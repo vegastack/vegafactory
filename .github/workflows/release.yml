@@ -14,6 +14,12 @@ permissions:
   id-token: write
   # Create the GitHub release and attach the SBOM.
   contents: write
+  actions: read
+
+# All versions and retries share this boundary; local live publishing refuses.
+concurrency:
+  group: vegafactory-paired-release
+  cancel-in-progress: false
 
 jobs:
   publish:
@@ -90,15 +96,50 @@ jobs:
             exit 1
           fi
 
-      - name: Restore original pair on retry
-        if: github.run_attempt > 1
+      - name: Decide retained-pair recovery
+        id: recovery
+        uses: actions/github-script@v8
+        with:
+          script: |
+            const { recoveryDecision } = await import(`${process.env.GITHUB_WORKSPACE}/scripts/release-artifacts.mjs`)
+            const artifacts = await github.paginate(github.rest.actions.listWorkflowRunArtifacts, { ...context.repo, run_id: context.runId })
+            const attempts = {}
+            const runAttempt = Number(process.env.GITHUB_RUN_ATTEMPT)
+            for (let n = 1; n < runAttempt; n++) {
+              attempts[n] = await github.paginate('GET /repos/{owner}/{repo}/actions/runs/{run_id}/attempts/{attempt_number}/jobs', { ...context.repo, run_id: context.runId, attempt_number: n })
+            }
+            const decision = recoveryDecision({ artifacts, attempts, sourceSha: context.sha, runAttempt })
+            core.setOutput('prepare', String(decision.prepare))
+            core.setOutput('artifact', decision.artifact)
+            core.setOutput('artifact-id', artifacts.find(a => a.name === decision.artifact)?.id ?? '')
+            const outcomes = artifacts.filter(a => a.name.startsWith(`release-outcome-${context.sha}-attempt-`) && !a.expired).sort((a, b) => b.id - a.id)
+            core.setOutput('outcome', outcomes[0]?.name ?? '')
+
+      - name: Restore finalized immutable pair
+        if: steps.recovery.outputs.prepare == 'false'
         uses: actions/download-artifact@v4
         with:
-          name: release-pair-${{ github.sha }}-attempt-1
+          name: ${{ steps.recovery.outputs.artifact }}
           path: work/release/
 
+      - name: Restore last available attempt observations
+        if: steps.recovery.outputs.prepare == 'false' && steps.recovery.outputs.outcome != ''
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ steps.recovery.outputs.outcome }}
+          path: work/previous-release/
+
+      - name: Preserve previous publication observations
+        if: steps.recovery.outputs.prepare == 'false' && steps.recovery.outputs.outcome != ''
+        run: |
+          node --input-type=module <<'NODE'
+          import { readFile, writeFile } from 'node:fs/promises'
+          try { await writeFile('work/release/release-state.json', await readFile('work/previous-release/release-state.json')) }
+          catch (error) { if (error.code !== 'ENOENT') throw error }
+          NODE
+
       - name: Install pinned release scanner
-        if: github.run_attempt == 1
+        if: steps.recovery.outputs.prepare == 'true'
         # SkillSpector v2.11.0 immutable commit, matched to the audited baseline.
         run: |
           uv tool install --python 3.12 'git+https://github.com/NVIDIA/skillspector.git@b7241089d7ec15d8b30df980dacbb428214732b9'
@@ -106,25 +147,40 @@ jobs:
           echo "$(dirname "$(uv python find 3.12)")" >> "$GITHUB_PATH"
 
       - name: Prepare and smoke immutable artifact pair
-        if: github.run_attempt == 1
+        if: steps.recovery.outputs.prepare == 'true'
         run: node scripts/release-artifacts.mjs prepare work/release "$GITHUB_REF_NAME"
 
-      - name: Verify restored immutable pair
-        if: github.run_attempt > 1
-        run: node scripts/release-artifacts.mjs verify work/release/release-manifest.json
+      - name: Verify finalized immutable pair and evidence
+        run: node scripts/release-artifacts.mjs verify-release work/release/release-manifest.json
 
-      # Publication and promotion are covered only by the operator-authorized release tag.
-      # Authentication/provenance decisions remain #156; runner routing is unchanged.
-      - name: Publish retained pair and promote after registry first-use smoke
-        run: node scripts/release-publish.mjs work/release/release-manifest.json --publish --promote
-
-      - name: Retain candidate and failure recovery evidence
-        if: always()
+      # Upload success is required BEFORE the first possible registry mutation.
+      - name: Retain finalized immutable pair
+        if: steps.recovery.outputs.prepare == 'true'
+        id: retained
         uses: actions/upload-artifact@v4
         with:
           name: release-pair-${{ github.sha }}-attempt-${{ github.run_attempt }}
           path: work/release/
+          if-no-files-found: error
           retention-days: 90
+
+      # Publication and promotion are covered only by the operator-authorized release tag.
+      # Authentication/provenance decisions remain #156; runner routing is unchanged.
+      - name: Publish retained pair and promote after registry first-use smoke
+        env:
+          VEGAFACTORY_RETAINED_PAIR_ID: ${{ steps.retained.outputs.artifact-id || steps.recovery.outputs.artifact-id }}
+        run: node scripts/release-publish.mjs work/release/release-manifest.json --publish --promote
+
+      - name: Retain attempt outcome and failure recovery evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-outcome-${{ github.sha }}-attempt-${{ github.run_attempt }}
+          path: work/release/
+          retention-days: 90
+
+      - name: Verify release assets before exposing success
+        run: node scripts/release-artifacts.mjs verify-release work/release/release-manifest.json
 
       - name: Create GitHub release after pair promotion
         uses: softprops/action-gh-release@v3

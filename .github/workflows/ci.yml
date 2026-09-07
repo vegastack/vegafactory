@@ -51,33 +51,37 @@ jobs:
       - name: Check (validate:skill + test + lint + typecheck)
         run: bun run check
 
-      - name: Build
-        run: bun run build
-
-      # Smoke-test the exact artifact npm would publish: pack a tarball,
-      # install it into a clean temp project with npm, and run the installed bin.
-      - name: Pack tarball
-        run: npm pack --pack-destination "$RUNNER_TEMP"
-        working-directory: packages/cli
-
-      - name: Packed-tarball smoke test
+      - name: Build paired package inputs
         run: |
           set -euo pipefail
-          TARBALL=$(ls "$RUNNER_TEMP"/vegastack-vegafactory-*.tgz)
-          # SMOKE_DIR is only npm's working directory and is never symlink-checked,
-          # so mktemp is fine for it. TARGET_DIR is passed to `add --dir`, and the
-          # CLI's assertNoSymlink (packages/cli/src/index.ts) refuses ANY symlinked
-          # path component. On macOS `mktemp -d` returns /var/folders/…, and /var is
-          # a symlink to /private/var, so it would fail there. RUNNER_TEMP lives in
-          # the runner's own _work tree, and `pwd -P` resolves any symlinked
-          # ancestor — correct on Linux too, so this survives the revert (#57).
-          SMOKE_DIR=$(mktemp -d)
-          TARGET_DIR="$(cd "$RUNNER_TEMP" && pwd -P)/vsk-smoke-target"
-          rm -rf "$TARGET_DIR"
-          mkdir -p "$TARGET_DIR"
-          cd "$SMOKE_DIR"
-          npm init -y > /dev/null
-          npm install "$TARBALL"
-          ./node_modules/.bin/vegafactory --version
-          ./node_modules/.bin/vegafactory skills add dev-architect \
-            --dry-run --non-interactive --agent both --dir "$TARGET_DIR"
+          bun run --cwd packages/dashboard build
+          bun run --cwd packages/dashboard assemble
+          bun run build
+
+      - name: Pack and smoke descriptor-backed CI pair
+        run: |
+          node --input-type=module <<'NODE'
+          import { readFile, writeFile, mkdtemp } from 'node:fs/promises'
+          import { join } from 'node:path'
+          import { assertPairVersions, command, packPair, smokePair } from './scripts/release-artifacts.mjs'
+          const root = process.cwd()
+          if (command(['git', 'status', '--porcelain', '--untracked-files=all'])) throw new Error('CI build changed source')
+          const cli = JSON.parse(await readFile('packages/cli/package.json', 'utf8'))
+          const dashboard = JSON.parse(await readFile('packages/dashboard/package.json', 'utf8'))
+          assertPairVersions({ cli: cli.version, dashboard: dashboard.version, tag: `v${cli.version}` })
+          const directory = await mkdtemp(join(process.env.RUNNER_TEMP, 'vegafactory-pair-'))
+          const manifest = await packPair(root, directory, {
+            sourceSha: command(['git', 'rev-parse', 'HEAD']),
+            treeSha: command(['git', 'rev-parse', 'HEAD^{tree}']),
+            version: cli.version,
+            toolchain: {
+              node: process.version, npm: command(['npm', '--version']),
+              bun: command(['bun', '--version']), platform: process.platform, arch: process.arch,
+            },
+            checkEvidence: { ok: false, reason: 'CI packaging rehearsal; no release check evidence captured' },
+            scanEvidence: { ok: false, reason: 'Release scanner has not run for this CI pair' },
+          })
+          manifest.platformMatrix.push(await smokePair(manifest, directory))
+          await writeFile(join(directory, 'release-manifest.json'), JSON.stringify(manifest, null, 2) + '\n')
+          console.log(JSON.stringify({ directory, artifacts: manifest.artifacts, platformMatrix: manifest.platformMatrix }, null, 2))
+          NODE

@@ -45,7 +45,7 @@ Suppressions live in `.vegastack/skillspector-baseline.json`. Adding one is a se
 
 ## Never commit generated files
 
-`dist/`, `packages/cli/skill/`, `packages/cli/skill-integrity.json`, `work/`, and `.vegastack/evidence-*.json` are build or tooling outputs. They are gitignored; `prepack` regenerates what the package needs. PRs that add them will be rejected.
+`dist/`, `packages/cli/skill/`, `packages/cli/skill-integrity.json`, `work/`, and `.vegastack/evidence-*.json` are build or tooling outputs. They are gitignored; paired release preparation builds them, and CLI `prepack` validates the generated descriptor against the exact dashboard tarball instead of rebuilding. PRs that add them will be rejected.
 
 ## Adding a new skill
 

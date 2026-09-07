@@ -1,7 +1,7 @@
 // Release preparation owns builds; consumers and publication use only retained bytes.
 import { createHash } from 'node:crypto'
 import { gunzipSync } from 'node:zlib'
-import { readFile, writeFile, mkdir, readdir, lstat, realpath, chmod, mkdtemp } from 'node:fs/promises'
+import { readFile, writeFile, mkdir, readdir, lstat, realpath, chmod, mkdtemp, rename } from 'node:fs/promises'
 import { join, resolve, relative, dirname, sep } from 'node:path'
 import { tmpdir } from 'node:os'
 import { spawnSync, spawn } from 'node:child_process'
@@ -168,6 +168,40 @@ export async function verifyPair(manifest, directory) {
   verifyDashboardDescriptor(descriptor && JSON.parse(descriptor.data.toString()),pair[DASHBOARD].bytes,manifest.version)
   return pair
 }
+// Release evidence is bound separately from archive-only CI rehearsals.
+export async function verifyReleaseEvidence(manifest, directory) {
+  await verifyPair(manifest,directory)
+  if (!manifest.checkEvidence?.ok || !manifest.scanEvidence?.ok || !manifest.platformMatrix?.length) throw new Error('release verification evidence missing')
+  for (const e of [manifest.checkEvidence,manifest.scanEvidence]) {
+    if (packagePath(e.file).includes('/') || !verifyArtifactBytes(await readFile(join(directory,e.file)),e)) throw new Error('release evidence changed')
+  }
+  const expected = new Map([['build-sbom.json','build'],['cli-runtime-sbom.json',CLI],['dashboard-runtime-sbom.json',DASHBOARD]])
+  if (!Array.isArray(manifest.sbomFiles) || manifest.sbomFiles.length !== expected.size) throw new Error('required SBOM evidence missing')
+  for (const e of manifest.sbomFiles) {
+    if (!e || expected.get(e.file)!==e.scope) throw new Error('invalid SBOM identity/scope')
+    expected.delete(e.file)
+    const bytes=await readFile(join(directory,e.file))
+    if (!verifyArtifactBytes(bytes,e)) throw new Error('SBOM evidence changed')
+    const bom=JSON.parse(bytes)
+    if (bom.bomFormat!=='CycloneDX' || !Array.isArray(bom.components)) throw new Error('invalid SBOM content')
+    if (e.scope!=='build' && (bom.metadata?.component?.name!==e.scope || bom.metadata?.component?.version!==manifest.version)) throw new Error('SBOM package mismatch')
+  }
+  return true
+}
+// The workflow supplies authoritative prior-attempt job observations. Missing history
+// never permits a second preparation of bytes that might already be public.
+export function recoveryDecision({artifacts,attempts,sourceSha,runAttempt}) {
+  const pairs=artifacts.filter(a=>a.name.startsWith(`release-pair-${sourceSha}-attempt-`))
+  if (pairs.length>1 || pairs.some(a=>a.expired)) throw new Error('ambiguous or expired retained pair; refuse rebuilding')
+  if (pairs.length===1) return {prepare:false,artifact:pairs[0].name}
+  for(let n=1;n<runAttempt;n++) {
+    const jobs=attempts[n]
+    const job=jobs?.find(j=>j.name==='publish')
+    const step=job?.steps?.find(s=>s.name==='Publish retained pair and promote after registry first-use smoke')
+    if(job?.status!=='completed' || step?.conclusion!=='skipped') throw new Error('prior publication uncertain; refuse rebuilding')
+  }
+  return {prepare:true,artifact:''}
+}
 async function availablePort() {
   const server=createServer(); await new Promise((ok,fail)=>{server.once('error',fail);server.listen(0,'127.0.0.1',ok)})
   const port=server.address().port; await new Promise(ok=>server.close(ok)); return port
@@ -239,15 +273,15 @@ export async function packPair(root, directory, {sourceSha,treeSha,version,toolc
     const bytes=await readFile(join(directory,file))
     artifacts.push({name,file,sha256:digest(bytes),integrity:`sha512-${digest(bytes,'sha512','base64')}`,bytes:bytes.length})
     const sbomFile=`${name===CLI?'cli':'dashboard'}-runtime-sbom.json`
-    await writeFile(join(directory,sbomFile),JSON.stringify(await runtimeSbom(readPackageArchive(bytes),name,version),null,2)+'\n');sbomFiles.push(sbomFile)
+    await writeFile(join(directory,sbomFile),JSON.stringify(await runtimeSbom(readPackageArchive(bytes),name,version),null,2)+'\n');sbomFiles.push({file:sbomFile,scope:name,sha256:digest(await readFile(join(directory,sbomFile)))})
   }
   const manifest={schemaVersion:1,sourceSha,treeSha,version,toolchain,platformMatrix:[],artifacts,checkEvidence,scanEvidence,sbomFiles}
   await verifyPair(manifest,directory)
-  await writeFile(join(directory,'release-manifest.json'),JSON.stringify(manifest,null,2)+'\n')
   return manifest
 }
 export async function prepareRelease(root,directory,tag) {
   root=resolve(root);directory=resolve(directory)
+  try {await readFile(join(directory,'release-manifest.json'));throw new Error('existing pair must be retained, never prepared again')}catch(e){if(e.code!=='ENOENT')throw e}
   if(command(['git','status','--porcelain','--untracked-files=all'],{cwd:root}))throw new Error('release preparation requires clean source')
   const sourceSha=command(['git','rev-parse','HEAD'],{cwd:root});const treeSha=command(['git','rev-parse','HEAD^{tree}'],{cwd:root})
   const cli=JSON.parse(await readFile(join(root,'packages/cli/package.json'),'utf8'));const dashboard=JSON.parse(await readFile(join(root,'packages/dashboard/package.json'),'utf8'))
@@ -265,15 +299,18 @@ export async function prepareRelease(root,directory,tag) {
   const scan=JSON.parse(scanText);const expected=(await readdir(join(root,'packages/cli/skill'),{withFileTypes:true})).filter(e=>e.isDirectory()).map(e=>e.name)
   assertScanEvidence(scan,expected);await writeFile(join(directory,'scan.json'),scanText)
   await writeFile(join(directory,'build-sbom.json'),JSON.stringify(await buildSbom(root),null,2)+'\n')
-  const manifest=await packPair(root,directory,{sourceSha,treeSha,version:cli.version,toolchain,checkEvidence:{file:'check.log',sha256:digest(Buffer.from(checkLog)),ok:true},scanEvidence:{file:'scan.json',sha256:digest(Buffer.from(scanText)),baselineSha256:digest(await readFile(join(root,'.vegastack/skillspector-baseline.json'))),ok:true,skills:expected},sbomFiles:['build-sbom.json']})
+  const manifest=await packPair(root,directory,{sourceSha,treeSha,version:cli.version,toolchain,checkEvidence:{file:'check.log',sha256:digest(Buffer.from(checkLog)),ok:true},scanEvidence:{file:'scan.json',sha256:digest(Buffer.from(scanText)),baselineSha256:digest(await readFile(join(root,'.vegastack/skillspector-baseline.json'))),ok:true,skills:expected},sbomFiles:[{file:'build-sbom.json',scope:'build',sha256:digest(await readFile(join(directory,'build-sbom.json')))}]})
   const smoke=await smokePair(manifest,directory);manifest.platformMatrix.push(smoke)
   if(command(['git','status','--porcelain','--untracked-files=all'],{cwd:root}) || command(['git','rev-parse','HEAD'],{cwd:root})!==sourceSha)throw new Error('source changed during preparation')
-  await writeFile(join(directory,'release-manifest.json'),JSON.stringify(manifest,null,2)+'\n')
+  await verifyReleaseEvidence(manifest,directory)
+  await writeFile(join(directory,'release-manifest.json.tmp'),JSON.stringify(manifest,null,2)+'\n')
+  await rename(join(directory,'release-manifest.json.tmp'),join(directory,'release-manifest.json'))
   return manifest
 }
 async function main() {
   const [verb,...args]=process.argv.slice(2)
   if(verb==='prepare')return prepareRelease(resolve(dirname(fileURLToPath(import.meta.url)),'..'),args[0]??'work/release',args[1])
+  if(verb==='verify-release') {const path=resolve(args[0]);await verifyReleaseEvidence(JSON.parse(await readFile(path,'utf8')),dirname(path));return {ok:true}}
   if(verb==='verify'||verb==='smoke') {const path=resolve(args[0]);const manifest=JSON.parse(await readFile(path,'utf8'));return verb==='verify'? (await verifyPair(manifest,dirname(path)),{ok:true}):smokePair(manifest,dirname(path))}
   if(verb==='validate-cli') {
     const root=resolve(dirname(fileURLToPath(import.meta.url)),'..');const version=JSON.parse(await readFile(join(root,'packages/cli/package.json'),'utf8')).version
