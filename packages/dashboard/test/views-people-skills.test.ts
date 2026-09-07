@@ -35,5 +35,5 @@ test.each([
   const context = await contextFixture({ month, viewer, statsPeople: 'on' })
   const view = buildPeopleView({ context })
   expect(view.gated).toBe(true)
-  expect(view.rows.map(row => row.login)).toEqual(expected)
+  expect(view.rows.map(row => row.login)).toEqual([...expected])
 })
