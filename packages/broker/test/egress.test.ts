@@ -22,13 +22,35 @@ describe('allowedFetch', () => {
 })
 
 test('bounds chunked JSON without trusting Content-Length and cancels overflow', async () => {
-  let cancelled = false
-  const transport = (async (_url: string) => new Response(new ReadableStream({
-    start(controller) { controller.enqueue(new TextEncoder().encode(' '.repeat(65))) },
-    cancel() { cancelled = true },
-  }))) as typeof fetch
-  await expect(fetchJson('https://api.github.com/x', {}, transport, 64)).rejects.toThrow()
-  expect(cancelled).toBe(true)
+  const fixture = (padding: number) => {
+    const body = { padding: 'x'.repeat(padding) }
+    const bytes = new TextEncoder().encode(JSON.stringify(body))
+    let offset = 0
+    let cancelled = false
+    const transport = (async (_url: string) => {
+      const response = new Response(new ReadableStream({
+        pull(controller) {
+          if (offset === bytes.byteLength) { controller.close(); return }
+          const end = Math.min(offset + 32, bytes.byteLength)
+          controller.enqueue(bytes.slice(offset, end)); offset = end
+        },
+        cancel() { cancelled = true },
+      }, { highWaterMark: 0 }))
+      expect(response.headers.has('content-length')).toBe(false)
+      return response
+    }) as typeof fetch
+    return { body, bytes: bytes.byteLength, transport, cancelled: () => cancelled }
+  }
+  const under = fixture(40)
+  expect(under.bytes).toBeLessThan(64)
+  expect((await fetchJson('https://api.github.com/x', {}, under.transport, 64)).body).toEqual(under.body)
+  expect(under.cancelled()).toBe(false)
+  const over = fixture(80)
+  expect(over.bytes).toBeGreaterThan(64)
+  const error = await fetchJson('https://api.github.com/x', {}, over.transport, 64).catch((caught) => caught)
+  expect(error).toBeInstanceOf(EgressRefused)
+  expect(error.message).toBe('upstream response exceeds the body limit')
+  expect(over.cancelled()).toBe(true)
 })
 
 test('parent cancellation bounds a stalled body and reaches the transport', async () => {

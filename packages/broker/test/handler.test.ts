@@ -4,17 +4,18 @@ import type { Env } from '../src/env.ts'
 
 const b64u = (bytes: Uint8Array) => btoa(String.fromCharCode(...bytes)).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '')
 const pair = await crypto.subtle.generateKey({ name: 'RSASSA-PKCS1-v1_5', modulusLength: 2048, publicExponent: new Uint8Array([1, 0, 1]), hash: 'SHA-256' }, true, ['sign', 'verify'])
+const rotatedPair = await crypto.subtle.generateKey({ name: 'RSASSA-PKCS1-v1_5', modulusLength: 2048, publicExponent: new Uint8Array([1, 0, 1]), hash: 'SHA-256' }, true, ['sign', 'verify'])
 const jwk = { ...(await crypto.subtle.exportKey('jwk', pair.publicKey)), kid: 'k1', alg: 'RS256', use: 'sig' }
 const der = new Uint8Array(await crypto.subtle.exportKey('pkcs8', pair.privateKey))
 const appPem = `-----BEGIN PRIVATE KEY-----\n${btoa(String.fromCharCode(...der)).replace(/(.{64})/g, '$1\n')}\n-----END PRIVATE KEY-----\n`
 const now = 1_800_000_000
 const expiry = new Date((now + 3600) * 1000).toISOString()
 
-async function oidcToken(claims: Record<string, unknown> = {}, kid = 'k1') {
+async function oidcToken(claims: Record<string, unknown> = {}, kid = 'k1', key: CryptoKey = pair.privateKey) {
   const header = { alg: 'RS256', kid, typ: 'JWT' }
   const payload = { iss: 'https://token.actions.githubusercontent.com', aud: 'vegastack-factory', exp: now + 300, nbf: now - 10, iat: now - 10, repository: 'acme/widgets', repository_owner: 'acme', repository_id: '12', repository_owner_id: '4', ...claims }
   const input = `${b64u(new TextEncoder().encode(JSON.stringify(header)))}.${b64u(new TextEncoder().encode(JSON.stringify(payload)))}`
-  const sig = await crypto.subtle.sign('RSASSA-PKCS1-v1_5', pair.privateKey, new TextEncoder().encode(input))
+  const sig = await crypto.subtle.sign('RSASSA-PKCS1-v1_5', key, new TextEncoder().encode(input))
   return `${input}.${b64u(new Uint8Array(sig))}`
 }
 
@@ -136,30 +137,66 @@ test('handler rejects malformed identity and mint responses without credential o
   expect(JSON.stringify(records)).not.toContain('ghs_secret')
 })
 
-test('unavailable JWKS and oversized mint body refuse through the real handler', async () => {
+test('unavailable JWKS refuses through the real handler', async () => {
   const base = github(installed, minted)
-  for (const unavailableJwks of [true, false]) {
+  const transport = (async (url: string, init: RequestInit) => {
+    if (url.endsWith('/.well-known/jwks')) return new Response('{}', { status: 503 })
+    return base(url, init)
+  }) as typeof fetch
+  const response = await handleTokenRequest(await post(await oidcToken()), envWith(), deps(transport, []))
+  expect(response.status).toBe(502)
+  expect(await response.text()).not.toContain('ghs_secret')
+})
+
+test('otherwise-valid mint stream grants below64KiB and refuses above64KiB', async () => {
+  const base = github(installed, minted)
+  for (const padding of [63 * 1024, 64 * 1024]) {
+    const body = { token: 'ghs_secret', expires_at: expiry, permissions: cap, padding: 'x'.repeat(padding) }
+    const bytes = new TextEncoder().encode(JSON.stringify(body))
+    const overLimit = padding === 64 * 1024
+    if (overLimit) expect(bytes.byteLength).toBeGreaterThan(64 * 1024)
+    else expect(bytes.byteLength).toBeLessThan(64 * 1024)
+    let enumerations = 0
     const transport = (async (url: string, init: RequestInit) => {
-      if (unavailableJwks && url.endsWith('/.well-known/jwks')) return new Response('{}', { status: 503 })
-      if (init.method === 'POST') return new Response(JSON.stringify({ padding: 'x'.repeat(64 * 1024), token: 'ghs_secret' }), { status: 201 })
+      if (init.method === 'POST') {
+        let offset = 0
+        const response = new Response(new ReadableStream({
+          pull(controller) {
+            if (offset === bytes.byteLength) { controller.close(); return }
+            const end = Math.min(offset + 16 * 1024, bytes.byteLength)
+            controller.enqueue(bytes.slice(offset, end)); offset = end
+          },
+        }, { highWaterMark: 0 }), { status: 201 })
+        expect(response.headers.has('content-length')).toBe(false)
+        return response
+      }
+      if (url.includes('/installation/repositories')) enumerations++
       return base(url, init)
     }) as typeof fetch
     const response = await handleTokenRequest(await post(await oidcToken()), envWith(), deps(transport, []))
-    expect(response.status).toBe(502)
-    expect(await response.text()).not.toContain('ghs_secret')
+    if (overLimit) {
+      expect(response.status).toBe(502)
+      expect(await response.json()).toEqual({ error: 'bad_gateway', reason: 'upstream_failure' })
+      expect(enumerations).toBe(0)
+    } else {
+      expect(response.status).toBe(200)
+      expect(await response.json()).toEqual({ token: 'ghs_secret', expires_at: expiry, repository: 'acme/widgets', permissions: cap })
+      expect(enumerations).toBe(1)
+    }
   }
 })
 
 test('handler performs one origin bypass for concurrent rotated-key callers', async () => {
   let bypasses = 0
   const base = github(installed, minted)
+  const rotatedJwk = { ...(await crypto.subtle.exportKey('jwk', rotatedPair.publicKey)), kid: 'rotation', alg: 'RS256', use: 'sig' }
   const transport = (async (url: string, init: RequestInit) => {
     if (url.endsWith('/.well-known/jwks')) {
       if (init.cache === 'no-store') {
         bypasses++
         expect((init as RequestInit & { cf?: unknown }).cf).toBeUndefined()
         await new Promise((resolve) => setTimeout(resolve, 10))
-        return new Response(JSON.stringify({ keys: [{ ...jwk, kid: 'rotation' }] }))
+        return new Response(JSON.stringify({ keys: [rotatedJwk] }))
       }
       return jwks.clone()
     }
@@ -167,7 +204,11 @@ test('handler performs one origin bypass for concurrent rotated-key callers', as
   }) as typeof fetch
   const records: Record<string, unknown>[] = []
   expect((await handleTokenRequest(await post(await oidcToken()), envWith(), deps(transport, records))).status).toBe(200)
-  const token = await oidcToken({}, 'rotation')
+  const token = await oidcToken({}, 'rotation', rotatedPair.privateKey)
+  const staleTransport = (async (_url: string) => new Response(JSON.stringify({ keys: [{ ...jwk, kid: 'rotation' }] }))) as typeof fetch
+  const refused = await handleTokenRequest(await post(token), envWith(), deps(staleTransport, records))
+  expect(refused.status).toBe(401)
+  expect((await refused.json()).reason).toBe('signature')
   const responses = await Promise.all([1, 2].map(async () => handleTokenRequest(await post(token), envWith(), deps(transport, records))))
   expect(responses.map((response) => response.status)).toEqual([200, 200])
   expect(bypasses).toBe(1)

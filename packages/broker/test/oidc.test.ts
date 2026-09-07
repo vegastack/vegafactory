@@ -1,13 +1,15 @@
 import { describe, expect, test } from 'bun:test'
-import { TokenRejected, parseSignedRepositoryIds, verifyOidcToken, loadJwks, parseJwtHeader } from '../src/oidc.ts'
+import { TokenRejected, parseSignedRepositoryIds, verifyOidcToken, loadJwks } from '../src/oidc.ts'
+import { EgressRefused } from '../src/egress.ts'
 
 const b64u = (bytes: Uint8Array) => btoa(String.fromCharCode(...bytes)).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '')
 const pair = await crypto.subtle.generateKey({ name: 'RSASSA-PKCS1-v1_5', modulusLength: 2048, publicExponent: new Uint8Array([1, 0, 1]), hash: 'SHA-256' }, true, ['sign', 'verify'])
+const rotatedPair = await crypto.subtle.generateKey({ name: 'RSASSA-PKCS1-v1_5', modulusLength: 2048, publicExponent: new Uint8Array([1, 0, 1]), hash: 'SHA-256' }, true, ['sign', 'verify'])
 const jwks = { keys: [{ ...(await crypto.subtle.exportKey('jwk', pair.publicKey)), kid: 'k1', alg: 'RS256', use: 'sig' }] as unknown as JsonWebKey[] }
 
-async function sign(payload: Record<string, unknown>, header: Record<string, unknown> = { alg: 'RS256', kid: 'k1', typ: 'JWT' }) {
+async function sign(payload: Record<string, unknown>, header: Record<string, unknown> = { alg: 'RS256', kid: 'k1', typ: 'JWT' }, key: CryptoKey = pair.privateKey) {
   const input = `${b64u(new TextEncoder().encode(JSON.stringify(header)))}.${b64u(new TextEncoder().encode(JSON.stringify(payload)))}`
-  const sig = await crypto.subtle.sign('RSASSA-PKCS1-v1_5', pair.privateKey, new TextEncoder().encode(input))
+  const sig = await crypto.subtle.sign('RSASSA-PKCS1-v1_5', key, new TextEncoder().encode(input))
   return `${input}.${b64u(new Uint8Array(sig))}`
 }
 const now = 1_800_000_000
@@ -61,18 +63,36 @@ test('signed numeric IDs reject coercion, missing and unsafe values', () => {
   for (const value of ['1x', '1e3', '', 0, -1, 1.5, Number.MAX_SAFE_INTEGER + 1, undefined]) {
     expect(() => parseSignedRepositoryIds({ ...good, repository_id: value })).toThrow(TokenRejected)
   }
-  expect(() => parseJwtHeader('a'.repeat(16 * 1024 + 1))).toThrow(TokenRejected)
+})
+
+test('otherwise-valid signed JWT is accepted below16KiB and refused above16KiB', async () => {
+  const under = await sign({ ...good, padding: 'x'.repeat(11 * 1024) })
+  const over = await sign({ ...good, padding: 'x'.repeat(13 * 1024) })
+  expect(new TextEncoder().encode(under).byteLength).toBeLessThan(16 * 1024)
+  expect(new TextEncoder().encode(over).byteLength).toBeGreaterThan(16 * 1024)
+  const options = { jwks, audience: 'vegastack-factory', nowSeconds: now }
+  expect((await verifyOidcToken(under, options)).repositoryId).toBe(12)
+  const error = await verifyOidcToken(over, options).catch((caught) => caught)
+  expect(error).toBeInstanceOf(TokenRejected)
+  expect(error.reason).toBe('malformed')
+  expect(error.message).toContain('oversized')
 })
 
 test('unknown kid refresh bypasses the edge once and accepts the rotated signed JWT', async () => {
-  const rotated = { ...jwks.keys[0], kid: 'rotated' }
+  const rotated = { ...(await crypto.subtle.exportKey('jwk', rotatedPair.publicKey)), kid: 'rotated', alg: 'RS256', use: 'sig' }
   const seen: RequestInit[] = []
   const transport = (async (_url: string, init: RequestInit) => {
     seen.push(init)
     return new Response(JSON.stringify(init.cache === 'no-store' ? { keys: [rotated] } : jwks))
   }) as typeof fetch
   await loadJwks(transport, now)
-  const token = await sign(good, { alg: 'RS256', kid: 'rotated' })
+  const token = await sign(good, { alg: 'RS256', kid: 'rotated' }, rotatedPair.privateKey)
+  // Even relabelling the stale public key cannot verify the newly rotated private key.
+  const stale = await verifyOidcToken(token, {
+    jwks: { keys: [{ ...jwks.keys[0], kid: 'rotated' } as JsonWebKey] }, audience: 'vegastack-factory', nowSeconds: now,
+  }).catch((error) => error)
+  expect(stale).toBeInstanceOf(TokenRejected)
+  expect(stale.reason).toBe('signature')
   const [first, second] = await Promise.all([
     loadJwks(transport, now + 1, { forceOrigin: true }),
     loadJwks(transport, now + 1, { forceOrigin: true }),
@@ -100,14 +120,35 @@ test('failed origin refresh preserves the original memo and its expiry', async (
   expect(calls).toBe(3)
 })
 
-test('JWKS refuses oversized streams, too many keys and unusable rotation without caching failures', async () => {
-  for (const response of [
-    new Response(new ReadableStream({ start(controller) { controller.enqueue(new TextEncoder().encode(' '.repeat(256 * 1024 + 1))); controller.close() } })),
-    new Response(JSON.stringify({ keys: Array.from({ length: 33 }, (_, index) => ({ ...jwks.keys[0], kid: `k${index}` })) })),
-  ]) {
-    const transport = (async (_url: string) => response.clone()) as typeof fetch
-    await expect(loadJwks(transport, now)).rejects.toThrow()
-  }
+test('otherwise-valid JWKS stream is accepted below256KiB and refused above256KiB', async () => {
+  const document = (padding: number) => JSON.stringify({ ...jwks, padding: 'x'.repeat(padding) })
+  const under = document(255 * 1024)
+  const over = document(256 * 1024)
+  expect(new TextEncoder().encode(under).byteLength).toBeLessThan(256 * 1024)
+  expect(new TextEncoder().encode(over).byteLength).toBeGreaterThan(256 * 1024)
+  const transport = (body: string) => (async (_url: string) => {
+    const bytes = new TextEncoder().encode(body)
+    let offset = 0
+    const response = new Response(new ReadableStream({
+      pull(controller) {
+        if (offset === bytes.byteLength) { controller.close(); return }
+        const end = Math.min(offset + 16 * 1024, bytes.byteLength)
+        controller.enqueue(bytes.slice(offset, end)); offset = end
+      },
+    }, { highWaterMark: 0 }))
+    expect(response.headers.has('content-length')).toBe(false)
+    return response
+  }) as typeof fetch
+  const accepted = await loadJwks(transport(under), now)
+  expect((await verifyOidcToken(await sign(good), { jwks: accepted, audience: 'vegastack-factory', nowSeconds: now })).repositoryId).toBe(12)
+  const error = await loadJwks(transport(over), now).catch((caught) => caught)
+  expect(error).toBeInstanceOf(EgressRefused)
+  expect(error.message).toBe('upstream response exceeds the body limit')
+})
+
+test('JWKS refuses too many keys and unusable rotation without caching failures', async () => {
+  const tooMany = (async (_url: string) => new Response(JSON.stringify({ keys: Array.from({ length: 33 }, (_, index) => ({ ...jwks.keys[0], kid: `k${index}` })) }))) as typeof fetch
+  await expect(loadJwks(tooMany, now)).rejects.toThrow()
   let calls = 0
   const transport = (async (_url: string) => new Response(JSON.stringify(++calls === 1 ? jwks : { keys: [{ ...jwks.keys[0], n: '', kid: 'rotated' }] }))) as typeof fetch
   await loadJwks(transport, now)
