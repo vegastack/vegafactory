@@ -107,7 +107,7 @@ npx @vegastack/vegafactory skills remove --group dev --global
 
 ### The dispatcher
 
-`vegafactory dispatch` polls the repos this machine watches and starts headless runs in their feature worktrees: `needs-plan` → dev-plan, unassigned `ready` → dev-implement, and a 🚀 reaction from a listed operator on any comment of a `for-operator` issue → the corrections run. It runs as **you** — your `gh` token, your harness authentication, your machine — which is why installing it is the operator's own step and never an agent's.
+`vegafactory dispatch` polls the repos this machine watches and starts headless runs in their feature worktrees: `needs-plan` → dev-plan, unassigned `ready` → dev-implement, and a 🚀 reaction from a listed operator on any comment of a `for-operator` issue → the corrections run. It runs as **you** — your `gh` token, your harness authentication, your machine — which is why installing it is the operator's own step and never an agent's. Board, launch-comment and native-dependency reads must be complete before claiming or starting work. Reads stop at 100 pages or 10,000 records, with a 10-second request bound, 60-second repository budget and at most two retries; incomplete or rate-limited reads remain a named refusal and do not mean an empty queue. Retry a tick after connectivity recovers or the reported rate reset; no unchanged failure produces repeated notifications. The status CLI and its dashboard bridge still require #141’s completeness integration before their final acceptance.
 
 Which repos, how often, and how many at a time is machine-local, in `~/.vegastack/factory.json` (the same file the control-room clone state lives in; keys it does not recognise are left untouched):
 

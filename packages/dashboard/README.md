@@ -42,11 +42,7 @@ default, and the optional ones degrade the page rather than refusing it.
 
 ## Offline behaviour
 
-The control-room clone is the source of truth and every cached view works from it alone. When a live
-source fails — GitHub unreachable, no token, no `vegafactory` binary — the page still renders, and a
-banner names each failure and how old the clone is. A failed live read is a value, never an
-exception: no page errors because GitHub was down, and one repo the board cannot read keeps
-every other repo's issues and pull requests on the page while the banner names it.
+The control-room clone is the source of truth and every cached view works from it alone. The live board retains successfully read pages and healthy repositories when another read is partial or unavailable, displaying each repository’s reason and observation time; an incomplete empty result is unknown, not “no issues” or “no pull requests”. GitHub reads are bounded to 100 pages or 10,000 records, 10 seconds per request and 60 seconds per repository, with at most two retries and three repositories in flight. After connectivity recovers or the reported rate reset, reload to retry. Repeated unchanged failures stay visible without repeated notifications. The status-backed views remain subject to #141’s separate status/bridge completeness integration.
 
 ## Building it locally
 

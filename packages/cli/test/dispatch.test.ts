@@ -655,7 +655,10 @@ describe('defaultParentCandidates', () => {
   const ghFor = (comments: Array<{ body: string; user?: { login: string } }>) => async (args: string[]): Promise<string> => {
     if (args[0] === 'issue' && args.includes('parent')) return JSON.stringify({ parent: { number: 104 } })
     if (args[0] === 'issue' && args.includes('title')) return JSON.stringify({ title: 'feat: the factory runtime' })
-    if (args[0] === 'api') return JSON.stringify(comments)
+    if (args[0] === 'api') {
+      const body = JSON.stringify(comments.map((comment, index) => ({ id: index + 1, ...comment })))
+      return args.includes('--include') ? 'HTTP/2.0 200 OK\r\nx-test: parent-comments\r\n\r\n' + body : body
+    }
     return '{}'
   }
 
