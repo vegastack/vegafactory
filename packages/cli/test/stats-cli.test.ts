@@ -141,7 +141,7 @@ test('the dry-run push names the records it would copy and the commit it would m
 
 // --- the people gate on every scope --------------------------------------------------------
 
-test('--org and --repo carry a per-person block only for a lead, whatever stats-people says', async () => {
+test('--org and --repo do not elevate a legacy lead into scoped administration', async () => {
   const { lines, deps: base } = await deps()
   await seed(base.cloneRoot, 'SEP-2026', [row({}), row({ human: 'someone-else', issue: 999, cost_usd: 50 })])
   expect(await runStats(parseStatsArgs(['--org', '--json']), { ...base, isLead: false })).toBe(0)
@@ -151,7 +151,7 @@ test('--org and --repo carry a per-person block only for a lead, whatever stats-
   expect(JSON.parse(lines.join('')).people).toBeNull()
   lines.length = 0
   expect(await runStats(parseStatsArgs(['--org', '--json']), { ...base, isLead: true })).toBe(0)
-  expect(Object.keys(JSON.parse(lines.join('')).people)).toEqual(['kmanojkumar', 'someone-else'])
+  expect(JSON.parse(lines.join('')).people).toBeNull()
 })
 
 test('the committed summaries never carry a per-person block: the clone is readable by everyone', async () => {
@@ -206,4 +206,41 @@ test('a rollup that cannot reach gh still writes the summaries, keeps an older t
   const summary = JSON.parse(await readFile(join(base.cloneRoot, 'stats/vegastack__vegafactory/SEP-2026.summary.json'), 'utf8'))
   expect(summary.lead_time_h.p50).toBe(24)
   expect(lines.join('\n')).toContain('HTTP 403')
+})
+
+test('a policy refusal prevents reading hook input and any capture or export', async () => {
+  const { deps: base } = await deps()
+  let effects = 0
+  const denied = { ...base, policy: { ...policy, refusal: 'org delegation required' }, readStdin: async () => { effects++; return '{}' }, git: async () => { effects++; return { code: 0, stdout: '', stderr: '' } } }
+  expect(await runStats(parseStatsArgs(['record', '--source', 'codex-session-end']), denied)).toBe(2)
+  expect(await runStats(parseStatsArgs(['push', '--commit']), denied)).toBe(2)
+  expect(effects).toBe(0)
+  expect(await listOutbox(base.home)).toEqual([])
+})
+
+test('explicit group read scope filters individual records before organization totals', async () => {
+  const { resolvePolicy } = await import('../../../skills/dev/dev-setup/scripts/effective-policy.mjs')
+  const { deps: base, lines } = await deps()
+  const effective = resolvePolicy({ org: 'stats-people: on\n```vsk-policy\n' + JSON.stringify({ schemaVersion: 2, administration: { orgAdmins: ['owner'], groupAdmins: { dev: ['reader'] }, groupAdminCapabilities: { dev: ['group.people.read'] } } }) + '\n```', identity: { org: 'vegastack', repo: base.repo, group: 'dev', peopleByScope: { org: [{ login: 'owner', groups: ['dev'] }, { login: 'reader', groups: ['dev'] }, { login: 'person', groups: ['dev', 'design'] }] }, repoGroups: { 'vegastack/vegafactory': 'dev', 'vegastack/design': 'design' } } }).policy
+  await seed(base.cloneRoot, 'SEP-2026', [row({ human: 'person', duration_s: 10 }), row({ human: 'person', repo: 'vegastack/design', duration_s: 900 })])
+  expect(await runStats(parseStatsArgs(['--org', '--json']), { ...base, login: 'reader', ghUser: 'reader', viewerVerified: true, effectivePolicy: effective })).toBe(0)
+  const summary = JSON.parse(lines.join(''))
+  expect(summary.runs).toBe(1)
+  expect(summary.people.person.duration_s).toBe(10)
+})
+
+test('CLI requester comes from verified GitHub context, not operators prose or claimed login', async () => {
+  const { buildStatsDeps, isLeadIn } = await import('../src/stats/cli.ts')
+  const home = await mkdtemp(join(tmpdir(), 'policy-identity-'))
+  const cwd = join(home, 'app')
+  await mkdir(join(cwd, '.vegastack'), { recursive: true })
+  await writeFile(join(cwd, '.vegastack', 'dev.md'), 'repo: acme/app\noperators: owner\nstats: on')
+  const verified = await buildStatsDeps(home, cwd, () => {}, async () => ({ login: 'member', id: 123 }))
+  expect(verified.login).toBe('member')
+  expect(verified.viewerVerified).toBe(true)
+  expect(verified.isLead).toBe(false)
+  const unavailable = await buildStatsDeps(home, cwd, () => {}, async () => ({ login: 'owner' }))
+  expect(unavailable.login).toBe('')
+  expect(unavailable.viewerVerified).toBe(false)
+  expect(isLeadIn('login,role\nmember,not-a-lead', 'member')).toBe(false)
 })

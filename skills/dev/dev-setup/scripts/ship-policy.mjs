@@ -22,7 +22,8 @@ import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from '
 import { homedir } from 'node:os'
 import { dirname, resolve } from 'node:path'
 import { pathToFileURL } from 'node:url'
-import { SCHEMA_VERSION, policyPath, repoFromRemote } from '../assets/hooks/ship-guard.mjs'
+import { policyPath, repoFromRemote } from '../assets/hooks/ship-guard.mjs'
+import { loadConfiguredPolicy, parsePolicy, policyHash, resolvePolicy } from './effective-policy.mjs'
 
 const DEFAULTS = { defaultBranch: 'main', gates: 3 }
 
@@ -32,12 +33,13 @@ function sectionOf(text, heading) {
   return parts[1].split(/^## /m)[0]
 }
 
-// The whole of the guard's policy, from the profile. Anything unreadable falls back to the
-// strictest default rather than to silence.
-export function compilePolicy(devMdText, { repo }) {
-  const text = typeof devMdText === 'string' ? devMdText : ''
+// The action grammar stays local to this profile; defaults/authority/provenance use the owner.
+// A malformed known value refuses compilation and preserves the previous enforcement copy.
+export function compilePolicy(devMdText, { repo, org = '', group = '', identity = {}, freshness = {}, resolved: supplied = null }) {
+  const resolved = supplied ?? resolvePolicy({ org, group, repo: devMdText, identity: { repo, ...identity }, freshness })
+  if (!resolved.ok) throw new Error(resolved.blocks.join('; '))
+  const text = parsePolicy(devMdText, 'repo').lines.join('\n')
   const branch = text.match(/^repo:.*default branch (\S+)/m)
-  const gates = text.match(/^gates:\s*([123])/m)
   const environments = []
   for (const line of sectionOf(text, '## Environments').split('\n')) {
     const match = line.match(/^- ([\w][\w-]*): (auto|ask) — (.+)$/)
@@ -55,10 +57,12 @@ export function compilePolicy(devMdText, { repo }) {
     }
   }
   return {
-    schemaVersion: SCHEMA_VERSION,
+    schemaVersion: 2,
     repo: String(repo),
+    policyDigest: resolved.policy.policyDigest,
+    sources: resolved.policy.sources,
     defaultBranch: branch ? branch[1] : DEFAULTS.defaultBranch,
-    gates: gates ? Number(gates[1]) : DEFAULTS.gates,
+    gates: resolved.policy.values.gates ?? DEFAULTS.gates,
     environments,
     shipAsk,
   }
@@ -82,6 +86,8 @@ export function staleness(storedText, compiled) {
   const drift = []
   if (stored.schemaVersion !== compiled.schemaVersion) drift.push(`schemaVersion ${JSON.stringify(stored.schemaVersion)} → ${compiled.schemaVersion}`)
   if (stored.repo !== compiled.repo) drift.push(`repo ${JSON.stringify(stored.repo)} → ${compiled.repo}`)
+  if (stored.policyDigest !== compiled.policyDigest) drift.push('effective policy digest changed')
+  if (policyHash(stored.sources ?? {}) !== policyHash(compiled.sources)) drift.push('effective policy sources changed')
   if (stored.defaultBranch !== compiled.defaultBranch) drift.push(`default branch ${JSON.stringify(stored.defaultBranch)} → ${compiled.defaultBranch}`)
   if (stored.gates !== compiled.gates) drift.push(`gates ${JSON.stringify(stored.gates)} → ${compiled.gates}`)
   const before = describeEnvironments(Array.isArray(stored.environments) ? stored.environments.filter((entry) => entry && typeof entry === 'object') : [])
@@ -150,7 +156,15 @@ function main(argv) {
     process.exit(2)
   }
 
-  const compiled = compilePolicy(devMdText, { repo })
+  let compiled
+  try {
+    compiled = compilePolicy(devMdText, { repo, resolved: loadConfiguredPolicy({ home: homedir(), repo, devMd: devMdText }) })
+  } catch (error) {
+    result.ok = false
+    result.blocks.push(`policy compilation refused: ${error.message}`)
+    emit(result, json)
+    process.exit(2)
+  }
   const path = flag(argv, '--policy') || policyPath(homedir(), repo)
   const state = staleness(readIfPresent(path), compiled)
   result.path = path

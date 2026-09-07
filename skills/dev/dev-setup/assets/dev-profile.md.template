@@ -3,6 +3,7 @@
 This file is the project's handbook and its only process document: short directional bullets, not prose. Skills read the section they need. When reality disagrees with a line, fix the line; when a gotcha or repeated instruction surfaces, fold one line into the right section — never append a log. A section left as TODO because its machinery didn't exist yet: re-run dev-setup detection when the machinery appears.
 
 repo: {{owner/repo}} · default branch {{branch}}
+policy-schema: 2
 stack: {{one line; the `## Architecture` section below carries the architecture facts}}
 commands: test `{{test}}` · build `{{build}}` · dev `{{dev}}` · setup `{{setup}}`
 authority: {{ordered — e.g. "CONTRIBUTING.md → this file → skill defaults"; delete the line when this file is the only process doc}}
@@ -11,11 +12,11 @@ authority: {{ordered — e.g. "CONTRIBUTING.md → this file → skill defaults"
 
 review: cross-agent-risky   # subagent (never cross-agent) | cross-agent-risky (other agent on risky) | cross-agent (always) — dev-review maps these
 harnesses: {{claude <version> · codex <version> · hermes absent}}   # what dev-setup found on this box, one `<name> <version|absent>` entry per harness; a re-run refreshes it. An absent harness the policy below names is also recorded in ## Environments with the capability it gates
-harness-policy: intake claude fable high · plan claude fable high · implement claude fable high · review codex gpt-5.6 xhigh · status claude sonnet medium · chronicle claude sonnet medium   # one `<stage> <agent> <model> <effort>` entry per stage; the six stages are fixed, the models and efforts are yours to confirm here because model ids move (harness-facts.md dates which are current and lists the flags each value becomes). Raise planning to xhigh for a risky full-plan issue
+harness-policy: intake {{intake-harness}} {{intake-model}} {{intake-effort}} · plan {{plan-harness}} {{plan-model}} {{plan-effort}} · implement {{implement-harness}} {{implement-model}} {{implement-effort}} · review {{review-harness}} {{review-model}} {{review-effort}} · status {{status-harness}} {{status-model}} {{status-effort}} · chronicle {{chronicle-harness}} {{chronicle-model}} {{chronicle-effort}}   # confirm detected supported subscription choices for every stage; placeholders block execution
 ui-evidence: playwright     # playwright | none
 evidence-repo: {{owner}}/dev-review-evidence   # shared across projects; this project's folder = repo name; delete the line when ui-evidence is none
 gates: 3                    # 3 = approve/PR/merge · 2 = approve + one "ship it" · 1 = direct-to-main, ship word merges locally and pushes, no PR
-tests: required             # required | logic-only
+tests: required             # required | logic-only | best-effort | none; an org lock governs allowed overrides
 skill-scan: none            # one line only — directory holding the agent skills to scan (the BUILT one where a bundle is generated) | none. the skill-scan skill's guard reads this and refuses if a second line gives a different value
 skillspector-update: auto   # off | notify | auto — how the SkillSpector CLI itself is kept current. auto installs it when absent and upgrades it before each scan, falling back to the installed copy on any failure; notify only reports what upstream has published; off never touches the network. one line only, same as above
 merge: squash
@@ -30,14 +31,18 @@ changelog: {{changesets | keep-a-changelog | pubspec+changelog | none (reason)}}
 decisions: .vegastack/decisions.md
 release: on-request         # per-merge = Ship runbook runs as part of shipping · on-request = only when the operator says "release"
 chronicle: on               # on = dev-implement writes a .vegastack/chronicle.md story entry per behavior-changing branch · off
-architect: {{github-username}}   # the architecture owner dev-architect speaks to — dev-setup writes `gh api user -q .login` (fallback `git config user.name`) without asking; changing it later is one edit here
+architect: {{github-username}}   # confirmed architecture owner from `gh api user -q .login`; a display/commit author is not identity authority
 control-room: {{org}}/vegafactory-control-room#{{group}}@{{sha7}}   # org control room · this repo's group · the clone sha this profile was drafted from; delete the line when the org has none
-sync-max-age: 30m           # how stale the local control-room clone may be before a session refreshes it — <n>m or <n>h
-# stats: off               # uncomment ONLY when the org's org.md says stats-override: allowed — statistics are org policy (stats:, stats-people: in org.md or group.md) and there is no machine-level knob; under stats-override: locked this line is read, reported, and ignored
+sync-max-age: 30m           # confirmed maximum validated-policy age, not a task deadline; <n>s, <n>m or <n>h
+# stats: off               # a mandatory org lock needs an exact org delegation; refusal prevents capture/export even when the diagnostic effective value is on
 operators: {{github-username}}   # csv of the humans who own issues here — every state flip assigns per conventions' Labels table; dev-setup writes the detected login, and the line is edited to add people
-dispatch: off               # off | local — local lets a vegafactory dispatcher on this machine start headless runs for this repo; it takes the ship-guard hook wired and the operator's own word, and every other value reads as off
+dispatch: off               # off | local; repo-only opt-in, current scoped approval and validated policy/guard required; invalid values refuse
 chronicle-style: plain      # plain | story | witty — the voice of chronicle entries; the rule and one worked example per style live in dev-chronicle's references/styles.md
 emoji: none                 # none | sparing — sparing allows at most one emoji per chronicle entry, in the title or footer, never inside a field's facts
+
+# provider-mode: subscription-only       # confirmed organization policy; no usage-billed fallback
+# learning: normal-work                  # normal-work | off; verified VegaFactory lessons, no built-in vendor memory
+# learning-adoption: scoped-reversible   # scoped-reversible | propose-only; never changes approval or quality/privacy authority
 
 ## Ship — what happens after merge, in order
 

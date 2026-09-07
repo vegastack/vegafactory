@@ -1,3 +1,4 @@
+import { parsePolicy, resolvePolicy } from '../../../../skills/dev/dev-setup/scripts/effective-policy.mjs'
 // The stats record — what one agent run or one interactive session is, as data.
 //
 // Counts and identifiers only. No prompt text, no assistant text, no tool arguments and no file
@@ -130,18 +131,14 @@ export interface StatsKnobs {
   statsOverride?: 'allowed' | 'locked'
 }
 
-// Exactly three lines are read, and everything else in the document is ignored: these knobs live
-// alongside prose in `org.md`, `group.md` and `dev.md`, and a parser that guessed at neighbouring
-// lines would turn a sentence about statistics into a policy change.
+// Legacy public shape, parsed by the same owner as runtime and guard policy.
 export function parseStatsKnobs(text: string): StatsKnobs {
-  const body = typeof text === 'string' ? text : ''
+  const layer = parsePolicy(text, 'repo')
+  const values = layer.values as Record<string, unknown>
   const knobs: StatsKnobs = {}
-  const stats = /^stats:\s*(on|off)\s*(?:#.*)?$/m.exec(body)
-  if (stats) knobs.stats = stats[1] as 'on' | 'off'
-  const people = /^stats-people:\s*(on|off)\s*(?:#.*)?$/m.exec(body)
-  if (people) knobs.statsPeople = people[1] as 'on' | 'off'
-  const override = /^stats-override:\s*(allowed|locked)\s*(?:#.*)?$/m.exec(body)
-  if (override) knobs.statsOverride = override[1] as 'allowed' | 'locked'
+  if (values.stats === 'on' || values.stats === 'off') knobs.stats = values.stats
+  if (values['stats-people'] === 'on' || values['stats-people'] === 'off') knobs.statsPeople = values['stats-people']
+  if (values['stats-override'] === 'allowed' || values['stats-override'] === 'locked') knobs.statsOverride = values['stats-override']
   return knobs
 }
 
@@ -152,37 +149,19 @@ export interface StatsPolicy {
   refusal: string | null
 }
 
-// Layered org → group → repo, nearest wins — except that a repo may only opt itself out while the
-// org says `stats-override: allowed`. Under `locked` the repo line is ignored and the reason is
-// carried back in `refusal`, so the person who wrote it learns why it did nothing instead of
-// believing the repo is silent.
-export function resolveStatsPolicy(layers: { org?: string; group?: string; repo?: string }): StatsPolicy {
-  const org = parseStatsKnobs(layers.org ?? '')
-  const group = parseStatsKnobs(layers.group ?? '')
-  const repo = parseStatsKnobs(layers.repo ?? '')
-  const override = group.statsOverride ?? org.statsOverride ?? 'allowed'
+// enabled is the diagnostic effective value. A non-null refusal always blocks capture/export.
+export function resolveStatsPolicy(layers: { org?: string; group?: string; repo?: string; identity?: Record<string, unknown>; freshness?: Record<string, unknown> }): StatsPolicy {
+  const resolved = resolvePolicy(layers)
+  return statsPolicyFromEffective(resolved)
+}
 
-  let refusal: string | null = null
-  let enabled: boolean
-  let source: StatsPolicy['source']
-  if (repo.stats !== undefined && override === 'allowed') {
-    enabled = repo.stats === 'on'
-    source = 'repo'
-  } else {
-    if (repo.stats !== undefined) {
-      refusal = `this repo carries "stats: ${repo.stats}" but the org sets "stats-override: locked" — the repo line is ignored`
-    }
-    if (group.stats !== undefined) {
-      enabled = group.stats === 'on'
-      source = 'group'
-    } else if (org.stats !== undefined) {
-      enabled = org.stats === 'on'
-      source = 'org'
-    } else {
-      enabled = true
-      source = 'default'
-    }
+export function statsPolicyFromEffective(resolved: ReturnType<typeof resolvePolicy>): StatsPolicy {
+  const values = resolved.policy.values
+  const enabled = values.stats !== 'off'
+  return {
+    enabled,
+    people: enabled && values['stats-people'] === 'on',
+    source: resolved.policy.sources.stats?.scope ?? 'default',
+    refusal: resolved.ok ? null : resolved.blocks.join('; '),
   }
-  const people = group.statsPeople ?? org.statsPeople ?? 'off'
-  return { enabled, people: enabled && people === 'on', source, refusal }
 }

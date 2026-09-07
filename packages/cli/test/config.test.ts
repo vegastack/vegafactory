@@ -90,3 +90,19 @@ describe('mergeRepoPolicy and stagePolicy', () => {
     expect(() => stagePolicy(parseRepoPolicy('dispatch: local\n'), 'plan')).toThrow(/plan/)
   })
 })
+
+test('runtime policy inherits org stages and refuses invalid known policy', () => {
+  const policy = mergeRepoPolicy('', 'dispatch: local', { org: 'implement: codex confirmed high' })
+  expect(stagePolicy(policy, 'implement').model).toBe('confirmed')
+  const bad = mergeRepoPolicy('', 'dispatch: local\ntests: never')
+  expect(bad.refusal).toMatch(/tests/)
+  expect(() => stagePolicy(bad, 'implement')).toThrow(/tests/)
+})
+
+test('configured room needs validated identity and freshness, while local-only stays supported', () => {
+  const text = 'dispatch: local\ncontrol-room: acme/room#dev\nimplement: codex selected high'
+  expect(mergeRepoPolicy('', text).refusal).toMatch(/unavailable/)
+  const fresh = mergeRepoPolicy('', text, { org: 'stats: on', identity: { repo: 'acme/app', group: 'dev', roomSha: 'a'.repeat(40) }, freshness: { validatedAt: '2026-09-06T00:00:00Z', now: '2026-09-06T00:01:00Z' } })
+  expect(fresh.refusal).toBeNull()
+  expect(fresh.effective?.sources.stats.revision).toBe('a'.repeat(40))
+})

@@ -1,6 +1,8 @@
 # {{group}} — group defaults
 
-One default for every knob a group can decide for a repo's `.vegastack/dev.md` — the per-repo facts (`repo:`, `skill-scan:`, `board:`, `control-room:`, the detected org types and fields) stay in the repo — so a repo that answers nothing else still gets a complete profile. A hand edit in a repo's dev.md beats every line here; this file beats `org.md`; `org.md` beats the skill defaults. Precedence and the read path: the vegafactory-setup skill's `references/control-room.md`.
+One default for every knob a group can decide for a repo's `.vegastack/dev.md` — the per-repo facts (`repo:`, `skill-scan:`, `board:`, `control-room:`, the detected org types and fields) stay in the repo — so a repo that answers nothing else still gets a complete profile. Ordinary explicit repo values beat group defaults, which beat ordinary org defaults. Organization locks require exact org delegation; this file cannot grant it or appoint admins. Precedence and the read path: the vegafactory-setup skill's `references/control-room.md`.
+
+policy-schema: 2
 
 ## Knobs
 
@@ -25,7 +27,7 @@ operators: {{operators}}    # csv of logins from people.csv who own issues in th
 
 ## Harness policy
 
-harness-policy: intake claude fable high · plan claude fable high · implement claude fable high · review codex gpt-5.6 xhigh · status claude sonnet medium · chronicle claude sonnet medium   # one `<stage> <agent> <model> <effort>` entry per stage — the same line a repo's dev.md carries, so the two layer key by key; xhigh for planning a `risky` `full-plan` issue; review runs on codex only under cross-agent / cross-agent-risky, else claude fable high
+harness-policy: intake {{intake-harness}} {{intake-model}} {{intake-effort}} · plan {{plan-harness}} {{plan-model}} {{plan-effort}} · implement {{implement-harness}} {{implement-model}} {{implement-effort}} · review {{review-harness}} {{review-model}} {{review-effort}} · status {{status-harness}} {{status-model}} {{status-effort}} · chronicle {{chronicle-harness}} {{chronicle-model}} {{chronicle-effort}}   # confirm detected supported subscription choices for every stage; placeholders block execution
 
 ## Runtime
 
@@ -34,4 +36,8 @@ ship-environments: preview auto · staging auto · production ask
 design-system: {{design-system}}           # the design layer a repo in this group consumes by default, or `none`
 secrets: {{secret-names}}                  # NAMES of the secrets a repo in this group expects — never values
 gh-floor: 2.97                             # the minimum gh CLI version this group's automation assumes
-stats: inherit                             # inherit | on | off — `off` needs org `stats-override: allowed`
+stats: inherit                             # inherit | on | off; an org lock needs explicit exact org delegation
+
+## Delegated administration
+
+Admin assignments and group capabilities resolve from org.md, independently of descriptive people.csv rows. A group admin may change only permitted ordinary/delegated defaults and already-authorized members/repositories. Machine settings additionally require previous org fleet.groupDelegations field/range permission; changing enrollment, machine group/repositories, host binding or coordination is org-admin-only. Keep local paths and credentials on the machine. Show the exact diff and verified requester before applying the existing Git delivery rules.

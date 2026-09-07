@@ -7,6 +7,7 @@
 // unit-testable; the effectful half lives in `sync.ts`.
 
 import { join } from 'node:path'
+import { parseControlRoomReference, parsePolicy } from '../../../skills/dev/dev-setup/scripts/effective-policy.mjs'
 
 export interface ControlRoomKnob {
   org: string
@@ -39,26 +40,14 @@ const DEFAULT_MAX_AGE_MINUTES = 30
 // `control-room: <org>/<repo>#<group>@<sha7>` — group and sha are both optional, and the value
 // stops at the first whitespace so the trailing `# comment` every knob line carries is ignored.
 export function parseControlRoomKnob(devMdText: string): ControlRoomKnob | null {
-  const match = /^control-room:\s*([^\s#]+)(#[^\s]*)?/m.exec(devMdText ?? '')
-  if (!match) return null
-  const repo = match[1]!
-  if (repo === 'none' || !repo.includes('/')) return null
-  const org = repo.split('/')[0]!
-  const tail = (match[2] ?? '').replace(/^#/, '')
-  const [groupPart, shaPart] = tail.split('@')
-  const group = groupPart ? groupPart : null
-  const sha = shaPart ? shaPart : null
-  return { org, repo, group, sha }
+  return parseControlRoomReference(devMdText)
 }
 
 // Freshness is a duration, not a timestamp: `<n>m` or `<n>h`. Anything unparseable falls back to
 // the default rather than disabling the refresh, because a typo must not silently freeze a clone.
 export function parseSyncMaxAge(devMdText: string): number {
-  const match = /^sync-max-age:\s*(\d+)\s*([mh])/m.exec(devMdText ?? '')
-  if (!match) return DEFAULT_MAX_AGE_MINUTES
-  const value = Number(match[1])
-  if (!Number.isFinite(value) || value <= 0) return DEFAULT_MAX_AGE_MINUTES
-  return match[2] === 'h' ? value * 60 : value
+  const seconds = (parsePolicy(devMdText, 'repo').values as Record<string, unknown>)['sync-max-age']
+  return typeof seconds === 'number' ? seconds / 60 : DEFAULT_MAX_AGE_MINUTES
 }
 
 export function defaultClonePath(org: string, home: string): string {
@@ -120,3 +109,7 @@ export function isStale(lastSyncedAt: string | null, now: number, maxAgeMinutes:
   if (age === null) return true
   return age >= maxAgeMinutes
 }
+
+// The same standalone reader is used by runtime, stats and the installed compiler. Snapshot
+// creation/atomic replacement belongs to sync; legacy fetch time is never validation evidence.
+export { loadConfiguredPolicy, loadSnapshotPolicy } from '../../../skills/dev/dev-setup/scripts/effective-policy.mjs'

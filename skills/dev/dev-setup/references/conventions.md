@@ -2,7 +2,11 @@
 
 The artifact spec. Skills cite this single rule source.
 
-Knob precedence, nearest wins: hand edits in `.vegastack/dev.md`, then the org control room's `groups/<g>/*`, then its `org.md`, then skill defaults; decision registers concatenate instead of overriding.
+Ordinary explicit knobs resolve repo → group → org. Organization locks require exact org delegation for an override; group permission cannot unlock them. Repository dispatch opt-in and executable repository facts are not inherited. Decision registers concatenate; neither registers nor remembered lessons grant authority.
+
+## Policy sources and migration
+
+Resolve policy through dev-setup's `scripts/effective-policy.mjs`; its sources/digest/freshness and explicit refusals govern consumers. The schema, capability matrix and migration walkthrough live in the control-room reference in vegafactory-setup. Inspect original/effective/proposed values, preserve originals and obtain concrete approval for authority changes; unknown schemas are not rewritten. Configured stale/missing policy blocks new tasks and external effects, while pinned reversible work may continue. Descriptive roles, machine bootstrap and remembered lessons grant no authority. Keep requester and execution identities separate, enforce previous trusted delegation, and filter people records before aggregation. Native vendor memory and cumulative task deadlines remain excluded.
 
 ## Comment metadata markers
 

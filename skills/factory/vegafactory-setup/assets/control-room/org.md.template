@@ -1,8 +1,9 @@
 # {{org}} — org profile
 
-The org's global answers. Everything here applies to everyone, in every group and every repo. Department knobs live in `groups/<g>/group.md`, never here — layout, precedence, and the read path are the vegafactory-setup skill's `references/control-room.md`.
+The org's global answers. Everything here applies to everyone, in every group and every repo. Group defaults live in `groups/<g>/group.md`; org locks and administration stay here — layout, precedence, and the read path are the vegafactory-setup skill's `references/control-room.md`.
 
 org: {{org}}
+policy-schema: 2
 
 ## Goals
 
@@ -17,7 +18,7 @@ org: {{org}}
 
 ## Statistics policy
 
-Three lines, each `on`/`off` except the last — a run is recorded only when the first says so, per-person fields only when the second does, and a repo may opt out only when the third allows it.
+Confirm reporting and quality choices for this organization. Ordinary values inherit; mandatory values and exact exceptions are authored in the organization authority object. The legacy stats-override line below remains readable but is not group delegation.
 
 stats: on
 stats-people: off
@@ -38,3 +39,22 @@ app-permissions: Issues read/write · Projects (organization) read/write · Meta
 Lines the operator has not confirmed yet. Each is a question the next run asks again rather than an answer anyone may assume.
 
 - (none)
+
+## Explicit authority
+
+Confirm the org admin login against people.csv and verified requester context before replacing the placeholder. Preserve existing assignments on rerun. The empty locks/delegations below make no hidden house-policy choice; render the organization's confirmed constraints and exact reporting exceptions here.
+
+```vsk-policy
+{
+  "schemaVersion": 2,
+  "locked": {},
+  "delegations": [],
+  "administration": {
+    "orgAdmins": ["{{confirmed-org-admin-login}}"],
+    "groupAdmins": {},
+    "groupAdminCapabilities": {}
+  }
+}
+```
+
+Only org admins appoint/remove admins. Confirm optional group capabilities and machine enrollment through the control-room reference's capability/fleet contract. Render registry entries disabled until qualification, preserving other machines. Local bootstrap coordinates, OS accounts, paths and credentials do not belong in this authority object. Each required unknown field blocks completion; preserve explicit optional declines. Learning settings, if selected, are `learning: normal-work|off` and `learning-adoption: scoped-reversible|propose-only`; verified lessons cannot change approvals, quality/privacy rules or enable native vendor memory.

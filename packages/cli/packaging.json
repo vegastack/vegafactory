@@ -97,6 +97,7 @@
     "references/ask-route.md",
     "references/stack-playbooks.md",
     "scripts/questions.mjs",
+    "scripts/effective-policy.mjs",
     "scripts/ship-policy.mjs",
     "assets/dev-profile.md.template",
     "assets/agents-section.md.template",

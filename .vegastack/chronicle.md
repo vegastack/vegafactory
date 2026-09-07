@@ -2,6 +2,16 @@
 
 The project's story, newest first: what got built, why, and how it went — for the operator's future recall. Format home: the dev-chronicle skill.
 
+## 07-09-2026 — Policy has one authority model ([#145](https://github.com/vegastack/vegafactory/issues/145))
+
+- **What:** Organization locks, group defaults and repository choices now resolve through one helper, alongside explicit admin/read scopes and registered-machine settings. Consumers keep the source and reason when a requested override is refused.
+- **Why:** Separate parsers let a group unlock mandatory org reporting and omitted org stage defaults. Descriptive lead rows could also grant broad people views without an explicit admin assignment.
+- **How it went:** Focused failures exposed those contradictions before their adapters changed. Real Git fixtures cover separate repo/group snapshots, changed local policy, wrong origins and expired validation. Shared evaluation and final candidate review remain separate acceptance gates.
+- **Changed:** Effective policy resolver · administration/fleet contracts · runtime/stats/guard adapters · scoped people reads · migration and source diagnostics.
+- **Decisions:** none.
+
+— approved by (kmanojkumar) · built by codex · branch codex/productionization-133
+
 ## 07-09-2026 — Approval follows the work that was actually approved ([#135](https://github.com/vegastack/vegafactory/issues/135))
 
 - **What:** Scoped approval records now bind the operator’s quoted intent to current brief and plan identities. Task progress keeps its approval; changed requirements require fresh intent. Parent selections distinguish code, preparation and research permissions.

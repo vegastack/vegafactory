@@ -7,19 +7,19 @@
 // in the log, because "nothing happened" and "the ship guard is unwired" look identical otherwise.
 import { spawn, spawnSync } from 'node:child_process'
 import { existsSync, rmSync, writeFileSync } from 'node:fs'
-import { parseControlRoomKnob } from './control-room.ts'
+import { parseControlRoomKnob, loadConfiguredPolicy } from './control-room.ts'
 import { appendFile, lstat, mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises'
 import { hostname, tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { pathToFileURL, fileURLToPath } from 'node:url'
-import { loadFactoryConfig, mergeRepoPolicy, stagePolicy, type FactoryConfig, type Harness, type RepoEntry, type RepoPolicy, type Stage, type Subagents } from './config.ts'
+import { loadFactoryConfig, repoPolicyFromEffective, stagePolicy, type FactoryConfig, type Harness, type RepoEntry, type RepoPolicy, type Stage, type Subagents } from './config.ts'
 import { buildLaunchPlan, type LaunchPlan } from './launch.ts'
 import { GhUnavailable, ghText } from './gh.ts'
 import { GIT_CREDENTIAL_ARGS } from './sync.ts'
 import { fromClaudeHeadless, fromCodexExec, reworkFromComments, type ReworkCounts } from './stats/capture.ts'
 import { appendRecord, takeSkillInvocations } from './stats/outbox.ts'
 import { pushOutbox, statsClonePath, type GitRunner, type PushResult } from './stats/push.ts'
-import { normalizeRecord, resolveStatsPolicy, type StatsPolicy, type StatsRecord } from './stats/record.ts'
+import { normalizeRecord, statsPolicyFromEffective, type StatsPolicy, type StatsRecord } from './stats/record.ts'
 
 export interface BoardIssue {
   number: number
@@ -288,6 +288,7 @@ export interface GuardState {
 export function evaluateGuards(input: { repo: string; policy: RepoPolicy; guards: GuardState; maxRuns: number }): Refusal[] {
   const refusals: Refusal[] = []
   const at = (reason: string): Refusal => ({ repo: input.repo, issue: null, reason })
+  if (input.policy.refusal) refusals.push(at(input.policy.refusal))
   if (input.policy.dispatch !== 'local') {
     refusals.push(at(`${input.repo} has dispatch: off — a repo runs dark builds only once its operator opts in`))
   }
@@ -751,7 +752,7 @@ export async function recordRun(
   input: RunOutcomeInput,
   deps: { home: string; hostname: string; policy: StatsPolicy; rework?: (repo: string, issue: number) => Promise<ReworkCounts | null> },
 ): Promise<string | null> {
-  if (!deps.policy.enabled) return null
+  if (!deps.policy.enabled || deps.policy.refusal) return null
   let rework: ReworkCounts | null = null
   if (deps.rework && input.issue !== null) {
     try {
@@ -1139,25 +1140,6 @@ async function readIfPresent(path: string): Promise<string | null> {
   }
 }
 
-// The org's own `org.md`, for the layered policies that are the org's to set. Same rule as the
-// group defaults: a missing clone is not an error.
-async function orgDefaults(config: FactoryConfig, entry: RepoEntry, devMd: string): Promise<string | null> {
-  const knob = parseControlRoomKnob(devMd)
-  const clone = knob ? config.controlRoom[knob.org] : undefined
-  if (!clone) return null
-  return readIfPresent(join(clone, 'org.md'))
-}
-
-// The org's group defaults, when this machine has a control-room clone for it. A missing clone is
-// not an error: the repo's own dev.md is the authority for everything that gates a run.
-async function groupDefaults(config: FactoryConfig, entry: RepoEntry, devMd: string): Promise<string | null> {
-  const knob = parseControlRoomKnob(devMd)
-  if (!knob?.group) return null
-  const clone = config.controlRoom[knob.org]
-  if (!clone) return null
-  return readIfPresent(join(clone, 'groups', knob.group, 'group.md'))
-}
-
 export async function runTick(
   config: FactoryConfig,
   options: { dryRun: boolean },
@@ -1181,17 +1163,18 @@ export async function runTick(
   const refusals: Refusal[] = []
 
   for (const entry of config.repos) {
+    if (config.executionMode === 'shared') {
+      refusals.push({ repo: entry.repo, issue: null, reason: 'shared machine requires validated registration and shared ownership; legacy local locks cannot authorize launch' })
+      continue
+    }
     const devMd = await readIfPresent(join(entry.path, '.vegastack', 'dev.md'))
     if (devMd === null) {
       refusals.push({ repo: entry.repo, issue: null, reason: `${entry.repo}: no .vegastack/dev.md at ${entry.path} — the dispatcher reads its policy from the repo, and an absent profile is off` })
       continue
     }
-    const groupMd = await groupDefaults(config, entry, devMd)
-    const policy = mergeRepoPolicy(groupMd, devMd)
-    // Whether this tick records anything is org policy layered over the repo's own line — never a
-    // machine setting, so a box cannot quietly opt itself out of the org's numbers.
-    const orgMd = await orgDefaults(config, entry, devMd)
-    const statsPolicy = resolveStatsPolicy({ org: orgMd ?? '', group: groupMd ?? '', repo: devMd })
+    const resolved = loadConfiguredPolicy({ home: config.home, repo: entry.repo, devMd, now: now().toISOString() })
+    const policy = repoPolicyFromEffective(resolved)
+    const statsPolicy = statsPolicyFromEffective(resolved)
     let harness: Harness
     try {
       harness = stagePolicy(policy, 'implement').harness

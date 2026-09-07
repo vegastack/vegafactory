@@ -198,6 +198,18 @@ Two refusals are deliberate and fail closed:
 
 An unreadable `~/.vegastack/factory.json` is also a refusal, never a silent reset: resetting it would drop every other org's clone record.
 
+### Effective policy and migration
+
+Runtime, stats and the standalone dev-setup compiler share `effective-policy.mjs`. Ordinary explicit values resolve org → group → repo, including individual harness stages. A repo alone opts into `dispatch: local`. Org locks and exact group/repo/value delegations live in one `vsk-policy` schema2 block in org.md; a group's legacy `stats-override: allowed` cannot unlock the organization. A refused override retains its effective value for diagnostics but stops capture/export and new launches.
+
+`policy-schema: 2` opts into the documented typed contract. Legacy version1 ordinary knobs remain readable and are never silently rewritten. Use `vegafactory guard sync --dry-run --json` to inspect the proposed compiled values, source revisions and digest, then `--check` to compare the installed copy. Show original/effective/proposed policy differences and preserve originals before an explicit migration; obtain approval for an actual authority change. Unknown schemas, duplicate known keys and invalid values refuse without overwriting the existing copy. Unknown extension fields remain inert.
+
+Configured rooms require `factory.json`'s `controlRooms[org].snapshots[canonicalCodeRepo]` binding. Each snapshot carries schemaVersion2, org, group, repository (the room), origin, full sourceCommit, policyDigest, validatedAt and contentPath. The digest is recomputed for that exact code repo's current profile and selected group, using canonical relative source paths; one org digest cannot stand for multiple code repos. The reader checks origin, commit, clean managed content and regular Git blobs. Missing bindings, changed local profile, wrong group/origin or expired validation refuse. Snapshot creation and atomic refresh are the sync transaction's responsibility; a legacy lastSyncedAt is not validation. Freshness never creates a cumulative task deadline.
+
+Organization admins and explicitly delegated group admins are configured separately from descriptive people.csv roles and the task operators list. Only org admins appoint/remove admins. CLI people queries verify the requester through GitHub and filter exact allowed repository records before totals; chat/URL/display-role claims do not grant authority. The dashboard's canonical adapters fail closed until a caller supplies validated scope. Control-room Git readers can still read committed reports; application permissions do not make shared Git files group-confidential.
+
+Registered-machine policy includes stable machine/installation identity, host binding, execution login, exact repositories and disabled initial enrollment. Org defaults → group defaults → machine overrides govern polling, capacity, checkpoint and verified-transfer recovery modes. Group edits require previous org delegation; bootstrap paths cannot enable or enlarge registration. No-fleet installations retain explicit legacy operation; shared machines require validated registration and shared ownership rather than local-lock fallback. Runtime activation, private house-policy migration and state-branch creation remain separate setup steps.
+
 ### Statistics
 
 One JSONL record per headless run and per interactive session, spooled to a machine-local outbox and pushed into the org's control room at `stats/<owner>__<name>/<MON-YYYY>/<hostname>.jsonl`. One file per repo, per month, per machine, so two machines never conflict — a concurrent push is a non-fast-forward, which `pull --rebase` and a retry settles without a human.
@@ -215,11 +227,11 @@ vegafactory stats record --source <kind>    # called by the capture hooks, reads
 
 **A record is counts and identifiers only.** When the run happened, which repo, issue and stage, which harness, model and effort, how long it took, turns, tool calls, the four token counters, cost, how it ended, rework rounds — read after a headless run from the issue's own review, ledger and hand-back comments, by marker — and which skills it used. Never prompt text, assistant text, tool arguments, or file contents — the harness transcripts are read for usage totals and tool-call counts and nothing else. A field the capture could not fill is `null`, never a guess and never a zero.
 
-**Whether anything is recorded at all is the org's call, not the machine's.** `stats: on|off` and `stats-people: on|off` live in the control room's `org.md` (or a department's `group.md`); a repo may opt itself out with `stats: off` in its `.vegastack/dev.md` only while `org.md` says `stats-override: allowed`. Under `stats-override: locked` the repo's line is read, reported back, and ignored. There is deliberately no machine-level knob. Per-person views are for the person they describe or a `lead` in `people.csv`; org and repo totals are for everyone, and the committed summary files carry no per-person block, because the control-room clone is readable by everyone the org onboards.
+**Whether anything is recorded is org/group/repo policy, never a machine bypass.** Ordinary `stats` and `stats-people` values inherit; explicit org locks require exact delegation. `stats-export: attributed` requires org authorization. Refusals stop capture and export. Per-person reads use verified own-data identity or explicit scoped administration; a descriptive `lead` role does not supply that grant. Committed summaries carry no per-person block, and the shared Git audience remains explicit.
 
 `push` is a dry run until `--commit`, because it writes to a repository other people read.
 
-`rollup` is the one statistics verb that reads the GitHub API: lead and cycle time come from each touched issue's label timeline, fetched through `gh` and written beside the summary as `<MON-YYYY>.timeline.json`. When `gh` cannot answer, the summaries are still regenerated from the timeline file the clone already holds, the reason is printed, and the exit code is 1.
+The CLI verifies its requester through the GitHub API. `rollup` also reads issue history: lead and cycle time come from each touched issue's label timeline, fetched through `gh` and written beside the summary as `<MON-YYYY>.timeline.json`. When `gh` cannot answer, the summaries are still regenerated from the timeline file the clone already holds, the reason is printed, and the exit code is 1.
 
 ## Dashboard
 

@@ -71,7 +71,14 @@ describe('resolveStatsPolicy', () => {
       enabled: true,
       people: false,
       source: 'org',
-      refusal: 'this repo carries "stats: off" but the org sets "stats-override: locked" — the repo line is ignored',
+      refusal: 'repo: stats override requires exact org delegation',
     })
   })
+})
+
+test('group cannot unlock org stats and malformed known knobs refuse capture', () => {
+  const policy = resolveStatsPolicy({ org: 'stats: on\nstats-override: locked', group: 'stats-override: allowed', repo: 'stats: off' })
+  expect(policy.enabled).toBe(true)
+  expect(policy.refusal).toMatch(/delegation/)
+  expect(resolveStatsPolicy({ repo: 'stats: nonsense' }).refusal).toMatch(/stats/)
 })

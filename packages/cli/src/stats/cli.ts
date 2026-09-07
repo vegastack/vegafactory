@@ -13,7 +13,8 @@
 
 import { spawn } from 'node:child_process'
 import { mkdir, readFile, readdir, writeFile } from 'node:fs/promises'
-import { hostname, userInfo } from 'node:os'
+import { hostname } from 'node:os'
+import { loadConfiguredPolicy, resolvePeopleReadScope, resolvePolicy } from '../../../../skills/dev/dev-setup/scripts/effective-policy.mjs'
 import { dirname, join, resolve } from 'node:path'
 import { parseControlRoomKnob } from '../control-room.ts'
 import { ghJson } from '../gh.ts'
@@ -23,7 +24,7 @@ import {
   type CaptureContext, type SkillHookSource,
 } from './capture.ts'
 import { appendRecord, appendSkillInvocations, listOutbox, takeSkillInvocations } from './outbox.ts'
-import { monthToken, parseMonthToken, resolveStatsPolicy, type StatsPolicy, type StatsRecord } from './record.ts'
+import { monthToken, parseMonthToken, statsPolicyFromEffective, type StatsPolicy, type StatsRecord } from './record.ts'
 import { planPush, pushOutbox, statsClonePath, type GitRunner } from './push.ts'
 import {
   rollupOrg, rollupRepo, rollupSkills, stableStringify,
@@ -89,7 +90,9 @@ export interface StatsDeps {
   hostname: string
   ghUser: string
   login: string
-  isLead: boolean
+  isLead: boolean // descriptive legacy input only; never an authority grant
+  effectivePolicy?: ReturnType<typeof resolvePolicy>['policy']
+  viewerVerified?: boolean
   policy: StatsPolicy
   repo: string | null
   cloneRoot: string
@@ -392,22 +395,26 @@ async function runRollup(args: StatsArgs, deps: StatsDeps): Promise<number> {
 async function runShow(args: StatsArgs, deps: StatsDeps): Promise<number> {
   const fallback = args.since ?? monthToken(deps.now())
   const subject = deps.ghUser
-  if (args.scope === 'me') {
-    if (subject !== deps.login && !deps.isLead) {
-      deps.log(`people-level statistics are for the person they describe or a lead in people.csv — ${deps.login} may not read ${subject}'s`)
-      return 2
+  let people = false
+  let buckets = await windowBuckets(deps, args.since)
+  if (deps.effectivePolicy) {
+    const effective = deps.effectivePolicy
+    const scope = resolvePeopleReadScope({ viewer: { login: deps.login, verified: deps.viewerVerified === true },
+      subject: args.scope === 'me' ? subject : null, administration: effective.administration,
+      policy: effective, repoGroups: effective.registry.repoGroups,
+      requestedRepos: deps.repo && ['me', 'repo'].includes(args.scope) ? [deps.repo] : Object.keys(effective.registry.repoGroups) })
+    if (scope.refusal) { deps.log(`people-level statistics: ${scope.refusal}`); return 2 }
+    if (!scope.refusal) {
+      const allowed = new Set(scope.allowedRepos)
+      buckets = buckets.map(bucket => ({ ...bucket, records: bucket.records.filter(record => allowed.has(record.repo)) }))
+        .filter(bucket => bucket.records.length > 0)
+      people = args.scope !== 'me'
     }
-    if (!deps.policy.people && !deps.isLead) {
-      deps.log('people-level statistics are off for this org (stats-people: off) — org and repo totals are available to everyone')
-      return 2
-    }
+  } else if (args.scope === 'me' && (!deps.login || subject !== deps.login)) {
+    deps.log('people-level statistics require verified own-data identity or explicit organization administration')
+    return 2
   }
-  const buckets = await windowBuckets(deps, args.since)
   const label = windowLabel(buckets, fallback)
-  // A per-person block on an org or repo summary is a people-level view of everyone at once, so it
-  // is a lead's to read and nobody else's — `stats-people: on` is what lets a lead read it, not
-  // what hands it to every viewer.
-  const people = deps.policy.people && deps.isLead
 
   if (args.scope === 'skills') {
     const summary = rollupSkills(buckets.flatMap(bucket => bucket.records), { month: label })
@@ -445,6 +452,10 @@ async function runShow(args: StatsArgs, deps: StatsDeps): Promise<number> {
 }
 
 export async function runStats(args: StatsArgs, deps: StatsDeps): Promise<number> {
+  if (deps.policy.refusal) {
+    deps.log(`stats policy refused: ${deps.policy.refusal}`)
+    return 2
+  }
   if (args.verb === 'record') return runRecord(args, deps)
   if (args.verb === 'push') return runPush(args, deps)
   if (args.verb === 'rollup') return runRollup(args, deps)
@@ -461,7 +472,7 @@ Where agent time and money went, from the org's own control room. Records are co
 identifiers only — no prompt text, no assistant text, no tool arguments, ever.
 
   --repo         this repository's month (the default)
-  --me           your own rows; a lead in people.csv may read another person's
+  --me           your own rows; explicit org administration controls scoped people reads
   --org          every repo in the org, totalled
   skills         invocations per skill, by trigger and harness
   --since        the month to report, e.g. SEP-2026 (default: this month, UTC)
@@ -518,7 +529,7 @@ export function isLeadIn(peopleCsv: string | null, login: string): boolean {
   if (loginAt < 0 || roleAt < 0) return false
   for (const line of lines) {
     const cells = line.split(',').map(cell => cell.trim())
-    if (cells[loginAt] === login) return /\blead\b/i.test(cells[roleAt] ?? '')
+    if (cells[loginAt] === login) return cells[roleAt]?.toLowerCase() === 'lead'
   }
   return false
 }
@@ -541,26 +552,28 @@ function defaultGit(): GitRunner {
   })
 }
 
-export async function buildStatsDeps(home: string, cwd: string, log: (line: string) => void): Promise<StatsDeps> {
+export async function buildStatsDeps(home: string, cwd: string, log: (line: string) => void, githubIdentity: () => Promise<{ login?: unknown; id?: unknown }> = () => ghJson(['api', 'user'])): Promise<StatsDeps> {
   const project = await findDevMd(cwd)
   const devMd = project?.text ?? ''
   const knob = parseControlRoomKnob(devMd)
-  const readOnlyClone = knob ? join(home, '.vegastack', 'control-room', knob.org) : null
-  const orgMd = readOnlyClone ? await readIfPresent(join(readOnlyClone, 'org.md')) : null
-  const groupMd = readOnlyClone && knob?.group ? await readIfPresent(join(readOnlyClone, 'groups', knob.group, 'group.md')) : null
-  const peopleCsv = readOnlyClone ? await readIfPresent(join(readOnlyClone, 'people.csv')) : null
-  // No network call for an identity: the operator's own login is already in dev.md's operators
-  // list, and an env override exists for a machine whose account name differs.
-  const ghUser = process.env.VSK_GH_USER
-    || (/^operators:\s*([^\s,#]+)/m.exec(devMd)?.[1] ?? '')
-    || userInfo().username
+  // Requester authority comes from the authenticated GitHub context, never an env override,
+  // operators prose, display role or OS account. An unavailable identity remains unknown.
+  let ghUser = ''
+  try {
+    const user = await githubIdentity()
+    if (typeof user.login === 'string' && /^[a-z\d](?:[a-z\d-]{0,37}[a-z\d])?$/i.test(user.login)
+      && typeof user.id === 'number' && Number.isSafeInteger(user.id) && user.id > 0) ghUser = user.login.toLowerCase()
+  } catch { /* No requester authority while identity cannot be verified. */ }
+  const effective = loadConfiguredPolicy({ home, repo: repoFromDevMd(devMd) ?? '', devMd })
   return {
     home,
     hostname: hostname(),
     ghUser,
     login: ghUser,
-    isLead: isLeadIn(peopleCsv, ghUser),
-    policy: resolveStatsPolicy({ org: orgMd ?? '', group: groupMd ?? '', repo: devMd }),
+    isLead: false,
+    viewerVerified: ghUser !== '',
+    effectivePolicy: knob ? effective.policy : undefined,
+    policy: statsPolicyFromEffective(effective),
     repo: repoFromDevMd(devMd),
     cloneRoot: statsClonePath(home, knob?.org ?? 'org'),
     git: defaultGit(),

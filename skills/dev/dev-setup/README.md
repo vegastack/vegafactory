@@ -30,6 +30,7 @@ npx @vegastack/vegafactory skills add --group dev --global
 | [references/ask-route.md](references/ask-route.md) | The ask route — tool or issue, the questions comment format, the reply grammar, re-asks |
 | [references/stack-playbooks.md](references/stack-playbooks.md) | Per-stack detection → draft mapping (npm/changesets, Node app, Flutter, Python, Go, generic), the guard library, and the greenfield playbook |
 | [scripts/questions.mjs](scripts/questions.mjs) | The ask round renderer, answer parser and route decision — authored here, duplicated into intake, plan and implement |
+| [scripts/effective-policy.mjs](scripts/effective-policy.mjs) | Canonical Markdown policy, org delegation, administration/read scope and registered-machine resolution with source/freshness diagnostics |
 | [scripts/ship-policy.mjs](scripts/ship-policy.mjs) | Compiles dev.md's Environments lines, gates knob and backticked Ship ask: commands into `~/.vegastack/guard/<owner>__<repo>.json`, the one file the ship guard reads; `--check` exits 2 when it is stale |
 | [assets/dev-profile.md.template](assets/dev-profile.md.template) | The `.vegastack/dev.md` starting point |
 | [assets/agents-section.md.template](assets/agents-section.md.template) | The marked AGENTS.md block this skill owns |

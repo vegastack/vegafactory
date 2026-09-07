@@ -49,3 +49,14 @@ describe('runGuardCli', () => {
     expect(lines.join('\n')).toContain('unreadable')
   })
 })
+
+test('standalone compiler shares org authority, provenance and refuses a group self-unlock', async () => {
+  const { compilePolicy, staleness } = await import('../../../skills/dev/dev-setup/scripts/ship-policy.mjs')
+  const input = { repo: 'acme/app', org: 'gates: 3\nstats: on\nstats-override: locked' }
+  const policy = compilePolicy('dispatch: local', input)
+  expect(policy.schemaVersion).toBe(2)
+  expect(policy.policyDigest).toMatch(/^[a-f0-9]{64}$/)
+  expect(policy.sources.gates.scope).toBe('org')
+  expect(() => compilePolicy('stats: off', { ...input, group: 'stats-override: allowed' })).toThrow(/delegation/)
+  expect(staleness(JSON.stringify({ ...policy, policyDigest: 'b'.repeat(64) }), policy).stale).toBe(true)
+})
