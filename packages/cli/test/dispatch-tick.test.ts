@@ -3,13 +3,13 @@
 // in dispatch.test.ts; these cover the seams between them, which is where the review found the
 // silent drops.
 import { describe, expect, spyOn, test } from 'bun:test'
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { scopeDigest } from '../../../skills/dev/dev-implement/scripts/lib/approval.mjs'
 
 process.env.VSK_PREFLIGHT_SCRIPT = resolve(import.meta.dir, '../../../skills/dev/dev-implement/scripts/preflight.mjs')
-import { executeRun, fetchBoard, fetchRockets, readLock, readState, repoLockPath, runOnce, runTick, settleRuns, watch, writeState, type PlannedRun, type RunOutcome, type RunTracker, type TickDeps } from '../src/dispatch.ts'
+import { executeRun, shipGuardWired, fetchBoard, fetchRockets, readLock, readState, repoLockPath, runOnce, runTick, settleRuns, watch, writeState, type PlannedRun, type RunOutcome, type RunTracker, type TickDeps } from '../src/dispatch.ts'
 import { parseFactoryConfig } from '../src/config.ts'
 
 const SHIP_POLICY = resolve(import.meta.dir, '../../../skills/dev/dev-setup/scripts/ship-policy.mjs')
@@ -144,7 +144,7 @@ describe('the corrections window (F17, F18)', () => {
     const { home, config } = fixture()
     await writeState(config.stateFile, { lastTick: { 'acme/app': '2026-09-03T10:00:00Z' }, handled: [] })
     const { gh, queries } = ghStub({ forOperator: [{ number: 12, title: 'feat: thing', labels: ['for-operator'], assignees: ['mk'], updated_at: '2026-09-03T09:00:00Z' }] }, args => {
-      if (args[0] === 'api' && args[1] === 'repos/acme/app/issues/12/comments') return JSON.stringify([{ id: 555, reactions: { rocket: 1 } }])
+      if (args[0] === 'api' && args[1] === 'repos/acme/app/issues/12/comments') return JSON.stringify([{ id: 555, body: 'Please apply the correction.', reactions: { rocket: 1 } }])
       if (args[0] === 'api' && args[1] === 'repos/acme/app/issues/comments/555/reactions') return JSON.stringify([{ id: 999, content: 'rocket', user: { login: 'mk' } }])
       return null
     })
@@ -250,7 +250,7 @@ describe('runs leave the tick (F19)', () => {
   test('a reaction is recorded as handled when its run starts, so the next tick does not start it again', async () => {
     const { config } = fixture({ maxRuns: 3 })
     const { gh } = ghStub({ forOperator: [{ number: 12, title: 'feat: thing', labels: ['for-operator'], assignees: ['mk'] }] }, args => {
-      if (args[1] === 'repos/acme/app/issues/12/comments') return JSON.stringify([{ id: 555, reactions: { rocket: 1 } }])
+      if (args[1] === 'repos/acme/app/issues/12/comments') return JSON.stringify([{ id: 555, body: 'Please apply the correction.', reactions: { rocket: 1 } }])
       if (args[1] === 'repos/acme/app/issues/comments/555/reactions') return JSON.stringify([{ id: 999, content: 'rocket', user: { login: 'mk' } }])
       return null
     })
@@ -258,7 +258,7 @@ describe('runs leave the tick (F19)', () => {
     const tracker: RunTracker = new Map()
     const deps = { harnessMetadata, gh, ensureWorktree, execute, parentCandidates: async () => [], tracker }
     const first = await runTick(config, { dryRun: false }, deps)
-    expect(first.runs.map(run => run.stage)).toEqual(['corrections'])
+    expect(first.runs.map(run => run.stage), JSON.stringify(first.refusals)).toEqual(['corrections'])
     expect((await readState(config.stateFile)).handled).toEqual([{ repo: 'acme/app', issue: 12, commentId: 555, reactionId: 999 }])
     finishAll()
     await settleRuns(tracker)
@@ -369,8 +369,8 @@ describe('the guard is checked for the harness and the checkout that will run (F
   })
 })
 
-describe('the parallel path launches the implement harness (F28)', () => {
-  test('a codex-implement repo launches codex for a parent-parallel run, and its guard check reads the codex wiring', async () => {
+describe('the parallel path retains the checked child gateway barrier (F28)', () => {
+  test('a wired codex parent still refuses parallel execution until the checked gateway exists', async () => {
     const { config } = fixture({ devMd: 'dispatch: local\noperators: mk\nplan: codex gpt-5.6 high\nimplement: codex gpt-5.6 high\n', maxRuns: 3 })
     const repoPath = config.repos[0]!.path
     // The main checkout is wired for Codex and only Codex; so is the parent worktree.
@@ -389,9 +389,8 @@ describe('the parallel path launches the implement harness (F28)', () => {
       children: [{ number: 131, parent: 104, assignee: null, labels: ['ready'] }, { number: 132, parent: 104, assignee: null, labels: ['ready'] }],
     }]
     const result = await runTick(config, { dryRun: true }, { harnessMetadata, gh, ensureWorktree, execute: async run => finished(run), parentCandidates })
-    expect(result.refusals).toEqual([])
-    expect(result.runs.map(run => [run.issue, run.launch.command])).toEqual([[104, 'codex']])
-    expect(result.runs[0]!.launch.args).not.toContain('--allowed-tools')
+    expect(result.runs).toEqual([])
+    expect(result.refusals.map(row => row.reason).join(' ')).toContain('checked child gateway')
   })
 })
 
@@ -427,19 +426,19 @@ test('a profile edited after sync refuses before any worktree or execute', async
   expect(result.refusals.some(r => r.reason.includes('stale'))).toBe(true)
 })
 
-// Positive caller integration remains red until the actual guard reader and managed
-// metadata are compatible. The executor uses only a harmless external fixture here;
-// this tests reaction bookkeeping, not vendor qualification or remote delivery.
+// Isolate reaction bookkeeping with unit metadata and a harmless OS executable.
+// The managed caller cases below separately exercise real metadata transport and
+// final policy checks; neither fixture claims vendor qualification or delivery.
 test('actual executor OS refusal retains corrections for a later real spawn', async () => {
   const { home, config, repos } = fixture()
   const repo = repos[0]!.path, command = join(home, 'retry.sh'), entered = join(home, 'entered')
   const { gh } = ghStub({ forOperator: [{ number: 12, title: 'feat: thing', labels: ['for-operator'], assignees: ['mk'] }] }, args => {
-    if (args[1] === 'repos/acme/app/issues/12/comments') return JSON.stringify([{ id: 555, reactions: { rocket: 1 } }])
+    if (args[1] === 'repos/acme/app/issues/12/comments') return JSON.stringify([{ id: 555, body: 'Please apply the correction.', reactions: { rocket: 1 } }])
     if (args[1] === 'repos/acme/app/issues/comments/555/reactions') return JSON.stringify([{ id: 999, content: 'rocket', user: { login: 'mk' } }])
     return null
   })
   const tracker: RunTracker = new Map()
-  const deps = { gh, tracker, parentCandidates: async () => [],
+  const deps = { gh, tracker, harnessMetadata, parentCandidates: async () => [],
     ensureWorktree: async () => ({ path: repo, branch: 'fixture-running', slug: 'thing', type: 'feat' }),
     execute: (run: PlannedRun, plan: Parameters<TickDeps['execute']>[1], cfg: typeof config, options: Parameters<TickDeps['execute']>[3]) =>
       executeRun(run, { ...plan, command, args: [entered] }, cfg, options,
@@ -512,9 +511,28 @@ for (const harness of ['claude', 'codex'] as const) for (const parallel of [fals
       execute: async (run, plan) => { actual.push(plan.cwd); return finished(run) },
     })
     await settleRuns(tracker)
-    expect(result.refusals).toEqual([])
-    expect(actual).toEqual([prepared])
-    expect(result.runs[0]!.remoteEffectCoverage).toEqual({ kind: 'unmanaged-possible', reasonCode: 'hook-configuration-only' })
+    // Validate the genuine prepared parent even though the dispatcher must not execute it.
+    expect((await shipGuardWired(prepared, harness, { home: config.home, repo: repos[0]!.repo })).wired).toBe(true)
+    if (parallel) {
+      expect(result.runs).toEqual([])
+      expect(actual).toEqual([])
+      expect(result.refusals.map(row => row.reason).join(' ')).toContain('checked child gateway')
+      // #140 validates the prepared child; #139 still owns its actual gateway/launch.
+      const child = join(repo, '.vegastack/.worktrees/131-child')
+      git(['worktree', 'add', '-q', '-b', 'fixture-child', child])
+      if (harness === 'claude') {
+        mkdirSync(join(child, '.claude'))
+        writeFileSync(join(child, '.claude/settings.json'), CLAUDE_WIRING)
+      }
+      expect((await shipGuardWired(child, harness, { home: config.home, repo: repos[0]!.repo })).wired).toBe(true)
+      const hookConfig = join(child, harness === 'claude' ? '.claude/settings.json' : '.codex/hooks.json')
+      writeFileSync(hookConfig, JSON.stringify({ unrelated: { command: 'echo ship-guard.mjs' } }))
+      expect((await shipGuardWired(child, harness, { home: config.home, repo: repos[0]!.repo })).wired).toBe(false)
+    } else {
+      expect(result.refusals).toEqual([])
+      expect(actual).toEqual([realpathSync(prepared)])
+      expect(result.runs[0]!.remoteEffectCoverage).toEqual({ kind: 'unmanaged-possible', reasonCode: 'hook-configuration-only' })
+    }
   })
 }
 
@@ -720,3 +738,85 @@ test('source trust: launched run exposes canonical comment/body provenance', asy
   expect(result.runs[0]!.approvalIds).toEqual(['intent-8'])
   expect(result.runs[0]!.approvalBindings).toEqual([{ approvalId: 'intent-8', commentId: authority.id, bodySha256: Bun.SHA256.hash(authority.body, 'hex') }])
 })
+
+// Reuse the owned external RPC boundary from hook-registration.test.ts. This is a
+// harmless executable fixture, never an installed vendor CLI or a model process.
+for (const mode of ['enabled', 'disabled', 'stale-policy', 'final-stale-policy'] as const) {
+  test(`managed caller with real compiler, metadata transport and executor: ${mode}`, async () => {
+    const { home, config, repos } = fixture({ devMd: 'dispatch: local\noperators: mk\nimplement: codex fixture high\n' })
+    const repo = realpathSync(repos[0]!.path), bin = join(home, 'bin')
+    const entered = join(home, 'entered'), calls = join(home, 'rpc-calls'), arm = join(home, 'executor-entered')
+    mkdirSync(bin)
+    mkdirSync(join(repo, '.codex'))
+    writeFileSync(join(repo, '.codex/hooks.json'), CODEX_WIRING)
+    const cli = join(bin, 'codex')
+    writeFileSync(cli, `#!/usr/bin/env node
+const fs = require('node:fs'), readline = require('node:readline');
+const cwd = process.cwd(), mode = ${JSON.stringify(mode)};
+if (process.argv.includes('--version')) { console.log('codex-cli 0.153.4'); process.exit(0); }
+if (process.argv[2] === 'exec') { fs.appendFileSync(${JSON.stringify(entered)}, JSON.stringify({cwd,args:process.argv.slice(2)}) + '\\n'); process.exit(0); }
+if (!process.argv.includes('app-server')) process.exit(2);
+readline.createInterface({input:process.stdin}).on('line', line => {
+  const request = JSON.parse(line);
+  fs.appendFileSync(${JSON.stringify(calls)}, request.method + '\\n');
+  if (request.id === undefined) return;
+  let result = {};
+  if (request.method === 'hooks/list') result = {data:[{cwd,errors:[],hooks:[{handlerType:'command',eventName:'preToolUse',command:'node .vegastack/hooks/ship-guard.mjs --harness codex',matcher:null,async:false,enabled:mode !== 'disabled',isManaged:false,currentHash:'sha256:'+'a'.repeat(64),source:'project',sourcePath:cwd+'/.codex/hooks.json',trustStatus:'untrusted'}]}]};
+  if (request.method === 'configRequirements/read') { if (request.params !== null) process.exit(2); result={requirements:null}; }
+  if (request.method === 'config/read') {
+    result={config:{projects:{[cwd]:{trust_level:'trusted'}},memories:{use_memories:false,generate_memories:false},features:{hooks:true,memories:false,external_agent_memory_import:false,context_management:{experimental_mode:false}}}};
+    if (mode === 'stale-policy' || (mode === 'final-stale-policy' && fs.existsSync(${JSON.stringify(arm)}))) fs.appendFileSync(cwd+'/.vegastack/dev.md','\\ngates: 2\\n');
+  }
+  process.stdout.write(JSON.stringify({id:request.id,result})+'\\n');
+});
+`)
+    chmodSync(cli, 0o755)
+    const previousHome = process.env.HOME, previousCodexHome = process.env.CODEX_HOME
+    process.env.HOME = home
+    process.env.CODEX_HOME = join(home, 'native-home')
+    const previousPath = process.env.PATH
+    process.env.PATH = `${bin}:${previousPath ?? ''}`
+    const { gh } = ghStub({ ready: [{ number: 8, title: 'feat: fixture', labels: ['ready'] }] })
+    const tracker: RunTracker = new Map()
+    let deliveries = 0
+    try {
+      const result = await runTick(config, { dryRun: false }, { gh, tracker, parentCandidates: async () => [],
+        ensureWorktree: async () => ({ path: repo, branch: 'fixture', slug: 'fixture', type: 'feat' }),
+        execute: (run, plan, cfg, options) => {
+          // Arm an observable external policy edit at executor entry, without relying on
+          // the number/order of metadata calls or on private logging implementation.
+          writeFileSync(arm, '')
+          return executeRun(run, { ...plan, env: { ...plan.env, HOME: home, CODEX_HOME: join(home, 'native-home') } }, cfg, options,
+            { gh: async () => { deliveries++; return '' }, git: async () => { deliveries++; return { ok: true, message: '' } } })
+        },
+      })
+      await settleRuns(tracker)
+      const methods = readFileSync(calls, 'utf8').trim().split('\n')
+      expect(methods.every(method => ['initialize', 'initialized', 'hooks/list', 'configRequirements/read', 'config/read'].includes(method))).toBe(true)
+      if (mode === 'enabled') {
+        expect(result.refusals).toEqual([])
+        expect(result.runs[0]?.launched).toBe(true)
+        const starts = readFileSync(entered, 'utf8').trim().split('\n').map(line => JSON.parse(line))
+        expect(starts).toHaveLength(1)
+        expect(starts[0].cwd).toBe(repo)
+        expect(starts[0].args).toContain('memories.use_memories=false')
+        expect(starts[0].args).toContain('memories.generate_memories=false')
+        expect([...new Set(methods)].sort()).toEqual(['initialize', 'initialized', 'hooks/list', 'configRequirements/read', 'config/read'].sort())
+      } else {
+        expect(result.runs).toEqual([])
+        expect(result.refusals.map(row => row.reason).join(' ')).toContain(mode === 'disabled' ? 'managed launch refused' : mode === 'final-stale-policy' ? 'prepared guard refused immediately before spawn' : 'final prepared-checkout check refused')
+        expect(existsSync(entered)).toBe(false)
+        expect(deliveries).toBe(0)
+        expect((await readState(config.stateFile)).handled).toEqual([])
+      }
+    } finally {
+      await settleRuns(tracker)
+      if (previousHome === undefined) delete process.env.HOME
+      else process.env.HOME = previousHome
+      if (previousCodexHome === undefined) delete process.env.CODEX_HOME
+      else process.env.CODEX_HOME = previousCodexHome
+      if (previousPath === undefined) delete process.env.PATH
+      else process.env.PATH = previousPath
+    }
+  }, 15000)
+}

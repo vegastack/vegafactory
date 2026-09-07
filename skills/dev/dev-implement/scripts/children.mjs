@@ -178,7 +178,13 @@ export function codexChildLaunch(child, { codex = 'codex', model, effort, parent
     args: [
       'exec', '-C', child.path, '--sandbox', 'workspace-write', '-a', 'never',
       '--dangerously-bypass-hook-trust', '-c', 'model=' + model,
-      '-c', 'model_reasoning_effort=' + effort, '--json', prompt,
+      '-c', 'model_reasoning_effort=' + effort,
+      '--strict-config',
+      '-c', 'memories.use_memories=false', '-c', 'memories.generate_memories=false',
+      '--disable', 'memories', '--disable', 'external_agent_memory_import',
+      '-c', 'features.context_management.experimental_mode=false', '--enable', 'hooks',
+      '-c', 'projects={' + JSON.stringify(child.path) + '={trust_level="trusted"}}',
+      '--json', prompt,
     ],
     prompt,
   };
@@ -420,34 +426,8 @@ function runVerb(verb, flags) {
   if (verb === 'plan') return { blocks, warns, plan, wrote: false };
 
   if (verb === 'launch') {
-    if (run.mode !== 'parallel') {
-      warns.push('not launching in parallel — ' + run.reason + '; run the children in plan order instead');
-      return { blocks, warns, plan, wrote: false };
-    }
-    const launch = harness === 'claude'
-      ? { harness, workflow: claudeWorkflowCall(run, { concurrency, parentIssue }) }
-      : {
-          harness,
-          runs: run.children.map((child) => codexChildLaunch(child, {
-            model: flags.model || 'gpt-5.6',
-            effort: flags.effort || 'high',
-            parentIssue,
-            parentBranch: run.parentBranch,
-          })),
-        };
-    const actions = [];
-    // The Claude path gets its worktrees from the harness (isolation: worktree);
-    // the Codex path has no such mechanism, so the parent creates them.
-    if (harness === 'codex') {
-      for (const child of run.children) {
-        actions.push(at(child.path, 'git worktree add -b ' + child.branch + ' from ' + child.baseSha));
-        if (write) {
-          const added = gitRun(repoRoot, ['worktree', 'add', '-b', child.branch, child.path, child.baseSha]);
-          if (!added.ok) blocks.push(at(child.path, 'git worktree add failed: ' + added.out));
-        }
-      }
-    }
-    return { blocks, warns, plan, launch, actions, wrote: write && blocks.length === 0 };
+    blocks.push('legacy child launch is unavailable until the checked CLI gateway is integrated; use plan for a non-executing preview');
+    return { blocks, warns, plan, wrote: false };
   }
 
   if (verb === 'join') {

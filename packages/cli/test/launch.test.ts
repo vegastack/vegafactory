@@ -14,7 +14,7 @@ describe('buildLaunchPlan', () => {
     expect(plan.command).toBe('claude')
     expect(plan.args[0]).toBe('-p')
     expect(plan.args[1]).toBe(plan.prompt)
-    expect(plan.args.slice(2)).toEqual(['--permission-mode', 'bypassPermissions', '--output-format', 'json', '--model', 'fable-5-1', '--effort', 'high'])
+    expect(plan.args.slice(2)).toEqual(['--permission-mode', 'bypassPermissions', '--output-format', 'json', '--model', 'fable-5-1', '--effort', 'high', '--settings', JSON.stringify({ autoMemoryEnabled: false, disableAllHooks: false, env: { CLAUDE_CODE_DISABLE_AUTO_MEMORY: '1' } })])
     expect(plan.cwd).toBe('/w/12-thing')
     expect(plan.env.VSK_ASK_ROUTE).toBe('issue')
     expect(plan.env.CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH).toBe('1')
@@ -24,7 +24,7 @@ describe('buildLaunchPlan', () => {
   test('the Codex plan carries -C, the sandbox, no approvals, hook-trust bypass and the model config', () => {
     const plan = buildLaunchPlan({ ...base, harness: 'codex', model: 'gpt-5.6', effort: 'xhigh' })
     expect(plan.command).toBe('codex')
-    expect(plan.args).toEqual(['exec', '-C', '/w/12-thing', '--sandbox', 'workspace-write', '-a', 'never', '--dangerously-bypass-hook-trust', '-c', 'model=gpt-5.6', '-c', 'model_reasoning_effort=xhigh', '--json', plan.prompt])
+    expect(plan.args).toEqual(['exec', '-C', '/w/12-thing', '--sandbox', 'workspace-write', '-a', 'never', '--dangerously-bypass-hook-trust', '-c', 'model=gpt-5.6', '-c', 'model_reasoning_effort=xhigh', '--strict-config', '-c', 'memories.use_memories=false', '-c', 'memories.generate_memories=false', '--disable', 'memories', '--disable', 'external_agent_memory_import', '-c', 'features.context_management.experimental_mode=false', '--enable', 'hooks', '-c', 'projects={"/w/12-thing"={trust_level="trusted"}}', '--json', plan.prompt])
     expect(plan.env.VSK_ASK_ROUTE).toBe('issue')
   })
 

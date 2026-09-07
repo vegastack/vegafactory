@@ -36,10 +36,10 @@ npx @vegastack/vegafactory skills add --group dev --global
 | [assets/agents-section.md.template](assets/agents-section.md.template) | The marked AGENTS.md block this skill owns |
 | [assets/factory-board.yml.template](assets/factory-board.yml.template) | The board-mirror workflow dev-setup writes when the project has a project board |
 | [assets/hooks/ship-guard.mjs](assets/hooks/ship-guard.mjs) | PreToolUse ship guard: reads only the compiled policy outside the worktree, parses the command as a shell would, and asks on a merge, tag, publish, deploy, force push or anything in the shipping family it cannot classify |
-| [assets/hooks/session-start.mjs](assets/hooks/session-start.mjs) | SessionStart context: the operator's queue and the worktree claim this checkout holds |
-| [assets/hooks/stop-heartbeat.mjs](assets/hooks/stop-heartbeat.mjs) | Stop heartbeat: one nudge to checkpoint the ledger when a working claim's ledger is older than the session |
+| [assets/hooks/session-start.mjs](assets/hooks/session-start.mjs) | Shared bounded advisory adapter: verified package/bin and normalized identity requests; SessionStart may expose a verified-context pointer |
+| [assets/hooks/stop-heartbeat.mjs](assets/hooks/stop-heartbeat.mjs) | Stop local-flush adapter: shared session-start.mjs sibling required; no continuation, network work or blocking output |
 | [assets/hooks/decision-nudge.mjs](assets/hooks/decision-nudge.mjs) | Stop decision nudge: asks whether this session settled a directional choice |
-| [assets/hooks/session-end.mjs](assets/hooks/session-end.mjs) | SessionEnd statistics capture: one record per interactive session, plus a throttled control-room push |
+| [assets/hooks/session-end.mjs](assets/hooks/session-end.mjs) | SessionEnd local-flush adapter: explicit harness, sanitized input and 500 ms limit; no transcript forwarding or detached push |
 | [assets/hooks/skill-activated.mjs](assets/hooks/skill-activated.mjs) | Records which skills a Claude session used, and whether the model or a person chose them |
 | [assets/hooks/prompt-skill-mention.mjs](assets/hooks/prompt-skill-mention.mjs) | Records `$name` skill mentions in a Codex prompt as a proxy, marked as one |
 | assets/workflows/implement-children.js (installed copy) | The saved Claude Code workflow (authored in dev-implement) copied to `.claude/workflows/` on the operator's yes, so a parent can run its independent children at the same time |

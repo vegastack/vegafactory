@@ -69,7 +69,12 @@ describe('launch shapes', () => {
     expect(launch.args).toEqual([
       'exec', '-C', '/r/.vegastack/.worktrees/131-dispatch-parent-launches',
       '--sandbox', 'workspace-write', '-a', 'never', '--dangerously-bypass-hook-trust',
-      '-c', 'model=gpt-5.6', '-c', 'model_reasoning_effort=high', '--json', launch.prompt,
+      '-c', 'model=gpt-5.6', '-c', 'model_reasoning_effort=high',
+      '--strict-config', '-c', 'memories.use_memories=false', '-c', 'memories.generate_memories=false',
+      '--disable', 'memories', '--disable', 'external_agent_memory_import',
+      '-c', 'features.context_management.experimental_mode=false', '--enable', 'hooks',
+      '-c', 'projects={"/r/.vegastack/.worktrees/131-dispatch-parent-launches"={trust_level="trusted"}}',
+      '--json', launch.prompt,
     ])
   })
   test('the prompt names the declared file set and the stop rule', () => {
@@ -374,4 +379,21 @@ describe('the join verb against real git', () => {
     expect(r.out.wrote).toBe(false)
     expect(existsSync(join(root, 'packages/cli/src/dispatch.ts'))).toBe(false)
   })
+})
+
+
+test('legacy launch refuses without creating children while the checked gateway is unavailable', () => {
+  for (const harness of ['claude', 'codex']) {
+    const root = parentRepo()
+    const before = sh(root, 'rev-parse', 'HEAD')
+    const report = join(root, 'groups.json')
+    writeFileSync(report, JSON.stringify({ guard: 'plan-lint', ok: true, groups: joinGroups }))
+    const result = runCli(root, ghStub(titles), 'launch', '--parent', '104', '--groups', report, '--repo', 'o/r', '--harness', harness, '--write')
+    expect(result.status).toBe(2)
+    expect(result.out.wrote).toBe(false)
+    expect(result.out.blocks.join(' ')).toContain('checked CLI gateway')
+    expect(existsSync(join(root, '.vegastack/.worktrees'))).toBe(false)
+    expect(sh(root, 'branch', '--list', 'feat/131-*')).toBe('')
+    expect(sh(root, 'rev-parse', 'HEAD')).toBe(before)
+  }
 })
