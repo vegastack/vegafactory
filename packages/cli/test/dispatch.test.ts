@@ -177,6 +177,14 @@ describe('shipGuardWired', () => {
 
   const claudeSettings = JSON.stringify({ hooks: { PreToolUse: [{ matcher: 'Bash', hooks: [{ type: 'command', command: 'node .vegastack/hooks/ship-guard.mjs --harness claude' }] }] } })
 
+  test('F4: an unrelated command field cannot wire a real installed guard', async () => {
+    const root = repoWith({ guard: true, settings: JSON.stringify({ unrelated: { command: 'echo ship-guard.mjs' } }), harness: 'claude' })
+    writeFileSync(join(root, '.vegastack/hooks/ship-guard.mjs'), readFileSync(join(import.meta.dir, '../../../skills/dev/dev-setup/assets/hooks/ship-guard.mjs')))
+    const result = await shipGuardWired(root, 'claude')
+    expect(result.wired).toBe(false)
+    expect(result.detail).toContain('PreToolUse')
+  })
+
   test('a guard file wired into the harness config reads as wired', async () => {
     const result = await shipGuardWired(repoWith({ guard: true, settings: claudeSettings, harness: 'claude' }), 'claude')
     expect(result.wired).toBe(true)

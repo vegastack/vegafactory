@@ -14,6 +14,7 @@ import { dirname, join } from 'node:path'
 import { pathToFileURL, fileURLToPath } from 'node:url'
 import { loadFactoryConfig, repoPolicyFromEffective, stagePolicy, type FactoryConfig, type Harness, type RepoEntry, type RepoPolicy, type Stage, type Subagents } from './config.ts'
 import { buildLaunchPlan, type LaunchPlan } from './launch.ts'
+import { validateRegistration } from './hook-registration.ts'
 import { GhUnavailable, ghText } from './gh.ts'
 import { GIT_CREDENTIAL_ARGS } from './sync.ts'
 import { fromClaudeHeadless, fromCodexExec, reworkFromComments, type ReworkCounts } from './stats/capture.ts'
@@ -304,19 +305,6 @@ export function evaluateGuards(input: { repo: string; policy: RepoPolicy; guards
   return refusals
 }
 
-// A `command` string somewhere in the hook config that actually invokes the guard — not the guard's
-// name appearing anywhere in the file, which a comment or an unrelated key would satisfy.
-function callsShipGuard(node: unknown): boolean {
-  if (Array.isArray(node)) return node.some(callsShipGuard)
-  if (node && typeof node === 'object') {
-    for (const [key, value] of Object.entries(node as Record<string, unknown>)) {
-      if (key === 'command' && typeof value === 'string' && value.includes('ship-guard.mjs')) return true
-      if (callsShipGuard(value)) return true
-    }
-  }
-  return false
-}
-
 // Wired means three files agree: the guard script exists, this harness's hook config actually
 // calls it, and — when the caller names the repo and home — the compiled policy the guard reads
 // exists for that repo. Any one missing or unreadable is unwired; the whole point of the check is
@@ -345,9 +333,8 @@ export async function shipGuardWired(repoPath: string, harness: Harness, policy?
   } catch {
     return { wired: false, detail: `${relative} is not valid JSON — the wiring cannot be read, so it counts as unwired` }
   }
-  if (!callsShipGuard(parsed)) {
-    return { wired: false, detail: `${relative} has no hook command calling ship-guard.mjs` }
-  }
+  const registration = validateRegistration({ config: parsed, harness, checkout: repoPath, guardPath })
+  if (!registration.ok) return { wired: false, detail: `${relative}: ${registration.problems.join('; ')}` }
   if (policy) {
     const policyFile = join(policy.home, '.vegastack', 'guard', `${policy.repo.replace(/\//g, '__').replace(/[^A-Za-z0-9._-]/g, '-')}.json`)
     const shown = `~/.vegastack/guard/${policyFile.split('/').pop()}`
