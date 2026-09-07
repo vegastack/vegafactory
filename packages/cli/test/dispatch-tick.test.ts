@@ -2,7 +2,7 @@
 // launches, and what it writes to the state file. The pure decision functions have their own tests
 // in dispatch.test.ts; these cover the seams between them, which is where the review found the
 // silent drops.
-import { describe, expect, test } from 'bun:test'
+import { describe, expect, spyOn, test } from 'bun:test'
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
@@ -166,7 +166,7 @@ describe('the corrections window (F17, F18)', () => {
     const corrections = [{ number: 12, title: 'feat: thing', labels: ['for-operator'], assignees: ['mk'], updatedAt: '' }]
     const handled = [{ repo: 'acme/app', issue: 12, commentId: 555, reactionId: 999 }, { repo: 'acme/app', issue: 12, commentId: 556, reactionId: 1001 }]
     const rockets = await fetchRockets(gh, 'acme/app', corrections, handled)
-    expect(calls.some(call => call[1] === 'repos/acme/app/issues/comments/555/reactions')).toBe(false)
+    expect(calls.some(call => new URL(call[1]!, 'https://api.github.com/').pathname === '/repos/acme/app/issues/comments/555/reactions')).toBe(false)
     expect(rockets.map(rocket => rocket.reactionId)).toEqual([1001, 1002])
   })
 
@@ -613,4 +613,91 @@ test('142 isolated runTick keeps a healthy repository and measures idle/larger c
     expect(snapshot.complete).toBe(true); expect(snapshot.items).toHaveLength(count)
     expect(reads).toBe(count <= 100 ? 1 : 2)
   }
+})
+
+// Cancellation diagnostics isolate the existing guard seam; actual managed-launch acceptance
+// still waits on the separately owned reader/compiler integration.
+test.each(['SIGINT', 'SIGTERM'] as const)('142 round2 watch %s cancels its read, settles started runs and removes listeners', async signalName => {
+  const { config } = fixture()
+  const before = [process.listenerCount('SIGINT'), process.listenerCount('SIGTERM')]
+  let requestSignal: AbortSignal | undefined
+  let settled = false
+  let completeStarted!: () => void
+  const tracker: RunTracker = new Map([['existing', { repo: 'acme/app', issue: 999,
+    done: new Promise<void>(resolve => { completeStarted = () => { settled = true; tracker.delete('existing'); resolve() } }),
+  }]])
+  // Use a different repository key so the pre-existing run does not exhaust this fixture's slot.
+  tracker.get('existing')!.repo = 'other/repo'
+  await watch(config, { dryRun: true, ticks: 1 }, {
+    tracker, shipGuard: async () => ({ wired: true, detail: 'cancellation diagnostic only' }),
+    gh: async (_args, options) => {
+      requestSignal = options?.signal
+      setTimeout(() => process.emit(signalName), 5)
+      setTimeout(completeStarted, 40)
+      await new Promise(resolve => setTimeout(resolve, 60))
+      return responsePage([])
+    },
+  })
+  expect(requestSignal?.aborted).toBe(true)
+  expect(settled).toBe(true)
+  expect((await readLock(config.dispatcherLock)).held).toBe(false)
+  expect([process.listenerCount('SIGINT'), process.listenerCount('SIGTERM')]).toEqual(before)
+  tracker.clear()
+})
+
+test('142 round2 cancellation during the final body read refuses rather than preparing a later launch', async () => {
+  const { config } = fixture()
+  const controller = new AbortController()
+  const base = ghStub({ ready: [{ number: 8, title: 'feat: fixture', labels: ['ready'] }] })
+  const result = await runTick(config, { dryRun: true, signal: controller.signal }, {
+    gh: base.gh, shipGuard: async () => ({ wired: true, detail: 'cancellation diagnostic only' }),
+    issueBody: async () => {
+      setTimeout(() => controller.abort(), 5)
+      await new Promise(resolve => setTimeout(resolve, 60))
+      return 'late body'
+    },
+  })
+  expect(result.runs).toEqual([])
+  expect(result.refusals.some(row => row.reason.includes('cancelled'))).toBe(true)
+})
+
+test('142 round2 an exhausted repository deadline prevents the final body read', async () => {
+  const { config } = fixture()
+  const base = ghStub({ ready: [{ number: 8, title: 'feat: fixture', labels: ['ready'] }] })
+  let clock = Date.now(), bodies = 0
+  const mockedClock = spyOn(Date, 'now').mockImplementation(() => clock)
+  try {
+    const result = await runTick(config, { dryRun: true }, {
+      shipGuard: async () => ({ wired: true, detail: 'deadline diagnostic only' }),
+      gh: async args => { const response = await base.gh(args); clock += 60_001; return response },
+      issueBody: async () => { bodies++; return 'must not read' },
+    })
+    expect(bodies).toBe(0)
+    expect(result.runs).toEqual([])
+    expect(result.refusals.some(row => row.reason.includes('deadline'))).toBe(true)
+  } finally { mockedClock.mockRestore() }
+})
+
+test('142 round2 raw gh body cancellation leaves claims and corrections untouched', async () => {
+  const { config } = fixture()
+  const base = ghStub({ ready: [{ number: 8, title: 'feat: fixture', labels: ['ready'] }] })
+  const controller = new AbortController()
+  let bodySignal: AbortSignal | undefined, claims = 0, executions = 0
+  const result = await runTick(config, { dryRun: false, signal: controller.signal }, {
+    shipGuard: async () => ({ wired: true, detail: 'cancellation diagnostic only' }),
+    gh: async (args, options) => {
+      if (args[0] === 'issue' && args.includes('body')) {
+        bodySignal = options?.signal
+        setTimeout(() => controller.abort(), 5)
+        return new Promise<string>(() => {})
+      }
+      return base.gh(args)
+    },
+    ensureWorktree: async () => { claims++; throw new Error('must not prepare') },
+    execute: async run => { executions++; return finished(run) },
+  })
+  expect(bodySignal?.aborted).toBe(true)
+  expect(claims).toBe(0); expect(executions).toBe(0)
+  expect(result.refusals.some(row => row.reason.includes('issue body unavailable') && row.reason.includes('cancelled'))).toBe(true)
+  expect((await readState(config.stateFile)).handled).toEqual([])
 })

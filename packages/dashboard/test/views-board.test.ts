@@ -75,15 +75,17 @@ test('142 actual page renders successful and partial repositories without false 
   const { spawnSync } = await import('node:child_process')
   const { resolve } = await import('node:path')
   const script = `
-    import { mock } from 'bun:test';
     import React from 'react';
     import { renderToStaticMarkup } from 'react-dom/server';
-    import { contextFixture } from './test/helpers/context.ts';
+    import { fixtureRoom } from './test/helpers/fixture-room.ts';
     globalThis.React = React;
-    const context = await contextFixture({month:'SEP-2026'});
-    context.env.repos = ['a/ok','b/fail'];
-    context.filters.repo = null;
-    mock.module('./src/lib/context.ts',()=>({loadContext:async()=>context}));
+    const {root} = await fixtureRoom();
+    Object.assign(process.env, {
+      VEGAFACTORY_CONTROL_ROOM: root, VEGAFACTORY_CACHE: root + '/page-cache.db',
+      VEGAFACTORY_ORG: 'a', VEGAFACTORY_STATE: root + '/factory.json',
+      VEGAFACTORY_REPOS: 'a/ok,b/fail', VEGAFACTORY_GH_TOKEN: '', VEGAFACTORY_BIN: '',
+      VEGAFACTORY_VIEWER: '',
+    });
     const calls = [];
     globalThis.fetch = async (url) => {
       calls.push(url);

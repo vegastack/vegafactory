@@ -16,7 +16,7 @@ import { loadFactoryConfig, repoPolicyFromEffective, stagePolicy, type FactoryCo
 import { buildLaunchPlan, validateManagedLaunch, type HarnessMetadata, type LaunchPlan } from './launch.ts'
 import { checkoutFile, inspectCodexConfiguration, readHookConfiguration, validateRegistration } from './hook-registration.ts'
 import { checkCompiledGuard, shipPolicyScript } from './guard.ts'
-import { GhUnavailable, ghText, boundedGhJson, fetchGhPages, readBudget, type ReadBudget, type PagedResult, type GhOptions } from './gh.ts'
+import { GhUnavailable, ghText, withinRead, assertReadActive, boundedGhJson, fetchGhPages, readBudget, type ReadBudget, type PagedResult, type GhOptions } from './gh.ts'
 import { GIT_CREDENTIAL_ARGS } from './sync.ts'
 import { fromClaudeHeadless, fromCodexExec, reworkFromComments, type ReworkCounts } from './stats/capture.ts'
 import { appendRecord, takeSkillInvocations } from './stats/outbox.ts'
@@ -616,7 +616,7 @@ export async function executeRun(
   run: PlannedRun,
   plan: LaunchPlan,
   config: FactoryConfig,
-  options: { operator: string | null; onSpawn?: () => void },
+  options: { operator: string | null; onSpawn?: () => void; signal?: AbortSignal },
   deps?: Partial<ExecuteDeps>,
 ): Promise<RunOutcome> {
   const now = deps?.now ?? (() => new Date())
@@ -653,6 +653,7 @@ export async function executeRun(
     await flush()
     return { started: false, refusal: reason, exitCode: null, timedOut: false, logFile: attemptFile, pushed: false, handedBack: false }
   }
+  if (options.signal?.aborted) return refuseLaunch('GitHub read cancelled before launch')
   if (run.parallel?.length) return refuseLaunch('parallel child execution requires the checked child gateway; preparation-only launch descriptions do not qualify')
   if (plan.command === 'claude' || plan.command === 'codex') {
     const controls = validateManagedLaunch(plan, await inspectManagedHarness(plan))
@@ -663,6 +664,7 @@ export async function executeRun(
     if (!guard.wired) return refuseLaunch(`prepared guard refused immediately before spawn: ${guard.detail}`)
   }
 
+  if (options.signal?.aborted) return refuseLaunch('GitHub read cancelled before launch')
   let tail = ''
   // The harness's own machine-readable result: `claude -p --output-format json` prints one object,
   // `codex exec --json` one event per line. Capped at 2 MB, keeping the END, because both formats
@@ -925,12 +927,12 @@ export async function settleRuns(tracker: RunTracker = processTracker): Promise<
 let statsPushChain: Promise<unknown> = Promise.resolve()
 
 export interface TickDeps {
-  issueBody: (repo: string, issue: number) => Promise<string>
+  issueBody: (repo: string, issue: number, options?: GhOptions) => Promise<string>
   gh: (args: string[], options?: GhOptions) => Promise<string>
   now: () => Date
   shipGuard: (repoPath: string, harness: Harness, policy?: { home: string; repo: string; policyDigest?: string }) => Promise<{ wired: boolean; detail: string; policyDigest?: string | null }>
   ensureWorktree: (repoPath: string, issue: number, title: string) => Promise<WorktreeTarget>
-  execute: (run: PlannedRun, plan: LaunchPlan, config: FactoryConfig, options: { operator: string | null; onSpawn?: () => void }) => Promise<RunOutcome>
+  execute: (run: PlannedRun, plan: LaunchPlan, config: FactoryConfig, options: { operator: string | null; onSpawn?: () => void; signal?: AbortSignal }) => Promise<RunOutcome>
   // Which parents could run their children at the same time. Reading a plan's independent groups
   // means running dev-plan's plan-lint, the one parser of that grammar, so it lives behind this
   // dependency rather than in a second copy here.
@@ -1173,22 +1175,26 @@ export async function runTick(
   const shipGuard = deps?.shipGuard ?? shipGuardWired
   const ensure = deps?.ensureWorktree ?? defaultEnsureWorktree
   const execute = deps?.execute ?? ((run, plan, cfg, opts) => executeRun(run, plan, cfg, opts))
-  const issueBody = deps?.issueBody ?? (async (repo: string, issue: number) => {
-    const raw = await gh(['issue', 'view', String(issue), '--repo', repo, '--json', 'body'])
-    return (JSON.parse(raw) as { body?: string }).body ?? ''
-  })
   const tracker = deps?.tracker ?? processTracker
 
-  let state = await readState(config.stateFile)
+  let state = await withinRead(readBudget(options.signal), () => readState(config.stateFile))
   const runs: RunReport[] = []
   const refusals: Refusal[] = []
 
   for (const entry of config.repos) {
+    const budget = readBudget(options.signal)
+    const active = (issue: number | null = null): boolean => {
+      try { assertReadActive(budget); return true }
+      catch (error) { refusals.push({ repo: entry.repo, issue, reason: (error as Error).message }); return false }
+    }
+    if (!active()) break
     if (config.executionMode === 'shared') {
       refusals.push({ repo: entry.repo, issue: null, reason: 'shared machine requires validated registration and shared ownership; legacy local locks cannot authorize launch' })
       continue
     }
-    const devMd = await readIfPresent(join(entry.path, '.vegastack', 'dev.md'))
+    let devMd: string | null
+    try { devMd = await withinRead(budget, () => readIfPresent(join(entry.path, '.vegastack', 'dev.md'))) }
+    catch (error) { refusals.push({ repo: entry.repo, issue: null, reason: (error as Error).message }); continue }
     if (devMd === null) {
       refusals.push({ repo: entry.repo, issue: null, reason: `${entry.repo}: no .vegastack/dev.md at ${entry.path} — the dispatcher reads its policy from the repo, and an absent profile is off` })
       continue
@@ -1209,7 +1215,7 @@ export async function runTick(
     // not "another run", and maxRuns against the in-flight count is what bounds it.
     const lock = await readLock(lockPath)
     const guards: GuardState = {
-      shipGuard: await shipGuard(entry.path, harness, { home: config.home, repo: entry.repo, policyDigest: resolved.policy?.policyDigest }),
+      shipGuard: await withinRead(budget, () => shipGuard(entry.path, harness, { home: config.home, repo: entry.repo, policyDigest: resolved.policy?.policyDigest })).catch(error => ({ wired: false, detail: (error as Error).message })),
       lock: lock.held && lock.pid === process.pid ? { held: false, pid: null } : lock,
       activeRuns: inFlight.length,
     }
@@ -1222,7 +1228,6 @@ export async function runTick(
     // The tick's time is the moment the board is read, stamped before any run: a run can take hours,
     // and a stamp taken after it would say the dispatcher went quiet for exactly that long.
     const readAt = now().toISOString().replace(/\.\d+Z$/, 'Z')
-    const budget = readBudget(options.signal)
     let board: { needsPlan: BoardIssue[]; ready: BoardIssue[]; corrections: BoardIssue[] }
     let rockets: Rocket[]
     try {
@@ -1237,7 +1242,7 @@ export async function runTick(
 
     let parents: ParentCandidate[] = []
     try {
-      parents = deps?.parentCandidates ? await deps.parentCandidates(entry.repo, entry.path, board.ready, policy.operators) : await defaultParentCandidates(gh, entry.repo, entry.path, board.ready, policy.operators, budget)
+      parents = deps?.parentCandidates ? await withinRead(budget, () => deps.parentCandidates!(entry.repo, entry.path, board.ready, policy.operators)) : await defaultParentCandidates(gh, entry.repo, entry.path, board.ready, policy.operators, budget)
     } catch (error) {
       refusals.push({ repo: entry.repo, issue: null, reason: `${entry.repo}: the parents' independent groups could not be read; repository dispatch refused — ${(error as Error).message}` })
       continue
@@ -1259,6 +1264,7 @@ export async function runTick(
     }
 
     for (const run of plan.runs) {
+      if (!active(run.issue)) break
       if (run.parallel?.length) {
         refusals.push({ repo: entry.repo, issue: run.issue, reason: 'parallel child execution requires the checked child gateway; preparation-only launch descriptions do not qualify' })
         continue
@@ -1270,7 +1276,7 @@ export async function runTick(
         refusals.push({ repo: entry.repo, issue: run.issue, reason: `#${run.issue}: ${(error as Error).message}` })
         continue
       }
-      const checkoutGuard = await guardFor(stage.harness)
+      const checkoutGuard = await withinRead(budget, () => guardFor(stage.harness)).catch(error => ({ wired: false, detail: (error as Error).message }))
       if (!checkoutGuard.wired) {
         refusals.push({ repo: entry.repo, issue: run.issue, reason: `#${run.issue} would run on ${stage.harness}, and the ship guard is not wired for it: ${checkoutGuard.detail} — dark builds run under bypass, and the guard is what bounds them` })
         continue
@@ -1300,6 +1306,20 @@ export async function runTick(
         refusals.push({ repo: entry.repo, issue: run.issue, reason: `#${run.issue}: launch preflight refused — ${(error as Error).message}` })
         continue
       }
+      let issueOutcome: string
+      try {
+        const body = await withinRead(budget, async signal => {
+          if (deps?.issueBody) return deps.issueBody(entry.repo, run.issue, { signal, timeoutMs: Math.min(10_000, budget.deadline - Date.now()) })
+          const value = await ghJsonVia<{ body?: unknown }>(gh, ['issue', 'view', String(run.issue), '--repo', entry.repo, '--json', 'body'], { ...budget, signal })
+          if (typeof value.body !== 'string') throw new GhUnavailable('GitHub returned an unreadable issue body')
+          return value.body
+        })
+        issueOutcome = outcomeOf(body) || run.title
+      } catch (error) {
+        refusals.push({ repo: entry.repo, issue: run.issue, reason: `issue body unavailable: ${(error as Error).message}` })
+        continue
+      }
+      if (!active(run.issue)) break
       const parentOf = run.parallel ? parents.find(candidate => candidate.parent.issue === run.issue) : undefined
       if (run.parallel && !parentOf) {
         refusals.push({ repo: entry.repo, issue: run.issue, reason: `#${run.issue}: the parent worktree for a parallel run could not be resolved — its children run one at a time next tick` })
@@ -1312,6 +1332,7 @@ export async function runTick(
         : options.dryRun
           ? worktreeFor(entry.path, run.issue, run.title)
           : await ensure(entry.path, run.issue, run.title)
+      if (!active(run.issue)) break
       // The harness reads its hook config from the directory it is started in, and that is the
       // worktree — a fresh checkout of tracked files, where a gitignored .claude/ or .codex/ does
       // not exist. So the wiring is verified again where the run will actually happen; a dry run
@@ -1319,12 +1340,13 @@ export async function runTick(
       if (!options.dryRun || existsSync(target.path)) {
         try { target.path = realpathSync(target.path) }
         catch { refusals.push({ repo: entry.repo, issue: run.issue, reason: 'prepared checkout could not be canonicalized' }); continue }
-        const worktreeGuard = await shipGuard(target.path, stage.harness, { home: config.home, repo: entry.repo, policyDigest: resolved.policy?.policyDigest })
+        const worktreeGuard = await withinRead(budget, () => shipGuard(target.path, stage.harness, { home: config.home, repo: entry.repo, policyDigest: resolved.policy?.policyDigest })).catch(error => ({ wired: false, detail: (error as Error).message }))
         if (!worktreeGuard.wired) {
           refusals.push({ repo: entry.repo, issue: run.issue, reason: `#${run.issue}: the ship guard is not wired for ${stage.harness} in the worktree ${target.path} (${worktreeGuard.detail}) — the run would start there under bypass with nothing bounding it; commit the harness wiring or list it in dev.md's worktree-include:` })
           continue
         }
       }
+      if (!active(run.issue)) break
       const launch = run.parallel && parentOf
         ? parentParallelLaunchPlan(
             { kind: 'parent-parallel', parent: run.issue, children: run.parallel },
@@ -1346,7 +1368,7 @@ export async function runTick(
             worktree: target.path,
             issue: { number: run.issue, title: run.title },
             operator: policy.operators[0] ?? 'the operator',
-            outcome: (await issueBody(entry.repo, run.issue).then(outcomeOf).catch(() => '')) || run.title,
+            outcome: issueOutcome,
             stopList: stopList(devMd),
             resume: run.stage === 'corrections',
             skillPath: null,
@@ -1368,22 +1390,27 @@ export async function runTick(
         runs.push(report)
         continue
       }
-      const controls = validateManagedLaunch(launch, await (deps?.harnessMetadata ?? inspectManagedHarness)(launch))
+      const metadata = await withinRead(budget, async () => (deps?.harnessMetadata ?? inspectManagedHarness)(launch)).catch(error => ({ version: 'unavailable', problems: [(error as Error).message] }))
+      if (!active(run.issue)) break
+      const controls = validateManagedLaunch(launch, metadata)
       if (!controls.ok) {
         refusals.push({ repo: entry.repo, issue: run.issue, reason: `#${run.issue}: managed launch refused: ${controls.problems.join('; ')}` })
         continue
       }
-      const beforeSpawn = await shipGuard(target.path, stage.harness, { home: config.home, repo: entry.repo, policyDigest: resolved.policy?.policyDigest })
+      const beforeSpawn = await withinRead(budget, () => shipGuard(target.path, stage.harness, { home: config.home, repo: entry.repo, policyDigest: resolved.policy?.policyDigest })).catch(error => ({ wired: false, detail: (error as Error).message, policyDigest: null }))
       if (!beforeSpawn.wired) {
         refusals.push({ repo: entry.repo, issue: run.issue, reason: `#${run.issue}: final prepared-checkout check refused: ${beforeSpawn.detail}` })
         continue
       }
+      if (!active(run.issue)) break
       if (beforeSpawn.policyDigest) launch.guardPolicyDigest = beforeSpawn.policyDigest
       // The run is started here and finished elsewhere: the tick moves on to the next run and the
       // next repo, and the loop keeps its interval, however long this run takes. The repo lock is
       // held from the first run in flight to the last one out, and the report the tick returns is
       // completed in place when the run ends — `--once` waits for that, the watch loop does not.
-      if (inFlightIssues(tracker, entry.repo).length === 0) await holdLock(lockPath, process.pid)
+      const acquiredLock = inFlightIssues(tracker, entry.repo).length === 0
+      if (acquiredLock) await holdLock(lockPath, process.pid)
+      if (!active(run.issue)) { if (acquiredLock) await releaseLock(lockPath); break }
       const key = `${entry.repo}#${run.issue}`
       const runStage = stage
       const runTarget = target
@@ -1394,7 +1421,7 @@ export async function runTick(
       const onSpawn = (): void => { acknowledged = true; resolveStart(true) }
       const done = (async () => {
         try {
-          const outcome = await execute(run, launch, config, { operator: policy.operators[0] ?? null, onSpawn })
+          const outcome = await execute(run, launch, config, { operator: policy.operators[0] ?? null, onSpawn, signal: options.signal })
           if (outcome.started === false || outcome.refusal) {
             refusals.push({ repo: entry.repo, issue: run.issue, reason: outcome.refusal ?? 'harness did not start' })
             resolveStart(false)
@@ -1512,12 +1539,13 @@ export async function watch(
   if (existing.held) throw new Error(`a dispatcher is already running on this machine (pid ${existing.pid}) — stop it before starting another`)
   await holdLock(config.dispatcherLock, process.pid)
   let stopping = false
-  const stop = (): void => { stopping = true }
+  const controller = new AbortController()
+  const stop = (): void => { stopping = true; controller.abort() }
   process.on('SIGINT', stop)
   process.on('SIGTERM', stop)
   try {
     for (let tick = 0; !stopping && (options.ticks === undefined || tick < options.ticks); tick += 1) {
-      const result = await runTick(config, { dryRun: options.dryRun }, deps).catch((error: Error) => ({
+      const result = await runTick(config, { dryRun: options.dryRun, signal: controller.signal }, deps).catch((error: Error) => ({
         ok: false,
         dryRun: options.dryRun,
         runs: [],
@@ -1525,11 +1553,22 @@ export async function watch(
       } satisfies TickResult))
       options.onTick?.(result)
       if (stopping) break
-      await new Promise(resolve => setTimeout(resolve, config.interval * 1000))
+      await new Promise<void>(resolve => {
+        const done = (): void => { clearTimeout(timer); controller.signal.removeEventListener('abort', done); resolve() }
+        const timer = setTimeout(done, config.interval * 1000)
+        controller.signal.addEventListener('abort', done, { once: true })
+        if (controller.signal.aborted) done()
+      })
     }
   } finally {
-    await settleRuns(deps?.tracker ?? processTracker)
-    await releaseLock(config.dispatcherLock)
+    try { await settleRuns(deps?.tracker ?? processTracker) }
+    finally {
+      try { await releaseLock(config.dispatcherLock) }
+      finally {
+        process.removeListener('SIGINT', stop)
+        process.removeListener('SIGTERM', stop)
+      }
+    }
   }
 }
 

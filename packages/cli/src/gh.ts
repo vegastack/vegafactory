@@ -139,10 +139,15 @@ function parseGhResponse(raw: string): { status: number; headers: Headers; body:
   return { status: Number(match[1]), headers, body: match[3]! }
 }
 
+export function assertReadActive(budget: ReadBudget): void {
+  if (budget.signal?.aborted) throw new GhUnavailable('GitHub read cancelled')
+  if (budget.deadline <= Date.now()) throw new GhUnavailable('GitHub repository deadline exceeded')
+}
+
 // A dependency seam is bounded too: a non-cooperative injected reader cannot hold a tick forever.
-async function withinRead<T>(budget: ReadBudget, call: (signal: AbortSignal) => Promise<T>): Promise<T> {
+export async function withinRead<T>(budget: ReadBudget, call: (signal: AbortSignal) => Promise<T>): Promise<T> {
+  assertReadActive(budget)
   const remaining = Math.min(10_000, budget.deadline - Date.now())
-  if (budget.signal?.aborted || remaining <= 0) throw new GhUnavailable(budget.signal?.aborted ? 'GitHub read cancelled' : 'GitHub repository deadline exceeded')
   const controller = new AbortController()
   let rejectBound!: (error: Error) => void
   const bound = new Promise<never>((_, reject) => { rejectBound = reject })
@@ -150,7 +155,11 @@ async function withinRead<T>(budget: ReadBudget, call: (signal: AbortSignal) => 
   const abort = (): void => stop('GitHub read cancelled')
   const timer = setTimeout(() => stop('GitHub request deadline exceeded'), remaining)
   budget.signal?.addEventListener('abort', abort, { once: true })
-  try { return await Promise.race([call(controller.signal), bound]) }
+  try {
+    const result = await Promise.race([call(controller.signal), bound])
+    assertReadActive(budget)
+    return result
+  }
   finally { clearTimeout(timer); budget.signal?.removeEventListener('abort', abort) }
 }
 
