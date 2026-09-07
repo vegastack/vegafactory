@@ -73,7 +73,7 @@ function ghStub(rows: { needsPlan?: SearchRow[]; ready?: SearchRow[]; forOperato
       if (endpoint[3] === '/comments') {
         const artifacts = [{ repo: endpoint[1], issue: number, kind: 'brief', artifactId: 'brief-' + number, rev: 1, digest: scopeDigest(body, 'brief') }, { repo: endpoint[1], issue: number, kind: 'plan', artifactId: 'plan-' + number, rev: 1, digest: scopeDigest(planBody, 'plan') }]
         const intent = { schemaVersion: 2, id: 'intent-' + number, operator: 'mk', scope: 'brief+plan', source: { kind: 'session', ref: 'session:fixture', quote: 'I approve these fixture artifacts.' }, artifacts, supersedes: [], revokes: [] }
-        return JSON.stringify([[{ id: number * 100 + 1, node_id: 'plan-' + number, body: planBody }, { id: number * 100 + 2, body: '<!-- vsk:v1 type=approval scope=brief+plan -->\n```json\n' + JSON.stringify(intent) + '\n```\n' }]])
+        return JSON.stringify([[{ id: number * 100 + 1, node_id: 'plan-' + number, body: planBody }, { id: number * 100 + 2, user: { login: 'mk' }, body: '<!-- vsk:v1 type=approval scope=brief+plan -->\n```json\n' + JSON.stringify(intent) + '\n```\n' }]])
       }
     }
     if (args[0] === 'api' && args[1] === 'user') return JSON.stringify({ login: 'mk' })
@@ -700,4 +700,23 @@ test('142 round2 raw gh body cancellation leaves claims and corrections untouche
   expect(claims).toBe(0); expect(executions).toBe(0)
   expect(result.refusals.some(row => row.reason.includes('issue body unavailable') && row.reason.includes('cancelled'))).toBe(true)
   expect((await readState(config.stateFile)).handled).toEqual([])
+})
+
+
+// Unit-level provenance evidence only. Guard/metadata/execution are stubs;
+// actual managed-launch acceptance remains the shared integration checkpoint.
+test('source trust: launched run exposes canonical comment/body provenance', async () => {
+  const { config } = fixture()
+  const { gh } = ghStub({ ready: [{ number: 8, title: 'feat: scoped', labels: ['ready'] }] })
+  const result = await runTick(config, { dryRun: false }, {
+    gh, harnessMetadata, parentCandidates: async () => [], ensureWorktree,
+    shipGuard: async () => ({ wired: true, detail: 'unit-level provenance fixture only' }),
+    execute: async run => finished(run),
+  })
+  await settleRuns()
+  expect(result.refusals).toEqual([])
+  expect(result.runs[0]!.launched).toBe(true)
+  const authority = JSON.parse(await gh(['api', 'repos/acme/app/issues/8/comments', '--paginate', '--slurp']))[0][1]
+  expect(result.runs[0]!.approvalIds).toEqual(['intent-8'])
+  expect(result.runs[0]!.approvalBindings).toEqual([{ approvalId: 'intent-8', commentId: authority.id, bodySha256: Bun.SHA256.hash(authority.body, 'hex') }])
 })

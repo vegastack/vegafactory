@@ -16,9 +16,9 @@ type ApprovalRecord = {
 };
 ```
 
-Record the operator's actual words and source, then the exact approved bindings. Quick-build implementation requires both brief and plan; full-plan planning requires brief approval, and implementation requires both. Research execution additionally binds its current immutable protocol through the consolidated event. Brief-only research preparation does not launch a trial. Shipping actions retain their own authority.
+Record the operator's actual words and source, then the exact approved bindings. A fresh provider-envelope publisher in current operator policy may attest session intent; a recorder's claim alone does not authenticate the speech. An untrusted publisher may only relay an independently read operator-published grant in the same complete authority history, with identical operator, quote and scope and no supersedes/revokes. A proven relay supplies its source's canonical authority ID and inherits that source's lifecycle; it creates no independent grant. Quick-build implementation requires both brief and plan; full-plan planning requires brief approval, and implementation requires both. Research execution additionally binds its current immutable protocol through the consolidated event. Brief-only research preparation does not launch a trial. Shipping actions retain their own authority.
 
-Events have unique IDs. A changed scope needs fresh intent; conflicting grants require explicit `supersedes`, never newest-wins. A revocation event names exact earlier IDs and grants no new binding when its artifact list is empty. Preserve originals. Legacy marker-only or malformed records refuse: an explicitly authorized `scope=none` correction can neutralize only exact malformed targets, and a separate valid approval still supplies current intent. The correction JSON has exactly `schemaVersion:2`, `kind:"correction"`, `scope:"none"`, `operator`, `source`, `targets:[{commentId,bodySha256}]`, `supersedes:[]`, `revokes:[]`. Changed/missing targets, invalid operator/source, self-reference and malformed corrections refuse.
+Events have unique IDs. A changed scope needs fresh intent; conflicting grants require explicit `supersedes`, never newest-wins. A revocation event names exact earlier IDs and grants no new binding when its artifact list is empty. Preserve originals. Legacy marker-only or malformed records refuse. An explicitly authorized `scope=none` correction can neutralize exact malformed or demonstrably invalid-source targets, and a separate valid approval still supplies current intent. Missing, ambiguous or inconsistent publisher/source reads are unavailable evidence, never correction-eligible invalidity; resolve required source facts before applying corrections. The correction JSON has exactly `schemaVersion:2`, `kind:"correction"`, `scope:"none"`, `operator`, `source`, `targets:[{commentId,bodySha256}]`, `supersedes:[]`, `revokes:[]`. Changed/missing targets, invalid operator/source, self-reference and malformed corrections refuse.
 
 For a reviewed parent scope, use a separate `scope=consolidated` event on the parent issue. Its closed JSON has `schemaVersion:2`, `kind:"consolidated"`, `id`, `operator`, `scope:"consolidated"`, `source`, `manifest`, `items`, `actions`, `supersedes` and `revokes`. Each item names exact repository/issue/mode (`code`, `preparation`, `research`), artifact bindings, task IDs and action IDs. Each action is one reviewed local operation set, an exact source-checkpoint ref/scope, or a protocol-bound research allowance. Unknown keys/kinds and excess or missing selections refuse. The completion index is not a plan.
 
@@ -30,13 +30,13 @@ The canonicalizer reads artifact/task markers outside fenced examples. Plan task
 
 Keep old comments verbatim. In report-only inventory, read every open issue and all comment pages, call `artifactRef` for its current brief/unique plan, and call `evaluateApprovals` for the intended stage. Report refusal reasons plus current artifact IDs/revisions/digests; never emit a fabricated grant or alter labels. Ask for the operator’s exact current-scope intent and, when needed, their exact malformed-target correction. Record each new event separately, refresh again and run the evaluator before work starts.
 
-`preflight.mjs --stage plan` requires brief intent; implementation requires brief+plan, including quick-build’s separate plan comment. Research preparation does not start a vendor process. `--consolidated-request <json>` accepts `{parentRepo,parentIssue,approvalBinding:{commentId,bodySha256},requested:{repo,issue,taskIds,actionId,branch,baseSha,paths,operation}}`; the approved manifest is fetched from the pinned record, never a local path. Approval bodies/source comments, canonical singleton comments, manifests and dependencies are fresh reads. Successful launch results expose `approvalIds` and `bindings` for run/recovery consumers.
+`preflight.mjs --stage plan` requires brief intent; implementation requires brief+plan, including quick-build’s separate plan comment. Research preparation does not start a vendor process. `--consolidated-request <json>` accepts `{parentRepo,parentIssue,approvalBinding:{commentId,bodySha256},requested:{repo,issue,taskIds,actionId,branch,baseSha,paths,operation}}`; the approved manifest is fetched from the pinned record, never a local path. Approval bodies/source comments, canonical singleton comments, manifests and dependencies are fresh reads. Successful scope results expose canonical `approvalIds`, `approvalBindings` and artifact `bindings`; each authority tuple is `{approvalId,commentId,bodySha256}`, with a positive safe-integer comment ID and exact source-body hash. Consolidated `recordBinding` separately preserves the requested record for audit, while the input `approvalBinding:{commentId,bodySha256}` pins that requested record. Neither a relay pin nor recordBinding replaces canonical authority. Preflight/RunReport consumers preserve the canonical tuples; fresh recovery admission deliberately selects the source comment-ID/body-hash pair.
 
-Preparation adds `requested.preparation:{commentId,bodySha256}` and the #144 owner’s exact source-bound projection: parent identity, current plan ref, selected task IDs/files/prerequisite issues and accepted code-contract receipts with child/parent SHA and evidence pins. These are checked against the canonical selected scope; the recovery owner establishes mapping completeness and actual accepted integration. Missing receipts or the recovery owner’s readTaskPrerequisites/inspectAcceptedIntegration adapter refuse. Fetched receipt hashes alone are not proof of accepted code. Full issue execution keeps every native blocker and is not authorized by preparation.
+Preparation adds `requested.preparation:{commentId,bodySha256}` and the #144 owner’s exact source-bound projection: parent identity, current plan ref, selected task IDs/files/prerequisite issues and accepted code-contract receipts with child/parent SHA and evidence pins. These are checked against the canonical selected scope; the recovery owner establishes mapping completeness and actual accepted integration. Missing receipts or the recovery owner’s readTaskPrerequisites/inspectAcceptedIntegration adapter refuse. The evaluated preparation carries canonical `approvalBinding`; `readTaskPrerequisites` receives and returns that same tuple alongside parent/plan/tasks, and an inconsistent outer result or receipt refuses before integration inspection. Fetched receipt hashes alone are not proof of accepted code. Full issue execution keeps every native blocker and is not authorized by preparation.
 
-Research adds its exact scenario and pinned reservation reference. The protocol owner supplies fetched ledger projections binding owner task/changed skill, protocol, source/tree and packed SHA-256/SRI, subscription harness/model/account/effort/config/policy, and complete phase/overall attempt history. Failed, child and resumed starts remain counted; a changed skill never gets a fresh allowance merely because another issue owns its next edit. `protocolLimits` recognizes only unambiguous envelope clauses from the bound protocol outside fenced examples (core/skill/reserve/total/active-time/per-process, or the top-level trial envelope); unsupported clauses refuse. Numeric limits beside a protocol digest are not authority.
+Research adds its exact scenario and pinned reservation reference. A reservation requires canonical `approvalId` and `approvalBinding`; the pooled suite, every historical allowance attempt and the evaluated research result also carry `approvalBinding`. The suite digest includes that tuple. The selected reserved attempt must match current canonical source authority; older attempt tuples remain immutable and spent, without guessed backfill or refunds. The protocol owner supplies fetched ledger projections binding owner task/changed skill, protocol, source/tree and packed SHA-256/SRI, subscription harness/model/account/effort/config/policy, and complete phase/overall attempt history. Failed, child and resumed starts remain counted; a changed skill never gets a fresh allowance merely because another issue owns its next edit. `protocolLimits` recognizes only unambiguous envelope clauses from the bound protocol outside fenced examples (core/skill/reserve/total/active-time/per-process, or the top-level trial envelope); unsupported clauses refuse. Numeric limits beside a protocol digest are not authority.
 
-`evaluateConsolidatedApproval` evaluates scope and returns research `pendingEffects`; `gatherConsolidatedApproval` will not admit a process without `admitConsolidatedResearch`’s protocol-owned `inspectCandidate` and atomic `consumeReservation` adapter. The former verifies actual clean SHA/tree, approved-base/integration ancestry and packed bytes; the latter consumes the exact revision/attempt once before launch. An absent adapter, changed identity or replay refuses. Checkpoint scope likewise retains #138’s complete export proof/durable delivery intent. These APIs do not supply production/service/private-state/publication authority.
+`evaluateConsolidatedApproval` evaluates scope and returns research `pendingEffects`; `gatherConsolidatedApproval` will not admit a process without `admitConsolidatedResearch`’s protocol-owned `inspectCandidate` and atomic `consumeReservation` adapter. The former verifies actual clean SHA/tree, approved-base/integration ancestry and packed bytes; the latter consumes the exact revision/attempt once before launch. Its request and receipt preserve the canonical `approvalBinding`, along with existing ledger revision, attempt, candidate, execution and optional suite digest checks. Outer approvalIds/approvalBindings, evaluated research and the reservation must agree before consumption; a relay-bound receipt refuses. A saved ok:true result never authorizes another effect: fresh complete source/history reads must reconfirm current activity/body and scope before recovery or another consumption. Legacy missing tuples remain unsupported/unverified. An absent adapter, changed identity or replay refuses. Checkpoint scope likewise retains #138’s complete export proof/durable delivery intent. These APIs do not supply production/service/private-state/publication authority.
 
 */
 import { createHash } from 'node:crypto';
@@ -324,6 +324,83 @@ function hasArtifactMarker(comment, kind) {
   return linesOf(comment?.body).some(({ line, structural }) => structural && structuralMarker(line)?.type === kind);
 }
 
+// Trusted publishers attest session intent. An untrusted publisher can only
+// relay an operator-published grant in this same complete authority history.
+// Relays create no independent authority and inherit their source lifecycle.
+function grantProjection(event) {
+  return event.kind === 'consolidated'
+    ? { schemaVersion: event.schemaVersion, kind: event.kind, operator: event.operator, scope: event.scope, manifest: event.manifest, items: event.items, actions: event.actions }
+    : { schemaVersion: event.schemaVersion, operator: event.operator, scope: event.scope, artifacts: event.artifacts };
+}
+
+class InvalidApprovalSource extends Error {}
+class ApprovalSourceUnavailable extends Error {}
+
+function validateHistorySources(parsed, operators, sourceComments) {
+  const known = (condition, reason) => { if (!condition) throw new ApprovalSourceUnavailable('approval source unavailable: ' + reason); };
+  const valid = (condition, reason) => { if (!condition) throw new InvalidApprovalSource(reason); };
+  const publisher = (entry) => {
+    known(integer(entry.comment.id) && text(entry.comment.user?.login), 'publisher/comment identity metadata missing');
+    return entry.comment.user.login;
+  };
+  const publisherTrusted = (entry) => operators.includes(publisher(entry));
+  const sourceFor = (event) => {
+    known(Array.isArray(sourceComments), 'source reads missing');
+    const matches = sourceComments.filter((comment) => comment.html_url === event.source.ref);
+    known(matches.length === 1, 'source comment missing or ambiguous');
+    const source = matches[0];
+    known(integer(source.id) && typeof source.body === 'string' && text(source.user?.login), 'source identity/body metadata missing');
+    return source;
+  };
+  // Resolve all required facts before any event can become correction-eligible.
+  // Unknown reads never become invalid evidence merely because another fault
+  // or an exact correction is also present in the same history.
+  for (const entry of parsed) {
+    if (entry.event.ok === false) continue;
+    publisher(entry);
+    if (entry.event.source.kind === 'github-comment') sourceFor(entry.event);
+  }
+  const refuseKnownInvalid = (entry, error) => {
+    if (!(error instanceof InvalidApprovalSource)) throw error;
+    entry.event = { ok: false, blocks: ['approval source invalid: ' + error.message] };
+  };
+  for (const entry of parsed) {
+    if (entry.event.ok === false || !publisherTrusted(entry)) continue;
+    try {
+      valid(operators.includes(entry.event.operator), 'named operator is not authorized');
+      if (entry.event.source.kind === 'github-comment') {
+        const source = sourceFor(entry.event);
+        valid(source.user.login === entry.event.operator && source.body.includes(entry.event.source.quote), 'operator source quotation does not match');
+      }
+      entry.authorityId = entry.event.id;
+    } catch (error) { refuseKnownInvalid(entry, error); }
+  }
+  for (const entry of parsed) {
+    if (entry.event.ok === false || publisherTrusted(entry)) continue;
+    try {
+      const event = entry.event;
+      valid(operators.includes(event.operator), 'named operator is not authorized');
+      valid(event.source.kind === 'github-comment', 'session assertion requires a current policy operator publisher');
+      const source = sourceFor(event);
+      valid(event.kind !== 'correction' && event.revokes.length === 0 && event.supersedes.length === 0, 'untrusted relay cannot change approval history');
+      const roots = parsed.filter((candidate) => String(candidate.comment.id) === String(source.id));
+      known(roots.length <= 1, 'source identity ambiguous in history');
+      valid(roots.length === 1 && roots[0] !== entry, 'source grant is not in this complete authority history');
+      const root = roots[0];
+      known(root.comment.body === source.body && root.comment.user?.login === source.user.login, 'source changed between history and direct read');
+      valid(publisherTrusted(root) && root.event.ok !== false && root.authorityId === root.event.id && text(root.event.id), 'source is not an operator-published authority');
+      valid(root.event.kind !== 'correction' && root.event.revokes.length === 0 && (root.event.kind === 'consolidated' || root.event.artifacts.length > 0), 'source grants no scope');
+      valid(event.source.quote === root.event.source.quote && sortedJson(grantProjection(event)) === sortedJson(grantProjection(root.event)), 'relay differs from operator-approved scope or quotation');
+      entry.authorityId = root.event.id;
+    } catch (error) { refuseKnownInvalid(entry, error); }
+  }
+}
+
+function approvalBinding(entry) {
+  if (!integer(entry.comment.id) || !text(entry.event.id)) throw new ApprovalSourceUnavailable('approval source unavailable: canonical comment/event identity missing');
+  return { approvalId: entry.event.id, commentId: entry.comment.id, bodySha256: hash(entry.comment.body) };
+}
+
 function approvalHistory(comments, operators, sourceComments = []) {
   check(Array.isArray(comments), 'approval history is unavailable');
   list(operators, text, 'operators', { nonempty: true });
@@ -331,11 +408,7 @@ function approvalHistory(comments, operators, sourceComments = []) {
   const parsed = marked.map((comment) => ({ comment, event: parseApproval(comment) }));
   const commentIds = marked.map((comment) => String(comment.id));
   check(new Set(commentIds).size === commentIds.length, 'duplicate approval comment identity');
-  for (const { event } of parsed) {
-    if (event.ok === false || event.source.kind !== 'github-comment') continue;
-    const source = sourceComments.filter((comment) => comment.html_url === event.source.ref);
-    check(source.length === 1 && source[0].user?.login === event.operator && source[0].body.includes(event.source.quote), 'approval source quotation is unavailable or changed');
-  }
+  validateHistorySources(parsed, operators, sourceComments);
   const neutralized = new Set();
   for (const { comment, event } of parsed) {
     if (event.kind !== 'correction') continue;
@@ -365,7 +438,9 @@ function approvalHistory(comments, operators, sourceComments = []) {
     byId.set(event.id, entry);
     events.push(entry);
   }
-  return { events, active: events.filter(({ event }) => !removed.has(event.id)), removed };
+  const active = events.filter((entry) => !removed.has(entry.event.id) && !removed.has(entry.authorityId));
+  const authorities = [...new Map(active.map((entry) => [entry.authorityId, byId.get(entry.authorityId)])).values()];
+  return { events, active, authorities, removed };
 }
 
 export function artifactRef({ repo: repository, issue, kind, artifact }) {
@@ -396,7 +471,7 @@ export function evaluateApprovals({ repo: repository, issue, brief, plan, commen
       }
       bindings.push(artifactRef({ repo: repository, issue, kind, artifact: current }));
     }
-    const applicable = history.active.filter(({ event }) => event.kind !== 'consolidated' && event.artifacts.length > 0);
+    const applicable = history.authorities.filter(({ event }) => event.kind !== 'consolidated' && event.artifacts.length > 0);
     for (const { event } of applicable) {
       check(event.artifacts.every((ref) => ref.repo === repository && ref.issue === issue), 'approval belongs to an unrelated issue');
     }
@@ -407,7 +482,7 @@ export function evaluateApprovals({ repo: repository, issue, brief, plan, commen
       check(matching[0].event.artifacts.some((ref) => sameRef(ref, binding)), 'approval scope or artifact identity changed');
       ids.add(matching[0].event.id);
     }
-    return { ok: true, bindings, approvalIds: [...ids], blocks: [] };
+    return { ok: true, bindings, approvalIds: [...ids], approvalBindings: [...ids].map((id) => approvalBinding(history.authorities.find((entry) => entry.event.id === id))), blocks: [] };
   } catch (error) {
     return { ok: false, bindings: [], approvalIds: [], blocks: ['approval: ' + error.message] };
   }
@@ -480,6 +555,11 @@ export function evaluateConsolidatedApproval({ record, manifestBytes, currentArt
     const history = approvalHistory(context.approvalComments, operators, context.sourceComments);
     const matching = history.active.filter(({ event }) => event.id === record.id);
     check(matching.length === 1 && sortedJson(matching[0].event) === sortedJson(record), 'approval is absent, revoked or altered');
+    const authority = history.authorities.find((entry) => entry.event.id === matching[0].authorityId);
+    check(authority, 'canonical source authority unavailable');
+    const canonicalRecord = authority.event;
+    const canonicalBinding = approvalBinding(authority);
+    const recordBinding = approvalBinding(matching[0]);
     check(String(matching[0].comment.id) === String(context.approvalBinding.commentId) && hash(matching[0].comment.body) === context.approvalBinding.bodySha256, 'approval quotation/body binding changed');
     if (record.manifest.source.kind === 'inline') check(record.manifest.source.utf8 === manifestBytes, 'inline manifest differs');
     else check(context.manifestBlob?.repositoryId === record.manifest.source.repositoryId && context.manifestBlob?.commitSha === record.manifest.source.commitSha && context.manifestBlob?.path === record.manifest.source.path && hash(manifestBytes) === record.manifest.source.blobSha256, 'immutable manifest blob unavailable or changed');
@@ -505,8 +585,8 @@ export function evaluateConsolidatedApproval({ record, manifestBytes, currentArt
     check(isObject(requested), 'missing requested scope');
     const item = record.items.find((entry) => entry.repo === requested.repo && entry.issue === requested.issue);
     check(item, 'requested issue is not selected');
-    for (const { event } of history.active) {
-      if (event.id === record.id) continue;
+    for (const { event, authorityId } of history.active) {
+      if (authorityId === matching[0].authorityId) continue;
       const bindings = event.kind === 'consolidated' ? event.items : event.artifacts;
       check(!bindings.some((entry) => entry.repo === item.repo && entry.issue === item.issue), 'conflicting consolidated approval needs explicit supersedes');
     }
@@ -520,13 +600,13 @@ export function evaluateConsolidatedApproval({ record, manifestBytes, currentArt
     const dependencies = currentDependencies.filter((entry) => entry.repo === item.repo && entry.issue === item.issue);
     check(dependencies.length === 1 && Array.isArray(dependencies[0].blockedBy), 'current dependency identity unavailable');
     check(item.mode === 'preparation' || !requested.preparation, 'preparation evidence on another mode');
-    const preparation = item.mode === 'preparation' ? validatePreparationEvidence(context, item, requested, manifest) : null;
+    const preparation = item.mode === 'preparation' ? { ...validatePreparationEvidence(context, item, requested, manifest), approvalBinding: canonicalBinding } : null;
     if (item.mode !== 'preparation') check(dependencies[0].blockedBy.every((dependency) => dependency.state === 'closed'), 'open native prerequisites');
     if (action.kind === 'research-tests') {
       check(action.scenarioIds.includes(requested.scenarioId), 'unreviewed research scenario');
       check(item.mode === 'research' || requested.scenarioId === 'SKILL-EVAL', 'predecessor cannot admit this research phase');
-      const research = validateResearchEvidence(context, item, requested, action, record, manifest, currentDependencies);
-      return { ok: true, bindings: item.artifacts, approvalIds: [record.id], manifestSha256: record.manifest.sha256,
+      const research = validateResearchEvidence(context, item, requested, action, canonicalRecord, manifest, currentDependencies, canonicalBinding);
+      return { ok: true, bindings: item.artifacts, approvalIds: [canonicalRecord.id], approvalBindings: [canonicalBinding], recordBinding, manifestSha256: record.manifest.sha256,
         taskIds: requested.taskIds, action, research, preparation, blocks: [] };
     }
     check(!requested.research && !requested.scenarioId, 'research fields on local request');
@@ -541,7 +621,7 @@ export function evaluateConsolidatedApproval({ record, manifestBytes, currentArt
       // This result validates intent scope only. #138 must separately prove
       // complete exported history and persist delivery intent before pushing.
     }
-    return { ok: true, bindings: item.artifacts, approvalIds: [record.id], manifestSha256: record.manifest.sha256, taskIds: requested.taskIds, files, action, preparation, blocks: [] };
+    return { ok: true, bindings: item.artifacts, approvalIds: [canonicalRecord.id], approvalBindings: [canonicalBinding], recordBinding, manifestSha256: record.manifest.sha256, taskIds: requested.taskIds, files, action, preparation, blocks: [] };
   } catch (error) {
     return { ok: false, bindings: [], approvalIds: [], blocks: ['consolidated approval: ' + error.message] };
   }
@@ -720,9 +800,10 @@ export function protocolLimits(body) {
 // JSON can supply that executable adapter or establish acceptance by itself.
 export const checkpointSuiteDigest = (suite) => hash(sortedJson(suite));
 
-function validateCheckpointSuite(context, suite, limits, item, requested, record, manifest, candidate, execution, dependencies, purpose) {
+function validateCheckpointSuite(context, suite, limits, item, requested, record, manifest, candidate, execution, dependencies, purpose, canonicalBinding) {
   const envelope = limits.checkpointEnvelope;
-  keys(suite, ['checkpointId', 'arm', 'cases', 'contributors', 'acceptedCheckpoints', 'interveningAcceptance', 'livePrerequisiteEvidence']);
+  check(sortedJson(suite?.approvalBinding) === sortedJson(canonicalBinding), 'checkpoint authority binding differs');
+  keys(suite, ['approvalBinding', 'checkpointId', 'arm', 'cases', 'contributors', 'acceptedCheckpoints', 'interveningAcceptance', 'livePrerequisiteEvidence']);
   const checkpoint = envelope.checkpoints.find((entry) => entry.id === suite.checkpointId);
   check(checkpoint && envelope.arms.includes(suite.arm) && suite.arm.startsWith(execution.harness + '-'), 'unselected evaluation checkpoint or arm');
   const bindings = envelope.caseBindings.filter((entry) => entry.checkpoint === checkpoint.id);
@@ -826,11 +907,12 @@ function validateCheckpointAttempts(attempts, envelope, selected, execution) {
   return skills;
 }
 
-function validateResearchEvidence(context, item, requested, action, record, manifest, dependencies) {
+function validateResearchEvidence(context, item, requested, action, record, manifest, dependencies, canonicalBinding) {
   check(requested.operation === 'research-test' && requested.paths.length === 0, 'research grant cannot authorize other effects');
   const evidence = boundEvidence(context, requested.research, 'research-reservation');
-  keys(evidence, ['schemaVersion', 'kind', 'approvalId', 'manifestSha256', 'actionId', 'owner', 'protocol', 'scenarioId', 'candidate', 'execution', 'allowance'], ['suite']);
+  keys(evidence, ['schemaVersion', 'kind', 'approvalId', 'approvalBinding', 'manifestSha256', 'actionId', 'owner', 'protocol', 'scenarioId', 'candidate', 'execution', 'allowance'], ['suite']);
   check(evidence.schemaVersion === 1 && evidence.kind === 'research-reservation' && evidence.approvalId === record.id && evidence.manifestSha256 === record.manifest.sha256 && evidence.actionId === action.id && evidence.scenarioId === requested.scenarioId, 'research reservation scope differs');
+  check(sortedJson(evidence.approvalBinding) === sortedJson(canonicalBinding), 'research authority comment/body binding differs');
   keys(evidence.owner, ['repo', 'issue', 'taskIds', 'artifact', 'skill']);
   check(evidence.owner.repo === item.repo && evidence.owner.issue === item.issue && sortedJson(evidence.owner.taskIds) === sortedJson(requested.taskIds), 'research owner differs');
   const protocol = manifest.selections.find((entry) => entry.issue === action.issue && entry.mode === 'research')?.artifacts.find((ref) => ref.kind === 'protocol');
@@ -857,7 +939,7 @@ function validateResearchEvidence(context, item, requested, action, record, mani
   }
   keys(evidence.execution, ['harness', 'version', 'model', 'accountRef', 'effort', 'platform', 'runtime', 'configDigest', 'policyDigest', 'providerMode']);
   check(['harness', 'version', 'model', 'accountRef', 'effort', 'platform', 'runtime'].every((key) => text(evidence.execution[key])) && digest(evidence.execution.configDigest) && digest(evidence.execution.policyDigest) && evidence.execution.providerMode === action.providerMode, 'execution identity unavailable');
-  const checkpoint = pooled ? validateCheckpointSuite(context, evidence.suite, limits, item, requested, record, manifest, candidate, evidence.execution, dependencies, evidence.allowance?.attempts?.find((entry) => entry.id === evidence.allowance.attemptId)?.purpose) : null;
+  const checkpoint = pooled ? validateCheckpointSuite(context, evidence.suite, limits, item, requested, record, manifest, candidate, evidence.execution, dependencies, evidence.allowance?.attempts?.find((entry) => entry.id === evidence.allowance.attemptId)?.purpose, canonicalBinding) : null;
   check(pooled || evidence.suite === undefined, 'checkpoint suite on another research phase');
   check(action.maxStarts <= limits.total && (limits.activeMs === null || action.aggregateActiveMs !== null && action.aggregateActiveMs <= limits.activeMs), 'grant exceeds protocol envelope');
   const allowance = evidence.allowance;
@@ -874,13 +956,16 @@ function validateResearchEvidence(context, item, requested, action, record, mani
   const attempts = allowance.attempts;
   check(new Set(attempts.map((entry) => entry.id)).size === attempts.length, 'duplicate shared attempt identity');
   for (const attempt of attempts) {
-    keys(attempt, ['id', 'phase', 'skill', 'kind', 'status', 'activeMs', 'reservedActiveMs'], limits.checkpointEnvelope && attempt.phase === 'SKILL-EVAL' ? ['checkpointId', 'arm', 'purpose', 'caseIds', 'sourceSha', 'suiteSha256', 'executionSha256', 'caseDigests'] : []);
+    keys(attempt, ['id', 'phase', 'skill', 'kind', 'status', 'activeMs', 'reservedActiveMs', 'approvalBinding'], limits.checkpointEnvelope && attempt.phase === 'SKILL-EVAL' ? ['checkpointId', 'arm', 'purpose', 'caseIds', 'sourceSha', 'suiteSha256', 'executionSha256', 'caseDigests'] : []);
+    keys(attempt.approvalBinding, ['approvalId', 'commentId', 'bodySha256']);
+    check(text(attempt.approvalBinding.approvalId) && integer(attempt.approvalBinding.commentId) && digest(attempt.approvalBinding.bodySha256), 'invalid historical attempt authority binding');
     check(text(attempt.id) && Object.hasOwn(limits.phases, attempt.phase) && (attempt.skill === null || text(attempt.skill)) && ['initial', 'child', 'resume'].includes(attempt.kind) && ['reserved', 'running', 'passed', 'failed', 'cancelled'].includes(attempt.status), 'invalid shared attempt');
     check(['activeMs', 'reservedActiveMs'].every((key) => Number.isSafeInteger(attempt[key]) && attempt[key] >= 0), 'invalid shared attempt duration');
     check(attempt.phase !== 'SKILL-EVAL' || (limits.checkpointEnvelope ? attempt.skill === null : text(attempt.skill)), 'skill attempt identity differs from protocol');
   }
   const reserved = attempts.filter((entry) => entry.id === allowance.attemptId);
   check(reserved.length === 1 && reserved[0].status === 'reserved' && reserved[0].phase === phase && reserved[0].skill === evidence.owner.skill && reserved[0].reservedActiveMs >= allowance.trialMaxMs, 'attempt reservation absent or consumed');
+  check(sortedJson(reserved[0].approvalBinding) === sortedJson(canonicalBinding), 'reserved attempt has wrong canonical authority');
   const totalActive = attempts.reduce((sum, entry) => sum + entry.activeMs, 0);
   const totalReserved = attempts.reduce((sum, entry) => sum + entry.reservedActiveMs, 0);
   check(allowance.totalStarts === attempts.length && allowance.phaseStarts === attempts.filter((entry) => entry.phase === phase).length && allowance.activeMs === totalActive && allowance.reservedActiveMs === totalReserved, 'shared counters differ from complete attempt history');
@@ -896,7 +981,7 @@ function validateResearchEvidence(context, item, requested, action, record, mani
   }
   // The protocol owner must atomically consume this reservation immediately at
   // launch and verify candidate bytes. Scope approval cannot replace that CAS.
-  return { reservationId: allowance.reservationId, attemptId: allowance.attemptId, ledgerRevision: allowance.ledgerRevision, candidate, execution: evidence.execution, trialMaxMs: allowance.trialMaxMs, checkpoint,
+  return { approvalId: record.id, approvalBinding: canonicalBinding, reservationId: allowance.reservationId, attemptId: allowance.attemptId, ledgerRevision: allowance.ledgerRevision, candidate, execution: evidence.execution, trialMaxMs: allowance.trialMaxMs, checkpoint,
     pendingEffects: ['verify-clean-candidate-and-packed-bytes', 'consume-shared-reservation-before-process-start'] };
 }
 
@@ -996,6 +1081,8 @@ export async function admitConsolidatedResearch(scope, adapter) {
     check(!scope.preparation || scope.preparation.pendingEffects.length === 0, 'preparation prerequisite admission is still pending');
     check(typeof adapter?.inspectCandidate === 'function' && typeof adapter?.consumeReservation === 'function', 'research candidate/shared-ledger production adapter unavailable');
     const expected = scope.research;
+    check(expected.approvalBinding?.approvalId === expected.approvalId, 'research authority ID differs from its comment binding');
+    check(sortedJson(scope.approvalIds) === sortedJson([expected.approvalId]) && sortedJson(scope.approvalBindings) === sortedJson([expected.approvalBinding]), 'research scope carries inconsistent canonical authority');
     if (expected.checkpoint) {
       check(typeof adapter.inspectCheckpoint === 'function', 'pooled checkpoint production adapter unavailable');
       const currentSuite = await adapter.inspectCheckpoint(expected.checkpoint.suite);
@@ -1011,9 +1098,10 @@ export async function admitConsolidatedResearch(scope, adapter) {
     check([expected.candidate.baseSha, ...expected.candidate.acceptedIntegrations].every((commit) => current.ancestorShas.includes(commit)), 'candidate lacks approved base/integrations');
     const receipt = await adapter.consumeReservation({ reservationId: expected.reservationId, attemptId: expected.attemptId,
       ledgerRevision: expected.ledgerRevision, candidate: expected.candidate, execution: expected.execution,
-      approvalIds: scope.approvalIds, manifestSha256: scope.manifestSha256, trialMaxMs: expected.trialMaxMs, ...(expected.checkpoint ? { suiteSha256: expected.checkpoint.digest } : {}) });
-    keys(receipt, ['reservationId', 'attemptId', 'previousRevision', 'revision', 'state', 'candidateSha', 'execution'], expected.checkpoint ? ['suiteSha256'] : []);
+      approvalIds: scope.approvalIds, approvalBinding: expected.approvalBinding, manifestSha256: scope.manifestSha256, trialMaxMs: expected.trialMaxMs, ...(expected.checkpoint ? { suiteSha256: expected.checkpoint.digest } : {}) });
+    keys(receipt, ['reservationId', 'attemptId', 'previousRevision', 'revision', 'state', 'candidateSha', 'execution', 'approvalBinding'], expected.checkpoint ? ['suiteSha256'] : []);
     check(receipt.reservationId === expected.reservationId && receipt.attemptId === expected.attemptId && receipt.previousRevision === expected.ledgerRevision && receipt.revision === expected.ledgerRevision + 1 && receipt.state === 'consumed' && receipt.candidateSha === expected.candidate.sourceSha && sortedJson(receipt.execution) === sortedJson(expected.execution), 'research reservation consume failed or changed');
+    check(sortedJson(receipt.approvalBinding) === sortedJson(expected.approvalBinding), 'consumed reservation carries wrong authority');
     check(!expected.checkpoint || receipt.suiteSha256 === expected.checkpoint.digest, 'consumed reservation belongs to another checkpoint suite');
     return { ...scope, research: { ...expected, pendingEffects: [], receipt } };
   } catch (error) {
@@ -1028,8 +1116,10 @@ export async function admitConsolidatedPreparation(scope, adapter) {
     check(scope.ok && scope.preparation, 'missing validated preparation scope');
     check(typeof adapter?.readTaskPrerequisites === 'function' && typeof adapter?.inspectAcceptedIntegration === 'function', 'preparation recovery-owner production adapter unavailable');
     const expected = scope.preparation;
-    const mapping = await adapter.readTaskPrerequisites({ parent: expected.parent, plan: expected.plan, taskIds: expected.taskIds });
-    keys(mapping, ['parent', 'plan', 'tasks']);
+    check(sortedJson(scope.approvalIds) === sortedJson([expected.approvalBinding.approvalId]) && sortedJson(scope.approvalBindings) === sortedJson([expected.approvalBinding]), 'preparation scope carries inconsistent canonical authority');
+    const mapping = await adapter.readTaskPrerequisites({ parent: expected.parent, plan: expected.plan, taskIds: expected.taskIds, approvalBinding: expected.approvalBinding });
+    keys(mapping, ['parent', 'plan', 'tasks', 'approvalBinding']);
+    check(sortedJson(mapping.approvalBinding) === sortedJson(expected.approvalBinding), 'preparation adapter carries wrong authority');
     check(sortedJson(mapping.parent) === sortedJson(expected.parent) && sameRef(mapping.plan, expected.plan) && sortedJson(mapping.tasks) === sortedJson(expected.tasks), 'authoritative preparation prerequisite mapping differs');
     const integrations = [];
     for (const contract of expected.acceptedContracts) {

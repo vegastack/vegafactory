@@ -1144,6 +1144,7 @@ export interface RunReport {
   launched: boolean
   remoteEffectCoverage: NonNullable<LaunchPlan['remoteEffectCoverage']>
   approvalIds?: string[]
+  approvalBindings?: Array<{ approvalId: string; commentId: number; bodySha256: string }>
   approvalChecked?: boolean
   bindings?: Array<{ repo: string; issue: number; kind: string; artifactId: string; rev: number; digest: string }>
   exitCode?: number | null
@@ -1284,7 +1285,7 @@ export async function runTick(
       // Re-read complete live scope immediately before any worktree or harness
       // effect. The packaged dev-implement parser owns both approval and native
       // prerequisite semantics; a board label or rocket is only a start signal.
-      let admission: { blocks: string[]; approvalIds: string[]; bindings: NonNullable<RunReport['bindings']> } = { blocks: [], approvalIds: [], bindings: [] }
+      let admission: { blocks: string[]; approvalIds: string[]; approvalBindings: NonNullable<RunReport['approvalBindings']>; bindings: NonNullable<RunReport['bindings']> } = { blocks: [], approvalIds: [], approvalBindings: [], bindings: [] }
       // A dry run previews a command only; it never reports approved bindings.
       if (!options.dryRun) try {
         const script = process.env.VSK_PREFLIGHT_SCRIPT
@@ -1300,6 +1301,7 @@ export async function runTick(
         }
         admission = { blocks: results.flatMap(result => result.blocks),
           approvalIds: [...new Set<string>(results.flatMap(result => result.approvalIds))],
+          approvalBindings: results.flatMap(result => result.approvalBindings),
           bindings: results.flatMap(result => result.bindings) }
         if (admission.blocks.length) throw new Error(admission.blocks.join('; '))
       } catch (error) {
@@ -1384,6 +1386,7 @@ export async function runTick(
         remoteEffectCoverage: launch.remoteEffectCoverage ?? { kind: 'unmanaged-possible', reasonCode: 'hook-configuration-only' },
         approvalChecked: !options.dryRun,
         approvalIds: admission.approvalIds,
+        approvalBindings: admission.approvalBindings,
         bindings: admission.bindings,
       }
       if (options.dryRun) {

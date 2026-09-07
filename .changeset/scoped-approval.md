@@ -2,4 +2,9 @@
 "@vegastack/vegafactory": major
 ---
 
-Require current scoped operator intent before planning or implementation launches. Approval records now bind canonical artifact identities and digests; legacy marker-only records require explicit reconfirmation. Task progress preserves approval while scope changes invalidate it. Consolidated parent selections retain exact preparation, research and shipping boundaries.
+Require current scoped operator intent before planning or implementation launches.
+
+- Bind approval to canonical artifacts; task progress preserves intent while scope changes require reconfirmation.
+- Require a policy-operator publisher for session attestations, or a verified identical grant relay that inherits its source’s authority and lifecycle.
+- Preserve canonical source provenance through launch, preparation and research records; unavailable source reads refuse, and recovery refreshes authority before another effect.
+- Retain legacy records and exact consolidated preparation, research and shipping boundaries.

@@ -1,5 +1,5 @@
 import { expect, test } from 'bun:test'
-import { execFileSync } from 'node:child_process'
+import { execFileSync, spawnSync } from 'node:child_process'
 import { mkdtempSync, writeFileSync, readFileSync, openSync, closeSync, unlinkSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -9,7 +9,7 @@ import { canonicalScope, scopeDigest, parseApproval, evaluateApprovals, evaluate
 const plan = '<!-- vsk:v1 type=plan rev=1 -->\n- [ ] **Task 1: verify** <!-- task-id:1-T1 -->\nFiles — `a.ts`\nInterfaces — none\nSteps: run check\n'
 const artifact = { repo: 'acme/app', issue: 1, kind: 'plan', artifactId: 'plan-node', rev: 1, digest: 'a'.repeat(64) }
 const record = () => ({ schemaVersion: 2, id: 'approval-1', operator: 'ada', scope: 'plan', source: { kind: 'session', ref: 'session:1', quote: 'I approve this plan.' }, artifacts: [artifact], supersedes: [], revokes: [] })
-const comment = (value: unknown) => ({ body: '<!-- vsk:v1 type=approval scope=plan -->\n```json\n' + JSON.stringify(value) + '\n```\n' })
+const comment = (value: unknown) => ({ user: { login: 'ada' }, body: '<!-- vsk:v1 type=approval scope=plan -->\n```json\n' + JSON.stringify(value) + '\n```\n' })
 
 test('task progress preserves scope; files, interfaces, actions and revisions do not', () => {
   expect(scopeDigest(plan, 'plan')).toBe(scopeDigest(plan.replace('[ ]', '[x]'), 'plan'))
@@ -86,17 +86,17 @@ test('revocations and conflicting events cannot be resolved by newest-wins', () 
   expect(evaluate([grant(), { ...grant('grant-2'), id: 4 }]).ok).toBe(false)
   const superseding = parseApproval(grant('grant-2'))
   superseding.supersedes = ['grant-1']
-  const second = { id: 4, body: '<!-- vsk:v1 type=approval scope=brief+plan -->\n```json\n' + JSON.stringify(superseding) + '\n```\n' }
+  const second = { id: 4, user: { login: 'ada' }, body: '<!-- vsk:v1 type=approval scope=brief+plan -->\n```json\n' + JSON.stringify(superseding) + '\n```\n' }
   expect(evaluate([grant(), second]).ok).toBe(true)
   const revocation = { ...record(), id: 'revoke-1', artifacts: [], revokes: ['grant-1'] }
   expect(evaluate([grant(), { id: 4, ...comment(revocation) }]).ok).toBe(false)
 })
 
 test('malformed historical approvals require an exact authorized correction', () => {
-  const broken = { id: 8, body: '<!-- vsk:v1 type=approval scope=brief -->\nOld ambiguous statement' }
+  const broken = { id: 8, user: { login: 'ada' }, body: '<!-- vsk:v1 type=approval scope=brief -->\nOld ambiguous statement' }
   expect(evaluate([broken, grant()]).ok).toBe(false)
   const correction = { schemaVersion: 2, kind: 'correction', scope: 'none', operator: 'ada', source: record().source, targets: [{ commentId: 8, bodySha256: Bun.SHA256.hash(broken.body, 'hex') }], supersedes: [], revokes: [] }
-  const correctionComment = { id: 9, body: '<!-- vsk:v1 type=approval scope=none -->\n```json\n' + JSON.stringify(correction) + '\n```\n' }
+  const correctionComment = { id: 9, user: { login: 'ada' }, body: '<!-- vsk:v1 type=approval scope=none -->\n```json\n' + JSON.stringify(correction) + '\n```\n' }
   expect(evaluate([broken, correctionComment, grant()]).ok).toBe(true)
   expect(evaluate([broken, correctionComment]).ok).toBe(false)
   expect(evaluate([{ ...broken, body: broken.body + ' edited' }, correctionComment, grant()]).ok).toBe(false)
@@ -114,7 +114,7 @@ function consolidatedFixture() {
   const manifest = { schemaVersion: 1, parent: { repo: 'acme/app', issue: 10, branch: 'codex/fixture', baseSha: 'a'.repeat(40) }, codeIssues: [1], preparationTaskIds: [], candidateProtocols: [], excludedIssues: [2], laterResearch: [3], selections: [item], actionBounds: { local: action } }
   const manifestBytes = JSON.stringify(manifest)
   const record = { schemaVersion: 2, kind: 'consolidated', id: 'consolidated-1', operator: 'ada', scope: 'consolidated', source: { kind: 'session', ref: 'session:1', quote: 'I approve this frozen scope.' }, manifest: { sha256: Bun.SHA256.hash(manifestBytes, 'hex'), source: { kind: 'inline', utf8: manifestBytes } }, items: [item], actions: [action], supersedes: [], revokes: [] }
-  const approved = { id: 10, body: '<!-- vsk:v1 type=approval scope=consolidated -->\n```json\n' + JSON.stringify(record) + '\n```\n' }
+  const approved = { id: 10, user: { login: 'ada' }, body: '<!-- vsk:v1 type=approval scope=consolidated -->\n```json\n' + JSON.stringify(record) + '\n```\n' }
   return { record, manifestBytes, operators: ['ada'], currentArtifacts: {
     artifacts: [{ repo: 'acme/app', issue: 1, kind: 'brief', artifact: brief }, { repo: 'acme/app', issue: 1, kind: 'plan', artifact: livePlan }],
     approvalComments: [approved], approvalBinding: { commentId: 10, bodySha256: Bun.SHA256.hash(approved.body, 'hex') },
@@ -164,7 +164,7 @@ function researchFixture() {
   fixture.record.actions.push({ ...action, candidateRule: { ...action.candidateRule, manifestSha256: fixture.record.manifest.sha256 } })
   refreshRecord(fixture)
   fixture.currentArtifacts.artifacts.push({ repo: 'acme/app', issue: 2, kind: 'brief', artifact: researchBrief }, { repo: 'acme/app', issue: 2, kind: 'protocol', artifact: protocol })
-  const evidence = { schemaVersion: 1, kind: 'research-reservation', approvalId: fixture.record.id, manifestSha256: fixture.record.manifest.sha256, actionId: 'research', owner: { repo: 'acme/app', issue: 1, taskIds: ['1-T1'], artifact: fixture.record.items[0].artifacts[1], skill: 'skills/dev/example' }, protocol: researchItem.artifacts[1], scenarioId: 'SKILL-EVAL', candidate: { repo: 'acme/app', parentBranch: 'codex/fixture', baseSha: 'a'.repeat(40), sourceSha: 'b'.repeat(40), treeSha: 'c'.repeat(40), acceptedIntegrations: [], packedArtifacts: [{ name: 'cli', sha256: 'd'.repeat(64), integrity: 'sha512-YWJj' }, { name: 'dashboard', sha256: 'e'.repeat(64), integrity: 'sha512-YWJj' }] }, execution: { harness: 'codex', version: 'fixture', model: 'same', accountRef: 'subscription:fixture', effort: 'high', platform: 'fixture', runtime: 'node24', configDigest: 'f'.repeat(64), policyDigest: 'a'.repeat(64), providerMode: 'subscription-only' }, allowance: { id: 'shared', reservationId: 'reserved-1', attemptId: 'attempt-1', phase: 'SKILL-EVAL', ledgerRevision: 1, status: 'reserved', totalStarts: 1, phaseStarts: 1, phaseMaxStarts: 44, activeMs: 0, reservedActiveMs: 600000, trialMaxMs: 600000, skillStarts: 1, skillMaxStarts: 4, skillCount: 1, maxSkills: 11, attempts: [{ id: 'attempt-1', phase: 'SKILL-EVAL', skill: 'skills/dev/example', kind: 'initial', status: 'reserved', activeMs: 0, reservedActiveMs: 600000 }] } }
+  const evidence = { schemaVersion: 1, kind: 'research-reservation', approvalId: fixture.record.id, approvalBinding: trustBinding(fixture.currentArtifacts.approvalComments[0]), manifestSha256: fixture.record.manifest.sha256, actionId: 'research', owner: { repo: 'acme/app', issue: 1, taskIds: ['1-T1'], artifact: fixture.record.items[0].artifacts[1], skill: 'skills/dev/example' }, protocol: researchItem.artifacts[1], scenarioId: 'SKILL-EVAL', candidate: { repo: 'acme/app', parentBranch: 'codex/fixture', baseSha: 'a'.repeat(40), sourceSha: 'b'.repeat(40), treeSha: 'c'.repeat(40), acceptedIntegrations: [], packedArtifacts: [{ name: 'cli', sha256: 'd'.repeat(64), integrity: 'sha512-YWJj' }, { name: 'dashboard', sha256: 'e'.repeat(64), integrity: 'sha512-YWJj' }] }, execution: { harness: 'codex', version: 'fixture', model: 'same', accountRef: 'subscription:fixture', effort: 'high', platform: 'fixture', runtime: 'node24', configDigest: 'f'.repeat(64), policyDigest: 'a'.repeat(64), providerMode: 'subscription-only' }, allowance: { id: 'shared', reservationId: 'reserved-1', attemptId: 'attempt-1', phase: 'SKILL-EVAL', ledgerRevision: 1, status: 'reserved', totalStarts: 1, phaseStarts: 1, phaseMaxStarts: 44, activeMs: 0, reservedActiveMs: 600000, trialMaxMs: 600000, skillStarts: 1, skillMaxStarts: 4, skillCount: 1, maxSkills: 11, attempts: [{ id: 'attempt-1', approvalBinding: trustBinding(fixture.currentArtifacts.approvalComments[0]), phase: 'SKILL-EVAL', skill: 'skills/dev/example', kind: 'initial', status: 'reserved', activeMs: 0, reservedActiveMs: 600000 }] } }
   const source = evidenceComment(evidence, 30)
   fixture.currentArtifacts.admissionEvidence = [source]
   fixture.requested = { ...fixture.requested, actionId: 'research', operation: 'research-test', paths: [], scenarioId: 'SKILL-EVAL', research: { commentId: 30, bodySha256: Bun.SHA256.hash(source.comment.body, 'hex') } }
@@ -174,7 +174,20 @@ function evidenceComment(payload: any, id: number) { return { kind: payload.kind
 function refreshRecord(fixture: any) {
   fixture.currentArtifacts.approvalComments[0].body = '<!-- vsk:v1 type=approval scope=consolidated -->\n```json\n' + JSON.stringify(fixture.record) + '\n```\n'
   fixture.currentArtifacts.approvalBinding.bodySha256 = Bun.SHA256.hash(fixture.currentArtifacts.approvalComments[0].body, 'hex')
+  const receipt = fixture.currentArtifacts.admissionEvidence?.find((entry: any) => entry.kind === 'research-reservation')
+  if (receipt) {
+    receipt.payload.approvalBinding = trustBinding(fixture.currentArtifacts.approvalComments[0])
+    receipt.payload.allowance.attempts.find((entry: any) => entry.id === receipt.payload.allowance.attemptId).approvalBinding = receipt.payload.approvalBinding
+    if (receipt.payload.suite) receipt.payload.suite.approvalBinding = receipt.payload.approvalBinding
+    if (receipt.payload.suite) sealPooledFixture(fixture)
+    else {
+      fixture.currentArtifacts.admissionEvidence[fixture.currentArtifacts.admissionEvidence.indexOf(receipt)] = evidenceComment(receipt.payload, receipt.comment.id)
+      fixture.requested.research.bodySha256 = Bun.SHA256.hash(evidenceComment(receipt.payload, receipt.comment.id).comment.body, 'hex')
+    }
+  }
 }
+function trustBinding(comment: any) { return { approvalId: parseApproval(comment).id, commentId: comment.id, bodySha256: Bun.SHA256.hash(comment.body, 'hex') } }
+
 
 test('protocol limits derive from bound source; unknown or conflicting envelopes refuse', () => {
   expect(protocolLimits(protocolBody)).toEqual({ total: 116, activeMs: 72000000, trialMaxMs: 600000, phases: { core: 48, 'SKILL-EVAL': 44, REQUALIFY: 24 }, skillMaxStarts: 4, maxSkills: 11 })
@@ -239,7 +252,7 @@ test('real candidate bytes and one-use fixture ledger permit only one process ef
       const current = JSON.parse(readFileSync(ledger, 'utf8'))
       if (current.revision !== request.ledgerRevision || current.status !== 'reserved') throw new Error('reservation already consumed')
       writeFileSync(ledger, JSON.stringify({ revision: current.revision + 1, status: 'consumed' }))
-      return { reservationId: request.reservationId, attemptId: request.attemptId, previousRevision: current.revision, revision: current.revision + 1, state: 'consumed', candidateSha: request.candidate.sourceSha, execution: request.execution }
+      return { reservationId: request.reservationId, attemptId: request.attemptId, previousRevision: current.revision, revision: current.revision + 1, state: 'consumed', candidateSha: request.candidate.sourceSha, execution: request.execution, approvalBinding: request.approvalBinding }
     } finally { closeSync(lock); unlinkSync(ledger + '.lock') }
   } }
   const results = await Promise.all([admitConsolidatedResearch(scope, adapter), admitConsolidatedResearch(scope, adapter)])
@@ -265,7 +278,7 @@ test('consolidated reader fetches every page and immutable blob bytes instead of
   const input = { parentRepo: 'acme/app', parentIssue: 10, approvalBinding: fixture.currentArtifacts.approvalBinding, requested: fixture.requested, operators: ['ada'], readJson }
   expect((await gatherConsolidatedApproval(input)).ok).toBe(true)
   const revoked = { ...record(), id: 'revoke-parent', scope: 'brief', artifacts: [], revokes: [fixture.record.id] }
-  const revocation = { id: 99, body: '<!-- vsk:v1 type=approval scope=brief -->\n```json\n' + JSON.stringify(revoked) + '\n```\n' }
+  const revocation = { id: 99, user: { login: 'ada' }, body: '<!-- vsk:v1 type=approval scope=brief -->\n```json\n' + JSON.stringify(revoked) + '\n```\n' }
   expect((await gatherConsolidatedApproval({ ...input, readJson: async args => args[1] === 'repos/acme/app/issues/10/comments' ? [fixture.currentArtifacts.approvalComments, [revocation]] : readJson(args) })).ok).toBe(false)
   await expect(gatherConsolidatedApproval({ ...input, readJson: async args => args[1]?.includes('/contents/') ? { type: 'file', encoding: 'base64', content: Buffer.from('altered').toString('base64') } : readJson(args) })).rejects.toThrow()
 })
@@ -297,9 +310,9 @@ test('preparation admits only exact selected task/files with fetched accepted-co
   const scope = evaluateConsolidatedApproval(fixture)
   expect(scope.ok).toBe(true)
   expect((await admitConsolidatedPreparation(scope, undefined)).ok).toBe(false)
-  const adapter = { readTaskPrerequisites: async () => ({ parent: preparation.parent, plan: preparation.plan, tasks: preparation.tasks }), inspectAcceptedIntegration: async (contract: any) => ({ contract, reviewedHead: contract.childHead, acceptedTaskIds: ['4-T1'], ancestorShas: [contract.parentHead, contract.childHead, manifest.parent.baseSha] }) }
+  const adapter = { readTaskPrerequisites: async () => ({ parent: preparation.parent, plan: preparation.plan, tasks: preparation.tasks, approvalBinding: scope.preparation.approvalBinding }), inspectAcceptedIntegration: async (contract: any) => ({ contract, reviewedHead: contract.childHead, acceptedTaskIds: ['4-T1'], ancestorShas: [contract.parentHead, contract.childHead, manifest.parent.baseSha] }) }
   expect((await admitConsolidatedPreparation(scope, adapter)).ok).toBe(true)
-  expect((await admitConsolidatedPreparation(scope, { ...adapter, readTaskPrerequisites: async () => ({ parent: preparation.parent, plan: preparation.plan, tasks: [{ ...preparation.tasks[0], prerequisiteIssues: [4, 6] }] }) })).ok).toBe(false)
+  expect((await admitConsolidatedPreparation(scope, { ...adapter, readTaskPrerequisites: async () => ({ parent: preparation.parent, plan: preparation.plan, tasks: [{ ...preparation.tasks[0], prerequisiteIssues: [4, 6] }], approvalBinding: scope.preparation.approvalBinding }) })).ok).toBe(false)
   expect(evaluateConsolidatedApproval({ ...fixture, requested: { ...fixture.requested, taskIds: ['1-T1', '1-T2'] } }).ok).toBe(false)
   expect(evaluateConsolidatedApproval({ ...fixture, requested: { ...fixture.requested, operation: 'publish' } }).ok).toBe(false)
   const gathered = await gatherConsolidatedApproval({ parentRepo: 'acme/app', parentIssue: 10, approvalBinding: fixture.currentArtifacts.approvalBinding, requested: fixture.requested, operators: ['ada'], admissionEvidence: fixture.currentArtifacts.admissionEvidence, readJson: async (args: string[]) => {
@@ -318,13 +331,13 @@ test('preparation admits only exact selected task/files with fetched accepted-co
 })
 
 test('correction operator, target self-reference and exact source quotation are enforced', () => {
-  const broken = { id: 8, body: '<!-- vsk:v1 type=approval -->' }
+  const broken = { id: 8, user: { login: 'ada' }, body: '<!-- vsk:v1 type=approval -->' }
   const correction = { schemaVersion: 2, kind: 'correction', scope: 'none', operator: 'mallory', source: record().source, targets: [{ commentId: 8, bodySha256: Bun.SHA256.hash(broken.body, 'hex') }], supersedes: [], revokes: [] }
-  const source = { id: 9, body: '<!-- vsk:v1 type=approval scope=none -->\n```json\n' + JSON.stringify(correction) + '\n```\n' }
+  const source = { id: 9, user: { login: 'ada' }, body: '<!-- vsk:v1 type=approval scope=none -->\n```json\n' + JSON.stringify(correction) + '\n```\n' }
   expect(evaluate([broken, source, grant()]).ok).toBe(false)
   expect(parseApproval({ ...source, id: 8 })).toHaveProperty('ok', false)
   const approval = parseApproval(grant()); approval.source = { kind: 'github-comment', ref: 'https://github.com/acme/app/issues/1#issuecomment-9', quote: 'I approve.' }
-  const quoted = { id: 3, body: '<!-- vsk:v1 type=approval scope=brief+plan -->\n```json\n' + JSON.stringify(approval) + '\n```\n' }
+  const quoted = { id: 3, user: { login: 'ada' }, body: '<!-- vsk:v1 type=approval scope=brief+plan -->\n```json\n' + JSON.stringify(approval) + '\n```\n' }
   const external = { id: 9, html_url: approval.source.ref, user: { login: 'ada' }, body: 'I approve.' }
   expect(evaluate([quoted], { sourceComments: [external] }).ok).toBe(true)
   expect(evaluate([quoted], { sourceComments: [{ ...external, body: 'I revoke.' }] }).ok).toBe(false)
@@ -409,7 +422,7 @@ function pooledFixture() {
   const checks = evidenceComment({ kind: 'checkpoint-source', issue: 1, taskIds: ['1-T1'], artifact: fixture.record.items[0].artifacts[1], sourceSha: evidence.candidate.sourceSha, checks: [{ command: 'bun test', resultSha256: 'a'.repeat(64), exitCode: 0 }] }, 31)
   fixture.currentArtifacts.admissionEvidence.push(checks)
   const envelope = checkpointEnvelope()
-  evidence.suite = { checkpointId: 'E1', arm: 'codex-current', cases: envelope.caseKinds.map(kind => ({ id: 'E1.example.' + kind, skill: 'example', kind, owners: [{ issue: 1, taskIds: ['1-T1'] }], fixtureSha256: 'a'.repeat(64), promptSha256: 'b'.repeat(64), priorSourceSha256: 'c'.repeat(64), currentSourceSha256: 'd'.repeat(64), assertions: [{ id: 'owner-1-' + kind, issue: 1, contractSha256: Bun.SHA256.hash(envelope.ownerAssertions['1'][kind as 'positive' | 'negative'], 'hex') }] })), contributors: [{ issue: 1, taskIds: ['1-T1'], artifact: fixture.record.items[0].artifacts[1], sourceSha: evidence.candidate.sourceSha, checks: { commentId: 31, bodySha256: Bun.SHA256.hash(checks.comment.body, 'hex') } }], acceptedCheckpoints: [], interveningAcceptance: [], livePrerequisiteEvidence: null }
+  evidence.suite = { approvalBinding: evidence.approvalBinding, checkpointId: 'E1', arm: 'codex-current', cases: envelope.caseKinds.map(kind => ({ id: 'E1.example.' + kind, skill: 'example', kind, owners: [{ issue: 1, taskIds: ['1-T1'] }], fixtureSha256: 'a'.repeat(64), promptSha256: 'b'.repeat(64), priorSourceSha256: 'c'.repeat(64), currentSourceSha256: 'd'.repeat(64), assertions: [{ id: 'owner-1-' + kind, issue: 1, contractSha256: Bun.SHA256.hash(envelope.ownerAssertions['1'][kind as 'positive' | 'negative'], 'hex') }] })), contributors: [{ issue: 1, taskIds: ['1-T1'], artifact: fixture.record.items[0].artifacts[1], sourceSha: evidence.candidate.sourceSha, checks: { commentId: 31, bodySha256: Bun.SHA256.hash(checks.comment.body, 'hex') } }], acceptedCheckpoints: [], interveningAcceptance: [], livePrerequisiteEvidence: null }
   evidence.allowance.skillMaxStarts = null; evidence.allowance.skillStarts = 0
   const attempt = evidence.allowance.attempts[0]
   Object.assign(attempt, { skill: null, checkpointId: 'E1', arm: 'codex-current', purpose: 'initial', caseIds: evidence.suite.cases.map((entry: any) => entry.id), sourceSha: evidence.candidate.sourceSha, suiteSha256: checkpointSuiteDigest(evidence.suite), executionSha256: checkpointSuiteDigest(evidence.execution), caseDigests: evidence.suite.cases.map((entry: any) => ({ id: entry.id, sha256: checkpointSuiteDigest(entry) })) })
@@ -455,4 +468,210 @@ test('pooled failures, children and resumes count cumulatively without per-skill
   evidence.allowance.totalStarts = 38; evidence.allowance.phaseStarts = 38
   sealPooledFixture(fixture)
   expect(evaluateConsolidatedApproval(fixture).ok).toBe(false)
+})
+
+function trustComment(value: any, id: number, publisher = 'ada') {
+  return { id, user: { login: publisher }, html_url: 'https://github.com/acme/app/issues/1#issuecomment-' + id, body: '<!-- vsk:v1 type=approval scope=' + value.scope + ' -->\n```json\n' + JSON.stringify(value) + '\n```\n' }
+}
+function trustOrdinary() {
+  const root = { ...grant(), user: { login: 'ada' }, html_url: 'https://github.com/acme/app/issues/1#issuecomment-3' }
+  const event = parseApproval(root)
+  const relay = trustComment({ ...event, id: 'relay-1', source: { kind: 'github-comment', ref: root.html_url, quote: event.source.quote } }, 4, 'ben')
+  return { root, relay }
+}
+function trustCorrection(target: any, id = 9) {
+  return trustComment({ schemaVersion: 2, kind: 'correction', scope: 'none', operator: 'ada', source: record().source, targets: [{ commentId: target.id, bodySha256: Bun.SHA256.hash(target.body, 'hex') }], supersedes: [], revokes: [] }, id)
+}
+function trustRelayConsolidated(fixture: any) {
+  const root = fixture.currentArtifacts.approvalComments[0]
+  root.user = { login: 'ada' }; root.html_url = 'https://github.com/acme/app/issues/10#issuecomment-' + root.id
+  const relayRecord = { ...structuredClone(fixture.record), id: 'relay-parent', source: { kind: 'github-comment', ref: root.html_url, quote: fixture.record.source.quote } }
+  const relay = trustComment(relayRecord, 11, 'ben')
+  fixture.record = relayRecord; fixture.currentArtifacts.approvalComments.push(relay)
+  fixture.currentArtifacts.sourceComments = [structuredClone(root)]
+  fixture.currentArtifacts.approvalBinding = { commentId: 11, bodySha256: Bun.SHA256.hash(relay.body, 'hex') }
+  return { fixture, root, relay }
+}
+function trustSealResearch(fixture: any) {
+  const payload = fixture.currentArtifacts.admissionEvidence[0].payload
+  if (payload.suite) sealPooledFixture(fixture)
+  else {
+    fixture.currentArtifacts.admissionEvidence[0] = evidenceComment(payload, 30)
+    fixture.requested.research.bodySha256 = Bun.SHA256.hash(fixture.currentArtifacts.admissionEvidence[0].comment.body, 'hex')
+  }
+}
+
+test('source trust: known invalid publisher is correctable; unknown publisher is not', () => {
+  const bad = { ...grant(), user: { login: 'ben' } }
+  expect(evaluate([bad]).blocks.join(' ')).toContain('invalid')
+  const fresh = { ...grant('fresh'), id: 8 }
+  expect(evaluate([bad, trustCorrection(bad), fresh]).ok).toBe(true)
+  expect(evaluate([bad, trustCorrection(bad)]).ok).toBe(false)
+  const unknown = { ...bad, user: undefined }
+  expect(evaluate([unknown, trustCorrection(unknown), fresh]).blocks.join(' ')).toContain('unavailable')
+  expect(evaluate([{ ...grant(), id: undefined }]).blocks.join(' ')).toContain('unavailable')
+})
+
+test('source trust: unknown source facts cannot be corrected into permission', () => {
+  const { root, relay } = trustOrdinary()
+  const comments = [root, relay, trustCorrection(relay)]
+  for (const sourceComments of [[], [{ ...root, user: undefined }], [{ ...root, body: undefined }], [root, root], [{ ...root, body: root.body + '\nchanged while reading' }]]) {
+    expect(evaluate(comments, { sourceComments }).blocks.join(' ')).toContain('unavailable')
+  }
+  // Known coherent source, demonstrably different relay: exact correction is allowed.
+  const changedEvent = parseApproval(relay); changedEvent.artifacts[0].digest = 'f'.repeat(64)
+  const mismatch = trustComment(changedEvent, 4, 'ben')
+  expect(evaluate([root, mismatch], { sourceComments: [root] }).ok).toBe(false)
+  expect(evaluate([root, mismatch, trustCorrection(mismatch)], { sourceComments: [root] }).ok).toBe(true)
+})
+
+test('source trust: relay is one source authority and cannot rebind or mutate lifecycle', () => {
+  const { root, relay } = trustOrdinary()
+  const good = evaluate([root, relay], { sourceComments: [root] })
+  expect(good.ok).toBe(true)
+  expect(good.approvalIds).toEqual(['grant-1'])
+  expect(good.approvalBindings).toEqual([trustBinding(root)])
+  for (const change of [(x: any) => { x.artifacts[0].rev++ }, (x: any) => { x.supersedes = ['grant-1'] }, (x: any) => { x.source.quote = 'different intent' }]) {
+    const event = parseApproval(relay); change(event)
+    expect(evaluate([root, trustComment(event, 4, 'ben')], { sourceComments: [root] }).ok).toBe(false)
+  }
+  const revoke = trustComment({ ...parseApproval(root), id: 'revoke-source', artifacts: [], revokes: ['grant-1'] }, 7)
+  expect(evaluate([root, relay, revoke], { sourceComments: [root] }).ok).toBe(false)
+  const replacement = trustComment({ ...parseApproval(root), id: 'replacement', supersedes: ['grant-1'] }, 7)
+  expect(evaluate([root, relay, replacement], { sourceComments: [root] }).approvalIds).toEqual(['replacement'])
+  expect(evaluate([root, relay, { ...grant('independent'), id: 8 }], { sourceComments: [root] }).ok).toBe(false)
+  expect(evaluate([{ ...root, user: { login: 'clara' } }], { operators: ['ada', 'clara'] }).ok).toBe(true)
+})
+
+test('source trust: consolidated local and checkpoint receipts distinguish requested relay from authority', () => {
+  const { fixture, root, relay } = trustRelayConsolidated(consolidatedFixture())
+  const result = evaluateConsolidatedApproval(fixture)
+  expect(result.ok).toBe(true)
+  expect(result.approvalIds).toEqual(['consolidated-1'])
+  expect(result.approvalBindings).toEqual([trustBinding(root)])
+  expect(result.recordBinding).toEqual(trustBinding(relay))
+  const edited = structuredClone(fixture); edited.record.actions[0].operations.push('publish')
+  expect(evaluateConsolidatedApproval(edited).ok).toBe(false)
+})
+
+test('source trust: research reserves canonical source ID/comment/body, never relay identity', async () => {
+  const { fixture, root, relay } = trustRelayConsolidated(researchFixture())
+  let scope = evaluateConsolidatedApproval(fixture)
+  expect(scope.ok).toBe(true)
+  expect(scope.research.approvalId).toBe('consolidated-1')
+  expect(scope.research.approvalBinding).toEqual(trustBinding(root))
+  const payload = fixture.currentArtifacts.admissionEvidence[0].payload
+  payload.approvalId = 'relay-parent'; trustSealResearch(fixture)
+  expect(evaluateConsolidatedApproval(fixture).ok).toBe(false)
+  payload.approvalId = 'consolidated-1'; payload.approvalBinding = trustBinding(relay); trustSealResearch(fixture)
+  expect(evaluateConsolidatedApproval(fixture).ok).toBe(false)
+  payload.approvalBinding = trustBinding(root); trustSealResearch(fixture)
+  scope = evaluateConsolidatedApproval(fixture)
+  const saved = join(mkdtempSync(join(tmpdir(), 'trust-recovery-')), 'scope.json'); writeFileSync(saved, JSON.stringify(scope))
+  const restored = JSON.parse(readFileSync(saved, 'utf8'))
+  const requests: any[] = []
+  const adapter = { inspectCandidate: async (candidate: any) => ({ candidate, clean: true, ancestorShas: [candidate.baseSha] }), consumeReservation: async (request: any) => {
+    requests.push(request)
+    return { reservationId: request.reservationId, attemptId: request.attemptId, previousRevision: request.ledgerRevision, revision: request.ledgerRevision + 1, state: 'consumed', candidateSha: request.candidate.sourceSha, execution: request.execution, approvalBinding: request.approvalBinding }
+  } }
+  expect((await admitConsolidatedResearch(restored, adapter)).ok).toBe(true)
+  expect(requests[0].approvalIds).toEqual(['consolidated-1'])
+  expect(requests[0].approvalBinding).toEqual(trustBinding(root))
+  expect((await admitConsolidatedResearch(restored, { ...adapter, consumeReservation: async (request: any) => ({ ...(await adapter.consumeReservation(request)), approvalBinding: trustBinding(relay) }) })).ok).toBe(false)
+  const torn = { ...restored, approvalBindings: [trustBinding(relay)] }; const before = requests.length
+  expect((await admitConsolidatedResearch(torn, adapter)).ok).toBe(false)
+  expect(requests.length).toBe(before)
+  const inconsistent = structuredClone(restored); inconsistent.research.approvalId = 'relay-parent'; inconsistent.approvalIds = ['relay-parent']
+  expect((await admitConsolidatedResearch(inconsistent, adapter)).ok).toBe(false)
+  expect(requests.length).toBe(before)
+})
+
+test('source trust: pooled checkpoint digest and consumption retain canonical source provenance', async () => {
+  const { fixture, root, relay } = trustRelayConsolidated(pooledFixture())
+  let scope = evaluateConsolidatedApproval(fixture)
+  expect(scope.ok).toBe(true)
+  expect(scope.research.checkpoint.suite.approvalBinding).toEqual(trustBinding(root))
+  fixture.currentArtifacts.admissionEvidence[0].payload.suite.approvalBinding = trustBinding(relay)
+  trustSealResearch(fixture)
+  expect(evaluateConsolidatedApproval(fixture).ok).toBe(false)
+  fixture.currentArtifacts.admissionEvidence[0].payload.suite.approvalBinding = trustBinding(root); trustSealResearch(fixture)
+  scope = evaluateConsolidatedApproval(fixture)
+  const requests: any[] = []
+  const adapter = { inspectCheckpoint: async (suite: any) => ({ suite, sourceDigests: suite.cases.map((entry: any) => ({ id: entry.id, fixtureSha256: entry.fixtureSha256, promptSha256: entry.promptSha256, priorSourceSha256: entry.priorSourceSha256, currentSourceSha256: entry.currentSourceSha256 })), assertionIds: suite.cases.map((entry: any) => ({ id: entry.id, assertionIds: entry.assertions.map((assertion: any) => assertion.id) })) }), inspectCandidate: async (candidate: any) => ({ candidate, clean: true, ancestorShas: [candidate.baseSha] }), consumeReservation: async (request: any) => {
+    requests.push(request)
+    return { reservationId: request.reservationId, attemptId: request.attemptId, previousRevision: request.ledgerRevision, revision: request.ledgerRevision + 1, state: 'consumed', candidateSha: request.candidate.sourceSha, execution: request.execution, approvalBinding: request.approvalBinding, suiteSha256: request.suiteSha256 }
+  } }
+  expect((await admitConsolidatedResearch(JSON.parse(JSON.stringify(scope)), adapter)).ok).toBe(true)
+  expect(requests[0].approvalBinding).toEqual(trustBinding(root))
+  expect(requests[0].suiteSha256).toBe(scope.research.checkpoint.digest)
+})
+
+test('source trust: actual CLI preserves canonical identity and cannot correct a failed source read', () => {
+  const { root, relay } = trustOrdinary()
+  const dir = mkdtempSync(join(tmpdir(), 'trust-cli-'))
+  const data = { issue: { ...brief, state: 'open', labels: [{ name: 'ready' }, { name: 'quick-build' }], assignees: [] }, comments: [livePlan, root, relay], source: root, unavailable: false }
+  const file = join(dir, 'input.json'); const stub = join(dir, 'gh')
+  writeFileSync(join(dir, 'dev.md'), 'repo: acme/app\noperators: ada\n')
+  writeFileSync(stub, '#!/usr/bin/env node\n' + `const fs=require('node:fs');const x=JSON.parse(fs.readFileSync(${JSON.stringify(file)},'utf8'));const p=process.argv[3];if(p.includes('/issues/comments/')){if(x.unavailable){process.stderr.write('HTTP 503: source unavailable');process.exit(1)}process.stdout.write(JSON.stringify(x.source))}else process.stdout.write(JSON.stringify(p.endsWith('/comments')?[x.comments]:p.endsWith('/blocked_by')?[[]]:x.issue));`, { mode: 0o755 })
+  const invoke = () => { writeFileSync(file, JSON.stringify(data)); return spawnSync('node', [join(import.meta.dir, '../scripts/preflight.mjs'), '--repo', 'acme/app', '--issue', '1', '--me', 'fixture-bot', '--dev-md', join(dir, 'dev.md'), '--json'], { encoding: 'utf8', env: { ...process.env, VSK_GH: stub } }) }
+  const pass = invoke(); expect(pass.status).toBe(0)
+  expect(JSON.parse(pass.stdout).approvalBindings).toEqual([trustBinding(root)])
+  data.comments.push(trustCorrection(relay))
+  data.unavailable = true
+  const blocked = invoke(); expect(blocked.status).toBe(2); expect(blocked.stdout).toContain('source unavailable')
+})
+
+test('source trust: preparation adapter receives and returns canonical source authority', async () => {
+  const { fixture } = preparationFixture()
+  const { root, relay } = trustRelayConsolidated(fixture)
+  const scope = evaluateConsolidatedApproval(fixture)
+  expect(scope.ok).toBe(true)
+  expect(scope.preparation.approvalBinding).toEqual(trustBinding(root))
+  const queries: any[] = []
+  const adapter = { readTaskPrerequisites: async (query: any) => {
+    queries.push(query)
+    return { parent: scope.preparation.parent, plan: scope.preparation.plan, tasks: scope.preparation.tasks, approvalBinding: query.approvalBinding }
+  }, inspectAcceptedIntegration: async (contract: any) => ({ contract, reviewedHead: contract.childHead, acceptedTaskIds: ['4-T1'], ancestorShas: [contract.parentHead, contract.childHead, scope.preparation.parent.baseSha] }) }
+  expect((await admitConsolidatedPreparation(JSON.parse(JSON.stringify(scope)), adapter)).ok).toBe(true)
+  expect(queries[0].approvalBinding).toEqual(trustBinding(root))
+  expect((await admitConsolidatedPreparation(scope, { ...adapter, readTaskPrerequisites: async (query: any) => ({ ...await adapter.readTaskPrerequisites(query), approvalBinding: trustBinding(relay) }) })).ok).toBe(false)
+})
+
+test('source trust: fresh consolidated reads reject revoked or body-stale recovered reservations before consumption', async () => {
+  for (const mutation of ['revoked', 'body-changed']) {
+    const { fixture, root } = trustRelayConsolidated(researchFixture())
+    const stored = JSON.parse(JSON.stringify(evaluateConsolidatedApproval(fixture)))
+    expect(stored.ok).toBe(true)
+    if (mutation === 'revoked') fixture.currentArtifacts.approvalComments.push(trustComment({ ...record(), id: 'revoke-parent', scope: 'brief', artifacts: [], revokes: ['consolidated-1'] }, 99))
+    else root.body += '\n'
+    let consumed = 0
+    const readJson = async (args: string[]) => {
+      const route = args[1]!
+      if (route === 'repos/acme/app/issues/10/comments') return [fixture.currentArtifacts.approvalComments]
+      if (route.includes('/issues/comments/')) {
+        const id = Number(route.split('/').at(-1))
+        return fixture.currentArtifacts.approvalComments.find((entry: any) => entry.id === id) ?? fixture.currentArtifacts.admissionEvidence.find((entry: any) => entry.comment.id === id).comment
+      }
+      if (route.endsWith('/blocked_by')) return [[]]
+      const issue = Number(route.split('/')[4])
+      if (route.endsWith('/comments')) return [fixture.currentArtifacts.artifacts.filter((entry: any) => entry.issue === issue && entry.kind !== 'brief').map((entry: any) => entry.artifact)]
+      return { ...fixture.currentArtifacts.artifacts.find((entry: any) => entry.issue === issue && entry.kind === 'brief').artifact, state: 'open' }
+    }
+    const result = await gatherConsolidatedApproval({ parentRepo: 'acme/app', parentIssue: 10, approvalBinding: fixture.currentArtifacts.approvalBinding, requested: fixture.requested, operators: ['ada'], admissionEvidence: fixture.currentArtifacts.admissionEvidence, readJson, researchAdapter: { inspectCandidate: async () => { throw new Error('must not inspect stale authority') }, consumeReservation: async () => { consumed++; throw new Error('must not consume stale authority') } } })
+    expect(result.ok).toBe(false)
+    expect(consumed).toBe(0)
+  }
+})
+
+test('source trust: each reserved attempt pins its source while prior authorities remain in spent totals', () => {
+  const { fixture, root, relay } = trustRelayConsolidated(researchFixture())
+  const payload = fixture.currentArtifacts.admissionEvidence[0].payload
+  const current = payload.allowance.attempts[0]
+  current.approvalBinding = trustBinding(relay); trustSealResearch(fixture)
+  expect(evaluateConsolidatedApproval(fixture).ok).toBe(false)
+  current.approvalBinding = trustBinding(root)
+  payload.allowance.attempts.push({ ...structuredClone(current), id: 'older-failed', status: 'failed', activeMs: 500, reservedActiveMs: 0, approvalBinding: { approvalId: 'older-authority', commentId: 5, bodySha256: 'f'.repeat(64) } })
+  payload.allowance.totalStarts = 2; payload.allowance.phaseStarts = 2; payload.allowance.skillStarts = 2; payload.allowance.activeMs = 500
+  trustSealResearch(fixture)
+  expect(evaluateConsolidatedApproval(fixture).ok).toBe(true)
 })

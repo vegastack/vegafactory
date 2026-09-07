@@ -69,7 +69,7 @@ export function evaluatePreflight({ issue, comments, devMd, me, expect = 'ready'
     blocks.push(`issue repo ${issue.repo} does not match dev.md repo ${repoLine[1]}`);
   }
 
-  return { blocks, warns, bindings: approval.bindings, approvalIds: approval.approvalIds };
+  return { blocks, warns, bindings: approval.bindings, approvalIds: approval.approvalIds, approvalBindings: approval.approvalBindings };
 }
 
 // Both CLI and dispatcher use this owner reader and evaluator. The injected

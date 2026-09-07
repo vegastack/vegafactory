@@ -1,6 +1,6 @@
 # dev-intake
 
-Turns requirements — a brainstorm, a feature thought, an SOW — into GitHub issues complete enough that a fresh agent needs nothing but the URL. All questions happen here, in grilling-style rounds where every question ships with a recommended answer; once an issue is approved and `ready`, dark implementation needs no further input. Also records schema-v2 approval with the operator’s actual source quotation and current artifact bindings, preserves legacy records for scoped reconfirmation, and manages the `needs-operator` → `ready` labels.
+Turns requirements — a brainstorm, a feature thought, an SOW — into GitHub issues complete enough that a fresh agent needs nothing but the URL. All questions happen here, in grilling-style rounds where every question ships with a recommended answer; once an issue is approved and `ready`, dark implementation needs no further input. Also records schema-v2 approval with the operator’s actual source quotation and current artifact bindings, preserves legacy records for scoped reconfirmation, and manages the `needs-operator` → `ready` labels. Session attestations need a current policy-operator publisher; an untrusted recorder may only relay an independently verified identical scoped grant. The evaluator returns its canonical source authority, with no new grant or lifecycle changes from the relay.
 
 The agent entry point is [SKILL.md](SKILL.md).
 

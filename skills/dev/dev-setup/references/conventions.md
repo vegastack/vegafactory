@@ -37,7 +37,7 @@ Human references use the operator’s GitHub username in parentheses, without ti
 - Approval: `Approved by (<username>) on DD-MM-YYYY: "<their words>"`
 - Register line: `- DD-MM-YYYY (<username>) — <decision>`
 
-Check the named operator against current policy. Agents may quote actual intent; authorship, labels and configured names cannot supply it. Session quotations are inspectable assertions, not cryptographic speech authentication.
+Use approval.mjs’s publisher/relay contract: current-policy provider-envelope publishers may attest listed operators’ session words; other recorders may only relay independently read identical operator-published scoped grants within complete authority history, without lifecycle mutations. Relays inherit source authority/lifecycle; account attestation does not authenticate off-platform speech.
 
 ## Scoped approval records
 
@@ -45,9 +45,9 @@ Use dev-implement’s `scripts/lib/approval.mjs` API and its embedded contract; 
 
 Approval marker scope must match one fenced JSON `ApprovalRecord={schemaVersion:2,id,operator,scope,source:{kind,ref,quote},artifacts,supersedes,revokes}`. Source kind is `session` or `github-comment`; record actual inspectable words. Scope is `brief`, `plan` or `brief+plan`: planning requires brief; implementation requires both; research execution additionally binds its protocol. Empty-artifact revocations remove exact earlier IDs. Conflicts require explicit supersedes; never newest-wins.
 
-Preserve legacy comments. Inventory refusal reasons/current digests without writes; request scoped reconfirmation. A separately authorized `scope=none` correction has `{schemaVersion:2,kind:"correction",scope:"none",operator,source,targets:[{commentId,bodySha256}],supersedes:[],revokes:[]}`. It neutralizes exact malformed targets only and grants no scope. Changed/missing/self-referential targets refuse.
+Preserve legacy comments; inventory refusals/current digests without writes and request reconfirmation. Follow approval.mjs’s exact correction schema, operator-publisher and target checks. Only malformed or demonstrably invalid-source targets qualify, never valid authority or unavailable/inconsistent source facts. Resolve source facts first; corrections grant no scope.
 
-Consolidated parent events bind actual intent to frozen manifest bytes, canonical artifacts and exact task/action subsets. Locators are inline UTF-8 or immutable repository/commit/path plus blob hash; local paths are insufficient. Pin approval comment ID/body hash separately. Preparation requires exact accepted task-contract receipts; research requires protocol-derived limits, complete shared attempts and a clean-candidate/atomic reservation adapter. Missing adapters refuse. Failed/resumed/child starts count without refunds. Checkpoint export, private/live operations and shipping retain their separate gates; an intent result is not an effect grant.
+Consolidated parent events bind frozen manifests, canonical artifacts and exact task/action subsets. Use inline UTF-8 or immutable repository/commit/path plus blob hash, never local paths. Keep requested `recordBinding` audit-only and canonical `approvalBindings` authoritative. Follow approval.mjs’s preparation/research/recovery provenance, receipt, adapter, counted-attempt and fresh-admission requirements; retain immutable history and unverified legacy records. Checkpoint/private/live/shipping gates remain separate.
 
 Canonicalization normalizes CRLF only, except structural plan checkboxes and one validated JSON `{tasks:[{id,evidenceUrls}]}` block between `<!-- vsk:progress:start -->` / `<!-- vsk:progress:end -->`. IDs must exist; URLs are HTTP(S). Unknown fields/duplicates refuse. Stable task IDs/order, interfaces, actions, revisions and every other byte remain scope. Brief/protocol bodies have no mutable fields; fenced examples remain immutable and supply no authority.
 

@@ -22,7 +22,7 @@ const approval = (scope = 'brief+plan') => {
     { repo: 'vegastack/vegafactory', issue: 1, kind: 'brief', artifactId: 'brief-1', rev: 1, digest: scopeDigest(baseIssue().body, 'brief') },
     { repo: 'vegastack/vegafactory', issue: 1, kind: 'plan', artifactId: 'plan-2', rev: 1, digest: scopeDigest(currentPlan.body, 'plan') },
   ].filter(ref => scope === 'brief+plan' || ref.kind === scope)
-  return { id: scope === 'plan' ? 4 : 3, body: `<!-- vsk:v1 type=approval scope=${scope} -->\n\`\`\`json\n` + JSON.stringify({ schemaVersion: 2, id: 'intent-' + scope, operator: 'kmanojkumar', scope, source: { kind: 'session', ref: 'session:1', quote: 'Approved.' }, artifacts, supersedes: [], revokes: [] }) + '\n```\n' }
+  return { id: scope === 'plan' ? 4 : 3, user: { login: 'kmanojkumar' }, body: `<!-- vsk:v1 type=approval scope=${scope} -->\n\`\`\`json\n` + JSON.stringify({ schemaVersion: 2, id: 'intent-' + scope, operator: 'kmanojkumar', scope, source: { kind: 'session', ref: 'session:1', quote: 'Approved.' }, artifacts, supersedes: [], revokes: [] }) + '\n```\n' }
 }
 const devMd = 'repo: vegastack/vegafactory · default branch main\noperators: kmanojkumar\n'
 

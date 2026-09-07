@@ -91,25 +91,25 @@
       "reason": "skillify only. RA1 (Rogue Agent / self-modification) is CORRECT about the pattern and is accepted with its limits stated, not explained away: this refresh contract instructs an agent to rewrite skillify's own marked sections when upstream sources drift. What actually bounds it, verified: refresh work runs on refresh/** branches, and .github/workflows/refresh-guard.yml fails any such PR whose diff touches anything outside a skill's refresh/ directory - so the automated path cannot reach skillify's SKILL.md or references at all. Checksums, versions and timestamps in refresh/sources.json are runner-only by repo rule, and the workflow maintains one standing PR rather than pushing. What bounds it as of 01-09-2026: the default branch IS branch-protected - a PR is required, force-pushes and deletion are blocked, and admins are not exempt - so 'a human reviews before merge' is now an enforced control rather than a convention. This sentence previously recorded the opposite, and the protection was enabled because this suppression depended on a control that did not exist. Still narrower than it sounds: refresh-guard only constrains refresh/** branches, so an agent following this contract from any other branch is bounded by the PR requirement alone. The residual risk is therefore real but not unique to this contract: it is the same risk carried by any agent with write access to the repository, and the finding is accepted on that basis rather than on a control that does not exist. Still flag if: this contract's wording changes at all (content-hashed, so it re-triggers automatically), or refresh-guard.yml stops restricting refresh/** diffs to refresh/ directories - that guard is the one real bound named here. Re-adjudicated 03-09-2026 (#101) after REFRESH.md dropped the authoring.md mirrored-table bullet (that table is now a citation of skill-maintainer's Hard limits): the hashed instruction - update skillify's marked section on a normal branch when skill-maintainer's sources drift - is the same sentence with 'two marked sections' read 'marked section', refresh-guard.yml is unchanged, and only the digest moves."
     },
     {
-      "hash": "sha256:8497ddb8eb7656520a7eabe799b6b7e5b951903fedb63a0bd02b4da36de03ca4",
+      "hash": "sha256:15f8fdbe0073b3f411cf28d85ba3d6276057e71a59c72ab8d5f51775cadbe50c",
       "rule_id": "P2",
       "file": "scripts/lib/approval.mjs",
       "reason": "The approval owner documents and parses vsk approval/progress metadata. The matched bytes are a schema example or literal delimiter comparison, not an agent-directed instruction; only declared JSON fields grant scope after canonical identity/source/history validation. This identical owner file is copied into dev-implement, dev-intake and dev-plan. Exact content fingerprint from the #135 scan; no path-wide or rule-wide exception. Still flag if: the matched content changes, a comment gains an instruction rather than metadata, or a new finding appears outside this exact fingerprint."
     },
     {
-      "hash": "sha256:e8896d4061d20b36027c151944e64b2f2173f4ae110c9e5b77d924f7e68b03ac",
+      "hash": "sha256:97df1816902f8175a062b581211228e605282482197294870bbcda4ab1337f89",
       "rule_id": "P2",
       "file": "scripts/lib/approval.mjs",
       "reason": "The approval owner documents and parses vsk approval/progress metadata. The matched bytes are a schema example or literal delimiter comparison, not an agent-directed instruction; only declared JSON fields grant scope after canonical identity/source/history validation. This identical owner file is copied into dev-implement, dev-intake and dev-plan. Exact content fingerprint from the #135 scan; no path-wide or rule-wide exception. Still flag if: the matched content changes, a comment gains an instruction rather than metadata, or a new finding appears outside this exact fingerprint."
     },
     {
-      "hash": "sha256:34491c10eefe15b66bb631d2c5d7861365f1ad61fa5f7b9c733eadc858e0d56c",
+      "hash": "sha256:13518233a3538553042cb8faf83f287ec43cd5ab65f04f6cb83df2933bcbb6e9",
       "rule_id": "P2",
       "file": "scripts/lib/approval.mjs",
       "reason": "The approval owner documents and parses vsk approval/progress metadata. The matched bytes are a schema example or literal delimiter comparison, not an agent-directed instruction; only declared JSON fields grant scope after canonical identity/source/history validation. This identical owner file is copied into dev-implement, dev-intake and dev-plan. Exact content fingerprint from the #135 scan; no path-wide or rule-wide exception. Still flag if: the matched content changes, a comment gains an instruction rather than metadata, or a new finding appears outside this exact fingerprint."
     },
     {
-      "hash": "sha256:ecc4878cc90ad69480bd913b37b09fc97ede6ee15d3548114ca6a0b29f1cc93d",
+      "hash": "sha256:18dc53409913bef0905ba3858ed190a2ddc099cf92263767453bf6e86f2b2af9",
       "rule_id": "P2",
       "file": "references/plan-format.md",
       "reason": "The plan template uses vsk plan and stable task-id metadata inside fenced Markdown examples. These delimiters bind immutable task identity; they contain no hidden operational directive. Exact content fingerprint from the #135 scan; no path-wide or rule-wide exception. Still flag if: the matched content changes, a comment gains an instruction rather than metadata, or a new finding appears outside this exact fingerprint."

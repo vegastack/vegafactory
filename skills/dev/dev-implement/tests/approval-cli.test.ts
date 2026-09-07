@@ -12,7 +12,7 @@ function fixture() {
     { repo: 'acme/app', issue: 1, kind: 'brief', artifactId: brief.node_id, rev: 1, digest: scopeDigest(brief.body, 'brief') },
     { repo: 'acme/app', issue: 1, kind: 'plan', artifactId: plan.node_id, rev: 1, digest: scopeDigest(plan.body, 'plan') },
   ], supersedes: [], revokes: [] }
-  return { brief: structuredClone(brief), comments: [structuredClone(plan), { id: 3, node_id: 'approval-3', body: '<!-- vsk:v1 type=approval scope=brief+plan -->\n```json\n' + JSON.stringify(event) + '\n```\n' }] }
+  return { brief: structuredClone(brief), comments: [structuredClone(plan), { id: 3, node_id: 'approval-3', user: { login: 'ada' }, body: '<!-- vsk:v1 type=approval scope=brief+plan -->\n```json\n' + JSON.stringify(event) + '\n```\n' }] }
 }
 function run(data: ReturnType<typeof fixture>, historyError = false, options: { me?: string; stage?: string; expect?: string } = {}) {
   const dir = mkdtempSync(join(tmpdir(), 'approval-cli-'))
@@ -42,7 +42,7 @@ for (const [name, change] of [
 })
 test('actual CLI refuses unreadable history', () => { expect(run(fixture(), true).status).toBe(2) })
 
-function eventComment(event: any, id: number) { return { id, node_id: 'event-' + id, body: '<!-- vsk:v1 type=approval scope=' + event.scope + ' -->\n```json\n' + JSON.stringify(event) + '\n```\n' } }
+function eventComment(event: any, id: number) { return { id, node_id: 'event-' + id, user: { login: 'ada' }, body: '<!-- vsk:v1 type=approval scope=' + event.scope + ' -->\n```json\n' + JSON.stringify(event) + '\n```\n' } }
 
 test('actual CLI refuses wrong scope and conflicting approvals on later pages', () => {
   const wrong = fixture(); const onlyBrief = parseApproval(wrong.comments[1]); onlyBrief.scope = 'brief'; onlyBrief.artifacts = onlyBrief.artifacts.filter((ref: any) => ref.kind === 'brief'); wrong.comments[1] = eventComment(onlyBrief, 3)
