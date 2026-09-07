@@ -1,11 +1,11 @@
 import { describe, expect, test } from 'bun:test'
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, symlinkSync, writeFileSync } from 'node:fs'
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { inspectCodexConfiguration, readHookConfiguration, validateRegistration } from '../src/hook-registration.ts'
 
 function fixture(harness: 'claude' | 'codex' = 'codex') {
-  const checkout = mkdtempSync(join(tmpdir(), 'vf hook registration '))
+  const checkout = realpathSync(mkdtempSync(join(tmpdir(), 'vf hook registration ')))
   const guardPath = join(checkout, '.vegastack/hooks/ship-guard.mjs')
   mkdirSync(join(checkout, '.vegastack/hooks'), { recursive: true })
   writeFileSync(guardPath, '// trusted fixture target\n')
@@ -146,7 +146,7 @@ test('multiline TOML instruction strings never register their example hook comma
 })
 
 
-for (const mode of ['enabled', 'disabled', 'managed-only', 'missing-requirements', 'memory-on', 'wrong-checkout', 'loader-error']) {
+for (const mode of ['enabled', 'disabled', 'managed-only', 'missing-requirements', 'memory-on', 'wrong-checkout', 'loader-error', 'forced-memory', 'forced-import', 'forced-context']) {
   test(`external Codex metadata RPC: ${mode}`, async () => {
     const f = fixture()
     const nativeHome = join(f.checkout, 'native-home')
@@ -164,7 +164,8 @@ readline.createInterface({ input: process.stdin }).on('line', line => {
   if (request.id === undefined) return;
   let result = {};
   if (request.method === 'hooks/list') result = { data: [{ cwd: mode === 'wrong-checkout' ? '/other' : cwd, errors: mode === 'loader-error' ? [{}] : [], warnings: [], hooks: [{ handlerType:'command', eventName:'preToolUse', command, matcher:null, async:false, enabled:mode !== 'disabled', isManaged:false, currentHash:'sha256:' + 'a'.repeat(64), source:'project', sourcePath:source, trustStatus:'untrusted' }] }] };
-  if (request.method === 'configRequirements/read') result = mode === 'missing-requirements' ? {} : { requirements: mode === 'managed-only' ? { allowManagedHooksOnly:true } : null };
+  if (request.method === 'configRequirements/read' && request.params !== null) process.exit(2);
+  if (request.method === 'configRequirements/read') result = mode === 'missing-requirements' ? {} : { requirements: mode === 'managed-only' ? { allowManagedHooksOnly:true } : mode.startsWith('forced-') ? { featureRequirements: { [mode === 'forced-memory' ? 'memories' : mode === 'forced-import' ? 'external_agent_memory_import' : 'context_management']:true } } : null };
   if (request.method === 'config/read') result = { config: { unrelatedSecret:'never-retain-me', projects:{ [cwd]:{ trust_level:'trusted' } }, memories:{use_memories:mode === 'memory-on', generate_memories:false}, features:{hooks:true,memories:false,external_agent_memory_import:false,context_management:{experimental_mode:false}} }, origins:{} };
   process.stdout.write(JSON.stringify({ id:request.id, result }) + '\\n');
 });

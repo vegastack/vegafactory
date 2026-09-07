@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test'
-import { chmodSync, mkdtempSync, readFileSync, symlinkSync, writeFileSync } from 'node:fs'
+import { chmodSync, mkdtempSync, readFileSync, realpathSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { mkdirSync } from 'node:fs'
@@ -656,7 +656,7 @@ describe('managed launches exclude native memory without disabling project instr
 
 
 test('the real executor refuses unsupported external harness metadata before spawn or delivery', async () => {
-  const home = mkdtempSync(join(tmpdir(), 'vf-real-executor-'))
+  const home = realpathSync(mkdtempSync(join(tmpdir(), 'vf-real-executor-')))
   const bin = join(home, 'bin'), marker = join(home, 'entered')
   mkdirSync(bin)
   writeFileSync(join(bin, 'claude'), `#!/usr/bin/env node

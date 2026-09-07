@@ -6,7 +6,7 @@
 // Refusals are first-class output, never silence: a repo that is skipped says why, in the JSON and
 // in the log, because "nothing happened" and "the ship guard is unwired" look identical otherwise.
 import { spawn, spawnSync } from 'node:child_process'
-import { existsSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
 import { parseControlRoomKnob, loadConfiguredPolicy } from './control-room.ts'
 import { appendFile, lstat, mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises'
 import { hostname, tmpdir } from 'node:os'
@@ -592,13 +592,15 @@ function defaultGit(args: string[], cwd: string): Promise<{ ok: boolean; message
 // and the worktree is left exactly as the run left it.
 // Metadata only: version and allowlisted config/hook RPCs start no task or turn.
 export async function inspectManagedHarness(plan: LaunchPlan): Promise<HarnessMetadata> {
+  try { if (realpathSync(plan.cwd) !== plan.cwd) return { version: '', problems: ['prepared checkout must be canonical before managed launch'] } }
+  catch { return { version: '', problems: ['prepared checkout is unavailable'] } }
   const options = { cwd: plan.cwd, env: { ...process.env, ...plan.env }, encoding: 'utf8' as const, timeout: 5000, killSignal: 'SIGKILL' as const, maxBuffer: 128 * 1024 }
   const version = spawnSync(plan.command, ['--version'], options)
   if (version.status !== 0 || version.error || version.signal) return { version: '' }
   const metadata: HarnessMetadata = { version: version.stdout.trim() }
   if (plan.command === 'codex' && metadata.version === 'codex-cli 0.153.4') {
     const inspected = await inspectCodexConfiguration({ command: plan.command, cwd: plan.cwd, env: options.env,
-      args: plan.args.flatMap((arg, index) => ['-c', '--config', '--enable', '--disable'].includes(arg)
+      args: plan.args.flatMap((arg, index) => arg === '--strict-config' ? [arg] : ['-c', '--config', '--enable', '--disable'].includes(arg)
         ? [arg, plan.args[index + 1] ?? ''] : []) })
     return { ...metadata, ...inspected }
   }
@@ -1319,6 +1321,8 @@ export async function runTick(
       // not exist. So the wiring is verified again where the run will actually happen; a dry run
       // checks a worktree that already exists and says nothing about one it would create.
       if (!options.dryRun || existsSync(target.path)) {
+        try { target.path = realpathSync(target.path) }
+        catch { refusals.push({ repo: entry.repo, issue: run.issue, reason: 'prepared checkout could not be canonicalized' }); continue }
         const worktreeGuard = await shipGuard(target.path, stage.harness, { home: config.home, repo: entry.repo, policyDigest: resolved.policy?.policyDigest })
         if (!worktreeGuard.wired) {
           refusals.push({ repo: entry.repo, issue: run.issue, reason: `#${run.issue}: the ship guard is not wired for ${stage.harness} in the worktree ${target.path} (${worktreeGuard.detail}) — the run would start there under bypass with nothing bounding it; commit the harness wiring or list it in dev.md's worktree-include:` })

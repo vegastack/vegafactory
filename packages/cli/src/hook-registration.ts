@@ -21,6 +21,8 @@ export async function inspectCodexConfiguration(input: {
   command: string; args: string[]; cwd: string; env: NodeJS.ProcessEnv
 }): Promise<CodexConfigurationInspection> {
   const failed = (reason: string): CodexConfigurationInspection => ({ features: {}, memoryRetrievalDisabled: false, memoryGenerationDisabled: false, hookApplicable: false, problems: [reason] })
+  try { if (realpathSync(input.cwd) !== input.cwd) return failed('prepared Codex checkout must be canonical') }
+  catch { return failed('prepared Codex checkout is unavailable') }
   const replies = await new Promise<Record<string, unknown> | null>(resolveResult => {
     const child = spawn(input.command, [...input.args, 'app-server', '--listen', 'stdio://'], {
       cwd: input.cwd, env: input.env, stdio: ['pipe', 'pipe', 'pipe'],
@@ -65,7 +67,7 @@ export async function inspectCodexConfiguration(input: {
           values.initialized = true
           send({ method: 'initialized' })
           send({ id: 1, method: 'hooks/list', params: { cwds: [input.cwd] } })
-          send({ id: 2, method: 'configRequirements/read', params: {} })
+          send({ id: 2, method: 'configRequirements/read', params: null })
           send({ id: 3, method: 'config/read', params: { cwd: input.cwd, includeLayers: true } })
         } else if ([1, 2, 3].includes(message.id as number) && values.initialized === true) {
           const key = String(message.id)
@@ -97,7 +99,11 @@ export async function inspectCodexConfiguration(input: {
   if (!Array.isArray(entries) || entries.length !== 1) return failed('Codex did not return exactly the requested checkout hook metadata')
   const entry = object(entries[0])
   if (entry?.cwd !== input.cwd || !Array.isArray(entry.errors) || entry.errors.length !== 0 || !Array.isArray(entry.hooks)) return failed('Codex hook metadata has errors or a different checkout')
-  if (object(requirements?.featureRequirements)?.hooks === false) return failed('managed requirements disable Codex hooks')
+  const pins = object(requirements?.featureRequirements)
+  if (pins?.hooks === false) return failed('managed requirements disable Codex hooks')
+  if (['memories', 'external_agent_memory_import', 'context_management'].some(key => pins?.[key] === true)) {
+    return failed('managed requirements force incompatible native-memory or context features')
+  }
   const knownSources = new Set<string>()
   try {
     for (const path of readHookConfiguration(input.cwd, 'codex', input.env.HOME, input.env.CODEX_HOME).sources) knownSources.add(realpathSync(path))
