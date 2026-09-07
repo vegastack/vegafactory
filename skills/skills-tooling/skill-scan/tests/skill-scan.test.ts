@@ -540,7 +540,10 @@ const argvLines = (path: string) =>
 describe('gatherFacts', () => {
   const withFake = (env: Record<string, string | undefined>, run: () => void) => {
     const saved = { ...process.env }
-    Object.assign(process.env, { VSK_SKILLSPECTOR: fake, ...env })
+    for (const [key, value] of Object.entries({ VSK_SKILLSPECTOR: fake, ...env })) {
+      if (value === undefined) delete process.env[key]
+      else process.env[key] = value
+    }
     try {
       run()
     } finally {
@@ -556,6 +559,16 @@ describe('gatherFacts', () => {
       expect(out.skills).toHaveLength(1)
     })
     expect(argvLines(log)[0][0]).toBe('scan')
+  })
+
+  test('fixture overrides preserve defined values and restore the environment after failure', () => {
+    const before = { ...process.env }
+    expect(() => withFake({ VSK_SKILLSPECTOR: 'explicit-fixture', VSK_FAKE_ARGV: undefined }, () => {
+      expect(process.env.VSK_SKILLSPECTOR).toBe('explicit-fixture')
+      expect(Object.hasOwn(process.env, 'VSK_FAKE_ARGV')).toBe(false)
+      throw new Error('fixture callback failed')
+    })).toThrow('fixture callback failed')
+    expect({ ...process.env }).toEqual(before)
   })
 
   const baselineFile = () => {
