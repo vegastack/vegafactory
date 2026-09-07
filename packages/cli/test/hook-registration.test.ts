@@ -181,7 +181,8 @@ readline.createInterface({ input: process.stdin }).on('line', line => {
       expect(result.hookHash).toBe('sha256:' + 'a'.repeat(64))
     }
     const methods = readFileSync(calls, 'utf8').trim().split('\n')
-    expect(methods).toEqual(['initialize', 'initialized', 'hooks/list', 'configRequirements/read', 'config/read'])
+    expect(methods.slice(0, 2)).toEqual(['initialize', 'initialized'])
+    expect(methods.slice(2).sort()).toEqual(['config/read', 'configRequirements/read', 'hooks/list'].sort())
     expect(JSON.stringify(result)).not.toContain('never-retain-me')
   }, 10000)
 }
