@@ -43,19 +43,22 @@ function statusOf(text: string): number | null {
 export function ghText(args: string[], options: GhOptions = {}): Promise<string> {
   return new Promise((resolve, reject) => {
     if (options.signal?.aborted) return reject(new GhUnavailable('GitHub read cancelled'))
-    const timeoutMs = Math.min(options.timeoutMs ?? 10_000, 60_000)
+    const timeoutMs = Math.min(options.timeoutMs ?? 10_000, 10_000)
     const maxOutputBytes = Math.min(options.maxOutputBytes ?? 8 * 1024 * 1024, 8 * 1024 * 1024)
     if (!Number.isFinite(timeoutMs) || timeoutMs <= 0 || !Number.isSafeInteger(maxOutputBytes) || maxOutputBytes <= 0) {
       return reject(new GhUnavailable('Invalid GitHub process bounds'))
     }
-    const child = spawn(binary(options), args, { cwd: options.cwd, stdio: ['pipe', 'pipe', 'pipe'] })
+    const child = spawn(binary(options), args, { cwd: options.cwd, stdio: ['pipe', 'pipe', 'pipe'], detached: process.platform !== 'win32' })
     const stdout: Buffer[] = [], stderr: Buffer[] = []
     let bytes = 0
     let failure: GhUnavailable | null = null
     const stop = (reason: string): void => {
       if (failure) return
       failure = new GhUnavailable(reason)
-      child.kill('SIGKILL')
+      // A gh credential helper may inherit the pipes. Terminate only this read's own
+      // process group, then close our pipe ends so descendants cannot hold the deadline open.
+      try { if (process.platform !== 'win32' && child.pid) process.kill(-child.pid, 'SIGKILL'); else child.kill('SIGKILL') } catch { child.kill('SIGKILL') }
+      child.stdin.destroy(); child.stdout.destroy(); child.stderr.destroy()
     }
     const abort = (): void => stop('GitHub read cancelled')
     const timer = setTimeout(() => stop('GitHub request deadline exceeded'), timeoutMs)
@@ -209,11 +212,12 @@ export async function fetchGhPages<T>(gh: GhReader, path: string, budget = readB
       const link = response.headers.get('link')
       if (!link) return result(null)
       const links = [...link.matchAll(/<([^>]+)>\s*;\s*rel="([^"]+)"/g)]
-      if (links.length === 0) throw new GhUnavailable('GitHub pagination link is unreadable')
+      if (links.length === 0 || link.replace(/<([^>]+)>\s*;\s*rel="([^"]+)"/g, '').replace(/[,\s]/g, '') !== '') throw new GhUnavailable('GitHub pagination link is unreadable')
       const next = links.filter(match => match[2]!.split(/\s+/).includes('next'))
       if (next.length === 0) return result(null)
       if (next.length !== 1) throw new GhUnavailable('GitHub pagination has ambiguous next links')
       url = githubUrl(next[0]![1]!)
+      url.searchParams.set('per_page', '100')
     }
   } catch (error) { return result(error instanceof Error ? error.message : 'GitHub read failed') }
 }

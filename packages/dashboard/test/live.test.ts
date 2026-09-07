@@ -135,3 +135,9 @@ test('142 board repository pool shares three slots across issues and pulls, and 
   expect(rows.issues.repositories.find(row => row.repo === 'a/b')).toMatchObject({ complete: false, reason: 'GitHub returned HTTP 403 for a/b' })
   expect(rows.pulls.live.ok && rows.pulls.live.data).toHaveLength(4)
 })
+
+test('142 malformed issue labels cannot turn an observed row into an apparently empty queue', async () => {
+  const result = await fetchOpenIssues({ repo: 'a/b', token: null, fetchImpl: async () => httpPage([{ id: 1, number: 1, title: 'unreadable labels', labels: null }]) })
+  expect(result.snapshot.complete).toBe(false)
+  expect(result.snapshot.reason).toContain('labels')
+})

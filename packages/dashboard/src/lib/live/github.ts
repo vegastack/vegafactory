@@ -147,11 +147,12 @@ export async function fetchPages<T>(path: string, options: PageOptions = {}): Pr
       const link = response.headers.get('link')
       if (!link) return result(null)
       const links = [...link.matchAll(/<([^>]+)>\s*;\s*rel="([^"]+)"/g)]
-      if (links.length === 0) throw new Error('GitHub pagination link is unreadable')
+      if (links.length === 0 || link.replace(/<([^>]+)>\s*;\s*rel="([^"]+)"/g, '').replace(/[,\s]/g, '') !== '') throw new Error('GitHub pagination link is unreadable')
       const next = links.filter(match => match[2]!.split(/\s+/).includes('next'))
       if (next.length === 0) return result(null)
       if (next.length !== 1) throw new Error('GitHub pagination has ambiguous next links')
       url = githubUrl(next[0]![1]!)
+      url.searchParams.set('per_page', '100')
     }
   } catch (error) { return result(error instanceof Error ? error.message : 'GitHub read failed') }
 }
@@ -173,8 +174,10 @@ function project<T>(result: PagedResult<Record<string, unknown>>, input: LiveInp
   let reason = result.reason
   for (const row of result.items) {
     if (typeof row.number !== 'number') { reason ??= 'GitHub returned an unreadable row'; continue }
-    const value = convert(row)
-    if (value !== null) rows.push(value)
+    try {
+      const value = convert(row)
+      if (value !== null) rows.push(value)
+    } catch (error) { reason ??= error instanceof Error ? error.message : 'GitHub returned an unreadable row' }
   }
   if (reason) reason = `${reason} for ${input.repo}`
   const snapshot: PagedResult<T> = { items: rows, complete: reason === null, reason, observedAt: result.observedAt }
@@ -185,10 +188,14 @@ function project<T>(result: PagedResult<Record<string, unknown>>, input: LiveInp
 
 export async function fetchOpenIssues(input: LiveInput): Promise<PagedLive<LiveIssue>> {
   const result = await fetchPages<Record<string, unknown>>(`${API}/repos/${input.repo}/issues?state=open`, { fetch: input.fetchImpl, token: input.token, budget: input.budget, signal: input.signal })
-  return project(result, input, row => row.pull_request ? null : ({
+  return project(result, input, row => {
+    if (row.pull_request) return null
+    if (!Array.isArray(row.labels) || row.labels.some(label => !label || typeof label.name !== 'string')) throw new Error('GitHub issue labels are unreadable')
+    return ({
     number: row.number as number, title: text(row.title), labels: names(row.labels), assignees: names(row.assignees),
     updatedAt: text(row.updated_at), url: text(row.html_url), repo: input.repo, nodeId: text(row.node_id),
-  }))
+    })
+  })
 }
 
 export async function fetchOpenPulls(input: LiveInput): Promise<PagedLive<LivePull>> {

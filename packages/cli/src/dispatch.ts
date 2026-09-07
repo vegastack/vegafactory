@@ -16,7 +16,7 @@ import { loadFactoryConfig, repoPolicyFromEffective, stagePolicy, type FactoryCo
 import { buildLaunchPlan, validateManagedLaunch, type HarnessMetadata, type LaunchPlan } from './launch.ts'
 import { checkoutFile, inspectCodexConfiguration, readHookConfiguration, validateRegistration } from './hook-registration.ts'
 import { checkCompiledGuard, shipPolicyScript } from './guard.ts'
-import { GhUnavailable, ghText } from './gh.ts'
+import { GhUnavailable, ghText, boundedGhJson, fetchGhPages, readBudget, type ReadBudget, type PagedResult, type GhOptions } from './gh.ts'
 import { GIT_CREDENTIAL_ARGS } from './sync.ts'
 import { fromClaudeHeadless, fromCodexExec, reworkFromComments, type ReworkCounts } from './stats/capture.ts'
 import { appendRecord, takeSkillInvocations } from './stats/outbox.ts'
@@ -24,6 +24,7 @@ import { pushOutbox, statsClonePath, type GitRunner, type PushResult } from './s
 import { normalizeRecord, statsPolicyFromEffective, type StatsPolicy, type StatsRecord } from './stats/record.ts'
 
 export interface BoardIssue {
+  nodeId?: string
   number: number
   title: string
   labels: string[]
@@ -564,7 +565,7 @@ export interface RunOutcome {
 
 export interface ExecuteDeps {
   now: () => Date
-  gh: (args: string[], options?: { cwd?: string; input?: string }) => Promise<string>
+  gh: (args: string[], options?: GhOptions) => Promise<string>
   git: (args: string[], cwd: string) => Promise<{ ok: boolean; message: string }>
   timeoutMs: number
 }
@@ -619,7 +620,7 @@ export async function executeRun(
   deps?: Partial<ExecuteDeps>,
 ): Promise<RunOutcome> {
   const now = deps?.now ?? (() => new Date())
-  const gh = deps?.gh ?? ((args: string[], ghOptions?: { cwd?: string; input?: string }) => ghText(args, ghOptions))
+  const gh = deps?.gh ?? ((args: string[], ghOptions?: GhOptions) => ghText(args, ghOptions))
   const git = deps?.git ?? defaultGit
   const timeoutMs = deps?.timeoutMs ?? 6 * 60 * 60 * 1000
   let startedAt = now()
@@ -879,6 +880,8 @@ export function worktreeFor(repoPath: string, issue: number, title: string): Wor
 }
 
 interface SearchIssue {
+  node_id?: string
+  pull_request?: unknown
   number: number
   title: string
   labels?: { name: string }[]
@@ -889,6 +892,7 @@ interface SearchIssue {
 function toBoardIssue(row: SearchIssue): BoardIssue {
   return {
     number: row.number,
+    nodeId: row.node_id,
     title: row.title,
     labels: (row.labels ?? []).map(label => label.name),
     assignees: (row.assignees ?? []).map(assignee => assignee.login),
@@ -922,7 +926,7 @@ let statsPushChain: Promise<unknown> = Promise.resolve()
 
 export interface TickDeps {
   issueBody: (repo: string, issue: number) => Promise<string>
-  gh: (args: string[], options?: { cwd?: string; input?: string }) => Promise<string>
+  gh: (args: string[], options?: GhOptions) => Promise<string>
   now: () => Date
   shipGuard: (repoPath: string, harness: Harness, policy?: { home: string; repo: string; policyDigest?: string }) => Promise<{ wired: boolean; detail: string; policyDigest?: string | null }>
   ensureWorktree: (repoPath: string, issue: number, title: string) => Promise<WorktreeTarget>
@@ -935,36 +939,32 @@ export interface TickDeps {
   harnessMetadata: (plan: LaunchPlan) => HarnessMetadata | Promise<HarnessMetadata>
 }
 
-async function ghJsonVia<T>(gh: TickDeps['gh'], args: string[]): Promise<T> {
-  const stdout = await gh(args)
-  try {
-    return JSON.parse(stdout) as T
-  } catch {
-    throw new GhUnavailable(`gh ${args.join(' ')} returned output that is not JSON`)
-  }
+async function ghJsonVia<T>(gh: TickDeps['gh'], args: string[], budget?: ReadBudget): Promise<T> {
+  return boundedGhJson<T>(gh, args, budget)
 }
 
-export async function fetchBoard(gh: TickDeps['gh'], repo: string): Promise<{
-  needsPlan: BoardIssue[]
-  ready: BoardIssue[]
-  corrections: BoardIssue[]
-}> {
-  const queries = searchQueries(repo)
-  const search = async (q: string): Promise<BoardIssue[]> => {
-    const result = await ghJsonVia<{ items?: SearchIssue[] }>(gh, ['api', '-X', 'GET', 'search/issues', '-f', `q=${q}`, '--cache', '0'])
-    return (result.items ?? []).map(toBoardIssue)
+export async function fetchBoard(gh: TickDeps['gh'], repo: string, budget?: ReadBudget): Promise<PagedResult<BoardIssue>> {
+  const snapshot = await fetchGhPages<SearchIssue>(gh, `repos/${repo}/issues?state=open`, budget)
+  const items: BoardIssue[] = []
+  let reason = snapshot.reason
+  // Enumerate first: the REST issue collection also contains PRs, which still consume pages.
+  for (const row of snapshot.items) {
+    if (row.pull_request) continue
+    if (!Number.isSafeInteger(row.number) || row.number <= 0 || typeof row.title !== 'string' ||
+        !Array.isArray(row.labels) || row.labels.some(label => !label || typeof label.name !== 'string') ||
+        !Array.isArray(row.assignees) || row.assignees.some(person => !person || typeof person.login !== 'string')) {
+      reason ??= 'GitHub returned an unreadable issue row'
+      continue
+    }
+    items.push(toBoardIssue(row))
   }
-  return {
-    needsPlan: await search(queries.needsPlan),
-    ready: await search(queries.ready),
-    corrections: await search(queries.corrections),
-  }
+  return { items, complete: reason === null, reason, observedAt: snapshot.observedAt }
 }
 
 // Reactions cost one call per comment, so only comments that actually carry a rocket are followed
 // up, and a comment whose rocket count is already covered by the handled list is not read again:
 // the count in the comment row is what says whether a reaction this tick has not seen exists.
-export async function fetchRockets(gh: TickDeps['gh'], repo: string, corrections: BoardIssue[], handled: HandledRun[] = []): Promise<Rocket[]> {
+export async function fetchRockets(gh: TickDeps['gh'], repo: string, corrections: BoardIssue[], handled: HandledRun[] = [], budget = readBudget()): Promise<Rocket[]> {
   const rockets: Rocket[] = []
   const handledByComment = new Map<string, number>()
   for (const entry of handled) {
@@ -974,13 +974,13 @@ export async function fetchRockets(gh: TickDeps['gh'], repo: string, corrections
   }
   for (const issue of corrections) {
     const comments = await ghJsonVia<{ id: number; reactions?: { rocket?: number } }[]>(
-      gh, ['api', `repos/${repo}/issues/${issue.number}/comments`, '--paginate'],
+      gh, ['api', `repos/${repo}/issues/${issue.number}/comments`, '--paginate'], budget,
     )
     for (const comment of comments) {
       if (!comment.reactions?.rocket) continue
       if ((handledByComment.get(`${issue.number}#${comment.id}`) ?? 0) >= comment.reactions.rocket) continue
       const reactions = await ghJsonVia<{ id: number; content: string; user?: { login: string } }[]>(
-        gh, ['api', `repos/${repo}/issues/comments/${comment.id}/reactions`, '--paginate'],
+        gh, ['api', `repos/${repo}/issues/comments/${comment.id}/reactions`, '--paginate'], budget,
       )
       for (const reaction of reactions) {
         if (reaction.content !== 'rocket') continue
@@ -1072,6 +1072,7 @@ export async function defaultParentCandidates(
   repoPath: string,
   ready: BoardIssue[],
   operators: string[],
+  budget = readBudget(),
 ): Promise<ParentCandidate[]> {
   if (ready.length < 2 || operators.length === 0) return []
   const script = process.env.VSK_PLAN_LINT_SCRIPT
@@ -1079,13 +1080,8 @@ export async function defaultParentCandidates(
   if (!existsSync(script)) return []
   const byParent = new Map<number, ReadyChild[]>()
   for (const child of ready) {
-    let parent: number | null = null
-    try {
-      const view = JSON.parse(await gh(['issue', 'view', String(child.number), '--repo', repo, '--json', 'parent'])) as { parent?: { number?: number } }
-      parent = view.parent?.number ?? null
-    } catch {
-      parent = null
-    }
+    const view = await ghJsonVia<{ parent?: { number?: number } }>(gh, ['issue', 'view', String(child.number), '--repo', repo, '--json', 'parent'], budget)
+    const parent = view.parent?.number ?? null
     if (parent === null) continue
     const list = byParent.get(parent) ?? []
     list.push({ number: child.number, parent, assignee: child.assignees[0] ?? null, labels: child.labels })
@@ -1094,12 +1090,7 @@ export async function defaultParentCandidates(
   const candidates: ParentCandidate[] = []
   for (const [parent, children] of byParent) {
     if (children.length < 2) continue
-    let comments: Array<{ body: string; user?: { login?: string } }>
-    try {
-      comments = JSON.parse(await gh(['api', `repos/${repo}/issues/${parent}/comments`, '--paginate'])) as Array<{ body: string; user?: { login?: string } }>
-    } catch {
-      continue
-    }
+    const comments = await ghJsonVia<Array<{ body: string; user?: { login?: string } }>>(gh, ['api', `repos/${repo}/issues/${parent}/comments`, '--paginate'], budget)
     const planComment = comments
       .filter(comment => typeof comment.body === 'string' && /<!--\s*vsk:v1\s+type=plan\b/.test(comment.body))
       .filter(comment => operators.includes(comment.user?.login ?? ''))
@@ -1125,12 +1116,7 @@ export async function defaultParentCandidates(
     // The parent worktree is named from the parent's real title, exactly as the parent's own run
     // named it. A placeholder here would point every parallel launch at a directory that does not
     // exist.
-    let parentTitle: string
-    try {
-      parentTitle = (JSON.parse(await gh(['issue', 'view', String(parent), '--repo', repo, '--json', 'title'])) as { title?: string }).title ?? ''
-    } catch {
-      continue
-    }
+    const parentTitle = (await ghJsonVia<{ title?: string }>(gh, ['issue', 'view', String(parent), '--repo', repo, '--json', 'title'], budget)).title ?? ''
     if (!parentTitle) continue
     const target = worktreeFor(repoPath, parent, parentTitle)
     // The parallel run happens in the parent's own worktree. One that is gone is not a candidate:
@@ -1179,16 +1165,14 @@ async function readIfPresent(path: string): Promise<string | null> {
 
 export async function runTick(
   config: FactoryConfig,
-  options: { dryRun: boolean },
+  options: { dryRun: boolean; signal?: AbortSignal },
   deps?: Partial<TickDeps>,
 ): Promise<TickResult> {
-  const gh = deps?.gh ?? ((args: string[], ghOptions?: { cwd?: string; input?: string }) => ghText(args, ghOptions))
+  const gh = deps?.gh ?? ((args: string[], ghOptions?: GhOptions) => ghText(args, ghOptions))
   const now = deps?.now ?? (() => new Date())
   const shipGuard = deps?.shipGuard ?? shipGuardWired
   const ensure = deps?.ensureWorktree ?? defaultEnsureWorktree
   const execute = deps?.execute ?? ((run, plan, cfg, opts) => executeRun(run, plan, cfg, opts))
-  const parentCandidates = deps?.parentCandidates
-    ?? ((repo: string, repoPath: string, ready: BoardIssue[], operators: string[]) => defaultParentCandidates(gh, repo, repoPath, ready, operators))
   const issueBody = deps?.issueBody ?? (async (repo: string, issue: number) => {
     const raw = await gh(['issue', 'view', String(issue), '--repo', repo, '--json', 'body'])
     return (JSON.parse(raw) as { body?: string }).body ?? ''
@@ -1238,11 +1222,14 @@ export async function runTick(
     // The tick's time is the moment the board is read, stamped before any run: a run can take hours,
     // and a stamp taken after it would say the dispatcher went quiet for exactly that long.
     const readAt = now().toISOString().replace(/\.\d+Z$/, 'Z')
-    let board: Awaited<ReturnType<typeof fetchBoard>>
+    const budget = readBudget(options.signal)
+    let board: { needsPlan: BoardIssue[]; ready: BoardIssue[]; corrections: BoardIssue[] }
     let rockets: Rocket[]
     try {
-      board = await fetchBoard(gh, entry.repo)
-      rockets = await fetchRockets(gh, entry.repo, board.corrections, state.handled)
+      const snapshot = await fetchBoard(gh, entry.repo, budget)
+      if (!snapshot.complete) throw new GhUnavailable(snapshot.reason!)
+      board = { needsPlan: snapshot.items.filter(row => row.labels.includes('needs-plan')), ready: snapshot.items.filter(row => row.labels.includes('ready')), corrections: snapshot.items.filter(row => row.labels.includes('for-operator')) }
+      rockets = await fetchRockets(gh, entry.repo, board.corrections, state.handled, budget)
     } catch (error) {
       refusals.push({ repo: entry.repo, issue: null, reason: `${entry.repo}: the board could not be read — ${(error as Error).message}` })
       continue
@@ -1250,9 +1237,10 @@ export async function runTick(
 
     let parents: ParentCandidate[] = []
     try {
-      parents = await parentCandidates(entry.repo, entry.path, board.ready, policy.operators)
+      parents = deps?.parentCandidates ? await deps.parentCandidates(entry.repo, entry.path, board.ready, policy.operators) : await defaultParentCandidates(gh, entry.repo, entry.path, board.ready, policy.operators, budget)
     } catch (error) {
-      refusals.push({ repo: entry.repo, issue: null, reason: `${entry.repo}: the parents' independent groups could not be read, so the children run one at a time — ${(error as Error).message}` })
+      refusals.push({ repo: entry.repo, issue: null, reason: `${entry.repo}: the parents' independent groups could not be read; repository dispatch refused — ${(error as Error).message}` })
+      continue
     }
     const plan = planTick({ repo: entry.repo, policy, board, rockets, state, guards, maxRuns: config.maxRuns, parents, inFlight })
     refusals.push(...plan.refusals)
@@ -1302,7 +1290,7 @@ export async function runTick(
           results.push(await owner.gatherAndEvaluate({ repo: entry.repo, issue: String(issue),
             stage: run.stage === 'plan' ? 'plan' : 'implement',
             expect: run.stage === 'plan' ? 'needs-plan' : run.stage === 'corrections' ? 'for-operator' : 'ready',
-          }, { readJson: (args: string[]) => ghJsonVia(gh, args), devMd }))
+          }, { readJson: (args: string[]) => ghJsonVia(gh, args, budget), devMd }))
         }
         admission = { blocks: results.flatMap(result => result.blocks),
           approvalIds: [...new Set<string>(results.flatMap(result => result.approvalIds))],

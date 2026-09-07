@@ -9,7 +9,7 @@ import { join, resolve } from 'node:path'
 import { scopeDigest } from '../../../skills/dev/dev-implement/scripts/lib/approval.mjs'
 
 process.env.VSK_PREFLIGHT_SCRIPT = resolve(import.meta.dir, '../../../skills/dev/dev-implement/scripts/preflight.mjs')
-import { executeRun, fetchRockets, readLock, readState, repoLockPath, runOnce, runTick, settleRuns, watch, writeState, type PlannedRun, type RunOutcome, type RunTracker, type TickDeps } from '../src/dispatch.ts'
+import { executeRun, fetchBoard, fetchRockets, readLock, readState, repoLockPath, runOnce, runTick, settleRuns, watch, writeState, type PlannedRun, type RunOutcome, type RunTracker, type TickDeps } from '../src/dispatch.ts'
 import { parseFactoryConfig } from '../src/config.ts'
 
 const SHIP_POLICY = resolve(import.meta.dir, '../../../skills/dev/dev-setup/scripts/ship-policy.mjs')
@@ -53,8 +53,7 @@ interface SearchRow { number: number; title: string; labels: string[]; assignees
 function ghStub(rows: { needsPlan?: SearchRow[]; ready?: SearchRow[]; forOperator?: SearchRow[] }, extra?: (args: string[]) => string | null) {
   const queries: string[] = []
   const calls: string[][] = []
-  const gh = async (args: string[]): Promise<string> => {
-    calls.push(args)
+  const answer = async (args: string[]): Promise<string> => {
     const endpoint = /^repos\/(acme\/[^/]+)\/issues\/(\d+)(.*)$/.exec(args[1] ?? '')
     if (endpoint && (args.includes('--slurp') || endpoint[3] === '')) {
       const custom = extra?.(args)
@@ -94,6 +93,27 @@ function ghStub(rows: { needsPlan?: SearchRow[]; ready?: SearchRow[]; forOperato
     }
     if (args[0] === 'issue' && args.includes('body')) return JSON.stringify({ body: '' })
     return '[]'
+  }
+  const gh = async (args: string[]): Promise<string> => {
+    calls.push(args)
+    if (!args.includes('--include')) return answer(args)
+    const url = new URL(args[1]!, 'https://api.github.com/')
+    const path = url.pathname.slice(1)
+    if (/^repos\/[^/]+\/[^/]+\/issues$/.test(path)) {
+      queries.push(path)
+      const values = [...(rows.needsPlan ?? []), ...(rows.ready ?? []), ...(rows.forOperator ?? [])]
+      return responsePage(values.map(row => ({ ...row, id: row.number, node_id: `I${row.number}`, labels: row.labels.map(name => ({ name })), assignees: (row.assignees ?? []).map(login => ({ login })) })))
+    }
+    const normalized = ['api', path, '--paginate']
+    const custom = extra?.(normalized)
+    const slurped = await answer([...normalized, '--slurp'])
+    const value = JSON.parse(slurped)
+    const flat = Array.isArray(value) && value.every(Array.isArray) ? value.flat() : value
+    // A single real comments collection serves both corrections and scoped approval reads.
+    const additional = custom ? JSON.parse(custom) : []
+    const data = /\/comments$/.test(path) && Array.isArray(additional) && !additional.every(Array.isArray)
+      ? [...flat, ...additional] : flat
+    return responsePage(data)
   }
   return { gh, queries, calls }
 }
@@ -138,9 +158,10 @@ describe('the corrections window (F17, F18)', () => {
     const calls: string[][] = []
     const gh = async (args: string[]): Promise<string> => {
       calls.push(args)
-      if (args[1] === 'repos/acme/app/issues/12/comments') return JSON.stringify([{ id: 555, reactions: { rocket: 1 } }, { id: 556, reactions: { rocket: 2 } }])
-      if (args[1] === 'repos/acme/app/issues/comments/556/reactions') return JSON.stringify([{ id: 1001, content: 'rocket', user: { login: 'mk' } }, { id: 1002, content: 'rocket', user: { login: 'ada' } }])
-      return '[]'
+      const path = args[1]!.split('?')[0]
+      if (path === 'repos/acme/app/issues/12/comments') return responsePage([{ id: 555, reactions: { rocket: 1 } }, { id: 556, reactions: { rocket: 2 } }])
+      if (path === 'repos/acme/app/issues/comments/556/reactions') return responsePage([{ id: 1001, content: 'rocket', user: { login: 'mk' } }, { id: 1002, content: 'rocket', user: { login: 'ada' } }])
+      return responsePage([])
     }
     const corrections = [{ number: 12, title: 'feat: thing', labels: ['for-operator'], assignees: ['mk'], updatedAt: '' }]
     const handled = [{ repo: 'acme/app', issue: 12, commentId: 555, reactionId: 999 }, { repo: 'acme/app', issue: 12, commentId: 556, reactionId: 1001 }]
@@ -182,7 +203,7 @@ describe('runs leave the tick (F19)', () => {
     const tracker: RunTracker = new Map()
     const result = await runTick(config, { dryRun: false }, { harnessMetadata, gh, ensureWorktree, execute, parentCandidates: async () => [], tracker })
     expect(pending).toHaveLength(2)
-    expect(queries.filter(q => q.includes('repo:acme/web'))).toHaveLength(3)
+    expect(queries.filter(q => q === 'repos/acme/web/issues')).toHaveLength(1)
     expect(result.runs.map(run => [run.repo, run.launched, run.exitCode])).toEqual([['acme/app', true, undefined], ['acme/web', true, undefined]])
     finishAll()
     await settleRuns(tracker)
@@ -496,3 +517,100 @@ for (const harness of ['claude', 'codex'] as const) for (const parallel of [fals
     expect(result.runs[0]!.remoteEffectCoverage).toEqual({ kind: 'unmanaged-possible', reasonCode: 'hook-configuration-only' })
   })
 }
+
+const responsePage = (rows: unknown[], next?: string, status = 200) => `HTTP/2.0 ${status} Status\r\nx-test: 1\r\n${next ? `link: <${next}>; rel="next"\r\n` : ''}\r\n${JSON.stringify(rows)}`
+
+test('142 reproduction: fetchBoard returns all 31 repository rows instead of three truncated searches', async () => {
+  const calls: string[][] = []
+  const all = Array.from({ length: 31 }, (_, index) => ({ id: index + 1, node_id: `I${index + 1}`, number: index + 1, title: 'row', labels: [{ name: 'ready' }], assignees: [] }))
+  const out = await fetchBoard(async args => {
+    calls.push(args)
+    if (args.includes('search/issues')) return JSON.stringify({ items: all.slice(0, 30), total_count: 31, incomplete_results: false })
+    return responsePage(all)
+  }, 'a/b')
+  expect(out.items).toHaveLength(31)
+  expect(out.complete).toBe(true)
+  expect(calls).toHaveLength(1)
+})
+
+test('142 fetchBoard filters PRs after 101-plus rows and deduplicates stable IDs', async () => {
+  const rows = Array.from({ length: 103 }, (_, index) => ({ id: index + 1, node_id: `I${index + 1}`, number: index + 1, title: 'row', labels: [{ name: 'ready' }], assignees: [], ...(index < 2 ? { pull_request: {} } : {}) }))
+  let calls = 0
+  const snapshot = await fetchBoard(async () => ++calls === 1 ? responsePage(rows.slice(0, 100), 'https://api.github.com/repos/a/b/issues?page=2') : responsePage([rows[99], ...rows.slice(100)]), 'a/b')
+  expect(snapshot.complete).toBe(true)
+  expect(snapshot.items).toHaveLength(101)
+  expect(snapshot.items[0]!.number).toBe(3)
+  expect(snapshot.items.at(-1)!.number).toBe(103)
+  expect(calls).toBe(2)
+})
+
+// These tests isolate the pagination decision through the existing transport/guard seams.
+// The real managed-launch positive controls above remain, including their inherited failures.
+test('142 isolated runTick refuses a failed later board page before any claim or correction', async () => {
+  const { config } = fixture()
+  let calls = 0, claims = 0, executions = 0
+  const result = await runTick(config, { dryRun: false }, {
+    shipGuard: async () => ({ wired: true, detail: 'pagination test seam only' }),
+    gh: async () => ++calls === 1 ? responsePage([{ id: 1, number: 1, title: 'ready', labels: [{ name: 'ready' }], assignees: [] }], 'https://api.github.com/repos/acme/app/issues?page=2') : responsePage([], undefined, 403),
+    ensureWorktree: async () => { claims++; throw new Error('must not claim') },
+    execute: async () => { executions++; throw new Error('must not execute') },
+  })
+  expect(calls).toBe(2); expect(claims).toBe(0); expect(executions).toBe(0)
+  expect(result.runs).toEqual([])
+  expect(result.refusals.map(row => row.reason).join()).toContain('HTTP 403')
+  expect((await readState(config.stateFile)).handled).toEqual([])
+})
+
+test('142 isolated runTick uses actual approval reader and refuses later comments/dependency pages', async () => {
+  for (const collection of ['comments', 'dependencies/blocked_by']) {
+    const { config } = fixture()
+    const base = ghStub({ ready: [{ number: 8, title: 'feat: approved', labels: ['ready'] }] })
+    let pages = 0, claims = 0, executions = 0
+    const result = await runTick(config, { dryRun: false }, {
+      shipGuard: async () => ({ wired: true, detail: 'pagination test seam only' }),
+      parentCandidates: async () => [],
+      gh: async args => {
+        const url = new URL(args[1] ?? '', 'https://api.github.com/')
+        if (url.pathname.endsWith(`/8/${collection}`)) {
+          pages++
+          return url.searchParams.get('page') === '2' ? responsePage([], undefined, 403)
+            : responsePage([{ id: 99, state: 'closed', body: '' }], `https://api.github.com/repos/acme/app/issues/8/${collection}?page=2`)
+        }
+        return base.gh(args)
+      },
+      ensureWorktree: async () => { claims++; throw new Error('must not claim') },
+      execute: async () => { executions++; throw new Error('must not execute') },
+    })
+    expect(pages).toBe(2); expect(claims).toBe(0); expect(executions).toBe(0)
+    expect(result.refusals.map(row => row.reason).join()).toContain('launch preflight refused')
+    expect(result.refusals.map(row => row.reason).join()).toContain('HTTP 403')
+  }
+})
+
+test('142 isolated runTick keeps a healthy repository and measures idle/larger collection calls', async () => {
+  const { config } = fixture({ repos: ['app', 'web'], maxRuns: 2 })
+  const calls: string[] = []
+  const result = await runTick(config, { dryRun: true }, {
+    shipGuard: async () => ({ wired: true, detail: 'pagination test seam only' }),
+    parentCandidates: async () => [],
+    gh: async args => {
+      calls.push(args[1]!)
+      return args[1]!.includes('acme/app') ? responsePage([], undefined, 403)
+        : responsePage([{ id: 8, number: 8, title: 'feat: available', labels: [{ name: 'ready' }], assignees: [] }])
+    },
+    issueBody: async () => '',
+  })
+  expect(result.runs.map(row => row.repo)).toEqual(['acme/web'])
+  expect(result.refusals.map(row => row.repo)).toEqual(['acme/app'])
+  expect(calls).toHaveLength(2)
+  for (const count of [0, 31, 101]) {
+    let reads = 0
+    const rows = Array.from({ length: count }, (_, index) => ({ id: index + 1, number: index + 1, title: 'row', labels: [], assignees: [] }))
+    const snapshot = await fetchBoard(async () => {
+      reads++
+      return responsePage(rows.slice((reads - 1) * 100, reads * 100), count > reads * 100 ? 'https://api.github.com/repos/a/b/issues?page=2' : undefined)
+    }, 'a/b')
+    expect(snapshot.complete).toBe(true); expect(snapshot.items).toHaveLength(count)
+    expect(reads).toBe(count <= 100 ? 1 : 2)
+  }
+})

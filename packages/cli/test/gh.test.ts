@@ -86,3 +86,39 @@ describe('142 bounded reads', () => {
     expect(await ghJson<{ items: unknown[]; total_count: number; incomplete_results: boolean }>(['api', 'search/issues'], { gh: stub })).toEqual({ items: [], total_count: 0, incomplete_results: false })
   })
 })
+
+test('142 cancellation ends a helper that inherited a real gh process pipe', async () => {
+  if (process.platform === 'win32') return
+  const { readFileSync } = await import('node:fs')
+  const childPid = join(mkdtempSync(join(tmpdir(), 'vsk-gh-helper-')), 'pid')
+  writeStub(`#!/usr/bin/env node\nrequire('node:child_process').spawn(process.execPath,['-e',${JSON.stringify(`require('node:fs').writeFileSync(${JSON.stringify(childPid)}, String(process.pid)); setInterval(()=>{},1000)`)}],{stdio:'inherit'}); setInterval(()=>{},1000)\n`)
+  const controller = new AbortController()
+  const promise = ghText(['api', 'user'], { gh: stub, signal: controller.signal })
+  for (let count = 0; count < 100; count++) {
+    try { readFileSync(childPid); break } catch { await new Promise(resolve => setTimeout(resolve, 10)) }
+  }
+  controller.abort()
+  await expect(promise).rejects.toThrow('cancelled')
+  const pid = Number(readFileSync(childPid, 'utf8'))
+  for (let count = 0; count < 100; count++) {
+    try { process.kill(pid, 0); await new Promise(resolve => setTimeout(resolve, 10)) } catch { break }
+  }
+  expect(() => process.kill(pid, 0)).toThrow()
+})
+
+test('142 CLI rate limits have two retries, over-budget delay refuses, and mutation calls are not replayed', async () => {
+  const { fetchGhPages, readBudget } = await import('../src/gh.ts')
+  let calls = 0
+  const out = await fetchGhPages(async () => { calls++; throw new GhUnavailable('rate limited', 429, new Headers({ 'retry-after': '0' })) }, 'repos/a/b/issues')
+  expect(out.reason).toContain('HTTP 429'); expect(calls).toBe(3)
+  calls = 0
+  const long = await fetchGhPages(async () => { calls++; throw new GhUnavailable('rate limited', 403, new Headers({ 'retry-after': '120' })) }, 'repos/a/b/issues')
+  expect(long.reason).toContain('retry delay'); expect(calls).toBe(1)
+  const timed = await fetchGhPages(async () => new Promise(() => {}), 'repos/a/b/issues', readBudget(undefined, 20))
+  expect(timed.reason).toContain('deadline')
+  const { readFileSync } = await import('node:fs')
+  const countFile = join(mkdtempSync(join(tmpdir(), 'vsk-gh-mutation-')), 'calls')
+  writeStub(`#!/usr/bin/env node\nrequire('node:fs').appendFileSync(${JSON.stringify(countFile)},'x'); console.error('HTTP 503 unavailable'); process.exit(1)\n`)
+  await expect(ghText(['api', 'repos/a/b/issues/1/comments', '--method', 'POST'], { gh: stub })).rejects.toBeInstanceOf(GhUnavailable)
+  expect(readFileSync(countFile, 'utf8')).toBe('x')
+})

@@ -51,11 +51,64 @@ test('one repo failing keeps every other repo\'s rows and names every failure', 
   const none = await acrossRepos(['b/private'], null, read)
   expect(none.live).toEqual({ ok: false, reason: 'GitHub returned HTTP 404 for b/private' })
   expect(none.reasons).toEqual(['GitHub returned HTTP 404 for b/private'])
-  expect(await acrossRepos([], null, read)).toEqual({ live: { ok: false, reason: 'no repos were passed to the dashboard' }, reasons: ['no repos were passed to the dashboard'] })
+  expect(await acrossRepos([], null, read)).toEqual({ live: { ok: false, reason: 'no repos were passed to the dashboard' }, reasons: ['no repos were passed to the dashboard'], repositories: [] })
 
   const context = await contextFixture({ month: 'SEP-2026' })
   const view = buildBoardView({ context, now, issues: partial.live, pulls: { ok: true, data: [] }, status: live, warnings: partial.reasons })
   expect(view.columns[2]!.issues).toHaveLength(2)
   expect(view.freshness.offline).toBe(true)
   expect(view.reasons).toEqual(partial.reasons)
+})
+
+test('142 reproduction: partial repository observation stays explicit when it has no matching rows', async () => {
+  const context = await contextFixture({ month: 'SEP-2026' })
+  const view = buildBoardView({ context, now, issues: { ok: true, data: [] }, pulls: { ok: true, data: [] }, status: live,
+    issueRepositories: [{ repo: 'a/b', complete: false, reason: 'GitHub returned HTTP 403 for a/b', observedAt: '2026-09-03T12:00:00.000Z' }],
+    pullRepositories: [{ repo: 'a/b', complete: true, reason: null, observedAt: '2026-09-03T12:00:00.000Z' }],
+  })
+  expect(view.issuesComplete).toBe(false)
+  expect(view.pullsComplete).toBe(true)
+  expect(view.repositories).toEqual([{ repo: 'a/b', complete: false, reasons: ['GitHub returned HTTP 403 for a/b'], observedAt: '2026-09-03T12:00:00.000Z' }])
+})
+
+test('142 actual page renders successful and partial repositories without false empty text or repeated alerts', async () => {
+  const { spawnSync } = await import('node:child_process')
+  const { resolve } = await import('node:path')
+  const script = `
+    import { mock } from 'bun:test';
+    import React from 'react';
+    import { renderToStaticMarkup } from 'react-dom/server';
+    import { contextFixture } from './test/helpers/context.ts';
+    globalThis.React = React;
+    const context = await contextFixture({month:'SEP-2026'});
+    context.env.repos = ['a/ok','b/fail'];
+    context.filters.repo = null;
+    mock.module('./src/lib/context.ts',()=>({loadContext:async()=>context}));
+    const calls = [];
+    globalThis.fetch = async (url) => {
+      calls.push(url);
+      const path = new URL(url);
+      if(path.pathname.includes('/b/fail/')) return new Response('denied',{status:403});
+      if(path.pathname.endsWith('/pulls')) return new Response('[]');
+      if(path.searchParams.get('page') === '2') return new Response('denied',{status:403});
+      return new Response(JSON.stringify([{id:1,node_id:'I1',number:1,title:'Visible successful page',labels:[{name:'ready'}],assignees:[],html_url:'https://github.com/a/ok/issues/1'}]),{headers:{link:'<https://api.github.com/repos/a/ok/issues?page=2>; rel="next"'}});
+    };
+    const Page = (await import('./src/app/board/page.tsx')).default;
+    const html = renderToStaticMarkup(await Page({searchParams:Promise.resolve({})}));
+    console.log(JSON.stringify({html,calls}));
+  `
+  const child = spawnSync(process.execPath, ['--eval', script], { cwd: resolve(import.meta.dir, '..'), encoding: 'utf8', timeout: 30_000 })
+  expect(child.status).toBe(0)
+  if (child.status !== 0) throw new Error(child.stderr)
+  const result = JSON.parse(child.stdout.trim()) as { html: string; calls: string[] }
+  expect(result.html).toContain('Visible successful page')
+  expect(result.html).toContain('a/ok: Incomplete')
+  expect(result.html).toContain('b/fail: Incomplete')
+  expect(result.html).toContain('GitHub returned HTTP 403 for a/ok')
+  expect(result.html).toContain('Issue list incomplete.')
+  expect(result.html).toContain('Pull request list incomplete.')
+  expect(result.html).not.toContain('No open pull requests.')
+  expect(result.html).not.toContain('role="alert"')
+  expect(result.html).not.toContain('aria-live=')
+  expect(result.calls).toHaveLength(5)
 })

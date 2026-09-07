@@ -2,6 +2,16 @@
 
 The project's story, newest first: what got built, why, and how it went — for the operator's future recall. Format home: the dev-chronicle skill.
 
+## 07-09-2026 — A partial board no longer looks empty ([#142](https://github.com/vegastack/vegafactory/issues/142))
+
+- **What:** The dispatcher reads repository issue pages and refuses to start work when the board, comments or dependency history is incomplete. The dashboard keeps available rows and identifies incomplete repositories with their observation time and failure reason.
+- **Why:** First-page reads silently missed issues and pull requests. A failed later page could look like an empty queue, and a stalled GitHub process had no deadline.
+- **How it went:** Real child-process and page-adapter reproductions failed first. Pagination and rendered-page fixtures now exercise the corrected paths; inherited managed-launch compatibility and later status integration remain explicit limits.
+- **Changed:** Complete or partial board results · bounded cancellable reads · stable row deduplication · visible repository failures · fewer repeated discovery calls.
+- **Decisions:** none.
+
+— approved by (kmanojkumar) · built by codex · branch codex/productionization-133
+
 ## 07-09-2026 — Hooks must be real before a run starts ([#140](https://github.com/vegastack/vegafactory/issues/140))
 
 - **What:** Launch validation checks the selected tool event, direct guard command, installed bytes and current compiler policy in the prepared checkout. Managed sessions exclude native memory; advisory hooks send only bounded local identity requests.
