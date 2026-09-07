@@ -20,6 +20,7 @@ const CLAUDE_WIRING = JSON.stringify({ hooks: { PreToolUse: [{ hooks: [{ type: '
 const CODEX_WIRING = JSON.stringify({ hooks: { PreToolUse: [{ hooks: [{ type: 'command', command: 'node .vegastack/hooks/ship-guard.mjs --harness codex' }] }] } })
 
 interface FixtureOptions {
+  home?: string
   repos?: string[]
   devMd?: string
   maxRuns?: number
@@ -27,7 +28,7 @@ interface FixtureOptions {
 
 // One home with one or more opted-in repos, each wired for Claude in its main checkout.
 function fixture(options: FixtureOptions = {}) {
-  const home = mkdtempSync(join(tmpdir(), 'vf-tick-'))
+  const home = options.home ?? mkdtempSync(join(tmpdir(), 'vf-tick-'))
   const names = options.repos ?? ['app']
   const devMd = options.devMd ?? 'dispatch: local\noperators: mk\nplan: claude fable-5-1 high\nimplement: claude fable-5-1 high\n'
   const repos = names.map(name => {
@@ -739,84 +740,182 @@ test('source trust: launched run exposes canonical comment/body provenance', asy
   expect(result.runs[0]!.approvalBindings).toEqual([{ approvalId: 'intent-8', commentId: authority.id, bodySha256: Bun.SHA256.hash(authority.body, 'hex') }])
 })
 
-// Reuse the owned external RPC boundary from hook-registration.test.ts. This is a
-// harmless executable fixture, never an installed vendor CLI or a model process.
-for (const mode of ['enabled', 'disabled', 'stale-policy', 'final-stale-policy'] as const) {
-  test(`managed caller with real compiler, metadata transport and executor: ${mode}`, async () => {
-    const { home, config, repos } = fixture({ devMd: 'dispatch: local\noperators: mk\nimplement: codex fixture high\n' })
+// Acceptance matrix: every internal caller collaborator is real. Only the external
+// GitHub transport and harmless PATH executables stand in for remote services.
+for (const mode of ['enabled', 'disabled', 'stale-policy', 'final-stale-policy', 'incomplete-board', 'incomplete-history', 'cancelled-body', 'exhausted-body'] as const) {
+  test(`managed ordinary acceptance: ${mode}`, async () => {
+    // Bun's synchronous child inherits its startup environment. Isolate the entire
+    // case at the OS boundary, including every real preparation subprocess.
+    if (!process.env.VSK_MANAGED_CASE_HOME) {
+      const isolated = mkdtempSync(join(tmpdir(), 'vf-managed-'))
+      const child = Bun.spawnSync([process.execPath, 'test', import.meta.path, '-t', `managed ordinary acceptance: ${mode}$`], {
+        env: { ...process.env, VSK_MANAGED_CASE_HOME: isolated, HOME: isolated, CODEX_HOME: join(isolated, '.codex'), PATH: `${join(isolated, 'bin')}:${process.env.PATH ?? ''}` },
+      })
+      writeFileSync(join(isolated, 'test-result.txt'), child.stdout.toString() + child.stderr.toString())
+      expect(child.exitCode, child.stdout.toString() + child.stderr.toString()).toBe(0)
+      return
+    }
+    const { home, config, repos } = fixture({ home: process.env.VSK_MANAGED_CASE_HOME, devMd: 'repo: acme/app · default branch main\ndispatch: local\noperators: mk\nimplement: codex fixture high\n' })
     const repo = realpathSync(repos[0]!.path), bin = join(home, 'bin')
-    const entered = join(home, 'entered'), calls = join(home, 'rpc-calls'), arm = join(home, 'executor-entered')
+    const entered = join(home, 'entered'), calls = join(home, 'rpc-calls'), deliveries = join(home, 'deliveries')
+    const gitCalls = join(home, 'git-calls')
+    const correction = ['incomplete-history', 'cancelled-body', 'exhausted-body'].includes(mode)
+    const issue = correction ? 12 : 8
+    const prepared = join(repo, `.vegastack/.worktrees/${issue}-fixture`)
+    const realGit = Bun.which('git')!
+    const git = (args: string[]) => {
+      const result = Bun.spawnSync([realGit, '-C', repo, ...args])
+      expect(result.exitCode, result.stderr.toString()).toBe(0)
+      return result.stdout.toString().trim()
+    }
     mkdirSync(bin)
     mkdirSync(join(repo, '.codex'))
     writeFileSync(join(repo, '.codex/hooks.json'), CODEX_WIRING)
-    const cli = join(bin, 'codex')
-    writeFileSync(cli, `#!/usr/bin/env node
-const fs = require('node:fs'), readline = require('node:readline');
-const cwd = process.cwd(), mode = ${JSON.stringify(mode)};
-if (process.argv.includes('--version')) { console.log('codex-cli 0.153.4'); process.exit(0); }
-if (process.argv[2] === 'exec') { fs.appendFileSync(${JSON.stringify(entered)}, JSON.stringify({cwd,args:process.argv.slice(2)}) + '\\n'); process.exit(0); }
-if (!process.argv.includes('app-server')) process.exit(2);
-readline.createInterface({input:process.stdin}).on('line', line => {
-  const request = JSON.parse(line);
-  fs.appendFileSync(${JSON.stringify(calls)}, request.method + '\\n');
-  if (request.id === undefined) return;
-  let result = {};
-  if (request.method === 'hooks/list') result = {data:[{cwd,errors:[],hooks:[{handlerType:'command',eventName:'preToolUse',command:'node .vegastack/hooks/ship-guard.mjs --harness codex',matcher:null,async:false,enabled:mode !== 'disabled',isManaged:false,currentHash:'sha256:'+'a'.repeat(64),source:'project',sourcePath:cwd+'/.codex/hooks.json',trustStatus:'untrusted'}]}]};
-  if (request.method === 'configRequirements/read') { if (request.params !== null) process.exit(2); result={requirements:null}; }
-  if (request.method === 'config/read') {
-    result={config:{projects:{[cwd]:{trust_level:'trusted'}},memories:{use_memories:false,generate_memories:false},features:{hooks:true,memories:false,external_agent_memory_import:false,context_management:{experimental_mode:false}}}};
-    if (mode === 'stale-policy' || (mode === 'final-stale-policy' && fs.existsSync(${JSON.stringify(arm)}))) fs.appendFileSync(cwd+'/.vegastack/dev.md','\\ngates: 2\\n');
-  }
-  process.stdout.write(JSON.stringify({id:request.id,result})+'\\n');
+    writeFileSync(join(repo, '.gitignore'), '.claude/\n.vegastack/.worktrees/\n')
+    git(['add', '.'])
+    git(['-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', 'commit', '-qm', 'fixture'])
+    git(['branch', '-M', 'main'])
+    const initialHead = git(['rev-parse', 'HEAD'])
+    const initialWorktrees = git(['worktree', 'list', '--porcelain'])
+    const initialBranches = git(['branch', '--format=%(refname)'])
+    writeFileSync(join(bin, 'git'), `#!/usr/bin/env node
+const fs=require('node:fs'), cp=require('node:child_process');
+const args=process.argv.slice(2);
+fs.appendFileSync(${JSON.stringify(gitCalls)},JSON.stringify({cwd:process.cwd(),args})+'\\n');
+if(['clone','pull','ls-remote'].includes(args[0]))process.exit(2);
+if(args[0]==='fetch'&&(args[1]!=='origin'||args[2]!=='main'))process.exit(2);
+// Only remote transport is redirected; real Git still fetches the fixture branch.
+if(args[0]==='fetch'&&args[1]==='origin'){args[1]=${JSON.stringify(repo)};args[2]='main:refs/remotes/origin/main';}
+if(args[0]==='push'){fs.appendFileSync(${JSON.stringify(deliveries)},JSON.stringify({cwd:process.cwd(),args})+'\\n');process.exit(0);}
+const result=cp.spawnSync(${JSON.stringify(realGit)},args,{stdio:'inherit'});process.exit(result.status??2);
+`, { mode: 0o755 })
+    // Any unexpected default gh delivery is recorded and refused, never networked.
+    writeFileSync(join(bin, 'gh'), `#!/usr/bin/env node
+require('node:fs').appendFileSync(${JSON.stringify(deliveries)},JSON.stringify(process.argv.slice(2))+'\\n');process.exit(2);
+`, { mode: 0o755 })
+    writeFileSync(join(bin, 'codex'), `#!/usr/bin/env node
+const fs=require('node:fs'), readline=require('node:readline');
+const cwd=process.cwd(), mode=${JSON.stringify(mode)};
+if(process.argv.includes('--version')){console.log('codex-cli 0.153.4');process.exit(0);}
+if(process.argv[2]==='exec'){fs.appendFileSync(${JSON.stringify(entered)},JSON.stringify({cwd,args:process.argv.slice(2)})+'\\n');process.exit(0);}
+if(!process.argv.includes('app-server'))process.exit(2);
+readline.createInterface({input:process.stdin}).on('line',line=>{
+ const request=JSON.parse(line);
+ fs.appendFileSync(${JSON.stringify(calls)},JSON.stringify({cwd,method:request.method})+'\\n');
+ if(request.id===undefined)return;
+ let result={};
+ if(request.method==='hooks/list')result={data:[{cwd,errors:[],hooks:[{handlerType:'command',eventName:'preToolUse',command:'node .vegastack/hooks/ship-guard.mjs --harness codex',matcher:null,async:false,enabled:mode!=='disabled',isManaged:false,currentHash:'sha256:'+'a'.repeat(64),source:'project',sourcePath:cwd+'/.codex/hooks.json',trustStatus:'untrusted'}]}]};
+ if(request.method==='configRequirements/read'){if(request.params!==null)process.exit(2);result={requirements:null};}
+ if(request.method==='config/read'){
+  result={config:{projects:{[cwd]:{trust_level:'trusted'}},memories:{use_memories:false,generate_memories:false},features:{hooks:true,memories:false,external_agent_memory_import:false,context_management:{experimental_mode:false}}}};
+  // The actual executor writes its attempt before its final external inspection.
+  const attempts=fs.existsSync(${JSON.stringify(config.logRoot)})?fs.readdirSync(${JSON.stringify(config.logRoot)},{recursive:true}):[];
+  if(mode==='stale-policy'||(mode==='final-stale-policy'&&attempts.some(p=>p.endsWith('.attempt'))))fs.appendFileSync(cwd+'/.vegastack/dev.md','\\ngates: 2\\n');
+ }
+ process.stdout.write(JSON.stringify({id:request.id,result})+'\\n');
 });
-`)
-    chmodSync(cli, 0o755)
-    const previousHome = process.env.HOME, previousCodexHome = process.env.CODEX_HOME
+`, { mode: 0o755 })
+    const previous = { HOME: process.env.HOME, CODEX_HOME: process.env.CODEX_HOME, PATH: process.env.PATH }
     process.env.HOME = home
-    process.env.CODEX_HOME = join(home, 'native-home')
-    const previousPath = process.env.PATH
-    process.env.PATH = `${bin}:${previousPath ?? ''}`
-    const { gh } = ghStub({ ready: [{ number: 8, title: 'feat: fixture', labels: ['ready'] }] })
-    const tracker: RunTracker = new Map()
-    let deliveries = 0
-    try {
-      const result = await runTick(config, { dryRun: false }, { gh, tracker, parentCandidates: async () => [],
-        ensureWorktree: async () => ({ path: repo, branch: 'fixture', slug: 'fixture', type: 'feat' }),
-        execute: (run, plan, cfg, options) => {
-          // Arm an observable external policy edit at executor entry, without relying on
-          // the number/order of metadata calls or on private logging implementation.
-          writeFileSync(arm, '')
-          return executeRun(run, { ...plan, env: { ...plan.env, HOME: home, CODEX_HOME: join(home, 'native-home') } }, cfg, options,
-            { gh: async () => { deliveries++; return '' }, git: async () => { deliveries++; return { ok: true, message: '' } } })
-        },
-      })
-      await settleRuns(tracker)
-      const methods = readFileSync(calls, 'utf8').trim().split('\n')
-      expect(methods.every(method => ['initialize', 'initialized', 'hooks/list', 'configRequirements/read', 'config/read'].includes(method))).toBe(true)
-      if (mode === 'enabled') {
-        expect(result.refusals).toEqual([])
-        expect(result.runs[0]?.launched).toBe(true)
-        const starts = readFileSync(entered, 'utf8').trim().split('\n').map(line => JSON.parse(line))
-        expect(starts).toHaveLength(1)
-        expect(starts[0].cwd).toBe(repo)
-        expect(starts[0].args).toContain('memories.use_memories=false')
-        expect(starts[0].args).toContain('memories.generate_memories=false')
-        expect([...new Set(methods)].sort()).toEqual(['initialize', 'initialized', 'hooks/list', 'configRequirements/read', 'config/read'].sort())
-      } else {
-        expect(result.runs).toEqual([])
-        expect(result.refusals.map(row => row.reason).join(' ')).toContain(mode === 'disabled' ? 'managed launch refused' : mode === 'final-stale-policy' ? 'prepared guard refused immediately before spawn' : 'final prepared-checkout check refused')
-        expect(existsSync(entered)).toBe(false)
-        expect(deliveries).toBe(0)
-        expect((await readState(config.stateFile)).handled).toEqual([])
+    process.env.CODEX_HOME = join(home, '.codex')
+    process.env.PATH = `${bin}:${previous.PATH ?? ''}`
+    const rows = { ready: [{ number: 8, title: 'feat: fixture', labels: ['ready'], assignees: correction ? ['someone-else'] : [] }, { number: 9, title: 'feat: other', labels: ['ready'], assignees: ['someone-else'] }],
+      forOperator: correction ? [{ number: 12, title: 'feat: fixture', labels: ['for-operator'], assignees: ['mk'] }] : [] }
+    const pending = { id: 555, body: 'Please apply the correction.', reactions: { rocket: 1 } }
+    const transport = ghStub(rows, args => {
+      if (args[0] === 'issue' && args.includes('parent')) return JSON.stringify({ parent: null })
+      if (args[1] === 'repos/acme/app/issues/12/comments') return JSON.stringify([pending])
+      if (args[1] === 'repos/acme/app/issues/comments/555/reactions') return JSON.stringify([{ id: 88, content: 'rocket', user: { login: 'mk' } }])
+      return null
+    })
+    const controller = new AbortController()
+    let failing = true
+    const reads: string[][] = []
+    const clockNow = Date.now.bind(Date)
+    let clockSpy: ReturnType<typeof spyOn> | undefined
+    const gh: TickDeps['gh'] = async args => {
+      reads.push(args)
+      const url = new URL(args[1] ?? '', 'https://api.github.com/')
+      if (failing && mode === 'incomplete-board' && url.pathname === '/repos/acme/app/issues') {
+        return url.searchParams.get('page') === '2' ? responsePage([], undefined, 403)
+          : responsePage([{ ...rows.ready[0], id: 8, labels: [{ name: 'ready' }], assignees: [] }], 'https://api.github.com/repos/acme/app/issues?page=2')
       }
-    } finally {
-      await settleRuns(tracker)
-      if (previousHome === undefined) delete process.env.HOME
-      else process.env.HOME = previousHome
-      if (previousCodexHome === undefined) delete process.env.CODEX_HOME
-      else process.env.CODEX_HOME = previousCodexHome
-      if (previousPath === undefined) delete process.env.PATH
-      else process.env.PATH = previousPath
+      if (failing && mode === 'incomplete-history' && url.pathname === '/repos/acme/app/issues/12/comments') {
+        return url.searchParams.get('page') === '2' ? responsePage([], undefined, 403)
+          : responsePage([pending], 'https://api.github.com/repos/acme/app/issues/12/comments?page=2')
+      }
+      const response = await transport.gh(args)
+      if (failing && args[0] === 'issue' && args.includes('body')) {
+        if (mode === 'cancelled-body') controller.abort()
+        if (mode === 'exhausted-body') clockSpy = spyOn(Date, 'now').mockImplementation(() => clockNow() + 61_000)
+      }
+      return response
     }
-  }, 15000)
+    const tracker: RunTracker = new Map()
+    const readLines = (path: string) => existsSync(path) ? readFileSync(path, 'utf8').trim().split('\n').map(line => JSON.parse(line)) : []
+    try {
+      const result = await runTick(config, { dryRun: false, signal: controller.signal }, { gh, tracker })
+      clockSpy?.mockRestore()
+      await settleRuns(tracker)
+      if (mode !== 'enabled') {
+        expect(result.runs).toEqual([])
+        const reason = { disabled: 'managed launch refused', 'stale-policy': 'final prepared-checkout check refused',
+          'final-stale-policy': 'prepared guard refused immediately before spawn', 'incomplete-board': 'board could not be read',
+          'incomplete-history': 'board could not be read', 'cancelled-body': 'cancelled', 'exhausted-body': 'deadline exceeded' }[mode]
+        expect(result.refusals.map(row => row.reason).join(' ')).toContain(reason)
+        expect(readLines(entered)).toEqual([])
+        expect(readLines(deliveries)).toEqual([])
+        expect((await readState(config.stateFile)).handled).toEqual([])
+        if (mode.startsWith('incomplete') || mode.endsWith('body')) {
+          expect(git(['rev-parse', 'HEAD'])).toBe(initialHead)
+          expect(git(['branch', '--format=%(refname)'])).toBe(initialBranches)
+          expect(git(['worktree', 'list', '--porcelain'])).toBe(initialWorktrees)
+          expect(existsSync(prepared)).toBe(false)
+          expect(readLines(calls)).toEqual([])
+          if (mode === 'incomplete-history') {
+            expect(reads.some(args => new URL(args[1] ?? '', 'https://api.github.com/').pathname === '/repos/acme/app/issues/12/comments')).toBe(true)
+            expect(reads.some(args => new URL(args[1] ?? '', 'https://api.github.com/').pathname.endsWith('/555/reactions'))).toBe(false)
+          }
+          // Same repository, approval and pending reaction: completion permits a real start.
+          failing = false
+          const retry = await runTick(config, { dryRun: false }, { gh, tracker })
+          await settleRuns(tracker)
+          expect(retry.refusals.filter(row => row.issue === issue)).toEqual([])
+          expect(retry.runs.map(run => [run.issue, run.stage, run.launched])).toEqual([[issue, correction ? 'corrections' : 'implement', true]])
+        } else {
+          expect(readFileSync(join(prepared, '.git'), 'utf8')).toContain('gitdir:')
+          expect(readLines(calls).every(row => row.cwd === prepared)).toBe(true)
+          expect(readLines(calls).length).toBeGreaterThan(0)
+          return
+        }
+      } else {
+        expect(result.refusals.filter(row => row.issue === 8)).toEqual([])
+        expect(result.runs.map(run => [run.issue, run.launched])).toEqual([[8, true]])
+        expect(result.runs[0]!.approvalIds).toEqual(['intent-8'])
+      }
+      expect(readLines(gitCalls).some(row => row.args[0] === 'fetch' && row.args[1] === 'origin' && row.args[2] === 'main')).toBe(true)
+      expect(readFileSync(join(prepared, '.git'), 'utf8')).toContain('gitdir:')
+      expect(git(['-C', prepared, 'branch', '--show-current'])).toBe(`feat/${issue}-fixture`)
+      expect(readFileSync(join(prepared, '.codex/hooks.json'), 'utf8')).toBe(CODEX_WIRING)
+      expect(readFileSync(join(home, '.codex/config.toml'), 'utf8')).toContain(`[projects."${prepared}"]`)
+      const starts = readLines(entered)
+      expect(starts).toHaveLength(1)
+      expect(starts[0].cwd).toBe(prepared)
+      expect(starts[0].cwd).not.toBe(repo)
+      expect(starts[0].args).toContain('memories.use_memories=false')
+      expect(starts[0].args).toContain('memories.generate_memories=false')
+      expect(readLines(deliveries)).toEqual([{ cwd: prepared, args: ['push', '-u', 'origin', 'HEAD'] }])
+      expect(reads.filter(args => args[0] === 'issue' && args.includes('parent')).map(args => args[2])).toContain('9')
+      expect(readLines(calls).every(row => row.cwd === prepared)).toBe(true)
+      expect([...new Set(readLines(calls).map(row => row.method))].sort()).toEqual(['initialize', 'initialized', 'hooks/list', 'configRequirements/read', 'config/read'].sort())
+      if (correction) expect((await readState(config.stateFile)).handled).toEqual([expect.objectContaining({ repo: 'acme/app', issue: 12, commentId: 555, reactionId: 88 })])
+    } finally {
+      clockSpy?.mockRestore()
+      await settleRuns(tracker)
+      for (const key of ['HOME', 'CODEX_HOME', 'PATH'] as const) {
+        if (previous[key] === undefined) delete process.env[key]
+        else process.env[key] = previous[key]
+      }
+    }
+  }, 30000)
 }
