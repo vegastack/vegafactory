@@ -24,3 +24,19 @@ test('extracted content, modes and links remain bound to the descriptor',async()
  await extractPackage(b,root);expect(await verifyExtractedDashboard(root,d)).toBe(true)
  await writeFile(join(root,'dist-standalone/server.js'),'altered');await expect(verifyExtractedDashboard(root,d)).rejects.toThrow()
 })
+
+test('complete exact scanner coverage passes while a copied previous dashboard descriptor fails',()=>{
+ expect(()=>assertScanEvidence({ok:true,skills:[{name:'a',completeness:{status:'complete',limitations:[],entirelyUninspected:0,partiallyInspected:0,coveragePercent:100}}]},['a'])).not.toThrow()
+ const old=dashboardDescriptor(packed(),'1.0.0')
+ const changed=archive([{path:'package/package.json',data:JSON.stringify({name:'@vegastack/vegafactory-dashboard',version:'1.0.0'})},{path:'package/dist-standalone/server.js',data:'new build same version'}])
+ expect(()=>verifyDashboardDescriptor(old,changed,'1.0.0')).toThrow()
+})
+
+test('materialized package symlink retains its traced sibling resolution context',async()=>{
+ const root=await mkdtemp(join(tmpdir(),'package-links-'));const src=join(root,'src');const store=join(src,'store/node_modules')
+ await mkdir(join(store,'a'),{recursive:true});await mkdir(join(store,'b'),{recursive:true});await mkdir(join(src,'app/node_modules'),{recursive:true})
+ await writeFile(join(store,'a/index.js'),"module.exports=require('b')");await writeFile(join(store,'b/index.js'),"module.exports='traced dependency'")
+ await symlink('../../store/node_modules/a',join(src,'app/node_modules/a'))
+ const output=join(root,'out');await materializeTree(src,output)
+ const {createRequire}=await import('node:module');expect(createRequire(join(output,'app/app.js'))('a')).toBe('traced dependency')
+})

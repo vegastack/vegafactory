@@ -21,7 +21,7 @@ export function assertScanEvidence(scan, expectedSkills) {
   if (JSON.stringify(actual) !== JSON.stringify([...expectedSkills].sort())) throw new Error('scanner skill coverage mismatch')
   for (const s of scan.skills) {
     const c = s.completeness
-    if (!c || c.limitations?.length || c.entirelyUninspected > 0 || c.partiallyInspected > 0 || c.partially_inspected > 0 || (c.coveragePercent != null && c.coveragePercent < 100)) throw new Error(`partial scanner coverage: ${s.name}`)
+    if (!c || c.status !== 'complete' || c.limitations?.length || c.entirelyUninspected > 0 || c.partiallyInspected > 0 || c.partially_inspected > 0 || (c.coveragePercent != null && c.coveragePercent < 100)) throw new Error(`partial scanner coverage: ${s.name}`)
   }
 }
 export function packagePath(path) {
@@ -89,13 +89,36 @@ export function verifyDashboardDescriptor(descriptor, bytes, version) {
 export async function materializeTree(source, destination) {
   const boundary = await realpath(source)
   async function copy(from, to, ancestors) {
-    const actual = await realpath(from); const rel = relative(boundary, actual)
+    const original = await lstat(from); const actual = await realpath(from); const rel = relative(boundary, actual)
     if (rel === '..' || rel.startsWith(`..${sep}`) || resolve(boundary,rel) !== actual) throw new Error('traced link escapes standalone tree')
     if (ancestors.has(actual)) throw new Error('traced link cycle')
     const s = await lstat(actual)
     if (s.isDirectory()) {
       await mkdir(to,{recursive:true}); const next = new Set([...ancestors,actual])
       for (const name of (await readdir(actual)).sort()) await copy(join(actual,name),join(to,name),next)
+      // A package symlink normally resolves imports from its real store location.
+      // Materializing it changes that location: carry the exact traced siblings
+      // into its own node_modules, retaining versions without a new resolver.
+      if (original.isSymbolicLink()) {
+        let modules=dirname(actual)
+        if (modules.split(sep).at(-1)?.startsWith('@')) modules=dirname(modules)
+        if (modules.split(sep).at(-1)==='node_modules') {
+          for (const name of (await readdir(modules)).sort()) {
+            if (name.startsWith('.') || await realpath(join(modules,name))===actual) continue
+            if (name.startsWith('@')) {
+              for (const child of (await readdir(join(modules,name))).sort()) {
+                const dependency=join(modules,name,child)
+                if(await realpath(dependency)===actual)continue
+                const target=join(to,'node_modules',name,child)
+                try{await lstat(target)}catch(e){if(e.code!=='ENOENT')throw e;await copy(dependency,target,next)}
+              }
+            } else {
+              const target=join(to,'node_modules',name)
+              try{await lstat(target)}catch(e){if(e.code!=='ENOENT')throw e;await copy(join(modules,name),target,next)}
+            }
+          }
+        }
+      }
     } else if (s.isFile()) {
       await mkdir(dirname(to),{recursive:true}); await writeFile(to,await readFile(actual)); await chmod(to,s.mode & 0o111 ? 0o755 : 0o644)
     } else throw new Error('unsupported traced device entry')
@@ -151,7 +174,7 @@ async function availablePort() {
 }
 export async function smokePair(manifest,directory) {
   const pair=await verifyPair(manifest,directory)
-  const home=await mkdtemp(join(tmpdir(),'vegafactory-pair-')); const consumer=join(home,'consumer'); await mkdir(consumer)
+  const home=await realpath(await mkdtemp(join(tmpdir(),'vegafactory-pair-'))); const consumer=join(home,'consumer'); await mkdir(consumer)
   // Only local tarballs, no dependency resolution or source checkout at runtime.
   const cliTar=join(home,'cli.tgz');await writeFile(cliTar,pair[CLI].bytes)
   const env={PATH:process.env.PATH,HOME:home,TMPDIR:home,CI:'1',npm_config_cache:join(home,'npm-cache')}

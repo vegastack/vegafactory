@@ -51,9 +51,6 @@ jobs:
           node-version: "24.x"
           registry-url: "https://registry.npmjs.org"
 
-      - name: Install dependencies
-        run: bun install --frozen-lockfile
-
       # A v0.2.0 tag on a tree whose package.json still says 0.1.0 must fail here,
       # not publish the wrong version.
       - name: Verify both packages carry the tag version
@@ -81,24 +78,40 @@ jobs:
       - name: Extract changelog entry for release notes
         run: |
           set -euo pipefail
+          mkdir -p work/release
           VERSION=$(node -p "require('./packages/cli/package.json').version")
           awk -v ver="$VERSION" '
             $0 == "## " ver { inside = 1; next }
             inside && /^## / { exit }
             inside { print }
-          ' packages/cli/CHANGELOG.md > release-notes.md
-          if ! grep -q '[^[:space:]]' release-notes.md; then
+          ' packages/cli/CHANGELOG.md > work/release/release-notes.md
+          if ! grep -q '[^[:space:]]' work/release/release-notes.md; then
             echo "::error::packages/cli/CHANGELOG.md has no entry for $VERSION — run bunx changeset version before tagging"
             exit 1
           fi
 
+      - name: Restore original pair on retry
+        if: github.run_attempt > 1
+        uses: actions/download-artifact@v4
+        with:
+          name: release-pair-${{ github.sha }}-attempt-1
+          path: work/release/
+
       - name: Install pinned release scanner
+        if: github.run_attempt == 1
         # SkillSpector v2.11.0 immutable commit, matched to the audited baseline.
         run: |
           uv tool install --python 3.12 'git+https://github.com/NVIDIA/skillspector.git@b7241089d7ec15d8b30df980dacbb428214732b9'
+          echo "$(uv tool dir --bin)" >> "$GITHUB_PATH"
+          echo "$(dirname "$(uv python find 3.12)")" >> "$GITHUB_PATH"
 
       - name: Prepare and smoke immutable artifact pair
+        if: github.run_attempt == 1
         run: node scripts/release-artifacts.mjs prepare work/release "$GITHUB_REF_NAME"
+
+      - name: Verify restored immutable pair
+        if: github.run_attempt > 1
+        run: node scripts/release-artifacts.mjs verify work/release/release-manifest.json
 
       # Publication and promotion are covered only by the operator-authorized release tag.
       # Authentication/provenance decisions remain #156; runner routing is unchanged.
@@ -109,7 +122,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: release-pair-${{ github.sha }}
+          name: release-pair-${{ github.sha }}-attempt-${{ github.run_attempt }}
           path: work/release/
           retention-days: 90
 
@@ -117,5 +130,5 @@ jobs:
         uses: softprops/action-gh-release@v3
         with:
           files: work/release/*
-          body_path: release-notes.md
+          body_path: work/release/release-notes.md
           generate_release_notes: true
