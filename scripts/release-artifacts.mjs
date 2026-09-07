@@ -178,7 +178,7 @@ export async function verifyReleaseEvidence(manifest, directory) {
   const expected = new Map([['build-sbom.json','build'],['cli-runtime-sbom.json',CLI],['dashboard-runtime-sbom.json',DASHBOARD]])
   if (!Array.isArray(manifest.sbomFiles) || manifest.sbomFiles.length !== expected.size) throw new Error('required SBOM evidence missing')
   for (const e of manifest.sbomFiles) {
-    if (!e || expected.get(e.file)!==e.scope) throw new Error('invalid SBOM identity/scope')
+    if (!e || !expected.has(e.file) || expected.get(e.file)!==e.scope) throw new Error('invalid SBOM identity/scope')
     expected.delete(e.file)
     const bytes=await readFile(join(directory,e.file))
     if (!verifyArtifactBytes(bytes,e)) throw new Error('SBOM evidence changed')
@@ -186,6 +186,7 @@ export async function verifyReleaseEvidence(manifest, directory) {
     if (bom.bomFormat!=='CycloneDX' || !Array.isArray(bom.components)) throw new Error('invalid SBOM content')
     if (e.scope!=='build' && (bom.metadata?.component?.name!==e.scope || bom.metadata?.component?.version!==manifest.version)) throw new Error('SBOM package mismatch')
   }
+  if (expected.size) throw new Error('required SBOM evidence missing')
   return true
 }
 // The workflow supplies authoritative prior-attempt job observations. Missing history

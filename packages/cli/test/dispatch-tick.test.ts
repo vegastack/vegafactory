@@ -758,7 +758,7 @@ for (const mode of ['enabled', 'disabled', 'stale-policy', 'final-stale-policy',
     const { home, config, repos } = fixture({ home: process.env.VSK_MANAGED_CASE_HOME, devMd: 'repo: acme/app · default branch main\ndispatch: local\noperators: mk\nimplement: codex fixture high\n' })
     const repo = realpathSync(repos[0]!.path), bin = join(home, 'bin')
     const entered = join(home, 'entered'), calls = join(home, 'rpc-calls'), deliveries = join(home, 'deliveries')
-    const gitCalls = join(home, 'git-calls')
+    const gitCalls = join(home, 'git-calls'), metadataFault = join(home, 'metadata-fault')
     const correction = ['incomplete-history', 'cancelled-body', 'exhausted-body'].includes(mode)
     const issue = correction ? 12 : 8
     const prepared = join(repo, `.vegastack/.worktrees/${issue}-fixture`)
@@ -808,9 +808,7 @@ readline.createInterface({input:process.stdin}).on('line',line=>{
  if(request.method==='configRequirements/read'){if(request.params!==null)process.exit(2);result={requirements:null};}
  if(request.method==='config/read'){
   result={config:{projects:{[cwd]:{trust_level:'trusted'}},memories:{use_memories:false,generate_memories:false},features:{hooks:true,memories:false,external_agent_memory_import:false,context_management:{experimental_mode:false}}}};
-  // The actual executor writes its attempt before its final external inspection.
-  const attempts=fs.existsSync(${JSON.stringify(config.logRoot)})?fs.readdirSync(${JSON.stringify(config.logRoot)},{recursive:true}):[];
-  if(mode==='stale-policy'||(mode==='final-stale-policy'&&attempts.some(p=>p.endsWith('.attempt'))))fs.appendFileSync(cwd+'/.vegastack/dev.md','\\ngates: 2\\n');
+  if(mode==='stale-policy'||fs.existsSync(${JSON.stringify(metadataFault)}))fs.appendFileSync(cwd+'/.vegastack/dev.md','\\ngates: 2\\n');
  }
  process.stdout.write(JSON.stringify({id:request.id,result})+'\\n');
 });
@@ -853,8 +851,20 @@ readline.createInterface({input:process.stdin}).on('line',line=>{
     }
     const tracker: RunTracker = new Map()
     const readLines = (path: string) => existsSync(path) ? readFileSync(path, 'utf8').trim().split('\n').map(line => JSON.parse(line)) : []
+    // Only this direct executor scenario arms the external metadata fault after
+    // real caller preparation and validation. It never observes private audit timing.
+    let finalOutcome: RunOutcome | undefined
+    const finalExecutor: TickDeps['execute'] = async (run, plan, cfg, options) => {
+      expect(plan.cwd).toBe(prepared)
+      expect((await shipGuardWired(plan.cwd, 'codex', { home, repo: run.repo, policyDigest: plan.guardPolicyDigest })).wired).toBe(true)
+      writeFileSync(metadataFault, 'change policy on every metadata read')
+      finalOutcome = await executeRun(run, plan, cfg, options)
+      return finalOutcome
+    }
     try {
-      const result = await runTick(config, { dryRun: false, signal: controller.signal }, { gh, tracker })
+      const result = await runTick(config, { dryRun: false, signal: controller.signal }, {
+        gh, tracker, ...(mode === 'final-stale-policy' ? { execute: finalExecutor } : {}),
+      })
       clockSpy?.mockRestore()
       await settleRuns(tracker)
       if (mode !== 'enabled') {
@@ -866,6 +876,14 @@ readline.createInterface({input:process.stdin}).on('line',line=>{
         expect(readLines(entered)).toEqual([])
         expect(readLines(deliveries)).toEqual([])
         expect((await readState(config.stateFile)).handled).toEqual([])
+        if (mode === 'final-stale-policy') {
+          expect(finalOutcome).toEqual(expect.objectContaining({ started: false, pushed: false, handedBack: false }))
+          expect(finalOutcome!.refusal).toContain('prepared guard refused immediately before spawn')
+          const audit = readLines(finalOutcome!.logFile)
+          expect(audit.some(row => row.event === 'launch-refused')).toBe(true)
+          expect(audit.some(row => row.event === 'start')).toBe(false)
+          expect(tracker.size).toBe(0)
+        }
         if (mode.startsWith('incomplete') || mode.endsWith('body')) {
           expect(git(['rev-parse', 'HEAD'])).toBe(initialHead)
           expect(git(['branch', '--format=%(refname)'])).toBe(initialBranches)

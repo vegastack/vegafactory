@@ -9,7 +9,7 @@ Act: implement approved work and return evidence in its issue.
 
 One issue/session: preflight → claim → build → verify → review → evidence. The operator reads the result in the issue; PRs and merges are `dev-ship`'s, on the operator's word. The ledger discipline lives in [ledger-and-resume](references/ledger-and-resume.md).
 
-Nearest neighbors: `dev-plan` writes the plan this skill executes task by task; `dev-review` judges the result; an issue that turns out to need a decision goes back through `needs-operator` and is asked there, because a guessed decision is one the operator did not make. dev.md's knobs govern this skill; its `## Architecture` section governs stack-touching choices.
+Nearest neighbors: `dev-plan` supplies the tasks; `dev-review` judges execution. Route unresolved decisions through `needs-operator`; never guess. dev.md's knobs govern this skill; its `## Architecture` section governs stack-touching choices.
 
 ## Direct requests — trivial only, tightly bounded
 

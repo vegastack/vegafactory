@@ -122,9 +122,10 @@ no record at all.
 
 The broker caps JWTs at 16KiB and a 600s lifetime; expiry must remain after now, with up to 60s skew
 only for issued/not-before times. JWKS is capped at 256KiB/32 keys and GitHub JSON at 64KiB, including
-chunked bodies. Fetch plus body reads have 3s deadlines inside a 15s whole exchange deadline. A
-rejected minted token is never returned or logged; `DELETE /installation/token` is attempted with
-that disposable token within the remaining budget, at most 3s, and refusal survives cleanup failure.
+chunked bodies. Fetch plus body reads have 3s deadlines inside a 15s whole exchange deadline. The broker's
+failure handler never returns or logs a rejected token. It makes a best-effort revocation of only
+the just-minted disposable token within the remaining budget, at most 3s; the broker still refuses
+the exchange if cleanup fails.
 These are broker limits, not issuer guarantees. [Cloudflare Request cache behavior](https://developers.cloudflare.com/workers/runtime-apis/request/)
 and [GitHub token creation](https://docs.github.com/en/rest/apps/apps#create-an-installation-access-token-for-an-app)
 are the upstream contracts.

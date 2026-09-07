@@ -130,6 +130,31 @@ test('real CLI refuses missing or altered SBOM before registry writes and refuse
   const {assertLivePublisher}=await import('./release-publish.mjs');expect(()=>assertLivePublisher({})).toThrow('serialized')
  }finally{await r.close()}
 })
+test('real CLI rejects incomplete, duplicate and mismatched SBOM identities before registry writes',async()=>{
+ const r=await processRegistry()
+ try {
+  for(const fault of ['unknown-omitted','duplicate','scope','package','malformed']) {
+   const p=await pairFixture(),entries:any[]=p.manifest.sbomFiles
+   if(fault==='unknown-omitted') {
+    for(let i=0;i<entries.length;i++) {
+     const bytes=Buffer.from(JSON.stringify({bomFormat:'CycloneDX',components:[],metadata:{component:{version:p.manifest.version}}}))
+     entries[i]={file:`unknown-${i}.json`,sha256:sha(bytes)}
+     await writeFile(join(p.dir,entries[i].file),bytes)
+    }
+   }else if(fault==='duplicate')entries[2]={...entries[1]}
+   else if(fault==='scope')entries[1].scope=DASHBOARD
+   else {
+    const bytes=Buffer.from(fault==='malformed'?'{}':JSON.stringify({bomFormat:'CycloneDX',components:[],metadata:{component:{name:DASHBOARD,version:p.manifest.version}}}))
+    await writeFile(join(p.dir,entries[1].file),bytes);entries[1].sha256=sha(bytes)
+   }
+   await writeFile(join(p.dir,'release-manifest.json'),JSON.stringify(p.manifest))
+   const result=await launchPair(p,r).result
+   expect(result.code,`${fault}: ${result.output}`).toBe(2)
+   expect(result.output).toContain('SBOM')
+   expect(r.writes).toEqual([])
+  }
+ }finally{await r.close()}
+},30000)
 test('real CLI registry auth, outage and integrity conflict never create an absent version',async()=>{
  const p=await pairFixture(),r=await processRegistry()
  try {
