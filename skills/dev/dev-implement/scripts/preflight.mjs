@@ -8,9 +8,10 @@
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { GhUnavailable, findMarkerComment, ghJson, parseFlags, renderResult } from './lib/gh.mjs';
+import { GhUnavailable, ghJson, parseFlags, renderResult } from './lib/gh.mjs';
+import { evaluateApprovals, readApprovalSources, gatherConsolidatedApproval } from './lib/approval.mjs';
 
-export function evaluatePreflight({ issue, comments, devMd, me, expect = 'ready' }) {
+export function evaluatePreflight({ issue, comments, devMd, me, expect = 'ready', stage = 'implement', sourceComments = [] }) {
   const blocks = [];
   const warns = [];
   const labels = (issue.labels ?? []).map((l) => l.name);
@@ -22,19 +23,13 @@ export function evaluatePreflight({ issue, comments, devMd, me, expect = 'ready'
     blocks.push(`issue state label is [${state.join(', ') || 'none'}], expected ${expect} (fresh start: ready · resume: working with the operator's handover · corrections: for-operator)`);
   }
 
-  const approval = findMarkerComment(comments, 'approval');
-  if (!approval) blocks.push('no recorded approval comment (marker type=approval) on the issue');
-
   const scope = ['research', 'quick-build', 'full-plan'].filter((s) => labels.includes(s));
   if (scope.length !== 1) blocks.push(`issue needs exactly one scope label (research | quick-build | full-plan), found: ${scope.join(', ') || 'none'}`);
-
-  if (scope[0] === 'full-plan') {
-    const planApproved = (comments ?? []).some((c) => {
-      const m = findMarkerComment([c], 'approval');
-      return m && ['plan', 'brief+plan'].includes(m.keys.scope);
-    });
-    if (!planApproved) blocks.push('full-plan issue without a recorded plan approval (marker type=approval scope=plan or brief+plan)');
-  }
+  const operators = (/^operators:\s*([^#\n]+)/m.exec(devMd ?? '')?.[1] ?? '').split(',').map((name) => name.trim()).filter(Boolean);
+  const approval = evaluateApprovals({ repo: issue.repo, issue: issue.number, brief: issue, comments, operators,
+    sourceComments, requiredScope: stage === 'plan' || scope[0] === 'research' ? 'brief' : 'brief+plan' });
+  blocks.push(...approval.blocks);
+  if (scope[0] === 'research' && stage !== 'plan') blocks.push('research execution requires consolidated protocol, candidate and shared allowance admission');
 
   // The brief-template rule: a resolved Assumptions section is deleted, so the
   // heading's presence at all means unresolved entries remain.
@@ -71,38 +66,35 @@ export function evaluatePreflight({ issue, comments, devMd, me, expect = 'ready'
     blocks.push(`issue repo ${issue.repo} does not match dev.md repo ${repoLine[1]}`);
   }
 
-  return { blocks, warns };
+  return { blocks, warns, bindings: approval.bindings, approvalIds: approval.approvalIds };
 }
 
-export function gatherAndEvaluate(flags) {
-  const repo = flags.repo || ghJson(['repo', 'view', '--json', 'nameWithOwner']).nameWithOwner;
-  const issueNumber = flags.issue;
-  // Interpolated paths and messages are concatenated, not template literals: a backtick at a
-  // shell-word start whose first inner token carries the interpolation trips SkillSpector's
-  // bounded parser for the whole skill (skill-maintainer's standards.md, known behaviours).
-  const raw = ghJson(['api', 'repos/' + repo + '/issues/' + issueNumber]);
-  const comments = ghJson(['api', 'repos/' + repo + '/issues/' + issueNumber + '/comments', '--paginate']);
-  let blockedBy = [];
-  try {
-    blockedBy = ghJson(['api', 'repos/' + repo + '/issues/' + issueNumber + '/dependencies/blocked_by'])
-      .filter((b) => b.state === 'open');
-  } catch (error) {
-    // Only an HTTP 404 (host without the dependencies API) means "none
-    // recorded" — matched on the parsed status, never the message text, so a
-    // path containing "404" can't masquerade. Every other failure — auth,
-    // network, rate limit — is unverifiable state and fails closed.
-    if (error.httpStatus !== 404) throw error;
-    blockedBy = [];
+// Both CLI and dispatcher use this owner reader and evaluator. The injected
+// reader is transport only, never an approval verdict or policy override.
+export async function gatherAndEvaluate(flags, { readJson = async (args) => ghJson(args), devMd: suppliedDevMd } = {}) {
+  const pages = async (args) => {
+    const result = await readJson([...args, '--paginate', '--slurp']);
+    if (!Array.isArray(result) || !result.every(Array.isArray)) throw new GhUnavailable('malformed paginated GitHub history');
+    return result.flat();
+  };
+  const repo = flags.repo || (await readJson(['repo', 'view', '--json', 'nameWithOwner'])).nameWithOwner;
+  if (flags['consolidated-request']) {
+    const request = JSON.parse(readFileSync(flags['consolidated-request'], 'utf8'));
+    const devMd = suppliedDevMd ?? readFileSync(flags['dev-md'] || '.vegastack/dev.md', 'utf8');
+    const operators = (/^operators:\s*([^#\n]+)/m.exec(devMd)?.[1] ?? '').split(',').map((name) => name.trim()).filter(Boolean);
+    return { ...(await gatherConsolidatedApproval({ ...request, operators, readJson })), warns: [] };
   }
-  const devMd = readFileSync(flags['dev-md'] || '.vegastack/dev.md', 'utf8');
-  const me = flags.me || ghJson(['api', 'user']).login;
-  return evaluatePreflight({
-    issue: { body: raw.body, state: raw.state, labels: raw.labels, assignees: raw.assignees, repo, blockedBy },
-    comments,
-    devMd,
-    me,
-    expect: flags.expect || 'ready',
-  });
+  const issueNumber = flags.issue;
+  const raw = await readJson(['api', 'repos/' + repo + '/issues/' + issueNumber]);
+  const comments = await pages(['api', 'repos/' + repo + '/issues/' + issueNumber + '/comments']);
+  // Missing dependency data cannot establish absence; do not treat a 404 as approval.
+  const blockedBy = (await pages(['api', 'repos/' + repo + '/issues/' + issueNumber + '/dependencies/blocked_by']))
+    .filter((entry) => entry.state !== 'closed');
+  const devMd = suppliedDevMd ?? readFileSync(flags['dev-md'] || '.vegastack/dev.md', 'utf8');
+  const sourceComments = await readApprovalSources(comments, readJson);
+  const me = flags.me || (await readJson(['api', 'user'])).login;
+  return evaluatePreflight({ issue: { ...raw, repo, blockedBy }, comments, devMd, me, sourceComments,
+    expect: flags.expect || 'ready', stage: flags.stage || 'implement' });
 }
 
 const invokedDirectly = process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url);
@@ -110,7 +102,7 @@ if (invokedDirectly) {
   const flags = parseFlags(process.argv.slice(2));
   let outcome;
   try {
-    outcome = gatherAndEvaluate(flags);
+    outcome = await gatherAndEvaluate(flags);
   } catch (error) {
     outcome = { blocks: [error instanceof GhUnavailable ? `cannot verify: ${error.message}` : `preflight error: ${error.message}`], warns: [] };
   }

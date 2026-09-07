@@ -5,7 +5,10 @@
 import { describe, expect, test } from 'bun:test'
 import { existsSync, mkdirSync, mkdtempSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { join, resolve } from 'node:path'
+import { scopeDigest } from '../../../skills/dev/dev-implement/scripts/lib/approval.mjs'
+
+process.env.VSK_PREFLIGHT_SCRIPT = resolve(import.meta.dir, '../../../skills/dev/dev-implement/scripts/preflight.mjs')
 import { fetchRockets, readLock, readState, repoLockPath, runOnce, runTick, settleRuns, watch, writeState, type PlannedRun, type RunOutcome, type RunTracker, type TickDeps } from '../src/dispatch.ts'
 import { parseFactoryConfig } from '../src/config.ts'
 
@@ -46,6 +49,29 @@ function ghStub(rows: { needsPlan?: SearchRow[]; ready?: SearchRow[]; forOperato
   const calls: string[][] = []
   const gh = async (args: string[]): Promise<string> => {
     calls.push(args)
+    const endpoint = /^repos\/(acme\/[^/]+)\/issues\/(\d+)(.*)$/.exec(args[1] ?? '')
+    if (endpoint && (args.includes('--slurp') || endpoint[3] === '')) {
+      const custom = extra?.(args)
+      if (custom !== null && custom !== undefined && args.includes('--slurp')) {
+        const value = JSON.parse(custom)
+        // Existing rocket fixtures describe the same comment history. Add scoped
+        // intent to those histories, while explicit nested-page fixtures stand.
+        if (Array.isArray(value) && value.every(Array.isArray)) return custom
+      }
+      const number = Number(endpoint[2])
+      const row = [...(rows.needsPlan ?? []), ...(rows.ready ?? []), ...(rows.forOperator ?? [])].find(row => row.number === number)
+      const labels = row?.labels ?? ['ready']
+      const body = '<!-- vsk:v1 type=brief rev=1 scope=quick-build -->\nBuild the fixture.\n'
+      const planBody = '<!-- vsk:v1 type=plan rev=1 -->\n- [ ] **Task 1: fixture** <!-- task-id:' + number + '-T1 -->\n'
+      if (endpoint[3] === '') return JSON.stringify({ number, node_id: 'brief-' + number, body, state: 'open', labels: [...labels, ...(labels.some(label => ['research', 'quick-build', 'full-plan'].includes(label)) ? [] : ['quick-build'])].map(name => ({ name })), assignees: (row?.assignees ?? []).map(login => ({ login })) })
+      if (endpoint[3] === '/dependencies/blocked_by') return '[[]]'
+      if (endpoint[3] === '/comments') {
+        const artifacts = [{ repo: endpoint[1], issue: number, kind: 'brief', artifactId: 'brief-' + number, rev: 1, digest: scopeDigest(body, 'brief') }, { repo: endpoint[1], issue: number, kind: 'plan', artifactId: 'plan-' + number, rev: 1, digest: scopeDigest(planBody, 'plan') }]
+        const intent = { schemaVersion: 2, id: 'intent-' + number, operator: 'mk', scope: 'brief+plan', source: { kind: 'session', ref: 'session:fixture', quote: 'I approve these fixture artifacts.' }, artifacts, supersedes: [], revokes: [] }
+        return JSON.stringify([[{ id: number * 100 + 1, node_id: 'plan-' + number, body: planBody }, { id: number * 100 + 2, body: '<!-- vsk:v1 type=approval scope=brief+plan -->\n```json\n' + JSON.stringify(intent) + '\n```\n' }]])
+      }
+    }
+    if (args[0] === 'api' && args[1] === 'user') return JSON.stringify({ login: 'mk' })
     const custom = extra?.(args)
     if (custom !== null && custom !== undefined) return custom
     if (args[0] === 'api' && args.includes('search/issues')) {
@@ -331,4 +357,15 @@ describe('the parallel path launches the implement harness (F28)', () => {
     expect(result.runs.map(run => [run.issue, run.launch.command])).toEqual([[104, 'codex']])
     expect(result.runs[0]!.launch.args).not.toContain('--allowed-tools')
   })
+})
+
+
+test('a ready marker-only issue never reaches execute or worktree creation', async () => {
+  const { config } = fixture()
+  const { gh } = ghStub({ ready: [{ number: 8, title: 'feat: scoped', labels: ['ready'] }] }, args => args[1] === 'repos/acme/app/issues/8/comments' && args.includes('--slurp') ? JSON.stringify([[{ id: 2, body: '<!-- vsk:v1 type=approval -->' }]]) : null)
+  let executions = 0; let worktrees = 0
+  const result = await runTick(config, { dryRun: false }, { gh, parentCandidates: async () => [], ensureWorktree: async (...args) => { worktrees++; return ensureWorktree(...args) }, execute: async run => { executions++; return finished(run) } })
+  expect(executions).toBe(0)
+  expect(worktrees).toBe(0)
+  expect(result.refusals.some(refusal => refusal.reason.includes('approval'))).toBe(true)
 })

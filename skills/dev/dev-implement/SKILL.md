@@ -5,9 +5,9 @@ description: Implement an approved GitHub issue end to end without further user 
 
 # dev-implement
 
-Act: build the approved issue end to end, dark, and hand the evidence back in the issue.
+Act: implement approved work and return evidence in its issue.
 
-One issue, one session: preflight → claim → build dark → verify → review → evidence → stop. The operator reads the result in the issue; PRs and merges are `dev-ship`'s, on the operator's word. The ledger discipline lives in [ledger-and-resume](references/ledger-and-resume.md).
+One issue/session: preflight → claim → build → verify → review → evidence. The operator reads the result in the issue; PRs and merges are `dev-ship`'s, on the operator's word. The ledger discipline lives in [ledger-and-resume](references/ledger-and-resume.md).
 
 Nearest neighbors: `dev-plan` writes the plan this skill executes task by task; `dev-review` judges the result; an issue that turns out to need a decision goes back through `needs-operator` and is asked there, because a guessed decision is one the operator did not make. dev.md's knobs govern this skill; its `## Architecture` section governs stack-touching choices.
 
@@ -18,6 +18,7 @@ When the operator asks in chat for a change, their words are the approval — bu
 ## Preflight — all must hold, or stop and say which failed
 
 - Run the guard first: `node <path-to-this-skill>/scripts/preflight.mjs --issue <n> --me $(gh api user -q .login) --json` (add `--repo <o/r> --dev-md <path>` outside the project root). Exit 2 stops you with its reasons; exit 1 passes with warnings, which go into the ledger. Resume and corrections runs pass `--expect working` / `--expect for-operator`.
+- Scoped intent follows conventions. Legacy records need reconfirmation; `--consolidated-request` requires preparation/research adapters.
 - Then the judgment checks: read the complete brief plus parent issue and milestone; read the brief's touch points in the current code, because they drift between approval and execution — the version-impact line, volatile dependency claims per `dev-architect`'s verify protocol, and a full-plan issue's plan included. A material decision left open — even outside a formal Assumptions section — or reality contradicting brief or plan is a stop: one `handback` comment with the smallest question, `needs-operator`.
 - Resuming a dead session's issue takes the operator's explicit handover, then the resume protocol in [ledger-and-resume](references/ledger-and-resume.md): brief → plan → ledger → `git log`, nothing else — in the branch's worktree, restored with `worktree.mjs restore --issue <n> --slug <slug> --write` when its directory is gone. A claim being abandoned instead is released by the operator with `node <path-to-this-skill>/scripts/reclaim.mjs --issue <n>` (`working` → `ready`, unassign; refuses a still-fresh ledger unless `--force`) — a claim is released on their word only.
 

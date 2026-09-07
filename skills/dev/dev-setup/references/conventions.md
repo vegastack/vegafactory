@@ -1,12 +1,12 @@
 # Workflow conventions
 
-The single spec for every artifact dev-family skills read and write. One home per rule: skills cite this file, never restate it. Everything here is harness-neutral.
+The artifact spec. Skills cite this single rule source.
 
 Knob precedence, nearest wins: hand edits in `.vegastack/dev.md`, then the org control room's `groups/<g>/*`, then its `org.md`, then skill defaults; decision registers concatenate instead of overriding.
 
 ## Comment metadata markers
 
-Every workflow-generated comment opens with an invisible HTML marker, then a human heading:
+Workflow comments open with a marker and heading:
 
 ```markdown
 <!-- vsk:v1 type=<type> rev=<n> [key=value ...] -->
@@ -15,7 +15,7 @@ Every workflow-generated comment opens with an invisible HTML marker, then a hum
 
 | type | required keys | instances |
 |---|---|---|
-| `approval` | `scope=<brief\|brief+plan\|plan>` | one per approval event |
+| `approval` | `scope=<brief\|brief+plan\|plan\|consolidated\|none>` and schema-v2 JSON | one per approval event |
 | `questions` | `rev` | one per ask round; earlier rounds stay as record (dev-setup's `references/ask-route.md`) |
 | `plan` | `rev` | one, edited in place |
 | `ledger` | `branch` | one, edited in place |
@@ -24,34 +24,46 @@ Every workflow-generated comment opens with an invisible HTML marker, then a hum
 | `decision` | — | one per decision proposal |
 | `handback` | — | one per stop event |
 
-`rev=<n>` and the matching `(v<n>)` heading suffix appear only on revisable artifacts — the brief (issue description), `plan`, `questions`, `evidence` — starting at `rev=1`/`(v1)`. Single-event comments (`approval`, `decision`, `handback`) and the `ledger` carry neither. Scripts and agents locate comments by marker, never heading text; a comment without its marker is not the artifact — no legacy fallback.
+`rev=<n>` and `(v<n>)` start at 1 on brief, plan, questions and evidence only. Approval, decision, handback and ledger have neither. Locate artifacts by marker, never heading; no legacy fallback.
 
 ## Operator identity
 
-Every human reference — approvals, revisions, decisions, changelog attributions, review adjudications — names the operator by GitHub username in parentheses, no title — `(<github-username>)`:
+Human references use the operator’s GitHub username in parentheses, without titles:
 
 - Approval: `Approved by (<username>) on DD-MM-YYYY: "<their words>"`
 - Register line: `- DD-MM-YYYY (<username>) — <decision>`
 
-An issue's operator is its approval-marker author when dev.md's `operators:` list names them, else its issue author when listed, else the first listed.
+Check the named operator against current policy. Agents may quote actual intent; authorship, labels and configured names cannot supply it. Session quotations are inspectable assertions, not cryptographic speech authentication.
+
+## Scoped approval records
+
+Use dev-implement’s `scripts/lib/approval.mjs` API and its embedded contract; no second parser. Refresh current policy and complete GitHub histories. `ArtifactRef={repo,issue,kind,artifactId,rev,digest}` binds brief issue-node or unique plan/protocol comment-node identity, revision and canonical SHA-256.
+
+Approval marker scope must match one fenced JSON `ApprovalRecord={schemaVersion:2,id,operator,scope,source:{kind,ref,quote},artifacts,supersedes,revokes}`. Source kind is `session` or `github-comment`; record actual inspectable words. Scope is `brief`, `plan` or `brief+plan`: planning requires brief; implementation requires both; research execution additionally binds its protocol. Empty-artifact revocations remove exact earlier IDs. Conflicts require explicit supersedes; never newest-wins.
+
+Preserve legacy comments. Inventory refusal reasons/current digests without writes; request scoped reconfirmation. A separately authorized `scope=none` correction has `{schemaVersion:2,kind:"correction",scope:"none",operator,source,targets:[{commentId,bodySha256}],supersedes:[],revokes:[]}`. It neutralizes exact malformed targets only and grants no scope. Changed/missing/self-referential targets refuse.
+
+Consolidated parent events bind actual intent to frozen manifest bytes, canonical artifacts and exact task/action subsets. Locators are inline UTF-8 or immutable repository/commit/path plus blob hash; local paths are insufficient. Pin approval comment ID/body hash separately. Preparation requires exact accepted task-contract receipts; research requires protocol-derived limits, complete shared attempts and a clean-candidate/atomic reservation adapter. Missing adapters refuse. Failed/resumed/child starts count without refunds. Checkpoint export, private/live operations and shipping retain their separate gates; an intent result is not an effect grant.
+
+Canonicalization normalizes CRLF only, except structural plan checkboxes and one validated JSON `{tasks:[{id,evidenceUrls}]}` block between `<!-- vsk:progress:start -->` / `<!-- vsk:progress:end -->`. IDs must exist; URLs are HTTP(S). Unknown fields/duplicates refuse. Stable task IDs/order, interfaces, actions, revisions and every other byte remain scope. Brief/protocol bodies have no mutable fields; fenced examples remain immutable and supply no authority.
 
 ## Revision markers
 
-Any artifact edited after its first approval: the heading gains `(v2)`, the marker `rev=2`, and a `Revisions:` line is appended — `v2 — DD-MM-YYYY: <what changed>, per (<username>) correction`. Existing revision lines are never rewritten.
+Scope edits increment marker/heading revisions and append `Revisions: v2 — DD-MM-YYYY: <change>, per (<username>) correction`; preserve earlier lines and obtain fresh approval. Validated progress changes need neither.
 
 ## Scope classes
 
-Set at intake, applied as a label, announced with its reason (operator overrides):
+Set and explain the scope label at intake; the operator may override:
 
 - **`research`** — a question to answer; throwaway code allowed, never merged. No branch/PR/changelog; findings + recommendation are the evidence comment.
-- **`quick-build`** — small change whose flow already exists in the repo to read. Brief and plan are drafted in the same conversation; **one approval covers both**; then straight to `ready`.
-- **`full-plan`** — big or new ground. Brief approval → `needs-plan` → a separate, fresh-grounded planning session posts the plan → `needs-operator` → "plan approved" → `ready`. Multi-deliverable work becomes an epic, each sub-issue classified independently.
+- **`quick-build`** — existing flow: draft brief+plan together, approve both, then `ready`.
+- **`full-plan`** — new ground: approve brief, `needs-plan`, separate grounded planning session, `needs-operator`, approve plan, `ready`. Split multiple deliverables into independently classified epic children.
 
 The scope ratchet lives in `dev-plan`.
 
 ## Labels
 
-State — exactly one per issue; every flip sets the assignee column (creation colors: dev-setup's labels row):
+Exactly one state; every flip sets its assignee (colors: dev-setup):
 
 | label | meaning | assignee |
 |---|---|---|
@@ -71,7 +83,7 @@ Modifiers (may coexist with the state label): `risky` · scope `research` / `qui
 
 ## The ledger
 
-Maintained by the implement session as one comment, edited in place:
+The implement session edits one ledger comment:
 
 ```markdown
 <!-- vsk:v1 type=ledger branch=<branch> -->
@@ -88,12 +100,12 @@ Maintained by the implement session as one comment, edited in place:
 
 ## `.vegastack/` workspaces
 
-Transitory artifacts (subagent reports, review packages, drafts, diffs) live at `.vegastack/.tmp/<issue-number>-<title-slug>/` (pre-issue: `.vegastack/.tmp/intake-<slug>/`), kept out of git by a self-ignoring `.gitignore` (`*`); every branch is checked out at `.vegastack/.worktrees/<issue-number>-<title-slug>/`, ignored from the root, so the main checkout never leaves the default branch. Subagents write full reports there and return short status, so their findings survive. Both live in the working tree, never under `.git/`, which harnesses protect. `<path-to-this-skill>` is the directory holding the SKILL.md you are reading.
+Drafts/reports live in `.vegastack/.tmp/<issue-number>-<title-slug>/` (before issue creation: `intake-<slug>`), with a self-ignoring `.gitignore` containing `*`. Branch checkouts live in root-ignored `.vegastack/.worktrees/<issue-number>-<title-slug>/`; main stays on its default branch. Keep both outside `.git/`. Subagents save full reports and return short status. `<path-to-this-skill>` means the directory containing SKILL.md.
 
 ## Verification gate
 
-Audit each claim against a tool result from this session: run the proving command fresh, read its full output and exit code, then claim with that evidence. Report outcomes faithfully — failing tests are reported with their output, a skipped step is named. Delegate only sizeable, independent, parallelizable work, never verification of your own, and keep spawn counts low. Guard scripts follow the same doctrine: machine-verifiable facts block (exit 2 with the reason); regex or judgment heuristics only warn — no AI inference inside guards, and an unverifiable state fails closed.
+Prove claims with fresh command output and exit codes. Report failures and skipped steps honestly. Delegate only substantial independent parallel work, never verification of your own; keep spawn counts low. Guards block machine-verifiable failures (exit 2); heuristics warn. No AI inference inside guards; unverifiable state fails closed.
 
 ## Plain-language collaboration
 
-Narrate at three moments: one line before starting, a brief update on a finding or change of direction, and an outcome-first recap that stands alone — what happened, which paths were taken, what is worth the operator double-checking. Readability beats concision; arrow chains and made-up labels hide meaning. Use mermaid or ASCII diagrams in issues wherever a picture beats prose. A vague or self-contradicting operator answer gets pushback with concrete options, never silent absorption.
+Announce starting, meaningful findings/direction changes, and a self-contained outcome with paths and remaining checks. Prefer readable literal language over arrow chains or invented labels. Use Mermaid/ASCII where useful. Challenge vague or contradictory answers with concrete options; never silently guess.

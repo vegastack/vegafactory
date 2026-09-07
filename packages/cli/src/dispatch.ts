@@ -11,7 +11,7 @@ import { parseControlRoomKnob } from './control-room.ts'
 import { appendFile, lstat, mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises'
 import { hostname, tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
-import { fileURLToPath } from 'node:url'
+import { pathToFileURL, fileURLToPath } from 'node:url'
 import { loadFactoryConfig, mergeRepoPolicy, stagePolicy, type FactoryConfig, type Harness, type RepoEntry, type RepoPolicy, type Stage, type Subagents } from './config.ts'
 import { buildLaunchPlan, type LaunchPlan } from './launch.ts'
 import { GhUnavailable, ghText } from './gh.ts'
@@ -1117,6 +1117,9 @@ export interface RunReport {
   stage: Stage
   launch: { command: string; args: string[]; env: Record<string, string>; cwd: string }
   launched: boolean
+  approvalIds?: string[]
+  approvalChecked?: boolean
+  bindings?: Array<{ repo: string; issue: number; kind: string; artifactId: string; rev: number; digest: string }>
   exitCode?: number | null
   logFile?: string
 }
@@ -1260,6 +1263,31 @@ export async function runTick(
         refusals.push({ repo: entry.repo, issue: run.issue, reason: `#${run.issue} would run on ${stage.harness}, and the ship guard is not wired for it: ${checkoutGuard.detail} — dark builds run under bypass, and the guard is what bounds them` })
         continue
       }
+      // Re-read complete live scope immediately before any worktree or harness
+      // effect. The packaged dev-implement parser owns both approval and native
+      // prerequisite semantics; a board label or rocket is only a start signal.
+      let admission: { blocks: string[]; approvalIds: string[]; bindings: NonNullable<RunReport['bindings']> } = { blocks: [], approvalIds: [], bindings: [] }
+      // A dry run previews a command only; it never reports approved bindings.
+      if (!options.dryRun) try {
+        const script = process.env.VSK_PREFLIGHT_SCRIPT
+          || join(dirname(dirname(fileURLToPath(import.meta.url))), 'skill', 'dev-implement', 'scripts', 'preflight.mjs')
+        const owner = await import(pathToFileURL(script).href)
+        const subjects = run.parallel ?? [run.issue]
+        const results = []
+        for (const issue of subjects) {
+          results.push(await owner.gatherAndEvaluate({ repo: entry.repo, issue: String(issue),
+            stage: run.stage === 'plan' ? 'plan' : 'implement',
+            expect: run.stage === 'plan' ? 'needs-plan' : run.stage === 'corrections' ? 'for-operator' : 'ready',
+          }, { readJson: (args: string[]) => ghJsonVia(gh, args), devMd }))
+        }
+        admission = { blocks: results.flatMap(result => result.blocks),
+          approvalIds: [...new Set<string>(results.flatMap(result => result.approvalIds))],
+          bindings: results.flatMap(result => result.bindings) }
+        if (admission.blocks.length) throw new Error(admission.blocks.join('; '))
+      } catch (error) {
+        refusals.push({ repo: entry.repo, issue: run.issue, reason: `#${run.issue}: launch preflight refused — ${(error as Error).message}` })
+        continue
+      }
       const parentOf = run.parallel ? parents.find(candidate => candidate.parent.issue === run.issue) : undefined
       if (run.parallel && !parentOf) {
         refusals.push({ repo: entry.repo, issue: run.issue, reason: `#${run.issue}: the parent worktree for a parallel run could not be resolved — its children run one at a time next tick` })
@@ -1317,6 +1345,9 @@ export async function runTick(
         stage: run.stage,
         launch: { command: launch.command, args: launch.args, env: launch.env, cwd: launch.cwd },
         launched: false,
+        approvalChecked: !options.dryRun,
+        approvalIds: admission.approvalIds,
+        bindings: admission.bindings,
       }
       if (options.dryRun) {
         runs.push(report)

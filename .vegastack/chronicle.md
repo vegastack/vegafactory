@@ -2,6 +2,16 @@
 
 The project's story, newest first: what got built, why, and how it went — for the operator's future recall. Format home: the dev-chronicle skill.
 
+## 07-09-2026 — Approval follows the work that was actually approved ([#135](https://github.com/vegastack/vegafactory/issues/135))
+
+- **What:** Scoped approval records now bind the operator’s quoted intent to current brief and plan identities. Task progress keeps its approval; changed requirements require fresh intent. Parent selections distinguish code, preparation and research permissions.
+- **Why:** The old preflight accepted a bare approval marker even after the brief changed. That could start work whose actual scope had never been approved.
+- **How it went:** Subprocess tests reproduced both failures. The shared parser and launch gate reject them; preparation and research adapters retain their separate evidence requirements. Final acceptance still needs the recorded scope, evaluation and review gates.
+- **Changed:** Current-scope preflight · dispatcher admission · inspectable legacy reconfirmation · frozen-manifest retrieval · counted research reservations.
+- **Decisions:** none.
+
+— approved by (kmanojkumar) · built by codex · branch codex/productionization-133
+
 ## 03-09-2026 — vegastack-skills became VegaFactory: a runtime around the skills, and a dashboard to watch it ([#104](https://github.com/vegastack/vegastack-skills/issues/104))
 
 - **What:** epic B, eighteen children stacked on one branch, turned a skills installer into a factory. The package is `@vegastack/vegafactory` and the bin is `vegafactory`; the authored groups are `dev`, `factory`, `skills-tooling` and `repo-tooling`. Around the skills there is now a runtime: one feature = one worktree with `worktree` verbs and a retention policy, an `operators:` roster so assignment follows the state label, a hooks package whose ship guard reads dev.md per environment, the issue itself as the interview surface when no question tool exists, an org control room cloned locally and refreshed by `vegafactory sync`, a dispatcher that turns labels and 🚀 reactions into headless runs, parallel children where a plan declares disjoint file sets, a public GitHub App with a board mirror, and statistics recorded per run into the control room. The last child is the one that makes all of it legible: `vegafactory dashboard` starts a local, read-only Next.js view — org, repo, people, skills, board, dispatcher — over those statistics and the live board. Alongside it, a hosted token broker ([#117](https://github.com/vegastack/vegastack-skills/issues/117)) — a Cloudflare Worker at `packages/broker` that trades a GitHub Actions OIDC token for a one-repository, issues-and-projects token — lets any org that installs the public App drive the factory without ever holding a private key of its own.

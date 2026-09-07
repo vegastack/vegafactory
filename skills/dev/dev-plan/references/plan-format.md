@@ -13,11 +13,11 @@ The comment a plan lives in, verbatim. dev-implement executes it task by task an
 
 ### Tasks
 
-- [ ] **Task 1: <name>**
+- [ ] **Task 1: <name>** <!-- task-id:<issue>-T1 -->
   - Files — Create: `exact/path.ts` · Modify: `exact/path.ts` (<which area>) · Test: `exact/path.test.ts`
   - Interfaces — Consumes: <exact signatures/names from earlier tasks> · Produces: <exact names, parameter and return types later tasks rely on — an implementer may see only this task; this block is how they learn what neighbors use>
   - Steps: write the failing test (the actual test code, fenced) → run it, expect FAIL with <reason> → implement the minimal code → run, expect PASS → commit `<type>: <message>`
-- [ ] **Task 2: …**
+- [ ] **Task 2: …** <!-- task-id:<issue>-T2 -->
 
 **Revisions:** (absent until a post-approval edit; then one line per edit)
 ````
@@ -39,6 +39,7 @@ Optional. Declare it only when the work below can run at the same time; its abse
 
 ## Rules
 
+- **Approval scope:** assign each structural task its immutable `<issue>-T<n>` ID before approval; never reuse removed IDs. Requirements, task identities/order, files, interfaces, actions and revisions are immutable approved scope. Only existing task checkboxes and the validated evidence-only progress block in dev-setup's conventions may change without renewed approval. Use dev-implement's canonicalizer; fenced examples are scope bytes, not task declarations. Missing IDs on an already approved legacy plan require a revised approved scope.
 - **Task size:** the smallest unit that carries its own test cycle and is worth a fresh reviewer's look. Fold setup/scaffolding/docs into the task whose deliverable needs them; split only where a reviewer could reject one task while approving its neighbor. Each task ends independently verifiable.
 - **Prose tasks** (docs, skill text, config) swap the test-first Steps for edit → verify (the concrete command: `bun run check`, a link-resolution run, a rendered read-through) → commit. The verify step is never omitted.
 - **Revisions:** post-approval edits follow the revision-marker rule in dev-setup's `references/conventions.md` — bump the heading/marker version and append the `Revisions:` line.
@@ -63,7 +64,7 @@ These are plan failures — plan-lint rejects them, and a human reviewer should 
 ## Worked micro-example
 
 ```markdown
-- [ ] **Task 1: reminder schedule column**
+- [ ] **Task 1: reminder schedule column** <!-- task-id:12-T1 -->
   - Files — Modify: `server/db/schema/invoices.ts` (invoices table) · Test: `server/db/schema/invoices.test.ts`
   - Interfaces — Produces: `invoices.reminderAt: timestamp | null` (Drizzle column), read by Task 2's query
   - Steps: failing test asserting the column exists in the generated schema → run, expect FAIL "no such column" → add the column + regenerate → run, expect PASS → commit `feat: reminder schedule column`

@@ -38,6 +38,7 @@
     "scripts/questions.mjs@dev-setup",
     "references/ask-route.md@dev-setup",
     "scripts/lib/gh.mjs",
+    "scripts/lib/approval.mjs",
     "scripts/preflight.mjs",
     "scripts/evidence-check.mjs",
     "scripts/reclaim.mjs",
