@@ -32,7 +32,7 @@ const NO_STDIO = 'ignore';
 const KIND_DELETE = 'delete';
 const VERB_WORKTREE_REMOVE = 'git worktree remove';
 
-export const SCHEMA_VERSION = 1
+export const SCHEMA_VERSION = 2
 export const SYNC_COMMAND = 'vegafactory guard sync'
 // The policy store, as any path spelling would carry it — `~/`, a HOME-relative form, absolute.
 const POLICY_STORE = '.vegastack/guard'
@@ -86,6 +86,17 @@ export function readPolicyFile(text, expectedRepo, displayPath) {
   if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return { missing: `the ship-guard policy at ${shown} is not a JSON object` }
   if (parsed.schemaVersion !== SCHEMA_VERSION) return { missing: `the ship-guard policy at ${shown} has schemaVersion ${JSON.stringify(parsed.schemaVersion)}, expected ${SCHEMA_VERSION}` }
   if (parsed.repo !== expectedRepo) return { missing: `the ship-guard policy at ${shown} is for ${JSON.stringify(parsed.repo)}, not ${expectedRepo}` }
+  if (typeof parsed.policyDigest !== 'string' || !/^[a-f0-9]{64}$/.test(parsed.policyDigest)) return { missing: `the ship-guard policy at ${shown} has an invalid effective policy digest` }
+  const sources = parsed.sources
+  if (!sources || typeof sources !== 'object' || Array.isArray(sources) || !Object.values(sources).every((source) =>
+    source && typeof source === 'object' && !Array.isArray(source)
+    && ['org', 'group', 'repo'].includes(source.scope)
+    && typeof source.path === 'string' && source.path.trim()
+    && typeof source.revision === 'string'
+    && (source.revisionKind === 'git' ? /^[a-f0-9]{40}$/.test(source.revision)
+      : source.revisionKind === 'sha256' && /^[a-f0-9]{64}$/.test(source.revision)))) {
+    return { missing: `the ship-guard policy at ${shown} has invalid source provenance` }
+  }
   const environments = Array.isArray(parsed.environments)
     ? parsed.environments.filter((entry) => entry && typeof entry === 'object' && typeof entry.target === 'string' && (entry.policy === 'auto' || entry.policy === 'ask') && typeof entry.pattern === 'string' && entry.pattern.trim())
       .map((entry) => ({ target: entry.target, policy: entry.policy, pattern: entry.pattern.trim() }))

@@ -10,8 +10,10 @@ import { NUDGE_REASON, isDirectional } from '../assets/hooks/decision-nudge.mjs'
 // The compiled policy the guard reads. dev.md is never handed to the guard: the compiler
 // (scripts/ship-policy.mjs) writes this shape to ~/.vegastack/guard/<owner>__<repo>.json.
 const POLICY = {
-  schemaVersion: 1,
+  schemaVersion: 2,
   repo: 'acme/app',
+  policyDigest: 'a'.repeat(64),
+  sources: { 'layer.repo': { scope: 'repo', path: '.vegastack/dev.md', revision: 'b'.repeat(64), revisionKind: 'sha256' } },
   defaultBranch: 'main',
   gates: 3,
   environments: [
@@ -37,7 +39,8 @@ describe('ship-guard policy file', () => {
     const broken = [
       readPolicyFile(null, 'acme/app'),
       readPolicyFile('{ not json', 'acme/app'),
-      readPolicyFile(JSON.stringify({ ...POLICY, schemaVersion: 2 }), 'acme/app'),
+      readPolicyFile(JSON.stringify({ ...POLICY, schemaVersion: 1 }), 'acme/app'),
+      readPolicyFile(JSON.stringify({ ...POLICY, schemaVersion: 3 }), 'acme/app'),
       readPolicyFile(JSON.stringify({ ...POLICY, repo: 'acme/other' }), 'acme/app'),
       readPolicyFile(JSON.stringify(POLICY), null),
     ]
@@ -51,6 +54,33 @@ describe('ship-guard policy file', () => {
       }
       expect(decide('bun run check', bad).decision).toBe('allow')
       expect(decide('git status', bad).decision).toBe('allow')
+    }
+  })
+
+  test('malformed schema2 provenance cannot authorize a guarded action', () => {
+    const source = POLICY.sources['layer.repo']
+    const malformedSources = [
+      undefined, null, [], 'repo',
+      ...[null, [], {}, { ...source, scope: 'machine' }, { ...source, path: '' },
+        { ...source, path: '  ' }, { ...source, revision: 'b'.repeat(40) },
+        { ...source, revision: 'z'.repeat(64) }, { ...source, revisionKind: 'unknown' },
+        { ...source, revisionKind: 'git' }, { ...source, revision: null },
+        { ...source, path: 42 }].map(entry => ({ 'layer.repo': entry })),
+    ]
+    const malformed = [
+      ...[undefined, null, 42, '', 'a'.repeat(40), 'g'.repeat(64), 'A'.repeat(64)]
+        .map(policyDigest => ({ ...POLICY, policyDigest })),
+      ...malformedSources.map(sources => ({ ...POLICY, sources })),
+    ]
+    for (const document of malformed) {
+      const rejected = readPolicyFile(JSON.stringify(document), 'acme/app')
+      expect(rejected.missing).toMatch(/digest|provenance/)
+      for (const command of ['wrangler deploy --env preview', 'git push origin feat/x', 'gh pr merge 12']) {
+        const result = decide(command, rejected)
+        expect(result).toMatchObject({ decision: 'ask', rule: 'no-policy' })
+        expect(result.reason).toContain('vegafactory guard sync')
+      }
+      expect(decide('git status', rejected).decision).toBe('allow')
     }
   })
 
@@ -373,11 +403,15 @@ describe('this repo runs the hooks package it ships', () => {
     expect(wiring.hooks.Stop[0].hooks.map((h: { command: string }) => h.command).join(' ')).toContain('decision-nudge.mjs')
   })
 
-  test("the guard, fed this repo's compiled dev.md, asks on its real shipping commands and allows its ordinary ones", () => {
+  test("the guard enforces this repo's shipping commands from an isolated local-policy fixture", () => {
     const script = join(repoRoot, '.vegastack/hooks/ship-guard.mjs')
     const compiler = join(repoRoot, 'skills/dev/dev-setup/scripts/ship-policy.mjs')
-    const policyFile = join(mkdtempSync(join(tmpdir(), 'vsk-guard-policy-')), 'policy.json')
-    const compiled = Bun.spawnSync(['node', compiler, '--dev-md', join(repoRoot, '.vegastack/dev.md'), '--repo', 'vegastack/vegafactory', '--policy', policyFile, '--write', '--json'])
+    const fixture = mkdtempSync(join(tmpdir(), 'vsk-guard-policy-'))
+    const policyFile = join(fixture, 'policy.json'), devMd = join(fixture, 'dev.md')
+    // Keep the real action rules, while the fixture declares local policy explicitly.
+    // This compiler/reader test must not depend on the operator's live control-room snapshot.
+    writeFileSync(devMd, readFileSync(join(repoRoot, '.vegastack/dev.md'), 'utf8').replace(/^control-room:.*$/m, 'control-room: none'))
+    const compiled = Bun.spawnSync(['node', compiler, '--dev-md', devMd, '--repo', 'vegastack/vegafactory', '--policy', policyFile, '--write', '--json'])
     expect(compiled.exitCode, compiled.stdout.toString()).toBe(0)
     const check = (command: string) => Bun.spawnSync(['node', script, '--check', '--command', command, '--policy', policyFile, '--repo', 'vegastack/vegafactory', '--json'])
     for (const command of ['gh pr merge 110 --rebase', 'git push origin main', 'git tag v0.19.0', 'git push origin v0.19.0', 'git push --force', 'wrangler deploy --env production', 'bun run --cwd packages/broker deploy:production']) {

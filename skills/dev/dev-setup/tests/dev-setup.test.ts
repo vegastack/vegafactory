@@ -165,8 +165,10 @@ describe('dev-setup contract', () => {
     const entries = policy!.replace(/^harness-policy:\s*/, '').split('#')[0].trim().split(' · ')
     expect(entries.map((entry) => entry.split(' ')[0])).toEqual(['intake', 'plan', 'implement', 'review', 'status', 'chronicle'])
     for (const entry of entries) expect(entry.split(' ')).toHaveLength(4)
-    expect(policy).toContain('review codex gpt-5.6 xhigh')
-    expect(policy).toContain('xhigh')
+    for (const entry of entries) {
+      const stage = entry.split(' ')[0]
+      expect(entry).toBe(stage + ' {{' + stage + '-harness}} {{' + stage + '-model}} {{' + stage + '-effort}}')
+    }
   })
 
   test('SKILL.md ties the review recommendation and the Environments gap note to detected harnesses', () => {
@@ -246,7 +248,7 @@ describe('dev-setup contract', () => {
   test('conventions carries the precedence rule and did not grow doing it', () => {
     const conventions = readFileSync(join(skillRoot, 'references/conventions.md'), 'utf8')
     expect(conventions).toContain(
-      "Knob precedence, nearest wins: hand edits in `.vegastack/dev.md`, then the org control room's `groups/<g>/*`, then its `org.md`, then skill defaults; decision registers concatenate instead of overriding.",
+      'locks require explicit org delegation',
     )
     expect(conventions).not.toContain('A checkpoint retains what a compaction summary must retain')
     expect(conventions.split(/\s+/).filter(Boolean).length).toBeLessThanOrEqual(1090)

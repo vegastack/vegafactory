@@ -124,7 +124,7 @@ export function parsePolicy(text = '', scope = 'repo') {
     if (!match) continue
     const key = match[1], value = match[2].replace(/\s+#.*$/, '').trim()
     if (forbidden.has(key)) { layer.blocks.push('prototype key in policy'); continue }
-    const stageLine = stages.includes(key) && (key !== 'review' || !enums.review.includes(value))
+    const stageLine = stages.includes(key) && !enums[key]?.includes(value)
     if (key === 'policy-schema' || ordinary.has(key) || stageLine) {
       if (seen.has(key)) layer.blocks.push(`duplicate policy key: ${key}`)
       seen.add(key)

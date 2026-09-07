@@ -11,7 +11,7 @@ export interface PeopleRow extends Totals {
 export interface PeopleView {
   viewer: string | null
   rows: PeopleRow[]
-  /** True whenever the viewer is seeing less than the whole org — their own row only. */
+  /** True unless verified canonical authority permits the whole organization. */
   gated: boolean
 }
 
@@ -27,9 +27,10 @@ export function buildPeopleView({ context }: { context: PageContext }): PeopleVi
   const rows = perPerson(context.db, context.filters)
     .filter((row) => canViewPerson({ viewer, subject: row.human, people: context.people, statsPeople: context.policy.statsPeople }).allowed)
     .map((row) => ({ ...row, login: row.human, ...describe(row.human, context.people) }))
-  const openToAll = context.policy.statsPeople === 'on'
-    && context.people.find((person) => person.login === viewer)?.role === 'lead'
-  return { viewer, rows, gated: !openToAll }
+  // This call supplies no verified admin/repository scope to canViewPerson, so its only
+  // grant is own-data visibility. Empty or own-only rows do not prove whole-org authority.
+  // Managed queries may clear this flag only after canonical scope validation.
+  return { viewer, rows, gated: true }
 }
 
 export interface PersonView {

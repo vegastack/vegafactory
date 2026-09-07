@@ -25,6 +25,21 @@ test('ordinary stages inherit individually, local dispatch cannot be inherited',
   expect(result.policy?.values.stages).toEqual({ plan: { harness: 'claude', model: 'chosen', effort: 'high' }, implement: { harness: 'claude', model: 'confirmed', effort: 'high' } })
 })
 
+test('chronicle on/off remains an ordinary knob alongside its harness stage', () => {
+  for (const value of ['on', 'off']) {
+    const result = resolvePolicy({ repo: `chronicle: ${value}\nharness-policy: chronicle codex fixture-model high`, identity })
+    expect(result.blocks).toEqual([])
+    expect(result.ok).toBe(true)
+    expect(result.policy.values.chronicle).toBe(value)
+    expect(result.policy.values.stages.chronicle).toEqual({ harness: 'codex', model: 'fixture-model', effort: 'high' })
+  }
+  const stage = parsePolicy('chronicle: codex fixture-model high')
+  expect(stage.blocks).toEqual([])
+  expect(stage.values.stages.chronicle).toEqual({ harness: 'codex', model: 'fixture-model', effort: 'high' })
+  expect(stage.values.chronicle).toBeUndefined()
+  expect(parsePolicy('chronicle: maybe').blocks).toContain('invalid or duplicate harness stage: chronicle')
+})
+
 test.each(['stats: maybe', 'stats: on\nstats: off', 'policy-schema: 9', 'harness-policy: plan unknown model high', 'review: none', '```vsk-policy\n{bad}\n```'])('known malformed input refuses: %s', text => {
   expect(resolvePolicy({ repo: text, identity }).ok).toBe(false)
 })
