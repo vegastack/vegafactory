@@ -2,7 +2,7 @@ import { describe, expect, test } from 'bun:test'
 import { chmodSync, mkdirSync, mkdtempSync, readFileSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { readHookConfiguration, validateRegistration } from '../src/hook-registration.ts'
+import { inspectCodexConfiguration, readHookConfiguration, validateRegistration } from '../src/hook-registration.ts'
 
 function fixture(harness: 'claude' | 'codex' = 'codex') {
   const checkout = mkdtempSync(join(tmpdir(), 'vf hook registration '))
@@ -110,3 +110,77 @@ test('Claude local disabling and unsupported inline configurations refuse withou
   writeFileSync(join(f.checkout, '.codex/config.toml'), '[hooks]\nPreToolUse = [{ hooks = [] }]\n')
   expect(() => readHookConfiguration(f.checkout, 'codex')).toThrow(/unsupported inline/)
 })
+
+
+test('bare node must agree with actual shell PATH resolution, including relative entries', () => {
+  const f = fixture()
+  const original = process.env.PATH
+  const bin = join(f.checkout, 'relative-bin')
+  mkdirSync(bin)
+  writeFileSync(join(bin, 'node'), '#!/bin/sh\nprintf wrong-node\n')
+  chmodSync(join(bin, 'node'), 0o755)
+  const observed = Bun.spawnSync(['/bin/sh', '-c', f.command], { cwd: f.checkout, env: { ...process.env, PATH: `relative-bin:${original}` } })
+  expect(observed.stdout.toString()).toBe('wrong-node')
+  try {
+    process.env.PATH = `relative-bin:${original}`
+    expect(validateRegistration(f).ok).toBe(false)
+  } finally { process.env.PATH = original }
+  expect(validateRegistration(f).ok).toBe(true)
+  const real = Bun.spawnSync(['/bin/sh', '-c', f.command], { cwd: f.checkout })
+  expect(real.exitCode).toBe(0)
+  expect(real.stdout.toString()).toBe('')
+})
+
+test('multiline TOML instruction strings never register their example hook commands', () => {
+  const f = fixture()
+  mkdirSync(join(f.checkout, '.codex'))
+  const example = '[[hooks.PreToolUse]]\n[[hooks.PreToolUse.hooks]]\ntype = "command"\ncommand = ' + JSON.stringify(f.command) + '\n[unrelated]\n'
+  for (const delimiter of ["\"\"\"", "'".repeat(3)]) {
+    const quotedExample = delimiter.startsWith('"') ? example.replaceAll('\\', '\\\\').replaceAll('"', '\\"') : example
+    writeFileSync(join(f.checkout, '.codex/config.toml'), 'developer_instructions = ' + delimiter + '\n' + quotedExample + delimiter + '\n')
+    expect(validateRegistration({ ...f, config: readHookConfiguration(f.checkout, 'codex').config }).ok).toBe(false)
+    const instructions = readFileSync(join(f.checkout, '.codex/config.toml'), 'utf8')
+    writeFileSync(join(f.checkout, '.codex/config.toml'), instructions + example.replace('[unrelated]\n', ''))
+    expect(validateRegistration({ ...f, config: readHookConfiguration(f.checkout, 'codex').config }).ok).toBe(true)
+  }
+})
+
+
+for (const mode of ['enabled', 'disabled', 'managed-only', 'missing-requirements', 'memory-on', 'wrong-checkout', 'loader-error']) {
+  test(`external Codex metadata RPC: ${mode}`, async () => {
+    const f = fixture()
+    const nativeHome = join(f.checkout, 'native-home')
+    mkdirSync(nativeHome)
+    mkdirSync(join(f.checkout, '.codex'))
+    const source = join(f.checkout, '.codex/hooks.json'), calls = join(f.checkout, 'rpc-calls')
+    writeFileSync(source, JSON.stringify(f.config))
+    const cli = join(f.checkout, 'codex-fixture')
+    writeFileSync(cli, `#!/usr/bin/env node
+const fs = require('node:fs'), readline = require('node:readline');
+const cwd = ${JSON.stringify(f.checkout)}, source = ${JSON.stringify(source)}, command = ${JSON.stringify(f.command)}, mode = ${JSON.stringify(mode)};
+readline.createInterface({ input: process.stdin }).on('line', line => {
+  const request = JSON.parse(line);
+  fs.appendFileSync(${JSON.stringify(calls)}, request.method + '\\n');
+  if (request.id === undefined) return;
+  let result = {};
+  if (request.method === 'hooks/list') result = { data: [{ cwd: mode === 'wrong-checkout' ? '/other' : cwd, errors: mode === 'loader-error' ? [{}] : [], warnings: [], hooks: [{ handlerType:'command', eventName:'preToolUse', command, matcher:null, async:false, enabled:mode !== 'disabled', isManaged:false, currentHash:'sha256:' + 'a'.repeat(64), source:'project', sourcePath:source, trustStatus:'untrusted' }] }] };
+  if (request.method === 'configRequirements/read') result = mode === 'missing-requirements' ? {} : { requirements: mode === 'managed-only' ? { allowManagedHooksOnly:true } : null };
+  if (request.method === 'config/read') result = { config: { unrelatedSecret:'never-retain-me', projects:{ [cwd]:{ trust_level:'trusted' } }, memories:{use_memories:mode === 'memory-on', generate_memories:false}, features:{hooks:true,memories:false,external_agent_memory_import:false,context_management:{experimental_mode:false}} }, origins:{} };
+  process.stdout.write(JSON.stringify({ id:request.id, result }) + '\\n');
+});
+`)
+    chmodSync(cli, 0o755)
+    const result = await inspectCodexConfiguration({ command: cli, args: [], cwd: f.checkout, env: { ...process.env, HOME: nativeHome, CODEX_HOME: nativeHome } })
+    if (mode === 'enabled' || mode === 'memory-on') expect(result.hookApplicable).toBe(true)
+    else expect(result.hookApplicable).toBe(false)
+    if (mode === 'memory-on') expect(result.memoryRetrievalDisabled).toBe(false)
+    if (mode === 'enabled') {
+      expect(result.memoryRetrievalDisabled).toBe(true)
+      expect(result.memoryGenerationDisabled).toBe(true)
+      expect(result.hookHash).toBe('sha256:' + 'a'.repeat(64))
+    }
+    const methods = readFileSync(calls, 'utf8').trim().split('\n')
+    expect(methods).toEqual(['initialize', 'initialized', 'hooks/list', 'configRequirements/read', 'config/read'])
+    expect(JSON.stringify(result)).not.toContain('never-retain-me')
+  }, 10000)
+}

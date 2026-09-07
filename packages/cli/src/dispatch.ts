@@ -13,8 +13,8 @@ import { hostname, tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { pathToFileURL, fileURLToPath } from 'node:url'
 import { loadFactoryConfig, repoPolicyFromEffective, stagePolicy, type FactoryConfig, type Harness, type RepoEntry, type RepoPolicy, type Stage, type Subagents } from './config.ts'
-import { buildLaunchPlan, codexManagedControls, validateManagedLaunch, type HarnessMetadata, type LaunchPlan } from './launch.ts'
-import { checkoutFile, readHookConfiguration, validateRegistration } from './hook-registration.ts'
+import { buildLaunchPlan, validateManagedLaunch, type HarnessMetadata, type LaunchPlan } from './launch.ts'
+import { checkoutFile, inspectCodexConfiguration, readHookConfiguration, validateRegistration } from './hook-registration.ts'
 import { checkCompiledGuard, shipPolicyScript } from './guard.ts'
 import { GhUnavailable, ghText } from './gh.ts'
 import { GIT_CREDENTIAL_ARGS } from './sync.ts'
@@ -333,6 +333,14 @@ export async function shipGuardWired(repoPath: string, harness: Harness, policy?
   if (policy) {
     const checked = checkCompiledGuard({ checkout: repoPath, ...policy })
     if (!checked.wired) return checked
+    // Consult the actual trusted reader's version contract; a current compiler cannot make
+    // an older guard understand a new policy. This is not a second policy parser.
+    try {
+      const reader = await import(pathToFileURL(join(dirname(shipPolicyScript()), '../assets/hooks/ship-guard.mjs')).href)
+      if (reader.SCHEMA_VERSION !== 2 || typeof reader.readPolicyFile !== 'function') {
+        return { wired: false, policyDigest: null, detail: `installed guard reader schema ${reader.SCHEMA_VERSION ?? 'unknown'} cannot consume compiled policy schema 2; upgrade the guard and compiler together` }
+      }
+    } catch { return { wired: false, policyDigest: null, detail: 'installed guard reader contract is unavailable' } }
     return { ...checked, detail: `${relative}: configured guard and ${checked.detail}; invocation/coverage remain unqualified` }
   }
   return { wired: true, detail: `${relative}: configured guard; compiled policy and invocation not checked`, policyDigest: null }
@@ -545,6 +553,8 @@ export interface RunOutcome {
   logFile: string
   pushed: boolean
   handedBack: boolean
+  started?: boolean
+  refusal?: string
   // What the stats record is built from. Optional because the tick's `execute` seam is stubbed in
   // several tests; a run with no stdout still produces a record, just a context-only one.
   stdout?: string
@@ -580,30 +590,30 @@ function defaultGit(args: string[], cwd: string): Promise<{ ok: boolean; message
 // (an evidence sha only resolves once the commit is on the remote), a hand-back comment carrying
 // the redacted tail is posted, the issue goes back to `needs-operator` assigned to its operator,
 // and the worktree is left exactly as the run left it.
-// Metadata commands only: neither --version nor features list starts a model session.
-export function inspectManagedHarness(plan: LaunchPlan): HarnessMetadata {
+// Metadata only: version and allowlisted config/hook RPCs start no task or turn.
+export async function inspectManagedHarness(plan: LaunchPlan): Promise<HarnessMetadata> {
   const options = { cwd: plan.cwd, env: { ...process.env, ...plan.env }, encoding: 'utf8' as const, timeout: 5000, killSignal: 'SIGKILL' as const, maxBuffer: 128 * 1024 }
   const version = spawnSync(plan.command, ['--version'], options)
   if (version.status !== 0 || version.error || version.signal) return { version: '' }
   const metadata: HarnessMetadata = { version: version.stdout.trim() }
-  if (plan.command === 'codex') {
-    const listed = spawnSync(plan.command, [...codexManagedControls(plan.cwd).filter(arg => arg !== '--strict-config'), 'features', 'list'], options)
-    metadata.features = {}
-    if (listed.status === 0 && !listed.error && !listed.signal) {
-      for (const line of listed.stdout.split('\n')) {
-        const match = /^(hooks|memories|external_agent_memory_import|context_management)\s+.+\s+(true|false)$/.exec(line.trim())
-        if (match) metadata.features[match[1]!] = match[2] === 'true'
-      }
-    }
+  if (plan.command === 'codex' && metadata.version === 'codex-cli 0.153.4') {
+    const inspected = await inspectCodexConfiguration({ command: plan.command, cwd: plan.cwd, env: options.env,
+      args: plan.args.flatMap((arg, index) => ['-c', '--config', '--enable', '--disable'].includes(arg)
+        ? [arg, plan.args[index + 1] ?? ''] : []) })
+    return { ...metadata, ...inspected }
   }
-  return metadata
+  // CLI version/help and a raw/cached settings cascade do not prove which managed Claude
+  // restrictions apply. Until a supported effective inspection is available, refuse instead
+  // of assuming project hooks or memory overrides beat administrator policy.
+  return { ...metadata, hookApplicable: false, memoryRetrievalDisabled: false, memoryGenerationDisabled: false,
+    problems: ['effective Claude hook and memory configuration inspection is unavailable'] }
 }
 
 export async function executeRun(
   run: PlannedRun,
   plan: LaunchPlan,
   config: FactoryConfig,
-  options: { operator: string | null },
+  options: { operator: string | null; onSpawn?: () => void },
   deps?: Partial<ExecuteDeps>,
 ): Promise<RunOutcome> {
   const now = deps?.now ?? (() => new Date())
@@ -627,16 +637,22 @@ export async function executeRun(
     })
     return writing
   }
-  record({ at: startedAt.toISOString(), event: 'start', repo: run.repo, issue: run.issue, stage: run.stage, command: plan.command, args: plan.args, cwd: plan.cwd })
+  record({ at: startedAt.toISOString(), event: 'prepared', repo: run.repo, issue: run.issue, stage: run.stage, command: plan.command, args: plan.args, cwd: plan.cwd })
   await flush()
 
+  const refuseLaunch = async (reason: string): Promise<RunOutcome> => {
+    record({ at: now().toISOString(), event: 'launch-refused', reason })
+    await flush()
+    return { started: false, refusal: reason, exitCode: null, timedOut: false, logFile: file, pushed: false, handedBack: false }
+  }
+  if (run.parallel?.length) return refuseLaunch('parallel child execution requires the checked child gateway; preparation-only launch descriptions do not qualify')
   if (plan.command === 'claude' || plan.command === 'codex') {
-    const controls = validateManagedLaunch(plan, inspectManagedHarness(plan))
-    if (!controls.ok) throw new Error(`managed launch refused: ${controls.problems.join('; ')}`)
+    const controls = validateManagedLaunch(plan, await inspectManagedHarness(plan))
+    if (!controls.ok) return refuseLaunch(`managed launch refused: ${controls.problems.join('; ')}`)
     // Log I/O and metadata inspection above can yield; repeat the real guard/compiler check
     // here so the next operation is the actual spawn, not another awaited preparation step.
     const guard = await shipGuardWired(plan.cwd, plan.command, { home: config.home, repo: run.repo, policyDigest: plan.guardPolicyDigest })
-    if (!guard.wired) throw new Error(`prepared guard refused immediately before spawn: ${guard.detail}`)
+    if (!guard.wired) return refuseLaunch(`prepared guard refused immediately before spawn: ${guard.detail}`)
   }
 
   let tail = ''
@@ -644,8 +660,14 @@ export async function executeRun(
   // `codex exec --json` one event per line. Capped at 2 MB, keeping the END, because both formats
   // put what the record needs last.
   let stdout = ''
+  let started = false
   const outcome = await new Promise<{ exitCode: number | null; timedOut: boolean }>(resolve => {
     const child = spawn(plan.command, plan.args, { cwd: plan.cwd, env: { ...process.env, ...plan.env }, stdio: ['ignore', 'pipe', 'pipe'] })
+    child.once('spawn', () => {
+      started = true
+      record({ at: now().toISOString(), event: 'start' })
+      options.onSpawn?.()
+    })
     let timedOut = false
     const timer = setTimeout(() => { timedOut = true; child.kill('SIGTERM') }, timeoutMs)
     for (const stream of ['stdout', 'stderr'] as const) {
@@ -671,6 +693,7 @@ export async function executeRun(
     })
   })
 
+  if (!started) return refuseLaunch('harness process did not start')
   const push = await git(['push', '-u', 'origin', 'HEAD'], plan.cwd)
   if (!push.ok) record({ at: new Date().toISOString(), event: 'push-failed', message: redact(push.message) })
 
@@ -701,6 +724,7 @@ export async function executeRun(
   record({ at: new Date().toISOString(), event: 'exit', exitCode: outcome.exitCode, timedOut: outcome.timedOut, pushed: push.ok, handedBack })
   await flush()
   return {
+    started: true,
     exitCode: outcome.exitCode,
     timedOut: outcome.timedOut,
     logFile: file,
@@ -892,13 +916,13 @@ export interface TickDeps {
   now: () => Date
   shipGuard: (repoPath: string, harness: Harness, policy?: { home: string; repo: string; policyDigest?: string }) => Promise<{ wired: boolean; detail: string; policyDigest?: string | null }>
   ensureWorktree: (repoPath: string, issue: number, title: string) => Promise<WorktreeTarget>
-  execute: (run: PlannedRun, plan: LaunchPlan, config: FactoryConfig, options: { operator: string | null }) => Promise<RunOutcome>
+  execute: (run: PlannedRun, plan: LaunchPlan, config: FactoryConfig, options: { operator: string | null; onSpawn?: () => void }) => Promise<RunOutcome>
   // Which parents could run their children at the same time. Reading a plan's independent groups
   // means running dev-plan's plan-lint, the one parser of that grammar, so it lives behind this
   // dependency rather than in a second copy here.
   parentCandidates: (repo: string, repoPath: string, ready: BoardIssue[], operators: string[]) => Promise<ParentCandidate[]>
   tracker: RunTracker
-  harnessMetadata: (plan: LaunchPlan) => HarnessMetadata
+  harnessMetadata: (plan: LaunchPlan) => HarnessMetadata | Promise<HarnessMetadata>
 }
 
 async function ghJsonVia<T>(gh: TickDeps['gh'], args: string[]): Promise<T> {
@@ -1120,6 +1144,7 @@ export interface RunReport {
   stage: Stage
   launch: { command: string; args: string[]; env: Record<string, string>; cwd: string }
   launched: boolean
+  remoteEffectCoverage: NonNullable<LaunchPlan['remoteEffectCoverage']>
   approvalIds?: string[]
   approvalChecked?: boolean
   bindings?: Array<{ repo: string; issue: number; kind: string; artifactId: string; rev: number; digest: string }>
@@ -1236,6 +1261,10 @@ export async function runTick(
     }
 
     for (const run of plan.runs) {
+      if (run.parallel?.length) {
+        refusals.push({ repo: entry.repo, issue: run.issue, reason: 'parallel child execution requires the checked child gateway; preparation-only launch descriptions do not qualify' })
+        continue
+      }
       let stage: ReturnType<typeof stagePolicy>
       try {
         stage = stagePolicy(policy, run.stage)
@@ -1330,6 +1359,7 @@ export async function runTick(
         stage: run.stage,
         launch: { command: launch.command, args: launch.args, env: launch.env, cwd: launch.cwd },
         launched: false,
+        remoteEffectCoverage: launch.remoteEffectCoverage ?? { kind: 'unmanaged-possible', reasonCode: 'hook-configuration-only' },
         approvalChecked: !options.dryRun,
         approvalIds: admission.approvalIds,
         bindings: admission.bindings,
@@ -1338,7 +1368,7 @@ export async function runTick(
         runs.push(report)
         continue
       }
-      const controls = validateManagedLaunch(launch, (deps?.harnessMetadata ?? inspectManagedHarness)(launch))
+      const controls = validateManagedLaunch(launch, await (deps?.harnessMetadata ?? inspectManagedHarness)(launch))
       if (!controls.ok) {
         refusals.push({ repo: entry.repo, issue: run.issue, reason: `#${run.issue}: managed launch refused: ${controls.problems.join('; ')}` })
         continue
@@ -1358,9 +1388,24 @@ export async function runTick(
       const runStage = stage
       const runTarget = target
       const runParent = parentOf
+      let resolveStart!: (started: boolean) => void
+      const startAcknowledged = new Promise<boolean>(resolve => { resolveStart = resolve })
+      let acknowledged = false
+      const onSpawn = (): void => { acknowledged = true; resolveStart(true) }
       const done = (async () => {
         try {
-          const outcome = await execute(run, launch, config, { operator: policy.operators[0] ?? null })
+          const outcome = await execute(run, launch, config, { operator: policy.operators[0] ?? null, onSpawn })
+          if (outcome.started === false || outcome.refusal) {
+            refusals.push({ repo: entry.repo, issue: run.issue, reason: outcome.refusal ?? 'harness did not start' })
+            resolveStart(false)
+            return
+          }
+          if (!acknowledged && outcome.started === true) onSpawn()
+          if (!acknowledged) {
+            refusals.push({ repo: entry.repo, issue: run.issue, reason: 'executor supplied no actual-spawn acknowledgement' })
+            resolveStart(false)
+            return
+          }
           report.exitCode = outcome.exitCode
           report.logFile = outcome.logFile
           const written = await recordRun({
@@ -1391,17 +1436,22 @@ export async function runTick(
             await statsPushChain
           }
         } catch (error) {
-          // executeRun does not throw; a stub or a future edit that does must still release the
-          // lock and leave the tracker, or the repo is wedged for the life of the process.
+          // A preparation/metadata failure is not a launch and must not consume corrections.
+          if (!acknowledged) {
+            refusals.push({ repo: entry.repo, issue: run.issue, reason: `launch refused before spawn: ${(error as Error).message}` })
+            resolveStart(false)
+          }
           report.exitCode = null
           process.stderr.write(`run on ${key} failed outside the harness: ${(error as Error).message}\n`)
         } finally {
+          resolveStart(false)
           tracker.delete(key)
           if (inFlightIssues(tracker, entry.repo).length === 0) await releaseLock(lockPath)
         }
       })()
       tracker.set(key, { repo: entry.repo, issue: run.issue, done })
-      report.launched = true
+      report.launched = await startAcknowledged
+      if (!report.launched) { await done; continue }
       // Only reactions need dedupe, and they are recorded the moment the run starts: the board
       // itself is the record for a label run once the run moves the label, and recording label
       // runs here would grow the state file forever for no gain.

@@ -87,3 +87,28 @@ describe('prepared compiler result contract', () => {
     expect(checkCompiledGuard(input, () => ({ ...run(valid), signal: 'SIGKILL' as const })).detail).toContain('deadline')
   })
 })
+
+
+test('the real compiler process is killed at the ten-second deadline', async () => {
+  const { mkdtempSync, writeFileSync, readFileSync } = await import('node:fs')
+  const { tmpdir } = await import('node:os')
+  const { join } = await import('node:path')
+  const root = mkdtempSync(join(tmpdir(), 'vf-compiler-deadline-'))
+  const script = join(root, 'compiler.mjs'), pidFile = join(root, 'pid')
+  writeFileSync(script, `import { writeFileSync } from 'node:fs'; writeFileSync(${JSON.stringify(pidFile)}, String(process.pid)); setInterval(() => {}, 1000);`)
+  const previous = process.env.VSK_SHIP_POLICY_SCRIPT
+  try {
+    process.env.VSK_SHIP_POLICY_SCRIPT = script
+    const start = Date.now()
+    const result = checkCompiledGuard({ checkout: root, home: root, repo: 'acme/app' })
+    expect(result.wired).toBe(false)
+    expect(result.detail).toContain('deadline')
+    expect(Date.now() - start).toBeGreaterThanOrEqual(9000)
+    expect(Date.now() - start).toBeLessThan(13000)
+    const pid = Number(readFileSync(pidFile, 'utf8'))
+    expect(() => process.kill(pid, 0)).toThrow()
+  } finally {
+    if (previous === undefined) delete process.env.VSK_SHIP_POLICY_SCRIPT
+    else process.env.VSK_SHIP_POLICY_SCRIPT = previous
+  }
+}, 15000)

@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, test } from 'bun:test'
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
+import { createHash } from 'node:crypto'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { classifyCommand, extractCommand, parseCommand, policyPath, readPolicyFile, renderDecision, repoFromRemote, splitSegments } from '../assets/hooks/ship-guard.mjs'
@@ -446,7 +447,13 @@ describe('advisory hooks at the actual subprocess boundary', () => {
   const assets = join(import.meta.dir, '../assets/hooks')
   function local() {
     const dir = mkdtempSync(join(tmpdir(), 'vf-advisory-'))
-    const calls = join(dir, 'calls.jsonl'), shim = join(dir, 'vegafactory')
+    const calls = join(dir, 'calls.jsonl'), shim = join(dir, 'dist/index.js')
+    mkdirSync(join(dir, 'dist'))
+    mkdirSync(join(dir, 'skill/dev-setup/assets/hooks'), { recursive: true })
+    const shared = readFileSync(join(assets, 'session-start.mjs'))
+    writeFileSync(join(dir, 'skill/dev-setup/assets/hooks/session-start.mjs'), shared)
+    writeFileSync(join(dir, 'package.json'), JSON.stringify({ name: '@vegastack/vegafactory', bin: { vegafactory: 'dist/index.js' } }))
+    writeFileSync(join(dir, 'skill-integrity.json'), JSON.stringify({ schemaVersion: 2, skills: { 'dev-setup': { files: { 'assets/hooks/session-start.mjs': createHash('sha256').update(shared).digest('hex') } } } }))
     writeFileSync(shim, String.raw`#!/usr/bin/env node
 const fs = require('node:fs');
 const payload = JSON.parse(fs.readFileSync(0, 'utf8'));
@@ -527,6 +534,21 @@ else process.stdout.write(JSON.stringify({ ok: true, contextPointer: 'vsk-contex
     expect(run.exitCode).toBe(0)
     expect(run.stdout.toString()).toBe('')
     expect(run.stderr.toString()).toBe('')
+  })
+
+  test('arbitrary scripts, wrong package identity and mismatched installed hook bytes receive no identities', () => {
+    const f = local()
+    const arbitrary = join(f.dir, 'untrusted.js')
+    writeFileSync(arbitrary, readFileSync(f.shim))
+    expect(invoke('session-start.mjs', JSON.stringify(input), { ...f.env, VSK_VEGAFACTORY: arbitrary }).stdout.toString()).toBe('')
+    expect(f.read()).toEqual([])
+    writeFileSync(join(f.dir, 'package.json'), JSON.stringify({ name: 'other-package', bin: { vegafactory: 'dist/index.js' } }))
+    invoke('session-start.mjs', JSON.stringify(input), f.env)
+    expect(f.read()).toEqual([])
+    writeFileSync(join(f.dir, 'package.json'), JSON.stringify({ name: '@vegastack/vegafactory', bin: { vegafactory: 'dist/index.js' } }))
+    writeFileSync(join(f.dir, 'skill/dev-setup/assets/hooks/session-start.mjs'), '// altered')
+    invoke('session-start.mjs', JSON.stringify(input), f.env)
+    expect(f.read()).toEqual([])
   })
 
   test('an open stdin pipe has a finite read deadline', async () => {

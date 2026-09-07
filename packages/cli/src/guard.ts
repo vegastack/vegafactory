@@ -73,7 +73,7 @@ export function guardUsage(): string {
                        ship guard reads: ~/.vegastack/guard/<owner>__<repo>.json, keyed by
                        the checkout's origin remote. Writes by default.
   sync --check         compare the stored file with what dev.md compiles to now; exit 2
-                       when it is stale or missing. The SessionStart hook runs this.
+                       when it is stale or missing. Managed launch checks use this compiler.
   sync --dry-run       print what would be written and change nothing.
 
 The guard never reads dev.md: the policy lives outside every worktree, and a command

@@ -4,9 +4,10 @@
 // invents a write destination, contacts a network or asks a model to continue.
 
 import { spawnSync } from 'node:child_process'
-import { accessSync, constants, lstatSync, realpathSync } from 'node:fs'
-import { delimiter, isAbsolute, join } from 'node:path'
-import { pathToFileURL } from 'node:url'
+import { accessSync, constants, lstatSync, readFileSync, realpathSync } from 'node:fs'
+import { delimiter, dirname, isAbsolute, join } from 'node:path'
+import { fileURLToPath, pathToFileURL } from 'node:url'
+import { createHash } from 'node:crypto'
 
 export const MAX_HOOK_INPUT_BYTES = 64 * 1024
 export const LOCAL_FLUSH_MS = 500
@@ -68,6 +69,21 @@ function localCli() {
       const path = realpathSync(candidate)
       if (!lstatSync(path).isFile()) continue
       accessSync(path, constants.R_OK)
+      const root = dirname(dirname(path))
+      const read = file => {
+        const stat = lstatSync(file)
+        if (!stat.isFile() || stat.isSymbolicLink() || stat.size > 1024 * 1024) throw new Error('unsupported package metadata')
+        return readFileSync(file)
+      }
+      const pkg = JSON.parse(read(join(root, 'package.json')))
+      if (pkg.name !== '@vegastack/vegafactory' || pkg.bin?.vegafactory !== 'dist/index.js'
+        || path !== realpathSync(join(root, 'dist/index.js'))) continue
+      const manifest = JSON.parse(read(join(root, 'skill-integrity.json')))
+      const expected = manifest.schemaVersion === 2 && manifest.skills?.['dev-setup']?.files?.['assets/hooks/session-start.mjs']
+      if (typeof expected !== 'string' || !/^[a-f0-9]{64}$/.test(expected)) continue
+      const hash = bytes => createHash('sha256').update(bytes).digest('hex')
+      if (hash(read(fileURLToPath(import.meta.url))) !== expected
+        || hash(read(join(root, 'skill/dev-setup/assets/hooks/session-start.mjs'))) !== expected) continue
       return path
     } catch { /* missing installed CLI is an advisory no-op */ }
   }

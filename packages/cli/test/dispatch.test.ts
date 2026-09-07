@@ -347,7 +347,8 @@ describe('executeRun', () => {
     expect(calls.some(call => call.join(' ') === 'git push -u origin HEAD')).toBe(true)
     expect(calls.some(call => call[0] === 'issue')).toBe(false)
     const log = readFileSync(outcome.logFile, 'utf8').trim().split('\n').map(line => JSON.parse(line))
-    expect(log[0].event).toBe('start')
+    expect(log[0].event).toBe('prepared')
+    expect(log.some(row => row.event === 'start')).toBe(true)
     expect(log.some(row => row.text?.includes('hello'))).toBe(true)
     expect(log.at(-1).event).toBe('exit')
   })
@@ -632,10 +633,11 @@ describe('managed launches exclude native memory without disabling project instr
   const input = { harness: 'codex' as const, model: 'fixture', effort: 'high', stage: 'implement' as const, worktree: '/prepared', issue: { number: 140, title: 'fixture' }, operator: 'mk', outcome: 'fixture', stopList: [], resume: false, skillPath: null, subagents: { spawnDepth: 1, concurrent: 3 } }
   test('Codex has explicit retrieval, generation, import and optional context controls', () => {
     const plan = buildLaunchPlan(input)
+    expect(plan.remoteEffectCoverage).toEqual({ kind: 'unmanaged-possible', reasonCode: 'hook-configuration-only' })
     expect(plan.args).toContain('memories.use_memories=false')
     expect(plan.args).toContain('memories.generate_memories=false')
     expect(plan.args).toContain('features.context_management.experimental_mode=false')
-    const metadata = { version: 'codex-cli 0.153.4', features: { hooks: true, memories: false, external_agent_memory_import: false, context_management: false } }
+    const metadata = { version: 'codex-cli 0.153.4', hookApplicable: true, memoryRetrievalDisabled: true, memoryGenerationDisabled: true, features: { hooks: true, memories: false, external_agent_memory_import: false, context_management: false } }
     expect(validateManagedLaunch(plan, metadata).ok).toBe(true)
     expect(validateManagedLaunch(plan, { ...metadata, version: 'codex-cli 0.100.0' }).ok).toBe(false)
     expect(validateManagedLaunch(plan, { ...metadata, features: { ...metadata.features, context_management: true } }).ok).toBe(false)
@@ -646,8 +648,32 @@ describe('managed launches exclude native memory without disabling project instr
     expect(plan.env.CLAUDE_CODE_DISABLE_AUTO_MEMORY).toBe('1')
     expect(plan.args).not.toContain('--bare')
     expect(plan.env.CLAUDE_CODE_DISABLE_CLAUDE_MDS).not.toBe('1')
-    expect(validateManagedLaunch(plan, { version: '2.1.263 (Claude Code)' }).ok).toBe(true)
-    expect(validateManagedLaunch({ ...plan, env: { ...plan.env, CLAUDE_CODE_DISABLE_AUTO_MEMORY: '0' } }, { version: '2.1.263 (Claude Code)' }).ok).toBe(false)
+    expect(validateManagedLaunch(plan, { version: '2.1.263 (Claude Code)', hookApplicable: true, memoryRetrievalDisabled: true, memoryGenerationDisabled: true }).ok).toBe(true)
+    expect(validateManagedLaunch({ ...plan, env: { ...plan.env, CLAUDE_CODE_DISABLE_AUTO_MEMORY: '0' } }, { version: '2.1.263 (Claude Code)', hookApplicable: true, memoryRetrievalDisabled: true, memoryGenerationDisabled: true }).ok).toBe(false)
     expect(validateManagedLaunch(plan, { version: '9.0.0 (Claude Code)' }).ok).toBe(false)
   })
+})
+
+
+test('the real executor refuses unsupported external harness metadata before spawn or delivery', async () => {
+  const home = mkdtempSync(join(tmpdir(), 'vf-real-executor-'))
+  const bin = join(home, 'bin'), marker = join(home, 'entered')
+  mkdirSync(bin)
+  writeFileSync(join(bin, 'claude'), `#!/usr/bin/env node
+const fs = require('node:fs');
+if (process.argv.includes('--version')) process.stdout.write('0.0.0 (Claude Code)');
+else fs.writeFileSync(${JSON.stringify(marker)}, 'entered');
+`)
+  chmodSync(join(bin, 'claude'), 0o755)
+  const plan = buildLaunchPlan({ harness: 'claude', model: 'fixture', effort: 'high', stage: 'implement', worktree: home,
+    issue: { number: 140, title: 'fixture' }, operator: 'mk', outcome: 'fixture', stopList: [], resume: false, skillPath: null, subagents: { spawnDepth: 1, concurrent: 3 } })
+  plan.env.PATH = `${bin}:${process.env.PATH ?? ''}`
+  const outcome = await executeRun({ repo: 'acme/app', issue: 140, title: 'fixture', stage: 'implement', commentId: null, reactionId: null }, plan,
+    parseFactoryConfig({ repos: [{ path: home, repo: 'acme/app', org: 'acme' }] }, home), { operator: 'mk' })
+  expect(outcome.started).toBe(false)
+  expect(outcome.refusal).toContain('unsupported Claude version')
+  expect(outcome.pushed).toBe(false)
+  expect(outcome.handedBack).toBe(false)
+  expect(readFileSync(outcome.logFile, 'utf8')).toContain('launch-refused')
+  expect(() => readFileSync(marker)).toThrow()
 })

@@ -3,13 +3,13 @@
 // in dispatch.test.ts; these cover the seams between them, which is where the review found the
 // silent drops.
 import { describe, expect, test } from 'bun:test'
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { scopeDigest } from '../../../skills/dev/dev-implement/scripts/lib/approval.mjs'
 
 process.env.VSK_PREFLIGHT_SCRIPT = resolve(import.meta.dir, '../../../skills/dev/dev-implement/scripts/preflight.mjs')
-import { fetchRockets, readLock, readState, repoLockPath, runOnce, runTick, settleRuns, watch, writeState, type PlannedRun, type RunOutcome, type RunTracker, type TickDeps } from '../src/dispatch.ts'
+import { executeRun, fetchRockets, readLock, readState, repoLockPath, runOnce, runTick, settleRuns, watch, writeState, type PlannedRun, type RunOutcome, type RunTracker, type TickDeps } from '../src/dispatch.ts'
 import { parseFactoryConfig } from '../src/config.ts'
 
 const SHIP_POLICY = resolve(import.meta.dir, '../../../skills/dev/dev-setup/scripts/ship-policy.mjs')
@@ -111,10 +111,10 @@ const ensureWorktree: TickDeps['ensureWorktree'] = async (repoPath, issue, title
 
 // Unit-only metadata fixture; actual harness behavior remains #158 qualification.
 const harnessMetadata: TickDeps['harnessMetadata'] = plan => plan.command === 'codex'
-  ? { version: 'codex-cli 0.153.4', features: { hooks: true, memories: false, external_agent_memory_import: false, context_management: false } }
-  : { version: '2.1.263 (Claude Code)' }
+  ? { version: 'codex-cli 0.153.4', hookApplicable: true, memoryRetrievalDisabled: true, memoryGenerationDisabled: true, features: { hooks: true, memories: false, external_agent_memory_import: false, context_management: false } }
+  : { version: '2.1.263 (Claude Code)', hookApplicable: true, memoryRetrievalDisabled: true, memoryGenerationDisabled: true }
 
-const finished = (run: PlannedRun): RunOutcome => ({ exitCode: 0, timedOut: false, logFile: `/logs/${run.issue}.jsonl`, pushed: true, handedBack: false })
+const finished = (run: PlannedRun): RunOutcome => ({ started: true, exitCode: 0, timedOut: false, logFile: `/logs/${run.issue}.jsonl`, pushed: true, handedBack: false })
 
 describe('the corrections window (F17, F18)', () => {
   // A 🚀 on an existing comment does not move the issue's updated_at, and a comment posted while a
@@ -167,7 +167,8 @@ describe('the corrections window (F17, F18)', () => {
 // An execute stub whose runs finish only when the test says so.
 function deferredExecute() {
   const pending: Array<{ run: PlannedRun; resolve: () => void }> = []
-  const execute = (run: PlannedRun): Promise<RunOutcome> => new Promise(resolve => {
+  const execute: TickDeps['execute'] = (run, _plan, _config, options): Promise<RunOutcome> => new Promise(resolve => {
+    options.onSpawn?.()
     pending.push({ run, resolve: () => resolve(finished(run)) })
   })
   return { execute, pending, finishAll: () => { for (const entry of pending.splice(0)) entry.resolve() } }
@@ -405,18 +406,66 @@ test('a profile edited after sync refuses before any worktree or execute', async
   expect(result.refusals.some(r => r.reason.includes('stale'))).toBe(true)
 })
 
-test('registration changed while building the launch prompt is checked again immediately before execute', async () => {
-  const { config } = fixture()
-  const { gh } = ghStub({ ready: [{ number: 8, title: 'feat: fixture', labels: ['ready'] }] })
-  let target = '', launched = 0
-  const result = await runTick(config, { dryRun: false }, { harnessMetadata, gh, parentCandidates: async () => [],
-    ensureWorktree: async (...args) => { const value = await ensureWorktree(...args); target = value.path; return value },
-    issueBody: async () => { writeFileSync(join(target, '.claude/settings.json'), '{}'); return '' },
-    execute: async run => { launched++; return finished(run) },
+test('actual executor late refusal retains corrections for a later real spawn', async () => {
+  const { home, config, repos } = fixture()
+  const repo = repos[0]!.path, bin = join(home, 'bin'), fault = join(home, 'fault'), entered = join(home, 'entered')
+  mkdirSync(bin)
+  writeFileSync(fault, 'refuse')
+  const git = (args: string[]) => {
+    const result = Bun.spawnSync(['git', '-C', repo, ...args])
+    expect(result.exitCode, result.stderr.toString()).toBe(0)
+  }
+  writeFileSync(join(repo, '.gitignore'), '.claude/\n.vegastack/.worktrees/\n')
+  git(['add', '.vegastack/hooks/ship-guard.mjs', '.vegastack/dev.md', '.gitignore'])
+  git(['-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', 'commit', '-qm', 'fixture'])
+  const target = join(repo, '.vegastack/.worktrees/12-thing')
+  git(['worktree', 'add', '-q', '-b', 'fixture-running', target])
+  mkdirSync(join(target, '.claude'))
+  writeFileSync(join(target, '.claude/settings.json'), CLAUDE_WIRING)
+  const bare = join(home, 'bare.git')
+  expect(Bun.spawnSync(['git', 'init', '--bare', '-q', bare]).exitCode).toBe(0)
+  git(['remote', 'set-url', '--push', 'origin', bare])
+  writeFileSync(join(bin, 'claude'), `#!/usr/bin/env node
+const fs = require('node:fs');
+if (process.argv.includes('--version')) {
+  if (fs.existsSync(${JSON.stringify(config.logRoot)}) && fs.readFileSync(${JSON.stringify(fault)}, 'utf8') === 'refuse')
+    fs.writeFileSync(${JSON.stringify(join(target, '.claude/settings.json'))}, '{}');
+  process.stdout.write('2.1.263 (Claude Code)');
+} else { fs.appendFileSync(${JSON.stringify(entered)}, 'entered'); process.stdout.write('{}'); }
+`)
+  chmodSync(join(bin, 'claude'), 0o755)
+  const { gh } = ghStub({ forOperator: [{ number: 12, title: 'feat: thing', labels: ['for-operator'], assignees: ['mk'] }] }, args => {
+    if (args[1] === 'repos/acme/app/issues/12/comments') return JSON.stringify([{ id: 555, reactions: { rocket: 1 } }])
+    if (args[1] === 'repos/acme/app/issues/comments/555/reactions') return JSON.stringify([{ id: 999, content: 'rocket', user: { login: 'mk' } }])
+    return null
   })
-  expect(launched).toBe(0)
-  expect(result.refusals.some(r => r.reason.includes('PreToolUse'))).toBe(true)
-})
+  const previous = process.env.PATH
+  const tracker: RunTracker = new Map()
+  try {
+    process.env.PATH = `${bin}:${previous ?? ''}`
+    const deps = { gh, tracker, parentCandidates: async () => [],
+      ensureWorktree: async () => ({ path: target, branch: 'fixture-running', slug: 'thing', type: 'feat' }),
+      execute: (run: PlannedRun, plan: Parameters<TickDeps['execute']>[1], cfg: typeof config, options: Parameters<TickDeps['execute']>[3]) => executeRun(run, plan, cfg, options, { gh }),
+    }
+    const refused = await runTick(config, { dryRun: false }, deps)
+    await settleRuns(tracker)
+    expect(refused.runs).toEqual([])
+    expect(refused.refusals.some(r => r.reason.includes('immediately before spawn'))).toBe(true)
+    expect((await readState(config.stateFile)).handled).toEqual([])
+    expect(existsSync(entered)).toBe(false)
+    writeFileSync(fault, 'allow')
+    writeFileSync(join(target, '.claude/settings.json'), CLAUDE_WIRING)
+    const retried = await runTick(config, { dryRun: false }, deps)
+    await settleRuns(tracker)
+    expect(retried.refusals).toEqual([])
+    expect(retried.runs[0]!.launched).toBe(true)
+    expect(readFileSync(entered, 'utf8')).toBe('entered')
+    expect((await readState(config.stateFile)).handled).toHaveLength(1)
+  } finally {
+    if (previous === undefined) delete process.env.PATH
+    else process.env.PATH = previous
+  }
+}, 15000)
 
 
 test('unsupported managed harness metadata refuses before execute', async () => {
@@ -470,5 +519,6 @@ for (const harness of ['claude', 'codex'] as const) for (const parallel of [fals
     await settleRuns(tracker)
     expect(result.refusals).toEqual([])
     expect(actual).toEqual([prepared])
+    expect(result.runs[0]!.remoteEffectCoverage).toEqual({ kind: 'unmanaged-possible', reasonCode: 'hook-configuration-only' })
   })
 }

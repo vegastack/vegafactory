@@ -1,9 +1,128 @@
 // A small supported registration grammar, not a shell interpreter or a sandbox.
 import { accessSync, constants, lstatSync, readFileSync, realpathSync } from 'node:fs'
+import { spawn } from 'node:child_process'
 import { basename, delimiter, isAbsolute, join, relative, resolve, sep } from 'node:path'
 
 export type HookHarness = 'claude' | 'codex'
 export interface RegistrationInput { config: unknown; harness: HookHarness; checkout: string; guardPath: string }
+
+export interface CodexConfigurationInspection {
+  features: Record<string, boolean>
+  memoryRetrievalDisabled: boolean
+  memoryGenerationDisabled: boolean
+  hookApplicable: boolean
+  hookHash?: string
+  problems: string[]
+}
+
+// A short-lived metadata connection to the installed CLI, not a daemon or model session.
+// The request vocabulary is closed: no thread/turn, command, hook execution or state mutation.
+export async function inspectCodexConfiguration(input: {
+  command: string; args: string[]; cwd: string; env: NodeJS.ProcessEnv
+}): Promise<CodexConfigurationInspection> {
+  const failed = (reason: string): CodexConfigurationInspection => ({ features: {}, memoryRetrievalDisabled: false, memoryGenerationDisabled: false, hookApplicable: false, problems: [reason] })
+  const replies = await new Promise<Record<string, unknown> | null>(resolveResult => {
+    const child = spawn(input.command, [...input.args, 'app-server', '--listen', 'stdio://'], {
+      cwd: input.cwd, env: input.env, stdio: ['pipe', 'pipe', 'pipe'],
+    })
+    let buffer = '', bytes = 0, settled = false, complete = false, closed = false
+    const values: Record<string, unknown> = {}
+    const finish = (value: Record<string, unknown> | null): void => {
+      if (settled) return
+      settled = true
+      clearTimeout(timer)
+      child.stdin.destroy()
+      if (closed) { resolveResult(value); return }
+      // A failed metadata query cannot outlive its caller unnoticed. Await the owned
+      // process's close event; failure to confirm termination still refuses admission.
+      const teardown = setTimeout(() => resolveResult(null), 1000)
+      child.once('close', () => { clearTimeout(teardown); resolveResult(value) })
+      child.kill('SIGKILL')
+    }
+    const timer = setTimeout(() => { complete = false; finish(null) }, 5000)
+    const send = (value: unknown): void => { if (!settled) child.stdin.write(`${JSON.stringify(value)}\n`) }
+    child.stdin.on('error', () => finish(null))
+    child.stderr.on('data', (chunk: Buffer) => { bytes += chunk.length; if (bytes > 1024 * 1024) finish(null) })
+    child.stdout.setEncoding('utf8')
+    child.stdout.on('data', (chunk: string) => {
+      bytes += Buffer.byteLength(chunk)
+      if (bytes > 1024 * 1024) { finish(null); return }
+      buffer += chunk
+      while (buffer.includes('\n') && !settled) {
+        const end = buffer.indexOf('\n'), line = buffer.slice(0, end)
+        buffer = buffer.slice(end + 1)
+        if (!line.trim()) continue
+        let message: Record<string, unknown> | null
+        try { message = object(JSON.parse(line)) } catch { finish(null); return }
+        if (!message) { finish(null); return }
+        if (message.id === undefined) {
+          if (typeof message.method === 'string' && /^(thread|turn|item|hook)\//.test(message.method)) { finish(null); return }
+          continue // unrelated global notifications are not proof
+        }
+        if (message.error || message.result === undefined) { finish(null); return }
+        if (message.id === 0) {
+          if (Object.hasOwn(values, 'initialized')) { finish(null); return }
+          values.initialized = true
+          send({ method: 'initialized' })
+          send({ id: 1, method: 'hooks/list', params: { cwds: [input.cwd] } })
+          send({ id: 2, method: 'configRequirements/read', params: {} })
+          send({ id: 3, method: 'config/read', params: { cwd: input.cwd, includeLayers: true } })
+        } else if ([1, 2, 3].includes(message.id as number) && values.initialized === true) {
+          const key = String(message.id)
+          if (Object.hasOwn(values, key)) { finish(null); return }
+          values[key] = message.result
+          if (['1', '2', '3'].every(key => Object.hasOwn(values, key))) { complete = true; child.stdin.end() }
+        } else { finish(null); return }
+      }
+    })
+    child.on('error', () => finish(null))
+    child.on('close', code => { closed = true; if (complete && code === 0) finish(values); else { complete = false; finish(null) } })
+    send({ id: 0, method: 'initialize', params: { clientInfo: { name: 'vegafactory-hook-inspection', version: '1' }, capabilities: { experimentalApi: true } } })
+  })
+  if (!replies) return failed('Codex effective hook/config metadata is unavailable, malformed or timed out')
+  const listed = object(replies['1']), requirementsReply = object(replies['2']), read = object(replies['3'])
+  if (!requirementsReply || !Object.hasOwn(requirementsReply, 'requirements')) return failed('Codex effective requirements are unknown')
+  const requirements = requirementsReply.requirements === null ? null : object(requirementsReply.requirements)
+  if (requirementsReply.requirements !== null && !requirements) return failed('Codex effective requirements are malformed')
+  if (requirements?.allowManagedHooksOnly != null && typeof requirements.allowManagedHooksOnly !== 'boolean') return failed('Codex managed hook requirement is unsupported')
+  const config = object(read?.config), features = object(config?.features), memories = object(config?.memories)
+  const result: CodexConfigurationInspection = {
+    features: {}, memoryRetrievalDisabled: memories?.use_memories === false,
+    memoryGenerationDisabled: memories?.generate_memories === false, hookApplicable: false, problems: [],
+  }
+  for (const key of ['hooks', 'memories', 'external_agent_memory_import']) if (typeof features?.[key] === 'boolean') result.features[key] = features[key] as boolean
+  const context = object(features?.context_management)?.experimental_mode
+  if (typeof context === 'boolean') result.features.context_management = context
+  const entries = listed?.data
+  if (!Array.isArray(entries) || entries.length !== 1) return failed('Codex did not return exactly the requested checkout hook metadata')
+  const entry = object(entries[0])
+  if (entry?.cwd !== input.cwd || !Array.isArray(entry.errors) || entry.errors.length !== 0 || !Array.isArray(entry.hooks)) return failed('Codex hook metadata has errors or a different checkout')
+  if (object(requirements?.featureRequirements)?.hooks === false) return failed('managed requirements disable Codex hooks')
+  const knownSources = new Set<string>()
+  try {
+    for (const path of readHookConfiguration(input.cwd, 'codex', input.env.HOME, input.env.CODEX_HOME).sources) knownSources.add(realpathSync(path))
+  } catch { return failed('Codex hook source files could not be verified') }
+  for (const value of entry.hooks) {
+    const hook = object(value)
+    if (!hook || hook.handlerType !== 'command' || hook.eventName !== 'preToolUse'
+      || hook.enabled !== true || hook.async !== false || typeof hook.isManaged !== 'boolean'
+      || typeof hook.currentHash !== 'string' || !/^sha256:[a-f0-9]{64}$/.test(hook.currentHash)
+      || !['trusted', 'managed', 'untrusted', 'modified'].includes(String(hook.trustStatus))) continue
+    if (requirements?.allowManagedHooksOnly === true && hook.isManaged !== true) continue
+    if (typeof hook.sourcePath !== 'string') continue
+    try { if (!knownSources.has(realpathSync(hook.sourcePath))) continue } catch { continue }
+    if (hook.source === 'project' && object(object(config?.projects)?.[input.cwd])?.trust_level !== 'trusted') continue
+    const registration = validateRegistration({ harness: 'codex', checkout: input.cwd, guardPath: join(input.cwd, '.vegastack/hooks/ship-guard.mjs'),
+      config: { hooks: { PreToolUse: [{ matcher: hook.matcher ?? undefined, hooks: [{ type: 'command', command: hook.command }] }] } } })
+    if (!registration.ok) continue
+    // Untrusted/modified definitions are usable only with the separately checked invocation's
+    // explicit hook-trust bypass and exact package-asset verification, never a trust-store write.
+    result.hookApplicable = true; result.hookHash = hook.currentHash
+    break
+  }
+  if (!result.hookApplicable) result.problems.push('the exact configured guard is not enabled/applicable in effective Codex metadata')
+  return result
+}
 
 function object(value: unknown): Record<string, unknown> | null {
   return value !== null && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : null
@@ -34,7 +153,7 @@ export function directArgv(command: unknown): string[] | null {
 export function installedNode(): string | null {
   for (const directory of (process.env.PATH ?? '').split(delimiter)) {
     // Empty/relative PATH components depend on the target cwd and cannot qualify an interpreter.
-    if (!isAbsolute(directory)) continue
+    if (!isAbsolute(directory)) return null
     try {
       const path = realpathSync(join(directory, 'node'))
       accessSync(path, constants.X_OK)
@@ -72,10 +191,37 @@ function shellMatcher(matcher: unknown): boolean {
 // Support the vendor's documented array-of-tables hook representation without claiming a
 // general TOML parser. Other config sections remain the vendor's; complex hook syntax refuses
 // with an inspectable JSON migration rather than being silently ignored or rewritten.
+function* tomlCodeLines(text: string): Generator<string> {
+  let multiline: string | null = null
+  for (const raw of text.split('\n')) {
+    const hidden = multiline !== null
+    let quote: string | null = null
+    for (let i = 0; i < raw.length; i++) {
+      const char = raw[i]!
+      if (multiline) {
+        if (multiline === '"""' && char === '\\') { i++; continue }
+        if (raw.slice(i, i + 3) === multiline) { multiline = null; i += 2 }
+      } else if (quote) {
+        if (quote === '"' && char === '\\') { i++; continue }
+        if (char === quote) quote = null
+      } else {
+        if (char === '#') break
+        if (raw.slice(i, i + 3) === '"""' || raw.slice(i, i + 3) === "'''") { multiline = raw.slice(i, i + 3); i += 2 }
+        else if (char === '"' || char === "'") quote = char
+      }
+    }
+    if (quote) throw new Error('unterminated TOML string; hook configuration cannot be established')
+    // A header inside instruction/string data is not a registration. Retain the raw value
+    // on the opening line so supported hook fields are still parsed by their narrow grammar.
+    if (!hidden) yield raw
+  }
+  if (multiline) throw new Error('unterminated multiline TOML string')
+}
+
 function inlineHooks(text: string): Record<string, unknown> {
   const hooks: Record<string, Array<Record<string, unknown>>> = {}
   let current: Record<string, unknown> | null = null
-  for (const raw of text.split('\n')) {
+  for (const raw of tomlCodeLines(text)) {
     const line = raw.trim()
     if (!line || line.startsWith('#')) continue
     if (line.startsWith('[')) {
@@ -105,11 +251,11 @@ function inlineHooks(text: string): Record<string, unknown> {
   return { hooks }
 }
 
-export function readHookConfiguration(checkout: string, harness: HookHarness, home?: string): { config: unknown; sources: string[]; duplicateCommands: string[] } {
+export function readHookConfiguration(checkout: string, harness: HookHarness, home?: string, codexHome = process.env.CODEX_HOME): { config: unknown; sources: string[]; duplicateCommands: string[] } {
   const project = harness === 'claude' ? ['.claude/settings.json', '.claude/settings.local.json'] : ['.codex/hooks.json', '.codex/config.toml']
   const files = project.map(path => ({ root: checkout, path: join(checkout, path) }))
   if (home) {
-    const root = harness === 'codex' ? process.env.CODEX_HOME || join(home, '.codex') : join(home, '.claude')
+    const root = harness === 'codex' ? codexHome || join(home, '.codex') : join(home, '.claude')
     for (const name of harness === 'codex' ? ['hooks.json', 'config.toml'] : ['settings.json']) files.push({ root, path: join(root, name) })
   }
   const sources: string[] = [], duplicateCommands: string[] = []

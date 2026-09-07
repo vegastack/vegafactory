@@ -30,6 +30,8 @@ export interface LaunchPlan {
   cwd: string
   prompt: string
   guardPolicyDigest?: string
+  // Existing #137 RecoveryEnvelope arm; configuration alone never establishes mediation.
+  remoteEffectCoverage?: { kind: 'unmanaged-possible'; reasonCode: string }
 }
 
 // Version-qualified controls, scoped to the process. These are configuration evidence only;
@@ -40,18 +42,21 @@ export function codexManagedControls(checkout: string): string[] {
     '-c', 'memories.use_memories=false', '-c', 'memories.generate_memories=false',
     '--disable', 'memories', '--disable', 'external_agent_memory_import',
     '-c', 'features.context_management.experimental_mode=false', '--enable', 'hooks',
-    '-c', `projects.${JSON.stringify(checkout)}.trust_level="trusted"`,
+    '-c', `projects={${JSON.stringify(checkout)}={trust_level="trusted"}}`,
   ]
 }
 
 const CLAUDE_SETTINGS = JSON.stringify({ autoMemoryEnabled: false, disableAllHooks: false, env: { CLAUDE_CODE_DISABLE_AUTO_MEMORY: '1' } })
-export interface HarnessMetadata { version: string; features?: Record<string, boolean> }
+export interface HarnessMetadata { version: string; features?: Record<string, boolean>; hookApplicable?: boolean; hookHash?: string; memoryRetrievalDisabled?: boolean; memoryGenerationDisabled?: boolean; problems?: string[] }
 
 export function validateManagedLaunch(plan: LaunchPlan, metadata: HarnessMetadata): { ok: boolean; problems: string[] } {
-  const problems: string[] = []
+  const problems: string[] = [...(metadata.problems ?? [])]
+  if (metadata.hookApplicable !== true) problems.push('effective applicability of the exact guard is unverified')
+  if (metadata.memoryRetrievalDisabled !== true || metadata.memoryGenerationDisabled !== true) problems.push('effective native-memory retrieval/generation controls are unverified')
   const pair = (flag: string, value: string) => plan.args.filter((arg, i) => arg === flag && plan.args[i + 1] === value).length === 1
   if (plan.command === 'codex') {
     if (metadata.version !== 'codex-cli 0.153.4') problems.push('unsupported Codex version for native-memory controls')
+    if (!plan.args.includes('--dangerously-bypass-hook-trust')) problems.push('vetted headless hook-trust handling is missing')
     const controls = codexManagedControls(plan.cwd)
     if (!plan.args.includes('--strict-config')) problems.push('strict config validation missing')
     for (let i = 1; i < controls.length; i += 2) if (!pair(controls[i]!, controls[i + 1]!)) problems.push(`managed Codex control missing: ${controls[i + 1]}`)
@@ -91,6 +96,7 @@ function envFor(input: LaunchInput): Record<string, string> {
 export function buildLaunchPlan(input: LaunchInput): LaunchPlan {
   const prompt = buildPrompt(input)
   const env = envFor(input)
+  const remoteEffectCoverage = { kind: 'unmanaged-possible' as const, reasonCode: 'hook-configuration-only' }
   if (input.harness === 'codex') {
     return {
       command: 'codex',
@@ -103,6 +109,7 @@ export function buildLaunchPlan(input: LaunchInput): LaunchPlan {
         '-c', `model_reasoning_effort=${input.effort}`, ...codexManagedControls(input.worktree), '--json', prompt,
       ],
       env,
+      remoteEffectCoverage,
       cwd: input.worktree,
       prompt,
     }
@@ -115,6 +122,7 @@ export function buildLaunchPlan(input: LaunchInput): LaunchPlan {
       '--settings', CLAUDE_SETTINGS,
     ],
     env,
+    remoteEffectCoverage,
     cwd: input.worktree,
     prompt,
   }
