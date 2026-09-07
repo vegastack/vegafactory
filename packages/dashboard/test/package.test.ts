@@ -16,3 +16,9 @@ test('is publishable at the CLI version, from an assembled standalone tree', () 
   expect(config).toContain('outputFileTracingRoot')
   expect(config).toContain("serverExternalPackages: ['bun:sqlite']")
 })
+
+test('standalone runtime declares Node and Bun requirements separately from platform proof', () => {
+  const manifest = JSON.parse(read('package.json'))
+  expect(manifest.engines.node).toBe('>=24')
+  expect(manifest.engines.bun).toBe('>=1.3')
+})

@@ -1,0 +1,262 @@
+// Release preparation owns builds; consumers and publication use only retained bytes.
+import { createHash } from 'node:crypto'
+import { gunzipSync } from 'node:zlib'
+import { readFile, writeFile, mkdir, readdir, lstat, realpath, chmod, mkdtemp } from 'node:fs/promises'
+import { join, resolve, relative, dirname, sep } from 'node:path'
+import { tmpdir } from 'node:os'
+import { spawnSync, spawn } from 'node:child_process'
+import { fileURLToPath } from 'node:url'
+import { createServer } from 'node:net'
+
+export const CLI = '@vegastack/vegafactory'
+export const DASHBOARD = '@vegastack/vegafactory-dashboard'
+const digest = (bytes, algorithm = 'sha256', encoding = 'hex') => createHash(algorithm).update(bytes).digest(encoding)
+export const verifyArtifactBytes = (bytes, expected) => typeof expected?.sha256 === 'string' && digest(bytes) === expected.sha256
+export function assertPairVersions({ cli, dashboard, tag }) {
+  if (!/^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/.test(cli) || cli !== dashboard || tag !== `v${cli}`) throw new Error('CLI/dashboard/tag version mismatch')
+}
+export function assertScanEvidence(scan, expectedSkills) {
+  if (!scan?.ok || scan.skipped || scan.blocks?.length || !expectedSkills?.length || !Array.isArray(scan.skills)) throw new Error('scanner unavailable or incomplete')
+  const actual = scan.skills.map(s => s.name).sort()
+  if (JSON.stringify(actual) !== JSON.stringify([...expectedSkills].sort())) throw new Error('scanner skill coverage mismatch')
+  for (const s of scan.skills) {
+    const c = s.completeness
+    if (!c || c.limitations?.length || c.entirelyUninspected > 0 || c.partiallyInspected > 0 || c.partially_inspected > 0 || (c.coveragePercent != null && c.coveragePercent < 100)) throw new Error(`partial scanner coverage: ${s.name}`)
+  }
+}
+export function packagePath(path) {
+  if (typeof path !== 'string' || !path || path.includes('\\') || /[\x00-\x1f\x7f]/.test(path) || path.startsWith('/') || path.split('/').some(x => !x || x === '.' || x === '..') || /^[A-Za-z]:/.test(path)) throw new Error(`unsafe package path: ${path}`)
+  return path
+}
+// Parse before writing anything. npm's POSIX pax records are supported; links and
+// devices are never extracted. Bounds and checksums apply to every tar header.
+export function readPackageArchive(bytes) {
+  const tar = gunzipSync(bytes, { maxOutputLength: 1024 * 1024 * 1024 })
+  const files = []; const seen = new Set(); let pax = null; let ended = false
+  const str = b => b.toString('utf8').split('\0')[0]
+  const oct = b => { const s = str(b).trim(); if (s && !/^[0-7]+$/.test(s)) throw new Error('invalid tar number'); return s ? parseInt(s, 8) : 0 }
+  for (let off = 0; off + 512 <= tar.length;) {
+    const h = tar.subarray(off, off + 512)
+    if (h.every(b => b === 0)) { if (!tar.subarray(off).every(b => b === 0)) throw new Error('trailing tar data'); ended = true; break }
+    const sum = [...h].reduce((s, b, i) => s + (i >= 148 && i < 156 ? 32 : b), 0)
+    if (sum !== oct(h.subarray(148, 156))) throw new Error('tar checksum mismatch')
+    const size = oct(h.subarray(124, 136)); const mode = oct(h.subarray(100, 108)); const type = str(h.subarray(156, 157)) || '0'
+    if (!Number.isSafeInteger(size) || off + 512 + size > tar.length) throw new Error('truncated tar entry')
+    const data = tar.subarray(off + 512, off + 512 + size); off += 512 + Math.ceil(size / 512) * 512
+    if (type === 'x') {
+      if (pax) throw new Error('duplicate pax header')
+      pax = {}
+      for (let i = 0; i < data.length;) {
+        const space = data.indexOf(32, i); const n = Number(data.subarray(i, space).toString())
+        if (space < i || !Number.isSafeInteger(n) || n <= space - i + 1 || i + n > data.length || data[i+n-1] !== 10) throw new Error('invalid pax record')
+        const record = data.subarray(space + 1, i+n-1).toString(); const eq = record.indexOf('='); const key = record.slice(0, eq)
+        if (eq < 1 || Object.hasOwn(pax,key)) throw new Error('invalid duplicate pax key')
+        if (!['path','mtime','atime','ctime','uid','gid','uname','gname','SCHILY.dev','SCHILY.ino','SCHILY.nlink'].includes(key)) throw new Error(`unsupported pax key: ${key}`)
+        pax[key] = record.slice(eq+1); i += n
+      }
+      continue
+    }
+    let path = pax?.path ?? [str(h.subarray(345,500)),str(h.subarray(0,100))].filter(Boolean).join('/'); pax = null
+    if (type === '5') path = path.replace(/\/$/,'')
+    packagePath(path)
+    if (path !== 'package' && !path.startsWith('package/')) throw new Error('tar entry outside package')
+    if (seen.has(path)) throw new Error('duplicate package path'); seen.add(path)
+    if (type === '5') continue
+    if (type !== '0' || path === 'package' || ![0o644,0o755].includes(mode)) throw new Error('unsupported package entry type or mode')
+    files.push({ path: path.slice(8), sha256: digest(data), mode, data })
+  }
+  if (!ended || pax) throw new Error('incomplete tar archive')
+  files.sort((a,b) => a.path < b.path ? -1 : a.path > b.path ? 1 : 0)
+  const paths = new Set(files.map(f => f.path))
+  for (const f of files) for (let p = dirname(f.path); p !== '.'; p = dirname(p)) if (paths.has(p)) throw new Error('file/directory collision')
+  return files
+}
+function packageIdentity(files) {
+  const entry = files.find(f => f.path === 'package.json')
+  if (!entry) throw new Error('missing package.json')
+  return JSON.parse(entry.data.toString())
+}
+export function dashboardDescriptor(bytes, version) {
+  const files = readPackageArchive(bytes); const p = packageIdentity(files)
+  if (p.name !== DASHBOARD || p.version !== version) throw new Error('dashboard package identity mismatch')
+  return { schemaVersion: 1, name: DASHBOARD, version, sha256: digest(bytes), integrity: `sha512-${digest(bytes,'sha512','base64')}`, bytes: bytes.length, files: files.map(({path,sha256,mode}) => ({path,sha256,mode})) }
+}
+export function verifyDashboardDescriptor(descriptor, bytes, version) {
+  const expected = dashboardDescriptor(bytes,version)
+  if (!descriptor || ['schemaVersion','name','version','sha256','integrity','bytes'].some(k => descriptor[k] !== expected[k]) || JSON.stringify(descriptor.files) !== JSON.stringify(expected.files)) throw new Error('missing, stale or altered dashboard descriptor')
+  return true
+}
+export async function materializeTree(source, destination) {
+  const boundary = await realpath(source)
+  async function copy(from, to, ancestors) {
+    const actual = await realpath(from); const rel = relative(boundary, actual)
+    if (rel === '..' || rel.startsWith(`..${sep}`) || resolve(boundary,rel) !== actual) throw new Error('traced link escapes standalone tree')
+    if (ancestors.has(actual)) throw new Error('traced link cycle')
+    const s = await lstat(actual)
+    if (s.isDirectory()) {
+      await mkdir(to,{recursive:true}); const next = new Set([...ancestors,actual])
+      for (const name of (await readdir(actual)).sort()) await copy(join(actual,name),join(to,name),next)
+    } else if (s.isFile()) {
+      await mkdir(dirname(to),{recursive:true}); await writeFile(to,await readFile(actual)); await chmod(to,s.mode & 0o111 ? 0o755 : 0o644)
+    } else throw new Error('unsupported traced device entry')
+  }
+  await copy(boundary,destination,new Set())
+}
+export function command(argv, {cwd,env=process.env,timeout=600000}={}) {
+  const r = spawnSync(argv[0],argv.slice(1),{cwd,env,timeout,encoding:'utf8',maxBuffer:64*1024*1024})
+  if (r.error || r.status !== 0) throw new Error(`${argv.join(' ')} failed (${r.status}): ${r.error?.message ?? ''}\n${r.stdout}\n${r.stderr}`)
+  return r.stdout.trim()
+}
+export async function extractPackage(bytes, destination) {
+  const files = readPackageArchive(bytes)
+  // Exclusive fresh destinations prevent a pre-existing symlink from redirecting writes.
+  await mkdir(destination)
+  for (const f of files) { const path=join(destination,f.path); await mkdir(dirname(path),{recursive:true}); await writeFile(path,f.data,{flag:'wx',mode:f.mode}) }
+  return files
+}
+export async function verifyExtractedDashboard(directory, descriptor) {
+  const actual=[]
+  async function walk(root,prefix='') {
+    for(const name of (await readdir(root)).sort()) {
+      const path=prefix?`${prefix}/${name}`:name;packagePath(path)
+      const file=join(root,name);const stat=await lstat(file)
+      if(stat.isDirectory())await walk(file,path)
+      else if(stat.isFile())actual.push({path,sha256:digest(await readFile(file)),mode:stat.mode & 0o777})
+      else throw new Error('extracted dashboard contains a link or device')
+    }
+  }
+  await walk(directory);actual.sort((a,b)=>a.path<b.path?-1:a.path>b.path?1:0)
+  if(JSON.stringify(actual)!==JSON.stringify(descriptor?.files))throw new Error('extracted dashboard differs from installed descriptor')
+  return true
+}
+export async function verifyPair(manifest, directory) {
+  if (manifest?.schemaVersion !== 1 || !/^[a-f0-9]{40}$/.test(manifest.sourceSha) || !/^[a-f0-9]{40}$/.test(manifest.treeSha) || manifest.artifacts?.length !== 2) throw new Error('invalid release manifest')
+  const pair = {}
+  for (const a of manifest.artifacts) {
+    if (![CLI,DASHBOARD].includes(a.name) || pair[a.name] || packagePath(a.file).includes('/')) throw new Error('invalid artifact identity/path')
+    const bytes = await readFile(join(directory,a.file))
+    if (!verifyArtifactBytes(bytes,a) || a.integrity !== `sha512-${digest(bytes,'sha512','base64')}` || a.bytes !== bytes.length) throw new Error('artifact bytes changed')
+    const files = readPackageArchive(bytes); const p = packageIdentity(files)
+    if (p.name !== a.name || p.version !== manifest.version) throw new Error('packed package identity mismatch')
+    pair[a.name] = {bytes,files,artifact:a}
+  }
+  assertPairVersions({cli:manifest.version,dashboard:manifest.version,tag:`v${manifest.version}`})
+  const descriptor = pair[CLI].files.find(f=>f.path==='dist/dashboard-artifact.json')
+  verifyDashboardDescriptor(descriptor && JSON.parse(descriptor.data.toString()),pair[DASHBOARD].bytes,manifest.version)
+  return pair
+}
+async function availablePort() {
+  const server=createServer(); await new Promise((ok,fail)=>{server.once('error',fail);server.listen(0,'127.0.0.1',ok)})
+  const port=server.address().port; await new Promise(ok=>server.close(ok)); return port
+}
+export async function smokePair(manifest,directory) {
+  const pair=await verifyPair(manifest,directory)
+  const home=await mkdtemp(join(tmpdir(),'vegafactory-pair-')); const consumer=join(home,'consumer'); await mkdir(consumer)
+  // Only local tarballs, no dependency resolution or source checkout at runtime.
+  const cliTar=join(home,'cli.tgz');await writeFile(cliTar,pair[CLI].bytes)
+  const env={PATH:process.env.PATH,HOME:home,TMPDIR:home,CI:'1',npm_config_cache:join(home,'npm-cache')}
+  command(['npm','install','--ignore-scripts','--offline','--no-audit','--no-fund','--prefix',consumer,cliTar],{cwd:home,env})
+  const cli=join(consumer,'node_modules',CLI,'dist/index.js')
+  const installedDescriptor=JSON.parse(await readFile(join(dirname(cli),'dashboard-artifact.json'),'utf8'))
+  verifyDashboardDescriptor(installedDescriptor,pair[DASHBOARD].bytes,manifest.version)
+  const version=command(['node',cli,'--version'],{cwd:home,env});if (!version.includes(manifest.version)) throw new Error('installed CLI version mismatch')
+  command(['node',cli,'skills','list'],{cwd:home,env})
+  const project=join(home,'project');await mkdir(project)
+  command(['node',cli,'skills','add','dev-implement','--agent','codex','--dir',project,'--non-interactive'],{cwd:home,env})
+  command(['node',cli,'skills','verify','dev-implement','--agent','codex','--dir',project],{cwd:home,env})
+  await readFile(join(project,'.agents/skills/dev-implement/scripts/preflight.mjs'))
+  const dashboard=join(home,'dashboard');await extractPackage(pair[DASHBOARD].bytes,dashboard);await verifyExtractedDashboard(dashboard,installedDescriptor)
+  const room=join(home,'room');await mkdir(room);await writeFile(join(home,'factory.json'),JSON.stringify({controlRooms:{}}));const stats=join(room,'stats','fixture__project','SEP-2026');await mkdir(stats,{recursive:true});await writeFile(join(stats,'test.jsonl'),JSON.stringify({ts:'2026-09-07T00:00:00.000Z',repo:'fixture/project',issue:1,human:'fixture',stage:'implement',outcome:'for-operator',harness:'codex',model:'fixture',duration_s:1,skills:[]})+'\n')
+  const port=await availablePort();const logs=[]
+  const child=spawn('bun',[join(dashboard,'dist-standalone/packages/dashboard/server.js')],{cwd:home,env:{...env,HOSTNAME:'127.0.0.1',PORT:String(port),VEGAFACTORY_CONTROL_ROOM:room,VEGAFACTORY_CACHE:join(home,'stats.db'),VEGAFACTORY_ORG:'fixture',VEGAFACTORY_STATE:join(home,'factory.json'),VEGAFACTORY_VERSION:manifest.version},stdio:['ignore','pipe','pipe']})
+  child.stdout.on('data',b=>logs.push(b.toString()));child.stderr.on('data',b=>logs.push(b.toString())); let error;child.on('error',e=>{error=e})
+  const routes=['/api/health','/','/skills','/people','/board','/dispatcher'];const results=[]
+  try {
+    let ready=false
+    for(let n=0;n<100;n++){if(error||child.exitCode!==null)throw new Error(`dashboard exited: ${error??logs.join('')}`);try{const r=await fetch(`http://127.0.0.1:${port}/api/health`,{signal:AbortSignal.timeout(500)});if(r.ok){ready=true;break}}catch{}await new Promise(ok=>setTimeout(ok,100))}
+    if(!ready)throw new Error(`dashboard readiness timeout: ${logs.join('')}`)
+    for(const route of routes){const r=await fetch(`http://127.0.0.1:${port}${route}`,{signal:AbortSignal.timeout(10000)});await r.text();if(!r.ok)throw new Error(`${route}: HTTP ${r.status}`);results.push({route,status:r.status})}
+  } finally {child.kill('SIGTERM');await new Promise(ok=>{if(child.exitCode!==null)return ok();child.once('close',ok);const t=setTimeout(()=>child.kill('SIGKILL'),3000);t.unref()})}
+  return {platform:process.platform,arch:process.arch,node:process.version,npm:command(['npm','--version']),bun:command(['bun','--version']),artifactHashes:manifest.artifacts.map(a=>a.sha256),routes:results,home,logs}
+}
+
+async function runtimeSbom(files, name, version) {
+  const components=[]
+  for(const f of files.filter(f=>f.path.endsWith('/package.json') || f.path==='package.json')) {
+    let p;try{p=JSON.parse(f.data.toString())}catch{continue}
+    if(p.name && p.version)components.push({type:'library',name:p.name,version:p.version,'bom-ref':f.path,hashes:[{alg:'SHA-256',content:f.sha256}],properties:[{name:'scope',value:'runtime shipped package metadata'},{name:'path',value:f.path}]})
+  }
+  return {bomFormat:'CycloneDX',specVersion:'1.5',version:1,metadata:{component:{type:'application',name,version}},components}
+}
+async function buildSbom(root) {
+  const components=[];const seen=new Set()
+  async function walk(path) {
+    let actual;try{actual=await realpath(path)}catch{return}
+    if(seen.has(actual))return;seen.add(actual)
+    for(const e of await readdir(actual,{withFileTypes:true})) {
+      const p=join(actual,e.name)
+      if(e.name==='package.json') {const bytes=await readFile(p);let m;try{m=JSON.parse(bytes)}catch{continue};if(m.name&&m.version)components.push({type:'library',name:m.name,version:m.version,'bom-ref':relative(root,p),hashes:[{alg:'SHA-256',content:digest(bytes)}]})}
+      else if(e.isDirectory()||e.isSymbolicLink())await walk(p)
+    }
+  }
+  await walk(join(root,'node_modules'))
+  return {bomFormat:'CycloneDX',specVersion:'1.5',version:1,metadata:{properties:[{name:'scope',value:'actual installed build graph; no second dependency resolution'}]},components}
+}
+export async function packPair(root, directory, {sourceSha,treeSha,version,toolchain,checkEvidence,scanEvidence,sbomFiles=[]}) {
+  await mkdir(directory,{recursive:true})
+  const pack=folder=>JSON.parse(command(['npm','pack','--ignore-scripts','--json','--pack-destination',directory],{cwd:join(root,folder)}))[0].filename
+  const dashboardFile=pack('packages/dashboard');const dashboardBytes=await readFile(join(directory,dashboardFile))
+  const descriptor=dashboardDescriptor(dashboardBytes,version)
+  const descriptorPath=join(root,'packages/cli/dist/dashboard-artifact.json')
+  await writeFile(descriptorPath,JSON.stringify(descriptor,null,2)+'\n')
+  verifyDashboardDescriptor(JSON.parse(await readFile(descriptorPath,'utf8')),await readFile(join(directory,dashboardFile)),version)
+  const cliFile=pack('packages/cli')
+  const artifacts=[]
+  for(const [name,file] of [[DASHBOARD,dashboardFile],[CLI,cliFile]]) {
+    const bytes=await readFile(join(directory,file))
+    artifacts.push({name,file,sha256:digest(bytes),integrity:`sha512-${digest(bytes,'sha512','base64')}`,bytes:bytes.length})
+    const sbomFile=`${name===CLI?'cli':'dashboard'}-runtime-sbom.json`
+    await writeFile(join(directory,sbomFile),JSON.stringify(await runtimeSbom(readPackageArchive(bytes),name,version),null,2)+'\n');sbomFiles.push(sbomFile)
+  }
+  const manifest={schemaVersion:1,sourceSha,treeSha,version,toolchain,platformMatrix:[],artifacts,checkEvidence,scanEvidence,sbomFiles}
+  await verifyPair(manifest,directory)
+  await writeFile(join(directory,'release-manifest.json'),JSON.stringify(manifest,null,2)+'\n')
+  return manifest
+}
+export async function prepareRelease(root,directory,tag) {
+  root=resolve(root);directory=resolve(directory)
+  if(command(['git','status','--porcelain','--untracked-files=all'],{cwd:root}))throw new Error('release preparation requires clean source')
+  const sourceSha=command(['git','rev-parse','HEAD'],{cwd:root});const treeSha=command(['git','rev-parse','HEAD^{tree}'],{cwd:root})
+  const cli=JSON.parse(await readFile(join(root,'packages/cli/package.json'),'utf8'));const dashboard=JSON.parse(await readFile(join(root,'packages/dashboard/package.json'),'utf8'))
+  assertPairVersions({cli:cli.version,dashboard:dashboard.version,tag:tag??`v${cli.version}`})
+  const toolchain={node:process.version,bun:command(['bun','--version']),npm:command(['npm','--version']),python:command(['python3.12','--version']),skillspector:command(['skillspector','--version']),platform:process.platform,arch:process.arch}
+  if(!process.version.startsWith('v24.')||toolchain.bun!=='1.3.14'||!toolchain.python.startsWith('Python 3.12.'))throw new Error('release requires Node24/Bun1.3.14/Python3.12')
+  const baseline=JSON.parse(await readFile(join(root,'.vegastack/skillspector-baseline.json'),'utf8'))
+  if(!baseline.scanner_version || !toolchain.skillspector.includes(baseline.scanner_version))throw new Error('scanner version differs from exact baseline pin')
+  await mkdir(directory,{recursive:true})
+  command(['bun','install','--frozen-lockfile'],{cwd:root})
+  const checkLog=command(['bun','run','check'],{cwd:root,timeout:1800000});await writeFile(join(directory,'check.log'),checkLog)
+  command(['bun','run','--cwd','packages/dashboard','build'],{cwd:root});command(['bun','run','--cwd','packages/dashboard','assemble'],{cwd:root})
+  command(['bun','run','build'],{cwd:root})
+  const scanText=command(['node','skills/skills-tooling/skill-scan/scripts/skill-scan.mjs','--json','--no-provision'],{cwd:root,timeout:1800000})
+  const scan=JSON.parse(scanText);const expected=(await readdir(join(root,'packages/cli/skill'),{withFileTypes:true})).filter(e=>e.isDirectory()).map(e=>e.name)
+  assertScanEvidence(scan,expected);await writeFile(join(directory,'scan.json'),scanText)
+  await writeFile(join(directory,'build-sbom.json'),JSON.stringify(await buildSbom(root),null,2)+'\n')
+  const manifest=await packPair(root,directory,{sourceSha,treeSha,version:cli.version,toolchain,checkEvidence:{file:'check.log',sha256:digest(Buffer.from(checkLog)),ok:true},scanEvidence:{file:'scan.json',sha256:digest(Buffer.from(scanText)),baselineSha256:digest(await readFile(join(root,'.vegastack/skillspector-baseline.json'))),ok:true,skills:expected},sbomFiles:['build-sbom.json']})
+  const smoke=await smokePair(manifest,directory);manifest.platformMatrix.push(smoke)
+  if(command(['git','status','--porcelain','--untracked-files=all'],{cwd:root}) || command(['git','rev-parse','HEAD'],{cwd:root})!==sourceSha)throw new Error('source changed during preparation')
+  await writeFile(join(directory,'release-manifest.json'),JSON.stringify(manifest,null,2)+'\n')
+  return manifest
+}
+async function main() {
+  const [verb,...args]=process.argv.slice(2)
+  if(verb==='prepare')return prepareRelease(resolve(dirname(fileURLToPath(import.meta.url)),'..'),args[0]??'work/release',args[1])
+  if(verb==='verify'||verb==='smoke') {const path=resolve(args[0]);const manifest=JSON.parse(await readFile(path,'utf8'));return verb==='verify'? (await verifyPair(manifest,dirname(path)),{ok:true}):smokePair(manifest,dirname(path))}
+  if(verb==='validate-cli') {
+    const root=resolve(dirname(fileURLToPath(import.meta.url)),'..');const version=JSON.parse(await readFile(join(root,'packages/cli/package.json'),'utf8')).version
+    if(!process.env.VEGAFACTORY_DASHBOARD_TARBALL)throw new Error('pack CLI through release prepare, or provide the exact dashboard tarball via VEGAFACTORY_DASHBOARD_TARBALL')
+    return {ok:verifyDashboardDescriptor(JSON.parse(await readFile(join(root,'packages/cli/dist/dashboard-artifact.json'),'utf8')),await readFile(process.env.VEGAFACTORY_DASHBOARD_TARBALL),version)}
+  }
+  throw new Error('usage: release-artifacts.mjs prepare <evidence-dir> <tag> | verify|smoke <manifest> | validate-cli')
+}
+if(process.argv[1]&&resolve(process.argv[1])===fileURLToPath(import.meta.url))main().then(result=>console.log(JSON.stringify(result,null,2))).catch(error=>{console.error(error.message);process.exitCode=2})

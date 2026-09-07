@@ -353,3 +353,7 @@ The project's story, newest first: what got built, why, and how it went — for 
 - **Decisions:** none new (executes the recorded v3 plan).
 
 — approved by operator (kmanojkumar) · built by claude · branch feat/10-workflow-conventions
+
+## 7 September 2026 — Immutable paired release preparation (#153)
+
+Release preparation now packs the dashboard first and embeds its exact identity in the CLI before packing the installer. The retained pair is checked in isolation, and publication resumes through registry readback rather than rebuilding or guessing that a network error means a version is absent. Candidate staging and first-use smoke precede promotion. Actual publication, provenance and final platform qualification remain separate evidence gates.

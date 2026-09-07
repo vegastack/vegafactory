@@ -36,11 +36,11 @@
   },
   "scripts": {
     "sync": "bun scripts/sync-skill.mjs",
-    "build": "bun run sync && bun build src/index.ts --target=node --outfile dist/index.js && chmod +x dist/index.js",
+    "build": "node -e \"require('node:fs').rmSync('dist/dashboard-artifact.json', {force:true})\" && bun run sync && bun build src/index.ts --target=node --outfile dist/index.js && chmod +x dist/index.js",
     "lint": "bun scripts/lint.mjs",
     "typecheck": "bunx tsc -p tsconfig.json --noEmit",
     "test": "bun test test",
-    "prepack": "bun run build",
-    "pack:local": "mkdir -p ../../work/packed && npm pack --pack-destination ../../work/packed"
+    "prepack": "node ../../scripts/release-artifacts.mjs validate-cli",
+    "pack:local": "node ../../scripts/release-artifacts.mjs prepare ../../work/packed"
   }
 }
