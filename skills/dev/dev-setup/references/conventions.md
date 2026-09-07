@@ -1,12 +1,12 @@
 # Workflow conventions
 
-The artifact spec. Skills cite this single rule source.
+Artifact authority.
 
 Ordinary defaults resolve repo, group, then org; locks require explicit org delegation. Repository dispatch/commands never inherit; registers concatenate. Policy/migration: dev-setup's `scripts/effective-policy.mjs`; vegafactory-setup control-room reference.
 
 ## Comment metadata markers
 
-Workflow comments open with a marker and heading:
+Comments open with marker and heading:
 
 ```markdown
 <!-- vsk:v1 type=<type> rev=<n> [key=value ...] -->
@@ -28,7 +28,7 @@ Workflow comments open with a marker and heading:
 
 ## Operator identity
 
-Human references use the operator’s GitHub username in parentheses, without titles:
+Use parenthesized operator GitHub usernames without titles:
 
 - Approval: `Approved by (<username>) on DD-MM-YYYY: "<their words>"`
 - Register line: `- DD-MM-YYYY (<username>) — <decision>`
@@ -37,11 +37,11 @@ Use approval.mjs’s publisher/relay contract: current-policy provider-envelope 
 
 ## Scoped approval records
 
-Use dev-implement’s `scripts/lib/approval.mjs` API and its embedded contract; no second parser. Refresh current policy and complete GitHub histories. `ArtifactRef={repo,issue,kind,artifactId,rev,digest}` binds brief issue-node or unique plan/protocol comment-node identity, revision and canonical SHA-256.
+Use dev-implement’s `scripts/lib/approval.mjs` exclusively; follow its contract. Refresh current policy and complete GitHub histories. `ArtifactRef={repo,issue,kind,artifactId,rev,digest}` binds brief issue-node or unique plan/protocol comment-node identity, revision and canonical SHA-256.
 
-An approval draft is the exact single comment body: top-level approval marker with matching scope, then one fenced JSON `ApprovalRecord={schemaVersion:2,id,operator,scope,source:{kind,ref,quote},artifacts,supersedes,revokes}`. Keep illustrative outer Markdown fences, alternate future records and unresolved source locators out of postable drafts; validate the complete body with approval.mjs's `parseApproval` before posting. Source kind is `session` or `github-comment`; record actual inspectable words. Reuse a valid current grant/relay that already covers the requested scope instead of inventing a plan-only event or posting redundant approval. Scope is `brief`, `plan` or `brief+plan`: planning requires brief; implementation requires both; research execution additionally binds its protocol. Empty-artifact revocations remove exact earlier IDs. Conflicts require explicit supersedes; never newest-wins.
+Draft the exact single approval comment body: top-level marker with matching scope, then one fenced JSON `ApprovalRecord={schemaVersion:2,id,operator,scope,source:{kind,ref,quote},artifacts,supersedes,revokes}`. Exclude outer Markdown fences, alternate future records and unresolved source locators; validate the whole body with approval.mjs's `parseApproval` before posting. Source kind: `session` or `github-comment`, with actual inspectable words. Reuse valid current grants/relays covering requested scope; avoid counterfactual plan-only events or redundant approvals. Scope: `brief`, `plan` or `brief+plan`; planning requires brief, implementation both, research execution additionally its protocol. Empty-artifact revocations remove exact earlier IDs. Conflicts require explicit supersedes; never newest-wins.
 
-Preserve legacy comments; inventory refusals/current digests without writes and request reconfirmation. Duplicate canonical plans keep progression held: preserve both comment identities and bodies while requesting explicit record-preserving reconciliation; do not recommend deleting either to clear ambiguity. Follow approval.mjs’s exact correction schema, operator-publisher and target checks. Only malformed or demonstrably invalid-source targets qualify, never valid authority or unavailable/inconsistent source facts. Resolve source facts first; corrections grant no scope.
+Preserve legacy comments; inventory refusals/current digests without writes and request reconfirmation. Duplicate canonical plans hold progression: preserve both identities and bodies and request explicit record-preserving reconciliation; never recommend deletion to clear ambiguity. Follow approval.mjs’s exact correction schema, operator-publisher and target checks. Only malformed or demonstrably invalid-source targets qualify, never valid authority or unavailable/inconsistent source facts. Resolve source facts first; corrections grant no scope.
 
 Consolidated parent events bind frozen manifests, canonical artifacts and exact task/action subsets. Use inline UTF-8 or immutable repository/commit/path plus blob hash, never local paths. Keep requested `recordBinding` audit-only and canonical `approvalBindings` authoritative. Follow approval.mjs’s preparation/research/recovery provenance, receipt, adapter, counted-attempt and fresh-admission requirements; retain immutable history and unverified legacy records. Checkpoint/private/live/shipping gates remain separate.
 
@@ -53,13 +53,13 @@ Scope edits increment marker/heading revisions and append `Revisions: v2 — DD-
 
 ## Scope classes
 
-Set and explain the scope label at intake; the operator may override:
+Intake sets and explains scope; operator overrides allowed:
 
-- **`research`** — a question to answer; throwaway code allowed, never merged. No branch/PR/changelog; findings + recommendation are the evidence comment.
+- **`research`** — inquiry; throwaway code allowed, never merged. No branch/PR/changelog; evidence comment contains findings and recommendation.
 - **`quick-build`** — existing flow: draft brief+plan together, approve both, then `ready`.
 - **`full-plan`** — new ground: approve brief, `needs-plan`, separate grounded planning session, `needs-operator`, approve plan, `ready`. Split multiple deliverables into independently classified epic children.
 
-The scope ratchet lives in `dev-plan`.
+Scope ratchet: `dev-plan`.
 
 ## Labels
 
@@ -67,13 +67,13 @@ Exactly one state; every flip sets its assignee (colors: dev-setup):
 
 | label | meaning | assignee |
 |---|---|---|
-| `needs-operator` | a question, a brief or plan to approve, a proposal | the operator |
-| `needs-plan` | brief approved; awaiting the planning stage (full-plan only) | the operator |
+| `needs-operator` | question, brief or plan approval, proposal | the operator |
+| `needs-plan` | brief approved; awaiting planning (full-plan only) | the operator |
 | `ready` | approved — an agent may start | nobody |
-| `working` | claimed; the ledger shows live progress | whoever started the run |
+| `working` | claimed; ledger shows live progress | the runner |
 | `for-operator` | done — evidence posted, awaiting operator review | the operator |
 
-Modifiers (may coexist with the state label): `risky` · scope `research` / `quick-build` / `full-plan` · `epic` (map parents, absent a native Epic type). Boards mirror state labels one way.
+Modifiers coexist with state: `risky` · scope `research` / `quick-build` / `full-plan` · `epic` (map parents, absent a native Epic type). Boards mirror state labels one way.
 
 ## Titles, types, hierarchy
 
@@ -83,7 +83,7 @@ Modifiers (may coexist with the state label): `risky` · scope `research` / `qui
 
 ## The ledger
 
-The implement session edits one ledger comment:
+Implementation edits one ledger:
 
 ```markdown
 <!-- vsk:v1 type=ledger branch=<branch> -->
@@ -96,11 +96,11 @@ The implement session edits one ledger comment:
 ```
 
 
-**Resume protocol:** a fresh, compacted, or handed-over session reads, in order: brief → plan comment → ledger → `git log` — nothing else.
+**Resume protocol:** fresh, compacted, or handed-over sessions read only: brief → plan comment → ledger → `git log`, in order.
 
 ## `.vegastack/` workspaces
 
-Drafts/reports live in `.vegastack/.tmp/<issue-number>-<title-slug>/` (before issue creation: `intake-<slug>`), with a self-ignoring `.gitignore` containing `*`. Branch checkouts live in root-ignored `.vegastack/.worktrees/<issue-number>-<title-slug>/`; main stays on its default branch. Keep both outside `.git/`. Subagents save full reports and return short status. `<path-to-this-skill>` means the directory containing SKILL.md.
+Drafts/reports: `.vegastack/.tmp/<issue-number>-<title-slug>/` (before issue creation: `intake-<slug>`), with a self-ignoring `.gitignore` containing `*`. Branch checkouts: root-ignored `.vegastack/.worktrees/<issue-number>-<title-slug>/`; main stays on its default branch. Keep both outside `.git/`. Subagents save full reports and return short status. `<path-to-this-skill>` means SKILL.md’s directory.
 
 ## Verification gate
 
@@ -108,4 +108,4 @@ Prove claims with fresh command output and exit codes. Report failures and skipp
 
 ## Plain-language collaboration
 
-Announce starting, meaningful findings/direction changes, and a self-contained outcome with paths and remaining checks. Prefer readable literal language over arrow chains or invented labels. Use Mermaid/ASCII where useful. Challenge vague or contradictory answers with concrete options; never silently guess.
+Announce starts, findings and direction changes; outcomes are self-contained with paths and remaining checks. Prefer literal language; avoid arrow chains and invented labels. Use Mermaid/ASCII where useful. Challenge unclear or contradictory answers with concrete options; never silently guess.
