@@ -13,7 +13,7 @@ Nearest neighbors: `dev-intake` owns the brief and its approval mechanics — th
 
 ## Every run
 
-1. Read `.vegastack/dev.md` and the issue: brief (description), current schema-v2 brief approval (dev-implement’s `evaluateApprovals`, complete history and current operator policy), scope label. Full-plan issues arrive labeled `needs-plan`; anything else at this door is either intake's inline request (below) or a misroute — say so.
+1. Read `.vegastack/dev.md` and the issue: brief (description), current schema-v2 brief approval (bundled `scripts/lib/approval.mjs`’s `evaluateApprovals`, complete history and current operator policy), scope label. Full-plan issues arrive labeled `needs-plan`; anything else at this door is either intake's inline request (below) or a misroute — say so.
 2. **Re-ground before planning** — open the brief's touch points in the current code and verify the flow, names and shapes the plan builds on, because code drifts between approval and build. A claim that no longer matches reality goes back to the operator (`handback` comment, `needs-operator`).
 3. Stack-bearing choices (schema, hosting, services, jobs, auth) check `dev-architect` — its verify protocol governs platform claims, and no plan re-proposes a recorded rejection.
 

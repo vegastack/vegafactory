@@ -5,11 +5,13 @@
 //
 // Exit codes: 0 pass · 1 pass-with-warnings · 2 blocked (reasons printed).
 // Usage: node preflight.mjs --issue <n> [--repo owner/name] [--me <login>] [--dev-md <path>] --json
+// --stage plan requires brief intent; implementation requires brief+plan.
+// --consolidated-request <json> reads an exact pinned parent selection.
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { GhUnavailable, ghJson, parseFlags, renderResult } from './lib/gh.mjs';
-import { evaluateApprovals, readApprovalSources, gatherConsolidatedApproval } from './lib/approval.mjs';
+import { evaluateApprovals, readApprovalSources, gatherConsolidatedApproval, parseStrictJson } from './lib/approval.mjs';
 
 export function evaluatePreflight({ issue, comments, devMd, me, expect = 'ready', stage = 'implement', sourceComments = [] }) {
   const blocks = [];
@@ -79,8 +81,11 @@ export async function gatherAndEvaluate(flags, { readJson = async (args) => ghJs
   };
   const repo = flags.repo || (await readJson(['repo', 'view', '--json', 'nameWithOwner'])).nameWithOwner;
   if (flags['consolidated-request']) {
-    const request = JSON.parse(readFileSync(flags['consolidated-request'], 'utf8'));
+    const request = parseStrictJson(readFileSync(flags['consolidated-request'], 'utf8'));
+    if (Object.keys(request).some((key) => !['parentRepo', 'parentIssue', 'approvalBinding', 'requested', 'admissionEvidence'].includes(key))) throw new Error('unknown consolidated request field');
     const devMd = suppliedDevMd ?? readFileSync(flags['dev-md'] || '.vegastack/dev.md', 'utf8');
+    const policyRepo = /^repo:\s*(\S+)/m.exec(devMd)?.[1];
+    if (policyRepo !== repo || request.parentRepo !== repo || request.requested?.repo !== repo) throw new Error('consolidated request and current policy repository differ');
     const operators = (/^operators:\s*([^#\n]+)/m.exec(devMd)?.[1] ?? '').split(',').map((name) => name.trim()).filter(Boolean);
     return { ...(await gatherConsolidatedApproval({ ...request, operators, readJson })), warns: [] };
   }

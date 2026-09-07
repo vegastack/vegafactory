@@ -4,7 +4,7 @@ import { mkdtempSync, writeFileSync, readFileSync, openSync, closeSync, unlinkSy
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { createHash } from 'node:crypto'
-import { canonicalScope, scopeDigest, parseApproval, evaluateApprovals, evaluateConsolidatedApproval, protocolLimits, gatherConsolidatedApproval, admitConsolidatedResearch } from '../scripts/lib/approval.mjs'
+import { canonicalScope, scopeDigest, parseApproval, evaluateApprovals, evaluateConsolidatedApproval, protocolLimits, gatherConsolidatedApproval, admitConsolidatedResearch, admitConsolidatedPreparation } from '../scripts/lib/approval.mjs'
 
 const plan = '<!-- vsk:v1 type=plan rev=1 -->\n- [ ] **Task 1: verify** <!-- task-id:1-T1 -->\nFiles — `a.ts`\nInterfaces — none\nSteps: run check\n'
 const artifact = { repo: 'acme/app', issue: 1, kind: 'plan', artifactId: 'plan-node', rev: 1, digest: 'a'.repeat(64) }
@@ -253,9 +253,7 @@ test('consolidated reader fetches every page and immutable blob bytes instead of
   const fixture: any = consolidatedFixture()
   fixture.record.manifest.source = { kind: 'git-blob', repositoryId: '123', commitSha: 'f'.repeat(40), path: 'scope.json', blobSha256: fixture.record.manifest.sha256 }
   refreshRecord(fixture)
-  const calls: string[][] = []
   const readJson = async (args: string[]) => {
-    calls.push(args)
     if (args[1] === 'repos/acme/app/issues/10/comments') return [[], fixture.currentArtifacts.approvalComments]
     if (args[1] === 'repositories/123') return { id: 123, full_name: 'acme/app' }
     if (args[1]?.includes('/contents/')) return { type: 'file', encoding: 'base64', content: Buffer.from(fixture.manifestBytes).toString('base64') }
@@ -266,12 +264,14 @@ test('consolidated reader fetches every page and immutable blob bytes instead of
   }
   const input = { parentRepo: 'acme/app', parentIssue: 10, approvalBinding: fixture.currentArtifacts.approvalBinding, requested: fixture.requested, operators: ['ada'], readJson }
   expect((await gatherConsolidatedApproval(input)).ok).toBe(true)
-  expect(calls.filter(args => args[1]?.endsWith('/comments')).every(args => args.includes('--slurp') && args.includes('--paginate'))).toBe(true)
+  const revoked = { ...record(), id: 'revoke-parent', scope: 'brief', artifacts: [], revokes: [fixture.record.id] }
+  const revocation = { id: 99, body: '<!-- vsk:v1 type=approval scope=brief -->\n```json\n' + JSON.stringify(revoked) + '\n```\n' }
+  expect((await gatherConsolidatedApproval({ ...input, readJson: async args => args[1] === 'repos/acme/app/issues/10/comments' ? [fixture.currentArtifacts.approvalComments, [revocation]] : readJson(args) })).ok).toBe(false)
   await expect(gatherConsolidatedApproval({ ...input, readJson: async args => args[1]?.includes('/contents/') ? { type: 'file', encoding: 'base64', content: Buffer.from('altered').toString('base64') } : readJson(args) })).rejects.toThrow()
 })
 
 
-test('preparation admits only exact selected task/files with fetched accepted-code receipts', () => {
+function preparationFixture() {
   const fixture: any = consolidatedFixture()
   const prerequisitePlan = { ...artifact, issue: 4, artifactId: 'plan-4', digest: scopeDigest(plan.replaceAll('1-T1', '4-T1'), 'plan') }
   const prerequisiteBrief = { ...artifact, kind: 'brief', issue: 4, artifactId: 'brief-4', digest: scopeDigest(brief.body, 'brief') }
@@ -289,9 +289,30 @@ test('preparation admits only exact selected task/files with fetched accepted-co
   const evidence = evidenceComment(preparation, 30)
   fixture.currentArtifacts.admissionEvidence = [evidence, receipt]
   fixture.requested.preparation = { commentId: 30, bodySha256: Bun.SHA256.hash(evidence.comment.body, 'hex') }
-  expect(evaluateConsolidatedApproval(fixture).ok).toBe(true)
+  return { fixture, preparation, manifest }
+}
+
+test('preparation admits only exact selected task/files with fetched accepted-code receipts', async () => {
+  const { fixture, preparation, manifest } = preparationFixture()
+  const scope = evaluateConsolidatedApproval(fixture)
+  expect(scope.ok).toBe(true)
+  expect((await admitConsolidatedPreparation(scope, undefined)).ok).toBe(false)
+  const adapter = { readTaskPrerequisites: async () => ({ parent: preparation.parent, plan: preparation.plan, tasks: preparation.tasks }), inspectAcceptedIntegration: async (contract: any) => ({ contract, reviewedHead: contract.childHead, acceptedTaskIds: ['4-T1'], ancestorShas: [contract.parentHead, contract.childHead, manifest.parent.baseSha] }) }
+  expect((await admitConsolidatedPreparation(scope, adapter)).ok).toBe(true)
+  expect((await admitConsolidatedPreparation(scope, { ...adapter, readTaskPrerequisites: async () => ({ parent: preparation.parent, plan: preparation.plan, tasks: [{ ...preparation.tasks[0], prerequisiteIssues: [4, 6] }] }) })).ok).toBe(false)
   expect(evaluateConsolidatedApproval({ ...fixture, requested: { ...fixture.requested, taskIds: ['1-T1', '1-T2'] } }).ok).toBe(false)
   expect(evaluateConsolidatedApproval({ ...fixture, requested: { ...fixture.requested, operation: 'publish' } }).ok).toBe(false)
+  const gathered = await gatherConsolidatedApproval({ parentRepo: 'acme/app', parentIssue: 10, approvalBinding: fixture.currentArtifacts.approvalBinding, requested: fixture.requested, operators: ['ada'], admissionEvidence: fixture.currentArtifacts.admissionEvidence, readJson: async (args: string[]) => {
+    const path = args[1]
+    if (path === 'repos/acme/app/issues/10/comments') return [fixture.currentArtifacts.approvalComments]
+    if (path?.includes('/issues/comments/')) return { ...fixture.currentArtifacts.admissionEvidence.find((entry: any) => path.endsWith('/' + entry.comment.id)).comment, user: { login: 'mallory' } }
+    if (path?.endsWith('/blocked_by')) return [[{ number: 5, state: 'open' }]]
+    const issue = Number(path?.split('/')[4])
+    if (path?.endsWith('/comments')) return [[fixture.currentArtifacts.artifacts.find((entry: any) => entry.issue === issue && entry.kind === 'plan').artifact]]
+    return { ...fixture.currentArtifacts.artifacts.find((entry: any) => entry.issue === issue && entry.kind === 'brief').artifact, state: 'open' }
+  } })
+  expect(gathered.ok).toBe(false)
+  expect(gathered.blocks.join(' ')).toContain('adapter unavailable')
   fixture.currentArtifacts.admissionEvidence.pop()
   expect(evaluateConsolidatedApproval(fixture).ok).toBe(false)
 })
@@ -307,4 +328,30 @@ test('correction operator, target self-reference and exact source quotation are 
   const external = { id: 9, html_url: approval.source.ref, user: { login: 'ada' }, body: 'I approve.' }
   expect(evaluate([quoted], { sourceComments: [external] }).ok).toBe(true)
   expect(evaluate([quoted], { sourceComments: [{ ...external, body: 'I revoke.' }] }).ok).toBe(false)
+})
+
+
+test('preparation may use only its selected SKILL-EVAL phase and still needs both adapters', async () => {
+  const { fixture, preparation, manifest } = preparationFixture()
+  const research = researchFixture()
+  fixture.record.items[0].artifacts[1] = research.record.items[0].artifacts[1]
+  fixture.currentArtifacts.artifacts[1] = research.currentArtifacts.artifacts[1]
+  fixture.record.items[0].actionIds.push('research')
+  fixture.record.items.push(research.record.items[1]); fixture.record.actions.push(research.record.actions[1])
+  fixture.currentArtifacts.artifacts.push(...research.currentArtifacts.artifacts.slice(2))
+  manifest.selections = fixture.record.items; manifest.candidateProtocols = [2]; manifest.excludedIssues = []
+  manifest.actionBounds.research = JSON.parse(research.manifestBytes).actionBounds.research
+  fixture.manifestBytes = JSON.stringify(manifest); fixture.record.manifest = { sha256: Bun.SHA256.hash(fixture.manifestBytes, 'hex'), source: { kind: 'inline', utf8: fixture.manifestBytes } }
+  fixture.record.actions[1].candidateRule.manifestSha256 = fixture.record.manifest.sha256
+  preparation.plan = fixture.record.items[0].artifacts[1]; preparation.tasks[0]!.files = ['skills/dev/example/SKILL.md']
+  const prepEvidence = evidenceComment(preparation, 30); fixture.currentArtifacts.admissionEvidence[0] = prepEvidence
+  const trial = research.currentArtifacts.admissionEvidence[0].payload; trial.manifestSha256 = fixture.record.manifest.sha256
+  const trialEvidence = evidenceComment(trial, 32); fixture.currentArtifacts.admissionEvidence.push(trialEvidence)
+  fixture.requested = { ...research.requested, preparation: { commentId: 30, bodySha256: Bun.SHA256.hash(prepEvidence.comment.body, 'hex') }, research: { commentId: 32, bodySha256: Bun.SHA256.hash(trialEvidence.comment.body, 'hex') } }
+  refreshRecord(fixture)
+  const result = evaluateConsolidatedApproval(fixture)
+  expect(result.ok).toBe(true)
+  expect((await admitConsolidatedPreparation(result, undefined)).ok).toBe(false)
+  expect((await admitConsolidatedResearch(result, undefined)).ok).toBe(false)
+  expect(evaluateConsolidatedApproval({ ...fixture, requested: { ...fixture.requested, scenarioId: 'H1' } }).ok).toBe(false)
 })

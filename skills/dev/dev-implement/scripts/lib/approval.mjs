@@ -32,7 +32,7 @@ Keep old comments verbatim. In report-only inventory, read every open issue and 
 
 `preflight.mjs --stage plan` requires brief intent; implementation requires brief+plan, including quick-build’s separate plan comment. Research preparation does not start a vendor process. `--consolidated-request <json>` accepts `{parentRepo,parentIssue,approvalBinding:{commentId,bodySha256},requested:{repo,issue,taskIds,actionId,branch,baseSha,paths,operation}}`; the approved manifest is fetched from the pinned record, never a local path. Approval bodies/source comments, canonical singleton comments, manifests and dependencies are fresh reads. Successful launch results expose `approvalIds` and `bindings` for run/recovery consumers.
 
-Preparation adds `requested.preparation:{commentId,bodySha256}` and the #144 owner’s exact source-bound projection: parent identity, current plan ref, selected task IDs/files/prerequisite issues and accepted code-contract receipts with child/parent SHA and evidence pins. These are checked against the canonical selected scope; the recovery owner establishes mapping completeness and actual accepted integration. Missing receipts refuse. Full issue execution keeps every native blocker and is not authorized by preparation.
+Preparation adds `requested.preparation:{commentId,bodySha256}` and the #144 owner’s exact source-bound projection: parent identity, current plan ref, selected task IDs/files/prerequisite issues and accepted code-contract receipts with child/parent SHA and evidence pins. These are checked against the canonical selected scope; the recovery owner establishes mapping completeness and actual accepted integration. Missing receipts or the recovery owner’s readTaskPrerequisites/inspectAcceptedIntegration adapter refuse. Fetched receipt hashes alone are not proof of accepted code. Full issue execution keeps every native blocker and is not authorized by preparation.
 
 Research adds its exact scenario and pinned reservation reference. The protocol owner supplies fetched ledger projections binding owner task/changed skill, protocol, source/tree and packed SHA-256/SRI, subscription harness/model/account/effort/config/policy, and complete phase/overall attempt history. Failed, child and resumed starts remain counted; a changed skill never gets a fresh allowance merely because another issue owns its next edit. `protocolLimits` recognizes only unambiguous envelope clauses from the bound protocol outside fenced examples (core/skill/reserve/total/active-time/per-process, or the top-level trial envelope); unsupported clauses refuse. Numeric limits beside a protocol digest are not authority.
 
@@ -291,7 +291,7 @@ export function parseApproval(comment) {
       }
     } else if (value.kind === 'consolidated') {
       keys(value, ['schemaVersion', 'kind', 'id', 'operator', 'scope', 'source', 'manifest', 'items', 'actions', 'supersedes', 'revokes']);
-      check(value.scope === 'consolidated', 'invalid consolidated scope');
+      check(value.scope === 'consolidated' && value.revokes.length === 0, 'consolidated grants cannot also revoke; use a separate empty-artifact event');
       keys(value.manifest, ['sha256', 'source']);
       check(digest(value.manifest.sha256), 'invalid manifest digest');
       validateManifestSource(value.manifest.source);
@@ -305,6 +305,7 @@ export function parseApproval(comment) {
       keys(value, ['schemaVersion', 'id', 'operator', 'scope', 'source', 'artifacts', 'supersedes', 'revokes']);
       check(['brief', 'plan', 'brief+plan'].includes(value.scope), 'unknown approval scope');
       validateArtifacts(value.artifacts);
+      check(value.revokes.length === 0 || value.artifacts.length === 0, 'revocation grants no new binding');
       check(value.artifacts.length > 0 || value.revokes.length > 0, 'approval grants or revokes no binding');
       const permitted = value.scope === 'brief+plan' ? ['brief', 'plan'] : [value.scope];
       check(value.artifacts.every((ref) => permitted.includes(ref.kind)), 'artifact outside approval scope');
@@ -519,14 +520,14 @@ export function evaluateConsolidatedApproval({ record, manifestBytes, currentArt
     const dependencies = currentDependencies.filter((entry) => entry.repo === item.repo && entry.issue === item.issue);
     check(dependencies.length === 1 && Array.isArray(dependencies[0].blockedBy), 'current dependency identity unavailable');
     check(item.mode === 'preparation' || !requested.preparation, 'preparation evidence on another mode');
-    if (item.mode === 'preparation') validatePreparationEvidence(context, item, requested, manifest);
-    else check(dependencies[0].blockedBy.every((dependency) => dependency.state === 'closed'), 'open native prerequisites');
+    const preparation = item.mode === 'preparation' ? validatePreparationEvidence(context, item, requested, manifest) : null;
+    if (item.mode !== 'preparation') check(dependencies[0].blockedBy.every((dependency) => dependency.state === 'closed'), 'open native prerequisites');
     if (action.kind === 'research-tests') {
       check(action.scenarioIds.includes(requested.scenarioId), 'unreviewed research scenario');
       check(item.mode === 'research' || requested.scenarioId === 'SKILL-EVAL', 'predecessor cannot admit this research phase');
       const research = validateResearchEvidence(context, item, requested, action, record, manifest);
       return { ok: true, bindings: item.artifacts, approvalIds: [record.id], manifestSha256: record.manifest.sha256,
-        taskIds: requested.taskIds, action, research, blocks: [] };
+        taskIds: requested.taskIds, action, research, preparation, blocks: [] };
     }
     check(!requested.research && !requested.scenarioId, 'research fields on local request');
     check(item.mode !== 'research', 'research selection cannot execute code');
@@ -540,7 +541,7 @@ export function evaluateConsolidatedApproval({ record, manifestBytes, currentArt
       // This result validates intent scope only. #138 must separately prove
       // complete exported history and persist delivery intent before pushing.
     }
-    return { ok: true, bindings: item.artifacts, approvalIds: [record.id], manifestSha256: record.manifest.sha256, taskIds: requested.taskIds, files, action, blocks: [] };
+    return { ok: true, bindings: item.artifacts, approvalIds: [record.id], manifestSha256: record.manifest.sha256, taskIds: requested.taskIds, files, action, preparation, blocks: [] };
   } catch (error) {
     return { ok: false, bindings: [], approvalIds: [], blocks: ['consolidated approval: ' + error.message] };
   }
@@ -570,7 +571,7 @@ function boundEvidence(context, reference, kind) {
 }
 
 function validatePreparationEvidence(context, item, requested, manifest) {
-  check(requested.operation === 'edit' || requested.operation === 'check' || requested.operation === 'review', 'preparation permits local preparation only');
+  check(['edit', 'check', 'review', 'integrate', 'checkpoint', 'research-test'].includes(requested.operation), 'preparation permits selected local/test actions only');
   const evidence = boundEvidence(context, requested.preparation, 'preparation');
   keys(evidence, ['schemaVersion', 'kind', 'parent', 'plan', 'tasks', 'acceptedContracts']);
   check(evidence.schemaVersion === 1 && evidence.kind === 'preparation' && sortedJson(evidence.parent) === sortedJson(manifest.parent), 'invalid preparation parent');
@@ -600,6 +601,7 @@ function validatePreparationEvidence(context, item, requested, manifest) {
     }
   }
   check(requested.taskIds.every((id) => taskIds.has(id)), 'preparation task mapping missing');
+  return { ...evidence, taskIds: requested.taskIds, requiredTasks: evidence.acceptedContracts.map((entry) => ({ issue: entry.issue, taskIds: manifest.selections.find((selection) => selection.repo === entry.repo && selection.issue === entry.issue).taskIds })), pendingEffects: ['verify-preparation-prerequisites-and-integrations'] };
 }
 
 // Supported protocol envelope grammar. Unknown/ambiguous prose is a refusal,
@@ -705,7 +707,7 @@ export async function readApprovalSources(comments, readJson) {
   return [...sources.values()];
 }
 
-export async function gatherConsolidatedApproval({ parentRepo, parentIssue, approvalBinding, requested, operators, readJson, admissionEvidence = [], researchAdapter }) {
+export async function gatherConsolidatedApproval({ parentRepo, parentIssue, approvalBinding, requested, operators, readJson, admissionEvidence = [], researchAdapter, preparationAdapter }) {
   const pages = async (path) => {
     const value = await readJson(['api', path, '--paginate', '--slurp']);
     check(Array.isArray(value) && value.every(Array.isArray), 'unreadable complete approval history');
@@ -761,9 +763,10 @@ export async function gatherConsolidatedApproval({ parentRepo, parentIssue, appr
     const comment = await readJson(['api', 'repos/' + parentRepo + '/issues/comments/' + entry.comment.id]);
     fetchedEvidence.push({ ...entry, comment });
   }
-  const result = evaluateConsolidatedApproval({ record, manifestBytes, operators, requested, currentDependencies,
+  let result = evaluateConsolidatedApproval({ record, manifestBytes, operators, requested, currentDependencies,
     currentArtifacts: { artifacts, approvalComments, approvalBinding, manifestBlob,
       sourceComments: await readApprovalSources(approvalComments, readJson), admissionEvidence: fetchedEvidence } });
+  if (result.ok && result.preparation) result = await admitConsolidatedPreparation(result, preparationAdapter);
   if (result.ok && result.research) return admitConsolidatedResearch(result, researchAdapter);
   return result;
 }
@@ -773,6 +776,7 @@ export async function gatherConsolidatedApproval({ parentRepo, parentIssue, appr
 export async function admitConsolidatedResearch(scope, adapter) {
   try {
     check(scope.ok && scope.research, 'missing validated research scope');
+    check(!scope.preparation || scope.preparation.pendingEffects.length === 0, 'preparation prerequisite admission is still pending');
     check(typeof adapter?.inspectCandidate === 'function' && typeof adapter?.consumeReservation === 'function', 'research candidate/shared-ledger production adapter unavailable');
     const expected = scope.research;
     const current = await adapter.inspectCandidate(expected.candidate);
@@ -788,5 +792,32 @@ export async function admitConsolidatedResearch(scope, adapter) {
     return { ...scope, research: { ...expected, pendingEffects: [], receipt } };
   } catch (error) {
     return { ok: false, bindings: [], approvalIds: [], blocks: ['research launch: ' + error.message] };
+  }
+}
+
+// The recovery owner verifies the mapping against its canonical task contract
+// and actual accepted-parent history. Comment hashes alone cannot prove either.
+export async function admitConsolidatedPreparation(scope, adapter) {
+  try {
+    check(scope.ok && scope.preparation, 'missing validated preparation scope');
+    check(typeof adapter?.readTaskPrerequisites === 'function' && typeof adapter?.inspectAcceptedIntegration === 'function', 'preparation recovery-owner production adapter unavailable');
+    const expected = scope.preparation;
+    const mapping = await adapter.readTaskPrerequisites({ parent: expected.parent, plan: expected.plan, taskIds: expected.taskIds });
+    keys(mapping, ['parent', 'plan', 'tasks']);
+    check(sortedJson(mapping.parent) === sortedJson(expected.parent) && sameRef(mapping.plan, expected.plan) && sortedJson(mapping.tasks) === sortedJson(expected.tasks), 'authoritative preparation prerequisite mapping differs');
+    const integrations = [];
+    for (const contract of expected.acceptedContracts) {
+      const current = await adapter.inspectAcceptedIntegration(contract);
+      keys(current, ['contract', 'ancestorShas', 'reviewedHead', 'acceptedTaskIds']);
+      check(sortedJson(current.contract) === sortedJson(contract) && current.reviewedHead === contract.childHead, 'preparation accepted contract/review differs');
+      list(current.ancestorShas, sha, 'accepted parent ancestry', { nonempty: true });
+      check(current.ancestorShas.includes(contract.childHead) && current.ancestorShas.includes(expected.parent.baseSha) && current.ancestorShas[0] === contract.parentHead, 'preparation code is not integrated into approved parent');
+      list(current.acceptedTaskIds, taskId, 'accepted prerequisite tasks', { nonempty: true });
+      check(sortedJson([...current.acceptedTaskIds].sort()) === sortedJson([...expected.requiredTasks.find((entry) => entry.issue === contract.issue).taskIds].sort()), 'preparation prerequisite acceptance is incomplete');
+      integrations.push(current);
+    }
+    return { ...scope, preparation: { ...expected, pendingEffects: [], integrations } };
+  } catch (error) {
+    return { ok: false, bindings: [], approvalIds: [], blocks: ['preparation launch: ' + error.message] };
   }
 }

@@ -76,12 +76,12 @@ export function findMarkerComment(comments, type) {
 
 // Render the guard result and compute the exit code. blocks/warns are arrays of
 // human sentences; the caller passes process.argv-derived json flag.
-export function renderResult(name, { blocks = [], warns = [], bindings, approvalIds }, { json = false } = {}) {
+export function renderResult(name, { blocks = [], warns = [], ...receipt }, { json = false } = {}) {
   const ok = blocks.length === 0;
   const exitCode = blocks.length > 0 ? 2 : warns.length > 0 ? 1 : 0;
   let text;
   if (json) {
-    text = JSON.stringify({ guard: name, ok, blocks, warns, ...(bindings ? { bindings, approvalIds } : {}) }, null, 2);
+    text = JSON.stringify({ ...receipt, guard: name, ok, blocks, warns }, null, 2);
   } else {
     const lines = [`${name}: ${ok ? (warns.length ? 'pass with warnings' : 'pass') : 'BLOCKED'}`];
     for (const b of blocks) lines.push(`  block: ${b}`);

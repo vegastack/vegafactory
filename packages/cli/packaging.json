@@ -62,7 +62,8 @@
     "scripts/brief-lint.mjs",
     "references/brief-template.md",
     "refresh/REFRESH.md",
-    "refresh/sources.json"
+    "refresh/sources.json",
+    "scripts/lib/approval.mjs@dev-implement"
   ],
   "dev-plan": [
     "SKILL.md",
@@ -73,7 +74,8 @@
     "scripts/plan-lint.mjs",
     "references/plan-format.md",
     "refresh/REFRESH.md",
-    "refresh/sources.json"
+    "refresh/sources.json",
+    "scripts/lib/approval.mjs@dev-implement"
   ],
   "dev-review": [
     "SKILL.md",
