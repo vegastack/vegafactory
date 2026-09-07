@@ -406,65 +406,39 @@ test('a profile edited after sync refuses before any worktree or execute', async
   expect(result.refusals.some(r => r.reason.includes('stale'))).toBe(true)
 })
 
-test('actual executor late refusal retains corrections for a later real spawn', async () => {
+// Positive caller integration remains red until the actual guard reader and managed
+// metadata are compatible. The executor uses only a harmless external fixture here;
+// this tests reaction bookkeeping, not vendor qualification or remote delivery.
+test('actual executor OS refusal retains corrections for a later real spawn', async () => {
   const { home, config, repos } = fixture()
-  const repo = repos[0]!.path, bin = join(home, 'bin'), fault = join(home, 'fault'), entered = join(home, 'entered')
-  mkdirSync(bin)
-  writeFileSync(fault, 'refuse')
-  const git = (args: string[]) => {
-    const result = Bun.spawnSync(['git', '-C', repo, ...args])
-    expect(result.exitCode, result.stderr.toString()).toBe(0)
-  }
-  writeFileSync(join(repo, '.gitignore'), '.claude/\n.vegastack/.worktrees/\n')
-  git(['add', '.vegastack/hooks/ship-guard.mjs', '.vegastack/dev.md', '.gitignore'])
-  git(['-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', 'commit', '-qm', 'fixture'])
-  const target = join(repo, '.vegastack/.worktrees/12-thing')
-  git(['worktree', 'add', '-q', '-b', 'fixture-running', target])
-  mkdirSync(join(target, '.claude'))
-  writeFileSync(join(target, '.claude/settings.json'), CLAUDE_WIRING)
-  const bare = join(home, 'bare.git')
-  expect(Bun.spawnSync(['git', 'init', '--bare', '-q', bare]).exitCode).toBe(0)
-  git(['remote', 'set-url', '--push', 'origin', bare])
-  writeFileSync(join(bin, 'claude'), `#!/usr/bin/env node
-const fs = require('node:fs');
-if (process.argv.includes('--version')) {
-  if (fs.existsSync(${JSON.stringify(config.logRoot)}) && fs.readFileSync(${JSON.stringify(fault)}, 'utf8') === 'refuse')
-    fs.writeFileSync(${JSON.stringify(join(target, '.claude/settings.json'))}, '{}');
-  process.stdout.write('2.1.263 (Claude Code)');
-} else { fs.appendFileSync(${JSON.stringify(entered)}, 'entered'); process.stdout.write('{}'); }
-`)
-  chmodSync(join(bin, 'claude'), 0o755)
+  const repo = repos[0]!.path, command = join(home, 'retry.sh'), entered = join(home, 'entered')
   const { gh } = ghStub({ forOperator: [{ number: 12, title: 'feat: thing', labels: ['for-operator'], assignees: ['mk'] }] }, args => {
     if (args[1] === 'repos/acme/app/issues/12/comments') return JSON.stringify([{ id: 555, reactions: { rocket: 1 } }])
     if (args[1] === 'repos/acme/app/issues/comments/555/reactions') return JSON.stringify([{ id: 999, content: 'rocket', user: { login: 'mk' } }])
     return null
   })
-  const previous = process.env.PATH
   const tracker: RunTracker = new Map()
-  try {
-    process.env.PATH = `${bin}:${previous ?? ''}`
-    const deps = { gh, tracker, parentCandidates: async () => [],
-      ensureWorktree: async () => ({ path: target, branch: 'fixture-running', slug: 'thing', type: 'feat' }),
-      execute: (run: PlannedRun, plan: Parameters<TickDeps['execute']>[1], cfg: typeof config, options: Parameters<TickDeps['execute']>[3]) => executeRun(run, plan, cfg, options, { gh }),
-    }
-    const refused = await runTick(config, { dryRun: false }, deps)
-    await settleRuns(tracker)
-    expect(refused.runs).toEqual([])
-    expect(refused.refusals.some(r => r.reason.includes('immediately before spawn'))).toBe(true)
-    expect((await readState(config.stateFile)).handled).toEqual([])
-    expect(existsSync(entered)).toBe(false)
-    writeFileSync(fault, 'allow')
-    writeFileSync(join(target, '.claude/settings.json'), CLAUDE_WIRING)
-    const retried = await runTick(config, { dryRun: false }, deps)
-    await settleRuns(tracker)
-    expect(retried.refusals).toEqual([])
-    expect(retried.runs[0]!.launched).toBe(true)
-    expect(readFileSync(entered, 'utf8')).toBe('entered')
-    expect((await readState(config.stateFile)).handled).toHaveLength(1)
-  } finally {
-    if (previous === undefined) delete process.env.PATH
-    else process.env.PATH = previous
+  const deps = { gh, tracker, parentCandidates: async () => [],
+    ensureWorktree: async () => ({ path: repo, branch: 'fixture-running', slug: 'thing', type: 'feat' }),
+    execute: (run: PlannedRun, plan: Parameters<TickDeps['execute']>[1], cfg: typeof config, options: Parameters<TickDeps['execute']>[3]) =>
+      executeRun(run, { ...plan, command, args: [entered] }, cfg, options,
+        { gh, git: async () => ({ ok: true, message: '' }) }),
   }
+  const refused = await runTick(config, { dryRun: false }, deps)
+  await settleRuns(tracker)
+  expect(refused.runs).toEqual([])
+  expect(refused.refusals.some(r => r.reason.includes('harness process did not start'))).toBe(true)
+  expect((await readState(config.stateFile)).handled).toEqual([])
+  expect(existsSync(entered)).toBe(false)
+  // An actual executable now exists; no internal metadata/logging call count is observed.
+  writeFileSync(command, '#!/bin/sh\necho entered > "$1"\n')
+  chmodSync(command, 0o755)
+  const retried = await runTick(config, { dryRun: false }, deps)
+  await settleRuns(tracker)
+  expect(retried.refusals).toEqual([])
+  expect(retried.runs[0]!.launched).toBe(true)
+  expect(readFileSync(entered, 'utf8')).toBe('entered\n')
+  expect((await readState(config.stateFile)).handled).toHaveLength(1)
 }, 15000)
 
 

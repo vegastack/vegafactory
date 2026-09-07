@@ -1,4 +1,4 @@
-import { describe, expect, test } from 'bun:test'
+import { describe, expect, spyOn, test } from 'bun:test'
 import { chmodSync, mkdtempSync, readFileSync, realpathSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -10,6 +10,7 @@ import {
   defaultParentCandidates, parentParallelLaunch, parentParallelLaunchPlan,
   type BoardIssue, type DispatchState, type GuardState, type Rocket,
 } from '../src/dispatch.ts'
+import { runStatusCli } from '../src/status.ts'
 import { buildLaunchPlan, validateManagedLaunch } from '../src/launch.ts'
 import { parseFactoryConfig, parseRepoPolicy } from '../src/config.ts'
 
@@ -320,6 +321,20 @@ describe('failureComment', () => {
   })
 })
 
+// Real log discovery and status decoding; only board/worktree dependencies are offline.
+async function statusRuns(home: string) {
+  const configPath = join(home, 'factory.json')
+  writeFileSync(configPath, JSON.stringify({ repos: [{ path: home, repo: 'acme/app', org: 'acme' }] }))
+  const output = spyOn(console, 'log').mockImplementation(() => {})
+  try {
+    expect(await runStatusCli(['--config', configPath, '--json'], home, {
+      gh: async () => '{"items":[]}', worktrees: async () => [],
+    })).toBe(0)
+    return JSON.parse(output.mock.calls.at(-1)![0] as string).repos[0].runs
+  } finally { output.mockRestore() }
+}
+
+
 describe('executeRun', () => {
   function harnessStub(body: string): string {
     const dir = mkdtempSync(join(tmpdir(), 'vsk-run-'))
@@ -347,10 +362,66 @@ describe('executeRun', () => {
     expect(calls.some(call => call.join(' ') === 'git push -u origin HEAD')).toBe(true)
     expect(calls.some(call => call[0] === 'issue')).toBe(false)
     const log = readFileSync(outcome.logFile, 'utf8').trim().split('\n').map(line => JSON.parse(line))
-    expect(log[0].event).toBe('prepared')
+    expect(log[0]).toMatchObject({ event: 'start', repo: 'acme/app', issue: 12, stage: 'implement' })
     expect(log.some(row => row.event === 'start')).toBe(true)
     expect(log.some(row => row.text?.includes('hello'))).toBe(true)
     expect(log.at(-1).event).toBe('exit')
+  })
+
+  test('silent actual spawn persists corrections identity before output or exit', async () => {
+    const home = mkdtempSync(join(tmpdir(), 'vsk-silent-'))
+    const release = join(home, 'release')
+    const command = harnessStub('#!/bin/sh\nwhile [ ! -f "$1" ]; do sleep 0.01; done\n')
+    let acknowledge!: () => void
+    const acknowledged = new Promise<void>(resolve => { acknowledge = resolve })
+    const running = executeRun({ ...planned, stage: 'corrections' },
+      { command, args: [release], env: {}, cwd: home, prompt: 'p' }, runFor(home),
+      { operator: null, onSpawn: acknowledge }, {
+        timeoutMs: 3000, gh: async () => '', git: async () => ({ ok: true, message: '' }),
+      })
+    try {
+      await acknowledged
+      // Poll the consumer-visible boundary, with the child held silent until assertions finish.
+      let runs = []
+      for (let i = 0; i < 50; i++) {
+        runs = await statusRuns(home)
+        if (runs[0]?.issue === planned.issue) break
+        await new Promise(resolve => setTimeout(resolve, 10))
+      }
+      expect(runs).toHaveLength(1)
+      expect(runs[0]).toMatchObject({ issue: 12, stage: 'corrections', exitCode: null })
+      expect(runs[0].startedAt).not.toBe('')
+    } finally {
+      writeFileSync(release, '')
+      await running
+    }
+    expect((await statusRuns(home))[0]).toMatchObject({ issue: 12, stage: 'corrections', exitCode: 0 })
+  })
+
+  test('OS spawn refusal keeps its audit outside status runs and a real retry starts', async () => {
+    const home = mkdtempSync(join(tmpdir(), 'vsk-refusal-'))
+    const command = join(home, 'retry.sh')
+    let starts = 0, deliveries = 0
+    const deps = { gh: async () => { deliveries++; return '' }, git: async () => { deliveries++; return { ok: true, message: '' } } }
+    const launch = () => executeRun({ ...planned, stage: 'corrections' },
+      { command, args: [], env: {}, cwd: home, prompt: 'p' }, runFor(home),
+      { operator: null, onSpawn: () => { starts++ } }, deps)
+    const refused = await launch()
+    expect(refused).toMatchObject({ started: false, refusal: 'harness process did not start', pushed: false, handedBack: false })
+    expect(starts).toBe(0)
+    expect(deliveries).toBe(0)
+    const audit = readFileSync(refused.logFile, 'utf8').trim().split('\n').map(line => JSON.parse(line))
+    expect(audit[0]).toMatchObject({ event: 'prepared', repo: 'acme/app', issue: 12, stage: 'corrections' })
+    expect(audit.at(-1)).toMatchObject({ event: 'launch-refused', reason: refused.refusal })
+    expect(audit.some(row => row.event === 'start' || row.event === 'exit')).toBe(false)
+    expect(await statusRuns(home)).toEqual([])
+    writeFileSync(command, '#!/bin/sh\nexit 0\n')
+    chmodSync(command, 0o755)
+    const retried = await launch()
+    expect(retried.started).toBe(true)
+    expect(starts).toBe(1)
+    expect((await statusRuns(home))[0]).toMatchObject({ issue: 12, stage: 'corrections', exitCode: 0 })
+    expect(readFileSync(refused.logFile, 'utf8')).toContain('launch-refused')
   })
 
   test('a failing run posts the hand-back, moves the label and assigns the operator', async () => {
@@ -668,10 +739,17 @@ else fs.writeFileSync(${JSON.stringify(marker)}, 'entered');
   const plan = buildLaunchPlan({ harness: 'claude', model: 'fixture', effort: 'high', stage: 'implement', worktree: home,
     issue: { number: 140, title: 'fixture' }, operator: 'mk', outcome: 'fixture', stopList: [], resume: false, skillPath: null, subagents: { spawnDepth: 1, concurrent: 3 } })
   plan.env.PATH = `${bin}:${process.env.PATH ?? ''}`
+  let starts = 0, deliveries = 0
   const outcome = await executeRun({ repo: 'acme/app', issue: 140, title: 'fixture', stage: 'implement', commentId: null, reactionId: null }, plan,
-    parseFactoryConfig({ repos: [{ path: home, repo: 'acme/app', org: 'acme' }] }, home), { operator: 'mk' })
+    parseFactoryConfig({ repos: [{ path: home, repo: 'acme/app', org: 'acme' }] }, home),
+    { operator: 'mk', onSpawn: () => { starts++ } }, {
+      gh: async () => { deliveries++; return '' }, git: async () => { deliveries++; return { ok: true, message: '' } },
+    })
   expect(outcome.started).toBe(false)
   expect(outcome.refusal).toContain('unsupported Claude version')
+  expect(starts).toBe(0)
+  expect(deliveries).toBe(0)
+  expect(await statusRuns(home)).toEqual([])
   expect(outcome.pushed).toBe(false)
   expect(outcome.handedBack).toBe(false)
   expect(readFileSync(outcome.logFile, 'utf8')).toContain('launch-refused')

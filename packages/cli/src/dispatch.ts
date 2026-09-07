@@ -622,10 +622,15 @@ export async function executeRun(
   const gh = deps?.gh ?? ((args: string[], ghOptions?: { cwd?: string; input?: string }) => ghText(args, ghOptions))
   const git = deps?.git ?? defaultGit
   const timeoutMs = deps?.timeoutMs ?? 6 * 60 * 60 * 1000
-  const startedAt = now()
+  let startedAt = now()
   const file = logPath(config, run.repo, run.issue, startedAt)
+  // Status discovers only .jsonl run logs. Keep every preparation/refusal audit,
+  // but expose a run log only after the OS acknowledges an actual process.
+  const attemptFile = `${file}.attempt`
+  let destination = attemptFile
   await mkdir(dirname(file), { recursive: true })
   await refuseSymlink(file)
+  await refuseSymlink(attemptFile)
   const lines: string[] = []
   const record = (row: Record<string, unknown>): void => { lines.push(JSON.stringify(row)) }
   // One append at a time, chained: two concurrent appends can land out of order, and a log whose
@@ -635,7 +640,7 @@ export async function executeRun(
     writing = writing.then(async () => {
       if (lines.length === 0) return
       const pending = lines.splice(0, lines.length)
-      await appendFile(file, `${pending.join('\n')}\n`)
+      await appendFile(destination, `${pending.join('\n')}\n`)
     })
     return writing
   }
@@ -645,7 +650,7 @@ export async function executeRun(
   const refuseLaunch = async (reason: string): Promise<RunOutcome> => {
     record({ at: now().toISOString(), event: 'launch-refused', reason })
     await flush()
-    return { started: false, refusal: reason, exitCode: null, timedOut: false, logFile: file, pushed: false, handedBack: false }
+    return { started: false, refusal: reason, exitCode: null, timedOut: false, logFile: attemptFile, pushed: false, handedBack: false }
   }
   if (run.parallel?.length) return refuseLaunch('parallel child execution requires the checked child gateway; preparation-only launch descriptions do not qualify')
   if (plan.command === 'claude' || plan.command === 'codex') {
@@ -667,7 +672,10 @@ export async function executeRun(
     const child = spawn(plan.command, plan.args, { cwd: plan.cwd, env: { ...process.env, ...plan.env }, stdio: ['ignore', 'pipe', 'pipe'] })
     child.once('spawn', () => {
       started = true
-      record({ at: now().toISOString(), event: 'start' })
+      startedAt = now()
+      destination = file
+      record({ at: startedAt.toISOString(), event: 'start', repo: run.repo, issue: run.issue, stage: run.stage, command: plan.command, args: plan.args, cwd: plan.cwd, attemptFile })
+      void flush()
       options.onSpawn?.()
     })
     let timedOut = false
