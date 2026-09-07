@@ -675,3 +675,89 @@ test('source trust: each reserved attempt pins its source while prior authoritie
   trustSealResearch(fixture)
   expect(evaluateConsolidatedApproval(fixture).ok).toBe(true)
 })
+
+
+for (const fault of ['operator', 'supersedes', 'revokes'] as const) {
+  test('source facts first: corrected relay ' + fault + ' cannot conceal inconsistent reads', () => {
+    const { root, relay } = trustOrdinary()
+    const event = parseApproval(relay)
+    if (fault === 'operator') event.operator = 'mallory'
+    else event[fault] = ['grant-1']
+    if (fault === 'revokes') event.artifacts = []
+    const invalid = trustComment(event, relay.id, 'ben')
+    expect(parseApproval(invalid)).toEqual(event)
+    const comments = [root, invalid, trustCorrection(invalid)]
+    const coherent = evaluate(comments, { sourceComments: [root] })
+    expect(coherent.ok).toBe(true)
+    expect(coherent.approvalBindings).toEqual([trustBinding(root)])
+    for (const changed of [
+      { ...root, body: root.body + '\nchanged during source read' },
+      { ...root, user: { login: 'mallory' } },
+      { ...root, id: 30 },
+    ]) {
+      const refused = evaluate(comments, { sourceComments: [changed] })
+      expect(refused.ok).toBe(false)
+      expect(refused.blocks.join(' ')).toContain('unavailable')
+    }
+  })
+}
+
+test('source facts first: trusted publishers reconcile non-approval source history before correction', () => {
+  const { root } = trustOrdinary()
+  const source = { id: 50, html_url: 'https://github.com/acme/app/issues/1#issuecomment-50', user: { login: 'ada' }, body: 'I approve the scoped work.' }
+  const invalid = trustComment({ ...parseApproval(root), id: 'invalid-trusted', operator: 'mallory', source: { kind: 'github-comment', ref: source.html_url, quote: source.body } }, 4)
+  const comments = [source, root, invalid, trustCorrection(invalid)]
+  expect(evaluate(comments, { sourceComments: [source] }).ok).toBe(true)
+  for (const changed of [{ ...source, body: source.body + ' changed' }, { ...source, user: { login: 'mallory' } }, { ...source, id: 51 }]) {
+    const refused = evaluate(comments, { sourceComments: [changed] })
+    expect(refused.ok).toBe(false)
+    expect(refused.blocks.join(' ')).toContain('unavailable')
+  }
+  for (const history of [[...comments, { ...source }], [{ ...source, user: undefined }, ...comments.slice(1)]]) {
+    const refused = evaluate(history, { sourceComments: [source] })
+    expect(refused.ok).toBe(false)
+    expect(refused.blocks.join(' ')).toContain('unavailable')
+  }
+  // An independently read source outside this history is not a relay authority.
+  const relay = trustComment({ ...parseApproval(root), id: 'absent-relay', source: { kind: 'github-comment', ref: source.html_url, quote: source.body } }, 4, 'ben')
+  expect(evaluate([root, relay, trustCorrection(relay)], { sourceComments: [source] }).ok).toBe(true)
+})
+
+test('source facts first: trusted GitHub attestations refuse inconsistent authority reads without another fault', () => {
+  const { root, relay } = trustOrdinary()
+  const attestation = { ...relay, user: { login: 'ada' } }
+  const source = { ...root, body: root.body + '\nchanged during source read' }
+  const result = evaluate([root, attestation], { sourceComments: [source] })
+  expect(result.ok).toBe(false)
+  expect(result.blocks.join(' ')).toContain('unavailable')
+})
+
+test('source facts first: fresh consolidated admission refuses corrected mixed faults', async () => {
+  for (const fault of ['operator', 'supersedes', 'revokes'] as const) {
+    const { fixture, root, relay } = trustRelayConsolidated(consolidatedFixture())
+    let event = parseApproval(relay)
+    if (fault === 'operator') event.operator = 'mallory'
+    else if (fault === 'supersedes') event.supersedes = [parseApproval(root).id]
+    else event = { ...record(), id: 'relay-revocation', source: event.source, artifacts: [], revokes: [parseApproval(root).id] }
+    const invalid = trustComment(event, relay.id, 'ben')
+    expect(parseApproval(invalid)).toEqual(event)
+    fixture.currentArtifacts.approvalComments = [root, invalid, trustCorrection(invalid)]
+    let direct = root
+    const readJson = async (args: string[]) => {
+      const route = args[1]!
+      if (route === 'repos/acme/app/issues/10/comments') return [fixture.currentArtifacts.approvalComments]
+      if (route.includes('/issues/comments/')) return direct
+      if (route.endsWith('/blocked_by')) return [[]]
+      if (route.endsWith('/comments')) return [[livePlan]]
+      return { ...brief, state: 'open' }
+    }
+    const input = { parentRepo: 'acme/app', parentIssue: 10, approvalBinding: { commentId: root.id, bodySha256: Bun.SHA256.hash(root.body, 'hex') }, requested: fixture.requested, operators: ['ada'], readJson }
+    const coherent = await gatherConsolidatedApproval(input)
+    expect(coherent.ok).toBe(true)
+    expect(coherent.approvalBindings).toEqual([trustBinding(root)])
+    direct = { ...root, body: root.body + '\nchanged during source read' }
+    const refused = await gatherConsolidatedApproval(input)
+    expect(refused.ok).toBe(false)
+    expect(refused.blocks.join(' ')).toContain('unavailable')
+  }
+})

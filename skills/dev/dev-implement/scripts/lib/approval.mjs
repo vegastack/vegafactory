@@ -336,29 +336,38 @@ function grantProjection(event) {
 class InvalidApprovalSource extends Error {}
 class ApprovalSourceUnavailable extends Error {}
 
-function validateHistorySources(parsed, operators, sourceComments) {
+function validateHistorySources(parsed, comments, operators, sourceComments) {
   const known = (condition, reason) => { if (!condition) throw new ApprovalSourceUnavailable('approval source unavailable: ' + reason); };
   const valid = (condition, reason) => { if (!condition) throw new InvalidApprovalSource(reason); };
-  const publisher = (entry) => {
-    known(integer(entry.comment.id) && text(entry.comment.user?.login), 'publisher/comment identity metadata missing');
-    return entry.comment.user.login;
-  };
-  const publisherTrusted = (entry) => operators.includes(publisher(entry));
-  const sourceFor = (event) => {
+  const publishers = new Map();
+  const sources = new Map();
+  const publisherTrusted = (entry) => operators.includes(publishers.get(entry));
+  const resolveSource = (event) => {
     known(Array.isArray(sourceComments), 'source reads missing');
     const matches = sourceComments.filter((comment) => comment.html_url === event.source.ref);
     known(matches.length === 1, 'source comment missing or ambiguous');
     const source = matches[0];
     known(integer(source.id) && typeof source.body === 'string' && text(source.user?.login), 'source identity/body metadata missing');
-    return source;
+    const locatorId = /#issuecomment-([1-9]\d*)$/.exec(event.source.ref)?.[1];
+    known(String(source.id) === locatorId, 'source comment identity differs from locator');
+    const history = comments.filter((comment) => String(comment?.id) === String(source.id) || comment?.html_url === event.source.ref);
+    known(history.length <= 1, 'source identity ambiguous in history');
+    if (history.length) {
+      const current = history[0];
+      known(integer(current.id) && typeof current.body === 'string' && text(current.user?.login), 'history source identity/body metadata missing');
+      known(current.id === source.id && current.body === source.body && current.user.login === source.user.login
+        && (current.html_url === undefined || current.html_url === source.html_url), 'source changed between history and direct read');
+    }
+    return { source, root: parsed.find((entry) => entry.comment === history[0]) };
   };
   // Resolve all required facts before any event can become correction-eligible.
   // Unknown reads never become invalid evidence merely because another fault
   // or an exact correction is also present in the same history.
   for (const entry of parsed) {
     if (entry.event.ok === false) continue;
-    publisher(entry);
-    if (entry.event.source.kind === 'github-comment') sourceFor(entry.event);
+    known(integer(entry.comment.id) && text(entry.comment.user?.login), 'publisher/comment identity metadata missing');
+    publishers.set(entry, entry.comment.user.login);
+    if (entry.event.source.kind === 'github-comment') sources.set(entry, resolveSource(entry.event));
   }
   const refuseKnownInvalid = (entry, error) => {
     if (!(error instanceof InvalidApprovalSource)) throw error;
@@ -369,7 +378,7 @@ function validateHistorySources(parsed, operators, sourceComments) {
     try {
       valid(operators.includes(entry.event.operator), 'named operator is not authorized');
       if (entry.event.source.kind === 'github-comment') {
-        const source = sourceFor(entry.event);
+        const { source } = sources.get(entry);
         valid(source.user.login === entry.event.operator && source.body.includes(entry.event.source.quote), 'operator source quotation does not match');
       }
       entry.authorityId = entry.event.id;
@@ -381,13 +390,9 @@ function validateHistorySources(parsed, operators, sourceComments) {
       const event = entry.event;
       valid(operators.includes(event.operator), 'named operator is not authorized');
       valid(event.source.kind === 'github-comment', 'session assertion requires a current policy operator publisher');
-      const source = sourceFor(event);
+      const { root } = sources.get(entry);
       valid(event.kind !== 'correction' && event.revokes.length === 0 && event.supersedes.length === 0, 'untrusted relay cannot change approval history');
-      const roots = parsed.filter((candidate) => String(candidate.comment.id) === String(source.id));
-      known(roots.length <= 1, 'source identity ambiguous in history');
-      valid(roots.length === 1 && roots[0] !== entry, 'source grant is not in this complete authority history');
-      const root = roots[0];
-      known(root.comment.body === source.body && root.comment.user?.login === source.user.login, 'source changed between history and direct read');
+      valid(root && root !== entry, 'source grant is not in this complete authority history');
       valid(publisherTrusted(root) && root.event.ok !== false && root.authorityId === root.event.id && text(root.event.id), 'source is not an operator-published authority');
       valid(root.event.kind !== 'correction' && root.event.revokes.length === 0 && (root.event.kind === 'consolidated' || root.event.artifacts.length > 0), 'source grants no scope');
       valid(event.source.quote === root.event.source.quote && sortedJson(grantProjection(event)) === sortedJson(grantProjection(root.event)), 'relay differs from operator-approved scope or quotation');
@@ -408,7 +413,7 @@ function approvalHistory(comments, operators, sourceComments = []) {
   const parsed = marked.map((comment) => ({ comment, event: parseApproval(comment) }));
   const commentIds = marked.map((comment) => String(comment.id));
   check(new Set(commentIds).size === commentIds.length, 'duplicate approval comment identity');
-  validateHistorySources(parsed, operators, sourceComments);
+  validateHistorySources(parsed, comments, operators, sourceComments);
   const neutralized = new Set();
   for (const { comment, event } of parsed) {
     if (event.kind !== 'correction') continue;
