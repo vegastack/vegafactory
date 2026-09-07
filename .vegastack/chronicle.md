@@ -2,6 +2,16 @@
 
 The project's story, newest first: what got built, why, and how it went — for the operator's future recall. Format home: the dev-chronicle skill.
 
+## 07-09-2026 — Broker access is checked before the token leaves ([#154](https://github.com/vegastack/vegafactory/issues/154))
+
+- **What:** The broker binds signed repository and owner IDs to the App installation, then checks the minted token's actual repository reach, permissions and expiry. Every installed-repository workflow remains eligible; project write authority is explicitly organization-wide.
+- **Why:** A permission echo could not prove repository scope, and unbounded upstream reads or stale signing keys could leave exchanges hanging or refusing rotated keys.
+- **How it went:** Signed JWT, streaming, action execution and timed failure fixtures exercise the boundaries. Focused broker tests pass; empty Secrets Store IDs remain a configuration refusal. Shared review, broad checks, behavioral evaluation and live rollout evidence remain pending.
+- **Changed:** Bound exchanges and key refresh · verified token scope · disposable-token cleanup · masked action outputs · honest trust and readiness documentation.
+- **Decisions:** none.
+
+— approved by (kmanojkumar) · built by codex · branch codex/productionization-133
+
 ## 07-09-2026 — A partial board no longer looks empty ([#142](https://github.com/vegastack/vegafactory/issues/142))
 
 - **What:** The dispatcher reads repository issue pages and refuses to start work when the board, comments or dependency history is incomplete. The dashboard keeps available rows and identifies incomplete repositories with their observation time and failure reason.

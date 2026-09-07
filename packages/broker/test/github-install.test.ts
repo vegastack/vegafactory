@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test'
-import { AppKeyRejected, NotInstalled, UpstreamFailure, appJwt, findInstallationId, importAppKey } from '../src/github.ts'
+import { AppKeyRejected, NotInstalled, UpstreamFailure, appJwt, findInstallation, importAppKey } from '../src/github.ts'
 
 const pair = await crypto.subtle.generateKey({ name: 'RSASSA-PKCS1-v1_5', modulusLength: 2048, publicExponent: new Uint8Array([1, 0, 1]), hash: 'SHA-256' }, true, ['sign', 'verify'])
 const der = new Uint8Array(await crypto.subtle.exportKey('pkcs8', pair.privateKey))
@@ -21,23 +21,28 @@ describe('app credentials', () => {
   })
 })
 
-describe('findInstallationId', () => {
+describe('findInstallation', () => {
   const respond = (status: number, body: unknown) => (async () => new Response(JSON.stringify(body), { status })) as unknown as typeof fetch
+  const identity = { repository: 'acme/widgets', repositoryId: 12, owner: 'acme', ownerId: 4, audience: 'vegastack-factory', expiresAt: 1_800_000_300 }
+  const lookup = (doFetch: typeof fetch) => findInstallation({ identity, appId: '123456', jwt: 'jwt', doFetch })
+  const installed = { id: 42, app_id: 123456, account: { id: 4 } }
 
   test('returns the installation id for an installed repository', async () => {
-    expect(await findInstallationId('acme', 'widgets', 'jwt', respond(200, { id: 42 }))).toBe(42)
+    expect(await lookup(respond(200, installed))).toEqual({ id: 42, appId: 123456, accountId: 4 })
   })
 
   test('turns 404 into NotInstalled and any other failure into UpstreamFailure', async () => {
-    await expect(findInstallationId('acme', 'widgets', 'jwt', respond(404, { message: 'Not Found' }))).rejects.toBeInstanceOf(NotInstalled)
-    await expect(findInstallationId('acme', 'widgets', 'jwt', respond(500, {}))).rejects.toBeInstanceOf(UpstreamFailure)
-    await expect(findInstallationId('acme', 'widgets', 'jwt', respond(200, { id: 'not-a-number' }))).rejects.toBeInstanceOf(UpstreamFailure)
+    await expect(lookup(respond(404, { message: 'Not Found' }))).rejects.toBeInstanceOf(NotInstalled)
+    await expect(lookup(respond(500, {}))).rejects.toBeInstanceOf(UpstreamFailure)
+    for (const body of [{ id: 42 }, { ...installed, id: -1 }, { ...installed, app_id: 999 }, { ...installed, account: { id: 9 } }]) {
+      await expect(lookup(respond(200, body))).rejects.toBeInstanceOf(UpstreamFailure)
+    }
   })
 
   test('percent-encodes the path segments it is given', async () => {
     let seen = ''
-    const spy = (async (url: string) => { seen = url; return new Response(JSON.stringify({ id: 7 }), { status: 200 }) }) as unknown as typeof fetch
-    await findInstallationId('acme', 'wid gets', 'jwt', spy)
+    const spy = (async (url: string) => { seen = url; return new Response(JSON.stringify(installed), { status: 200 }) }) as unknown as typeof fetch
+    await findInstallation({ identity: { ...identity, repository: 'acme/wid gets' }, appId: '123456', jwt: 'jwt', doFetch: spy })
     expect(seen).toBe('https://api.github.com/repos/acme/wid%20gets/installation')
   })
 })

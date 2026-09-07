@@ -6,7 +6,8 @@
 // leave. And no error message ever carries a credential: a failing call reports a status, never the
 // JWT it sent or the token it received.
 
-import { allowedFetch } from './egress.ts'
+import { allowedFetch, fetchJson, withDeadline } from './egress.ts'
+import type { VerifiedIdentity } from './oidc.ts'
 
 const API_HEADERS = {
   Accept: 'application/vnd.github+json',
@@ -79,26 +80,34 @@ export async function appJwt(appId: string, key: CryptoKey, nowSeconds: number):
   return `${input}.${base64url(new Uint8Array(signature))}`
 }
 
-export async function findInstallationId(
-  owner: string,
-  repo: string,
-  jwt: string,
-  doFetch: typeof fetch,
-): Promise<number> {
+export interface Installation { id: number; appId: number; accountId: number }
+
+const positiveId = (value: unknown): value is number => typeof value === 'number' && Number.isSafeInteger(value) && value > 0
+const record = (value: unknown): Record<string, unknown> =>
+  typeof value === 'object' && value !== null && !Array.isArray(value) ? value as Record<string, unknown> : {}
+
+export async function findInstallation(args: {
+  identity: VerifiedIdentity; appId: string; jwt: string; doFetch: typeof fetch; signal?: AbortSignal
+}): Promise<Installation> {
+  const owner = args.identity.owner
+  const repo = args.identity.repository.slice(owner.length + 1)
   const url = `https://api.github.com/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/installation`
-  const response = await allowedFetch(url, { method: 'GET', headers: { ...API_HEADERS, Authorization: `Bearer ${jwt}` } }, doFetch)
+  const response = await fetchJson(url, { method: 'GET', headers: { ...API_HEADERS, Authorization: `Bearer ${args.jwt}` }, signal: args.signal }, args.doFetch, 64 * 1024)
   if (response.status === 404) throw new NotInstalled('the VegaStack Factory App is not installed on this repository')
   if (response.status !== 200) throw new UpstreamFailure(`the installation lookup failed (HTTP ${response.status})`)
-  const body = (await response.json().catch(() => null)) as { id?: unknown } | null
-  const id = body?.id
-  if (typeof id !== 'number' || !Number.isInteger(id)) throw new UpstreamFailure('the installation lookup returned no installation id')
-  return id
+  const body = record(response.body)
+  const accountId = record(body.account).id
+  const configuredApp = /^[1-9]\d*$/.test(args.appId) ? Number(args.appId) : NaN
+  if (!positiveId(body.id) || !positiveId(body.app_id) || !positiveId(accountId) ||
+      !positiveId(configuredApp) || body.app_id !== configuredApp || accountId !== args.identity.ownerId) {
+    throw new UpstreamFailure('the installation identity does not match the signed owner and configured App')
+  }
+  return { id: body.id, appId: body.app_id, accountId }
 }
 
 // The permission cap, and the only place it is written. The mint asks for exactly these three
-// permissions on exactly one repository, and the response's own echo is compared to the same
-// constant before a token is ever returned — so a widening on GitHub's side is a refusal here
-// rather than a broader token in a customer's workflow.
+// permissions, with repository permissions narrowed to one repository. Organization projects
+// remain organization-wide. Both permission echo and actual repository enumeration are checked.
 export const CAPPED_PERMISSIONS: Readonly<Record<string, string>> = Object.freeze({
   issues: 'write',
   metadata: 'read',
@@ -121,40 +130,79 @@ export function permissionsMatchCap(echo: unknown): boolean {
   return expectedKeys.every((key) => actual[key] === CAPPED_PERMISSIONS[key])
 }
 
-function offendingKeys(echo: unknown): string[] {
-  if (typeof echo !== 'object' || echo === null || Array.isArray(echo)) return ['<not an object>']
-  const actual = echo as Record<string, unknown>
-  const keys = new Set([...Object.keys(CAPPED_PERMISSIONS), ...Object.keys(actual)])
-  return [...keys].filter((key) => actual[key] !== CAPPED_PERMISSIONS[key]).sort()
+export class TokenScopeViolation extends Error {
+  constructor() { super('the minted token repository scope does not match the signed identity'); this.name = 'TokenScopeViolation' }
+}
+
+export function repositoryScopeMatches(
+  value: unknown, identity: Pick<VerifiedIdentity, 'repository' | 'repositoryId' | 'ownerId'>,
+): boolean {
+  const body = record(value)
+  if (body.total_count !== 1 || !Array.isArray(body.repositories) || body.repositories.length !== 1) return false
+  const repo = record(body.repositories[0])
+  return repo.id === identity.repositoryId && repo.full_name === identity.repository && record(repo.owner).id === identity.ownerId
 }
 
 export async function mintRepoToken(args: {
-  installationId: number
-  repo: string
+  installation: Installation
+  identity: VerifiedIdentity
   jwt: string
   doFetch: typeof fetch
+  now: () => number
+  signal?: AbortSignal
 }): Promise<{ token: string; expiresAt: string; permissions: Record<string, string> }> {
-  const url = `https://api.github.com/app/installations/${encodeURIComponent(String(args.installationId))}/access_tokens`
-  const response = await allowedFetch(
+  const url = `https://api.github.com/app/installations/${args.installation.id}/access_tokens`
+  if (args.identity.expiresAt <= args.now()) throw new UpstreamFailure('the caller expired before minting')
+  const response = await fetchJson(
     url,
     {
       method: 'POST',
       headers: { ...API_HEADERS, Authorization: `Bearer ${args.jwt}`, 'Content-Type': 'application/json' },
-      body: JSON.stringify({ repositories: [args.repo], permissions: CAPPED_PERMISSIONS }),
+      body: JSON.stringify({ repository_ids: [args.identity.repositoryId], permissions: CAPPED_PERMISSIONS }),
+      signal: args.signal,
     },
     args.doFetch,
+    64 * 1024,
   )
   if (response.status !== 201) throw new UpstreamFailure(`the token mint failed (HTTP ${response.status})`)
-  const body = (await response.json().catch(() => null)) as
-    | { token?: unknown; expires_at?: unknown; permissions?: unknown }
-    | null
-  const token = body?.token
-  const expiresAt = body?.expires_at
-  if (typeof token !== 'string' || token.length === 0) throw new UpstreamFailure('the token mint returned no token')
-  if (typeof expiresAt !== 'string' || expiresAt.length === 0) throw new UpstreamFailure('the token mint returned no expiry')
-  if (!permissionsMatchCap(body?.permissions)) {
-    // The token is discarded here and never reaches the caller or a log line.
-    throw new PermissionCapViolation(`the minted token exceeds the cap on: ${offendingKeys(body?.permissions).join(', ')}`)
+  const body = record(response.body)
+  const token = body.token
+  // Accept GitHub's opaque current/legacy formats, without a fixed-length token assumption.
+  if (typeof token !== 'string' || !/^[\x21-\x7e]+$/.test(token)) throw new UpstreamFailure('the token mint returned no usable token')
+  try {
+    const expiresAt = body.expires_at
+    const expiry = typeof expiresAt === 'string' && /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,3})?Z$/.test(expiresAt)
+      ? Date.parse(expiresAt) / 1000 : NaN
+    const checkExpiry = () => {
+      const now = args.now()
+      const canonical = typeof expiresAt === 'string' ? expiresAt.replace(/(?:\.(\d{1,3}))?Z$/, (_match, fraction: string | undefined) => `.${(fraction ?? '').padEnd(3, '0')}Z`) : ''
+      if (!Number.isFinite(expiry) || new Date(expiry * 1000).toISOString() !== canonical ||
+          expiry <= now + 30 || expiry > now + 3660 || args.identity.expiresAt <= now) {
+        throw new UpstreamFailure('the minted token or caller has an unusable expiry')
+      }
+      args.signal?.throwIfAborted()
+    }
+    checkExpiry()
+    if (!permissionsMatchCap(body.permissions)) throw new PermissionCapViolation('the minted token permissions do not match the cap')
+    const repositories = await fetchJson('https://api.github.com/installation/repositories?per_page=2', {
+      headers: { ...API_HEADERS, Authorization: `Bearer ${token}` }, signal: args.signal,
+    }, args.doFetch, 64 * 1024)
+    if (repositories.status !== 200) throw new UpstreamFailure('the minted token scope could not be read')
+    // Refuse pagination rather than accepting an incomplete view of a token's reach.
+    if (repositories.headers.has('link') || !repositoryScopeMatches(repositories.body, args.identity)) throw new TokenScopeViolation()
+    checkExpiry()
+    return { token, expiresAt: expiresAt as string, permissions: { ...CAPPED_PERMISSIONS } }
+  } catch (error) {
+    // Only this just-minted disposable token is revoked. No shared App, installation or key
+    // mutation. A failed revoke cannot change the refusal; the exchange deadline still wins.
+    try {
+      await withDeadline(async (signal) => {
+        const revoked = await allowedFetch('https://api.github.com/installation/token', {
+          method: 'DELETE', headers: { ...API_HEADERS, Authorization: `Bearer ${token}` }, signal,
+        }, args.doFetch)
+        void revoked.body?.cancel().catch(() => {})
+      }, args.signal)
+    } catch { /* best effort within the remaining exchange budget */ }
+    throw error
   }
-  return { token, expiresAt, permissions: body?.permissions as Record<string, string> }
 }

@@ -40,7 +40,10 @@ Workflows stays at No access and no webhook is configured, so nothing about this
 
 VegaStack runs a hosted broker so an organisation can use the factory **without holding any private
 key**: install the public App, and your Actions jobs exchange their own OIDC token for a
-one-repository token. Written here for an org that is not `vegastack`.
+token for one repository’s issues/metadata and **organization-wide project writes**. Written here
+for an org that is not `vegastack`. The broker contract below was checked against its source and
+[GitHub installation APIs](https://docs.github.com/en/rest/apps/installations) on 07-09-2026; local
+verification does not claim a deployed exchange is ready.
 
 | Fact | Value |
 |---|---|
@@ -48,10 +51,13 @@ one-repository token. Written here for an org that is not `vegastack`.
 | Preview endpoint | `POST https://factory-token.vegastack.dev/token` |
 | Audience | `vegastack-factory` |
 | Auth | `Authorization: Bearer <the job's OIDC token>` |
-| Health probe | `GET https://factory-token.vegastack.com/health` → `{"status":"ok"}`, unauthenticated |
+| Health probe | `GET https://factory-token.vegastack.com/health` → `{"status":"ok"}`, unauthenticated liveness only; never authenticated readiness |
 | Token lifetime | GitHub's fixed 1 hour; the broker reports `expires_at`, it does not set it |
 
-Request: no body. The broker reads nothing the caller sends — see the tenancy statement below.
+Request: no body. Identity comes from the verified bearer JWT, never unsigned repository parameters.
+The action’s `audience` input must match the deployment’s `OIDC_AUDIENCE`; both default to
+`vegastack-factory` in preview and production. A GitHub Environment claim does not change the
+audience. An intentionally different deployment audience needs a matching caller configuration.
 
 Response `200`:
 
@@ -73,39 +79,62 @@ Response `200`:
 | 403 | The App is not installed on that repository | Install it, or accept the refusal — this is the kill switch working |
 | 404 / 405 | No such route, or the wrong method | Only `POST /token` and `GET /health` answer |
 | 429 | Rate limited for that repository | Retry after the `Retry-After` seconds |
-| 502 | GitHub was unreachable or answered unusably | Retry; nothing was minted |
+| 502 | Upstream exchange timed out or returned unusable evidence | Retry; no token was returned. A minted but rejected token receives a best-effort revocation attempt |
 | 503 | The rate limiter was unavailable | Retry; the broker fails closed rather than granting |
-| 500 | The broker refused its own result — a widened permission echo, or an unusable App key | Report it; the token, if any, was discarded |
+| 500 | The broker refused its own result — excess permissions/repository reach, or an unusable App key | Report it; no token is returned; rejected minted tokens receive a best-effort revocation attempt |
 
 ### The permission cap
 
-Every token carries exactly `issues: write`, `metadata: read`, `organization_projects: write`, on
-exactly one repository. The cap is enforced twice: the mint asks for precisely that set, and the
-response's own `permissions` echo is compared to the same constant before the token is returned. A
-widening on GitHub's side becomes a 500 and a discarded token, never a broader token in your
-workflow. There is no `contents: write` and no way to ask for one.
+Every returned token carries exactly `issues: write`, `metadata: read`, `organization_projects: write`.
+The first two are scoped to one repository. **Organization project write authority remains
+organization-wide**, retained for the existing board use case; repository selection cannot prove
+one-project isolation. Installers consent to that reach when choosing this trust model.
+
+The mint requests the signed numeric repository ID and exact permission cap. Before returning the
+token, the broker independently calls `GET /installation/repositories` using that token and requires
+exactly one matching repository ID/full name/owner ID, with no pagination. The permission echo
+alone is insufficient. Expiry must be more than 30s and at most 1h+60s in the future. There is no
+`contents: write` and no way for a caller to request it.
 
 ### Tenancy
 
 The repository a caller receives a token for comes from the **verified** `repository` and
-`repository_owner` claims in its own OIDC token, and from nothing in the request. There is no
-repository parameter. One organisation cannot mint a token for another's repository, and the
+`repository_owner`, `repository_id` and `repository_owner_id` claims in its OIDC token. The
+installation App ID must match configuration and its account ID must match the signed owner ID.
+There is no unsigned repository parameter. One organisation cannot mint a token for another's repository, and the
 installation lookup refuses any repository the App is not installed on.
+
+Any valid workflow/ref in an installed repository is eligible, including a newly added workflow.
+No protected-workflow/ref/environment allowlist is required or imposed. A fork's signed identity
+needs an installation for that fork. A privileged PR workflow bearing the installed base repository's
+identity remains eligible even when it processes fork input; operators govern untrusted workflow
+execution on that repository.
 
 ### What is stored
 
 Nothing of yours. The broker declares **no storage binding at all** — no KV, no D1, no R2, no
 Durable Object. GitHub's public signing keys sit in an in-isolate memo and the Cloudflare edge
-cache for an hour. Each request emits one audit record holding the repository, owner, installation
+cache for an hour. An unknown kid triggers a single-flight origin refresh at most once/minute per
+isolate, bypassing both caches with `cache: "no-store"` and no positive edge TTL override. Failure
+retains the previous memo and its original expiry. Each request emits one audit record holding the repository, owner, installation
 id, decision and status — never a token, never code, never repository content. `GET /health` writes
 no record at all.
 
+The broker caps JWTs at 16KiB and a 600s lifetime; expiry must remain after now, with up to 60s skew
+only for issued/not-before times. JWKS is capped at 256KiB/32 keys and GitHub JSON at 64KiB, including
+chunked bodies. Fetch plus body reads have 3s deadlines inside a 15s whole exchange deadline. A
+rejected minted token is never returned or logged; `DELETE /installation/token` is attempted with
+that disposable token within the remaining budget, at most 3s, and refusal survives cleanup failure.
+These are broker limits, not issuer guarantees. [Cloudflare Request cache behavior](https://developers.cloudflare.com/workers/runtime-apis/request/)
+and [GitHub token creation](https://docs.github.com/en/rest/apps/apps#create-an-installation-access-token-for-an-app)
+are the upstream contracts.
+
 ### The rate limit
 
-An abuse brake, not a quota you can budget against. The number, written down: **30 token requests
+An abuse brake, not an exact global quota. [Cloudflare documents eventual consistency](https://developers.cloudflare.com/workers/runtime-apis/bindings/rate-limit/), so its counters are not exact accounting. The number, written down: **30 token requests
 per minute per repository, per Cloudflare location** — Cloudflare's rate-limit binding counts per
-location rather than globally, and its period accepts only 10 or 60 seconds. A legitimate burst
-degrades to a 429 and a retry; a runaway workflow is stopped. It is never an authorization
+location rather than globally, and its period accepts only 10 or 60 seconds. A burst can
+degrade to a 429 and a retry; enforcement is permissive and eventually consistent. It is never an authorization
 decision — the OIDC claims and the installation lookup are — and it is keyed by
 `<owner>/<repository>` from the verified claims, so one organisation's traffic cannot spend
 another's allowance.
@@ -138,10 +167,11 @@ to `vegastack/vegafactory`.
 
 ### Abuse surface
 
-Anyone who can run Actions in a repository where the App is installed can obtain an
-issues-and-projects token for **that one repository**. That is the same boundary as an organisation
-running its own App, and it is why the cap excludes `contents: write`: the worst a compromised
-workflow gets is what its own repository's issues and projects allow.
+Anyone who can run Actions in a repository where the App is installed can obtain a
+token with issue/metadata access to that repository and **organization-wide project write access**.
+The cap excludes `contents: write`, but a compromised installed-repository workflow can affect
+organization projects beyond a single repository. Repository enumeration does not reduce that
+project authority. Do not describe the whole token as repository-only.
 
 ## Creating the App
 
@@ -228,11 +258,14 @@ Adding a row to the permission table is a dated line in the register the `decisi
 
 ## Acceptance drill
 
-Run on a throwaway repository, by the operator, after the App is installed and the secrets are set. Three checks:
+Live checks require a separately authorized rollout on a throwaway repository after installation
+and credential setup. Local fixtures do not qualify a deployed broker, and a health HTTP 200 response
+is only liveness. Keep current CI runners. Never delete a shared App key or uninstall the shared
+App as a qualification drill. Four checks:
 
 1. A job that mints a token and runs `gh issue edit --add-label` leaves an event whose actor is `vegafactory[bot]`, not a human.
 2. A `git push` step in that same job, using the minted token, **fails** — the App has no Contents write.
-3. Uninstalling the App makes the mint step of the next run fail closed, and reinstalling makes it pass again.
+3. Controlled installation HTTP 404, key-rotation, expiry and upstream-failure fixtures prove local refusal; disposable-token revocation fixtures prove cleanup. Real shared-App uninstall/key-revocation drills are excluded. Record actual live broker allow/deny and organization-project reach separately before rollout acceptance.
 4. `gh issue comment` against an issue in a **second** repository of the same org, using the minted token, **fails** — the token is scoped by `repositories:` to the one repository the job runs in, not to the installation.
 
 Check 2 is the one worth being stubborn about, and check 4 is its twin: level and scope are two different ways a token can be too wide. It is the difference between a token that can edit a label and a token that can rewrite the repository.
