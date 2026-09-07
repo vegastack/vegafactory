@@ -79,17 +79,17 @@ Four hooks, one Node file each, written to `.vegastack/hooks/` and wired only on
 | Event | File | What it does | Harnesses |
 |---|---|---|---|
 | `PreToolUse` | `ship-guard.mjs` | Asks before a command the compiled policy says needs the operator's word — a merge, a tag, a publish, a production deploy, a force push. | Claude Code · Codex · Hermes |
-| `SessionStart` | `session-start.mjs` | Opens the session with the operator's queue and the worktree claim this checkout holds. | Claude Code · Codex |
-| `Stop` | `stop-heartbeat.mjs` | Asks a session holding a `working` claim to checkpoint its ledger before it stops. | Claude Code · Codex |
+| `SessionStart` | `session-start.mjs` | Requests a bounded verified-context pointer from the local VegaFactory resolver. | Claude Code · Codex |
+| `Stop` | `stop-heartbeat.mjs` | Requests a bounded local checkpoint flush; no continuation or blocking output. | Claude Code · Codex |
 | `Stop` | `decision-nudge.mjs` | Asks whether this session settled a directional choice worth a register line. | Claude Code · Codex |
 
-The four files ship as packaged assets — `assets/hooks/ship-guard.mjs`, `assets/hooks/session-start.mjs`, `assets/hooks/stop-heartbeat.mjs`, `assets/hooks/decision-nudge.mjs` — and are copied verbatim into `.vegastack/hooks/`. Because both Stop contracts match, one script per event serves both harnesses; the `--harness` flag selects the output shape. Each hook uses Node rather than `jq`, which is not guaranteed on an operator's machine, and every marker file lives under the OS temp dir, never inside the repo. The wiring shape is doubly nested — matcher groups each holding their own `hooks` array — in Claude Code's `.claude/settings.json` and Codex's `<repo>/.codex/hooks.json` alike (merge into existing hook config, never overwrite): <!-- source: CC-HOOKS --> <!-- source: CODEX-HOOKS -->
+The hook files ship as packaged assets — `assets/hooks/ship-guard.mjs`, `assets/hooks/session-start.mjs`, `assets/hooks/stop-heartbeat.mjs`, `assets/hooks/decision-nudge.mjs` — and are copied verbatim into `.vegastack/hooks/`. The advisory SessionStart adapter is also the shared implementation for `stop-heartbeat.mjs` and `session-end.mjs`: copy `session-start.mjs` beside either consumer even when its SessionStart event is not enabled. Missing CLI/adapter support is silent and does not prove capture. The ship guard and decision nudge remain separate. The wiring shape is doubly nested — matcher groups each holding their own `hooks` array — in Claude Code's `.claude/settings.json` and Codex's `<repo>/.codex/hooks.json` alike (merge into existing hook config, never overwrite): <!-- source: CC-HOOKS --> <!-- source: CODEX-HOOKS -->
 
 ```json
 { "hooks": {
   "PreToolUse": [ { "matcher": "Bash", "hooks": [ { "type": "command", "command": "node .vegastack/hooks/ship-guard.mjs --harness claude" } ] } ],
-  "SessionStart": [ { "hooks": [ { "type": "command", "command": "node .vegastack/hooks/session-start.mjs --harness claude" } ] } ],
-  "Stop": [ { "hooks": [ { "type": "command", "command": "node .vegastack/hooks/stop-heartbeat.mjs --harness claude" }, { "type": "command", "command": "node .vegastack/hooks/decision-nudge.mjs --harness claude" } ] } ]
+  "SessionStart": [ { "hooks": [ { "type": "command", "command": "node .vegastack/hooks/session-start.mjs --harness claude", "timeout": 1 } ] } ],
+  "Stop": [ { "hooks": [ { "type": "command", "command": "node .vegastack/hooks/stop-heartbeat.mjs --harness claude", "timeout": 1 }, { "type": "command", "command": "node .vegastack/hooks/decision-nudge.mjs --harness claude" } ] } ]
 } }
 ```
 
@@ -98,12 +98,12 @@ The Codex block is the same file, `--harness codex`, written to `<repo>/.codex/h
 ```json
 { "hooks": {
   "PreToolUse": [ { "hooks": [ { "type": "command", "command": "node .vegastack/hooks/ship-guard.mjs --harness codex" } ] } ],
-  "SessionStart": [ { "hooks": [ { "type": "command", "command": "node .vegastack/hooks/session-start.mjs --harness codex" } ] } ],
-  "Stop": [ { "hooks": [ { "type": "command", "command": "node .vegastack/hooks/stop-heartbeat.mjs --harness codex" }, { "type": "command", "command": "node .vegastack/hooks/decision-nudge.mjs --harness codex" } ] } ]
+  "SessionStart": [ { "hooks": [ { "type": "command", "command": "node .vegastack/hooks/session-start.mjs --harness codex", "timeout": 1 } ] } ],
+  "Stop": [ { "hooks": [ { "type": "command", "command": "node .vegastack/hooks/stop-heartbeat.mjs --harness codex", "timeout": 1 }, { "type": "command", "command": "node .vegastack/hooks/decision-nudge.mjs --harness codex" } ] } ]
 } }
 ```
 
-Codex's `PreToolUse` entry carries **no matcher**: the name of Codex's shell tool is **unverified** — `codex --help` on 0.149.1 names no tool, and the hooks documentation does not enumerate matcher values — so guessing one would silently disable the guard. Unmatched is both safe and correct here, because the ship guard resolves any payload carrying no shell command to allow and only ever speaks about commands it can read. Replace it with the real matcher once the tool name is verified.
+Codex's example intentionally has no matcher, covering every supported tool event. Current [official hook documentation](https://learn.chatgpt.com/docs/hooks) maps shell and unified exec to `Bash`; the supported restrictive grammar is an explicit name union containing `Bash`, optionally anchored. Hosted/specialized tool paths and later stdin transport mean this is not complete remote-effect mediation. Unknown coverage remains unknown. Verified documentation 07-09-2026; actual pinned-harness execution remains qualification evidence. <!-- source: CODEX-HOOKS -->
 
 Codex parses `permissionDecision: "ask"` but does not support it, so the ship guard sends Codex `{"decision":"block","reason":"<command> needs the operator's word — run it by hand"}` instead; a Codex operator answers by running the command themselves. <!-- source: CODEX-HOOKS -->
 
@@ -143,3 +143,22 @@ What a dispatcher can rely on when it starts a run with no human at the keyboard
 - Parallel children of one parent use each harness's native mechanism and nothing else: a saved workflow with `isolation: "worktree"` on Claude Code, one `codex exec -C <worktree>` per child on Codex (verified 03-09-2026: `spawn_agent` takes no cwd). Correctness rests on the parent's HEAD sha travelling in the child's own instructions, never on `worktree.baseRef`, and the 16-agent workflow ceiling is a hard bound whatever `factory.json` says.
 - The OpenTelemetry stream is **optional and never required**: capture is deterministic without a collector — the dispatcher parses each harness's own run output, SessionEnd hooks cover interactive sessions, and skill invocations come from hook payloads. `OTEL_LOG_TOOL_DETAILS` stays off; it exports exactly the tool arguments a record must never hold.
 - Every target harness spawns subagents (Claude Code's Task tool, Codex agents, Hermes `delegate_task`), so dev.md's `review:` knob means the same thing on each; only a headless run that cannot spawn falls back to a labeled self-review.
+
+
+## Managed hook and native-memory contract — 07-09-2026
+
+Configuration is separate from invocation and qualification. The dispatcher validates synchronous `PreToolUse` command hooks with direct `node <resolved checkout guard> --harness claude|codex` argv, quoted paths allowed; wrappers, operators, wrong flags/events, symlinks and absent interpreters refuse. Guard bytes must match the installed package. Claude project/local/user JSON and Codex JSON plus documented inline array-of-tables are inspected together; complex inline hook syntax gets an explicit migration refusal. Merge new owned registrations only when no equivalent event/argv already exists across those sources; preserve user hooks and original files. Do not replace their configuration or silently recompile policy during launch.
+
+Check the selected harness in the prepared ordinary or parent worktree and immediately before spawn. The installed owner compiler performs `--check --json` against the checkout's actual origin and current policy, bounded to ten seconds. Stale/missing/unsupported output refuses. A passing configuration check is not proof that a vendor invoked the guard. A local guard subprocess establishes only local invocation; retain the harmless denied-command proof and unchanged-effect evidence from actual harness qualification separately. Same-user hooks are cooperative, and protected remote effects still require server-side permissions.
+
+Native memory is excluded only in VegaFactory-managed processes. Pinned metadata: Codex0.153.4 and Claude Code2.1.263. Unknown versions refuse managed execution pending qualification. Codex overrides `memories.use_memories=false`, `memories.generate_memories=false`, disables memories/import and `features.context_management.experimental_mode`, and retains hooks/project trust for the exact checkout. The optional task-note/search facility is separate from ordinary project instructions. Claude uses `CLAUDE_CODE_DISABLE_AUTO_MEMORY=1` and session `autoMemoryEnabled:false`, without bare/safe mode or disabling CLAUDE.md. No global setting or existing vendor store is changed/read. Controls are supported configuration, not runtime qualification: verify their actual pinned behavior before claiming support. Sources: [Codex configuration](https://learn.chatgpt.com/docs/config-file/config-reference), [Codex context management](https://learn.chatgpt.com/docs/models), [Claude memory](https://code.claude.com/docs/en/memory). <!-- source: CODEX-CONFIG --> <!-- source: CC-MEMORY -->
+
+### Local advisory wire contract
+
+`session-start.mjs`, `stop-heartbeat.mjs` and `session-end.mjs` require explicit `--harness claude|codex`; configure each enabled event with `timeout: 1` second. The optional SessionEnd registration has the same nested command shape and invokes `node .vegastack/hooks/session-end.mjs --harness <selected>` with that timeout. Installing files does not enable a new event.
+
+The adapter reads at most64KiB and waits at most350ms for input, then allows500ms for a local Node CLI invocation: `vegafactory stats record --source managed-hook`. Its only JSON fields are `{harness,event,sessionId,turnId?,cwd,stopHookActive}`. Events are exactly `SessionStart`, `Stop`, `SessionEnd`; session/turn IDs are1–128 ASCII letters/digits/underscore/hyphen starting with a letter/digit. cwd is an absolute path of at most4096 characters without NUL/newline. It is an identity hint, never a write destination. The private consumer must verify registered repository/worktree membership and the owned run/session before any read, flush or lesson lookup; unknown/foreign identities refuse. No transcript/tool payload, network, model subprocess, detached upload or Stop continuation is allowed.
+
+The current stats CLI does not yet implement `managed-hook`; its refusal is deliberately silent in the advisory adapter. #143 owns that local consumer, identity resolution and durable deduplication; #144 owns verified lesson selection. Identical repeated events retain identical identity fields, without fabricated timestamps or IDs. No current capture, flush or lesson reuse is claimed before those owners integrate.
+
+On success the local consumer may return `{ok:true,contextPointer:"vsk-context:<opaque-id>"}` only after validation; the suffix follows the same1–128-character ID grammar. SessionStart emits one fixed context-pointer line, bounded to that ID. Stop/SessionEnd never emit instructions, even on success. Missing CLI/sibling, invalid input/output, unknown source, timeout and re-entered Stop exit0 without output. CLI refusal/missing response is not a persisted-checkpoint receipt. Shell wrappers around the installed JavaScript CLI are unsupported; the adapter invokes its resolved package bin with Node directly. Retain authored AGENTS.md/CLAUDE.md and hooks. Actual vendor invocation, memory exclusion, capture deduplication and complete effect coverage need their own evidence.

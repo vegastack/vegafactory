@@ -10,8 +10,12 @@ import {
   defaultParentCandidates, parentParallelLaunch, parentParallelLaunchPlan,
   type BoardIssue, type DispatchState, type GuardState, type Rocket,
 } from '../src/dispatch.ts'
-import { buildLaunchPlan } from '../src/launch.ts'
+import { buildLaunchPlan, validateManagedLaunch } from '../src/launch.ts'
 import { parseFactoryConfig, parseRepoPolicy } from '../src/config.ts'
+
+const SHIP_POLICY = join(import.meta.dir, '../../../skills/dev/dev-setup/scripts/ship-policy.mjs')
+process.env.VSK_SHIP_POLICY_SCRIPT = SHIP_POLICY
+const GUARD_BYTES = readFileSync(join(import.meta.dir, '../../../skills/dev/dev-setup/assets/hooks/ship-guard.mjs'))
 
 const issue = (number: number, labels: string[], assignees: string[] = []): BoardIssue =>
   ({ number, title: `feat: thing ${number}`, labels, assignees, updatedAt: '2026-09-03T10:00:00Z' })
@@ -167,7 +171,10 @@ describe('shipGuardWired', () => {
   function repoWith(options: { guard: boolean; settings: string | null; harness: 'claude' | 'codex' }): string {
     const root = mkdtempSync(join(tmpdir(), 'vsk-guard-'))
     mkdirSync(join(root, '.vegastack/hooks'), { recursive: true })
-    if (options.guard) writeFileSync(join(root, '.vegastack/hooks/ship-guard.mjs'), '// guard\n')
+    if (options.guard) writeFileSync(join(root, '.vegastack/hooks/ship-guard.mjs'), GUARD_BYTES)
+    writeFileSync(join(root, '.vegastack/dev.md'), 'gates: 3\n')
+    expect(Bun.spawnSync(['git', 'init', '-q', root]).exitCode).toBe(0)
+    expect(Bun.spawnSync(['git', '-C', root, 'remote', 'add', 'origin', 'https://github.com/acme/app.git']).exitCode).toBe(0)
     const dir = options.harness === 'claude' ? '.claude' : '.codex'
     const file = options.harness === 'claude' ? 'settings.json' : 'hooks.json'
     mkdirSync(join(root, dir), { recursive: true })
@@ -195,12 +202,13 @@ describe('shipGuardWired', () => {
     const repoPath = repoWith({ guard: true, settings: claudeSettings, harness: 'claude' })
     const missing = await shipGuardWired(repoPath, 'claude', { home, repo: 'acme/app' })
     expect(missing.wired).toBe(false)
-    expect(missing.detail).toContain('acme__app.json')
+    expect(missing.detail).toContain('policy')
     expect(missing.detail).toContain('vegafactory guard sync')
     mkdirSync(join(home, '.vegastack/guard'), { recursive: true })
     writeFileSync(join(home, '.vegastack/guard/acme__app.json'), JSON.stringify({ schemaVersion: 1, repo: 'acme/other' }))
     expect((await shipGuardWired(repoPath, 'claude', { home, repo: 'acme/app' })).wired).toBe(false)
-    writeFileSync(join(home, '.vegastack/guard/acme__app.json'), JSON.stringify({ schemaVersion: 1, repo: 'acme/app', defaultBranch: 'main', gates: 3, environments: [], shipAsk: [] }))
+    const compiled = Bun.spawnSync(['node', SHIP_POLICY, '--write', '--json'], { cwd: repoPath, env: { ...process.env, HOME: home } })
+    expect(compiled.exitCode, compiled.stdout.toString()).toBe(0)
     expect((await shipGuardWired(repoPath, 'claude', { home, repo: 'acme/app' })).wired).toBe(true)
   })
 
@@ -616,5 +624,30 @@ describe('defaultParentCandidates', () => {
     const candidates = await candidatesFor(dir, [{ body: planBody, user: { login: 'mk' } }, { body: forged, user: { login: 'mallory' } }])
     expect(candidates).toHaveLength(1)
     expect(candidates[0]?.groups[0]?.files).toEqual(['packages/cli/src/dispatch.ts'])
+  })
+})
+
+
+describe('managed launches exclude native memory without disabling project instructions', () => {
+  const input = { harness: 'codex' as const, model: 'fixture', effort: 'high', stage: 'implement' as const, worktree: '/prepared', issue: { number: 140, title: 'fixture' }, operator: 'mk', outcome: 'fixture', stopList: [], resume: false, skillPath: null, subagents: { spawnDepth: 1, concurrent: 3 } }
+  test('Codex has explicit retrieval, generation, import and optional context controls', () => {
+    const plan = buildLaunchPlan(input)
+    expect(plan.args).toContain('memories.use_memories=false')
+    expect(plan.args).toContain('memories.generate_memories=false')
+    expect(plan.args).toContain('features.context_management.experimental_mode=false')
+    const metadata = { version: 'codex-cli 0.153.4', features: { hooks: true, memories: false, external_agent_memory_import: false, context_management: false } }
+    expect(validateManagedLaunch(plan, metadata).ok).toBe(true)
+    expect(validateManagedLaunch(plan, { ...metadata, version: 'codex-cli 0.100.0' }).ok).toBe(false)
+    expect(validateManagedLaunch(plan, { ...metadata, features: { ...metadata.features, context_management: true } }).ok).toBe(false)
+    expect(validateManagedLaunch({ ...plan, args: [...plan.args, '-c', 'memories.use_memories=true'] }, metadata).ok).toBe(false)
+  })
+  test('Claude disables auto memory only for the managed session, retaining hooks and project guidance', () => {
+    const plan = buildLaunchPlan({ ...input, harness: 'claude' })
+    expect(plan.env.CLAUDE_CODE_DISABLE_AUTO_MEMORY).toBe('1')
+    expect(plan.args).not.toContain('--bare')
+    expect(plan.env.CLAUDE_CODE_DISABLE_CLAUDE_MDS).not.toBe('1')
+    expect(validateManagedLaunch(plan, { version: '2.1.263 (Claude Code)' }).ok).toBe(true)
+    expect(validateManagedLaunch({ ...plan, env: { ...plan.env, CLAUDE_CODE_DISABLE_AUTO_MEMORY: '0' } }, { version: '2.1.263 (Claude Code)' }).ok).toBe(false)
+    expect(validateManagedLaunch(plan, { version: '9.0.0 (Claude Code)' }).ok).toBe(false)
   })
 })

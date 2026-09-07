@@ -13,8 +13,9 @@ import { hostname, tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { pathToFileURL, fileURLToPath } from 'node:url'
 import { loadFactoryConfig, repoPolicyFromEffective, stagePolicy, type FactoryConfig, type Harness, type RepoEntry, type RepoPolicy, type Stage, type Subagents } from './config.ts'
-import { buildLaunchPlan, type LaunchPlan } from './launch.ts'
-import { validateRegistration } from './hook-registration.ts'
+import { buildLaunchPlan, codexManagedControls, validateManagedLaunch, type HarnessMetadata, type LaunchPlan } from './launch.ts'
+import { checkoutFile, readHookConfiguration, validateRegistration } from './hook-registration.ts'
+import { checkCompiledGuard, shipPolicyScript } from './guard.ts'
 import { GhUnavailable, ghText } from './gh.ts'
 import { GIT_CREDENTIAL_ARGS } from './sync.ts'
 import { fromClaudeHeadless, fromCodexExec, reworkFromComments, type ReworkCounts } from './stats/capture.ts'
@@ -310,46 +311,31 @@ export function evaluateGuards(input: { repo: string; policy: RepoPolicy; guards
 // exists for that repo. Any one missing or unreadable is unwired; the whole point of the check is
 // that a repo whose guard state cannot be established never starts an unattended run. The policy
 // lives in the home directory, not the checkout, so a run cannot edit it into permission.
-export async function shipGuardWired(repoPath: string, harness: Harness, policy?: { home: string; repo: string }): Promise<{ wired: boolean; detail: string }> {
+export async function shipGuardWired(repoPath: string, harness: Harness, policy?: { home: string; repo: string; policyDigest?: string }): Promise<{ wired: boolean; detail: string; policyDigest?: string | null }> {
   const guardPath = join(repoPath, '.vegastack', 'hooks', 'ship-guard.mjs')
   try {
     await readFile(guardPath, 'utf8')
   } catch {
     return { wired: false, detail: `no ${join('.vegastack', 'hooks', 'ship-guard.mjs')} in ${repoPath}` }
   }
-  const wiringPath = harness === 'claude'
-    ? join(repoPath, '.claude', 'settings.json')
-    : join(repoPath, '.codex', 'hooks.json')
   const relative = harness === 'claude' ? '.claude/settings.json' : '.codex/hooks.json'
-  let text: string
-  try {
-    text = await readFile(wiringPath, 'utf8')
-  } catch {
-    return { wired: false, detail: `${relative} is missing — the guard script is there but nothing calls it` }
-  }
   let parsed: unknown
-  try {
-    parsed = JSON.parse(text)
-  } catch {
-    return { wired: false, detail: `${relative} is not valid JSON — the wiring cannot be read, so it counts as unwired` }
-  }
+  try { parsed = readHookConfiguration(repoPath, harness, policy?.home).config }
+  catch (error) { return { wired: false, detail: `${relative}: ${(error as Error).message}`, policyDigest: null } }
   const registration = validateRegistration({ config: parsed, harness, checkout: repoPath, guardPath })
   if (!registration.ok) return { wired: false, detail: `${relative}: ${registration.problems.join('; ')}` }
+  // Trust the installed package's exact asset, not an arbitrary same-named script.
+  try {
+    const actual = await readFile(checkoutFile(repoPath, guardPath))
+    const expected = await readFile(join(dirname(shipPolicyScript()), '../assets/hooks/ship-guard.mjs'))
+    if (!actual.equals(expected)) return { wired: false, detail: 'ship-guard.mjs differs from the installed package asset', policyDigest: null }
+  } catch { return { wired: false, detail: 'the installed guard package asset could not be verified', policyDigest: null } }
   if (policy) {
-    const policyFile = join(policy.home, '.vegastack', 'guard', `${policy.repo.replace(/\//g, '__').replace(/[^A-Za-z0-9._-]/g, '-')}.json`)
-    const shown = `~/.vegastack/guard/${policyFile.split('/').pop()}`
-    let stored: unknown
-    try {
-      stored = JSON.parse(await readFile(policyFile, 'utf8'))
-    } catch {
-      return { wired: false, detail: `no compiled guard policy at ${shown} — run \`vegafactory guard sync\` in ${repoPath}` }
-    }
-    const record = stored && typeof stored === 'object' ? stored as { schemaVersion?: unknown; repo?: unknown } : {}
-    if (record.schemaVersion !== 1 || record.repo !== policy.repo) {
-      return { wired: false, detail: `the compiled guard policy at ${shown} is not for ${policy.repo} (schemaVersion 1) — run \`vegafactory guard sync\` in ${repoPath}` }
-    }
+    const checked = checkCompiledGuard({ checkout: repoPath, ...policy })
+    if (!checked.wired) return checked
+    return { ...checked, detail: `${relative}: configured guard and ${checked.detail}; invocation/coverage remain unqualified` }
   }
-  return { wired: true, detail: `.vegastack/hooks/ship-guard.mjs wired for ${harness} in ${relative}${policy ? ', policy compiled' : ''}` }
+  return { wired: true, detail: `${relative}: configured guard; compiled policy and invocation not checked`, policyDigest: null }
 }
 
 // Guards first, then the board, then the reactions, then the budget. Truncation is loud: every run
@@ -594,6 +580,25 @@ function defaultGit(args: string[], cwd: string): Promise<{ ok: boolean; message
 // (an evidence sha only resolves once the commit is on the remote), a hand-back comment carrying
 // the redacted tail is posted, the issue goes back to `needs-operator` assigned to its operator,
 // and the worktree is left exactly as the run left it.
+// Metadata commands only: neither --version nor features list starts a model session.
+export function inspectManagedHarness(plan: LaunchPlan): HarnessMetadata {
+  const options = { cwd: plan.cwd, env: { ...process.env, ...plan.env }, encoding: 'utf8' as const, timeout: 5000, killSignal: 'SIGKILL' as const, maxBuffer: 128 * 1024 }
+  const version = spawnSync(plan.command, ['--version'], options)
+  if (version.status !== 0 || version.error || version.signal) return { version: '' }
+  const metadata: HarnessMetadata = { version: version.stdout.trim() }
+  if (plan.command === 'codex') {
+    const listed = spawnSync(plan.command, [...codexManagedControls(plan.cwd).filter(arg => arg !== '--strict-config'), 'features', 'list'], options)
+    metadata.features = {}
+    if (listed.status === 0 && !listed.error && !listed.signal) {
+      for (const line of listed.stdout.split('\n')) {
+        const match = /^(hooks|memories|external_agent_memory_import|context_management)\s+.+\s+(true|false)$/.exec(line.trim())
+        if (match) metadata.features[match[1]!] = match[2] === 'true'
+      }
+    }
+  }
+  return metadata
+}
+
 export async function executeRun(
   run: PlannedRun,
   plan: LaunchPlan,
@@ -624,6 +629,15 @@ export async function executeRun(
   }
   record({ at: startedAt.toISOString(), event: 'start', repo: run.repo, issue: run.issue, stage: run.stage, command: plan.command, args: plan.args, cwd: plan.cwd })
   await flush()
+
+  if (plan.command === 'claude' || plan.command === 'codex') {
+    const controls = validateManagedLaunch(plan, inspectManagedHarness(plan))
+    if (!controls.ok) throw new Error(`managed launch refused: ${controls.problems.join('; ')}`)
+    // Log I/O and metadata inspection above can yield; repeat the real guard/compiler check
+    // here so the next operation is the actual spawn, not another awaited preparation step.
+    const guard = await shipGuardWired(plan.cwd, plan.command, { home: config.home, repo: run.repo, policyDigest: plan.guardPolicyDigest })
+    if (!guard.wired) throw new Error(`prepared guard refused immediately before spawn: ${guard.detail}`)
+  }
 
   let tail = ''
   // The harness's own machine-readable result: `claude -p --output-format json` prints one object,
@@ -876,7 +890,7 @@ export interface TickDeps {
   issueBody: (repo: string, issue: number) => Promise<string>
   gh: (args: string[], options?: { cwd?: string; input?: string }) => Promise<string>
   now: () => Date
-  shipGuard: (repoPath: string, harness: Harness, policy?: { home: string; repo: string }) => Promise<{ wired: boolean; detail: string }>
+  shipGuard: (repoPath: string, harness: Harness, policy?: { home: string; repo: string; policyDigest?: string }) => Promise<{ wired: boolean; detail: string; policyDigest?: string | null }>
   ensureWorktree: (repoPath: string, issue: number, title: string) => Promise<WorktreeTarget>
   execute: (run: PlannedRun, plan: LaunchPlan, config: FactoryConfig, options: { operator: string | null }) => Promise<RunOutcome>
   // Which parents could run their children at the same time. Reading a plan's independent groups
@@ -884,6 +898,7 @@ export interface TickDeps {
   // dependency rather than in a second copy here.
   parentCandidates: (repo: string, repoPath: string, ready: BoardIssue[], operators: string[]) => Promise<ParentCandidate[]>
   tracker: RunTracker
+  harnessMetadata: (plan: LaunchPlan) => HarnessMetadata
 }
 
 async function ghJsonVia<T>(gh: TickDeps['gh'], args: string[]): Promise<T> {
@@ -1175,7 +1190,7 @@ export async function runTick(
     // not "another run", and maxRuns against the in-flight count is what bounds it.
     const lock = await readLock(lockPath)
     const guards: GuardState = {
-      shipGuard: await shipGuard(entry.path, harness, { home: config.home, repo: entry.repo }),
+      shipGuard: await shipGuard(entry.path, harness, { home: config.home, repo: entry.repo, policyDigest: resolved.policy?.policyDigest }),
       lock: lock.held && lock.pid === process.pid ? { held: false, pid: null } : lock,
       activeRuns: inFlight.length,
     }
@@ -1214,7 +1229,7 @@ export async function runTick(
     const guardFor = async (stageHarness: Harness): Promise<{ wired: boolean; detail: string }> => {
       let known = wiredInCheckout.get(stageHarness)
       if (!known) {
-        known = await shipGuard(entry.path, stageHarness, { home: config.home, repo: entry.repo })
+        known = await shipGuard(entry.path, stageHarness, { home: config.home, repo: entry.repo, policyDigest: resolved.policy?.policyDigest })
         wiredInCheckout.set(stageHarness, known)
       }
       return known
@@ -1275,7 +1290,7 @@ export async function runTick(
       // not exist. So the wiring is verified again where the run will actually happen; a dry run
       // checks a worktree that already exists and says nothing about one it would create.
       if (!options.dryRun || existsSync(target.path)) {
-        const worktreeGuard = await shipGuard(target.path, stage.harness, { home: config.home, repo: entry.repo })
+        const worktreeGuard = await shipGuard(target.path, stage.harness, { home: config.home, repo: entry.repo, policyDigest: resolved.policy?.policyDigest })
         if (!worktreeGuard.wired) {
           refusals.push({ repo: entry.repo, issue: run.issue, reason: `#${run.issue}: the ship guard is not wired for ${stage.harness} in the worktree ${target.path} (${worktreeGuard.detail}) — the run would start there under bypass with nothing bounding it; commit the harness wiring or list it in dev.md's worktree-include:` })
           continue
@@ -1323,6 +1338,17 @@ export async function runTick(
         runs.push(report)
         continue
       }
+      const controls = validateManagedLaunch(launch, (deps?.harnessMetadata ?? inspectManagedHarness)(launch))
+      if (!controls.ok) {
+        refusals.push({ repo: entry.repo, issue: run.issue, reason: `#${run.issue}: managed launch refused: ${controls.problems.join('; ')}` })
+        continue
+      }
+      const beforeSpawn = await shipGuard(target.path, stage.harness, { home: config.home, repo: entry.repo, policyDigest: resolved.policy?.policyDigest })
+      if (!beforeSpawn.wired) {
+        refusals.push({ repo: entry.repo, issue: run.issue, reason: `#${run.issue}: final prepared-checkout check refused: ${beforeSpawn.detail}` })
+        continue
+      }
+      if (beforeSpawn.policyDigest) launch.guardPolicyDigest = beforeSpawn.policyDigest
       // The run is started here and finished elsewhere: the tick moves on to the next run and the
       // next repo, and the loop keeps its interval, however long this run takes. The repo lock is
       // held from the first run in flight to the last one out, and the report the tick returns is

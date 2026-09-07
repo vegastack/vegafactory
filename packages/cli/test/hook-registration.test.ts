@@ -1,8 +1,8 @@
 import { describe, expect, test } from 'bun:test'
-import { chmodSync, mkdirSync, mkdtempSync, symlinkSync, writeFileSync } from 'node:fs'
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { validateRegistration } from '../src/hook-registration.ts'
+import { readHookConfiguration, validateRegistration } from '../src/hook-registration.ts'
 
 function fixture(harness: 'claude' | 'codex' = 'codex') {
   const checkout = mkdtempSync(join(tmpdir(), 'vf hook registration '))
@@ -41,7 +41,7 @@ describe('supported direct guard registration', () => {
   test('shell programs and incorrect argv never count as a direct guard call', () => {
     const f = fixture()
     for (const command of [
-      'echo ship-guard.mjs', `echo ${f.command}`, `${f.command} && true`, `${f.command}; true`,
+      'echo ship-guard.mjs', f.command.replace(' ', '\u00a0'), `echo ${f.command}`, `${f.command} && true`, `${f.command}; true`,
       `${f.command} | cat`, `${f.command} &`, `$(echo node) "${f.guardPath}" --harness codex`,
       `node "${f.guardPath}"`, `node "${f.guardPath}" --harness claude`,
       `${f.command} --check`, `env ${f.command}`, `node -e "${f.guardPath}" --harness codex`,
@@ -78,4 +78,35 @@ describe('supported direct guard registration', () => {
     // An unrelated executable named node must not replace the installed interpreter.
     expect(validateRegistration({ ...f, config }).ok).toBe(false)
   })
+})
+
+
+test('Codex JSON and inline layers merge without overwriting either file or adding duplicate hooks', () => {
+  const f = fixture()
+  mkdirSync(join(f.checkout, '.codex'))
+  const json = JSON.stringify({ hooks: { SessionStart: [{ hooks: [{ type: 'command', command: 'node other.mjs' }] }] } })
+  const toml = 'model = "fixture"\n[[hooks.PreToolUse]]\nmatcher = "Bash"\n[[hooks.PreToolUse.hooks]]\ntype = "command"\ncommand = ' + JSON.stringify(f.command) + '\n'
+  writeFileSync(join(f.checkout, '.codex/hooks.json'), json)
+  writeFileSync(join(f.checkout, '.codex/config.toml'), toml)
+  const merged = readHookConfiguration(f.checkout, 'codex')
+  expect(validateRegistration({ ...f, config: merged.config }).ok).toBe(true)
+  expect(merged.sources).toHaveLength(2)
+  expect(readFileSync(join(f.checkout, '.codex/hooks.json'), 'utf8')).toBe(json)
+  expect(readFileSync(join(f.checkout, '.codex/config.toml'), 'utf8')).toBe(toml)
+  writeFileSync(join(f.checkout, '.codex/hooks.json'), JSON.stringify(f.config))
+  expect(readHookConfiguration(f.checkout, 'codex').sources).toHaveLength(2)
+  // Same registration in two layers is observable; the reader does not install a third one.
+  writeFileSync(join(f.checkout, '.codex/config.toml'), toml.replace('matcher = "Bash"\n', ''))
+  expect(readHookConfiguration(f.checkout, 'codex').duplicateCommands).toHaveLength(1)
+})
+
+test('Claude local disabling and unsupported inline configurations refuse without writes', () => {
+  const f = fixture('claude')
+  mkdirSync(join(f.checkout, '.claude'))
+  writeFileSync(join(f.checkout, '.claude/settings.json'), JSON.stringify(f.config))
+  writeFileSync(join(f.checkout, '.claude/settings.local.json'), '{"disableAllHooks":true}')
+  expect(validateRegistration({ ...f, config: readHookConfiguration(f.checkout, 'claude').config }).ok).toBe(false)
+  mkdirSync(join(f.checkout, '.codex'))
+  writeFileSync(join(f.checkout, '.codex/config.toml'), '[hooks]\nPreToolUse = [{ hooks = [] }]\n')
+  expect(() => readHookConfiguration(f.checkout, 'codex')).toThrow(/unsupported inline/)
 })

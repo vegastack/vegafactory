@@ -3,7 +3,7 @@
 // in dispatch.test.ts; these cover the seams between them, which is where the review found the
 // silent drops.
 import { describe, expect, test } from 'bun:test'
-import { existsSync, mkdirSync, mkdtempSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { scopeDigest } from '../../../skills/dev/dev-implement/scripts/lib/approval.mjs'
@@ -11,6 +11,10 @@ import { scopeDigest } from '../../../skills/dev/dev-implement/scripts/lib/appro
 process.env.VSK_PREFLIGHT_SCRIPT = resolve(import.meta.dir, '../../../skills/dev/dev-implement/scripts/preflight.mjs')
 import { fetchRockets, readLock, readState, repoLockPath, runOnce, runTick, settleRuns, watch, writeState, type PlannedRun, type RunOutcome, type RunTracker, type TickDeps } from '../src/dispatch.ts'
 import { parseFactoryConfig } from '../src/config.ts'
+
+const SHIP_POLICY = resolve(import.meta.dir, '../../../skills/dev/dev-setup/scripts/ship-policy.mjs')
+const GUARD_BYTES = readFileSync(resolve(import.meta.dir, '../../../skills/dev/dev-setup/assets/hooks/ship-guard.mjs'))
+process.env.VSK_SHIP_POLICY_SCRIPT = SHIP_POLICY
 
 const CLAUDE_WIRING = JSON.stringify({ hooks: { PreToolUse: [{ hooks: [{ type: 'command', command: 'node .vegastack/hooks/ship-guard.mjs --harness claude' }] }] } })
 const CODEX_WIRING = JSON.stringify({ hooks: { PreToolUse: [{ hooks: [{ type: 'command', command: 'node .vegastack/hooks/ship-guard.mjs --harness codex' }] }] } })
@@ -30,11 +34,13 @@ function fixture(options: FixtureOptions = {}) {
     const path = join(home, name)
     mkdirSync(join(path, '.vegastack/hooks'), { recursive: true })
     mkdirSync(join(path, '.claude'), { recursive: true })
-    writeFileSync(join(path, '.vegastack/hooks/ship-guard.mjs'), '// guard\n')
+    writeFileSync(join(path, '.vegastack/hooks/ship-guard.mjs'), GUARD_BYTES)
     writeFileSync(join(path, '.claude/settings.json'), CLAUDE_WIRING)
     writeFileSync(join(path, '.vegastack/dev.md'), devMd)
-    mkdirSync(join(home, '.vegastack/guard'), { recursive: true })
-    writeFileSync(join(home, `.vegastack/guard/acme__${name}.json`), JSON.stringify({ schemaVersion: 1, repo: `acme/${name}`, defaultBranch: 'main', gates: 3, environments: [], shipAsk: [] }))
+    expect(Bun.spawnSync(['git', 'init', '-q', path]).exitCode).toBe(0)
+    expect(Bun.spawnSync(['git', '-C', path, 'remote', 'add', 'origin', `https://github.com/acme/${name}.git`]).exitCode).toBe(0)
+    const compiled = Bun.spawnSync(['node', SHIP_POLICY, '--write', '--json'], { cwd: path, env: { ...process.env, HOME: home } })
+    expect(compiled.exitCode, compiled.stdout.toString()).toBe(0)
     return { path, repo: `acme/${name}`, org: 'acme' }
   })
   const config = parseFactoryConfig({ repos, maxRuns: options.maxRuns ?? 1 }, home)
@@ -96,11 +102,17 @@ const ensureWorktree: TickDeps['ensureWorktree'] = async (repoPath, issue, title
   const slug = title.replace(/^[a-z]+:\s*/, '').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '')
   const path = join(repoPath, '.vegastack', '.worktrees', `${issue}-${slug}`)
   mkdirSync(join(path, '.vegastack/hooks'), { recursive: true })
-  writeFileSync(join(path, '.vegastack/hooks/ship-guard.mjs'), '// guard\n')
+  writeFileSync(join(path, '.vegastack/hooks/ship-guard.mjs'), GUARD_BYTES)
   mkdirSync(join(path, '.claude'), { recursive: true })
   writeFileSync(join(path, '.claude/settings.json'), CLAUDE_WIRING)
+  writeFileSync(join(path, '.vegastack/dev.md'), readFileSync(join(repoPath, '.vegastack/dev.md')))
   return { path, branch: `feat/${issue}-${slug}`, slug, type: 'feat' }
 }
+
+// Unit-only metadata fixture; actual harness behavior remains #158 qualification.
+const harnessMetadata: TickDeps['harnessMetadata'] = plan => plan.command === 'codex'
+  ? { version: 'codex-cli 0.153.4', features: { hooks: true, memories: false, external_agent_memory_import: false, context_management: false } }
+  : { version: '2.1.263 (Claude Code)' }
 
 const finished = (run: PlannedRun): RunOutcome => ({ exitCode: 0, timedOut: false, logFile: `/logs/${run.issue}.jsonl`, pushed: true, handedBack: false })
 
@@ -116,7 +128,7 @@ describe('the corrections window (F17, F18)', () => {
       if (args[0] === 'api' && args[1] === 'repos/acme/app/issues/comments/555/reactions') return JSON.stringify([{ id: 999, content: 'rocket', user: { login: 'mk' } }])
       return null
     })
-    const result = await runTick(config, { dryRun: true }, { gh, ensureWorktree, execute: async run => finished(run), parentCandidates: async () => [] })
+    const result = await runTick(config, { dryRun: true }, { harnessMetadata, gh, ensureWorktree, execute: async run => finished(run), parentCandidates: async () => [] })
     expect(queries.some(q => q.includes('updated:'))).toBe(false)
     expect(result.runs.map(run => [run.issue, run.stage])).toEqual([[12, 'corrections']])
     expect(existsSync(home)).toBe(true)
@@ -146,7 +158,7 @@ describe('the corrections window (F17, F18)', () => {
       clock += 40 * 60 * 1000
       return finished(run)
     }
-    await runTick(config, { dryRun: false }, { gh, now, ensureWorktree, execute, parentCandidates: async () => [] })
+    await runTick(config, { dryRun: false }, { harnessMetadata, gh, now, ensureWorktree, execute, parentCandidates: async () => [] })
     const state = await readState(config.stateFile)
     expect(state.lastTick['acme/app']).toBe('2026-09-03T10:00:00Z')
   })
@@ -167,7 +179,7 @@ describe('runs leave the tick (F19)', () => {
     const { gh, queries } = ghStub({ ready: [{ number: 8, title: 'feat: b', labels: ['ready'] }] })
     const { execute, pending, finishAll } = deferredExecute()
     const tracker: RunTracker = new Map()
-    const result = await runTick(config, { dryRun: false }, { gh, ensureWorktree, execute, parentCandidates: async () => [], tracker })
+    const result = await runTick(config, { dryRun: false }, { harnessMetadata, gh, ensureWorktree, execute, parentCandidates: async () => [], tracker })
     expect(pending).toHaveLength(2)
     expect(queries.filter(q => q.includes('repo:acme/web'))).toHaveLength(3)
     expect(result.runs.map(run => [run.repo, run.launched, run.exitCode])).toEqual([['acme/app', true, undefined], ['acme/web', true, undefined]])
@@ -181,7 +193,7 @@ describe('runs leave the tick (F19)', () => {
     const { gh } = ghStub({ ready: [{ number: 8, title: 'feat: b', labels: ['ready'] }] })
     const { execute, finishAll } = deferredExecute()
     const tracker: RunTracker = new Map()
-    const deps = { gh, ensureWorktree, execute, parentCandidates: async () => [], tracker }
+    const deps = { harnessMetadata, gh, ensureWorktree, execute, parentCandidates: async () => [], tracker }
     const first = await runTick(config, { dryRun: false }, deps)
     expect(first.runs).toHaveLength(1)
     const lock = await readLock(repoLockPath(config, 'acme/app'))
@@ -203,7 +215,7 @@ describe('runs leave the tick (F19)', () => {
     const { gh } = ghStub({ ready: [{ number: 8, title: 'feat: b', labels: ['ready'] }] })
     const { execute, pending, finishAll } = deferredExecute()
     const tracker: RunTracker = new Map()
-    const deps = { gh, ensureWorktree, execute, parentCandidates: async () => [], tracker }
+    const deps = { harnessMetadata, gh, ensureWorktree, execute, parentCandidates: async () => [], tracker }
     await runTick(config, { dryRun: false }, deps)
     const second = await runTick(config, { dryRun: false }, deps)
     expect(pending).toHaveLength(1)
@@ -222,7 +234,7 @@ describe('runs leave the tick (F19)', () => {
     })
     const { execute, finishAll } = deferredExecute()
     const tracker: RunTracker = new Map()
-    const deps = { gh, ensureWorktree, execute, parentCandidates: async () => [], tracker }
+    const deps = { harnessMetadata, gh, ensureWorktree, execute, parentCandidates: async () => [], tracker }
     const first = await runTick(config, { dryRun: false }, deps)
     expect(first.runs.map(run => run.stage)).toEqual(['corrections'])
     expect((await readState(config.stateFile)).handled).toEqual([{ repo: 'acme/app', issue: 12, commentId: 555, reactionId: 999 }])
@@ -237,10 +249,11 @@ describe('runs leave the tick (F19)', () => {
     const { gh } = ghStub({ ready: [{ number: 8, title: 'feat: b', labels: ['ready'] }] })
     const { execute, pending } = deferredExecute()
     const tracker: RunTracker = new Map()
-    const once = runOnce(config, { dryRun: false }, { gh, ensureWorktree, execute, parentCandidates: async () => [], tracker })
+    const once = runOnce(config, { dryRun: false }, { harnessMetadata, gh, ensureWorktree, execute, parentCandidates: async () => [], tracker })
     let settled = false
     void once.then(() => { settled = true })
-    await new Promise(resolve => setTimeout(resolve, 50))
+    const deadline = Date.now() + 3000
+    while (pending.length === 0 && Date.now() < deadline) await new Promise(resolve => setTimeout(resolve, 10))
     expect(pending).toHaveLength(1)
     expect(settled).toBe(false)
     pending[0]!.resolve()
@@ -258,7 +271,7 @@ describe('runs leave the tick (F19)', () => {
       dryRun: false,
       ticks: 2,
       onTick: result => { ticks.push(result.runs.length) },
-    }, { gh, ensureWorktree, execute, parentCandidates: async () => [], tracker })
+    }, { harnessMetadata, gh, ensureWorktree, execute, parentCandidates: async () => [], tracker })
     const secondTick = new Promise<void>(resolve => {
       const poll = setInterval(() => { if (ticks.length === 2) { clearInterval(poll); resolve() } }, 20)
     })
@@ -276,7 +289,7 @@ describe('the guard is checked for the harness and the checkout that will run (F
   test('a plan run on a harness the guard is not wired for is refused by name, while implement runs on the wired one', async () => {
     const { config } = fixture({ devMd: mixed, maxRuns: 3 })
     const { gh } = ghStub({ needsPlan: [{ number: 7, title: 'feat: a', labels: ['needs-plan'] }], ready: [{ number: 8, title: 'feat: b', labels: ['ready'] }] })
-    const result = await runTick(config, { dryRun: true }, { gh, ensureWorktree, execute: async run => finished(run), parentCandidates: async () => [] })
+    const result = await runTick(config, { dryRun: true }, { harnessMetadata, gh, ensureWorktree, execute: async run => finished(run), parentCandidates: async () => [] })
     expect(result.runs.map(run => run.issue)).toEqual([8])
     const refusal = result.refusals.find(entry => entry.issue === 7)!
     expect(refusal.reason).toContain('.codex/hooks.json')
@@ -286,7 +299,7 @@ describe('the guard is checked for the harness and the checkout that will run (F
   test('a profile with no plan entry refuses the needs-plan issue by name instead of throwing out of the tick', async () => {
     const { config } = fixture({ devMd: 'dispatch: local\noperators: mk\nimplement: claude fable-5-1 high\n', maxRuns: 3 })
     const { gh } = ghStub({ needsPlan: [{ number: 7, title: 'feat: a', labels: ['needs-plan'] }], ready: [{ number: 8, title: 'feat: b', labels: ['ready'] }] })
-    const result = await runTick(config, { dryRun: true }, { gh, ensureWorktree, execute: async run => finished(run), parentCandidates: async () => [] })
+    const result = await runTick(config, { dryRun: true }, { harnessMetadata, gh, ensureWorktree, execute: async run => finished(run), parentCandidates: async () => [] })
     expect(result.runs.map(run => run.issue)).toEqual([8])
     expect(result.refusals.find(entry => entry.issue === 7)!.reason).toContain('no harness policy for the plan stage')
   })
@@ -299,11 +312,11 @@ describe('the guard is checked for the harness and the checkout that will run (F
     const bare: TickDeps['ensureWorktree'] = async (repoPath, issue) => {
       const path = join(repoPath, '.vegastack', '.worktrees', `${issue}-b`)
       mkdirSync(join(path, '.vegastack/hooks'), { recursive: true })
-      writeFileSync(join(path, '.vegastack/hooks/ship-guard.mjs'), '// guard\n')
+      writeFileSync(join(path, '.vegastack/hooks/ship-guard.mjs'), GUARD_BYTES)
       return { path, branch: `feat/${issue}-b`, slug: 'b', type: 'feat' }
     }
     const tracker: RunTracker = new Map()
-    const result = await runTick(config, { dryRun: false }, { gh, ensureWorktree: bare, execute: async run => { launched.push(run.issue); return finished(run) }, parentCandidates: async () => [], tracker })
+    const result = await runTick(config, { dryRun: false }, { harnessMetadata, gh, ensureWorktree: bare, execute: async run => { launched.push(run.issue); return finished(run) }, parentCandidates: async () => [], tracker })
     await settleRuns(tracker)
     expect(launched).toEqual([])
     expect(result.runs).toEqual([])
@@ -327,7 +340,7 @@ describe('the guard is checked for the harness and the checkout that will run (F
     }
     const launched: string[] = []
     const tracker: RunTracker = new Map()
-    const result = await runTick(config, { dryRun: false }, { gh, ensureWorktree: withCodex, execute: async (run, plan) => { launched.push(plan.command); return finished(run) }, parentCandidates: async () => [], tracker })
+    const result = await runTick(config, { dryRun: false }, { harnessMetadata, gh, ensureWorktree: withCodex, execute: async (run, plan) => { launched.push(plan.command); return finished(run) }, parentCandidates: async () => [], tracker })
     await settleRuns(tracker)
     expect(launched).toEqual(['codex'])
     expect(result.refusals).toEqual([])
@@ -343,16 +356,17 @@ describe('the parallel path launches the implement harness (F28)', () => {
     writeFileSync(join(repoPath, '.codex/hooks.json'), CODEX_WIRING)
     const parentWorktree = join(repoPath, '.vegastack/.worktrees/104-parent')
     mkdirSync(join(parentWorktree, '.vegastack/hooks'), { recursive: true })
-    writeFileSync(join(parentWorktree, '.vegastack/hooks/ship-guard.mjs'), '// guard\n')
+    writeFileSync(join(parentWorktree, '.vegastack/hooks/ship-guard.mjs'), GUARD_BYTES)
     mkdirSync(join(parentWorktree, '.codex'), { recursive: true })
     writeFileSync(join(parentWorktree, '.codex/hooks.json'), CODEX_WIRING)
+    writeFileSync(join(parentWorktree, '.vegastack/dev.md'), readFileSync(join(repoPath, '.vegastack/dev.md')))
     const { gh } = ghStub({ ready: [{ number: 131, title: 'feat: x', labels: ['ready'] }, { number: 132, title: 'feat: y', labels: ['ready'] }] })
     const parentCandidates: TickDeps['parentCandidates'] = async () => [{
       parent: { issue: 104, branch: 'feat/104-parent', head: 'abc1234', worktree: parentWorktree },
       groups: [{ id: 'a', members: ['#131'], files: ['a.ts'] }, { id: 'b', members: ['#132'], files: ['b.ts'] }],
       children: [{ number: 131, parent: 104, assignee: null, labels: ['ready'] }, { number: 132, parent: 104, assignee: null, labels: ['ready'] }],
     }]
-    const result = await runTick(config, { dryRun: true }, { gh, ensureWorktree, execute: async run => finished(run), parentCandidates })
+    const result = await runTick(config, { dryRun: true }, { harnessMetadata, gh, ensureWorktree, execute: async run => finished(run), parentCandidates })
     expect(result.refusals).toEqual([])
     expect(result.runs.map(run => [run.issue, run.launch.command])).toEqual([[104, 'codex']])
     expect(result.runs[0]!.launch.args).not.toContain('--allowed-tools')
@@ -364,8 +378,97 @@ test('a ready marker-only issue never reaches execute or worktree creation', asy
   const { config } = fixture()
   const { gh } = ghStub({ ready: [{ number: 8, title: 'feat: scoped', labels: ['ready'] }] }, args => args[1] === 'repos/acme/app/issues/8/comments' && args.includes('--slurp') ? JSON.stringify([[{ id: 2, body: '<!-- vsk:v1 type=approval -->' }]]) : null)
   let executions = 0; let worktrees = 0
-  const result = await runTick(config, { dryRun: false }, { gh, parentCandidates: async () => [], ensureWorktree: async (...args) => { worktrees++; return ensureWorktree(...args) }, execute: async run => { executions++; return finished(run) } })
+  const result = await runTick(config, { dryRun: false }, { harnessMetadata, gh, parentCandidates: async () => [], ensureWorktree: async (...args) => { worktrees++; return ensureWorktree(...args) }, execute: async run => { executions++; return finished(run) } })
   expect(executions).toBe(0)
   expect(worktrees).toBe(0)
   expect(result.refusals.some(refusal => refusal.reason.includes('approval'))).toBe(true)
 })
+
+
+test('F4 full caller: unrelated registration refuses before execute with real current compiler policy', async () => {
+  const { config, repos } = fixture()
+  writeFileSync(join(repos[0]!.path, '.claude/settings.json'), JSON.stringify({ unrelated: { command: 'echo ship-guard.mjs' } }))
+  const { gh } = ghStub({ ready: [{ number: 8, title: 'feat: fixture', labels: ['ready'] }] })
+  let launched = 0
+  const result = await runTick(config, { dryRun: false }, { harnessMetadata, gh, ensureWorktree, execute: async run => { launched++; return finished(run) }, parentCandidates: async () => [] })
+  expect(launched).toBe(0)
+  expect(result.refusals.some(r => r.reason.includes('PreToolUse'))).toBe(true)
+})
+
+test('a profile edited after sync refuses before any worktree or execute', async () => {
+  const { config, repos } = fixture()
+  writeFileSync(join(repos[0]!.path, '.vegastack/dev.md'), readFileSync(join(repos[0]!.path, '.vegastack/dev.md'), 'utf8') + 'gates: 2\n')
+  const { gh } = ghStub({ ready: [{ number: 8, title: 'feat: fixture', labels: ['ready'] }] })
+  let launched = 0
+  const result = await runTick(config, { dryRun: false }, { harnessMetadata, gh, ensureWorktree, execute: async run => { launched++; return finished(run) }, parentCandidates: async () => [] })
+  expect(launched).toBe(0)
+  expect(result.refusals.some(r => r.reason.includes('stale'))).toBe(true)
+})
+
+test('registration changed while building the launch prompt is checked again immediately before execute', async () => {
+  const { config } = fixture()
+  const { gh } = ghStub({ ready: [{ number: 8, title: 'feat: fixture', labels: ['ready'] }] })
+  let target = '', launched = 0
+  const result = await runTick(config, { dryRun: false }, { harnessMetadata, gh, parentCandidates: async () => [],
+    ensureWorktree: async (...args) => { const value = await ensureWorktree(...args); target = value.path; return value },
+    issueBody: async () => { writeFileSync(join(target, '.claude/settings.json'), '{}'); return '' },
+    execute: async run => { launched++; return finished(run) },
+  })
+  expect(launched).toBe(0)
+  expect(result.refusals.some(r => r.reason.includes('PreToolUse'))).toBe(true)
+})
+
+
+test('unsupported managed harness metadata refuses before execute', async () => {
+  const { config } = fixture()
+  const { gh } = ghStub({ ready: [{ number: 8, title: 'feat: fixture', labels: ['ready'] }] })
+  let launched = 0
+  const result = await runTick(config, { dryRun: false }, { gh, ensureWorktree, harnessMetadata: () => ({ version: 'unknown' }),
+    execute: async run => { launched++; return finished(run) }, parentCandidates: async () => [] })
+  expect(launched).toBe(0)
+  expect(result.refusals.some(r => r.reason.includes('unsupported Claude version'))).toBe(true)
+})
+
+for (const harness of ['claude', 'codex'] as const) for (const parallel of [false, true]) {
+  test(`real Git ${parallel ? 'parent' : 'ordinary'} prepared worktree uses its ${harness} guard and compiler`, async () => {
+    const { config, repos } = fixture({ devMd: `dispatch: local\noperators: mk\nimplement: ${harness} fixture high\n`, maxRuns: 3 })
+    const repo = repos[0]!.path
+    if (harness === 'codex') {
+      mkdirSync(join(repo, '.codex'))
+      writeFileSync(join(repo, '.codex/hooks.json'), CODEX_WIRING)
+    }
+    const git = (args: string[]) => {
+      const result = Bun.spawnSync(['git', '-C', repo, ...args])
+      expect(result.exitCode, result.stderr.toString()).toBe(0)
+      return result.stdout.toString().trim()
+    }
+    writeFileSync(join(repo, '.gitignore'), '.claude/\n.vegastack/.worktrees/\n')
+    git(['add', '.vegastack/hooks/ship-guard.mjs', '.vegastack/dev.md', '.gitignore', ...(harness === 'codex' ? ['.codex/hooks.json'] : [])])
+    git(['-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', 'commit', '-qm', 'fixture'])
+    const prepared = join(repo, '.vegastack/.worktrees/104-prepared')
+    git(['worktree', 'add', '-q', '-b', 'fixture-prepared', prepared])
+    expect(readFileSync(join(prepared, '.git'), 'utf8')).toContain('gitdir:')
+    // The ordinary worktree-include operation copies only this known ignored hook file.
+    if (harness === 'claude') {
+      mkdirSync(join(prepared, '.claude'))
+      writeFileSync(join(prepared, '.claude/settings.json'), CLAUDE_WIRING)
+    }
+    const { gh } = ghStub({ ready: parallel
+      ? [{ number: 131, title: 'feat: a', labels: ['ready'] }, { number: 132, title: 'feat: b', labels: ['ready'] }]
+      : [{ number: 104, title: 'feat: prepared', labels: ['ready'] }] })
+    const parentCandidates: TickDeps['parentCandidates'] = async () => parallel ? [{
+      parent: { issue: 104, branch: 'fixture-prepared', head: git(['rev-parse', 'HEAD']), worktree: prepared },
+      groups: [{ id: 'a', members: ['#131'], files: ['a.ts'] }, { id: 'b', members: ['#132'], files: ['b.ts'] }],
+      children: [{ number: 131, parent: 104, assignee: null, labels: ['ready'] }, { number: 132, parent: 104, assignee: null, labels: ['ready'] }],
+    }] : []
+    const tracker: RunTracker = new Map()
+    const actual: string[] = []
+    const result = await runTick(config, { dryRun: false }, { gh, harnessMetadata, parentCandidates, tracker,
+      ensureWorktree: async () => ({ path: prepared, branch: 'fixture-prepared', slug: 'prepared', type: 'feat' }),
+      execute: async (run, plan) => { actual.push(plan.cwd); return finished(run) },
+    })
+    await settleRuns(tracker)
+    expect(result.refusals).toEqual([])
+    expect(actual).toEqual([prepared])
+  })
+}

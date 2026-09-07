@@ -2,6 +2,16 @@
 
 The project's story, newest first: what got built, why, and how it went — for the operator's future recall. Format home: the dev-chronicle skill.
 
+## 07-09-2026 — Hooks must be real before a run starts ([#140](https://github.com/vegastack/vegafactory/issues/140))
+
+- **What:** Launch validation checks the selected tool event, direct guard command, installed bytes and current compiler policy in the prepared checkout. Managed sessions exclude native memory; advisory hooks send only bounded local identity requests.
+- **Why:** An unrelated echo of the guard filename counted as wiring, while a stored policy header could conceal stale intent. Session hooks also forwarded raw payloads or started network work during exit.
+- **How it went:** The original false positive failed a regression test first. Real Git worktrees and hook subprocess fixtures exercise the corrected seams. Child-launch/copy compatibility, private capture integration, pooled evaluation and final review remain explicit gates.
+- **Changed:** Exact registration validation · fresh compiler comparison · managed memory controls · local advisory adapter · qualification vocabulary.
+- **Decisions:** none.
+
+— approved by (kmanojkumar) · built by codex · branch codex/productionization-133
+
 ## 07-09-2026 — Policy has one authority model ([#145](https://github.com/vegastack/vegafactory/issues/145))
 
 - **What:** Organization locks, group defaults and repository choices now resolve through one helper, alongside explicit admin/read scopes and registered-machine settings. Consumers keep the source and reason when a requested override is refused.

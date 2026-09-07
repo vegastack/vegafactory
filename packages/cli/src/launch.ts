@@ -29,6 +29,49 @@ export interface LaunchPlan {
   env: Record<string, string>
   cwd: string
   prompt: string
+  guardPolicyDigest?: string
+}
+
+// Version-qualified controls, scoped to the process. These are configuration evidence only;
+// real hook/memory behavior is a separate pinned-harness qualification (#158).
+export function codexManagedControls(checkout: string): string[] {
+  return [
+    '--strict-config',
+    '-c', 'memories.use_memories=false', '-c', 'memories.generate_memories=false',
+    '--disable', 'memories', '--disable', 'external_agent_memory_import',
+    '-c', 'features.context_management.experimental_mode=false', '--enable', 'hooks',
+    '-c', `projects.${JSON.stringify(checkout)}.trust_level="trusted"`,
+  ]
+}
+
+const CLAUDE_SETTINGS = JSON.stringify({ autoMemoryEnabled: false, disableAllHooks: false, env: { CLAUDE_CODE_DISABLE_AUTO_MEMORY: '1' } })
+export interface HarnessMetadata { version: string; features?: Record<string, boolean> }
+
+export function validateManagedLaunch(plan: LaunchPlan, metadata: HarnessMetadata): { ok: boolean; problems: string[] } {
+  const problems: string[] = []
+  const pair = (flag: string, value: string) => plan.args.filter((arg, i) => arg === flag && plan.args[i + 1] === value).length === 1
+  if (plan.command === 'codex') {
+    if (metadata.version !== 'codex-cli 0.153.4') problems.push('unsupported Codex version for native-memory controls')
+    const controls = codexManagedControls(plan.cwd)
+    if (!plan.args.includes('--strict-config')) problems.push('strict config validation missing')
+    for (let i = 1; i < controls.length; i += 2) if (!pair(controls[i]!, controls[i + 1]!)) problems.push(`managed Codex control missing: ${controls[i + 1]}`)
+    for (let i = 0; i < plan.args.length; i++) {
+      const flag = plan.args[i], value = plan.args[i + 1] ?? ''
+      if ((flag === '-c' || flag === '--config') && /^(memories(?:\.|=)|features\.(?:memories|external_agent_memory_import|context_management|hooks)(?:\.|=))/.test(value)
+        && !controls.includes(value)) problems.push('conflicting native-memory/hook config override')
+      if (flag === '--enable' && ['memories', 'external_agent_memory_import', 'context_management'].includes(value)) problems.push('native context feature re-enabled')
+      if (flag === '--disable' && value === 'hooks') problems.push('hooks disabled')
+    }
+    for (const [feature, enabled] of Object.entries({ hooks: true, memories: false, external_agent_memory_import: false, context_management: false })) {
+      if (metadata.features?.[feature] !== enabled) problems.push(`effective Codex ${feature} control is unavailable or disagrees`)
+    }
+  } else if (plan.command === 'claude') {
+    if (metadata.version !== '2.1.263 (Claude Code)') problems.push('unsupported Claude version for native-memory controls')
+    if (plan.env.CLAUDE_CODE_DISABLE_AUTO_MEMORY !== '1' || !pair('--settings', CLAUDE_SETTINGS)) problems.push('managed Claude auto-memory disabling controls missing')
+    if (plan.args.filter(arg => arg === '--settings').length !== 1) problems.push('conflicting Claude settings overrides')
+    if (plan.args.includes('--bare') || plan.args.includes('--safe-mode') || ['CLAUDE_CODE_SIMPLE', 'CLAUDE_CODE_SAFE_MODE', 'CLAUDE_CODE_DISABLE_CLAUDE_MDS'].some(key => plan.env[key] !== '0')) problems.push('managed launch must retain hooks and project instructions')
+  } else problems.push('unsupported managed harness')
+  return { ok: problems.length === 0, problems }
 }
 
 function envFor(input: LaunchInput): Record<string, string> {
@@ -38,6 +81,10 @@ function envFor(input: LaunchInput): Record<string, string> {
     // #111's route: with no human at a keyboard, a question goes into the issue and the next run
     // reads the answer there.
     VSK_ASK_ROUTE: 'issue',
+    ...(input.harness === 'claude' ? {
+      CLAUDE_CODE_DISABLE_AUTO_MEMORY: '1', CLAUDE_CODE_SIMPLE: '0',
+      CLAUDE_CODE_SAFE_MODE: '0', CLAUDE_CODE_DISABLE_CLAUDE_MDS: '0',
+    } : {}),
   }
 }
 
@@ -53,7 +100,7 @@ export function buildLaunchPlan(input: LaunchInput): LaunchPlan {
       args: [
         'exec', '-C', input.worktree, '--sandbox', 'workspace-write', '-a', 'never',
         '--dangerously-bypass-hook-trust', '-c', `model=${input.model}`,
-        '-c', `model_reasoning_effort=${input.effort}`, '--json', prompt,
+        '-c', `model_reasoning_effort=${input.effort}`, ...codexManagedControls(input.worktree), '--json', prompt,
       ],
       env,
       cwd: input.worktree,
@@ -65,6 +112,7 @@ export function buildLaunchPlan(input: LaunchInput): LaunchPlan {
     args: [
       '-p', prompt, '--permission-mode', 'bypassPermissions', '--output-format', 'json',
       '--model', input.model, '--effort', input.effort,
+      '--settings', CLAUDE_SETTINGS,
     ],
     env,
     cwd: input.worktree,

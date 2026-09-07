@@ -6,6 +6,51 @@ import { spawnSync } from 'node:child_process'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
+export interface CompiledGuardCheck { wired: boolean; detail: string; policyDigest: string | null }
+
+export function shipPolicyScript(): string {
+  const packageRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..')
+  return process.env.VSK_SHIP_POLICY_SCRIPT || join(packageRoot, 'skill', 'dev-setup', 'scripts', 'ship-policy.mjs')
+}
+
+// The compiler owns policy parsing and comparison. This adapter only validates its result
+// envelope and identity; launch never rewrites a stale enforcement document into permission.
+export function checkCompiledGuard(
+  input: { checkout: string; home: string; repo: string; policyDigest?: string },
+  invoke = (script: string, args: string[]) => spawnSync(process.execPath, [script, ...args], {
+    cwd: input.checkout, env: { ...process.env, HOME: input.home }, encoding: 'utf8',
+    timeout: 10_000, killSignal: 'SIGKILL', maxBuffer: 1024 * 1024,
+  }),
+): CompiledGuardCheck {
+  const fail = (detail: string): CompiledGuardCheck => ({ wired: false, detail: `${detail} — run vegafactory guard sync explicitly`, policyDigest: null })
+  let run: ReturnType<typeof invoke>
+  try {
+    // The compiler derives repo identity from the actual checkout's origin, not this caller.
+    run = invoke(shipPolicyScript(), ['--check', '--json', '--dev-md', join(input.checkout, '.vegastack/dev.md')])
+  } catch { return fail('compiled policy check could not run') }
+  if (run.error || run.signal) return fail('compiled policy check failed or exceeded its 10-second deadline')
+  let result: Record<string, unknown>
+  try {
+    const value: unknown = JSON.parse(String(run.stdout ?? ''))
+    if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('shape')
+    result = value as Record<string, unknown>
+  } catch { return fail('compiled policy check returned unreadable output') }
+  if (run.status !== 0 || result.ok !== true || result.stale !== false) {
+    const detail = typeof result.reason === 'string' ? result.reason : Array.isArray(result.blocks) ? result.blocks.filter(x => typeof x === 'string').join('; ') : 'comparison refused'
+    return fail(`compiled policy is missing, stale or refused: ${detail}`)
+  }
+  const policy = result.policy as Record<string, unknown> | null
+  if (result.guard !== 'ship-policy' || result.check !== true || result.written !== false
+    || !Array.isArray(result.blocks) || result.blocks.length !== 0 || !policy || Array.isArray(policy)
+    || policy.schemaVersion !== 2 || policy.repo !== input.repo
+    || typeof policy.policyDigest !== 'string' || !/^[a-f0-9]{64}$/.test(policy.policyDigest)
+    || !policy.sources || typeof policy.sources !== 'object' || Array.isArray(policy.sources)) {
+    return fail('compiled policy check returned an unsupported envelope or wrong repository identity')
+  }
+  if (input.policyDigest && input.policyDigest !== policy.policyDigest) return fail('compiled policy differs from the selected launch policy')
+  return { wired: true, detail: 'current compiled policy verified in the prepared checkout', policyDigest: policy.policyDigest }
+}
+
 export interface GuardArgs {
   verb: 'sync'
   check: boolean
@@ -80,9 +125,7 @@ interface ScriptResult {
 }
 
 function defaultSpawn(args: string[]): GuardSpawnResult {
-  const packageRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..')
-  const script = process.env.VSK_SHIP_POLICY_SCRIPT || join(packageRoot, 'skill', 'dev-setup', 'scripts', 'ship-policy.mjs')
-  const run = spawnSync(process.execPath, [script, ...args], { encoding: 'utf8' })
+  const run = spawnSync(process.execPath, [shipPolicyScript(), ...args], { encoding: 'utf8', timeout: 10_000, killSignal: 'SIGKILL', maxBuffer: 1024 * 1024 })
   return { status: run.status ?? 2, stdout: `${run.stdout ?? ''}${run.stderr ?? ''}` }
 }
 
