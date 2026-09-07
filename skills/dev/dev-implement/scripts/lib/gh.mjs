@@ -40,14 +40,6 @@ export function ghJson(args, { gh = process.env.VSK_GH || 'gh', input } = {}) {
   }
 }
 
-// A complete array history is explicit: gh --paginate otherwise emits adjacent
-// JSON documents. Slurp preserves every page, including a malformed one to refuse.
-export function ghPages(args, options) {
-  const pages = ghJson([...args, '--paginate', '--slurp'], options);
-  if (!Array.isArray(pages) || !pages.every(Array.isArray)) throw new GhUnavailable('GitHub returned malformed paginated history');
-  return pages.flat();
-}
-
 // Parse a `<!-- vsk:v1 key=value ... -->` marker from a comment/body's first
 // marker line. Returns { keys } or null when no marker exists — and per
 // conventions, no marker means the artifact does not exist (no fallback).

@@ -105,6 +105,15 @@ describe('preflight', () => {
     const ok = evaluatePreflight({ issue, comments: [currentPlan, approval('brief'), approval('plan')], devMd, me: 'kmanojkumar' })
     expect(ok.blocks).toEqual([])
   })
+  test('planning permits the operator assignee with a separate service-account runner', () => {
+    const issue = baseIssue()
+    issue.labels = [{ name: 'needs-plan' }, { name: 'full-plan' }]
+    issue.assignees = [{ login: 'kmanojkumar' }]
+    const input = { issue, comments: [approval('brief')], devMd, me: 'service-runner', expect: 'needs-plan', stage: 'plan' }
+    expect(evaluatePreflight(input).blocks).toEqual([])
+    issue.assignees = [{ login: 'another-runner' }]
+    expect(evaluatePreflight(input).blocks.join(' ')).toContain('another-runner')
+  })
   test('blocks on unresolved Assumptions section', () => {
     const issue = baseIssue()
     issue.body += '\n## Assumptions — confirm or correct\n- gh supports X\n'

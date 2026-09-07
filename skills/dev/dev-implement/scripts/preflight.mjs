@@ -11,7 +11,7 @@ import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { GhUnavailable, ghJson, parseFlags, renderResult } from './lib/gh.mjs';
-import { evaluateApprovals, readApprovalSources, gatherConsolidatedApproval, parseStrictJson } from './lib/approval.mjs';
+import { evaluateApprovals, readApprovalSources, gatherConsolidatedApproval, parseStrictJson, readPages } from './lib/approval.mjs';
 
 export function evaluatePreflight({ issue, comments, devMd, me, expect = 'ready', stage = 'implement', sourceComments = [] }) {
   const blocks = [];
@@ -51,7 +51,8 @@ export function evaluatePreflight({ issue, comments, devMd, me, expect = 'ready'
   // picked it up by hand, and a block would strand a claimable issue.
   const assigned = (issue.assignees ?? []).map((a) => a.login);
   const others = assigned.filter((l) => l !== me);
-  if (others.length > 0 && expect !== 'for-operator') {
+  const operatorPlanning = stage === 'plan' && expect === 'needs-plan' && others.every((login) => operators.includes(login));
+  if (others.length > 0 && expect !== 'for-operator' && !operatorPlanning) {
     const why = expect === 'working'
       ? 'a working issue belongs to its claimant'
       : "a ready issue is unassigned by convention, so another assignee is someone else's claim";
@@ -74,11 +75,7 @@ export function evaluatePreflight({ issue, comments, devMd, me, expect = 'ready'
 // Both CLI and dispatcher use this owner reader and evaluator. The injected
 // reader is transport only, never an approval verdict or policy override.
 export async function gatherAndEvaluate(flags, { readJson = async (args) => ghJson(args), devMd: suppliedDevMd } = {}) {
-  const pages = async (args) => {
-    const result = await readJson([...args, '--paginate', '--slurp']);
-    if (!Array.isArray(result) || !result.every(Array.isArray)) throw new GhUnavailable('malformed paginated GitHub history');
-    return result.flat();
-  };
+  const pages = (args) => readPages(readJson, args);
   const repo = flags.repo || (await readJson(['repo', 'view', '--json', 'nameWithOwner'])).nameWithOwner;
   if (flags['consolidated-request']) {
     const request = parseStrictJson(readFileSync(flags['consolidated-request'], 'utf8'));

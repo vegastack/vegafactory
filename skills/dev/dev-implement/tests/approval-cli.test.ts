@@ -14,31 +14,33 @@ function fixture() {
   ], supersedes: [], revokes: [] }
   return { brief: structuredClone(brief), comments: [structuredClone(plan), { id: 3, node_id: 'approval-3', body: '<!-- vsk:v1 type=approval scope=brief+plan -->\n```json\n' + JSON.stringify(event) + '\n```\n' }] }
 }
-function run(data: ReturnType<typeof fixture>, historyError = false) {
+function run(data: ReturnType<typeof fixture>, historyError = false, options: { me?: string; stage?: string; expect?: string } = {}) {
   const dir = mkdtempSync(join(tmpdir(), 'approval-cli-'))
   writeFileSync(join(dir, 'data.json'), JSON.stringify(data))
   writeFileSync(join(dir, 'dev.md'), 'repo: acme/app\noperators: ada\n')
   const stub = join(dir, 'gh')
   writeFileSync(stub, '#!/usr/bin/env node\n' + `const x=JSON.parse(require('node:fs').readFileSync(${JSON.stringify(join(dir, 'data.json'))},'utf8'));const p=process.argv[3]; if(p.endsWith('/comments')) { if(${historyError}) { process.stderr.write('HTTP 503');process.exit(1) }; process.stdout.write(JSON.stringify(process.argv.includes('--slurp')?(x.pages??[x.comments]):x.comments)) } else if(p.endsWith('/blocked_by')) process.stdout.write(process.argv.includes('--slurp')?'[[]]':'[]'); else process.stdout.write(JSON.stringify(x.brief));`, { mode: 0o755 })
-  return spawnSync('node', [resolve(import.meta.dir, '../scripts/preflight.mjs'), '--issue', '1', '--repo', 'acme/app', '--me', 'ada', '--dev-md', join(dir, 'dev.md'), '--json'], { encoding: 'utf8', env: { ...process.env, VSK_GH: stub } })
+  return spawnSync('node', [resolve(import.meta.dir, '../scripts/preflight.mjs'), '--issue', '1', '--repo', 'acme/app', '--me', options.me ?? 'ada', '--stage', options.stage ?? 'implement', '--expect', options.expect ?? 'ready', '--dev-md', join(dir, 'dev.md'), '--json'], { encoding: 'utf8', env: { ...process.env, VSK_GH: stub } })
 }
 
 test('actual CLI refuses a bare marker despite ready label', () => {
   const data = fixture(); data.comments[1]!.body = '<!-- vsk:v1 type=approval -->'
   expect(run(data).status).toBe(2)
 })
-test('actual CLI accepts agent-recorded current intent and progress, rejects changed scope/history', () => {
+test('actual CLI accepts agent-recorded current intent and progress', () => {
   expect(run(fixture()).status).toBe(0)
   const progress = fixture(); progress.comments[0]!.body = progress.comments[0]!.body.replace('[ ]', '[x]')
   expect(run(progress).status).toBe(0)
-  for (const change of [
-    (x: ReturnType<typeof fixture>) => { x.brief.body += 'New requirement' },
-    (x: ReturnType<typeof fixture>) => { x.comments[0]!.body += 'New interface' },
-    (x: ReturnType<typeof fixture>) => { x.comments[1]!.body = x.comments[1]!.body.replace('"ada"', '"mallory"') },
-    (x: ReturnType<typeof fixture>) => { x.comments.push({ ...x.comments[0]!, id: 9, node_id: 'duplicate-plan' }) },
-  ]) { const data=fixture(); change(data); expect(run(data).status).toBe(2) }
-  expect(run(fixture(), true).status).toBe(2)
 })
+for (const [name, change] of [
+  ['changed brief', (x: ReturnType<typeof fixture>) => { x.brief.body += 'New requirement' }],
+  ['changed interface', (x: ReturnType<typeof fixture>) => { x.comments[0]!.body += 'New interface' }],
+  ['wrong operator', (x: ReturnType<typeof fixture>) => { x.comments[1]!.body = x.comments[1]!.body.replace('"ada"', '"mallory"') }],
+  ['duplicate plan', (x: ReturnType<typeof fixture>) => { x.comments.push({ ...x.comments[0]!, id: 9, node_id: 'duplicate-plan' }) }],
+] as const) test('actual CLI refuses ' + name, () => {
+  const data = fixture(); change(data); expect(run(data).status).toBe(2)
+})
+test('actual CLI refuses unreadable history', () => { expect(run(fixture(), true).status).toBe(2) })
 
 function eventComment(event: any, id: number) { return { id, node_id: 'event-' + id, body: '<!-- vsk:v1 type=approval scope=' + event.scope + ' -->\n```json\n' + JSON.stringify(event) + '\n```\n' } }
 
@@ -96,4 +98,14 @@ test('actual consolidated CLI returns manifest/task receipt and refuses another 
   expect(result.manifestSha256).toBe(record.manifest.sha256)
   expect(result.taskIds).toEqual(['1-T1']); expect(result.action.id).toBe('local')
   expect(invoke('another/project').status).toBe(2)
+})
+
+
+test('actual planning CLI accepts the operator assignee for a service-account runner', () => {
+  const data: any = fixture()
+  data.brief.labels = [{ name: 'needs-plan' }, { name: 'full-plan' }]
+  data.brief.assignees = [{ login: 'ada' }]
+  expect(run(data, false, { stage: 'plan', expect: 'needs-plan', me: 'service-runner' }).status).toBe(0)
+  data.brief.assignees = [{ login: 'another-runner' }]
+  expect(run(data, false, { stage: 'plan', expect: 'needs-plan', me: 'service-runner' }).status).toBe(2)
 })

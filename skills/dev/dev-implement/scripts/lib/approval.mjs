@@ -695,6 +695,12 @@ function validateResearchEvidence(context, item, requested, action, record, mani
 
 // Transport adapters return provider records, not precomputed permission flags.
 // Source reads are shared by the ordinary and consolidated launch paths.
+export async function readPages(readJson, args) {
+  const value = await readJson([...args, '--paginate', '--slurp']);
+  check(Array.isArray(value) && value.every(Array.isArray), 'unreadable complete paginated history');
+  return value.flat();
+}
+
 export async function readApprovalSources(comments, readJson) {
   const sources = new Map();
   for (const comment of comments) {
@@ -708,11 +714,7 @@ export async function readApprovalSources(comments, readJson) {
 }
 
 export async function gatherConsolidatedApproval({ parentRepo, parentIssue, approvalBinding, requested, operators, readJson, admissionEvidence = [], researchAdapter, preparationAdapter }) {
-  const pages = async (path) => {
-    const value = await readJson(['api', path, '--paginate', '--slurp']);
-    check(Array.isArray(value) && value.every(Array.isArray), 'unreadable complete approval history');
-    return value.flat();
-  };
+  const pages = (path) => readPages(readJson, ['api', path]);
   check(repo(parentRepo) && integer(parentIssue), 'invalid approval parent');
   keys(approvalBinding, ['commentId', 'bodySha256']);
   check(integer(approvalBinding.commentId) && digest(approvalBinding.bodySha256), 'invalid approval comment binding');
