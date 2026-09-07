@@ -28,6 +28,7 @@ npx @vegastack/vegafactory skills add --group dev --global
 | scripts/questions.mjs (installed copy) | The ask round renderer, parser and route decision, duplicated in from dev-setup |
 | references/ask-route.md (installed copy) | The ask route: tool or issue, the questions comment format, the reply grammar |
 | [scripts/lib/gh.mjs](scripts/lib/gh.mjs) | Shared guard plumbing: gh invocation, marker parsing, result contract |
+| [scripts/lib/approval.mjs](scripts/lib/approval.mjs) | Canonical scoped-intent parsing, current approval and consolidated selection validation |
 | [scripts/preflight.mjs](scripts/preflight.mjs) | Deterministic preflight guard (exit 2 blocks) |
 | [scripts/evidence-check.mjs](scripts/evidence-check.mjs) | Evidence-comment shape guard; with `--issue`, also blocks when plan checkboxes lag the ledger's completed tasks |
 | [scripts/reclaim.mjs](scripts/reclaim.mjs) | Operator-run release of an orphaned claim (`working` → `ready`, unassign; refuses a still-fresh ledger unless `--force`) |
@@ -46,4 +47,4 @@ npx @vegastack/vegafactory skills add --group dev --global
 
 ## Behavior contract
 
-Preflight fails closed: no recorded approval comment, open blockers, another claimant, or a material open decision in the brief each stop the run with a named reason. Dark mode means no progress pings and no questions — routine choices are the implementer's, stop-list hits end dark mode with one `needs-operator` comment. Tests are never weakened to pass. The evidence comment is edited in place across correction rounds so the current truth is always in one place.
+Preflight fails closed: missing or stale scoped intent, open blockers, another claimant, or a material open decision in the brief each stop the run with a named reason. Dark mode means no progress pings and no questions — routine choices are the implementer's, stop-list hits end dark mode with one `needs-operator` comment. Tests are never weakened to pass. The evidence comment is edited in place across correction rounds so the current truth is always in one place.

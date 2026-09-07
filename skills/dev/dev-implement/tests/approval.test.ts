@@ -4,7 +4,7 @@ import { mkdtempSync, writeFileSync, readFileSync, openSync, closeSync, unlinkSy
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { createHash } from 'node:crypto'
-import { canonicalScope, scopeDigest, parseApproval, evaluateApprovals, evaluateConsolidatedApproval, protocolLimits, gatherConsolidatedApproval, admitConsolidatedResearch, admitConsolidatedPreparation } from '../scripts/lib/approval.mjs'
+import { canonicalScope, scopeDigest, parseApproval, evaluateApprovals, evaluateConsolidatedApproval, protocolLimits, gatherConsolidatedApproval, admitConsolidatedResearch, admitConsolidatedPreparation, checkpointSuiteDigest } from '../scripts/lib/approval.mjs'
 
 const plan = '<!-- vsk:v1 type=plan rev=1 -->\n- [ ] **Task 1: verify** <!-- task-id:1-T1 -->\nFiles — `a.ts`\nInterfaces — none\nSteps: run check\n'
 const artifact = { repo: 'acme/app', issue: 1, kind: 'plan', artifactId: 'plan-node', rev: 1, digest: 'a'.repeat(64) }
@@ -354,4 +354,105 @@ test('preparation may use only its selected SKILL-EVAL phase and still needs bot
   expect((await admitConsolidatedPreparation(result, undefined)).ok).toBe(false)
   expect((await admitConsolidatedResearch(result, undefined)).ok).toBe(false)
   expect(evaluateConsolidatedApproval({ ...fixture, requested: { ...fixture.requested, scenarioId: 'H1' } }).ok).toBe(false)
+})
+
+
+const checkpointEnvelope = () => ({ schemaVersion: 1, kind: 'skill-eval-checkpoints', phase: 'SKILL-EVAL', maxStarts: 44, initialStartsPerCheckpoint: 4, repeatAndSplitStarts: 36, maxProcessMs: 600000, maxConcurrentProcesses: 3, overallMaxStarts: 116, overallActiveMs: 72000000, coreMaxStarts: 48, requalifyMaxStarts: 24, caseKinds: ['positive', 'negative'], arms: ['claude-baseline', 'claude-current', 'codex-baseline', 'codex-current'], checkpoints: [{ id: 'E1', codeOwners: [1], preparationTasks: [], skills: ['example'], after: [] }, { id: 'E2', codeOwners: [1], preparationTasks: [], skills: ['example'], after: ['E1'] }], caseBindings: [{ checkpoint: 'E1', skill: 'example', owners: [{ issue: 1, taskIds: ['1-T1'] }] }, { checkpoint: 'E2', skill: 'example', owners: [{ issue: 1, taskIds: ['1-T1'] }] }], ownerAssertions: { '1': { positive: 'Bind current scope.', negative: 'Refuse stale intent.' } }, maxSkills: 11 })
+const checkpointProtocol = (value = checkpointEnvelope()) => '<!-- custom-protocol issue=2 rev=2 -->\n```vsk-research\n' + JSON.stringify(value) + '\n```\n'
+
+test('closed checkpoint envelope permits repeated skill revisions without a fresh per-skill allowance', () => {
+  const limits = protocolLimits(checkpointProtocol())
+  expect(limits.phases['SKILL-EVAL']).toBe(44)
+  expect(limits.skillMaxStarts).toBeNull()
+  expect(limits.checkpointEnvelope.checkpoints.map((entry: any) => entry.id)).toEqual(['E1', 'E2'])
+  for (const mutate of [
+    (x: any) => { x.unknown = true },
+    (x: any) => { x.repeatAndSplitStarts = 37 },
+    (x: any) => { x.checkpoints[1].after = ['unknown'] },
+    (x: any) => { x.caseBindings.pop() },
+    (x: any) => { x.ownerAssertions['1'].unknown = 'do more' },
+  ]) { const data=checkpointEnvelope(); mutate(data); expect(() => protocolLimits(checkpointProtocol(data))).toThrow() }
+  expect(() => protocolLimits(checkpointProtocol() + checkpointProtocol())).toThrow()
+  expect(() => protocolLimits('````md\n' + checkpointProtocol() + '\n````')).toThrow()
+})
+
+test('immutable git-blob node IDs resolve through GraphQL and retain REST identity checks', async () => {
+  const fixture: any = consolidatedFixture()
+  fixture.record.manifest.source = { kind: 'git-blob', repositoryId: 'repo-node', commitSha: 'f'.repeat(40), path: 'scope.json', blobSha256: fixture.record.manifest.sha256 }
+  refreshRecord(fixture)
+  const readJson = async (args: string[]): Promise<any> => {
+    if (args[1] === 'repos/acme/app/issues/10/comments') return [fixture.currentArtifacts.approvalComments]
+    if (args[1] === 'graphql') return { data: { node: { __typename: 'Repository', id: 'repo-node', databaseId: 123, nameWithOwner: 'acme/app' } } }
+    if (args[1] === 'repositories/123') return { id: 123, node_id: 'repo-node', full_name: 'acme/app' }
+    if (args[1]?.includes('/contents/')) return { type: 'file', encoding: 'base64', content: Buffer.from(fixture.manifestBytes).toString('base64') }
+    if (args[1] === 'repos/acme/app/issues/1') return { ...brief, state: 'open' }
+    if (args[1] === 'repos/acme/app/issues/1/comments') return [[livePlan]]
+    if (args[1]?.endsWith('/blocked_by')) return [[]]
+    throw new Error('HTTP 404 for unsupported endpoint')
+  }
+  const input = { parentRepo: 'acme/app', parentIssue: 10, approvalBinding: fixture.currentArtifacts.approvalBinding, requested: fixture.requested, operators: ['ada'], readJson }
+  expect((await gatherConsolidatedApproval(input)).ok).toBe(true)
+  await expect(gatherConsolidatedApproval({ ...input, readJson: async args => args[1] === 'repositories/123' ? { id: 123, node_id: 'wrong-node', full_name: 'acme/app' } : readJson(args) })).rejects.toThrow()
+})
+
+
+function pooledFixture() {
+  const fixture: any = researchFixture()
+  const protocol = fixture.currentArtifacts.artifacts.find((entry: any) => entry.kind === 'protocol').artifact
+  protocol.body = checkpointProtocol()
+  const ref = fixture.record.items[1].artifacts[1]; ref.rev = 2; ref.digest = scopeDigest(protocol.body, 'protocol')
+  const manifest = JSON.parse(fixture.manifestBytes); manifest.selections = fixture.record.items; manifest.actionBounds.research.protocolDigest = ref.digest
+  fixture.manifestBytes = JSON.stringify(manifest); fixture.record.manifest = { sha256: Bun.SHA256.hash(fixture.manifestBytes, 'hex'), source: { kind: 'inline', utf8: fixture.manifestBytes } }
+  fixture.record.actions[1].protocolDigest = ref.digest; fixture.record.actions[1].candidateRule.manifestSha256 = fixture.record.manifest.sha256
+  const evidence = fixture.currentArtifacts.admissionEvidence[0].payload
+  evidence.manifestSha256 = fixture.record.manifest.sha256; evidence.protocol = ref; evidence.owner.skill = null
+  const checks = evidenceComment({ kind: 'checkpoint-source', issue: 1, taskIds: ['1-T1'], artifact: fixture.record.items[0].artifacts[1], sourceSha: evidence.candidate.sourceSha, checks: [{ command: 'bun test', resultSha256: 'a'.repeat(64), exitCode: 0 }] }, 31)
+  fixture.currentArtifacts.admissionEvidence.push(checks)
+  const envelope = checkpointEnvelope()
+  evidence.suite = { checkpointId: 'E1', arm: 'codex-current', cases: envelope.caseKinds.map(kind => ({ id: 'E1.example.' + kind, skill: 'example', kind, owners: [{ issue: 1, taskIds: ['1-T1'] }], fixtureSha256: 'a'.repeat(64), promptSha256: 'b'.repeat(64), priorSourceSha256: 'c'.repeat(64), currentSourceSha256: 'd'.repeat(64), assertions: [{ id: 'owner-1-' + kind, issue: 1, contractSha256: Bun.SHA256.hash(envelope.ownerAssertions['1'][kind as 'positive' | 'negative'], 'hex') }] })), contributors: [{ issue: 1, taskIds: ['1-T1'], artifact: fixture.record.items[0].artifacts[1], sourceSha: evidence.candidate.sourceSha, checks: { commentId: 31, bodySha256: Bun.SHA256.hash(checks.comment.body, 'hex') } }], acceptedCheckpoints: [], interveningAcceptance: [], livePrerequisiteEvidence: null }
+  evidence.allowance.skillMaxStarts = null; evidence.allowance.skillStarts = 0
+  const attempt = evidence.allowance.attempts[0]
+  Object.assign(attempt, { skill: null, checkpointId: 'E1', arm: 'codex-current', purpose: 'initial', caseIds: evidence.suite.cases.map((entry: any) => entry.id), sourceSha: evidence.candidate.sourceSha, suiteSha256: checkpointSuiteDigest(evidence.suite), executionSha256: checkpointSuiteDigest(evidence.execution), caseDigests: evidence.suite.cases.map((entry: any) => ({ id: entry.id, sha256: checkpointSuiteDigest(entry) })) })
+  refreshRecord(fixture); sealPooledFixture(fixture)
+  return fixture
+}
+function sealPooledFixture(fixture: any) {
+  const evidence = fixture.currentArtifacts.admissionEvidence[0].payload
+  const current = evidence.allowance.attempts.find((entry: any) => entry.id === evidence.allowance.attemptId)
+  current.suiteSha256 = checkpointSuiteDigest(evidence.suite)
+  current.caseIds = evidence.suite.cases.map((entry: any) => entry.id)
+  current.caseDigests = evidence.suite.cases.map((entry: any) => ({ id: entry.id, sha256: checkpointSuiteDigest(entry) }))
+  fixture.currentArtifacts.admissionEvidence[0] = evidenceComment(evidence, 30)
+  fixture.requested.research.bodySha256 = Bun.SHA256.hash(fixture.currentArtifacts.admissionEvidence[0].comment.body, 'hex')
+}
+
+test('pooled checkpoint scope binds every case/owner/source and refuses an absent actual adapter', async () => {
+  const fixture = pooledFixture(); const result = evaluateConsolidatedApproval(fixture)
+  expect(result.ok).toBe(true)
+  expect((await admitConsolidatedResearch(result, undefined)).ok).toBe(false)
+  for (const mutate of [
+    (x: any) => { x.currentArtifacts.admissionEvidence[0].payload.suite.cases.pop() },
+    (x: any) => { x.currentArtifacts.admissionEvidence[0].payload.suite.contributors = [] },
+    (x: any) => { x.currentArtifacts.admissionEvidence[0].payload.suite.cases[0].owners[0].taskIds = ['1-T2'] },
+    (x: any) => { x.currentArtifacts.admissionEvidence[0].payload.suite.cases[0].assertions[0].contractSha256 = 'f'.repeat(64) },
+    (x: any) => { x.currentDependencies[0].blockedBy = [{ state: 'open', number: 7 }] },
+    (x: any) => { x.currentArtifacts.admissionEvidence[0].payload.suite.arm = 'claude-current' },
+  ]) { const changed=pooledFixture(); mutate(changed); sealPooledFixture(changed); expect(evaluateConsolidatedApproval(changed).ok).toBe(false) }
+})
+
+test('pooled failures, children and resumes count cumulatively without per-skill refunds', () => {
+  const fixture = pooledFixture(); const evidence = fixture.currentArtifacts.admissionEvidence[0].payload
+  const current = evidence.allowance.attempts[0]
+  for (let n=0; n<5; n++) evidence.allowance.attempts.push({ ...structuredClone(current), id: 'failed-' + n, kind: n % 2 ? 'child' : 'resume', purpose: 'repeat', status: 'failed', activeMs: 1000, reservedActiveMs: 0 })
+  evidence.allowance.totalStarts = 6; evidence.allowance.phaseStarts = 6; evidence.allowance.activeMs = 5000
+  sealPooledFixture(fixture)
+  expect(evaluateConsolidatedApproval(fixture).ok).toBe(true)
+  evidence.allowance.attempts[1].caseDigests[0].sha256 = 'f'.repeat(64)
+  sealPooledFixture(fixture)
+  expect(evaluateConsolidatedApproval(fixture).ok).toBe(false)
+  evidence.allowance.attempts[1].caseDigests = structuredClone(current.caseDigests)
+  for(let n=5; n<37; n++) evidence.allowance.attempts.push({ ...structuredClone(current), id: 'failed-' + n, purpose: 'repeat', status: 'failed', activeMs: 0, reservedActiveMs: 0 })
+  evidence.allowance.totalStarts = 38; evidence.allowance.phaseStarts = 38
+  sealPooledFixture(fixture)
+  expect(evaluateConsolidatedApproval(fixture).ok).toBe(false)
 })

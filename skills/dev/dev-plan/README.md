@@ -25,6 +25,7 @@ npx @vegastack/vegafactory skills add --group dev --global
 | references/conventions.md (installed copy) | The workflow artifact spec, duplicated into every dev-family install |
 | scripts/questions.mjs (installed copy) | The ask round renderer, parser and route decision, duplicated in from dev-setup |
 | references/ask-route.md (installed copy) | The ask route: tool or issue, the questions comment format, the reply grammar |
+| scripts/lib/approval.mjs (installed copy) | Canonical scope and approval evaluator, copied from dev-implement for standalone authoring |
 | [scripts/plan-lint.mjs](scripts/plan-lint.mjs) | Plan structure + banned-placeholder guard (blocks) |
 | [references/plan-format.md](references/plan-format.md) | The plan comment template, banned placeholders, self-review, worked example |
 | [refresh/REFRESH.md](refresh/REFRESH.md) | Freshness contract (evergreen waiver) |
@@ -34,4 +35,4 @@ npx @vegastack/vegafactory skills add --group dev --global
 
 ## Behavior
 
-Picks up `needs-plan` issues (or intake's inline request), re-grounds against the current repo, runs the numbered questionnaire with recommended answers, and posts the plan per [plan-format](references/plan-format.md). Posting flips the issue to `needs-operator`; the operator's "plan approved" is recorded as a marker comment and the issue goes `ready` — building belongs to dev-implement. Guardrails: no plan re-proposes a recorded dev-architect rejection; a plan nearing GitHub's comment cap becomes an epic-split proposal; checkboxes are never pre-ticked; every run ends with a plain-language summary.
+Picks up `needs-plan` issues (or intake's inline request), re-grounds against the current repo, runs the numbered questionnaire with recommended answers, and posts the plan per [plan-format](references/plan-format.md). Posting flips the issue to `needs-operator`; the operator's "plan approved" is recorded as a schema-v2 event bound to current plan scope; together with current brief intent it permits `ready`. Preserve legacy records and obtain scoped reconfirmation before admission — building belongs to dev-implement. Guardrails: no plan re-proposes a recorded dev-architect rejection; a plan nearing GitHub's comment cap becomes an epic-split proposal; checkboxes are never pre-ticked; every run ends with a plain-language summary.

@@ -525,7 +525,7 @@ export function evaluateConsolidatedApproval({ record, manifestBytes, currentArt
     if (action.kind === 'research-tests') {
       check(action.scenarioIds.includes(requested.scenarioId), 'unreviewed research scenario');
       check(item.mode === 'research' || requested.scenarioId === 'SKILL-EVAL', 'predecessor cannot admit this research phase');
-      const research = validateResearchEvidence(context, item, requested, action, record, manifest);
+      const research = validateResearchEvidence(context, item, requested, action, record, manifest, currentDependencies);
       return { ok: true, bindings: item.artifacts, approvalIds: [record.id], manifestSha256: record.manifest.sha256,
         taskIds: requested.taskIds, action, research, preparation, blocks: [] };
     }
@@ -604,11 +604,92 @@ function validatePreparationEvidence(context, item, requested, manifest) {
   return { ...evidence, taskIds: requested.taskIds, requiredTasks: evidence.acceptedContracts.map((entry) => ({ issue: entry.issue, taskIds: manifest.selections.find((selection) => selection.repo === entry.repo && selection.issue === entry.issue).taskIds })), pendingEffects: ['verify-preparation-prerequisites-and-integrations'] };
 }
 
+const skillName = (value) => typeof value === 'string' && /^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(value);
+const checkpointId = (value) => typeof value === 'string' && /^[A-Za-z][A-Za-z0-9-]*$/.test(value);
+
+function checkpointEnvelope(body) {
+  const blocks = [];
+  let collecting = false;
+  let raw = '';
+  for (const row of linesOf(body)) {
+    if (row.fenceOpen?.startsWith('vsk-research')) {
+      check(row.fenceOpen === 'vsk-research', 'unknown research block format');
+      collecting = true;
+      raw = '';
+    } else if (collecting && row.fenceClose) {
+      blocks.push(parseStrictJson(raw));
+      collecting = false;
+    } else if (collecting) raw += row.line;
+  }
+  check(!collecting && blocks.length <= 1, 'unclosed or competing research envelopes');
+  if (blocks.length === 0) return null;
+  const value = blocks[0];
+  keys(value, ['schemaVersion', 'kind', 'phase', 'maxStarts', 'initialStartsPerCheckpoint', 'repeatAndSplitStarts', 'maxProcessMs', 'maxConcurrentProcesses', 'overallMaxStarts', 'overallActiveMs', 'coreMaxStarts', 'requalifyMaxStarts', 'caseKinds', 'arms', 'checkpoints', 'caseBindings', 'ownerAssertions', 'maxSkills']);
+  check(value.schemaVersion === 1 && value.kind === 'skill-eval-checkpoints' && value.phase === 'SKILL-EVAL', 'unknown research checkpoint envelope');
+  for (const key of ['maxStarts', 'initialStartsPerCheckpoint', 'maxProcessMs', 'maxConcurrentProcesses', 'overallMaxStarts', 'overallActiveMs', 'coreMaxStarts', 'requalifyMaxStarts', 'maxSkills']) check(integer(value[key]), 'invalid checkpoint limit');
+  check(Number.isSafeInteger(value.repeatAndSplitStarts) && value.repeatAndSplitStarts >= 0, 'invalid repeat/split allowance');
+  check(sortedJson(value.caseKinds) === sortedJson(['positive', 'negative']) && sortedJson(value.arms) === sortedJson(['claude-baseline', 'claude-current', 'codex-baseline', 'codex-current']), 'unsupported evaluation cases or arms');
+  check(value.initialStartsPerCheckpoint === value.arms.length && value.maxConcurrentProcesses <= value.arms.length && value.maxStarts + value.coreMaxStarts + value.requalifyMaxStarts === value.overallMaxStarts, 'inconsistent pooled allocation');
+  list(value.checkpoints, isObject, 'evaluation checkpoints', { nonempty: true });
+  const known = new Set();
+  const skills = new Set();
+  for (const entry of value.checkpoints) {
+    keys(entry, ['id', 'codeOwners', 'preparationTasks', 'skills', 'after'], ['interveningCodeAcceptance', 'livePrerequisite', 'reservation']);
+    check(checkpointId(entry.id) && !known.has(entry.id), 'duplicate or invalid checkpoint identity');
+    list(entry.codeOwners, integer, 'checkpoint code owners');
+    list(entry.preparationTasks, taskId, 'checkpoint preparation tasks');
+    check(entry.codeOwners.length + entry.preparationTasks.length > 0, 'checkpoint has no owners');
+    list(entry.skills, skillName, 'checkpoint skills', { nonempty: true });
+    list(entry.after, (id) => known.has(id), 'checkpoint dependencies');
+    if (entry.interveningCodeAcceptance !== undefined) list(entry.interveningCodeAcceptance, integer, 'intervening acceptance', { nonempty: true });
+    for (const key of ['livePrerequisite', 'reservation']) if (entry[key] !== undefined) check(text(entry[key]), 'empty checkpoint prerequisite');
+    known.add(entry.id);
+    entry.skills.forEach((name) => skills.add(name));
+  }
+  check(skills.size <= value.maxSkills && value.checkpoints.length * value.initialStartsPerCheckpoint + value.repeatAndSplitStarts === value.maxStarts, 'checkpoint allocation exceeds shared pool');
+  list(value.caseBindings, isObject, 'checkpoint case bindings', { nonempty: true });
+  const cases = new Set();
+  const owners = new Set();
+  for (const binding of value.caseBindings) {
+    keys(binding, ['checkpoint', 'skill', 'owners']);
+    const entry = value.checkpoints.find((candidate) => candidate.id === binding.checkpoint);
+    const id = binding.checkpoint + '.' + binding.skill;
+    check(entry?.skills.includes(binding.skill) && !cases.has(id), 'unknown or duplicate checkpoint skill binding');
+    cases.add(id);
+    list(binding.owners, isObject, 'case owners', { nonempty: true });
+    const seen = new Set();
+    for (const owner of binding.owners) {
+      keys(owner, ['issue', 'taskIds']);
+      check(integer(owner.issue) && !seen.has(owner.issue), 'invalid or duplicate case owner');
+      seen.add(owner.issue);
+      list(owner.taskIds, (id) => taskId(id) && id.startsWith(owner.issue + '-T'), 'case owner tasks', { nonempty: true });
+      check(entry.codeOwners.includes(owner.issue) || owner.taskIds.every((id) => entry.preparationTasks.includes(id)), 'case owner is outside checkpoint');
+      owners.add(String(owner.issue));
+    }
+  }
+  check(cases.size === value.checkpoints.reduce((sum, entry) => sum + entry.skills.length, 0), 'checkpoint skill case coverage missing');
+  check(isObject(value.ownerAssertions) && sortedJson(Object.keys(value.ownerAssertions).sort()) === sortedJson([...owners].sort()), 'owner assertion coverage differs');
+  for (const assertion of Object.values(value.ownerAssertions)) {
+    keys(assertion, value.caseKinds);
+    check(value.caseKinds.every((kind) => text(assertion[kind])), 'empty owner assertion');
+  }
+  return value;
+}
+
 // Supported protocol envelope grammar. Unknown/ambiguous prose is a refusal,
 // never a semantic guess. Values come from the immutable bound source, not the
 // reservation record. This parser has no repository or issue-number defaults.
 export function protocolLimits(body) {
   const source = linesOf(canonicalScope(body, 'protocol')).filter((row) => row.structural).map((row) => row.line).join('');
+  const envelope = checkpointEnvelope(body);
+  if (envelope) {
+    for (const [pattern, expected] of [[/Overall maximum\s*(\d+) processes/g, envelope.overallMaxStarts], [/Overall maximum\s*\d+ processes and\s*(\d+) hours/g, envelope.overallActiveMs / 3600000], [/Up to\s*(\d+) vendor processes/g, envelope.coreMaxStarts], [/Reserve\s*(\d+) additional processes/g, envelope.requalifyMaxStarts]]) {
+      check([...source.matchAll(pattern)].every((match) => Number(match[1]) === expected), 'prose conflicts with closed research envelope');
+    }
+    return { total: envelope.overallMaxStarts, activeMs: envelope.overallActiveMs, trialMaxMs: envelope.maxProcessMs,
+      phases: { core: envelope.coreMaxStarts, 'SKILL-EVAL': envelope.maxStarts, REQUALIFY: envelope.requalifyMaxStarts },
+      skillMaxStarts: null, maxSkills: envelope.maxSkills, checkpointEnvelope: envelope };
+  }
   const numbers = { one: 1, two: 2, three: 3, four: 4, five: 5, six: 6, seven: 7, eight: 8, nine: 9, ten: 10, fifteen: 15, twenty: 20 };
   const value = (word) => /^\d+$/.test(word) ? Number(word) : numbers[word.toLowerCase()];
   const read = (pattern, group = 1) => {
@@ -627,16 +708,139 @@ export function protocolLimits(body) {
     skillMaxStarts: read(/at most ([A-Za-z]+|\d+) vendor processes per changed authored skill/g), maxSkills: read(/maximum\s*(\d+) skills\/\d+ processes/g) };
 }
 
-function validateResearchEvidence(context, item, requested, action, record, manifest) {
+// Pooled SKILL-EVAL receipts add suite:{checkpointId,arm,cases,contributors,
+// acceptedCheckpoints,interveningAcceptance,livePrerequisiteEvidence}. Cases pin
+// fixture/prompt and prior/current skill hashes plus owner assertion identities.
+// Contributors pin exact plan/task/source/check evidence. Every attempt records
+// checkpoint/arm/purpose, case IDs/digests and source/runtime digests; failures,
+// child starts and resumes remain in the same pool. Only initial arms require
+// the complete checkpoint case set; explicit repeat/split starts may be subsets.
+// The protocol owner must inspect actual source/check/prerequisite/fixture bytes
+// through inspectCheckpoint before consuming the shared reservation. No request
+// JSON can supply that executable adapter or establish acceptance by itself.
+export const checkpointSuiteDigest = (suite) => hash(sortedJson(suite));
+
+function validateCheckpointSuite(context, suite, limits, item, requested, record, manifest, candidate, execution, dependencies, purpose) {
+  const envelope = limits.checkpointEnvelope;
+  keys(suite, ['checkpointId', 'arm', 'cases', 'contributors', 'acceptedCheckpoints', 'interveningAcceptance', 'livePrerequisiteEvidence']);
+  const checkpoint = envelope.checkpoints.find((entry) => entry.id === suite.checkpointId);
+  check(checkpoint && envelope.arms.includes(suite.arm) && suite.arm.startsWith(execution.harness + '-'), 'unselected evaluation checkpoint or arm');
+  const bindings = envelope.caseBindings.filter((entry) => entry.checkpoint === checkpoint.id);
+  if (item.mode !== 'research') {
+    const ownTasks = [...new Set(bindings.flatMap((entry) => entry.owners.filter((owner) => owner.issue === item.issue).flatMap((owner) => owner.taskIds)))].sort();
+    check(ownTasks.length > 0 && sortedJson(ownTasks) === sortedJson([...requested.taskIds].sort()), 'checkpoint invocation lacks exact owner tasks');
+  }
+  list(suite.contributors, isObject, 'checkpoint contributors', { nonempty: true });
+  const expectedOwners = [...new Set([...checkpoint.codeOwners, ...checkpoint.preparationTasks.map((id) => Number(id.split('-')[0]))])].sort((a, b) => a - b);
+  check(sortedJson(suite.contributors.map((entry) => entry.issue).sort((a, b) => a - b)) === sortedJson(expectedOwners), 'checkpoint contributor inventory differs');
+  for (const contributor of suite.contributors) {
+    keys(contributor, ['issue', 'taskIds', 'artifact', 'sourceSha', 'checks']);
+    const selected = record.items.find((entry) => entry.repo === manifest.parent.repo && entry.issue === contributor.issue);
+    const expectedTasks = checkpoint.codeOwners.includes(contributor.issue) ? selected?.taskIds : checkpoint.preparationTasks.filter((id) => id.startsWith(contributor.issue + '-T'));
+    check(selected && selected.artifacts.some((ref) => ref.kind === 'plan' && sameRef(ref, contributor.artifact)) && contributor.sourceSha === candidate.sourceSha && sortedJson([...contributor.taskIds].sort()) === sortedJson([...expectedTasks].sort()), 'checkpoint contributor scope/source differs');
+    const current = dependencies.filter((entry) => entry.repo === selected.repo && entry.issue === selected.issue);
+    check(current.length === 1 && Array.isArray(current[0].blockedBy), 'checkpoint contributor dependencies unavailable');
+    if (selected.mode === 'code') check(current[0].blockedBy.every((dependency) => dependency.state === 'closed'), 'checkpoint contributor has open native prerequisites');
+    else check(selected.mode === 'preparation' && contributor.taskIds.every((id) => checkpoint.preparationTasks.includes(id)), 'checkpoint preparation scope differs');
+    const receipt = boundEvidence(context, contributor.checks, 'checkpoint-source');
+    keys(receipt, ['kind', 'issue', 'taskIds', 'artifact', 'sourceSha', 'checks']);
+    check(receipt.issue === contributor.issue && sortedJson(receipt.taskIds) === sortedJson(contributor.taskIds) && sameRef(receipt.artifact, contributor.artifact) && receipt.sourceSha === candidate.sourceSha, 'checkpoint check receipt differs');
+    list(receipt.checks, isObject, 'checkpoint checks', { nonempty: true });
+    for (const result of receipt.checks) { keys(result, ['command', 'resultSha256', 'exitCode']); check(text(result.command) && digest(result.resultSha256) && result.exitCode === 0, 'checkpoint checks are not successful evidence'); }
+  }
+  list(suite.cases, isObject, 'checkpoint cases', { nonempty: true });
+  const expectedCases = bindings.flatMap((binding) => envelope.caseKinds.map((kind) => checkpoint.id + '.' + binding.skill + '.' + kind)).sort();
+  const caseIds = suite.cases.map((entry) => entry.id);
+  check(new Set(caseIds).size === caseIds.length && caseIds.every((id) => expectedCases.includes(id)) && (purpose !== 'initial' || sortedJson([...caseIds].sort()) === sortedJson(expectedCases)), 'checkpoint case coverage differs');
+  for (const entry of suite.cases) {
+    keys(entry, ['id', 'skill', 'kind', 'owners', 'fixtureSha256', 'promptSha256', 'priorSourceSha256', 'currentSourceSha256', 'assertions']);
+    const binding = bindings.find((value) => value.skill === entry.skill);
+    check(binding && envelope.caseKinds.includes(entry.kind) && entry.id === checkpoint.id + '.' + entry.skill + '.' + entry.kind, 'checkpoint case identity differs');
+    check(['fixtureSha256', 'promptSha256', 'priorSourceSha256', 'currentSourceSha256'].every((key) => digest(entry[key])), 'checkpoint fixture/prompt/skill source identity unavailable');
+    check(sortedJson(entry.owners) === sortedJson(binding.owners), 'checkpoint case owner/tasks differ');
+    for (const owner of binding.owners) {
+      const contributor = suite.contributors.find((value) => value.issue === owner.issue);
+      check(contributor && owner.taskIds.every((id) => contributor.taskIds.includes(id)), 'case task is outside contributor scope');
+    }
+    list(entry.assertions, isObject, 'case assertions', { nonempty: true });
+    check(new Set(entry.assertions.map((assertion) => assertion.id)).size === entry.assertions.length, 'duplicate assertion identity');
+    for (const assertion of entry.assertions) {
+      keys(assertion, ['id', 'issue', 'contractSha256']);
+      check(text(assertion.id) && binding.owners.some((owner) => owner.issue === assertion.issue) && assertion.contractSha256 === hash(envelope.ownerAssertions[assertion.issue][entry.kind]), 'case assertion is outside approved owner contract');
+    }
+    check(binding.owners.every((owner) => entry.assertions.some((assertion) => assertion.issue === owner.issue)), 'case owner assertion evidence missing');
+  }
+  const receipts = (entries, expected, kind, field) => {
+    list(entries, isObject, kind);
+    check(sortedJson(entries.map((entry) => entry[field]).sort()) === sortedJson([...expected].sort()), 'checkpoint prerequisite receipts differ');
+    for (const entry of entries) {
+      keys(entry, [field, 'evidence']);
+      const receipt = boundEvidence(context, entry.evidence, kind);
+      check(receipt[field] === entry[field] && receipt.acceptance === 'accepted' && sha(receipt.sourceSha), 'checkpoint prerequisite is not accepted');
+    }
+  };
+  receipts(suite.acceptedCheckpoints, checkpoint.after, 'checkpoint-acceptance', 'id');
+  receipts(suite.interveningAcceptance, checkpoint.interveningCodeAcceptance ?? [], 'code-acceptance', 'issue');
+  if (checkpoint.livePrerequisite) {
+    const receipt = boundEvidence(context, suite.livePrerequisiteEvidence, 'live-prerequisite');
+    check(receipt.contractSha256 === hash(checkpoint.livePrerequisite) && receipt.acceptance === 'accepted', 'checkpoint live prerequisite unresolved');
+  } else check(suite.livePrerequisiteEvidence === null, 'unexpected checkpoint live prerequisite');
+  return { suite, digest: checkpointSuiteDigest(suite), checkpoint, envelope };
+}
+
+function validateCheckpointAttempts(attempts, envelope, selected, execution) {
+  const skillAttempts = attempts.filter((entry) => entry.phase === 'SKILL-EVAL');
+  const initial = new Set();
+  let repeats = 0;
+  const skills = new Set();
+  for (const attempt of skillAttempts) {
+    const checkpoint = envelope.checkpoints.find((entry) => entry.id === attempt.checkpointId);
+    check(checkpoint && envelope.arms.includes(attempt.arm) && ['initial', 'repeat', 'split'].includes(attempt.purpose) && sha(attempt.sourceSha) && digest(attempt.suiteSha256) && digest(attempt.executionSha256), 'invalid pooled attempt binding');
+    const expectedCases = checkpoint.skills.flatMap((skill) => envelope.caseKinds.map((kind) => checkpoint.id + '.' + skill + '.' + kind)).sort();
+    list(attempt.caseIds, text, 'attempt cases', { nonempty: true });
+    list(attempt.caseDigests, isObject, 'attempt case digests', { nonempty: true });
+    check(sortedJson(attempt.caseDigests.map((entry) => entry.id).sort()) === sortedJson([...attempt.caseIds].sort()), 'attempt case digest inventory differs');
+    for (const entry of attempt.caseDigests) { keys(entry, ['id', 'sha256']); check(digest(entry.sha256), 'invalid attempt case digest'); }
+    check(attempt.caseIds.every((id) => expectedCases.includes(id)), 'attempt includes an unselected case');
+    if (attempt.purpose === 'initial') {
+      const key = attempt.checkpointId + ':' + attempt.arm;
+      check(attempt.kind === 'initial' && !initial.has(key) && sortedJson([...attempt.caseIds].sort()) === sortedJson(expectedCases), 'duplicate or incomplete initial checkpoint arm');
+      initial.add(key);
+    } else repeats++;
+    checkpoint.skills.forEach((skill) => skills.add(skill));
+  }
+  check(repeats <= envelope.repeatAndSplitStarts && skills.size <= envelope.maxSkills, 'shared repeat/split or skill inventory allowance exceeded');
+  if (selected) {
+    const current = skillAttempts.find((entry) => entry.id === selected.attemptId);
+    check(current && current.checkpointId === selected.checkpoint.id && current.arm === selected.suite.arm && current.suiteSha256 === selected.digest && current.sourceSha === selected.sourceSha && current.executionSha256 === hash(sortedJson(execution)), 'reserved pooled attempt differs from frozen suite/runtime');
+    check(sortedJson(current.caseDigests) === sortedJson(selected.suite.cases.map((entry) => ({ id: entry.id, sha256: checkpointSuiteDigest(entry) }))), 'reserved case bytes differ');
+    for (const attempt of skillAttempts.filter((entry) => entry.checkpointId === current.checkpointId && entry.sourceSha === current.sourceSha)) {
+      if (attempt.arm.split('-')[0] === execution.harness) check(attempt.executionSha256 === current.executionSha256, 'matched arms changed runtime/model/account/config');
+      for (const prior of attempt.caseDigests) {
+        const now = current.caseDigests.find((entry) => entry.id === prior.id);
+        check(!now || now.sha256 === prior.sha256, 'matched arms changed fixture/prompt/source/assertions');
+      }
+    }
+  }
+  if (selected) check(skillAttempts.filter((entry) => entry.status === 'running').length + 1 <= envelope.maxConcurrentProcesses, 'checkpoint process concurrency limit exceeded');
+  return skills;
+}
+
+function validateResearchEvidence(context, item, requested, action, record, manifest, dependencies) {
   check(requested.operation === 'research-test' && requested.paths.length === 0, 'research grant cannot authorize other effects');
   const evidence = boundEvidence(context, requested.research, 'research-reservation');
-  keys(evidence, ['schemaVersion', 'kind', 'approvalId', 'manifestSha256', 'actionId', 'owner', 'protocol', 'scenarioId', 'candidate', 'execution', 'allowance']);
+  keys(evidence, ['schemaVersion', 'kind', 'approvalId', 'manifestSha256', 'actionId', 'owner', 'protocol', 'scenarioId', 'candidate', 'execution', 'allowance'], ['suite']);
   check(evidence.schemaVersion === 1 && evidence.kind === 'research-reservation' && evidence.approvalId === record.id && evidence.manifestSha256 === record.manifest.sha256 && evidence.actionId === action.id && evidence.scenarioId === requested.scenarioId, 'research reservation scope differs');
   keys(evidence.owner, ['repo', 'issue', 'taskIds', 'artifact', 'skill']);
   check(evidence.owner.repo === item.repo && evidence.owner.issue === item.issue && sortedJson(evidence.owner.taskIds) === sortedJson(requested.taskIds), 'research owner differs');
   const protocol = manifest.selections.find((entry) => entry.issue === action.issue && entry.mode === 'research')?.artifacts.find((ref) => ref.kind === 'protocol');
   check(protocol && sameRef(evidence.protocol, protocol), 'research protocol differs');
-  if (item.mode !== 'research') {
+  const currentProtocol = context.artifacts.find((entry) => entry.repo === protocol.repo && entry.issue === protocol.issue && entry.kind === 'protocol');
+  const limits = protocolLimits(currentProtocol.artifact.body);
+  const pooled = limits.checkpointEnvelope && requested.scenarioId === 'SKILL-EVAL';
+  if (pooled) {
+    check(evidence.owner.skill === null && item.artifacts.some((ref) => sameRef(ref, evidence.owner.artifact)), 'pooled invocation owner binding differs');
+  } else if (item.mode !== 'research') {
     check(requested.taskIds.length === 1 && /^skills\/[^/]+\/[^/]+$/.test(evidence.owner.skill), 'skill evaluation needs one selected task and authored skill');
     check(item.artifacts.some((ref) => sameRef(ref, evidence.owner.artifact)), 'skill owner scope changed');
     const current = context.artifacts.find((entry) => entry.repo === item.repo && entry.issue === item.issue && entry.kind === 'plan');
@@ -653,8 +857,8 @@ function validateResearchEvidence(context, item, requested, action, record, mani
   }
   keys(evidence.execution, ['harness', 'version', 'model', 'accountRef', 'effort', 'platform', 'runtime', 'configDigest', 'policyDigest', 'providerMode']);
   check(['harness', 'version', 'model', 'accountRef', 'effort', 'platform', 'runtime'].every((key) => text(evidence.execution[key])) && digest(evidence.execution.configDigest) && digest(evidence.execution.policyDigest) && evidence.execution.providerMode === action.providerMode, 'execution identity unavailable');
-  const currentProtocol = context.artifacts.find((entry) => entry.repo === protocol.repo && entry.issue === protocol.issue && entry.kind === 'protocol');
-  const limits = protocolLimits(currentProtocol.artifact.body);
+  const checkpoint = pooled ? validateCheckpointSuite(context, evidence.suite, limits, item, requested, record, manifest, candidate, evidence.execution, dependencies, evidence.allowance?.attempts?.find((entry) => entry.id === evidence.allowance.attemptId)?.purpose) : null;
+  check(pooled || evidence.suite === undefined, 'checkpoint suite on another research phase');
   check(action.maxStarts <= limits.total && (limits.activeMs === null || action.aggregateActiveMs !== null && action.aggregateActiveMs <= limits.activeMs), 'grant exceeds protocol envelope');
   const allowance = evidence.allowance;
   keys(allowance, ['id', 'reservationId', 'attemptId', 'phase', 'ledgerRevision', 'status', 'totalStarts', 'phaseStarts', 'phaseMaxStarts', 'activeMs', 'reservedActiveMs', 'trialMaxMs', 'skillStarts', 'skillMaxStarts', 'skillCount', 'maxSkills', 'attempts']);
@@ -665,15 +869,15 @@ function validateResearchEvidence(context, item, requested, action, record, mani
   check(allowance.phase === phase && allowance.phaseMaxStarts === limits.phases[phase] && allowance.trialMaxMs <= limits.trialMaxMs && allowance.skillMaxStarts === limits.skillMaxStarts && allowance.maxSkills === limits.maxSkills, 'reservation bounds differ from canonical protocol');
   check(allowance.totalStarts <= action.maxStarts && allowance.phaseStarts <= allowance.phaseMaxStarts && allowance.reservedActiveMs >= allowance.trialMaxMs, 'research start allowance exceeded');
   check(action.aggregateActiveMs === null || allowance.activeMs + allowance.reservedActiveMs <= action.aggregateActiveMs, 'research aggregate active allowance exceeded');
-  if (requested.scenarioId === 'SKILL-EVAL') check(allowance.phase === 'SKILL-EVAL' && integer(allowance.skillMaxStarts) && integer(allowance.maxSkills) && allowance.skillStarts > 0 && allowance.skillStarts <= allowance.skillMaxStarts && allowance.skillCount > 0 && allowance.skillCount <= allowance.maxSkills, 'skill phase allowance exceeded');
+  if (requested.scenarioId === 'SKILL-EVAL' && !pooled) check(allowance.phase === 'SKILL-EVAL' && integer(allowance.skillMaxStarts) && integer(allowance.maxSkills) && allowance.skillStarts > 0 && allowance.skillStarts <= allowance.skillMaxStarts && allowance.skillCount > 0 && allowance.skillCount <= allowance.maxSkills, 'skill phase allowance exceeded');
   list(allowance.attempts, isObject, 'shared attempt history', { nonempty: true });
   const attempts = allowance.attempts;
   check(new Set(attempts.map((entry) => entry.id)).size === attempts.length, 'duplicate shared attempt identity');
   for (const attempt of attempts) {
-    keys(attempt, ['id', 'phase', 'skill', 'kind', 'status', 'activeMs', 'reservedActiveMs']);
+    keys(attempt, ['id', 'phase', 'skill', 'kind', 'status', 'activeMs', 'reservedActiveMs'], limits.checkpointEnvelope && attempt.phase === 'SKILL-EVAL' ? ['checkpointId', 'arm', 'purpose', 'caseIds', 'sourceSha', 'suiteSha256', 'executionSha256', 'caseDigests'] : []);
     check(text(attempt.id) && Object.hasOwn(limits.phases, attempt.phase) && (attempt.skill === null || text(attempt.skill)) && ['initial', 'child', 'resume'].includes(attempt.kind) && ['reserved', 'running', 'passed', 'failed', 'cancelled'].includes(attempt.status), 'invalid shared attempt');
     check(['activeMs', 'reservedActiveMs'].every((key) => Number.isSafeInteger(attempt[key]) && attempt[key] >= 0), 'invalid shared attempt duration');
-    check(attempt.phase !== 'SKILL-EVAL' || text(attempt.skill), 'skill attempt lacks skill identity');
+    check(attempt.phase !== 'SKILL-EVAL' || (limits.checkpointEnvelope ? attempt.skill === null : text(attempt.skill)), 'skill attempt identity differs from protocol');
   }
   const reserved = attempts.filter((entry) => entry.id === allowance.attemptId);
   check(reserved.length === 1 && reserved[0].status === 'reserved' && reserved[0].phase === phase && reserved[0].skill === evidence.owner.skill && reserved[0].reservedActiveMs >= allowance.trialMaxMs, 'attempt reservation absent or consumed');
@@ -682,14 +886,17 @@ function validateResearchEvidence(context, item, requested, action, record, mani
   check(allowance.totalStarts === attempts.length && allowance.phaseStarts === attempts.filter((entry) => entry.phase === phase).length && allowance.activeMs === totalActive && allowance.reservedActiveMs === totalReserved, 'shared counters differ from complete attempt history');
   for (const [name, maximum] of Object.entries(limits.phases)) check(attempts.filter((entry) => entry.phase === name).length <= maximum, 'shared phase allowance exceeded');
   const skills = [...new Set(attempts.filter((entry) => entry.phase === 'SKILL-EVAL').map((entry) => entry.skill))];
-  if (limits.maxSkills !== null) {
+  if (limits.checkpointEnvelope) {
+    const inventory = validateCheckpointAttempts(attempts, limits.checkpointEnvelope, pooled ? { ...checkpoint, attemptId: allowance.attemptId, sourceSha: candidate.sourceSha } : null, evidence.execution);
+    check(allowance.skillStarts === 0 && allowance.skillCount === inventory.size, 'pooled counters differ from shared checkpoint attempts');
+  } else if (limits.maxSkills !== null && !limits.checkpointEnvelope) {
     check(skills.length <= limits.maxSkills && allowance.skillCount === skills.length, 'shared changed-skill inventory exceeded');
     for (const skill of skills) check(attempts.filter((entry) => entry.phase === 'SKILL-EVAL' && entry.skill === skill).length <= limits.skillMaxStarts, 'shared per-skill allowance exceeded');
     check(allowance.skillStarts === attempts.filter((entry) => entry.phase === 'SKILL-EVAL' && entry.skill === evidence.owner.skill).length, 'per-skill counter differs from shared attempts');
   }
   // The protocol owner must atomically consume this reservation immediately at
   // launch and verify candidate bytes. Scope approval cannot replace that CAS.
-  return { reservationId: allowance.reservationId, attemptId: allowance.attemptId, ledgerRevision: allowance.ledgerRevision, candidate, execution: evidence.execution, trialMaxMs: allowance.trialMaxMs,
+  return { reservationId: allowance.reservationId, attemptId: allowance.attemptId, ledgerRevision: allowance.ledgerRevision, candidate, execution: evidence.execution, trialMaxMs: allowance.trialMaxMs, checkpoint,
     pendingEffects: ['verify-clean-candidate-and-packed-bytes', 'consume-shared-reservation-before-process-start'] };
 }
 
@@ -728,8 +935,16 @@ export async function gatherConsolidatedApproval({ parentRepo, parentIssue, appr
   const locator = record.manifest.source;
   if (locator.kind === 'inline') manifestBytes = locator.utf8;
   else {
-    const repository = await readJson(['api', 'repositories/' + encodeURIComponent(locator.repositoryId)]);
-    check(String(repository.id) === locator.repositoryId || repository.node_id === locator.repositoryId, 'immutable manifest repository identity changed');
+    let databaseId = locator.repositoryId;
+    let node;
+    if (!/^[1-9]\d*$/.test(databaseId)) {
+      const result = await readJson(['api', 'graphql', '-f', 'query=query($id:ID!){node(id:$id){__typename ... on Repository{id databaseId nameWithOwner}}}', '-f', 'id=' + locator.repositoryId]);
+      node = result.data?.node;
+      check(!result.errors && node?.__typename === 'Repository' && node.id === locator.repositoryId && integer(node.databaseId) && repo(node.nameWithOwner), 'manifest repository node unavailable or wrong type');
+      databaseId = String(node.databaseId);
+    }
+    const repository = await readJson(['api', 'repositories/' + databaseId]);
+    check(String(repository.id) === databaseId && (!node || repository.node_id === node.id && repository.full_name === node.nameWithOwner), 'immutable manifest repository identity changed');
     check(repo(repository.full_name), 'manifest repository unavailable');
     const blob = await readJson(['api', 'repos/' + repository.full_name + '/contents/' + locator.path.split('/').map(encodeURIComponent).join('/') + '?ref=' + locator.commitSha]);
     check(blob.type === 'file' && blob.encoding === 'base64' && typeof blob.content === 'string', 'manifest is not a readable immutable file');
@@ -781,6 +996,14 @@ export async function admitConsolidatedResearch(scope, adapter) {
     check(!scope.preparation || scope.preparation.pendingEffects.length === 0, 'preparation prerequisite admission is still pending');
     check(typeof adapter?.inspectCandidate === 'function' && typeof adapter?.consumeReservation === 'function', 'research candidate/shared-ledger production adapter unavailable');
     const expected = scope.research;
+    if (expected.checkpoint) {
+      check(typeof adapter.inspectCheckpoint === 'function', 'pooled checkpoint production adapter unavailable');
+      const currentSuite = await adapter.inspectCheckpoint(expected.checkpoint.suite);
+      keys(currentSuite, ['suite', 'sourceDigests', 'assertionIds']);
+      check(sortedJson(currentSuite.suite) === sortedJson(expected.checkpoint.suite), 'actual checkpoint eligibility/case receipts differ');
+      const sourceDigests = expected.checkpoint.suite.cases.map((entry) => ({ id: entry.id, fixtureSha256: entry.fixtureSha256, promptSha256: entry.promptSha256, priorSourceSha256: entry.priorSourceSha256, currentSourceSha256: entry.currentSourceSha256 }));
+      check(sortedJson(currentSuite.sourceDigests) === sortedJson(sourceDigests) && sortedJson(currentSuite.assertionIds) === sortedJson(expected.checkpoint.suite.cases.map((entry) => ({ id: entry.id, assertionIds: entry.assertions.map((assertion) => assertion.id) }))), 'actual checkpoint fixture/prompt/source/assertion bytes differ');
+    }
     const current = await adapter.inspectCandidate(expected.candidate);
     keys(current, ['candidate', 'clean', 'ancestorShas']);
     check(current.clean === true && sortedJson(current.candidate) === sortedJson(expected.candidate), 'actual candidate or packed bytes differ');
@@ -788,9 +1011,10 @@ export async function admitConsolidatedResearch(scope, adapter) {
     check([expected.candidate.baseSha, ...expected.candidate.acceptedIntegrations].every((commit) => current.ancestorShas.includes(commit)), 'candidate lacks approved base/integrations');
     const receipt = await adapter.consumeReservation({ reservationId: expected.reservationId, attemptId: expected.attemptId,
       ledgerRevision: expected.ledgerRevision, candidate: expected.candidate, execution: expected.execution,
-      approvalIds: scope.approvalIds, manifestSha256: scope.manifestSha256, trialMaxMs: expected.trialMaxMs });
-    keys(receipt, ['reservationId', 'attemptId', 'previousRevision', 'revision', 'state', 'candidateSha', 'execution']);
+      approvalIds: scope.approvalIds, manifestSha256: scope.manifestSha256, trialMaxMs: expected.trialMaxMs, ...(expected.checkpoint ? { suiteSha256: expected.checkpoint.digest } : {}) });
+    keys(receipt, ['reservationId', 'attemptId', 'previousRevision', 'revision', 'state', 'candidateSha', 'execution'], expected.checkpoint ? ['suiteSha256'] : []);
     check(receipt.reservationId === expected.reservationId && receipt.attemptId === expected.attemptId && receipt.previousRevision === expected.ledgerRevision && receipt.revision === expected.ledgerRevision + 1 && receipt.state === 'consumed' && receipt.candidateSha === expected.candidate.sourceSha && sortedJson(receipt.execution) === sortedJson(expected.execution), 'research reservation consume failed or changed');
+    check(!expected.checkpoint || receipt.suiteSha256 === expected.checkpoint.digest, 'consumed reservation belongs to another checkpoint suite');
     return { ...scope, research: { ...expected, pendingEffects: [], receipt } };
   } catch (error) {
     return { ok: false, bindings: [], approvalIds: [], blocks: ['research launch: ' + error.message] };

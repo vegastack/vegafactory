@@ -59,11 +59,11 @@
     "references/conventions.md@dev-setup",
     "scripts/questions.mjs@dev-setup",
     "references/ask-route.md@dev-setup",
+    "scripts/lib/approval.mjs@dev-implement",
     "scripts/brief-lint.mjs",
     "references/brief-template.md",
     "refresh/REFRESH.md",
-    "refresh/sources.json",
-    "scripts/lib/approval.mjs@dev-implement"
+    "refresh/sources.json"
   ],
   "dev-plan": [
     "SKILL.md",
@@ -71,11 +71,11 @@
     "references/conventions.md@dev-setup",
     "scripts/questions.mjs@dev-setup",
     "references/ask-route.md@dev-setup",
+    "scripts/lib/approval.mjs@dev-implement",
     "scripts/plan-lint.mjs",
     "references/plan-format.md",
     "refresh/REFRESH.md",
-    "refresh/sources.json",
-    "scripts/lib/approval.mjs@dev-implement"
+    "refresh/sources.json"
   ],
   "dev-review": [
     "SKILL.md",
