@@ -10,3 +10,5 @@ Enforce confirmed reporting privacy before export and apply current repository p
 - Use basic private diagnostics and real disk-pressure launch/stop controls; exclude raw transcripts, credentials and built-in vendor memory.
 
 - Validate retained completed task state and immutable recovery evidence before managed retention; hold active, missing, changed or pending telemetry references without deleting authority or delivery history.
+
+- Export verified continuation terminal segments with the saved logical execution identity, refusing missing or conflicting private mappings without rewriting earlier reports.

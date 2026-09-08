@@ -85,12 +85,12 @@ test('group cannot unlock org stats and malformed known knobs refuse capture', (
 
 import { serializeExport as privacySerialize, validateExport, readExport as privacyRead, reportingExecutionRef } from '../src/stats/privacy.ts'
 import { canonicalJson, type Destination, type LocalMeasurement } from '../src/stats/types.ts'
-import { mkdtemp, rm, stat } from 'node:fs/promises'
+import { mkdtemp, rm, stat, readFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 const destination:Destination={host:'github.com',org:'o',repo:'o/r',controlRoom:'o/room'}
 const eventId='9d31a521-53ea-4c39-bb58-213739ab6d47'
-const localExecution:LocalMeasurement={schemaVersion:2,recordKind:'execution',utcDay:'2026-09-06',stage:'implement',outcome:'succeeded',costUsd:null,turns:0}
+const localExecution:Extract<LocalMeasurement,{recordKind:'execution'}>={schemaVersion:2,recordKind:'execution',utcDay:'2026-09-06',stage:'implement',outcome:'succeeded',costUsd:null,turns:0}
 const nonAttributed={values:{'stats-export':'non-attributed'}}
 test('privacy schema projects private canaries away and distinguishes zero from unknown',()=>{
  const local={...localExecution,hostname:'PRIVATE_HOST_CANARY',stdout:'ghp_SECRET_CANARY',argv:['/Users/CANARY'],values:{human:'PRIVATE_HUMAN_CANARY',session_id:'PRIVATE_SESSION_CANARY',worktree:'/Users/CANARY'}}
@@ -165,4 +165,68 @@ test('historical flat capture cannot be upgraded to attribution by a later polic
  const wire=privacySerialize(historical,destination,eventId,{values:{'stats-export':'attributed'}})!
  expect(wire).not.toHaveProperty('executionRef');expect(wire).not.toHaveProperty('taskOwner')
  expect(canonicalJson(wire)).not.toContain('CANARY')
+})
+
+async function terminalPrivacyFixture(continuedFirst=false){
+ const {enqueueEvent,spoolRoot,readSpoolJson,spoolEventFile}=await import('../src/stats/outbox.ts')
+ const {terminalCaptureKey,hashBytes,destinationId}=await import('../src/stats/types.ts')
+ const home=await mkdtemp(join(tmpdir(),'privacy-segments-149-')),root=spoolRoot(home),runId=crypto.randomUUID(),sequence=crypto.randomUUID()
+ const input=(segment:string,target=destination):import('../src/stats/types.ts').SpoolEnvelope&{payload:typeof localExecution}=>({schemaVersion:2,eventId:crypto.randomUUID(),destination:target,captureKey:terminalCaptureKey(runId,segment),payload:{...localExecution,localRunId:runId,outcome:segment==='0'?'interrupted':'succeeded'}})
+ const save=async(event:ReturnType<typeof input>)=>{await enqueueEvent(root,event);return (await readSpoolJson<ReturnType<typeof input>>(spoolEventFile(root,event)))!}
+ const mapFile=(event:ReturnType<typeof input>)=>join(root,'captures',hashBytes(canonicalJson([destinationId(event.destination),event.captureKey]))+'.json')
+ const first=await save(input(continuedFirst?sequence:'0')),firstMap=await readFile(mapFile(first),'utf8'),firstBytes=await readFile(spoolEventFile(root,first),'utf8')
+ const second=await save(input(continuedFirst?'0':sequence)),initial=continuedFirst?second:first,continued=continuedFirst?first:second
+ const logicalFile=join(root,'reporting-identities',hashBytes(canonicalJson([destinationId(destination),initial.captureKey]))+'.json')
+ return{home,root,runId,sequence,initial,continued,first,firstMap,firstBytes,logicalFile,input,save,mapFile,spoolEventFile,dispose:()=>rm(home,{recursive:true,force:true})}
+}
+test.each([false,true])('terminal privacy exports both segments with one logical identity, continuation first=%s',async continuedFirst=>{
+ const f=await terminalPrivacyFixture(continuedFirst),{currentPolicySerializer}=await import('../src/stats/privacy.ts')
+ try{
+  let mode='attributed';const destinations:string[]=[]
+  const serialize=currentPolicySerializer(f.home,async d=>{destinations.push(d.repo);return{values:{'stats-export':mode},policyDigest:'a'.repeat(64)}})
+  const original=await serialize(f.initial),continuation=await serialize(f.continued)
+  expect(original).not.toBeNull();expect(continuation).not.toBeNull()
+  const before=privacyRead(original!.bytes),after=privacyRead(continuation!.bytes)
+  const {readExport:dashboardRead}=await import('../../dashboard/src/lib/stats/record.ts')
+  expect(dashboardRead(original!.bytes)).toEqual(before);expect(dashboardRead(continuation!.bytes)).toEqual(after)
+  if(before.payload.recordKind!=='execution'||after.payload.recordKind!=='execution')throw Error('execution expected')
+  expect(before.payload).toMatchObject({executionRef:f.initial.payload.executionRef,outcome:'interrupted'})
+  expect(after.payload).toMatchObject({executionRef:f.initial.payload.executionRef,outcome:'succeeded'})
+  expect(before.eventId).not.toBe(after.eventId);expect(f.initial.payload.executionRef).not.toBe(f.runId)
+  for(const bytes of [original!.bytes,continuation!.bytes]){expect(bytes).not.toContain(f.runId);expect(bytes).not.toContain(f.sequence);expect(bytes).not.toContain('captureKey')}
+  expect(await readFile(f.mapFile(f.first),'utf8')).toBe(f.firstMap)
+  expect(await readFile(f.spoolEventFile(f.root,f.first),'utf8')).toBe(f.firstBytes)
+  const foreign=await f.save(f.input(f.sequence,{host:'github.com',org:'other',repo:'other/r',controlRoom:'other/room'}))
+  const foreignRead=privacyRead((await serialize(foreign))!.bytes)
+  if(foreignRead.payload.recordKind!=='execution')throw Error('execution expected')
+  expect(foreignRead.destination.repo).toBe('other/r');expect(foreignRead.payload.executionRef).not.toBe(after.payload.executionRef)
+  expect(destinations).toEqual(['o/r','o/r','other/r'])
+  mode='non-attributed';expect(privacyRead((await serialize(f.continued))!.bytes).payload).not.toHaveProperty('executionRef')
+  mode='off';expect(await serialize(f.continued)).toBeNull()
+  expect((await serialize(f.initial))).toBeNull()
+  mode='attributed';expect((await serialize(f.initial))!.bytes).toBe(original!.bytes)
+ }finally{await f.dispose()}
+})
+test.each(['event','digest','destination','key','run','ordinal','forged-logical','missing-logical','conflicting-logical'] as const)('terminal privacy refuses %s continuation bindings without repairing history',async kind=>{
+ const f=await terminalPrivacyFixture(),{currentPolicySerializer}=await import('../src/stats/privacy.ts'),{writeSpoolJson}=await import('../src/stats/outbox.ts'),{hashBytes}=await import('../src/stats/types.ts')
+ const {unlink}=await import('node:fs/promises')
+ try{
+  const event=structuredClone(f.continued),mapping=JSON.parse(await readFile(f.mapFile(event),'utf8'))
+  if(kind==='event')mapping.eventId=crypto.randomUUID()
+  if(kind==='digest')mapping.payloadDigest='f'.repeat(64)
+  if(kind==='destination')mapping.destination='f'.repeat(64)
+  if(kind==='key')mapping.captureKey=f.initial.captureKey
+  if(kind==='run')event.payload.localRunId=crypto.randomUUID()
+  if(kind==='ordinal')event.captureKey=f.runId+':terminal:1'
+  if(kind==='forged-logical'){event.payload.executionRef=crypto.randomUUID();mapping.executionRef=event.payload.executionRef;mapping.payloadDigest=hashBytes(canonicalJson(event.payload))}
+  if(kind==='missing-logical')await unlink(f.mapFile(f.initial))
+  if(kind==='conflicting-logical')await writeSpoolJson(f.logicalFile,{executionRef:crypto.randomUUID()})
+  await writeSpoolJson(f.mapFile(f.continued),mapping)
+  const snapshot=await readFile(f.mapFile(f.continued),'utf8')
+  const serialize=currentPolicySerializer(f.home,async()=>({values:{'stats-export':'attributed'},policyDigest:'a'.repeat(64)}))
+  await expect(serialize(event)).rejects.toThrow('privacy-reporting-identity-unavailable')
+  expect(await readFile(f.mapFile(f.continued),'utf8')).toBe(snapshot)
+  if(kind==='missing-logical'){await expect(readFile(f.mapFile(f.initial),'utf8')).rejects.toMatchObject({code:'ENOENT'});await expect(readFile(f.logicalFile,'utf8')).rejects.toMatchObject({code:'ENOENT'})}
+  else expect(await readFile(f.mapFile(f.initial),'utf8')).toBe(f.firstMap)
+ }finally{await f.dispose()}
 })

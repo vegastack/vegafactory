@@ -5,7 +5,7 @@ import { randomUUID } from 'node:crypto'
 import { readFile, statfs } from 'node:fs/promises'
 import { join } from 'node:path'
 import { loadConfiguredPolicy, resolvePolicy } from '../../../../skills/dev/dev-setup/scripts/effective-policy.mjs'
-import { canonicalJson, validateDestination, validateMeasurement, UUID, MEASUREMENT_KEYS, hashBytes, destinationId,
+import { canonicalJson, validateDestination, validateMeasurement, UUID, MEASUREMENT_KEYS, hashBytes, destinationId, parseTerminalCaptureKey, terminalCaptureKey,
   type Destination, type ExportMeasurement, type LocalMeasurement, type ExportReader, type ExportSerializer,
   type Coverage, type ExecutionAttribution, type MeasurementKey } from './types.ts'
 
@@ -188,11 +188,20 @@ export function currentPolicySerializer(home:string,policyFor:(destination:Desti
     if(!policy.policyDigest||!HEX.test(policy.policyDigest))fail('privacy-policy-digest-unavailable')
     if(event.payload.recordKind==='execution'&&exportMode(policy)==='attributed'&&!historicalExecution(event.payload)){
       const runId=event.payload.localRunId
-      if(!runId||!UUID.test(runId)||event.captureKey!==runId+':terminal:0')fail('privacy-reporting-identity-unavailable')
+      const segment=parseTerminalCaptureKey(event.captureKey)
+      if(!runId||!segment||segment.runId!==runId)fail('privacy-reporting-identity-unavailable')
       const {readSpoolJson,spoolRoot}=await import('./outbox.ts')
       const capture=hashBytes(canonicalJson([destinationId(event.destination),event.captureKey]))
       const mapping=await readSpoolJson<{executionRef:string;eventId:string;payloadDigest:string;destination:string;captureKey:string}>(join(spoolRoot(home),'captures',capture+'.json'))
       if(!mapping||mapping.executionRef!==event.payload.executionRef||mapping.executionRef===runId||mapping.eventId!==event.eventId||mapping.payloadDigest!==hashBytes(canonicalJson(event.payload))||mapping.destination!==destinationId(event.destination)||mapping.captureKey!==event.captureKey)fail('privacy-reporting-identity-unavailable')
+      if(segment!.sequence!=='0'){
+        // Export only reads the logical identity already published by capture. A
+        // forged segment map must never create or repair a reporting identity.
+        const logicalKey=terminalCaptureKey(runId!),logical=hashBytes(canonicalJson([destinationId(event.destination),logicalKey]))
+        const original=await readSpoolJson<{executionRef:string;eventId:string;destination:string;captureKey:string}>(join(spoolRoot(home),'captures',logical+'.json'))
+        const prepared=await readSpoolJson<{executionRef:string}>(join(spoolRoot(home),'reporting-identities',logical+'.json'))
+        if(original&&(original.destination!==destinationId(event.destination)||original.captureKey!==logicalKey||!UUID.test(original.eventId)||original.executionRef!==mapping!.executionRef)||prepared&&(Object.keys(prepared).join(',')!=='executionRef'||prepared.executionRef!==mapping!.executionRef)||!original&&!prepared)fail('privacy-reporting-identity-unavailable')
+      }
     }
     const measurement=serializeExport(event.payload,event.destination,event.eventId,policy)
     return measurement===null?null:{bytes:canonicalJson(measurement)+'\n',policyDigest:policy.policyDigest!}
