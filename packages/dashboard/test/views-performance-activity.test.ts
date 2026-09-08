@@ -136,3 +136,16 @@ test('personal activity keeps task-owner and account-owner grants separate', asy
   context.filters = { ...context.filters, access: wrong }
   expect(buildActivityView(context, { ok: true, data: { dispatcher: { running: false, pid: null, lastTick: null, interval: null }, repos: [] } }).rows).toEqual([])
 })
+
+test('a malformed forbidden repository row cannot fail or alter a permitted activity report', async () => {
+  const context = await measuredContext()
+  context.db.query('insert into activity_collections(repo,period,payload_json) values(?,?,?)')
+    .run(foreignRepo, '2026-09', '{')
+  const view = buildActivityView(context, {
+    ok: true,
+    data: { dispatcher: { running: false, pid: null, lastTick: null, interval: null }, repos: [] },
+  })
+  expect(view.state.availability).toBe('ready')
+  expect(view.rows.map(row => `${row.repo}#${row.issue}`)).toEqual([`${repo}#151`])
+  expect(JSON.stringify(view)).not.toContain(foreignRepo)
+})

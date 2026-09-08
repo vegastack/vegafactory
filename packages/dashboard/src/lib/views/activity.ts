@@ -179,7 +179,13 @@ export function buildActivityView(context: PageContext, status: Live<StatusRepor
       if (payload.agentAccountOwner) row.accountOwners.add(payload.agentAccountOwner)
       row.executions.push(event)
     }
-    const activities = context.db.query<ActivitySqlRow>('select repo,issue,task_id,activity_id,kind,occurred_at,task_owner,agent_account_owner,payload_json from activity_measurements').all()
+    const activityPredicates = [`repo in (${allowed.map(() => '?').join(',')})`, 'substr(occurred_at,1,7) = ?']
+    const activityValues: unknown[] = [...allowed, period(filters.month)]
+    if (access?.kind === 'person') {
+      activityPredicates.push(`${access.dimension === 'task-owner' ? 'task_owner' : 'agent_account_owner'} = ?`)
+      activityValues.push(access.subject)
+    }
+    const activities = context.db.query<ActivitySqlRow>(`select repo,issue,task_id,activity_id,kind,occurred_at,task_owner,agent_account_owner,payload_json from activity_measurements where ${activityPredicates.join(' and ')}`).all(...activityValues)
       .filter(row => inScope(row.repo) && row.occurred_at.slice(0, 7) === period(filters.month) && matchesOwner(row))
     const uniqueActivities = new Map<string, ActivitySqlRow>()
     for (const activity of activities) {
@@ -219,8 +225,9 @@ export function buildActivityView(context: PageContext, status: Live<StatusRepor
       }
     }
 
-    const collectionRows = context.db.query<{ repo: string; period: string; payload_json: string }>('select repo,period,payload_json from activity_collections').all()
-      .filter(row => inScope(row.repo) && row.period === period(filters.month))
+    const collectionRows = access?.kind === 'person' ? [] : context.db.query<{ repo: string; period: string; payload_json: string }>(
+      `select repo,period,payload_json from activity_collections where repo in (${allowed.map(() => '?').join(',')}) and period = ?`,
+    ).all(...allowed, period(filters.month)).filter(row => inScope(row.repo) && row.period === period(filters.month))
     const completeRepos = new Set(collectionRows.filter(row => {
       try { return (JSON.parse(row.payload_json) as { complete?: unknown }).complete === true } catch { return false }
     }).map(row => row.repo))
