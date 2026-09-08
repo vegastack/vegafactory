@@ -23,10 +23,13 @@ export interface PendingDelivery {
   intentRef: string|null; exportProof?: {repositoryId:string;remoteRef:string;verifiedRemoteHead:string|null;approvedBaseSha:string;headSha:string;closureDigest:string;validatorVersion:1}; approvalBindings?:ApprovalAuthorityRef[]; status:'pending'|'ambiguous'|'acknowledged'; attempts:number; lastError:string|null
 }
 export interface RunAttempt {
-  id:string; startedAt:string; finishedAt:string; processIdentity:ProcessIdentity|null; processGroupId:number|null
+  id:string; startedAt:string; finishedAt:string|null; processIdentity:ProcessIdentity|null; processGroupId:number|null
   terminationCause:TerminalCause; exitCode:number|null; activeElapsedMs:number|null
+  vendorSessionId?:string|null; terminalSequence?:string; snapshotDigest?:string
 }
 export interface RunRecord {
+  terminalSegment?:{sequence:string;firstAttemptId:string}
+  continuations?:Array<{requestId:string;requestDigest:string;previousAttemptId:string;attemptId:string}>
   acceptedScopeRef?:Extract<import('./shared-claims.ts').EvidenceRef,{kind:'state-receipt'}>|null
   stopProof?:import('./shared-claims.ts').StopProof|null
   stopReceiptIds?:{receipt:string;transition:string}
@@ -64,7 +67,7 @@ export interface RunRecord {
   sharedClaim:{taskKey:string;generation:number;ownerToken:string;stateCommit:string}|null; checkpoint:CheckpointRef|null
   remoteEffectCoverage:RecoveryEnvelope['remoteEffectCoverage']
 }
-type Automatic = 'attemptOperationIds'|'claimOperationId'|'attemptElapsedMs'|'attemptId'|'attempts'|'schemaVersion'|'runId'|'generation'|'state'|'terminationCause'|'exitCode'|'pid'|'processStartId'|'processGroupId'|'processIdentity'|'finishedAt'|'pendingDelivery'
+type Automatic = 'terminalSegment'|'continuations'|'attemptOperationIds'|'claimOperationId'|'attemptElapsedMs'|'attemptId'|'attempts'|'schemaVersion'|'runId'|'generation'|'state'|'terminationCause'|'exitCode'|'pid'|'processStartId'|'processGroupId'|'processIdentity'|'finishedAt'|'pendingDelivery'
 export type RunInput = Omit<RunRecord,Automatic> & {root:string;runId?:string}
 export type RunPatch = Partial<Pick<RunRecord,'state'|'terminationCause'|'exitCode'|'pid'|'processStartId'|'processGroupId'|'processIdentity'|'finishedAt'|'pendingDelivery'|'headSha'|'activeElapsedMs'|'waitReason'|'quotaWait'|'quotaChecks'|'terminationRequest'|'cancelRequestedAt'|'attemptElapsedMs'|'worktreeDigest'|'stopProof'|'stopReceiptIds'|'stopReceiptPayload'|'acceptedScopeRef'|'vendorSessionId'|'checkpoint'|'sharedClaim'>>
 const patchKeys = new Set(['state','terminationCause','exitCode','pid','processStartId','processGroupId','processIdentity','finishedAt','pendingDelivery','headSha','activeElapsedMs','waitReason','quotaWait','quotaChecks','terminationRequest','cancelRequestedAt','attemptElapsedMs','worktreeDigest','stopProof','stopReceiptIds','stopReceiptPayload','acceptedScopeRef','vendorSessionId','checkpoint','sharedClaim'])
@@ -159,7 +162,7 @@ function validatePending(value:unknown,run:RunRecord):void {
 }
 export function parseRun(value:unknown):RunRecord {
   const required=['schemaVersion','runId','generation','repo','issue','parent','checkout','branch','baseSha','headSha','stage','harness','model','effort','execution','approvalBindings','recordBinding','approvalRefs','policyDigest','claimToken','state','terminationCause','exitCode','pid','processStartId','processGroupId','processIdentity','startedAt','finishedAt','pendingDelivery','taskKey','activeElapsedMs','taskOwner','agentAccountOwner','accountRef','waitReason','machine','sharedClaim','checkpoint','remoteEffectCoverage']
-  const optional=['quotaWait','checkpointIntent','attemptId','attempts','hostBindingDigest','vendorSessionId','authorityRequest','handbackIntent','deliveryError','runtimeBinding','configurationDigest','dispatchRequest','attemptOperationIds','claimOperationId','approvedTaskIds','attemptElapsedMs','quotaChecks','terminationRequest','cancelRequestedAt','worktreeDigest','stopProof','stopReceiptIds','stopReceiptPayload','acceptedScopeRef']
+  const optional=['terminalSegment','continuations','quotaWait','checkpointIntent','attemptId','attempts','hostBindingDigest','vendorSessionId','authorityRequest','handbackIntent','deliveryError','runtimeBinding','configurationDigest','dispatchRequest','attemptOperationIds','claimOperationId','approvedTaskIds','attemptElapsedMs','quotaChecks','terminationRequest','cancelRequestedAt','worktreeDigest','stopProof','stopReceiptIds','stopReceiptPayload','acceptedScopeRef']
   if(!plain(value)||required.some(k=>!Object.hasOwn(value,k))||Object.keys(value).some(k=>!required.includes(k)&&!optional.includes(k)))throw Error('unknown or missing run field')
   const r=value as unknown as RunRecord,diagnostic=r.execution===null
   if(r.schemaVersion!==2||!uuid.test(r.runId)||!number(r.generation)||r.generation<1||!validRepo(r.repo)||!number(r.issue)||r.issue<1||!nullable(r.parent,v=>number(v)&&v>0)||!text(r.checkout,8192)||!isAbsolute(r.checkout)||!date(r.startedAt)||!nullable(r.finishedAt,date)||!['prepared','running','terminal','interrupted'].includes(r.state)||!nullable(r.terminationCause,v=>typeof v==='string'&&causes.has(v))||!nullable(r.exitCode,v=>Number.isSafeInteger(v))||!nullable(r.activeElapsedMs,v=>typeof v==='number'&&Number.isFinite(v)&&v>=0)||!uuid.test(r.claimToken))throw Error('invalid run lifecycle')
@@ -205,7 +208,13 @@ export function parseRun(value:unknown):RunRecord {
   if(r.configurationDigest!==undefined&&!digest(r.configurationDigest))throw Error('invalid execution configuration binding')
   if(r.vendorSessionId!==undefined&&!nullable(r.vendorSessionId,v=>typeof v==='string'&&/^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/.test(v)))throw Error('invalid vendor session')
   if(r.attemptId!==undefined&&!uuid.test(r.attemptId))throw Error('invalid attempt identity')
-  if(r.attempts!==undefined){if(!Array.isArray(r.attempts))throw Error('invalid attempt history');const ids=new Set<string>();for(const a of r.attempts){if(!closed(a,['id','startedAt','finishedAt','processIdentity','processGroupId','terminationCause','exitCode','activeElapsedMs'])||!uuid.test(a.id)||ids.has(a.id)||a.id===r.attemptId||!date(a.startedAt)||!date(a.finishedAt)||!causes.has(a.terminationCause)||!nullable(a.processIdentity,validRunProcess)||a.processGroupId!==(a.processIdentity?.pid??null)||!nullable(a.exitCode,v=>Number.isSafeInteger(v))||!nullable(a.activeElapsedMs,v=>typeof v==='number'&&Number.isFinite(v)&&v>=0))throw Error('invalid previous attempt');ids.add(a.id)}}
+  if(r.attempts!==undefined){if(!Array.isArray(r.attempts))throw Error('invalid attempt history');const ids=new Set<string>();for(const a of r.attempts){if(!plain(a)||['id','startedAt','finishedAt','processIdentity','processGroupId','terminationCause','exitCode','activeElapsedMs'].some(k=>!Object.hasOwn(a,k))||Object.keys(a).some(k=>!['id','startedAt','finishedAt','processIdentity','processGroupId','terminationCause','exitCode','activeElapsedMs','vendorSessionId','terminalSequence','snapshotDigest'].includes(k))||!uuid.test(a.id)||ids.has(a.id)||a.id===r.attemptId||!date(a.startedAt)||!nullable(a.finishedAt,date)||a.vendorSessionId!==undefined&&!nullable(a.vendorSessionId,v=>typeof v==='string'&&/^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/.test(v))||a.terminalSequence!==undefined&&a.terminalSequence!=='0'&&!uuid.test(a.terminalSequence)||a.snapshotDigest!==undefined&&!digest(a.snapshotDigest)||!causes.has(a.terminationCause)||!nullable(a.processIdentity,validRunProcess)||a.processGroupId!==(a.processIdentity?.pid??null)||!nullable(a.exitCode,v=>Number.isSafeInteger(v))||!nullable(a.activeElapsedMs,v=>typeof v==='number'&&Number.isFinite(v)&&v>=0))throw Error('invalid previous attempt');ids.add(a.id)}}
+  if(r.terminalSegment!==undefined&&(!closed(r.terminalSegment,['sequence','firstAttemptId'])||!uuid.test(r.terminalSegment.sequence)||r.terminalSegment.sequence!==r.terminalSegment.firstAttemptId||![r.attemptId,...(r.attempts??[]).map(a=>a.id)].includes(r.terminalSegment.firstAttemptId)))throw Error('invalid terminal segment')
+  if(r.continuations!==undefined){
+    if(!Array.isArray(r.continuations))throw Error('invalid continuation history')
+    const requests=new Set<string>(),attempts=new Set<string>()
+    for(const c of r.continuations){if(!closed(c,['requestId','requestDigest','previousAttemptId','attemptId'])||![c.requestId,c.previousAttemptId,c.attemptId].every(id=>uuid.test(id))||!digest(c.requestDigest)||requests.has(c.requestId)||attempts.has(c.attemptId)||!r.attempts?.some(a=>a.id===c.previousAttemptId)||![r.attemptId,...(r.attempts??[]).map(a=>a.id)].includes(c.attemptId))throw Error('invalid continuation identity');requests.add(c.requestId);attempts.add(c.attemptId)}
+  }
   for(const p of r.pendingDelivery)validatePending(p,r)
   return structuredClone(r)
 }
@@ -227,12 +236,13 @@ export async function createRun(input:RunInput):Promise<RunRecord> {
 
 export async function readRun(root:string,runId:string):Promise<RunRecord>{requireId(runId);await privatePath(root,true);const dir=join(root,runId);await privatePath(dir,true);const path=join(dir,'run.json');await privatePath(path,false);const r=parseRun(parseStrictJson(await readPrivateRunFile(path)));if(r.runId!==runId)throw Error('run identity mismatch');roots.set(runId,root);return r}
 export async function readRuns(root:string):Promise<RunRecord[]>{let names:string[];try{names=await readdir(root)}catch(e){if((e as NodeJS.ErrnoException).code==='ENOENT')return [];throw e}const result:RunRecord[]=[];for(const id of names)if(uuid.test(id))result.push(await readRun(root,id));return result}
-async function mutateRun(runId:string,expectedGeneration:number,root:string,change:(old:RunRecord)=>RunRecord|Promise<RunRecord>):Promise<RunRecord>{
+async function mutateRun(runId:string,expectedGeneration:number,root:string,change:(old:RunRecord)=>RunRecord|Promise<RunRecord>,replay?:(old:RunRecord)=>boolean):Promise<RunRecord>{
   requireId(runId)
   const lock=await acquireClaim(join(root,runId,'mutation'),await processIdentity())
   if(lock.kind!=='owned')throw Error('run mutation unavailable')
   try {
     const old=await readRun(root,runId)
+    if(replay?.(old))return old
     if(old.generation!==expectedGeneration)throw Error('stale run generation')
     const next=parseRun({...await change(old),generation:old.generation+1})
     await atomicRunFile(join(root,runId,'run.json'),next)
@@ -249,6 +259,10 @@ export async function transitionRun(runId:string,expectedGeneration:number,patch
     if(old.vendorSessionId&&patch.vendorSessionId!==undefined&&patch.vendorSessionId!==old.vendorSessionId)throw Error('vendor session identity changed')
     if(old.processIdentity)for(const field of ['pid','processStartId','processGroupId','processIdentity'] as const)if(patch[field]!==undefined&&!sameJson(patch[field],old[field]))throw Error('acknowledged process identity is immutable')
     if(old.sharedClaim&&patch.sharedClaim&&['taskKey','generation','ownerToken'].some(key=>old.sharedClaim![key as keyof typeof old.sharedClaim]!==patch.sharedClaim![key as keyof typeof patch.sharedClaim]))throw Error('shared owner cannot change through lifecycle update')
+    if(patch.pendingDelivery)for(const previous of old.pendingDelivery.filter(p=>p.kind==='telemetry-capture')){
+      const next=patch.pendingDelivery.find(p=>p.id===previous.id)
+      if(!next||next.kind!==previous.kind||!sameJson(next.target,previous.target)||previous.payload!==undefined&&next.payload!==previous.payload||previous.payloadDigest!==undefined&&next.payloadDigest!==previous.payloadDigest)throw Error('terminal capture is immutable')
+    }
     return{...old,...patch}
   })
 }
@@ -271,6 +285,81 @@ export async function beginRunAttempt(root:string,runId:string,expectedGeneratio
     if(old.worktreeDigest&&await worktreeFingerprint(old.checkout)!==old.worktreeDigest)throw Error('saved checkout changed; verified handover required')
     const previous:RunAttempt={id:old.attemptId??old.runId,startedAt:old.startedAt,finishedAt:old.finishedAt,processIdentity:old.processIdentity,processGroupId:old.processGroupId,terminationCause:old.terminationCause,exitCode:old.exitCode,activeElapsedMs:old.attemptElapsedMs??old.activeElapsedMs}
     return{...old,attemptId:randomUUID(),attemptOperationIds:{recovery:randomUUID(),start:randomUUID(),coverage:randomUUID()},attempts:[...(old.attempts??[]),previous],state:'prepared',terminationCause:null,exitCode:null,pid:null,processStartId:null,processGroupId:null,processIdentity:null,startedAt:new Date().toISOString(),finishedAt:null,attemptElapsedMs:0,terminationRequest:null,waitReason:null,quotaWait:null}
+  })
+}
+
+export interface RunContinuationRequest {
+  root:string;runId:string;expectedGeneration:number;requestId:string;previousAttemptId:string
+  checkpoint:CheckpointRef;worktreeDigest:string
+  currentOwner:{machine:RunRecord['machine'];sharedClaim:RunRecord['sharedClaim']}
+}
+export interface RecoveryContinuationDecision {
+  action:'resume-task';reason:string;runId:string;expectedGeneration:number;previousAttemptId:string
+  taskIds:string[];approvedTaskIds:string[];approvalBindings:RunRecord['approvalBindings'];recordBinding:RunRecord['recordBinding']
+  artifacts:RunRecord['approvalRefs'];execution:NonNullable<RunRecord['execution']>;checkpoint:CheckpointRef;worktreeDigest:string
+  currentOwner:RunContinuationRequest['currentOwner'];sourceRefs:Array<{id:string;updatedAt:string;bodySha256:string}>
+}
+export interface RunContinuationController {
+  // Controller-owned code performs fresh authority, completed-work, qualification and
+  // shared-owner reconciliation. It is never loaded from the persisted request.
+  verifyRecovery:(input:{run:RunRecord;request:RunContinuationRequest})=>Promise<RecoveryContinuationDecision>
+}
+async function saveContinuationSnapshot(root:string,run:RunRecord):Promise<string>{
+  const {sha256}=await import('./shared-claims.ts'),directory=join(root,run.runId,'history')
+  await mkdir(directory,{mode:0o700}).catch(error=>{if((error as NodeJS.ErrnoException).code!=='EEXIST')throw error})
+  await privatePath(directory,true)
+  const bytes=await readPrivateRunFile(join(root,run.runId,'run.json')),snapshotDigest=sha256(bytes),path=join(directory,(run.attemptId??run.runId)+'.'+snapshotDigest+'.json')
+  // The run mutation guard serializes this immutable publication. Atomic rename
+  // avoids leaving a partial snapshot that would poison a retry after disk failure.
+  try{if(await readPrivateRunFile(path)!==bytes)throw Error('original attempt snapshot differs')}
+  catch(error){if((error as NodeJS.ErrnoException).code!=='ENOENT')throw error;await atomicRunFile(path,parseStrictJson(bytes))}
+  const dir=await open(directory,'r');try{await dir.sync()}finally{await dir.close()}
+  return snapshotDigest
+}
+export async function readRunAttemptSnapshot(root:string,runId:string,attempt:RunAttempt):Promise<RunRecord>{
+  requireId(runId);requireId(attempt.id)
+  if(!attempt.snapshotDigest)throw Error('original private attempt snapshot unavailable')
+  const bytes=await readPrivateRunFile(join(root,runId,'history',attempt.id+'.'+attempt.snapshotDigest+'.json')),{sha256}=await import('./shared-claims.ts')
+  if(sha256(bytes)!==attempt.snapshotDigest)throw Error('original private attempt snapshot changed')
+  const snapshot=parseRun(parseStrictJson(bytes))
+  if(snapshot.runId!==runId||(snapshot.attemptId??snapshot.runId)!==attempt.id)throw Error('original private attempt identity differs')
+  return snapshot
+}
+export async function beginVerifiedRunContinuation(request:RunContinuationRequest,controller:RunContinuationController):Promise<RunRecord>{
+  request=structuredClone(request)
+  const {root,runId,expectedGeneration,requestId,previousAttemptId}=request,{sha256}=await import('./shared-claims.ts')
+  if(!isAbsolute(root)||!number(expectedGeneration)||expectedGeneration<1||!uuid.test(requestId)||!uuid.test(previousAttemptId)||!digest(request.worktreeDigest)||typeof controller?.verifyRecovery!=='function')throw Error('verified continuation request unavailable')
+  parseCheckpointRef(request.checkpoint)
+  const requestDigest=sha256(canonicalWire(request))
+  return mutateRun(runId,expectedGeneration,root,async old=>{
+    if((old.attemptId??old.runId)!==previousAttemptId||!['terminal','interrupted'].includes(old.state)||!old.terminationCause||old.terminationCause==='termination-unconfirmed'||old.cancelRequestedAt||old.waitReason==='subscription-quota')throw Error('continuation requires the original stopped attempt')
+    if(!old.execution||!old.approvedTaskIds?.length||!old.approvalBindings.length||!old.machine||!old.sharedClaim||!request.currentOwner.machine||!request.currentOwner.sharedClaim)throw Error('continuation original authority/owner unavailable')
+    if(!sameJson(old.checkpoint,request.checkpoint)||old.worktreeDigest!==request.worktreeDigest||request.checkpoint.runId!==runId||request.checkpoint.repo!==old.repo||request.checkpoint.branch!==old.branch||request.checkpoint.baseSha!==old.baseSha||request.checkpoint.headSha!==old.headSha||request.checkpoint.scopeDigest!==old.taskKey.scopeDigest)throw Error('continuation source checkpoint differs')
+    if(request.currentOwner.sharedClaim.taskKey!==old.sharedClaim.taskKey||request.currentOwner.sharedClaim.generation<old.sharedClaim.generation||request.currentOwner.sharedClaim.generation===old.sharedClaim.generation&&(!sameJson(request.currentOwner.machine,old.machine)||request.currentOwner.sharedClaim.ownerToken!==old.sharedClaim.ownerToken))throw Error('continuation owner generation differs')
+    // This operation consumes an existing private same-home record. Remote-only
+    // reconstruction must not turn foreign PIDs or missing history into local proof.
+    if(!await verifyLocalRunStopped(old))throw Error('original owned process stop unavailable')
+    const {readHostBinding}=await import('./machine-identity.ts')
+    if(request.currentOwner.machine.hostBindingDigest!==(await readHostBinding()).digest)throw Error('continuation target host differs')
+    const decision=await controller.verifyRecovery({run:structuredClone(old),request:structuredClone(request)})
+    if(!decision||decision.action!=='resume-task'||!text(decision.reason)||decision.runId!==runId||decision.expectedGeneration!==expectedGeneration||decision.previousAttemptId!==previousAttemptId||!sameJson(decision.approvedTaskIds,old.approvedTaskIds)||!sameJson(decision.approvalBindings,old.approvalBindings)||!sameJson(decision.recordBinding,old.recordBinding)||!sameJson(decision.artifacts,old.approvalRefs)||!sameJson(decision.execution,old.execution)||!sameJson(decision.checkpoint,request.checkpoint)||decision.worktreeDigest!==request.worktreeDigest||!sameJson(decision.currentOwner,request.currentOwner)||!Array.isArray(decision.taskIds)||!decision.taskIds.length||new Set(decision.taskIds).size!==decision.taskIds.length||decision.taskIds.some(id=>!old.approvedTaskIds!.includes(id))||!Array.isArray(decision.sourceRefs)||!decision.sourceRefs.length||decision.sourceRefs.some(ref=>!closed(ref,['id','updatedAt','bodySha256'])||!text(ref.id)||!date(ref.updatedAt)||!digest(ref.bodySha256)))throw Error('verified recovery decision differs')
+    const {execFile}=await import('node:child_process'),{promisify}=await import('node:util'),execute=promisify(execFile)
+    const git=async(args:string[])=>(await execute('git',args,{cwd:old.checkout,encoding:'utf8',timeout:5000,env:{...process.env,GIT_NO_REPLACE_OBJECTS:'1',GIT_TERMINAL_PROMPT:'0'}})).stdout.trim()
+    const [head,tree,branch,fingerprint]=await Promise.all([git(['rev-parse','HEAD']),git(['rev-parse','HEAD^{tree}']),git(['symbolic-ref','--short','HEAD']),worktreeFingerprint(old.checkout)])
+    if(head!==request.checkpoint.headSha||tree!==request.checkpoint.treeSha||branch!==old.branch||fingerprint!==request.worktreeDigest)throw Error('continuation checkout changed')
+    // Read stop again after controller I/O before preserving and resetting the attempt.
+    if(!await verifyLocalRunStopped(old))throw Error('original owned process stop changed')
+    const attemptId=randomUUID(),snapshotDigest=await saveContinuationSnapshot(root,old)
+    const previous:RunAttempt={id:previousAttemptId,startedAt:old.startedAt,finishedAt:old.finishedAt,processIdentity:old.processIdentity,processGroupId:old.processGroupId,terminationCause:old.terminationCause,exitCode:old.exitCode,activeElapsedMs:old.attemptElapsedMs??null,vendorSessionId:old.vendorSessionId??null,terminalSequence:terminalCaptureDescriptor(old).sequence,snapshotDigest}
+    const next={...old,...request.currentOwner,hostBindingDigest:request.currentOwner.machine.hostBindingDigest,attemptId,attemptOperationIds:{recovery:randomUUID(),start:randomUUID(),coverage:randomUUID()},attempts:[...(old.attempts??[]),previous],continuations:[...(old.continuations??[]),{requestId,requestDigest,previousAttemptId,attemptId}],terminalSegment:{sequence:attemptId,firstAttemptId:attemptId},state:'prepared' as const,terminationCause:null,exitCode:null,pid:null,processStartId:null,processGroupId:null,processIdentity:null,startedAt:new Date().toISOString(),finishedAt:null,attemptElapsedMs:0,terminationRequest:null,cancelRequestedAt:null,waitReason:null,quotaWait:null,vendorSessionId:null,stopProof:null,acceptedScopeRef:null}
+    delete next.stopReceiptIds;delete next.stopReceiptPayload
+    return next
+  },old=>{
+    const existing=old.continuations?.find(c=>c.requestId===requestId)
+    if(!existing)return false
+    if(existing.requestDigest!==requestDigest)throw Error('continuation request identity rebound')
+    if(existing.attemptId!==old.attemptId)throw Error('continuation attempt already advanced')
+    return true // A replay supplies no launch authority; normal admission still runs.
   })
 }
 
@@ -613,16 +702,39 @@ export async function findOwnedRunSession(root:string,input:{sessionId:string;cw
   }catch{return null}
 }
 
+export interface TerminalCaptureDescriptor {runId:string;attemptId:string;eventKind:'terminal';sequence:string;captureKey:string}
+export function terminalCaptureDescriptor(run:RunRecord):TerminalCaptureDescriptor {
+  const sequence=run.terminalSegment?.sequence??'0'
+  return{runId:run.runId,attemptId:run.attemptId??run.runId,eventKind:'terminal',sequence,captureKey:`${run.runId}:terminal:${sequence}`}
+}
+// Quota retries remain in their current measurement segment. A verified continuation
+// starts a new segment, even when the previous interruption is still uncaptured.
+export function terminalCaptureAttempts(run:RunRecord):RunAttempt[]{
+  const attempts=run.attempts??[]
+  if(!run.terminalSegment)return attempts
+  if(run.attemptId===run.terminalSegment.firstAttemptId)return[]
+  const index=attempts.findIndex(a=>a.id===run.terminalSegment!.firstAttemptId)
+  if(index<0)throw Error('terminal segment history unavailable')
+  return attempts.slice(index)
+}
+export function terminalCaptureElapsedMs(run:RunRecord):number|null {
+  const values=[...terminalCaptureAttempts(run).map(a=>a.activeElapsedMs),run.attemptElapsedMs??null]
+  return values.some(v=>v===null)?null:values.reduce<number>((sum,v)=>sum+v!,0)
+}
+
 export async function ensureTerminalCaptureIntent(root:string,runId:string):Promise<void>{
-  const captureKey=`${runId}:terminal:0`
-  await updateRun(root,runId,run=>run.pendingDelivery.some(p=>p.kind==='telemetry-capture'&&'captureKey'in p.target&&p.target.captureKey===captureKey)?{}:{pendingDelivery:[...run.pendingDelivery,{id:randomUUID(),kind:'telemetry-capture',target:{captureKey},intentRef:null,status:'pending',attempts:0,lastError:null}]})
+  await updateRun(root,runId,run=>{
+    const {captureKey}=terminalCaptureDescriptor(run)
+    return run.pendingDelivery.some(p=>p.kind==='telemetry-capture'&&'captureKey'in p.target&&p.target.captureKey===captureKey)?{}:{pendingDelivery:[...run.pendingDelivery,{id:randomUUID(),kind:'telemetry-capture',target:{captureKey},intentRef:null,status:'pending',attempts:0,lastError:null}]}
+  })
 }
 export async function prepareTerminalCapture(root:string,runId:string,payload:import('./stats/record.ts').StatsRecord):Promise<PendingDelivery>{
   const {RECORD_FIELDS,serializeRecord}=await import('./stats/record.ts'),{sha256}=await import('./shared-claims.ts')
   if(!plain(payload)||Object.keys(payload).some(key=>!RECORD_FIELDS.includes(key as typeof RECORD_FIELDS[number]))||!closed(payload.tokens,['in','out','cache_read','cache_write'])||Object.values(payload.tokens).some(v=>!nullable(v,x=>typeof x==='number'&&Number.isFinite(x)&&x>=0))||!Array.isArray(payload.skills)||payload.skills.some(s=>!closed(s,['name','trigger','harness'])||!text(s.name)||!['model','typed','mention'].includes(s.trigger)||!text(s.harness)))throw Error('terminal capture schema refused')
-  const captureKey=`${runId}:terminal:0`,serialized=serializeRecord(payload),payloadDigest=sha256(serialized)
+  const serialized=serializeRecord(payload),payloadDigest=sha256(serialized)
   let selected:PendingDelivery|undefined
   await updateRun(root,runId,run=>{
+    const {captureKey}=terminalCaptureDescriptor(run)
     if(run.state!=='terminal'||run.waitReason==='subscription-quota'||payload.repo!==run.repo||payload.issue!==run.issue||payload.session_id!==(run.vendorSessionId??null))throw Error('terminal capture identity unavailable')
     selected=run.pendingDelivery.find(p=>p.kind==='telemetry-capture'&&'captureKey'in p.target&&p.target.captureKey===captureKey)
     if(selected){if(selected.payloadDigest===undefined&&selected.payload===undefined&&selected.status==='pending'&&selected.attempts===0){selected={...selected,payload:serialized,payloadDigest};return{pendingDelivery:run.pendingDelivery.map(p=>p.id===selected!.id?selected!:p)}}if(selected.payloadDigest!==payloadDigest)throw Error('terminal capture key rebound');return{}}
