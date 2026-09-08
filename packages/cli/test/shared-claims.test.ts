@@ -108,12 +108,12 @@ test('receipt retry rejects changed payload under the same immutable operation I
     await publishRecoveryReceipt({ claim: result.claim, operationId, payload });
     await expect(publishRecoveryReceipt({ claim: result.claim, operationId, payload: { ...payload, result: 'failed' } })).rejects.toThrow('different request');
 });
-test('two-phase remote-only recovery fences sends and preserves unlinked outcomes', async () => {
+test.each(['qualified', 'unqualified'] as const)('two-phase remote-only recovery with %s evidence fences sends and preserves unlinked outcomes', async (result) => {
     const f = await fixture(), owned = await acquireSharedTask({ ...f, operationId: randomUUID() });
     if (owned.kind !== 'owned')
         throw Error('claim');
     let claim = owned.claim;
-    const qualification = await publishRecoveryReceipt({ claim, operationId: randomUUID(), payload: { schemaVersion: 2, kind: 'execution-qualification', harness: 'codex', harnessVersion: 'test-fixture', model: 'model', effort: 'high', accountRef: 'account', configurationDigest: d, candidateSha: root, validationIds: ['137-T4/check/' + d], managedKinds: ['checkpoint-push', 'handback', 'evidence', 'telemetry-push'], unmanagedDenied: true, result: 'qualified' } });
+    const qualification = await publishRecoveryReceipt({ claim, operationId: randomUUID(), payload: { schemaVersion: 2, kind: 'execution-qualification', harness: 'codex', harnessVersion: 'test-fixture', model: 'model', effort: 'high', accountRef: 'account', configurationDigest: d, candidateSha: root, validationIds: ['137-T4/check/' + d], managedKinds: ['checkpoint-push', 'handback', 'evidence', 'telemetry-push'], unmanagedDenied: result === 'qualified', result } });
     claim = qualification.claim;
     const effectId = randomUUID(), target = { kind: 'issue-comment' as const, repositoryId: 'R_app', issueNodeId: 'I_137', commentId: null, markerId: 'handback' };
     const intent: RecoveryEvidencePayload = { schemaVersion: 2, kind: 'effect-intent', effectId, runId: claim.runId, generation: 1, approvalBindings: f.candidate.approvalBindings, effectKind: 'handback', target, payloadDigest: d, result: 'prepared', observedRemoteId: null, observedDigest: null, reasonCode: null };
@@ -126,18 +126,41 @@ test('two-phase remote-only recovery fences sends and preserves unlinked outcome
     if (linked.kind !== 'owned')
         throw Error('link');
     claim = linked.claim;
-    await expect(beginManagedEffect({ claim, effectId, operationId: randomUUID() })).rejects.toThrow('unmanaged');
-    envelope.remoteEffectCoverage = { kind: 'qualified-managed-only', qualification: qualification.reference };
+    const stopProof = { kind: 'operator-confirmed' as const, machineId: f.machine.id, installationId: f.machine.installationId, sessionId: f.session.sessionId, hostBindingDigest: d, bootIdDigest: d, runIds: [claim.runId], generation: 1, observedAt: new Date().toISOString(), evidenceRef: f.candidate.approvalBindings[0]!.source };
+    const completion = await transitionSharedTask({ claim, operationId: randomUUID(), transition: { kind: 'complete', stopProof, acceptedScope: qualification.reference } });
+    expect(completion).toMatchObject({ kind: 'refused', reason: 'unmanaged remote effects possible; recovery blocked' });
+    const checkpoint = { schemaVersion: 1 as const, id: randomUUID(), repo: 'acme/app', repositoryId: 'R_app', branch: 'task/137', baseSha: root, headSha: root, treeSha: root, scopeDigest: d, runId: claim.runId, publishedAt: new Date().toISOString() };
+    envelope.checkpoint = checkpoint;
+    expect((await transitionSharedTask({ claim, operationId: randomUUID(), transition: { kind: 'checkpoint', checkpoint, recovery: envelope } })).kind).toBe('owned');
+    const handoff = await transitionSharedTask({ claim, operationId: randomUUID(), transition: { kind: 'handoff', machine: f.machine, session: f.session, candidate: f.candidate, stopProof, recovery: envelope } });
+    expect(handoff).toMatchObject({ kind: 'refused', reason: 'unmanaged remote effects possible; recovery blocked' });
+    for (const wrong of [{ ...claim, ownerToken: randomUUID() }, { ...claim, generation: 2 }]) {
+        await expect(verifyManagedEffect(wrong, effectId)).rejects.toThrow('current owner');
+        expect((await transitionSharedTask({ claim: wrong, operationId: randomUUID(), transition: { kind: 'effect-send', effectId } })).kind).toBe('refused');
+    }
+    expect((await transitionSharedTask({ claim, operationId: randomUUID(), transition: { kind: 'recovery', recovery: { ...envelope, execution: { ...envelope.execution, accountRef: 'other' } } } })).kind).toBe('refused');
+    expect((await transitionSharedTask({ claim, operationId: randomUUID(), transition: { kind: 'recovery', recovery: { ...envelope, effects: [{ ...envelope.effects[0]!, payloadDigest: 'e'.repeat(64) }] } } })).kind).toBe('refused');
+    if (result === 'unqualified') {
+        const mislabeled = await transitionSharedTask({ claim, operationId: randomUUID(), transition: { kind: 'recovery', recovery: { ...envelope, remoteEffectCoverage: { kind: 'qualified-managed-only', qualification: qualification.reference } } } });
+        expect(mislabeled).toMatchObject({ kind: 'refused', reason: 'managed coverage qualification mismatch' });
+    } else {
+        envelope.remoteEffectCoverage = { kind: 'qualified-managed-only', qualification: qualification.reference };
+    }
     f.setAmbiguous();
     linked = await transitionSharedTask({ claim, operationId: randomUUID(), transition: { kind: 'recovery', recovery: envelope } });
     expect(linked.kind).toBe('owned');
-    if (linked.kind !== 'owned')
-        throw Error('link');
+    if (linked.kind !== 'owned') throw Error('link');
     claim = linked.claim;
+    const mutationsBeforeRefusal = f.mutations;
+    f.target.verifyTransition = async () => { throw Error('current authority revoked'); };
+    await expect(beginManagedEffect({ claim, effectId, operationId: randomUUID() })).rejects.toThrow('authority revoked');
+    expect(f.mutations).toBe(mutationsBeforeRefusal);
+    f.target.verifyTransition = async () => {};
     // A new local root proves the evidence path does not need the old machine's files.
     claim = { ...claim, target: { ...claim.target, localRoot: await mkdtemp(join(tmpdir(), 'vf-remote-only-')) } };
     const sending = await beginManagedEffect({ claim, effectId, operationId: randomUUID() });
     claim = sending.claim;
+    expect((await readCoordination(claim.target)).tasks[claim.taskKey]!.recovery!.remoteEffectCoverage).toEqual(envelope.remoteEffectCoverage);
     await expect(beginManagedEffect({ claim, effectId, operationId: randomUUID() })).rejects.toThrow('already sent');
     expect((await transitionSharedTask({ claim, operationId: randomUUID(), transition: { kind: 'recovery', recovery: envelope } })).kind).toBe('refused');
     const outcome = await publishRecoveryReceipt({ claim, operationId: randomUUID(), payload: { ...intent, kind: 'effect-outcome', result: 'acknowledged', observedRemoteId: '1234', observedDigest: d } });

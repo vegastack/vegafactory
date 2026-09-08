@@ -918,7 +918,7 @@ async function validateRemoteRecovery(target: CoordinationTarget, e: RecoveryEnv
     for (const a of e.approvalBindings)
         await resolveEvidence(target, a.source);
     const q = await resolveEvidence(target, e.execution.qualification);
-    if (!q || q.kind !== 'execution-qualification' || q.result !== 'qualified' || q.harness !== e.execution.harness || q.harnessVersion !== e.execution.harnessVersion || q.model !== e.execution.model || q.effort !== e.execution.effort || q.accountRef !== e.execution.accountRef)
+    if (!q || q.kind !== 'execution-qualification' || q.harness !== e.execution.harness || q.harnessVersion !== e.execution.harnessVersion || q.model !== e.execution.model || q.effort !== e.execution.effort || q.accountRef !== e.execution.accountRef)
         throw Error('original execution qualification unavailable');
     for (const x of e.completed) {
         const a = await resolveEvidence(target, x.acceptance.evidence);
@@ -950,7 +950,7 @@ async function validateRemoteRecovery(target: CoordinationTarget, e: RecoveryEnv
     const coverage = e.remoteEffectCoverage;
     if (coverage.kind === 'qualified-managed-only') {
         const p = await resolveEvidence(target, coverage.qualification);
-        if (!p || p.kind !== 'execution-qualification' || canonical(p) !== canonical(q) || !p.unmanagedDenied || !effectKinds.every(k => p.managedKinds.includes(k)))
+        if (!p || p.kind !== 'execution-qualification' || canonical(p) !== canonical(q) || p.result !== 'qualified' || !p.unmanagedDenied || !effectKinds.every(k => p.managedKinds.includes(k)))
             throw Error('managed coverage qualification mismatch');
     }
     else if (coverage.kind === 'reconciled') {
@@ -988,8 +988,8 @@ export async function transitionSharedTask(input: {
         if (transition.kind === 'receipt')
             recoveryPayload = parseRecoveryPayload(transition.payload);
         else if (transition.kind === 'effect-send') {
-            if (!t.recovery || t.recovery.remoteEffectCoverage.kind === 'unmanaged-possible')
-                throw Error('unmanaged remote-effect barrier');
+            if (!t.recovery)
+                throw Error('acknowledged intent envelope required');
             await validateRemoteRecovery(target, t.recovery, t);
             const effect = t.recovery.effects.find(x => x.operationId === transition.effectId);
             if (!effect || effect.state !== 'prepared')
@@ -1103,8 +1103,8 @@ export async function verifyManagedEffect(claim: SharedClaim, effectId: string):
         throw Error('current owner and acknowledged intent envelope required');
     await claim.target.verifyTransition(t, { kind: 'recovery', recovery: t.recovery });
     await validateRemoteRecovery(claim.target, t.recovery, t);
-    if (t.recovery.remoteEffectCoverage.kind === 'unmanaged-possible')
-        throw Error('unmanaged remote-effect barrier');
+    // Unknown vendor effects retain completion/transfer barriers; this exact managed
+    // intent is separately verified against current authority and ownership.
     const effect = t.recovery.effects.find(x => x.operationId === effectId);
     if (!effect || effect.state !== 'prepared')
         throw Error('effect not prepared or already sent; reconcile before retry');
