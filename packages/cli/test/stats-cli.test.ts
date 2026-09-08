@@ -129,14 +129,14 @@ test('--since totals every month in the window rather than printing one of them'
   expect(summary.month).toBe('SEP-2026…OCT-2026')
 })
 
-test('the dry-run push names the records it would copy and the commit it would make', async () => {
+test('legacy dry-run push refuses export and names explicit migration', async () => {
   const { lines, deps: base } = await deps()
-  await appendRecord(base.home, row({}), 'mini')
-  expect(await runStats(parseStatsArgs(['push']), base)).toBe(0)
-  const output = lines.join('\n')
-  expect(output).toContain('dry run')
-  expect(output).toContain('(+1)')
-  expect(output).toContain('stats: vegastack/vegafactory +1 runs SEP-2026 · kmanojkumar@mini · claude/fable-5.1')
+  const originalPath = await appendRecord(base.home, row({}), 'mini')
+  const originalBytes = await readFile(originalPath)
+  expect(await runStats(parseStatsArgs(['push']), base)).toBe(2)
+  expect(lines.join('\n')).toContain('legacy-spool-requires-explicit-migration')
+  expect(await readFile(originalPath)).toEqual(originalBytes)
+  expect(await listOutbox(base.home)).toHaveLength(1)
 })
 
 // --- the people gate on every scope --------------------------------------------------------
