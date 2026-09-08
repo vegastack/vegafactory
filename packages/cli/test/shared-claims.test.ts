@@ -352,3 +352,120 @@ test('restart uses persisted original parent identity rather than adopting the c
         expect(await transitionSharedTask({ claim: restarted, operationId: randomUUID(), transition: { kind: 'start' } })).toMatchObject({ kind: 'refused', reason: 'original parent owner/run/generation changed' });
     }
 });
+
+async function stoppedChildFixture(state: 'stopped' | 'blocked' = 'stopped') {
+    const p = await parentFixture();
+    p.machine.defaults.childConcurrent = 1;
+    p.target.verifyChildRelationship = async () => ({ maxChildren: 1 });
+    const child = await acquireSharedTask({ ...p, candidate: p.child, operationId: randomUUID() });
+    if (child.kind !== 'owned') throw Error('child claim');
+    const receipt = await publishRecoveryReceipt({ claim: child.claim, operationId: randomUUID(), payload: { schemaVersion: 2, kind: 'effect-reconciliation', runId: child.claim.runId, scopeDigest: d, approvalBindings: p.child.approvalBindings, allowedActionIds: [], checkedEffectIds: [], inspector: { kind: 'qualified-adapter', identityRef: p.machine.id }, result: 'unresolved', reasonCode: 'owned-process-group-stopped' } });
+    const stopProof = { kind: 'process-exit' as const, machineId: p.machine.id, installationId: p.machine.installationId, sessionId: p.session.sessionId, hostBindingDigest: d, bootIdDigest: d, runIds: [child.claim.runId], generation: 1, observedAt: new Date().toISOString(), evidenceRef: receipt.reference };
+    let physicalStop = true, verifications = 0;
+    p.target.verifyTransition = async (task, transition) => {
+        if (transition.kind === 'stop') {
+            verifications++;
+            if (!physicalStop || task.runId !== child.claim.runId || canonical(transition.stopProof) !== canonical(stopProof)) throw Error('physical stop unconfirmed');
+        }
+    };
+    expect((await transitionSharedTask({ claim: child.claim, operationId: randomUUID(), transition: { kind: state === 'stopped' ? 'stop' : 'block', stopProof } })).kind).toBe('owned');
+    const next = { ...p.child, issue: 139, issueNodeId: 'I_139', runId: randomUUID(), paths: ['src/next'] };
+    return { ...p, childClaim: child.claim, next, stopProof, setUnconfirmed: () => { physicalStop = false; }, get verifications() { return verifications; } };
+}
+
+test.each(['stopped', 'blocked'] as const)('verified %s child frees process capacity but keeps resource and ownership reservations', async state => {
+    const p = await stoppedChildFixture(state), checks = p.verifications;
+    expect((await acquireSharedTask({ ...p, candidate: { ...p.next, paths: p.child.paths }, operationId: randomUUID() })).kind).toBe('busy');
+    const operationId = randomUUID(), next = await acquireSharedTask({ ...p, candidate: p.next, operationId });
+    expect(next.kind).toBe('owned');
+    expect(p.verifications).toBeGreaterThan(checks);
+    expect((await acquireSharedTask({ ...p, candidate: p.next, operationId })).kind).toBe('owned');
+    const snapshot = await readCoordination(p.target);
+    expect(snapshot.index.active).toHaveLength(3);
+    expect(snapshot.tasks[p.childClaim.taskKey]!.state).toBe(state);
+    expect(snapshot.tasks[p.childClaim.taskKey]!.acceptedScopes).toEqual([]);
+    expect((await transitionSharedTask({ claim: p.childClaim, operationId: randomUUID(), transition: { kind: 'start' } })).kind).toBe('refused');
+    // A new claimed child consumes the freed slot immediately.
+    expect((await acquireSharedTask({ ...p, candidate: { ...p.next, issue: 140, issueNodeId: 'I_140', runId: randomUUID(), paths: ['src/third'] }, operationId: randomUUID() })).kind).toBe('busy');
+    p.setUnconfirmed();
+    expect((await acquireSharedTask({ ...p, candidate: p.next, operationId })).kind).not.toBe('owned');
+});
+
+test('unconfirmed or unavailable stop evidence cannot free a child slot', async () => {
+    for (const kind of ['physical', 'receipt', 'generation', 'missing'] as const) {
+        const p = await stoppedChildFixture();
+        if (kind === 'physical') p.setUnconfirmed();
+        if (kind === 'receipt') p.target.verifyEvidence = async () => { throw Error('immutable stop evidence unavailable'); };
+        if (kind === 'generation' || kind === 'missing') {
+            const snapshot = await readCoordination(p.target), task = snapshot.tasks[p.childClaim.taskKey]!;
+            task.stopProof = kind === 'missing' ? null : { ...p.stopProof, generation: 2 };
+            await p.target.provider.commit(p.target, { branchId: snapshot.branchId, expectedHeadOid: snapshot.head, files: { ['coordination/tasks/' + task.taskKey + '.json']: canonical(task) }, operationId: randomUUID() });
+        }
+        expect(await acquireSharedTask({ ...p, candidate: p.next, operationId: randomUUID() })).toMatchObject({ kind: 'busy', reason: 'parent child capacity busy' });
+    }
+});
+
+async function pendingEffectFixture(kind: 'telemetry-push' | 'handback', state: 'prepared' | 'ambiguous' = 'prepared') {
+    const f = await fixture(), owned = await acquireSharedTask({ ...f, operationId: randomUUID() });
+    if (owned.kind !== 'owned') throw Error('claim');
+    const qualification = await publishRecoveryReceipt({ claim: owned.claim, operationId: randomUUID(), payload: { schemaVersion: 2, kind: 'execution-qualification', harness: 'codex', harnessVersion: 'fixture', model: 'model', effort: 'high', accountRef: 'account', configurationDigest: d, candidateSha: root, validationIds: ['137-T4/check/' + d], managedKinds: ['checkpoint-push', 'handback', 'evidence', 'telemetry-push'], unmanagedDenied: true, result: 'qualified' } });
+    const effectId = randomUUID(), target = kind === 'telemetry-push' ? { kind: 'telemetry' as const, destinationRepositoryId: 'R_stats', destinationPath: 'stats/events.jsonl', eventId: randomUUID(), batchId: randomUUID() } : { kind: 'issue-comment' as const, repositoryId: 'R_app', issueNodeId: 'I_137', commentId: null, markerId: 'handback' };
+    const intent = await publishRecoveryReceipt({ claim: owned.claim, operationId: randomUUID(), payload: { schemaVersion: 2, kind: 'effect-intent', effectId, runId: owned.claim.runId, generation: 1, approvalBindings: f.candidate.approvalBindings, effectKind: kind, target, payloadDigest: d, result: 'prepared', observedRemoteId: null, observedDigest: null, reasonCode: null } });
+    const checkpoint = { schemaVersion: 1 as const, id: randomUUID(), repo: 'acme/app', repositoryId: 'R_app', branch: 'task/137', baseSha: root, headSha: root, treeSha: root, scopeDigest: d, runId: owned.claim.runId, publishedAt: new Date().toISOString() };
+    const recovery: RecoveryEnvelope = { schemaVersion: 2, taskKey: owned.claim.taskKey, runId: owned.claim.runId, generation: 1, scopeDigest: d, approvalDigest: d, approvalBindings: f.candidate.approvalBindings, recordBinding: null, execution: { providerMode: 'subscription', harness: 'codex', harnessVersion: 'fixture', model: 'model', effort: 'high', accountRef: 'account', qualification: qualification.reference }, checkpoint, completed: [], children: [], joins: [], effects: [{ operationId: effectId, runId: owned.claim.runId, generation: 1, kind, target, payloadDigest: d, state: 'prepared', intent: intent.reference, outcome: null }], remoteEffectCoverage: { kind: 'qualified-managed-only', qualification: qualification.reference } };
+    expect((await transitionSharedTask({ claim: owned.claim, operationId: randomUUID(), transition: { kind: 'checkpoint', checkpoint, recovery } })).kind).toBe('owned');
+    if (state === 'ambiguous') { await beginManagedEffect({ claim: owned.claim, effectId, operationId: randomUUID() }); recovery.effects[0]!.state = state; }
+    const stopProof = { kind: 'operator-confirmed' as const, machineId: f.machine.id, installationId: f.machine.installationId, sessionId: f.session.sessionId, hostBindingDigest: d, bootIdDigest: d, runIds: [owned.claim.runId], generation: 1, observedAt: new Date().toISOString(), evidenceRef: f.candidate.approvalBindings[0]!.source };
+    return { ...f, claim: owned.claim, recovery, stopProof, effectId };
+}
+
+test.each(['prepared', 'ambiguous'] as const)('typed %s telemetry remains pending through verified transfer while code/control effects block', async state => {
+    for (const kind of ['telemetry-push', 'handback'] as const) {
+        const p = await pendingEffectFixture(kind, state);
+        const machine = { ...p.machine, id: 'other', installationId: randomUUID(), hostBindingDigest: 'a'.repeat(64) }, session = { ...p.session, machineId: 'other', installationId: machine.installationId, hostBindingDigest: machine.hostBindingDigest, sessionId: randomUUID() };
+        const transferred = await transitionSharedTask({ claim: p.claim, operationId: randomUUID(), transition: { kind: 'handoff', machine, session, candidate: p.candidate, stopProof: p.stopProof, recovery: p.recovery } });
+        expect(transferred.kind).toBe(kind === 'telemetry-push' ? 'owned' : 'refused');
+        if (transferred.kind === 'owned') {
+            expect((await readCoordination(p.target)).tasks[p.claim.taskKey]!.recovery!.effects).toEqual(p.recovery.effects);
+            await expect(verifyManagedEffect(p.claim, p.effectId)).rejects.toThrow('current owner');
+        }
+    }
+});
+
+test.each(['prepared', 'ambiguous'] as const)('reconciled %s telemetry does not block accepted completion and its exact history survives', async state => {
+    const p = await pendingEffectFixture('telemetry-push', state);
+    const reconciliation = await publishRecoveryReceipt({ claim: p.claim, operationId: randomUUID(), payload: { schemaVersion: 2, kind: 'effect-reconciliation', runId: p.claim.runId, scopeDigest: d, approvalBindings: p.candidate.approvalBindings, allowedActionIds: [], checkedEffectIds: [], inspector: { kind: 'authorized-operator', identityRef: 'fixture-inspector' }, result: 'complete', reasonCode: 'fixture-inspected' } });
+    p.recovery.remoteEffectCoverage = { kind: 'reconciled', evidence: reconciliation.reference };
+    expect((await transitionSharedTask({ claim: p.claim, operationId: randomUUID(), transition: { kind: 'recovery', recovery: p.recovery } })).kind).toBe('owned');
+    const accepted = await publishRecoveryReceipt({ claim: p.claim, operationId: randomUUID(), payload: { schemaVersion: 2, kind: 'acceptance', taskId: '137-T1', runId: p.claim.runId, sourceSha: root, scopeDigest: d, validationId: '137-T1/check/' + d, commandDigest: d, result: 'passed', acceptedScope: { schemaVersion: 2, repo: p.candidate.repo, issue: p.candidate.issue, artifacts: [{ repo: p.candidate.repo, issue: p.candidate.issue, kind: 'brief', artifactId: 'I_137', rev: 1, digest: d }], approvalBindings: p.candidate.approvalBindings, approvedTaskIds: p.candidate.approvedTaskIds, completedTaskIds: p.candidate.approvedTaskIds, parentRepo: p.candidate.repo, parentIssue: 133, parentBefore: root, parentAfter: root, acceptedAt: new Date().toISOString() } } });
+    const complete = await transitionSharedTask({ claim: p.claim, operationId: randomUUID(), transition: { kind: 'complete', stopProof: p.stopProof, acceptedScope: accepted.reference } });
+    expect(complete.kind).toBe('owned');
+    if (complete.kind !== 'owned') throw Error('completion');
+    const raw = await p.target.provider.read(p.target, complete.claim.stateCommit, 'coordination/tasks/' + p.claim.taskKey + '.json');
+    expect(JSON.parse(raw!).recovery.effects).toEqual(p.recovery.effects);
+    expect(JSON.parse(raw!).state).toBe('completed');
+    expect((await readCoordination(p.target)).index.active).toEqual([]);
+});
+
+test('reporting exception preserves unmanaged coverage, code reconciliation and telemetry intent validation', async () => {
+    const p = await pendingEffectFixture('telemetry-push');
+    for (const effects of [[{ ...p.recovery.effects[0]!, payloadDigest: 'e'.repeat(64) }], [{ ...p.recovery.effects[0]!, target: { kind: 'telemetry' as const, destinationRepositoryId: 'R_other', destinationPath: 'stats/other.jsonl', eventId: randomUUID(), batchId: randomUUID() } }]]) {
+        expect((await transitionSharedTask({ claim: p.claim, operationId: randomUUID(), transition: { kind: 'recovery', recovery: { ...p.recovery, effects } } })).kind).toBe('refused');
+    }
+    p.recovery.remoteEffectCoverage = { kind: 'unmanaged-possible', reasonCode: 'vendor-unknown' };
+    expect((await transitionSharedTask({ claim: p.claim, operationId: randomUUID(), transition: { kind: 'recovery', recovery: p.recovery } })).kind).toBe('owned');
+    expect(await transitionSharedTask({ claim: p.claim, operationId: randomUUID(), transition: { kind: 'complete', stopProof: p.stopProof, acceptedScope: p.recovery.execution.qualification as any } })).toMatchObject({ kind: 'refused', reason: 'unmanaged remote effects possible; recovery blocked' });
+    const code = await pendingEffectFixture('handback');
+    const reconciliation = await publishRecoveryReceipt({ claim: code.claim, operationId: randomUUID(), payload: { schemaVersion: 2, kind: 'effect-reconciliation', runId: code.claim.runId, scopeDigest: d, approvalBindings: code.candidate.approvalBindings, allowedActionIds: [], checkedEffectIds: [], inspector: { kind: 'authorized-operator', identityRef: 'fixture-inspector' }, result: 'complete', reasonCode: 'fixture-inspected' } });
+    code.recovery.remoteEffectCoverage = { kind: 'reconciled', evidence: reconciliation.reference };
+    expect(await transitionSharedTask({ claim: code.claim, operationId: randomUUID(), transition: { kind: 'recovery', recovery: code.recovery } })).toMatchObject({ kind: 'refused', reason: 'incomplete effect reconciliation' });
+});
+
+test('telemetry kind on a code/control target does not obtain the reporting exemption', async () => {
+    const p = await pendingEffectFixture('telemetry-push'), effectId = randomUUID();
+    const target = { kind: 'issue-comment' as const, repositoryId: 'R_app', issueNodeId: 'I_137', commentId: null, markerId: 'not-reporting' };
+    const intent = await publishRecoveryReceipt({ claim: p.claim, operationId: randomUUID(), payload: { schemaVersion: 2, kind: 'effect-intent', effectId, runId: p.claim.runId, generation: 1, approvalBindings: p.candidate.approvalBindings, effectKind: 'telemetry-push', target, payloadDigest: d, result: 'prepared', observedRemoteId: null, observedDigest: null, reasonCode: null } });
+    p.recovery.effects.push({ operationId: effectId, runId: p.claim.runId, generation: 1, kind: 'telemetry-push', target, payloadDigest: d, state: 'prepared', intent: intent.reference, outcome: null });
+    expect((await transitionSharedTask({ claim: p.claim, operationId: randomUUID(), transition: { kind: 'recovery', recovery: p.recovery } })).kind).toBe('owned');
+    expect(await transitionSharedTask({ claim: p.claim, operationId: randomUUID(), transition: { kind: 'complete', stopProof: p.stopProof, acceptedScope: p.recovery.execution.qualification as any } })).toMatchObject({ kind: 'refused', reason: 'unresolved remote effects retain ownership' });
+});

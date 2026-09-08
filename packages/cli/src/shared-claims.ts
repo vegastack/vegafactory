@@ -775,11 +775,29 @@ async function verifyChildAdmission(snapshot: CoordinationSnapshot, child: TaskR
         throw Error('approved parent child limit must be an integer from 1 to 3');
     return result.maxChildren;
 }
+async function occupiedChildSlots(snapshot: CoordinationSnapshot, rows: Summary[], target: CoordinationTarget): Promise<Summary[]> {
+    const occupied: Summary[] = [];
+    for (const row of rows) {
+        const task = snapshot.tasks[row.taskKey];
+        if (task && ['stopped', 'blocked'].includes(task.state) && task.stopProof) {
+            try {
+                // Revalidate physical termination through the real controller, not just
+                // receipt shape. Failure retains capacity and every resource reservation.
+                await bounded(target.verifyTransition(structuredClone(task), { kind: 'stop', stopProof: structuredClone(task.stopProof) }));
+                await bounded(verifyStop(target, task, task.stopProof));
+                continue;
+            } catch { /* Unknown termination still occupies a vendor-process slot. */ }
+        }
+        occupied.push(row);
+    }
+    return occupied;
+}
 async function verifyAdmissionReadback(snapshot: CoordinationSnapshot, t: TaskRecord, type: string, target: CoordinationTarget) {
     if (t.parentTaskKey === null || !['acquire', 'start', 'handoff'].includes(type)) return;
     if (!['claimed', 'running'].includes(t.state)) throw Error('child admission is no longer executable');
     const maxChildren = await verifyChildAdmission(snapshot, t, target);
-    if (snapshot.index.active.filter(row => row.parentTaskKey === t.parentTaskKey).length > maxChildren!)
+    const occupied = await occupiedChildSlots(snapshot, snapshot.index.active.filter(row => row.parentTaskKey === t.parentTaskKey), target);
+    if (occupied.length > maxChildren!)
         throw Error('parent child capacity changed before acknowledgment');
 }
 async function reserve(snapshot: CoordinationSnapshot, t: TaskRecord, machine: EffectiveMachine, session: MachineSession, target: CoordinationTarget, replace = false) {
@@ -804,9 +822,10 @@ async function reserve(snapshot: CoordinationSnapshot, t: TaskRecord, machine: E
     if (other.filter(x => x.machineId === machine.id && x.parentTaskKey === null).length >= machine.defaults.maxRuns && t.parentTaskKey === null)
         throw Error('machine at maxRuns');
     const maxChildren = await verifyChildAdmission(snapshot, t, target);
-    if (t.parentTaskKey !== null && other.filter(x => x.parentTaskKey === t.parentTaskKey).length >= maxChildren!)
+    const occupied = t.parentTaskKey === null ? [] : await occupiedChildSlots(snapshot, other.filter(x => x.parentTaskKey !== null && (x.parentTaskKey === t.parentTaskKey || x.machineId === machine.id)), target);
+    if (t.parentTaskKey !== null && occupied.filter(x => x.parentTaskKey === t.parentTaskKey).length >= maxChildren!)
         throw Error('parent child capacity busy');
-    if (t.parentTaskKey !== null && other.filter(x => x.machineId === machine.id && x.parentTaskKey !== null).length >= machine.defaults.childConcurrent)
+    if (t.parentTaskKey !== null && occupied.filter(x => x.machineId === machine.id).length >= machine.defaults.childConcurrent)
         throw Error('machine child capacity busy');
     // Only the verified coordinator pair overlaps; siblings and foreign resources still conflict.
     if (other.some(x => x.taskKey !== t.parentTaskKey && conflicting(x, summaryOf(t))))
@@ -1000,6 +1019,8 @@ async function validateRemoteRecovery(target: CoordinationTarget, e: RecoveryEnv
                 throw Error('effect outcome differs from prepared intent');
         }
     }
+    // Reporting backlog remains validated and retained; it is not code/control work.
+    const blockingEffects = e.effects.filter(x => x.kind !== 'telemetry-push' || x.target.kind !== 'telemetry');
     const coverage = e.remoteEffectCoverage;
     if (coverage.kind === 'qualified-managed-only') {
         const p = await resolveEvidence(target, coverage.qualification);
@@ -1008,12 +1029,12 @@ async function validateRemoteRecovery(target: CoordinationTarget, e: RecoveryEnv
     }
     else if (coverage.kind === 'reconciled') {
         const p = await resolveEvidence(target, coverage.evidence);
-        if (!p || p.kind !== 'effect-reconciliation' || p.result !== 'complete' || p.runId !== e.runId || p.scopeDigest !== e.scopeDigest || canonical(p.approvalBindings) !== canonical(e.approvalBindings) || e.effects.some(x => !p.checkedEffectIds.includes(x.operationId)))
+        if (!p || p.kind !== 'effect-reconciliation' || p.result !== 'complete' || p.runId !== e.runId || p.scopeDigest !== e.scopeDigest || canonical(p.approvalBindings) !== canonical(e.approvalBindings) || blockingEffects.some(x => !p.checkedEffectIds.includes(x.operationId)))
             throw Error('incomplete effect reconciliation');
     }
     else if (requireCoverage)
         throw Error('unmanaged remote effects possible; recovery blocked');
-    if (requireCoverage && e.effects.some(x => x.state === 'prepared' || x.state === 'ambiguous'))
+    if (requireCoverage && blockingEffects.some(x => x.state === 'prepared' || x.state === 'ambiguous'))
         throw Error('unresolved remote effects retain ownership');
 }
 async function verifyStop(target: CoordinationTarget, t: TaskRecord, proof: StopProof) {

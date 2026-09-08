@@ -4,13 +4,13 @@ import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { canonical, taskKey } from '../src/shared-claims.ts';
-for (const scenario of ['same-task', 'independent', 'last-child-slot'])
+for (const scenario of ['same-task', 'independent', 'last-child-slot', 'last-freed-child-slot'])
     test(`actual separate-home claimants: ${scenario}`, async () => {
         const independent = scenario === 'independent';
         const dir = await mkdtemp(join(tmpdir(), 'vf-shared-process-')), root = '1'.repeat(40), installation = '11111111-1111-4111-8111-111111111111';
         let head = root, sequence = 1, commitCalls = 0;
         const versions = new Map<string, Record<string, string>>([[root, { 'coordination/index.json': canonical({ schemaVersion: 1, installationId: installation, revision: 0, active: [], machines: [] }) }]]);
-        const parentBinding = scenario === 'last-child-slot' ? { taskKey: taskKey('github.com', 'R_app', 'I_parent'), runId: randomUUID(), generation: 1, ownerToken: randomUUID(), machineId: 'coordinator', installationId: randomUUID(), sessionId: randomUUID() } : null;
+        const parentBinding = scenario.startsWith('last-') ? { taskKey: taskKey('github.com', 'R_app', 'I_parent'), runId: randomUUID(), generation: 1, ownerToken: randomUUID(), machineId: 'coordinator', installationId: randomUUID(), sessionId: randomUUID() } : null;
         if (parentBinding) {
             const { taskKey: key, ...identity } = parentBinding;
             const parent = { schemaVersion: 1, taskKey: key, ...identity, host: 'github.com', repo: 'acme/app', issue: 133, repositoryNodeId: 'R_app', issueNodeId: 'I_parent', scopeDigest: 'd'.repeat(64), approvalDigest: 'd'.repeat(64), approvalBindings: [{ approvalId: 'approved', source: { kind: 'github-comment', repositoryId: 'R_app', issueNodeId: 'I_parent', commentId: '123', bodySha256: 'd'.repeat(64) } }], stage: 'coordinate', state: 'running', paths: [], resources: [], independent: false, parentTaskKey: null, parentBinding: null, approvedTaskIds: ['133-T1'], checkpoint: null, stopProof: null, unresolvedEffects: [], recovery: null, acceptedScopes: [] };
@@ -20,6 +20,18 @@ for (const scenario of ['same-task', 'independent', 'last-child-slot'])
                 ['coordination/tasks/' + key + '.json']: canonical(parent),
                 'coordination/machines/coordinator.json': canonical({ schemaVersion: 1, machineId: parent.machineId, installationId: parent.installationId, sessionId: parent.sessionId, hostBindingDigest: 'c'.repeat(64), bootIdDigest: 'd'.repeat(64), observedAt: new Date().toISOString(), activeTaskKeys: [key] }),
             });
+        }
+        if (scenario === 'last-freed-child-slot' && parentBinding) {
+            const state = versions.get(root)!, parent = JSON.parse(state['coordination/tasks/' + parentBinding.taskKey + '.json']!);
+            const key = taskKey('github.com', 'R_app', 'I_stopped'), runId = randomUUID();
+            const child = { ...parent, taskKey: key, issue: 136, issueNodeId: 'I_stopped', runId, ownerToken: randomUUID(), parentTaskKey: parentBinding.taskKey, parentBinding, state: 'stopped', paths: ['src/stopped'], independent: true, stopProof: { kind: 'operator-confirmed', machineId: parent.machineId, installationId: parent.installationId, sessionId: parent.sessionId, hostBindingDigest: 'c'.repeat(64), bootIdDigest: 'd'.repeat(64), runIds: [runId], generation: 1, observedAt: new Date().toISOString(), evidenceRef: parent.approvalBindings[0].source } };
+            const index = JSON.parse(state['coordination/index.json']!);
+            index.active.push({ taskKey: key, repo: child.repo, issueNodeId: child.issueNodeId, machineId: child.machineId, parentTaskKey: parentBinding.taskKey, paths: child.paths, resources: [], independent: true });
+            const machine = JSON.parse(state['coordination/machines/coordinator.json']!);
+            machine.activeTaskKeys.push(key);
+            state['coordination/index.json'] = canonical(index);
+            state['coordination/tasks/' + key + '.json'] = canonical(child);
+            state['coordination/machines/coordinator.json'] = canonical(machine);
         }
         const server = Bun.serve({ hostname: '127.0.0.1', port: 0, async fetch(request) {
                 const { method, args } = await request.json() as {
@@ -70,6 +82,7 @@ const result=await acquireSharedTask({machine,session,candidate,operationId:rand
             expect(results.filter(r => JSON.parse(r.out).kind === 'owned'), JSON.stringify(results)).toHaveLength(independent ? 2 : 1);
             expect((await readFile(join(dir, 'sentinel'), 'utf8')).trim().split('\n')).toHaveLength(independent ? 2 : 1);
             expect(commitCalls).toBeGreaterThanOrEqual(independent ? 2 : 1);
+            if (scenario === 'last-freed-child-slot') expect(JSON.parse(versions.get(head)!['coordination/index.json']!).active).toHaveLength(3);
         }
         finally {
             server.stop(true);
