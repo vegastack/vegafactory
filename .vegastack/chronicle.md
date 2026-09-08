@@ -2,6 +2,16 @@
 
 The project's story, newest first: what got built, why, and how it went — for the operator's future recall. Format home: the dev-chronicle skill.
 
+## 08-09-2026 — Workflow labels have one meaning ([#141](https://github.com/vegastack/vegafactory/issues/141))
+
+- **What:** An explicit semantic label map now drives dispatch, preflight, reclaim, status and board mirroring. The dashboard joins CLI snapshots to live issue identities and labels; conflicts and stale reads remain visible.
+- **Why:** Positional legacy parsing and separate default-label filters disagreed, allowing mixed correction states and hiding custom queues.
+- **How it went:** Focused resolver and consumer fixtures exercise complete legacy profiles, custom mappings, conflicts and snapshot freshness. Evaluation, assembled checks, packed-bundle acceptance, independent review and live board qualification remain open under source-first sequencing.
+- **Changed:** Semantic policy compiler · standalone helper copies · CLI snapshot bridge · configured board options · explicit migration preview.
+- **Decisions:** none.
+
+— approved by (kmanojkumar) · built by codex · branch codex/productionization-133
+
 ## 08-09-2026 — Policy refresh preserves the last valid state ([#147](https://github.com/vegastack/vegafactory/issues/147))
 
 - **What:** Sync validates immutable per-repository snapshots before one guarded settings publication. Status and dashboard read their source identity and validation age; failed refreshes keep the last valid state and operator edits. Restore selects inactive backup content until a successful fresh sync.

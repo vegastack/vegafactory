@@ -24,6 +24,7 @@ branch: <type>/<issue>-<slug>   # type: feat | fix | docs | chore | refactor —
 worktree-include: {{files}}   # space-separated gitignored files a fresh checkout needs (local env and secret files) | none — copied into every new worktree
 worktree-retention: 14d     # how long a parked worktree survives with no session, measured from the later of its last commit and its last ledger edit; prune pushes first and never removes uncommitted or unpushed work
 labels: needs-operator needs-plan ready working for-operator risky research quick-build full-plan epic   # epic label marks map parents only where the org has no native Epic issue type
+workflow-labels: {"needsOperator":"needs-operator","needsPlan":"needs-plan","ready":"ready","working":"working","forOperator":"for-operator"}   # custom names need explicit mapping; if labels: remains, both must agree
 board: none                 # project board number the five state labels mirror into, one way, or none — .github/workflows/factory-board.yml reads this line and a card dragged on the board is cosmetic until the next label change
 issue-types: {{Feature=feat · Bug=fix · Task=docs,chore,refactor,research | none}}   # native org issue types dev-setup detected; dev-intake sets one at creation. none = personal repo, or an org that defines none
 issue-fields: {{Priority=<options> default <option> · Effort=<options> default lowest for research/quick-build, middle for full-plan | none}}   # org issue fields dev-setup detected; dev-intake asks for both and writes them at creation. none = org defines none

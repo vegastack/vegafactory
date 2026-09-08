@@ -233,6 +233,7 @@ export async function runStatusCli(argv: string[], home: string, deps?: Partial<
     const observedAt = new Date().toISOString()
     try {
       const parsed = await boundedGhJson(gh, ['api', '-X', 'GET', 'search/issues', '-f', `q=repo:${entry.repo} is:issue is:open`, '-f', 'per_page=100', '--cache', '0'], readBudget()) as { items?: { node_id?: string; number: number; title: string; labels?: { name: string }[]; assignees?: { login: string }[]; updated_at?: string }[] }
+      if (parsed.items?.some(row => !Number.isSafeInteger(row.number) || row.number < 1 || typeof row.node_id !== 'string' || !row.node_id || typeof row.title !== 'string' || !Array.isArray(row.labels) || row.labels.some(label => typeof label?.name !== 'string'))) throw new Error('GitHub returned unreadable workflow issue identity or labels')
       board = (parsed.items ?? []).map(row => ({
         number: row.number,
         nodeId: row.node_id,

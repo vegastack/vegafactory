@@ -17,7 +17,7 @@ function runBlock(script: string, env: Record<string, string>, ghVersion = 'gh v
   const ghLog = join(dir, 'gh.log')
   writeFileSync(
     join(bin, 'gh'),
-    `#!/bin/sh\nif [ "$1" = "--version" ]; then echo "${ghVersion}"; exit 0; fi\nif [ -n "\${FAIL_FIRST:-}" ]; then : > "${dir}/failfirst"; fi\nprintf '%s\\n' "$*" >> "${ghLog}"\nif [ -n "\${FAIL_ALWAYS:-}" ]; then echo "GraphQL: Resource not accessible by integration (updateProjectV2ItemFieldValue)" >&2; exit 1; fi\nif [ -f "${dir}/failfirst" ] && ! grep -q item-add "${ghLog}"; then echo "https://github.com/vegastack/vegafactory/issues/1 is not an item in project 7; add it first with \\\`gh project item-add\\\`" >&2; exit 1; fi\nexit 0\n`,
+    `#!/bin/sh\nif [ "$2" = "field-list" ]; then echo '{"fields":[{"name":"Status","options":[{"name":"ready"},{"name":"Go"}]}]}'; exit 0; fi\nif [ "$1" = "--version" ]; then echo "${ghVersion}"; exit 0; fi\nif [ -n "\${FAIL_FIRST:-}" ]; then : > "${dir}/failfirst"; fi\nprintf '%s\\n' "$*" >> "${ghLog}"\nif [ -n "\${FAIL_ALWAYS:-}" ]; then echo "GraphQL: Resource not accessible by integration (updateProjectV2ItemFieldValue)" >&2; exit 1; fi\nif [ -f "${dir}/failfirst" ] && ! grep -q item-add "${ghLog}"; then echo "https://github.com/vegastack/vegafactory/issues/1 is not an item in project 7; add it first with \\\`gh project item-add\\\`" >&2; exit 1; fi\nexit 0\n`,
   )
   chmodSync(join(bin, 'gh'), 0o755)
   const file = join(dir, 'block.sh')
@@ -25,7 +25,7 @@ function runBlock(script: string, env: Record<string, string>, ghVersion = 'gh v
   const out = join(dir, 'outputs')
   writeFileSync(out, '')
   const proc = Bun.spawnSync(['sh', file], {
-    env: { ...process.env, PATH: `${bin}:${process.env.PATH}`, GITHUB_OUTPUT: out, VSK_DIR: dir, ...env },
+    env: { ...process.env, POLICY_MODULE: join(skillRoot, 'scripts/effective-policy.mjs'), PATH: `${bin}:${process.env.PATH}`, GITHUB_OUTPUT: out, VSK_DIR: dir, ...env, ...(env.LABELS ? { LABELS: JSON.stringify(env.LABELS.split(',')) } : {}) },
   })
   return {
     code: proc.exitCode,
@@ -111,14 +111,14 @@ describe('factory-board template — resolve step', () => {
     const r = runBlock(resolve(), { PROFILE: profile('', 'board: 7'), APP_ID: '1', LABELS: 'risky,full-plan', STATE_LABELS: STATES })
     expect(r.code).toBe(0)
     expect(r.outputs).toContain('decision=skip')
-    expect(r.stdout).toContain('no state label')
+    expect(r.stdout).toContain('no known workflow state label')
   })
 
   test('two state labels are ambiguous and skipped', () => {
     const r = runBlock(resolve(), { PROFILE: profile('', 'board: 7'), APP_ID: '1', LABELS: 'ready,working', STATE_LABELS: STATES })
     expect(r.code).toBe(0)
     expect(r.outputs).toContain('decision=skip')
-    expect(r.stdout).toContain('ambiguous, skipped')
+    expect(r.stdout).toContain('conflicting state labels')
   })
 })
 
@@ -190,7 +190,7 @@ describe("this repo's own factory-board workflow", () => {
       .slice(marker + '\n# ---\n'.length)
       .replaceAll('{{runs-on}}', '[self-hosted, vsk-runners-mac]')
       .replaceAll('{{profile}}', '.vegastack/dev.md')
-      .replaceAll('{{state-labels}}', 'needs-operator,needs-plan,ready,working,for-operator')
+      .replaceAll('{{product-revision}}', '280f379cf5e955dd758b77566bf309c7b6ff5b6b')
     expect(live).toBe(rendered)
   })
 
@@ -198,4 +198,31 @@ describe("this repo's own factory-board workflow", () => {
     const profileText = readFileSync(join(skillRoot, '../../../.vegastack/dev.md'), 'utf8')
     expect(profileText).toMatch(/^board: none\b/m)
   })
+})
+
+
+test('141 board compiler resolves custom map without CSV positional interpretation', () => {
+  const map = { needsOperator: 'Decision', needsPlan: 'Plan', ready: 'Go', working: 'Build', forOperator: 'Review' }
+  const r = runBlock(resolve(), { PROFILE: profile('', 'board: 7\nworkflow-labels: ' + JSON.stringify(map)), APP_ID: '1', LABELS: 'Go,full-plan' })
+  expect(r.code).toBe(0)
+  expect(r.outputs).toContain('status=Go')
+  const conflict = runBlock(resolve(), { PROFILE: profile('', 'board: 7\nworkflow-labels: ' + JSON.stringify(map)), APP_ID: '1', LABELS: 'Go,Decision' })
+  expect(conflict.outputs).toContain('decision=skip')
+  expect(conflict.ghLog).toBe('')
+})
+
+
+test('141 board preserves complete actual labels, CSV and reordered defaults', () => {
+  const actual = /^labels:\s*([^#\n]+)/m.exec(readFileSync(join(skillRoot, '../../../.vegastack/dev.md'), 'utf8'))![1]!.trim()
+  for (const labels of [actual, actual.split(/\s+/).join(','), actual.split(/\s+/).reverse().join(' ')]) {
+    const result = runBlock(resolve(), { PROFILE: profile('', 'board: 7\nlabels: ' + labels), APP_ID: '1', LABELS: 'ready,full-plan' })
+    expect(result.outputs).toContain('status=ready')
+  }
+})
+
+test('141 missing configured board option refuses before item mutations', () => {
+  const result = runBlock(step('mirror').run as string, { BOARD: '7', OWNER: 'vegastack', STATUS: 'Missing', ISSUE_URL: 'https://github.com/vegastack/vegafactory/issues/1' })
+  expect(result.code).toBe(1)
+  expect(result.stdout).toContain('configured Status option unavailable')
+  expect(result.ghLog).toBe('')
 })
