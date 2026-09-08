@@ -1,4 +1,4 @@
-name: VegaStack Factory token
+name: VegaFactory token
 description: Exchange this job's GitHub OIDC token for repository issues and organization-wide project access (1 hour).
 author: VegaStack
 
@@ -19,7 +19,7 @@ inputs:
   endpoint:
     description: The broker endpoint to exchange the OIDC token at.
     required: false
-    default: https://factory-token.vegastack.com/token
+    default: https://vegafactory-token.vegastack.com/token
   audience:
     description: The OIDC audience the broker verifies.
     required: false

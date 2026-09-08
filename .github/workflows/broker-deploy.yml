@@ -1,42 +1,79 @@
 name: Broker deploy
 
 on:
-  push:
-    branches: [main]
-    paths:
-      - "packages/broker/**"
-      - ".github/workflows/broker-deploy.yml"
   workflow_dispatch:
     inputs:
       environment:
-        description: "Which broker environment to deploy"
+        description: "Reviewed broker environment (both share App authority)"
         type: choice
-        options:
-          - preview
-          - production
-        default: preview
+        options: [preview, production]
+        required: true
+      reviewed_ref:
+        description: "Full reviewed 40-character commit SHA already merged to main"
+        type: string
+        required: true
+      reviewed_digest:
+        description: "Reviewed SHA-256 of the dry-run Worker index.js (same bytes for promotion)"
+        type: string
+        required: true
 
 permissions:
   contents: read
+  actions: read
 
 concurrency:
-  group: broker-deploy-${{ github.event.inputs.environment || 'preview' }}
+  group: broker-deploy-${{ inputs.environment }}
   cancel-in-progress: false
 
 jobs:
   deploy:
-    name: deploy (${{ github.event.inputs.environment || 'preview' }})
-    # Self-hosted while GitHub-hosted runners are billing-locked (#57): on
-    # ubuntu-latest every job died in ~3s having recorded ZERO steps, because the
-    # runner never picked it up. Revert to `ubuntu-latest` together with ci.yml
-    # and release.yml's --no-provenance flag, never one without the other.
+    name: deploy (${{ inputs.environment }})
+    if: github.ref == 'refs/heads/main'
+    # Keep the current account runners; provisioning/migration is a separate operation.
     runs-on: [self-hosted, vsk-runners-mac]
-    # `preview` on a merge to main is `preview: auto`; `production` carries a
-    # required reviewer on the GitHub Environment, which is what makes
-    # `production: ask` mechanical rather than a promise in a document.
-    environment: ${{ github.event.inputs.environment || 'preview' }}
+    # BOTH environments must have required reviewers and a main-only branch policy.
+    # Naming an environment here does not provision or prove those live settings.
+    environment: ${{ inputs.environment }}
+    env:
+      BROKER_ENVIRONMENT: ${{ inputs.environment }}
+      REVIEWED_REF: ${{ inputs.reviewed_ref }}
+      REVIEWED_DIGEST: ${{ inputs.reviewed_digest }}
     steps:
+      - name: Validate dispatch and live protection
+        uses: actions/github-script@v8
+        with:
+          script: |
+            const { BROKER_ENVIRONMENT, REVIEWED_REF, REVIEWED_DIGEST } = process.env
+            if (!['preview', 'production'].includes(BROKER_ENVIRONMENT) ||
+                !/^[0-9a-f]{40}$/.test(REVIEWED_REF) || !/^[0-9a-f]{64}$/.test(REVIEWED_DIGEST)) {
+              throw new Error('An environment, full reviewed SHA and SHA-256 digest are required')
+            }
+            const params = { ...context.repo, environment_name: BROKER_ENVIRONMENT }
+            const { data } = await github.rest.repos.getEnvironment(params)
+            const review = data.protection_rules?.find(rule => rule.type === 'required_reviewers')
+            if (!review?.reviewers?.length || !data.deployment_branch_policy?.custom_branch_policies ||
+                data.deployment_branch_policy.protected_branches) {
+              throw new Error('Required reviewers and a custom main-only branch policy must be configured')
+            }
+            const policies = await github.paginate(github.rest.repos.listDeploymentBranchPolicies, params)
+            if (policies.length !== 1 || policies[0].name !== 'main' || policies[0].type !== 'branch') {
+              throw new Error('Only the main branch may deploy this same-App environment')
+            }
+            // This readback does not prove an eligible human is available or an approval happened.
+            // The protected job gate and the operator's live rollout evidence establish those facts.
+
       - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.reviewed_ref }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Verify reviewed source is merged
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$REVIEWED_REF"
+          git merge-base --is-ancestor "$REVIEWED_REF" refs/remotes/origin/main
 
       - uses: oven-sh/setup-bun@v2
         with:
@@ -52,14 +89,38 @@ jobs:
       - name: Check (validate:skill + test + lint + typecheck)
         run: bun run check
 
-      # The deploy guard: no storage binding, the App key only in the Secrets Store
-      # binding, a custom domain rather than a workers.dev origin, and a rate limit
-      # the platform can honour. It exits 2 until the operator fills in the store id.
+      # Empty live store IDs remain a deploy refusal, never substituted with fixture IDs.
       - name: Broker config guard
         run: node packages/broker/scripts/config-check.mjs --json
 
-      - name: Deploy
-        run: bun run --cwd packages/broker deploy:${{ github.event.inputs.environment || 'preview' }}
+      - name: Prepare and verify exact Worker bytes
+        shell: bash
+        run: |
+          set -euo pipefail
+          BROKER_ARTIFACT_DIR="$(mktemp -d "$RUNNER_TEMP/broker-artifact.XXXXXX")"
+          echo "BROKER_ARTIFACT_DIR=$BROKER_ARTIFACT_DIR" >> "$GITHUB_ENV"
+          cd packages/broker
+          bun run wrangler deploy --config wrangler.jsonc --env "$BROKER_ENVIRONMENT" --dry-run --outdir "$BROKER_ARTIFACT_DIR"
+          node --input-type=module - "$BROKER_ARTIFACT_DIR/index.js" <<'JS'
+          import { readFileSync } from 'node:fs'
+          import { createHash } from 'node:crypto'
+          const digest = createHash('sha256').update(readFileSync(process.argv[2])).digest('hex')
+          if (digest !== process.env.REVIEWED_DIGEST) throw new Error('Worker bytes differ from reviewed digest')
+          JS
+
+      - name: Retain reviewed Worker
+        uses: actions/upload-artifact@v4
+        with:
+          name: broker-${{ inputs.environment }}-${{ inputs.reviewed_ref }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ env.BROKER_ARTIFACT_DIR }}/index.js
+          if-no-files-found: error
+
+      - name: Deploy verified bytes without rebundling
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd packages/broker
+          bun run wrangler deploy "$BROKER_ARTIFACT_DIR/index.js" --config wrangler.jsonc --env "$BROKER_ENVIRONMENT" --no-bundle
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}

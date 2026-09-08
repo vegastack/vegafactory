@@ -24,7 +24,7 @@
           "simple": { "limit": 30, "period": 60 }
         }
       ],
-      "routes": [{ "pattern": "factory-token.vegastack.dev", "custom_domain": true }],
+      "routes": [{ "pattern": "vegafactory-token.vegastack.dev", "custom_domain": true }],
       "observability": { "enabled": true }
     },
     "production": {
@@ -47,7 +47,7 @@
           "simple": { "limit": 30, "period": 60 }
         }
       ],
-      "routes": [{ "pattern": "factory-token.vegastack.com", "custom_domain": true }],
+      "routes": [{ "pattern": "vegafactory-token.vegastack.com", "custom_domain": true }],
       "observability": { "enabled": true }
     }
   }

@@ -47,17 +47,31 @@ verification does not claim a deployed exchange is ready.
 
 | Fact | Value |
 |---|---|
-| Endpoint | `POST https://factory-token.vegastack.com/token` |
-| Preview endpoint | `POST https://factory-token.vegastack.dev/token` |
+| Endpoint | `POST https://vegafactory-token.vegastack.com/token` |
+| Preview endpoint | `POST https://vegafactory-token.vegastack.dev/token` |
 | Audience | `vegastack-factory` |
 | Auth | `Authorization: Bearer <the job's OIDC token>` |
-| Health probe | `GET https://factory-token.vegastack.com/health` → `{"status":"ok"}`, unauthenticated liveness only; never authenticated readiness |
+| Health probe | `GET https://vegafactory-token.vegastack.com/health` → `{"status":"ok"}`, unauthenticated liveness only; never authenticated readiness |
 | Token lifetime | GitHub's fixed 1 hour; the broker reports `expires_at`, it does not set it |
 
 Request: no body. Identity comes from the verified bearer JWT, never unsigned repository parameters.
 The action’s `audience` input must match the deployment’s `OIDC_AUDIENCE`; both default to
 `vegastack-factory` in preview and production. A GitHub Environment claim does not change the
 audience. An intentionally different deployment audience needs a matching caller configuration.
+
+Both canonical domains retain App `4812956`. Preview has production App authority: both deployments
+require an explicit reviewed dispatch, protected GitHub Environment and a merged source SHA with
+the reviewed Worker digest. These are prepared source defaults, not a claim that either endpoint
+has passed live acceptance. Confirm actual store bindings, account/zone access and an eligible
+operator reviewer under the current self-review rules before enabling deployment; an unavailable
+reviewer blocks rollout. Keep current account runners.
+
+Inventory caller action revisions and explicit endpoint/audience overrides before migration.
+The public action name remains `vegastack/factory-token`; this repository's source change does not
+publish its mirror. Preserve the previous compatible Worker/action/audience pair and deployment ID.
+An existing endpoint is retired only after callers are verified and retirement is explicitly
+approved; no alias is promised. The operator rollout checklist and bounded preview/production
+acceptance live in the broker's repository README. `/health` alone never closes rollout.
 
 Response `200`:
 

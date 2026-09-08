@@ -3,7 +3,7 @@
 **This directory is the source of truth.** The public action lives at `vegastack/factory-token`;
 that repository is a mirror of this directory, and a change lands here first.
 
-Exchange a GitHub Actions OIDC token for a VegaStack Factory token — issues/metadata on one
+Exchange a GitHub Actions OIDC token for a VegaFactory token — issues/metadata on one
 repository, organization-wide project writes, one hour. No private key in your organisation.
 
 ## Use it
@@ -25,7 +25,7 @@ jobs:
 
 | Input | Default | What it is |
 |---|---|---|
-| `endpoint` | `https://factory-token.vegastack.com/token` | The broker endpoint |
+| `endpoint` | `https://vegafactory-token.vegastack.com/token` | The broker endpoint |
 | `audience` | `vegastack-factory` | The OIDC audience the broker verifies |
 
 | Output | What it is |
@@ -61,3 +61,13 @@ and the action masks the token before exposing it.
 `/health` is only liveness, not proof an authenticated exchange works. The limiter provides
 per-location abuse mitigation, not an exact global quota. Use controlled failures/disposable-token
 fixtures for local verification; actual live allow/deny and project reach remain rollout gates.
+
+## Canonical domain migration
+
+The prepared production default is `https://vegafactory-token.vegastack.com/token`; preview is
+`https://vegafactory-token.vegastack.dev/token`. Both keep App `4812956` and audience
+`vegastack-factory`. Preview carries the same App authority and requires reviewed deployment.
+This source edit does not publish the action mirror or qualify either endpoint. Before switching
+callers, record the action revision and endpoint/audience pair, then verify a masked authenticated
+exchange on the separately authorized rollout. Retain the previous compatible Worker/action pair
+for recovery. Retiring an existing endpoint requires caller inventory and explicit authorization.

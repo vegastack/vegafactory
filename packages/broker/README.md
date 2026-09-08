@@ -82,5 +82,89 @@ guard is deterministic, and a JSONC comment makes it block with that sentence.
 Local development reads the App key from `.dev.vars` (see `.dev.vars.example`, and note `.dev.vars`
 is gitignored) under the same binding name production reaches, so no call site changes.
 
-Deploys run from `.github/workflows/broker-deploy.yml`: preview automatically on a merge to main,
-production only by dispatch behind the `production` GitHub Environment's required reviewer.
+## Protected rollout preparation
+
+| Environment | Canonical domain | App ID | OIDC audience |
+|---|---|---|---|
+| Preview | `vegafactory-token.vegastack.dev` | `4812956` | `vegastack-factory` |
+| Production | `vegafactory-token.vegastack.com` | `4812956` | `vegastack-factory` |
+
+Both environments hold the same App authority. Preview needs the same deployment review and
+secret controls as production. The public action repository remains `vegastack/factory-token`;
+its release/mirror is a separate operation, and existing `@v1` callers do not change when this
+source changes. Inventory each caller's action revision, endpoint, audience and installation before
+rollout. Explicitly configured callers need their endpoint updated. Keep an existing endpoint until
+that inventory proves migration and the operator authorizes retirement; this source adds no alias.
+
+The committed empty store IDs are intentional unresolved prerequisites. `config-check.mjs` refuses
+deployment until the actual configured IDs are provided through a separately authorized change.
+It proves configuration shape, canonical domains, App/audience pairing and no storage; it cannot
+prove account/zone access, secret availability, DNS/TLS, installation state or human availability.
+Fixture IDs belong only in tests. Never copy them into deploy configuration.
+
+The dispatch-only workflow requires `environment`, `reviewed_ref` (a full commit SHA merged to
+main), and `reviewed_digest` (SHA-256 of the exact bundled `index.js`). Dispatch the workflow from
+`main`. Both GitHub Environments must have required reviewers and exactly one custom deployment
+branch policy: the branch `main`, with no tag policies. The workflow reads those settings and
+refuses missing protection or unavailable readback. Configure environment-scoped Cloudflare
+credentials before enabling either environment, disable administrator bypass, and verify that the
+operator can actually approve under the configured reviewer/self-review rules. A reviewer entry
+alone does not prove an eligible approver exists; an unavailable reviewer is a live blocker.
+
+Prepare the exact artifact from a clean checkout of the reviewed SHA with frozen dependencies:
+
+```sh
+cd packages/broker
+bun run wrangler deploy --env preview --dry-run --outdir <retained-artifact-directory>
+shasum -a 256 <retained-artifact-directory>/index.js
+```
+
+Review the bundled bytes, action at that source SHA, and both environment config diffs. The
+workflow repeats the dry-run, requires the reviewed digest, retains `index.js`, and deploys those
+bytes with `--no-bundle`. Production must select the same source SHA and digest proven in preview;
+a changed output refuses promotion and requires a new reviewed artifact. Retain the artifact
+before workflow retention expires. A digest is byte identity, not proof of readiness.
+
+Before seeking either deployment word, prepare the command/dispatch inputs and this sanitized
+checklist. Unknown entries stay `unverified`; never replace them with assumed success:
+
+```text
+{environment, domain, appId, audience, artifactDigest,
+ storeBindingPresent, reviewProtection, previousCompatibleDeployment}
+```
+
+Attach the exact Worker/action source SHA, previous compatible action revision and deployment ID,
+route and binding names, config diff, reviewer/self-review readback, run ID and artifact download
+reference. After deployment add the actual Worker version/deployment IDs and masked smoke results.
+Store IDs are configuration identifiers; private keys, OIDC tokens and installation token values
+never enter this inventory, logs, issue comments or retained artifacts.
+
+## Live acceptance and recovery (separate authorization)
+
+Preparation does not complete rollout. After merge and explicit preview authorization, verify
+DNS/TLS, health liveness and a real Actions exchange within ten minutes. Confirm signed repository
+identity, actual token repository reach, permission cap and expiry without logging tokens; include
+an uninstalled caller refusal, controlled limiter/timeout failures and disposable-token revocation.
+Preview is bounded to ten exchanges, fifteen seconds each. A preview failure stops production.
+After separate production authorization, repeat at most six positive/negative exchanges for the
+same artifact and verify existing callers. Local fixtures and `/health` alone cannot pass these gates.
+
+Record a prior compatible Worker deployment, action revision, domains and unchanged audience as
+one rollback pair. Prepare a deployment diff/dry-run and controlled failure rehearsal; an actual
+rollback needs its own authorization. Do not change App identity or revoke its shared key to repair
+a domain migration. Shared-App uninstall/key-loss failures are simulated in controlled transport;
+real disruption is separately authorized maintenance.
+
+Before live acceptance, the operator must name the operational owner and confirm they can locate
+logs, deployment IDs and rollback evidence. Key rotation uses overlap: install the new key in the
+Secrets Store, deploy/review a masked successful exchange, then retire the old key on authorization.
+Emergency uninstall/revoke/disable actions belong to the named owner and affect shared workflows;
+never use them as qualification drills.
+
+Use GitHub notifications and dashboard attention for decisions and unrecoverable failures. Alert on
+attempted-traffic 5xx/exchange-denial spikes and delivery failures; no-success for ten minutes is
+actionable only with verified eligible attempts in that window. An idle pilot stays quiet. A missing
+monitoring signal is a visible monitoring gap. Live qualification must demonstrate idle silence,
+attempted-traffic failure, recovery and notification deduplication. No Slack/email integration or
+synthetic traffic generator is introduced here. Owner, delivery and reviewer evidence remain live
+prerequisites; this preparation does not provision a monitor or claim these checks passed.

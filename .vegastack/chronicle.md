@@ -2,6 +2,16 @@
 
 The project's story, newest first: what got built, why, and how it went — for the operator's future recall. Format home: the dev-chronicle skill.
 
+## 08-09-2026 — Broker deployment requires a reviewed artifact ([#155](https://github.com/vegastack/vegafactory/issues/155))
+
+- **What:** Prepared the two canonical broker domains and an explicit deployment workflow that checks the merged source, Worker digest and protected environment before deploying the retained bundle. The existing App and OIDC audience stay paired across preview and production.
+- **Why:** Preview has the same App authority as production, so a merge alone must not deploy it.
+- **How it went:** All 61 broker tests passed. Preview, production and deployment without rebundling produced identical Worker bytes. The last dry-run exposed a missing explicit Wrangler config path, which is now covered. Both empty live store IDs still refuse deployment; reviewer availability and live exchange evidence remain unverified.
+- **Changed:** Broker/action domain references · explicit reviewed-artifact dispatch · binding/protection guards · rollback and caller migration preparation.
+- **Decisions:** none. Handbook replacements remain proposals. Final assembled checks, skill evaluation, independent review and all live operations are still pending.
+
+— approved by (kmanojkumar) · built by codex · branch codex/productionization-133
+
 ## 08-09-2026 — Reports have an enforced privacy boundary ([#149](https://github.com/vegastack/vegafactory/issues/149))
 
 - **What:** Reports now cross an explicit schema before delivery. Task and account owners stay distinct, local execution identities stay private, and people totals use current repository permissions. Retention uses the same guarded Git writer as delivery and preserves the original delivery evidence.
