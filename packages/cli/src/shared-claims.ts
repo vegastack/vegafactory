@@ -846,6 +846,46 @@ export async function inspectHistoricalCoordinationTask(target: CoordinationTarg
     }
 }
 
+export type HandoffCoordinationTaskInspection = {
+    kind: 'historical-handoff';
+    receipt: OperationReceipt;
+    predecessor: TaskRecord;
+    handedOff: TaskRecord;
+} | { kind: 'invalid-or-unavailable'; reason: string };
+// Handoff receipts carry no recovery evidence payload. Inspect only their pinned
+// ownership transition; callers must independently verify current work authority.
+export async function inspectHandoffCoordinationTask(target: CoordinationTarget, input: {
+    taskKey: string;
+    expected: ParentClaimBinding;
+    evidence: Extract<EvidenceRef, { kind: 'state-receipt' }>;
+}): Promise<HandoffCoordinationTaskInspection> {
+    try {
+        if (!closed({ taskKey: digest, expected: parentBindingSchema, evidence: stateEvidence })(input) || input.expected.taskKey !== input.taskKey)
+            throw Error('handoff pin and exact predecessor binding required');
+        const total = { bytes: 0 };
+        const receipt = await readImmutableOperationReceipt(target, input.evidence, total);
+        if (receipt.type !== 'handoff' || receipt.recoveryPayload !== null || receipt.taskKey !== input.taskKey ||
+            await bounded(target.provider.compare(target, receipt.previousHead, input.evidence.commitSha)) !== 'ahead')
+            throw Error('invalid pinned handoff transition');
+        const before = await readCoordinationSnapshot(target, false, total, receipt.previousHead);
+        const predecessor = await inspectTaskAtSnapshot(target, input.taskKey, input.expected, before, total);
+        const after = await readCoordinationSnapshot(target, false, total, input.evidence.commitSha);
+        const handedOff = await inspectTaskAtSnapshot(target, input.taskKey, {}, after, total);
+        if (predecessor.kind !== 'active' || handedOff.kind !== 'active')
+            throw Error('handoff requires retained active owners');
+        const prior = predecessor.task, next = handedOff.task;
+        if (next.state !== 'claimed' || next.generation !== prior.generation + 1 || receipt.generation !== next.generation ||
+            next.runId !== prior.runId || next.ownerToken === prior.ownerToken || canonical(receipt.resultOwner) !== canonical(ownerOf(next)))
+            throw Error('handoff generation/result owner mismatch');
+        for (const field of ['host', 'repo', 'repositoryNodeId', 'issueNodeId', 'scopeDigest', 'approvalDigest', 'approvalBindings', 'parentTaskKey', 'parentBinding'] as const)
+            if (canonical(prior[field] ?? null) !== canonical(next[field] ?? null))
+                throw Error('handoff changed original task authority');
+        return { kind: 'historical-handoff', receipt, predecessor: prior, handedOff: next };
+    } catch {
+        return { kind: 'invalid-or-unavailable', reason: 'historical handoff could not be verified' };
+    }
+}
+
 function validateSession(machine: EffectiveMachine, session: MachineSession, target: CoordinationTarget) {
     if (!machine.enabled || !id(machine.id) || !uuid(session.sessionId) || !digest(session.bootIdDigest) || machine.id !== session.machineId || machine.installationId !== session.installationId || machine.hostBindingDigest !== session.hostBindingDigest || !positive(machine.defaults.maxRuns) || !positive(machine.defaults.childConcurrent) || canonical(machine.coordination) !== canonical({ repositoryId: target.repositoryId, repository: target.repository, branch: target.branch, rootCommit: target.rootCommit, installationId: target.installationId }))
         throw Error('machine session/coordination mismatch');
@@ -1092,7 +1132,7 @@ export async function resolveEvidence(target: CoordinationTarget, ref: EvidenceR
     }
     return (await readEvidenceReceipt(target, ref)).recoveryPayload;
 }
-async function readEvidenceReceipt(target: CoordinationTarget, ref: Extract<EvidenceRef, { kind: 'state-receipt' }>, total?: { bytes: number }): Promise<OperationReceipt> {
+async function readImmutableOperationReceipt(target: CoordinationTarget, ref: Extract<EvidenceRef, { kind: 'state-receipt' }>, total?: { bytes: number }): Promise<OperationReceipt> {
     parseEvidenceRef(ref);
     const current = await bounded(target.provider.branch(target));
     if (current.repositoryId !== target.repositoryId || !current.private || ![target.rootCommit, ref.commitSha].every(v => sha(v)) || !['ahead', 'identical'].includes(await bounded(target.provider.compare(target, target.rootCommit, ref.commitSha))) || !['ahead', 'identical'].includes(await bounded(target.provider.compare(target, ref.commitSha, current.head))))
@@ -1104,7 +1144,13 @@ async function readEvidenceReceipt(target: CoordinationTarget, ref: Extract<Evid
     const budget = transactionClock.getStore();
     if (budget && (budget.decodedBytes += Buffer.byteLength(raw)) > 8 * 1024 * 1024) throw Error('total decoded transaction read bound exceeded');
     const receipt = parse<OperationReceipt>(JSON.parse(raw), receiptSchema, 'evidence receipt', 32 * 1024);
-    if (receipt.operationId !== ref.operationId || receipt.recoveryPayload === null)
+    if (receipt.operationId !== ref.operationId)
+        throw Error('evidence receipt identity/payload mismatch');
+    return receipt;
+}
+async function readEvidenceReceipt(target: CoordinationTarget, ref: Extract<EvidenceRef, { kind: 'state-receipt' }>, total?: { bytes: number }): Promise<OperationReceipt> {
+    const receipt = await readImmutableOperationReceipt(target, ref, total);
+    if (receipt.recoveryPayload === null)
         throw Error('evidence receipt identity/payload mismatch');
     const p = parseRecoveryPayload(receipt.recoveryPayload);
     await target.verifyEvidence(ref, p);

@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { processIdentity } from '../src/claims.ts';
-import { acquireSharedTask, transitionSharedTask, linkAcceptedScope, inspectHistoricalCoordinationTask, inspectCoordinationTask, readCoordination, readSharedStatus, taskKey, parseRecoveryEnvelope, parseRecoveryPayload, publishRecoveryReceipt, resolveEvidence, beginManagedEffect, verifyManagedEffect, canonical, sha256, githubCoordinationProvider, type CoordinationTarget, type CoordinationProvider, type VerifiedCandidate, type EffectiveMachine, type MachineSession, type RecoveryEvidencePayload, type RecoveryEnvelope } from '../src/shared-claims.ts';
+import { acquireSharedTask, transitionSharedTask, linkAcceptedScope, inspectHandoffCoordinationTask, inspectHistoricalCoordinationTask, inspectCoordinationTask, readCoordination, readSharedStatus, taskKey, parseRecoveryEnvelope, parseRecoveryPayload, publishRecoveryReceipt, resolveEvidence, beginManagedEffect, verifyManagedEffect, canonical, sha256, githubCoordinationProvider, type CoordinationTarget, type CoordinationProvider, type VerifiedCandidate, type EffectiveMachine, type MachineSession, type RecoveryEvidencePayload, type RecoveryEnvelope } from '../src/shared-claims.ts';
 const d = 'd'.repeat(64), root = '1'.repeat(40), installation = '11111111-1111-4111-8111-111111111111';
 async function fixture() {
     let head = root, version = 1, ambiguous = false, conflicts = 0, mutations = 0;
@@ -724,4 +724,81 @@ test('handoff lost-response retry proves the original owner and returns only the
     p.target.verifyCandidate = verify;
     expect(canonical(await readCoordination(p.target))).toBe(before);
     expect(sends).toBe(1);
+});
+
+
+test('handoff history reads actual null-payload receipt and preserves both pinned owners', async () => {
+    const f = await pendingEffectFixture('telemetry-push', 'ambiguous');
+    expect((await transitionSharedTask({ claim: f.claim, operationId: randomUUID(), transition: { kind: 'stop', stopProof: f.stopProof } })).kind).toBe('owned');
+    const predecessor = (await readCoordination(f.target)).tasks[f.claim.taskKey]!;
+    const previousHead = (await f.target.provider.branch(f.target)).head;
+    const machine = { ...f.machine, id: 'receiver', installationId: randomUUID(), hostBindingDigest: 'a'.repeat(64) };
+    const session = { ...f.session, machineId: machine.id, installationId: machine.installationId, hostBindingDigest: machine.hostBindingDigest, sessionId: randomUUID() };
+    const operationId = randomUUID();
+    const transferred = await transitionSharedTask({ claim: f.claim, operationId, transition: { kind: 'handoff', machine, session, candidate: f.candidate, stopProof: f.stopProof, recovery: f.recovery } });
+    if (transferred.kind !== 'owned') throw Error(transferred.reason);
+    const handedOff = (await readCoordination(f.target)).tasks[f.claim.taskKey]!;
+    const path = `coordination/operations/${operationId}.json`;
+    const receiptHead = transferred.claim.stateCommit;
+    const raw = f.versions.get(receiptHead)![path]!;
+    const evidence = { kind: 'state-receipt' as const, operationId, commitSha: receiptHead, blobSha256: sha256(raw) };
+    const { taskKey, runId, generation, ownerToken, machineId, installationId, sessionId } = f.claim;
+    const input = { taskKey, expected: { taskKey, runId, generation, ownerToken, machineId, installationId, sessionId }, evidence };
+    // Move latest state beyond the pinned handoff so neither returned record can be substituted.
+    expect((await transitionSharedTask({ claim: transferred.claim, operationId: randomUUID(), transition: { kind: 'start' } })).kind).toBe('owned');
+    let writes = 0;
+    const commit = f.target.provider.commit;
+    f.target.provider.commit = async (...args) => { writes++; return commit(...args); };
+    expect(await inspectHandoffCoordinationTask(f.target, input)).toEqual({ kind: 'historical-handoff', receipt: JSON.parse(raw), predecessor, handedOff });
+    expect(JSON.parse(raw)).toMatchObject({ type: 'handoff', previousHead, recoveryPayload: null });
+    expect(predecessor.stopProof).toEqual(f.stopProof);
+    expect(handedOff.recovery!.effects).toEqual(predecessor.recovery!.effects);
+    await expect(resolveEvidence(f.target, evidence)).rejects.toThrow('payload mismatch');
+    expect((await inspectHistoricalCoordinationTask(f.target, { ...input, at: 'previous-head' })).kind).toBe('invalid-or-unavailable');
+    for (const bad of [
+        { ...input, expected: { ...input.expected, ownerToken: handedOff.ownerToken } },
+        { ...input, expected: { ...input.expected, runId: randomUUID() } },
+        { ...input, evidence: { ...evidence, blobSha256: 'f'.repeat(64) } },
+        { ...input, evidence: { ...evidence, operationId: randomUUID() } },
+    ]) expect((await inspectHandoffCoordinationTask(f.target, bad)).kind).toBe('invalid-or-unavailable');
+    // Rehash malformed receipts to exercise validation beyond the blob-integrity check.
+    for (const patch of [
+        { type: 'acquire' }, { operationId: randomUUID() }, { recoveryPayload: { schemaVersion: 2, kind: 'execution-qualification' } }, { previousHead: evidence.commitSha }, { previousHead: (await f.target.provider.branch(f.target)).head },
+        { taskKey: 'f'.repeat(64) }, { generation: 3 },
+        { resultOwner: { ...JSON.parse(raw).resultOwner, runId: randomUUID() } },
+        { resultOwner: { ...JSON.parse(raw).resultOwner, ownerToken: randomUUID() } },
+        { extra: true },
+    ]) {
+        const changed = canonical({ ...JSON.parse(raw), ...patch });
+        f.versions.get(evidence.commitSha)![path] = changed;
+        expect((await inspectHandoffCoordinationTask(f.target, { ...input, evidence: { ...evidence, blobSha256: sha256(changed) } })).kind).toBe('invalid-or-unavailable');
+    }
+    f.versions.get(evidence.commitSha)![path] = raw;
+    const taskPath = `coordination/tasks/${taskKey}.json`;
+    for (const head of [previousHead, evidence.commitSha]) {
+        const saved = f.versions.get(head)![taskPath]!;
+        for (const malformed of ['{}', canonical({ ...JSON.parse(saved), runId: randomUUID() }), ' '.repeat(256 * 1024 + 1)]) {
+            f.versions.get(head)![taskPath] = malformed;
+            expect((await inspectHandoffCoordinationTask(f.target, input)).kind).toBe('invalid-or-unavailable');
+        }
+        delete f.versions.get(head)![taskPath];
+        expect((await inspectHandoffCoordinationTask(f.target, input)).kind).toBe('invalid-or-unavailable');
+        f.versions.get(head)![taskPath] = saved;
+    }
+    const read = f.target.provider.read;
+    f.target.provider.read = async () => { throw Error('offline'); };
+    expect((await inspectHandoffCoordinationTask(f.target, input)).kind).toBe('invalid-or-unavailable');
+    f.target.provider.read = read;
+    expect((await inspectHandoffCoordinationTask({ ...f.target, rootCommit: 'e'.repeat(40) }, input)).kind).toBe('invalid-or-unavailable');
+    const branch = f.target.provider.branch;
+    f.target.provider.branch = async (...args) => ({ ...await branch(...args), private: false });
+    expect((await inspectHandoffCoordinationTask(f.target, input)).kind).toBe('invalid-or-unavailable');
+    f.target.provider.branch = async (...args) => ({ ...await branch(...args), repositoryId: 'R_other' });
+    expect((await inspectHandoffCoordinationTask(f.target, input)).kind).toBe('invalid-or-unavailable');
+    f.target.provider.branch = async (...args) => ({ ...await branch(...args), defaultBranch: f.target.branch });
+    expect((await inspectHandoffCoordinationTask(f.target, input)).kind).toBe('invalid-or-unavailable');
+    f.target.provider.branch = branch;
+    f.rewrite();
+    expect((await inspectHandoffCoordinationTask(f.target, input)).kind).toBe('invalid-or-unavailable');
+    expect(writes).toBe(0);
 });

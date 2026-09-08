@@ -13,3 +13,4 @@ Protect dispatcher ownership with atomic local claims and conditional shared tas
 - Link verified partial acceptance while retaining current ownership and all reservations; inspect immutable historical task facts from pinned receipts and exact original owner identities.
 - Treat in-progress local guard publication as bounded contention while preserving unknown or abandoned guard evidence.
 - Recover a committed handoff after response loss only from its exact receipt, original owner and revalidated transfer authority.
+- Inspect handoff receipts as verified predecessor and successor records without treating null handoff payloads as recovery evidence.
