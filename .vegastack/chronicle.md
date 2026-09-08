@@ -2,6 +2,16 @@
 
 The project's story, newest first: what got built, why, and how it went — for the operator's future recall. Format home: the dev-chronicle skill.
 
+## 08-09-2026 — Dispatch claims have an owner ([#137](https://github.com/vegastack/vegafactory/issues/137))
+
+- **What:** Local repository/watch claims now serialize mutation and retain exact owner tokens. Shared task state uses conditional commits, reservations and immutable recovery evidence.
+- **Why:** Two processes previously passed the same unlocked read and both executed. Pathname-only release could remove a replacement owner's claim.
+- **How it went:** The actual two-process race reproduced double entry, then passed with one execute entry. Controlled separate-home shared fixtures distinguish same-task exclusion from independent work. Provider qualification, full reboot acceptance, final evaluation and assembled review remain open.
+- **Changed:** Claims and machine identity APIs · shared state/recovery wires · dispatch/status adapters · offline recovery instructions.
+- **Decisions:** none.
+
+— approved by (kmanojkumar) · built by codex · branch codex/productionization-133
+
 ## 08-09-2026 — Workflow labels have one meaning ([#141](https://github.com/vegastack/vegafactory/issues/141))
 
 - **What:** An explicit semantic label map now drives dispatch, preflight, reclaim, status and board mirroring. The dashboard joins CLI snapshots to live issue identities and labels; conflicts and stale reads remain visible.

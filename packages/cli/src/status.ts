@@ -1,3 +1,4 @@
+import { readSharedStatus, type CoordinationTarget, type SharedStatus } from './shared-claims.ts'
 import { labelsDigest, resolveState, resolveLabels } from '../../../skills/dev/dev-setup/scripts/effective-policy.mjs'
 import { boundedGhJson, readBudget } from './gh.ts'
 import type { LabelMap, State } from './config.ts'
@@ -35,6 +36,7 @@ export interface WorkflowStateSnapshot {
 }
 
 export interface RepoStatus {
+  shared?: SharedStatus
   workflow?: WorkflowStateSnapshot
   repo: string
   dispatch: 'off' | 'local'
@@ -45,7 +47,7 @@ export interface RepoStatus {
 }
 
 export interface StatusReport {
-  dispatcher: { running: boolean; pid: number | null; lastTick: string | null; interval: number }
+  dispatcher: { running: boolean; pid: number | null; lastTick: string | null; interval: number; refusal?: string }
   repos: RepoStatus[]
 }
 
@@ -84,7 +86,8 @@ export function buildStatus(input: {
   config: FactoryConfig
   state: DispatchState
   lockPid: number | null
-  repos: { repo: string; policy: RepoPolicy; snapshot?: RepoStatus['snapshot']; boardComplete?: boolean; boardReason?: string | null; observedAt?: string; board: BoardIssue[]; worktrees: WorktreeRow[]; logs: { file: string; body: string }[] }[]
+  lockRefusal?: string
+  repos: { repo: string; policy: RepoPolicy; shared?: SharedStatus; snapshot?: RepoStatus['snapshot']; boardComplete?: boolean; boardReason?: string | null; observedAt?: string; board: BoardIssue[]; worktrees: WorktreeRow[]; logs: { file: string; body: string }[] }[]
 }): StatusReport {
   const repos: RepoStatus[] = input.repos.map(entry => {
     let labelMap: LabelMap | null = null
@@ -116,6 +119,7 @@ export function buildStatus(input: {
     })
     return {
       repo: entry.repo,
+      ...(entry.shared ? { shared: entry.shared } : {}),
       dispatch: entry.policy.dispatch,
       ...(entry.snapshot ? { snapshot: entry.snapshot } : {}),
       workflow,
@@ -127,6 +131,7 @@ export function buildStatus(input: {
   return {
     dispatcher: {
       running: input.lockPid !== null,
+      ...(input.lockRefusal ? { refusal: input.lockRefusal } : {}),
       pid: input.lockPid,
       lastTick: Object.values(input.state.lastTick).sort().at(-1) ?? null,
       interval: input.config.interval,
@@ -138,11 +143,12 @@ export function buildStatus(input: {
 export function renderStatus(report: StatusReport): string {
   const lines: string[] = []
   const dispatcher = report.dispatcher
-  lines.push(dispatcher.running
+  lines.push(dispatcher.refusal ? `dispatcher: ownership unavailable — ${dispatcher.refusal}` : dispatcher.running
     ? `dispatcher: running (pid ${dispatcher.pid}), every ${dispatcher.interval}s, last tick ${dispatcher.lastTick ?? 'never'}`
     : 'dispatcher: not running')
   for (const repo of report.repos) {
     lines.push(`${repo.repo} — dispatch: ${repo.dispatch}`)
+    if (repo.shared) lines.push(`  ownership: ${repo.shared.refusal ?? `${repo.shared.tasks.length} recorded tasks at ${repo.shared.head}`}; observed state is not liveness proof`)
     if (repo.snapshot) lines.push(`  policy: ${repo.snapshot.state} · ${repo.snapshot.sourceCommit ?? 'no validated source'}${repo.snapshot.reason ? ` · ${repo.snapshot.reason}` : ''}`)
     lines.push(`  board: ${repo.board.needsPlan} needs-plan · ${repo.board.ready} ready · ${repo.board.working} working · ${repo.board.forOperator} for-operator`)
     if (repo.workflow) lines.push(`  workflow: ${repo.workflow.complete ? 'complete' : 'incomplete'} · observed ${repo.workflow.observedAt}${repo.workflow.blocks.length ? ' · ' + repo.workflow.blocks.join('; ') : ''}`)
@@ -172,7 +178,8 @@ export interface StatusDeps {
   gh: (args: string[]) => Promise<string>
   worktrees: (repoPath: string) => Promise<WorktreeRow[]>
   logs: (config: FactoryConfig, repo: string) => Promise<{ file: string; body: string }[]>
-  readLock: (path: string) => Promise<{ held: boolean; pid: number | null }>
+  readLock: (path: string) => Promise<{ held: boolean; pid: number | null; reason?: string }>
+  sharedTarget?: (repo: string, config: FactoryConfig) => Promise<CoordinationTarget>
 }
 
 export async function runStatusCli(argv: string[], home: string, deps?: Partial<StatusDeps>): Promise<number> {
@@ -256,7 +263,12 @@ export async function runStatusCli(argv: string[], home: string, deps?: Partial<
         snapshot = { state: result.state, sourceCommit: result.snapshot?.sourceCommit ?? null, policyDigest: result.snapshot?.policyDigest ?? null, validatedAt: result.snapshot?.validatedAt ?? null, ageSeconds: result.ageSeconds, reason: result.reason, machine: result.machine }
       } catch (error) { policy = { ...policy, refusal: (error as Error).message }; snapshot = { state: 'unavailable', sourceCommit: null, policyDigest: null, validatedAt: null, ageSeconds: null, reason: (error as Error).message } }
     }
+    const shared = config.executionMode === 'shared'
+      ? deps?.sharedTarget ? await readSharedStatus(await deps.sharedTarget(entry.repo, config), [entry.repo])
+        : { head: null, tasks: [], refusal: 'verified coordination reader unavailable' }
+      : undefined
     repos.push({
+      shared,
       snapshot,
       repo: entry.repo,
       policy,
@@ -266,7 +278,7 @@ export async function runStatusCli(argv: string[], home: string, deps?: Partial<
     })
   }
 
-  const report = buildStatus({ config, state, lockPid: lock.held ? lock.pid : null, repos })
+  const report = buildStatus({ config, state, lockPid: lock.held ? lock.pid : null, lockRefusal: lock.reason, repos })
   console.log(json ? JSON.stringify({ command: 'status', ...report }, null, 2) : renderStatus(report))
   return 0
 }

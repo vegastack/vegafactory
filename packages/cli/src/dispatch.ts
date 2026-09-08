@@ -8,6 +8,9 @@ import type { LabelMap } from './config.ts'
 // Refusals are first-class output, never silence: a repo that is skipped says why, in the JSON and
 // in the log, because "nothing happened" and "the ship guard is unwired" look identical otherwise.
 import { spawn, spawnSync } from 'node:child_process'
+import { createHash } from 'node:crypto'
+import { acquireClaim, releaseClaim, inspectClaim, processIdentity, type Claim } from './claims.ts'
+import { acquireSharedTask, transitionSharedTask, type EffectiveMachine, type MachineSession, type VerifiedCandidate, type SharedClaim, type TaskTransition } from './shared-claims.ts'
 import { existsSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
 import { resolveTarget, syncControlRoom } from './sync.ts'
 import { parseControlRoomKnob, loadConfiguredPolicy, readSettingsFile, factoryConfigPath } from './control-room.ts'
@@ -624,7 +627,7 @@ export async function executeRun(
   run: PlannedRun,
   plan: LaunchPlan,
   config: FactoryConfig,
-  options: { operator: string | null; onSpawn?: () => void; signal?: AbortSignal },
+  options: { operator: string | null; onSpawn?: () => void; signal?: AbortSignal; sharedClaim?: SharedClaim },
   deps?: Partial<ExecuteDeps>,
 ): Promise<RunOutcome> {
   const now = deps?.now ?? (() => new Date())
@@ -940,13 +943,18 @@ export interface TickDeps {
   now: () => Date
   shipGuard: (repoPath: string, harness: Harness, policy?: { home: string; repo: string; policyDigest?: string }) => Promise<{ wired: boolean; detail: string; policyDigest?: string | null }>
   ensureWorktree: (repoPath: string, issue: number, title: string) => Promise<WorktreeTarget>
-  execute: (run: PlannedRun, plan: LaunchPlan, config: FactoryConfig, options: { operator: string | null; onSpawn?: () => void; signal?: AbortSignal }) => Promise<RunOutcome>
+  execute: (run: PlannedRun, plan: LaunchPlan, config: FactoryConfig, options: { operator: string | null; onSpawn?: () => void; signal?: AbortSignal; sharedClaim?: SharedClaim }) => Promise<RunOutcome>
   // Which parents could run their children at the same time. Reading a plan's independent groups
   // means running dev-plan's plan-lint, the one parser of that grammar, so it lives behind this
   // dependency rather than in a second copy here.
   parentCandidates: (repo: string, repoPath: string, ready: BoardIssue[], operators: string[]) => Promise<ParentCandidate[]>
   tracker: RunTracker
   harnessMetadata: (plan: LaunchPlan) => HarnessMetadata | Promise<HarnessMetadata>
+  // #138 supplies fresh authority locators and the durable wrapper; missing adapters refuse.
+  sharedAdmission?: (input: { run: PlannedRun; entry: RepoEntry; policy: RepoPolicy; approvalBindings: NonNullable<RunReport['approvalBindings']>; bindings: NonNullable<RunReport['bindings']> }) => Promise<{ machine: EffectiveMachine; session: MachineSession; candidate: VerifiedCandidate; operationId: string }>
+  executeShared?: TickDeps['execute']
+  persistSharedRun?: (claim: SharedClaim, run: PlannedRun, plan: LaunchPlan) => Promise<void>
+  finishSharedRun?: (claim: SharedClaim, outcome: RunOutcome | null) => Promise<TaskTransition>
 }
 
 async function ghJsonVia<T>(gh: TickDeps['gh'], args: string[], budget?: ReadBudget): Promise<T> {
@@ -1001,10 +1009,10 @@ export async function fetchRockets(gh: TickDeps['gh'], repo: string, corrections
   return rockets
 }
 
-export interface LockState { held: boolean; pid: number | null }
+export interface LockState { held: boolean; pid: number | null; reason?: string; token?: string }
 
 export function repoLockPath(config: FactoryConfig, repo: string): string {
-  return join(config.lockRoot, `${repo.replace('/', '-')}.lock`)
+  return join(config.lockRoot, `${createHash('sha256').update(`github.com/${repo.toLowerCase()}`).digest('hex')}.lock`)
 }
 
 // A pid that no longer exists never keeps a lock: a dispatcher killed mid-run would otherwise wedge
@@ -1018,38 +1026,25 @@ export function pidAlive(pid: number): boolean {
   }
 }
 
+// Compatibility readers expose refusals as held. Tokens, never PID equality, prove ownership.
 export async function readLock(path: string): Promise<LockState> {
-  let raw: string
-  try {
-    raw = await readFile(path, 'utf8')
-  } catch {
-    return { held: false, pid: null }
-  }
-  let pid: number | null = null
-  try {
-    const parsed = JSON.parse(raw) as { pid?: unknown }
-    if (typeof parsed.pid === 'number') pid = parsed.pid
-  } catch {
-    // A lock file nobody can parse is a lock nobody can clear; treat it as stale rather than
-    // wedging the repo forever, and say so through the pid being unknown.
-    return { held: false, pid: null }
-  }
-  if (pid === null || !pidAlive(pid)) return { held: false, pid }
-  return { held: true, pid }
+  const value = await inspectClaim(path)
+  return { held: value.kind === 'held' || value.kind === 'refused', pid: value.pid,
+    ...(value.reason ? { reason: value.reason } : {}) }
 }
-
-export async function holdLock(path: string, pid: number): Promise<void> {
-  await refuseSymlink(path)
-  await mkdir(dirname(path), { recursive: true })
-  await writeFile(path, `${JSON.stringify({ pid, at: new Date().toISOString() })}\n`)
+const ownedLocks = new Map<string, Claim>()
+export async function holdLock(path: string, pid: number): Promise<Claim> {
+  if (pid !== process.pid) throw new Error('only this process may acquire its claim')
+  const result = await acquireClaim(path, await processIdentity())
+  if (result.kind !== 'owned') throw new Error(result.reason)
+  ownedLocks.set(path, result.claim)
+  return result.claim
 }
-
-export async function releaseLock(path: string): Promise<void> {
-  try {
-    await rm(path)
-  } catch {
-    // Already gone is the outcome we wanted.
-  }
+export async function releaseLock(path: string, expected?: Claim): Promise<void> {
+  const claim = expected ?? ownedLocks.get(path)
+  if (!claim) return
+  await releaseClaim(claim)
+  if (ownedLocks.get(path)?.token === claim.token) ownedLocks.delete(path)
 }
 
 // The worktree the run will happen in. Creating it is the packaged script's job — the CLI is a
@@ -1213,8 +1208,8 @@ export async function runTick(
       } catch { /* The canonical reader below keeps missing/stale authority fail closed. */ }
     }
     const resolved = loadConfiguredPolicy({ home: config.home, repo: entry.repo, devMd, settingsPath, now: now().toISOString() })
-    if (config.executionMode === 'shared') {
-      refusals.push({ repo: entry.repo, issue: null, reason: resolved.ok ? 'shared machine requires validated registration and shared ownership; legacy local locks cannot authorize launch' : resolved.blocks.join('; ') })
+    if (config.executionMode === 'shared' && (!deps?.sharedAdmission || !deps.persistSharedRun || !deps.finishSharedRun || !deps.executeShared)) {
+      refusals.push({ repo: entry.repo, issue: null, reason: resolved.ok ? 'shared machine requires verified candidate, shared ownership and durable run adapters; legacy local locks cannot authorize launch' : resolved.blocks.join('; ') })
       continue
     }
     const policy = repoPolicyFromEffective(resolved)
@@ -1227,13 +1222,21 @@ export async function runTick(
       continue
     }
     const lockPath = repoLockPath(config, entry.repo)
+    // A new hashed key cannot silently bypass the PID-only predecessor pathname.
+    try {
+      await lstat(join(config.lockRoot, `${entry.repo.replace('/', '-')}.lock`))
+      refusals.push({ repo: entry.repo, issue: null, reason: 'legacy repository claim preserved; stop all dispatchers and reconcile its exact owner before migration' })
+      continue
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') { refusals.push({ repo: entry.repo, issue: null, reason: 'legacy claim cannot be inspected; ownership unavailable' }); continue }
+    }
     const inFlight = inFlightIssues(tracker, entry.repo)
     // This process holds the repo lock for as long as it has a run in flight there; its own lock is
     // not "another run", and maxRuns against the in-flight count is what bounds it.
     const lock = await readLock(lockPath)
     const guards: GuardState = {
       shipGuard: await withinRead(budget, () => shipGuard(entry.path, harness, { home: config.home, repo: entry.repo, policyDigest: resolved.policy?.policyDigest })).catch(error => ({ wired: false, detail: (error as Error).message })),
-      lock: lock.held && lock.pid === process.pid ? { held: false, pid: null } : lock,
+      lock: lock.held && (await inspectClaim(lockPath)).token === ownedLocks.get(lockPath)?.token && ownedLocks.has(lockPath) ? { held: false, pid: null } : lock,
       activeRuns: inFlight.length,
     }
     const guardRefusals = evaluateGuards({ repo: entry.repo, policy, guards, maxRuns: config.maxRuns })
@@ -1429,8 +1432,37 @@ export async function runTick(
       // held from the first run in flight to the last one out, and the report the tick returns is
       // completed in place when the run ends — `--once` waits for that, the watch loop does not.
       const acquiredLock = inFlightIssues(tracker, entry.repo).length === 0
-      if (acquiredLock) await holdLock(lockPath, process.pid)
-      if (!active(run.issue)) { if (acquiredLock) await releaseLock(lockPath); break }
+      let ownedClaim = ownedLocks.get(lockPath)
+      if (acquiredLock) {
+        try { ownedClaim = await holdLock(lockPath, process.pid) }
+        catch (error) { refusals.push({ repo: entry.repo, issue: run.issue, reason: (error as Error).message }); continue }
+      }
+      if (!active(run.issue)) { if (acquiredLock) await releaseLock(lockPath, ownedClaim); break }
+      let sharedClaim: SharedClaim | undefined
+      if (config.executionMode === 'shared') {
+        try {
+          const input = await deps!.sharedAdmission!({ run, entry, policy, approvalBindings: admission.approvalBindings, bindings: admission.bindings })
+          const shared = await acquireSharedTask(input)
+          if (shared.kind !== 'owned') throw new Error(shared.reason)
+          sharedClaim = shared.claim
+          // The native gate is unchanged and repeated after shared acquisition. No stale
+          // search, claim, or coordinator-only source instruction authorizes this launch.
+          const script = process.env.VSK_PREFLIGHT_SCRIPT || join(dirname(dirname(fileURLToPath(import.meta.url))), 'skill', 'dev-implement', 'scripts', 'preflight.mjs')
+          const owner = await import(pathToFileURL(script).href)
+          const fresh = await owner.gatherAndEvaluate({ repo: entry.repo, issue: String(run.issue), stage: run.stage === 'plan' ? 'plan' : 'implement', expect: run.stage === 'plan' ? 'needs-plan' : run.stage === 'corrections' ? 'for-operator' : 'ready' }, { readJson: (args: string[]) => ghJsonVia(gh, args, budget), devMd, configuredPolicy: loadConfiguredPolicy({ home: config.home, repo: entry.repo, devMd, settingsPath, now: now().toISOString() }) })
+          if (fresh.blocks.length || JSON.stringify(fresh.approvalBindings) !== JSON.stringify(admission.approvalBindings) || JSON.stringify(fresh.bindings) !== JSON.stringify(admission.bindings)) throw new Error('approval changed after shared acquisition')
+          if (!active(run.issue)) throw new Error('shared launch cancelled before durable preparation')
+          await deps!.persistSharedRun!(sharedClaim, run, launch)
+          const started = await transitionSharedTask({ claim: sharedClaim, operationId: crypto.randomUUID(), transition: { kind: 'start' } })
+          if (started.kind !== 'owned') throw new Error(started.reason)
+          sharedClaim = started.claim
+        } catch (error) {
+          // Unknown termination/effects retain the shared reservation. Recovery owns it.
+          refusals.push({ repo: entry.repo, issue: run.issue, reason: `shared admission refused: ${(error as Error).message}` })
+          if (acquiredLock) await releaseLock(lockPath, ownedClaim)
+          continue
+        }
+      }
       const key = `${entry.repo}#${run.issue}`
       const runStage = stage
       const runTarget = target
@@ -1439,9 +1471,11 @@ export async function runTick(
       const startAcknowledged = new Promise<boolean>(resolve => { resolveStart = resolve })
       let acknowledged = false
       const onSpawn = (): void => { acknowledged = true; resolveStart(true) }
+      let sharedOutcome: RunOutcome | null = null
       const done = (async () => {
         try {
-          const outcome = await execute(run, launch, config, { operator: policy.operators[0] ?? null, onSpawn, signal: options.signal })
+          const outcome = await (sharedClaim ? deps!.executeShared! : execute)(run, launch, config, { operator: policy.operators[0] ?? null, onSpawn, signal: options.signal, sharedClaim })
+          sharedOutcome = outcome
           if (outcome.started === false || outcome.refusal) {
             refusals.push({ repo: entry.repo, issue: run.issue, reason: outcome.refusal ?? 'harness did not start' })
             resolveStart(false)
@@ -1493,7 +1527,14 @@ export async function runTick(
         } finally {
           resolveStart(false)
           tracker.delete(key)
-          if (inFlightIssues(tracker, entry.repo).length === 0) await releaseLock(lockPath)
+          if (sharedClaim) {
+            try {
+              const transition = await deps!.finishSharedRun!(sharedClaim, sharedOutcome)
+              const result = await transitionSharedTask({ claim: sharedClaim, operationId: crypto.randomUUID(), transition })
+              if (result.kind !== 'owned') throw new Error(result.reason)
+            } catch (error) { refusals.push({ repo: entry.repo, issue: run.issue, reason: `shared reservation retained: ${(error as Error).message}` }) }
+          }
+          if (inFlightIssues(tracker, entry.repo).length === 0) await releaseLock(lockPath, ownedClaim)
         }
       })()
       tracker.set(key, { repo: entry.repo, issue: run.issue, done })
@@ -1563,9 +1604,7 @@ export async function watch(
   options: { dryRun: boolean; onTick?: (result: TickResult) => void; ticks?: number },
   deps?: Partial<TickDeps>,
 ): Promise<void> {
-  const existing = await readLock(config.dispatcherLock)
-  if (existing.held) throw new Error(`a dispatcher is already running on this machine (pid ${existing.pid}) — stop it before starting another`)
-  await holdLock(config.dispatcherLock, process.pid)
+  const dispatcherClaim = await holdLock(config.dispatcherLock, process.pid)
   let stopping = false
   let networkFailures = 0
   const controller = new AbortController()
@@ -1593,7 +1632,7 @@ export async function watch(
   } finally {
     try { await settleRuns(deps?.tracker ?? processTracker) }
     finally {
-      try { await releaseLock(config.dispatcherLock) }
+      try { await releaseLock(config.dispatcherLock, dispatcherClaim) }
       finally {
         process.removeListener('SIGINT', stop)
         process.removeListener('SIGTERM', stop)

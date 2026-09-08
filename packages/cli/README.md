@@ -143,6 +143,20 @@ vegafactory status --json                       # what happened
 
 Every run's stdout and stderr land in `~/.vegastack/factory/logs/<org>/<repo>/<issue>-<timestamp>.jsonl`. A run that fails or times out posts a hand-back comment carrying the last 40 log lines with token shapes redacted, moves the issue to `needs-operator` assigned to its operator, and leaves the worktree exactly as the run left it.
 
+### Owned claims and recovery
+
+Use one non-root dispatcher account and one lock directory per host. The default is `~/.vegastack/factory/locks`; an optional absolute `lockRoot` in the exact service config selects another directory. Changing the directory requires stopped-service migration and inspection of the old directory first. Two homes are not a substitute for a shared host lock root.
+
+Repository and watch claims use random owner tokens plus the process UID, boot identity and start identity. Every acquisition, renewal, release and stale-owner replacement takes the same short exclusive mutation guard. A PID alone never proves ownership. The guard waits at most two seconds for contention; this is not a task timeout. Repository path keys hash the canonical GitHub identity. Existing PID-only files are preserved and refuse migration until reconciled. Status reports unverifiable ownership explicitly.
+
+For a corrupt claim, legacy claim or abandoned mutation guard: stop every dispatcher using that account/root; preserve the owner file and guard directory; verify the recorded process is absent or its boot/start identity differs; verify no retained run is executing; then take an exclusive offline recovery guard and reconcile only the inspected pathname and exact token. Re-read the token while holding that guard before clearing a verified stale record. If a mutation guard has no valid owner record, recovery is an offline operator action: automatic recursive guard stealing is forbidden. Never delete a worktree, checkpoint or run record to unlock a task. An unknown process identity remains a visible refusal.
+
+Registered machines additionally use the configured existing private control-room state branch. Shared claims reserve repository/issue identity, host capacity, parent child slots and incompatible resources with one GitHub `createCommitOnBranch` transaction using `expectedHeadOid`. Different machines and scope revisions do not create different task keys. Only verified independent scopes may overlap; ambiguous paths serialize. A missing, rewritten, malformed, default or inaccessible state branch refuses dispatch; runtime never creates or resets it. [GitHub's conditional commit input](https://docs.github.com/en/graphql/reference/commits#createcommitonbranchinput) defines the expected-head field.
+
+Recovery receipts are closed typed data pinned to an actual commit and blob digest. Publishing a receipt and linking it into the task are separate acknowledged transitions. Unlinked intent cannot authorize an effect, and an ambiguous send must be reconciled before retry. Completed scope evidence remains historical even after active reservations are removed. A stale heartbeat or disconnected host never proves termination. Transfer requires verified stopped execution, an available checkpoint, original execution identity, current authority and resolution of every possible remote effect. Configured hooks alone leave `remoteEffectCoverage` as `unmanaged-possible`.
+
+The source coordination API is available to the durable runtime owner: `acquireSharedTask`, `transitionSharedTask`, `publishRecoveryReceipt`, `resolveEvidence`, `beginManagedEffect` and `readSharedStatus`. Dispatch requires verified-candidate, durable-preparation, shared-executor and stopped-result adapters; absence refuses instead of launching through the legacy executor. Live provider behavior, full macOS/Linux reboot coverage, managed-effect qualification and assembled acceptance remain separate required gates.
+
 ### Running it as a service
 
 ```sh

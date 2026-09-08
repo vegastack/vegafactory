@@ -117,3 +117,8 @@ describe('runServiceCli', () => {
     expect(code).toBe(2)
   })
 })
+
+test('137 service refuses a relative configuration that could select another lock root',()=>{
+ expect(()=>renderLaunchdPlist({...input,configPath:'factory.json'})).toThrow('absolute config')
+ expect(()=>renderSystemdUnit({...input,configPath:'factory.json'})).toThrow('absolute config')
+})

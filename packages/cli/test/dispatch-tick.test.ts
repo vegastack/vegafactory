@@ -950,3 +950,34 @@ test('141 actual tick uses custom ready and refuses mixed custom correction rock
   expect(result.runs.map(row => row.issue)).toEqual([8])
   expect(result.refusals.some(row => row.issue === 9 && row.reason.includes('conflicting'))).toBe(true)
 })
+
+test('137 two actual runOnce processes racing after fresh admission start one execute seam', async () => {
+  const { config, home } = fixture()
+  const worker = join(home, 'race-worker.ts')
+  const source = `import {runOnce} from ${JSON.stringify(resolve('packages/cli/src/dispatch.ts'))};
+import {scopeDigest} from ${JSON.stringify(resolve('skills/dev/dev-implement/scripts/lib/approval.mjs'))};
+import {writeFile,access,appendFile} from 'node:fs/promises';
+process.env.VSK_PREFLIGHT_SCRIPT=${JSON.stringify(process.env.VSK_PREFLIGHT_SCRIPT)};
+const responsePage=${responsePage.toString()};const ghStub=${ghStub.toString()};
+const config=${JSON.stringify(config)};const number=137;
+const {gh}=ghStub({ready:[{number,title:'feat: claim race',labels:['ready']}]});
+const index=process.argv[2];const result=await runOnce(config,{dryRun:false},{gh,tracker:new Map(),parentCandidates:async()=>[],shipGuard:async()=>({wired:true,detail:'controlled fixture'}),
+harnessMetadata:()=>({version:'2.1.263 (Claude Code)',hookApplicable:true,memoryRetrievalDisabled:true,memoryGenerationDisabled:true}),
+issueBody:async()=>{await writeFile(config.home+'/ready'+index,'ready');for(;;){try{await access(config.home+'/ready0');await access(config.home+'/ready1');break}catch{await Bun.sleep(5)}}return 'fixture';},
+ensureWorktree:async(path)=>({path,branch:'feat/137',slug:'137',type:'feat'}),execute:async(_run,_plan,_config,options)=>{await appendFile(config.home+'/sentinel','execute\\n');options.onSpawn?.();await Bun.sleep(400);return {started:true,exitCode:0,timedOut:false,pushed:false,handedBack:false,logFile:'/controlled'};}});process.stdout.write(JSON.stringify(result));`
+  writeFileSync(worker, source)
+  const processes = [0, 1].map(index => Bun.spawn([process.execPath, worker, String(index)], { stdout: 'pipe', stderr: 'pipe' }))
+  const results = await Promise.all(processes.map(async p => ({ code: await p.exited, out: await new Response(p.stdout).text(), err: await new Response(p.stderr).text() })))
+  expect(results.every(r => r.code === 0), JSON.stringify(results)).toBe(true)
+  expect(results.flatMap(r => JSON.parse(r.out).runs).filter(r => r.launched), JSON.stringify(results)).toHaveLength(1)
+  expect(readFileSync(join(home, 'sentinel'), 'utf8').trim().split('\n')).toHaveLength(1)
+}, 10000)
+
+test('137 hashed repository key preserves legacy lock evidence rather than bypassing it',async()=>{
+ const {config}=fixture();mkdirSync(config.lockRoot,{recursive:true,mode:0o700})
+ const legacy=join(config.lockRoot,'acme-app.lock');writeFileSync(legacy,JSON.stringify({pid:99999999}),{mode:0o600})
+ const {gh}=ghStub({ready:[{number:137,title:'feat: migration',labels:['ready']}]});let calls=0
+ const result=await runOnce(config,{dryRun:false},{gh,harnessMetadata,ensureWorktree,parentCandidates:async()=>[],execute:async run=>{calls++;return finished(run)}})
+ expect(calls).toBe(0);expect(result.refusals.some(r=>r.reason.includes('legacy repository claim'))).toBe(true)
+ expect(readFileSync(legacy,'utf8')).toContain('99999999')
+})

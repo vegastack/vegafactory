@@ -91,6 +91,8 @@ export function parseFactoryConfig(raw: unknown, home: string): FactoryConfig {
   }
 
   const root = join(home, '.vegastack', 'factory')
+  if (document.lockRoot !== undefined && (typeof document.lockRoot !== 'string' || !isAbsolute(document.lockRoot))) throw new Error('factory.json: lockRoot must be one absolute directory shared by this dispatcher account')
+  const lockRoot = typeof document.lockRoot === 'string' ? document.lockRoot : join(root, 'locks')
   return {
     repos: entries,
     interval: positiveInteger(document.interval, 'interval', DEFAULTS.interval),
@@ -103,8 +105,8 @@ export function parseFactoryConfig(raw: unknown, home: string): FactoryConfig {
     home,
     stateFile: join(root, 'state.json'),
     logRoot: join(root, 'logs'),
-    lockRoot: join(root, 'locks'),
-    dispatcherLock: join(root, 'dispatcher.lock'),
+    lockRoot,
+    dispatcherLock: document.lockRoot === undefined ? join(root, 'dispatcher.lock') : join(lockRoot, 'dispatcher.lock'),
     // Presence of bootstrap opts into shared registration checks, never into authority. The
     // snapshot/claim owners complete that path; an unavailable registry must not fall back.
     executionMode: document.machine !== undefined || document.executionMode === 'shared' ? 'shared' : 'legacy',
