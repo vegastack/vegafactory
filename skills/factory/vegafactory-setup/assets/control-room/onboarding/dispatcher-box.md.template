@@ -28,7 +28,9 @@ CI jobs get their own bun and Node from `setup-bun` and `setup-node`, so these c
 - `sudo systemsetup -setcomputersleep Never`
 - `sudo pmset -a sleep 0 disksleep 0 womp 1`
 
-On macOS a per-user LaunchAgent loads only inside that account's GUI session, so exactly one account may rely on auto-login. Give it to `{{runner-user}}`. `{{dispatcher-user}}`'s service is installed by `vegafactory service install` with `RunAtLoad` and `KeepAlive`; its requirement is the reboot drill in `## Dispatcher ownership and offline recovery
+On macOS a per-user LaunchAgent loads only inside that account's GUI session, so exactly one account may rely on auto-login. Give it to `{{runner-user}}`. `{{dispatcher-user}}`'s service is installed by `vegafactory service install` with `RunAtLoad` and `KeepAlive`; its requirement is the reboot drill in `## Verify`, not any particular mechanism.
+
+## Dispatcher ownership and offline recovery
 
 Keep one non-root dispatcher account, `{{dispatcher-user}}`, and one confirmed absolute config path for the host. All service and manual invocations use that path and its single `lockRoot` (default `~/.vegastack/factory/locks`). Inspect the previous root with services stopped before changing it. Separate homes or copied machine configuration do not establish exclusion or enroll another machine.
 
@@ -40,7 +42,6 @@ Shared ownership lives on the explicitly configured existing private state branc
 
 Before another machine resumes work, verify stop evidence, remotely available checkpoint and original execution identity, current policy/approval, exact owner generation and reconciled effects. A stale heartbeat, unreachable machine or configured guard is insufficient. Independent work can continue while the affected task retains its reservation. Qualification of real macOS/Linux reboot behavior and the selected GitHub conditional provider remains part of the authorized live drill; local fixtures cannot mark it passed.
 
-## Verify`, not any particular mechanism.
 
 ## Grant the group
 
