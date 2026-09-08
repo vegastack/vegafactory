@@ -112,7 +112,7 @@ test('managed hook refuses unknown identities, malformed IDs and reentered Stop 
   expect(await readdir(home)).toEqual([])
 })
 
-test('installed managed hook resolves owned terminal session and Stop/SessionEnd share one durable capture',async()=>{
+test.each(['source', 'bundled'] as const)('installed managed hook (%s) resolves owned terminal session and Stop/SessionEnd share one durable capture',async(route)=>{
   const fs=await import('node:fs/promises'),{execFileSync,spawn}=await import('node:child_process'),{resolve}=await import('node:path'),{pathToFileURL}=await import('node:url')
   const runtime=await import('../src/runs.ts'),recordOwner=await import('../src/stats/record.ts'),{processIdentity}=await import('../src/claims.ts'),policyOwner=await import('../../../skills/dev/dev-setup/scripts/effective-policy.mjs')
   const canonicalHome=await fs.realpath(home),repo=join(canonicalHome,'repo'),room=join(canonicalHome,'room'),installed=join(canonicalHome,'installed'),hooks=join(repo,'.vegastack','hooks'),sourceHooks=resolve('skills/dev/dev-setup/assets/hooks')
@@ -142,18 +142,50 @@ test('installed managed hook resolves owned terminal session and Stop/SessionEnd
   await fs.writeFile(join(installed,'skill','dev-setup','assets','hooks','session-start.mjs'),shared)
   await fs.writeFile(join(installed,'package.json'),JSON.stringify({name:'@vegastack/vegafactory',type:'module',bin:{vegafactory:'dist/index.js'}}))
   await fs.writeFile(join(installed,'skill-integrity.json'),JSON.stringify({schemaVersion:2,skills:{'dev-setup':{files:{'assets/hooks/session-start.mjs':hashBytes(shared)}}}}))
-  // Real installed package topology, direct Node entry into the authored consumer. Packed/vendored proof remains #158.
-  await fs.writeFile(join(installed,'dist','index.js'),`import {runStatsCli} from ${JSON.stringify(pathToFileURL(resolve('packages/cli/src/stats/cli.ts')).href)};process.exitCode=await runStatsCli(process.argv.slice(3),${JSON.stringify(canonicalHome)});`)
-  const node=Bun.which('node')!,invoke=(name:string,event:string,session='owned-vendor-session',cwd=repo)=>execFileSync(node,[join(hooks,name),'--harness','codex'],{cwd:repo,encoding:'utf8',input:JSON.stringify({hook_event_name:event,session_id:session,cwd,transcript_path:'/never/read/private-transcript'}),env:{...process.env,VSK_VEGAFACTORY:join(installed,'dist','index.js')},timeout:2000})
+  // Exercise both the authored consumer and the actual bundled command router. Runtime scripts
+  // come from authored packaging entries, never the possibly stale generated skill tree.
+  // Release packing and actual vendor qualification remain #158.
+  if(route === 'source') {
+    await fs.writeFile(join(installed,'dist','index.js'),`import {runStatsCli} from ${JSON.stringify(pathToFileURL(resolve('packages/cli/src/stats/cli.ts')).href)};process.exitCode=await runStatsCli(process.argv.slice(3),${JSON.stringify(canonicalHome)});`)
+  } else {
+    const packaging=JSON.parse(await fs.readFile(resolve('packages/cli/packaging.json'),'utf8')) as Record<string,string[]>
+    const skillPaths=new Map<string,string>()
+    for(const group of await fs.readdir(resolve('skills'),{withFileTypes:true}))if(group.isDirectory()){
+      for(const skill of await fs.readdir(resolve('skills',group.name),{withFileTypes:true}))if(skill.isDirectory())skillPaths.set(skill.name,resolve('skills',group.name,skill.name))
+    }
+    for(const [name,entries] of Object.entries(packaging))for(const entry of entries){
+      const [relative,owner]=entry.split('@')
+      if(!relative!.startsWith('scripts/'))continue
+      const target=join(installed,'skill',name,relative!)
+      await fs.mkdir((await import('node:path')).dirname(target),{recursive:true})
+      await fs.copyFile(join(skillPaths.get(owner??name)!,relative!),target)
+    }
+    const build=await Bun.build({entrypoints:[resolve('packages/cli/src/index.ts')],target:'node',outdir:join(installed,'dist'),naming:'index.js'})
+    expect(build.success).toBe(true)
+  }
+  // Keep the adapter's silent outward behavior, but retain its actual child result in this
+  // controlled fixture so a timeout or module-load error cannot masquerade as capture success.
+  const probe=join(canonicalHome,'hook-child-probe.cjs'),childResults=join(canonicalHome,'hook-child-results.jsonl')
+  await fs.writeFile(probe,`const cp=require('node:child_process'),fs=require('node:fs'),mod=require('node:module'),original=cp.spawnSync;
+cp.spawnSync=function(command,args,options){if(!args?.includes('managed-hook'))return original.call(this,command,args,options);
+const start=performance.now(),result=original.call(this,command,args,{...options,stdio:['pipe','pipe','pipe']});
+fs.appendFileSync(${JSON.stringify(childResults)},JSON.stringify({status:result.status,signal:result.signal,error:result.error?.code??null,stderr:result.stderr,elapsedMs:performance.now()-start,timeoutMs:options.timeout})+'\\n');return result;};mod.syncBuiltinESMExports();`)
+  const assertChildSucceeded=async()=>{
+    const results=(await fs.readFile(childResults,'utf8')).trim().split('\n').map(line=>JSON.parse(line))
+    expect(results.at(-1)).toMatchObject({status:0,signal:null,error:null,stderr:''})
+  }
+  const node=Bun.which('node')!,invoke=(name:string,event:string,session='owned-vendor-session',cwd=repo)=>execFileSync(node,[join(hooks,name),'--harness','codex'],{cwd:repo,encoding:'utf8',input:JSON.stringify({hook_event_name:event,session_id:session,cwd,transcript_path:'/never/read/private-transcript'}),env:{...process.env,HOME:canonicalHome,NODE_OPTIONS:`--require=${probe}`,VSK_VEGAFACTORY:join(installed,'dist','index.js')},timeout:2000})
   const before=(await runtime.readRun(runtime.runsRoot(canonicalHome),run.runId)).generation
   expect(invoke('session-start.mjs','SessionStart','unknown-session')).toBe('')
   expect(invoke('stop-heartbeat.mjs','Stop','owned-vendor-session','/foreign/cwd')).toBe('')
   expect((await runtime.readRun(runtime.runsRoot(canonicalHome),run.runId)).generation).toBe(before)
-  expect(invoke('stop-heartbeat.mjs','Stop')).toBe('')
-  expect(invoke('session-end.mjs','SessionEnd')).toBe('')
   const {inspectSpool,spoolRoot}=await import('../src/stats/outbox.ts')
-  expect((await inspectSpool(spoolRoot(canonicalHome))).events).toHaveLength(1)
-  expect((await runtime.readRun(runtime.runsRoot(canonicalHome),run.runId)).pendingDelivery[0]?.status).toBe('acknowledged')
+  for(const [hook,event] of [['stop-heartbeat.mjs','Stop'],['session-end.mjs','SessionEnd']] as const){
+    expect(invoke(hook,event)).toBe('')
+    await assertChildSucceeded()
+    expect((await inspectSpool(spoolRoot(canonicalHome))).events).toHaveLength(1)
+    expect((await runtime.readRun(runtime.runsRoot(canonicalHome),run.runId)).pendingDelivery[0]?.status).toBe('acknowledged')
+  }
   await fs.writeFile(join(room,'org.md'),'stats: on\nlearning: off\nsync-max-age: 2h\n');git(room,'add','.');git(room,'commit','-m','disable learning')
   snapshot.sourceCommit=git(room,'rev-parse','HEAD');snapshot.policyDigest='0'.repeat(64)
   snapshot.policyDigest=policyOwner.loadSnapshotPolicy({snapshot,repo:'a/r',devMd}).policy.policyDigest
