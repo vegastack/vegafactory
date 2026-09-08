@@ -276,8 +276,9 @@ credentials do not block an identity-safe empty/unavailable shell.
 The app is a second published package, `@vegastack/vegafactory-dashboard`, fetched at this CLI's own
 version on first use into `~/.vegastack/dashboard/<version>/` — the core install stays small. The
 CLI verifies the exact descriptor-declared tarball bytes and regular-file tree, stages them with
-scripts disabled, and atomically selects the version. A failed/interrupted staging directory and an
-unowned or mismatched existing install are preserved rather than executed. `--dir` is explicitly
+scripts disabled, and atomically selects the version. An ordinary caught failure removes only that
+attempt's owned staging directory; crash-interrupted or unrelated staging and an unowned or
+mismatched existing install remain preserved and unexecuted. `--dir` is explicitly
 `unverified-development`; release qualification never treats it as artifact proof.
 
 Each canonical org has an isolated immutable-generation cache at

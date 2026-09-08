@@ -93,6 +93,6 @@ callers migrate to this lease in #151.
 Successful rebuilds publish a new immutable generation only after SQLite integrity and org/scope
 metadata match. Failed refreshes retain the previous eligible rows and derive generation source age
 and digest from those persisted rows, not the failed attempt's timestamp. Active, unknown or corrupt
-reader ownership conservatively retains an old generation. Legacy shared `stats.db`, wrong-org
-caches and interrupted package staging remain preserved for explicit recovery; none is silently
-relabelled or deleted.
+reader ownership conservatively retains an old generation. An ordinary caught install failure cleans
+only its owned current staging; crash-interrupted or unrelated staging, legacy shared `stats.db` and
+wrong-org caches remain preserved for explicit recovery. None is silently relabelled or executed.
