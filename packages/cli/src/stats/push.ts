@@ -349,7 +349,7 @@ export async function cleanupDelivered(root:string,options:{now?:Date;controller
   return result
 }
 
-export async function cleanupBasicLogs(home:string,now=new Date(),options:{dryRun?:boolean}={}):Promise<CleanupResult>{
+export async function cleanupBasicLogs(home:string,now=new Date(),options:{dryRun?:boolean;targetForRun?:RetentionTargetResolver}={}):Promise<CleanupResult>{
   const runtime=await import('../runs.ts'),claims=await import('../claims.ts'),{planRetention}=await import('./privacy.ts'),root=spoolRoot(home)
   const result:CleanupResult={removed:0,protected:0,deleteCandidates:[],held:[],failures:[]}
   for(const candidate of await runtime.readRuns(runtime.runsRoot(home))){
@@ -363,7 +363,7 @@ export async function cleanupBasicLogs(home:string,now=new Date(),options:{dryRu
       if(!info.isFile()||info.isSymbolicLink()||info.uid!==process.getuid?.()||(info.mode&0o077)){result.protected++;result.held.push({reason:'retention-unsafe-diagnostic'});continue}
       const events=(await inspectSpool(root)).events.filter(e=>e.captureKey.startsWith(run.runId+':'))
       const receipts=await Promise.all(events.map(e=>readDeliveryReceipt(root,e)))
-      if(run.sharedClaim){result.protected++;result.held.push({reason:'retention-archived-state-reader-unavailable'});continue}
+      if(run.sharedClaim){const state=await assessManagedRetention(home,run,options.targetForRun);if(state.held){result.protected++;result.held.push({reason:state.reason!});continue}}
       const active=run.state!=='terminal'||run.waitReason!==null||run.terminationCause==='termination-unconfirmed'||!run.finishedAt||run.execution!==null&&run.remoteEffectCoverage.kind==='unmanaged-possible'
       const delivered=!run.pendingDelivery.some(p=>p.status!=='acknowledged')&&!receipts.some(r=>r===null)
       const plan=planRetention({now:now.toISOString(),files:[{path:file,kind:'basic-diagnostic',createdAt:run.finishedAt??run.startedAt,bytes:info.size,active:!!active,delivered}],policy:{diagnosticDays:14,sharedMonths:12}})
@@ -376,6 +376,7 @@ export async function cleanupBasicLogs(home:string,now=new Date(),options:{dryRu
       if(!basic){result.protected++;result.held.push({reason:'retention-nonbasic-diagnostic-held'});continue}
       result.deleteCandidates.push(file)
       if(options.dryRun)continue
+      if(run.sharedClaim){const state=await assessManagedRetention(home,await runtime.readRun(runtime.runsRoot(home),run.runId),options.targetForRun);if(state.held){result.protected++;result.held.push({reason:state.reason!});continue}}
       const current=await lstat(file)
       if(current.ino!==info.ino||current.dev!==info.dev||current.size!==info.size||current.mtimeMs!==info.mtimeMs||!current.isFile()||current.isSymbolicLink())throw Error('retention-diagnostic-changed')
       await rm(file);const directory=await open(dirname(file),'r');try{await directory.sync()}finally{await directory.close()}
@@ -411,15 +412,62 @@ export function configuredRetentionActive(home:string):(event:SpoolEnvelope)=>Pr
       }
       for(const run of related){
         if(run.state!=='terminal'||run.waitReason||run.terminationCause==='termination-unconfirmed'||run.pendingDelivery.some(p=>p.status!=='acknowledged')||run.remoteEffectCoverage.kind==='unmanaged-possible')return true
-        if(run.sharedClaim){
-          const {loadFactoryConfig}=await import('../config.ts'),config=await loadFactoryConfig(join(home,'.vegastack','factory.json'),home)
-          const target=await(await import('../dispatch.ts')).verifiedSharedTarget(run.repo,config,run.runId)
-          const current=await(await import('../shared-claims.ts')).readCoordination(target),task=current.tasks[run.sharedClaim.taskKey]
-          if(!task)throw Error('retention-archived-state-reader-unavailable')
-          if(task.state!=='completed'||task.unresolvedEffects.length||task.recovery?.effects.some(e=>e.state!=='acknowledged'&&e.state!=='cancelled-before-send'))return true
-        }
+        if(run.sharedClaim){const state=await assessManagedRetention(home,run);if(state.held){if(state.reason==='retention-task-absent'||state.reason==='retention-task-unverified')throw Error(state.reason);return true}}
       }
       return false
-    }catch(error){throw Error(error instanceof Error&&error.message==='retention-archived-state-reader-unavailable'?error.message:'retention-active-reference-unavailable')}
+    }catch(error){throw Error(error instanceof Error&&['retention-task-absent','retention-task-unverified'].includes(error.message)?error.message:'retention-active-reference-unavailable')}
   }
+}
+
+
+export type RetentionTargetResolver=(run:import('../runs.ts').RunRecord)=>Promise<import('../shared-claims.ts').CoordinationTarget>
+export interface ManagedRetentionDecision {held:boolean;reason:string|null;head:string|null}
+// The137 reader owns archival schema, current-head consistency and expected identity.
+// Retention additionally requires quiescent local and retained recovery state. It never
+// removes the authority, effect, checkpoint, acceptance or dedup evidence it inspected.
+export async function assessManagedRetention(home:string,run:import('../runs.ts').RunRecord,targetForRun?:RetentionTargetResolver):Promise<ManagedRetentionDecision>{
+  const held=(reason:string,head:string|null=null):ManagedRetentionDecision=>({held:true,reason,head})
+  if(!run.sharedClaim||!run.machine)return held('retention-task-unverified')
+  try{
+    const target=targetForRun?await targetForRun(run):await(async()=>{const {loadFactoryConfig}=await import('../config.ts');const config=await loadFactoryConfig(join(home,'.vegastack','factory.json'),home);return(await import('../dispatch.ts')).verifiedSharedTarget(run.repo,config,run.runId)})()
+    const owner=await import('../shared-claims.ts')
+    const expected={runId:run.runId,generation:run.sharedClaim.generation,ownerToken:run.sharedClaim.ownerToken,machineId:run.machine.id,installationId:run.machine.installationId,sessionId:run.machine.sessionId,scopeDigest:run.taskKey.scopeDigest}
+    const inspection=await owner.inspectCoordinationTask(target,run.sharedClaim.taskKey,expected)
+    if(inspection.kind==='absent')return held('retention-task-absent',inspection.head)
+    if(inspection.kind==='invalid-or-unavailable')return held('retention-task-unverified')
+    const {task,head}=inspection,recovery=task.recovery
+    if(task.repo!==run.repo||task.issue!==run.issue||owner.canonical(task.approvalBindings)!==owner.canonical(run.approvalBindings))return held('retention-task-unverified',head)
+    if(inspection.kind==='active'||run.state!=='terminal'||!run.finishedAt||run.waitReason||run.terminationCause==='termination-unconfirmed')return held('retention-active-or-unknown',head)
+    if(!recovery||!task.stopProof||task.stopProof.machineId!==run.machine.id||task.stopProof.installationId!==run.machine.installationId||task.stopProof.sessionId!==run.machine.sessionId||task.stopProof.hostBindingDigest!==run.machine.hostBindingDigest||task.stopProof.generation!==run.sharedClaim.generation||!task.stopProof.runIds.includes(run.runId)||!task.acceptedScopes.some(scope=>scope.scopeDigest===run.taskKey.scopeDigest&&(!run.acceptedScopeRef||owner.canonical(scope.receipt)===owner.canonical(run.acceptedScopeRef)))||owner.canonical(recovery.recordBinding)!==owner.canonical(run.recordBinding)||owner.canonical(recovery.execution)!==owner.canonical(run.execution))return held('retention-recovery-held',head)
+    if(run.pendingDelivery.some(p=>p.status!=='acknowledged')||task.unresolvedEffects.length||run.remoteEffectCoverage.kind==='unmanaged-possible'||recovery.remoteEffectCoverage.kind==='unmanaged-possible'||recovery.effects.some(e=>e.state!=='acknowledged'&&e.state!=='cancelled-before-send')||recovery.joins.some(j=>j.state==='prepared'))return held('retention-recovery-held',head)
+    // Typed reference presence is not proof that the retained evidence is readable.
+    // Resolve through137's immutable evidence reader; never manufacture a qualification,
+    // acceptance, telemetry receipt or replacement authority during cleanup.
+    const refs=new Map<string,import('../shared-claims.ts').EvidenceRef>()
+    const collect=(value:unknown):void=>{if(!value||typeof value!=='object')return;const row=value as Record<string,unknown>;if(row.kind==='state-receipt'||row.kind==='github-comment'){const ref=owner.parseEvidenceRef(row);refs.set(owner.canonical(ref),ref);return}for(const child of Object.values(row))collect(child)}
+    collect(recovery);collect(task.stopProof);collect(task.acceptedScopes)
+    if(refs.size>256)return held('retention-task-unverified',head)
+    const resolved=new Map<string,import('../shared-claims.ts').RecoveryEvidencePayload|null>()
+    for(const [key,ref]of refs)resolved.set(key,await owner.resolveEvidence(target,ref))
+    const qualification=resolved.get(owner.canonical(recovery.execution.qualification))
+    if(!qualification||qualification.kind!=='execution-qualification'||qualification.result!=='qualified'||(['harness','harnessVersion','model','effort','accountRef'] as const).some(key=>qualification[key]!==recovery.execution[key]))return held('retention-recovery-held',head)
+    for(const effect of recovery.effects){
+      const intent=resolved.get(owner.canonical(effect.intent)),outcome=effect.outcome?resolved.get(owner.canonical(effect.outcome)):null
+      if(!intent||intent.kind!=='effect-intent'||!outcome||outcome.kind!=='effect-outcome'||intent.result!=='prepared'||outcome.result!==effect.state||[intent,outcome].some(p=>p.effectId!==effect.operationId||p.runId!==run.runId||p.generation!==effect.generation||p.effectKind!==effect.kind||p.payloadDigest!==effect.payloadDigest||owner.canonical(p.target)!==owner.canonical(effect.target)||owner.canonical(p.approvalBindings)!==owner.canonical(run.approvalBindings)))return held('retention-recovery-held',head)
+    }
+    const coverage=recovery.remoteEffectCoverage
+    if(coverage.kind==='qualified-managed-only'&&owner.canonical(resolved.get(owner.canonical(coverage.qualification)))!==owner.canonical(qualification))return held('retention-recovery-held',head)
+    if(coverage.kind==='reconciled'){
+      const proof=resolved.get(owner.canonical(coverage.evidence))
+      if(!proof||proof.kind!=='effect-reconciliation'||proof.result!=='complete'||proof.runId!==run.runId||proof.scopeDigest!==run.taskKey.scopeDigest||owner.canonical(proof.approvalBindings)!==owner.canonical(run.approvalBindings)||recovery.effects.some(e=>e.kind!=='telemetry-push'&&!proof.checkedEffectIds.includes(e.operationId)))return held('retention-recovery-held',head)
+    }
+    const accepted=task.acceptedScopes.find(scope=>scope.scopeDigest===run.taskKey.scopeDigest&&(!run.acceptedScopeRef||owner.canonical(scope.receipt)===owner.canonical(run.acceptedScopeRef)))!
+    const proof=resolved.get(owner.canonical(accepted.receipt))
+    if(!proof||proof.kind!=='acceptance'||proof.result!=='passed'||proof.runId!==run.runId||proof.sourceSha!==run.headSha||proof.scopeDigest!==run.taskKey.scopeDigest||!proof.acceptedScope||proof.acceptedScope.repo!==run.repo||proof.acceptedScope.issue!==run.issue||owner.canonical(proof.acceptedScope.approvalBindings)!==owner.canonical(run.approvalBindings)||!run.approvedTaskIds?.every(id=>proof.acceptedScope!.completedTaskIds.includes(id)))return held('retention-recovery-held',head)
+    // A head advance while resolving evidence requires a fresh assessment, not a
+    // mixture of archival state at one head and authority/effects at another.
+    const fresh=await owner.inspectCoordinationTask(target,run.sharedClaim.taskKey,expected)
+    if(fresh.kind!=='completed'||fresh.head!==head||owner.canonical(fresh.task)!==owner.canonical(task))return held('retention-task-unverified',head)
+    return{held:false,reason:null,head}
+  }catch{return held('retention-task-unverified')}
 }

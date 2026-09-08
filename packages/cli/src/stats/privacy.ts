@@ -297,6 +297,7 @@ export function basicDiagnostic(at:string,event:string,fields:Record<string,unkn
   return result
 }
 const OUTWARD_REASONS=new Set([
+  'retention-task-absent','retention-task-unverified',
   'capture-payload-conflict','capture-pending','capture-unavailable','diagnostic-cause-invalid',
   'diagnostic-event-invalid','diagnostic-exit-invalid','diagnostic-reason-invalid','disk-low',
   'disk-pressure','disk-pressure-state-invalid','disk-probe-unavailable','disk-recovery-pending',
