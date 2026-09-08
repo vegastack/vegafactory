@@ -366,7 +366,6 @@ export async function smokePair(manifest,directory) {
     } else cleanup.cliStopped=true
     if(dashboardPid) {
       const deadline=Date.now()+1_000;while(processAlive(dashboardPid)&&Date.now()<deadline)await new Promise(ok=>setTimeout(ok,50))
-      if(processAlive(dashboardPid)){try{process.kill(process.platform==='win32'?dashboardPid:-dashboardPid,'SIGKILL')}catch(error){if(error.code!=='ESRCH')throw error};const killed=Date.now()+1_000;while(processAlive(dashboardPid)&&Date.now()<killed)await new Promise(ok=>setTimeout(ok,50))}
       cleanup.dashboardStopped=!processAlive(dashboardPid)
     } else cleanup.dashboardStopped=true
     await rm(home,{recursive:true,force:true});cleanup.isolatedHomeRemoved=true
