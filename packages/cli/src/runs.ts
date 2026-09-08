@@ -30,6 +30,7 @@ export interface RunRecord {
   acceptedScopeRef?:Extract<import('./shared-claims.ts').EvidenceRef,{kind:'state-receipt'}>|null
   stopProof?:import('./shared-claims.ts').StopProof|null
   stopReceiptIds?:{receipt:string;transition:string}
+  stopReceiptPayload?:Extract<import('./shared-claims.ts').RecoveryEvidencePayload,{kind:'effect-reconciliation'}>
   terminationRequest?:{cause:'timed-out'|'cancelled'|'interrupted'|'failed';at:string}|null
   cancelRequestedAt?:string|null
   quotaChecks?:number
@@ -65,8 +66,8 @@ export interface RunRecord {
 }
 type Automatic = 'attemptOperationIds'|'claimOperationId'|'attemptElapsedMs'|'attemptId'|'attempts'|'schemaVersion'|'runId'|'generation'|'state'|'terminationCause'|'exitCode'|'pid'|'processStartId'|'processGroupId'|'processIdentity'|'finishedAt'|'pendingDelivery'
 export type RunInput = Omit<RunRecord,Automatic> & {root:string;runId?:string}
-export type RunPatch = Partial<Pick<RunRecord,'state'|'terminationCause'|'exitCode'|'pid'|'processStartId'|'processGroupId'|'processIdentity'|'finishedAt'|'pendingDelivery'|'headSha'|'activeElapsedMs'|'waitReason'|'quotaWait'|'quotaChecks'|'terminationRequest'|'cancelRequestedAt'|'attemptElapsedMs'|'worktreeDigest'|'stopProof'|'stopReceiptIds'|'acceptedScopeRef'|'vendorSessionId'|'checkpoint'|'sharedClaim'>>
-const patchKeys = new Set(['state','terminationCause','exitCode','pid','processStartId','processGroupId','processIdentity','finishedAt','pendingDelivery','headSha','activeElapsedMs','waitReason','quotaWait','quotaChecks','terminationRequest','cancelRequestedAt','attemptElapsedMs','worktreeDigest','stopProof','stopReceiptIds','acceptedScopeRef','vendorSessionId','checkpoint','sharedClaim'])
+export type RunPatch = Partial<Pick<RunRecord,'state'|'terminationCause'|'exitCode'|'pid'|'processStartId'|'processGroupId'|'processIdentity'|'finishedAt'|'pendingDelivery'|'headSha'|'activeElapsedMs'|'waitReason'|'quotaWait'|'quotaChecks'|'terminationRequest'|'cancelRequestedAt'|'attemptElapsedMs'|'worktreeDigest'|'stopProof'|'stopReceiptIds'|'stopReceiptPayload'|'acceptedScopeRef'|'vendorSessionId'|'checkpoint'|'sharedClaim'>>
+const patchKeys = new Set(['state','terminationCause','exitCode','pid','processStartId','processGroupId','processIdentity','finishedAt','pendingDelivery','headSha','activeElapsedMs','waitReason','quotaWait','quotaChecks','terminationRequest','cancelRequestedAt','attemptElapsedMs','worktreeDigest','stopProof','stopReceiptIds','stopReceiptPayload','acceptedScopeRef','vendorSessionId','checkpoint','sharedClaim'])
 const sameJson=(a:unknown,b:unknown)=>canonicalWire(a)===canonicalWire(b)
 const uuid = /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i
 const causes = new Set(['succeeded','failed','spawn-failed','timed-out','cancelled','interrupted','termination-unconfirmed'])
@@ -158,7 +159,7 @@ function validatePending(value:unknown,run:RunRecord):void {
 }
 export function parseRun(value:unknown):RunRecord {
   const required=['schemaVersion','runId','generation','repo','issue','parent','checkout','branch','baseSha','headSha','stage','harness','model','effort','execution','approvalBindings','recordBinding','approvalRefs','policyDigest','claimToken','state','terminationCause','exitCode','pid','processStartId','processGroupId','processIdentity','startedAt','finishedAt','pendingDelivery','taskKey','activeElapsedMs','taskOwner','agentAccountOwner','accountRef','waitReason','machine','sharedClaim','checkpoint','remoteEffectCoverage']
-  const optional=['quotaWait','checkpointIntent','attemptId','attempts','hostBindingDigest','vendorSessionId','authorityRequest','handbackIntent','deliveryError','runtimeBinding','configurationDigest','dispatchRequest','attemptOperationIds','claimOperationId','approvedTaskIds','attemptElapsedMs','quotaChecks','terminationRequest','cancelRequestedAt','worktreeDigest','stopProof','stopReceiptIds','acceptedScopeRef']
+  const optional=['quotaWait','checkpointIntent','attemptId','attempts','hostBindingDigest','vendorSessionId','authorityRequest','handbackIntent','deliveryError','runtimeBinding','configurationDigest','dispatchRequest','attemptOperationIds','claimOperationId','approvedTaskIds','attemptElapsedMs','quotaChecks','terminationRequest','cancelRequestedAt','worktreeDigest','stopProof','stopReceiptIds','stopReceiptPayload','acceptedScopeRef']
   if(!plain(value)||required.some(k=>!Object.hasOwn(value,k))||Object.keys(value).some(k=>!required.includes(k)&&!optional.includes(k)))throw Error('unknown or missing run field')
   const r=value as unknown as RunRecord,diagnostic=r.execution===null
   if(r.schemaVersion!==2||!uuid.test(r.runId)||!number(r.generation)||r.generation<1||!validRepo(r.repo)||!number(r.issue)||r.issue<1||!nullable(r.parent,v=>number(v)&&v>0)||!text(r.checkout,8192)||!isAbsolute(r.checkout)||!date(r.startedAt)||!nullable(r.finishedAt,date)||!['prepared','running','terminal','interrupted'].includes(r.state)||!nullable(r.terminationCause,v=>typeof v==='string'&&causes.has(v))||!nullable(r.exitCode,v=>Number.isSafeInteger(v))||!nullable(r.activeElapsedMs,v=>typeof v==='number'&&Number.isFinite(v)&&v>=0)||!uuid.test(r.claimToken))throw Error('invalid run lifecycle')
@@ -190,6 +191,7 @@ export function parseRun(value:unknown):RunRecord {
   if(r.checkpointIntent!==undefined)validateCheckpointIntentShape(r.checkpointIntent)
   if(r.acceptedScopeRef!=null&&parseEvidenceRef(r.acceptedScopeRef).kind!=='state-receipt')throw Error('invalid accepted scope reference')
   if(r.stopReceiptIds!==undefined&&(!closed(r.stopReceiptIds,['receipt','transition'])||Object.values(r.stopReceiptIds).some(id=>!uuid.test(id))))throw Error('invalid stop operation identity')
+  if(r.stopReceiptPayload!==undefined){const p=parseRecoveryPayload(r.stopReceiptPayload);if(!r.stopReceiptIds||p.kind!=='effect-reconciliation'||p.runId!==r.runId||p.scopeDigest!==r.taskKey.scopeDigest||!sameJson(p.approvalBindings,r.approvalBindings)||p.reasonCode!=='owned-process-group-stopped')throw Error('invalid saved stop receipt payload')}
   if(r.stopProof!==undefined&&r.stopProof!==null){parseStopProof(r.stopProof);if(!r.machine||r.stopProof.machineId!==r.machine.id||r.stopProof.installationId!==r.machine.installationId||!r.stopProof.runIds.includes(r.runId))throw Error('stop proof identity differs')}
   if(r.worktreeDigest!==undefined&&!nullable(r.worktreeDigest,digest))throw Error('invalid saved worktree digest')
   if(r.terminationRequest!=null&&(!closed(r.terminationRequest,['cause','at'])||!['timed-out','cancelled','interrupted','failed'].includes(r.terminationRequest.cause)||!date(r.terminationRequest.at)))throw Error('invalid termination request')
@@ -708,14 +710,16 @@ export async function verifyLocalRunStopped(run:RunRecord):Promise<boolean>{
 export async function verifySharedStopProof(proof:import('./shared-claims.ts').StopProof,task:import('./shared-claims.ts').TaskRecord,target:import('./shared-claims.ts').CoordinationTarget,run:RunRecord):Promise<void>{
   const owner=await import('./shared-claims.ts')
   owner.parseStopProof(proof)
-  if(proof.machineId!==task.machineId||proof.installationId!==task.installationId||proof.sessionId!==task.sessionId||proof.generation!==task.generation||!proof.runIds.includes(task.runId))throw Error('stop proof ownership differs')
+  if(run.runId!==task.runId||run.taskKey.scopeDigest!==task.scopeDigest||run.machine?.id!==proof.machineId||run.machine.installationId!==proof.installationId||run.machine.sessionId!==proof.sessionId||run.machine.hostBindingDigest!==proof.hostBindingDigest||proof.machineId!==task.machineId||proof.installationId!==task.installationId||proof.sessionId!==task.sessionId||proof.generation!==task.generation||!proof.runIds.includes(task.runId))throw Error('stop proof ownership differs')
   if(proof.evidenceRef.kind!=='state-receipt')throw Error('operator stop requires the verified recovery-owner adapter')
   const payload=await owner.resolveEvidence(target,proof.evidenceRef)
   const raw=await target.provider.read(target,proof.evidenceRef.commitSha,owner.operationPath(proof.evidenceRef.operationId))
   if(raw===null||owner.sha256(raw)!==proof.evidenceRef.blobSha256)throw Error('stop receipt changed')
   const receipt=JSON.parse(raw) as import('./shared-claims.ts').OperationReceipt
-  if(receipt.resultOwner.machineId!==proof.machineId||receipt.resultOwner.installationId!==proof.installationId||receipt.resultOwner.sessionId!==proof.sessionId||receipt.resultOwner.runId!==task.runId||receipt.generation!==proof.generation||!payload||payload.kind!=='effect-reconciliation'||payload.result!=='complete'||payload.reasonCode!=='owned-process-group-stopped'||payload.runId!==task.runId)throw Error('stop attestation is incomplete')
-  if(run.machine?.id===proof.machineId&&!await verifyLocalRunStopped(run))throw Error('original local process remains unconfirmed')
+  if(receipt.operationId!==proof.evidenceRef.operationId||receipt.taskKey!==task.taskKey||receipt.resultOwner.ownerToken!==task.ownerToken||receipt.resultOwner.machineId!==proof.machineId||receipt.resultOwner.installationId!==proof.installationId||receipt.resultOwner.sessionId!==proof.sessionId||receipt.resultOwner.runId!==task.runId||receipt.generation!==proof.generation||!payload||payload.kind!=='effect-reconciliation'||payload.scopeDigest!==task.scopeDigest||owner.canonical(payload.approvalBindings)!==owner.canonical(run.approvalBindings)||payload.reasonCode!=='owned-process-group-stopped'||payload.runId!==task.runId)throw Error('stop attestation is incomplete')
+  if(!await verifyLocalRunStopped(run))throw Error('original local process remains unconfirmed')
+  if(run.processIdentity&&proof.bootIdDigest!==owner.sha256(`VegaFactory/boot/v1\n${run.processIdentity.bootId}`))throw Error('stop proof boot identity differs')
+  if(proof.kind==='verified-reboot'&&run.processIdentity?.bootId===(await processIdentity()).bootId)throw Error('stop proof reboot is unconfirmed')
 }
 
 export interface QualifiedExecutionRecord {schemaVersion:1;execution:ExecutionIdentity;runtimeBinding:InstalledRuntimeBinding;configurationDigest:string}

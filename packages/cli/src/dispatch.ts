@@ -2123,21 +2123,27 @@ async function persistAttemptCapture(record:RunRecord,stdout:string,root:string,
 async function finishDurableSharedRun(claim:SharedClaim,outcome:RunOutcome|null,config:FactoryConfig):Promise<TaskTransition>{
   const helpers=await import('./runs.ts'),owner=await import('./shared-claims.ts'),root=runsRoot(config.home)
   let record=await helpers.readRun(root,claim.runId)
-  if(record.sharedClaim?.ownerToken!==claim.ownerToken||outcome?.runId&&outcome.runId!==record.runId)throw Error('shared finish identity mismatch')
+  if(!record.sharedClaim||record.sharedClaim.taskKey!==claim.taskKey||record.sharedClaim.generation!==claim.generation||record.sharedClaim.ownerToken!==claim.ownerToken||record.machine?.id!==claim.machineId||record.machine.installationId!==claim.installationId||record.machine.sessionId!==claim.sessionId||outcome?.runId&&outcome.runId!==record.runId)throw Error('shared finish identity mismatch')
   if(record.waitReason==='subscription-quota'||record.terminationCause==='termination-unconfirmed'||!await helpers.verifyLocalRunStopped(record))return{kind:'block',stopProof:null}
   try{await(await import('./checkpoints.ts')).flushRunCheckpoint(record,config);await flushRunHandback(record,config)}catch{/* Unresolved code/control delivery retains ownership below. */}
   record=await helpers.readRun(root,record.runId);claim=await sharedClaimForRun(record,config)
   const snapshot=await owner.readCoordination(claim.target),task=snapshot.tasks[claim.taskKey]
-  if(!task?.recovery||task.recovery.remoteEffectCoverage.kind==='unmanaged-possible'||task.recovery.effects.some(e=>e.kind!=='telemetry-push'&&e.state!=='acknowledged'&&e.state!=='cancelled-before-send')||record.pendingDelivery.some(p=>p.kind!=='telemetry-capture'&&p.status!=='acknowledged'))return{kind:'block',stopProof:null}
-  if(record.stopProof){await helpers.verifySharedStopProof(record.stopProof,task,claim.target,record);if(record.acceptedScopeRef&&record.terminationCause==='succeeded'){await owner.resolveEvidence(claim.target,record.acceptedScopeRef);return{kind:'complete',stopProof:record.stopProof,acceptedScope:record.acceptedScopeRef}}return{kind:'stop',stopProof:record.stopProof}}
-  record=await helpers.updateRun(root,record.runId,r=>({stopReceiptIds:r.stopReceiptIds??{receipt:randomUUID(),transition:randomUUID()}}))
+  if(!task?.recovery)return{kind:'block',stopProof:null}
+  // Physical absence permits a stop attestation; unresolved effects still retain
+  // task ownership and prevent accepted completion or automatic transfer.
+  const reconciled=task.recovery.remoteEffectCoverage.kind!=='unmanaged-possible'&&!task.recovery.effects.some(e=>e.kind!=='telemetry-push'&&e.state!=='acknowledged'&&e.state!=='cancelled-before-send')&&!record.pendingDelivery.some(p=>p.kind!=='telemetry-capture'&&p.status!=='acknowledged')
+  if(record.stopProof){await helpers.verifySharedStopProof(record.stopProof,task,claim.target,record);if(reconciled&&record.acceptedScopeRef&&record.terminationCause==='succeeded'){await owner.resolveEvidence(claim.target,record.acceptedScopeRef);return{kind:'complete',stopProof:record.stopProof,acceptedScope:record.acceptedScopeRef}}return{kind:'stop',stopProof:record.stopProof}}
   const allowedActionIds=[...new Set([record.handbackIntent?.id,record.checkpointIntent?.id,record.authorityRequest?.kind==='consolidated'?record.authorityRequest.requested.actionId:null].filter((id):id is string=>!!id))].sort()
-  const payload:import('./shared-claims.ts').RecoveryEvidencePayload={schemaVersion:2,kind:'effect-reconciliation',runId:record.runId,scopeDigest:record.taskKey.scopeDigest,approvalBindings:record.approvalBindings,allowedActionIds,checkedEffectIds:task.recovery.effects.filter(e=>e.state==='acknowledged'||e.state==='cancelled-before-send').map(e=>e.operationId).sort(),inspector:{kind:'qualified-adapter',identityRef:record.machine!.id},result:'complete',reasonCode:'owned-process-group-stopped'}
-  const receipt=await owner.publishRecoveryReceipt({claim,operationId:record.stopReceiptIds!.receipt,payload})
+  const payload:import('./shared-claims.ts').RecoveryEvidencePayload={schemaVersion:2,kind:'effect-reconciliation',runId:record.runId,scopeDigest:record.taskKey.scopeDigest,approvalBindings:record.approvalBindings,allowedActionIds,checkedEffectIds:task.recovery.effects.filter(e=>e.state==='acknowledged'||e.state==='cancelled-before-send').map(e=>e.operationId).sort(),inspector:{kind:'qualified-adapter',identityRef:record.machine!.id},result:reconciled?'complete':'unresolved',reasonCode:'owned-process-group-stopped'}
+  // Freeze the request with its operation identity before publishing. A lost
+  // acknowledgment must not rebind that ID to later delivery facts.
+  record=await helpers.updateRun(root,record.runId,r=>({stopReceiptIds:r.stopReceiptIds??{receipt:randomUUID(),transition:randomUUID()},stopReceiptPayload:r.stopReceiptPayload??payload}))
+  const receipt=await owner.publishRecoveryReceipt({claim,operationId:record.stopReceiptIds!.receipt,payload:record.stopReceiptPayload!})
   const identity=await processIdentity(),bootId=record.processIdentity?.bootId??identity.bootId
   const proof:import('./shared-claims.ts').StopProof={kind:bootId===identity.bootId?'process-exit':'verified-reboot',machineId:record.machine!.id,installationId:record.machine!.installationId,sessionId:record.machine!.sessionId,hostBindingDigest:record.machine!.hostBindingDigest,bootIdDigest:createHash('sha256').update(`VegaFactory/boot/v1\n${bootId}`).digest('hex'),runIds:[record.runId],generation:claim.generation,observedAt:record.finishedAt??new Date().toISOString(),evidenceRef:receipt.reference}
+  await helpers.verifySharedStopProof(proof,task,claim.target,record)
   await helpers.updateRun(root,record.runId,()=>({stopProof:proof}))
-  if(record.acceptedScopeRef&&record.terminationCause==='succeeded'){await owner.resolveEvidence(claim.target,record.acceptedScopeRef);return{kind:'complete',stopProof:proof,acceptedScope:record.acceptedScopeRef}}
+  if(reconciled&&record.acceptedScopeRef&&record.terminationCause==='succeeded'){await owner.resolveEvidence(claim.target,record.acceptedScopeRef);return{kind:'complete',stopProof:proof,acceptedScope:record.acceptedScopeRef}}
   return{kind:'stop',stopProof:proof}
 }
 

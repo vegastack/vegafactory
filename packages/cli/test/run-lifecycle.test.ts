@@ -141,6 +141,58 @@ if(args.includes('app-server')){
       expect(publicWrites).toBe(0)
       await dispatch.runOnce(config,{dryRun:false},{processDeps:{wrapperPath:resolve('packages/cli/src/run-wrapper.ts')}})
       expect(JSON.parse(await fs.readFile(phasePath,'utf8')).starts).toBe(2)
+      // The default finisher must preserve physical stop independently of remote
+      // reconciliation. These are real wrapper exits and controlled state receipts.
+      const root=runtime.runsRoot(home),finish=dispatch.sharedRunAdapters(config).finishSharedRun!
+      let shared=await dispatch.sharedClaimForRun(saved,config)
+      const task=(await wire.readCoordination(shared.target)).tasks[shared.taskKey]!
+      const originalStop=await wire.resolveEvidence(shared.target,saved.stopProof!.evidenceRef)
+      expect(originalStop?.kind==='effect-reconciliation'&&originalStop.result).toBe('complete') // telemetry alone is nonblocking
+      await expect(finish({...shared,generation:shared.generation+1},null)).rejects.toThrow('identity mismatch')
+      const recovery=structuredClone(task.recovery!)
+      recovery.remoteEffectCoverage={kind:'unmanaged-possible',reasonCode:'controlled-unknown-effects'}
+      const changed=await wire.transitionSharedTask({claim:shared,operationId:crypto.randomUUID(),transition:{kind:'recovery',recovery}})
+      if(changed.kind!=='owned')throw Error(changed.reason)
+      shared=changed.claim
+      await runtime.updateRun(root,saved.runId,()=>({stopProof:null,stopReceiptIds:undefined,stopReceiptPayload:undefined,acceptedScopeRef:execution.qualification}))
+      const stopped=await finish(shared,null)
+      expect(stopped.kind).toBe('stop')
+      if(stopped.kind!=='stop'||!stopped.stopProof)throw Error('physical stop missing')
+      const proof=stopped.stopProof,payload=await wire.resolveEvidence(shared.target,proof.evidenceRef)
+      expect(payload?.kind==='effect-reconciliation'&&payload.result).toBe('unresolved')
+      const retained=await runtime.readRun(root,saved.runId)
+      expect(await finish(shared,null)).toEqual(stopped)
+      expect((await runtime.readRun(root,saved.runId)).stopReceiptIds).toEqual(retained.stopReceiptIds)
+      await runtime.verifySharedStopProof(proof,task,shared.target,retained)
+      await expect(runtime.verifySharedStopProof({...proof,hostBindingDigest:'9'.repeat(64)},task,shared.target,retained)).rejects.toThrow()
+      await expect(runtime.verifySharedStopProof({...proof,generation:proof.generation+1},task,shared.target,retained)).rejects.toThrow()
+      await expect(runtime.verifySharedStopProof({...proof,bootIdDigest:'8'.repeat(64)},task,shared.target,retained)).rejects.toThrow('boot identity')
+      if(proof.evidenceRef.kind!=='state-receipt')throw Error('state receipt missing')
+      await expect(runtime.verifySharedStopProof({...proof,evidenceRef:{...proof.evidenceRef,blobSha256:'7'.repeat(64)}},task,shared.target,retained)).rejects.toThrow('changed')
+      await expect(runtime.verifySharedStopProof(proof,{...task,ownerToken:crypto.randomUUID()},shared.target,retained)).rejects.toThrow()
+      await expect(runtime.verifySharedStopProof(proof,task,shared.target,{...retained,processIdentity:null})).rejects.toThrow('unconfirmed')
+      const currentIdentity=await(await import('../src/claims.ts')).processIdentity()
+      await expect(runtime.verifySharedStopProof(proof,task,shared.target,{...retained,processIdentity:currentIdentity})).rejects.toThrow('unconfirmed')
+      // Pending code delivery also yields an unresolved stop, even with qualified
+      // coverage. Lose the receipt acknowledgment, then retry after local delivery
+      // changes: the original operation/payload must be reused, never rebound.
+      const restored=await wire.transitionSharedTask({claim:await dispatch.sharedClaimForRun(retained,config),operationId:crypto.randomUUID(),transition:{kind:'recovery',recovery:task.recovery!}})
+      if(restored.kind!=='owned')throw Error(restored.reason)
+      const pending:import('../src/runs.ts').PendingDelivery={id:crypto.randomUUID(),kind:'evidence',target:{repo:saved.repo,issue:saved.issue,commentId:null},intentRef:null,status:'pending',attempts:0,lastError:null}
+      await runtime.updateRun(root,saved.runId,()=>({stopProof:null,stopReceiptIds:undefined,stopReceiptPayload:undefined,pendingDelivery:[...saved.pendingDelivery,pending]}))
+      const publish=wire.publishRecoveryReceipt
+      const lost=spyOn(wire,'publishRecoveryReceipt').mockImplementation(async input=>{await publish(input);throw Error('controlled lost stop response')})
+      try{await expect(finish(restored.claim,null)).rejects.toThrow('controlled lost stop response')}finally{lost.mockRestore()}
+      const beforeRetry=await runtime.readRun(root,saved.runId)
+      const stopReceiptCount=Object.values(versions.get(head)!).filter(raw=>{try{return JSON.parse(raw).recoveryPayload?.reasonCode==='owned-process-group-stopped'}catch{return false}}).length
+      await runtime.updateRun(root,saved.runId,r=>({pendingDelivery:r.pendingDelivery.map(p=>p.id===pending.id?{...p,status:'acknowledged'}:p),acceptedScopeRef:null}))
+      const retried=await finish(restored.claim,null)
+      expect(retried.kind).toBe('stop')
+      if(retried.kind!=='stop'||!retried.stopProof)throw Error('retry stop missing')
+      expect((await runtime.readRun(root,saved.runId)).stopReceiptIds).toEqual(beforeRetry.stopReceiptIds)
+      const retryPayload=await wire.resolveEvidence(restored.claim.target,retried.stopProof.evidenceRef)
+      expect(retryPayload?.kind==='effect-reconciliation'&&retryPayload.result).toBe('unresolved')
+      expect(Object.values(versions.get(head)!).filter(raw=>{try{return JSON.parse(raw).recoveryPayload?.reasonCode==='owned-process-group-stopped'}catch{return false}})).toHaveLength(stopReceiptCount)
       // The same installed default machinery prepares a consolidated scope with a
       // separate relay pin. Neither that pin nor JSON key order creates authority.
       const brief2={...issue,id:2,node_id:'I_2',number:2},plan2={...baseComment,id:21,node_id:'PLAN_2',body:planBody.replace('1-T1','2-T1'),issue_url:'https://api.github.com/repos/acme/app/issues/2',html_url:'https://github.com/acme/app/issues/2#issuecomment-21'}
