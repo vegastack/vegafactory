@@ -14,7 +14,7 @@ describe('buildLaunchPlan', () => {
     expect(plan.command).toBe('claude')
     expect(plan.args[0]).toBe('-p')
     expect(plan.args[1]).toBe(plan.prompt)
-    expect(plan.args.slice(2)).toEqual(['--permission-mode', 'bypassPermissions', '--output-format', 'json', '--model', 'fable-5-1', '--effort', 'high', '--settings', JSON.stringify({ autoMemoryEnabled: false, disableAllHooks: false, env: { CLAUDE_CODE_DISABLE_AUTO_MEMORY: '1' } })])
+    expect(plan.args.slice(2)).toEqual(['--permission-mode', 'bypassPermissions', '--output-format', 'stream-json', '--verbose', '--model', 'fable-5-1', '--effort', 'high', '--settings', JSON.stringify({ autoMemoryEnabled: false, disableAllHooks: false, env: { CLAUDE_CODE_DISABLE_AUTO_MEMORY: '1' } })])
     expect(plan.cwd).toBe('/w/12-thing')
     expect(plan.env.VSK_ASK_ROUTE).toBe('issue')
     expect(plan.env.CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH).toBe('1')

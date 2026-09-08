@@ -100,6 +100,33 @@ test('Codex JSON and inline layers merge without overwriting either file or addi
   expect(readHookConfiguration(f.checkout, 'codex').duplicateCommands).toHaveLength(1)
 })
 
+test('Codex feature-table hooks flags are not hook registrations', () => {
+  const f = fixture()
+  mkdirSync(join(f.checkout, '.codex'))
+  const path = join(f.checkout, '.codex/config.toml')
+  const features = '[features]\nhooks = true\nmemories = false\n'
+  writeFileSync(path, features)
+  expect(validateRegistration({ ...f, config: readHookConfiguration(f.checkout, 'codex').config }).ok).toBe(false)
+  writeFileSync(join(f.checkout, '.codex/hooks.json'), JSON.stringify(f.config))
+  const inline = '[[hooks.SessionStart]]\n[[hooks.SessionStart.hooks]]\ntype = "command"\ncommand = "node other.mjs"\n'
+  for (const toml of [features, features + inline, inline + features, '']) {
+    writeFileSync(path, toml)
+    const merged = readHookConfiguration(f.checkout, 'codex')
+    expect(validateRegistration({ ...f, config: merged.config }).ok).toBe(true)
+    expect(merged.duplicateCommands).toEqual([])
+    expect(readFileSync(path, 'utf8')).toBe(toml)
+  }
+})
+
+test('unsupported real TOML hook tables and top-level assignments still refuse', () => {
+  const f = fixture()
+  mkdirSync(join(f.checkout, '.codex'))
+  for (const toml of ['hooks = {}', 'hooks.PreToolUse = []', '"hooks" = {}', "'hooks' = {}", '[hooks]\nPreToolUse = []', '[features]\nhooks = true\n[hooks]\nPreToolUse = []']) {
+    writeFileSync(join(f.checkout, '.codex/config.toml'), toml)
+    expect(() => readHookConfiguration(f.checkout, 'codex')).toThrow(/unsupported inline/)
+  }
+})
+
 test('Claude local disabling and unsupported inline configurations refuse without writes', () => {
   const f = fixture('claude')
   mkdirSync(join(f.checkout, '.claude'))

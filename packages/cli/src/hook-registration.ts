@@ -227,10 +227,12 @@ function* tomlCodeLines(text: string): Generator<string> {
 function inlineHooks(text: string): Record<string, unknown> {
   const hooks: Record<string, Array<Record<string, unknown>>> = {}
   let current: Record<string, unknown> | null = null
+  let topLevel = true
   for (const raw of tomlCodeLines(text)) {
     const line = raw.trim()
     if (!line || line.startsWith('#')) continue
     if (line.startsWith('[')) {
+      topLevel = false
       current = null
       if (!/^\[\[?(?:hooks|"hooks"|'hooks')(?:\.|\])/.test(line)) continue
       const match = /^\[\[hooks\.([A-Za-z]+)(\.hooks)?\]\]\s*(?:#.*)?$/.exec(line)
@@ -246,7 +248,9 @@ function inlineHooks(text: string): Record<string, unknown> {
       continue
     }
     if (!current) {
-      if (/^(?:hooks|"hooks"|'hooks')\s*[.=]/.test(line)) throw new Error('unsupported inline hooks; use the documented array-of-tables or hooks.json')
+      // Within another table, e.g. [features], hooks is a setting rather than a
+      // root registration. TOML assignments stay in that table until the next header.
+      if (topLevel && /^(?:hooks|"hooks"|'hooks')\s*[.=]/.test(line)) throw new Error('unsupported inline hooks; use the documented array-of-tables or hooks.json')
       continue
     }
     const field = /^(matcher|type|command|timeout|async|asyncRewake|disabled|statusMessage)\s*=\s*("(?:[^"\\]|\\.)*"|'[^']*'|true|false|[0-9]+)\s*(?:#.*)?$/.exec(line)
