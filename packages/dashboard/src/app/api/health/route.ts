@@ -1,11 +1,16 @@
 import { readEnv } from '@/lib/env'
+import { cacheReadiness, directoryWithoutLinks } from '@/lib/cache/build'
 
-// The route `vegafactory dashboard` polls to decide the server is up. Dynamic on purpose: a
-// cached 200 would report health the process no longer has.
 export const dynamic = 'force-dynamic'
 
-export function GET(): Response {
+// Data can be unavailable on first launch. Readiness proves the selected process and safe
+// namespace; it never turns a missing snapshot into a launcher timeout.
+export async function GET(): Promise<Response> {
   const result = readEnv(process.env as Record<string, string | undefined>)
-  const version = result.ok ? result.env.version : '0.0.0'
-  return Response.json({ ok: true, version })
+  if (!result.ok) return Response.json({ ok: false }, { status: 503 })
+  const env = result.env
+  try { await directoryWithoutLinks(env.cacheFile) }
+  catch { return Response.json({ ok: false }, { status: 503 }) }
+  return Response.json({ ok: true, org: env.org, version: env.version, instanceId: env.instanceId,
+    cacheSchema: env.cacheSchema, ...cacheReadiness(env.cacheFile, env.org) })
 }

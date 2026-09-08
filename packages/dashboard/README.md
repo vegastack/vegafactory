@@ -6,9 +6,9 @@ The local, read-only web view of the factory. It is launched by the CLI, not run
 vegafactory dashboard
 ```
 
-The CLI fetches this package at its own version on first use, collects the environment, and starts
-the Next.js standalone server under Bun on `127.0.0.1`. Nothing here writes to GitHub or to the
-control room.
+The CLI selects one configured organization (or requires `--org` when selection is ambiguous),
+verifies this package against its bundled artifact descriptor, and starts the Next.js standalone
+server under Bun on `127.0.0.1`. Nothing here writes to GitHub or to the control room.
 
 ## The six views
 
@@ -26,16 +26,20 @@ filtered view is a URL you can bookmark or paste into an issue.
 
 ## The environment contract
 
-The CLI sets these; the server reads them and nothing else. The four required ones have no sane
-default, and the optional ones degrade the page rather than refusing it.
+The CLI sets these; the server reads them and nothing else. Identity and repository scope are
+required even for an empty first-use shell. Viewer, token and CLI bridge absence degrade live data
+rather than weakening validation.
 
 | Variable | Required | Means |
 |---|---|---|
 | `VEGAFACTORY_CONTROL_ROOM` | yes | path to this machine's control-room clone |
-| `VEGAFACTORY_CACHE` | yes | path to the derived `bun:sqlite` index |
+| `VEGAFACTORY_CACHE` | yes | exact `~/.vegastack/dashboard/<sha256(org)>/cache-v2` namespace |
 | `VEGAFACTORY_ORG` | yes | the org whose freshness entry to read |
 | `VEGAFACTORY_STATE` | yes | path to `~/.vegastack/factory.json` |
-| `VEGAFACTORY_REPOS` | no | comma-separated repos the board reads live |
+| `VEGAFACTORY_REPOS` | yes | comma-separated selected-org registrations; an empty string is valid |
+| `VEGAFACTORY_VERSION` | yes | exact installed version, or `unverified-development` for explicit `--dir` |
+| `VEGAFACTORY_INSTANCE_ID` | yes | random identity for this child only |
+| `VEGAFACTORY_CACHE_SCHEMA` | yes | exact supported cache schema (`2`) |
 | `VEGAFACTORY_VIEWER` | no | the `gh` login of whoever is looking — the people gate's subject |
 | `VEGAFACTORY_GH_TOKEN` | no | the viewer's own `gh` token, used server-side only |
 | `VEGAFACTORY_BIN` | no | path to the `vegafactory` binary, for selected-config status and activity bridges |
@@ -43,6 +47,11 @@ default, and the optional ones degrade the page rather than refusing it.
 ## Offline behaviour
 
 Current verified policy is required before every cached read. A stale or missing policy never becomes an authorization grant. The live board retains successfully read pages and healthy repositories when another read is partial or unavailable, displaying each repository’s reason and observation time; an incomplete empty result is unknown, not “no issues” or “no pull requests”. GitHub reads are bounded to 100 pages or 10,000 records, 10 seconds per request and 60 seconds per repository, with at most two retries and three repositories in flight. After connectivity recovers or the reported rate reset, reload to retry. Repeated unchanged failures stay visible without repeated notifications. Status preserves the CLI workflow/shared/policy/recovery projections. Missing source identity and recovery history remain unavailable.
+
+Readiness is separate from data availability. `/api/health` returns only
+`{ok,org,version,instanceId,cacheSchema,dataState,sourceAgeSeconds}`; an `empty` or `unavailable`
+first-use shell is ready when its launcher identity and cache namespace are valid. It never returns
+tokens or local paths.
 
 ## Building it locally
 
@@ -71,4 +80,19 @@ Metric version 2 distinguishes unknown from measured zero, execution segments fr
 
 The dashboard uses the same bounded CLI activity collector, with explicit org, repo, month and selected config. An activity-only month is selectable with zero executions. Failed refreshes preserve the previous complete collection's source observation time. SQLite source associations, event identities and derived metadata commit together; a failed ingestion rolls back. Transport schema remains version 2; derived views carry metric version 2. Raw archive files are unchanged.
 
-`loadContext(search, {kind:'aggregate'})` obtains current repository authorization. `loadContext(search, {kind:'person',subject,dimension})` obtains a subject-bound task-owner or account-owner context. Generic aggregates refuse person-only grants; only the matching central person query may use that scope. `allowedRepos:[]` denies access even when group/repo filters are cleared. Current attribution is applied again on cached fallback; stale person and issue identities cannot survive a downgrade. Null owners are aggregate buckets, not person profiles. The context generation/lease owner and route consumers preserve these contracts.
+`withContext(search, async context => renderedResult)` obtains current aggregate authorization;
+`withContext(search, async context => renderedResult, {kind:'person',subject,dimension})` obtains a
+subject-bound task-owner or account-owner context. The callback is awaited before its SQLite handle
+closes and its persistent reader pin is released; callers must not retain `context` or `context.db`
+after the callback settles. Generic aggregates refuse person-only grants; only the matching central
+person query may use that scope. `allowedRepos:[]` denies access even when group/repo filters are
+cleared. Current attribution is applied again on cached fallback; stale person and issue identities
+cannot survive a downgrade. Null owners are aggregate buckets, not person profiles. The seven page
+callers migrate to this lease in #151.
+
+Successful rebuilds publish a new immutable generation only after SQLite integrity and org/scope
+metadata match. Failed refreshes retain the previous eligible rows and derive generation source age
+and digest from those persisted rows, not the failed attempt's timestamp. Active, unknown or corrupt
+reader ownership conservatively retains an old generation. Legacy shared `stats.db`, wrong-org
+caches and interrupted package staging remain preserved for explicit recovery; none is silently
+relabelled or deleted.

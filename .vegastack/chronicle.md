@@ -2,6 +2,16 @@
 
 The project's story, newest first: what got built, why, and how it went — for the operator's future recall. Format home: the dev-chronicle skill.
 
+## 09-09-2026 — Each dashboard opens one verified organization ([#150](https://github.com/vegastack/vegafactory/issues/150))
+
+- **What:** Dashboard source now selects one configured organization, keeps its repositories and cache generations isolated, and accepts readiness only from the exact owned child. Descriptor-bound package bytes are staged and verified before an installed version becomes selectable.
+- **Why:** A first configured org, shared cache file, or unrelated HTTP 200 could silently mix data or launch the wrong process.
+- **How it went:** Resuming the preserved source exposed missing private modes on claim directories; real generation use refused until that was corrected. Focused tests now cover live cross-process readers, crashed and unknown owners, retained failed-refresh provenance, descriptor attacks and child cleanup. Page migrations, packed-pair proof and broad qualification remain with their named later owners.
+- **Changed:** Explicit `--org` selection · canonical per-org cache namespaces · request-lifetime reader pins · honest empty/unavailable readiness · descriptor-verified atomic installation · recovery guidance.
+- **Decisions:** none.
+
+— approved by (kmanojkumar) · built by Codex · branch codex/productionization-133
+
 ## 08-09-2026 — Reports distinguish missing measurements from completed work ([#148](https://github.com/vegastack/vegafactory/issues/148))
 
 - **What:** CLI and dashboard source now share measured coverage, separate execution segments from task activity, and discover accepted merges and first releases independently of run months. Task and account owners remain distinct, including explicit unknown-owner buckets.

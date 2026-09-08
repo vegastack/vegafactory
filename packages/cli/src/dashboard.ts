@@ -6,9 +6,16 @@
 // the CLI's own version keeps the two in step without a resolution step that can drift.
 
 import { execFile, spawn } from 'node:child_process'
-import { lstat, readFile } from 'node:fs/promises'
+import { chmod, lstat, mkdir, mkdtemp, open, readFile, readdir, rename, rm, writeFile } from 'node:fs/promises'
 import { homedir } from 'node:os'
-import { join } from 'node:path'
+import { dirname, isAbsolute, join, resolve, sep } from 'node:path'
+
+import { createHash, randomUUID } from 'node:crypto'
+import { constants } from 'node:fs'
+import { fileURLToPath } from 'node:url'
+import { gunzipSync } from 'node:zlib'
+import { acquireClaim, processIdentity, releaseClaim, type ProcessIdentity } from './claims.ts'
+import { inspectOwnedGroup, signalOwnedGroup } from './run-wrapper.ts'
 
 export const DASHBOARD_PACKAGE = '@vegastack/vegafactory-dashboard'
 export const SERVER_ENTRY = 'dist-standalone/packages/dashboard/server.js'
@@ -36,7 +43,7 @@ export function dashboardPaths(input: { home: string; version: string; override:
 }
 
 export function installArgs(input: { root: string; version: string }): string[] {
-  return ['install', '--prefix', input.root, dashboardSpec(input.version), '--no-audit', '--no-fund', '--omit=dev']
+  return ['install', '--prefix', input.root, dashboardSpec(input.version), '--no-audit', '--no-fund', '--omit=dev', '--ignore-scripts']
 }
 
 export interface DashboardPlan {
@@ -81,6 +88,8 @@ export interface ServerLaunchInput {
   token: string | null
   bin: string
   port: number
+  version: string
+  instanceId: string
 }
 
 // The whole contract the server reads, and nothing else. A null value is omitted rather than set
@@ -96,8 +105,11 @@ export function launchEnv({ env }: { env: ServerLaunchInput }): Record<string, s
     VEGAFACTORY_ORG: env.org,
     VEGAFACTORY_STATE: env.stateFile,
     VEGAFACTORY_BIN: env.bin,
+    VEGAFACTORY_REPOS: env.repos.join(','),
+    VEGAFACTORY_VERSION: env.version,
+    VEGAFACTORY_INSTANCE_ID: env.instanceId,
+    VEGAFACTORY_CACHE_SCHEMA: '2',
   }
-  if (env.repos.length > 0) out.VEGAFACTORY_REPOS = env.repos.join(',')
   if (env.viewer) out.VEGAFACTORY_VIEWER = env.viewer
   if (env.token) out.VEGAFACTORY_GH_TOKEN = env.token
   return out
@@ -131,18 +143,6 @@ async function symlinked(path: string): Promise<boolean> {
   }
 }
 
-async function health(port: number, deadline: number): Promise<boolean> {
-  while (Date.now() < deadline) {
-    try {
-      const response = await fetch(healthUrl(port), { cache: 'no-store' })
-      if (response.ok) return true
-    } catch {
-      // the server has not bound its port yet; the loop is the wait
-    }
-    await new Promise((resolve) => setTimeout(resolve, 250))
-  }
-  return false
-}
 
 export interface DashboardOptions {
   rest: string[]
@@ -152,6 +152,7 @@ export interface DashboardOptions {
 
 interface Flags {
   port: number
+  org: string | null
   open: boolean
   dir: string | null
   dryRun: boolean
@@ -160,7 +161,7 @@ interface Flags {
 }
 
 export function parseDashboardFlags(rest: string[]): Flags {
-  const flags: Flags = { port: DEFAULT_PORT, open: false, dir: null, dryRun: false, json: false, help: false }
+  const flags: Flags = { port: DEFAULT_PORT, org: null, open: false, dir: null, dryRun: false, json: false, help: false }
   const argv = [...rest]
   while (argv.length) {
     const flag = argv.shift()!
@@ -169,6 +170,11 @@ export function parseDashboardFlags(rest: string[]): Flags {
       const port = Number(value)
       if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error('--port requires a port number between 1 and 65535')
       flags.port = port
+    }
+    else if (flag === '--org') {
+      const value = argv.shift()
+      if (!value || value.startsWith('-')) throw Error('--org requires a value')
+      flags.org = value
     }
     else if (flag === '--open') flags.open = true
     else if (flag === '--dir') {
@@ -185,13 +191,14 @@ export function parseDashboardFlags(rest: string[]): Flags {
 }
 
 export function dashboardUsage(): string {
-  return `Usage: vegafactory dashboard [--port N] [--open] [--dir PATH] [--dry-run] [--json]
+  return `Usage: vegafactory dashboard [--org ORG] [--port N] [--open] [--dir PATH] [--dry-run] [--json]
 
 Starts the local read-only dashboard over the control room's statistics and the live board.
 The package is fetched on first use into ~/.vegastack/dashboard/<version>/ and the server
-binds 127.0.0.1 only. The derived cache lives at ~/.vegastack/cache/stats.db and deleting
-it is always safe.
+binds 127.0.0.1 only. Organization caches use immutable pinned generations under
+~/.vegastack/dashboard/<sha256(org)>/cache-v2/. Legacy shared caches are preserved.
 
+  --org ORG    organization (inferred only when one is configured)
   --port N     first port to try (default ${DEFAULT_PORT}; the next ${PORT_SPAN - 1} are tried in turn)
   --open       open the URL in the browser once the server answers
   --dir PATH   launch an already-built package tree instead of the fetched one
@@ -205,7 +212,7 @@ answered · 2 a usage error or a refusal.`
 // Collects the environment from this machine: the control room this org recorded, the viewer and
 // token from `gh`, and the path to this very binary for the status bridge. Everything optional
 // degrades to null — a dashboard with no `gh` still renders every cached view.
-async function collect(home: string): Promise<{
+async function collect(home: string, requested: string | null): Promise<{
   controlRoom: string
   org: string
   stateFile: string
@@ -222,13 +229,12 @@ async function collect(home: string): Promise<{
   } catch (error) {
     return { error: (error as Error).message }
   }
-  const entries = Object.entries(config.controlRooms)
-  const first = entries[0]
-  if (!first) return { error: `no control room is recorded in ${stateFile} — run \`vegafactory sync\` first` }
-
-  const settingsRepos = Array.isArray((config.settings as Record<string, unknown>).repos)
-    ? ((config.settings as Record<string, unknown>).repos as unknown[]).filter((repo): repo is string => typeof repo === 'string')
-    : []
+  let org: string, repos: string[]
+  try {
+    org = selectDashboardOrg(Object.keys(config.controlRooms), requested)
+    repos = dashboardRepositories(config.settings.repos, org)
+    if (!isAbsolute(config.controlRooms[org]!.path)) throw Error('control room path must be absolute')
+  } catch (error) { return { error: (error as Error).message } }
 
   const { ghText } = await import('./gh.ts')
   const quiet = async (args: string[]): Promise<string | null> => {
@@ -240,10 +246,10 @@ async function collect(home: string): Promise<{
   }
 
   return {
-    controlRoom: first[1].path,
-    org: first[0],
+    controlRoom: config.controlRooms[org]!.path,
+    org,
     stateFile,
-    repos: settingsRepos,
+    repos,
     viewer: await quiet(['api', 'user', '-q', '.login']),
     token: await quiet(['auth', 'token']),
   }
@@ -280,13 +286,13 @@ export async function runDashboard(options: DashboardOptions): Promise<number> {
     return 2
   }
 
-  const environment = await collect(home)
+  const environment = await collect(home, flags.org)
   if ('error' in environment) {
     console.error(`error: ${environment.error}`)
     return 2
   }
 
-  const cacheFile = join(home, '.vegastack', 'cache', 'stats.db')
+  const cacheFile = dashboardCacheNamespace(home, environment.org)
   if (plan.action === 'plan') {
     const document = {
       command: 'dashboard', ok: true, url: healthUrl(flags.port).replace('/api/health', ''),
@@ -297,55 +303,303 @@ export async function runDashboard(options: DashboardOptions): Promise<number> {
   }
 
   let fetched = false
-  if (plan.action === 'fetch-then-launch') {
-    if (!flags.json) console.log(`fetching ${dashboardSpec(options.version)} into ${paths.root} …`)
-    const result = await run('npm', installArgs({ root: paths.root, version: options.version }))
-    if (result.code !== 0) {
-      console.error(`error: could not fetch ${dashboardSpec(options.version)} — ${result.stderr.trim() || 'npm exited non-zero'}`)
+  try {
+    if (paths.source === 'cache') {
+      const descriptorPath = fileURLToPath(new URL('./dashboard-artifact.json', import.meta.url))
+      const descriptor = validateDashboardDescriptor(JSON.parse(await readFile(descriptorPath, 'utf8')), options.version)
+      fetched = await installDashboardArtifact(paths.root, descriptor, () => downloadDashboard(options.version, descriptor))
+    } else await verifyAncestors(dirname(paths.entry))
+  } catch (error) { console.error(`error: ${(error as Error).message}`); return 2 }
+
+  const version = paths.source === 'override' ? 'unverified-development' : options.version
+  const deadline = Date.now() + HEALTH_TIMEOUT_MS
+  for (const port of portCandidates(flags.port, PORT_SPAN).filter(port => port <= 65535)) {
+    if (Date.now() >= deadline) break
+    const identity: DashboardIdentity = {org: environment.org, version, instanceId: randomUUID(), cacheSchema: 2}
+    const env = launchEnv({env: {...environment, cacheFile, port, version, instanceId: identity.instanceId, bin: process.argv[1] ?? 'vegafactory'}})
+    const attempt = launchDashboardChild(paths.entry, {...process.env, ...env}, flags.json)
+    try {
+      const ready = await waitDashboardChild(attempt, identity, port, Math.min(deadline, Date.now() + 2_000))
+      if (!ready) {
+        if (!await stopDashboardChild(attempt)) { console.error('error: dashboard child termination is unverified; retained ownership, no port retry'); return 1 }
+        continue
+      }
+      const url = `http://127.0.0.1:${port}`
+      if (flags.json) console.log(JSON.stringify({command: 'dashboard', ok: true, ...identity, url, dir: paths.root, entry: paths.entry, fetched, pid: attempt.child.pid ?? null}, null, 2))
+      else console.log(`dashboard: ${url}${paths.source === 'override' ? ' (unverified-development)' : ''}  (ctrl-c to stop)`)
+      if (flags.open) await run(process.platform === 'darwin' ? 'open' : 'xdg-open', [url])
+      const interrupt = () => { void stopDashboardChild(attempt) }
+      process.on('SIGINT', interrupt); process.on('SIGTERM', interrupt)
+      try { const code = await attempt.finished; return code === 0 || code === null ? 0 : 1 }
+      finally { process.off('SIGINT', interrupt); process.off('SIGTERM', interrupt) }
+    } catch (error) {
+      const stopped = await stopDashboardChild(attempt)
+      console.error(`error: ${(error as Error).message}${stopped ? '' : '; child termination unverified'}`)
       return 1
     }
-    fetched = true
-    if (!(await exists(paths.entry))) {
-      console.error(`error: ${dashboardSpec(options.version)} installed but has no ${SERVER_ENTRY}`)
-      return 1
+  }
+  console.error('error: no owned dashboard instance became ready within 20 seconds')
+  return 1
+}
+
+export interface DashboardChild {
+  child: ReturnType<typeof spawn>
+  finished: Promise<number | null>
+  identity: Promise<ProcessIdentity | null>
+  exited: boolean
+  error: Error | null
+  stopping?: Promise<boolean>
+}
+export function launchDashboardChild(entry: string, env: NodeJS.ProcessEnv, quiet = true): DashboardChild {
+  const child = spawn('bun', [entry], {env, detached: true, stdio: quiet ? ['ignore', 'ignore', 'inherit'] : 'inherit'})
+  let complete!: (code: number | null) => void
+  let identify!: (value: ProcessIdentity | null) => void
+  const state: DashboardChild = {child, finished: new Promise(resolve => {complete = resolve}), identity: new Promise(resolve => {identify = resolve}), exited: false, error: null}
+  child.once('error', error => {state.error = error; state.exited = true; identify(null); complete(1)})
+  child.once('exit', code => {state.exited = true; complete(code)})
+  child.once('spawn', () => {void processIdentity(child.pid!).then(identify, () => identify(null))})
+  return state
+}
+export async function waitDashboardChild(state: DashboardChild, identity: DashboardIdentity, port: number, deadline: number): Promise<boolean> {
+  while (!state.exited && !state.error && Date.now() < deadline) {
+    try {
+      const response = await fetch(healthUrl(port), {cache: 'no-store', signal: AbortSignal.timeout(Math.max(1, Math.min(1000, deadline - Date.now())))})
+      const actual: unknown = await response.json()
+      if (response.ok && matchesReadiness(actual, identity) && !state.exited && !state.error) {
+        const owned = await state.identity
+        if (owned && (await inspectOwnedGroup(owned)).kind === 'owned' && !state.exited) return true
+      }
+    } catch { /* The bounded next probe can observe this child's bind or exit. */ }
+    if (!state.exited) await Promise.race([state.finished, new Promise(resolve => setTimeout(resolve, 250))])
+  }
+  return false
+}
+export function stopDashboardChild(state: DashboardChild): Promise<boolean> {
+  return state.stopping ??= (async () => {
+    const identity = await state.identity
+    if (!identity) return state.exited
+    let observation = await inspectOwnedGroup(identity)
+    if (observation.kind === 'absent') { await state.finished; return true }
+    if (observation.kind !== 'owned' || !await signalOwnedGroup(identity, 'SIGTERM')) return false
+    await Promise.race([state.finished, new Promise(resolve => setTimeout(resolve, 5000))])
+    observation = await inspectOwnedGroup(identity)
+    if (observation.kind !== 'absent') {
+      if (observation.kind !== 'owned' || !await signalOwnedGroup(identity, 'SIGKILL')) return false
+      await Promise.race([state.finished, new Promise(resolve => setTimeout(resolve, 1000))])
     }
+    return state.exited && (await inspectOwnedGroup(identity)).kind === 'absent'
+  })()
+}
+
+export interface DashboardIdentity { org: string; version: string; instanceId: string; cacheSchema: 2 }
+export function matchesReadiness(actual: unknown, expected: DashboardIdentity): boolean {
+  if (!actual || typeof actual !== 'object') return false
+  const value = actual as Record<string, unknown>
+  return value.ok === true && value.org === expected.org && value.version === expected.version &&
+    value.instanceId === expected.instanceId && value.cacheSchema === expected.cacheSchema &&
+    ['ready', 'empty', 'unavailable'].includes(value.dataState as string) &&
+    (value.sourceAgeSeconds === null || typeof value.sourceAgeSeconds === 'number' && Number.isFinite(value.sourceAgeSeconds) && value.sourceAgeSeconds >= 0)
+}
+export function selectDashboardOrg(orgs: string[], requested: string | null): string {
+  const canonical = orgs.map(org => org.toLowerCase())
+  if (orgs.some((org, i) => org !== canonical[i] || !/^[a-z0-9](?:[a-z0-9-]{0,37}[a-z0-9])?$/.test(org)) || new Set(canonical).size !== orgs.length) throw Error('configured org identity is not canonical')
+  const selected = requested?.toLowerCase() ?? (canonical.length === 1 ? canonical[0] : null)
+  if (!selected || !canonical.includes(selected)) throw Error('select a configured organization with --org')
+  return selected
+}
+export function dashboardRepositories(raw: unknown, org: string): string[] {
+  if (raw === undefined) return []
+  if (!Array.isArray(raw)) throw Error('configured repositories must be registration objects')
+  const repos: string[] = []
+  for (const item of raw) {
+    if (!item || typeof item !== 'object' || typeof item.repo !== 'string' || typeof item.org !== 'string' || typeof item.path !== 'string' || !isAbsolute(item.path)) throw Error('invalid repository registration')
+    if (item.org !== org) continue
+    if (!item.repo.startsWith(org + '/') || !/^[a-z0-9-]+\/[A-Za-z0-9_.-]+$/.test(item.repo)) throw Error('repository does not belong to selected org')
+    if (repos.includes(item.repo)) throw Error('duplicate repository registration')
+    repos.push(item.repo)
   }
-
-  const env = launchEnv({
-    env: {
-      controlRoom: environment.controlRoom,
-      cacheFile,
-      org: environment.org,
-      repos: environment.repos,
-      stateFile: environment.stateFile,
-      viewer: environment.viewer,
-      token: environment.token,
-      bin: process.argv[1] ?? 'vegafactory',
-      port: flags.port,
-    },
-  })
-
-  const child = spawn('bun', [paths.entry], {
-    env: { ...process.env, ...env, VEGAFACTORY_VERSION: options.version },
-    stdio: flags.json ? ['ignore', 'ignore', 'inherit'] : 'inherit',
-  })
-
-  const answered = await health(flags.port, Date.now() + HEALTH_TIMEOUT_MS)
-  if (!answered) {
-    child.kill()
-    console.error(`error: the dashboard server did not answer ${healthUrl(flags.port)} within ${HEALTH_TIMEOUT_MS / 1000}s`)
-    return 1
+  return repos.sort()
+}
+export function dashboardCacheNamespace(home: string, org: string): string {
+  return join(home, '.vegastack', 'dashboard', digest(org), 'cache-v2')
+}
+interface ArtifactFile { path: string; sha256: string; mode: number }
+export interface DashboardArtifactDescriptor {
+  schemaVersion: 1; name: string; version: string; sha256: string; integrity: string; bytes: number; files: ArtifactFile[]
+}
+const digest = (bytes: string | Uint8Array, algorithm = 'sha256', encoding: 'hex' | 'base64' = 'hex') => createHash(algorithm).update(bytes).digest(encoding)
+function artifactPath(path: string): string {
+  if (typeof path !== 'string' || !path || path.includes('\\') || /[\x00-\x1f\x7f]/.test(path) || path.startsWith('/') || path.split('/').some(x => !x || x === '.' || x === '..') || /^[A-Za-z]:/.test(path)) throw Error('unsafe package path')
+  return path
+}
+export function validateDashboardDescriptor(value: unknown, version: string): DashboardArtifactDescriptor {
+  const d = value as DashboardArtifactDescriptor
+  if (!d || typeof d !== 'object' || Object.keys(d).sort().join(',') !== 'bytes,files,integrity,name,schemaVersion,sha256,version' ||
+    d.schemaVersion !== 1 || d.name !== DASHBOARD_PACKAGE || d.version !== version ||
+    !/^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/.test(version) || !/^[a-f0-9]{64}$/.test(d.sha256) || !/^sha512-[A-Za-z0-9+/]{86}==$/.test(d.integrity) ||
+    !Number.isSafeInteger(d.bytes) || d.bytes < 1 || d.bytes > 1024 * 1024 * 1024 || !Array.isArray(d.files) || !d.files.length) throw Error('missing, stale or malformed dashboard descriptor')
+  const seen = new Set<string>()
+  let previous = ''
+  for (const file of d.files) {
+    if (!file || typeof file !== 'object' || Object.keys(file).sort().join(',') !== 'mode,path,sha256') throw Error('invalid dashboard file manifest')
+    artifactPath(file.path)
+    if (file.path <= previous || seen.has(file.path) || !/^[a-f0-9]{64}$/.test(file.sha256) || ![0o644, 0o755].includes(file.mode)) throw Error('invalid dashboard file manifest')
+    previous = file.path; seen.add(file.path)
   }
+  for (const file of d.files) for (let path = dirname(file.path); path !== '.'; path = dirname(path)) if (seen.has(path)) throw Error('package file/directory collision')
+  if (!seen.has('package.json') || !seen.has(SERVER_ENTRY)) throw Error('dashboard descriptor has no package identity/server')
+  return d
+}
 
-  const url = `http://127.0.0.1:${flags.port}`
-  if (flags.json) {
-    console.log(JSON.stringify({ command: 'dashboard', ok: true, url, dir: paths.root, entry: paths.entry, fetched, pid: child.pid ?? null }, null, 2))
-  } else {
-    console.log(`dashboard: ${url}  (ctrl-c to stop)`)
+function readPackageArchive(bytes: Buffer): Array<ArtifactFile & {data: Buffer}> {
+  const tar = gunzipSync(bytes, { maxOutputLength: 1024 * 1024 * 1024 })
+  const files: Array<ArtifactFile & {data: Buffer}> = []; const seen = new Set<string>(); let pax: Record<string,string> | null = null; let ended = false
+  const str = (b: Buffer) => b.toString('utf8').split('\0')[0]!
+  const oct = (b: Buffer) => { const s = str(b).trim(); if (s && !/^[0-7]+$/.test(s)) throw new Error('invalid tar number'); return s ? parseInt(s, 8) : 0 }
+  for (let off = 0; off + 512 <= tar.length;) {
+    const h = tar.subarray(off, off + 512)
+    if (h.every(b => b === 0)) { if (!tar.subarray(off).every(b => b === 0)) throw new Error('trailing tar data'); ended = true; break }
+    const sum = [...h].reduce((s, b, i) => s + (i >= 148 && i < 156 ? 32 : b), 0)
+    if (sum !== oct(h.subarray(148, 156))) throw new Error('tar checksum mismatch')
+    const size = oct(h.subarray(124, 136)); const mode = oct(h.subarray(100, 108)); const type = str(h.subarray(156, 157)) || '0'
+    if (!Number.isSafeInteger(size) || off + 512 + size > tar.length) throw new Error('truncated tar entry')
+    const data = tar.subarray(off + 512, off + 512 + size); off += 512 + Math.ceil(size / 512) * 512
+    if (type === 'x') {
+      if (pax) throw new Error('duplicate pax header')
+      pax = {}
+      for (let i = 0; i < data.length;) {
+        const space = data.indexOf(32, i); const n = Number(data.subarray(i, space).toString())
+        if (space < i || !Number.isSafeInteger(n) || n <= space - i + 1 || i + n > data.length || data[i+n-1] !== 10) throw new Error('invalid pax record')
+        const record = data.subarray(space + 1, i+n-1).toString(); const eq = record.indexOf('='); const key = record.slice(0, eq)
+        if (eq < 1 || Object.hasOwn(pax,key)) throw new Error('invalid duplicate pax key')
+        if (!['path','mtime','atime','ctime','uid','gid','uname','gname','SCHILY.dev','SCHILY.ino','SCHILY.nlink'].includes(key)) throw new Error(`unsupported pax key: ${key}`)
+        pax[key] = record.slice(eq+1); i += n
+      }
+      continue
+    }
+    let path = pax?.path ?? [str(h.subarray(345,500)),str(h.subarray(0,100))].filter(Boolean).join('/'); pax = null
+    if (type === '5') path = path.replace(/\/$/,'')
+    artifactPath(path)
+    if (path !== 'package' && !path.startsWith('package/')) throw new Error('tar entry outside package')
+    if (seen.has(path)) throw new Error('duplicate package path'); seen.add(path)
+    if (type === '5') continue
+    if (type !== '0' || path === 'package' || ![0o644,0o755].includes(mode)) throw new Error('unsupported package entry type or mode')
+    files.push({ path: path.slice(8), sha256: digest(data), mode, data })
   }
-  if (flags.open) await run(process.platform === 'darwin' ? 'open' : 'xdg-open', [url])
-
-  return new Promise<number>((resolve) => {
-    child.on('exit', (code) => resolve(code === 0 || code === null ? 0 : 1))
-  })
+  if (!ended || pax) throw new Error('incomplete tar archive')
+  files.sort((a,b) => a.path < b.path ? -1 : a.path > b.path ? 1 : 0)
+  const paths = new Set(files.map(f => f.path))
+  for (const f of files) for (let p = dirname(f.path); p !== '.'; p = dirname(p)) if (paths.has(p)) throw new Error('file/directory collision')
+  return files
+}
+export function verifyDashboardArtifact(bytes: Buffer, descriptor: DashboardArtifactDescriptor): Array<ArtifactFile & {data: Buffer}> {
+  validateDashboardDescriptor(descriptor, descriptor.version)
+  if (bytes.length !== descriptor.bytes || digest(bytes) !== descriptor.sha256 || `sha512-${digest(bytes, 'sha512', 'base64')}` !== descriptor.integrity) throw Error('dashboard artifact integrity mismatch')
+  const files = readPackageArchive(bytes)
+  if (JSON.stringify(files.map(({path, sha256, mode}) => ({path, sha256, mode}))) !== JSON.stringify(descriptor.files)) throw Error('dashboard artifact file manifest mismatch')
+  const pkg = JSON.parse(files.find(file => file.path === 'package.json')!.data.toString())
+  if (pkg.name !== descriptor.name || pkg.version !== descriptor.version) throw Error('dashboard package identity mismatch')
+  return files
+}
+async function verifyAncestors(path: string, create = false): Promise<void> {
+  let current: string = sep
+  for (const part of resolve(path).split(sep).filter(Boolean)) {
+    current = join(current, part)
+    if (create) await mkdir(current, { mode: 0o700 }).catch(error => { if (error.code !== 'EEXIST') throw error })
+    const info = await lstat(current)
+    if (!info.isDirectory() || info.isSymbolicLink()) throw Error('dashboard path contains a link or non-directory')
+  }
+}
+export async function verifyDashboardTree(root: string, descriptor: DashboardArtifactDescriptor): Promise<void> {
+  validateDashboardDescriptor(descriptor, descriptor.version)
+  await verifyAncestors(root)
+  const expected = new Map(descriptor.files.map(file => [file.path, file]))
+  const directories = new Set<string>()
+  for (const file of descriptor.files) for (let path = dirname(file.path); path !== '.'; path = dirname(path)) directories.add(path)
+  const observed = new Set<string>()
+  const walk = async (directory: string, prefix: string): Promise<void> => {
+    const before = await lstat(directory)
+    if (!before.isDirectory() || before.isSymbolicLink()) throw Error('dashboard directory changed')
+    for (const name of (await readdir(directory)).sort()) {
+      const relative = prefix ? `${prefix}/${name}` : name, path = join(directory, name)
+      const info = await lstat(path)
+      if (info.isSymbolicLink()) throw Error('dashboard filesystem link refused')
+      if (info.isDirectory()) {
+        if (!directories.has(relative)) throw Error('unexpected dashboard directory')
+        await walk(path, relative); continue
+      }
+      const file = expected.get(relative)
+      if (!file || !info.isFile() || info.nlink !== 1 || (info.mode & 0o7777) !== file.mode) throw Error('dashboard file/type/mode mismatch')
+      const handle = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW)
+      try {
+        const opened = await handle.stat()
+        if (opened.ino !== info.ino || opened.dev !== info.dev || opened.nlink !== 1) throw Error('dashboard file changed while opening')
+        const bytes = await handle.readFile(), after = await handle.stat(), named = await lstat(path)
+        if (digest(bytes) !== file.sha256 || after.ino !== named.ino || after.dev !== named.dev || after.size !== opened.size || after.mtimeMs !== opened.mtimeMs || after.ctimeMs !== opened.ctimeMs || named.isSymbolicLink()) throw Error('dashboard file integrity mismatch')
+      } finally { await handle.close() }
+      observed.add(relative)
+    }
+    const after = await lstat(directory)
+    if (after.ino !== before.ino || after.dev !== before.dev || after.mtimeMs !== before.mtimeMs || after.isSymbolicLink()) throw Error('dashboard directory changed during verification')
+  }
+  await walk(root, '')
+  if (observed.size !== expected.size) throw Error('dashboard files missing')
+  const pkg = JSON.parse(await readFile(join(root, 'package.json'), 'utf8'))
+  if (pkg.name !== descriptor.name || pkg.version !== descriptor.version) throw Error('dashboard package identity mismatch')
+}
+export function dashboardInstallReceipt(descriptor: DashboardArtifactDescriptor): string {
+  return JSON.stringify({schemaVersion: 1, owner: 'vegafactory-dashboard', version: descriptor.version, descriptorSha256: digest(JSON.stringify(descriptor))})
+}
+export async function installDashboardArtifact(root: string, descriptor: DashboardArtifactDescriptor, download: () => Promise<Buffer>): Promise<boolean> {
+  await verifyAncestors(dirname(root), true)
+  const claimRoot = join(dirname(root), '.install-claims')
+  await verifyAncestors(claimRoot, true)
+  const identity = await processIdentity(), deadline = Date.now() + 120_000
+  let held
+  for (;;) {
+    const result = await acquireClaim(join(claimRoot, `${digest(descriptor.version)}.claim`), identity)
+    if (result.kind === 'owned') { held = result.claim; break }
+    if (result.kind === 'refused' || Date.now() >= deadline) throw Error('dashboard install claim unavailable')
+    await new Promise(resolve => setTimeout(resolve, 50))
+  }
+  let staging: string | null = null
+  try {
+    if (await exists(root)) {
+      await verifyAncestors(root)
+      const receipt = join(root, 'dashboard-install.json'), info = await lstat(receipt)
+      if (!info.isFile() || info.isSymbolicLink() || info.nlink !== 1 || await readFile(receipt, 'utf8') !== dashboardInstallReceipt(descriptor)) throw Error('unowned dashboard install preserved; remove or relocate it explicitly before retrying')
+      await verifyDashboardTree(join(root, 'node_modules', DASHBOARD_PACKAGE), descriptor)
+      return false
+    }
+    staging = await mkdtemp(`${root}.staging-`)
+    const files = verifyDashboardArtifact(await download(), descriptor)
+    const packageRoot = join(staging, 'node_modules', DASHBOARD_PACKAGE)
+    await mkdir(packageRoot, {recursive: true})
+    for (const file of files) {
+      if (Date.now() >= deadline) throw Error('dashboard install deadline exceeded')
+      const path = join(packageRoot, file.path)
+      await mkdir(dirname(path), {recursive: true})
+      await writeFile(path, file.data, {flag: 'wx', mode: file.mode}); await chmod(path, file.mode)
+    }
+    await verifyDashboardTree(packageRoot, descriptor)
+    await writeFile(join(staging, 'dashboard-install.json'), dashboardInstallReceipt(descriptor), {flag: 'wx'})
+    if (await exists(root)) throw Error('dashboard install appeared before publication')
+    await rename(staging, root); staging = null
+    return true
+  } finally { if (staging) await rm(staging, {recursive: true, force: true}); await releaseClaim(held) }
+}
+async function downloadDashboard(version: string, descriptor: DashboardArtifactDescriptor): Promise<Buffer> {
+  const signal = AbortSignal.timeout(120_000)
+  const registry = process.env.npm_config_registry ?? process.env.NPM_CONFIG_REGISTRY ?? 'https://registry.npmjs.org/'
+  const metadata = await fetch(new URL(`${encodeURIComponent(DASHBOARD_PACKAGE)}/${version}`, registry.endsWith('/') ? registry : registry + '/'), {signal})
+  if (!metadata.ok) throw Error('dashboard package lookup failed')
+  const value = await metadata.json() as {dist?: {tarball?: string}}
+  if (!value.dist?.tarball) throw Error('dashboard tarball locator missing')
+  const response = await fetch(value.dist.tarball, {signal})
+  if (!response.ok || !response.body) throw Error('dashboard download failed')
+  const chunks: Buffer[] = []; let size = 0
+  const reader = response.body.getReader()
+  try { for (;;) { const part = await reader.read(); if (part.done) break; size += part.value.length; if (size > descriptor.bytes) throw Error('dashboard archive size mismatch'); chunks.push(Buffer.from(part.value)) } }
+  finally { await reader.cancel() }
+  return Buffer.concat(chunks)
 }

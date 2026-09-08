@@ -1,6 +1,4 @@
-// The cache is derived and disposable: it holds nothing the control room does not, so it has no
-// migrations. Bumping CACHE_SCHEMA_VERSION is the whole migration story — an older file is
-// deleted and rebuilt on the next open, and deleting the file by hand is always safe.
+// Schema changes create a separate generation namespace; existing files are never reset.
 export const CACHE_SCHEMA_VERSION = 2
 
 export const SCHEMA_SQL = `

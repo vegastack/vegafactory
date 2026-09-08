@@ -1,5 +1,7 @@
-import { mkdir, readFile, readdir, rm, stat } from 'node:fs/promises'
-import { dirname, join, relative, sep } from 'node:path'
+import { randomUUID } from 'node:crypto'
+import { acquireClaim, inspectClaim, processIdentity, releaseClaim, type Claim } from '../../../../cli/src/claims'
+import { copyFile, lstat, mkdir, readFile, readdir, rename, rm, stat, writeFile } from 'node:fs/promises'
+import { dirname, join, relative, resolve, sep } from 'node:path'
 
 import { readRecords, type StatsRecord } from '../stats/record'
 import { readEventBatch, destinationKey, canonicalJson, hashBytes, type ExportReader, type ExportedEvent } from '../../../../cli/src/stats/types'
@@ -24,7 +26,7 @@ export interface Db {
 }
 
 interface SqliteModule {
-  Database: new (file: string, options?: { create?: boolean }) => Db
+  Database: new (file: string, options?: { create?: boolean; readwrite?: boolean; readonly?: boolean }) => Db
 }
 
 // The specifier is computed and carries both bundlers' ignore comments, so neither Turbopack nor
@@ -45,42 +47,21 @@ function initialise(db: Db): void {
   db.run(`pragma user_version = ${CACHE_SCHEMA_VERSION}`)
 }
 
-// A cache whose schema version differs, or that will not open or read at all, is deleted and
-// rebuilt rather than repaired. Every row in it is reproducible from the control-room clone, so
-// throwing the file away costs one re-ingest and never any data.
+// Existing generations are evidence for active readers. Opening never repairs or deletes one.
 export async function openCache(file: string): Promise<Db> {
   const { Database } = await loadSqlite()
-  // The cache path is the server's to own: `vegafactory dashboard` names ~/.vegastack/cache/stats.db
-  // and nothing creates that directory, because the file is derived and may be deleted at any time.
   await mkdir(dirname(file), { recursive: true })
-  const fresh = async (): Promise<Db> => {
-    await rm(file, { force: true })
-    const db = new Database(file, { create: true })
-    initialise(db)
-    return db
-  }
-  let db: Db
+  const existing = await stat(file).then(() => true, error => {
+    if (error.code === 'ENOENT') return false
+    throw error
+  })
+  const db = new Database(file, { create: !existing, readwrite: true })
   try {
-    db = new Database(file, { create: true })
-  } catch {
-    return fresh()
-  }
-  try {
-    const version = db.query<{ user_version: number }>('pragma user_version').get()?.user_version ?? 0
-    if (version !== CACHE_SCHEMA_VERSION) {
-      db.close()
-      return fresh()
-    }
-    db.run(SCHEMA_SQL)
+    if (!existing) initialise(db)
+    else if (db.query<{ user_version: number }>('pragma user_version').get()?.user_version !== CACHE_SCHEMA_VERSION)
+      throw new Error('cache-schema-mismatch: preserve the existing generation and rebuild separately')
     return db
-  } catch {
-    try {
-      db.close()
-    } catch {
-      // an unopenable file has nothing to close cleanly; the delete below is the recovery
-    }
-    return fresh()
-  }
+  } catch (error) { db.close(); throw error }
 }
 
 export interface Source {
@@ -99,8 +80,9 @@ export async function discoverSources(controlRoom: string): Promise<Source[]> {
     let entries
     try {
       entries = await readdir(dir, { withFileTypes: true })
-    } catch {
-      return
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return
+      throw error
     }
     for (const entry of entries) {
       if (entry.isSymbolicLink()) continue
@@ -227,4 +209,182 @@ export async function refreshCache(db:Db,controlRoom:string,options:RefreshOptio
   }catch(error){db.run('rollback');throw error}
   const total=db.query<{n:number}>('select count(*) as n from runs').get()?.n??0
   return {ingested,removed,skippedLines,total,eventTotal:batch.events.length,invalidEvents:0,duplicateEvents:batch.duplicates,metricVersion:2,sourceDigest,organization:options.org??null}
+}
+
+export interface GenerationMetadata {
+  schemaVersion: number
+  metricVersion: 2
+  generation: string
+  compatibilityKey: string
+  org: string
+  sourceDigest: string
+  sourceObservedAt: string | null
+  dataState: 'ready' | 'empty' | 'unavailable'
+}
+const generationName = /^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/
+
+// Incomplete live reads retain #148's last safely served activity rows. Generation identity and
+// age therefore come from those persisted rows, never from the failed attempt's fresh timestamp
+// or placeholder digest.
+export function retainedGenerationProvenance(db: Db, metricSourceDigest: string, policyObservedAt: string | null): {
+  sourceDigest: string
+  sourceObservedAt: string | null
+  activityTotal: number
+  activityUnavailable: boolean
+} {
+  const persisted = db.query<{repo:string;period:string;payload_json:string}>('select repo,period,payload_json from activity_collections order by repo,period').all()
+    .map(row => ({ repo: row.repo, period: row.period, collection: parseActivityCollection(JSON.parse(row.payload_json), row.repo) }))
+  const available = persisted.filter(row => row.collection.complete || row.collection.sourceDigest !== '0'.repeat(64) || row.collection.activities.length + row.collection.snapshots.length > 0)
+  const observations = [policyObservedAt, ...available.map(row => row.collection.observedAt)]
+    .filter((at): at is string => !!at && Number.isFinite(Date.parse(at)))
+  return {
+    sourceDigest: hashBytes(canonicalJson({ metrics: metricSourceDigest, activity: available.map(row => ({ repo: row.repo, period: row.period, sourceDigest: row.collection.sourceDigest })) })),
+    sourceObservedAt: observations.length ? new Date(Math.min(...observations.map(Date.parse))).toISOString() : null,
+    activityTotal: available.reduce((count, row) => count + row.collection.activities.length + row.collection.snapshots.length, 0),
+    activityUnavailable: persisted.some(row => !row.collection.complete) && available.length === 0,
+  }
+}
+
+export async function directoryWithoutLinks(path: string): Promise<void> {
+  const absolute = resolve(path)
+  let current: string = sep
+  for (const part of absolute.split(sep).filter(Boolean)) {
+    current = join(current, part)
+    await mkdir(current, { mode: 0o700 }).catch(error => { if (error.code !== 'EEXIST') throw error })
+    const info = await lstat(current)
+    if (!info.isDirectory() || info.isSymbolicLink()) throw Error('cache namespace contains a link or non-directory')
+  }
+}
+async function generationMetadata(path: string, org: string, key: string): Promise<GenerationMetadata | null> {
+  try {
+    const raw = JSON.parse(await readFile(path, 'utf8')) as GenerationMetadata
+    return raw && typeof raw === 'object' && Object.keys(raw).sort().join(',') === 'compatibilityKey,dataState,generation,metricVersion,org,schemaVersion,sourceDigest,sourceObservedAt' &&
+      raw.schemaVersion === CACHE_SCHEMA_VERSION && raw.metricVersion === 2 && raw.org === org && raw.compatibilityKey === key &&
+      generationName.test(raw.generation) && /^[a-f0-9]{64}$/.test(raw.sourceDigest) &&
+      ['ready', 'empty', 'unavailable'].includes(raw.dataState) &&
+      (raw.sourceObservedAt === null || Number.isFinite(Date.parse(raw.sourceObservedAt))) ? raw : null
+  } catch { return null }
+}
+async function cacheClaim(namespace: string): Promise<Claim> {
+  const identity = await processIdentity(), deadline = Date.now() + 10_000
+  for (;;) {
+    const result = await acquireClaim(join(namespace, 'writer.claim'), identity)
+    if (result.kind === 'owned') return result.claim
+    if (result.kind === 'refused' || Date.now() >= deadline) throw Error(`cache-writer-unavailable: ${result.reason}`)
+    await new Promise(resolve => setTimeout(resolve, 25))
+  }
+}
+// Manifest publication, reader pin acquisition and reclamation share the same process-identity
+// claim. Time is only a contention bound: a pin of unknown liveness always retains its generation.
+async function reclaimGenerations(namespace: string): Promise<void> {
+  const selected = new Set<string>()
+  for (const entry of await readdir(namespace)) {
+    if (!/^[a-f0-9]{64}\.json$/.test(entry)) continue
+    try { const m = JSON.parse(await readFile(join(namespace, entry), 'utf8')); if (generationName.test(m.generation)) selected.add(m.generation) } catch { return }
+  }
+  const root = join(namespace, 'generations')
+  for (const entry of await readdir(root, { withFileTypes: true })) {
+    if (!entry.isDirectory() || !generationName.test(entry.name) || selected.has(entry.name)) continue
+    const dir = join(root, entry.name)
+    let retained = false
+    const pins = await readdir(join(dir, 'pins')).catch(() => null)
+    if (!pins) continue
+    for (const pin of pins) {
+      if (!generationName.test(pin.replace(/\.claim$/, ''))) { retained = true; break }
+      const state = await inspectClaim(join(dir, 'pins', pin))
+      if (state.kind !== 'stopped' && state.kind !== 'absent') { retained = true; break }
+    }
+    if (!retained) await rm(dir, { recursive: true })
+  }
+}
+
+export async function withCacheGeneration<T>(input: {
+  namespace: string
+  org: string
+  compatibility: unknown
+  refresh(db: Db): Promise<{ sourceDigest: string; sourceObservedAt: string | null; total: number; dataState?: 'ready' | 'empty' | 'unavailable' }>
+}, consume: (db: Db, metadata: GenerationMetadata, stale: boolean) => Promise<T>): Promise<T> {
+  await directoryWithoutLinks(input.namespace)
+  await directoryWithoutLinks(join(input.namespace, 'generations'))
+  const compatibilityKey = hashBytes(canonicalJson(input.compatibility))
+  const manifest = join(input.namespace, `${compatibilityKey}.json`)
+  const lock = await cacheClaim(input.namespace)
+  let db: Db | null = null, pin: Claim | null = null
+  let metadata: GenerationMetadata | null = null, stale = false
+  try {
+    const previous = await generationMetadata(manifest, input.org, compatibilityKey)
+    const generation = randomUUID(), dir = join(input.namespace, 'generations', generation)
+    await mkdir(dir, { mode: 0o700 }); await mkdir(join(dir, 'pins'), { mode: 0o700 })
+    const file = join(dir, 'stats.db')
+    try {
+      if (previous) {
+        const priorCheck = await openGeneration(input.namespace, previous)
+        priorCheck.close()
+        const prior = join(input.namespace, 'generations', previous.generation, 'stats.db')
+        const info = await lstat(prior)
+        if (!info.isFile() || info.isSymbolicLink() || info.nlink !== 1) throw Error('cache-generation-not-regular')
+        await copyFile(prior, file)
+      }
+      db = await openCache(file)
+      const refreshed = await input.refresh(db)
+      metadata = { schemaVersion: CACHE_SCHEMA_VERSION, metricVersion: 2, generation, compatibilityKey, org: input.org,
+        sourceDigest: refreshed.sourceDigest, sourceObservedAt: refreshed.sourceObservedAt,
+        dataState: refreshed.dataState ?? (refreshed.total > 0 ? 'ready' : 'empty') }
+      db.run('insert or replace into metric_metadata(key,value_json) values (?,?)', 'generation', canonicalJson(metadata))
+      if (db.query<{integrity_check:string}>('pragma integrity_check').get()?.integrity_check !== 'ok') throw Error('cache-integrity-check-failed')
+      db.close(); db = null
+      await writeFile(join(dir, 'metadata.json'), JSON.stringify(metadata), { flag: 'wx' })
+      const temp = `${manifest}.${generation}.tmp`
+      await writeFile(temp, JSON.stringify(metadata), { flag: 'wx' })
+      await rename(temp, manifest)
+    } catch (error) {
+      db?.close(); db = null
+      await rm(dir, { recursive: true, force: true })
+      if (!previous) {
+        // A failed first refresh still yields an identity-safe, empty read-only shell.
+        await mkdir(dir, { mode: 0o700 }); await mkdir(join(dir, 'pins'), { mode: 0o700 })
+        db = await openCache(file)
+        metadata = { schemaVersion: CACHE_SCHEMA_VERSION, metricVersion: 2, generation, compatibilityKey, org: input.org, sourceDigest: '0'.repeat(64), sourceObservedAt: null, dataState: 'unavailable' }
+        db.run('insert or replace into metric_metadata(key,value_json) values (?,?)', 'generation', canonicalJson(metadata))
+        db.close(); db = null
+        await writeFile(join(dir, 'metadata.json'), JSON.stringify(metadata), { flag: 'wx' })
+      } else metadata = previous
+      stale = true
+    }
+    const chosen = join(input.namespace, 'generations', metadata.generation)
+    const acquired = await acquireClaim(join(chosen, 'pins', `${randomUUID()}.claim`), lock.identity)
+    if (acquired.kind !== 'owned') throw Error(`cache-reader-pin-unavailable: ${acquired.reason}`)
+    pin = acquired.claim
+    db = await openGeneration(input.namespace, metadata)
+    await reclaimGenerations(input.namespace)
+  } catch (error) { db?.close(); if (pin) await releaseClaim(pin); throw error }
+  finally { await releaseClaim(lock) }
+  readiness.set(input.namespace, metadata!)
+  try { return await consume(db!, metadata!, stale) }
+  finally { db?.close(); if (pin) await releaseClaim(pin) }
+}
+
+async function openGeneration(namespace: string, metadata: GenerationMetadata): Promise<Db> {
+  const directory = join(namespace, 'generations', metadata.generation)
+  for (const path of [directory, join(directory, 'stats.db'), join(directory, 'metadata.json')]) {
+    const info = await lstat(path)
+    if (info.isSymbolicLink() || path !== directory && (!info.isFile() || info.nlink !== 1) || path === directory && !info.isDirectory()) throw Error('cache-generation-link-refused')
+  }
+  const disk = await generationMetadata(join(directory, 'metadata.json'), metadata.org, metadata.compatibilityKey)
+  if (!disk || canonicalJson(disk) !== canonicalJson(metadata)) throw Error('cache-generation-identity-mismatch')
+  const { Database } = await loadSqlite()
+  const db = new Database(join(directory, 'stats.db'), { readonly: true })
+  try {
+    if (db.query<{user_version:number}>('pragma user_version').get()?.user_version !== CACHE_SCHEMA_VERSION ||
+      db.query<{value_json:string}>('select value_json from metric_metadata where key = ?').get('generation')?.value_json !== canonicalJson(metadata) ||
+      db.query<{integrity_check:string}>('pragma integrity_check').get()?.integrity_check !== 'ok') throw Error('cache-generation-identity-mismatch')
+    return db
+  } catch (error) { db.close(); throw error }
+}
+
+const readiness = new Map<string, GenerationMetadata>()
+export function cacheReadiness(namespace: string, org: string): {dataState: 'ready'|'empty'|'unavailable'; sourceAgeSeconds: number|null} {
+  const current = readiness.get(namespace)
+  if (!current || current.org !== org) return {dataState: 'unavailable', sourceAgeSeconds: null}
+  return {dataState: current.dataState, sourceAgeSeconds: current.sourceObservedAt === null ? null : Math.max(0, Math.floor((Date.now() - Date.parse(current.sourceObservedAt)) / 1000))}
 }

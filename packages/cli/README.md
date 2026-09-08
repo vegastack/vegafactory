@@ -254,29 +254,45 @@ The CLI verifies its requester through the GitHub API. `rollup` also reads issue
 
 ```bash
 vegafactory dashboard              # fetch on first use, then serve on 127.0.0.1:7777
+vegafactory dashboard --org acme   # required only when more than one org is configured
 vegafactory dashboard --open       # …and open it in the browser
 vegafactory dashboard --dry-run    # print what a real run would do, change nothing
 ```
 
 | Flag | Means |
 |---|---|
+| `--org ORG` | Select one configured canonical organization; inferred when exactly one is configured |
 | `--port N` | First port to try; the next nine are tried in turn |
 | `--open` | Open the URL in the browser once the server answers |
 | `--dir PATH` | Launch an already-built package tree instead of the fetched one |
 | `--dry-run` | Print the plan and change nothing |
-| `--json` | Machine-readable result: `{command, ok, url, dir, entry, fetched, pid}` |
+| `--json` | Machine-readable result, including the exact `org`, `version`, `instanceId` and cache schema of the owned child |
 
 Exit **0** the server answered, or the dry-run plan printed · **1** the server exited or never
-answered on its health route · **2** a usage error or a refusal (a symlink on the install path, no
-control room recorded for this machine, `gh` unavailable).
+answered with the expected identity · **2** a usage error or refusal such as ambiguous org selection,
+an invalid repository registration, an unsafe path, or an unverified existing install. Missing `gh`
+credentials do not block an identity-safe empty/unavailable shell.
 
 The app is a second published package, `@vegastack/vegafactory-dashboard`, fetched at this CLI's own
 version on first use into `~/.vegastack/dashboard/<version>/` — the core install stays small. The
-derived index lives at `~/.vegastack/cache/stats.db`; it holds nothing the control room does not, so
-**deleting it is always safe** and the next start rebuilds it.
+CLI verifies the exact descriptor-declared tarball bytes and regular-file tree, stages them with
+scripts disabled, and atomically selects the version. A failed/interrupted staging directory and an
+unowned or mismatched existing install are preserved rather than executed. `--dir` is explicitly
+`unverified-development`; release qualification never treats it as artifact proof.
 
-The server binds `127.0.0.1` only, and your `gh` token is passed to that process and never leaves
-it: the browser receives projected view models, not credentials.
+Each canonical org has an isolated immutable-generation cache at
+`~/.vegastack/dashboard/<sha256(org)>/cache-v2/`. Requests hold process-identity reader pins until
+their async render callback finishes; obsolete generations are reclaimed only when every exact pin
+owner is absent or proven stopped. A failed refresh serves the last eligible generation with its
+original source timestamp/digest and a stale/partial reason. The legacy
+`~/.vegastack/cache/stats.db` is never migrated, relabelled or deleted automatically: after a new
+selected-org generation has served the expected views, inspect/move it as a manual dry-run cleanup
+candidate before deleting it.
+
+The server binds `127.0.0.1` only. The CLI generates a fresh per-child instance ID and accepts
+readiness only when org, version, instance, schema and data-state match while that owned child is
+still alive. Your `gh` token is passed only to that server process and never appears in readiness or
+client data: the browser receives projected view models, not credentials.
 
 Six views — org, repo, people, skills, board, dispatcher — read the control-room clone; the board and
 dispatcher views also read live GitHub and `vegafactory status --json`. When the live half is

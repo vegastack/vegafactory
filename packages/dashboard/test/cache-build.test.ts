@@ -1,14 +1,18 @@
 import { expect, test } from 'bun:test'
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { spawn } from 'node:child_process'
+import { mkdir, mkdtemp, readFile, readdir, realpath, rm, stat, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { CACHE_SCHEMA_VERSION, openCache, refreshCache, type Db } from '../src/lib/cache/build'
+import { CACHE_SCHEMA_VERSION, openCache, refreshCache, retainedGenerationProvenance, withCacheGeneration, type Db } from '../src/lib/cache/build'
+import type { TaskActivityCollection } from '../../cli/src/stats/timeline'
+import { canonicalJson, hashBytes } from '../../cli/src/stats/types'
 
 const record = (issue: number) => JSON.stringify({
   ts: '2026-09-02T10:00:00.000Z', repo: 'vegastack/vegafactory', issue, cost_usd: 0.4,
   skills: [{ name: 'dev-implement', trigger: 'model', harness: 'claude' }],
 })
 const count = (db: Db, t: string) => db.query<{ n: number }>(`select count(*) as n from ${t}`).get()!.n
+const safeTemp = async (prefix: string) => mkdtemp(join(await realpath(tmpdir()), prefix))
 
 async function room() {
   const root = await mkdtemp(join(tmpdir(), 'vf-room-'))
@@ -32,9 +36,10 @@ test('unchanged sources are skipped, changed ones replace their rows, vanished o
   expect(count(db, 'runs')).toBe(0)
   db.run(`pragma user_version = ${CACHE_SCHEMA_VERSION + 1}`)
   db.close()
-  expect(count(await openCache(cache), 'sources')).toBe(0)
+  await expect(openCache(cache)).rejects.toThrow('cache-schema-mismatch')
   await writeFile(cache, 'this is not a database')
-  expect(count(await openCache(cache), 'runs')).toBe(0)
+  await expect(openCache(cache)).rejects.toThrow()
+  expect(await readFile(cache, 'utf8')).toBe('this is not a database')
 })
 
 test('the cache directory is created; the server owns the path, not the caller', async () => {
@@ -42,7 +47,139 @@ test('the cache directory is created; the server owns the path, not the caller',
   const nested = join(root, 'does', 'not', 'exist', 'yet', 'stats.db')
   const db = await openCache(nested)
   expect(count(db, 'runs')).toBe(0)
+  db.close()
 })
+
+test('a generation stays pinned for the whole async callback and failed refresh retains its persisted provenance', async () => {
+  const root = await safeTemp('vf-generation-'), namespace = join(root, 'cache-v2')
+  const compatibility = { org: 'vegastack', allowedRepos: ['vegastack/vegafactory'], policyDigest: 'a'.repeat(64) }
+  const observedAt = '2026-09-01T00:00:00.000Z', sourceDigest = 'b'.repeat(64)
+  try {
+    let release!: () => void
+    const hold = new Promise<void>(resolve => { release = resolve })
+    let callbackStarted!: () => void
+    const started = new Promise<void>(resolve => { callbackStarted = resolve })
+    const first = withCacheGeneration({ namespace, org: 'vegastack', compatibility, refresh: async db => {
+      db.run('create table retained_provenance(value text not null)')
+      db.query('insert into retained_provenance(value) values (?)').run('persisted-row')
+      return { sourceDigest, sourceObservedAt: observedAt, total: 1 }
+    } }, async (db, metadata, stale) => {
+      callbackStarted()
+      expect(stale).toBe(false)
+      expect(metadata).toMatchObject({ schemaVersion: 2, metricVersion: 2, org: 'vegastack', sourceDigest, sourceObservedAt: observedAt, dataState: 'ready' })
+      expect(db.query<{ value: string }>('select value from retained_provenance').get()).toEqual({ value: 'persisted-row' })
+      expect(await readdir(join(namespace, 'generations', metadata.generation, 'pins'))).toHaveLength(1)
+      await hold
+      return metadata
+    })
+    await started
+    const manifestsWhileOpen = (await readdir(namespace)).filter(name => /^[a-f0-9]{64}\.json$/.test(name))
+    expect(manifestsWhileOpen).toHaveLength(1)
+    release()
+    const original = await first
+    expect(await readdir(join(namespace, 'generations', original.generation, 'pins'))).toEqual([])
+
+    const retained = await withCacheGeneration({ namespace, org: 'vegastack', compatibility, refresh: async db => {
+      db.query('update retained_provenance set value=?').run('failed-refresh-row')
+      throw Error('failed refresh at 2026-09-09T00:00:00.000Z')
+    } }, async (db, metadata, stale) => ({
+      stale, metadata, value: db.query<{ value: string }>('select value from retained_provenance').get()!.value,
+    }))
+    expect(retained).toEqual({ stale: true, metadata: original, value: 'persisted-row' })
+    let rejectedGeneration = ''
+    await expect(withCacheGeneration({ namespace, org: 'vegastack', compatibility, refresh: async () => ({ sourceDigest, sourceObservedAt: observedAt, total: 1 }) }, async (_db, metadata) => {
+      rejectedGeneration = metadata.generation
+      throw Error('async rendering failed')
+    })).rejects.toThrow('async rendering failed')
+    expect(await readdir(join(namespace, 'generations', rejectedGeneration, 'pins'))).toEqual([])
+  } finally { await rm(root, { recursive: true, force: true }) }
+})
+
+test('failed first use returns an identity-safe unavailable shell without publishing a corrupt generation', async () => {
+  const root = await safeTemp('vf-generation-empty-'), namespace = join(root, 'cache-v2')
+  try {
+    const result = await withCacheGeneration({ namespace, org: 'vegastack', compatibility: { scope: [] }, refresh: async () => {
+      throw Error('offline')
+    } }, async (db, metadata, stale) => ({ stale, metadata, runs: count(db, 'runs') }))
+    expect(result).toMatchObject({ stale: true, runs: 0, metadata: { schemaVersion: 2, metricVersion: 2, org: 'vegastack', sourceDigest: '0'.repeat(64), sourceObservedAt: null, dataState: 'unavailable' } })
+    expect((await readdir(namespace)).filter(name => /^[a-f0-9]{64}\.json$/.test(name))).toEqual([])
+  } finally { await rm(root, { recursive: true, force: true }) }
+})
+
+test('incomplete activity refresh keeps the retained row timestamp and digest as generation provenance', async () => {
+  const root = await safeTemp('vf-generation-provenance-'), cache = join(root, 'stats.db')
+  const db = await openCache(cache)
+  const old = { activities: [], snapshots: [], complete: true, reason: null, observedAt: '2026-09-01T01:00:00.000Z', sourceDigest: 'b'.repeat(64) } satisfies TaskActivityCollection
+  const failed = { activities: [], snapshots: [], complete: false, reason: 'activity-github-auth-failed', observedAt: '2026-09-09T12:00:00.000Z', sourceDigest: '0'.repeat(64) } satisfies TaskActivityCollection
+  try {
+    await refreshCache(db, root, { org: 'vegastack', allowedRepos: ['vegastack/vegafactory'], activityCollections: [{ repo: 'vegastack/vegafactory', period: '2026-09', collection: old }] })
+    await refreshCache(db, root, { org: 'vegastack', allowedRepos: ['vegastack/vegafactory'], activityCollections: [{ repo: 'vegastack/vegafactory', period: '2026-09', collection: failed }] })
+    const retained = JSON.parse(db.query<{payload_json:string}>('select payload_json from activity_collections').get()!.payload_json)
+    expect(retained).toMatchObject({ complete: false, reason: 'activity-github-auth-failed', observedAt: old.observedAt, sourceDigest: old.sourceDigest })
+    const provenance = retainedGenerationProvenance(db, 'c'.repeat(64), '2026-09-02T00:00:00.000Z')
+    expect(provenance).toEqual({ sourceObservedAt: old.observedAt, activityTotal: 0, activityUnavailable: false,
+      sourceDigest: hashBytes(canonicalJson({ metrics: 'c'.repeat(64), activity: [{ repo: 'vegastack/vegafactory', period: '2026-09', sourceDigest: old.sourceDigest }] })) })
+    db.run('delete from activity_collections')
+    await refreshCache(db, root, { org: 'vegastack', allowedRepos: ['vegastack/vegafactory'], activityCollections: [{ repo: 'vegastack/vegafactory', period: '2026-09', collection: failed }] })
+    expect(retainedGenerationProvenance(db, 'c'.repeat(64), null)).toEqual({ sourceObservedAt: null, activityTotal: 0, activityUnavailable: true,
+      sourceDigest: hashBytes(canonicalJson({ metrics: 'c'.repeat(64), activity: [] })) })
+  } finally { db.close(); await rm(root, { recursive: true, force: true }) }
+})
+
+test('an unknown reader pin conservatively retains its obsolete generation', async () => {
+  const root = await safeTemp('vf-generation-unknown-'), namespace = join(root, 'cache-v2')
+  const compatibility = { selected: 'vegastack/vegafactory' }
+  const build = () => withCacheGeneration({ namespace, org: 'vegastack', compatibility, refresh: async () => ({ sourceDigest: 'd'.repeat(64), sourceObservedAt: null, total: 1 }) }, async (_db, metadata) => metadata)
+  try {
+    const first = await build()
+    const pin = join(namespace, 'generations', first.generation, 'pins', `${crypto.randomUUID()}.claim`)
+    await writeFile(pin, '{corrupt', { mode: 0o600 })
+    await build()
+    expect((await stat(join(namespace, 'generations', first.generation))).isDirectory()).toBe(true)
+    await rm(pin)
+    await build()
+    await expect(stat(join(namespace, 'generations', first.generation))).rejects.toThrow()
+  } finally { await rm(root, { recursive: true, force: true }) }
+})
+
+test('a live cross-process reader prevents reclaim; its released and crashed pins are reclaimed only after exact liveness proof', async () => {
+  const root = await safeTemp('vf-generation-process-'), namespace = join(root, 'cache-v2')
+  const moduleUrl = new URL('../src/lib/cache/build.ts', import.meta.url).href
+  const compatibility = { selected: 'vegastack/vegafactory' }
+  const seed = async () => withCacheGeneration({ namespace, org: 'vegastack', compatibility, refresh: async () => ({ sourceDigest: crypto.randomUUID().replaceAll('-', '').padEnd(64, '0'), sourceObservedAt: '2026-09-01T00:00:00.000Z', total: 1 }) }, async (_db, metadata) => metadata)
+  const child = (ready: string, release: string) => {
+    const script = `import {withCacheGeneration} from ${JSON.stringify(moduleUrl)};import {writeFile,stat} from 'node:fs/promises';const sleep=ms=>new Promise(r=>setTimeout(r,ms));await withCacheGeneration({...${JSON.stringify({ namespace, org: 'vegastack', compatibility })},refresh:async()=>({sourceDigest:'c'.repeat(64),sourceObservedAt:'2026-09-02T00:00:00.000Z',total:1})},async(_db,m)=>{await writeFile(${JSON.stringify(ready)},JSON.stringify(m));while(true){try{await stat(${JSON.stringify(release)});break}catch{}await sleep(20)}})`
+    return spawn(process.execPath, ['--eval', script], { env: process.env, stdio: ['ignore', 'pipe', 'pipe'] })
+  }
+  const waitFile = async (path: string) => {
+    const deadline = Date.now() + 5000
+    while (Date.now() < deadline) {
+      try { return JSON.parse(await readFile(path, 'utf8')) as { generation: string } } catch { await Bun.sleep(20) }
+    }
+    throw Error(`child did not publish ${path}`)
+  }
+  const waitExit = (process: ReturnType<typeof spawn>) => new Promise<number | null>((resolve, reject) => {
+    process.once('error', reject); process.once('exit', resolve)
+  })
+  try {
+    await seed()
+    const ready = join(root, 'reader-ready.json'), release = join(root, 'reader-release')
+    const reader = child(ready, release), live = await waitFile(ready)
+    await seed()
+    expect((await stat(join(namespace, 'generations', live.generation))).isDirectory()).toBe(true)
+    await writeFile(release, 'release')
+    expect(await waitExit(reader)).toBe(0)
+    await seed()
+    await expect(stat(join(namespace, 'generations', live.generation))).rejects.toThrow()
+
+    const crashReady = join(root, 'crash-ready.json'), neverRelease = join(root, 'never-release')
+    const crashedReader = child(crashReady, neverRelease), crashed = await waitFile(crashReady)
+    expect(crashedReader.kill('SIGKILL')).toBe(true)
+    expect(await waitExit(crashedReader)).not.toBe(0)
+    await seed()
+    await expect(stat(join(namespace, 'generations', crashed.generation))).rejects.toThrow()
+  } finally { await rm(root, { recursive: true, force: true }) }
+}, 20_000)
 
 test('immutable events deduplicate across sources, survive one source removal and reject conflicting identity',async()=>{
   const {Database}=await import('bun:sqlite'),{SCHEMA_SQL}=await import('../src/lib/cache/schema')
