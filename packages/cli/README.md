@@ -226,7 +226,7 @@ Registered-machine policy includes stable machine/installation identity, host bi
 
 ### Statistics
 
-One JSONL record per headless run and per interactive session, spooled to a machine-local outbox and pushed into the org's control room at `stats/<owner>__<name>/<MON-YYYY>/<hostname>.jsonl`. One file per repo, per month, per machine, so two machines never conflict — a concurrent push is a non-fast-forward, which `pull --rebase` and a retry settles without a human.
+Metric v2 uses immutable execution, activity and rework-snapshot events in the private outbox and control room. Execution segments retain independent event IDs and one logical execution identity across continuation. Historical JSONL files remain unchanged and use explicitly labelled legacy definitions. See the [metric dictionary and coverage rules](https://github.com/vegastack/vegafactory/blob/main/packages/cli/docs/metrics.md).
 
 ```sh
 vegafactory stats                       # this repo, this month
@@ -234,14 +234,15 @@ vegafactory stats --org --since SEP-2026
 vegafactory stats --me                  # your own rows
 vegafactory stats skills                # invocations per skill, by trigger and harness
 vegafactory stats push                  # dry run: prints the plan and the commit it would make
-vegafactory stats push --commit         # copies the outbox in, commits, pushes, rebases on rejection
-vegafactory stats rollup --since SEP-2026   # regenerate the summaries; reads each touched issue's timeline through gh
+vegafactory stats push --commit         # delivers verified immutable event batches
+vegafactory stats rollup --since SEP-2026   # discover accepted delivery independently of run months
+vegafactory stats activity --org acme --repo acme/project.docs --month 2026-09 --json
 vegafactory stats record --source <kind>    # called by the capture hooks, reads the payload on stdin
 ```
 
-**A record is counts and identifiers only.** When the run happened, which repo, issue and stage, which harness, model and effort, how long it took, turns, tool calls, the four token counters, cost, how it ended, rework rounds — read after a headless run from the issue's own review, ledger and hand-back comments, by marker — and which skills it used. Never prompt text, assistant text, tool arguments, or file contents — the harness transcripts are read for usage totals and tool-call counts and nothing else. A field the capture could not fill is `null`, never a guess and never a zero.
+**Records contain counts and permitted identifiers only.** Execution records carry observed runtime, usage and terminal outcome. Activities carry event identity and occurrence time; cumulative rework snapshots carry their as-of date and history coverage. Missing measurements stay `null`, and reported zero stays zero. Mutable legacy review/ledger/handback counters do not become monthly events. Prompt text, assistant text, tool arguments and file contents do not enter shared reports.
 
-**Whether anything is recorded is org/group/repo policy, never a machine bypass.** Ordinary `stats` and `stats-people` values inherit; explicit org locks require exact delegation. `stats-export: attributed` requires org authorization. Refusals stop capture and export. Per-person reads use verified own-data identity or explicit scoped administration; a descriptive `lead` role does not supply that grant. Committed summaries carry no per-person block, and the shared Git audience remains explicit.
+**Whether anything is recorded is org/group/repo policy, never a machine bypass.** Ordinary `stats` and `stats-people` values inherit; explicit org locks require exact delegation. `stats-export: attributed` requires org authorization. Refusals stop capture and export. Per-person reads use verified own-data identity or explicit scoped administration; a descriptive `lead` role does not supply that grant. Derived summaries retain their authorized repository scope. The private shared Git audience remains explicit; UI filtering does not erase Git history or copies.
 
 `push` is a dry run until `--commit`, because it writes to a repository other people read.
 
@@ -328,7 +329,7 @@ The tool makes three kinds of network call, all to somewhere you already own:
 
 - `doctor`'s single version check against registry.npmjs.org;
 - `sync`'s shallow git fetch of the control room named by the project's `control-room:` knob;
-- `stats push`'s git push of your statistics records into that same control room, and `stats rollup`'s reads of the touched issues' timelines from the GitHub API;
+- `stats push`'s git push of your statistics records into that same control room, and bounded `stats rollup`/`stats activity` reads of all-state issues, immutable acceptance receipts, delivery PRs and linked releases/tags;
 - `dashboard`'s first-use fetch of `@vegastack/vegafactory-dashboard` from registry.npmjs.org, and that server's own reads of the GitHub API for the live board.
 
 All of them but the two registry calls use your existing `gh` credential, and the control-room calls reach only your organization's own repository. `add`, `verify`, and `remove` are fully offline. Statistics are recorded only while the org's `stats:` policy says so, and a record carries counts and identifiers only — never transcript text (see [Statistics](#statistics)).

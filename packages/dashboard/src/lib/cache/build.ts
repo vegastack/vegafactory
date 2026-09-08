@@ -2,8 +2,11 @@ import { mkdir, readFile, readdir, rm, stat } from 'node:fs/promises'
 import { dirname, join, relative, sep } from 'node:path'
 
 import { readRecords, type StatsRecord } from '../stats/record'
-import { readEventBatch, destinationKey, canonicalJson, type ExportReader } from '../../../../cli/src/stats/types'
+import { readEventBatch, destinationKey, canonicalJson, hashBytes, type ExportReader, type ExportedEvent } from '../../../../cli/src/stats/types'
 import { CACHE_SCHEMA_VERSION, SCHEMA_SQL } from './schema'
+import { readExport as strictReadExport, validateExport } from '../stats/record'
+import type { TaskActivityCollection } from '../../../../cli/src/stats/timeline'
+import { parseActivityCollection, subscriptionFee, type SubscriptionFee } from '../../../../cli/src/stats/metrics'
 
 export { CACHE_SCHEMA_VERSION } from './schema'
 
@@ -138,82 +141,90 @@ export interface RefreshResult {
   eventTotal: number
   invalidEvents: number
   duplicateEvents: number
+  metricVersion: 2
+  sourceDigest: string
+  organization: string | null
 }
 
-// The rebuild rule: a source whose size and mtime match what the cache recorded is left alone; a
-// changed one has its rows deleted and re-inserted; a vanished one has its rows deleted. One
-// stat per file is the whole cost of a warm start.
-export async function refreshCache(db: Db, controlRoom: string, options: {readExport?:ExportReader} = {}): Promise<RefreshResult> {
-  const sources = await discoverSources(controlRoom)
-  const known = new Map(
-    db.query<{ path: string; size: number; mtime_ms: number }>('select path, size, mtime_ms from sources')
-      .all()
-      .map((row) => [row.path, row]),
-  )
-
-  const insertRun = db.query<{ id: number }>(
-    `insert into runs (${RUN_COLUMNS.join(', ')}) values (${RUN_COLUMNS.map(() => '?').join(', ')}) returning id`,
-  )
-  const insertSkill = db.query('insert into skill_invocations (run_id, name, trigger, harness) values (?, ?, ?, ?)')
-  const dropRuns = db.query('delete from runs where source = ?')
-  const dropSkills = db.query('delete from skill_invocations where run_id in (select id from runs where source = ?)')
-  const upsertSource = db.query(
-    'insert into sources (path, size, mtime_ms, ingested_at) values (?, ?, ?, ?) on conflict(path) do update set size = excluded.size, mtime_ms = excluded.mtime_ms, ingested_at = excluded.ingested_at',
-  )
-  const dropSource = db.query('delete from sources where path = ?')
-
-  const ingested: string[] = []
-  let skippedLines = 0
-  const seen = new Set<string>()
-
-  for (const source of sources) {
-    seen.add(source.relative)
-    const previous = known.get(source.relative)
-    if (previous && previous.size === source.size && previous.mtime_ms === source.mtimeMs) continue
-
-    const body = await readFile(source.path, 'utf8')
-    if(source.path.endsWith('.json')) {
-      db.query('insert into event_sources(source,bytes) values(?,?) on conflict(source) do update set bytes=excluded.bytes').run(source.relative,body)
-      upsertSource.run(source.relative,source.size,source.mtimeMs,new Date().toISOString())
-      ingested.push(source.relative)
-      continue
+export interface RefreshOptions {
+  readExport?:ExportReader
+  projectEvent?:(event:ExportedEvent)=>ExportedEvent|null
+  legacyRecord?:(record:StatsRecord)=>StatsRecord|null
+  /** Production callers supply their current authorized scope before any cache write. */
+  allowedRepos?:string[]|null
+  org?:string
+  activityCollections?:Array<{repo:string;period:string;collection:TaskActivityCollection}>
+  subscriptionFee?:SubscriptionFee|null
+}
+// Read and validate before opening the synchronous transaction. Source associations,
+// legacy rows, event identities and derived metadata all commit or roll back together.
+export async function refreshCache(db:Db,controlRoom:string,options:RefreshOptions={}):Promise<RefreshResult>{
+  const allowed=options.allowedRepos===undefined?null:options.allowedRepos
+  const permitted=(repo:string)=>allowed===null||allowed.includes(repo)
+  const sources=(await discoverSources(controlRoom)).filter(source=>{
+    if(allowed===null)return true
+    const segment=source.relative.split('/')[1]
+    return allowed.some(repo=>{const name=repo.replaceAll('/','__');return segment===name||segment===name+'-'+hashBytes(repo).slice(0,12)})
+  })
+  const known=new Map(db.query<{path:string;size:number;mtime_ms:number}>('select path,size,mtime_ms from sources').all().map(row=>[row.path,row]))
+  const hashes=new Map(db.query<{path:string;content_sha256:string}>('select path,content_sha256 from metric_sources').all().map(row=>[row.path,row.content_sha256]))
+  const inputs:Array<{source:string;bytes:string}>=[],legacy:Array<{source:Source;records:StatsRecord[]}>=[],prepared:Array<{source:Source;digest:string}>=[]
+  let skippedLines=0
+  const reader=options.readExport??strictReadExport
+  for(const source of sources){
+    if(source.size>8*1024*1024)throw Error('metric-source-too-large')
+    const bytes=await readFile(source.path,'utf8'),digest=hashBytes(bytes)
+    if(source.path.endsWith('.json')){
+      const read=reader(bytes),event=options.projectEvent?options.projectEvent(read):read
+      if(!event)continue
+      if(!permitted(event.destination.repo)||options.org&&event.destination.org!==options.org)continue
+      // Cache only the currently permitted wire projection, never historical
+      // attributed bytes that a stricter reader has deliberately removed.
+      const {historicalNonAttributed:_historical,...payload}=event.payload as unknown as Record<string,unknown>
+      const wire=validateExport({...payload,schemaVersion:2,metricVersion:2,eventId:event.eventId,destination:event.destination})
+      inputs.push({source:source.relative,bytes:canonicalJson(wire)})
+    }else{
+      const parsed=readRecords(bytes,source.relative);skippedLines+=parsed.skipped
+      legacy.push({source,records:parsed.records.filter(row=>permitted(row.repo)&&(!options.org||row.repo.split('/')[0]===options.org)).map(row=>options.legacyRecord?options.legacyRecord(row):row).filter((row):row is StatsRecord=>row!==null)})
     }
-    const { records, skipped } = readRecords(body, source.relative)
-    skippedLines += skipped
-
-    dropSkills.run(source.relative)
-    dropRuns.run(source.relative)
-    for (const record of records) {
-      const row = insertRun.get(...runValues(record, source.relative))
-      if (!row) continue
-      for (const hit of record.skills) insertSkill.run(row.id, hit.name, hit.trigger, hit.harness)
-    }
-    upsertSource.run(source.relative, source.size, source.mtimeMs, new Date().toISOString())
-    ingested.push(source.relative)
+    prepared.push({source,digest})
   }
-
-  const removed: string[] = []
-  for (const path of known.keys()) {
-    if (seen.has(path)) continue
-    dropSkills.run(path)
-    dropRuns.run(path)
-    dropSource.run(path)
-    db.query('delete from event_sources where source=?').run(path)
-    removed.push(path)
-  }
-
-  // Rebuild the small identity index atomically from retained source associations. Removing
-  // one duplicate file never removes the event still supplied by another source.
-  const batch=readEventBatch(db.query<{source:string;bytes:string}>('select source,bytes from event_sources order by source').all(),options.readExport)
+  const batch=readEventBatch(inputs,strictReadExport)
+  if(batch.invalid.length)throw Error('metric-invalid-events')
+  const collections=(options.activityCollections??[]).map(row=>{
+    if(!permitted(row.repo)||options.org&&row.repo.split('/')[0]!==options.org)throw Error('metric-activity-scope-refused')
+    return {...row,collection:parseActivityCollection(row.collection,row.repo)}
+  })
+  const fee=subscriptionFee(options.subscriptionFee),sourceDigest=hashBytes(canonicalJson(prepared.map(row=>[row.source.relative,row.digest])))
+  const ingested=prepared.filter(row=>hashes.get(row.source.relative)!==row.digest).map(row=>row.source.relative)
+  const seen=new Set(prepared.map(row=>row.source.relative)),removed=[...known.keys()].filter(path=>!seen.has(path))
   db.run('begin immediate')
-  try {
-    db.run('delete from events');db.run('delete from invalid_events')
-    const insert=db.query('insert into events(destination,event_id,payload_sha256,payload_json) values(?,?,?,?)')
-    for(const row of batch.events)insert.run(destinationKey(row.event.destination),row.event.eventId,row.payloadSha256,canonicalJson(row.event.payload))
-    const invalid=db.query('insert or replace into invalid_events(source,reason,bytes) values(?,?,?)')
-    for(const row of batch.invalid)invalid.run(row.source,row.reason,row.bytes)
+  try{
+    db.run('delete from skill_invocations');db.run('delete from runs');db.run('delete from event_sources');db.run('delete from events');db.run('delete from invalid_events');db.run('delete from sources');db.run('delete from metric_sources')
+    const insertRun=db.query<{id:number}>(`insert into runs (${RUN_COLUMNS.join(',')}) values (${RUN_COLUMNS.map(()=>'?').join(',')}) returning id`)
+    const insertSkill=db.query('insert into skill_invocations(run_id,name,trigger,harness) values(?,?,?,?)')
+    for(const row of legacy)for(const record of row.records){const inserted=insertRun.get(...runValues(record,row.source.relative));if(!inserted)throw Error('metric-run-ingestion-failed');for(const hit of record.skills)insertSkill.run(inserted.id,hit.name,hit.trigger,hit.harness)}
+    const insertSource=db.query('insert into sources(path,size,mtime_ms,ingested_at) values(?,?,?,?)'),insertHash=db.query('insert into metric_sources(path,content_sha256) values(?,?)')
+    const at=new Date().toISOString()
+    for(const row of prepared){insertSource.run(row.source.relative,row.source.size,row.source.mtimeMs,at);insertHash.run(row.source.relative,row.digest)}
+    const insertInput=db.query('insert into event_sources(source,bytes) values(?,?)')
+    for(const row of inputs)insertInput.run(row.source,row.bytes)
+    const insertEvent=db.query('insert into events(destination,event_id,payload_sha256,payload_json) values(?,?,?,?)')
+    for(const row of batch.events)insertEvent.run(destinationKey(row.event.destination),row.event.eventId,row.payloadSha256,canonicalJson(row.event.payload))
+    if(allowed!==null){const old=db.query<{repo:string}>('select distinct repo from activity_collections').all();for(const row of old)if(!allowed.includes(row.repo))db.query('delete from activity_collections where repo=?').run(row.repo)}
+    const insertCollection=db.query('insert into activity_collections(repo,period,payload_json) values(?,?,?) on conflict(repo,period) do update set payload_json=excluded.payload_json')
+    for(const row of collections){
+      let collection=row.collection
+      if(!collection.complete){
+        const old=db.query<{payload_json:string}>('select payload_json from activity_collections where repo=? and period=?').get(row.repo,row.period)
+        if(old){const prior=parseActivityCollection(JSON.parse(old.payload_json),row.repo);collection={...prior,complete:false,reason:collection.reason}}
+      }
+      insertCollection.run(row.repo,row.period,canonicalJson(collection))
+    }
+    const metadata=db.query('insert into metric_metadata(key,value_json) values(?,?) on conflict(key) do update set value_json=excluded.value_json')
+    for(const [key,value] of Object.entries({metricVersion:2,sourceDigest,organization:options.org??null,allowedRepos:allowed,subscriptionFee:fee,observedAt:at}))metadata.run(key,canonicalJson(value))
     db.run('commit')
   }catch(error){db.run('rollback');throw error}
-  const total = db.query<{ n: number }>('select count(*) as n from runs').get()?.n ?? 0
-  return { ingested, removed, skippedLines, total, eventTotal:batch.events.length, invalidEvents:batch.invalid.length, duplicateEvents:batch.duplicates }
+  const total=db.query<{n:number}>('select count(*) as n from runs').get()?.n??0
+  return {ingested,removed,skippedLines,total,eventTotal:batch.events.length,invalidEvents:0,duplicateEvents:batch.duplicates,metricVersion:2,sourceDigest,organization:options.org??null}
 }

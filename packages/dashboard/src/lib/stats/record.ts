@@ -130,3 +130,7 @@ export function readRecords(body: string, source: string): { records: StatsRecor
   }
   return { records, skipped, source }
 }
+
+// Both package consumers use the same versioned definitions; release packaging
+// verifies this shared code is bundled rather than requiring a sibling checkout.
+export { METRIC_DICTIONARY, summarizeMeasured, summarizeExecutions } from '../../../../cli/src/stats/metrics'

@@ -112,3 +112,19 @@ test('rework is read off the issue comments by marker: review rounds, the ledger
   // Comments that were fetched and carry no marker measure zero rework; that is a fact, not a gap.
   expect(reworkFromComments(['hello'])).toEqual({ review_rounds: 0, fix_rounds: 0, handbacks: 0 })
 })
+
+test('interactive missing usage stays unknown for each field, including mixed reported and missing turns', () => {
+  const usage = { input_tokens: 0, output_tokens: 2, cache_read_input_tokens: 3, cache_creation_input_tokens: 4 }
+  const fields = [['input_tokens','in'], ['output_tokens','out'], ['cache_read_input_tokens','cache_read'], ['cache_creation_input_tokens','cache_write']] as const
+  for (const [vendor, field] of fields) {
+    const partial: Record<string, number> = { ...usage }
+    delete partial[vendor]
+    const lines = [usage, partial].map(value => JSON.stringify({ type: 'assistant', message: { usage: value } }))
+    const record = fromClaudeSessionEnd({}, lines, context)
+    expect(record.tokens[field]).toBeNull()
+    expect(record.tool_calls).toBeNull()
+    for (const [other, key] of fields) if (other !== vendor) expect(record.tokens[key]).toBe(usage[other] * 2)
+  }
+  expect(fromClaudeSessionEnd({}, [JSON.stringify({ type: 'assistant', message: {} })], context).tokens)
+    .toEqual({ in: null, out: null, cache_read: null, cache_write: null })
+})

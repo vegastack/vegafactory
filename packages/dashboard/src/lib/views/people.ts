@@ -1,7 +1,7 @@
 import { whereClause, type Filters } from '../cache/filters'
 import type { Db } from '../cache/build'
 import type { PageContext } from '../context'
-import { perStageForPerson, type Totals } from '../cache/queries'
+import { perStageForPerson, personTotals, unknownOwnerTotals, type Totals } from '../cache/queries'
 import { resolvePeopleReadScope, type Gate, type Person } from '../control-room/people'
 import { readValidatedPolicies } from '../control-room/policy'
 import { exportMode, validateExport, privacyReason, type ExportPolicy } from '../../../../cli/src/stats/privacy'
@@ -9,7 +9,7 @@ import type { ExportedEvent } from '../../../../cli/src/stats/types'
 
 export type PeopleDimension = 'task-owner' | 'account-owner'
 export interface PeopleRow extends Totals {login:string;name:string;role:string}
-export interface PeopleView {viewer:string|null;rows:PeopleRow[];gated:boolean;refusal:string|null}
+export interface PeopleView {viewer:string|null;rows:PeopleRow[];gated:boolean;refusal:string|null;unknownOwners?:{taskOwner:Totals|null;agentAccountOwner:Totals|null}}
 export interface PersonView {gate:Gate;person:Person|null;totals:Totals|null;stages:Array<{stage:string}&Totals>;dimension?:PeopleDimension}
 export type PeoplePolicies = Map<string,Record<string,any>>
 export type PeoplePolicyLoader = (context:PageContext)=>Promise<PeoplePolicies>
@@ -22,6 +22,7 @@ export const currentPeoplePolicies:PeoplePolicyLoader=async context=>{
 }
 function allowedRepos(context:PageContext,policies:PeoplePolicies,subject:string|null):string[]{
   if(!context.env.viewer)throw Error('privacy-viewer-unavailable')
+  if(context.access?.kind==='person'&&subject!==context.access.subject)throw Error('privacy-person-scope-unavailable')
   const requested=context.filters.repos.length?context.filters.repos:context.env.repos
   if(!requested.length)throw Error('privacy-repository-scope-unavailable')
   const allowed:string[]=[]
@@ -30,7 +31,7 @@ function allowedRepos(context:PageContext,policies:PeoplePolicies,subject:string
     if(!policy||policy.repo!==repo||policy.registry.org!==context.env.org)throw Error('privacy-current-policy-unavailable')
     if(exportMode(policy as ExportPolicy)!=='attributed')continue
     const scope=resolvePeopleReadScope({viewer:{login:context.env.viewer,verified:true},subject,requestedRepos:[repo],policy,administration:policy.administration,repoGroups:policy.registry.repoGroups})
-    if(!scope.refusal&&scope.allowedRepos.includes(repo))allowed.push(repo)
+    if(!scope.refusal&&scope.allowedRepos.includes(repo)&&(context.allowedRepos===undefined||context.allowedRepos.includes(repo)))allowed.push(repo)
   }
   if(!allowed.length)throw Error('privacy-person-scope-unavailable')
   return allowed
@@ -38,6 +39,7 @@ function allowedRepos(context:PageContext,policies:PeoplePolicies,subject:string
 // This adapter is also consumed by #148 metrics. Select the dimension before aggregation;
 // ownership of a task never confers access to another person's account-owner row.
 export function scopePeopleEvents(events:ExportedEvent[],context:PageContext,policies:PeoplePolicies,subject:string,dimension:PeopleDimension):ExportedEvent[]{
+  if(context.access?.kind==='person'&&dimension!==context.access.dimension)return []
   const allowed=new Set(allowedRepos(context,policies,subject))
   return events.filter(event=>{
     if(!allowed.has(event.destination.repo))return false
@@ -46,72 +48,34 @@ export function scopePeopleEvents(events:ExportedEvent[],context:PageContext,pol
     return owner===subject
   })
 }
-function typedEvents(context:PageContext):ExportedEvent[]{
-  return context.db.query<{destination:string;eventId:string;payload:string}>('select destination,event_id as eventId,payload_json as payload from events').all().map(row=>{
-    const destination=JSON.parse(row.destination),payload=JSON.parse(row.payload)
-    // Cached local provenance flags are not accepted as shared fields.
-    const {historicalNonAttributed:_historical,...measurement}=payload
-    const wire=validateExport({...measurement,schemaVersion:2,metricVersion:2,eventId:row.eventId,destination})
-    const {metricVersion:_version,eventId,destination:target,...local}=wire
-    return {eventId,destination:target,payload:local}
-  })
-}
-function executionTotals(events:ExportedEvent[],context:PageContext):{totals:Totals|null;stages:Array<{stage:string}&Totals>}{
-  const empty=():Totals=>({runs:0,costUsd:0,durationS:0,tokensIn:0,tokensOut:0,cacheRead:0,cacheWrite:0,handbacks:0,reviewRounds:0,fixRounds:0,humanTouchpoints:0})
-  const byStage=new Map<string,Totals>(),totals=empty()
-  for(const event of events){
-    const p=event.payload
-    if(p.recordKind!=='execution')continue
-    const month=new Date(p.utcDay).toLocaleString('en-US',{month:'short',timeZone:'UTC'}).toUpperCase()+'-'+p.utcDay.slice(0,4)
-    if(month!==context.filters.month||context.filters.harness&&p.harness!==context.filters.harness||context.filters.model&&p.model!==context.filters.model)continue
-    const stage=byStage.get(p.stage)??empty()
-    for(const target of [totals,stage]){target.runs++;for(const [key,value]of Object.entries({costUsd:p.costUsd,durationS:p.durationSeconds,tokensIn:p.tokensIn,tokensOut:p.tokensOut,cacheRead:p.cacheReadTokens,cacheWrite:p.cacheWriteTokens}))if(typeof value==='number')target[key as keyof Totals]+=value}
-    byStage.set(p.stage,stage)
-  }
-  return{totals:totals.runs?totals:null,stages:[...byStage].map(([stage,value])=>({stage,...value}))}
-}
-function personTotals(db:Db,filters:Filters,subject:string):Totals|null{
-  const {sql,values}=whereClause(filters)
-  const columns={costUsd:'cost_usd',durationS:'duration_s',tokensIn:'tokens_in',tokensOut:'tokens_out',cacheRead:'cache_read',cacheWrite:'cache_write',handbacks:'handbacks',reviewRounds:'review_rounds',fixRounds:'fix_rounds'}
-  const sums=Object.entries(columns).map(([key,column])=>`coalesce(sum(${column}),0) as ${key}`).join(',')
-  const row=db.query<Omit<Totals,'humanTouchpoints'>>(`select count(*) as runs,${sums} from runs where ${sql} and human=?`).get(...values,subject)
-  return row&&row.runs?{...row,humanTouchpoints:row.handbacks+row.reviewRounds+row.fixRounds}:null
-}
-function combineTotals(left:Totals|null,right:Totals|null):Totals|null{
-  if(!left)return right;if(!right)return left
-  return Object.fromEntries((['runs','costUsd','durationS','tokensIn','tokensOut','cacheRead','cacheWrite','handbacks','reviewRounds','fixRounds','humanTouchpoints'] as const).map(key=>[key,left[key as keyof Totals]+right[key as keyof Totals]])) as unknown as Totals
+function personFilters(context:PageContext,repos:string[]):Filters {
+  return {...context.filters,repos,allowedRepos:repos,attributedRepos:repos}
 }
 export async function buildPeopleView({context,loadPolicies=currentPeoplePolicies}:{context:PageContext;loadPolicies?:PeoplePolicyLoader}):Promise<PeopleView>{
   const viewer=context.env.viewer
   try{
-    const policies=await loadPolicies(context),rows:PeopleRow[]=[],events=typedEvents(context)
+    const policies=await loadPolicies(context),rows:PeopleRow[]=[]
     let permitted=false
     for(const person of context.people){
       let repos:string[];try{repos=allowedRepos(context,policies,person.login)}catch{continue}
       permitted=true
       // Every query binds the allowed repository set before SQL aggregation.
-      const row=personTotals(context.db,{...context.filters,repos},person.login)
-      const measured=executionTotals(scopePeopleEvents(events,context,policies,person.login,'task-owner'),context).totals
-      const total=combineTotals(row??null,measured)
+      const total=personTotals(context.db,personFilters(context,repos),person.login)
       if(total)rows.push({...total,login:person.login,...describe(person.login,context.people)})
     }
     let whole=false;try{whole=allowedRepos(context,policies,null).length===(context.filters.repos.length?context.filters.repos:context.env.repos).length}catch{/* no full-org grant */}
-    return{viewer,rows,gated:!whole,refusal:permitted?null:'privacy-person-reporting-unavailable'}
+    let unknownOwners:PeopleView['unknownOwners']
+    if(context.access?.kind!=='person')try{const repos=allowedRepos(context,policies,null),filters=personFilters(context,repos);unknownOwners={taskOwner:unknownOwnerTotals(context.db,filters,'task-owner'),agentAccountOwner:unknownOwnerTotals(context.db,filters,'account-owner')}}catch{/* No aggregate owner grant. */}
+    return{viewer,rows,gated:!whole,refusal:permitted?null:'privacy-person-reporting-unavailable',...(unknownOwners?{unknownOwners}:{})}
   }catch{return{viewer,rows:[],gated:true,refusal:'privacy-current-policy-unavailable'}}
 }
 export async function buildPersonView({context,login,dimension='task-owner',loadPolicies=currentPeoplePolicies}:{context:PageContext;login:string;dimension?:PeopleDimension;loadPolicies?:PeoplePolicyLoader}):Promise<PersonView>{
   try{
+    if(context.access?.kind==='person'&&(context.access.subject!==login||context.access.dimension!==dimension))throw Error('privacy-person-scope-unavailable')
     const policies=await loadPolicies(context),repos=allowedRepos(context,policies,login)
     const person=context.people.find(person=>person.login===login)??null
     if(!person)throw Error('privacy-person-unknown')
-    if(dimension==='account-owner'){
-      const selected=scopePeopleEvents(typedEvents(context),context,policies,login,dimension)
-      return{gate:{allowed:true,reason:null},person,dimension,...executionTotals(selected,context)}
-    }
-    const filters={...context.filters,repos},legacy=personTotals(context.db,filters,login)
-    const measured=executionTotals(scopePeopleEvents(typedEvents(context),context,policies,login,dimension),context)
-    const stages=new Map(perStageForPerson(context.db,filters,login).map(row=>[row.stage,row]))
-    for(const row of measured.stages)stages.set(row.stage,{stage:row.stage,...combineTotals(stages.get(row.stage)??null,row)!})
-    return{gate:{allowed:true,reason:null},person,totals:combineTotals(legacy,measured.totals),stages:[...stages.values()],dimension}
+    const filters=personFilters(context,repos)
+    return {gate:{allowed:true,reason:null},person,totals:personTotals(context.db,filters,login,dimension),stages:perStageForPerson(context.db,filters,login,dimension),dimension}
   }catch(error){const code=privacyReason(error),reason=code==='operation-unavailable'?'privacy-person-scope-unavailable':code;return{gate:{allowed:false,reason},person:null,totals:null,stages:[],dimension}}
 }

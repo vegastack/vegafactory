@@ -13,7 +13,7 @@
 // from the records, while lead and cycle time come from the issues' label timelines. A run does not
 // know how long its issue waited for a human, and no amount of per-run capture can tell you.
 
-import type { StatsRecord } from './record.ts'
+import { parseMonthToken, type StatsRecord } from './record.ts'
 
 export interface TimelineEvent {
   issue: number
@@ -146,13 +146,16 @@ function cycleTimes(timelines: TimelineEvent[]): Record<string, Pct> {
   return out
 }
 
-function leadTimes(timelines: TimelineEvent[]): { pct: Pct; closed: number } {
+function leadTimes(timelines: TimelineEvent[], month?:string): { pct: Pct; closed: number } {
   const created = new Map<number, string>()
   const spans: number[] = []
   let closed = 0
+  const counted=new Set<number>()
   for (const event of [...timelines].sort((a, b) => Date.parse(a.created_at) - Date.parse(b.created_at))) {
     if (event.event === 'created') created.set(event.issue, event.created_at)
     else if (event.event === 'closed') {
+      if(counted.has(event.issue)||month&&!inMonth(event.created_at,month))continue
+      counted.add(event.issue)
       closed += 1
       const at = created.get(event.issue)
       if (at === undefined) continue
@@ -203,7 +206,9 @@ export function rollupRepo(
     if ((record.review_rounds ?? 0) + (record.fix_rounds ?? 0) + (record.handbacks ?? 0) > 0) runsWithRework += 1
   }
 
-  const lead = leadTimes(timelines)
+  const parsedMonth=parseMonthToken(options.month)
+  const metricMonth=parsedMonth?`${parsedMonth.year}-${String(parsedMonth.month).padStart(2,'0')}`:/^\d{4}-\d{2}$/.test(options.month)?options.month:undefined
+  const lead = leadTimes(timelines,metricMonth)
   return {
     schemaVersion: 1,
     repo: options.repo,
@@ -288,4 +293,31 @@ export async function readControlRoomEvents(root:string,reader?:import('./types.
   }
   await walk(join(root,'stats'))
   return(await import('./types.ts')).readEventBatch(inputs,reader)
+}
+
+import { inMonth, summarizeExecutions, summarizeIssueMonth, type SubscriptionFee } from './metrics.ts'
+import type { ExportedEvent } from './types.ts'
+import type { TaskActivityCollection } from './timeline.ts'
+export interface MeasuredRepoSummary {
+  schemaVersion:2
+  metricVersion:2
+  repo:string
+  month:string
+  runs:number
+  execution:ReturnType<typeof summarizeExecutions>
+  byStage:Record<string,ReturnType<typeof summarizeExecutions>>
+  taskActivity:ReturnType<typeof summarizeIssueMonth>
+  discovery:{complete:boolean;reason:string|null;observedAt:string|null;sourceDigest:string|null}
+  legacy:RepoSummary|null
+}
+export function rollupMeasuredRepo(events:ExportedEvent[],options:{repo:string;month:string;collection?:TaskActivityCollection|null;subscriptionFee?:SubscriptionFee|null;legacy?:StatsRecord[];person?:boolean}):MeasuredRepoSummary {
+  const scoped=events.filter(e=>e.destination.repo===options.repo)
+  const execution=summarizeExecutions(scoped.filter(e=>e.payload.utcDay.slice(0,7)===options.month),options.subscriptionFee)
+  const activities=scoped.flatMap(e=>e.payload.recordKind==='activity'&&e.payload.activity?[e.payload.activity]:[])
+  const snapshots=scoped.flatMap(e=>e.payload.recordKind==='rework-snapshot'&&e.payload.reworkSnapshot?[e.payload.reworkSnapshot]:[])
+  const c=options.collection
+  const byStage:MeasuredRepoSummary['byStage']={}
+  for(const stage of new Set(scoped.filter(e=>e.payload.recordKind==='execution'&&e.payload.utcDay.slice(0,7)===options.month).map(e=>e.payload.recordKind==='execution'?e.payload.stage:'unknown')))byStage[stage]=summarizeExecutions(scoped.filter(e=>e.payload.recordKind==='execution'&&e.payload.stage===stage&&e.payload.utcDay.slice(0,7)===options.month))
+  const taskActivity=summarizeIssueMonth([...activities,...(c?.activities??[])],options.month,{complete:c?.complete??(options.person===true&&(activities.length>0||snapshots.length>0)),snapshots:[...snapshots,...(c?.snapshots??[])]})
+  return {schemaVersion:2,metricVersion:2,repo:options.repo,month:options.month,runs:execution.executionEvents,execution,byStage,taskActivity,discovery:{complete:c?.complete??false,reason:c?.reason??'activity-source-unavailable',observedAt:c?.observedAt??null,sourceDigest:c?.sourceDigest??null},legacy:options.legacy?.length?rollupRepo(options.legacy,[],{repo:options.repo,month:options.month,people:false}):null}
 }

@@ -79,3 +79,15 @@ test('freshness reads the org entry sync wrote; a failed live read only sets off
   expect(freshnessFrom({ factoryJson: state('2026-09-03T09:00:00.000Z'), org: 'vegastack', now, liveOk: false }))
     .toMatchObject({ offline: true, label: 'synced 3 hours ago' })
 })
+
+test('v2 summary reader exposes coverage and merged states without reusing legacy close or human-touch metrics', async () => {
+  const {rollupMeasuredRepo}=await import('../../cli/src/stats/rollup')
+  const {serializeExport,readExport}=await import('../../cli/src/stats/privacy')
+  const destination={host:'github.com' as const,org:'o',repo:'o/r',controlRoom:'o/room'}
+  const wire=serializeExport({schemaVersion:2,recordKind:'execution',utcDay:'2026-09-01',stage:'implement',outcome:'succeeded',costUsd:null,tokensIn:0},destination,crypto.randomUUID(),{values:{'stats-export':'non-attributed'}})!
+  const report=rollupMeasuredRepo([readExport(JSON.stringify(wire))],{repo:'o/r',month:'2026-09'})
+  const parsed=parseSummary('repo','o/r','SEP-2026',JSON.stringify(report))
+  expect(parsed).toMatchObject({metricVersion:2,definitionLabel:'metric v2',runs:1,costUsd:null,operatorMinutes:null,mergedIssues:null,coverage:{costUsd:{value:null,known:0,unknown:1},tokensIn:{value:0,known:1,unknown:0}}})
+  expect(parsed.throughput.issuesClosed).toBeNull()
+  expect(parsed.missing).toContain('task source coverage')
+})

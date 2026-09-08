@@ -113,7 +113,7 @@ export function readEventBatch(inputs:Array<{source:string;bytes:string}>,reader
     const event=reader(input.bytes)
     validateDestination(event.destination);validateMeasurement(event.payload)
     if(!UUID.test(event.eventId))throw Error('invalid-export-event-id')
-    rows.push({source:input.source,event,payloadSha256:hashBytes(input.bytes),semanticKey:event.payload.recordKind==='activity'?semanticCaptureKey(event.destination,event.payload):null})
+    rows.push({source:input.source,event,payloadSha256:hashBytes(input.bytes),semanticKey:event.payload.recordKind!=='execution'?semanticCaptureKey(event.destination,event.payload):null})
   }catch(error){invalid.push({source:input.source,reason:(error as Error).message,bytes:Buffer.byteLength(input.bytes)})}}
   const ids=new Map<string,IngestedEvent[]>(),result:IngestedEvent[]=[]
   for(const row of rows){const key=canonicalJson([destinationKey(row.event.destination),row.event.eventId]);ids.set(key,[...(ids.get(key)??[]),row])}
@@ -125,7 +125,7 @@ export function readEventBatch(inputs:Array<{source:string;bytes:string}>,reader
   const semantic=new Map<string,IngestedEvent[]>(),events:IngestedEvent[]=[]
   for(const row of result){if(row.semanticKey){const key=canonicalJson([destinationKey(row.event.destination),row.semanticKey]);semantic.set(key,[...(semantic.get(key)??[]),row])}else events.push(row)}
   for(const group of semantic.values()){
-    if(new Set(group.map(row=>canonicalJson(row.event.payload))).size>1){for(const row of group)invalid.push({source:row.source,reason:'conflicting-semantic-activity',bytes:0});continue}
+    if(new Set(group.map(row=>canonicalJson(row.event.payload))).size>1){for(const row of group)invalid.push({source:row.source,reason:row.event.payload.recordKind==='activity'?'conflicting-semantic-activity':'conflicting-semantic-snapshot',bytes:0});continue}
     events.push(group[0]!);duplicates+=group.length-1
   }
   return{events,invalid,duplicates}

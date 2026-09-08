@@ -4,15 +4,16 @@ import { join } from 'node:path'
 import { parseSummary } from '../src/lib/stats/summaries'
 import { buildOrgView } from '../src/lib/views/org'
 import { buildRepoView } from '../src/lib/views/repo'
-import { contextFixture } from './helpers/context'
+import { contextFixture as rawContextFixture } from './helpers/context'
+const contextFixture:typeof rawContextFixture=async options=>{const context=await rawContextFixture(options);context.filters.allowedRepos=Object.keys(context.repoGroups);context.filters.attributedRepos=Object.keys(context.repoGroups);return context}
 
 test('org totals, per-repo rows carrying their group, and a share that never divides by zero', async () => {
   const view = buildOrgView({ context: await contextFixture({ month: 'SEP-2026' }), summary: null })
   expect(view.totals.runs).toBe(2)
   expect(view.repos[0]).toMatchObject({ repo: 'vegastack/vegafactory', group: 'dev' })
-  expect(view.humanShare).toBeCloseTo(2, 6)
+  expect(view.humanShare).toBeNull()
   const empty = buildOrgView({ context: await contextFixture({ month: 'JAN-2027' }), summary: null })
-  expect(empty).toMatchObject({ humanShare: 0 })
+  expect(empty).toMatchObject({ humanShare: null })
   expect(empty.totals.runs).toBe(0)
 })
 

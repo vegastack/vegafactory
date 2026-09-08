@@ -82,32 +82,73 @@ test('the fixture summaries are byte-identical to what the writer produces today
   expect(`${stableStringify(rollupSkills(records, { month: 'SEP-2026' }))}\n`).toBe(read('org.skills.json'))
 })
 
-test('event readers deduplicate immutable and cross-machine semantic identities before counting',async()=>{
-  const {readMeasurementEvents}=await import('../src/stats/rollup.ts')
-  const destination={host:'github.com' as const,org:'o',repo:'o/r',controlRoom:'o/room'}
-  const event={eventId:crypto.randomUUID(),destination,payload:{schemaVersion:2,recordKind:'activity',utcDay:'2026-09-08',taskRef:'task',activityId:'activity'}}
-  const read=(bytes:string)=>JSON.parse(bytes)
-  const batch=readMeasurementEvents([{source:'a',bytes:JSON.stringify(event)},{source:'b',bytes:JSON.stringify(event)},{source:'c',bytes:JSON.stringify({...event,eventId:crypto.randomUUID()})}],read)
+test('strict event readers deduplicate immutable and cross-machine semantic activities and snapshots',async()=>{
+  const {readMeasurementEvents}=await import('../src/stats/rollup.ts'),{serializeExport}=await import('../src/stats/privacy.ts')
+  const destination={host:'github.com' as const,org:'o',repo:'o/r',controlRoom:'o/room'},taskRef={repo:'o/r',issue:1,taskId:'148-T1'},sourceRef={repo:'o/r',issue:1,commentId:1,nodeId:'IC_event',bodySha256:'a'.repeat(64)}
+  const event=serializeExport({schemaVersion:2,recordKind:'activity',utcDay:'2026-09-08',taskRef,activity:{taskRef,activityId:'IC_event:fix',kind:'fix',occurredAt:'2026-09-08T00:00:00Z',sourceRef,deliveryRef:null}},destination,crypto.randomUUID(),{values:{'stats-export':'attributed'}})!
+  const batch=readMeasurementEvents([{source:'a',bytes:JSON.stringify(event)},{source:'b',bytes:JSON.stringify(event)},{source:'c',bytes:JSON.stringify({...event,eventId:crypto.randomUUID()})}])
   expect(batch.events).toHaveLength(1);expect(batch.duplicates).toBe(2);expect(batch.invalid).toEqual([])
-  expect(readMeasurementEvents([{source:'a',bytes:JSON.stringify(event)}]).invalid[0]?.reason).toBe('privacy-reader-unavailable-149')
-  const conflict=readMeasurementEvents([{source:'a',bytes:JSON.stringify(event)},{source:'b',bytes:JSON.stringify({...event,payload:{...event.payload,utcDay:'2026-09-09'}})}],read)
+  const conflict=readMeasurementEvents([{source:'a',bytes:JSON.stringify(event)},{source:'b',bytes:JSON.stringify({...event,utcDay:'2026-09-09'})}])
   expect(conflict.events).toHaveLength(0);expect(conflict.invalid).toHaveLength(2)
+  const snapshot=serializeExport({schemaVersion:2,recordKind:'rework-snapshot',utcDay:'2026-09-08',taskRef,reworkSnapshot:{taskRef,asOf:'2026-09-08T00:00:00Z',sourceRef,counterEpoch:'b'.repeat(64)+':v2',reviewRounds:2,fixRounds:1,handbacks:1,historyComplete:true,historyStart:'2026-08-01T00:00:00Z'}},destination,crypto.randomUUID(),{values:{'stats-export':'attributed'}})!
+  expect(readMeasurementEvents([{source:'a',bytes:JSON.stringify(snapshot)},{source:'b',bytes:JSON.stringify({...snapshot,eventId:crypto.randomUUID()})}])).toMatchObject({duplicates:1,invalid:[]})
 })
 
-test('CLI rollup and show consume unique v2 events through injected owner reader, while production refuses',async()=>{
+test('CLI show consumes unique actual privacy exports and keeps source discovery unavailable independently',async()=>{
   const {mkdtemp,mkdir,writeFile,rm}=await import('node:fs/promises'),{join}=await import('node:path'),{tmpdir}=await import('node:os')
-  const {runStats,parseStatsArgs}=await import('../src/stats/cli.ts')
-  const {normalizeRecord}=await import('../src/stats/record.ts')
+  const {runStats,parseStatsArgs}=await import('../src/stats/cli.ts'),{serializeExport}=await import('../src/stats/privacy.ts'),{resolvePolicy}=await import('../../../skills/dev/dev-setup/scripts/effective-policy.mjs')
   const home=await mkdtemp(join(tmpdir(),'typed-cli-')),dir=join(home,'stats','o__r','2026-09','events'),lines:string[]=[]
   try{
     await mkdir(dir,{recursive:true})
-    const event={eventId:crypto.randomUUID(),destination:{host:'github.com',org:'o',repo:'o/r',controlRoom:'o/room'},payload:{schemaVersion:2,recordKind:'execution',utcDay:'2026-09-08',stage:'implement',outcome:'succeeded'}}
+    const event=serializeExport({schemaVersion:2,recordKind:'execution',utcDay:'2026-09-08',stage:'implement',outcome:'succeeded',executionRef:crypto.randomUUID(),costUsd:null},{host:'github.com',org:'o',repo:'o/r',controlRoom:'o/room'},crypto.randomUUID(),{values:{'stats-export':'attributed'}})!
     await writeFile(join(dir,'a.json'),JSON.stringify(event));await writeFile(join(dir,'b.json'),JSON.stringify(event))
-    const deps:import('../src/stats/cli.ts').StatsDeps={home,cloneRoot:home,hostname:'fixture',ghUser:'robot',login:'robot',isLead:false,policy:{enabled:true,people:false,source:'org',refusal:null},repo:'o/r',git:async()=>{throw Error('no git')},gh:async()=>[],readStdin:async()=>'',readTranscript:async()=>{throw Error('no transcript')},now:()=>new Date('2026-09-08'),log:line=>lines.push(line),exportReader:bytes=>JSON.parse(bytes),measurementRecord:e=>normalizeRecord({repo:e.destination.repo,ts:e.payload.utcDay,stage:e.payload.recordKind==='execution'?e.payload.stage:null,outcome:'complete'})}
+    const effective=resolvePolicy({org:'stats: on\nstats-people: on\nstats-export: attributed\n```vsk-policy\n'+JSON.stringify({schemaVersion:2,administration:{orgAdmins:['robot'],groupAdmins:{},groupAdminCapabilities:{}}})+'\n```',identity:{org:'o',repo:'o/r',group:'dev',peopleByScope:{org:[{login:'robot',groups:['dev']}]},repoGroups:{'o/r':'dev'}}})
+    expect(effective.ok).toBe(true)
+    const deps:import('../src/stats/cli.ts').StatsDeps={home,cloneRoot:home,hostname:'fixture',ghUser:'robot',login:'robot',isLead:false,viewerVerified:true,effectivePolicy:effective.policy,policy:{enabled:true,people:true,source:'org',refusal:null},repo:'o/r',git:async()=>{throw Error('no git')},gh:async()=>[],readGh:async()=>{throw Error('offline')},readStdin:async()=>'',readTranscript:async()=>{throw Error('no transcript')},now:()=>new Date('2026-09-08'),log:line=>lines.push(line)}
     expect(await runStats(parseStatsArgs(['--json']),deps)).toBe(0)
-    expect(JSON.parse(lines.at(-1)!).runs).toBe(1)
-    expect(await runStats(parseStatsArgs(['rollup','--json']),deps)).toBe(0)
-    expect(await runStats(parseStatsArgs(['--json']),{...deps,exportReader:undefined})).toBe(2)
-    expect(lines.at(-1)).toContain('privacy-reader-unavailable-149')
+    expect(JSON.parse(lines.at(-1)!)).toMatchObject({runs:1,execution:{values:{costUsd:{value:null,known:0,unknown:1}}}})
+    expect(await runStats(parseStatsArgs(['rollup','--json']),deps)).toBe(1)
+    expect(await runStats(parseStatsArgs(['--json']),deps)).toBe(0)
+    await writeFile(join(dir,'b.json'),JSON.stringify({...event,privateReceipt:'CANARY'}))
+    expect(await runStats(parseStatsArgs(['--json']),deps)).toBe(2)
+    expect(lines.at(-1)).not.toContain('CANARY')
   }finally{await rm(home,{recursive:true,force:true})}
+})
+
+test('metric v2 keeps measured coverage and separate execution, activity and snapshot denominators', async () => {
+  const { summarizeMeasured, summarizeIssueMonth, utcMonthBounds } = await import('../src/stats/metrics.ts')
+  expect(summarizeMeasured([null, null])).toEqual({ total: null, known: 0, unknown: 2 })
+  expect(summarizeMeasured([0, null, 3])).toEqual({ total: 3, known: 2, unknown: 1 })
+  expect(utcMonthBounds('2024-02')).toEqual({ start: '2024-02-01T00:00:00.000Z', end: '2024-03-01T00:00:00.000Z' })
+  expect(utcMonthBounds('2026-12').end).toBe('2027-01-01T00:00:00.000Z')
+  expect(() => utcMonthBounds('2026-13')).toThrow()
+  const taskRef = { repo: 'o/project.docs', issue: 1, taskId: 'T1' }
+  const sourceRef = { repo: taskRef.repo, issue: 1, commentId: 2, nodeId: 'IC_2', bodySha256: 'a'.repeat(64) }
+  const activity = (id: string, at: string, kind: 'fix' | 'merged') => ({ taskRef, activityId: id, kind, occurredAt: at, sourceRef, deliveryRef: kind === 'merged' ? {repo:taskRef.repo,pr:4,prNodeId:'PR_4',acceptedParentHead:'a'.repeat(40),mergedCommit:'b'.repeat(40)} : null })
+  const events = [activity('aug','2026-08-31T23:59:59Z','fix'),activity('sep','2026-09-01T00:00:00Z','fix'),activity('sep','2026-09-01T00:00:00Z','fix'),activity('merge','2026-09-30T23:59:59Z','merged'),activity('oct','2026-10-01T00:00:00Z','merged')]
+  expect(summarizeIssueMonth(events, '2026-09')).toMatchObject({ mergedIssues: 1, fixRounds: 1, reviewRounds: 0, handbacks: 0 })
+  expect(summarizeIssueMonth(events, '2026-09', {complete:false})).toMatchObject({ mergedIssues:null, fixRounds:null })
+})
+
+test('snapshot rework requires both exact boundaries and monotone epoch; lifetime is one authoritative as-of', async () => {
+  const {summarizeIssueMonth}=await import('../src/stats/metrics.ts')
+  const taskRef={repo:'o/r',issue:1,taskId:'148-T1'},sourceRef={repo:'o/r',issue:1,commentId:1,nodeId:'IC_one',bodySha256:'a'.repeat(64)}
+  const snapshot=(asOf:string,fixRounds:number,counterEpoch='b'.repeat(64)+':v2')=>({taskRef,asOf,sourceRef,counterEpoch,reviewRounds:2,fixRounds,handbacks:1,historyComplete:true,historyStart:'2026-08-01T00:00:00.000Z'})
+  const baseline=snapshot('2026-09-01T00:00:00.000Z',3),end=snapshot('2026-10-01T00:00:00.000Z',4)
+  const result=summarizeIssueMonth([],'2026-09',{snapshots:[baseline,baseline,end,end]})
+  expect(result).toMatchObject({reviewRounds:0,fixRounds:1,handbacks:0,lifetime:[{fixRounds:4,asOf:end.asOf}]})
+  expect(summarizeIssueMonth([],'2026-09',{snapshots:[end]}).fixRounds).toBeNull()
+  expect(summarizeIssueMonth([],'2026-09',{snapshots:[baseline,snapshot('2026-09-20T00:00:00.000Z',4)]}).fixRounds).toBeNull()
+  expect(summarizeIssueMonth([],'2026-09',{snapshots:[baseline,snapshot(end.asOf,1)]}).fixRounds).toBeNull()
+  expect(summarizeIssueMonth([],'2026-09',{snapshots:[baseline,snapshot(end.asOf,4,'c'.repeat(64)+':v2')]}).fixRounds).toBeNull()
+})
+
+test('expired lifetime remains unavailable and null owners do not collide with a real unknown login', async () => {
+  const {summarizeIssueMonth,summarizeExecutions}=await import('../src/stats/metrics.ts')
+  const taskRef={repo:'o/r',issue:1,taskId:null},sourceRef={repo:'o/r',issue:1,commentId:1,nodeId:'IC_old',bodySha256:'a'.repeat(64)}
+  const report=summarizeIssueMonth([],'2026-09',{observedAt:'2028-01-01T00:00:00.000Z',snapshots:[{taskRef,sourceRef,asOf:'2026-09-01T00:00:00.000Z',counterEpoch:'b'.repeat(64)+':v2',reviewRounds:2,fixRounds:4,handbacks:1,historyComplete:true,historyStart:'2026-08-01T00:00:00.000Z'}]})
+  expect(report.lifetime).toMatchObject([{asOf:'2026-09-01T00:00:00.000Z',reviewRounds:null,fixRounds:null,handbacks:null}])
+  const destination={host:'github.com' as const,org:'o',repo:'o/r',controlRoom:'o/room'}
+  const events=[null,'unknown'].map(taskOwner=>({eventId:crypto.randomUUID(),destination,payload:{schemaVersion:2 as const,recordKind:'execution' as const,utcDay:'2026-09-01',stage:'implement',outcome:'succeeded',taskOwner}}))
+  expect(summarizeExecutions(events).taskOwners).toEqual([{owner:null,events:1},{owner:'unknown',events:1}])
 })

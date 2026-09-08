@@ -2,6 +2,16 @@
 
 The project's story, newest first: what got built, why, and how it went — for the operator's future recall. Format home: the dev-chronicle skill.
 
+## 08-09-2026 — Reports distinguish missing measurements from completed work ([#148](https://github.com/vegastack/vegafactory/issues/148))
+
+- **What:** CLI and dashboard source now share measured coverage, separate execution segments from task activity, and discover accepted merges and first releases independently of run months. Task and account owners remain distinct, including explicit unknown-owner buckets.
+- **Why:** Missing usage had become zero, repeated counters had become new work, and run-month discovery missed later delivery.
+- **How it went:** The focused source suite passed 85 tests and strict CLI/dashboard types. A failed-refresh privacy case exposed stale identity filtering and now has a regression test. One older unscoped skills assertion belongs to the queued UI fixture migration; broad checks, independent review and live qualification remain open.
+- **Changed:** Nullable usage and operator minutes · verified delivery periods · dated monthly/lifetime rework · current repository/person scopes · transactional derived cache · explicit metric definitions.
+- **Decisions:** none.
+
+— approved by (kmanojkumar) · built by codex · branch codex/productionization-133
+
 ## 08-09-2026 — Interrupted work keeps its verified progress ([#144](https://github.com/vegastack/vegafactory/issues/144))
 
 - **What:** Recovery now retains verified completed tasks and reconstructs a receiving run from its exact shared handoff. Unavailable earlier history stays unknown, while accepted child deliveries give reporting a verifiable source. Local lessons carry evidence for adoption and undo.

@@ -128,8 +128,8 @@ export function fromCodexExec(events: unknown[], context: CaptureContext): Stats
 export function fromClaudeSessionEnd(hook: unknown, transcriptLines: string[], context: CaptureContext): StatsRecord {
   const payload = asObject(hook)
   let turns = 0
-  let toolCalls = 0
-  const totals = { in: 0, out: 0, cache_read: 0, cache_write: 0 }
+  let toolCalls: number | null = 0
+  const totals: StatsRecord['tokens'] = { in: 0, out: 0, cache_read: 0, cache_write: 0 }
   let sawAssistant = false
   for (const line of Array.isArray(transcriptLines) ? transcriptLines : []) {
     let entry: Record<string, unknown>
@@ -143,12 +143,14 @@ export function fromClaudeSessionEnd(hook: unknown, transcriptLines: string[], c
     const usage = asObject(message.usage)
     turns += 1
     sawAssistant = true
-    totals.in += numberOrNull(usage.input_tokens) ?? 0
-    totals.out += numberOrNull(usage.output_tokens) ?? 0
-    totals.cache_read += numberOrNull(usage.cache_read_input_tokens) ?? 0
-    totals.cache_write += numberOrNull(usage.cache_creation_input_tokens) ?? 0
+    // A session total is known only when every included turn reported that field.
+    for (const [key, vendor] of [['in', 'input_tokens'], ['out', 'output_tokens'], ['cache_read', 'cache_read_input_tokens'], ['cache_write', 'cache_creation_input_tokens']] as const) {
+      const value = numberOrNull(usage[vendor])
+      totals[key] = totals[key] === null || value === null ? null : totals[key] + value
+    }
+    if(!Array.isArray(message.content))toolCalls=null
     for (const block of Array.isArray(message.content) ? message.content : []) {
-      if (asObject(block).type === 'tool_use') toolCalls += 1
+      if (asObject(block).type === 'tool_use' && toolCalls !== null) toolCalls += 1
     }
   }
   return normalizeRecord({

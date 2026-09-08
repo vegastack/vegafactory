@@ -1,8 +1,14 @@
 import { compareMonths, monthToken } from '../stats/month'
 import type { Db } from './build'
 
+export type ReportAccess = {kind:'aggregate'} | {kind:'person';subject:string;dimension:'task-owner'|'account-owner'}
 export interface Filters {
+  access?: ReportAccess
   month: string
+  /** Authorization is independent of display filters; [] denies all, null explicitly permits the org scope. */
+  allowedRepos?: string[] | null
+  /** Current attributed reporting scope; omitted callers do not acquire identities. */
+  attributedRepos?: string[]
   repo: string | null
   group: string | null
   harness: string | null
@@ -23,25 +29,13 @@ export interface FilterOptions {
   models: string[]
 }
 
-const column = (db: Db, name: string): string[] =>
-  db.query<{ value: string | null }>(`select distinct ${name} as value from runs where ${name} is not null`)
-    .all()
-    .map((row) => row.value)
-    .filter((value): value is string => value !== null)
-
-// Every option comes out of the cache, so the filter bar can only ever offer values that exist.
-// Groups are the groups of the repos the cache actually holds, not every group repos.md names —
-// a group with no runs this month is a dead control that answers nothing.
-export function filterOptions(db: Db, repoGroups: Record<string, string>): FilterOptions {
-  const repos = column(db, 'repo').sort()
-  const groups = [...new Set(repos.map((repo) => repoGroups[repo]).filter((g): g is string => Boolean(g)))].sort()
-  return {
-    months: column(db, 'month').sort(compareMonths).reverse(),
-    repos,
-    groups,
-    harnesses: column(db, 'harness').sort(),
-    models: column(db, 'model').sort(),
-  }
+function authorized(repo:string,allowedRepos:string[]|null):boolean{return allowedRepos===null||allowedRepos.includes(repo)}
+export function filterOptions(db: Db, repoGroups: Record<string, string>, allowedRepos:string[]|null = [],access:ReportAccess={kind:'aggregate'}): FilterOptions {
+  const rows=db.query<{repo:string;month:string;harness:string|null;model:string|null;task_owner:string|null;agent_account_owner:string|null}>(`select repo,month,harness,model,human as task_owner,null as agent_account_owner from runs union select repo,month,harness,model,task_owner,agent_account_owner from measurements`).all().filter(row=>authorized(row.repo,allowedRepos)&&(access.kind==='aggregate'||(access.dimension==='task-owner'?row.task_owner:row.agent_account_owner)===access.subject))
+  const activity=access.kind==='person'?db.query<{repo:string;at:string}>(`select json_extract(destination,'$.repo') as repo,case json_extract(payload_json,'$.recordKind') when 'activity' then json_extract(payload_json,'$.activity.occurredAt') else json_extract(payload_json,'$.reworkSnapshot.asOf') end as at from events where (json_extract(payload_json,'$.recordKind')='activity' or json_extract(payload_json,'$.recordKind')='rework-snapshot') and json_extract(payload_json,'$.${access.dimension==='task-owner'?'taskOwner':'agentAccountOwner'}')=?`).all(access.subject).filter(row=>authorized(row.repo,allowedRepos)):db.query<{repo:string;at:string}>(`select repo,occurred_at as at from activity_measurements union select repo,as_of as at from rework_snapshots`).all().filter(row=>authorized(row.repo,allowedRepos))
+  const collections=access.kind==='person'?[]:db.query<{repo:string;period:string}>('select repo,period from activity_collections').all().filter(row=>authorized(row.repo,allowedRepos))
+  const repos=[...new Set([...rows.map(row=>row.repo),...activity.map(row=>row.repo),...collections.map(row=>row.repo)])].sort()
+  return {months:[...new Set([...rows.map(row=>row.month),...activity.map(row=>monthToken(new Date(row.at))),...collections.map(row=>monthToken(new Date(row.period+'-01T00:00:00Z')))])].sort(compareMonths).reverse(),repos,groups:[...new Set(repos.map(repo=>repoGroups[repo]).filter((group):group is string=>Boolean(group)))].sort(),harnesses:[...new Set(rows.map(row=>row.harness).filter((v):v is string=>v!==null))].sort(),models:[...new Set(rows.map(row=>row.model).filter((v):v is string=>v!==null))].sort()}
 }
 
 const pick = (value: string | undefined, allowed: string[]): string | null =>
@@ -54,6 +48,7 @@ export function parseFilters(
   params: Record<string, string | undefined>,
   options: FilterOptions,
   repoGroups: Record<string, string>,
+  allowedRepos:string[]|null = [],
 ): Filters {
   const group = pick(params.group, options.groups)
   const inGroup = group
@@ -66,7 +61,8 @@ export function parseFilters(
   if (repo && inGroup && !inGroup.includes(repo)) repo = null
   const repos = repo ? [repo] : (inGroup ?? [])
   return {
-    month: pick(params.month, options.months) ?? options.months[0] ?? monthToken(new Date()),
+    allowedRepos,
+    month: pick(params.month, options.months) ?? monthToken(new Date()),
     repo,
     group,
     harness: pick(params.harness, options.harnesses),
@@ -80,10 +76,16 @@ export function parseFilters(
 // clause no row satisfies, which is the honest answer rather than a silently unfiltered page.
 // Every column is the runs table's, and a query that joins another table passes that table's
 // alias so `harness` — which skill_invocations also carries — can never be ambiguous.
-export function whereClause(filters: Filters, alias = ''): { sql: string; values: unknown[] } {
+export function whereClause(filters: Filters, alias = '',subject?:{login:string;dimension:'task-owner'|'account-owner'}): { sql: string; values: unknown[] } {
   const column = (name: string): string => (alias ? `${alias}.${name}` : name)
   const clauses = [`${column('month')} = ?`]
+  if(filters.access?.kind==='person'&&(!subject||subject.login!==filters.access.subject||subject.dimension!==filters.access.dimension))clauses.push('1 = 0')
   const values: unknown[] = [filters.month]
+  if(filters.allowedRepos!==null){
+    const allowed=filters.allowedRepos??[]
+    if(!allowed.length)clauses.push('1 = 0')
+    else {clauses.push(`${column('repo')} in (${allowed.map(()=>'?').join(', ')})`);values.push(...allowed)}
+  }
   if (filters.group && filters.repos.length === 0) clauses.push('1 = 0')
   else if (filters.repos.length > 0) {
     clauses.push(`${column('repo')} in (${filters.repos.map(() => '?').join(', ')})`)

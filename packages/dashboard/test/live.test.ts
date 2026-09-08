@@ -163,3 +163,50 @@ test('141 standalone status bridge consumes actual CLI JSON without a sibling sk
   expect(result.data.repos[0].workflow.issues[0].state).toBe('ready')
   expect(result.data.repos[0].workflow.complete).toBe(true)
 })
+
+test('status adapter preserves actual shared/snapshot/recovery fields and scopes selected configuration', async () => {
+  const {parseStatusReport}=await import('../src/lib/live/status')
+  const shared={head:'a'.repeat(40),tasks:[{taskKey:'b'.repeat(64),repo:'o/r',issue:1,state:'stopped',machineId:'machine',generation:2}],refusal:null}
+  const recovery:import('../src/lib/live/status').DurableRecoverySummary={action:'inspect',reason:'prior terminal capture preserved; verified continuation required',checkpointHead:'c'.repeat(40),unbackedTail:true,terminalCapturePreserved:true}
+  const snapshot={state:'fresh',sourceCommit:'d'.repeat(40),policyDigest:'e'.repeat(64),validatedAt:'2026-09-01T00:00:00Z',ageSeconds:0,reason:null,machine:{id:'machine',state:'configured',reason:null,executionIdentityVerified:false,sourceCommit:'d'.repeat(40),configuration:{private:'not part of status contract'}}}
+  const report=parseStatusReport({dispatcher:{running:false},repos:[{repo:'o/r',shared,snapshot,runs:[{issue:1,stage:'implement',recovery}],board:{}}]})!
+  expect(report.repos[0]!.shared).toEqual(shared)
+  expect(report.repos[0]!.snapshot).toMatchObject({state:'fresh',ageSeconds:0,machine:{executionIdentityVerified:false}})
+  expect(report.repos[0]!.snapshot?.machine).not.toHaveProperty('configuration')
+  expect(report.repos[0]!.runs[0]!.recovery).toEqual(recovery)
+  expect(report.repos[0]!.runs[0]!.pendingDelivery).toBeNull()
+  expect(parseStatusReport({})).toBeNull()
+})
+
+test('activity bridge sends exact selected config/org/repo/month, retains incomplete data and rejects extra private fields', async () => {
+  const {mkdtemp,writeFile,readFile,rm}=await import('node:fs/promises'),{tmpdir}=await import('node:os')
+  const {readActivities,readStatus}=await import('../src/lib/live/status')
+  const root=await mkdtemp(join(tmpdir(),'activity-bridge-')),bin=join(root,'cli'),argv=join(root,'argv.json'),configPath=join(root,'selected.json')
+  const report:import('../src/lib/live/status').ActivityReport={schemaVersion:2,metricVersion:2,org:'o',repo:'o/r',period:'2026-09',activities:[],snapshots:[],complete:false,reason:'activity-source-unavailable',observedAt:'2026-08-31T00:00:00.000Z',sourceDigest:'a'.repeat(64)}
+  const script=(value:unknown,code=1)=>'#!'+process.execPath+'\nimport{writeFileSync}from"node:fs";writeFileSync('+JSON.stringify(argv)+',JSON.stringify(process.argv.slice(2)));console.log('+JSON.stringify(JSON.stringify(value))+');process.exit('+code+');\n'
+  try{
+    await writeFile(bin,script(report),{mode:0o755})
+    expect(await readActivities({bin,org:'o',repo:'o/r',month:'2026-09',configPath})).toEqual({ok:true,data:report})
+    expect(JSON.parse(await readFile(argv,'utf8'))).toEqual(['stats','activity','--org','o','--repo','o/r','--month','2026-09','--json','--config',configPath])
+    await writeFile(bin,script({...report,privateReceipt:'CANARY'}))
+    expect((await readActivities({bin,org:'o',repo:'o/r',month:'2026-09',configPath})).ok).toBe(false)
+    await writeFile(bin,script({dispatcher:{running:false},repos:[{repo:'o/r'},{repo:'other/private'}]},0))
+    const status=await readStatus({bin,configPath,org:'o',repos:['o/r']})
+    expect(status.ok&&status.data.repos.map(row=>row.repo)).toEqual(['o/r'])
+    expect(JSON.parse(await readFile(argv,'utf8'))).toEqual(['status','--json','--config',configPath])
+  }finally{await rm(root,{recursive:true,force:true})}
+})
+
+test('shared history bridge preserves verified suffix and unknown checkpoint availability without inventing archive completeness', async () => {
+  const {parseStatusReport}=await import('../src/lib/live/status')
+  const head='a'.repeat(40)
+  const history:NonNullable<import('../src/lib/live/status').SharedStatus['history']>={coverage:'bounded',archiveCoverage:'partial',sourceCommit:head}
+  const task:import('../src/lib/live/status').SharedTaskStatus={taskKey:'b'.repeat(64),repo:'o/r',issue:1,state:'stopped',machineId:'machine-c',generation:3,sourceCommit:head,originMachineId:null,lastTransitionObservedAt:'2026-09-08T00:00:00Z',checkpoint:{headSha:'c'.repeat(40),publishedAt:'2026-09-07T00:00:00Z',sourceCommit:head,availability:'unknown'},history:{coverage:'bounded',events:[{kind:'handoff',generation:3,machineId:'machine-c',previousMachineId:'machine-b',sourceCommit:head,observedAt:'2026-09-08T00:00:00Z'}]}}
+  const shared={head,refusal:null,history,tasks:[task]}
+  const report=parseStatusReport({dispatcher:{running:false},repos:[{repo:'o/r',shared}]})!
+  expect(report.repos[0]!.shared).toEqual(shared)
+  expect(report.repos[0]!.shared!.tasks[0]!.originMachineId).toBeNull()
+  const old=parseStatusReport({dispatcher:{running:false},repos:[{repo:'o/r',shared:{head,refusal:null,tasks:[{taskKey:task.taskKey,repo:'o/r',issue:1,state:'stopped',machineId:'machine-c',generation:3}]}}]})!
+  expect(old.repos[0]!.shared!.history).toBeUndefined()
+  expect(old.repos[0]!.shared!.tasks[0]!.history).toBeUndefined()
+})

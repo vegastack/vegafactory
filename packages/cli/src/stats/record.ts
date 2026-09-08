@@ -288,3 +288,11 @@ export function parseLocalRecord(value: unknown): StatsRecord {
   if(!Array.isArray(record.skills)||record.skills.some(s=>!s||Object.keys(s).sort().join(',')!=='harness,name,trigger'||!['model','typed','mention'].includes(s.trigger)||typeof s.name!=='string'||typeof s.harness!=='string'||s.name.length>128||s.harness.length>128))throw Error('invalid-local-skills')
   return normalizeRecord(record)
 }
+
+/** Display-only execution adapter. Activity and cumulative snapshots never become
+ * runs; callers retain the validated event for coverage and semantic identities. */
+export function measurementRecord(event: import('./types.ts').ExportedEvent): StatsRecord | null {
+  const p=event.payload
+  if(p.recordKind!=='execution')return null
+  return normalizeRecord({repo:event.destination.repo,ts:p.endedAt??p.utcDay+'T00:00:00.000Z',issue:typeof p.taskRef==='object'?p.taskRef?.issue??null:null,stage:p.stage,harness:p.harness??null,model:p.model??null,mode:p.mode??null,human:p.taskOwner??null,duration_s:p.durationSeconds??null,turns:p.turns??null,tool_calls:p.toolCalls??null,subagents:p.subagents??null,tokens:{in:p.tokensIn??null,out:p.tokensOut??null,cache_read:p.cacheReadTokens??null,cache_write:p.cacheWriteTokens??null},cost_usd:p.costUsd??null,outcome:p.outcome==='succeeded'||p.outcome==='complete'?'complete':p.outcome==='handback'?'handback':'failed',skills:p.skills??[]})
+}

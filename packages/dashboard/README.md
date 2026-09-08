@@ -14,10 +14,10 @@ control room.
 
 | View | Reads | Shows |
 |---|---|---|
-| Org (`/`) | the cache | runs, cost, human touchpoints per run, and the same per repo and per stage |
-| Repo (`/repo/<owner>/<name>`) | the cache and the month's rollup | the repo's lead time, cycle time per workflow state, runs and cost per stage, rework and cost per issue |
-| People (`/people`, `/people/<login>`) | the cache and `people.csv` | runs and cost per person, behind the lead gate |
-| Skills (`/skills`) | the cache and the org skills rollup | invocations, trigger, outcome, cost per invocation |
+| Org (`/`) | the cache | terminal segments, nullable usage coverage, measured operator minutes, and per-repo/per-stage totals |
+| Repo (`/repo/<owner>/<name>`) | the cache and the month's rollup | verified merged work, monthly/lifetime rework, nullable usage and separately labelled legacy lead/cycle summaries |
+| People (`/people`, `/people/<login>`) | the cache and `people.csv` | authorized task/account-owner metrics and a separate unknown-owner aggregate bucket |
+| Skills (`/skills`) | the cache and the org skills rollup | invocations, trigger, outcome and nonadditive whole-run cost association |
 | Board (`/board`) | live GitHub and `vegafactory status --json` | the five workflow-state columns, open PRs, worktrees |
 | Dispatcher (`/dispatcher`) | `vegafactory status --json` | whether it is alive, its last tick, and the runs in flight |
 
@@ -38,11 +38,11 @@ default, and the optional ones degrade the page rather than refusing it.
 | `VEGAFACTORY_REPOS` | no | comma-separated repos the board reads live |
 | `VEGAFACTORY_VIEWER` | no | the `gh` login of whoever is looking — the people gate's subject |
 | `VEGAFACTORY_GH_TOKEN` | no | the viewer's own `gh` token, used server-side only |
-| `VEGAFACTORY_BIN` | no | path to the `vegafactory` binary, for the status bridge |
+| `VEGAFACTORY_BIN` | no | path to the `vegafactory` binary, for selected-config status and activity bridges |
 
 ## Offline behaviour
 
-The control-room clone is the source of truth and every cached view works from it alone. The live board retains successfully read pages and healthy repositories when another read is partial or unavailable, displaying each repository’s reason and observation time; an incomplete empty result is unknown, not “no issues” or “no pull requests”. GitHub reads are bounded to 100 pages or 10,000 records, 10 seconds per request and 60 seconds per repository, with at most two retries and three repositories in flight. After connectivity recovers or the reported rate reset, reload to retry. Repeated unchanged failures stay visible without repeated notifications. The status-backed views remain subject to #141’s separate status/bridge completeness integration.
+Current verified policy is required before every cached read. A stale or missing policy never becomes an authorization grant. The live board retains successfully read pages and healthy repositories when another read is partial or unavailable, displaying each repository’s reason and observation time; an incomplete empty result is unknown, not “no issues” or “no pull requests”. GitHub reads are bounded to 100 pages or 10,000 records, 10 seconds per request and 60 seconds per repository, with at most two retries and three repositories in flight. After connectivity recovers or the reported rate reset, reload to retry. Repeated unchanged failures stay visible without repeated notifications. Status preserves the CLI workflow/shared/policy/recovery projections. Missing source identity and recovery history remain unavailable.
 
 ## Building it locally
 
@@ -64,3 +64,11 @@ components themselves (`src/components/ui/`) are copied in through `vegastack-co
 flow, which needs the `CF_ACCESS_CLIENT_ID` and `CF_ACCESS_CLIENT_SECRET` service tokens in
 `packages/dashboard/.env.local`. Until that copy-in runs, the pages render semantic markup over the
 same tokens.
+
+## Metric and reader contracts
+
+Metric version 2 distinguishes unknown from measured zero, execution segments from logical executions, and monthly activities from cumulative snapshots. Corrections are fix events; human effort is supplied operator minutes. Reported cost, API-equivalent estimates and an optional account fee remain separate. The [CLI metric dictionary](https://github.com/vegastack/vegafactory/blob/main/packages/cli/docs/metrics.md) is the definition source. Legacy data is labelled and never promoted into measured v2 coverage.
+
+The dashboard uses the same bounded CLI activity collector, with explicit org, repo, month and selected config. An activity-only month is selectable with zero executions. Failed refreshes preserve the previous complete collection's source observation time. SQLite source associations, event identities and derived metadata commit together; a failed ingestion rolls back. Transport schema remains version 2; derived views carry metric version 2. Raw archive files are unchanged.
+
+`loadContext(search, {kind:'aggregate'})` obtains current repository authorization. `loadContext(search, {kind:'person',subject,dimension})` obtains a subject-bound task-owner or account-owner context. Generic aggregates refuse person-only grants; only the matching central person query may use that scope. `allowedRepos:[]` denies access even when group/repo filters are cleared. Current attribution is applied again on cached fallback; stale person and issue identities cannot survive a downgrade. Null owners are aggregate buckets, not person profiles. The context generation/lease owner and route consumers preserve these contracts.
