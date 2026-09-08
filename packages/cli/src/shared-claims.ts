@@ -978,7 +978,18 @@ async function transactWithinWindow(target: CoordinationTarget, operationId: str
                 if (prior.type === 'effect-send')
                     return { kind: 'ambiguous', reason: 'effect send already reserved; reconcile outcome before retry' };
                 const t = s.tasks[prior.taskKey] ?? parse<TaskRecord>(await pinnedJson(target, s.head, taskPath(prior.taskKey), 256 * 1024), recordSchema, 'completed task');
-                if (prior.generation !== t.generation || canonical(prior.resultOwner) !== canonical(ownerOf(t)) || expected && !owns(t, expected))
+                if (prior.generation !== t.generation || canonical(prior.resultOwner) !== canonical(ownerOf(t)))
+                    return { kind: 'refused', reason: 'old receipt no longer owns current task' };
+                if (prior.type === 'handoff' && expected) {
+                    // A successful handoff changes the owner. Prove the retry's old
+                    // tuple at the receipt's immutable predecessor, never from the new token.
+                    const historical = await readCoordinationSnapshot(target, false, { bytes: 0 }, prior.previousHead);
+                    const original = historical.tasks[prior.taskKey];
+                    if (!original || !owns(original, expected))
+                        return { kind: 'refused', reason: 'handoff receipt original owner mismatch' };
+                    await build(historical); // Revalidate current authority/evidence; no remote mutation.
+                }
+                else if (expected && !owns(t, expected))
                     return { kind: 'refused', reason: 'old receipt no longer owns current task' };
                 if (prior.type === 'accept-scope') {
                     const retained = canonical(t);

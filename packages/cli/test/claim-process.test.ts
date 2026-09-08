@@ -61,3 +61,45 @@ test('watch refuses a second live process and recovers only after the original p
         await rm(dir, { recursive: true, force: true });
     }
 }, 5000);
+
+test('contender waits while a live process publishes its mutation guard owner', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'vf-guard-publication-'));
+    const module = new URL('../src/claims.ts', import.meta.url).href;
+    const worker = join(dir, 'publication.mjs');
+    await writeFile(worker, `import fs from 'node:fs/promises';
+import {syncBuiltinESMExports} from 'node:module';
+const [dir,role]=process.argv.slice(2),path=dir+'/lease';
+const wait=async(name)=>{const until=Date.now()+3000;while(true){try{await fs.access(dir+'/'+name);return}catch{}if(Date.now()>until)throw Error('barrier '+name);await new Promise(r=>setTimeout(r,5))}};
+if(role==='owner'){const mkdir=fs.mkdir;fs.mkdir=async(...args)=>{const result=await mkdir(...args);if(args[0]===path+'.guard'){await fs.writeFile(dir+'/unpublished','ready');await wait('publish')}return result}}
+else {const lstat=fs.lstat;fs.lstat=async(...args)=>{try{return await lstat(...args)}catch(error){if(args[0]===path+'.guard/owner.json'&&error.code==='ENOENT')await fs.writeFile(dir+'/observed-missing','ready');throw error}}}
+syncBuiltinESMExports();
+const {acquireClaim,processIdentity}=await import(${JSON.stringify(module)});
+const identity=await processIdentity();
+if(role==='contender'){await wait('unpublished');await fs.writeFile(dir+'/contending','ready')}
+const result=await acquireClaim(path,identity);
+await fs.writeFile(dir+'/'+role+'.tmp',JSON.stringify(result));await fs.rename(dir+'/'+role+'.tmp',dir+'/'+role);
+if(role==='owner')await wait('finish');`);
+    const wait = async (name: string) => {
+        const until = Date.now() + 3000;
+        for (;;) {
+            try { return await readFile(join(dir, name), 'utf8'); } catch {}
+            if (Date.now() >= until) throw Error('barrier ' + name);
+            await Bun.sleep(5);
+        }
+    };
+    const children = ['owner', 'contender'].map(role => Bun.spawn([Bun.which('node')!, worker, dir, role], { stdout: 'pipe', stderr: 'pipe' }));
+    try {
+        await wait('observed-missing');
+        await writeFile(join(dir, 'publish'), 'go');
+        const owner = JSON.parse(await wait('owner')), contender = JSON.parse(await wait('contender'));
+        expect(owner.kind).toBe('owned');
+        expect(contender).toMatchObject({ kind: 'busy' });
+        expect(JSON.parse(await readFile(join(dir, 'lease'), 'utf8')).token).toBe(owner.claim.token);
+        await writeFile(join(dir, 'finish'), 'done');
+        for (const child of children) expect({ code: await child.exited, err: await new Response(child.stderr).text() }).toEqual({ code: 0, err: '' });
+    } finally {
+        for (const child of children) child.kill();
+        await Promise.all(children.map(child => child.exited));
+        await rm(dir, { recursive: true, force: true });
+    }
+});

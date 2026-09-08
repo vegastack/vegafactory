@@ -1,5 +1,5 @@
 import { test, expect } from 'bun:test';
-import { mkdtemp, readFile, writeFile, chmod, symlink, mkdir, rm } from 'node:fs/promises';
+import { mkdtemp, readFile, writeFile, chmod, symlink, mkdir, rm, lstat } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { acquireClaim, releaseClaim, renewClaim, processIdentity, inspectClaim } from '../src/claims.ts';
@@ -23,13 +23,11 @@ test('one acquisition wins, wrong token cannot release or renew the owner', asyn
     await releaseClaim(result.claim);
     expect((await inspectClaim(path)).kind).toBe('held');
 });
-test('unreadable, corrupt, legacy, symlink and abandoned guard refuse without removal', async () => {
+test('unreadable, corrupt, legacy and symlink claims refuse without removal', async () => {
     const identity = await processIdentity();
-    for (const mode of ['corrupt', 'legacy', 'permission', 'symlink', 'guard']) {
+    for (const mode of ['corrupt', 'legacy', 'permission', 'symlink']) {
         const path = await fixture();
-        if (mode === 'guard')
-            await mkdir(path + '.guard', { mode: 0o700 });
-        else if (mode === 'symlink') {
+        if (mode === 'symlink') {
             await writeFile(path + '.target', 'secret');
             await symlink(path + '.target', path);
         }
@@ -119,4 +117,18 @@ test('memoized self identity never accepts a changed claimant tuple', async () =
         expect(await readFile(path, 'utf8')).toBe(before);
     }
     await releaseClaim(held.claim);
+});
+
+test('unpublished guard stays busy and verified dead guard refuses without removal', async () => {
+    const path = await fixture(), identity = await processIdentity();
+    await mkdir(path + '.guard', { mode: 0o700 });
+    const guard = await lstat(path + '.guard');
+    expect(await acquireClaim(path, identity)).toMatchObject({ kind: 'busy' });
+    expect((await lstat(path + '.guard')).ino).toBe(guard.ino);
+    expect(await readFile(path + '.guard/owner.json').catch(e => e.code)).toBe('ENOENT');
+    const record = JSON.stringify({ schemaVersion: 1, token: crypto.randomUUID(), identity: { ...identity, startId: 'prior-process-start' } });
+    await writeFile(path + '.guard/owner.json', record, { mode: 0o600 });
+    expect(await acquireClaim(path, identity)).toMatchObject({ kind: 'refused', reason: expect.stringContaining('abandoned mutation guard') });
+    expect(await readFile(path + '.guard/owner.json', 'utf8')).toBe(record);
+    await rm(path + '.guard', { recursive: true });
 });

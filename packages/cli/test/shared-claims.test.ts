@@ -691,3 +691,37 @@ test('stopped unfinished ownership accepts a partial scope without releasing its
     expect(after.machines).toEqual(before.machines);
     expect(after.tasks[f.claim.taskKey]).toEqual({ ...before.tasks[f.claim.taskKey]!, acceptedScopes: [{ scopeDigest: d, receipt: f.published.reference }] });
 });
+
+test('handoff lost-response retry proves the original owner and returns only the committed successor', async () => {
+    const p = await pendingEffectFixture('telemetry-push');
+    const machine = { ...p.machine, id: 'other', installationId: randomUUID(), hostBindingDigest: 'a'.repeat(64) };
+    const session = { ...p.session, machineId: machine.id, installationId: machine.installationId, hostBindingDigest: machine.hostBindingDigest, sessionId: randomUUID() };
+    const transition = { kind: 'handoff' as const, machine, session, candidate: p.candidate, stopProof: p.stopProof, recovery: p.recovery };
+    const request = { claim: p.claim, operationId: randomUUID(), transition };
+    const commit = p.target.provider.commit, branch = p.target.provider.branch;
+    let lost = false, sends = 0;
+    p.target.provider.commit = async (...args) => { sends++; await commit(...args); lost = true; return { kind: 'ambiguous', reason: 'response lost' }; };
+    p.target.provider.branch = async (...args) => { if (lost) throw Error('readback unavailable'); return branch(...args); };
+    expect((await transitionSharedTask(request)).kind).toBe('ambiguous');
+    lost = false;
+    const current = await readCoordination(p.target), before = canonical(current);
+    const retry = await transitionSharedTask(request);
+    expect(retry.kind).toBe('owned');
+    if (retry.kind !== 'owned') throw Error(retry.reason);
+    expect(retry.claim.ownerToken).toBe(current.tasks[p.claim.taskKey]!.ownerToken);
+    expect(retry.claim.generation).toBe(2);
+    expect(sends).toBe(1);
+    for (const bad of [
+        { ...request, claim: { ...p.claim, ownerToken: randomUUID() } },
+        { ...request, claim: retry.claim },
+        { ...request, operationId: randomUUID() },
+        { ...request, transition: { ...transition, session: { ...session, sessionId: randomUUID() } } },
+        { ...request, transition: { ...transition, candidate: { ...p.candidate, scopeDigest: 'a'.repeat(64) } } },
+    ]) expect((await transitionSharedTask(bad)).kind).toBe('refused');
+    const verify = p.target.verifyCandidate;
+    p.target.verifyCandidate = async () => { throw Error('current policy revoked'); };
+    expect(await transitionSharedTask(request)).toMatchObject({ kind: 'refused', reason: 'current policy revoked' });
+    p.target.verifyCandidate = verify;
+    expect(canonical(await readCoordination(p.target))).toBe(before);
+    expect(sends).toBe(1);
+});

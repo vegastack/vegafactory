@@ -173,6 +173,7 @@ async function atomicOwner(path: string, value: Owner) {
         throw error;
     }
 }
+class ClaimBusy extends ClaimRefusal {}
 async function guarded<T>(path: string, identity: ProcessIdentity, mutate: () => Promise<T>): Promise<T> {
     await mkdir(dirname(path), { recursive: true, mode: 0o700 });
     await privatePath(dirname(path), true);
@@ -186,15 +187,20 @@ async function guarded<T>(path: string, identity: ProcessIdentity, mutate: () =>
             if ((error as NodeJS.ErrnoException).code !== 'EEXIST')
                 throw error;
             await privatePath(guard, true);
-            const held = await owner(guard + '/owner.json');
-            if (!held || await stopped(held.identity))
+            const held = await owner(guard + '/owner.json').catch(error => {
+                // The owner can finish releasing between inspection and open.
+                if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null;
+                throw error;
+            });
+            if (held && await stopped(held.identity))
                 throw new ClaimRefusal(`abandoned mutation guard: ${guard}; offline operator recovery required`);
             if (Date.now() >= deadline)
-                throw new ClaimRefusal(`mutation guard busy: ${guard}`);
+                throw new ClaimBusy(`mutation guard busy: ${guard}`);
             await sleep(50);
         }
     }
-    // Failure before publication intentionally leaves an unowned guard requiring offline recovery.
+    // Missing publication may be in progress or abandoned: wait only, never reclaim it.
+    // A failed publication preserves the guard for offline recovery.
     await atomicOwner(guard + '/owner.json', { schemaVersion: 1, token, identity });
     try {
         return await mutate();
@@ -222,7 +228,7 @@ export async function acquireClaim(path: string, identity: ProcessIdentity): Pro
         });
     }
     catch (error) {
-        return { kind: 'refused', reason: (error as Error).message };
+        return { kind: error instanceof ClaimBusy ? 'busy' : 'refused', reason: (error as Error).message };
     }
 }
 export async function releaseClaim(claim: Claim): Promise<void> {

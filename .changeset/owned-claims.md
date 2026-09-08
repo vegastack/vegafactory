@@ -11,3 +11,5 @@ Protect dispatcher ownership with atomic local claims and conditional shared tas
 - Inspect retained active or completed private task records at one verified current head, preserving recovery and pending delivery references.
 - Reuse only the live caller’s verified immutable process identity to reduce claim overhead while retaining fresh foreign-process and ownership checks.
 - Link verified partial acceptance while retaining current ownership and all reservations; inspect immutable historical task facts from pinned receipts and exact original owner identities.
+- Treat in-progress local guard publication as bounded contention while preserving unknown or abandoned guard evidence.
+- Recover a committed handoff after response loss only from its exact receipt, original owner and revalidated transfer authority.
