@@ -163,3 +163,26 @@ test('installed managed hook resolves owned terminal session and Stop/SessionEnd
   expect(invoke('stop-heartbeat.mjs','Stop')).toBe('')
   expect((await runtime.readRun(runtime.runsRoot(canonicalHome),run.runId)).generation).toBe(disabledGeneration)
 },10000)
+
+test('actual failed child argv and stdout never enter basic diagnostic files',async()=>{
+ const {executeRun}=await import('../src/dispatch.ts'),{parseFactoryConfig}=await import('../src/config.ts')
+ const {readFile,stat}=await import('node:fs/promises'),{resolve}=await import('node:path')
+ const secret='ghp_PRIVATE_STDOUT_CANARY',native='NATIVE_MEMORY_CANARY'
+ const code=`process.stdout.write(${JSON.stringify(secret)});process.stderr.write(${JSON.stringify(native)});process.exit(1)`
+ const result=await executeRun({repo:'o/r',issue:1,title:'fixture',stage:'implement',commentId:null,reactionId:null},{command:process.execPath,args:['-e',code],cwd:home,env:{},prompt:''},parseFactoryConfig({repos:[{repo:'o/r',org:'o',path:home}]},home),{operator:null},{wrapperPath:resolve('packages/cli/src/run-wrapper.ts')})
+ expect(result.terminationCause).toBe('failed')
+ expect(result.stdout).toContain(secret) // transient structured-capture input only
+ const log=await readFile(result.logFile,'utf8')
+ expect(log).not.toContain('CANARY');expect(log).not.toContain(code);expect(log).not.toContain(home)
+ expect((await stat(result.logFile)).mode&0o777).toBe(0o600)
+ const {basicDiagnostic}=await import('../src/stats/privacy.ts')
+ for(const line of log.trim().split('\n')){const row=JSON.parse(line);expect(row).toEqual(basicDiagnostic(row.at,row.event,row))}
+ expect(result.handedBack).toBe(false)
+},10000)
+
+test('CLI legacy hooks do not read a supplied transcript or native-memory path',async()=>{
+ const {parseStatsArgs,runStats}=await import('../src/stats/cli.ts')
+ let reads=0
+ const code=await runStats(parseStatsArgs(['record','--source','claude-session-end']),{home,hostname:'fixture',ghUser:'alice',login:'alice',isLead:false,policy,repo:'o/r',cloneRoot:home,git:async()=>({code:0,stdout:'',stderr:''}),gh:async()=>[],readStdin:async()=>JSON.stringify({session_id:'fixture',transcript_path:'/Users/private/.claude/NATIVE_MEMORY_CANARY'}),readTranscript:async()=>{reads++;throw Error('native-memory-read')},now:()=>new Date(),log:()=>{}})
+ expect(code).toBe(0);expect(reads).toBe(0)
+})

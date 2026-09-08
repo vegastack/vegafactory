@@ -3,19 +3,46 @@
 import { createHash } from 'node:crypto'
 export type JsonValue = null | boolean | number | string | JsonValue[] | { [key: string]: JsonValue }
 export interface Destination { host: 'github.com'; org: string; repo: string; controlRoom: string }
+export interface TaskRef { repo: string; issue: number; taskId: string | null }
+export interface StatsEvidenceRef { repo: string; issue: number | null; commentId: number | null; nodeId: string | null; bodySha256: string | null }
+export interface DeliveryRef { repo: string; pr: number; prNodeId: string; acceptedParentHead: string; mergedCommit: string | null }
+export interface TaskActivity { taskRef: TaskRef; activityId: string; kind: 'implemented' | 'merged' | 'released' | 'review' | 'fix' | 'handback'; occurredAt: string; deliveryRef: DeliveryRef | null; sourceRef: StatsEvidenceRef }
+export interface ReworkSnapshot { taskRef: TaskRef; asOf: string; sourceRef: StatsEvidenceRef; counterEpoch: string; reviewRounds: number | null; fixRounds: number | null; handbacks: number | null; historyComplete: boolean; historyStart: string | null }
+export interface EstimateBasis { sourceUrl: string; checkedAt: string; priceDigest: string; currency: string; model: string }
+export const MEASUREMENT_KEYS = ['durationSeconds','turns','toolCalls','subagents','tokensIn','tokensOut','cacheReadTokens','cacheWriteTokens','costUsd'] as const
+export type MeasurementKey = typeof MEASUREMENT_KEYS[number]
+export type Coverage = Record<MeasurementKey, {known:number;unknown:number}>
+export interface ExecutionMeasurements {
+  stage: string; harness: string | null; model: string | null; mode: 'headless' | 'interactive' | null; outcome: string
+  durationSeconds: number | null; turns: number | null; toolCalls: number | null; subagents: number | null
+  tokensIn: number | null; tokensOut: number | null; cacheReadTokens: number | null; cacheWriteTokens: number | null; costUsd: number | null
+  coverage: Coverage; skills: Array<{name:string;trigger:'model'|'typed'|'mention';harness:string}>
+}
+export interface ExecutionAttribution {
+  taskRef: TaskRef | null; taskOwner: string | null; agentAccountOwner: string | null; executionRef: string; attempt: number
+  startedAt: string | null; endedAt: string | null; operatorMinutes: number | null; apiEquivalentUsd: number | null; estimateBasis: EstimateBasis | null
+}
+interface ExportBase { schemaVersion: 2; metricVersion: 2; eventId: string; destination: Destination; utcDay: string }
+export type ExportMeasurement =
+  | (ExportBase & {recordKind:'execution'} & ExecutionMeasurements & (ExecutionAttribution | {[K in keyof ExecutionAttribution]?:never}))
+  | (ExportBase & {recordKind:'activity';taskRef:TaskRef;taskOwner:string|null;agentAccountOwner:string|null;activity:TaskActivity})
+  | (ExportBase & {recordKind:'rework-snapshot';taskRef:TaskRef;taskOwner:string|null;reworkSnapshot:ReworkSnapshot})
+// Local compatibility input remains private. New collectors use the camelCase fields;
+// values is exclusively the explicit legacy capture adapter, never a shared object spread.
 interface MeasurementBase { schemaVersion: 2; utcDay: string; values?: { [key: string]: JsonValue } }
 export type LocalMeasurement =
-  | (MeasurementBase & { recordKind: 'execution'; stage: string; outcome: string })
-  | (MeasurementBase & { recordKind: 'activity'; taskRef: string; activityId: string })
-  | (MeasurementBase & { recordKind: 'rework-snapshot'; taskRef: string; counterEpoch: string; asOf: string; sourceRef: string })
+  | (MeasurementBase & { recordKind:'execution';stage:string;outcome:string;localRunId?:string;historicalNonAttributed?:boolean } & Partial<Omit<ExecutionMeasurements,'stage'|'outcome'>> & Partial<ExecutionAttribution>)
+  | (MeasurementBase & { recordKind:'activity';taskRef:TaskRef|string;activityId?:string;taskOwner?:string|null;agentAccountOwner?:string|null;activity?:TaskActivity })
+  | (MeasurementBase & { recordKind:'rework-snapshot';taskRef:TaskRef|string;counterEpoch?:string;asOf?:string;sourceRef?:string;taskOwner?:string|null;reworkSnapshot?:ReworkSnapshot })
 export interface SpoolEnvelope { schemaVersion: 2; eventId: string; destination: Destination; payload: LocalMeasurement; captureKey: string }
 export interface SerializedExport { bytes: string; policyDigest: string }
 export type ExportSerializer = (event: Readonly<SpoolEnvelope>) => Promise<SerializedExport | null>
 // A reader returns validated transport identity plus owner-defined measurement. #148 builds metrics.
 export interface ExportedEvent { eventId: string; destination: Destination; payload: LocalMeasurement }
 export type ExportReader = (bytes: string) => ExportedEvent
-export const serializeExport: ExportSerializer = async () => { throw Error('privacy-serializer-unavailable-149') }
-export const readExport: ExportReader = () => { throw Error('privacy-reader-unavailable-149') }
+export const serializeExport: ExportSerializer = async () => { throw Error('current-export-policy-required') }
+export { readExport } from './privacy.ts'
+import { readExport } from './privacy.ts'
 export const hashBytes = (value: string | Uint8Array): string => createHash('sha256').update(value).digest('hex')
 export const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 export function canonicalJson(value: unknown): string {
@@ -40,10 +67,9 @@ export const destinationKey = (d: Destination): string => canonicalJson(validate
 export const destinationId = (d: Destination): string => hashBytes(destinationKey(d))
 export function validateMeasurement(value: unknown): LocalMeasurement {
   const p = value as LocalMeasurement
-  const base = ['schemaVersion', 'utcDay', 'recordKind', 'values']
-  const keys = p?.recordKind === 'execution' ? [...base, 'stage', 'outcome'] : p?.recordKind === 'activity' ? [...base, 'taskRef', 'activityId'] : [...base, 'taskRef', 'counterEpoch', 'asOf', 'sourceRef']
-  if (!p || Object.keys(p).some(k => !keys.includes(k)) || p.schemaVersion !== 2 || !['execution','activity','rework-snapshot'].includes(p.recordKind) || !/^\d{4}-\d{2}-\d{2}$/.test(p.utcDay) || !Number.isFinite(Date.parse(p.utcDay)) || new Date(p.utcDay).toISOString().slice(0,10) !== p.utcDay) throw Error('invalid-measurement')
-  for (const key of keys.filter(k => !base.includes(k))) if (typeof (p as unknown as Record<string,unknown>)[key] !== 'string' || !(p as unknown as Record<string,unknown>)[key]) throw Error('invalid-measurement-identity')
+  if (!p || typeof p !== 'object' || Array.isArray(p) || p.schemaVersion !== 2 || !['execution','activity','rework-snapshot'].includes(p.recordKind) || !/^\d{4}-\d{2}-\d{2}$/.test(p.utcDay) || !Number.isFinite(Date.parse(p.utcDay)) || new Date(p.utcDay).toISOString().slice(0,10) !== p.utcDay) throw Error('invalid-measurement')
+  if(p.recordKind==='execution' && (typeof p.stage!=='string'||!p.stage||typeof p.outcome!=='string'||!p.outcome))throw Error('invalid-measurement-identity')
+  if(p.recordKind!=='execution' && (!p.taskRef || p.recordKind==='activity' && !(p.activity?.activityId??p.activityId) || p.recordKind==='rework-snapshot' && !(p.reworkSnapshot?.counterEpoch??p.counterEpoch)))throw Error('invalid-measurement-identity')
   if (canonicalJson(p).length > 256 * 1024) throw Error('measurement-too-large')
   return p
 }
@@ -51,8 +77,8 @@ export function semanticCaptureKey(destination: Destination, payload: LocalMeasu
   validateMeasurement(payload)
   if (payload.recordKind === 'execution') { if (!runId || !UUID.test(runId)) throw Error('run-identity-unavailable'); return `${runId}:terminal:0` }
   return payload.recordKind === 'activity'
-    ? 'activity:' + hashBytes(canonicalJson([destinationKey(destination), payload.taskRef, payload.activityId]))
-    : 'snapshot:' + hashBytes(canonicalJson([destinationKey(destination), payload.taskRef, payload.counterEpoch, payload.asOf, payload.sourceRef]))
+    ? 'activity:' + hashBytes(canonicalJson([destinationKey(destination), payload.taskRef, payload.activity?.activityId ?? payload.activityId]))
+    : 'snapshot:' + hashBytes(canonicalJson([destinationKey(destination), payload.taskRef, payload.reworkSnapshot?.counterEpoch ?? payload.counterEpoch, payload.reworkSnapshot?.asOf ?? payload.asOf, payload.reworkSnapshot?.sourceRef ?? payload.sourceRef]))
 }
 export function validateEnvelope(value: unknown): SpoolEnvelope {
   const e = value as SpoolEnvelope

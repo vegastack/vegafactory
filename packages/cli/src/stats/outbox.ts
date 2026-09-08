@@ -136,7 +136,7 @@ export async function appendSkillInvocations(home: string, sessionId: string, in
   const file = sessionSidecar(home, sessionId)
   await mkdir(dirname(file), { recursive: true, mode: 0o700 })
   await refuseIrregular(file)
-  await appendFile(file, `${invocations.map(entry => JSON.stringify(entry)).join('\n')}\n`)
+  await appendFile(file, `${invocations.map(entry => JSON.stringify(entry)).join('\n')}\n`,{mode:0o600})
 }
 
 export async function takeSkillInvocations(home: string, sessionId: string): Promise<SkillInvocation[]> {
@@ -232,19 +232,27 @@ export function spoolEventFile(root: string, event: Pick<SpoolEnvelope,'destinat
   return join(root,'events',destinationId(event.destination),event.eventId + '.json')
 }
 export async function enqueueEvent(root: string, input: SpoolEnvelope): Promise<{eventId: string; persisted: boolean}> {
-  const supplied = validateEnvelope({...input,captureKey:input.payload.recordKind==='execution'?input.captureKey:semanticCaptureKey(input.destination,input.payload)})
+  let supplied = validateEnvelope({...input,captureKey:input.payload.recordKind==='execution'?input.captureKey:semanticCaptureKey(input.destination,input.payload)})
   const capture = hashBytes(canonicalJson([destinationId(supplied.destination), supplied.captureKey]))
-  const digest = hashBytes(canonicalJson(supplied.payload))
   return withSpoolClaim(root,'capture:' + capture, async () => {
     const mappingPath = join(root,'captures',capture + '.json')
-    const previous = await readSpoolJson<{eventId:string;payloadDigest:string;destination:string;captureKey:string}>(mappingPath)
+    const previous = await readSpoolJson<{eventId:string;payloadDigest:string;destination:string;captureKey:string;executionRef?:string}>(mappingPath)
+    if(supplied.payload.recordKind==='execution'&&supplied.payload.localRunId){
+      const runId=supplied.payload.localRunId
+      if(!UUID.test(runId)||supplied.captureKey!==runId+':terminal:0')throw Error('privacy-reporting-identity-unavailable')
+      const prepared=await readSpoolJson<{executionRef:string}>(join(root,'reporting-identities',capture+'.json'))
+      const saved=previous?.executionRef??prepared?.executionRef
+      if(saved&&!UUID.test(saved)||previous?.executionRef&&prepared?.executionRef&&previous.executionRef!==prepared.executionRef||supplied.payload.executionRef&&supplied.payload.executionRef!==saved)throw Error('privacy-reporting-identity-rebound')
+      supplied={...supplied,payload:{...supplied.payload,executionRef:saved??randomUUID()}}
+    }
+    const digest = hashBytes(canonicalJson(supplied.payload))
     if (previous && (previous.payloadDigest !== digest || previous.destination !== destinationId(supplied.destination) || previous.captureKey !== supplied.captureKey || !UUID.test(previous.eventId))) {
       await quarantineSpool(root, capture, 'capture-payload-conflict', Buffer.byteLength(canonicalJson(input)))
       throw Error('capture-payload-conflict')
     }
     const event = { ...supplied, eventId: previous?.eventId ?? supplied.eventId }
     // Mapping becomes durable BEFORE the event, so an interrupted enqueue reuses its ID.
-    if (!previous) await writeSpoolJson(mappingPath, { eventId:event.eventId,payloadDigest:digest,destination:destinationId(event.destination),captureKey:event.captureKey })
+    if (!previous) await writeSpoolJson(mappingPath, { eventId:event.eventId,payloadDigest:digest,destination:destinationId(event.destination),captureKey:event.captureKey,...(event.payload.recordKind==='execution'&&event.payload.executionRef?{executionRef:event.payload.executionRef}:{}) })
     return withSpoolClaim(root,'event:' + event.eventId, async () => {
       const identityFile = join(root,'identities',event.eventId+'.json')
       const identity={destination:destinationId(event.destination),captureKey:event.captureKey,payloadDigest:digest}
@@ -294,7 +302,7 @@ export async function inspectSpool(root: string): Promise<SpoolInspection> {
     let entries;try{entries=await readdir(dir,{withFileTypes:true})}catch(e){if((e as NodeJS.ErrnoException).code==='ENOENT')return;throw e}
     for(const entry of entries){const file=join(dir,entry.name);if(entry.isDirectory())await temporary(file);else if(entry.isFile()&&entry.name.endsWith('.tmp')){const info=await lstat(file);result.quarantine.push({source:file,reason:'partial-spool-write',bytes:info.size,recordedAt:info.mtime.toISOString(),action:'inspect and reconcile this interrupted write; original capture mapping is retained'})}}
   }
-  for(const dir of ['captures','identities','attempts','receipts','suppressed','batches','legacy-snapshots'])await temporary(join(root,dir))
+  for(const dir of ['captures','identities','attempts','receipts','suppressed','batches','legacy-snapshots','retention','reporting-identities'])await temporary(join(root,dir))
   result.quarantineBytes=result.quarantine.reduce((total,row)=>total+row.bytes,0)
   result.quarantineOldestAgeMs=result.quarantine.reduce((oldest,row)=>Math.max(oldest,Date.now()-Date.parse(row.recordedAt)),0)
   return result
@@ -376,7 +384,7 @@ export async function migrateLegacySpool(report:MigrationReport,mapping:Record<s
       if(previous&&previous.lineSha256!==candidate.lineSha256)throw Error('migration-line-history-changed')
       const captureKey=previous?.captureKey??'legacy:'+hashBytes(canonicalJson([snapshot.sha256,candidate.offset]))
       if(!previous)await writeSpoolJson(tracked,{...state,lines:{...state.lines,[candidate.offset]:{lineSha256:candidate.lineSha256,captureKey}}})
-      await enqueueEvent(options.root,{schemaVersion:2,eventId:randomUUID(),captureKey,destination:mapping[record.repo]!,payload:{schemaVersion:2,recordKind:'execution',utcDay:new Date(record.ts).toISOString().slice(0,10),stage:record.stage??'unknown',outcome:record.outcome??'unknown',values:JSON.parse(serializeRecord(record))}})
+      await enqueueEvent(options.root,{schemaVersion:2,eventId:randomUUID(),captureKey,destination:mapping[record.repo]!,payload:{schemaVersion:2,recordKind:'execution',utcDay:new Date(record.ts).toISOString().slice(0,10),stage:record.stage??'unknown',outcome:record.outcome??'unknown',historicalNonAttributed:true,values:JSON.parse(serializeRecord(record))}})
       migrated++
     }
     for(const invalid of report.invalid)await quarantineSpool(options.root,'legacy:'+invalid.source,invalid.reason,invalid.bytes,invalid.action)

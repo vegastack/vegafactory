@@ -10,17 +10,19 @@ export const dynamic = 'force-dynamic'
 
 export default async function PeoplePage({ searchParams }: { searchParams: Promise<Record<string, string | string[] | undefined>> }) {
   const context = await loadContext(await searchParams)
-  const view = buildPeopleView({ context })
+  const view = await buildPeopleView({ context })
 
   return (
     <Shell title={`People — ${context.filters.month}`} freshness={context.freshness}>
       <FilterBar base="/people" options={context.options} filters={context.filters} />
       {view.gated && (
         <p className="text-muted-foreground mb-6 text-sm">
-          People-level stats are visible to the person themselves and to a lead, while the org&rsquo;s
-          <code className="mx-1">stats-people</code> knob is on. You are seeing your own row.
+          People reports require confirmed attributed reporting and current repository permissions.
+          Organization and group administrators see only their permitted scope.
+          {view.refusal && <span className="block">{view.refusal}</span>}
         </p>
       )}
+      <p className="text-muted-foreground mb-6 text-sm">Private repository readers can also read report files and Git history. This page does not restrict access to existing clones.</p>
       <StatTable
         caption="Runs, cost and human touchpoints per person"
         rows={view.rows}

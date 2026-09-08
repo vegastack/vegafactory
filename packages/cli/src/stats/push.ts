@@ -1,7 +1,8 @@
+import { currentPolicySerializer, configuredExportPolicy, privacyReason } from './privacy.ts'
 // Immutable destination-bound transport. Only exact remote bytes prove delivery.
 import { spawn } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
-import { canonicalJson, destinationId, destinationKey, eventPath, hashBytes, serializeExport, validateDestination, UUID, type Destination, type SpoolEnvelope, type ExportSerializer } from './types.ts'
+import { canonicalJson, destinationId, destinationKey, eventPath, hashBytes, validateDestination, UUID, type Destination, type SpoolEnvelope, type ExportSerializer } from './types.ts'
 import { open, rm, lstat } from 'node:fs/promises'
 import { dirname, join, resolve } from 'node:path'
 import { listOutbox, inspectSpool, spoolRoot, readSpoolJson, writeSpoolJson, withSpoolClaim, quarantineSpool, spoolEventFile, legacyMigrationComplete, type OutboxBatch } from './outbox.ts'
@@ -44,6 +45,7 @@ export interface PushResult {
   // Another push on this machine held the lock; nothing was touched and the outbox will be
   // replayed by the next attempt.
   locked: boolean
+  retention?: CleanupResult
 }
 
 // PID-only predecessor locks are preserved and refused; #137 owns every new claim.
@@ -57,7 +59,7 @@ export interface TelemetryEffects {
 }
 export interface PushOptions {
   home:string; cloneRoot:string; ghUser:string; hostname:string; commit:boolean; git:GitRunner; maxRetries?:number
-  destination?:Destination; serialize?:ExportSerializer; effects?:TelemetryEffects; retention?:DeliveredRetentionController; wait?:(ms:number)=>Promise<void>; now?:()=>Date
+  cleanupOnly?:boolean; dryRunRetention?:boolean; destination?:Destination; serialize?:ExportSerializer; effects?:TelemetryEffects; retention?:DeliveredRetentionController; wait?:(ms:number)=>Promise<void>; now?:()=>Date
 }
 export function matchesDestination(destination: Destination, remote: string): boolean {
   try {
@@ -90,7 +92,7 @@ export async function pushOutbox(options:PushOptions):Promise<PushResult>{
   if((await Promise.all(legacy.map(batch=>legacyMigrationComplete(root,batch.file)))).some(done=>!done))result.refusals.push('legacy-spool-requires-explicit-migration: stats migrate --json')
   if(inspection.quarantine.length)result.refusals.push(`spool-quarantine:${inspection.quarantine.length}; stats inspect --json`)
   if(!options.commit){result.deferred=inspection.events.map(e=>e.eventId);result.ok=!result.refusals.length;return result}
-  try{await lstat(pushLockPath(options.home));result.locked=true;throw Error('legacy-push-lock-requires-inspection')}catch(e){if((e as NodeJS.ErrnoException).code!=='ENOENT'){result.refusals.push((e as Error).message);result.ok=false;return result}}
+  try{await lstat(pushLockPath(options.home));result.locked=true;throw Error('legacy-push-lock-requires-inspection')}catch(e){if((e as NodeJS.ErrnoException).code!=='ENOENT'){result.refusals.push(privacyReason(e));result.ok=false;return result}}
   if(!inspection.events.length){result.ok=!result.refusals.length;return result}
   const now=options.now??(()=>new Date()),wait=options.wait??(ms=>new Promise(r=>setTimeout(r,ms))),effects=options.effects??configuredTelemetryEffects(options.home)
   const run=async(args:string[],extra?:GitOptions):Promise<string>=>{
@@ -137,7 +139,7 @@ export async function pushOutbox(options:PushOptions):Promise<PushResult>{
       result.pushed++
     }
     let pending:SpoolEnvelope[]=[]
-    for(const event of selected){
+    for(const event of options.cleanupOnly?[]:selected){
       if(await readDeliveryReceipt(root,event))continue
       const suppressed=await readSpoolJson<{localPayloadDigest:string}>(suppressionFile(root,event))
       if(suppressed){if(suppressed.localPayloadDigest!==hashBytes(canonicalJson(event.payload)))throw Error('suppressed-payload-conflict');if(!(await history(root,event)).length)continue}
@@ -159,9 +161,8 @@ export async function pushOutbox(options:PushOptions):Promise<PushResult>{
           // but never repeatedly serializes or invents a remote acknowledgment.
           if(await readSpoolJson(suppressionFile(root,event)))continue
           // The exact remote path is absent. Only now may current policy produce new bytes.
-          const serialized=await(options.serialize??serializeExport)(event)
+          const serialized=await(options.serialize??currentPolicySerializer(options.home))(event)
           if(serialized===null){
-            if(event.payload.recordKind==='execution')throw Error('execution-suppression-requires-owner-disposition')
             await writeSpoolJson(suppressionFile(root,event),{eventId:event.eventId,localPayloadDigest:hashBytes(canonicalJson(event.payload)),disposition:'policy-suppressed',recordedAt:now().toISOString()});continue
           }
           if(typeof serialized.bytes!=='string'||Buffer.byteLength(serialized.bytes)>1024*1024||!/^[a-f0-9]{64}$/.test(serialized.policyDigest))throw Error('invalid-serialized-export')
@@ -169,7 +170,7 @@ export async function pushOutbox(options:PushOptions):Promise<PushResult>{
           const attempt:DeliveryAttempt={batchId,operationId:randomUUID(),bytes:serialized.bytes,attemptHash:hashBytes(serialized.bytes),policyDigest:serialized.policyDigest,preparedAt:now().toISOString()}
           await writeSpoolJson(attemptFile(root,event),[...attempts,attempt])
           prepared.push({event,attempt});next.push(event)
-        }catch(error){result.refusals.push((error as Error).message);result.deferred.push(event.eventId)}
+        }catch(error){result.refusals.push(privacyReason(error));result.deferred.push(event.eventId)}
       }
       pending=next
       if(!prepared.length)break
@@ -197,11 +198,60 @@ export async function pushOutbox(options:PushOptions):Promise<PushResult>{
     }
     result.deferred.push(...pending.map(e=>e.eventId))
     result.ok=!result.refusals.length&&!result.deferred.length
-    await cleanupDelivered(root,{now:now(),controller:options.retention})
-    await cleanupBasicLogs(options.home,now())
+    const retention:DeliveredRetentionController=options.retention??{
+      active:configuredRetentionActive(options.home),
+      async removeActiveReport(event,receipt){
+        const policy=await configuredExportPolicy(options.home,event.destination)
+        if(!policy.policyDigest||!/^[a-f0-9]{64}$/.test(policy.policyDigest))throw Error('retention-policy-unavailable')
+        const file=join(root,'retention',destinationId(event.destination),event.eventId+'.json')
+        let operation=await readSpoolJson<RetentionRemoval>(file)
+        if(operation)validateRetentionRemoval(operation,event,receipt)
+        // Each changed policy starts a new intent only when no previous send is unresolved.
+        if(operation?.state==='absent'){
+          const observed=await refresh()
+          if(await remoteBytes(observed,event)===null)return
+          throw Error('retention-remote-report-reappeared')
+        }
+        for(let retry=0;retry<3;retry++){
+          const remoteHead=await refresh(),bytes=await remoteBytes(remoteHead,event)
+          if(bytes===null){
+            if(!operation)operation={schemaVersion:1,eventId:event.eventId,destination:event.destination,path:eventPath(event),originalPayloadSha256:receipt.payloadSha256,policyDigest:policy.policyDigest,operationId:randomUUID(),batchId:randomUUID(),preparedAt:now().toISOString(),attemptedCommits:[],state:'prepared',observedCommit:null,observedAt:null}
+            // This is an absence observation, never a DeliveryReceipt or proof that we
+            // caused somebody else's removal. Retained attemptedCommits distinguish it.
+            operation={...operation,state:'absent',observedCommit:remoteHead,observedAt:now().toISOString()}
+            await writeSpoolJson(file,operation);return
+          }
+          if(hashBytes(bytes)!==receipt.payloadSha256||!(await history(root,event)).some(a=>a.bytes===bytes&&a.attemptHash===receipt.attemptHash))throw Error('retention-remote-payload-diverged')
+          if(!operation){operation={schemaVersion:1,eventId:event.eventId,destination:event.destination,path:eventPath(event),originalPayloadSha256:receipt.payloadSha256,policyDigest:policy.policyDigest,operationId:randomUUID(),batchId:randomUUID(),preparedAt:now().toISOString(),attemptedCommits:[],state:'prepared',observedCommit:null,observedAt:null};await writeSpoolJson(file,operation)}
+          if(operation.policyDigest!==policy.policyDigest)throw Error('retention-pending-policy-changed')
+          const index=join(root,'git-index-'+randomUUID()),extra:GitOptions={env:{...telemetryIdentity,GIT_INDEX_FILE:index}}
+          try{
+            await run(['read-tree',remoteHead],extra)
+            await run(['update-index','--force-remove','--',eventPath(event)],extra)
+            const tree=(await run(['write-tree'],extra)).trim()
+            const commit=(await run(['commit-tree',tree,'-p',remoteHead,'-m',`stats retention: ${operation.batchId} 1 event`],extra)).trim()
+            if(!/^[a-f0-9]{40}$/.test(commit))throw Error('retention-commit-unavailable')
+            operation={...operation,attemptedCommits:[...operation.attemptedCommits,commit]}
+            await writeSpoolJson(file,operation) // durable exact intent before sending
+            if(await retention.active(event))throw Error('retention-active-reference-held')
+            const currentPolicy=await configuredExportPolicy(options.home,event.destination)
+            if(currentPolicy.policyDigest!==operation.policyDigest)throw Error('retention-pending-policy-changed')
+            await options.git(['-c','http.followRedirects=false','push','--no-follow-tags','--recurse-submodules=no',remote,`${commit}:${defaultRef}`],options.cloneRoot)
+            const observed=await refresh()
+            if(await remoteBytes(observed,event)===null){operation={...operation,state:'absent',observedCommit:observed,observedAt:now().toISOString()};await writeSpoolJson(file,operation);return}
+          }finally{await rm(index,{force:true})}
+          await wait([1000,2000,4000][retry]!)
+        }
+        throw Error('retention-removal-unconfirmed')
+      },
+    }
+    result.retention=await cleanupDelivered(root,{now:now(),controller:retention,dryRun:options.dryRunRetention,destinations:selected.map(e=>e.destination)})
+    const basic=await cleanupBasicLogs(options.home,now(),{dryRun:options.dryRunRetention})
+    result.refusals.push(...result.retention.failures.map(f=>f.reason),...basic.failures.map(f=>f.reason))
+    if(result.refusals.length)result.ok=false
     return result
   },0)}catch(error){
-    result.refusals.push((error as Error).message)
+    result.refusals.push(privacyReason(error))
     result.locked=(error as Error).message.includes('spool-claim-unavailable')
     result.deferred.push(...inspection.events.filter(e=>!result.deferred.includes(e.eventId)).map(e=>e.eventId))
     result.ok=false;return result
@@ -265,43 +315,111 @@ export interface DeliveredRetentionController {
   active(event:SpoolEnvelope):Promise<boolean>
   removeActiveReport(event:SpoolEnvelope,receipt:DeliveryReceipt):Promise<void>
 }
-export async function cleanupDelivered(root:string,options:{now?:Date;controller?:DeliveredRetentionController}={}):Promise<{removed:number;protected:number}>{
-  const now=options.now??new Date(),cutoff=new Date(now);cutoff.setUTCFullYear(cutoff.getUTCFullYear()-1)
-  const result={removed:0,protected:0}
-  for(const event of (await inspectSpool(root)).events){
-    const receipt=await readDeliveryReceipt(root,event)
-    if(!receipt||Math.max(Date.parse(receipt.acknowledgedAt),Date.parse(event.payload.utcDay))>cutoff.getTime()){result.protected++;continue}
-    await withSpoolClaim(root,'event:'+event.eventId,async()=>{
-      const current=await readDeliveryReceipt(root,event)
-      if(!current||options.controller&&await options.controller.active(event)){result.protected++;return}
-      // The proof must still correspond to an exact retained attempt. Undelivered queues never expire.
+export interface CleanupResult {removed:number;protected:number;deleteCandidates:string[];held:Array<{eventId?:string;reason:string}>;failures:Array<{eventId?:string;reason:string}>}
+export async function cleanupDelivered(root:string,options:{now?:Date;controller?:DeliveredRetentionController;dryRun?:boolean;destinations?:Destination[]}={}):Promise<CleanupResult>{
+  const {planRetention}=await import('./privacy.ts'),now=options.now??new Date()
+  const result:CleanupResult={removed:0,protected:0,deleteCandidates:[],held:[],failures:[]}
+  for(const candidate of (await inspectSpool(root)).events.filter(e=>!options.destinations||options.destinations.some(d=>destinationKey(d)===destinationKey(e.destination)))){
+    try{await withSpoolClaim(root,'event:'+candidate.eventId,async()=>{
+      // Enumerate again inside the same event claim used by enqueue; stale caller objects
+      // cannot authorize deleting a replacement file or a newly published capture.
+      const event=(await inspectSpool(root)).events.find(e=>e.eventId===candidate.eventId&&destinationKey(e.destination)===destinationKey(candidate.destination))
+      if(!event)return
+      const receipt=await readDeliveryReceipt(root,event),file=spoolEventFile(root,event)
+      const info=await lstat(file)
+      const expired=planRetention({now:now.toISOString(),files:[{path:file,kind:'delivered-report',createdAt:event.payload.utcDay+'T00:00:00Z',bytes:info.size,active:false,delivered:receipt!==null}],policy:{diagnosticDays:14,sharedMonths:12}}).deleteCandidates.length>0
+      const active=expired&&options.controller?await options.controller.active(event):!options.controller
+      const plan=planRetention({now:now.toISOString(),files:[{path:file,kind:'delivered-report',createdAt:event.payload.utcDay+'T00:00:00Z',bytes:info.size,active,delivered:receipt!==null}],policy:{diagnosticDays:14,sharedMonths:12}})
+      if(!plan.deleteCandidates.length||!receipt||!options.controller){result.protected++;result.held.push({eventId:event.eventId,reason:!options.controller?'retention-shared-removal-unavailable':plan.held[0]?.reason??'retention-receipt-unavailable'});return}
       const attempts=await history(root,event)
-      if(!attempts.some(a=>a.attemptHash===current.attemptHash&&a.policyDigest===current.policyDigest))throw Error('retention-acknowledgment-unproven')
-      await options.controller?.removeActiveReport(event,current)
-      const file=spoolEventFile(root,event),info=await lstat(file)
-      if(!info.isFile()||info.isSymbolicLink())throw Error('retention-unsafe-event')
+      if(!attempts.some(a=>a.attemptHash===receipt.attemptHash&&a.policyDigest===receipt.policyDigest)){result.protected++;result.held.push({eventId:event.eventId,reason:'retention-acknowledgment-unproven'});return}
+      result.deleteCandidates.push(file)
+      if(options.dryRun)return
+      // The current authorized writer operation must complete first. A read-clone unlink
+      // is never evidence of shared removal. Receipt and attempt tombstones remain local.
+      await options.controller.removeActiveReport(event,receipt)
+      if(await options.controller.active(event)){result.protected++;result.held.push({eventId:event.eventId,reason:'retention-active-after-shared-removal'});return}
+      const current=await lstat(file)
+      if(!current.isFile()||current.isSymbolicLink()||current.ino!==info.ino||current.dev!==info.dev||current.size!==info.size||current.mtimeMs!==info.mtimeMs)throw Error('retention-unsafe-event')
       await rm(file)
       const directory=await open(dirname(file),'r');try{await directory.sync()}finally{await directory.close()}
-      // Capture mapping, receipt and attempted hashes remain as private dedup/recovery tombstones.
       result.removed++
-    })
+    })}catch(error){const failure={eventId:candidate.eventId,reason:privacyReason(error)};result.protected++;result.held.push(failure);result.failures.push(failure)}
   }
   return result
 }
 
-export async function cleanupBasicLogs(home:string,now=new Date()):Promise<{removed:number;protected:number}>{
-  const runtime=await import('../runs.ts'),root=spoolRoot(home),events=(await inspectSpool(root)).events
-  const result={removed:0,protected:0},cutoff=now.getTime()-14*24*60*60*1000
-  for(const run of await runtime.readRuns(runtime.runsRoot(home))){
-    if(run.state!=='terminal'||run.waitReason||run.terminationCause==='termination-unconfirmed'||!run.finishedAt||Date.parse(run.finishedAt)>cutoff||run.pendingDelivery.some(p=>p.status!=='acknowledged')){result.protected++;continue}
-    const unsent=await Promise.all(events.filter(e=>e.captureKey.startsWith(run.runId+':')).map(e=>readDeliveryReceipt(root,e)))
-    if(unsent.some(receipt=>!receipt)){result.protected++;continue}
-    const file=join(runtime.runsRoot(home),run.runId,'events.jsonl')
-    let info;try{info=await lstat(file)}catch(e){if((e as NodeJS.ErrnoException).code==='ENOENT')continue;throw e}
-    if(!info.isFile()||info.isSymbolicLink()||info.uid!==process.getuid?.()||(info.mode&0o077)){result.protected++;continue}
-    // Run truth, attempt captures and delivery receipts remain; only basic local log lines expire.
-    await rm(file);const directory=await open(dirname(file),'r');try{await directory.sync()}finally{await directory.close()}
-    result.removed++
+export async function cleanupBasicLogs(home:string,now=new Date(),options:{dryRun?:boolean}={}):Promise<CleanupResult>{
+  const runtime=await import('../runs.ts'),claims=await import('../claims.ts'),{planRetention}=await import('./privacy.ts'),root=spoolRoot(home)
+  const result:CleanupResult={removed:0,protected:0,deleteCandidates:[],held:[],failures:[]}
+  for(const candidate of await runtime.readRuns(runtime.runsRoot(home))){
+    // This is exactly #138's mutation claim, backed by #137's existing local fence.
+    const held=await claims.acquireClaim(join(runtime.runsRoot(home),candidate.runId,'mutation'),await claims.processIdentity())
+    if(held.kind!=='owned'){result.protected++;result.held.push({reason:'retention-run-mutation-unavailable'});continue}
+    try{
+      const run=await runtime.readRun(runtime.runsRoot(home),candidate.runId)
+      const file=join(runtime.runsRoot(home),run.runId,'events.jsonl')
+      let info;try{info=await lstat(file)}catch(e){if((e as NodeJS.ErrnoException).code==='ENOENT')continue;throw e}
+      if(!info.isFile()||info.isSymbolicLink()||info.uid!==process.getuid?.()||(info.mode&0o077)){result.protected++;result.held.push({reason:'retention-unsafe-diagnostic'});continue}
+      const events=(await inspectSpool(root)).events.filter(e=>e.captureKey.startsWith(run.runId+':'))
+      const receipts=await Promise.all(events.map(e=>readDeliveryReceipt(root,e)))
+      if(run.sharedClaim){result.protected++;result.held.push({reason:'retention-archived-state-reader-unavailable'});continue}
+      const active=run.state!=='terminal'||run.waitReason!==null||run.terminationCause==='termination-unconfirmed'||!run.finishedAt||run.execution!==null&&run.remoteEffectCoverage.kind==='unmanaged-possible'
+      const delivered=!run.pendingDelivery.some(p=>p.status!=='acknowledged')&&!receipts.some(r=>r===null)
+      const plan=planRetention({now:now.toISOString(),files:[{path:file,kind:'basic-diagnostic',createdAt:run.finishedAt??run.startedAt,bytes:info.size,active:!!active,delivered}],policy:{diagnosticDays:14,sharedMonths:12}})
+      if(!plan.deleteCandidates.length){result.protected++;result.held.push({reason:plan.held[0]!.reason});continue}
+      // Validate retained log lines as the basic class; legacy raw log files never qualify.
+      const bytes=await runtime.readPrivateRunFile(file)
+      const {basicDiagnostic}=await import('./privacy.ts')
+      let basic=true
+      for(const line of bytes.split('\n').filter(Boolean)){try{const row=JSON.parse(line);if(canonicalJson(row)!==canonicalJson(basicDiagnostic(row.at,row.event,row)))basic=false}catch{basic=false}}
+      if(!basic){result.protected++;result.held.push({reason:'retention-nonbasic-diagnostic-held'});continue}
+      result.deleteCandidates.push(file)
+      if(options.dryRun)continue
+      const current=await lstat(file)
+      if(current.ino!==info.ino||current.dev!==info.dev||current.size!==info.size||current.mtimeMs!==info.mtimeMs||!current.isFile()||current.isSymbolicLink())throw Error('retention-diagnostic-changed')
+      await rm(file);const directory=await open(dirname(file),'r');try{await directory.sync()}finally{await directory.close()}
+      result.removed++
+    }catch(error){const failure={reason:privacyReason(error)};result.protected++;result.held.push(failure);result.failures.push(failure)}finally{await claims.releaseClaim(held.claim)}
   }
   return result
+}
+
+interface RetentionRemoval {
+  schemaVersion:1;eventId:string;destination:Destination;path:string;originalPayloadSha256:string;policyDigest:string
+  operationId:string;batchId:string;preparedAt:string;attemptedCommits:string[];state:'prepared'|'absent';observedCommit:string|null;observedAt:string|null
+}
+function validateRetentionRemoval(value:RetentionRemoval,event:SpoolEnvelope,receipt:DeliveryReceipt):void{
+  if(!value||Object.keys(value).sort().join(',')!=='attemptedCommits,batchId,destination,eventId,observedAt,observedCommit,operationId,originalPayloadSha256,path,policyDigest,preparedAt,schemaVersion,state'||value.schemaVersion!==1||value.eventId!==event.eventId||destinationKey(value.destination)!==destinationKey(event.destination)||value.path!==eventPath(event)||value.originalPayloadSha256!==receipt.payloadSha256||!/^[a-f0-9]{64}$/.test(value.policyDigest)||!UUID.test(value.operationId)||!UUID.test(value.batchId)||!Number.isFinite(Date.parse(value.preparedAt))||!Array.isArray(value.attemptedCommits)||value.attemptedCommits.length>1000||value.attemptedCommits.some(c=>!/^[a-f0-9]{40}$/.test(c))||!['prepared','absent'].includes(value.state)||value.state==='prepared'&&(value.observedCommit!==null||value.observedAt!==null)||value.state==='absent'&&(!/^[a-f0-9]{40}$/.test(value.observedCommit??'')||!Number.isFinite(Date.parse(value.observedAt??''))))throw Error('retention-invalid-removal-receipt')
+}
+export function configuredRetentionActive(home:string):(event:SpoolEnvelope)=>Promise<boolean>{
+  return async event=>{
+    try{
+      const policy=await configuredExportPolicy(home,event.destination)
+      const runtime=await import('../runs.ts'),runs=await runtime.readRuns(runtime.runsRoot(home))
+      const executionId=event.payload.recordKind==='execution'?event.payload.localRunId:undefined
+      const related=runs.filter(run=>run.repo===event.destination.repo&&(executionId?run.runId===executionId:event.payload.recordKind!=='execution'&&typeof event.payload.taskRef==='object'?run.issue===event.payload.taskRef.issue:true))
+      if(executionId&&!related.length)return true
+      // An observation can be produced on another host. Consult the configured shared
+      // active index even when this home has no matching local run.
+      if((policy as typeof policy&{fleet?:unknown}).fleet){
+        const {loadFactoryConfig}=await import('../config.ts'),config=await loadFactoryConfig(join(home,'.vegastack','factory.json'),home)
+        const target=await(await import('../dispatch.ts')).verifiedSharedTarget(event.destination.repo,config,executionId)
+        const current=await(await import('../shared-claims.ts')).readCoordination(target)
+        const issue=event.payload.recordKind==='execution'?event.payload.taskRef?.issue:typeof event.payload.taskRef==='object'?event.payload.taskRef.issue:undefined
+        if(Object.values(current.tasks).some(task=>task.repo===event.destination.repo&&(issue===undefined||task.issue===issue)||task.recovery?.effects.some(effect=>effect.target.kind==='telemetry'&&effect.target.eventId===event.eventId)))return true
+      }
+      for(const run of related){
+        if(run.state!=='terminal'||run.waitReason||run.terminationCause==='termination-unconfirmed'||run.pendingDelivery.some(p=>p.status!=='acknowledged')||run.remoteEffectCoverage.kind==='unmanaged-possible')return true
+        if(run.sharedClaim){
+          const {loadFactoryConfig}=await import('../config.ts'),config=await loadFactoryConfig(join(home,'.vegastack','factory.json'),home)
+          const target=await(await import('../dispatch.ts')).verifiedSharedTarget(run.repo,config,run.runId)
+          const current=await(await import('../shared-claims.ts')).readCoordination(target),task=current.tasks[run.sharedClaim.taskKey]
+          if(!task)throw Error('retention-archived-state-reader-unavailable')
+          if(task.state!=='completed'||task.unresolvedEffects.length||task.recovery?.effects.some(e=>e.state!=='acknowledged'&&e.state!=='cancelled-before-send'))return true
+        }
+      }
+      return false
+    }catch(error){throw Error(error instanceof Error&&error.message==='retention-archived-state-reader-unavailable'?error.message:'retention-active-reference-unavailable')}
+  }
 }

@@ -2,6 +2,16 @@
 
 The project's story, newest first: what got built, why, and how it went — for the operator's future recall. Format home: the dev-chronicle skill.
 
+## 08-09-2026 — Reports have an enforced privacy boundary ([#149](https://github.com/vegastack/vegafactory/issues/149))
+
+- **What:** Reports now cross an explicit schema before delivery. Task and account owners stay distinct, local execution identities stay private, and people totals use current repository permissions. Retention uses the same guarded Git writer as delivery and preserves the original delivery evidence.
+- **Why:** Hiding a dashboard row could not prevent raw identifiers from reaching shared files, and deleting a local copy could not prove a shared report was removed.
+- **How it went:** Focused Git tests cover real three-variant export, stricter-policy reconciliation, lost removal responses and changed remote bytes. Broad validation, independent privacy review, live provider qualification and the remaining metric/detail-page consumers remain open under source-first sequencing.
+- **Changed:** Closed report schema · scoped people views and private export · basic diagnostics ·14-day/12-calendar-month retention · real disk-pressure controls.
+- **Decisions:** none.
+
+— approved by (kmanojkumar) · built by codex · branch codex/productionization-133
+
 ## 08-09-2026 — A child branch must prove its work ([#139](https://github.com/vegastack/vegafactory/issues/139))
 
 - **What:** Source work adds a CLI owner for independent children, records their actual processes and checks, and joins exact accepted commits in order. An untouched branch can no longer pass as completed work.

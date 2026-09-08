@@ -182,7 +182,7 @@ export async function captureTerminalRun(home: string, runId: string, destinatio
   if (recordProblems(record).length || record.repo !== run.repo || record.issue !== run.issue || record.session_id !== (run.vendorSessionId ?? null)) throw Error('terminal-measurement-identity-mismatch')
   const event = await enqueueEvent(spoolRoot(home), {
     schemaVersion: 2, eventId: crypto.randomUUID(), destination, captureKey,
-    payload: { schemaVersion: 2, recordKind: 'execution', utcDay: new Date(record.ts).toISOString().slice(0, 10), stage: run.stage, outcome: run.terminationCause ?? 'interrupted', values: JSON.parse(delivery.payload) },
+    payload: { schemaVersion: 2, recordKind: 'execution', utcDay: new Date(record.ts).toISOString().slice(0, 10), stage: run.stage, outcome: run.terminationCause ?? 'interrupted', values: JSON.parse(delivery.payload), localRunId:run.runId, taskRef:{repo:run.repo,issue:run.issue,taskId:run.taskKey.taskId === 'unknown' ? null : run.taskKey.taskId}, taskOwner:run.taskOwner, agentAccountOwner:run.agentAccountOwner, attempt:(run.attempts?.length??0)+1, startedAt:run.startedAt, endedAt:run.finishedAt },
   })
   await acknowledgeTerminalCapture(runsRoot(home), runId, captureKey, delivery.payloadDigest)
   return event.eventId

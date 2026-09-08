@@ -1,9 +1,13 @@
+import { RECORD_FIELDS } from '../../../../cli/src/stats/record'
+// Production event validation is shared with transport and survives the dashboard bundle.
+export { readExport, validateExport } from '../../../../cli/src/stats/privacy'
+export type { ExportMeasurement } from '../../../../cli/src/stats/types'
 import { monthToken } from './month'
 
 // The run record #121 writes, re-declared here rather than imported: the dashboard is fetched
 // as its own tarball onto machines that have no CLI source tree. Every field but `ts`, `repo`
-// and the derived `month` is nullable, and an unrecognised key is passed over — a record shape
-// #121 widens later still parses, it just carries no column for the new key.
+// and the derived `month` is nullable. This explicit legacy adapter refuses unknown keys;
+// schema2 events use the shared strict validator and retain their separate discriminant.
 export interface SkillHit {
   name: string
   trigger: string | null
@@ -68,6 +72,10 @@ export function parseRecordLine(line: string): StatsRecord | null {
   }
   if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return null
   const row = parsed as Record<string, unknown>
+  if(Object.keys(row).some(key=>!RECORD_FIELDS.includes(key as typeof RECORD_FIELDS[number])))return null
+  for(const key of ['issue','parent','duration_s','turns','tool_calls','subagents','cost_usd','review_rounds','fix_rounds','handbacks']){const value=row[key];if(value!==undefined&&value!==null&&(typeof value!=='number'||!Number.isFinite(value)||value<0))return null}
+  if(row.tokens!==undefined&&(!row.tokens||typeof row.tokens!=='object'||Array.isArray(row.tokens)||Object.entries(row.tokens).some(([key,value])=>!['in','out','cache_read','cache_write'].includes(key)||value!==null&&(typeof value!=='number'||!Number.isFinite(value)||value<0))))return null
+  if(row.skills!==undefined&&(!Array.isArray(row.skills)||row.skills.length>128||row.skills.some(raw=>!raw||typeof raw!=='object'||Object.keys(raw).some(key=>!['name','trigger','harness'].includes(key)))))return null
 
   const ts = asString(row.ts)
   const repo = asString(row.repo)
@@ -89,8 +97,8 @@ export function parseRecordLine(line: string): StatsRecord | null {
     effort: asString(row.effort),
     mode: asString(row.mode),
     human: asString(row.human),
-    sessionId: asString(row.session_id),
-    worktree: asString(row.worktree),
+    sessionId: null,
+    worktree: null,
     durationS: asNumber(row.duration_s),
     turns: asNumber(row.turns),
     toolCalls: asNumber(row.tool_calls),

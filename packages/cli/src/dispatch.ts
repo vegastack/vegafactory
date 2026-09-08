@@ -1,3 +1,5 @@
+import { inspectSpool, spoolRoot } from './stats/outbox.ts'
+import { basicDiagnostic, probePressure, privacyReason } from './stats/privacy.ts'
 import { canonical as canonicalWire } from './shared-claims.ts'
 import { createRun, readRun, transitionRun, runsRoot, type RunRecord, type TerminalCause, type RunInput, prepareRunAttemptDirectory } from './runs.ts'
 import { resolveLabels, resolveState } from '../../../skills/dev/dev-setup/scripts/effective-policy.mjs'
@@ -634,11 +636,15 @@ export async function executeRun(
   let record:RunRecord=deps?.preparedRun??await createRun(deps?.runInput??{root,hostBindingDigest,repo:run.repo,issue:run.issue,parent:null,checkout:plan.cwd,branch,baseSha:gitHead,headSha:gitHead||null,stage:run.stage,harness:plan.command,model:'unknown',effort:'unknown',execution:null,approvalBindings:[],recordBinding:null,approvalRefs:[],policyDigest:plan.guardPolicyDigest??'',claimToken:randomUUID(),startedAt,taskKey:{repo:run.repo,issue:run.issue,taskId:'unknown',scopeDigest:''},activeElapsedMs:null,taskOwner:null,agentAccountOwner:null,accountRef:null,waitReason:null,machine:null,sharedClaim:null,checkpoint:null,remoteEffectCoverage:plan.remoteEffectCoverage??{kind:'unmanaged-possible',reasonCode:'unqualified-local-attempt'}})
   const recordRoot=deps?.runInput?.root??root
   const file=join(recordRoot,record.runId,'events.jsonl')
-  const event=async(event:string,fields:Record<string,unknown>={})=>{await appendFile(file,JSON.stringify({at:now().toISOString(),event,...fields})+'\n',{mode:0o600})}
+  const event=async(event:string,fields:Record<string,unknown>={})=>{await appendFile(file,JSON.stringify(basicDiagnostic(now().toISOString(),event,fields))+'\n',{mode:0o600})}
   let mutations=Promise.resolve()
   const transition=(patch:Parameters<typeof transitionRun>[2])=>{mutations=mutations.then(async()=>{record=await transitionRun(record.runId,record.generation,patch,recordRoot)});return mutations}
   await event('prepared')
   const refuse=async(reason:string):Promise<RunOutcome>=>{await transition({state:'terminal',terminationCause:'spawn-failed',finishedAt:now().toISOString()});await event('launch-refused',{reasonCode:'launch-refused'});return{runId:record.runId,started:false,refusal:reason,terminationCause:'spawn-failed',exitCode:null,timedOut:false,logFile:file,pushed:false,handedBack:false}}
+  let pendingBytes=0
+  try{pendingBytes=(await inspectSpool(spoolRoot(config.home))).pendingBytes}catch{return refuse('privacy-spool-unavailable')}
+  const pressure=await probePressure(config.home,pendingBytes)
+  if(pressure.paused)return refuse(pressure.reason)
   if(options.signal?.aborted)return refuse('cancelled before launch')
   if(run.parallel?.length){
     try{if(!options.sharedClaim)throw Error('shared parent ownership required');await(await import('./children.ts')).validateParallelCoordinator(run,record,config)}
@@ -698,8 +704,13 @@ export async function executeRun(
     const aborted=()=>{void transition({cancelRequestedAt:now().toISOString()}).catch(()=>{});stop('cancelled')}
     options.signal?.addEventListener('abort',aborted,{once:true})
     const handshakeTimer=setTimeout(()=>stop('spawn-failed'),6000)
+    let probingPressure=false
     const heartbeat=setInterval(()=>{
       send({kind:'heartbeat'})
+      if(started&&!exited&&!probingPressure){
+        probingPressure=true
+        void probePressure(config.home,0).then(current=>{if(!settled&&!exited&&current.paused){void event('storage-pressure',{reasonCode:current.reason}).catch(()=>{});stop('failed')}}).finally(()=>{probingPressure=false})
+      }
       if(started&&!exited){elapsed=Math.max(elapsed,monotonic()-activeStart);void transition({attemptElapsedMs:elapsed,activeElapsedMs:historicalElapsed===null?null:historicalElapsed+elapsed}).catch(()=>stop('termination-unconfirmed'))}
     },5000)
     const settle=async()=>{
@@ -795,8 +806,12 @@ export async function executeRun(
     await transition({waitReason:'subscription-quota',quotaWait:{checks:record.quotaChecks??0,nextCheckAt:new Date(nextQuotaCheck(record.quotaChecks??0,now().getTime(),quota.retryAt??undefined)).toISOString()}})
   }
   try{const helpers=await import('./runs.ts');await transition({headSha:spawnSync('git',['rev-parse','HEAD'],{cwd:record.checkout,encoding:'utf8'}).stdout?.trim()||record.headSha,worktreeDigest:await helpers.worktreeFingerprint(record.checkout)})}catch{/* Unverifiable saved work cannot be automatically resumed. */}
-  await persistAttemptCapture(record,stdout,recordRoot,terminalCause)
-  await event('exit',{terminationCause:terminalCause,exitCode})
+  try{await persistAttemptCapture(record,stdout,recordRoot,terminalCause)}catch{
+    // The process outcome stays terminal and pending persistence stays visible; no ACK.
+    await (await import('./runs.ts')).updateRun(recordRoot,record.runId,current=>({pendingDelivery:current.pendingDelivery.map(p=>p.kind==='telemetry-capture'&&'captureKey' in p.target&&p.target.captureKey===current.runId+':terminal:0'?{...p,lastError:'capture-unavailable'}:p)})).catch(()=>{})
+    await event('capture-pending',{reasonCode:'capture-unavailable'}).catch(()=>{})
+  }
+  await event('exit',{terminationCause:terminalCause,exitCode,durationSeconds:elapsed/1000})
   try { await (await import('./checkpoints.ts')).flushRunCheckpoint(record,config) } catch { await event('checkpoint-pending',{reasonCode:'checkpoint-unavailable'}) }
   try{await flushRunHandback(record,config)}catch{await event('handback-pending',{reasonCode:'handback-unavailable'})}
   // Source and public delivery require a separately durable, exact action intent. Process completion grants none.
@@ -1621,7 +1636,7 @@ export async function runTick(
             resolveStart(false)
           }
           report.exitCode = null
-          process.stderr.write(`run on ${key} failed outside the harness: ${(error as Error).message}\n`)
+          process.stderr.write(`run on ${key} failed outside the harness: ${privacyReason(error)}\n`)
         } finally {
           resolveStart(false)
           tracker.delete(key)

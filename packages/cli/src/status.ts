@@ -1,3 +1,4 @@
+import { privacyStatus, privacyReason, type PrivacyStatus } from './stats/privacy.ts'
 import { verifiedSharedTarget } from './dispatch.ts'
 import { readRuns, runsRoot, type RunRecord, type TerminalCause } from './runs.ts'
 import { readSharedStatus, type CoordinationTarget, type SharedStatus } from './shared-claims.ts'
@@ -54,6 +55,7 @@ export interface RepoStatus {
 }
 
 export interface StatusReport {
+  privacy?: PrivacyStatus[]
   dispatcher: { running: boolean; pid: number | null; lastTick: string | null; interval: number; refusal?: string }
   repos: RepoStatus[]
 }
@@ -114,7 +116,7 @@ export function buildStatus(input: {
     const runs: RunSummary[] = (entry.durableRuns ?? []).toSorted((a,b)=>b.startedAt.localeCompare(a.startedAt)).map(run => ({
       runId:run.runId,state:run.state,terminationCause:run.terminationCause,
       pendingDelivery:run.pendingDelivery.filter(p=>p.status!=='acknowledged').length,
-      lastError:run.pendingDelivery.find(p=>p.lastError)?.lastError??null,
+      lastError:run.pendingDelivery.find(p=>p.lastError)?privacyReason(new Error(run.pendingDelivery.find(p=>p.lastError)!.lastError!)):null,
       issue:run.issue,stage:run.stage as Stage,startedAt:run.startedAt,exitCode:run.exitCode,
       lastMessage:run.terminationCause??run.state,logFile:'',
     }))
@@ -174,6 +176,7 @@ export function renderStatus(report: StatusReport): string {
       lines.push(`  run #${run.issue} ${run.stage} — ${how}${run.lastMessage ? ` — ${run.lastMessage}` : ''}`)
     }
   }
+  for(const privacy of report.privacy??[])lines.push(`reporting ${privacy.repo??'local'}: ${privacy.mode} · ${privacy.pendingCount} pending (${privacy.pendingBytes} bytes) · ${privacy.pressure.reason}`,`  ${privacy.recipient}`,`  ${privacy.history}`)
   return lines.join('\n')
 }
 
@@ -230,7 +233,7 @@ export async function runStatusCli(argv: string[], home: string, deps?: Partial<
   try {
     config = await loadFactoryConfig(configPath ?? `${home}/.vegastack/factory.json`, home)
   } catch (error) {
-    console.error((error as Error).message)
+    console.error(privacyReason(error))
     return 2
   }
 
@@ -275,7 +278,7 @@ export async function runStatusCli(argv: string[], home: string, deps?: Partial<
         const result = await getPolicySnapshot(room.org, entry.repo, Date.now(), { settingsPath: config.settingsPath ?? `${home}/.vegastack/factory.json`, devMd })
         policy = repoPolicyFromEffective(result.policy)
         snapshot = { state: result.state, sourceCommit: result.snapshot?.sourceCommit ?? null, policyDigest: result.snapshot?.policyDigest ?? null, validatedAt: result.snapshot?.validatedAt ?? null, ageSeconds: result.ageSeconds, reason: result.reason, machine: result.machine }
-      } catch (error) { policy = { ...policy, refusal: (error as Error).message }; snapshot = { state: 'unavailable', sourceCommit: null, policyDigest: null, validatedAt: null, ageSeconds: null, reason: (error as Error).message } }
+      } catch (error) { policy = { ...policy, refusal: privacyReason(error) }; snapshot = { state: 'unavailable', sourceCommit: null, policyDigest: null, validatedAt: null, ageSeconds: null, reason: privacyReason(error) } }
     }
     const shared = config.executionMode === 'shared'
       ? await (async()=>{try{return await readSharedStatus(await (deps?.sharedTarget??verifiedSharedTarget)(entry.repo,config),[entry.repo])}catch{return{head:null,tasks:[],refusal:'verified coordination reader unavailable'}}})()
@@ -295,6 +298,7 @@ export async function runStatusCli(argv: string[], home: string, deps?: Partial<
   }
 
   const report = buildStatus({ config, state, lockPid: lock.held ? lock.pid : null, lockRefusal: lock.reason, repos })
+  report.privacy=await Promise.all(repos.map(entry=>privacyStatus(home,entry.policy.effective as import('./stats/privacy.ts').ExportPolicy|undefined,entry.repo)))
   console.log(json ? JSON.stringify({ command: 'status', ...report }, null, 2) : renderStatus(report))
   return 0
 }

@@ -1,3 +1,4 @@
+import { configuredExportPolicy, currentPolicySerializer, exportMode, privacyStatus, privacyReason, serializeExport as serializeMeasurement } from './privacy.ts'
 // `vegafactory stats` — the four verbs, and the only place the pieces are wired together.
 //
 // `record` is what the hooks call, so it is built to be uninteresting: it reads one JSON payload on
@@ -39,7 +40,9 @@ const SOURCES: readonly StatsSource[] = [
 ] as const
 
 export interface StatsArgs {
-  verb: 'show' | 'record' | 'push' | 'rollup' | 'inspect' | 'migrate'
+  verb: 'show' | 'record' | 'push' | 'rollup' | 'inspect' | 'migrate' | 'cleanup' | 'export' | 'privacy'
+  output?: string
+  dryRun?: boolean
   apply?: boolean
   mapping?: string
   report?: string
@@ -62,7 +65,7 @@ export function parseStatsArgs(argv: string[]): StatsArgs {
   if (rest[0] && !rest[0].startsWith('-')) {
     const head = rest.shift()!
     if (head === 'skills') setScope('skills')
-    else if (head === 'show' || head === 'record' || head === 'push' || head === 'rollup' || head === 'inspect' || head === 'migrate') args.verb = head
+    else if (head === 'show' || head === 'record' || head === 'push' || head === 'rollup' || head === 'inspect' || head === 'migrate' || head === 'cleanup' || head === 'export' || head === 'privacy') args.verb = head
     else throw new Error(`Unknown stats verb: ${head}`)
   }
   while (rest.length) {
@@ -74,6 +77,8 @@ export function parseStatsArgs(argv: string[]): StatsArgs {
     else if (flag === '--json') args.json = true
     else if (flag === '--commit') args.commit = true
     else if (flag === '--apply') args.apply = true
+    else if (flag === '--dry-run') args.dryRun = true
+    else if (flag === '--output') {const value=rest.shift();if(!value||value.startsWith('--'))throw Error('export-output-required');args.output=value}
     else if (flag === '--mapping' || flag === '--report') {const value=rest.shift();if(!value||value.startsWith('--'))throw Error(flag+' requires a JSON file');args[flag.slice(2) as 'mapping'|'report']=value}
     else if (flag === '--since') {
       const value = rest.shift()
@@ -87,6 +92,8 @@ export function parseStatsArgs(argv: string[]): StatsArgs {
     }
     else throw new Error(`Unknown option: ${flag}`)
   }
+  if(args.apply&&args.dryRun)throw Error('cleanup-mode-conflict')
+  if(args.verb==='export'&&!args.output)throw Error('export-output-required')
   return args
 }
 
@@ -98,6 +105,7 @@ export interface StatsDeps {
   ghUser: string
   login: string
   isLead: boolean // descriptive legacy input only; never an authority grant
+  policyForRepo?: (repo:string)=>Promise<ReturnType<typeof resolvePolicy>['policy']>
   effectivePolicy?: ReturnType<typeof resolvePolicy>['policy']
   viewerVerified?: boolean
   policy: StatsPolicy
@@ -185,7 +193,7 @@ async function readMonth(cloneRoot: string, repoDir: string, month: string): Pro
     for (const line of text.split('\n')) {
       if (line.trim() === '') continue
       try {
-        records.push(JSON.parse(line) as StatsRecord)
+        records.push((await import('./record.ts')).parseLocalRecord(JSON.parse(line)))
       } catch {
         // one unreadable line never costs the month its summary
       }
@@ -258,9 +266,8 @@ async function runRecord(args: StatsArgs, deps: StatsDeps): Promise<number> {
     return 1
   }
   const context: CaptureContext = { repo: deps.repo, ts: deps.now().toISOString(), human: deps.ghUser }
-  const hook = payload as { session_id?: unknown; transcript_path?: unknown }
   const record = args.source === 'claude-session-end'
-    ? fromClaudeSessionEnd(payload, typeof hook.transcript_path === 'string' ? await deps.readTranscript(hook.transcript_path) : [], context)
+    ? fromClaudeSessionEnd(payload, [], context)
     : fromCodexSessionEnd(payload, context)
   if (record.session_id) record.skills = await takeSkillInvocations(deps.home, record.session_id)
   await appendRecord(deps.home, record, deps.hostname)
@@ -275,6 +282,7 @@ async function runPush(args: StatsArgs, deps: StatsDeps): Promise<number> {
     hostname: deps.hostname,
     commit: args.commit,
     git: deps.git,
+    serialize: currentPolicySerializer(deps.home),
   })
   if (args.json) {
     deps.log(JSON.stringify({ guard: 'stats-push', commit: args.commit, ...result }))
@@ -361,7 +369,7 @@ async function runRollup(args: StatsArgs, deps: StatsDeps): Promise<number> {
   const allRecords: StatsRecord[] = []
   const timelines: string[] = []
   const unreachable: string[] = []
-  for (const bucket of (await windowBuckets(deps,month)).filter(b=>b.month===month)) {
+  for (const bucket of (await scopedBuckets(await windowBuckets(deps,month),args,deps)).filter(b=>b.month===month)) {
     const {dir,repo,records}=bucket
     if (records.length === 0) continue
     allRecords.push(...records)
@@ -409,28 +417,74 @@ async function runRollup(args: StatsArgs, deps: StatsDeps): Promise<number> {
   return unreachable.length > 0 ? 1 : 0
 }
 
+async function currentReadPolicy(deps:StatsDeps,repo:string):Promise<ReturnType<typeof resolvePolicy>['policy']>{
+  const policy=deps.policyForRepo?await deps.policyForRepo(repo):deps.effectivePolicy
+  if(!policy||policy.repo!==repo)throw Error('privacy-current-policy-unavailable')
+  return policy
+}
+async function scopedBuckets(buckets:WindowBucket[],args:StatsArgs,deps:StatsDeps):Promise<WindowBucket[]>{
+  const result:WindowBucket[]=[]
+  for(const repo of [...new Set(buckets.map(b=>b.repo))]){
+    if(deps.repo&&['repo','me'].includes(args.scope)&&repo!==deps.repo)continue
+    const policy=await currentReadPolicy(deps,repo),mode=exportMode(policy as import('./privacy.ts').ExportPolicy)
+    if(mode==='off')continue
+    if(args.scope==='me'&&mode!=='attributed')throw Error('privacy-person-reporting-unavailable')
+    const scope=resolvePeopleReadScope({viewer:{login:deps.login,verified:deps.viewerVerified===true},subject:args.scope==='me'?deps.login:null,policy,administration:policy.administration,repoGroups:policy.registry.repoGroups,requestedRepos:[repo]})
+    if(scope.refusal||!scope.allowedRepos.includes(repo))throw Error('privacy-read-scope-refused')
+    for(const bucket of buckets.filter(b=>b.repo===repo))result.push({...bucket,records:bucket.records.filter(r=>r.repo===repo&&(args.scope!=='me'||r.human===deps.login))})
+  }
+  return result
+}
+async function runCleanup(args:StatsArgs,deps:StatsDeps):Promise<number>{
+  try{
+    const {cleanupDelivered,cleanupBasicLogs,configuredRetentionActive}=await import('./push.ts')
+    const spool=await inspectSpool(spoolRoot(deps.home)),destinations=spool.events.filter(e=>!deps.repo||e.destination.repo===deps.repo).map(e=>e.destination)
+    const now=deps.now()
+    if(!args.apply){
+      const reports=await cleanupDelivered(spoolRoot(deps.home),{now,dryRun:true,destinations,controller:{active:configuredRetentionActive(deps.home),removeActiveReport:async()=>{throw Error('retention-dry-run-removal-refused')}}})
+      const diagnostics=await cleanupBasicLogs(deps.home,now,{dryRun:true})
+      deps.log(JSON.stringify({mode:'dry-run',reports,diagnostics,history:'Git history, clones, source checkpoints and recovery identity are retained.'}));return 0
+    }
+    const results=[]
+    const unique=new Map(destinations.map(d=>[JSON.stringify(d),d]))
+    for(const destination of unique.values())results.push(await pushOutbox({home:deps.home,cloneRoot:deps.cloneRoot,ghUser:deps.ghUser,hostname:deps.hostname,commit:true,git:deps.git,cleanupOnly:true,destination,now:deps.now}))
+    const diagnostics=await cleanupBasicLogs(deps.home,now)
+    deps.log(JSON.stringify({mode:'apply',reports:results,diagnostics,history:'Active-file removal does not erase Git history or clones.'}))
+    return results.every(result=>result.ok)?0:2
+  }catch(error){deps.log(privacyReason(error));return 2}
+}
+async function runExport(args:StatsArgs,deps:StatsDeps):Promise<number>{
+  try{
+    if(!args.output)throw Error('privacy-export-output-required')
+    if(!deps.login||deps.viewerVerified!==true)throw Error('privacy-viewer-unavailable')
+    const batch=await(await import('./rollup.ts')).readControlRoomEvents(deps.cloneRoot,deps.exportReader)
+    if(batch.invalid.length)throw Error('privacy-export-invalid-records')
+    const lines:string[]=[]
+    for(const row of batch.events){
+      const event=row.event,repo=event.destination.repo
+      if(args.since&&!monthsInWindow([monthToken(new Date(event.payload.utcDay))],args.since).length)continue
+      if(deps.repo&&['repo','me'].includes(args.scope)&&repo!==deps.repo)continue
+      const policy=await currentReadPolicy(deps,repo)
+      const scope=resolvePeopleReadScope({viewer:{login:deps.login,verified:deps.viewerVerified===true},subject:args.scope==='me'?deps.login:null,policy,administration:policy.administration,repoGroups:policy.registry.repoGroups,requestedRepos:[repo]})
+      if(scope.refusal||!scope.allowedRepos.includes(repo))throw Error('privacy-read-scope-refused')
+      if(args.scope==='me'&&event.payload.taskOwner!==deps.login)continue
+      const wire=serializeMeasurement(event.payload,event.destination,event.eventId,policy as import('./privacy.ts').ExportPolicy)
+      if(wire)lines.push(JSON.stringify(wire))
+    }
+    const {open}=await import('node:fs/promises'),file=await open(resolve(args.output),'wx',0o600)
+    try{await file.writeFile(lines.join('\n')+(lines.length?'\n':''));await file.sync()}finally{await file.close()}
+    deps.log(JSON.stringify({exported:lines.length,mode:'private-file',history:'Existing Git history and clones are unchanged.'}));return 0
+  }catch(error){deps.log(privacyReason(error));return 2}
+}
+
 async function runShow(args: StatsArgs, deps: StatsDeps): Promise<number> {
+  if(!deps.login||deps.viewerVerified!==true)throw Error('privacy-viewer-unavailable')
   const fallback = args.since ?? monthToken(deps.now())
   const subject = deps.ghUser
   let people = false
   let buckets = await windowBuckets(deps, args.since)
-  if (deps.effectivePolicy) {
-    const effective = deps.effectivePolicy
-    const scope = resolvePeopleReadScope({ viewer: { login: deps.login, verified: deps.viewerVerified === true },
-      subject: args.scope === 'me' ? subject : null, administration: effective.administration,
-      policy: effective, repoGroups: effective.registry.repoGroups,
-      requestedRepos: deps.repo && ['me', 'repo'].includes(args.scope) ? [deps.repo] : Object.keys(effective.registry.repoGroups) })
-    if (scope.refusal) { deps.log(`people-level statistics: ${scope.refusal}`); return 2 }
-    if (!scope.refusal) {
-      const allowed = new Set(scope.allowedRepos)
-      buckets = buckets.map(bucket => ({ ...bucket, records: bucket.records.filter(record => allowed.has(record.repo)) }))
-        .filter(bucket => bucket.records.length > 0)
-      people = args.scope !== 'me'
-    }
-  } else if (args.scope === 'me' && (!deps.login || subject !== deps.login)) {
-    deps.log('people-level statistics require verified own-data identity or explicit organization administration')
-    return 2
-  }
+  buckets = await scopedBuckets(buckets,args,deps)
+  people = args.scope === 'me'
   const label = windowLabel(buckets, fallback)
 
   if (args.scope === 'skills') {
@@ -470,16 +524,19 @@ async function runShow(args: StatsArgs, deps: StatsDeps): Promise<number> {
 
 export async function runStats(args: StatsArgs, deps: StatsDeps): Promise<number> {
   if (deps.policy.refusal) {
-    deps.log(`stats policy refused: ${deps.policy.refusal}`)
+    deps.log('privacy-policy-refused')
     return 2
   }
-  if (args.verb === 'record') return runRecord(args, deps)
-  if (args.verb === 'push') return runPush(args, deps)
-  if (args.verb === 'inspect' || args.verb === 'migrate') return runStatsMaintenance(args,deps.home,deps.log)
   try {
+  if (args.verb === 'privacy') {deps.log(JSON.stringify(await privacyStatus(deps.home,deps.effectivePolicy as import('./privacy.ts').ExportPolicy|undefined,deps.repo??undefined)));return 0}
+  if (args.verb === 'export') return runExport(args,deps)
+  if (args.verb === 'cleanup') return runCleanup(args,deps)
+  if (args.verb === 'record') return await runRecord(args, deps)
+  if (args.verb === 'push') return await runPush(args, deps)
+  if (args.verb === 'inspect' || args.verb === 'migrate') return runStatsMaintenance(args,deps.home,deps.log)
     if (args.verb === 'rollup') return await runRollup(args, deps)
     return await runShow(args, deps)
-  } catch(error) {deps.log((error as Error).message);return 2}
+  } catch(error) {deps.log(privacyReason(error));return 2}
 }
 
 export function statsUsage(): string {
@@ -508,7 +565,11 @@ Exit 0 done · 1 deferred (a push that will retry) · 2 a refusal.
 Outbox: ~/.vegastack/stats/events-v2 (immutable private envelopes and receipts).
 Legacy JSONL stays unchanged. migrate prints a dry-run report; applying requires the saved
 exact report and an explicit JSON mapping from code repository to Destination.
-Production export/reading refuses until the #149 privacy serializer/reader is supplied.
+stats privacy --json reports current mode, recipients, pending bytes and disk pressure.
+stats export --output <file> writes a scoped current-policy export privately and exclusively.
+stats cleanup --dry-run|--apply selects inactive basic logs after14days and acknowledged
+reports after12calendar months; pending/recovery identities are held. Shared report removal
+requires an authorized writer; historical Git data and clones are not erased.
 Managed hooks use --source managed-hook and silently refuse unknown cwd/session identity.
 `
 }
@@ -584,6 +645,14 @@ export async function buildStatsDeps(home: string, cwd: string, log: (line: stri
     isLead: false,
     viewerVerified: ghUser !== '',
     effectivePolicy: knob ? effective.policy : undefined,
+    policyForRepo: async repo => {
+      const {readPrivateRunFile}=await import('../runs.ts')
+      const settings=JSON.parse(await readPrivateRunFile(join(home,'.vegastack','factory.json'))) as {repos?:Array<{repo:string;org:string;path:string}>;controlRooms?:Record<string,{repo:string}>}
+      const row=settings.repos?.find(row=>row.repo===repo)
+      const room=row?settings.controlRooms?.[row.org]:null
+      if(!row||!room)throw Error('privacy-destination-unregistered')
+      return await configuredExportPolicy(home,{host:'github.com',org:row.org,repo,controlRoom:room.repo}) as ReturnType<typeof resolvePolicy>['policy']
+    },
     policy: statsPolicyFromEffective(effective),
     repo: repoFromDevMd(devMd),
     cloneRoot: statsClonePath(home, knob?.org ?? 'org'),
@@ -629,7 +698,6 @@ export async function runStatsCli(argv: string[], home: string): Promise<number>
     return 0
   }
   const deps = await buildStatsDeps(home, process.cwd(), line => console.log(line))
-  if (deps.policy.refusal) console.error(deps.policy.refusal)
   return runStats(args, deps)
 }
 
@@ -650,5 +718,5 @@ export async function runStatsMaintenance(args:StatsArgs,home:string,log:(line:s
       log(JSON.stringify(await migrateLegacySpool(report,mapping,{root:spoolRoot(home),apply:true})))
     }else log(JSON.stringify(await inspectLegacySpool(outboxRoot(home))))
     return 0
-  }catch(error){log((error as Error).message);return 2}
+  }catch(error){log(privacyReason(error));return 2}
 }
