@@ -380,6 +380,15 @@ export interface MachineSession {
     localRoot: string;
     target: CoordinationTarget;
 }
+export interface ParentClaimBinding {
+    taskKey: string;
+    runId: string;
+    generation: number;
+    ownerToken: string;
+    machineId: string;
+    installationId: string;
+    sessionId: string;
+}
 export interface VerifiedCandidate {
     host: string;
     repo: string;
@@ -395,6 +404,8 @@ export interface VerifiedCandidate {
     resources: string[];
     independent: boolean;
     parentTaskKey: string | null;
+    // Missing is readable legacy data, never authority for a new child execution.
+    parentBinding?: ParentClaimBinding | null;
     approvedTaskIds: string[];
 }
 export interface SharedClaim {
@@ -439,6 +450,8 @@ export interface TaskRecord {
     resources: string[];
     independent: boolean;
     parentTaskKey: string | null;
+    // Missing is readable legacy data, never authority for a new child execution.
+    parentBinding?: ParentClaimBinding | null;
     approvedTaskIds: string[];
     checkpoint: CheckpointRef | null;
     stopProof: StopProof | null;
@@ -542,6 +555,8 @@ export interface CoordinationTarget {
     localRoot: string;
     provider: CoordinationProvider;
     verifyCandidate: (candidate: VerifiedCandidate, machine: EffectiveMachine, session: MachineSession) => Promise<void>;
+    // The controller binds canonical group/current authority to these pinned records.
+    verifyChildRelationship?: (input: { parent: TaskRecord; child: TaskRecord }) => Promise<{ maxChildren: number }>;
     verifySession?: (previous: MachineRecord, machine: EffectiveMachine, session: MachineSession) => Promise<void>;
     verifyTransition: (task: TaskRecord, transition: TaskTransition) => Promise<void>;
     verifyEvidence: (ref: EvidenceRef, payload: RecoveryEvidencePayload | null) => Promise<void>;
@@ -583,7 +598,9 @@ export type TaskTransition = {
 const summary = closed({ taskKey: digest, repo, issueNodeId: node, machineId: id, parentTaskKey: nullable(digest), paths: unique(relative), resources: unique(id), independent: boolean });
 const indexSchema = closed({ schemaVersion: literal(1), installationId: uuid, revision: integer, active: unique(summary), machines: unique(id) });
 const machineSchema = closed({ schemaVersion: literal(1), machineId: id, installationId: uuid, sessionId: uuid, hostBindingDigest: digest, bootIdDigest: digest, observedAt: date, activeTaskKeys: unique(digest) });
-const recordSchema = closed({ schemaVersion: literal(1), taskKey: digest, host: pattern(/^[a-z0-9.-]+$/), repo, issue: positive, repositoryNodeId: node, issueNodeId: node, scopeDigest: digest, approvalDigest: digest, approvalBindings: authorities, generation: positive, machineId: id, installationId: uuid, sessionId: uuid, ownerToken: uuid, runId: uuid, stage: id, state: literal('claimed', 'running', 'stopped', 'blocked', 'completed'), paths: unique(relative), resources: unique(id), independent: boolean, parentTaskKey: nullable(digest), approvedTaskIds: unique(id), checkpoint: nullable(checkpoint), stopProof: nullable(stopProof), unresolvedEffects: unique(evidence), recovery: nullable(envelope), acceptedScopes: unique(closed({ scopeDigest: digest, receipt: stateEvidence })) });
+const recordFields = { schemaVersion: literal(1), taskKey: digest, host: pattern(/^[a-z0-9.-]+$/), repo, issue: positive, repositoryNodeId: node, issueNodeId: node, scopeDigest: digest, approvalDigest: digest, approvalBindings: authorities, generation: positive, machineId: id, installationId: uuid, sessionId: uuid, ownerToken: uuid, runId: uuid, stage: id, state: literal('claimed', 'running', 'stopped', 'blocked', 'completed'), paths: unique(relative), resources: unique(id), independent: boolean, parentTaskKey: nullable(digest), approvedTaskIds: unique(id), checkpoint: nullable(checkpoint), stopProof: nullable(stopProof), unresolvedEffects: unique(evidence), recovery: nullable(envelope), acceptedScopes: unique(closed({ scopeDigest: digest, receipt: stateEvidence })) };
+const parentBindingSchema = closed({ taskKey: digest, runId: uuid, generation: positive, ownerToken: uuid, machineId: id, installationId: uuid, sessionId: uuid });
+const recordSchema = union(closed(recordFields), closed({ ...recordFields, parentBinding: nullable(parentBindingSchema) }));
 const receiptSchema = closed({ schemaVersion: literal(1), operationId: uuid, type: id, taskKey: digest, generation: positive, previousHead: sha, requestDigest: digest, resultOwner: closed({ ownerToken: uuid, machineId: id, installationId: uuid, sessionId: uuid, runId: uuid }), recoveryPayload: nullable(payload) });
 export function taskKey(host: string, repositoryNodeId: string, issueNodeId: string): string {
     if (!/^[a-z0-9.-]+$/.test(host) || !node(repositoryNodeId) || !node(issueNodeId))
@@ -737,18 +754,46 @@ function conflicting(a: Summary, b: Summary) {
         return true;
     return a.resources.some(r => b.resources.includes(r)) || a.paths.some(p => b.paths.some(q => { p = p.toLowerCase().replace(/\/$/, ''); q = q.toLowerCase().replace(/\/$/, ''); return p === q || p.startsWith(q + '/') || q.startsWith(p + '/'); }));
 }
-async function reserve(snapshot: CoordinationSnapshot, t: TaskRecord, machine: EffectiveMachine, session: MachineSession, replace = false) {
+function validateParentBinding(t: Pick<TaskRecord, 'parentTaskKey' | 'parentBinding'>) {
+    if (t.parentTaskKey === null) {
+        if (t.parentBinding != null) throw Error('top-level task cannot carry a parent binding');
+    } else if (!parentBindingSchema(t.parentBinding) || t.parentBinding!.taskKey !== t.parentTaskKey) {
+        throw Error('original parent binding required; legacy child execution refused');
+    }
+}
+async function verifyChildAdmission(snapshot: CoordinationSnapshot, child: TaskRecord, target: CoordinationTarget): Promise<number | null> {
+    validateParentBinding(child);
+    if (child.parentTaskKey === null) return null;
+    const parent = snapshot.tasks[child.parentTaskKey];
+    if (!parent || !snapshot.index.active.some(row => row.taskKey === parent.taskKey) || parent.taskKey === child.taskKey || parent.parentTaskKey !== null || parent.state !== 'running' || parent.stopProof || parent.host !== child.host || parent.repo !== child.repo || parent.repositoryNodeId !== child.repositoryNodeId)
+        throw Error('active running top-level parent required');
+    if (canonical(child.parentBinding) !== canonical({ taskKey: parent.taskKey, generation: parent.generation, ...ownerOf(parent) }))
+        throw Error('original parent owner/run/generation changed');
+    if (!target.verifyChildRelationship) throw Error('verified parent group authority required');
+    const result = await bounded(target.verifyChildRelationship({ parent: structuredClone(parent), child: structuredClone(child) }));
+    if (!closed({ maxChildren: positive })(result) || result.maxChildren > 3)
+        throw Error('approved parent child limit must be an integer from 1 to 3');
+    return result.maxChildren;
+}
+async function verifyAdmissionReadback(snapshot: CoordinationSnapshot, t: TaskRecord, type: string, target: CoordinationTarget) {
+    if (t.parentTaskKey === null || !['acquire', 'start', 'handoff'].includes(type)) return;
+    if (!['claimed', 'running'].includes(t.state)) throw Error('child admission is no longer executable');
+    const maxChildren = await verifyChildAdmission(snapshot, t, target);
+    if (snapshot.index.active.filter(row => row.parentTaskKey === t.parentTaskKey).length > maxChildren!)
+        throw Error('parent child capacity changed before acknowledgment');
+}
+async function reserve(snapshot: CoordinationSnapshot, t: TaskRecord, machine: EffectiveMachine, session: MachineSession, target: CoordinationTarget, replace = false) {
     const m = snapshot.machines[machine.id];
     if (m && (m.installationId !== session.installationId || m.hostBindingDigest !== session.hostBindingDigest))
         throw Error('registered machine installation/host mismatch');
     if (m && m.sessionId !== session.sessionId) {
-        if (!session.target.verifySession)
+        if (!target.verifySession)
             throw Error('registered machine already has another session; verified session reconciliation required');
-        await session.target.verifySession(m, machine, session);
+        await target.verifySession(m, machine, session);
         for (const old of Object.values(snapshot.tasks).filter(t => t.machineId === machine.id)) {
             if (!['stopped', 'blocked'].includes(old.state) || !old.stopProof)
                 throw Error('prior machine execution stop remains unknown');
-            await verifyStop(session.target, old, old.stopProof);
+            await verifyStop(target, old, old.stopProof);
         }
     }
     if (Object.values(snapshot.machines).some(x => x.machineId !== machine.id && x.hostBindingDigest === machine.hostBindingDigest))
@@ -758,9 +803,13 @@ async function reserve(snapshot: CoordinationSnapshot, t: TaskRecord, machine: E
         throw Error('task busy');
     if (other.filter(x => x.machineId === machine.id && x.parentTaskKey === null).length >= machine.defaults.maxRuns && t.parentTaskKey === null)
         throw Error('machine at maxRuns');
-    if (t.parentTaskKey && other.filter(x => x.parentTaskKey === t.parentTaskKey).length >= Math.min(3, machine.defaults.childConcurrent))
+    const maxChildren = await verifyChildAdmission(snapshot, t, target);
+    if (t.parentTaskKey !== null && other.filter(x => x.parentTaskKey === t.parentTaskKey).length >= maxChildren!)
         throw Error('parent child capacity busy');
-    if (other.some(x => conflicting(x, summaryOf(t))))
+    if (t.parentTaskKey !== null && other.filter(x => x.machineId === machine.id && x.parentTaskKey !== null).length >= machine.defaults.childConcurrent)
+        throw Error('machine child capacity busy');
+    // Only the verified coordinator pair overlaps; siblings and foreign resources still conflict.
+    if (other.some(x => x.taskKey !== t.parentTaskKey && conflicting(x, summaryOf(t))))
         throw Error('incompatible resource reservation busy');
     snapshot.tasks[t.taskKey] = t;
     snapshot.index.active = [...other, summaryOf(t)];
@@ -806,6 +855,7 @@ async function transactWithinWindow(target: CoordinationTarget, operationId: str
                 const t = s.tasks[prior.taskKey] ?? parse<TaskRecord>(await pinnedJson(target, s.head, taskPath(prior.taskKey), 256 * 1024), recordSchema, 'completed task');
                 if (prior.generation !== t.generation || canonical(prior.resultOwner) !== canonical(ownerOf(t)) || expected && !owns(t, expected))
                     return { kind: 'refused', reason: 'old receipt no longer owns current task' };
+                await verifyAdmissionReadback(s, t, prior.type, target);
                 return { kind: 'owned', claim: claimOf(t, s.head, target) };
             }
             const { task: t, type, payload: p } = await build(s);
@@ -816,8 +866,10 @@ async function transactWithinWindow(target: CoordinationTarget, operationId: str
             if (result.kind === 'committed' || result.kind === 'ambiguous') {
                 try {
                     const current = await readCoordination(target), got = await receiptAt(target, current.head, operationId), task = current.tasks[t.taskKey] ?? parse<TaskRecord>(await pinnedJson(target, current.head, taskPath(t.taskKey), 256 * 1024), recordSchema, 'completed task');
-                    if (got && canonical(got) === canonical(receipt) && owns(task, claimOf(t, s.head, target)))
+                    if (got && canonical(got) === canonical(receipt) && owns(task, claimOf(t, s.head, target))) {
+                        await verifyAdmissionReadback(current, task, type, target);
                         return { kind: 'owned', claim: claimOf(task, current.head, target) };
+                    }
                     if (got)
                         return { kind: 'refused', reason: 'receipt/current ownership mismatch' };
                 }
@@ -849,6 +901,7 @@ export async function acquireSharedTask(input: {
     try {
         if (!uuid(operationId)) throw Error('invalid operation ID');
         validateSession(machine, session, target);
+        validateParentBinding(c);
         await target.verifyCandidate(c, machine, session);
         const key = taskKey(c.host, c.repositoryNodeId, c.issueNodeId);
         if (!c.approvalBindings.length || !c.approvedTaskIds.length)
@@ -880,9 +933,9 @@ export async function acquireSharedTask(input: {
                     throw Error('prior completed execution lacks stop proof');
                 await verifyStop(target, old, old.stopProof);
             }
-            const t: TaskRecord = { schemaVersion: 1, taskKey: key, host: c.host, repo: c.repo, issue: c.issue, repositoryNodeId: c.repositoryNodeId, issueNodeId: c.issueNodeId, scopeDigest: c.scopeDigest, approvalDigest: c.approvalDigest, approvalBindings: c.approvalBindings, generation: old ? old.generation + 1 : 1, machineId: machine.id, installationId: machine.installationId, sessionId: session.sessionId, ownerToken, runId: c.runId, stage: c.stage, state: 'claimed', paths: c.paths, resources: c.resources, independent: c.independent, parentTaskKey: c.parentTaskKey, approvedTaskIds: c.approvedTaskIds, checkpoint: null, stopProof: null, unresolvedEffects: [], recovery: null, acceptedScopes: old?.acceptedScopes ?? [] };
+            const t: TaskRecord = { schemaVersion: 1, taskKey: key, host: c.host, repo: c.repo, issue: c.issue, repositoryNodeId: c.repositoryNodeId, issueNodeId: c.issueNodeId, scopeDigest: c.scopeDigest, approvalDigest: c.approvalDigest, approvalBindings: c.approvalBindings, generation: old ? old.generation + 1 : 1, machineId: machine.id, installationId: machine.installationId, sessionId: session.sessionId, ownerToken, runId: c.runId, stage: c.stage, state: 'claimed', paths: c.paths, resources: c.resources, independent: c.independent, parentTaskKey: c.parentTaskKey, parentBinding: c.parentBinding ?? null, approvedTaskIds: c.approvedTaskIds, checkpoint: null, stopProof: null, unresolvedEffects: [], recovery: null, acceptedScopes: old?.acceptedScopes ?? [] };
             parse(t, recordSchema, 'candidate task');
-            await reserve(s, t, machine, session);
+            await reserve(s, t, machine, session, target);
             return { task: t, type: 'acquire', payload: null };
         }, undefined, sha256(canonical({ candidate: c, machineId: machine.id, sessionId: session.sessionId, ownerToken })));
     }
@@ -984,6 +1037,8 @@ export async function transitionSharedTask(input: {
         if (!t || !owns(t, claim))
             throw Error('wrong current owner; transition refused');
         await target.verifyTransition(t, transition);
+        if (['complete', 'handoff'].includes(transition.kind) && s.index.active.some(row => row.parentTaskKey === t.taskKey))
+            throw Error('active child reservations retain parent ownership');
         let recoveryPayload: RecoveryEvidencePayload | null = null;
         if (transition.kind === 'receipt')
             recoveryPayload = parseRecoveryPayload(transition.payload);
@@ -999,6 +1054,7 @@ export async function transitionSharedTask(input: {
         else if (transition.kind === 'start') {
             if (t.state !== 'claimed')
                 throw Error('task cannot start from current state');
+            await verifyChildAdmission(s, t, target);
             t.state = 'running';
         }
         else if (transition.kind === 'stop' || transition.kind === 'block') {
@@ -1059,8 +1115,8 @@ export async function transitionSharedTask(input: {
             validateSession(transition.machine, transition.session, target);
             await target.verifyCandidate(transition.candidate, transition.machine, transition.session);
             const c = transition.candidate;
-            if (taskKey(c.host, c.repositoryNodeId, c.issueNodeId) !== t.taskKey || c.scopeDigest !== t.scopeDigest || c.approvalDigest !== t.approvalDigest || canonical(c.approvalBindings) !== canonical(t.approvalBindings))
-                throw Error('handoff must preserve verified original scope');
+            if (taskKey(c.host, c.repositoryNodeId, c.issueNodeId) !== t.taskKey || c.scopeDigest !== t.scopeDigest || c.approvalDigest !== t.approvalDigest || canonical(c.approvalBindings) !== canonical(t.approvalBindings) || c.parentTaskKey !== t.parentTaskKey || canonical(c.parentBinding ?? null) !== canonical(t.parentBinding ?? null))
+                throw Error('handoff must preserve verified original scope and parent binding');
             s.machines[t.machineId]!.activeTaskKeys = s.machines[t.machineId]!.activeTaskKeys.filter(k => k !== t.taskKey);
             t.machineId = transition.machine.id;
             t.installationId = transition.machine.installationId;
@@ -1071,7 +1127,7 @@ export async function transitionSharedTask(input: {
             t.stopProof = transition.stopProof;
             // Carry remotely sufficient original execution/effect history into the new ownership generation.
             t.recovery = { ...transition.recovery, generation: t.generation };
-            await reserve(s, t, transition.machine, transition.session, true);
+            await reserve(s, t, transition.machine, transition.session, target, true);
         }
         return { task: t, type: transition.kind, payload: recoveryPayload };
     }, claim, requestDigest);

@@ -191,3 +191,164 @@ test('verified transfer keeps remote recovery, one takeover wins and old owner c
 test('operation path injection refuses before local intent or remote mutation', async()=>{
  const f=await fixture();expect((await acquireSharedTask({...f,operationId:'../../escape'})).kind).toBe('refused');expect(f.mutations).toBe(0)
 })
+
+async function parentFixture() {
+    const f = await fixture();
+    const parent = await acquireSharedTask({ ...f, candidate: { ...f.candidate, independent: false, paths: [] }, operationId: randomUUID() });
+    if (parent.kind !== 'owned') throw Error('parent claim');
+    expect((await transitionSharedTask({ claim: parent.claim, operationId: randomUUID(), transition: { kind: 'start' } })).kind).toBe('owned');
+    const { taskKey, runId, generation, ownerToken, machineId, installationId, sessionId } = parent.claim;
+    const parentBinding = { taskKey, runId, generation, ownerToken, machineId, installationId, sessionId };
+    const child = { ...f.candidate, issue: 138, issueNodeId: 'I_138', runId: randomUUID(), paths: ['src/child'], parentTaskKey: taskKey, parentBinding };
+    f.target.verifyChildRelationship = async ({ parent: current, child: incoming }) => {
+        expect(current.runId).toBe(parentBinding.runId);
+        expect(incoming.parentBinding).toEqual(parentBinding);
+        return { maxChildren: 3 };
+    };
+    return { ...f, f, parent: parent.claim, child };
+}
+
+test('verified original parent permits coordinator overlap and persists the immutable child binding', async () => {
+    const p = await parentFixture(), operationId = randomUUID();
+    const child = await acquireSharedTask({ ...p, candidate: p.child, operationId });
+    expect(child.kind).toBe('owned');
+    if (child.kind !== 'owned') throw Error('child claim');
+    const stored = (await readCoordination(p.target)).tasks[child.claim.taskKey]!;
+    expect(stored.parentBinding).toEqual(p.child.parentBinding);
+    expect((await acquireSharedTask({ ...p, candidate: p.child, operationId })).kind).toBe('owned');
+    expect((await acquireSharedTask({ ...p, candidate: { ...p.child, parentBinding: { ...p.child.parentBinding, runId: randomUUID() } }, operationId })).kind).toBe('refused');
+    expect((await transitionSharedTask({ claim: child.claim, operationId: randomUUID(), transition: { kind: 'start' } })).kind).toBe('owned');
+    for (const patch of [{ paths: ['src/child/nested'] }, { paths: [] }, { paths: ['src/*'] }]) {
+        expect((await acquireSharedTask({ ...p, candidate: { ...p.child, ...patch, issue: 139, issueNodeId: 'I_139', runId: randomUUID() }, operationId: randomUUID() })).kind).not.toBe('owned');
+    }
+    expect((await acquireSharedTask({ ...p, candidate: { ...p.child, issue: 139, issueNodeId: 'I_139', runId: randomUUID(), paths: ['src/other'] }, operationId: randomUUID() })).kind).toBe('owned');
+});
+
+test('child admission refuses missing authority, invalid bounds and foreign original-parent identities', async () => {
+    const p = await parentFixture(), mutations = p.f.mutations;
+    const binding = p.child.parentBinding;
+    for (const changed of [undefined, { ...binding, taskKey: d }, { ...binding, runId: randomUUID() }, { ...binding, generation: 2 }, { ...binding, ownerToken: randomUUID() }, { ...binding, machineId: 'other' }, { ...binding, installationId: randomUUID() }, { ...binding, sessionId: randomUUID() }, { ...binding, extra: true }]) {
+        expect((await acquireSharedTask({ ...p, candidate: { ...p.child, parentBinding: changed }, operationId: randomUUID() })).kind).toBe('refused');
+    }
+    delete p.target.verifyChildRelationship;
+    expect((await acquireSharedTask({ ...p, candidate: p.child, operationId: randomUUID() })).kind).toBe('refused');
+    for (const maxChildren of [0, -1, 1.5, 4, NaN]) {
+        p.target.verifyChildRelationship = async () => ({ maxChildren });
+        expect((await acquireSharedTask({ ...p, candidate: p.child, operationId: randomUUID() })).kind).toBe('refused');
+    }
+    p.target.verifyChildRelationship = async () => { throw Error('canonical group revoked'); };
+    expect((await acquireSharedTask({ ...p, candidate: p.child, operationId: randomUUID() })).kind).toBe('refused');
+    expect(p.f.mutations).toBe(mutations);
+});
+
+test('parent cancellation preserves child reservations and fences child start and acquisition replay', async () => {
+    const p = await parentFixture(), operationId = randomUUID();
+    const acquired = await acquireSharedTask({ ...p, candidate: p.child, operationId });
+    if (acquired.kind !== 'owned') throw Error('child claim');
+    const stopProof = { kind: 'operator-confirmed' as const, machineId: p.parent.machineId, installationId: p.parent.installationId, sessionId: p.parent.sessionId, hostBindingDigest: d, bootIdDigest: d, runIds: [p.parent.runId], generation: 1, observedAt: new Date().toISOString(), evidenceRef: p.candidate.approvalBindings[0]!.source };
+    const complete = await transitionSharedTask({ claim: p.parent, operationId: randomUUID(), transition: { kind: 'complete', stopProof, acceptedScope: p.candidate.approvalBindings[0]!.source as any } });
+    expect(complete).toMatchObject({ kind: 'refused', reason: 'active child reservations retain parent ownership' });
+    const recovery = {} as RecoveryEnvelope; // Child guard must refuse before considering incomplete transfer evidence.
+    expect(await transitionSharedTask({ claim: p.parent, operationId: randomUUID(), transition: { kind: 'handoff', machine: p.machine, session: p.session, candidate: p.candidate, stopProof, recovery } })).toMatchObject({ kind: 'refused', reason: 'active child reservations retain parent ownership' });
+    expect((await transitionSharedTask({ claim: p.parent, operationId: randomUUID(), transition: { kind: 'stop', stopProof } })).kind).toBe('owned');
+    expect((await transitionSharedTask({ claim: acquired.claim, operationId: randomUUID(), transition: { kind: 'start' } })).kind).toBe('refused');
+    expect((await acquireSharedTask({ ...p, candidate: p.child, operationId })).kind).toBe('refused');
+    expect((await transitionSharedTask({ claim: acquired.claim, operationId: randomUUID(), transition: { kind: 'block', stopProof: null } })).kind).toBe('owned');
+    expect((await readCoordination(p.target)).index.active).toHaveLength(2);
+});
+
+test('child acknowledgment and retry recheck the pinned parent after a concurrent stop', async () => {
+    for (const mode of ['conflict', 'ambiguous'] as const) {
+        const p = await parentFixture(), commit = p.target.provider.commit;
+        let changed = false, calls = 0;
+        p.target.verifyChildRelationship = async () => { calls++; return { maxChildren: 3 }; };
+        p.target.provider.commit = async (target, input) => {
+            if (changed) return commit(target, input);
+            changed = true;
+            const result = mode === 'ambiguous' ? await commit(target, input) : null;
+            const stopped = await transitionSharedTask({ claim: p.parent, operationId: randomUUID(), transition: { kind: 'block', stopProof: null } });
+            expect(stopped.kind).toBe('owned');
+            return result ? { kind: 'ambiguous', reason: 'response lost after parent stop' } : { kind: 'conflict', reason: 'parent stopped concurrently' };
+        };
+        const result = await acquireSharedTask({ ...p, candidate: p.child, operationId: randomUUID() });
+        expect(result.kind).not.toBe('owned');
+        expect(calls).toBeGreaterThanOrEqual(1);
+        expect((await readCoordination(p.target)).tasks[p.parent.taskKey]!.state).toBe('blocked');
+    }
+});
+
+async function onMachine(p: Awaited<ReturnType<typeof parentFixture>>, index: number, childConcurrent = 1) {
+    const machine = { ...p.machine, id: 'worker-' + index, installationId: randomUUID(), hostBindingDigest: sha256('worker-' + index), defaults: { ...p.machine.defaults, maxRuns: 1, childConcurrent } };
+    const session = { ...p.session, machineId: machine.id, installationId: machine.installationId, hostBindingDigest: machine.hostBindingDigest, sessionId: randomUUID() };
+    return { machine, session };
+}
+
+test('parent capacity is global while host child capacity spans parent groups', async () => {
+    const p = await parentFixture();
+    p.target.verifyChildRelationship = async () => ({ maxChildren: 2 });
+    for (const index of [0, 1, 2]) {
+        const host = await onMachine(p, index);
+        const child = { ...p.child, issue: 150 + index, issueNodeId: 'I_' + (150 + index), runId: randomUUID(), paths: ['src/' + index] };
+        const result = await acquireSharedTask({ ...host, candidate: child, operationId: randomUUID() });
+        expect(result.kind).toBe(index < 2 ? 'owned' : 'busy');
+        if (index === 2) expect(result).toMatchObject({ reason: 'parent child capacity busy' });
+    }
+    const q = await parentFixture();
+    q.target.verifyChildRelationship = async () => ({ maxChildren: 3 });
+    q.machine.defaults.childConcurrent = 1;
+    expect((await acquireSharedTask({ ...q, candidate: q.child, operationId: randomUUID() })).kind).toBe('owned');
+    q.machine.allowedRepositories.push('acme/second');
+    q.machine.repositoryIds['acme/second'] = 'R_second';
+    const parent2 = await acquireSharedTask({ ...q, candidate: { ...q.candidate, issue: 150, issueNodeId: 'I_150', repo: 'acme/second', repositoryNodeId: 'R_second', runId: randomUUID(), independent: false, paths: [] }, operationId: randomUUID() });
+    if (parent2.kind !== 'owned') throw Error('second parent claim');
+    expect((await transitionSharedTask({ claim: parent2.claim, operationId: randomUUID(), transition: { kind: 'start' } })).kind).toBe('owned');
+    const { taskKey, runId, generation, ownerToken, machineId, installationId, sessionId } = parent2.claim;
+    const child2 = { ...q.child, issue: 151, issueNodeId: 'I_151', repo: 'acme/second', repositoryNodeId: 'R_second', runId: randomUUID(), parentTaskKey: taskKey, parentBinding: { taskKey, runId, generation, ownerToken, machineId, installationId, sessionId } };
+    expect(await acquireSharedTask({ ...q, candidate: child2, operationId: randomUUID() })).toMatchObject({ kind: 'busy', reason: 'machine child capacity busy' });
+});
+
+test('verified coordinator exemption does not bypass unrelated cross-repository resource reservations', async () => {
+    const p = await parentFixture();
+    p.machine.allowedRepositories.push('acme/second');
+    p.machine.repositoryIds['acme/second'] = 'R_second';
+    expect((await acquireSharedTask({ ...p, candidate: { ...p.candidate, issue: 150, issueNodeId: 'I_150', repo: 'acme/second', repositoryNodeId: 'R_second', runId: randomUUID(), resources: ['database'] }, operationId: randomUUID() })).kind).toBe('owned');
+    expect(await acquireSharedTask({ ...p, candidate: { ...p.child, resources: ['database'] }, operationId: randomUUID() })).toMatchObject({ kind: 'busy', reason: 'incompatible resource reservation busy' });
+});
+
+test('legacy child stays inspectable and stoppable without deriving a new parent binding', async () => {
+    const p = await parentFixture(), acquired = await acquireSharedTask({ ...p, candidate: p.child, operationId: randomUUID() });
+    if (acquired.kind !== 'owned') throw Error('child claim');
+    const snapshot = await readCoordination(p.target), task = snapshot.tasks[acquired.claim.taskKey]!;
+    delete task.parentBinding;
+    await p.target.provider.commit(p.target, { branchId: snapshot.branchId, expectedHeadOid: snapshot.head, files: { ['coordination/tasks/' + task.taskKey + '.json']: canonical(task) }, operationId: randomUUID() });
+    expect((await readCoordination(p.target)).tasks[task.taskKey]!.parentBinding).toBeUndefined();
+    expect(await transitionSharedTask({ claim: acquired.claim, operationId: randomUUID(), transition: { kind: 'start' } })).toMatchObject({ kind: 'refused', reason: 'original parent binding required; legacy child execution refused' });
+    expect((await transitionSharedTask({ claim: acquired.claim, operationId: randomUUID(), transition: { kind: 'block', stopProof: null } })).kind).toBe('owned');
+});
+
+test('eligible conditional retry and duplicate start revalidate canonical parent group authority', async () => {
+    const p = await parentFixture();
+    let checks = 0;
+    p.target.verifyChildRelationship = async () => { checks++; return { maxChildren: 3 }; };
+    p.f.setConflicts(1);
+    const acquired = await acquireSharedTask({ ...p, candidate: p.child, operationId: randomUUID() });
+    expect(acquired.kind).toBe('owned');
+    expect(checks).toBe(3); // Both conditional attempts and the immutable receipt readback.
+    if (acquired.kind !== 'owned') throw Error('child claim');
+    const operationId = randomUUID();
+    expect((await transitionSharedTask({ claim: acquired.claim, operationId, transition: { kind: 'start' } })).kind).toBe('owned');
+    p.target.verifyChildRelationship = async () => { throw Error('group authority revoked'); };
+    expect(await transitionSharedTask({ claim: acquired.claim, operationId, transition: { kind: 'start' } })).toMatchObject({ kind: 'refused', reason: 'group authority revoked' });
+});
+
+test('restart uses persisted original parent identity rather than adopting the current parent record', async () => {
+    for (const replacement of [{ runId: randomUUID() }, { generation: 2 }, { ownerToken: randomUUID() }]) {
+        const p = await parentFixture(), acquired = await acquireSharedTask({ ...p, candidate: p.child, operationId: randomUUID() });
+        if (acquired.kind !== 'owned') throw Error('child claim');
+        const snapshot = await readCoordination(p.target), parent = snapshot.tasks[p.parent.taskKey]!;
+        await p.target.provider.commit(p.target, { branchId: snapshot.branchId, expectedHeadOid: snapshot.head, files: { ['coordination/tasks/' + parent.taskKey + '.json']: canonical({ ...parent, ...replacement }) }, operationId: randomUUID() });
+        const restarted = { ...acquired.claim, target: { ...p.target, localRoot: await mkdtemp(join(tmpdir(), 'vf-child-restart-')) } };
+        expect((await readCoordination(restarted.target)).tasks[acquired.claim.taskKey]!.parentBinding).toEqual(p.child.parentBinding);
+        expect(await transitionSharedTask({ claim: restarted, operationId: randomUUID(), transition: { kind: 'start' } })).toMatchObject({ kind: 'refused', reason: 'original parent owner/run/generation changed' });
+    }
+});
