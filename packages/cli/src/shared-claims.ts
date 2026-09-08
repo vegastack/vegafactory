@@ -236,8 +236,8 @@ export type RecoveryEvidencePayload = {
     result: "complete" | "unresolved";
     reasonCode: string | null;
 };
-const transactionClock = new AsyncLocalStorage<number>();
-function requestTimeout(): number { return Math.max(1, Math.min(10000, (transactionClock.getStore() ?? Date.now() + 10000) - Date.now())); }
+const transactionClock = new AsyncLocalStorage<{ deadline: number; decodedBytes: number }>();
+function requestTimeout(): number { return Math.max(1, Math.min(10000, (transactionClock.getStore()?.deadline ?? Date.now() + 10000) - Date.now())); }
 async function bounded<T>(work: Promise<T>): Promise<T> {
     let timer: ReturnType<typeof setTimeout> | undefined;
     try {
@@ -657,6 +657,8 @@ async function pinnedJson(target: CoordinationTarget, head: string, path: string
     if (raw === null)
         return null;
     const bytes = Buffer.byteLength(raw);
+    const budget = transactionClock.getStore();
+    if (budget && (budget.decodedBytes += bytes) > 8 * 1024 * 1024) throw Error('total decoded transaction read bound exceeded');
     if (total)
         total.bytes += bytes;
     if (bytes > max || (total && total.bytes > 8 * 1024 * 1024))
@@ -783,7 +785,7 @@ async function receiptAt(target: CoordinationTarget, head: string, operationId: 
     throw Error('receipt path identity mismatch'); if (r.recoveryPayload)
     parseRecoveryPayload(r.recoveryPayload); return r; }
 function transact(...args: Parameters<typeof transactWithinWindow>): Promise<SharedClaimResult> {
-    return transactionClock.run(Date.now() + 45000, () => transactWithinWindow(...args));
+    return transactionClock.run({ deadline: Date.now() + 45000, decodedBytes: 0 }, () => transactWithinWindow(...args));
 }
 async function transactWithinWindow(target: CoordinationTarget, operationId: string, build: (snapshot: CoordinationSnapshot) => Promise<{
     task: TaskRecord;
@@ -900,6 +902,8 @@ export async function resolveEvidence(target: CoordinationTarget, ref: EvidenceR
     const raw = await bounded(target.provider.read(target, ref.commitSha, operationPath(ref.operationId)));
     if (raw === null || Buffer.byteLength(raw) > 32 * 1024 || sha256(raw) !== ref.blobSha256)
         throw Error('immutable evidence blob missing or changed');
+    const budget = transactionClock.getStore();
+    if (budget && (budget.decodedBytes += Buffer.byteLength(raw)) > 8 * 1024 * 1024) throw Error('total decoded transaction read bound exceeded');
     const receipt = parse<OperationReceipt>(JSON.parse(raw), receiptSchema, 'evidence receipt', 32 * 1024);
     if (receipt.operationId !== ref.operationId || receipt.recoveryPayload === null)
         throw Error('evidence receipt identity/payload mismatch');
