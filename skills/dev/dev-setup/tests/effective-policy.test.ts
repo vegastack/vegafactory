@@ -172,7 +172,7 @@ test('machine schema refuses credential or host-path fields rather than retainin
 
 test('real Git snapshot bindings are per code repository and reject drift without renewing age', async () => {
   const { execFileSync } = await import('node:child_process')
-  const { mkdtemp, mkdir, writeFile, rm } = await import('node:fs/promises')
+  const { mkdtemp, mkdir, writeFile, readFile, rm, symlink } = await import('node:fs/promises')
   const { tmpdir } = await import('node:os')
   const { join } = await import('node:path')
   const { loadConfiguredPolicy, parsePeopleRegistry } = await import('../scripts/effective-policy.mjs')
@@ -207,8 +207,19 @@ test('real Git snapshot bindings are per code repository and reject drift withou
     await mkdir(join(home, '.vegastack'))
     await writeFile(join(home, '.vegastack/factory.json'), JSON.stringify(state))
     const input = { home, repo: 'acme/app', devMd: profiles['acme/app'], now: freshness.now }
-    const first = loadConfiguredPolicy(input)
+    const trace = join(home, 'git-trace.log'), previousTrace = process.env.GIT_TRACE
+    let first: ReturnType<typeof loadConfiguredPolicy>
+    try {
+      process.env.GIT_TRACE = trace
+      first = loadConfiguredPolicy(input)
+    } finally {
+      if (previousTrace === undefined) delete process.env.GIT_TRACE
+      else process.env.GIT_TRACE = previousTrace
+    }
     expect(first.ok).toBe(true)
+    const commands = (await readFile(trace, 'utf8')).split('\n').filter(line => line.includes('built-in: git '))
+    expect(commands).toHaveLength(5)
+    expect(commands.filter(line => line.includes('cat-file --batch'))).toHaveLength(1)
     expect(loadConfiguredPolicy({ ...input, repo: 'acme/design', devMd: profiles['acme/design'] }).ok).toBe(true)
     expect(loadConfiguredPolicy({ ...input, devMd: input.devMd + '\ngates: 2' }).blocks.join(' ')).toMatch(/digest changed/)
     expect(loadConfiguredPolicy({ ...input, now: '2026-09-06T02:00:00Z' }).ok).toBe(false)
@@ -220,6 +231,26 @@ test('real Git snapshot bindings are per code repository and reject drift withou
     await writeFile(join(home, '.vegastack/factory.json'), JSON.stringify(state))
     await writeFile(join(content, 'org.md'), org + 'stats: off')
     expect(loadConfiguredPolicy(input).blocks.join(' ')).toMatch(/identity changed/)
+    await writeFile(join(content, 'org.md'), org)
+    expect(loadConfiguredPolicy(input).ok).toBe(true)
+    git('remote', 'set-url', 'origin', join(home, 'foreign.git'))
+    expect(loadConfiguredPolicy(input).blocks.join(' ')).toMatch(/identity changed/)
+    git('remote', 'set-url', 'origin', origin)
+    expect(loadConfiguredPolicy({ ...input, now: '2026-09-05T23:00:00Z' }).ok).toBe(false)
+    await writeFile(join(content, 'people.csv'), 'invalid registry')
+    git('add', '.'); git('commit', '-qm', 'Malformed registry')
+    expect(loadConfiguredPolicy(input).blocks.join(' ')).toMatch(/identity changed/)
+    const appSnapshot = snapshots['acme/app'] as { sourceCommit: string }
+    appSnapshot.sourceCommit = git('rev-parse', 'HEAD')
+    await writeFile(join(home, '.vegastack/factory.json'), JSON.stringify(state))
+    expect(loadConfiguredPolicy(input).ok).toBe(false)
+    await writeFile(join(content, 'people.csv'), csv)
+    await rm(join(content, 'org.md'))
+    await symlink('groups/dev/group.md', join(content, 'org.md'))
+    git('add', '.'); git('commit', '-qm', 'Symlink policy')
+    appSnapshot.sourceCommit = git('rev-parse', 'HEAD')
+    await writeFile(join(home, '.vegastack/factory.json'), JSON.stringify(state))
+    expect(loadConfiguredPolicy(input).blocks.join(' ')).toMatch(/not a regular blob/)
   } finally { await rm(home, { recursive: true, force: true }) }
 })
 
@@ -240,4 +271,43 @@ test('mutating the resolved admin map cannot supply a previous trusted self-gran
   const policy = managed()
   policy.administration.orgAdmins.push('member')
   expect(authorizeAdministration({ actor: { login: 'member', verified: true }, action: 'administration.manage', target: { org: 'acme' }, administration: policy.administration, policy }).allowed).toBe(false)
+})
+
+
+test('private policy batch reader validates exact byte framing and separate file/aggregate bounds', async () => {
+  // Exercise the private protocol parser without adding an exported testing API.
+  const { readFileSync } = await import('node:fs')
+  const source = readFileSync(`${__dirname}/../scripts/effective-policy.mjs`, 'utf8')
+  const body = source.slice(source.indexOf('function gitReadBlobs('), source.indexOf('// A per-code-repository pointer'))
+  const oid = 'a'.repeat(40), other = 'b'.repeat(40)
+  let output: Buffer
+  const calls: Array<{ args: string[], options: { input: string, maxBuffer: number, timeout: number } }> = []
+  const read = new Function('execFileSync', body + '; return gitReadBlobs')((command: string, args: string[], options: { input: string, maxBuffer: number, timeout: number }) => {
+    expect(command).toBe('git'); calls.push({ args, options }); return output
+  }) as (cwd: string, oids: string[]) => Map<string, string>
+  const frame = (id: string, text: string) => Buffer.concat([Buffer.from(`${id} blob ${Buffer.byteLength(text)}\n`), Buffer.from(text), Buffer.from('\n')])
+  output = Buffer.concat([frame(oid, 'é\n'), frame(other, '')])
+  expect([...read('/fixture', [oid, other])]).toEqual([[oid, 'é\n'], [other, '']])
+  expect(calls).toHaveLength(1)
+  expect(calls[0]?.args).toEqual(['cat-file', '--batch'])
+  expect(calls[0]?.options.input).toBe(`${oid}\n${other}\n`)
+  expect(calls[0]?.options.timeout).toBe(5000)
+  for (const malformed of [
+    '', `${oid} missing\n`, `${other} blob 0\n\n`, `${oid} tree 0\n\n`,
+    `${oid} blob 01\nx\n`, `${oid} blob 4\nabc\n`, `${oid} blob 3\nabc`,
+    `${oid} blob 3\nabc!`, `${oid} blob 0\n\nextra`, `${oid} blob 4194305\n`,
+    `${oid} blob 9007199254740993\n`, 'x'.repeat(65) + '\n',
+  ]) {
+    output = Buffer.from(malformed)
+    expect(() => read('/fixture', [oid])).toThrow()
+  }
+  output = frame(oid, '')
+  expect(() => read('/fixture', [oid, other])).toThrow()
+  const large = 'x'.repeat(4 * 1024 * 1024)
+  output = Buffer.concat([frame(oid, large), frame(other, large)])
+  expect(read('/fixture', [oid, other]).get(other)?.length).toBe(large.length)
+  expect(calls.at(-1)?.options.maxBuffer).toBeGreaterThan(output.length)
+  const ids = Array.from({ length: 17 }, (_, index) => index.toString(16).padStart(40, '0'))
+  output = Buffer.concat(ids.map(id => frame(id, large)))
+  expect(() => read('/fixture', ids)).toThrow(/byte limit/)
 })

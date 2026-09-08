@@ -578,6 +578,34 @@ function gitRead(cwd, args) {
   return execFileSync('git', args, { cwd, encoding: 'utf8', stdio: 'pipe', timeout: 5000, maxBuffer: 4 * 1024 * 1024 })
 }
 
+// Git batch output is byte framed, not line-oriented policy text. Keep the existing
+// 4 MiB per-file ceiling, with a separate bounded allowance for the whole snapshot.
+function gitReadBlobs(cwd, oids) {
+  const blobLimit = 4 * 1024 * 1024, aggregateLimit = 64 * 1024 * 1024
+  const output = execFileSync('git', ['cat-file', '--batch'], {
+    cwd, input: oids.join('\n') + '\n', stdio: 'pipe', timeout: 5000,
+    maxBuffer: Math.min(oids.length * (blobLimit + 64), aggregateLimit + oids.length * 64),
+  })
+  const blobs = new Map()
+  let offset = 0, total = 0
+  for (const oid of oids) {
+    const end = output.indexOf(10, offset)
+    if (end < offset || end - offset > 63) throw new Error('invalid policy blob batch header')
+    const header = output.subarray(offset, end).toString('utf8')
+    const match = /^([a-f0-9]{40}) blob (0|[1-9][0-9]*)$/.exec(header)
+    if (!match || match[1] !== oid) throw new Error('unexpected policy blob batch identity or type')
+    const size = Number(match[2])
+    total += size
+    if (!Number.isSafeInteger(size) || size > blobLimit || total > aggregateLimit) throw new Error('policy blob batch exceeds byte limit')
+    offset = end + 1
+    if (offset + size >= output.length || output[offset + size] !== 10) throw new Error('truncated or invalid policy blob batch framing')
+    blobs.set(oid, output.subarray(offset, offset + size).toString('utf8'))
+    offset += size + 1
+  }
+  if (offset !== output.length) throw new Error('unexpected trailing policy blob batch output')
+  return blobs
+}
+
 // A per-code-repository pointer is supplied by the snapshot owner. Read authoritative blobs
 // from its exact Git commit, not symlink targets or a mutable worktree. No fetch or state write.
 /** @param {{snapshot:any,repo:string,devMd:string,room?:any,expectedOrigin?:string,now?:string|number}} input */
@@ -599,19 +627,23 @@ export function loadSnapshotPolicy({ snapshot, repo, devMd, room = parseControlR
       || gitRead(snapshot.contentPath, ['remote', 'get-url', 'origin']).trim() !== snapshot.origin
       || gitRead(snapshot.contentPath, ['status', '--porcelain', '--untracked-files=all']).trim()) return refused('snapshot content/origin/source identity changed')
     const entries = new Map(gitRead(snapshot.contentPath, ['ls-tree', '-r', '-z', snapshot.sourceCommit]).split('\0').filter(Boolean).map(line => {
-      const [metadata, path] = line.split('\t'); return [path, metadata.split(' ')[0]]
+      const match = /^(\d{6}) (blob|tree|commit) ([a-f0-9]{40})\t([\s\S]+)$/.exec(line)
+      if (!match) throw new Error('invalid snapshot tree entry')
+      return [match[4], { mode: match[1], type: match[2], oid: match[3] }]
     }))
-    const read = (path, required = true) => {
-      if (!entries.has(path) && !required) return ''
-      if (!['100644', '100755'].includes(entries.get(path))) throw new Error(`snapshot policy file is missing or not a regular blob: ${path}`)
-      return gitRead(snapshot.contentPath, ['show', snapshot.sourceCommit + ':' + path])
+    const peoplePaths = [...entries.keys()].filter(path => path === 'people.csv' || /^groups\/[a-z0-9][a-z0-9-]{0,63}\/people\.csv$/.test(path))
+    const paths = ['org.md', ...(room.group ? ['groups/' + room.group + '/group.md'] : []), 'repos.md', ...peoplePaths]
+    for (const path of paths) {
+      const entry = entries.get(path)
+      if (!entry || !['100644', '100755'].includes(entry.mode) || entry.type !== 'blob') throw new Error(`snapshot policy file is missing or not a regular blob: ${path}`)
     }
+    const blobs = gitReadBlobs(snapshot.contentPath, unique(paths.map(path => entries.get(path).oid)))
+    const read = path => blobs.get(entries.get(path).oid)
     const org = read('org.md'), group = room.group ? read('groups/' + room.group + '/group.md') : ''
     const registry = parseRepositoryRegistry(read('repos.md'))
     if (registry.blocks.length || !own(registry.repoGroups, repo) || (room.group !== null && registry.repoGroups[repo] !== room.group)) return refused('code repository/group is missing or conflicts with the snapshot registry')
     const peopleByScope = {}
-    for (const [path] of entries) {
-      if (path !== 'people.csv' && !/^groups\/[a-z0-9][a-z0-9-]{0,63}\/people\.csv$/.test(path)) continue
+    for (const path of peoplePaths) {
       const parsed = parsePeopleRegistry(read(path))
       if (parsed.blocks.length) return refused(parsed.blocks.join('; '))
       peopleByScope[path === 'people.csv' ? 'org' : path.split('/')[1]] = parsed.people

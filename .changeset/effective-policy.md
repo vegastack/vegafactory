@@ -7,3 +7,4 @@ Resolve organization policy, scoped administration and registered-machine settin
 - Require exact organization delegation for locked overrides, with source and freshness diagnostics.
 - Reject stale or mismatched policy snapshots and legacy role-based authority; preserve explicit local operation and readable legacy policy.
 - Compile guard policy schema2 and keep capture/export refusals effective before side effects.
+- Batch exact policy Git blobs with bounded, verified framing while rechecking snapshot identity and freshness on every read.
