@@ -11,11 +11,10 @@
 // `show` and `rollup` read the control-room clone and are pure reporting. People-level views are
 // gated: your own rows, or a `lead`'s. Everyone can see org totals.
 
-import { spawn } from 'node:child_process'
 import { mkdir, readFile, readdir, writeFile } from 'node:fs/promises'
 import { hostname } from 'node:os'
 import { loadConfiguredPolicy, resolvePeopleReadScope, resolvePolicy } from '../../../../skills/dev/dev-setup/scripts/effective-policy.mjs'
-import { dirname, join, resolve } from 'node:path'
+import { dirname, join, resolve, basename } from 'node:path'
 import { parseControlRoomKnob } from '../control-room.ts'
 import { ghJson } from '../gh.ts'
 import { GIT_CREDENTIAL_ARGS } from '../sync.ts'
@@ -23,23 +22,27 @@ import {
   fromClaudeSessionEnd, fromCodexSessionEnd, fromSkillHook,
   type CaptureContext, type SkillHookSource,
 } from './capture.ts'
-import { appendRecord, appendSkillInvocations, listOutbox, takeSkillInvocations } from './outbox.ts'
+import { appendRecord, appendSkillInvocations, takeSkillInvocations, inspectSpool, spoolRoot, outboxRoot, inspectLegacySpool, migrateLegacySpool, type MigrationReport } from './outbox.ts'
 import { monthToken, parseMonthToken, statsPolicyFromEffective, type StatsPolicy, type StatsRecord } from './record.ts'
-import { planPush, pushOutbox, statsClonePath, type GitRunner } from './push.ts'
+import { pushOutbox, statsClonePath, boundedTelemetryGit, type GitRunner } from './push.ts'
 import {
   rollupOrg, rollupRepo, rollupSkills, stableStringify,
   type OrgSummary, type RepoSummary, type SkillsSummary, type TimelineEvent,
 } from './rollup.ts'
 import { fetchTimelines, type GhJson } from './timeline.ts'
 
-export type StatsSource = 'claude-session-end' | 'codex-session-end' | 'claude-post-tool' | 'claude-prompt-expansion' | 'codex-prompt'
+export type StatsSource = 'managed-hook' | 'claude-session-end' | 'codex-session-end' | 'claude-post-tool' | 'claude-prompt-expansion' | 'codex-prompt'
 
 const SOURCES: readonly StatsSource[] = [
+  'managed-hook',
   'claude-session-end', 'codex-session-end', 'claude-post-tool', 'claude-prompt-expansion', 'codex-prompt',
 ] as const
 
 export interface StatsArgs {
-  verb: 'show' | 'record' | 'push' | 'rollup'
+  verb: 'show' | 'record' | 'push' | 'rollup' | 'inspect' | 'migrate'
+  apply?: boolean
+  mapping?: string
+  report?: string
   scope: 'repo' | 'me' | 'org' | 'skills'
   since: string | null
   json: boolean
@@ -59,7 +62,7 @@ export function parseStatsArgs(argv: string[]): StatsArgs {
   if (rest[0] && !rest[0].startsWith('-')) {
     const head = rest.shift()!
     if (head === 'skills') setScope('skills')
-    else if (head === 'show' || head === 'record' || head === 'push' || head === 'rollup') args.verb = head
+    else if (head === 'show' || head === 'record' || head === 'push' || head === 'rollup' || head === 'inspect' || head === 'migrate') args.verb = head
     else throw new Error(`Unknown stats verb: ${head}`)
   }
   while (rest.length) {
@@ -70,6 +73,8 @@ export function parseStatsArgs(argv: string[]): StatsArgs {
     else if (flag === '--skills') setScope('skills')
     else if (flag === '--json') args.json = true
     else if (flag === '--commit') args.commit = true
+    else if (flag === '--apply') args.apply = true
+    else if (flag === '--mapping' || flag === '--report') {const value=rest.shift();if(!value||value.startsWith('--'))throw Error(flag+' requires a JSON file');args[flag.slice(2) as 'mapping'|'report']=value}
     else if (flag === '--since') {
       const value = rest.shift()
       if (!value || !parseMonthToken(value)) throw new Error(`--since takes a month token in MON-YYYY form, e.g. SEP-2026 — got ${JSON.stringify(value ?? '')}`)
@@ -87,6 +92,8 @@ export function parseStatsArgs(argv: string[]): StatsArgs {
 
 export interface StatsDeps {
   home: string
+  exportReader?: import('./types.ts').ExportReader
+  measurementRecord?: (event:import('./types.ts').ExportedEvent)=>StatsRecord|null
   hostname: string
   ghUser: string
   login: string
@@ -220,6 +227,7 @@ function monthsInWindow(months: string[], since: string | null): string[] {
 // --- the verbs ---------------------------------------------------------------------------
 
 async function runRecord(args: StatsArgs, deps: StatsDeps): Promise<number> {
+  if(args.source === 'managed-hook'){ await (await import('./record.ts')).consumeManagedHook(deps.home,await deps.readStdin()); return 0 }
   if (!deps.policy.enabled) {
     // Not an error and not a warning: the org (or this repo) turned statistics off, and a hook that
     // shouted about it every time a session ended would be its own kind of telemetry.
@@ -271,11 +279,8 @@ async function runPush(args: StatsArgs, deps: StatsDeps): Promise<number> {
   if (args.json) {
     deps.log(JSON.stringify({ guard: 'stats-push', commit: args.commit, ...result }))
   } else if (!args.commit) {
-    const plan = planPush(await listOutbox(deps.home), deps.cloneRoot, { ghUser: deps.ghUser, hostname: deps.hostname })
-    const lines = plan.copies.reduce((sum, copy) => sum + copy.lines, 0)
-    deps.log(lines === 0
-      ? 'stats push (dry run): the outbox is empty — nothing to push'
-      : `stats push (dry run — pass --commit to write): ${lines} record(s) into ${plan.copies.length} file(s)\n  ${plan.copies.map(copy => `${copy.from} → ${copy.to} (+${copy.lines})`).join('\n  ')}\n  commit: ${plan.subject}`)
+    const spool=await inspectSpool(spoolRoot(deps.home))
+    deps.log(`stats push (dry run): ${spool.events.length} immutable event(s), ${spool.quarantine.length} quarantined; pass --commit for verified delivery`)
   } else if (result.locked) {
     deps.log(`stats push: another push is running on this machine — ${result.deferred.length} file(s) deferred to the next attempt`)
   } else {
@@ -305,6 +310,19 @@ async function windowBuckets(deps: StatsDeps, since: string | null): Promise<Win
         timelines: await readTimelines(deps.cloneRoot, dir, month),
       })
     }
+  }
+  const batch=await(await import('./rollup.ts')).readControlRoomEvents(deps.cloneRoot,deps.exportReader)
+  if(batch.invalid.length)throw Error(`stats events refused: ${batch.invalid.length} invalid; ${batch.invalid[0]!.reason}`)
+  if(batch.events.length&&!deps.measurementRecord)throw Error('metric-reader-unavailable-148')
+  for(const row of batch.events){
+    const record=deps.measurementRecord!(row.event)
+    if(!record)continue
+    const month=monthToken(new Date(record.ts))
+    if(!monthsInWindow([month],since).length)continue
+    const dir=basename(dirname(dirname(dirname(row.source))))
+    let bucket=buckets.find(b=>b.repo===record.repo&&b.month===month)
+    if(!bucket){bucket={dir,repo:record.repo,month,records:[],timelines:await readTimelines(deps.cloneRoot,dir,month)};buckets.push(bucket)}
+    bucket.records.push(record)
   }
   return buckets
 }
@@ -343,11 +361,10 @@ async function runRollup(args: StatsArgs, deps: StatsDeps): Promise<number> {
   const allRecords: StatsRecord[] = []
   const timelines: string[] = []
   const unreachable: string[] = []
-  for (const dir of await repoDirs(deps.cloneRoot)) {
-    const records = await readMonth(deps.cloneRoot, dir, month)
+  for (const bucket of (await windowBuckets(deps,month)).filter(b=>b.month===month)) {
+    const {dir,repo,records}=bucket
     if (records.length === 0) continue
     allRecords.push(...records)
-    const repo = records[0]?.repo ?? dir
     // Lead and cycle time come from the issues' label timelines, fetched here for every issue the
     // month's records touch and written beside the summary. A fetch that fails keeps the timeline
     // file the clone already has, so a rate limit degrades to last rollup's answer, never to a
@@ -458,8 +475,11 @@ export async function runStats(args: StatsArgs, deps: StatsDeps): Promise<number
   }
   if (args.verb === 'record') return runRecord(args, deps)
   if (args.verb === 'push') return runPush(args, deps)
-  if (args.verb === 'rollup') return runRollup(args, deps)
-  return runShow(args, deps)
+  if (args.verb === 'inspect' || args.verb === 'migrate') return runStatsMaintenance(args,deps.home,deps.log)
+  try {
+    if (args.verb === 'rollup') return await runRollup(args, deps)
+    return await runShow(args, deps)
+  } catch(error) {deps.log((error as Error).message);return 2}
 }
 
 export function statsUsage(): string {
@@ -467,6 +487,9 @@ export function statsUsage(): string {
        vegafactory stats push [--commit] [--json]
        vegafactory stats rollup [--since MON-YYYY] [--json]   (reads issue timelines through gh)
        vegafactory stats record --source <kind>      (called by the harness hooks)
+       vegafactory stats inspect [--json]
+       vegafactory stats migrate [--json]
+       vegafactory stats migrate --apply --report <JSON-file> --mapping <JSON-file>
 
 Where agent time and money went, from the org's own control room. Records are counts and
 identifiers only — no prompt text, no assistant text, no tool arguments, ever.
@@ -482,7 +505,11 @@ stats: / stats-people: in org.md or group.md, and a repo opt-out only under
 stats-override: allowed. There is no machine-level knob.
 
 Exit 0 done · 1 deferred (a push that will retry) · 2 a refusal.
-Outbox: ~/.vegastack/stats/outbox/<owner>__<name>/<MON-YYYY>/<host>.jsonl
+Outbox: ~/.vegastack/stats/events-v2 (immutable private envelopes and receipts).
+Legacy JSONL stays unchanged. migrate prints a dry-run report; applying requires the saved
+exact report and an explicit JSON mapping from code repository to Destination.
+Production export/reading refuses until the #149 privacy serializer/reader is supplied.
+Managed hooks use --source managed-hook and silently refuse unknown cwd/session identity.
 `
 }
 
@@ -534,23 +561,7 @@ export function isLeadIn(peopleCsv: string | null, login: string): boolean {
   return false
 }
 
-function defaultGit(): GitRunner {
-  return (args, cwd) => new Promise(resolveRun => {
-    const child = spawn('git', [...GIT_CREDENTIAL_ARGS, ...args], {
-      cwd,
-      env: { ...process.env, GIT_TERMINAL_PROMPT: '0' },
-      stdio: ['ignore', 'pipe', 'pipe'],
-    })
-    let stdout = ''
-    let stderr = ''
-    child.stdout.setEncoding('utf8')
-    child.stderr.setEncoding('utf8')
-    child.stdout.on('data', (chunk: string) => { stdout += chunk })
-    child.stderr.on('data', (chunk: string) => { stderr += chunk })
-    child.on('error', error => resolveRun({ code: 1, stdout, stderr: `${stderr}${(error as Error).message}` }))
-    child.on('close', code => resolveRun({ code: code ?? 1, stdout, stderr }))
-  })
-}
+function defaultGit(): GitRunner { return boundedTelemetryGit(GIT_CREDENTIAL_ARGS) }
 
 export async function buildStatsDeps(home: string, cwd: string, log: (line: string) => void, githubIdentity: () => Promise<{ login?: unknown; id?: unknown }> = () => ghJson(['api', 'user'])): Promise<StatsDeps> {
   const project = await findDevMd(cwd)
@@ -601,7 +612,43 @@ export async function runStatsCli(argv: string[], home: string): Promise<number>
     console.error(`error: ${(error as Error).message}`)
     return 2
   }
+  if(args.verb === 'inspect' || args.verb === 'migrate') return runStatsMaintenance(args,home,line=>console.log(line))
+  if(args.verb === 'record' && args.source === 'managed-hook') {
+    // Branch before identity/network, transcript readers, or caller-cwd configuration discovery.
+    const raw = await new Promise<string|null>(resolveInput => {
+      let bytes=0; const chunks:Buffer[]=[]
+      const finish=(value:string|null)=>{clearTimeout(timer);process.stdin.off('data',data);process.stdin.off('end',end);process.stdin.off('error',error);process.stdin.pause();resolveInput(value)}
+      const data=(chunk:Buffer)=>{bytes+=chunk.length;if(bytes>64*1024)finish(null);else chunks.push(chunk)}
+      const end=()=>finish(Buffer.concat(chunks).toString('utf8')),error=()=>finish(null)
+      const timer=setTimeout(()=>finish(null),350)
+      process.stdin.on('data',data);process.stdin.once('end',end);process.stdin.once('error',error)
+    })
+    if(raw===null)return 0
+    let timer:ReturnType<typeof setTimeout>|undefined
+    try { await Promise.race([(await import('./record.ts')).consumeManagedHook(home,raw),new Promise(resolveFlush=>{timer=setTimeout(resolveFlush,500)})]) } catch { /* Hooks refuse silently; timeout is not a persistence receipt. */ } finally {if(timer)clearTimeout(timer)}
+    return 0
+  }
   const deps = await buildStatsDeps(home, process.cwd(), line => console.log(line))
   if (deps.policy.refusal) console.error(deps.policy.refusal)
   return runStats(args, deps)
+}
+
+export async function runStatsMaintenance(args:StatsArgs,home:string,log:(line:string)=>void):Promise<number>{
+  try{
+    if(args.verb==='inspect'){
+      const spool=await inspectSpool(spoolRoot(home))
+      const {readDeliveryReceipt}=await import('./push.ts')
+      const dispositions=await Promise.all(spool.events.map(async e=>({eventId:e.eventId,destination:e.destination,delivered:!!await readDeliveryReceipt(spoolRoot(home),e)})))
+      log(JSON.stringify({schemaVersion:2,events:dispositions,pendingBytes:spool.pendingBytes,oldestAgeMs:spool.oldestAgeMs,quarantine:spool.quarantine}))
+      return 0
+    }
+    if(args.apply){
+      if(!args.report||!args.mapping)throw Error('migration apply requires --report and --mapping JSON files')
+      const report=JSON.parse(await readFile(args.report,'utf8')) as MigrationReport
+      if(report.sourceRoot!==resolve(outboxRoot(home)))throw Error('migration report belongs to another local spool')
+      const mapping=JSON.parse(await readFile(args.mapping,'utf8')) as Record<string,import('./types.ts').Destination>
+      log(JSON.stringify(await migrateLegacySpool(report,mapping,{root:spoolRoot(home),apply:true})))
+    }else log(JSON.stringify(await inspectLegacySpool(outboxRoot(home))))
+    return 0
+  }catch(error){log((error as Error).message);return 2}
 }

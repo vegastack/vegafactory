@@ -43,3 +43,21 @@ test('the cache directory is created; the server owns the path, not the caller',
   const db = await openCache(nested)
   expect(count(db, 'runs')).toBe(0)
 })
+
+test('immutable events deduplicate across sources, survive one source removal and reject conflicting identity',async()=>{
+  const {Database}=await import('bun:sqlite'),{SCHEMA_SQL}=await import('../src/lib/cache/schema')
+  const {mkdtemp,mkdir,writeFile,rm}=await import('node:fs/promises'),{tmpdir}=await import('node:os'),{join}=await import('node:path')
+  const root=await mkdtemp(join(tmpdir(),'event-cache-')),db=new Database(':memory:');db.exec(SCHEMA_SQL)
+  try{
+    const dir=join(root,'stats','o__r','2026-09','events');await mkdir(dir,{recursive:true})
+    const event={eventId:crypto.randomUUID(),destination:{host:'github.com',org:'o',repo:'o/r',controlRoom:'o/room'},payload:{schemaVersion:2,recordKind:'execution',utcDay:'2026-09-08',stage:'implement',outcome:'succeeded'}}
+    const a=join(dir,'a.json'),b=join(dir,'b.json');await writeFile(a,JSON.stringify(event));await writeFile(b,JSON.stringify(event))
+    const reader={readExport:(bytes:string)=>JSON.parse(bytes)}
+    expect((await refreshCache(db,root,reader)).eventTotal).toBe(1)
+    expect(db.query('select count(*) as n from events').get()).toEqual({n:1})
+    await rm(a);expect((await refreshCache(db,root,reader)).eventTotal).toBe(1)
+    await writeFile(a,JSON.stringify({...event,payload:{...event.payload,outcome:'failed'}}))
+    const conflict=await refreshCache(db,root,reader);expect(conflict.eventTotal).toBe(0);expect(conflict.invalidEvents).toBe(2)
+    expect((await refreshCache(db,root)).invalidEvents).toBe(2)
+  }finally{db.close();await rm(root,{recursive:true,force:true})}
+})

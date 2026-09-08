@@ -81,3 +81,33 @@ test('the fixture summaries are byte-identical to what the writer produces today
   expect(`${stableStringify(rollupOrg([repo], { month: 'SEP-2026', people: false }))}\n`).toBe(read('org.summary.json'))
   expect(`${stableStringify(rollupSkills(records, { month: 'SEP-2026' }))}\n`).toBe(read('org.skills.json'))
 })
+
+test('event readers deduplicate immutable and cross-machine semantic identities before counting',async()=>{
+  const {readMeasurementEvents}=await import('../src/stats/rollup.ts')
+  const destination={host:'github.com' as const,org:'o',repo:'o/r',controlRoom:'o/room'}
+  const event={eventId:crypto.randomUUID(),destination,payload:{schemaVersion:2,recordKind:'activity',utcDay:'2026-09-08',taskRef:'task',activityId:'activity'}}
+  const read=(bytes:string)=>JSON.parse(bytes)
+  const batch=readMeasurementEvents([{source:'a',bytes:JSON.stringify(event)},{source:'b',bytes:JSON.stringify(event)},{source:'c',bytes:JSON.stringify({...event,eventId:crypto.randomUUID()})}],read)
+  expect(batch.events).toHaveLength(1);expect(batch.duplicates).toBe(2);expect(batch.invalid).toEqual([])
+  expect(readMeasurementEvents([{source:'a',bytes:JSON.stringify(event)}]).invalid[0]?.reason).toBe('privacy-reader-unavailable-149')
+  const conflict=readMeasurementEvents([{source:'a',bytes:JSON.stringify(event)},{source:'b',bytes:JSON.stringify({...event,payload:{...event.payload,utcDay:'2026-09-09'}})}],read)
+  expect(conflict.events).toHaveLength(0);expect(conflict.invalid).toHaveLength(2)
+})
+
+test('CLI rollup and show consume unique v2 events through injected owner reader, while production refuses',async()=>{
+  const {mkdtemp,mkdir,writeFile,rm}=await import('node:fs/promises'),{join}=await import('node:path'),{tmpdir}=await import('node:os')
+  const {runStats,parseStatsArgs}=await import('../src/stats/cli.ts')
+  const {normalizeRecord}=await import('../src/stats/record.ts')
+  const home=await mkdtemp(join(tmpdir(),'typed-cli-')),dir=join(home,'stats','o__r','2026-09','events'),lines:string[]=[]
+  try{
+    await mkdir(dir,{recursive:true})
+    const event={eventId:crypto.randomUUID(),destination:{host:'github.com',org:'o',repo:'o/r',controlRoom:'o/room'},payload:{schemaVersion:2,recordKind:'execution',utcDay:'2026-09-08',stage:'implement',outcome:'succeeded'}}
+    await writeFile(join(dir,'a.json'),JSON.stringify(event));await writeFile(join(dir,'b.json'),JSON.stringify(event))
+    const deps:import('../src/stats/cli.ts').StatsDeps={home,cloneRoot:home,hostname:'fixture',ghUser:'robot',login:'robot',isLead:false,policy:{enabled:true,people:false,source:'org',refusal:null},repo:'o/r',git:async()=>{throw Error('no git')},gh:async()=>[],readStdin:async()=>'',readTranscript:async()=>{throw Error('no transcript')},now:()=>new Date('2026-09-08'),log:line=>lines.push(line),exportReader:bytes=>JSON.parse(bytes),measurementRecord:e=>normalizeRecord({repo:e.destination.repo,ts:e.payload.utcDay,stage:e.payload.recordKind==='execution'?e.payload.stage:null,outcome:'complete'})}
+    expect(await runStats(parseStatsArgs(['--json']),deps)).toBe(0)
+    expect(JSON.parse(lines.at(-1)!).runs).toBe(1)
+    expect(await runStats(parseStatsArgs(['rollup','--json']),deps)).toBe(0)
+    expect(await runStats(parseStatsArgs(['--json']),{...deps,exportReader:undefined})).toBe(2)
+    expect(lines.at(-1)).toContain('privacy-reader-unavailable-149')
+  }finally{await rm(home,{recursive:true,force:true})}
+})

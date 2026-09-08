@@ -267,3 +267,25 @@ export function rollupSkills(records: StatsRecord[], options: { month: string })
   }
   return { schemaVersion: 1, month: options.month, skills }
 }
+
+// Transport identity is resolved before #148's metric definitions see any measurements.
+export { readEventBatch as readMeasurementEvents } from './types.ts'
+
+export async function readControlRoomEvents(root:string,reader?:import('./types.ts').ExportReader):Promise<import('./types.ts').EventBatch> {
+  const {readdir,readFile,lstat}=await import('node:fs/promises'),{join}=await import('node:path')
+  const inputs:Array<{source:string;bytes:string}>=[]
+  const walk=async(dir:string):Promise<void>=>{
+    let entries;try{entries=await readdir(dir,{withFileTypes:true})}catch(error){if((error as NodeJS.ErrnoException).code==='ENOENT')return;throw error}
+    for(const entry of entries){
+      if(entry.isSymbolicLink())continue
+      const path=join(dir,entry.name)
+      if(entry.isDirectory())await walk(path)
+      else if(entry.isFile()&&dir.endsWith('/events')&&entry.name.endsWith('.json')){
+        const info=await lstat(path);if(info.size>1024*1024)throw Error('export-event-too-large')
+        inputs.push({source:path,bytes:await readFile(path,'utf8')})
+      }
+    }
+  }
+  await walk(join(root,'stats'))
+  return(await import('./types.ts')).readEventBatch(inputs,reader)
+}

@@ -852,7 +852,15 @@ export async function recordRun(
   deps: { home: string; hostname: string; policy: StatsPolicy; rework?: (repo: string, issue: number) => Promise<ReworkCounts | null> },
 ): Promise<string | null> {
   if (!deps.policy.enabled || deps.policy.refusal) return null
-  if(input.runId){const saved=await readRun(runsRoot(deps.home),input.runId);if(saved.repo!==input.repo||saved.issue!==input.issue||input.attemptId&&saved.attemptId!==input.attemptId)throw Error('durable capture run identity differs');return null}
+  if(input.runId){
+    const saved=await readRun(runsRoot(deps.home),input.runId)
+    if(saved.repo!==input.repo||saved.issue!==input.issue||input.attemptId&&saved.attemptId!==input.attemptId)throw Error('durable capture run identity differs')
+    try {
+      const {registeredCaptureContext,captureTerminalRun}=await import('./stats/record.ts')
+      const context=await registeredCaptureContext(deps.home,saved.repo,saved.checkout)
+      return context ? await captureTerminalRun(deps.home,saved.runId,context.destination,context.policy) : null
+    } catch { return null } // The durable run retains its pending capture; task success is independent.
+  }
   let rework: ReworkCounts | null = null
   if (deps.rework && input.issue !== null) {
     try {
@@ -1824,21 +1832,7 @@ export async function runDispatchCli(argv: string[], home: string): Promise<numb
 
 // The tick's own git runner for the stats push: the operator's existing gh credential, injected per
 // invocation exactly as `sync.ts` does, and never a token in argv or in the clone's config.
-const defaultStatsGit: GitRunner = (args, cwd) => new Promise(resolve => {
-  const child = spawn('git', [...GIT_CREDENTIAL_ARGS, ...args], {
-    cwd,
-    env: { ...process.env, GIT_TERMINAL_PROMPT: '0' },
-    stdio: ['ignore', 'pipe', 'pipe'],
-  })
-  let stdout = ''
-  let stderr = ''
-  child.stdout.setEncoding('utf8')
-  child.stderr.setEncoding('utf8')
-  child.stdout.on('data', (chunk: string) => { stdout += chunk })
-  child.stderr.on('data', (chunk: string) => { stderr += chunk })
-  child.on('error', error => resolve({ code: 1, stdout, stderr: `${stderr}${(error as Error).message}` }))
-  child.on('close', code => resolve({ code: code ?? 1, stdout, stderr }))
-})
+const defaultStatsGit: GitRunner = async (args,cwd,options) => (await import('./stats/push.ts')).boundedTelemetryGit(GIT_CREDENTIAL_ARGS)(args,cwd,options)
 
 // Production shared adapters consume the configured immutable policy. Missing qualification
 // remains a refusal before acquisition; controlled transaction fixtures do not activate a fleet.

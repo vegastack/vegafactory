@@ -2,6 +2,16 @@
 
 The project's story, newest first: what got built, why, and how it went — for the operator's future recall. Format home: the dev-chronicle skill.
 
+## 08-09-2026 — Captured work survives a lost delivery ([#143](https://github.com/vegastack/vegafactory/issues/143))
+
+- **What:** Captured events keep one private identity through concurrent writes, interrupted delivery and explicit legacy migration. Organization destinations remain separate, and duplicate source files no longer create duplicate event counts.
+- **Why:** Mutable machine logs could lose a concurrent append or reach the wrong organization, and a lost push acknowledgment could count the same work again.
+- **How it went:** Real bare Git fixtures and a killed pusher proved recovery from retained attempt bytes. An installed Node hook fixture reached owned terminal capture without trusting foreign sessions. Privacy serialization, composed metrics, final evaluation, independent review and platform qualification remain open under source-first sequencing.
+- **Changed:** Immutable spool and receipts · bounded managed-hook consumer · explicit migration and inspection · CLI and SQLite event identity · protected retention.
+- **Decisions:** none.
+
+— approved by (kmanojkumar) · built by codex · branch codex/productionization-133
+
 ## 08-09-2026 — Execution survives its process ([#138](https://github.com/vegastack/vegafactory/issues/138))
 
 - **What:** Source work adds private run records, an owned cancellation wrapper, durable delivery markers, checkpoint history validation and visible pending status.

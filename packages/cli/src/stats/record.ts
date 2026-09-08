@@ -165,3 +165,85 @@ export function statsPolicyFromEffective(resolved: ReturnType<typeof resolvePoli
     refusal: resolved.ok ? null : resolved.blocks.join('; '),
   }
 }
+
+// The local durable run record is the only terminal capture authority. Vendor stdout
+// has already been reduced by #138; hook inputs never supply measurement payloads.
+export async function captureTerminalRun(home: string, runId: string, destination: import('./types.ts').Destination, policy: StatsPolicy): Promise<string | null> {
+  if (!policy.enabled || policy.refusal) return null
+  const { readRun, runsRoot, acknowledgeTerminalCapture } = await import('../runs.ts')
+  const { hashBytes, validateDestination } = await import('./types.ts')
+  const { enqueueEvent, spoolRoot } = await import('./outbox.ts')
+  const run = await readRun(runsRoot(home), runId)
+  if (run.state !== 'terminal' || run.waitReason || !run.execution || run.terminationCause === 'termination-unconfirmed' || run.repo !== validateDestination(destination).repo) return null
+  const captureKey = `${run.runId}:terminal:0`
+  const delivery = run.pendingDelivery.find(p => p.kind === 'telemetry-capture' && 'captureKey' in p.target && p.target.captureKey === captureKey)
+  if (!delivery?.payload || !delivery.payloadDigest || hashBytes(delivery.payload) !== delivery.payloadDigest) return null
+  const record = parseLocalRecord(JSON.parse(delivery.payload))
+  if (recordProblems(record).length || record.repo !== run.repo || record.issue !== run.issue || record.session_id !== (run.vendorSessionId ?? null)) throw Error('terminal-measurement-identity-mismatch')
+  const event = await enqueueEvent(spoolRoot(home), {
+    schemaVersion: 2, eventId: crypto.randomUUID(), destination, captureKey,
+    payload: { schemaVersion: 2, recordKind: 'execution', utcDay: new Date(record.ts).toISOString().slice(0, 10), stage: run.stage, outcome: run.terminationCause ?? 'interrupted', values: JSON.parse(delivery.payload) },
+  })
+  await acknowledgeTerminalCapture(runsRoot(home), runId, captureKey, delivery.payloadDigest)
+  return event.eventId
+}
+
+export interface ManagedHookInput { harness: 'claude' | 'codex'; event: 'SessionStart' | 'Stop' | 'SessionEnd'; sessionId: string; turnId?: string; cwd: string; stopHookActive: boolean }
+export function parseManagedHook(raw: string): ManagedHookInput | null {
+  if (Buffer.byteLength(raw) > 64 * 1024) return null
+  try {
+    const value = JSON.parse(raw) as ManagedHookInput
+    if (!value || typeof value !== 'object' || Array.isArray(value) || Object.keys(value).some(k => !['harness','event','sessionId','turnId','cwd','stopHookActive'].includes(k)) || !['claude','codex'].includes(value.harness) || !['SessionStart','Stop','SessionEnd'].includes(value.event) || typeof value.stopHookActive !== 'boolean') return null
+    const id = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/
+    if (typeof value.sessionId !== 'string' || !id.test(value.sessionId) || (value.turnId !== undefined && (typeof value.turnId !== 'string' || !id.test(value.turnId))) || typeof value.cwd !== 'string' || !value.cwd.startsWith('/') || value.cwd.length > 4096 || /[\0\r\n]/.test(value.cwd) || value.event === 'Stop' && value.stopHookActive) return null
+    return value
+  } catch { return null }
+}
+
+export async function registeredCaptureContext(home: string, repo: string, checkout: string): Promise<{destination: import('./types.ts').Destination; policy: StatsPolicy; learningEnabled:boolean} | null> {
+  const { readFile } = await import('node:fs/promises'), { join, resolve } = await import('node:path')
+  const { readPrivateRunFile } = await import('../runs.ts')
+  const { parseControlRoomKnob, readFactoryConfig } = await import('../control-room.ts')
+  const { validateDestination } = await import('./types.ts')
+  const raw = await readPrivateRunFile(join(home,'.vegastack','factory.json'))
+  const wire = JSON.parse(raw) as {repos?:Array<{repo:string;path:string;org:string}>}
+  const entries = (wire.repos ?? []).filter(entry => entry.repo === repo && typeof entry.path === 'string' && (checkout === resolve(entry.path) || checkout.startsWith(join(resolve(entry.path),'.vegastack','.worktrees') + '/')))
+  if (entries.length !== 1) return null
+  const devMd = await readFile(join(checkout,'.vegastack','dev.md'),'utf8')
+  const knob = parseControlRoomKnob(devMd), factory = readFactoryConfig(raw)
+  if (!knob || knob.org !== entries[0]!.org || factory.controlRooms[knob.org]?.repo !== knob.repo) return null
+  const { loadConfiguredPolicy } = await import('../../../../skills/dev/dev-setup/scripts/effective-policy.mjs')
+  const effective = loadConfiguredPolicy({home,repo,devMd})
+  const policy = statsPolicyFromEffective(effective)
+  if (!effective.ok || !policy.enabled || policy.refusal) return null
+  return { destination:validateDestination({host:'github.com',org:knob.org,repo,controlRoom:knob.repo}), policy, learningEnabled:effective.policy.values.learning!=='off' }
+}
+
+export async function consumeManagedHook(home: string, raw: string): Promise<{ok:true} | null> {
+  const input = parseManagedHook(raw)
+  if (!input) return null
+  try {
+    // Check the private registry before reading any caller-named directory or run payload.
+    const { join, resolve } = await import('node:path')
+    const { readPrivateRunFile, findOwnedRunSession, runsRoot } = await import('../runs.ts')
+    const registry = JSON.parse(await readPrivateRunFile(join(home,'.vegastack','factory.json'))) as {repos?:Array<{path:string}>}
+    if (!(registry.repos ?? []).some(entry => typeof entry.path === 'string' && (input.cwd === resolve(entry.path) || input.cwd.startsWith(join(resolve(entry.path),'.vegastack','.worktrees') + '/')))) return null
+    const run = await findOwnedRunSession(runsRoot(home),input)
+    if (!run || run.harness !== input.harness) return null
+    const context = await registeredCaptureContext(home,run.repo,run.checkout)
+    if (!context || !context.learningEnabled) return null
+    // #144 may later return a verified context pointer. No pointer is invented here.
+    if (input.event === 'SessionStart' || run.state !== 'terminal') return null
+    return await captureTerminalRun(home,run.runId,context.destination,context.policy) ? {ok:true} : null
+  } catch { return null }
+}
+
+export function parseLocalRecord(value: unknown): StatsRecord {
+  const record=value as StatsRecord
+  if(!record||typeof record!=='object'||Array.isArray(record)||Object.keys(record).some(k=>!RECORD_FIELDS.includes(k as keyof StatsRecord)))throw Error('unknown-local-record-field')
+  if(recordProblems(record).length||!record.tokens||Object.keys(record.tokens).some(k=>!['in','out','cache_read','cache_write'].includes(k))||Object.values(record.tokens).some(v=>v!==null&&(typeof v!=='number'||!Number.isFinite(v)||v<0)))throw Error('invalid-local-record')
+  for(const key of ['issue','parent','duration_s','turns','tool_calls','subagents','cost_usd','review_rounds','fix_rounds','handbacks'] as const){const v=record[key];if(v!==null&&v!==undefined&&(typeof v!=='number'||!Number.isFinite(v)||v<0))throw Error('invalid-local-number')}
+  for(const key of ['stage','harness','model','effort','mode','human','session_id','worktree','outcome'] as const){const v=record[key];if(v!==null&&v!==undefined&&(typeof v!=='string'||v.length>4096||/[\r\n\0]/.test(v)))throw Error('invalid-local-identifier')}
+  if(!Array.isArray(record.skills)||record.skills.some(s=>!s||Object.keys(s).sort().join(',')!=='harness,name,trigger'||!['model','typed','mention'].includes(s.trigger)||typeof s.name!=='string'||typeof s.harness!=='string'||s.name.length>128||s.harness.length>128))throw Error('invalid-local-skills')
+  return normalizeRecord(record)
+}

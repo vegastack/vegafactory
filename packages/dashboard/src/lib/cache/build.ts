@@ -2,6 +2,7 @@ import { mkdir, readFile, readdir, rm, stat } from 'node:fs/promises'
 import { dirname, join, relative, sep } from 'node:path'
 
 import { readRecords, type StatsRecord } from '../stats/record'
+import { readEventBatch, destinationKey, canonicalJson, type ExportReader } from '../../../../cli/src/stats/types'
 import { CACHE_SCHEMA_VERSION, SCHEMA_SQL } from './schema'
 
 export { CACHE_SCHEMA_VERSION } from './schema'
@@ -102,7 +103,7 @@ export async function discoverSources(controlRoom: string): Promise<Source[]> {
       if (entry.isSymbolicLink()) continue
       const path = join(dir, entry.name)
       if (entry.isDirectory()) await walk(path)
-      else if (entry.isFile() && entry.name.endsWith('.jsonl')) {
+      else if (entry.isFile() && (entry.name.endsWith('.jsonl') || dir.endsWith('/events') && entry.name.endsWith('.json'))) {
         const info = await stat(path)
         found.push({ path, relative: relative(controlRoom, path).split(sep).join('/'), size: info.size, mtimeMs: info.mtimeMs })
       }
@@ -134,12 +135,15 @@ export interface RefreshResult {
   skippedLines: number
   /** Runs the cache holds after the pass — its size, not this pass's delta. */
   total: number
+  eventTotal: number
+  invalidEvents: number
+  duplicateEvents: number
 }
 
 // The rebuild rule: a source whose size and mtime match what the cache recorded is left alone; a
 // changed one has its rows deleted and re-inserted; a vanished one has its rows deleted. One
 // stat per file is the whole cost of a warm start.
-export async function refreshCache(db: Db, controlRoom: string): Promise<RefreshResult> {
+export async function refreshCache(db: Db, controlRoom: string, options: {readExport?:ExportReader} = {}): Promise<RefreshResult> {
   const sources = await discoverSources(controlRoom)
   const known = new Map(
     db.query<{ path: string; size: number; mtime_ms: number }>('select path, size, mtime_ms from sources')
@@ -168,6 +172,12 @@ export async function refreshCache(db: Db, controlRoom: string): Promise<Refresh
     if (previous && previous.size === source.size && previous.mtime_ms === source.mtimeMs) continue
 
     const body = await readFile(source.path, 'utf8')
+    if(source.path.endsWith('.json')) {
+      db.query('insert into event_sources(source,bytes) values(?,?) on conflict(source) do update set bytes=excluded.bytes').run(source.relative,body)
+      upsertSource.run(source.relative,source.size,source.mtimeMs,new Date().toISOString())
+      ingested.push(source.relative)
+      continue
+    }
     const { records, skipped } = readRecords(body, source.relative)
     skippedLines += skipped
 
@@ -188,9 +198,22 @@ export async function refreshCache(db: Db, controlRoom: string): Promise<Refresh
     dropSkills.run(path)
     dropRuns.run(path)
     dropSource.run(path)
+    db.query('delete from event_sources where source=?').run(path)
     removed.push(path)
   }
 
+  // Rebuild the small identity index atomically from retained source associations. Removing
+  // one duplicate file never removes the event still supplied by another source.
+  const batch=readEventBatch(db.query<{source:string;bytes:string}>('select source,bytes from event_sources order by source').all(),options.readExport)
+  db.run('begin immediate')
+  try {
+    db.run('delete from events');db.run('delete from invalid_events')
+    const insert=db.query('insert into events(destination,event_id,payload_sha256,payload_json) values(?,?,?,?)')
+    for(const row of batch.events)insert.run(destinationKey(row.event.destination),row.event.eventId,row.payloadSha256,canonicalJson(row.event.payload))
+    const invalid=db.query('insert or replace into invalid_events(source,reason,bytes) values(?,?,?)')
+    for(const row of batch.invalid)invalid.run(row.source,row.reason,row.bytes)
+    db.run('commit')
+  }catch(error){db.run('rollback');throw error}
   const total = db.query<{ n: number }>('select count(*) as n from runs').get()?.n ?? 0
-  return { ingested, removed, skippedLines, total }
+  return { ingested, removed, skippedLines, total, eventTotal:batch.events.length, invalidEvents:batch.invalid.length, duplicateEvents:batch.duplicates }
 }
