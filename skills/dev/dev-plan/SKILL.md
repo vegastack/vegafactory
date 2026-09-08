@@ -40,7 +40,9 @@ Checkboxes belong to the implement session and post empty, because dev-status re
 
 ## Labels and approval
 
-Post the plan → flip to `needs-operator`, assigned to the issue's operator (conventions' Labels table). On the operator's "plan approved": record the schema-v2 event per conventions with `scope=plan`, exact source quotation and current canonical `ArtifactRef`. A policy-operator publisher attests session words; another recorder may only relay a verified identical scoped grant. Evaluate fresh complete history with current brief approval, preserving canonical `approvalBindings`, then flip to `ready` and unassign — an unassigned `ready` issue is what tells the next agent it is free — stop; building is dev-implement's.
+Post a new plan → `needs-operator`, assigned to the issue's operator (conventions' Labels table). Resolve fresh complete approval history against current canonical artifacts first: reuse valid intent covering the requested scope, including a combined brief+plan grant, preserving canonical `approvalBindings`. When new approval is needed, record the operator's actual scope per conventions: `scope=plan` for standalone full-plan approval, `scope=brief+plan` for quick-build inline approval, with exact source quotation and current canonical `ArtifactRef`s. A policy-operator publisher attests session words; another recorder may only relay a verified identical scoped grant.
+
+A requested approval draft must match that disposition: the exact existing event body for reuse, or the applicable new event/verified relay, never a hypothetical substitute. Validate the complete body per conventions. Only after fresh evaluation confirms both current brief and plan approval, flip to `ready` and unassign; stop — building is dev-implement's.
 
 ## The ratchet — one home, this file
 
