@@ -1,7 +1,7 @@
 import { expect, test } from 'bun:test'
 import { createHash } from 'node:crypto'
 import { verifyArtifactBytes, assertPairVersions, assertScanEvidence, readPackageArchive, dashboardDescriptor, verifyDashboardDescriptor, materializeTree } from './release-artifacts.mjs'
-import { mkdtemp, mkdir, writeFile, symlink, readFile } from 'node:fs/promises'
+import { mkdtemp, mkdir, writeFile, symlink, readFile, chmod, rm, link } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { gzipSync } from 'node:zlib'
@@ -91,3 +91,92 @@ test('actual workflow recovery command permits a failed preparation retry and re
  fixture.jobs[0]!.steps[0]!.conclusion='failure';const uncertain=run(fixture);expect(uncertain.status).not.toBe(0);expect(uncertain.stderr).toContain('uncertain')
  const reuse=run({...fixture,artifacts:[{name:'release-pair-a-attempt-1',id:42,expired:false}]});expect(reuse.status).toBe(0);expect(JSON.parse(reuse.stdout)).toMatchObject({prepare:'false','artifact-id':42})
 })
+
+
+import { CLI, DASHBOARD, extractPackage, packPair, verifyInstalledRuntime } from './release-artifacts.mjs'
+import { verifyInstalledRuntimeBinding } from '../packages/cli/src/runs.ts'
+const runtimeSha = (bytes: Buffer | string) => createHash('sha256').update(bytes).digest('hex')
+const runtimeSource = 'a'.repeat(40), runtimeTree = 'b'.repeat(40)
+async function runtimeFixture() {
+ const home=await realpath(await mkdtemp(join(tmpdir(),'installed-runtime-'))), directory=join(home,'pair'), installedRoot=join(home,'installed')
+ await mkdir(directory)
+ const dashboard=packed(), descriptor=dashboardDescriptor(dashboard,'1.0.0')
+ const cli=archive([
+  {path:'package/package.json',data:JSON.stringify({name:CLI,version:'1.0.0'})},
+  {path:'package/dist/index.js',data:'// CLI'}, {path:'package/dist/run-wrapper.js',data:'// wrapper'},
+  {path:'package/dist/dashboard-artifact.json',data:JSON.stringify(descriptor)},
+  {path:'package/skill/z/SKILL.md',data:'skill'}, {path:'package/README.md',data:'readme'},
+  {path:'package/LICENSE',data:'license'}, {path:'package/skill-integrity.json',data:'{}'},
+  {path:'package/dist/index.js.map',data:'{}'}, {path:'package/Z.txt',data:'Z'}, {path:'package/a.txt',data:'a'},
+ ])
+ const artifacts=[]
+ for(const [name,file,bytes] of [[DASHBOARD,'dashboard.tgz',dashboard],[CLI,'cli.tgz',cli]] as const) {
+  await writeFile(join(directory,file),bytes)
+  artifacts.push({name,file,sha256:runtimeSha(bytes),integrity:'sha512-'+createHash('sha512').update(bytes).digest('base64'),bytes:bytes.length})
+ }
+ await extractPackage(cli,installedRoot)
+ return {home,cli,manifest:{schemaVersion:1,sourceSha:runtimeSource,treeSha:runtimeTree,version:'1.0.0',artifacts},directory,installedRoot,expectedSourceSha:runtimeSource,expectedTreeSha:runtimeTree}
+}
+test('installed runtime producer binds the full retained pair and matches the independent runtime consumer',async()=>{
+ const f=await runtimeFixture(), binding=await verifyInstalledRuntime(f)
+ const entries=readPackageArchive(f.cli).map(({path,mode,sha256}:any)=>({path,mode,sha256}))
+ expect(binding).toEqual({schemaVersion:1,sourceSha:runtimeSource,treeSha:runtimeTree,packageName:CLI,version:'1.0.0',tarballSha256:runtimeSha(f.cli),inventoryDigest:runtimeSha(JSON.stringify(entries))})
+ await verifyInstalledRuntimeBinding(binding,f.installedRoot,join(f.installedRoot,'dist/index.js'))
+ await expect(verifyInstalledRuntimeBinding(binding,f.installedRoot,join(f.installedRoot,'dist/run-wrapper.js'))).rejects.toThrow('outside')
+})
+test('installed runtime producer refuses missing, changed, extra files and directories, modes and links',async()=>{
+ const f=await runtimeFixture()
+ const reset=async()=>{await rm(f.installedRoot,{recursive:true,force:true});await extractPackage(f.cli,f.installedRoot)}
+ const target=()=>join(f.installedRoot,'README.md')
+ const mutations=[
+  async()=>writeFile(target(),'changed'),async()=>rm(target()),async()=>writeFile(join(f.installedRoot,'extra'),'extra'),
+  async()=>mkdir(join(f.installedRoot,'extra-empty-directory')),async()=>chmod(target(),0o755),async()=>chmod(target(),0o600),
+  async()=>{await rm(target());await symlink('LICENSE',target())},
+  async()=>{await rm(target());await link(join(f.installedRoot,'LICENSE'),target())},
+  async()=>{await rm(join(f.installedRoot,'skill'),{recursive:true});await symlink('../pair',join(f.installedRoot,'skill'))},
+  async()=>{await rm(f.installedRoot,{recursive:true});await symlink('pair',f.installedRoot)},
+ ]
+ for(const mutate of mutations){await mutate();await expect(verifyInstalledRuntime(f)).rejects.toThrow();await reset()}
+ const alias=join(f.home,'alias');await symlink(f.home,alias)
+ await expect(verifyInstalledRuntime({...f,installedRoot:join(alias,'installed')})).rejects.toThrow('link')
+ if(process.platform!=='win32') {
+  const fifo=spawnSync('mkfifo',[join(f.installedRoot,'fifo')],{encoding:'utf8'})
+  expect(fifo.status).toBe(0);await expect(verifyInstalledRuntime(f)).rejects.toThrow()
+ }
+})
+test('installed runtime producer requires trusted source/tree and refuses changed retained bytes or pair identity',async()=>{
+ const f=await runtimeFixture()
+ for(const change of [{expectedSourceSha:'c'.repeat(40)},{expectedTreeSha:'c'.repeat(40)},{expectedSourceSha:undefined},{expectedTreeSha:'invalid'},
+  {manifest:{...f.manifest,sourceSha:'c'.repeat(40)}},{manifest:{...f.manifest,treeSha:'c'.repeat(40)}},
+  {manifest:{...f.manifest,version:'2.0.0'}},{manifest:{...f.manifest,artifacts:f.manifest.artifacts.slice(1)}}]) {
+  await expect(verifyInstalledRuntime({...f,...change})).rejects.toThrow()
+ }
+ const otherDashboard=archive([{path:'package/package.json',data:JSON.stringify({name:DASHBOARD,version:'1.0.0'})},{path:'package/dist-standalone/server.js',data:'other build'}])
+ await writeFile(join(f.directory,'dashboard.tgz'),otherDashboard)
+ const substituted={...f.manifest,artifacts:f.manifest.artifacts.map(a=>a.name===DASHBOARD?{...a,sha256:runtimeSha(otherDashboard),integrity:'sha512-'+createHash('sha512').update(otherDashboard).digest('base64'),bytes:otherDashboard.length}:a)}
+ await expect(verifyInstalledRuntime({...f,manifest:substituted})).rejects.toThrow('descriptor')
+ await writeFile(join(f.directory,'dashboard.tgz'),packed())
+ await writeFile(join(f.directory,'cli.tgz'),Buffer.concat([f.cli,Buffer.from('changed')]))
+ await expect(verifyInstalledRuntime(f)).rejects.toThrow('artifact bytes changed')
+ await writeFile(join(f.directory,'cli.tgz'),f.cli)
+ await writeFile(join(f.directory,'dashboard.tgz'),packed().subarray(0,20))
+ await expect(verifyInstalledRuntime(f)).rejects.toThrow('artifact bytes changed')
+})
+test('installed runtime producer verifies a real npm packed and offline installed fixture without normalizing modes',async()=>{
+ const home=await realpath(await mkdtemp(join(tmpdir(),'npm-runtime-'))),directory=join(home,'pair'),consumer=join(home,'consumer')
+ for(const folder of ['packages/cli/dist','packages/cli/skill/fixture','packages/dashboard'])await mkdir(join(home,folder),{recursive:true})
+ await writeFile(join(home,'packages/dashboard/package.json'),JSON.stringify({name:DASHBOARD,version:'1.0.0'}))
+ await writeFile(join(home,'packages/cli/package.json'),JSON.stringify({name:CLI,version:'1.0.0',bin:{vegafactory:'dist/index.js'},files:['dist','skill','skill-integrity.json','README.md','LICENSE']}))
+ for(const [path,data,mode] of [['dist/index.js','#!/usr/bin/env node\nconsole.log("1.0.0")\n',0o755],['dist/run-wrapper.js','// wrapper',0o644],['dist/index.js.map','{}',0o644],['skill/fixture/SKILL.md','fixture',0o644],['skill-integrity.json','{}',0o644],['README.md','fixture',0o644],['LICENSE','fixture',0o644]] as const)await writeFile(join(home,'packages/cli',path),data,{mode})
+ const manifest=await packPair(home,directory,{sourceSha:runtimeSource,treeSha:runtimeTree,version:'1.0.0',toolchain:{fixture:true},checkEvidence:{ok:false},scanEvidence:{ok:false}})
+ const tarball=manifest.artifacts.find((a:any)=>a.name===CLI)!
+ const result=spawnSync('npm',['install','--ignore-scripts','--offline','--no-audit','--no-fund','--prefix',consumer,join(directory,tarball.file)],{cwd:home,env:{...process.env,HOME:home,npm_config_cache:join(home,'cache')},encoding:'utf8',timeout:30000})
+ expect({status:result.status,stderr:result.stderr}).toMatchObject({status:0})
+ const installedRoot=join(consumer,'node_modules',CLI)
+ const input={manifest,directory,installedRoot,expectedSourceSha:runtimeSource,expectedTreeSha:runtimeTree}
+ const binding=await verifyInstalledRuntime(input)
+ await verifyInstalledRuntimeBinding(binding,installedRoot,join(installedRoot,'dist/index.js'))
+ expect(spawnSync('node',[join(installedRoot,'dist/index.js')],{cwd:home,encoding:'utf8'}).stdout.trim()).toBe('1.0.0')
+ await chmod(join(installedRoot,'dist/index.js'),0o644)
+ await expect(verifyInstalledRuntime(input)).rejects.toThrow('inventory')
+},30000)

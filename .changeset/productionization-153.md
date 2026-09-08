@@ -7,3 +7,4 @@ Prepare and verify one immutable CLI/dashboard release pair before publication, 
 
 - Retain the finalized pair before publication, guard failed-preparation retries, and reconcile per-package promotion under one release workflow.
 - Bind build/runtime SBOM evidence, bound registry reads, and integrate descriptor-backed paired CI packing.
+- Verify every installed CLI file and mode against the retained pair and trusted candidate source/tree before producing external runtime identity evidence.

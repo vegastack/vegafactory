@@ -438,6 +438,8 @@ The project's story, newest first: what got built, why, and how it went — for 
 
 Release preparation now packs the dashboard first and embeds its exact identity in the CLI before packing the installer. The retained pair is checked in isolation, and publication resumes through registry readback rather than rebuilding or guessing that a network error means a version is absent. Candidate staging and first-use smoke precede promotion. Actual publication, provenance and final platform qualification remain separate evidence gates.
 
+8 September: installed CLI runtime evidence now compares every packaged file and mode with the retained pair and trusted source/tree before qualification. Producer-consumer tests include a real offline npm fixture; final candidate qualification remains pending.
+
 Review corrections retain the finalized pair before publication, bind every required SBOM, serialize live publishers through the Release workflow, and preserve each promotion readback. Synthetic process fixtures exercise the actual preparation/publication commands, loopback registry, installed CLI and server; current-source full preparation remains blocked by the separate expired scanner baseline disposition.
 
 
