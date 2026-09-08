@@ -7,23 +7,30 @@
 // Usage: node preflight.mjs --issue <n> [--repo owner/name] [--me <login>] [--dev-md <path>] --json
 // --stage plan requires brief intent; implementation requires brief+plan.
 // --consolidated-request <json> reads an exact pinned parent selection.
-import { readFileSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
+import { homedir } from 'node:os';
 import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { GhUnavailable, ghJson, parseFlags, renderResult } from './lib/gh.mjs';
 import { evaluateApprovals, readApprovalSources, gatherConsolidatedApproval, parseStrictJson, readPages } from './lib/approval.mjs';
+const policyUrl = new URL('./effective-policy.mjs', import.meta.url);
+const { resolveState, readWorkflowLabels, loadConfiguredPolicy, DEFAULT_LABELS } = await import(existsSync(policyUrl) ? policyUrl.href : new URL('../../dev-setup/scripts/effective-policy.mjs', import.meta.url).href);
 
-export function evaluatePreflight({ issue, comments, devMd, me, expect = 'ready', stage = 'implement', sourceComments = [] }) {
+export function evaluatePreflight({ issue, comments, devMd, me, expect = 'ready', stage = 'implement', sourceComments = [], configuredPolicy = null }) {
   const blocks = [];
   const warns = [];
   const labels = (issue.labels ?? []).map((l) => l.name);
 
   if (issue.state && issue.state !== 'open') blocks.push(`issue is ${issue.state} — only open issues are workable`);
-  const STATE_LABELS = ['needs-operator', 'needs-plan', 'ready', 'working', 'for-operator'];
-  const state = STATE_LABELS.filter((s) => labels.includes(s));
-  if (!state.includes(expect)) {
-    blocks.push(`issue state label is [${state.join(', ') || 'none'}], expected ${expect} (fresh start: ready · resume: working with the operator's handover · corrections: for-operator)`);
-  }
+  let labelMap;
+  try { labelMap = configuredPolicy?.policy.values['workflow-labels'] ?? readWorkflowLabels(devMd ?? ''); }
+  catch (error) { blocks.push(error.message); }
+  if (configuredPolicy) blocks.push(...configuredPolicy.blocks);
+  const resolvedState = resolveState(labels, labelMap);
+  blocks.push(...resolvedState.blocks);
+  const expectedState = Object.entries(DEFAULT_LABELS).find(([key, name]) => key === expect || name === expect)?.[0];
+  if (!expectedState || resolvedState.state !== expectedState) blocks.push('issue state label is ' + (resolvedState.state ?? 'unresolved') + ', expected ' + expect);
+
 
   const scope = ['research', 'quick-build', 'full-plan'].filter((s) => labels.includes(s));
   if (scope.length !== 1) blocks.push(`issue needs exactly one scope label (research | quick-build | full-plan), found: ${scope.join(', ') || 'none'}`);
@@ -69,12 +76,12 @@ export function evaluatePreflight({ issue, comments, devMd, me, expect = 'ready'
     blocks.push(`issue repo ${issue.repo} does not match dev.md repo ${repoLine[1]}`);
   }
 
-  return { blocks, warns, bindings: approval.bindings, approvalIds: approval.approvalIds, approvalBindings: approval.approvalBindings };
+  return { state: resolvedState.state, labelMap, blocks, warns, bindings: approval.bindings, approvalIds: approval.approvalIds, approvalBindings: approval.approvalBindings };
 }
 
 // Both CLI and dispatcher use this owner reader and evaluator. The injected
 // reader is transport only, never an approval verdict or policy override.
-export async function gatherAndEvaluate(flags, { readJson = async (args) => ghJson(args), devMd: suppliedDevMd } = {}) {
+export async function gatherAndEvaluate(flags, { readJson = async (args) => ghJson(args), devMd: suppliedDevMd, configuredPolicy } = {}) {
   const pages = (args) => readPages(readJson, args);
   const repo = flags.repo || (await readJson(['repo', 'view', '--json', 'nameWithOwner'])).nameWithOwner;
   if (flags['consolidated-request']) {
@@ -95,7 +102,7 @@ export async function gatherAndEvaluate(flags, { readJson = async (args) => ghJs
   const devMd = suppliedDevMd ?? readFileSync(flags['dev-md'] || '.vegastack/dev.md', 'utf8');
   const sourceComments = await readApprovalSources(comments, readJson);
   const me = flags.me || (await readJson(['api', 'user'])).login;
-  return evaluatePreflight({ issue: { ...raw, repo, blockedBy }, comments, devMd, me, sourceComments,
+  return evaluatePreflight({ issue: { ...raw, repo, blockedBy }, comments, devMd, me, sourceComments, configuredPolicy: configuredPolicy ?? loadConfiguredPolicy({ home: homedir(), repo, devMd }),
     expect: flags.expect || 'ready', stage: flags.stage || 'implement' });
 }
 

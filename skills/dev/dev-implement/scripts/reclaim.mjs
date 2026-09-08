@@ -12,12 +12,14 @@
 // before any mutation, so a block never leaves a half-released issue.
 // Usage: node reclaim.mjs --issue <n> [--repo o/r] [--orphan-hours 6] [--force] [--json]
 import { execFileSync } from 'node:child_process';
+import { existsSync, readFileSync } from 'node:fs';
+import { homedir } from 'node:os';
 import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { GhUnavailable, findMarkerComment, ghJson, parseFlags, renderResult } from './lib/gh.mjs';
+const policyUrl = new URL('./effective-policy.mjs', import.meta.url);
+const { resolveState, readWorkflowLabels, loadConfiguredPolicy } = await import(existsSync(policyUrl) ? policyUrl.href : new URL('../../dev-setup/scripts/effective-policy.mjs', import.meta.url).href);
 
-const WORKING = 'working';
-const READY = 'ready';
 // stdio mode for a discarded fd, hoisted out of quote-adjacency: SkillSpector reads the
 // bare word beside its own closing quote as a removal cue and fails closed on the whole
 // file (skill-maintainer's standards.md, known behaviours). Same value, same behaviour.
@@ -27,12 +29,17 @@ const ageHours = (iso, now) => Math.floor((now - Date.parse(iso)) / 3_600_000);
 
 // Read-verify: the deterministic facts that must hold before a release. Returns
 // { blocks, plan } — plan is the mutation to run when blocks is empty.
-export function evaluateReclaim({ issue, comments, orphanHours = 6, force = false, now = Date.now() }) {
+export function evaluateReclaim({ issue, comments, devMd = '', configuredPolicy = null, orphanHours = 6, force = false, now = Date.now() }) {
   const blocks = [];
   const labels = (issue.labels ?? []).map((l) => l.name);
 
   if (issue.state && issue.state !== 'open') blocks.push(`issue is ${issue.state} — only an open working issue can be reclaimed`);
-  if (!labels.includes(WORKING)) blocks.push(`issue is not '${WORKING}' (labels: [${labels.join(', ') || 'none'}]) — nothing to reclaim`);
+  let labelMap;
+  try { labelMap = configuredPolicy?.policy.values['workflow-labels'] ?? readWorkflowLabels(devMd); } catch (error) { blocks.push(error.message); }
+  if (configuredPolicy) blocks.push(...configuredPolicy.blocks);
+  const resolvedState = resolveState(labels, labelMap);
+  blocks.push(...resolvedState.blocks);
+  if (resolvedState.state !== 'working') blocks.push("issue is not 'working' — nothing to reclaim");
 
   const moved = findMarkerComment(comments, 'ledger')?.comment?.updated_at ?? null;
   const ageH = moved ? ageHours(moved, now) : null;
@@ -43,7 +50,7 @@ export function evaluateReclaim({ issue, comments, orphanHours = 6, force = fals
   const assignees = (issue.assignees ?? []).map((a) => a.login);
   return {
     blocks,
-    plan: { removeAssignees: assignees, ledgerAgeHours: ageH },
+    plan: { labelMap, state: resolvedState.state, removeAssignees: assignees, ledgerAgeHours: ageH },
   };
 }
 
@@ -64,14 +71,19 @@ export function gatherAndReclaim(flags) {
   // bounded parser for the whole skill (skill-maintainer's standards.md, known behaviours).
   const raw = ghJson(['api', 'repos/' + repo + '/issues/' + issueNumber]);
   const comments = ghJson(['api', 'repos/' + repo + '/issues/' + issueNumber + '/comments', '--paginate']);
+  const devMd = readFileSync(flags['dev-md'] || '.vegastack/dev.md', 'utf8');
+  const configuredPolicy = loadConfiguredPolicy({ home: homedir(), repo, devMd });
   const orphanRaw = Number(flags['orphan-hours']);
   const { blocks, plan } = evaluateReclaim({
     issue: { state: raw.state, labels: raw.labels, assignees: raw.assignees },
     comments,
+    devMd, configuredPolicy,
     orphanHours: Number.isFinite(orphanRaw) && orphanRaw >= 1 ? orphanRaw : 6,
     force: Boolean(flags.force),
   });
   if (blocks.length > 0) return { blocks, warns: [] };
+
+  const WORKING = plan.labelMap.working, READY = plan.labelMap.ready;
 
   // Mutations, only past a clean read-verify. Label swap first (frees the
   // claim), then unassign, then the operator-visible note.

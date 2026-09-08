@@ -27,6 +27,7 @@ test('every failure is a reason: an HTTP error, a thrown fetch, a missing or fai
   expect((await fetchOpenIssues({ repo: 'a/b', token: 't', fetchImpl: async () => { throw new Error('offline') } })).ok).toBe(false)
   const ok = await readStatus({ bin: join(import.meta.dirname, 'fixtures', 'status-stub.mjs') })
   expect(ok.ok && ok.data.repos[0]!.board.ready).toBe(2)
+  expect(ok.ok && ok.data.repos[0]!.workflow?.labelMap?.ready).toBe('Go')
   expect(await readStatus({ bin: null })).toEqual({ ok: false, reason: 'no vegafactory binary was passed to the dashboard' })
   expect((await readStatus({ bin: join(import.meta.dirname, 'fixtures', 'absent.mjs') })).ok).toBe(false)
 })
@@ -140,4 +141,25 @@ test('142 malformed issue labels cannot turn an observed row into an apparently 
   const result = await fetchOpenIssues({ repo: 'a/b', token: null, fetchImpl: async () => httpPage([{ id: 1, number: 1, title: 'unreadable labels', labels: null }]) })
   expect(result.snapshot.complete).toBe(false)
   expect(result.snapshot.reason).toContain('labels')
+})
+
+test('141 standalone status bridge consumes actual CLI JSON without a sibling skill', async () => {
+  const { mkdtempSync, mkdirSync, writeFileSync, copyFileSync } = await import('node:fs')
+  const { tmpdir } = await import('node:os')
+  const root = mkdtempSync(join(tmpdir(), 'vsk-status-bridge-'))
+  mkdirSync(join(root, '.vegastack'))
+  const map = { needsOperator: 'Decision', needsPlan: 'Plan', ready: 'Go', working: 'Build', forOperator: 'Review' }
+  writeFileSync(join(root, '.vegastack/dev.md'), 'workflow-labels: ' + JSON.stringify(map))
+  writeFileSync(join(root, 'factory.json'), JSON.stringify({ repos: [{ path: root, repo: 'acme/app', org: 'acme' }] }))
+  const cliSource = join(import.meta.dirname, '../../cli/src/status.ts')
+  const bin = join(root, 'status-cli')
+  writeFileSync(bin, '#!' + process.execPath + '\nimport {runStatusCli} from ' + JSON.stringify(cliSource) + ';\nawait runStatusCli(["--json","--config",' + JSON.stringify(join(root, 'factory.json')) + '], ' + JSON.stringify(root) + ', {gh:async()=>JSON.stringify({total_count:1,incomplete_results:false,items:[{number:1,node_id:"I_1",title:"Custom",labels:[{name:"Go"}],assignees:[]}]}),worktrees:async()=>[],logs:async()=>[]});\n', { mode: 0o755 })
+  // Only the bridge module is copied: its runtime uses Node, not repository or skill imports.
+  copyFileSync(join(import.meta.dirname, '../src/lib/live/status.ts'), join(root, 'bridge.ts'))
+  const bridge = await import(join(root, 'bridge.ts'))
+  const result = await bridge.readStatus({ bin })
+  expect(result.ok).toBe(true)
+  expect(result.data.repos[0].workflow.labelMap).toEqual(map)
+  expect(result.data.repos[0].workflow.issues[0].state).toBe('ready')
+  expect(result.data.repos[0].workflow.complete).toBe(true)
 })

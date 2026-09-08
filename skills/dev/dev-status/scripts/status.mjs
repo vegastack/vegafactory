@@ -8,19 +8,16 @@ import { existsSync, readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+const policyUrl = new URL('./effective-policy.mjs', import.meta.url);
+const { resolveState, readWorkflowLabels } = await import(existsSync(policyUrl) ? policyUrl.href : new URL('../../dev-setup/scripts/effective-policy.mjs', import.meta.url).href);
 
-const DEFAULT_LABELS = ['needs-operator', 'needs-plan', 'ready', 'working', 'for-operator', 'risky', 'research', 'quick-build', 'full-plan', 'epic'];
-
-// The labels: knob lists names positionally (5 states, risky, 3 scopes, epic —
-// the dev-profile template order); a project that renamed labels still parses.
 export function readKnobs(devMdText) {
-  const labelsLine = /^labels:\s*([^\n#]+)/m.exec(devMdText ?? '')?.[1]?.trim();
-  const names = labelsLine ? labelsLine.split(/\s+/) : DEFAULT_LABELS;
-  const labels = names.length >= 10 ? names : DEFAULT_LABELS;
+  const labelMap = readWorkflowLabels(devMdText ?? '');
   return {
-    states: labels.slice(0, 5),
-    risky: labels[5],
-    scopes: labels.slice(6, 9),
+    labelMap,
+    states: Object.values(labelMap),
+    risky: 'risky',
+    scopes: ['research', 'quick-build', 'full-plan'],
     register: /^decisions:\s*(\S+)/m.exec(devMdText ?? '')?.[1] ?? '.vegastack/decisions.md',
     operators: (/^operators:\s*([^\n#]+)/m.exec(devMdText ?? '')?.[1] ?? '')
       .split(',').map((t) => t.trim()).filter(Boolean),
@@ -234,10 +231,19 @@ export function gatherStatus({ repo, orphanHours = 6, devMdPath = '.vegastack/de
   const viewer = me || gh(['api', 'user']).login;
   const devMdText = existsSync(devMdPath) ? readFileSync(devMdPath, 'utf8') : '';
   const knobs = readKnobs(devMdText);
-  const board = {};
+  const board = { unresolved: [] };
+  const unresolvedSeen = new Set();
   for (const label of knobs.states) {
     board[label] = gh(['issue', 'list', '-R', resolvedRepo, '--label', label, '--state', 'open',
-      '--json', 'number,title,url,updatedAt,labels,assignees,author']).map((i) => ({
+      '--json', 'number,title,url,updatedAt,labels,assignees,author']).filter((i) => {
+        const state = resolveState((i.labels ?? []).map(l => l.name), knobs.labelMap);
+        if (state.blocks.length) {
+          if (!unresolvedSeen.has(i.number)) board.unresolved.push({ ...i, state: null, blocks: state.blocks });
+          unresolvedSeen.add(i.number);
+          return false;
+        }
+        return knobs.labelMap[state.state] === label;
+      }).map((i) => ({
       number: i.number, title: i.title, url: i.url,
       ageDays: ageDays(i.updatedAt, now),
       scope: (i.labels ?? []).map((l) => l.name).find((n) => knobs.scopes.includes(n)) ?? null,

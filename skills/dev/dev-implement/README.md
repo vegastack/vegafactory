@@ -24,6 +24,7 @@ npx @vegastack/vegafactory skills add --group dev --global
 |---|---|
 | [SKILL.md](SKILL.md) | Agent entry point: preflight, claim, dark-mode bounds, verify, review modes, evidence contract, corrections loop |
 | [agents/openai.yaml](agents/openai.yaml) | Codex interface metadata |
+| scripts/effective-policy.mjs (installed copy) | Canonical workflow label map and exclusive state resolution, copied from dev-setup |
 | references/conventions.md (installed copy) | The workflow artifact spec, duplicated into every dev-family install |
 | scripts/questions.mjs (installed copy) | The ask round renderer, parser and route decision, duplicated in from dev-setup |
 | references/ask-route.md (installed copy) | The ask route: tool or issue, the questions comment format, the reply grammar |

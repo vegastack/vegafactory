@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto'
 import { expect, test } from 'bun:test'
 import { acrossRepos } from '../src/lib/live/github'
 import { buildBoardView } from '../src/lib/views/board'
@@ -5,10 +6,10 @@ import { buildDispatcherView } from '../src/lib/views/dispatcher'
 import { contextFixture } from './helpers/context'
 
 const now = Date.parse('2026-09-03T12:00:00.000Z')
-const issue = (n: number, label: string) => ({ number: n, title: `#${n}`, labels: [label], assignees: [], updatedAt: '2026-09-03T10:00:00Z', url: `https://x/${n}` })
+const issue = (n: number, label: string) => ({ number: n, title: `#${n}`, labels: [label], assignees: [], updatedAt: '2026-09-03T10:00:00Z', url: `https://x/${n}`, repo: 'vegastack/vegafactory', nodeId: `I_${n}` })
 const report = {
   dispatcher: { running: true, pid: 4242, lastTick: '2026-09-03T11:59:00.000Z', interval: 120 },
-  repos: [{ repo: 'vegastack/vegafactory', dispatch: 'local', board: { needsPlan: 1, ready: 2, working: 0, forOperator: 3 }, worktrees: [{ path: '/w/122', branch: 'feat/122', issue: 122, state: 'clean' }], runs: [] }],
+  repos: [{ workflow: { repo: 'vegastack/vegafactory', policyDigest: 'a'.repeat(64), observedAt: new Date(now).toISOString(), complete: true, labelMap: { needsOperator: 'needs-operator', needsPlan: 'needs-plan', ready: 'ready', working: 'working', forOperator: 'for-operator' }, blocks: [], issues: [{number:122,nodeId:'I_122',labelsDigest:createHash('sha256').update(JSON.stringify(['needs-plan'])).digest('hex'),state:'needsPlan' as const,blocks:[]},{number:121,nodeId:'I_121',labelsDigest:createHash('sha256').update(JSON.stringify(['ready'])).digest('hex'),state:'ready' as const,blocks:[]}] }, repo: 'vegastack/vegafactory', dispatch: 'local', board: { needsPlan: 1, ready: 2, working: 0, forOperator: 3 }, worktrees: [{ path: '/w/122', branch: 'feat/122', issue: 122, state: 'clean' }], runs: [] }],
 }
 const live = { ok: true as const, data: report }
 
@@ -55,9 +56,11 @@ test('one repo failing keeps every other repo\'s rows and names every failure', 
 
   const context = await contextFixture({ month: 'SEP-2026' })
   const view = buildBoardView({ context, now, issues: partial.live, pulls: { ok: true, data: [] }, status: live, warnings: partial.reasons })
-  expect(view.columns[2]!.issues).toHaveLength(2)
+  expect(view.columns.at(-1)!.label).toBe('Unresolved')
+  expect(view.columns.at(-1)!.issues).toHaveLength(2)
   expect(view.freshness.offline).toBe(true)
-  expect(view.reasons).toEqual(partial.reasons)
+  expect(view.reasons).toEqual(expect.arrayContaining(partial.reasons))
+  expect(view.reasons.join()).toContain('workflow identity missing')
 })
 
 test('142 reproduction: partial repository observation stays explicit when it has no matching rows', async () => {
@@ -113,4 +116,35 @@ test('142 actual page renders successful and partial repositories without false 
   expect(result.html).not.toContain('role="alert"')
   expect(result.html).not.toContain('aria-live=')
   expect(result.calls).toHaveLength(5)
+})
+
+
+test('141 board joins two custom maps by repository/node/digest; conflicts and stale rows stay visible once', async () => {
+  const context = await contextFixture({ month: 'SEP-2026' })
+  const maps = [
+    { needsOperator: 'Decision', needsPlan: 'Plan', ready: 'Go', working: 'Build', forOperator: 'Review' },
+    { needsOperator: 'Decide', needsPlan: 'Sketch', ready: 'Start', working: 'Making', forOperator: 'Inspect' },
+  ]
+  const rows = maps.map((map, i) => ({ ...issue(i + 1, map.ready), repo: 'acme/r' + i }))
+  const snapshots = rows.map((row, i) => ({ ...report.repos[0]!, repo: row.repo, workflow: {
+    repo: row.repo, policyDigest: 'b'.repeat(64), observedAt: new Date(now).toISOString(), complete: true,
+    labelMap: maps[i]!, blocks: [], issues: [{ number: row.number, nodeId: row.nodeId,
+      labelsDigest: createHash('sha256').update(JSON.stringify(row.labels)).digest('hex'), state: 'ready' as const, blocks: [] }],
+  } }))
+  const render = (repos = snapshots, data = rows) => buildBoardView({ context, now, issues: { ok: true, data }, pulls: { ok: true, data: [] }, status: { ok: true, data: { ...report, repos } } })
+  expect(render().columns[2]!.issues).toHaveLength(2)
+  expect(render().issuesComplete).toBe(true)
+  const changed = render(snapshots, [{ ...rows[0]!, labels: ['Go', 'Decision'] }, rows[1]!])
+  expect(changed.columns.at(-1)!.issues.map(row => row.number)).toEqual([1])
+  expect(changed.reasons.join()).toContain('labels changed')
+  snapshots[0]!.workflow.observedAt = '2026-09-01T00:00:00Z'
+  expect(render().reasons.join()).toContain('stale')
+  snapshots[0]!.workflow.observedAt = new Date(now).toISOString()
+  const conflict = snapshots[0]!.workflow.issues[0]!
+  Object.assign(conflict, { state: null, blocks: ['conflicting state labels: Go, Decision'] })
+  expect(render().columns.flatMap(column => column.issues).map(row => row.number).sort()).toEqual([1, 2])
+  expect(render().reasons.join()).toContain('conflicting')
+  const missing = buildBoardView({ context, now, issues: { ok: true, data: rows }, pulls: { ok: true, data: [] }, status: { ok: true, data: { ...report, repos: [] } } })
+  expect(missing.columns.at(-1)!.label).toBe('Unresolved')
+  expect(missing.columns.at(-1)!.issues).toHaveLength(2)
 })

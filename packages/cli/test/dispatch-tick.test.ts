@@ -937,3 +937,16 @@ readline.createInterface({input:process.stdin}).on('line',line=>{
     }
   }, 30000)
 }
+
+test('141 actual tick uses custom ready and refuses mixed custom correction rockets', async () => {
+  const map = { needsOperator: 'Decision', needsPlan: 'Plan', ready: 'Go', working: 'Build', forOperator: 'Review' }
+  const { config } = fixture({ devMd: 'dispatch: local\noperators: mk\nplan: claude fable-5-1 high\nimplement: claude fable-5-1 high\nworkflow-labels: ' + JSON.stringify(map) })
+  const { gh } = ghStub({ ready: [{ number: 8, title: 'custom', labels: ['Go'] }], forOperator: [{ number: 9, title: 'mixed', labels: ['Review', 'Decision'], assignees: ['mk'] }] }, args => {
+    if (args[1] === 'repos/acme/app/issues/9/comments') return JSON.stringify([{ id: 555, body: 'Correct this.', reactions: { rocket: 1 } }])
+    if (args[1] === 'repos/acme/app/issues/comments/555/reactions') return JSON.stringify([{ id: 999, content: 'rocket', user: { login: 'mk' } }])
+    return null
+  })
+  const result = await runTick(config, { dryRun: true }, { gh, ensureWorktree, shipGuard: async () => ({ wired: true, detail: 'fixture' }), tracker: new Map() })
+  expect(result.runs.map(row => row.issue)).toEqual([8])
+  expect(result.refusals.some(row => row.issue === 9 && row.reason.includes('conflicting'))).toBe(true)
+})

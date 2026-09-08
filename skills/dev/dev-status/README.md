@@ -22,6 +22,7 @@ npx @vegastack/vegafactory skills add --group dev --global
 |---|---|
 | [SKILL.md](SKILL.md) | Agent entry point — gather + render rules |
 | [agents/openai.yaml](agents/openai.yaml) | Codex interface metadata |
+| scripts/effective-policy.mjs (installed copy) | Canonical workflow label map and exclusive state resolution, copied from dev-setup |
 | references/conventions.md (installed copy) | The workflow artifact spec, duplicated into every dev-family install |
 | [scripts/status.mjs](scripts/status.mjs) | The gatherer: gh-backed, markers-only, knob-aware (labels/register from dev.md), exit 2 on cannot-verify |
 | [refresh/REFRESH.md](refresh/REFRESH.md) | Freshness contract (evergreen waiver) |
@@ -31,4 +32,4 @@ npx @vegastack/vegafactory skills add --group dev --global
 
 ## Behavior
 
-`node scripts/status.mjs --orphan-hours 6 --json` returns the data; the skill orders it (your queue first, oldest first), omits empty sections, shows a quiet board as one honest line, and marks judgment as judgment — the wait-reason one-liners and the Next pick are the skill's calls, clearly not data. A possibly-orphaned `working` issue — its ledger heartbeat silent past the orphan window — is surfaced as a fact ("check, resume, or reclaim"), never acted on: takeovers still require the operator's explicit handover, and `reclaim.mjs` is the operator's to run. The default view is yours — Needs you is what you are assigned — and `--all` shows the whole team's board; an Unowned bucket catches human-state issues nobody holds. Projects with renamed labels or a moved decision register work unchanged — the script reads the dev.md knobs.
+`node scripts/status.mjs --orphan-hours 6 --json` returns the data; the skill orders it (your queue first, oldest first), omits empty sections, shows a quiet board as one honest line, and marks judgment as judgment — the wait-reason one-liners and the Next pick are the skill's calls, clearly not data. A possibly-orphaned `working` issue — its ledger heartbeat silent past the orphan window — is surfaced as a fact ("check, resume, or reclaim"), never acted on: takeovers still require the operator's explicit handover, and `reclaim.mjs` is the operator's to run. The default view is yours — Needs you is what you are assigned — and `--all` shows the whole team's board; an Unowned bucket catches human-state issues nobody holds. Custom state names require the explicit five-key `workflow-labels` map. Legacy default lists retain scope labels regardless of order; conflicting states appear once in `unresolved`. Ambiguous legacy custom profiles require a conversion preview and accepted migration.

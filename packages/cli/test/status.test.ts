@@ -86,7 +86,7 @@ describe('runStatusCli', () => {
     console.log = (line: string) => { printed.push(line) }
     try {
       const code = await runStatusCli(['--json', '--config', join(root, 'factory.json')], root, {
-        gh: async () => JSON.stringify({ items: [{ number: 8, title: 'b', labels: [{ name: 'working' }], assignees: [{ login: 'mk' }], updated_at: '2026-09-03T10:00:00Z' }] }),
+        gh: async () => JSON.stringify({ total_count: 1, incomplete_results: false, items: [{ node_id: 'I_8', number: 8, title: 'b', labels: [{ name: 'working' }], assignees: [{ login: 'mk' }], updated_at: '2026-09-03T10:00:00Z' }] }),
         worktrees: async () => [],
         logs: async () => [],
         readLock: async () => ({ held: false, pid: null }),
@@ -117,4 +117,36 @@ test('status renders validated snapshot state, source and refusal without a fetc
   expect(report.repos[0]?.snapshot?.ageSeconds).toBe(7200)
   expect(renderStatus(report)).toContain('policy: stale')
   expect(renderStatus(report)).toContain('a'.repeat(40))
+})
+
+
+test('141 status custom states are exclusive and snapshots carry stable raw-label identity', () => {
+  const custom = { needsOperator: 'Decision', needsPlan: 'Plan', ready: 'Go', working: 'Build', forOperator: 'Review' }
+  const report = buildStatus({ config, state: { lastTick: {}, handled: [] }, lockPid: null,
+    repos: [{ repo: 'acme/app', policy: parseRepoPolicy('workflow-labels: ' + JSON.stringify(custom)), board: [
+      { ...board[0]!, number: 1, nodeId: 'I_1', labels: ['Go'] },
+      { ...board[0]!, number: 2, nodeId: 'I_2', labels: ['Go', 'Decision'] },
+    ], boardComplete: true, observedAt: '2026-09-08T07:00:00Z', worktrees: [], logs: [] }] })
+  expect(report.repos[0]!.board.ready).toBe(1)
+  expect(report.repos[0]!.workflow?.issues.map(row => row.state)).toEqual(['ready', null])
+  expect(report.repos[0]!.workflow?.issues[1]!.blocks.join()).toContain('conflicting')
+  expect(report.repos[0]!.workflow?.issues[0]!.labelsDigest).toMatch(/^[a-f0-9]{64}$/)
+})
+
+test('141 status refuses missing and truncated search completeness instead of claiming an empty complete board', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'vsk-status-incomplete-'))
+  mkdirSync(join(root, '.vegastack'))
+  writeFileSync(join(root, '.vegastack/dev.md'), 'operators: mk\n')
+  writeFileSync(join(root, 'factory.json'), JSON.stringify({ repos: [{ path: root, repo: 'acme/app', org: 'acme' }] }))
+  const log = console.log
+  const printed: string[] = []
+  console.log = (line: string) => { printed.push(line) }
+  try {
+    for (const response of [{ items: [] }, { total_count: 101, incomplete_results: false, items: [] }, { total_count: 0, incomplete_results: true, items: [] }]) {
+      await runStatusCli(['--json', '--config', join(root, 'factory.json')], root, { gh: async () => JSON.stringify(response), worktrees: async () => [], logs: async () => [] })
+      const report = JSON.parse(printed.at(-1)!)
+      expect(report.repos[0].workflow.complete).toBe(false)
+      expect(report.repos[0].workflow.blocks.join()).toContain('incomplete')
+    }
+  } finally { console.log = log }
 })

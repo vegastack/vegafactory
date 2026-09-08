@@ -97,11 +97,25 @@ export function resolveLabels(value) {
 
 /** @param {string[]} labels @param {LabelMap} map @returns {{state:State|null,blocks:string[]}} */
 export function resolveState(labels, map) {
+  if (map === undefined || map === null) return { state: null, blocks: ['workflow label map unavailable'] }
   try { map = resolveLabels(map) } catch (error) { return { state: null, blocks: [error.message] } }
   if (!Array.isArray(labels) || labels.some(label => typeof label !== 'string')) return { state: null, blocks: ['unreadable issue labels'] }
   const states = WORKFLOW_STATES.filter(key => labels.includes(map[key]))
   return states.length === 1 ? { state: states[0], blocks: [] }
     : { state: null, blocks: [states.length ? 'conflicting state labels: ' + states.map(key => map[key]).join(', ') : 'no known workflow state label'] }
+}
+
+// Resolve just the local label contract for read-only profile tooling. Runtime admission
+// supplies the complete configured policy separately; this helper grants no authority.
+export function readWorkflowLabels(text = '') {
+  const layer = parsePolicy(text)
+  if (layer.blocks.length) throw new Error(layer.blocks.join('; '))
+  return workflowLabelsFromValues(layer.values)
+}
+function workflowLabelsFromValues(values) {
+  const map = resolveLabels(values['workflow-labels'] ?? values.labels)
+  if (values['workflow-labels'] !== undefined && values.labels !== undefined && !same(map, resolveLabels(values.labels))) throw new Error('labels and workflow-labels disagree; explicit migration required')
+  return map
 }
 
 export const labelsDigest = labels => policyHash([...new Set(labels)].sort())
@@ -243,11 +257,7 @@ export function resolvePolicy({ org = '', group = '', repo = '', identity = {}, 
     }
     if (layer.scope === 'org') for (const [key, value] of Object.entries(locked)) { values[key] = value; sources[key] = source(layer) }
   }
-  try {
-    const map = resolveLabels(values['workflow-labels'] ?? values.labels)
-    if (values['workflow-labels'] !== undefined && values.labels !== undefined && !same(map, resolveLabels(values.labels))) blocks.push('labels and workflow-labels disagree; explicit migration required')
-    values['workflow-labels'] = map
-  } catch (error) { blocks.push(error.message) }
+  try { values['workflow-labels'] = workflowLabelsFromValues(values) } catch (error) { blocks.push(error.message) }
   const configured = freshness.configured === true || Boolean(values['control-room'] && values['control-room'] !== 'none')
   const now = typeof freshness.now === 'number' ? freshness.now : Date.parse(freshness.now ?? '')
   const validated = Date.parse(freshness.validatedAt ?? '')

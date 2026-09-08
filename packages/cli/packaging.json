@@ -51,7 +51,8 @@
     "references/worktrees.md",
     "references/changelog-and-chronicle.md",
     "refresh/REFRESH.md",
-    "refresh/sources.json"
+    "refresh/sources.json",
+    "scripts/effective-policy.mjs@dev-setup"
   ],
   "dev-intake": [
     "SKILL.md",
@@ -129,7 +130,8 @@
     "references/conventions.md@dev-setup",
     "scripts/status.mjs",
     "refresh/REFRESH.md",
-    "refresh/sources.json"
+    "refresh/sources.json",
+    "scripts/effective-policy.mjs@dev-setup"
   ],
   "skill-maintainer": [
     "SKILL.md",

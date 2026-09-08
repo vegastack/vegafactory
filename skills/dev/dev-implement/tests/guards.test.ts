@@ -254,3 +254,14 @@ describe('checkTaskConsistency: plan checkboxes must reflect the ledger', () => 
     expect(checkTaskConsistency([]).blocks).toEqual([])
   })
 })
+
+test('141 preflight shares custom semantic state and refuses mixed or changed correction scope', () => {
+  const map = { needsOperator: 'Decision', needsPlan: 'Plan', ready: 'Go', working: 'Build', forOperator: 'Review' }
+  const profile = devMd + 'workflow-labels: ' + JSON.stringify(map)
+  const check = (labels: string[], body = baseIssue().body, expected = 'ready') => evaluatePreflight({ issue: { ...baseIssue(), body, labels: [...labels, 'quick-build'].map(name => ({ name })) }, comments: [currentPlan, approval()], devMd: profile, me: 'kmanojkumar', expect: expected })
+  expect(check(['Go']).blocks).toEqual([])
+  expect(check(['Go']).state).toBe('ready')
+  expect(check(['Go', 'Decision']).blocks.join()).toContain('conflicting')
+  expect(check([]).blocks.join()).toContain('no known workflow state')
+  expect(check(['Review'], baseIssue().body + 'Changed scope.', 'for-operator').blocks.length).toBeGreaterThan(0)
+})

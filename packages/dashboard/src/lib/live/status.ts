@@ -21,7 +21,39 @@ export interface StatusRun {
   logFile: string
 }
 
+export const WORKFLOW_STATES = ['needsOperator', 'needsPlan', 'ready', 'working', 'forOperator'] as const
+export type WorkflowState = typeof WORKFLOW_STATES[number]
+export interface WorkflowStateSnapshot {
+  repo: string; policyDigest: string; observedAt: string; complete: boolean
+  labelMap: Record<WorkflowState, string> | null; blocks: string[]
+  issues: Array<{ number: number; nodeId: string; labelsDigest: string; state: WorkflowState | null; blocks: string[] }>
+}
+
+// Validate the wire contract only. Label-to-state interpretation belongs to the CLI.
+function workflowSnapshot(value: unknown, repo: string): WorkflowStateSnapshot | null {
+  if (!value || typeof value !== 'object') return null
+  const row = value as WorkflowStateSnapshot
+  const strings = (v: unknown): v is string[] => Array.isArray(v) && v.every(s => typeof s === 'string')
+  if (row.repo !== repo || !/^[a-f0-9]{64}$/.test(row.policyDigest) || typeof row.observedAt !== 'string'
+    || !Number.isFinite(Date.parse(row.observedAt)) || typeof row.complete !== 'boolean' || !strings(row.blocks)
+    || !Array.isArray(row.issues)) return null
+  if (row.labelMap !== null && (!row.labelMap || typeof row.labelMap !== 'object'
+    || Object.keys(row.labelMap).length !== 5 || !WORKFLOW_STATES.every(key => typeof row.labelMap?.[key] === 'string' && row.labelMap[key].trim())
+    || new Set(Object.values(row.labelMap).map(label => label.toLowerCase())).size !== 5)) return null
+  if (row.complete && (!row.labelMap || row.blocks.length)) return null
+  const ids = new Set<string>()
+  for (const issue of row.issues) {
+    if (!issue || !Number.isSafeInteger(issue.number) || issue.number < 1 || typeof issue.nodeId !== 'string' || !issue.nodeId
+      || ids.has(issue.nodeId) || !/^[a-f0-9]{64}$/.test(issue.labelsDigest) || !strings(issue.blocks)
+      || (issue.state !== null && !WORKFLOW_STATES.includes(issue.state))
+      || (issue.state !== null && issue.blocks.length)) return null
+    ids.add(issue.nodeId)
+  }
+  return row
+}
+
 export interface StatusRepo {
+  workflow?: WorkflowStateSnapshot | null
   repo: string
   dispatch: string
   board: { needsPlan: number; ready: number; working: number; forOperator: number }
@@ -61,6 +93,7 @@ function toReport(parsed: unknown): StatusReport | null {
       const board = (row.board && typeof row.board === 'object' ? row.board : {}) as Record<string, unknown>
       repos.push({
         repo: text(row.repo),
+        workflow: workflowSnapshot(row.workflow, text(row.repo)),
         dispatch: text(row.dispatch),
         board: {
           needsPlan: count(board.needsPlan), ready: count(board.ready),

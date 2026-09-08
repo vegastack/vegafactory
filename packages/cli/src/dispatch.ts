@@ -1,3 +1,5 @@
+import { resolveLabels, resolveState } from '../../../skills/dev/dev-setup/scripts/effective-policy.mjs'
+import type { LabelMap } from './config.ts'
 // The dispatcher: what a tick would do, and then doing it. Everything that decides is a pure
 // function over data — a board, a set of reactions, a policy, the state file — so the whole
 // decision surface is unit-testable without a network, a clock, or a running loop. The effectful
@@ -96,7 +98,7 @@ export interface TickPlan {
 // The state labels are exactly the ones conventions.md defines; an issue wearing two of them is a
 // board in a state no skill produced, and guessing which one wins is how a plan run lands on an
 // issue somebody is already implementing.
-const STATE_LABELS = ['needs-operator', 'needs-plan', 'ready', 'working', 'for-operator']
+const defaultMap = resolveLabels(undefined)
 
 // `no:assignee` is in the query and checked again here: search indexes lag, and a stale index is
 // exactly how two runs start on one issue.
@@ -105,19 +107,19 @@ const STATE_LABELS = ['needs-operator', 'needs-plan', 'ready', 'working', 'for-o
 // issue's `updated_at`, so a 🚀 on an existing hand-back comment would never re-enter a window; and
 // a comment posted while a run was in flight lands before the next window opens. Every
 // for-operator issue is read on every tick, and the handled list is what stops the repeats.
-export function searchQueries(repo: string): { needsPlan: string; ready: string; corrections: string } {
+export function searchQueries(repo: string, map: LabelMap = defaultMap): { needsPlan: string; ready: string; corrections: string } {
   const scope = `repo:${repo} is:issue is:open`
   return {
-    needsPlan: `${scope} label:needs-plan`,
-    ready: `${scope} label:ready no:assignee`,
-    corrections: `${scope} label:for-operator`,
+    needsPlan: `${scope} label:${JSON.stringify(map.needsPlan)}`,
+    ready: `${scope} label:${JSON.stringify(map.ready)} no:assignee`,
+    corrections: `${scope} label:${JSON.stringify(map.forOperator)}`,
   }
 }
 
-function stateLabelRefusal(repo: string, issue: BoardIssue): Refusal | null {
-  const states = issue.labels.filter(label => STATE_LABELS.includes(label))
-  if (states.length > 1) {
-    return { repo, issue: issue.number, reason: `#${issue.number} carries two state labels (${states.join(', ')}) — the board says nothing a run could act on` }
+function stateLabelRefusal(repo: string, issue: BoardIssue, map: LabelMap = defaultMap, expected?: string): Refusal | null {
+  const result = resolveState(issue.labels, map)
+  if (result.blocks.length || (expected && result.state !== expected)) {
+    return { repo, issue: issue.number, reason: `#${issue.number}: ${result.blocks.join('; ') || 'workflow state changed; expected ' + expected}` }
   }
   if (issue.labels.includes('epic')) {
     return { repo, issue: issue.number, reason: `#${issue.number} is an epic — epics are maps, and only their children ever run` }
@@ -125,11 +127,11 @@ function stateLabelRefusal(repo: string, issue: BoardIssue): Refusal | null {
   return null
 }
 
-export function planLabelRuns(input: { repo: string; needsPlan: BoardIssue[]; ready: BoardIssue[] }): TickPlan {
+export function planLabelRuns(input: { repo: string; needsPlan: BoardIssue[]; ready: BoardIssue[]; labelMap?: LabelMap }): TickPlan {
   const runs: PlannedRun[] = []
   const refusals: Refusal[] = []
   const consider = (issue: BoardIssue, stage: Stage): void => {
-    const refusal = stateLabelRefusal(input.repo, issue)
+    const refusal = stateLabelRefusal(input.repo, issue, input.labelMap, stage === 'plan' ? 'needsPlan' : 'ready')
     if (refusal) {
       refusals.push(refusal)
       return
@@ -178,6 +180,7 @@ function handledKey(run: HandledRun): string {
 // id has never been handled. The last one is why the state file exists at all — reactions have no
 // "seen" bit, so a restart would otherwise re-run every correction ever asked for.
 export function planRocketRuns(input: {
+  labelMap?: LabelMap
   repo: string
   corrections: BoardIssue[]
   rockets: Rocket[]
@@ -197,6 +200,8 @@ export function planRocketRuns(input: {
       refusals.push({ repo: input.repo, issue: rocket.issue, reason: `#${rocket.issue} is no longer for-operator — the reaction is left for the next tick to re-read` })
       continue
     }
+    const refusal = stateLabelRefusal(input.repo, issue, input.labelMap, 'forOperator')
+    if (refusal) { refusals.push(refusal); continue }
     if (input.operators.length === 0) {
       refusals.push({ repo: input.repo, issue: rocket.issue, reason: `#${rocket.issue} has a rocket but the profile lists no operators: — nobody is trusted to start a run` })
       continue
@@ -359,8 +364,9 @@ export function parentParallelLaunch(
   ready: ReadyChild[],
   groups: IndependentGroup[],
   parent: ParentContext,
+  labelMap: LabelMap = defaultMap,
 ): ParentParallelRun | null {
-  const eligible = ready.filter(child => child.parent === parent.issue && !child.assignee && child.labels.includes('ready'))
+  const eligible = ready.filter(child => child.parent === parent.issue && !child.assignee && resolveState(child.labels, labelMap).state === 'ready')
   if (eligible.length < 2) return null
   const claimed = new Map<number, string>()
   for (const child of eligible) {
@@ -439,10 +445,11 @@ export function planTick(input: {
   const guardRefusals = evaluateGuards({ repo: input.repo, policy: input.policy, guards: input.guards, maxRuns: input.maxRuns })
   if (guardRefusals.length > 0) return { runs: [], refusals: guardRefusals }
 
-  const labels = planLabelRuns({ repo: input.repo, needsPlan: input.board.needsPlan, ready: input.board.ready })
+  const labels = planLabelRuns({ repo: input.repo, needsPlan: input.board.needsPlan, ready: input.board.ready, labelMap: input.policy.labelMap })
   const rockets = planRocketRuns({
     repo: input.repo,
     corrections: input.board.corrections,
+    labelMap: input.policy.labelMap,
     rockets: input.rockets,
     operators: input.policy.operators,
     state: input.state,
@@ -452,7 +459,7 @@ export function planTick(input: {
   const parallelRuns: PlannedRun[] = []
   const covered = new Set<number>()
   for (const candidate of input.parents ?? []) {
-    const parallel = parentParallelLaunch(candidate.children, candidate.groups, candidate.parent)
+    const parallel = parentParallelLaunch(candidate.children, candidate.groups, candidate.parent, input.policy.labelMap)
     if (!parallel) continue
     if (parallel.children.some(child => covered.has(child))) continue
     for (const child of parallel.children) covered.add(child)
@@ -1243,7 +1250,8 @@ export async function runTick(
     try {
       const snapshot = await fetchBoard(gh, entry.repo, budget)
       if (!snapshot.complete) throw new GhUnavailable(snapshot.reason!)
-      board = { needsPlan: snapshot.items.filter(row => row.labels.includes('needs-plan')), ready: snapshot.items.filter(row => row.labels.includes('ready')), corrections: snapshot.items.filter(row => row.labels.includes('for-operator')) }
+      const map = policy.labelMap ?? defaultMap
+      board = { needsPlan: snapshot.items.filter(row => row.labels.includes(map.needsPlan)), ready: snapshot.items.filter(row => row.labels.includes(map.ready)), corrections: snapshot.items.filter(row => row.labels.includes(map.forOperator)) }
       rockets = await fetchRockets(gh, entry.repo, board.corrections, state.handled, budget)
     } catch (error) {
       refusals.push({ repo: entry.repo, issue: null, reason: `${entry.repo}: the board could not be read — ${(error as Error).message}` })
@@ -1306,7 +1314,7 @@ export async function runTick(
           results.push(await owner.gatherAndEvaluate({ repo: entry.repo, issue: String(issue),
             stage: run.stage === 'plan' ? 'plan' : 'implement',
             expect: run.stage === 'plan' ? 'needs-plan' : run.stage === 'corrections' ? 'for-operator' : 'ready',
-          }, { readJson: (args: string[]) => ghJsonVia(gh, args, budget), devMd }))
+          }, { readJson: (args: string[]) => ghJsonVia(gh, args, budget), devMd, configuredPolicy: resolved }))
         }
         admission = { blocks: results.flatMap(result => result.blocks),
           approvalIds: [...new Set<string>(results.flatMap(result => result.approvalIds))],

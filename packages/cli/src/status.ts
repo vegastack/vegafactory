@@ -1,3 +1,6 @@
+import { labelsDigest, resolveState, resolveLabels } from '../../../skills/dev/dev-setup/scripts/effective-policy.mjs'
+import { boundedGhJson, readBudget } from './gh.ts'
+import type { LabelMap, State } from './config.ts'
 // `vegafactory status` — one screen answering "is the factory running, and what is it doing?".
 // Four sources, none of them authoritative on its own: the dispatcher's lock and state file say
 // whether it is alive and when it last ticked, the board says what is waiting, the worktrees say
@@ -21,7 +24,18 @@ export interface RunSummary {
   logFile: string
 }
 
+export interface WorkflowStateSnapshot {
+  repo: string
+  policyDigest: string
+  observedAt: string
+  complete: boolean
+  labelMap: LabelMap | null
+  blocks: string[]
+  issues: { number: number; nodeId: string; labelsDigest: string; state: State | null; blocks: string[] }[]
+}
+
 export interface RepoStatus {
+  workflow?: WorkflowStateSnapshot
   repo: string
   dispatch: 'off' | 'local'
   board: { needsPlan: number; ready: number; working: number; forOperator: number }
@@ -70,10 +84,23 @@ export function buildStatus(input: {
   config: FactoryConfig
   state: DispatchState
   lockPid: number | null
-  repos: { repo: string; policy: RepoPolicy; snapshot?: RepoStatus['snapshot']; board: BoardIssue[]; worktrees: WorktreeRow[]; logs: { file: string; body: string }[] }[]
+  repos: { repo: string; policy: RepoPolicy; snapshot?: RepoStatus['snapshot']; boardComplete?: boolean; boardReason?: string | null; observedAt?: string; board: BoardIssue[]; worktrees: WorktreeRow[]; logs: { file: string; body: string }[] }[]
 }): StatusReport {
   const repos: RepoStatus[] = input.repos.map(entry => {
-    const count = (label: string): number => entry.board.filter(issue => issue.labels.includes(label)).length
+    let labelMap: LabelMap | null = null
+    const blocks = [entry.policy.refusal, entry.boardReason, entry.snapshot?.reason].filter((reason): reason is string => Boolean(reason))
+    try { labelMap = resolveLabels(entry.policy.labelMap ?? entry.policy.effective?.values['workflow-labels']) } catch (error) { blocks.push((error as Error).message) }
+    const workflow: WorkflowStateSnapshot = {
+      repo: entry.repo, policyDigest: entry.policy.effective?.policyDigest ?? '',
+      observedAt: entry.observedAt ?? new Date().toISOString(), complete: entry.boardComplete === true && blocks.length === 0,
+      labelMap, blocks,
+      issues: entry.board.map(issue => {
+        const result = labelMap ? resolveState(issue.labels, labelMap) : { state: null, blocks: ['workflow label map unavailable'] }
+        return { number: issue.number, nodeId: issue.nodeId ?? '', labelsDigest: labelsDigest(issue.labels),
+          state: blocks.length ? null : result.state, blocks: [...blocks, ...result.blocks] }
+      }),
+    }
+    const count = (state: State): number => workflow.issues.filter(issue => issue.state === state).length
     const runs: RunSummary[] = entry.logs.map(log => {
       const rows = rowsOf(log.body)
       const start = rows.find(row => row.event === 'start')
@@ -91,7 +118,8 @@ export function buildStatus(input: {
       repo: entry.repo,
       dispatch: entry.policy.dispatch,
       ...(entry.snapshot ? { snapshot: entry.snapshot } : {}),
-      board: { needsPlan: count('needs-plan'), ready: count('ready'), working: count('working'), forOperator: count('for-operator') },
+      workflow,
+      board: { needsPlan: count('needsPlan'), ready: count('ready'), working: count('working'), forOperator: count('forOperator') },
       worktrees: entry.worktrees,
       runs,
     }
@@ -117,6 +145,7 @@ export function renderStatus(report: StatusReport): string {
     lines.push(`${repo.repo} — dispatch: ${repo.dispatch}`)
     if (repo.snapshot) lines.push(`  policy: ${repo.snapshot.state} · ${repo.snapshot.sourceCommit ?? 'no validated source'}${repo.snapshot.reason ? ` · ${repo.snapshot.reason}` : ''}`)
     lines.push(`  board: ${repo.board.needsPlan} needs-plan · ${repo.board.ready} ready · ${repo.board.working} working · ${repo.board.forOperator} for-operator`)
+    if (repo.workflow) lines.push(`  workflow: ${repo.workflow.complete ? 'complete' : 'incomplete'} · observed ${repo.workflow.observedAt}${repo.workflow.blocks.length ? ' · ' + repo.workflow.blocks.join('; ') : ''}`)
     for (const worktree of repo.worktrees) {
       lines.push(`  worktree ${worktree.branch} (${worktree.state}) ${worktree.path}`)
     }
@@ -200,19 +229,21 @@ export async function runStatusCli(argv: string[], home: string, deps?: Partial<
       // A repo with no profile still shows on the board as dispatch: off, which is the truth.
     }
     let board: BoardIssue[] = []
+    let boardComplete = false, boardReason: string | null = null
+    const observedAt = new Date().toISOString()
     try {
-      const stdout = await gh(['api', '-X', 'GET', 'search/issues', '-f', `q=repo:${entry.repo} is:issue is:open label:needs-plan,ready,working,for-operator`, '--cache', '0'])
-      const parsed = JSON.parse(stdout) as { items?: { number: number; title: string; labels?: { name: string }[]; assignees?: { login: string }[]; updated_at?: string }[] }
+      const parsed = await boundedGhJson(gh, ['api', '-X', 'GET', 'search/issues', '-f', `q=repo:${entry.repo} is:issue is:open`, '-f', 'per_page=100', '--cache', '0'], readBudget()) as { items?: { node_id?: string; number: number; title: string; labels?: { name: string }[]; assignees?: { login: string }[]; updated_at?: string }[] }
       board = (parsed.items ?? []).map(row => ({
         number: row.number,
+        nodeId: row.node_id,
         title: row.title,
         labels: (row.labels ?? []).map(label => label.name),
         assignees: (row.assignees ?? []).map(assignee => assignee.login),
         updatedAt: row.updated_at ?? '',
       }))
-    } catch {
-      // The board is unreachable; the rest of the report is still worth printing, and the empty
-      // counts are visibly paired with whatever the dispatcher's own state says.
+      boardComplete = true
+    } catch (error) {
+      boardReason = (error as Error).message
     }
     let snapshot: RepoStatus['snapshot']
     let policy = devMd ? mergeRepoPolicy(null, devMd) : parseRepoPolicy('')
@@ -222,13 +253,13 @@ export async function runStatusCli(argv: string[], home: string, deps?: Partial<
         const result = await getPolicySnapshot(room.org, entry.repo, Date.now(), { settingsPath: config.settingsPath ?? `${home}/.vegastack/factory.json`, devMd })
         policy = repoPolicyFromEffective(result.policy)
         snapshot = { state: result.state, sourceCommit: result.snapshot?.sourceCommit ?? null, policyDigest: result.snapshot?.policyDigest ?? null, validatedAt: result.snapshot?.validatedAt ?? null, ageSeconds: result.ageSeconds, reason: result.reason, machine: result.machine }
-      } catch (error) { snapshot = { state: 'unavailable', sourceCommit: null, policyDigest: null, validatedAt: null, ageSeconds: null, reason: (error as Error).message } }
+      } catch (error) { policy = { ...policy, refusal: (error as Error).message }; snapshot = { state: 'unavailable', sourceCommit: null, policyDigest: null, validatedAt: null, ageSeconds: null, reason: (error as Error).message } }
     }
     repos.push({
       snapshot,
       repo: entry.repo,
       policy,
-      board,
+      board, boardComplete, boardReason, observedAt,
       worktrees: await worktreesOf(entry.path).catch(() => []),
       logs: await logsOf(config, entry.repo).catch(() => []),
     })
