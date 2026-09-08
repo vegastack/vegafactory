@@ -15,7 +15,7 @@ Nearest neighbor: `dev-implement` produces the `for-operator` issue with its evi
 
 On the user's PR instruction:
 
-- Run the deterministic guard first: `node <path-to-this-skill>/scripts/ship-gate.mjs --issue <n> --branch <name> --json` (add `--repo <o/r> --dev-md <path>` outside the project root; `--worktree <path>` when the branch's worktree cannot be auto-resolved) — it resolves the branch's own worktree from `git worktree list` and re-runs the project check command fresh there, requires the evidence sha to equal the branch head (the corrections loop is the only reconciliation path), the changelog entry, the chronicle entry where the knob says `on`, a clean-or-adjudicated review verdict, and greps added lines for leftover `[DEBUG-` tags; exit 2 stops you with its reasons, warnings are read-twice signals.
+- Run `node <path-to-this-skill>/scripts/ship-gate.mjs --issue <n> --branch <name> --json` (optional `--repo <o/r> --dev-md <path> --worktree <path>`). It checks the exact committed checkout before/after the project command, full evidence/review/head equality, canonical plan scope/base binding, scoped operator exceptions, changelog/chronicle and debug tags. Missing check or dirty/moved candidate refuses; ignored build output is allowed. Exit 2 stops; warnings remain visible. Metadata and migration: [README](README.md).
 - Verify the issue is at `for-operator` with the evidence comment present — including its `**Docs:**` line (brief/plan revisions in sync) — and the branch is pushed. Not there yet → say what's missing instead of creating a premature PR. Docs out of sync is corrections work through implement's loop, because a brief patched from here has no ledger line behind it.
 - Verify the changelog state matches the evidence comment's `**Changelog:**` line: a behavior-changing branch carries its entry per dev.md's `changelog:` knob (changesets: a `.changeset/*.md` in the diff; keep-a-changelog: the diff adds lines to CHANGELOG.md), while `none` with a reason that holds up (docs-only, test-only) is fine. An unexplained miss → corrections loop, not a PR.
 - `gh pr create` from the task branch: title from the issue, body is `Closes #<n>` plus a link to the evidence comment — the issue holds the report; the PR links it rather than duplicating it.
@@ -34,12 +34,14 @@ With `gates: 1` there is no PR: the same verifications run, then the ship word t
 
 On the user's merge instruction:
 
-- Re-check that the PR head is still the revision the evidence comment names and checks are green — a branch that moved since review gets re-verified before it lands.
+- Re-run the gate and read back the remote PR head/base IDs and base repository/ref against the accepted candidate. Every new commit, including evidence/docs, invalidates review/checks. Renew exact full-candidate review before merge; keep evidence in comments to avoid self-reference commits.
 - Pending `Decision:` lines exist (issue comments, or the evidence comment's `**Decision:**` line) → name them in the merge confirmation — "merging will record: …" — so the operator's word demonstrably covers them, because the register is append-only and an inferred line cannot be taken back. On the word, append each to the register dev.md names (`decisions:` knob) in conventions' Operator identity format; the register is append-only and this is its moment.
 - A merge conflict with the default branch is corrections work: update the branch, run the checks the update touched, and the standing merge instruction holds once checks are green again — unless the update changed behavior, or more than 7 days have passed since the word; either way, re-confirm with one sentence rather than acting on a stale instruction.
 - Merge per the dev.md `merge` knob (default `gh pr merge --squash`; `gates: 1` merges locally per the same knob and pushes). `Closes #<n>` closes the issue; confirm both happened.
 - Then remove the merged branch's worktree — `node <path-to-dev-implement>/scripts/worktree.mjs remove --issue <n> --write --json` — which takes the **directory only**. Deleting the local branch and deleting the remote branch are each their own operator word, and an epic parent's worktree goes only when the parent PR merges. Child-into-parent merges and the one-PR-per-feature rule: [runbook](references/runbook.md).
 - A bot PR (Renovate, Dependabot) has no issue or evidence comment and merging it is still shipping: green checks qualify it, only the operator's explicit word — per PR or per named batch — merges it; majors and security advisories get named before their word is acted on.
+
+Final assembled parent review and postmerge `parentDelivery` proof follow the [runbook](references/runbook.md). One approved parent scope covers routine authorized child integration; final whole-parent review remains mandatory. Local child acceptance means implemented; only verified parent merge means delivered.
 
 ## After the merge — the Ship runbook
 

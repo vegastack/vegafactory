@@ -40,7 +40,33 @@ A local `guard:` failure (missing changelog entry, tag/version mismatch) means t
 One feature, one worktree — the full scenario matrix lives in `dev-implement`'s `references/worktrees.md`; what ship owns is the end of it.
 
 - **The gate runs where the branch is.** `ship-gate.mjs` reads `git worktree list --porcelain` and runs its git calls, its dev.md read and the fresh check command in the worktree holding the branch. `--worktree <path>` overrides. A branch no worktree holds and no matching checkout still blocks — that is the fact the old checkout-mismatch block was protecting, and it survives.
-- **One PR per feature.** An epic's children merge into the **parent branch**, on the child's own merge word, with no PR of their own: `git switch <parent-branch>` in the parent's worktree, merge the child branch per the `merge:` knob, delete nothing. When every child is done, the parent branch gets one PR to the default branch.
+- **One PR per feature.** An epic’s children integrate into the **parent branch** under the final approval that pins their revisions, local integration scopes and preparation subsets; routine authorized integration needs no second approval. Otherwise obtain the scoped integration word. No child PR; delete nothing. Fully accepted code children may close as implemented in the feature branch. Prepared live children can join without closing; pending operations stay explicit. The final assembled parent gets one PR to the default branch after whole-parent acceptance.
 - **After the merge, the directory goes and nothing else.** `worktree.mjs remove --issue <n> --write` fetches the default branch, then removes the checkout when it is clean, pushed, merged and unlocked — merged by ancestry or, after a squash or rebase merge, by content; it fails closed and reports which of those did not hold. The local branch and the remote branch are separate operator words, on the always-ask list.
 - **A parent's worktree survives its children.** It is removed only when the parent's own PR merges.
 - **Parked worktrees are pruned, not swept.** `worktree.mjs prune --older-than <window> --write` pushes an unpushed candidate first, removes only `parked` worktrees past `worktree-retention:` (the window is what lifts the not-merged rule there), and keeps every branch. `--force` on `remove` and branch deletion always take the operator's word.
+
+## Final parent candidate and transformations
+
+The final plan approval covers its named child revisions, local scopes and preparation subsets. Material scope changes and unresolved findings return to the operator. Tests and independent review for risky changes cannot be disabled by project knobs. After the #158/#159 qualification equivalents, review the entire assembled candidate, including #155–#157 preparation. Child reviews prove only their recorded source/parent-base pair. A source-first checkpoint never satisfies final acceptance.
+
+Record final evidence in the parent issue comment: full candidate SHA/base SHA, canonical approved ArtifactRefs and plan digests, check command/results/environment, #153 artifact manifest/tarball hashes, and the #144 `acceptedDeliveries` projection pinned by child source/parent integration/evidence identities and accepted task scope. Include a child acceptance versus pending-operations matrix: accepted code, partial scope, preparation and unperformed live work. Preserve partial/preparation rows; child closure, PR title and closing keywords prove no delivery. Any commit, even a documentation/evidence commit, changes identity and requires fresh checks and full-candidate review. Keep evidence in comments.
+
+Immediately before an authorized merge, read the remote PR and compare its node/number, head, base repository/ref/SHA to that accepted evidence. A changed base or head blocks until renewed evidence. A local rebase changes identity: rerun checks, review the changed diff/base, then renew the whole-candidate review. After GitHub rebase/squash merge, fetch the exact merged commit, verify its commit range and final tree relationship to the reviewed candidate and run the project check on that clean exact merged SHA before release. Record the transformation; never call changed SHAs identical.
+
+Only after GitHub PR readback and those Git/check proofs, append:
+
+```ts
+parentDelivery: {
+  repo, parentIssue, pr, prNodeId, acceptedParentHead,
+  baseRepo, baseRef, mergedAt, mergedCommit,
+  transformation: null | {
+    kind: "rebase" | "squash", reviewedHead, mergedHead, evidenceRef
+  }
+}
+```
+
+`evidenceRef` points to the exact reviewed-diff/merged-check evidence, never a title or inferred closing link. Map the complete pinned `acceptedDeliveries` scope projection to this delivery, so several children can share one PR without dropping partial or preparation scope. #148 discovers children through all-state enumeration and follows parent evidence even without a current-month execution. Nothing writes `parentDelivery` on child close or final review alone.
+
+For deterministic readback validation, `ship-gate.mjs` exports `evaluateParentDelivery({parentDelivery,pr,expected,acceptedDeliveries,requiredDeliveries,verification})`. `pr` is the actual GitHub PR REST object. `expected` pins repo/parentIssue/pr/prNodeId/acceptedParentHead/baseRepo/baseRef/baseSha from accepted parent evidence. `requiredDeliveries` is the exact #144 projection from that same evidence, not a list reconstructed from closed issues. `verification` carries freshly resolved `reviewedHead,mergedHead,baseSha,acceptedTree,mergedTree,check:{sha,exit}`. For a normal merge supply actual `ancestorShas`; transformations additionally supply the inspected `rangeHead` and `evidenceRef`. Obtain trees with `git rev-parse <sha>^{tree}`, ancestry with `git rev-list <merged>`, inspect the complete base-to-merged range/diff and retain its evidence. Changed trees or missing exact-check evidence refuse. This helper validates supplied facts; the caller must gather them freshly, and an empty block list is not merge authority.
+
+A release bump is a separate reviewed candidate. Even metadata-only changes rebuild different bytes and repeat packed smoke/checks. Runtime/policy changes additionally repeat affected qualification scenarios. Publication (#156) requires the source-to-artifact-to-registry evidence chain. Implemented, merged and released remain separate states; merge/publish/deploy retain their existing explicit operator gates.

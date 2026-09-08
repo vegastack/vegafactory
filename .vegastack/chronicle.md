@@ -379,3 +379,8 @@ The project's story, newest first: what got built, why, and how it went — for 
 Release preparation now packs the dashboard first and embeds its exact identity in the CLI before packing the installer. The retained pair is checked in isolation, and publication resumes through registry readback rather than rebuilding or guessing that a network error means a version is absent. Candidate staging and first-use smoke precede promotion. Actual publication, provenance and final platform qualification remain separate evidence gates.
 
 Review corrections retain the finalized pair before publication, bind every required SBOM, serialize live publishers through the Release workflow, and preserve each promotion readback. Synthetic process fixtures exercise the actual preparation/publication commands, loopback registry, installed CLI and server; current-source full preparation remains blocked by the separate expired scanner baseline disposition.
+
+
+## 08-09-2026 — Ship the reviewed commit (#136)
+
+The ship gate used to accept an ancestor review and run checks over uncommitted files, so a passing checkout could hide a failing committed artifact. It now binds the current review to full commit/base identities and canonical plan scope, refuses dirty or check-mutated candidates, and requires explicit operator decisions for every open finding. Parent delivery records distinguish accepted local work from verified merge and release. Focused real-Git regression coverage accompanies the change; final assembled qualification, independent review and release remain separate gates.

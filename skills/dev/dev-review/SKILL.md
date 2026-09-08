@@ -7,7 +7,7 @@ description: Independent review of finished implementation work — a diff again
 
 Advise: report every finding with its confidence and severity, or the verified absence of findings — the loop downstream is the filter.
 
-Fresh eyes per axis, severities with teeth, a bounded fix loop, and every dismissal on the record. The reviewer's job is findings or verified absence of findings and nothing else, because praise is noise in a document read for defects. The reviewer briefs live in [dispatch-prompts](references/dispatch-prompts.md).
+Fresh reviewers report findings or their verified absence, with bounded fix loops and recorded dismissals. Briefs: [dispatch-prompts](references/dispatch-prompts.md).
 
 Nearest neighbors: `dev-implement` invokes this per dev.md's `review:` knob and applies the findings; `dev-ship` consumes the verdict marker; `dev-plan`'s approval gate reviews plans, this skill reviews built work.
 
@@ -25,16 +25,16 @@ When dev.md names a `skill-scan:` root, the security dispatch also gets the scan
 | **Standards** | always | project rules (known-patterns file + repo docs, which override) + the fixed smell baseline pasted in full into its prompt |
 | **Security** | on `risky`, when touch points hit auth, money, user data, or external input, or when the diff touches a skill under dev.md's `skill-scan:` root | data-flow traces, exploitability before severity, and triage of the skill scan's findings — method in [security-axis](references/security-axis.md) |
 
-Each axis is a fresh subagent with no memory of writing the code (its prompt: [dispatch-prompts](references/dispatch-prompts.md)), reported separately, because merging lets one axis mask another. Each axis reports every finding it sees with confidence and severity; the loop is the filter, because a reviewer told to report only what matters reports less than it found.
+Each axis uses a fresh subagent without implementation memory and reports separately. Report every finding with confidence/severity; the loop filters findings.
 
 **Dispatch without pre-judgement** — a brief saying what not to flag ("do not flag…", "don't treat X as a defect", "at most minor") hides a false positive that belongs in the open adjudication below.
 
 ## The review comment — one per cycle, rounds appended, marker always current
 
-One comment per review cycle. The single marker at the top is edited every round to the newest `round`/`sha`/`verdict`, because the first marker is the one consumers (ship-gate) read. Prior rounds stay as plain `## Review — round <n>` sections below, with no markers of their own.
+One comment per cycle. Edit its top marker every round to the newest `round`/`sha`/`verdict`, because the first marker is the one consumers (ship-gate) read. Prior rounds stay as plain sections below, without markers or active JSON bindings. Publish one fenced JSON `reviewBinding` as defined in [conventions](references/conventions.md): full commit/base IDs, canonical plan scope digest, verdict and stable open/resolved finding IDs. Keep the marker and binding identical; legacy reviews need renewal.
 
 ```markdown
-<!-- vsk:v1 type=review round=<n> sha=<head7> agent=<claude|codex> verdict=<clean|needs-fixes> -->
+<!-- vsk:v1 type=review round=<n> sha=<full-head-sha> agent=<claude|codex> verdict=<clean|needs-fixes> -->
 ## Review — round <n> @ <sha7>
 
 **Verdict: <clean|needs-fixes>** — spec: <counts> · standards: <counts> · security: <counts | n/a (no surface)>
@@ -48,16 +48,18 @@ One comment per review cycle. The single marker at the top is edited every round
 Reviewed: <sha7> · axes: <list> · reviewer: <mode>
 ```
 
-Severities: `[CRITICAL]` (security axis: exploitable now — blocks) > `[MUST-FIX]` (wrong, broken, or contradicts the brief — blocks) > `[SHOULD-FIX]` (convention or quality, does not block) > `[NIT]`. Finding IDs are `Finding [N]`, because `#N` auto-links to an issue. Low-confidence findings and nitpicks go in the collapsed block, because low-confidence items in the main list dilute it. Group one recurring defect across files into one finding with a location list. A review comment carries every finding once and in full — issue, why it matters, fix — with nitpicks in the collapsed block and nothing else, because the comment count is the noise metric.
+Severities: `[CRITICAL]` (security axis: exploitable now — blocks) > `[MUST-FIX]` (wrong, broken, or contradicts the brief — blocks) > `[SHOULD-FIX]` (convention or quality, does not block) > `[NIT]`. Finding IDs are `Finding [N]`, because `#N` auto-links to an issue. Low-confidence findings and nitpicks go in the collapsed block, because low-confidence items in the main list dilute it. Group one recurring defect across files into one finding with a location list. Each finding appears once with issue, impact and fix; collapse nitpicks.
 
 ## The loop — 3 rounds max, then open adjudication
 
-`[CRITICAL]` and `[MUST-FIX]` findings enter the loop; `[SHOULD-FIX]`/`[NIT]` are fixed opportunistically or recorded as deferred minors, because a loop that grows with every nit has no end.
+`[CRITICAL]` and `[MUST-FIX]` findings enter the loop; `[SHOULD-FIX]`/`[NIT]` are fixed opportunistically or recorded as deferred minors, keeping the loop bounded.
 
 - **Rounds 1–2:** resume (or redispatch) the implementer with the open findings verbatim and the report-file path. It fixes, re-runs the covering tests, appends its fix report to the same file.
 - **Round 3:** a fresh implementer — "a prior implementer attempted this; read the report file for what was tried" — because a loop surviving two resumes means the implementer can't see its own problem.
 - **Every round:** the re-review is scoped to the fix diff (`FIX_BASE..HEAD`, a new package file); the re-reviewer verdicts each finding **ADDRESSED / NOT ADDRESSED** ("attempted" is not addressed), new breakage in the fix diff joins the open list, and out-of-scope observations become deferred minors.
-- **At the cap:** adjudicate each open finding yourself, openly — parked with a ruling ("why the code stands"), or fixed forward — and every adjudication lands in the evidence comment's Review line and the ledger; adjudicating early to end a loop is pre-judging by another name.
+- **At the cap:** fix forward or bring unresolved findings to the operator. Only their explicit same-review decision can accept risk; record the typed `adjudication` in evidence and surface its rulings in the Review line and ledger. Negative prose or an agent’s parked ruling grants no exception. Early adjudication never shortens the loop.
+
+Risky work requires tests and independent review. Every commit renews full-candidate review. After qualification, review all assembled child/preparation scopes; child reviews bind only their parent base. Transformations/delivery: dev-ship’s runbook.
 
 ## Noise controls — hard filters, not politeness
 

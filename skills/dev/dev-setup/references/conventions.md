@@ -6,7 +6,7 @@ Ordinary defaults resolve repo, group, then org; locks require explicit org dele
 
 ## Comment metadata markers
 
-Comments open with marker and heading:
+Comments open:
 
 ```markdown
 <!-- vsk:v1 type=<type> rev=<n> [key=value ...] -->
@@ -24,11 +24,11 @@ Comments open with marker and heading:
 | `decision` | — | one per decision proposal |
 | `handback` | — | one per stop event |
 
-`rev=<n>` and `(v<n>)` start at 1 on brief, plan, questions and evidence only. Approval, decision, handback and ledger have neither. Locate artifacts by marker, never heading; no legacy fallback.
+`rev=<n>` and `(v<n>)` start at 1 on brief, plan, questions and evidence only. Approval, decision, handback and ledger have neither. Locate by marker; no heading/legacy fallback.
 
 ## Operator identity
 
-Use parenthesized operator GitHub usernames without titles:
+Use parenthesized GitHub usernames:
 
 - Approval: `Approved by (<username>) on DD-MM-YYYY: "<their words>"`
 - Register line: `- DD-MM-YYYY (<username>) — <decision>`
@@ -53,7 +53,7 @@ Scope edits increment marker/heading revisions and append `Revisions: v2 — DD-
 
 ## Scope classes
 
-Intake sets and explains scope; operator overrides allowed:
+Intake explains scope; operator overrides:
 
 - **`research`** — inquiry; throwaway code allowed, never merged. No branch/PR/changelog; evidence comment contains findings and recommendation.
 - **`quick-build`** — existing flow: draft brief+plan together, approve both, then `ready`.
@@ -63,7 +63,7 @@ Scope ratchet: `dev-plan`.
 
 ## Labels
 
-Exactly one state; every flip sets its assignee (colors: dev-setup):
+One state; flips set assignees (colors: dev-setup):
 
 | label | meaning | assignee |
 |---|---|---|
@@ -73,7 +73,7 @@ Exactly one state; every flip sets its assignee (colors: dev-setup):
 | `working` | claimed; ledger shows live progress | the runner |
 | `for-operator` | done — evidence posted, awaiting operator review | the operator |
 
-Modifiers coexist with state: `risky` · scope `research` / `quick-build` / `full-plan` · `epic` (map parents, absent a native Epic type). Boards mirror state labels one way.
+Modifiers coexist with state: `risky` · scope `research` / `quick-build` / `full-plan` · `epic` (map parents, absent a native Epic type). Boards mirror states one-way.
 
 ## Titles, types, hierarchy
 
@@ -83,7 +83,7 @@ Modifiers coexist with state: `risky` · scope `research` / `quick-build` / `ful
 
 ## The ledger
 
-Implementation edits one ledger:
+One implementation ledger:
 
 ```markdown
 <!-- vsk:v1 type=ledger branch=<branch> -->
@@ -106,6 +106,8 @@ Drafts/reports: `.vegastack/.tmp/<issue-number>-<title-slug>/` (before issue cre
 
 Prove claims with fresh command output and exit codes. Report failures and skipped steps honestly. Delegate only substantial independent parallel work, never verification of your own; keep spawn counts low. Guards block machine-verifiable failures (exit 2); heuristics warn. No AI inference inside guards; unverifiable state fails closed.
 
-## Plain-language collaboration
+## Review bindings
 
-Announce starts, findings and direction changes; outcomes are self-contained with paths and remaining checks. Prefer literal language; avoid arrow chains and invented labels. Use Mermaid/ASCII where useful. Challenge unclear or contradictory answers with concrete options; never silently guess.
+One fenced JSON section each: `{"reviewBinding":{sha,baseSha,scopeDigest,verdict,findings:[{id,status}]}}` in review; `{"adjudication":{sha,reviewCommentId,operator,source:{kind,ref,quote},findings:[{id,disposition,reason}]}}` in evidence. Full commit IDs; scopeDigest=canonical plan digest. Status=open/resolved; disposition=accept-risk. Every open finding requires same-review operator acceptance. dev-ship’s README defines source checks. No prose exceptions.
+
+Communicate starts/findings/direction plainly; self-contained outcomes include paths/remaining checks. Avoid invented labels/arrows; visualize usefully. Challenge ambiguity with options; never silently guess.

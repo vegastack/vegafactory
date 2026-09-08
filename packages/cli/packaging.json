@@ -115,6 +115,7 @@
   ],
   "dev-ship": [
     "SKILL.md",
+    "scripts/lib/approval.mjs@dev-implement",
     "scripts/ship-gate.mjs",
     "references/conventions.md@dev-setup",
     "agents/openai.yaml",
