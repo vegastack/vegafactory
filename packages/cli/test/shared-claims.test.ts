@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { processIdentity } from '../src/claims.ts';
-import { acquireSharedTask, transitionSharedTask, inspectCoordinationTask, readCoordination, readSharedStatus, taskKey, parseRecoveryEnvelope, parseRecoveryPayload, publishRecoveryReceipt, resolveEvidence, beginManagedEffect, verifyManagedEffect, canonical, sha256, githubCoordinationProvider, type CoordinationTarget, type CoordinationProvider, type VerifiedCandidate, type EffectiveMachine, type MachineSession, type RecoveryEvidencePayload, type RecoveryEnvelope } from '../src/shared-claims.ts';
+import { acquireSharedTask, transitionSharedTask, linkAcceptedScope, inspectHistoricalCoordinationTask, inspectCoordinationTask, readCoordination, readSharedStatus, taskKey, parseRecoveryEnvelope, parseRecoveryPayload, publishRecoveryReceipt, resolveEvidence, beginManagedEffect, verifyManagedEffect, canonical, sha256, githubCoordinationProvider, type CoordinationTarget, type CoordinationProvider, type VerifiedCandidate, type EffectiveMachine, type MachineSession, type RecoveryEvidencePayload, type RecoveryEnvelope } from '../src/shared-claims.ts';
 const d = 'd'.repeat(64), root = '1'.repeat(40), installation = '11111111-1111-4111-8111-111111111111';
 async function fixture() {
     let head = root, version = 1, ambiguous = false, conflicts = 0, mutations = 0;
@@ -438,6 +438,7 @@ test.each(['prepared', 'ambiguous'] as const)('reconciled %s telemetry does not 
     p.recovery.remoteEffectCoverage = { kind: 'reconciled', evidence: reconciliation.reference };
     expect((await transitionSharedTask({ claim: p.claim, operationId: randomUUID(), transition: { kind: 'recovery', recovery: p.recovery } })).kind).toBe('owned');
     const accepted = await publishRecoveryReceipt({ claim: p.claim, operationId: randomUUID(), payload: { schemaVersion: 2, kind: 'acceptance', taskId: '137-T1', runId: p.claim.runId, sourceSha: root, scopeDigest: d, validationId: '137-T1/check/' + d, commandDigest: d, result: 'passed', acceptedScope: { schemaVersion: 2, repo: p.candidate.repo, issue: p.candidate.issue, artifacts: [{ repo: p.candidate.repo, issue: p.candidate.issue, kind: 'brief', artifactId: 'I_137', rev: 1, digest: d }], approvalBindings: p.candidate.approvalBindings, approvedTaskIds: p.candidate.approvedTaskIds, completedTaskIds: p.candidate.approvedTaskIds, parentRepo: p.candidate.repo, parentIssue: 133, parentBefore: root, parentAfter: root, acceptedAt: new Date().toISOString() } } });
+    if (state === 'ambiguous') expect((await linkAcceptedScope({ claim: p.claim, operationId: randomUUID(), acceptedScope: accepted.reference })).kind).toBe('owned');
     const complete = await transitionSharedTask({ claim: p.claim, operationId: randomUUID(), transition: { kind: 'complete', stopProof: p.stopProof, acceptedScope: accepted.reference } });
     expect(complete.kind).toBe('owned');
     if (complete.kind !== 'owned') throw Error('completion');
@@ -525,4 +526,168 @@ test('retained inspector preserves unresolved refs and rejects malformed or fore
         await write({ ...task, recovery });
         expect((await inspectCoordinationTask(p.target, key)).kind).toBe('invalid-or-unavailable');
     }
+});
+
+async function acceptanceFixture() {
+    const f = await fixture();
+    f.candidate.approvedTaskIds.push('137-T2');
+    const acquired = await acquireSharedTask({ ...f, operationId: randomUUID() });
+    if (acquired.kind !== 'owned') throw Error('claim');
+    const payload: Extract<RecoveryEvidencePayload, { kind: 'acceptance' }> = {
+        schemaVersion: 2, kind: 'acceptance', taskId: '137-T1', runId: acquired.claim.runId,
+        sourceSha: root, scopeDigest: d, validationId: '137-T1/check/' + d, commandDigest: d, result: 'passed',
+        acceptedScope: { schemaVersion: 2, repo: f.candidate.repo, issue: f.candidate.issue,
+            artifacts: [{ repo: f.candidate.repo, issue: f.candidate.issue, kind: 'brief', artifactId: 'I_137', rev: 1, digest: d }],
+            approvalBindings: f.candidate.approvalBindings, approvedTaskIds: f.candidate.approvedTaskIds,
+            completedTaskIds: ['137-T1'], parentRepo: f.candidate.repo, parentIssue: 133,
+            parentBefore: root, parentAfter: '2'.repeat(40), acceptedAt: new Date().toISOString() }
+    };
+    const published = await publishRecoveryReceipt({ claim: acquired.claim, operationId: randomUUID(), payload });
+    return { ...f, claim: acquired.claim, published, payload };
+}
+test('partial accepted scope links once after a lost response and retains active ownership and reservations', async () => {
+    const f = await acceptanceFixture(), before = await readCoordination(f.target);
+    f.setAmbiguous();
+    const input = { claim: f.claim, operationId: randomUUID(), acceptedScope: f.published.reference };
+    expect((await linkAcceptedScope(input)).kind).toBe('owned');
+    const linked = await readCoordination(f.target);
+    expect((await linkAcceptedScope(input)).kind).toBe('owned');
+    expect((await readCoordination(f.target)).head).toBe(linked.head);
+    expect(linked.index).toEqual(before.index);
+    expect(linked.machines).toEqual(before.machines);
+    expect(linked.tasks[f.claim.taskKey]).toEqual({ ...before.tasks[f.claim.taskKey]!, acceptedScopes: [{ scopeDigest: d, receipt: f.published.reference }] });
+    expect((await transitionSharedTask({ claim: f.claim, operationId: randomUUID(), transition: { kind: 'start' } })).kind).toBe('owned');
+    f.target.verifyTransition = async () => { throw Error('current approval revoked'); };
+    expect(await linkAcceptedScope(input)).toMatchObject({ kind: 'refused', reason: 'current approval revoked' });
+});
+test('historical receipt and previous head preserve original identity without latest-owner substitution', async () => {
+    const f = await acceptanceFixture();
+    const { taskKey, runId, generation, ownerToken, machineId, installationId, sessionId } = f.claim;
+    const input = { taskKey, expected: { taskKey, runId, generation, ownerToken, machineId, installationId, sessionId }, evidence: f.published.reference, at: 'previous-head' as const };
+    await transitionSharedTask({ claim: f.claim, operationId: randomUUID(), transition: { kind: 'start' } });
+    const result = await inspectHistoricalCoordinationTask(f.target, input);
+    expect(result.kind).toBe('historical');
+    if (result.kind !== 'historical') throw Error('historical');
+    expect(result.head).toBe(f.claim.stateCommit);
+    expect(result.task.state).toBe('claimed');
+    expect((await inspectCoordinationTask(f.target, taskKey)).kind).toBe('active');
+    for (const expected of [{ ...input.expected, generation: generation + 1 }, { ...input.expected, ownerToken: randomUUID() }])
+        expect((await inspectHistoricalCoordinationTask(f.target, { ...input, expected })).kind).toBe('invalid-or-unavailable');
+    expect((await inspectHistoricalCoordinationTask(f.target, { ...input, evidence: { ...input.evidence, blobSha256: 'f'.repeat(64) } })).kind).toBe('invalid-or-unavailable');
+});
+
+test('acceptance refuses missing receipts, stale generation, source or authority denial and unsupported transitions without writes', async () => {
+    const f = await acceptanceFixture();
+    const input = { claim: f.claim, operationId: randomUUID(), acceptedScope: f.published.reference };
+    const before = (await readCoordination(f.target)).head;
+    expect((await linkAcceptedScope({ ...input, acceptedScope: { ...input.acceptedScope, operationId: randomUUID() } })).kind).toBe('refused');
+    expect((await linkAcceptedScope({ ...input, claim: { ...f.claim, generation: 2 } })).kind).toBe('refused');
+    f.target.verifyEvidence = async (_ref, payload) => { if (payload?.kind === 'acceptance' && payload.sourceSha !== '3'.repeat(40)) throw Error('reviewed source mismatch'); };
+    expect(await linkAcceptedScope(input)).toMatchObject({ kind: 'refused', reason: 'reviewed source mismatch' });
+    f.target.verifyEvidence = async () => {};
+    f.target.verifyTransition = async () => { throw Error('join not authorized'); };
+    expect(await linkAcceptedScope(input)).toMatchObject({ kind: 'refused', reason: 'join not authorized' });
+    f.target.verifyTransition = async () => {};
+    expect(await transitionSharedTask({ claim: f.claim, operationId: randomUUID(), transition: { kind: 'typo' } as any })).toEqual({ kind: 'refused', reason: 'unsupported task transition kind' });
+    expect((await readCoordination(f.target)).head).toBe(before);
+});
+test('acceptance exact scope bindings refuse foreign task sets, scope, run and receipt publisher', async () => {
+    const f = await acceptanceFixture();
+    const scope = f.payload.acceptedScope!;
+    const variants = [
+        { ...f.payload, acceptedScope: null },
+        { ...f.payload, runId: randomUUID() },
+        { ...f.payload, scopeDigest: 'e'.repeat(64) },
+        { ...f.payload, taskId: '137-T2' },
+        { ...f.payload, acceptedScope: { ...scope, approvedTaskIds: ['137-T1'] } },
+        { ...f.payload, acceptedScope: { ...scope, approvalBindings: [{ ...scope.approvalBindings[0]!, approvalId: 'foreign' }] } },
+    ];
+    for (const payload of variants) {
+        const published = await publishRecoveryReceipt({ claim: f.claim, operationId: randomUUID(), payload });
+        const before = (await readCoordination(f.target)).head;
+        expect((await linkAcceptedScope({ claim: f.claim, operationId: randomUUID(), acceptedScope: published.reference })).kind).toBe('refused');
+        expect((await readCoordination(f.target)).head).toBe(before);
+    }
+    const other = await acquireSharedTask({ ...f, candidate: { ...f.candidate, issue: 138, issueNodeId: 'I_138', paths: ['src/b'], runId: randomUUID() }, operationId: randomUUID() });
+    if (other.kind !== 'owned') throw Error('other claim');
+    const published = await publishRecoveryReceipt({ claim: other.claim, operationId: randomUUID(), payload: f.payload });
+    expect((await linkAcceptedScope({ claim: f.claim, operationId: randomUUID(), acceptedScope: published.reference })).kind).toBe('refused');
+});
+test('historical pins refuse unavailable or malformed state, foreign branch and every wrong owner field', async () => {
+    const f = await acceptanceFixture();
+    const { taskKey, runId, generation, ownerToken, machineId, installationId, sessionId } = f.claim;
+    const input = { taskKey, expected: { taskKey, runId, generation, ownerToken, machineId, installationId, sessionId }, evidence: f.published.reference, at: 'receipt' as const };
+    for (const field of ['taskKey', 'runId', 'ownerToken', 'machineId', 'installationId', 'sessionId'] as const) {
+        const wrong = field === 'taskKey' ? 'e'.repeat(64) : field === 'machineId' ? 'foreign-machine' : randomUUID();
+        expect((await inspectHistoricalCoordinationTask(f.target, { ...input, expected: { ...input.expected, [field]: wrong } })).kind).toBe('invalid-or-unavailable');
+    }
+    expect((await inspectHistoricalCoordinationTask(f.target, { ...input, expected: { taskKey } as any })).kind).toBe('invalid-or-unavailable');
+    expect((await inspectHistoricalCoordinationTask(f.target, { ...input, evidence: null as any })).kind).toBe('invalid-or-unavailable');
+    const path = 'coordination/tasks/' + taskKey + '.json', files = f.versions.get(input.evidence.commitSha)!;
+    const original = files[path]!;
+    for (const corrupt of ['{}', canonical({ ...JSON.parse(original), state: 'completed' }), canonical({ ...JSON.parse(original), extra: true })]) {
+        files[path] = corrupt;
+        expect((await inspectHistoricalCoordinationTask(f.target, input)).kind).toBe('invalid-or-unavailable');
+    }
+    delete files[path];
+    expect((await inspectHistoricalCoordinationTask(f.target, input)).kind).toBe('invalid-or-unavailable');
+    files[path] = original;
+    const branch = f.target.provider.branch;
+    f.target.provider.branch = async t => ({ ...await branch(t), defaultBranch: 'factory-state' });
+    expect((await inspectHistoricalCoordinationTask(f.target, input)).kind).toBe('invalid-or-unavailable');
+    f.target.provider.branch = branch;
+    f.rewrite();
+    expect((await inspectHistoricalCoordinationTask(f.target, input)).kind).toBe('invalid-or-unavailable');
+});
+test('historical read retains checkpoint, stop and pending effects across actual ownership transfer', async () => {
+    const f = await pendingEffectFixture('telemetry-push', 'ambiguous');
+    expect((await transitionSharedTask({ claim: f.claim, operationId: randomUUID(), transition: { kind: 'stop', stopProof: f.stopProof } })).kind).toBe('owned');
+    const published = await publishRecoveryReceipt({ claim: f.claim, operationId: randomUUID(), payload: { schemaVersion: 2, kind: 'acceptance', taskId: '137-T1', runId: f.claim.runId, sourceSha: root, scopeDigest: d, validationId: '137-T1/check/' + d, commandDigest: d, result: 'passed', acceptedScope: null } });
+    const original = (await readCoordination(f.target)).tasks[f.claim.taskKey]!;
+    const machine = { ...f.machine, id: 'replacement', installationId: randomUUID(), hostBindingDigest: 'a'.repeat(64) }, session = { ...f.session, machineId: machine.id, installationId: machine.installationId, hostBindingDigest: machine.hostBindingDigest, sessionId: randomUUID() };
+    expect((await transitionSharedTask({ claim: f.claim, operationId: randomUUID(), transition: { kind: 'handoff', machine, session, candidate: f.candidate, stopProof: f.stopProof, recovery: f.recovery } })).kind).toBe('owned');
+    const { taskKey, runId, generation, ownerToken, machineId, installationId, sessionId } = f.claim;
+    const expected = { taskKey, runId, generation, ownerToken, machineId, installationId, sessionId };
+    const result = await inspectHistoricalCoordinationTask(f.target, { taskKey, expected, evidence: published.reference, at: 'receipt' });
+    expect(result).toEqual({ kind: 'historical', head: published.reference.commitSha, task: original });
+    expect((await inspectCoordinationTask(f.target, taskKey, { ownerToken })).kind).toBe('invalid-or-unavailable');
+    expect((await transitionSharedTask({ claim: f.claim, operationId: randomUUID(), transition: { kind: 'start' } })).kind).toBe('refused');
+});
+
+test('historical child token comes only from immutable child facts bound to its exact original parent', async () => {
+    const p = await parentFixture();
+    const acquired = await acquireSharedTask({ ...p, candidate: p.child, operationId: randomUUID() });
+    if (acquired.kind !== 'owned') throw Error('child');
+    const published = await publishRecoveryReceipt({ claim: p.parent, operationId: randomUUID(), payload: { schemaVersion: 2, kind: 'acceptance', taskId: '137-T1', runId: acquired.claim.runId, sourceSha: root, scopeDigest: d, validationId: '137-T1/check/' + d, commandDigest: d, result: 'passed', acceptedScope: null } });
+    const { taskKey, runId, generation, machineId, installationId, sessionId } = acquired.claim;
+    const expected = { child: { taskKey, runId, generation, machineId, installationId, sessionId }, parent: p.child.parentBinding };
+    const input = { taskKey, expected, evidence: published.reference, at: 'receipt' as const };
+    const original = (await readCoordination(p.target)).tasks[taskKey]!;
+    const current = await readCoordination(p.target);
+    await p.target.provider.commit(p.target, { branchId: current.branchId, expectedHeadOid: current.head, operationId: randomUUID(), files: { ['coordination/tasks/' + taskKey + '.json']: canonical({ ...original, ownerToken: randomUUID(), generation: 2 }) } });
+    expect(await inspectHistoricalCoordinationTask(p.target, input)).toEqual({ kind: 'historical', head: published.reference.commitSha, task: original });
+    expect((await inspectCoordinationTask(p.target, taskKey, { ownerToken: acquired.claim.ownerToken })).kind).toBe('invalid-or-unavailable');
+    expect((await inspectHistoricalCoordinationTask(p.target, { ...input, expected: { ...expected, parent: { ...expected.parent, ownerToken: randomUUID() } } })).kind).toBe('invalid-or-unavailable');
+    expect((await inspectHistoricalCoordinationTask(p.target, { ...input, expected: { ...expected, child: { ...expected.child, generation: 2 } } })).kind).toBe('invalid-or-unavailable');
+    expect((await inspectHistoricalCoordinationTask(p.target, { ...input, expected: expected.child as any })).kind).toBe('invalid-or-unavailable');
+    expect((await inspectHistoricalCoordinationTask(p.target, { ...input, extra: true } as any)).kind).toBe('invalid-or-unavailable');
+    const files = p.versions.get(published.reference.commitSha)!;
+    const path = 'coordination/tasks/' + taskKey + '.json';
+    const { parentBinding: _binding, ...legacy } = original;
+    for (const record of [legacy, { ...original, parentBinding: null }, { ...original, parentTaskKey: null }]) {
+        files[path] = canonical(record);
+        expect((await inspectHistoricalCoordinationTask(p.target, input)).kind).toBe('invalid-or-unavailable');
+    }
+});
+
+test('stopped unfinished ownership accepts a partial scope without releasing its reservations', async () => {
+    const f = await acceptanceFixture();
+    const stopProof = { kind: 'operator-confirmed' as const, machineId: f.machine.id, installationId: f.machine.installationId, sessionId: f.session.sessionId, hostBindingDigest: d, bootIdDigest: d, runIds: [f.claim.runId], generation: 1, observedAt: new Date().toISOString(), evidenceRef: f.candidate.approvalBindings[0]!.source };
+    expect((await transitionSharedTask({ claim: f.claim, operationId: randomUUID(), transition: { kind: 'stop', stopProof } })).kind).toBe('owned');
+    const before = await readCoordination(f.target);
+    expect((await linkAcceptedScope({ claim: f.claim, operationId: randomUUID(), acceptedScope: f.published.reference })).kind).toBe('owned');
+    const after = await readCoordination(f.target);
+    expect(after.index).toEqual(before.index);
+    expect(after.machines).toEqual(before.machines);
+    expect(after.tasks[f.claim.taskKey]).toEqual({ ...before.tasks[f.claim.taskKey]!, acceptedScopes: [{ scopeDigest: d, receipt: f.published.reference }] });
 });

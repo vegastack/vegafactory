@@ -10,3 +10,4 @@ Protect dispatcher ownership with atomic local claims and conditional shared tas
 - Keep typed telemetry delivery pending without blocking otherwise verified code completion or transfer.
 - Inspect retained active or completed private task records at one verified current head, preserving recovery and pending delivery references.
 - Reuse only the live caller’s verified immutable process identity to reduce claim overhead while retaining fresh foreign-process and ownership checks.
+- Link verified partial acceptance while retaining current ownership and all reservations; inspect immutable historical task facts from pinned receipts and exact original owner identities.

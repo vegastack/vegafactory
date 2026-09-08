@@ -579,6 +579,9 @@ export type TaskTransition = {
         kind: 'state-receipt';
     }>;
 } | {
+    kind: 'accept-scope';
+    acceptedScope: Extract<EvidenceRef, { kind: 'state-receipt' }>;
+} | {
     kind: 'handoff';
     machine: EffectiveMachine;
     session: MachineSession;
@@ -690,19 +693,28 @@ async function pinnedJson(target: CoordinationTarget, head: string, path: string
 export async function readCoordination(target: CoordinationTarget): Promise<CoordinationSnapshot> {
     return readCoordinationSnapshot(target, true);
 }
-async function readCoordinationSnapshot(target: CoordinationTarget, rememberHead: boolean, total = { bytes: 0 }): Promise<CoordinationSnapshot> {
+async function readCoordinationSnapshot(target: CoordinationTarget, rememberHead: boolean, total = { bytes: 0 }, immutableHead?: string): Promise<CoordinationSnapshot> {
     if (!/^[a-z0-9.-]+$/.test(target.host) || !repo(target.repository) || !node(target.repositoryId) || !branch(target.branch) || !sha(target.rootCommit) || !uuid(target.installationId))
         throw Error('invalid coordination target');
-    const remote = await bounded(target.provider.branch(target));
+    let remote = await bounded(target.provider.branch(target));
     if (!remote.private || remote.repositoryId !== target.repositoryId || !node(remote.id) || !sha(remote.head) || target.branch.replace(/^refs\/heads\//, '') === remote.defaultBranch)
         throw Error('coordination branch identity/privacy/default mismatch');
     const memory = await remembered(target);
     for (const base of new Set([target.rootCommit, ...(memory ? [memory.head] : [])]))
         if (!['ahead', 'identical'].includes(await bounded(target.provider.compare(target, base, remote.head))))
             throw Error('coordination history is not verified forward ancestry');
-    const index = parse<Index>(await pinnedJson(target, remote.head, 'coordination/index.json', 1024 * 1024, total), indexSchema, 'coordination index', 1024 * 1024);
+    let index = parse<Index>(await pinnedJson(target, remote.head, 'coordination/index.json', 1024 * 1024, total), indexSchema, 'coordination index', 1024 * 1024);
     if (index.installationId !== target.installationId || memory && index.revision < memory.revision)
         throw Error('coordination installation/revision rollback');
+    if (immutableHead !== undefined) {
+        if (rememberHead || !sha(immutableHead) || !['ahead', 'identical'].includes(await bounded(target.provider.compare(target, target.rootCommit, immutableHead))) || !['ahead', 'identical'].includes(await bounded(target.provider.compare(target, immutableHead, remote.head))))
+            throw Error('historical state is outside verified branch ancestry');
+        const historical = parse<Index>(await pinnedJson(target, immutableHead, 'coordination/index.json', 1024 * 1024, total), indexSchema, 'historical coordination index', 1024 * 1024);
+        if (historical.installationId !== target.installationId || historical.revision > index.revision)
+            throw Error('historical installation/revision mismatch');
+        index = historical;
+        remote = { ...remote, head: immutableHead };
+    }
     const tasks: Record<string, TaskRecord> = {}, machines: Record<string, MachineRecord> = {};
     for (const row of index.active) {
         if (tasks[row.taskKey] || Object.values(tasks).some(t => t.issueNodeId === row.issueNodeId))
@@ -765,32 +777,75 @@ export async function inspectCoordinationTask(
     expected: Partial<Pick<TaskRecord, 'runId' | 'generation' | 'ownerToken' | 'machineId' | 'installationId' | 'sessionId' | 'scopeDigest'>> = {},
 ): Promise<CoordinationTaskInspection> {
     try {
-        const path = taskPath(key);
+        taskPath(key);
         const bindings: Record<string, Check> = { runId: uuid, generation: positive, ownerToken: uuid, machineId: id, installationId: uuid, sessionId: uuid, scopeDigest: digest };
         if (!expected || typeof expected !== 'object' || Array.isArray(expected) || Object.entries(expected).some(([name, value]) => !Object.hasOwn(bindings, name) || !bindings[name]!(value)))
             throw Error('invalid expected task binding');
         // Reuse the current-head, private branch, ancestry, bounds and full index
         // consistency checks, without writing even the local accepted-head pointer.
         const total = { bytes: 0 }, snapshot = await readCoordinationSnapshot(target, false, total);
-        const raw = snapshot.tasks[key] ?? await pinnedJson(target, snapshot.head, path, 256 * 1024, total);
-        if (raw === null) return { kind: 'absent', head: snapshot.head };
-        const task = parse<TaskRecord>(raw, recordSchema, 'retained task record');
-        const indexed = snapshot.index.active.some(row => row.taskKey === key);
-        if (task.taskKey !== key || task.host !== target.host || key !== taskKey(task.host, task.repositoryNodeId, task.issueNodeId) || indexed !== (task.state !== 'completed'))
-            throw Error('retained task/index identity mismatch');
-        if (Object.entries(expected).some(([name, value]) => task[name as keyof TaskRecord] !== value))
-            throw Error('retained task binding mismatch');
-        if (task.recovery) {
-            const e = parseRecoveryEnvelope(task.recovery);
-            if (e.taskKey !== key || e.runId !== task.runId || e.generation !== task.generation || e.scopeDigest !== task.scopeDigest || e.approvalDigest !== task.approvalDigest || canonical(e.approvalBindings) !== canonical(task.approvalBindings))
-                throw Error('retained recovery identity mismatch');
-        }
-        return { kind: indexed ? 'active' : 'completed', head: snapshot.head, task };
+        return await inspectTaskAtSnapshot(target, key, expected, snapshot, total);
     }
     catch {
         return { kind: 'invalid-or-unavailable', reason: 'retained coordination task could not be verified' };
     }
 }
+async function inspectTaskAtSnapshot(target: CoordinationTarget, key: string, expected: Partial<TaskRecord>, snapshot: CoordinationSnapshot, total: { bytes: number }): Promise<CoordinationTaskInspection> {
+    const path = taskPath(key);
+    const raw = snapshot.tasks[key] ?? await pinnedJson(target, snapshot.head, path, 256 * 1024, total);
+    if (raw === null) return { kind: 'absent', head: snapshot.head };
+    const task = parse<TaskRecord>(raw, recordSchema, 'retained task record');
+    const indexed = snapshot.index.active.some(row => row.taskKey === key);
+    if (task.taskKey !== key || task.host !== target.host || key !== taskKey(task.host, task.repositoryNodeId, task.issueNodeId) || indexed !== (task.state !== 'completed'))
+        throw Error('retained task/index identity mismatch');
+    if (Object.entries(expected).some(([name, value]) => task[name as keyof TaskRecord] !== value))
+        throw Error('retained task binding mismatch');
+    if (task.recovery) {
+        const e = parseRecoveryEnvelope(task.recovery);
+        if (e.taskKey !== key || e.runId !== task.runId || e.generation !== task.generation || e.scopeDigest !== task.scopeDigest || e.approvalDigest !== task.approvalDigest || canonical(e.approvalBindings) !== canonical(task.approvalBindings))
+            throw Error('retained recovery identity mismatch');
+    }
+    return { kind: indexed ? 'active' : 'completed', head: snapshot.head, task };
+}
+export type HistoricalTaskBinding = ParentClaimBinding | {
+    child: Omit<ParentClaimBinding, 'ownerToken'>;
+    parent: ParentClaimBinding;
+};
+export type HistoricalCoordinationTaskInspection = {
+    kind: 'historical';
+    head: string;
+    task: TaskRecord;
+} | { kind: 'invalid-or-unavailable'; reason: string };
+// Immutable facts only: the returned owner must never authorize current work.
+// The receipt can have been published by the parent while pinning a child record.
+export async function inspectHistoricalCoordinationTask(target: CoordinationTarget, input: {
+    taskKey: string;
+    expected: HistoricalTaskBinding;
+    evidence: Extract<EvidenceRef, { kind: 'state-receipt' }>;
+    at: 'receipt' | 'previous-head';
+}): Promise<HistoricalCoordinationTaskInspection> {
+    try {
+        const childBinding = closed({ child: closed({ taskKey: digest, runId: uuid, generation: positive, machineId: id, installationId: uuid, sessionId: uuid }), parent: parentBindingSchema });
+        if (!closed({ taskKey: digest, expected: union(parentBindingSchema, childBinding), evidence: stateEvidence, at: literal('receipt', 'previous-head') })(input))
+            throw Error('historical pin and exact task/parent binding required');
+        const expected = 'child' in input.expected ? input.expected.child : input.expected;
+        if (expected.taskKey !== input.taskKey) throw Error('historical task key mismatch');
+        const total = { bytes: 0 };
+        const receipt = await readEvidenceReceipt(target, input.evidence, total);
+        const head = input.at === 'receipt' ? input.evidence.commitSha : receipt.previousHead;
+        if (!['ahead', 'identical'].includes(await bounded(target.provider.compare(target, receipt.previousHead, input.evidence.commitSha))))
+            throw Error('receipt previous head is not ancestral');
+        const snapshot = await readCoordinationSnapshot(target, false, total, head);
+        const result = await inspectTaskAtSnapshot(target, input.taskKey, expected, snapshot, total);
+        if (result.kind !== 'active' && result.kind !== 'completed') throw Error('historical task missing');
+        if ('child' in input.expected && (result.task.parentTaskKey !== input.expected.parent.taskKey || canonical(result.task.parentBinding ?? null) !== canonical(input.expected.parent)))
+            throw Error('historical original parent binding mismatch');
+        return { kind: 'historical', head, task: result.task };
+    } catch {
+        return { kind: 'invalid-or-unavailable', reason: 'historical coordination task could not be verified' };
+    }
+}
+
 function validateSession(machine: EffectiveMachine, session: MachineSession, target: CoordinationTarget) {
     if (!machine.enabled || !id(machine.id) || !uuid(session.sessionId) || !digest(session.bootIdDigest) || machine.id !== session.machineId || machine.installationId !== session.installationId || machine.hostBindingDigest !== session.hostBindingDigest || !positive(machine.defaults.maxRuns) || !positive(machine.defaults.childConcurrent) || canonical(machine.coordination) !== canonical({ repositoryId: target.repositoryId, repository: target.repository, branch: target.branch, rootCommit: target.rootCommit, installationId: target.installationId }))
         throw Error('machine session/coordination mismatch');
@@ -887,12 +942,13 @@ async function reserve(snapshot: CoordinationSnapshot, t: TaskRecord, machine: E
         snapshot.index.machines.push(machine.id);
 }
 function filesFor(snapshot: CoordinationSnapshot, t: TaskRecord, receipt: OperationReceipt): Record<string, string> {
-    snapshot.index.revision++;
+    if (receipt.type !== 'accept-scope') snapshot.index.revision++;
     parse(snapshot.index, indexSchema, 'index', 1024 * 1024);
     parse(t, recordSchema, 'task');
     parse(receipt, receiptSchema, 'receipt', 32 * 1024);
-    const files: Record<string, string> = { 'coordination/index.json': canonical(snapshot.index), [taskPath(t.taskKey)]: canonical(t), [operationPath(receipt.operationId)]: canonical(receipt) };
-    for (const m of Object.values(snapshot.machines))
+    const files: Record<string, string> = { [taskPath(t.taskKey)]: canonical(t), [operationPath(receipt.operationId)]: canonical(receipt) };
+    if (receipt.type !== 'accept-scope') files['coordination/index.json'] = canonical(snapshot.index);
+    for (const m of receipt.type === 'accept-scope' ? [] : Object.values(snapshot.machines))
         files[machinePath(m.machineId)] = canonical(m);
     if (Object.values(files).reduce((n, v) => n + Buffer.byteLength(v), 0) > 8 * 1024 * 1024)
         throw Error('transaction size exceeded');
@@ -924,6 +980,11 @@ async function transactWithinWindow(target: CoordinationTarget, operationId: str
                 const t = s.tasks[prior.taskKey] ?? parse<TaskRecord>(await pinnedJson(target, s.head, taskPath(prior.taskKey), 256 * 1024), recordSchema, 'completed task');
                 if (prior.generation !== t.generation || canonical(prior.resultOwner) !== canonical(ownerOf(t)) || expected && !owns(t, expected))
                     return { kind: 'refused', reason: 'old receipt no longer owns current task' };
+                if (prior.type === 'accept-scope') {
+                    const retained = canonical(t);
+                    await build(s); // Recheck current authority and immutable source/join evidence on retries.
+                    if (canonical(t) !== retained) throw Error('acceptance receipt is not linked in current task');
+                }
                 await verifyAdmissionReadback(s, t, prior.type, target);
                 return { kind: 'owned', claim: claimOf(t, s.head, target) };
             }
@@ -1018,12 +1079,17 @@ export async function resolveEvidence(target: CoordinationTarget, ref: EvidenceR
         await target.verifyEvidence(ref, null);
         return null;
     }
+    return (await readEvidenceReceipt(target, ref)).recoveryPayload;
+}
+async function readEvidenceReceipt(target: CoordinationTarget, ref: Extract<EvidenceRef, { kind: 'state-receipt' }>, total?: { bytes: number }): Promise<OperationReceipt> {
+    parseEvidenceRef(ref);
     const current = await bounded(target.provider.branch(target));
     if (current.repositoryId !== target.repositoryId || !current.private || ![target.rootCommit, ref.commitSha].every(v => sha(v)) || !['ahead', 'identical'].includes(await bounded(target.provider.compare(target, target.rootCommit, ref.commitSha))) || !['ahead', 'identical'].includes(await bounded(target.provider.compare(target, ref.commitSha, current.head))))
         throw Error('evidence is outside verified state-branch ancestry');
     const raw = await bounded(target.provider.read(target, ref.commitSha, operationPath(ref.operationId)));
     if (raw === null || Buffer.byteLength(raw) > 32 * 1024 || sha256(raw) !== ref.blobSha256)
         throw Error('immutable evidence blob missing or changed');
+    if (total && (total.bytes += Buffer.byteLength(raw)) > 8 * 1024 * 1024) throw Error('coordination payload bound exceeded');
     const budget = transactionClock.getStore();
     if (budget && (budget.decodedBytes += Buffer.byteLength(raw)) > 8 * 1024 * 1024) throw Error('total decoded transaction read bound exceeded');
     const receipt = parse<OperationReceipt>(JSON.parse(raw), receiptSchema, 'evidence receipt', 32 * 1024);
@@ -1031,7 +1097,7 @@ export async function resolveEvidence(target: CoordinationTarget, ref: EvidenceR
         throw Error('evidence receipt identity/payload mismatch');
     const p = parseRecoveryPayload(receipt.recoveryPayload);
     await target.verifyEvidence(ref, p);
-    return p;
+    return receipt;
 }
 async function validateRemoteRecovery(target: CoordinationTarget, e: RecoveryEnvelope, t: TaskRecord, requireCoverage = false) {
     parseRecoveryEnvelope(e);
@@ -1102,6 +1168,8 @@ export async function transitionSharedTask(input: {
     transition: TaskTransition;
 }): Promise<SharedClaimResult> {
     const { claim, operationId, transition } = input, target = claim.target;
+    if (!transition || !['start', 'checkpoint', 'stop', 'block', 'complete', 'accept-scope', 'handoff', 'recovery', 'receipt', 'effect-send'].includes(transition.kind))
+        return { kind: 'refused', reason: 'unsupported task transition kind' };
     const requestDigest = sha256(canonical(transition.kind === 'handoff' ? { ...transition, session: { machineId: transition.session.machineId, sessionId: transition.session.sessionId, installationId: transition.session.installationId, hostBindingDigest: transition.session.hostBindingDigest, bootIdDigest: transition.session.bootIdDigest } } : transition));
     return transact(target, operationId, async (s) => {
         const t = s.tasks[claim.taskKey];
@@ -1159,6 +1227,20 @@ export async function transitionSharedTask(input: {
                 t.checkpoint = c;
             }
         }
+        else if (transition.kind === 'accept-scope') {
+            const receipt = await readEvidenceReceipt(target, transition.acceptedScope);
+            const p = receipt.recoveryPayload;
+            if (receipt.taskKey !== t.taskKey || receipt.generation !== t.generation || canonical(receipt.resultOwner) !== canonical(ownerOf(t)) || !p || p.kind !== 'acceptance' || p.result !== 'passed' || p.runId !== t.runId || p.scopeDigest !== t.scopeDigest || !p.acceptedScope)
+                throw Error('current owner acceptance unavailable');
+            const accepted = parseAcceptedScope(p.acceptedScope);
+            if (accepted.repo !== t.repo || accepted.issue !== t.issue || canonical([...accepted.approvedTaskIds].sort()) !== canonical([...t.approvedTaskIds].sort()) || !accepted.completedTaskIds.length || !accepted.completedTaskIds.includes(p.taskId) || canonical(accepted.approvalBindings) !== canonical(t.approvalBindings))
+                throw Error('foreign or mismatched accepted scope');
+            for (const authority of t.approvalBindings) await resolveEvidence(target, authority.source);
+            // The injected evidence/transition verifiers authorize the actual
+            // reviewed source and parent join; decoded payloads grant no authority.
+            const link = { scopeDigest: t.scopeDigest, receipt: transition.acceptedScope };
+            if (!t.acceptedScopes.some(x => canonical(x) === canonical(link))) t.acceptedScopes.push(link);
+        }
         else if (transition.kind === 'complete') {
             await verifyStop(target, t, transition.stopProof);
             if (!t.recovery)
@@ -1170,7 +1252,8 @@ export async function transitionSharedTask(input: {
             const accepted = parseAcceptedScope(p.acceptedScope);
             if (accepted.repo !== t.repo || accepted.issue !== t.issue || canonical([...accepted.approvedTaskIds].sort()) !== canonical([...t.approvedTaskIds].sort()) || canonical([...accepted.completedTaskIds].sort()) !== canonical([...t.approvedTaskIds].sort()) || canonical(accepted.approvalBindings) !== canonical(t.approvalBindings))
                 throw Error('partial or foreign acceptance cannot complete task');
-            t.acceptedScopes.push({ scopeDigest: t.scopeDigest, receipt: transition.acceptedScope });
+            const link = { scopeDigest: t.scopeDigest, receipt: transition.acceptedScope };
+            if (!t.acceptedScopes.some(x => canonical(x) === canonical(link))) t.acceptedScopes.push(link);
             t.stopProof = transition.stopProof;
             t.state = 'completed';
             s.index.active = s.index.active.filter(x => x.taskKey !== t.taskKey);
@@ -1203,6 +1286,14 @@ export async function transitionSharedTask(input: {
         return { task: t, type: transition.kind, payload: recoveryPayload };
     }, claim, requestDigest);
 }
+export async function linkAcceptedScope(input: {
+    claim: SharedClaim;
+    operationId: string;
+    acceptedScope: Extract<EvidenceRef, { kind: 'state-receipt' }>;
+}): Promise<SharedClaimResult> {
+    return transitionSharedTask({ claim: input.claim, operationId: input.operationId, transition: { kind: 'accept-scope', acceptedScope: input.acceptedScope } });
+}
+
 export async function publishRecoveryReceipt(input: {
     claim: SharedClaim;
     operationId: string;
