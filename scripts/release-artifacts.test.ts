@@ -1,13 +1,13 @@
 import { expect, test } from 'bun:test'
 import { createHash } from 'node:crypto'
-import { verifyArtifactBytes, assertPairVersions, assertScanEvidence, readPackageArchive, dashboardDescriptor, verifyDashboardDescriptor, materializeTree } from './release-artifacts.mjs'
+import { verifyArtifactBytes, assertPairVersions, assertScanEvidence, readPackageArchive, dashboardDescriptor, verifyDashboardDescriptor, materializeTree, smokePair } from './release-artifacts.mjs'
 import { mkdtemp, mkdir, writeFile, symlink, readFile, chmod, rm, link } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { gzipSync } from 'node:zlib'
-function archive(entries: {path:string, data?:string, type?:string}[]) {
+function archive(entries: {path:string, data?:string, type?:string, mode?:number}[]) {
  const chunks: Buffer[]=[]
- for(const e of entries){const b=Buffer.from(e.data??'');const h=Buffer.alloc(512);h.write(e.path,0,100);h.write('0000644\0',100);h.write(b.length.toString(8).padStart(11,'0')+'\0',124);h.fill(32,148,156);h.write(e.type??'0',156);h.write([...h].reduce((a,v)=>a+v,0).toString(8).padStart(6,'0')+'\0 ',148);chunks.push(h,b,Buffer.alloc((512-b.length%512)%512))}
+ for(const e of entries){const b=Buffer.from(e.data??'');const h=Buffer.alloc(512);h.write((e.mode??0o644).toString(8).padStart(7,'0')+'\0',100);h.write(e.path,0,100);h.write(b.length.toString(8).padStart(11,'0')+'\0',124);h.fill(32,148,156);h.write(e.type??'0',156);h.write([...h].reduce((a,v)=>a+v,0).toString(8).padStart(6,'0')+'\0 ',148);chunks.push(h,b,Buffer.alloc((512-b.length%512)%512))}
  return gzipSync(Buffer.concat([...chunks,Buffer.alloc(1024)]))
 }
 const packed=()=>archive([{path:'package/package.json',data:JSON.stringify({name:'@vegastack/vegafactory-dashboard',version:'1.0.0'})},{path:'package/dist-standalone/server.js',data:'server'}])
@@ -94,8 +94,8 @@ test('actual workflow recovery command permits a failed preparation retry and re
 
 
 import { CLI, DASHBOARD, extractPackage, packPair, verifyInstalledRuntime } from './release-artifacts.mjs'
-import { verifyInstalledRuntimeBinding } from '../packages/cli/src/runs.ts'
-const runtimeSha = (bytes: Buffer | string) => createHash('sha256').update(bytes).digest('hex')
+import { verifyInstalledRuntimeBinding, type InstalledRuntimeBinding } from '../packages/cli/src/runs.ts'
+const runtimeSha = (bytes: Buffer | string): string => createHash('sha256').update(bytes).digest('hex')
 const runtimeSource = 'a'.repeat(40), runtimeTree = 'b'.repeat(40)
 async function runtimeFixture() {
  const home=await realpath(await mkdtemp(join(tmpdir(),'installed-runtime-'))), directory=join(home,'pair'), installedRoot=join(home,'installed')
@@ -118,7 +118,7 @@ async function runtimeFixture() {
  return {home,cli,manifest:{schemaVersion:1,sourceSha:runtimeSource,treeSha:runtimeTree,version:'1.0.0',artifacts},directory,installedRoot,expectedSourceSha:runtimeSource,expectedTreeSha:runtimeTree}
 }
 test('installed runtime producer binds the full retained pair and matches the independent runtime consumer',async()=>{
- const f=await runtimeFixture(), binding=await verifyInstalledRuntime(f)
+ const f=await runtimeFixture(), binding=await verifyInstalledRuntime(f) as InstalledRuntimeBinding
  const entries=readPackageArchive(f.cli).map(({path,mode,sha256}:any)=>({path,mode,sha256}))
  expect(binding).toEqual({schemaVersion:1,sourceSha:runtimeSource,treeSha:runtimeTree,packageName:CLI,version:'1.0.0',tarballSha256:runtimeSha(f.cli),inventoryDigest:runtimeSha(JSON.stringify(entries))})
  await verifyInstalledRuntimeBinding(binding,f.installedRoot,join(f.installedRoot,'dist/index.js'))
@@ -174,9 +174,68 @@ test('installed runtime producer verifies a real npm packed and offline installe
  expect({status:result.status,stderr:result.stderr}).toMatchObject({status:0})
  const installedRoot=join(consumer,'node_modules',CLI)
  const input={manifest,directory,installedRoot,expectedSourceSha:runtimeSource,expectedTreeSha:runtimeTree}
- const binding=await verifyInstalledRuntime(input)
+ const binding=await verifyInstalledRuntime(input) as InstalledRuntimeBinding
  await verifyInstalledRuntimeBinding(binding,installedRoot,join(installedRoot,'dist/index.js'))
  expect(spawnSync('node',[join(installedRoot,'dist/index.js')],{cwd:home,encoding:'utf8'}).stdout.trim()).toBe('1.0.0')
  await chmod(join(installedRoot,'dist/index.js'),0o644)
  await expect(verifyInstalledRuntime(input)).rejects.toThrow('inventory')
+},30000)
+
+async function launcherSmokeFixture(earlyExit=false) {
+ const home=await realpath(await mkdtemp(join(tmpdir(),'launcher-smoke-pair-'))),directory=join(home,'pair');await mkdir(directory)
+ const dashboard=archive([
+  {path:'package/package.json',data:JSON.stringify({name:DASHBOARD,version:'1.0.0'})},
+  {path:'package/dist-standalone/packages/dashboard/server.js',data:'// retained exact dashboard fixture'},
+ ])
+ const descriptor=dashboardDescriptor(dashboard,'1.0.0')
+ const child=`import {createServer} from 'node:http';
+const [port,instanceId,org,version]=process.argv.slice(2);
+const pages={
+ '/':'Needs your decision Blocked or failed Running Recently merged',
+ '/performance':'Performance report is unavailable. Unlinked terminal segments Unavailable',
+ '/activity':'Activity report is unavailable. Task activity is unavailable',
+ '/people':'People reporting is unavailable for the current policy and scope.',
+ '/people/fixture-user':'This person report is unavailable for the current verified identity, policy, and repository scope.',
+ '/skills':'No skill invocations recorded for this month.',
+ '/repo/fixture/project':'This repository is outside the current verified reporting scope.',
+ '/board':'Some data is incomplete or unavailable.',
+ '/dispatcher':'Running Unavailable Last tick Unavailable',
+};
+const server=createServer((request,response)=>{const path=new URL(request.url,'http://fixture').pathname;if(path==='/api/health'){response.setHeader('content-type','application/json');response.end(JSON.stringify({ok:true,org,version,instanceId,cacheSchema:2,dataState:'unavailable',sourceAgeSeconds:null}));return}response.setHeader('content-type','text/html');response.statusCode=Object.hasOwn(pages,path)?200:404;response.end(pages[path]??'not found')});
+server.listen(Number(port),'127.0.0.1',()=>console.log('ready'));const stop=()=>server.close(()=>process.exit(0));process.on('SIGTERM',stop);process.on('SIGINT',stop);`
+ const cli=`#!/usr/bin/env node
+import {readFileSync,existsSync,mkdirSync,writeFileSync} from 'node:fs';import {join,isAbsolute} from 'node:path';import {spawn} from 'node:child_process';import {randomUUID} from 'node:crypto';import {fileURLToPath} from 'node:url';
+const [verb,...rest]=process.argv.slice(2);const home=process.env.HOME;
+if(verb==='--version'){console.log('vegafactory 1.0.0');process.exit(0)}
+if(verb==='skills'){if(rest[0]==='list'){console.log('fixture skill');process.exit(0)}const root=rest[rest.indexOf('--dir')+1];if(rest[0]==='add'){mkdirSync(join(root,'.agents/skills/dev-implement/scripts'),{recursive:true});writeFileSync(join(root,'.agents/skills/dev-implement/scripts/preflight.mjs'),'fixture');process.exit(0)}if(rest[0]==='verify'){if(!existsSync(join(root,'.agents/skills/dev-implement/scripts/preflight.mjs')))process.exit(74);process.exit(0)}}
+if(verb!=='dashboard'||rest.includes('--dir')||!rest.includes('--json'))process.exit(75);
+${earlyExit?'process.exit(76);':''}
+const config=JSON.parse(readFileSync(join(home,'.vegastack/factory.json'),'utf8'));const org=rest[rest.indexOf('--org')+1];const start=Number(rest[rest.indexOf('--port')+1]);const room=config.controlRooms?.[org];const repos=config.repos;
+if(config.schemaVersion!==2||config.revision!==0||!room||!isAbsolute(room.path)||!Array.isArray(repos)||repos.length!==1||repos[0].org!==org||repos[0].repo!=='fixture/project'||!isAbsolute(repos[0].path))process.exit(77);
+const retained=join(home,'.vegastack/dashboard/1.0.0/node_modules/@vegastack/vegafactory-dashboard/dist-standalone/packages/dashboard/server.js');if(!existsSync(retained))process.exit(78);
+const instanceId=randomUUID();const child=spawn(process.execPath,[fileURLToPath(new URL('./fixture-dashboard-child.mjs',import.meta.url)),String(start+1),instanceId,org,'1.0.0'],{detached:true,stdio:['ignore','pipe','inherit']});
+child.stdout.once('data',()=>console.log(JSON.stringify({command:'dashboard',ok:true,org,version:'1.0.0',instanceId,cacheSchema:2,url:'http://127.0.0.1:'+(start+1),dir:join(home,'.vegastack/dashboard/1.0.0'),entry:retained,fetched:false,pid:child.pid})));const stop=()=>{child.once('close',()=>process.exit(0));child.kill('SIGTERM')};process.on('SIGTERM',stop);process.on('SIGINT',stop);await new Promise(()=>{});`
+ const cliBytes=archive([
+  {path:'package/package.json',data:JSON.stringify({name:CLI,version:'1.0.0',type:'module',bin:{vegafactory:'dist/index.js'}})},
+  {path:'package/dist/index.js',data:cli,mode:0o755},{path:'package/dist/run-wrapper.js',data:'// wrapper'},
+  {path:'package/dist/fixture-dashboard-child.mjs',data:child},{path:'package/dist/dashboard-artifact.json',data:JSON.stringify(descriptor)},
+  {path:'package/skill/dev-implement/SKILL.md',data:'name: dev-implement'},
+ ])
+ const artifacts=[]
+ for(const [name,file,bytes] of [[DASHBOARD,'dashboard.tgz',dashboard],[CLI,'cli.tgz',cliBytes]] as const){await writeFile(join(directory,file),bytes);artifacts.push({name,file,sha256:runtimeSha(bytes),integrity:'sha512-'+createHash('sha512').update(bytes).digest('base64'),bytes:bytes.length})}
+ return {directory,manifest:{schemaVersion:1,sourceSha:runtimeSource,treeSha:runtimeTree,version:'1.0.0',artifacts}}
+}
+
+test('pair smoke uses the installed CLI launcher, rejects a stale listener, reaches all scoped routes, and proves owned cleanup',async()=>{
+ const fixture=await launcherSmokeFixture();const result=await smokePair(fixture.manifest,fixture.directory)
+ expect(result.launcher).toMatchObject({command:'dashboard',ok:true,org:'fixture',version:'1.0.0',cacheSchema:2})
+ expect(result.readiness).toMatchObject({ok:true,org:'fixture',version:'1.0.0',cacheSchema:2,dataState:'unavailable',sourceAgeSeconds:null})
+ expect(result.readiness.instanceId).toMatch(/^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/)
+ expect(result.routes.map((row:any)=>row.route)).toEqual(['/','/performance','/activity','/people','/people/fixture-user?dimension=task-owner','/skills','/repo/fixture/project','/board','/dispatcher'])
+ expect(result).toMatchObject({installedCli:true,staleListenerRejected:true,ownedChildAlive:true,cleanup:{cliStopped:true,dashboardStopped:true,isolatedHomeRemoved:true}})
+},30000)
+
+test('pair smoke rejects an installed launcher that exits before owning a ready dashboard',async()=>{
+ const fixture=await launcherSmokeFixture(true)
+ await expect(smokePair(fixture.manifest,fixture.directory)).rejects.toThrow('installed CLI dashboard exited before readiness')
 },30000)

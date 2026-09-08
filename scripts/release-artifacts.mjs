@@ -2,7 +2,7 @@
 import { createHash } from 'node:crypto'
 import { constants } from 'node:fs'
 import { gunzipSync } from 'node:zlib'
-import { readFile, writeFile, mkdir, readdir, lstat, realpath, chmod, mkdtemp, rename, open } from 'node:fs/promises'
+import { readFile, writeFile, mkdir, readdir, lstat, realpath, chmod, mkdtemp, rename, open, rm } from 'node:fs/promises'
 import { join, resolve, relative, dirname, sep } from 'node:path'
 import { tmpdir } from 'node:os'
 import { spawnSync, spawn } from 'node:child_process'
@@ -255,39 +255,124 @@ export function recoveryDecision({artifacts,attempts,sourceSha,runAttempt}) {
   }
   return {prepare:true,artifact:''}
 }
-async function availablePort() {
-  const server=createServer(); await new Promise((ok,fail)=>{server.once('error',fail);server.listen(0,'127.0.0.1',ok)})
-  const port=server.address().port; await new Promise(ok=>server.close(ok)); return port
+const dashboardUuid=/^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/
+const dashboardReadinessKeys=['cacheSchema','dataState','instanceId','ok','org','sourceAgeSeconds','version']
+function assertSmokeReadiness(value,expected) {
+  if (!value || typeof value!=='object' || Object.keys(value).sort().join(',')!==dashboardReadinessKeys.join(',') ||
+    value.ok!==true || value.org!==expected.org || value.version!==expected.version || value.instanceId!==expected.instanceId ||
+    value.cacheSchema!==2 || !['ready','empty','unavailable'].includes(value.dataState) ||
+    !(value.sourceAgeSeconds===null || typeof value.sourceAgeSeconds==='number' && Number.isFinite(value.sourceAgeSeconds) && value.sourceAgeSeconds>=0)) throw new Error('dashboard readiness identity or data state mismatch')
+  return value
+}
+const processAlive=pid=>{
+  if(!Number.isSafeInteger(pid)||pid<1)return false
+  try{process.kill(pid,0);return true}catch(error){if(error.code==='ESRCH')return false;throw error}
+}
+async function waitForExit(child,timeout) {
+  if(child.exitCode!==null || child.signalCode!==null)return true
+  return Promise.race([new Promise(resolve=>child.once('close',()=>resolve(true))),new Promise(resolve=>setTimeout(()=>resolve(false),timeout))])
+}
+async function startStaleDashboard(expected) {
+  const body=JSON.stringify({ok:true,org:expected.org,version:expected.version,instanceId:expected.instanceId,cacheSchema:2,dataState:'ready',sourceAgeSeconds:0})
+  const server=createServer(socket=>socket.end(`HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: ${Buffer.byteLength(body)}\r\nConnection: close\r\n\r\n${body}`))
+  await new Promise((ok,fail)=>{server.once('error',fail);server.listen(0,'127.0.0.1',ok)})
+  return {server,port:server.address().port}
+}
+async function closeServer(server) {
+  if(!server.listening)return
+  await new Promise((ok,fail)=>server.close(error=>error?fail(error):ok()))
 }
 export async function smokePair(manifest,directory) {
   const pair=await verifyPair(manifest,directory)
-  const home=await realpath(await mkdtemp(join(tmpdir(),'vegafactory-pair-'))); const consumer=join(home,'consumer'); await mkdir(consumer)
-  // Only local tarballs, no dependency resolution or source checkout at runtime.
-  const cliTar=join(home,'cli.tgz');await writeFile(cliTar,pair[CLI].bytes)
-  const env={PATH:process.env.PATH,HOME:home,TMPDIR:home,CI:'1',npm_config_cache:join(home,'npm-cache')}
-  command(['npm','install','--ignore-scripts','--offline','--no-audit','--no-fund','--prefix',consumer,cliTar],{cwd:home,env})
-  const cli=join(consumer,'node_modules',CLI,'dist/index.js')
-  const installedDescriptor=JSON.parse(await readFile(join(dirname(cli),'dashboard-artifact.json'),'utf8'))
-  verifyDashboardDescriptor(installedDescriptor,pair[DASHBOARD].bytes,manifest.version)
-  const version=command(['node',cli,'--version'],{cwd:home,env});if (!version.includes(manifest.version)) throw new Error('installed CLI version mismatch')
-  command(['node',cli,'skills','list'],{cwd:home,env})
-  const project=join(home,'project');await mkdir(project)
-  command(['node',cli,'skills','add','dev-implement','--agent','codex','--dir',project,'--non-interactive'],{cwd:home,env})
-  command(['node',cli,'skills','verify','dev-implement','--agent','codex','--dir',project],{cwd:home,env})
-  await readFile(join(project,'.agents/skills/dev-implement/scripts/preflight.mjs'))
-  const dashboard=join(home,'dashboard');await extractPackage(pair[DASHBOARD].bytes,dashboard);await verifyExtractedDashboard(dashboard,installedDescriptor)
-  const room=join(home,'room');await mkdir(room);await writeFile(join(home,'factory.json'),JSON.stringify({controlRooms:{}}));const stats=join(room,'stats','fixture__project','SEP-2026');await mkdir(stats,{recursive:true});await writeFile(join(stats,'test.jsonl'),JSON.stringify({ts:'2026-09-07T00:00:00.000Z',repo:'fixture/project',issue:1,human:'fixture',stage:'implement',outcome:'for-operator',harness:'codex',model:'fixture',duration_s:1,skills:[]})+'\n')
-  const port=await availablePort();const logs=[]
-  const child=spawn('bun',[join(dashboard,'dist-standalone/packages/dashboard/server.js')],{cwd:home,env:{...env,HOSTNAME:'127.0.0.1',PORT:String(port),VEGAFACTORY_CONTROL_ROOM:room,VEGAFACTORY_CACHE:join(home,'stats.db'),VEGAFACTORY_ORG:'fixture',VEGAFACTORY_STATE:join(home,'factory.json'),VEGAFACTORY_VERSION:manifest.version},stdio:['ignore','pipe','pipe']})
-  child.stdout.on('data',b=>logs.push(b.toString()));child.stderr.on('data',b=>logs.push(b.toString())); let error;child.on('error',e=>{error=e})
-  const routes=['/api/health','/','/skills','/people','/board','/dispatcher'];const results=[]
+  const home=await realpath(await mkdtemp(join(tmpdir(),'vegafactory-pair-'))),consumer=join(home,'consumer')
+  const cleanup={cliStopped:false,dashboardStopped:false,isolatedHomeRemoved:false};let launcherProcess=null,dashboardPid=null,stale=null,result
   try {
-    let ready=false
-    for(let n=0;n<100;n++){if(error||child.exitCode!==null)throw new Error(`dashboard exited: ${error??logs.join('')}`);try{const r=await fetch(`http://127.0.0.1:${port}/api/health`,{signal:AbortSignal.timeout(500)});if(r.ok){ready=true;break}}catch{}await new Promise(ok=>setTimeout(ok,100))}
-    if(!ready)throw new Error(`dashboard readiness timeout: ${logs.join('')}`)
-    for(const route of routes){const r=await fetch(`http://127.0.0.1:${port}${route}`,{signal:AbortSignal.timeout(10000)});await r.text();if(!r.ok)throw new Error(`${route}: HTTP ${r.status}`);results.push({route,status:r.status})}
-  } finally {child.kill('SIGTERM');await new Promise(ok=>{if(child.exitCode!==null)return ok();child.once('close',ok);const t=setTimeout(()=>child.kill('SIGKILL'),3000);t.unref()})}
-  return {platform:process.platform,arch:process.arch,node:process.version,npm:command(['npm','--version']),bun:command(['bun','--version']),artifactHashes:manifest.artifacts.map(a=>a.sha256),routes:results,home,logs}
+    await mkdir(consumer)
+    // Install and inventory-check the exact retained CLI without resolving or rebuilding it.
+    const cliTar=join(home,'cli.tgz');await writeFile(cliTar,pair[CLI].bytes)
+    const fixtureBin=join(home,'bin');await mkdir(fixtureBin);await writeFile(join(fixtureBin,'gh'),'#!/usr/bin/env node\nprocess.exit(1)\n',{mode:0o755})
+    const env={PATH:`${fixtureBin}${process.platform==='win32'?';':':'}${process.env.PATH??''}`,HOME:home,TMPDIR:home,CI:'1',npm_config_cache:join(home,'npm-cache')}
+    command(['npm','install','--ignore-scripts','--offline','--no-audit','--no-fund','--prefix',consumer,cliTar],{cwd:home,env})
+    const installedRoot=join(consumer,'node_modules',CLI),cli=join(installedRoot,'dist/index.js'),cliBin=join(consumer,'node_modules/.bin/vegafactory')
+    const installedDescriptor=JSON.parse(await readFile(join(dirname(cli),'dashboard-artifact.json'),'utf8'))
+    verifyDashboardDescriptor(installedDescriptor,pair[DASHBOARD].bytes,manifest.version)
+    const runtimeBinding=await verifyInstalledRuntime({manifest,directory,installedRoot,expectedSourceSha:manifest.sourceSha,expectedTreeSha:manifest.treeSha})
+    const version=command([cliBin,'--version'],{cwd:home,env});if (!version.includes(manifest.version)) throw new Error('installed CLI version mismatch')
+    command([cliBin,'skills','list'],{cwd:home,env})
+    const project=join(home,'project');await mkdir(project)
+    command([cliBin,'skills','add','dev-implement','--agent','codex','--dir',project,'--non-interactive'],{cwd:home,env})
+    command([cliBin,'skills','verify','dev-implement','--agent','codex','--dir',project],{cwd:home,env})
+    await readFile(join(project,'.agents/skills/dev-implement/scripts/preflight.mjs'))
+
+    // Seed the launcher's own immutable version cache from this retained pair. The installed
+    // runtime sees no source checkout, repository script or live registry override.
+    const dashboardRoot=join(home,'.vegastack/dashboard',manifest.version),dashboard=join(dashboardRoot,'node_modules',DASHBOARD)
+    await mkdir(dirname(dashboard),{recursive:true});await extractPackage(pair[DASHBOARD].bytes,dashboard);await verifyExtractedDashboard(dashboard,installedDescriptor)
+    const receipt={schemaVersion:1,owner:'vegafactory-dashboard',version:manifest.version,descriptorSha256:digest(JSON.stringify(installedDescriptor))}
+    await writeFile(join(dashboardRoot,'dashboard-install.json'),JSON.stringify(receipt))
+
+    const room=join(home,'room'),repo=join(home,'repo'),stateDir=join(home,'.vegastack'),stateFile=join(stateDir,'factory.json')
+    await mkdir(join(repo,'.vegastack'),{recursive:true});await mkdir(stateDir,{recursive:true,mode:0o700});await mkdir(room)
+    await writeFile(join(repo,'.vegastack/dev.md'),'repo: fixture/project\ncontrol-room: fixture/control-room#dev\n')
+    const factory={schemaVersion:2,revision:0,repos:[{repo:'fixture/project',org:'fixture',path:repo}],controlRooms:{fixture:{repo:'fixture/control-room',path:room,branch:'main',lastSyncedAt:null,sha:null}}}
+    await writeFile(stateFile,JSON.stringify(factory),{mode:0o600})
+    // A configured row and a foreign row are intentionally not granted by a validated policy.
+    // Every response must therefore stay unavailable/empty and must not reveal either canary.
+    const now=new Date(),months=['JAN','FEB','MAR','APR','MAY','JUN','JUL','AUG','SEP','OCT','NOV','DEC'],month=`${months[now.getUTCMonth()]}-${now.getUTCFullYear()}`
+    for(const name of ['fixture__project','foreign__private']){const stats=join(room,'stats',name,month);await mkdir(stats,{recursive:true});await writeFile(join(stats,'test.jsonl'),JSON.stringify({ts:now.toISOString(),repo:name==='fixture__project'?'fixture/project':'foreign/private',issue:1,human:'PRIVATE_SCOPE_CANARY',stage:'implement',outcome:'for-operator',harness:'codex',model:'fixture',duration_s:1,skills:[]})+'\n')}
+
+    const staleIdentity='00000000-0000-4000-8000-000000000000'
+    stale=await startStaleDashboard({org:'fixture',version:manifest.version,instanceId:staleIdentity})
+    const stdout=[],stderr=[];let launchError=null
+    launcherProcess=spawn(cliBin,['dashboard','--org','fixture','--port',String(stale.port),'--json'],{cwd:home,env,stdio:['ignore','pipe','pipe']})
+    launcherProcess.stdout.on('data',bytes=>stdout.push(bytes.toString()));launcherProcess.stderr.on('data',bytes=>stderr.push(bytes.toString()));launcherProcess.once('error',error=>{launchError=error})
+    let launcher=null
+    const deadline=Date.now()+25_000
+    while(Date.now()<deadline && !launcher) {
+      if(launchError)throw new Error(`installed CLI dashboard failed to start: ${launchError.message}`)
+      const output=stdout.join('').trim();if(output){try{launcher=JSON.parse(output)}catch{/* JSON is pretty-printed over several chunks. */}}
+      if(!launcher && (launcherProcess.exitCode!==null||launcherProcess.signalCode!==null))throw new Error(`installed CLI dashboard exited before readiness: ${stderr.join('').trim()}`)
+      if(!launcher)await new Promise(ok=>setTimeout(ok,100))
+    }
+    if(!launcher)throw new Error(`installed CLI dashboard readiness timeout: ${stderr.join('').trim()}`)
+    if(launcher.command!=='dashboard'||launcher.ok!==true||launcher.org!=='fixture'||launcher.version!==manifest.version||launcher.cacheSchema!==2||!dashboardUuid.test(launcher.instanceId)||launcher.instanceId===staleIdentity||
+      launcher.fetched!==false||typeof launcher.url!=='string'||!launcher.url.startsWith('http://127.0.0.1:')||launcher.url===`http://127.0.0.1:${stale.port}`||
+      launcher.dir!==dashboardRoot||launcher.entry!==join(dashboard,'dist-standalone/packages/dashboard/server.js')||!Number.isSafeInteger(launcher.pid)||launcher.pid<1||launcher.pid===launcherProcess.pid) throw new Error('installed CLI dashboard launcher identity mismatch')
+    dashboardPid=launcher.pid
+    if(launcherProcess.exitCode!==null||!processAlive(launcherProcess.pid)||!processAlive(dashboardPid))throw new Error('installed CLI dashboard owned process is not alive')
+    const healthResponse=await fetch(`${launcher.url}/api/health`,{cache:'no-store',signal:AbortSignal.timeout(5_000)})
+    if(!healthResponse.ok)throw new Error(`dashboard readiness: HTTP ${healthResponse.status}`)
+    const readiness=assertSmokeReadiness(await healthResponse.json(),{org:'fixture',version:manifest.version,instanceId:launcher.instanceId})
+    const required=new Map([
+      ['/', ['Needs your decision','Blocked or failed','Running','Recently merged']],
+      ['/performance',['Performance report is unavailable.','Unlinked terminal segments']],
+      ['/activity',['Activity report is unavailable.']],
+      ['/people',['People reporting is unavailable for the current policy and scope.']],
+      ['/people/fixture-user?dimension=task-owner',['This person report is unavailable for the current verified identity, policy, and repository scope.']],
+      ['/skills',['No skill invocations recorded for this month.']],
+      ['/repo/fixture/project',['This repository is outside the current verified reporting scope.']],
+      ['/board',['Some data is incomplete or unavailable.']],
+      ['/dispatcher',['Running','Unavailable']],
+    ]),routes=[]
+    for(const [route,phrases] of required){const response=await fetch(`${launcher.url}${route}`,{cache:'no-store',signal:AbortSignal.timeout(10_000)}),body=await response.text();if(!response.ok)throw new Error(`${route}: HTTP ${response.status}`);if(body.includes('PRIVATE_SCOPE_CANARY')||phrases.some(phrase=>!body.includes(phrase)))throw new Error(`${route}: dishonest or scope-leaking response`);routes.push({route,status:response.status,scope:'current policy unavailable; configured and foreign fixture rows excluded'})}
+    result={platform:process.platform,arch:process.arch,node:process.version,npm:command(['npm','--version']),bun:command(['bun','--version']),artifactHashes:manifest.artifacts.map(a=>a.sha256),runtimeBinding,
+      installedCli:true,staleListenerRejected:true,ownedChildAlive:true,launcher:{command:launcher.command,ok:launcher.ok,org:launcher.org,version:launcher.version,instanceId:launcher.instanceId,cacheSchema:launcher.cacheSchema,fetched:launcher.fetched},readiness,routes,cleanup}
+  } finally {
+    if(stale)await closeServer(stale.server)
+    if(launcherProcess) {
+      if(launcherProcess.exitCode===null&&launcherProcess.signalCode===null)launcherProcess.kill('SIGTERM')
+      cleanup.cliStopped=await waitForExit(launcherProcess,7_000)
+      if(!cleanup.cliStopped){launcherProcess.kill('SIGKILL');cleanup.cliStopped=await waitForExit(launcherProcess,1_000)}
+    } else cleanup.cliStopped=true
+    if(dashboardPid) {
+      const deadline=Date.now()+1_000;while(processAlive(dashboardPid)&&Date.now()<deadline)await new Promise(ok=>setTimeout(ok,50))
+      if(processAlive(dashboardPid)){try{process.kill(process.platform==='win32'?dashboardPid:-dashboardPid,'SIGKILL')}catch(error){if(error.code!=='ESRCH')throw error};const killed=Date.now()+1_000;while(processAlive(dashboardPid)&&Date.now()<killed)await new Promise(ok=>setTimeout(ok,50))}
+      cleanup.dashboardStopped=!processAlive(dashboardPid)
+    } else cleanup.dashboardStopped=true
+    await rm(home,{recursive:true,force:true});cleanup.isolatedHomeRemoved=true
+    if(!cleanup.cliStopped||!cleanup.dashboardStopped)throw new Error('installed CLI dashboard cleanup is unverified')
+  }
+  return result
 }
 
 async function runtimeSbom(files, name, version) {
