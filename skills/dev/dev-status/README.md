@@ -22,11 +22,11 @@ npx @vegastack/vegafactory skills add --group dev --global
 |---|---|
 | [SKILL.md](SKILL.md) | Agent entry point — gather + render rules |
 | [agents/openai.yaml](agents/openai.yaml) | Codex interface metadata |
-| scripts/effective-policy.mjs (installed copy) | Canonical workflow label map and exclusive state resolution, copied from dev-setup |
 | references/conventions.md (installed copy) | The workflow artifact spec, duplicated into every dev-family install |
 | [scripts/status.mjs](scripts/status.mjs) | The gatherer: gh-backed, markers-only, knob-aware (labels/register from dev.md), exit 2 on cannot-verify |
 | [refresh/REFRESH.md](refresh/REFRESH.md) | Freshness contract (evergreen waiver) |
 | [refresh/sources.json](refresh/sources.json) | Deliberately empty source registry behind the evergreen waiver |
+| scripts/effective-policy.mjs (installed copy) | Canonical workflow label map and exclusive state resolution, copied from dev-setup |
 | `tests/` | Unit tests for every helper + a gh-stub integration test over canned scenarios (never packaged) |
 | `evals/` | Behavioral evals in the agentskills.io format (never packaged) |
 
