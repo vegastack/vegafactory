@@ -11,13 +11,15 @@ describe('the implement-children workflow asset', () => {
     expect(source).toContain("name: 'implement-children'")
     expect(source).toContain("title: 'Build children'")
   })
-  test('it pipelines one isolated agent per child and returns the join contract', () => {
-    expect(source).toMatch(/pipeline\(\s*args\.children/)
-    expect(source).toContain("isolation: 'worktree'")
-    expect(source).toContain('schema: CHILD_RESULT')
-    for (const field of ['issue', 'status', 'branch', 'head', 'files', 'message']) expect(source).toContain(field)
-  })
   test('it uses nothing a workflow script cannot have', () => {
     expect(source).not.toMatch(/require\(|from '(node:|fs|path)|Date\.now\(|new Date\(|Math\.random\(/)
   })
+})
+
+// A compatibility entry must refuse before invoking any supplied executor.
+test('legacy workflow cannot become a second child execution owner', async () => {
+  const workflow = await import('../assets/workflows/implement-children.js')
+  let starts=0
+  await expect(workflow.default({args:{children:[{issue:8,prompt:'controlled'}],parentIssue:1,parentBranch:'parent',parentHead:'a'.repeat(40),concurrency:1},agent:async()=>{starts++;return{issue:8,status:'done'}},pipeline:async(rows:any[],run:any)=>Promise.all(rows.map(row=>run(null,row))),log:()=>{}})).rejects.toThrow('vegafactory children run')
+  expect(starts).toBe(0)
 })

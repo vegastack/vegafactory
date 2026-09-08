@@ -8,7 +8,7 @@ The main checkout never leaves the default branch and never carries uncommitted 
 |---|---|
 | New issue, no parent | `worktree.mjs create --issue <n> --write` — the slug and type come off the issue title (`<type>:` prefix, the rest slugified; `--slug`/`--type` override, and GitHub being unreachable blocks rather than guesses) — fetches `origin/<default>`, `git worktree add` on a new branch, copies dev.md's `worktree-include:` files, runs `commands: setup`, adds the Codex trust entry. The ledger's first line records the path. |
 | Epic parent | Branch `<type>/<parent-n>-<slug>`, one worktree, created when the **first child** is claimed. The parent never gets `ready`. |
-| Sub-issue of an epic | `create --parent <parent-branch>`: `git switch -c` from the parent branch **inside the parent's worktree**. One child at a time; children are sequential (parallel children are #115). |
+| Sub-issue of an epic | `create --parent <parent-branch>`: `git switch -c` from the parent branch **inside the parent's worktree**. One child at a time; ordinary removal cannot delete that parent directory while it holds a serial child branch. Independent children use the CLI contract below. |
 | Resume | Same branch, same worktree, reused. The resume read-order — brief → plan → ledger → `git log` — runs *there*, and the ledger names which "there" that is. |
 | Corrections / reclaim | Reuse the worktree. Directory gone but branch alive → `restore --issue <n> --write`, which finds the branch carrying the number (`--slug` picks one when several do), re-adds the checkout and re-runs include-copy, setup and trust. `restore` never creates a branch: a missing branch means the work is elsewhere. |
 | Ship, PR | `ship-gate.mjs` resolves the branch's worktree itself (`--worktree <path>` overrides) and runs its git calls, its dev.md read and the fresh check command there, so the checkout test passes by construction. |
@@ -19,6 +19,16 @@ The main checkout never leaves the default branch and never carries uncommitted 
 | Release | `chore/release-<version>` in its own worktree. |
 | Cross-agent review | Read-only, in the same worktree; a reviewer never switches the branch under it. |
 | Abandoned issue | Branch and worktree are removed only on the operator's word. |
+
+## Verified independent children
+
+Inside a registered, currently owned parent session, pass the canonical `plan-lint --groups --json` report to `vegafactory children run --parent <n> --groups <file> --repo <o/r> --write --json`. Without `--write` it previews. The CLI revalidates original parent and child approval, preserves the selected subscription setup, prepares both harnesses through `createChildWorktree`, and executes through the common owned runtime. Failed setup, required includes, effective hooks or native prerequisites refuse; unsupported effective harness inspection never becomes qualification. The standalone helper plans and validates, and directs execution and integration to the CLI.
+
+At most three qualified child processes run for a parent across machines, also bounded by each host's policy. Literal file/resource overlap refuses parallel admission. Original parent claim identity and child run IDs are saved before reservation; a replaced owner, unknown termination or unfinished original run cannot start a duplicate. Parent cancellation cancels only its owned children. Healthy execution has no cumulative task time limit.
+
+`vegafactory children join` takes the same parent/groups/repo flags. It requires a current explicit integration action, successful durable child execution, clean exact source, the original base and branch, full changed-path scope, and the check command from the recorded parent base actually passing at the produced commit. No-change requires that positive acceptance too. It merges immutable local commits in declared order without rewriting published child branches. Missing/failed children remain reported; independent verified siblings can still join. A merge conflict or failed assembled-parent check retains source and prior successes and stops subsequent integration.
+
+The private run ledger and immutable shared receipts bind child run/generation, source SHA, parent before/after and acceptance. Prepared intent precedes Git changes. Restart reconciles receipts with exact Git facts before another join. Typed remote child acceptance requires its verified checkpoint; an accepted remote join additionally requires the resulting parent checkpoint. Missing backup or unresolved delivery leaves prepared/partial evidence, never remote completion. Cross-host reconstruction belongs to the recovery controller and must supply original approval, run and launch context; current-owner guessing is refused. Whole-parent review and remote merge/release permission remain separate.
 
 ## Lifecycle states
 

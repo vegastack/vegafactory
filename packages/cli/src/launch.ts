@@ -36,6 +36,12 @@ export interface LaunchPlan {
   remoteEffectCoverage?: { kind: 'unmanaged-possible'; reasonCode: string }
 }
 
+// Runtime identity is injected after approval and preparation. A child inherits
+// its own durable run/attempt, never the parent identifiers in the shell's env.
+export function ownedLaunchEnvironment(plan: LaunchPlan, run: { runId: string; accountRef: string | null }, attemptId: string, inherited: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
+  return { ...inherited, ...plan.env, VSK_RUN_ID: run.runId, VSK_ATTEMPT_ID: attemptId, VSK_ACCOUNT_REF: run.accountRef ?? '' }
+}
+
 // Version-qualified controls, scoped to the process. These are configuration evidence only;
 // real hook/memory behavior is a separate pinned-harness qualification (#158).
 export function codexManagedControls(checkout: string): string[] {

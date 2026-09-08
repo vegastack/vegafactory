@@ -21,7 +21,7 @@ import { hostname, tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { pathToFileURL, fileURLToPath } from 'node:url'
 import { loadFactoryConfig, repoPolicyFromEffective, stagePolicy, type FactoryConfig, type Harness, type RepoEntry, type RepoPolicy, type Stage, type Subagents } from './config.ts'
-import { buildLaunchPlan, validateManagedLaunch, observeVendorEvent, inspectSubscription, resumeLaunchPlan, type HarnessMetadata, type LaunchPlan } from './launch.ts'
+import { buildLaunchPlan, ownedLaunchEnvironment, validateManagedLaunch, observeVendorEvent, inspectSubscription, resumeLaunchPlan, type HarnessMetadata, type LaunchPlan } from './launch.ts'
 import { checkoutFile, inspectCodexConfiguration, readHookConfiguration, validateRegistration } from './hook-registration.ts'
 import { checkCompiledGuard, shipPolicyScript } from './guard.ts'
 import { GhUnavailable, ghText, withinRead, assertReadActive, boundedGhJson, fetchGhPages, readBudget, type ReadBudget, type PagedResult, type GhOptions } from './gh.ts'
@@ -391,18 +391,13 @@ export function parentParallelLaunch(
 // children.mjs, whose Codex path is one `codex exec -C <child worktree>` per child.
 export function parentParallelPrompt(run: ParentParallelRun, parent: ParentContext, harness: Harness = 'claude'): string {
   const children = run.children.map(n => `#${n}`).join(', ')
-  const opening = harness === 'codex'
-    ? [
-        `Run the independent children of #${run.parent} at the same time: ${children}.`,
-        `You are in ${parent.worktree} on ${parent.branch}. Drive it with children.mjs — plan, then launch --harness codex --write, then join — and never merge a child by hand. Each child is one codex exec in its own worktree, started by the launch; wait for every one to finish before the join.`,
-      ]
-    : [
-        `Run the saved workflow implement-children for the independent children of #${run.parent}: ${children}.`,
-        `You are in ${parent.worktree} on ${parent.branch}. Build the workflow's arguments with children.mjs — plan, then launch, then join — and never merge a child by hand.`,
-      ]
+  const opening = [
+    `Run the approved independent children of #${run.parent}: ${children}.`,
+    `You are in ${parent.worktree} on ${parent.branch}. Save the canonical plan-lint --groups report, then use vegafactory children run --parent ${run.parent} --groups <report.json> --repo <owner/name> --write --json. This CLI owns execution for ${harness}; wait for its verified results. Use vegafactory children join with the same parent/groups/repo and --write only under current explicit integration authority.`,
+  ]
   return [
     ...opening,
-    'Each child runs in its own worktree branched from this branch\'s HEAD sha and may touch only the files its group declared. After the join, run the project\'s check command once and hand back.',
+    'You own coordination and ordered integration only; do not edit the reserved child files in this parent session. Each child runs in its own worktree branched from this branch\'s HEAD sha and may touch only the files its group declared. After the join, run the project\'s check command once and hand back.',
   ].join('\n\n')
 }
 
@@ -430,7 +425,6 @@ export function parentParallelLaunchPlan(
     subagents: options.subagents,
   })
   const args = base.args.map(arg => (arg === base.prompt ? prompt : arg))
-  if (options.harness === 'claude') args.push('--allowed-tools', 'Workflow')
   return { ...base, args, prompt }
 }
 
@@ -646,7 +640,10 @@ export async function executeRun(
   await event('prepared')
   const refuse=async(reason:string):Promise<RunOutcome>=>{await transition({state:'terminal',terminationCause:'spawn-failed',finishedAt:now().toISOString()});await event('launch-refused',{reasonCode:'launch-refused'});return{runId:record.runId,started:false,refusal:reason,terminationCause:'spawn-failed',exitCode:null,timedOut:false,logFile:file,pushed:false,handedBack:false}}
   if(options.signal?.aborted)return refuse('cancelled before launch')
-  if(run.parallel?.length)return refuse('parallel launch requires child gateway')
+  if(run.parallel?.length){
+    try{if(!options.sharedClaim)throw Error('shared parent ownership required');await(await import('./children.ts')).validateParallelCoordinator(run,record,config)}
+    catch(error){return refuse((error as Error).message)}
+  }
   if(!['darwin','linux'].includes(process.platform))return refuse('owned process cancellation unsupported on this platform')
   if(plan.command==='claude'||plan.command==='codex'){
     const controls=validateManagedLaunch(plan,await inspectManagedHarness(plan));if(!controls.ok)return refuse('managed launch configuration refused')
@@ -750,7 +747,7 @@ export async function executeRun(
           if(m.schemaVersion!==1||m.identity.pid!==child.pid||m.pgid!==child.pid||!identity||canonicalWire(identity)!==canonicalWire(m.identity))throw Error('wrapper handshake mismatch')
           clearTimeout(handshakeTimer)
           if(options.signal?.aborted||stopAt!==null){stop('cancelled');return}
-          send({kind:'acknowledge',runId:record.runId,attemptId,command:plan.command,args:plan.args,cwd:plan.cwd,env:{...process.env,...plan.env}})
+          send({kind:'acknowledge',runId:record.runId,attemptId,command:plan.command,args:plan.args,cwd:plan.cwd,env:ownedLaunchEnvironment(plan,record,attemptId)})
         }else if(m.kind==='spawn'){
           if(started)throw Error('duplicate vendor spawn')
           started=true;activeStart=monotonic()
@@ -1366,8 +1363,8 @@ export async function runTick(
 
     for (const run of plan.runs) {
       if (!active(run.issue)) break
-      if (run.parallel?.length) {
-        refusals.push({ repo: entry.repo, issue: run.issue, reason: 'parallel child execution requires the checked child gateway; preparation-only launch descriptions do not qualify' })
+      if (run.parallel?.length && config.executionMode !== 'shared') {
+        refusals.push({ repo: entry.repo, issue: run.issue, reason: 'parallel child execution requires qualified shared parent ownership' })
         continue
       }
       let stage: ReturnType<typeof stagePolicy>
@@ -1392,7 +1389,7 @@ export async function runTick(
         const script = process.env.VSK_PREFLIGHT_SCRIPT
           || join(dirname(dirname(fileURLToPath(import.meta.url))), 'skill', 'dev-implement', 'scripts', 'preflight.mjs')
         const owner = await import(pathToFileURL(script).href)
-        const subjects = run.parallel ?? [run.issue]
+        const subjects = [run.issue] // the coordinator owns its own canonical approval; each child is admitted by the gateway
         const results = []
         for (const issue of subjects) {
           results.push(await owner.gatherAndEvaluate({ repo: entry.repo, issue: String(issue),
@@ -1867,6 +1864,7 @@ export async function verifiedSharedTarget(repo:string,config:FactoryConfig,runI
       await(await import('./runs.ts')).verifyRunAuthority(record,config,'launch')
       await (await import('./shared-claims.ts')).resolveEvidence(target,record.execution.qualification)
     },
+    verifyChildRelationship: input => import('./children.ts').then(owner => owner.verifyChildRelationship(input,config)),
     verifySession:async(previous,current,session)=>{
       if(previous.machineId!==current.id||previous.installationId!==current.installationId||previous.hostBindingDigest!==session.hostBindingDigest)throw Error('machine session identity differs')
       const helpers=await import('./runs.ts'),prior=(await helpers.readRuns(runsRoot(config.home))).filter(r=>r.machine?.sessionId===previous.sessionId)
@@ -1881,7 +1879,10 @@ export async function verifiedSharedTarget(repo:string,config:FactoryConfig,runI
       sharedAuthorityContexts.delete(target)
       await helpers.verifyRunAuthority(run,config)
       sharedAuthorityContexts.set(target,canonicalWire({runId:run.runId,bindings:run.approvalBindings,recordBinding:run.recordBinding}))
-      if(transition.kind==='receipt')await helpers.verifyRunEvidencePayload(null,transition.payload,{run,task,publishing:true,verifyAuthority:()=>helpers.verifyRunAuthority(run,config),stopped:()=>helpers.verifyLocalRunStopped(run)})
+      if(transition.kind==='receipt'){
+        if(transition.payload.kind==='acceptance'||transition.payload.kind==='join')await(await import('./children.ts')).verifyChildrenEvidence({run,task,payload:transition.payload,publishing:true},config)
+        else await helpers.verifyRunEvidencePayload(null,transition.payload,{run,task,publishing:true,verifyAuthority:()=>helpers.verifyRunAuthority(run,config),stopped:()=>helpers.verifyLocalRunStopped(run)})
+      }
       if(transition.kind==='start'&&(run.state!=='prepared'||!run.execution||!run.runtimeBinding))throw Error('shared durable preparation unavailable')
       if((transition.kind==='stop'||transition.kind==='complete'||transition.kind==='handoff'||transition.kind==='block')&&transition.stopProof)await helpers.verifySharedStopProof(transition.stopProof,task,target,run)
       if(transition.kind==='handoff'&&(!transition.recovery.checkpoint||transition.machine.id!==machine.id))throw Error('verified recovery target unavailable')
@@ -1891,8 +1892,20 @@ export async function verifiedSharedTarget(repo:string,config:FactoryConfig,runI
       let runId=sharedRunContexts.get(target)
       if(!runId&&payload&&'runId'in payload)runId=payload.runId
       if(!runId)throw Error('evidence lacks a bound run context')
+      let task=sharedTaskContexts.get(target)
+      // Capacity may inspect an already stopped sibling while admitting a new
+      // child. Resolve that receipt's actual run/task, never the incoming run.
+      if(payload?.kind==='effect-reconciliation'&&payload.runId!==runId){
+        runId=payload.runId
+        const sibling=await helpers.readRun(runsRoot(config.home),runId)
+        if(sibling.repo!==repo||!sibling.sharedClaim)throw Error('stopped sibling evidence has no original owner')
+        const snapshot=await(await import('./shared-claims.ts')).readCoordination(target)
+        task=snapshot.tasks[sibling.sharedClaim.taskKey]
+        if(!task||task.runId!==sibling.runId||task.ownerToken!==sibling.sharedClaim.ownerToken||task.generation!==sibling.sharedClaim.generation||task.machineId!==sibling.machine?.id||task.sessionId!==sibling.machine.sessionId)throw Error('stopped sibling owner differs')
+      }
       const run=await helpers.readRun(runsRoot(config.home),runId)
-      await helpers.verifyRunEvidencePayload(ref,payload,{run,task:sharedTaskContexts.get(target),verifyAuthority:async()=>{if(sharedAuthorityContexts.get(target)!==canonicalWire({runId:run.runId,bindings:run.approvalBindings,recordBinding:run.recordBinding}))await helpers.verifyRunAuthority(run,config)}})
+      if(payload?.kind==='acceptance'||payload?.kind==='join')await(await import('./children.ts')).verifyChildrenEvidence({run,task,payload,publishing:false,ref},config)
+      else await helpers.verifyRunEvidencePayload(ref,payload,{run,task,verifyAuthority:async()=>{if(sharedAuthorityContexts.get(target)!==canonicalWire({runId:run.runId,bindings:run.approvalBindings,recordBinding:run.recordBinding}))await helpers.verifyRunAuthority(run,config)},stopped:()=>helpers.verifyLocalRunStopped(run)})
     },
   }
   sharedMachineContexts.set(target,machine)
@@ -1916,6 +1929,15 @@ export function sharedRunAdapters(config:FactoryConfig,processDeps?:Pick<Execute
       const subject=await boundedGhJson(ghText,['api',`repos/${input.run.repo}/issues/${input.run.issue}`],readBudget()) as {node_id:string}
       const session:MachineSession={target,localRoot:target.localRoot,machineId:machine.id,installationId:machine.installationId,sessionId:record.machine.sessionId,hostBindingDigest:machine.hostBindingDigest,bootIdDigest:await readBootIdentityDigest(),identity:await processIdentity()}
       const candidate:VerifiedCandidate={host:target.host,repo:record.repo,issue:record.issue,repositoryNodeId:machine.repositoryIds[record.repo]!,issueNodeId:subject.node_id,scopeDigest:record.taskKey.scopeDigest,approvalDigest:createHash('sha256').update(coordination.canonical(authorities)).digest('hex'),approvalBindings:authorities,runId:record.runId,stage:record.stage,paths:[],resources:[],independent:false,parentTaskKey:null,approvedTaskIds:record.approvedTaskIds??[record.taskKey.taskId]}
+      if(record.parent!==null){
+        const parentRuns=(await helpers.readRuns(runsRoot(config.home))).filter(r=>r.repo===record.repo&&r.issue===record.parent&&r.parent===null&&r.state==='running')
+        if(parentRuns.length!==1)throw Error('unique original parent run unavailable')
+        const launch=await(await import('./children.ts')).readChildrenRecord(runsRoot(config.home),parentRuns[0]!.runId)
+        const child=launch.children.find(c=>c.runId===record.runId&&c.issue===record.issue)
+        if(!child||child.scopeDigest!==record.taskKey.scopeDigest||canonicalWire(child.taskIds)!==canonicalWire(record.approvedTaskIds))throw Error('child launch is not durably bound')
+        candidate.parentTaskKey=launch.parentBinding.taskKey;candidate.parentBinding=launch.parentBinding
+        candidate.paths=child.files;candidate.resources=child.resources;candidate.independent=true
+      }
       if(!record.claimOperationId)throw Error('durable shared acquisition operation identity unavailable')
       return{machine,session,candidate,operationId:record.claimOperationId}
     },
@@ -1949,10 +1971,15 @@ export function sharedRunAdapters(config:FactoryConfig,processDeps?:Pick<Execute
 }
 
 const dispatcherSessionId=randomUUID()
-export async function prepareDispatchRun(input:{run:PlannedRun;plan:LaunchPlan;config:FactoryConfig;policy:RepoPolicy;approvalBindings:NonNullable<RunReport['approvalBindings']>;bindings:NonNullable<RunReport['bindings']>;authorityReads:unknown[];recordBinding?:{approvalId:string;commentId:number;bodySha256:string}|null;gh:TickDeps['gh'];metadata:HarnessMetadata;claim:Claim;authorityRequest?:import('./runs.ts').RunAuthorityRequest}):Promise<RunRecord>{
+export async function prepareDispatchRun(input:{run:PlannedRun;plan:LaunchPlan;config:FactoryConfig;policy:RepoPolicy;approvalBindings:NonNullable<RunReport['approvalBindings']>;bindings:NonNullable<RunReport['bindings']>;authorityReads:unknown[];recordBinding?:{approvalId:string;commentId:number;bodySha256:string}|null;gh:TickDeps['gh'];metadata:HarnessMetadata;claim:Claim;parent?:{run:RunRecord;binding:import('./shared-claims.ts').ParentClaimBinding;childIssue:number};authorityRequest?:import('./runs.ts').RunAuthorityRequest}):Promise<RunRecord>{
   const {run,plan,config,policy,gh,metadata}=input,helpers=await import('./runs.ts'),owner=await import('./shared-claims.ts')
   const stage=stagePolicy(policy,run.stage),root=runsRoot(config.home)
-  if(input.claim.path!==repoLockPath(config,run.repo))throw Error('local run claim targets another repository')
+  if(input.parent){
+    const parent=input.parent
+    if(parent.childIssue!==run.issue||parent.run.repo!==run.repo||parent.run.parent!==null||parent.run.state!=='running'||parent.binding.runId!==parent.run.runId||input.claim.path!==join(root,parent.run.runId,'child-'+run.issue+'.lock'))throw Error('local child claim differs from parent')
+    const original=await sharedClaimForRun(parent.run,config)
+    if(canonicalWire((await import('./children.ts')).parentClaimBinding(original))!==canonicalWire(parent.binding))throw Error('original parent claim changed')
+  }else if(input.claim.path!==repoLockPath(config,run.repo))throw Error('local run claim targets another repository')
   await(await import('./claims.ts')).renewClaim(input.claim)
   const subscription=await inspectSubscription(plan)
   const records=await helpers.readRuns(root)
@@ -1975,7 +2002,7 @@ export async function prepareDispatchRun(input:{run:PlannedRun;plan:LaunchPlan;c
   const host=(await (await import('./machine-identity.ts')).readHostBinding()).digest
   const target=await verifiedSharedTarget(run.repo,config),machine=sharedMachineContexts.get(target)!
   const selection=await helpers.approvedTaskSelection(input.bindings as import('./shared-claims.ts').ArtifactRef[],input.authorityReads,run.stage,{},input.authorityRequest?.kind==='consolidated'?input.authorityRequest.requested.taskIds:undefined)
-  const runInput:RunInput={root,repo:run.repo,issue:run.issue,parent:null,checkout:plan.cwd,branch:branch.stdout.trim(),baseSha:input.authorityRequest?.kind==='consolidated'?input.authorityRequest.requested.baseSha:head.stdout.trim(),headSha:head.stdout.trim(),stage:run.stage,harness:stage.harness,model:stage.model,effort:stage.effort,execution:seed.execution!,runtimeBinding:seed.runtimeBinding,configurationDigest:seed.configurationDigest,approvalBindings:authorities,recordBinding,approvalRefs:input.bindings as import('./shared-claims.ts').ArtifactRef[],policyDigest:policy.effective?.policyDigest??'',claimToken:input.claim.token,startedAt:new Date().toISOString(),taskKey:{repo:run.repo,issue:run.issue,taskId:selection.taskId,scopeDigest:selection.scopeDigest},approvedTaskIds:selection.approvedTaskIds,activeElapsedMs:null,taskOwner:null,agentAccountOwner:null,accountRef:subscription.accountRef,waitReason:null,hostBindingDigest:host,machine:{id:machine.id,installationId:machine.installationId,sessionId:dispatcherSessionId,hostBindingDigest:host},sharedClaim:null,checkpoint:null,remoteEffectCoverage:coverage,authorityRequest:input.authorityRequest??{kind:'native'},handbackIntent:{id:'run-handback',approvalBindings:authorities},dispatchRequest:{commentId:run.commentId,reactionId:run.reactionId}}
+  const runInput:RunInput={root,repo:run.repo,issue:run.issue,parent:input.parent?.run.issue??null,checkout:plan.cwd,branch:branch.stdout.trim(),baseSha:input.authorityRequest?.kind==='consolidated'?input.authorityRequest.requested.baseSha:head.stdout.trim(),headSha:head.stdout.trim(),stage:run.stage,harness:stage.harness,model:stage.model,effort:stage.effort,execution:seed.execution!,runtimeBinding:seed.runtimeBinding,configurationDigest:seed.configurationDigest,approvalBindings:authorities,recordBinding,approvalRefs:input.bindings as import('./shared-claims.ts').ArtifactRef[],policyDigest:policy.effective?.policyDigest??'',claimToken:input.claim.token,startedAt:new Date().toISOString(),taskKey:{repo:run.repo,issue:run.issue,taskId:selection.taskId,scopeDigest:selection.scopeDigest},approvedTaskIds:selection.approvedTaskIds,activeElapsedMs:null,taskOwner:null,agentAccountOwner:null,accountRef:subscription.accountRef,waitReason:null,hostBindingDigest:host,machine:{id:machine.id,installationId:machine.installationId,sessionId:input.parent?.run.machine?.id===machine.id?input.parent.run.machine.sessionId:dispatcherSessionId,hostBindingDigest:host},sharedClaim:null,checkpoint:null,remoteEffectCoverage:coverage,authorityRequest:input.authorityRequest??{kind:'native'},handbackIntent:{id:'run-handback',approvalBindings:authorities},dispatchRequest:{commentId:run.commentId,reactionId:run.reactionId}}
   if(runInput.authorityRequest?.kind==='consolidated'){const intent=await(await import('./checkpoints.ts')).checkpointIntentFromApproval({...runInput,runId:runInput.runId??randomUUID(),schemaVersion:2,generation:1,state:'prepared',terminationCause:null,exitCode:null,pid:null,processStartId:null,processGroupId:null,processIdentity:null,finishedAt:null,pendingDelivery:[]} as RunRecord,config);if(intent)runInput.checkpointIntent=intent}
   return helpers.createRun(runInput)
 }

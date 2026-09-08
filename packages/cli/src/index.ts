@@ -12,6 +12,7 @@ import { selectSkills, type SkillEntry } from './selection.ts'
 import { resolveTarget, syncControlRoom } from './sync.ts'
 import { dashboardUsage, runDashboard } from './dashboard.ts'
 import { dispatchUsage, runDispatchCli } from './dispatch.ts'
+import { runChildrenCli } from './children.ts'
 import { guardUsage, runGuardCli } from './guard.ts'
 import { runServiceCli, serviceUsage } from './service.ts'
 import { runStatsCli } from './stats/cli.ts'
@@ -21,7 +22,7 @@ import { runWorktree, worktreeUsage } from './worktree.ts'
 type Agent = 'codex' | 'claude' | 'hermes'
 type AgentChoice = Agent | 'both' | 'all'
 type Mode = 'project' | 'global'
-type Command = 'add' | 'verify' | 'doctor' | 'remove' | 'list' | 'version' | 'help' | 'worktree' | 'sync' | 'dispatch' | 'service' | 'status' | 'stats' | 'dashboard' | 'guard' | 'checkpoint'
+type Command = 'add' | 'verify' | 'doctor' | 'remove' | 'list' | 'version' | 'help' | 'worktree' | 'sync' | 'dispatch' | 'service' | 'status' | 'stats' | 'dashboard' | 'guard' | 'checkpoint' | 'children'
 // Top-level verbs the factory reserves; they are named in usage and refuse until they land.
 const reservedTopLevel: readonly string[] = [] as const
 const installerVerbs: readonly string[] = ['add', 'verify', 'doctor', 'remove', 'list'] as const
@@ -93,6 +94,9 @@ Control room (skills read the local clone, never the network):
   convention. Exit 0 synced, already fresh, or no control room · 1 the fetch
   failed and the existing clone stands · 2 a refusal (dirty clone, symlink, bad state file).
 
+Verified children:
+  vegafactory children run|join --parent N --groups FILE --repo owner/name [--write] [--json]
+
 The dispatcher (headless runs in feature worktrees, on the operator's own machine):
   vegafactory dispatch [--once] [--watch] [--dry-run] [--json] [--config PATH]
   Turns labels and rocket reactions on the repos named in ~/.vegastack/factory.json
@@ -148,7 +152,7 @@ function parse(argv: string[]): Options {
       if (!installerVerbs.includes(verb) && verb !== 'help' && verb !== 'version') throw new Error(`Unknown command: skills ${verb}`)
       command = verb as Command
     }
-    else if (head === 'worktree' || head === 'dispatch' || head === 'service' || head === 'status' || head === 'stats' || head === 'dashboard' || head === 'guard' || head === 'checkpoint') return { command: head, all: false, dryRun: false, force: false, nonInteractive: false, json: false, rest: argv.splice(0) }
+    else if (head === 'worktree' || head === 'dispatch' || head === 'service' || head === 'status' || head === 'stats' || head === 'dashboard' || head === 'guard' || head === 'checkpoint' || head === 'children') return { command: head, all: false, dryRun: false, force: false, nonInteractive: false, json: false, rest: argv.splice(0) }
     else if (reservedTopLevel.includes(head)) throw new Error(`${head} is not available yet — it lands in a later release of vegafactory`)
     else if (installerVerbs.includes(head)) throw new Error(`Unknown command: ${head} — installer verbs moved under the skills namespace: run "vegafactory skills ${head} …"`)
     else if (head === 'sync' || head === 'help' || head === 'version') command = head
@@ -789,6 +793,7 @@ async function main() {
     process.exitCode = await runGuardCli(rest)
     return
   }
+  if (options.command === 'children') { process.exitCode = await runChildrenCli(options.rest ?? [], homedir()); return }
   if (options.command === 'dispatch') {
     const rest = options.rest ?? []
     if (rest[0] === 'help' || rest[0] === '--help' || rest[0] === '-h') return console.log(dispatchUsage())

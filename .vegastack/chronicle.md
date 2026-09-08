@@ -2,6 +2,16 @@
 
 The project's story, newest first: what got built, why, and how it went — for the operator's future recall. Format home: the dev-chronicle skill.
 
+## 08-09-2026 — A child branch must prove its work ([#139](https://github.com/vegastack/vegafactory/issues/139))
+
+- **What:** Source work adds a CLI owner for independent children, records their actual processes and checks, and joins exact accepted commits in order. An untouched branch can no longer pass as completed work.
+- **Why:** The previous helper could join branches that had never executed a child, and separate launch descriptions did not own cancellation or recovery.
+- **How it went:** Real Git and process fixtures exercised committed output, cancellation, missing checks and interrupted joins. Shared stopped-process capacity needs the queued owner corrections; the old workflow compatibility patch, final evaluation, independent review and actual platform qualification remain open.
+- **Changed:** Registered child CLI · durable source acceptance and join receipts · original parent ownership · required checkout setup · parent worktree retention.
+- **Decisions:** none.
+
+— approved by (kmanojkumar) · built by codex · branch codex/productionization-133
+
 ## 08-09-2026 — Captured work survives a lost delivery ([#143](https://github.com/vegastack/vegafactory/issues/143))
 
 - **What:** Captured events keep one private identity through concurrent writes, interrupted delivery and explicit legacy migration. Organization destinations remain separate, and duplicate source files no longer create duplicate event counts.

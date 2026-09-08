@@ -348,15 +348,15 @@ function applyCodexTrust({ home, absPath, write, actions, warns, blocks }) {
 
 // --- create and restore ---------------------------------------------------
 
-function prepareCheckout({ repoRoot, path, devMd, home, write, actions, warns, blocks }) {
+function prepareCheckout({ repoRoot, path, devMd, home, write, actions, warns, blocks, required = false }) {
   for (const file of parseIncludeKnob(devMd)) {
     const source = join(repoRoot, file);
     if (!existsSync(source)) {
-      warns.push(at(file, 'listed in worktree-include: but absent from the main checkout — not copied'));
+      (required ? blocks : warns).push(at(file, 'listed in worktree-include: but absent from the main checkout — not copied'));
       continue;
     }
     if (symlinkBlock(source)) {
-      warns.push(at(file, 'is a symlink in the main checkout — not copied'));
+      (required ? blocks : warns).push(at(file, 'is a symlink in the main checkout — not copied'));
       continue;
     }
     actions.push(at(file, 'copy into the worktree'));
@@ -372,7 +372,7 @@ function prepareCheckout({ repoRoot, path, devMd, home, write, actions, warns, b
       try {
         execFileSync('sh', ['-c', setup], { cwd: path, encoding: 'utf8', stdio: [DISCARD, 'pipe', 'pipe'] });
       } catch (error) {
-        warns.push(at('setup', '`' + setup + '` failed: ' + (error.stderr?.toString().trim() || error.message)));
+        (required ? blocks : warns).push(at('setup', '`' + setup + '` failed: ' + (error.stderr?.toString().trim() || error.message)));
       }
     }
   }
@@ -475,7 +475,7 @@ export function createChildWorktree({ repoRoot, issue, slug, type, baseSha, devM
       return { blocks, warns, actions, path: plan.path, branch: plan.branch };
     }
   }
-  prepareCheckout({ repoRoot, path: plan.path, devMd, home, write, actions, warns, blocks });
+  prepareCheckout({ repoRoot, path: plan.path, devMd, home, write, actions, warns, blocks, required: true });
   return { blocks, warns, actions, path: plan.path, branch: plan.branch };
 }
 
@@ -605,6 +605,10 @@ export function removeWorktree({ repoRoot, name, base, force = false, push = fal
   if (!entry) return { blocks: [at(name, 'no worktree at ' + path + ' — nothing to remove')], warns, actions };
 
   const branch = entry.branch;
+  const branchIssue = branch && /^[^/]+\/([1-9]\d*)(?:-|$)/.exec(branch);
+  if (branchIssue && issueOfWorktree(name) !== Number(branchIssue[1])) {
+    return { blocks: ['serial child cannot remove its parent worktree; return to the parent branch and retain it until the parent PR merges'], warns, actions, path, branch };
+  }
   refreshBase({ repoRoot, base, remote, actions, warns });
   let facts = gatherRemovalFacts({ repoRoot, path, branch, base, remote, locked: entry.locked });
   if (push && branch && (facts.remoteMissing || facts.unpushed)) {

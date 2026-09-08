@@ -141,3 +141,23 @@ describe('codexTrustToml', () => {
     expect(codexTrustToml(first.text, '/r/.vegastack/.worktrees/106-x').changed).toBe(false)
   })
 })
+
+import { createChildWorktree, removeWorktree } from '../scripts/worktree.mjs'
+test('parallel child preparation refuses failed setup and missing required includes', () => {
+  for (const extra of ['commands: setup `exit 19`\n', 'worktree-include: .absent-required-hook\n']) {
+    const root = repo(), baseSha = git(root,'rev-parse','HEAD').trim()
+    const child = createChildWorktree({repoRoot:root,issue:139,slug:'prepared',type:'feat',baseSha,devMd:extra,home:root,write:true})
+    expect(child.blocks.length).toBeGreaterThan(0)
+    expect(existsSync(child.path)).toBe(true)
+    expect(git(child.path,'rev-parse','HEAD').trim()).toBe(baseSha)
+  }
+})
+test('ordinary removal cannot delete the parent checkout occupied by a serial child', () => {
+  const root=repo()
+  const parent=createWorktree({repoRoot:root,issue:133,slug:'parent',type:'feat',base:'main',devMd:'',home:root,write:true})
+  const child=createWorktree({repoRoot:root,issue:139,slug:'child',type:'feat',base:'main',parent:parent.branch,devMd:'',home:root,write:true})
+  expect(child.path).toBe(parent.path)
+  const result=removeWorktree({repoRoot:root,name:'133-parent',base:'main',force:true,write:true})
+  expect(result.blocks.join(' ')).toContain('serial child cannot remove')
+  expect(existsSync(parent.path)).toBe(true)
+})
