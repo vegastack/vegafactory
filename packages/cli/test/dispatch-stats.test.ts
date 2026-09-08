@@ -129,11 +129,13 @@ test('managed hook refuses unknown identities, malformed IDs and reentered Stop 
   expect(parseManagedHook(JSON.stringify({...hook,transcript_path:'/private/data'}))).toBeNull()
   let callbacks=0
   expect(await consumeManagedHook(home,JSON.stringify(hook),async()=>{callbacks++})).toBeNull()
-  expect(callbacks).toBe(0)
+  let grants=0
+  expect(await consumeManagedHook(home,JSON.stringify({...hook,validated:true,flushGranted:true}),async()=>{callbacks++},async()=>{grants++})).toBeNull()
+  expect({callbacks,grants}).toEqual({callbacks:0,grants:0})
   expect(await readdir(home)).toEqual([])
 })
 
-async function managedHookFixtureProof(route:'source'|'bundled'|'callback'):Promise<void>{
+async function managedHookFixtureProof(route:'source'|'bundled'|'callback'|'grant'|'hold'):Promise<void>{
   const fs=await import('node:fs/promises'),{execFileSync,spawn}=await import('node:child_process'),{resolve}=await import('node:path'),{pathToFileURL}=await import('node:url')
   const runtime=await import('../src/runs.ts'),recordOwner=await import('../src/stats/record.ts'),{processIdentity}=await import('../src/claims.ts'),policyOwner=await import('../../../skills/dev/dev-setup/scripts/effective-policy.mjs')
   const canonicalHome=await fs.realpath(home),repo=join(canonicalHome,'repo'),room=join(canonicalHome,'room'),installed=join(canonicalHome,'installed'),hooks=join(repo,'.vegastack','hooks'),sourceHooks=resolve('skills/dev/dev-setup/assets/hooks')
@@ -158,6 +160,60 @@ async function managedHookFixtureProof(route:'source'|'bundled'|'callback'):Prom
   await runtime.prepareTerminalCapture(runtime.runsRoot(canonicalHome),run.runId,recordOwner.normalizeRecord({repo:'a/r',issue:1,ts:run.finishedAt!,session_id:'owned-vendor-session',stage:'implement',outcome:'complete'}))
   expect(await runtime.findOwnedRunSession(runtime.runsRoot(canonicalHome),{sessionId:'owned-vendor-session',cwd:repo})).not.toBeNull()
   expect(await recordOwner.registeredCaptureContext(canonicalHome,'a/r',repo)).not.toBeNull()
+  if(route==='grant'){
+    // Capture/run storage boundary only;144 separately proves optional Git index writes
+    // are disabled and supervises real500ms/1s process cancellation.
+    const raw=JSON.stringify({harness:'codex',event:'Stop',sessionId:'owned-vendor-session',cwd:repo,stopHookActive:false})
+    const {spoolRoot,inspectSpool}=await import('../src/stats/outbox.ts'),runFile=join(runtime.runsRoot(canonicalHome),run.runId,'run.json')
+    const before=await fs.readFile(runFile,'utf8'),context=(await recordOwner.registeredCaptureContext(canonicalHome,run.repo,repo))!
+    let grants=0,callbacks=0
+    expect(await recordOwner.consumeManagedHook(canonicalHome,raw,async()=>{callbacks++},async()=>{grants++;throw Error('managed-hook-flush-timeout')})).toBeNull()
+    expect({grants,callbacks}).toEqual({grants:1,callbacks:0})
+    await expect(fs.lstat(spoolRoot(canonicalHome))).rejects.toMatchObject({code:'ENOENT'})
+    expect(await fs.readFile(runFile,'utf8')).toBe(before)
+    await expect(recordOwner.captureTerminalRun(canonicalHome,run.runId,context.destination,context.policy,undefined,async()=>{throw Error('flush-grant-refused')})).rejects.toThrow('flush-grant-refused')
+    await expect(fs.lstat(spoolRoot(canonicalHome))).rejects.toMatchObject({code:'ENOENT'})
+    let grant!:()=>void,entered!:()=>void
+    const waiting=new Promise<void>(resolve=>{grant=resolve}),atBoundary=new Promise<void>(resolve=>{entered=resolve})
+    const capture=recordOwner.consumeManagedHook(canonicalHome,raw,async value=>{
+      callbacks++;expect((await runtime.readRun(runtime.runsRoot(canonicalHome),value.run.runId)).pendingDelivery[0]?.status).toBe('acknowledged')
+    },async()=>{grants++;entered();await waiting})
+    await atBoundary
+    await expect(fs.lstat(spoolRoot(canonicalHome))).rejects.toMatchObject({code:'ENOENT'})
+    expect(await fs.readFile(runFile,'utf8')).toBe(before)
+    grant();expect(await capture).toEqual({ok:true})
+    expect({grants,callbacks}).toEqual({grants:2,callbacks:1})
+    expect((await inspectSpool(spoolRoot(canonicalHome))).events).toHaveLength(1)
+    return
+  }
+  if(route==='hold'){
+    const {canonical,sha256}=await import('../src/shared-claims.ts'),{spoolRoot}=await import('../src/stats/outbox.ts')
+    const current=await runtime.readRun(runtime.runsRoot(canonicalHome),run.runId),sequence=current.attemptId!
+    const receipt=()=>({kind:'state-receipt' as const,operationId:crypto.randomUUID(),commitSha:'a'.repeat(40),blobSha256:'b'.repeat(64)})
+    const original:import('../src/shared-claims.ts').TaskRecord={schemaVersion:1,taskKey:'d'.repeat(64),host:'github.com',repo:current.repo,issue:current.issue,repositoryNodeId:'R_app',issueNodeId:'I_1',scopeDigest:current.taskKey.scopeDigest,approvalDigest:'b'.repeat(64),approvalBindings:current.approvalBindings,generation:1,machineId:'original-machine',installationId:crypto.randomUUID(),sessionId:crypto.randomUUID(),ownerToken:crypto.randomUUID(),runId:current.runId,stage:'implement',state:'running',paths:[],resources:[],independent:true,parentTaskKey:null,parentBinding:null,approvedTaskIds:['1-T1'],checkpoint:null,stopProof:null,unresolvedEffects:[],recovery:null,acceptedScopes:[]}
+    const bytes=canonical(original)
+    // Schema-valid private unavailable-history fixture.138 separately proves receiving
+    // construction;143 must refuse allocation even with a prepared current payload.
+    const received=runtime.parseRun({...current,activeElapsedMs:null,approvedTaskIds:['1-T1'],terminalSegment:{sequence,firstAttemptId:sequence},machine:{id:'receiver',installationId:crypto.randomUUID(),sessionId:crypto.randomUUID(),hostBindingDigest:current.hostBindingDigest!},sharedClaim:{taskKey:original.taskKey,generation:2,ownerToken:crypto.randomUUID(),stateCommit:'e'.repeat(40)},remoteRecovery:{kind:'receiving-home',requestId:crypto.randomUUID(),requestDigest:'c'.repeat(64),handoff:receipt(),originalStateCommit:'e'.repeat(40),stopProof:{kind:'verified-reboot',machineId:original.machineId,installationId:original.installationId,sessionId:original.sessionId,hostBindingDigest:'f'.repeat(64),bootIdDigest:'a'.repeat(64),runIds:[current.runId],generation:1,observedAt:new Date().toISOString(),evidenceRef:receipt()},originalTask:{bytes,sha256:sha256(bytes)},priorHistory:'unavailable',reportingContext:'unavailable'}})
+    const root=runtime.runsRoot(canonicalHome),runFile=join(root,run.runId,'run.json')
+    await runtime.atomicRunFile(runFile,received)
+    await runtime.prepareTerminalCapture(root,run.runId,recordOwner.normalizeRecord({repo:received.repo,issue:received.issue,ts:received.finishedAt!,session_id:'owned-vendor-session',duration_s:10,outcome:'complete'}))
+    const before=await fs.readFile(runFile,'utf8'),context=(await recordOwner.registeredCaptureContext(canonicalHome,run.repo,repo))!
+    let grants=0,callbacks=0
+    await expect(recordOwner.captureTerminalRun(canonicalHome,run.runId,context.destination,context.policy,undefined,async()=>{grants++})).rejects.toThrow('original-reporting-context-unavailable')
+    expect(grants).toBe(0)
+    await expect(fs.lstat(spoolRoot(canonicalHome))).rejects.toMatchObject({code:'ENOENT'})
+    const raw=JSON.stringify({harness:'codex',event:'Stop',sessionId:'owned-vendor-session',cwd:repo,stopHookActive:false})
+    expect(await recordOwner.consumeManagedHook(canonicalHome,raw,async value=>{
+      callbacks++;expect(grants).toBe(1);expect(value.reportingHold).toBe('original-reporting-context-unavailable')
+      expect(value.run.remoteRecovery?.originalTask.bytes).toBe(bytes)
+    },async()=>{grants++})).toBeNull()
+    expect({grants,callbacks}).toEqual({grants:1,callbacks:1})
+    expect(await fs.readFile(runFile,'utf8')).toBe(before)
+    await expect(fs.lstat(spoolRoot(canonicalHome))).rejects.toMatchObject({code:'ENOENT'})
+    expect((await runtime.readRun(root,run.runId)).pendingDelivery.every(row=>row.status==='pending')).toBe(true)
+    return
+  }
   if(route==='callback'){
     const raw=(event:string)=>JSON.stringify({harness:'codex',event,sessionId:'owned-vendor-session',cwd:repo,stopHookActive:false})
     let callbacks=0
@@ -259,6 +315,8 @@ child.once('close',(status,signal)=>record({status,signal,error,stderr,elapsedMs
 }
 test.each(['source','bundled'] as const)('installed managed hook (%s) resolves owned terminal session and Stop/SessionEnd share one durable capture',managedHookFixtureProof,10000)
 test('managed hook callback receives fresh private authority only after durable capture',()=>managedHookFixtureProof('callback'),10000)
+test('managed hook awaits one trusted flush grant and rejected grants leave storage untouched',()=>managedHookFixtureProof('grant'),10000)
+test('receiving-home reporting hold preserves pending bytes and still permits granted learning',()=>managedHookFixtureProof('hold'),10000)
 
 test('actual failed child argv and stdout never enter basic diagnostic files',async()=>{
  const {executeRun}=await import('../src/dispatch.ts'),{parseFactoryConfig}=await import('../src/config.ts')

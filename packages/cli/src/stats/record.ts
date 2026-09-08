@@ -168,12 +168,15 @@ export function statsPolicyFromEffective(resolved: ReturnType<typeof resolvePoli
 
 // The local durable run record is the only terminal capture authority. Vendor stdout
 // has already been reduced by #138; hook inputs never supply measurement payloads.
-export async function captureTerminalRun(home: string, runId: string, destination: import('./types.ts').Destination, policy: StatsPolicy, exactCaptureKey?:string): Promise<string | null> {
+export type BeforeManagedFlush=()=>Promise<void>
+export async function captureTerminalRun(home: string, runId: string, destination: import('./types.ts').Destination, policy: StatsPolicy, exactCaptureKey?:string, beforeFlush?:BeforeManagedFlush): Promise<string | null> {
   if (!policy.enabled || policy.refusal) return null
-  const { readRun, runsRoot, acknowledgeTerminalCapture, terminalCaptureDescriptor, terminalCaptureAttempts, readRunAttemptSnapshot } = await import('../runs.ts')
+  const { readRun, runsRoot, acknowledgeTerminalCapture, terminalCaptureDescriptor, terminalCaptureAttempts, readRunAttemptSnapshot, runReportingHold } = await import('../runs.ts')
   const { hashBytes, validateDestination, parseTerminalCaptureKey } = await import('./types.ts')
   const { enqueueEvent, spoolRoot } = await import('./outbox.ts')
   const current = await readRun(runsRoot(home), runId)
+  const reportingHold=runReportingHold(current)
+  if(reportingHold)throw Error(reportingHold) // Never invent receiving-home ordinal or reporting identity.
   if(current.repo!==validateDestination(destination).repo)return null
   const currentKey=terminalCaptureDescriptor(current).captureKey,captureKey=exactCaptureKey??currentKey
   const parsed=parseTerminalCaptureKey(captureKey)
@@ -196,6 +199,9 @@ export async function captureTerminalRun(home: string, runId: string, destinatio
   if (!delivery?.payload || !delivery.payloadDigest || hashBytes(delivery.payload) !== delivery.payloadDigest) return null
   const record = parseLocalRecord(JSON.parse(delivery.payload))
   if (recordProblems(record).length || record.repo !== run.repo || record.issue !== run.issue || record.session_id !== (run.vendorSessionId ?? null)) throw Error('terminal-measurement-identity-mismatch')
+  // A trusted supervisor grants the one local flush phase only after these reads.
+  // Await it before UUID/ordinal preparation and every directory, claim, map, event or ACK write.
+  await beforeFlush?.()
   const event = await enqueueEvent(spoolRoot(home), {
     schemaVersion: 2, eventId: crypto.randomUUID(), destination, captureKey,
     payload: { schemaVersion: 2, recordKind: 'execution', utcDay: new Date(record.ts).toISOString().slice(0, 10), stage: run.stage, outcome: run.terminationCause ?? 'interrupted', values: JSON.parse(delivery.payload), localRunId:run.runId, taskRef:{repo:run.repo,issue:run.issue,taskId:run.taskKey.taskId === 'unknown' ? null : run.taskKey.taskId}, taskOwner:run.taskOwner, agentAccountOwner:run.agentAccountOwner, attempt:(run.attempts?.length??0)+1, startedAt:run.terminalSegment?(terminalCaptureAttempts(run)[0]?.startedAt??run.startedAt):run.startedAt, endedAt:run.finishedAt },
@@ -220,7 +226,7 @@ export interface RegisteredCaptureContext {
   destination:import('./types.ts').Destination;policy:StatsPolicy;learningEnabled:boolean
   effectivePolicy:ReturnType<typeof import('../../../../skills/dev/dev-setup/scripts/effective-policy.mjs').loadConfiguredPolicy>
 }
-export interface ValidatedManagedHookContext {input:ManagedHookInput;run:import('../runs.ts').RunRecord;context:RegisteredCaptureContext}
+export interface ValidatedManagedHookContext {input:ManagedHookInput;run:import('../runs.ts').RunRecord;context:RegisteredCaptureContext;reportingHold:ReturnType<typeof import('../runs.ts').runReportingHold>}
 export async function registeredCaptureContext(home: string, repo: string, checkout: string): Promise<RegisteredCaptureContext | null> {
   const { readFile } = await import('node:fs/promises'), { join, resolve } = await import('node:path')
   const { readPrivateRunFile } = await import('../runs.ts')
@@ -240,25 +246,30 @@ export async function registeredCaptureContext(home: string, repo: string, check
   return { destination:validateDestination({host:'github.com',org:knob.org,repo,controlRoom:knob.repo}), policy, learningEnabled:effective.policy.values.learning!=='off', effectivePolicy:effective }
 }
 
-export async function consumeManagedHook(home: string, raw: string, afterValidated?:(value:ValidatedManagedHookContext)=>Promise<void>): Promise<{ok:true} | null> {
+export async function consumeManagedHook(home: string, raw: string, afterValidated?:(value:ValidatedManagedHookContext)=>Promise<void>, beforeFlush?:BeforeManagedFlush): Promise<{ok:true} | null> {
   const input = parseManagedHook(raw)
   if (!input) return null
   try {
     // Check the private registry before reading any caller-named directory or run payload.
     const { join, resolve } = await import('node:path')
-    const { readPrivateRunFile, findOwnedRunSession, runsRoot } = await import('../runs.ts')
+    const { readPrivateRunFile, findOwnedRunSession, runsRoot, runReportingHold } = await import('../runs.ts')
     const registry = JSON.parse(await readPrivateRunFile(join(home,'.vegastack','factory.json'))) as {repos?:Array<{path:string}>}
     if (!(registry.repos ?? []).some(entry => typeof entry.path === 'string' && (input.cwd === resolve(entry.path) || input.cwd.startsWith(join(resolve(entry.path),'.vegastack','.worktrees') + '/')))) return null
     const run = await findOwnedRunSession(runsRoot(home),input)
     if (!run || run.harness !== input.harness) return null
     const context = await registeredCaptureContext(home,run.repo,run.checkout)
     if (!context || !context.learningEnabled) return null
-    const captured=input.event!=='SessionStart'&&run.state==='terminal'
+    const reportingHold=runReportingHold(run)
+    // No wire verdict or cached authority enters here.144 starts one500ms flush only
+    // after this request's real private validation, inside its unchanged1s overall cap.
+    // A rejected/timed-out grant stops before capture AND the learning callback.
+    await beforeFlush?.()
+    const captured=!reportingHold&&input.event!=='SessionStart'&&run.state==='terminal'
       ? await captureTerminalRun(home,run.runId,context.destination,context.policy) : null
     // Trusted same-phase144 composition can reuse this actual fresh validation, never
     // a caller-supplied verdict. It re-reads the current generation after our durable ACK.
     // A callback cannot manufacture capture success or a public context pointer here.
-    await afterValidated?.({input,run,context})
+    await afterValidated?.({input,run,context,reportingHold})
     return captured ? {ok:true} : null
   } catch { return null }
 }
