@@ -136,3 +136,158 @@ test('verified continuation independently rejects a live group and unknown termi
     await rm(f.directory,{recursive:true,force:true})
   }
 })
+
+// Two homes and a real source checkpoint; callbacks are controlled controller
+// fixtures, not a claim to qualify GitHub stop evidence or a vendor runtime.
+async function receivingFixture(){
+  const runtime=await import('../src/runs.ts'),wire=await import('../src/shared-claims.ts')
+  const {execFileSync}=await import('node:child_process'),{mkdir}=await import('node:fs/promises')
+  const {readHostBinding}=await import('../src/machine-identity.ts')
+  const directory=await mkdtemp(join(tmpdir(),'receiving-')),oldHome=join(directory,'old-home'),newHome=join(directory,'new-home'),root=join(newHome,'runs'),source=join(oldHome,'source'),checkout=join(newHome,'checkout'),remote=join(directory,'remote.git')
+  await mkdir(source,{recursive:true});await mkdir(newHome)
+  const git=(cwd:string,args:string[])=>execFileSync('git',args,{cwd,encoding:'utf8',stdio:['ignore','pipe','pipe']}).trim()
+  git(source,['init','-q','-b','feat/1-work']);await writeFile(join(source,'allowed.txt'),'verified progress\n')
+  git(source,['add','allowed.txt']);git(source,['-c','user.name=Fixture','-c','user.email=fixture@example.test','commit','-qm','verified progress'])
+  git(directory,['clone','-q','--bare',source,remote]);git(newHome,['clone','-q',remote,checkout])
+  await writeFile(join(oldHome,'pending-outbox'),'original private telemetry bytes')
+  const runId=crypto.randomUUID(),host=(await readHostBinding()).digest,taskKey='d'.repeat(64)
+  const authority={approvalId:'fixture',source:{kind:'github-comment' as const,repositoryId:'R_repo',issueNodeId:'I_issue',commentId:'12',bodySha256:'a'.repeat(64)}}
+  const reference=()=>({kind:'state-receipt' as const,operationId:crypto.randomUUID(),commitSha:'e'.repeat(40),blobSha256:'f'.repeat(64)})
+  const artifacts:import('../src/shared-claims.ts').ArtifactRef[]=[{repo:'o/r',issue:1,kind:'plan',artifactId:'PLAN_1',rev:1,digest:'a'.repeat(64)}]
+  const approvedTaskIds=['1-T1','1-T2'],scopeDigest=wire.sha256(wire.canonical({artifacts,taskIds:approvedTaskIds}))
+  const checkpoint:import('../src/shared-claims.ts').CheckpointRef={schemaVersion:1,id:crypto.randomUUID(),repo:'o/r',repositoryId:'R_repo',branch:'feat/1-work',baseSha:git(checkout,['rev-parse','HEAD']),headSha:git(checkout,['rev-parse','HEAD']),treeSha:git(checkout,['rev-parse','HEAD^{tree}']),scopeDigest,runId,publishedAt:'2026-09-07T00:00:00.000Z'}
+  const execution:import('../src/shared-claims.ts').ExecutionIdentity={providerMode:'subscription',harness:'codex',harnessVersion:'fixture',model:'fixture',effort:'high',accountRef:'original-account',qualification:reference()}
+  const effect:import('../src/shared-claims.ts').EffectRef={operationId:crypto.randomUUID(),runId,generation:3,kind:'telemetry-push',target:{kind:'telemetry',destinationRepositoryId:'R_room',destinationPath:'data/fixture.jsonl',eventId:crypto.randomUUID(),batchId:crypto.randomUUID()},payloadDigest:'a'.repeat(64),state:'ambiguous',intent:reference(),outcome:null}
+  const envelope:import('../src/shared-claims.ts').RecoveryEnvelope={schemaVersion:2,taskKey,runId,generation:3,approvalBindings:[authority],recordBinding:authority,scopeDigest,approvalDigest:'b'.repeat(64),execution,checkpoint,completed:[{taskId:'1-T1',headSha:checkpoint.headSha,acceptance:{sourceSha:checkpoint.headSha,validationId:'fixture/check/'+'a'.repeat(64),commandDigest:'a'.repeat(64),evidence:reference()}}],children:[],joins:[],effects:[effect],remoteEffectCoverage:{kind:'reconciled',evidence:reference()}}
+  const original:import('../src/shared-claims.ts').TaskRecord={schemaVersion:1,taskKey,host:'github.com',repo:'o/r',issue:1,repositoryNodeId:'R_repo',issueNodeId:'I_issue',scopeDigest,approvalDigest:'b'.repeat(64),approvalBindings:[authority],generation:3,machineId:'old-machine',installationId:crypto.randomUUID(),sessionId:crypto.randomUUID(),ownerToken:crypto.randomUUID(),runId,stage:'implement',state:'running',paths:['allowed.txt'],resources:[],independent:true,parentTaskKey:null,parentBinding:null,approvedTaskIds,checkpoint,stopProof:null,unresolvedEffects:[],recovery:envelope,acceptedScopes:[]}
+  const machine={id:'receiver',installationId:crypto.randomUUID(),sessionId:crypto.randomUUID(),hostBindingDigest:host}
+  const stopProof:import('../src/shared-claims.ts').StopProof={kind:'verified-reboot',machineId:original.machineId,installationId:original.installationId,sessionId:original.sessionId,hostBindingDigest:'1'.repeat(64),bootIdDigest:'2'.repeat(64),runIds:[runId],generation:3,observedAt:'2026-09-07T01:00:00.000Z',evidenceRef:reference()}
+  const current:import('../src/shared-claims.ts').TaskRecord={...structuredClone(original),generation:4,machineId:machine.id,installationId:machine.installationId,sessionId:machine.sessionId,ownerToken:crypto.randomUUID(),state:'claimed',stopProof,recovery:{...structuredClone(envelope),generation:4}}
+  const handoff=reference(),previousHead='3'.repeat(40)
+  const receipt:import('../src/shared-claims.ts').OperationReceipt={schemaVersion:1,operationId:handoff.operationId,type:'handoff',taskKey,generation:4,previousHead,requestDigest:'4'.repeat(64),resultOwner:{ownerToken:current.ownerToken,machineId:machine.id,installationId:machine.installationId,sessionId:machine.sessionId,runId},recoveryPayload:null}
+  handoff.blobSha256=wire.sha256(wire.canonical(receipt))
+  const decision:import('../src/runs.ts').VerifiedReceivingRunDecision={action:'resume-task',reason:'verified fixture outstanding task',original:{stateCommit:previousHead,task:original},current:{stateCommit:handoff.commitSha,task:current},handoff:{ref:handoff,receipt},artifacts,authorityRequest:{kind:'native'},taskIds:['1-T2'],sourceRefs:[{id:'fixture-source',updatedAt:'2026-09-07T01:00:00.000Z',bodySha256:'a'.repeat(64)}],receiver:{machine,claimToken:crypto.randomUUID(),policyDigest:'b'.repeat(64),runtimeBinding:{schemaVersion:1,sourceSha:'5'.repeat(40),treeSha:'6'.repeat(40),packageName:'@vegastack/vegafactory',version:'0.1.0',tarballSha256:'7'.repeat(64),inventoryDigest:'8'.repeat(64)},configurationDigest:'9'.repeat(64),worktreeDigest:await runtime.worktreeFingerprint(checkout)}}
+  const request:import('../src/runs.ts').ReceivingRunRequest={root,requestId:crypto.randomUUID(),runId,taskKey,expectedSharedGeneration:4,checkout,handoff}
+  const controller={verifyRecovery:async()=>structuredClone(decision)}
+  return{runtime,wire,directory,oldHome,newHome,root,checkout,request,decision,controller,effect}
+}
+
+test('receiving home preserves logical run, unavailable history and old telemetry without old local home',async()=>{
+  const f=await receivingFixture()
+  try{
+    await rm(f.oldHome,{recursive:true,force:true})
+    const old=f.wire.canonical(f.decision.original.task)
+    const run=await f.runtime.createVerifiedReceivingRun(f.request,f.controller)
+    expect(run.runId).toBe(f.request.runId);expect(run.approvedTaskIds).toEqual(['1-T1','1-T2']);expect(run.taskKey.scopeDigest).toBe(f.decision.original.task.scopeDigest)
+    expect(run.execution).toEqual(f.decision.original.task.recovery!.execution);expect(run.recordBinding).toEqual(f.decision.original.task.recovery!.recordBinding)
+    expect(run.machine).toEqual(f.decision.receiver.machine);expect(run.sharedClaim?.generation).toBe(4);expect(run.state).toBe('prepared')
+    expect(run.attempts).toEqual([]);expect(run.attemptId).not.toBe(run.runId);expect(run.processIdentity).toBeNull();expect(run.stopProof).toBeNull();expect(run.vendorSessionId).toBeNull();expect(run.finishedAt).toBeNull()
+    expect(run.remoteRecovery?.originalTask).toEqual({bytes:old,sha256:f.wire.sha256(old)})
+    expect(JSON.parse(run.remoteRecovery!.originalTask.bytes).recovery.effects).toEqual([f.effect])
+    expect(JSON.parse(run.remoteRecovery!.originalTask.bytes).stopProof).toBeNull();expect(run.remoteRecovery!.stopProof).toEqual(f.decision.current.task.stopProof!)
+    expect(run.pendingDelivery).toEqual([]);expect(run.activeElapsedMs).toBeNull();expect(f.runtime.priorRunElapsedMs(run)).toBeNull();expect(f.runtime.terminalCaptureElapsedMs(run)).toBe(0)
+    expect(f.runtime.runReportingHold(run)).toBe('original-reporting-context-unavailable')
+    expect(f.runtime.terminalCaptureDescriptor(run).sequence).toBe(run.attemptId!)
+    expect((await stat(join(f.root,run.runId,'run.json'))).mode&0o777).toBe(0o600)
+    expect(await f.runtime.readRun(f.root,run.runId)).toEqual(run)
+  }finally{await rm(f.directory,{recursive:true,force:true})}
+})
+
+test('receiving allocation rechecks authority on replay, rejects rebound and existing ordinary records',async()=>{
+  const f=await receivingFixture()
+  try{
+    let calls=0
+    const controller={verifyRecovery:async()=>{calls++;return structuredClone(f.decision)}}
+    const run=await f.runtime.createVerifiedReceivingRun(f.request,controller)
+    f.decision.current.stateCommit='b'.repeat(40);f.decision.sourceRefs[0]!.updatedAt='2026-09-08T00:00:00.000Z'
+    expect(await f.runtime.createVerifiedReceivingRun(f.request,controller)).toEqual(run);expect(calls).toBe(4)
+    expect(await readFile(join(f.oldHome,'pending-outbox'),'utf8')).toBe('original private telemetry bytes')
+    await expect(f.runtime.createVerifiedReceivingRun({...f.request,requestId:crypto.randomUUID()},controller)).rejects.toThrow('rebound')
+    await expect(f.runtime.createVerifiedReceivingRun(f.request,{verifyRecovery:async()=>{throw Error('source revoked')}})).rejects.toThrow('revoked')
+    await f.runtime.atomicRunFile(join(f.root,run.runId,'run.json'),parseRun({...run,policyDigest:'f'.repeat(64)}))
+    await expect(f.runtime.createVerifiedReceivingRun(f.request,controller)).rejects.toThrow('saved identity')
+    await f.runtime.atomicRunFile(join(f.root,run.runId,'run.json'),run)
+    await f.runtime.prepareRunAttemptDirectory(f.root,run)
+    await expect(f.runtime.createVerifiedReceivingRun(f.request,controller)).rejects.toThrow('wrapper')
+    const otherRoot=join(f.newHome,'ordinary')
+    const ordinary=await createRun({...input(otherRoot),runId:f.request.runId})
+    await expect(f.runtime.createVerifiedReceivingRun({...f.request,root:otherRoot},controller)).rejects.toThrow('rebound')
+    expect(await f.runtime.readRun(otherRoot,ordinary.runId)).toEqual(ordinary)
+  }finally{await rm(f.directory,{recursive:true,force:true})}
+})
+
+test('receiving constructor rejects changed scope, completed tasks, owner, stop, history and unresolved control effects',async()=>{
+  const f=await receivingFixture()
+  try{
+    const cases:Array<(decision:import('../src/runs.ts').VerifiedReceivingRunDecision)=>void>=[
+      d=>{d.taskIds=['1-T1']},d=>{d.taskIds=['1-T9']},d=>{d.current.task.generation++},d=>{d.current.task.runId=crypto.randomUUID()},
+      d=>{d.handoff.receipt.previousHead='a'.repeat(40)},d=>{d.current.task.stopProof!.generation++},d=>{d.receiver.machine.hostBindingDigest='a'.repeat(64)},
+      d=>{d.receiver.runtimeBinding.inventoryDigest='invalid'},d=>{delete (d as Partial<typeof d>).authorityRequest},d=>{d.artifacts[0]!.rev++},d=>{d.current.task.recovery!.effects=[]},
+      d=>{d.current.task.parentTaskKey='a'.repeat(64)},d=>{d.current.task.state='running'},
+      d=>{d.original.task.recovery!.remoteEffectCoverage={kind:'unmanaged-possible',reasonCode:'unverified'};d.current.task.recovery!.remoteEffectCoverage=d.original.task.recovery!.remoteEffectCoverage},
+      d=>{const effect=d.original.task.recovery!.effects[0]!;effect.kind='handback';effect.target={kind:'issue-comment',repositoryId:'R_repo',issueNodeId:'I_issue',commentId:null,markerId:'original-marker'};d.current.task.recovery!.effects=structuredClone(d.original.task.recovery!.effects)},
+    ]
+    for(const change of cases){const decision=structuredClone(f.decision);change(decision);await expect(f.runtime.createVerifiedReceivingRun(f.request,{verifyRecovery:async()=>decision})).rejects.toThrow();expect(await f.runtime.readRuns(f.root)).toEqual([])}
+    let checks=0
+    await expect(f.runtime.createVerifiedReceivingRun(f.request,{verifyRecovery:async()=>{const decision=structuredClone(f.decision);if(++checks===2)decision.receiver.claimToken=crypto.randomUUID();return decision}})).rejects.toThrow('changed during verification')
+    await writeFile(join(f.checkout,'allowed.txt'),'unbacked change')
+    await expect(f.runtime.createVerifiedReceivingRun(f.request,f.controller)).rejects.toThrow('checkout changed')
+    expect(await f.runtime.readRuns(f.root)).toEqual([])
+  }finally{await rm(f.directory,{recursive:true,force:true})}
+})
+
+test('receiving provenance cannot be injected or rewritten and unknown cumulative history survives local capture and quota retry',async()=>{
+  const f=await receivingFixture(),{normalizeRecord}=await import('../src/stats/record.ts')
+  try{
+    let run=await f.runtime.createVerifiedReceivingRun(f.request,f.controller)
+    await expect(createRun({...input(f.root),remoteRecovery:run.remoteRecovery} as never)).rejects.toThrow('verified constructor')
+    await expect(transitionRun(run.runId,run.generation,{remoteRecovery:undefined} as never,f.root)).rejects.toThrow('immutable')
+    await expect(transitionRun(run.runId,run.generation,{activeElapsedMs:0},f.root)).rejects.toThrow('unknown')
+    expect(()=>parseRun({...run,remoteRecovery:{...run.remoteRecovery,originalTask:{...run.remoteRecovery!.originalTask,bytes:'changed'}}})).toThrow('provenance')
+    expect(()=>parseRun({...run,remoteRecovery:{...run.remoteRecovery,reportingContext:'available'}})).toThrow('provenance')
+    const original=run.remoteRecovery
+    run=await transitionRun(run.runId,run.generation,{state:'terminal',terminationCause:'failed',finishedAt:new Date().toISOString(),attemptElapsedMs:25,activeElapsedMs:null,vendorSessionId:'receiver-session',waitReason:'subscription-quota'},f.root)
+    run=await f.runtime.beginRunAttempt(f.root,run.runId,run.generation)
+    expect(run.attempts).toHaveLength(1);expect(run.remoteRecovery).toEqual(original);expect(run.activeElapsedMs).toBeNull();expect(f.runtime.priorRunElapsedMs(run)).toBeNull()
+    run=await transitionRun(run.runId,run.generation,{state:'terminal',terminationCause:'succeeded',finishedAt:new Date().toISOString(),attemptElapsedMs:35,activeElapsedMs:null,waitReason:null},f.root)
+    expect(f.runtime.terminalCaptureElapsedMs(run)).toBe(60)
+    const capture=await f.runtime.prepareTerminalCapture(f.root,run.runId,normalizeRecord({repo:run.repo,issue:run.issue,session_id:run.vendorSessionId,ts:run.finishedAt!,duration_s:0.06,outcome:'complete'}))
+    const saved=await f.runtime.readRun(f.root,run.runId)
+    expect(saved.pendingDelivery[0]?.payload).toBe(capture.payload);expect(saved.remoteRecovery).toEqual(original);expect(f.runtime.runReportingHold(saved)).toBe('original-reporting-context-unavailable')
+    await expect(transitionRun(run.runId,saved.generation,{pendingDelivery:[]},f.root)).rejects.toThrow('immutable')
+    const ordinary=await createRun(input(join(f.newHome,'ordinary')))
+    expect(f.runtime.runReportingHold(ordinary)).toBeNull();expect(f.runtime.priorRunElapsedMs(ordinary)).toBe(0)
+  }finally{await rm(f.directory,{recursive:true,force:true})}
+})
+
+test('receiving allocation excludes simultaneous duplicate constructors and malformed opaque provenance',async()=>{
+  const f=await receivingFixture()
+  try{
+    const outcomes=await Promise.allSettled([f.runtime.createVerifiedReceivingRun(f.request,f.controller),f.runtime.createVerifiedReceivingRun({...f.request,requestId:crypto.randomUUID()},f.controller)])
+    expect(outcomes.filter(result=>result.status==='fulfilled')).toHaveLength(1)
+    const [run]=await f.runtime.readRuns(f.root)
+    expect(run!.attempts).toEqual([])
+    const bytes='x'.repeat(256*1024+1)
+    expect(()=>parseRun({...run,remoteRecovery:{...run!.remoteRecovery,originalTask:{bytes,sha256:f.wire.sha256(bytes)}}})).toThrow('provenance')
+  }finally{await rm(f.directory,{recursive:true,force:true})}
+})
+
+test('receiving startup reconciliation keeps historical usage unknown after receiver spawn failure',async()=>{
+  const f=await receivingFixture(),{spawn}=await import('node:child_process'),{processIdentity}=await import('../src/claims.ts')
+  let child:ReturnType<typeof spawn>|undefined
+  try{
+    const run=await f.runtime.createVerifiedReceivingRun(f.request,f.controller)
+    const attempt=await f.runtime.prepareRunAttemptDirectory(f.root,run)
+    child=spawn(process.execPath,['-e','setInterval(()=>{},1000)'],{detached:true,stdio:'ignore'})
+    const identity=await processIdentity(child.pid!)
+    const stopped=new Promise<void>(resolve=>child!.once('exit',()=>resolve()));child.kill();await stopped
+    await f.runtime.atomicRunFile(join(attempt,'handshake.json'),{schemaVersion:1,runId:run.runId,attemptId:run.attemptId,identity,pgid:identity.pid})
+    await f.runtime.atomicRunFile(join(attempt,'result.json'),{schemaVersion:1,runId:run.runId,attemptId:run.attemptId,exitCode:null,cause:'spawn-failed',finishedAt:new Date().toISOString()})
+    const [recovered]=await f.runtime.reconcileRuns(f.root)
+    expect(recovered!.state).toBe('terminal');expect(recovered!.terminationCause).toBe('spawn-failed');expect(recovered!.attemptElapsedMs).toBe(0);expect(recovered!.activeElapsedMs).toBeNull()
+    expect(recovered!.remoteRecovery).toEqual(run.remoteRecovery);expect(f.runtime.runReportingHold(recovered!)).toBe('original-reporting-context-unavailable')
+  }finally{
+    if(child&&child.exitCode===null&&child.signalCode===null){const exited=new Promise<void>(resolve=>child!.once('exit',()=>resolve()));child.kill('SIGKILL');await exited}
+    await rm(f.directory,{recursive:true,force:true})
+  }
+})

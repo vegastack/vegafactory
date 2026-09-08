@@ -1,13 +1,13 @@
 import { canonical as canonicalWire } from './shared-claims.ts'
 import { parseStrictJson } from '../../../skills/dev/dev-implement/scripts/lib/approval.mjs'
 // Private local execution truth. Remote ownership and delivery acknowledgments stay separate.
-import { randomUUID } from 'node:crypto'
+import { randomUUID, createHash } from 'node:crypto'
 import { constants } from 'node:fs'
 import { lstat, mkdir, open, readFile, readdir, rename, rm, realpath } from 'node:fs/promises'
 import { join, dirname, isAbsolute, resolve } from 'node:path'
 import { homedir } from 'node:os'
 import { acquireClaim, releaseClaim, processIdentity, type ProcessIdentity } from './claims.ts'
-import { parseEvidenceRef, parseCheckpointRef, parseStopProof, parseRecoveryPayload, type ApprovalAuthorityRef, type ArtifactRef, type ExecutionIdentity, type CheckpointRef, type RecoveryEnvelope } from './shared-claims.ts'
+import { parseEvidenceRef, parseCheckpointRef, parseStopProof, parseRecoveryPayload, parseRecoveryEnvelope, type ApprovalAuthorityRef, type ArtifactRef, type ExecutionIdentity, type CheckpointRef, type RecoveryEnvelope, type EvidenceRef, type TaskRecord, type OperationReceipt } from './shared-claims.ts'
 export type TerminalCause = 'succeeded' | 'failed' | 'spawn-failed' | 'timed-out' | 'cancelled' | 'interrupted' | 'termination-unconfirmed'
 export interface PendingDelivery {
   payload?:string
@@ -28,6 +28,14 @@ export interface RunAttempt {
   vendorSessionId?:string|null; terminalSequence?:string; snapshotDigest?:string
 }
 export interface RunRecord {
+  remoteRecovery?:{
+    kind:'receiving-home';requestId:string;requestDigest:string
+    handoff:Extract<EvidenceRef,{kind:'state-receipt'}>;originalStateCommit:string
+    stopProof:NonNullable<TaskRecord['stopProof']>
+    // Historical bytes are retained, not decoded into ownership or send authority.
+    originalTask:{bytes:string;sha256:string}
+    priorHistory:'unavailable';reportingContext:'unavailable'
+  }
   terminalSegment?:{sequence:string;firstAttemptId:string}
   continuations?:Array<{requestId:string;requestDigest:string;previousAttemptId:string;attemptId:string}>
   acceptedScopeRef?:Extract<import('./shared-claims.ts').EvidenceRef,{kind:'state-receipt'}>|null
@@ -67,11 +75,12 @@ export interface RunRecord {
   sharedClaim:{taskKey:string;generation:number;ownerToken:string;stateCommit:string}|null; checkpoint:CheckpointRef|null
   remoteEffectCoverage:RecoveryEnvelope['remoteEffectCoverage']
 }
-type Automatic = 'terminalSegment'|'continuations'|'attemptOperationIds'|'claimOperationId'|'attemptElapsedMs'|'attemptId'|'attempts'|'schemaVersion'|'runId'|'generation'|'state'|'terminationCause'|'exitCode'|'pid'|'processStartId'|'processGroupId'|'processIdentity'|'finishedAt'|'pendingDelivery'
+type Automatic = 'remoteRecovery'|'terminalSegment'|'continuations'|'attemptOperationIds'|'claimOperationId'|'attemptElapsedMs'|'attemptId'|'attempts'|'schemaVersion'|'runId'|'generation'|'state'|'terminationCause'|'exitCode'|'pid'|'processStartId'|'processGroupId'|'processIdentity'|'finishedAt'|'pendingDelivery'
 export type RunInput = Omit<RunRecord,Automatic> & {root:string;runId?:string}
 export type RunPatch = Partial<Pick<RunRecord,'state'|'terminationCause'|'exitCode'|'pid'|'processStartId'|'processGroupId'|'processIdentity'|'finishedAt'|'pendingDelivery'|'headSha'|'activeElapsedMs'|'waitReason'|'quotaWait'|'quotaChecks'|'terminationRequest'|'cancelRequestedAt'|'attemptElapsedMs'|'worktreeDigest'|'stopProof'|'stopReceiptIds'|'stopReceiptPayload'|'acceptedScopeRef'|'vendorSessionId'|'checkpoint'|'sharedClaim'>>
 const patchKeys = new Set(['state','terminationCause','exitCode','pid','processStartId','processGroupId','processIdentity','finishedAt','pendingDelivery','headSha','activeElapsedMs','waitReason','quotaWait','quotaChecks','terminationRequest','cancelRequestedAt','attemptElapsedMs','worktreeDigest','stopProof','stopReceiptIds','stopReceiptPayload','acceptedScopeRef','vendorSessionId','checkpoint','sharedClaim'])
 const sameJson=(a:unknown,b:unknown)=>canonicalWire(a)===canonicalWire(b)
+const hashBytes=(bytes:string)=>createHash('sha256').update(bytes).digest('hex')
 const uuid = /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i
 const causes = new Set(['succeeded','failed','spawn-failed','timed-out','cancelled','interrupted','termination-unconfirmed'])
 const roots = new Map<string,string>()
@@ -162,7 +171,7 @@ function validatePending(value:unknown,run:RunRecord):void {
 }
 export function parseRun(value:unknown):RunRecord {
   const required=['schemaVersion','runId','generation','repo','issue','parent','checkout','branch','baseSha','headSha','stage','harness','model','effort','execution','approvalBindings','recordBinding','approvalRefs','policyDigest','claimToken','state','terminationCause','exitCode','pid','processStartId','processGroupId','processIdentity','startedAt','finishedAt','pendingDelivery','taskKey','activeElapsedMs','taskOwner','agentAccountOwner','accountRef','waitReason','machine','sharedClaim','checkpoint','remoteEffectCoverage']
-  const optional=['terminalSegment','continuations','quotaWait','checkpointIntent','attemptId','attempts','hostBindingDigest','vendorSessionId','authorityRequest','handbackIntent','deliveryError','runtimeBinding','configurationDigest','dispatchRequest','attemptOperationIds','claimOperationId','approvedTaskIds','attemptElapsedMs','quotaChecks','terminationRequest','cancelRequestedAt','worktreeDigest','stopProof','stopReceiptIds','stopReceiptPayload','acceptedScopeRef']
+  const optional=['remoteRecovery','terminalSegment','continuations','quotaWait','checkpointIntent','attemptId','attempts','hostBindingDigest','vendorSessionId','authorityRequest','handbackIntent','deliveryError','runtimeBinding','configurationDigest','dispatchRequest','attemptOperationIds','claimOperationId','approvedTaskIds','attemptElapsedMs','quotaChecks','terminationRequest','cancelRequestedAt','worktreeDigest','stopProof','stopReceiptIds','stopReceiptPayload','acceptedScopeRef']
   if(!plain(value)||required.some(k=>!Object.hasOwn(value,k))||Object.keys(value).some(k=>!required.includes(k)&&!optional.includes(k)))throw Error('unknown or missing run field')
   const r=value as unknown as RunRecord,diagnostic=r.execution===null
   if(r.schemaVersion!==2||!uuid.test(r.runId)||!number(r.generation)||r.generation<1||!validRepo(r.repo)||!number(r.issue)||r.issue<1||!nullable(r.parent,v=>number(v)&&v>0)||!text(r.checkout,8192)||!isAbsolute(r.checkout)||!date(r.startedAt)||!nullable(r.finishedAt,date)||!['prepared','running','terminal','interrupted'].includes(r.state)||!nullable(r.terminationCause,v=>typeof v==='string'&&causes.has(v))||!nullable(r.exitCode,v=>Number.isSafeInteger(v))||!nullable(r.activeElapsedMs,v=>typeof v==='number'&&Number.isFinite(v)&&v>=0)||!uuid.test(r.claimToken))throw Error('invalid run lifecycle')
@@ -215,11 +224,18 @@ export function parseRun(value:unknown):RunRecord {
     const requests=new Set<string>(),attempts=new Set<string>()
     for(const c of r.continuations){if(!closed(c,['requestId','requestDigest','previousAttemptId','attemptId'])||![c.requestId,c.previousAttemptId,c.attemptId].every(id=>uuid.test(id))||!digest(c.requestDigest)||requests.has(c.requestId)||attempts.has(c.attemptId)||!r.attempts?.some(a=>a.id===c.previousAttemptId)||![r.attemptId,...(r.attempts??[]).map(a=>a.id)].includes(c.attemptId))throw Error('invalid continuation identity');requests.add(c.requestId);attempts.add(c.attemptId)}
   }
+  if(r.remoteRecovery!==undefined){
+    const p=r.remoteRecovery
+    if(!closed(p,['kind','requestId','requestDigest','handoff','originalStateCommit','stopProof','originalTask','priorHistory','reportingContext'])||p.kind!=='receiving-home'||!uuid.test(p.requestId)||!digest(p.requestDigest)||!sha(p.originalStateCommit)||!closed(p.originalTask,['bytes','sha256'])||typeof p.originalTask.bytes!=='string'||!p.originalTask.bytes.length||Buffer.byteLength(p.originalTask.bytes)>256*1024||!digest(p.originalTask.sha256)||hashBytes(p.originalTask.bytes)!==p.originalTask.sha256||p.priorHistory!=='unavailable'||p.reportingContext!=='unavailable'||parseEvidenceRef(p.handoff).kind!=='state-receipt')throw Error('invalid receiving run provenance')
+    parseStopProof(p.stopProof)
+    if(r.activeElapsedMs!==null||!r.execution||!r.machine||!r.sharedClaim||!r.approvedTaskIds?.length||!r.terminalSegment)throw Error('receiving run history must remain unknown')
+  }
   for(const p of r.pendingDelivery)validatePending(p,r)
   return structuredClone(r)
 }
 
 export async function createRun(input:RunInput):Promise<RunRecord> {
+  if(Object.hasOwn(input,'remoteRecovery'))throw Error('receiving provenance requires verified constructor')
   const {root,runId=randomUUID(),...identity}=input
   requireId(runId)
   if(!isAbsolute(root))throw Error('run root must be absolute')
@@ -228,8 +244,9 @@ export async function createRun(input:RunInput):Promise<RunRecord> {
   await privatePath(root,true)
   if((await lstat(dirname(root))).isSymbolicLink())throw Error('run root parent is a symlink')
   const dir=join(root,runId)
-  await mkdir(dir,{mode:0o700})
-  await atomicRunFile(join(dir,'run.json'),record)
+  const creation=await acquireClaim(join(root,runId+'.creation'),await processIdentity())
+  if(creation.kind!=='owned')throw Error('run creation unavailable')
+  try{await mkdir(dir,{mode:0o700});await atomicRunFile(join(dir,'run.json'),record)}finally{await releaseClaim(creation.claim)}
   roots.set(runId,root)
   return record
 }
@@ -363,6 +380,133 @@ export async function beginVerifiedRunContinuation(request:RunContinuationReques
   })
 }
 
+// Receiving-home recovery has no original local PID, private attempts or outbox.
+// #144 supplies executable current authority/qualification/stop/handoff verification;
+// it must use #137's actual pinned readers, never load a verifier from saved data.
+export interface ReceivingRunRequest {
+  root:string;requestId:string;runId:string;taskKey:string;expectedSharedGeneration:number;checkout:string
+  handoff:Extract<EvidenceRef,{kind:'state-receipt'}>
+}
+export interface VerifiedReceivingRunDecision {
+  action:'resume-task';reason:string
+  original:{stateCommit:string;task:TaskRecord};current:{stateCommit:string;task:TaskRecord}
+  handoff:{ref:Extract<EvidenceRef,{kind:'state-receipt'}>;receipt:OperationReceipt}
+  artifacts:ArtifactRef[];authorityRequest:RunAuthorityRequest;taskIds:string[]
+  sourceRefs:Array<{id:string;updatedAt:string;bodySha256:string}>
+  receiver:{machine:NonNullable<RunRecord['machine']>;claimToken:string;policyDigest:string;runtimeBinding:InstalledRuntimeBinding;configurationDigest:string;worktreeDigest:string}
+}
+export interface ReceivingRunController {
+  verifyRecovery:(request:ReceivingRunRequest)=>Promise<VerifiedReceivingRunDecision>
+}
+export function runReportingHold(run:RunRecord):'original-reporting-context-unavailable'|null {
+  return run.remoteRecovery?'original-reporting-context-unavailable':null
+}
+export function priorRunElapsedMs(run:RunRecord):number|null {
+  if(run.remoteRecovery||(run.attempts??[]).some(attempt=>attempt.activeElapsedMs===null))return null
+  return (run.attempts??[]).reduce((total,attempt)=>total+attempt.activeElapsedMs!,0)
+}
+function receivingFacts(request:ReceivingRunRequest,decision:VerifiedReceivingRunDecision) {
+  if(!decision||decision.action!=='resume-task'||!text(decision.reason)||!decision.original||!decision.current||!decision.handoff||!decision.receiver)throw Error('verified receiving recovery unavailable')
+  const {original,current,receiver}=decision,old=original.task,next=current.task,receipt=decision.handoff.receipt
+  if(!old||!next||!receipt||!sha(original.stateCommit)||!sha(current.stateCommit)||!sameJson(request.handoff,decision.handoff.ref)||receipt.schemaVersion!==1||receipt.type!=='handoff'||receipt.recoveryPayload!==null||hashBytes(canonicalWire(receipt))!==request.handoff.blobSha256||receipt.operationId!==request.handoff.operationId||receipt.taskKey!==request.taskKey||receipt.previousHead!==original.stateCommit||!digest(receipt.requestDigest)||receipt.generation!==request.expectedSharedGeneration)throw Error('receiving handoff receipt differs')
+  if(old.runId!==request.runId||next.runId!==request.runId||old.taskKey!==request.taskKey||next.taskKey!==request.taskKey||next.generation!==request.expectedSharedGeneration||old.generation+1!==next.generation||old.state==='completed'||next.state!=='claimed'||old.parentTaskKey!==null||next.parentTaskKey!==null||old.parentBinding!=null||next.parentBinding!=null)throw Error('receiving standalone owner generation differs')
+  for(const key of ['host','repo','issue','repositoryNodeId','issueNodeId','scopeDigest','approvalDigest','approvalBindings','stage','approvedTaskIds','paths','resources','independent','acceptedScopes'] as const)if(!sameJson(old[key],next[key]))throw Error('receiving original task scope differs')
+  const owner={ownerToken:next.ownerToken,machineId:next.machineId,installationId:next.installationId,sessionId:next.sessionId,runId:next.runId}
+  if(!sameJson(receipt.resultOwner,owner)||!uuid.test(next.ownerToken)||next.ownerToken===old.ownerToken||receiver.machine.id!==next.machineId||receiver.machine.installationId!==next.installationId||receiver.machine.sessionId!==next.sessionId||!uuid.test(receiver.claimToken)||!digest(receiver.policyDigest)||!digest(receiver.configurationDigest)||!digest(receiver.worktreeDigest))throw Error('receiving current owner/setup differs')
+  // Handoff retains the verified stop in its result. A reboot receipt need not
+  // already have existed in the lost owner's predecessor task record.
+  const stop=parseStopProof(next.stopProof)
+  if(stop.machineId!==old.machineId||stop.installationId!==old.installationId||stop.sessionId!==old.sessionId||stop.generation!==old.generation||!stop.runIds.includes(old.runId))throw Error('receiving original stop proof differs')
+  const envelope=parseRecoveryEnvelope(old.recovery),currentEnvelope=parseRecoveryEnvelope(next.recovery),checkpoint=parseCheckpointRef(old.checkpoint)
+  if(envelope.taskKey!==old.taskKey||envelope.runId!==old.runId||envelope.generation!==old.generation||envelope.scopeDigest!==old.scopeDigest||envelope.approvalDigest!==old.approvalDigest||!sameJson(envelope.approvalBindings,old.approvalBindings)||!sameJson(currentEnvelope,{...envelope,generation:next.generation})||!sameJson(checkpoint,envelope.checkpoint)||!sameJson(checkpoint,next.checkpoint)||checkpoint.runId!==old.runId||checkpoint.repo!==old.repo||checkpoint.repositoryId!==old.repositoryNodeId||checkpoint.scopeDigest!==old.scopeDigest)throw Error('receiving original checkpoint/effects differ')
+  if(envelope.remoteEffectCoverage.kind==='unmanaged-possible'||envelope.effects.some(effect=>(effect.kind!=='telemetry-push'||effect.target.kind!=='telemetry')&&['prepared','ambiguous'].includes(effect.state)))throw Error('receiving unresolved code/control effects')
+  if(!Array.isArray(old.approvedTaskIds)||!old.approvedTaskIds.length||new Set(old.approvedTaskIds).size!==old.approvedTaskIds.length||!Array.isArray(decision.taskIds)||!decision.taskIds.length||new Set(decision.taskIds).size!==decision.taskIds.length||decision.taskIds.some(id=>!old.approvedTaskIds.includes(id)||envelope.completed.some(done=>done.taskId===id)))throw Error('receiving outstanding task selection differs')
+  if(!Array.isArray(decision.artifacts)||!decision.artifacts.length||hashBytes(canonicalWire({artifacts:decision.artifacts,taskIds:old.approvedTaskIds}))!==old.scopeDigest)throw Error('receiving approved artifact scope differs')
+  if(!Array.isArray(decision.sourceRefs)||!decision.sourceRefs.length||decision.sourceRefs.some(ref=>!closed(ref,['id','updatedAt','bodySha256'])||!text(ref.id)||!date(ref.updatedAt)||!digest(ref.bodySha256)))throw Error('receiving fresh source evidence unavailable')
+  if(!decision.authorityRequest||!['native','consolidated'].includes(decision.authorityRequest.kind))throw Error('receiving launch authority unavailable')
+  parseInstalledRuntimeBinding(receiver.runtimeBinding)
+  if(!validExecution(envelope.execution))throw Error('receiving original execution unavailable')
+  const bytes=canonicalWire(old)
+  if(Buffer.byteLength(bytes)>256*1024)throw Error('receiving original provenance exceeds bound')
+  // Exclude moving current read-head/source timestamps, never immutable authority,
+  // handoff, receiver setup, local claim, checkpoint or outstanding task selection.
+  const requestDigest=hashBytes(canonicalWire({request,originalStateCommit:original.stateCommit,originalTaskDigest:hashBytes(bytes),stopProof:stop,owner,receiver,artifacts:decision.artifacts,authorityRequest:decision.authorityRequest,taskIds:decision.taskIds,sourceRefs:decision.sourceRefs.map(({id,bodySha256})=>({id,bodySha256}))}))
+  return{old,next,envelope,checkpoint,bytes,requestDigest}
+}
+async function verifyReceivingCheckout(request:ReceivingRunRequest,decision:VerifiedReceivingRunDecision):Promise<void>{
+  const {readHostBinding}=await import('./machine-identity.ts')
+  if(decision.receiver.machine.hostBindingDigest!==(await readHostBinding()).digest)throw Error('receiving target host differs')
+  const {execFile}=await import('node:child_process'),{promisify}=await import('node:util'),execute=promisify(execFile)
+  const git=async(args:string[])=>(await execute('git',args,{cwd:request.checkout,encoding:'utf8',timeout:5000,env:{...process.env,GIT_NO_REPLACE_OBJECTS:'1',GIT_TERMINAL_PROMPT:'0'}})).stdout.trim()
+  const checkpoint=decision.current.task.checkpoint!
+  const [head,tree,branch,fingerprint]=await Promise.all([git(['rev-parse','HEAD']),git(['rev-parse','HEAD^{tree}']),git(['symbolic-ref','--short','HEAD']),worktreeFingerprint(request.checkout)])
+  if(head!==checkpoint.headSha||tree!==checkpoint.treeSha||branch!==checkpoint.branch||fingerprint!==decision.receiver.worktreeDigest)throw Error('receiving checkout changed')
+}
+export async function createVerifiedReceivingRun(request:ReceivingRunRequest,controller:ReceivingRunController):Promise<RunRecord>{
+  if(!closed(request,['root','requestId','runId','taskKey','expectedSharedGeneration','checkout','handoff'])||!isAbsolute(request.root)||!isAbsolute(request.checkout)||!uuid.test(request.requestId)||!uuid.test(request.runId)||!digest(request.taskKey)||!number(request.expectedSharedGeneration)||request.expectedSharedGeneration<2||parseEvidenceRef(request.handoff).kind!=='state-receipt'||!controller||typeof controller.verifyRecovery!=='function')throw Error('receiving request unavailable')
+  // Clone callback boundaries: its caller must not change an admitted request/decision.
+  request=structuredClone(request)
+  await mkdir(request.root,{recursive:true,mode:0o700});await privatePath(request.root,true)
+  if((await lstat(dirname(request.root))).isSymbolicLink())throw Error('run root parent is a symlink')
+  const lock=await acquireClaim(join(request.root,request.runId+'.creation'),await processIdentity())
+  if(lock.kind!=='owned')throw Error('receiving run creation unavailable')
+  try{
+    const decision=structuredClone(await controller.verifyRecovery(structuredClone(request))),facts=receivingFacts(request,decision)
+    await verifyReceivingCheckout(request,decision)
+    const fresh=structuredClone(await controller.verifyRecovery(structuredClone(request))),verified=receivingFacts(request,fresh)
+    if(verified.requestDigest!==facts.requestDigest)throw Error('receiving authority/setup changed during verification')
+    await verifyReceivingCheckout(request,fresh)
+    const {old,next,envelope,checkpoint,bytes,requestDigest}=verified,receiver=fresh.receiver
+    const identity={
+      runId:request.runId,repo:old.repo,issue:old.issue,parent:null,checkout:request.checkout,
+      branch:checkpoint.branch,baseSha:checkpoint.baseSha,headSha:checkpoint.headSha,stage:old.stage,
+      harness:envelope.execution.harness,model:envelope.execution.model,effort:envelope.execution.effort,
+      execution:envelope.execution,approvalBindings:old.approvalBindings,recordBinding:envelope.recordBinding,
+      approvalRefs:fresh.artifacts,authorityRequest:fresh.authorityRequest,policyDigest:receiver.policyDigest,
+      claimToken:receiver.claimToken,taskKey:{repo:old.repo,issue:old.issue,taskId:old.approvedTaskIds.length===1?old.approvedTaskIds[0]:'whole-issue',scopeDigest:old.scopeDigest},
+      approvedTaskIds:old.approvedTaskIds,accountRef:envelope.execution.accountRef,machine:receiver.machine,
+      hostBindingDigest:receiver.machine.hostBindingDigest,checkpoint,runtimeBinding:receiver.runtimeBinding,
+      configurationDigest:receiver.configurationDigest,worktreeDigest:receiver.worktreeDigest,
+    }
+    let existing=false
+    try{await lstat(join(request.root,request.runId));existing=true}catch(error){if((error as NodeJS.ErrnoException).code!=='ENOENT')throw error}
+    // An existing incomplete or invalid directory is evidence to reconcile, not
+    // permission to replace private state left by another creator or a crash.
+    const saved=existing?await readRun(request.root,request.runId):null
+    if(saved){
+      if(saved.remoteRecovery?.requestId!==request.requestId||saved.remoteRecovery.requestDigest!==verified.requestDigest)throw Error('receiving request identity rebound')
+      if(Object.entries(identity).some(([key,value])=>!sameJson(saved[key as keyof RunRecord],value))||saved.remoteRecovery.originalStateCommit!==fresh.original.stateCommit||saved.remoteRecovery.originalTask.bytes!==bytes||!sameJson(saved.remoteRecovery.stopProof,next.stopProof))throw Error('receiving saved identity differs')
+      if(saved.state!=='prepared'||saved.pid!==null||saved.attemptId!==saved.terminalSegment?.firstAttemptId||saved.attempts?.length||saved.sharedClaim?.generation!==verified.next.generation||saved.sharedClaim.ownerToken!==verified.next.ownerToken)throw Error('receiving allocation already advanced')
+      try{await lstat(runAttemptDirectory(request.root,saved));throw Error('receiving wrapper already prepared')}catch(error){if((error as NodeJS.ErrnoException).code!=='ENOENT')throw error}
+      return saved // Fresh verification still does not authorize a vendor spawn.
+    }
+    const attemptId=randomUUID()
+    const run=parseRun({
+      ...identity,schemaVersion:2,generation:1,state:'prepared',terminationCause:null,exitCode:null,
+      pid:null,processStartId:null,processGroupId:null,processIdentity:null,startedAt:new Date().toISOString(),
+      finishedAt:null,pendingDelivery:[],activeElapsedMs:null,taskOwner:null,agentAccountOwner:null,waitReason:null,
+      sharedClaim:{taskKey:next.taskKey,generation:next.generation,ownerToken:next.ownerToken,stateCommit:fresh.current.stateCommit},
+      remoteEffectCoverage:envelope.remoteEffectCoverage,attemptId,attempts:[],attemptElapsedMs:0,
+      attemptOperationIds:{recovery:randomUUID(),start:randomUUID(),coverage:randomUUID()},
+      terminalSegment:{sequence:attemptId,firstAttemptId:attemptId},vendorSessionId:null,stopProof:null,
+      remoteRecovery:{kind:'receiving-home',requestId:request.requestId,requestDigest,handoff:request.handoff,
+        originalStateCommit:fresh.original.stateCommit,stopProof:next.stopProof,originalTask:{bytes,sha256:hashBytes(bytes)},
+        priorHistory:'unavailable',reportingContext:'unavailable'},
+    })
+    const staging=join(request.root,'.receiving-'+randomUUID())
+    await mkdir(staging,{mode:0o700})
+    try{
+      await atomicRunFile(join(staging,'run.json'),run)
+      // Both constructors hold the same guard. Publish the complete private
+      // directory atomically: a crash never exposes an empty receiving run.
+      await rename(staging,join(request.root,run.runId))
+      for(const directory of [join(request.root,run.runId),request.root]){const handle=await open(directory,constants.O_RDONLY|constants.O_NOFOLLOW);try{await handle.sync()}finally{await handle.close()}}
+    }finally{await rm(staging,{recursive:true,force:true})}
+    roots.set(run.runId,request.root)
+    return run
+  }finally{await releaseClaim(lock.claim)}
+}
+
 export function classifyRecovery(input:{state:RunRecord['state'];ownerAlive:boolean;pendingDelivery:unknown[]}):{state:RunRecord['state'];replay:false}{return{state:!input.ownerAlive&&['prepared','running'].includes(input.state)?'interrupted':input.state,replay:false}}
 export async function reconcileRuns(root:string):Promise<RunRecord[]>{
   const result:RunRecord[]=[]
@@ -382,7 +526,7 @@ export async function reconcileRuns(root:string):Promise<RunRecord[]>{
     if(!invalid)try{stopped=await verifyLocalRunStopped(run)}catch{}
     if(stopped){
       const cause:TerminalCause=run.terminationRequest?.cause??terminal?.cause??'interrupted'
-      run=await mutateRun(run.runId,run.generation,root,old=>({...old,state:terminal?'terminal':'interrupted',terminationCause:cause,exitCode:terminal?.exitCode??null,finishedAt:terminal?.finishedAt??null,activeElapsedMs:terminal?.cause==='spawn-failed'?(old.attempts??[]).every(a=>a.activeElapsedMs!==null)?(old.attempts??[]).reduce((sum,a)=>sum+a.activeElapsedMs!,0):null:null,attemptElapsedMs:terminal?.cause==='spawn-failed'?0:null}))
+      run=await mutateRun(run.runId,run.generation,root,old=>({...old,state:terminal?'terminal':'interrupted',terminationCause:cause,exitCode:terminal?.exitCode??null,finishedAt:terminal?.finishedAt??null,activeElapsedMs:terminal?.cause==='spawn-failed'?priorRunElapsedMs(old):null,attemptElapsedMs:terminal?.cause==='spawn-failed'?0:null}))
     }else{
       const observation=!invalid&&run.processIdentity?await(await import('./run-wrapper.ts')).inspectOwnedGroup(run.processIdentity):null
       if(invalid||observation?.kind==='foreign'||observation?.kind==='unknown'||!run.processIdentity)run=await mutateRun(run.runId,run.generation,root,old=>({...old,state:'interrupted',terminationCause:'termination-unconfirmed',activeElapsedMs:null,attemptElapsedMs:null}))
