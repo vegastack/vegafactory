@@ -2,8 +2,7 @@
 import { execFile } from 'node:child_process'
 import { lstat, mkdir, mkdtemp, readFile } from 'node:fs/promises'
 import { dirname, isAbsolute, join, resolve } from 'node:path'
-import { platform, userInfo } from 'node:os'
-import { createHash } from 'node:crypto'
+import { readHostBinding } from './machine-identity.ts'
 import { promisify } from 'node:util'
 import {
   ageMinutes, defaultClonePath, factoryConfigPath, isStale, parseControlRoomKnob,
@@ -74,13 +73,7 @@ interface MachineBootstrap {
   controlRoom: { repositoryId: string; repo: string; remote: string; branch: string }
 }
 export async function localHostBindingDigest(): Promise<string> {
-  let host: string
-  if (platform() === 'darwin') {
-    const out = await run('/usr/sbin/ioreg', ['-rd1', '-c', 'IOPlatformExpertDevice'], { timeout: 5000 })
-    host = /"IOPlatformUUID"\s*=\s*"([^"]+)"/.exec(out.stdout)?.[1] ?? ''
-  } else host = (await readFile('/etc/machine-id', 'utf8')).trim()
-  if (!host) throw new Error('cannot verify local host binding')
-  return createHash('sha256').update(`${platform()}:${userInfo().uid}:${host}`).digest('hex')
+  return (await readHostBinding()).digest
 }
 async function githubIdentity(repo: string): Promise<{ node_id: string; full_name: string; permissions?: { pull?: boolean } }> {
   const result = await run('gh', ['api', `repos/${repo}`], { timeout: 10000, maxBuffer: 1024 * 1024 })

@@ -130,11 +130,12 @@ test('inspect and restore verify provenance, retain old validation time, and def
 
 test('enrollment publication verifies repository ID, host, installation, account and enabled registry from one snapshot', async () => {
   const { chmod } = await import('node:fs/promises')
-  const { localHostBindingDigest } = await import('../src/sync.ts')
+  const { readHostBinding } = await import('../src/machine-identity.ts')
   const f = await fixture('enrolled')
   const room = join(f.home, 'room-source'), remote = join(f.home, 'room.git'), bin = join(f.home, 'bin')
   await mkdir(join(room, 'groups/dev'), { recursive: true }); await mkdir(bin)
-  const hostBindingDigest = await localHostBindingDigest()
+  // Enrollment is produced by the canonical identity owner, independently of sync.
+  const { digest: hostBindingDigest } = await readHostBinding()
   const installationId = '12345678-1234-4123-8123-123456789013'
   const fleet = { schemaVersion: 1, coordination: { repositoryId: 'R_room', repository: 'acme/room', branch: 'factory-state', rootCommit: 'b'.repeat(40), installationId: '12345678-1234-4123-8123-123456789012' }, defaults: { pollSeconds: 120, maxRuns: 1, childConcurrent: 3, checkpoints: 'task-branch', recovery: 'verified-transfer' }, groupDefaults: {}, machines: {
     'dev-box': { installationId, hostBindingDigest, executionLogin: 'owner', group: 'dev', repositories: ['acme/app'], enabled: true, overrides: {} },
@@ -164,10 +165,12 @@ test('enrollment publication verifies repository ID, host, installation, account
     const saved = await readFile(target.settingsPath, 'utf8')
     expect(first.config.controlRooms.acme!.repositoryId).toBe('R_room')
     await updateSettings(f.settings, s => { s.settings.machine = { ...machine, hostBindingDigest: '0'.repeat(64) }; return s })
-    const copiedConfig = readFactoryConfig(await readFile(target.settingsPath, 'utf8'))
+    const copiedSettings = await readFile(target.settingsPath, 'utf8')
+    const copiedConfig = readFactoryConfig(copiedSettings)
     const copied = await syncControlRoom({ target, config: copiedConfig, now: NOW + 1000 })
     expect(copied.ok).toBe(false)
     expect(copied.message).toContain('host binding mismatch')
+    expect(await readFile(target.settingsPath, 'utf8')).toBe(copiedSettings)
     await writeFile(target.settingsPath, saved)
     fleet.machines['dev-box'].enabled = false
     await writeFile(join(room, 'org.md'), org()); git(['add', '.'], room); git(['commit', '-m', 'disable'], room); git(['push', remote, 'main'], room)
