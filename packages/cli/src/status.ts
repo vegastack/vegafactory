@@ -5,6 +5,8 @@
 //
 // The report is built as data and rendered separately, so `--json` and the human view can never
 // disagree about what was found.
+import { getPolicySnapshot, parseControlRoomKnob } from './control-room.ts'
+import { repoPolicyFromEffective } from './config.ts'
 import type { BoardIssue, DispatchState } from './dispatch.ts'
 import type { FactoryConfig, RepoPolicy, Stage } from './config.ts'
 
@@ -25,6 +27,7 @@ export interface RepoStatus {
   board: { needsPlan: number; ready: number; working: number; forOperator: number }
   worktrees: WorktreeRow[]
   runs: RunSummary[]
+  snapshot?: { state: string; sourceCommit: string | null; policyDigest: string | null; validatedAt: string | null; ageSeconds: number | null; reason: string | null; machine?: Awaited<ReturnType<typeof getPolicySnapshot>>['machine'] }
 }
 
 export interface StatusReport {
@@ -67,7 +70,7 @@ export function buildStatus(input: {
   config: FactoryConfig
   state: DispatchState
   lockPid: number | null
-  repos: { repo: string; policy: RepoPolicy; board: BoardIssue[]; worktrees: WorktreeRow[]; logs: { file: string; body: string }[] }[]
+  repos: { repo: string; policy: RepoPolicy; snapshot?: RepoStatus['snapshot']; board: BoardIssue[]; worktrees: WorktreeRow[]; logs: { file: string; body: string }[] }[]
 }): StatusReport {
   const repos: RepoStatus[] = input.repos.map(entry => {
     const count = (label: string): number => entry.board.filter(issue => issue.labels.includes(label)).length
@@ -87,6 +90,7 @@ export function buildStatus(input: {
     return {
       repo: entry.repo,
       dispatch: entry.policy.dispatch,
+      ...(entry.snapshot ? { snapshot: entry.snapshot } : {}),
       board: { needsPlan: count('needs-plan'), ready: count('ready'), working: count('working'), forOperator: count('for-operator') },
       worktrees: entry.worktrees,
       runs,
@@ -111,6 +115,7 @@ export function renderStatus(report: StatusReport): string {
     : 'dispatcher: not running')
   for (const repo of report.repos) {
     lines.push(`${repo.repo} — dispatch: ${repo.dispatch}`)
+    if (repo.snapshot) lines.push(`  policy: ${repo.snapshot.state} · ${repo.snapshot.sourceCommit ?? 'no validated source'}${repo.snapshot.reason ? ` · ${repo.snapshot.reason}` : ''}`)
     lines.push(`  board: ${repo.board.needsPlan} needs-plan · ${repo.board.ready} ready · ${repo.board.working} working · ${repo.board.forOperator} for-operator`)
     for (const worktree of repo.worktrees) {
       lines.push(`  worktree ${worktree.branch} (${worktree.state}) ${worktree.path}`)
@@ -209,9 +214,20 @@ export async function runStatusCli(argv: string[], home: string, deps?: Partial<
       // The board is unreachable; the rest of the report is still worth printing, and the empty
       // counts are visibly paired with whatever the dispatcher's own state says.
     }
+    let snapshot: RepoStatus['snapshot']
+    let policy = devMd ? mergeRepoPolicy(null, devMd) : parseRepoPolicy('')
+    const room = parseControlRoomKnob(devMd)
+    if (room) {
+      try {
+        const result = await getPolicySnapshot(room.org, entry.repo, Date.now(), { settingsPath: config.settingsPath ?? `${home}/.vegastack/factory.json`, devMd })
+        policy = repoPolicyFromEffective(result.policy)
+        snapshot = { state: result.state, sourceCommit: result.snapshot?.sourceCommit ?? null, policyDigest: result.snapshot?.policyDigest ?? null, validatedAt: result.snapshot?.validatedAt ?? null, ageSeconds: result.ageSeconds, reason: result.reason, machine: result.machine }
+      } catch (error) { snapshot = { state: 'unavailable', sourceCommit: null, policyDigest: null, validatedAt: null, ageSeconds: null, reason: (error as Error).message } }
+    }
     repos.push({
+      snapshot,
       repo: entry.repo,
-      policy: devMd ? mergeRepoPolicy(null, devMd) : parseRepoPolicy(''),
+      policy,
       board,
       worktrees: await worktreesOf(entry.path).catch(() => []),
       logs: await logsOf(config, entry.repo).catch(() => []),

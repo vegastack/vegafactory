@@ -1,173 +1,216 @@
-import { afterAll, beforeAll, describe, expect, test } from 'bun:test'
-import { mkdir, mkdtemp, readFile, realpath, rm, symlink, writeFile } from 'node:fs/promises'
+import { afterAll, beforeAll, expect, test } from 'bun:test'
+import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import type { FactoryConfig } from '../src/control-room.ts'
-import { planSync, resolveTarget, syncControlRoom } from '../src/sync.ts'
-
-const NOW = Date.parse('2026-09-03T12:00:00Z')
-let root = ''
-let origin = ''
-
+import { readFactoryConfig, serializeFactoryConfig, updateSettings, getPolicySnapshot } from '../src/control-room.ts'
+import { resolveTarget, syncControlRoom, inspectSnapshots, restoreSnapshot } from '../src/sync.ts'
+let root = '', origin = '', source = ''
+const NOW = Date.parse('2026-09-06T07:00:00Z')
+const DEV_MD = 'repo: acme/app\ncontrol-room: acme/room#dev\nsync-max-age: 2h\n'
 function git(args: string[], cwd: string) {
-  const env = { ...process.env, GIT_AUTHOR_NAME: 't', GIT_AUTHOR_EMAIL: 't@e', GIT_COMMITTER_NAME: 't', GIT_COMMITTER_EMAIL: 't@e' }
-  const result = Bun.spawnSync(['git', ...args], { cwd, env })
-  if (result.exitCode !== 0) throw new Error(result.stderr.toString())
+  const result = Bun.spawnSync(['git', ...args], { cwd, env: { ...process.env, GIT_AUTHOR_NAME: 't', GIT_AUTHOR_EMAIL: 't@e', GIT_COMMITTER_NAME: 't', GIT_COMMITTER_EMAIL: 't@e' } })
+  if (result.exitCode) throw new Error(result.stderr.toString())
   return result.stdout.toString().trim()
 }
-
-const configFor = (home: string): FactoryConfig => ({
-  schemaVersion: 1,
-  controlRooms: {
-    vegastack: { repo: 'vegastack/vegafactory-control-room', path: join(home, 'clone'), branch: 'main', remote: origin, lastSyncedAt: null, sha: null },
-  },
-  settings: {},
-})
-const DEV_MD = 'control-room: vegastack/vegafactory-control-room#dev\n'
-
 beforeAll(async () => {
-  root = await realpath(await mkdtemp(join(tmpdir(), 'vf-sync-')))
-  origin = join(root, 'origin')
-  await mkdir(join(origin, 'groups/dev'), { recursive: true })
-  await writeFile(join(origin, 'org.md'), 'stats: on\n')
-  await writeFile(join(origin, 'groups/dev/group.md'), 'review: cross-agent-risky\n')
-  git(['init', '--initial-branch=main'], origin)
-  git(['add', '-A'], origin)
-  git(['commit', '-m', 'seed'], origin)
+  root = await realpath(await mkdtemp(join(tmpdir(), 'sync-147-')))
+  source = join(root, 'source'); origin = join(root, 'origin.git')
+  await mkdir(join(source, 'groups/dev'), { recursive: true })
+  await writeFile(join(source, 'org.md'), 'stats: on\nsync-max-age: 2h\n')
+  await writeFile(join(source, 'groups/dev/group.md'), 'review: subagent\n')
+  await writeFile(join(source, 'repos.md'), '| repo | group | board | owner |\n|---|---|---|---|\n| acme/app | dev | | owner |\n| acme/other | dev | | owner |\n')
+  git(['init', '-b', 'main'], source); git(['add', '.'], source); git(['commit', '-m', 'seed'], source)
+  git(['clone', '--bare', source, origin], root)
 })
 afterAll(async () => { await rm(root, { recursive: true, force: true }) })
+async function fixture(name: string) {
+  const home = join(root, name), settings = join(home, '.vegastack')
+  await mkdir(settings, { recursive: true })
+  const config = readFactoryConfig(JSON.stringify({ schemaVersion: 1, extension: 'kept', controlRooms: { acme: { repo: 'acme/room', remote: origin, path: join(home, 'operator-room'), branch: 'main', sha: null, lastSyncedAt: null } } }))
+  await writeFile(join(settings, 'factory.json'), JSON.stringify(serializeFactoryConfig(config)))
+  const target = resolveTarget({ devMdText: DEV_MD, config, home })!
+  return { home, settings, config, target }
+}
+test('validated per-repo snapshot is published once; unchanged commit refresh renews only validation', async () => {
+  const f = await fixture('same')
+  const first = await syncControlRoom({ ...f, now: NOW })
+  expect(first.ok).toBe(true)
+  expect(first.sha).toMatch(/^[a-f0-9]{40}$/)
+  const saved = JSON.stringify(first.config)
+  expect(first.config.revision).toBe(1)
+  expect(await readFile(join(first.path, 'org.md'), 'utf8')).toContain('stats: on')
+  const noOp = await syncControlRoom({ ...f, config: first.config, now: NOW + 1000 })
+  expect(noOp.action).toBe('fresh')
+  const second = await syncControlRoom({ ...f, config: first.config, now: NOW + 7200000, force: true })
+  expect(second.ok).toBe(true)
+  expect(second.sha).toBe(first.sha)
+  expect(second.config.revision).toBe(2)
+  expect(second.lastSyncedAt).not.toBe(first.lastSyncedAt)
+  expect(JSON.stringify(first.config)).toBe(saved)
+  const snapshot = await getPolicySnapshot('acme', 'acme/app', NOW + 14400000, { settingsPath: f.target.settingsPath, devMd: DEV_MD })
+  expect(snapshot.state).toBe('stale')
+  expect(snapshot.snapshot?.policyDigest).toBe(first.config.controlRooms.acme!.snapshots!['acme/app']!.policyDigest)
+})
+test('malformed fetched policy preserves exact settings and immutable old content', async () => {
+  const f = await fixture('invalid')
+  const first = await syncControlRoom({ ...f, now: NOW })
+  expect(first.ok).toBe(true)
+  const saved = await readFile(f.target.settingsPath, 'utf8')
+  await writeFile(join(source, 'org.md'), 'stats: nonsense\n')
+  git(['add', '.'], source); git(['commit', '-m', 'malformed'], source); git(['push', origin, 'main'], source)
+  const next = await syncControlRoom({ ...f, config: first.config, now: NOW + 1000, force: true })
+  expect(next.ok).toBe(false)
+  expect(next.message).toContain(first.sha!)
+  expect(await readFile(f.target.settingsPath, 'utf8')).toBe(saved)
+  expect(await readFile(join(first.path, 'org.md'), 'utf8')).toContain('stats: on')
+  git(['revert', '--no-edit', 'HEAD'], source); git(['push', origin, 'main'], source)
+})
+test('wrong origin, dirty source and conflicting bootstrap never change last good state', async () => {
+  const f = await fixture('refuse')
+  const first = await syncControlRoom({ ...f, now: NOW })
+  expect(first.ok).toBe(true)
+  const saved = await readFile(f.target.settingsPath, 'utf8')
+  const wrong = await syncControlRoom({ ...f, config: first.config, target: { ...f.target, remote: '/wrong' }, now: NOW, force: true })
+  expect(wrong.ok).toBe(false)
+  await writeFile(join(first.path, 'org.md'), 'operator edit\n')
+  const dirty = await syncControlRoom({ ...f, config: first.config, now: NOW, force: true })
+  expect(dirty.ok).toBe(false)
+  expect(await readFile(join(first.path, 'org.md'), 'utf8')).toBe('operator edit\n')
+  expect(await readFile(f.target.settingsPath, 'utf8')).toBe(saved)
+  expect(() => resolveTarget({ ...f, devMdText: DEV_MD, config: { ...f.config, settings: { machine: { group: 'other', controlRoom: { repo: 'acme/room' } } } } })).toThrow(/bootstrap/)
+})
+test('two syncs and an unrelated settings editor preserve committed updates', async () => {
+  const f = await fixture('concurrent')
+  const module = new URL('../src/sync.ts', import.meta.url).pathname
+  const children = [1, 2].map(() => Bun.spawn([process.execPath, '-e', `import {syncControlRoom} from ${JSON.stringify(module)}; const r=await syncControlRoom(${JSON.stringify({ target: f.target, config: f.config, now: NOW })}); console.log(JSON.stringify(r));`], { stdout: 'pipe', stderr: 'pipe' }))
+  await updateSettings(f.settings, s => ({ ...s, settings: { ...s.settings, editor: 'preserved' } }))
+  const results = await Promise.all(children.map(async child => { expect(await child.exited).toBe(0); return JSON.parse(await new Response(child.stdout).text()) }))
+  expect(results.some(r => r.ok)).toBe(true)
+  const wire = JSON.parse(await readFile(f.target.settingsPath, 'utf8'))
+  expect(wire.editor).toBe('preserved')
+  expect(wire.controlRooms.acme.snapshots['acme/app'].sourceCommit).toMatch(/^[a-f0-9]{40}$/)
+  expect(wire.revision).toBeGreaterThanOrEqual(2)
+})
+test('dry run and interrupted candidate publication do not migrate settings', async () => {
+  const f = await fixture('interrupted')
+  const before = await readFile(f.target.settingsPath, 'utf8')
+  expect((await syncControlRoom({ ...f, now: NOW, dryRun: true })).ok).toBe(true)
+  expect(await readFile(f.target.settingsPath, 'utf8')).toBe(before)
+  await mkdir(f.target.settingsPath + '.guard')
+  const result = await syncControlRoom({ ...f, now: NOW })
+  expect(result.ok).toBe(false)
+  expect(await readFile(f.target.settingsPath, 'utf8')).toBe(before)
+})
+test('inspect and restore verify provenance, retain old validation time, and default to dry run', async () => {
+  const f = await fixture('restore')
+  const first = await syncControlRoom({ ...f, now: NOW })
+  const second = await syncControlRoom({ ...f, config: first.config, now: NOW + 1000, force: true })
+  expect(second.ok).toBe(true)
+  const codeRepo = join(f.home, 'code-repo')
+  await mkdir(join(codeRepo, '.vegastack'), { recursive: true })
+  await writeFile(join(codeRepo, '.vegastack/dev.md'), DEV_MD)
+  git(['init', '-b', 'main'], codeRepo); git(['remote', 'add', 'origin', 'https://github.com/acme/app.git'], codeRepo)
+  const sourceRoot = new URL('../../../', import.meta.url).pathname
+  const runbook = await readFile(join(sourceRoot, 'skills/factory/vegafactory-setup/references/control-room.md'), 'utf8')
+  const script = /bun --eval '\n([\s\S]*?)\n'\n/.exec(runbook)![1]!
+  const inspected = Bun.spawnSync([process.execPath, '--eval', script], { cwd: sourceRoot, env: { ...process.env, VF_SETTINGS_PATH: f.target.settingsPath, VF_REPO_PATH: codeRepo } })
+  expect(inspected.exitCode).toBe(0)
+  expect(JSON.parse(inspected.stdout.toString()).history[0].ok).toBe(true)
+  const inspection = await inspectSnapshots({ target: f.target, now: NOW + 7200000 })
+  expect(inspection.history[0]?.ok).toBe(true)
+  const before = await readFile(f.target.settingsPath, 'utf8')
+  expect((await restoreSnapshot({ target: f.target, index: 0, now: NOW + 7200000 })).applied).toBe(false)
+  expect(await readFile(f.target.settingsPath, 'utf8')).toBe(before)
+  expect((await restoreSnapshot({ target: f.target, index: 0, now: NOW + 7200000, apply: true })).applied).toBe(true)
+  const restored = await getPolicySnapshot('acme', 'acme/app', NOW + 7200000, { settingsPath: f.target.settingsPath, devMd: DEV_MD })
+  expect(restored.state).toBe('unavailable')
+  const wire = JSON.parse(await readFile(f.target.settingsPath, 'utf8'))
+  expect(wire.controlRooms.acme.recovery.snapshots['acme/app'].validatedAt).toBe(first.lastSyncedAt)
+})
 
-describe('control-room sync', () => {
-  test('a profile naming no control room resolves to no target', () => {
-    expect(resolveTarget({ devMdText: '## Knobs\nreview: subagent\n', config: configFor(root), home: root })).toBeNull()
-  })
+test('enrollment publication verifies repository ID, host, installation, account and enabled registry from one snapshot', async () => {
+  const { chmod } = await import('node:fs/promises')
+  const { localHostBindingDigest } = await import('../src/sync.ts')
+  const f = await fixture('enrolled')
+  const room = join(f.home, 'room-source'), remote = join(f.home, 'room.git'), bin = join(f.home, 'bin')
+  await mkdir(join(room, 'groups/dev'), { recursive: true }); await mkdir(bin)
+  const hostBindingDigest = await localHostBindingDigest()
+  const installationId = '12345678-1234-4123-8123-123456789013'
+  const fleet = { schemaVersion: 1, coordination: { repositoryId: 'R_room', repository: 'acme/room', branch: 'factory-state', rootCommit: 'b'.repeat(40), installationId: '12345678-1234-4123-8123-123456789012' }, defaults: { pollSeconds: 120, maxRuns: 1, childConcurrent: 3, checkpoints: 'task-branch', recovery: 'verified-transfer' }, groupDefaults: {}, machines: {
+    'dev-box': { installationId, hostBindingDigest, executionLogin: 'owner', group: 'dev', repositories: ['acme/app'], enabled: true, overrides: {} },
+    'other-box': { installationId: '12345678-1234-4123-8123-123456789014', hostBindingDigest: 'd'.repeat(64), executionLogin: 'owner', group: 'dev', repositories: ['acme/app'], enabled: true, overrides: {} },
+  } }
+  const org = () => 'sync-max-age: 2h\npolicy-schema: 2\n```vsk-policy\n' + JSON.stringify({ schemaVersion: 2, fleet }) + '\n```\n'
+  await writeFile(join(room, 'org.md'), org())
+  await writeFile(join(room, 'groups/dev/group.md'), 'review: subagent\n')
+  await writeFile(join(room, 'people.csv'), 'login,name,role,slack,timezone,groups\nowner,Owner,lead,,UTC,dev\n')
+  await writeFile(join(room, 'repos.md'), '| repo | group | board | owner | repository-id |\n|---|---|---|---|---|\n| acme/app | dev | | owner | R_app |\n')
+  git(['init', '-b', 'main'], room); git(['add', '.'], room); git(['commit', '-m', 'enrollment'], room); git(['clone', '--bare', room, remote], root)
+  const actualGit = Bun.which('git')!
+  // A deterministic local provider fixture: Git object reads remain real; only the remote
+  // fetch transport and read-only GitHub identity responses are replaced. No live qualification.
+  await writeFile(join(bin, 'git'), `#!${process.execPath}\nimport {spawnSync} from 'node:child_process'; let a=process.argv.slice(2); const f=a.indexOf('fetch'); if(f>=0) { const o=a.indexOf('origin',f); if(o>=0) a[o]=${JSON.stringify(remote)}; } const r=spawnSync(${JSON.stringify(actualGit)},a,{stdio:'inherit'}); process.exit(r.status??1);\n`)
+  await writeFile(join(bin, 'gh'), `#!${process.execPath}\nconst endpoint=process.argv[3]; console.log(JSON.stringify(endpoint==='user'?{login:'owner'}:{node_id:endpoint==='repos/acme/room'?'R_room':'R_app',full_name:endpoint.slice(6),permissions:{pull:true}}));\n`)
+  await chmod(join(bin, 'git'), 0o755); await chmod(join(bin, 'gh'), 0o755)
+  const machine = { id: 'dev-box', installationId, hostBindingDigest, group: 'dev', controlRoom: { repositoryId: 'R_room', repo: 'acme/room', remote: 'https://github.com/acme/room.git', branch: 'main' } }
+  await updateSettings(f.settings, s => { s.orgs.acme!.remote = machine.controlRoom.remote; s.settings.machine = machine; return s })
+  const config = readFactoryConfig(await readFile(f.target.settingsPath, 'utf8'))
+  const target = resolveTarget({ devMdText: DEV_MD, config, home: f.home })!
+  const oldPath = process.env.PATH
+  process.env.PATH = `${bin}:${oldPath}`
+  try {
+    const first = await syncControlRoom({ target, config, now: NOW })
+    expect(first.ok).toBe(true)
+    const saved = await readFile(target.settingsPath, 'utf8')
+    expect(first.config.controlRooms.acme!.repositoryId).toBe('R_room')
+    await updateSettings(f.settings, s => { s.settings.machine = { ...machine, hostBindingDigest: '0'.repeat(64) }; return s })
+    const copiedConfig = readFactoryConfig(await readFile(target.settingsPath, 'utf8'))
+    const copied = await syncControlRoom({ target, config: copiedConfig, now: NOW + 1000 })
+    expect(copied.ok).toBe(false)
+    expect(copied.message).toContain('host binding mismatch')
+    await writeFile(target.settingsPath, saved)
+    fleet.machines['dev-box'].enabled = false
+    await writeFile(join(room, 'org.md'), org()); git(['add', '.'], room); git(['commit', '-m', 'disable'], room); git(['push', remote, 'main'], room)
+    const disabled = await syncControlRoom({ target, config: first.config, now: NOW + 2000, force: true })
+    expect(disabled.ok).toBe(false)
+    expect(disabled.message).toContain('disabled')
+    expect(await readFile(target.settingsPath, 'utf8')).toBe(saved)
+  } finally { process.env.PATH = oldPath }
+}, 20000)
 
-  test('a profile with no knob resolves from an org name to the conventional control-room repo — the bootstrap case', () => {
-    const target = resolveTarget({ devMdText: '## Knobs\nreview: subagent\n', config: configFor(root), home: root, org: 'vegastack' })
-    expect(target).toMatchObject({ org: 'vegastack', repo: 'vegastack/vegafactory-control-room', group: null, recordedSha: null, remote: origin, clonePath: join(root, 'clone') })
-    // An org the machine has never synced falls back to the GitHub URL by convention.
-    const fresh = resolveTarget({ devMdText: '', config: { schemaVersion: 1, controlRooms: {}, settings: {} }, home: root, org: 'acme' })
-    expect(fresh).toMatchObject({ org: 'acme', repo: 'acme/vegafactory-control-room', remote: 'https://github.com/acme/vegafactory-control-room.git', clonePath: join(root, '.vegastack/control-room/acme') })
-    // The profile's own knob wins over a matching --org, and a different --org is refused rather than guessed.
-    expect(resolveTarget({ devMdText: DEV_MD, config: configFor(root), home: root, org: 'vegastack' })).toMatchObject({ group: 'dev' })
-    expect(() => resolveTarget({ devMdText: DEV_MD, config: configFor(root), home: root, org: 'acme' })).toThrow(/acme/)
-  })
+test('multiple repo bindings publish together, swapped rows deny, and older active content survives backup retention', async () => {
+  const f = await fixture('bindings')
+  for (const name of ['app', 'other']) {
+    const path = join(f.home, name)
+    await mkdir(join(path, '.vegastack'), { recursive: true })
+    await writeFile(join(path, '.vegastack/dev.md'), DEV_MD.replace('acme/app', `acme/${name}`))
+    git(['init', '-b', 'main'], path); git(['remote', 'add', 'origin', `https://github.com/acme/${name}.git`], path)
+  }
+  await updateSettings(f.settings, s => ({ ...s, settings: { ...s.settings, repos: ['app', 'other'].map(name => ({ repo: `acme/${name}`, org: 'acme', path: join(f.home, name) })) } }))
+  let config = readFactoryConfig(await readFile(f.target.settingsPath, 'utf8'))
+  const first = await syncControlRoom({ ...f, config, now: NOW })
+  expect(first.ok).toBe(true)
+  expect(Object.keys(first.config.controlRooms.acme!.snapshots!).sort()).toEqual(['acme/app', 'acme/other'])
+  const rows = first.config.controlRooms.acme!.snapshots!
+  expect(rows['acme/app']!.policyDigest).not.toBe(rows['acme/other']!.policyDigest)
+  await updateSettings(f.settings, s => { const snapshots = s.orgs.acme!.snapshots!; [snapshots['acme/app'], snapshots['acme/other']] = [snapshots['acme/other']!, snapshots['acme/app']!]; return s })
+  expect((await getPolicySnapshot('acme', 'acme/app', NOW, { settingsPath: f.target.settingsPath, devMd: DEV_MD })).state).toBe('unavailable')
+  // Restore fixture pointer order through the same transaction before exercising retention.
+  await updateSettings(f.settings, s => { s.orgs.acme!.snapshots = rows; return s })
+  config = readFactoryConfig(await readFile(f.target.settingsPath, 'utf8'))
+  for (let index = 1; index <= 3; index++) {
+    const next = await syncControlRoom({ ...f, config, now: NOW + index * 1000, force: true })
+    expect(next.ok).toBe(true); config = next.config
+  }
+  expect(config.controlRooms.acme!.history).toHaveLength(2)
+  expect(await readFile(join(first.path, 'org.md'), 'utf8')).toContain('stats: on')
+  expect(config.controlRooms.acme!.path).not.toBe(Object.values(config.controlRooms.acme!.snapshots!)[0]!.contentPath)
+}, 20000)
 
-  test('a target takes its path and remote from the machine config, its group from the profile', () => {
-    const target = resolveTarget({ devMdText: DEV_MD, config: configFor(root), home: root })
-    expect(target).toMatchObject({ org: 'vegastack', group: 'dev', branch: 'main', clonePath: join(root, 'clone'), remote: origin })
-  })
-
-  test('the plan: no clone clones, a stale clone refreshes, a fresh one is left alone unless forced', () => {
-    expect(planSync({ cloneExists: false, lastSyncedAt: null, now: NOW, maxAgeMinutes: 30, force: false }).action).toBe('clone')
-    expect(planSync({ cloneExists: true, lastSyncedAt: '2026-09-03T11:00:00Z', now: NOW, maxAgeMinutes: 30, force: false }).action).toBe('refresh')
-    expect(planSync({ cloneExists: true, lastSyncedAt: '2026-09-03T11:45:00Z', now: NOW, maxAgeMinutes: 30, force: false }).action).toBe('fresh')
-    expect(planSync({ cloneExists: true, lastSyncedAt: '2026-09-03T11:45:00Z', now: NOW, maxAgeMinutes: 30, force: true }).action).toBe('refresh')
-  })
-
-  test('a first run clones shallow, records the sha, and leaves the files readable', async () => {
-    const home = join(root, 'first')
-    await mkdir(home, { recursive: true })
-    const target = resolveTarget({ devMdText: DEV_MD, config: configFor(home), home })!
-    const result = await syncControlRoom({ target, config: configFor(home), now: NOW })
-    expect(result.ok).toBe(true)
-    expect(result.action).toBe('clone')
-    expect(result.sha).toMatch(/^[0-9a-f]{7}$/)
-    expect(result.config.controlRooms.vegastack!.lastSyncedAt).toBe(new Date(NOW).toISOString())
-    expect(await readFile(join(home, 'clone/groups/dev/group.md'), 'utf8')).toContain('review: cross-agent-risky')
-  })
-
-  test('a dry run reports the action and writes nothing', async () => {
-    const home = join(root, 'dry')
-    await mkdir(home, { recursive: true })
-    const target = resolveTarget({ devMdText: DEV_MD, config: configFor(home), home })!
-    const result = await syncControlRoom({ target, config: configFor(home), now: NOW, dryRun: true })
-    expect(result.action).toBe('clone')
-    expect(result.ok).toBe(true)
-    expect(await readFile(join(home, 'clone/org.md'), 'utf8').catch((e: Error) => e.message)).toContain('ENOENT')
-  })
-
-  test('a second run fast-forwards to the new commit', async () => {
-    const home = join(root, 'refresh')
-    await mkdir(home, { recursive: true })
-    const target = resolveTarget({ devMdText: DEV_MD, config: configFor(home), home })!
-    const first = await syncControlRoom({ target, config: configFor(home), now: NOW })
-    await writeFile(join(origin, 'groups/dev/group.md'), 'review: cross-agent\n')
-    git(['add', '-A'], origin)
-    git(['commit', '-m', 'knob moved'], origin)
-    const second = await syncControlRoom({ target, config: first.config, now: NOW + 60 * 60_000, force: true })
-    expect(second.ok).toBe(true)
-    expect(second.action).toBe('refresh')
-    expect(second.sha).not.toBe(first.sha)
-    expect(await readFile(join(home, 'clone/groups/dev/group.md'), 'utf8')).toContain('review: cross-agent')
-  })
-
-  test('editing remote in the machine config repoints the next refresh, and editing branch follows a different branch', async () => {
-    const home = join(root, 'repoint')
-    await mkdir(home, { recursive: true })
-    const other = join(root, 'origin-other')
-    await mkdir(join(other, 'groups/dev'), { recursive: true })
-    await writeFile(join(other, 'org.md'), 'stats: off\n')
-    await writeFile(join(other, 'groups/dev/group.md'), 'review: subagent\n')
-    git(['init', '--initial-branch=main'], other)
-    git(['add', '-A'], other)
-    git(['commit', '-m', 'seed other'], other)
-    git(['checkout', '-b', 'edge'], other)
-    await writeFile(join(other, 'org.md'), 'stats: edge\n')
-    git(['add', '-A'], other)
-    git(['commit', '-m', 'edge'], other)
-    git(['checkout', 'main'], other)
-
-    const target = resolveTarget({ devMdText: DEV_MD, config: configFor(home), home })!
-    const first = await syncControlRoom({ target, config: configFor(home), now: NOW })
-    expect(await readFile(join(home, 'clone/org.md'), 'utf8')).toContain('stats: on')
-
-    const repointed = await syncControlRoom({ target: { ...target, remote: other }, config: first.config, now: NOW + 60 * 60_000, force: true })
-    expect(repointed.ok).toBe(true)
-    expect(repointed.action).toBe('refresh')
-    expect(await readFile(join(home, 'clone/org.md'), 'utf8')).toContain('stats: off')
-    expect(repointed.config.controlRooms.vegastack!.remote).toBe(other)
-
-    const branched = await syncControlRoom({ target: { ...target, remote: other, branch: 'edge' }, config: repointed.config, now: NOW + 2 * 60 * 60_000, force: true })
-    expect(branched.ok).toBe(true)
-    expect(await readFile(join(home, 'clone/org.md'), 'utf8')).toContain('stats: edge')
-    expect(branched.config.controlRooms.vegastack!.branch).toBe('edge')
-  })
-
-  test('a clone with local modifications is refused by name and never reset', async () => {
-    const home = join(root, 'dirty')
-    await mkdir(home, { recursive: true })
-    const target = resolveTarget({ devMdText: DEV_MD, config: configFor(home), home })!
-    const first = await syncControlRoom({ target, config: configFor(home), now: NOW })
-    await writeFile(join(home, 'clone/org.md'), 'hand edited\n')
-    const result = await syncControlRoom({ target, config: first.config, now: NOW + 60 * 60_000, force: true })
-    expect(result.ok).toBe(false)
-    expect(result.action).toBe('refused')
-    expect(result.message).toContain(join(home, 'clone'))
-    expect(await readFile(join(home, 'clone/org.md'), 'utf8')).toBe('hand edited\n')
-  })
-
-  test('a symlinked clone path is refused before any git call', async () => {
-    const home = join(root, 'link')
-    await mkdir(join(home, 'real'), { recursive: true })
-    await symlink(join(home, 'real'), join(home, 'clone'))
-    const target = resolveTarget({ devMdText: DEV_MD, config: configFor(home), home })!
-    const result = await syncControlRoom({ target, config: configFor(home), now: NOW })
-    expect(result.ok).toBe(false)
-    expect(result.action).toBe('refused')
-    expect(result.message).toMatch(/symlink/i)
-  })
-
-  test('a failed fetch keeps the old clone and reports when it last synced', async () => {
-    const home = join(root, 'offline')
-    await mkdir(home, { recursive: true })
-    const target = resolveTarget({ devMdText: DEV_MD, config: configFor(home), home })!
-    const first = await syncControlRoom({ target, config: configFor(home), now: NOW })
-    const result = await syncControlRoom({ target: { ...target, remote: join(root, 'gone') }, config: first.config, now: NOW + 2 * 60 * 60_000, force: true })
-    expect(result.ok).toBe(false)
-    expect(result.action).toBe('stale')
-    expect(result.lastSyncedAt).toBe(first.lastSyncedAt)
-    expect(result.ageMinutes).toBe(120)
-    expect(await readFile(join(home, 'clone/org.md'), 'utf8')).toContain('stats: on')
-  })
+test('discovery spreads polling and backs off network failures without changing policy expiry', async () => {
+  const { discoveryDelayMs } = await import('../src/dispatch.ts')
+  expect(discoveryDelayMs(120, 0, 0)).toBe(120000)
+  expect(discoveryDelayMs(120, 0, 1)).toBe(132000)
+  expect(discoveryDelayMs(120, 1, 0)).toBe(240000)
+  expect(discoveryDelayMs(120, 10, 0)).toBe(300000)
 })

@@ -8,6 +8,7 @@
 // is `off`, a stage naming a harness this dispatcher cannot launch is dropped rather than guessed,
 // and any unreadable field in factory.json is a named error instead of a default. A dispatcher that
 // silently defaults is a dispatcher that starts a dark build nobody asked for.
+import { readFactoryConfig } from './control-room.ts'
 import { resolvePolicy } from '../../../skills/dev/dev-setup/scripts/effective-policy.mjs'
 import { readFile } from 'node:fs/promises'
 import { isAbsolute, join, resolve } from 'node:path'
@@ -32,6 +33,7 @@ export interface FactoryConfig {
   lockRoot: string
   dispatcherLock: string
   executionMode?: 'legacy' | 'shared'
+  settingsPath?: string
 }
 
 export interface RepoPolicy {
@@ -118,7 +120,11 @@ export async function loadFactoryConfig(path: string, home: string): Promise<Fac
   } catch {
     throw new Error(`factory.json: ${path} is not valid JSON — fix it rather than deleting it, the control-room clone paths live there too`)
   }
-  return parseFactoryConfig(parsed, home)
+  // The pre-sync dispatcher supported unversioned local-only configuration. Preserve that
+  // format for local work; any policy or enrollment state requires a supported schema.
+  const wire = parsed as Record<string, unknown>
+  if (wire.schemaVersion !== undefined || wire.controlRooms !== undefined || wire.machine !== undefined) readFactoryConfig(text)
+  return { ...parseFactoryConfig(parsed, home), settingsPath: resolve(path) }
 }
 
 // Thin adapters preserve the dispatcher shape; all interpretation belongs to the owner helper.

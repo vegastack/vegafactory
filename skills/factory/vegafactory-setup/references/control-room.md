@@ -113,3 +113,37 @@ Recovery `verified-transfer` still requires proof the original execution stopped
 `freshness` supplies configured/validatedAt/now/maxAgeSeconds. Effective schema2 includes resolved values, per-key scope/path/revision diagnostics, administration, fleet and policyDigest. Revisions are full Git SHAs for validated room sources or SHA256 of exact local text. The digest sorts resolved values/sources and authority/registry data and excludes observation time. Consumers must inspect `ok` or refusal before any effect: an effective locked value is useful diagnostic data even when an attempted override is denied.
 
 Validated snapshot readers consume `factory.json` at `controlRooms[org].snapshots[canonicalCodeRepo]`. Each value keeps `{schemaVersion:2,org,group,repository,origin,sourceCommit,policyDigest,validatedAt,contentPath}`; repository is the control room, while the map key binds the code repo. Its digest is the full resolved policy for that repo/profile/group, with canonical relative paths. The reader checks exact origin/HEAD and clean content, reads regular blobs from the recorded Git commit, then recomputes the digest. Changed local policy needs renewed validation. The optional `repository-id` column in repos.md supplies confirmed GitHub node IDs required by fleet registrations. The snapshot owner verifies those IDs during publication; this parser does not turn authored strings into verified network identity.
+
+## Local settings, refresh and recovery
+
+`factory.json` is the single machine-local store. Its supported wire shape is `{schemaVersion:2,revision,controlRooms:{[org]:...},...extensions}`. The transaction API's `orgs` is a view of `controlRooms`, never a second file/map; an existing extension named `orgs` stays inert. Persist confirmed setup answers, optional declines, bootstrap and verified local checkout registrations through `updateSettings(root,mutate)` before attempting sync. `root` contains `factory.json`; services using a different absolute config path call `updateSettingsAtPath(path,mutate)` and pass that same path to readers and refresh. Neither API enrolls the machine or approves Git delivery.
+
+Every mutation rereads under the canonical path's exclusive guard and increments revision. Schema1 converts only after successful mutation/validation, retaining its original bytes in `factory.json.schema1.bak`. Unknown versions, unreadable files and unsafe symlink paths refuse unchanged. An interrupted `.guard` directory is never stolen because its owner appears old; stop participating writers, verify their termination and inspect the owner record before offline recovery. A text editor bypassing this transaction cannot receive its concurrent lost-update guarantee.
+
+`vegafactory sync --dry-run --json` describes refresh/migration without fetching or writing. A real sync verifies the configured connection, fetches a managed candidate (30 seconds per fetch, at most two attempts, 90 seconds for candidate work), validates every configured code-repository profile through the canonical resolver, then publishes all bindings together. Same-commit refresh renews `validatedAt` only after successful fetch and validation. A failed attempt retains last-good source identity and settings. Unconfigured first setup must complete a confirmed code-repository profile before it can publish authority; answers already persisted remain resumable.
+
+Policy reader content lives under the settings directory's `policy-snapshots/<org>/snapshot-*`. The separate `controlRooms[org].path` is the telemetry writer checkout, initialized once from validated content; existing operator edits and unpushed commits are never reset or repointed. Do not write telemetry into `contentPath`. Canonical GitHub owner/name and repository node ID must match the verified connection; a rename needs explicit verified reconciliation. Enrolled machines additionally match the current host binding, installation, account, group and registry scope. Host bindings hash platform, non-root account UID and the platform machine identifier; copying factory.json to another host is not enrollment.
+
+`status --json` exposes each repo's validation state, full source SHA, policy digest, timestamp, age and refusal. Machine configuration displayed by status is diagnostic, not verified execution-account authority. Dashboard policy reads the same manifest and local profiles; legacy fetch time or directory mtime cannot manufacture freshness. Optional old knowledge carries source/date and a warning; it grants no authority. At the selected two-hour bound, age7199 seconds is fresh and age7200 is stale. Dispatcher polling remains distinct from this bound; running reversible work retains its pinned rules and external actions revalidate.
+
+The source APIs `inspectSnapshots({target,now})` and `restoreSnapshot({target,index,now,apply?})` verify supported schema, exact source/content identity and every backup's per-repo digest. Restore defaults to dry-run. Explicit `apply:true` selects inactive recovery content with its original timestamp and empties the authoritative snapshot map. A successful real sync is required before authority resumes, including when the selected backup was recently validated. Two prior valid pointer sets are retained; immutable directories are not automatically removed, so older active-run pins remain available. Failed candidate directories may remain for inspection.
+
+Until a packaged recovery entrypoint is approved and integrated, these are source-only recovery APIs, not installed CLI subcommands. From the source checkout, inspect the exact configured path without writes:
+
+```sh
+VF_SETTINGS_PATH=/absolute/path/factory.json VF_REPO_PATH=/absolute/path/code-repo bun --eval '
+import {readFile} from "node:fs/promises";
+import {homedir} from "node:os";
+import {join} from "node:path";
+import {readSettingsFile} from "./packages/cli/src/control-room.ts";
+import {resolveTarget,inspectSnapshots} from "./packages/cli/src/sync.ts";
+const settingsPath=process.env.VF_SETTINGS_PATH, repoPath=process.env.VF_REPO_PATH;
+const config=await readSettingsFile(settingsPath);
+const devMdText=await readFile(join(repoPath,".vegastack/dev.md"),"utf8");
+const target=resolveTarget({config,devMdText,home:homedir(),settingsPath,repoPath});
+if(!target) throw new Error("No configured control room");
+console.log(JSON.stringify(await inspectSnapshots({target,now:Date.now()}),null,2));
+'
+```
+
+For a reviewed restoration, use the same resolved target and call `restoreSnapshot({target,index:0,now:Date.now()})` first. Inspect that exact result before explicitly adding `apply:true`; never alter `validatedAt` to bypass the required fresh sync. Packaged recovery availability and final behavioral/provider qualification remain open integration gates.

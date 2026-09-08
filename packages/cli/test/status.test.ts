@@ -107,3 +107,14 @@ describe('runStatusCli', () => {
     expect(code).toBe(2)
   })
 })
+
+test('status renders validated snapshot state, source and refusal without a fetch timestamp fallback', () => {
+  const report = buildStatus({
+    config: parseFactoryConfig({ repos: [{ path: '/repo', repo: 'acme/app', org: 'acme' }] }, '/home/test'),
+    state: { lastTick: {} } as Parameters<typeof buildStatus>[0]['state'], lockPid: null,
+    repos: [{ repo: 'acme/app', policy: parseRepoPolicy(''), board: [], worktrees: [], logs: [], snapshot: { state: 'stale', sourceCommit: 'a'.repeat(40), policyDigest: 'b'.repeat(64), validatedAt: '2026-09-06T00:00:00Z', ageSeconds: 7200, reason: 'mandatory policy stale: validated refresh required' } }],
+  })
+  expect(report.repos[0]?.snapshot?.ageSeconds).toBe(7200)
+  expect(renderStatus(report)).toContain('policy: stale')
+  expect(renderStatus(report)).toContain('a'.repeat(40))
+})

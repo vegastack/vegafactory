@@ -6,7 +6,7 @@ import { homedir } from 'node:os'
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { createInterface } from 'node:readline/promises'
-import { factoryConfigPath, parseSyncMaxAge, readFactoryConfig, serializeFactoryConfig } from './control-room.ts'
+import { factoryConfigPath, parseSyncMaxAge, readFactoryConfig } from './control-room.ts'
 import { selectSkills, type SkillEntry } from './selection.ts'
 import { resolveTarget, syncControlRoom } from './sync.ts'
 import { dashboardUsage, runDashboard } from './dashboard.ts'
@@ -733,7 +733,6 @@ async function sync(options: Options) {
     force: options.force,
     dryRun: options.dryRun,
   })
-  if (result.ok && !options.dryRun && result.config !== config) await durableJson(statePath, serializeFactoryConfig(result.config))
 
   const code = result.ok ? 0 : result.action === 'refused' ? 2 : 1
   return report(options, {

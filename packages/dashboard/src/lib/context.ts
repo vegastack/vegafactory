@@ -1,11 +1,9 @@
 import { openCache, refreshCache, type Db } from './cache/build'
 import { filterOptions, parseFilters, type FilterOptions, type Filters } from './cache/filters'
 import { readPeople, type Person } from './control-room/people'
-import { readPolicy, type Policy } from './control-room/policy'
-import { readRepoGroups } from './control-room/repos'
+import { readValidatedPolicies, type Policy } from './control-room/policy'
 import { readEnv, type ServerEnv } from './env'
-import { freshnessFrom, type Freshness } from './freshness'
-import { readOrNull } from './read'
+import { type Freshness } from './freshness'
 
 export interface PageContext {
   env: ServerEnv
@@ -16,6 +14,7 @@ export interface PageContext {
   people: Person[]
   policy: Policy
   freshness: Freshness
+  knowledgeWarning?: string | null
 }
 
 // One cache handle per process, opened lazily. The refresh below is per request and costs one
@@ -38,7 +37,8 @@ export async function loadContext(
   const db = await cache(env.cacheFile)
   await refreshCache(db, env.controlRoom)
 
-  const repoGroups = await readRepoGroups(env.controlRoom)
+  const validated = await readValidatedPolicies({ settingsPath: env.stateFile, org: env.org, repos: env.repos, now: Date.now() })
+  const repoGroups = validated.policy.effective?.registry.repoGroups ?? {}
   const flat: Record<string, string | undefined> = {}
   for (const [key, raw] of Object.entries(searchParams)) flat[key] = Array.isArray(raw) ? raw[0] : raw
 
@@ -52,15 +52,9 @@ export async function loadContext(
     options,
     filters,
     repoGroups,
-    people: await readPeople(env.controlRoom, group),
-    policy: await readPolicy(env.controlRoom, group),
-    // liveOk is true here because loading the context touched nothing live. A page that then
-    // reads GitHub or the dispatcher recomputes this with `freshnessAt` once it knows the answer.
-    freshness: freshnessFrom({
-      factoryJson: await readOrNull(env.stateFile),
-      org: env.org,
-      now: Date.now(),
-      liveOk: true,
-    }),
+    people: validated.contentPath && !validated.policy.refusal ? await readPeople(validated.contentPath, group) : [],
+    policy: validated.policy,
+    knowledgeWarning: validated.knowledgeWarning,
+    freshness: validated.freshness,
   }
 }

@@ -7,7 +7,8 @@
 // in the log, because "nothing happened" and "the ship guard is unwired" look identical otherwise.
 import { spawn, spawnSync } from 'node:child_process'
 import { existsSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
-import { parseControlRoomKnob, loadConfiguredPolicy } from './control-room.ts'
+import { resolveTarget, syncControlRoom } from './sync.ts'
+import { parseControlRoomKnob, loadConfiguredPolicy, readSettingsFile, factoryConfigPath } from './control-room.ts'
 import { appendFile, lstat, mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises'
 import { hostname, tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
@@ -1189,10 +1190,6 @@ export async function runTick(
       catch (error) { refusals.push({ repo: entry.repo, issue, reason: (error as Error).message }); return false }
     }
     if (!active()) break
-    if (config.executionMode === 'shared') {
-      refusals.push({ repo: entry.repo, issue: null, reason: 'shared machine requires validated registration and shared ownership; legacy local locks cannot authorize launch' })
-      continue
-    }
     let devMd: string | null
     try { devMd = await withinRead(budget, () => readIfPresent(join(entry.path, '.vegastack', 'dev.md'))) }
     catch (error) { refusals.push({ repo: entry.repo, issue: null, reason: (error as Error).message }); continue }
@@ -1200,7 +1197,19 @@ export async function runTick(
       refusals.push({ repo: entry.repo, issue: null, reason: `${entry.repo}: no .vegastack/dev.md at ${entry.path} — the dispatcher reads its policy from the repo, and an absent profile is off` })
       continue
     }
-    const resolved = loadConfiguredPolicy({ home: config.home, repo: entry.repo, devMd, now: now().toISOString() })
+    const settingsPath = config.settingsPath ?? factoryConfigPath(config.home)
+    if (parseControlRoomKnob(devMd)) {
+      try {
+        const settings = await readSettingsFile(settingsPath)
+        const target = resolveTarget({ devMdText: devMd, config: settings, home: config.home, settingsPath, repoPath: entry.path })
+        if (target) await syncControlRoom({ target, config: settings, now: now().getTime() })
+      } catch { /* The canonical reader below keeps missing/stale authority fail closed. */ }
+    }
+    const resolved = loadConfiguredPolicy({ home: config.home, repo: entry.repo, devMd, settingsPath, now: now().toISOString() })
+    if (config.executionMode === 'shared') {
+      refusals.push({ repo: entry.repo, issue: null, reason: resolved.ok ? 'shared machine requires validated registration and shared ownership; legacy local locks cannot authorize launch' : resolved.blocks.join('; ') })
+      continue
+    }
     const policy = repoPolicyFromEffective(resolved)
     const statsPolicy = statsPolicyFromEffective(resolved)
     let harness: Harness
@@ -1529,6 +1538,14 @@ export async function runOnce(
   return result
 }
 
+// HTTP Retry-After/reset is honored inside the canonical GitHub read adapter. Between
+// discovery ticks, network refusals back off and each machine spreads its polling independently.
+export function discoveryDelayMs(interval: number, networkFailures: number, random = Math.random()): number {
+  const normal = interval * 1000
+  const delay = Math.max(normal, Math.min(300000, normal * 2 ** Math.min(5, Math.max(0, networkFailures))))
+  return delay + Math.floor(Math.max(0, Math.min(1, random)) * Math.min(normal / 10, 30000))
+}
+
 // One dispatcher per machine, and it never exits on its own: a tick that throws is logged through
 // the refusal list and the loop continues, because a service that dies on one bad repo stops
 // watching every other one. Stopping waits for the runs in flight — a run is never orphaned by the
@@ -1542,6 +1559,7 @@ export async function watch(
   if (existing.held) throw new Error(`a dispatcher is already running on this machine (pid ${existing.pid}) — stop it before starting another`)
   await holdLock(config.dispatcherLock, process.pid)
   let stopping = false
+  let networkFailures = 0
   const controller = new AbortController()
   const stop = (): void => { stopping = true; controller.abort() }
   process.on('SIGINT', stop)
@@ -1555,10 +1573,11 @@ export async function watch(
         refusals: [{ repo: '*', issue: null, reason: `the tick failed: ${error.message}` }],
       } satisfies TickResult))
       options.onTick?.(result)
+      networkFailures = result.refusals.some(row => /GitHub|fetch failed|network|HTTP (?:429|5\d\d)/i.test(row.reason)) ? networkFailures + 1 : 0
       if (stopping) break
       await new Promise<void>(resolve => {
         const done = (): void => { clearTimeout(timer); controller.signal.removeEventListener('abort', done); resolve() }
-        const timer = setTimeout(done, config.interval * 1000)
+        const timer = setTimeout(done, discoveryDelayMs(config.interval, networkFailures))
         controller.signal.addEventListener('abort', done, { once: true })
         if (controller.signal.aborted) done()
       })

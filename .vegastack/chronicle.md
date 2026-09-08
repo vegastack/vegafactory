@@ -2,6 +2,16 @@
 
 The project's story, newest first: what got built, why, and how it went — for the operator's future recall. Format home: the dev-chronicle skill.
 
+## 08-09-2026 — Policy refresh preserves the last valid state ([#147](https://github.com/vegastack/vegafactory/issues/147))
+
+- **What:** Sync validates immutable per-repository snapshots before one guarded settings publication. Status and dashboard read their source identity and validation age; failed refreshes keep the last valid state and operator edits. Restore selects inactive backup content until a successful fresh sync.
+- **Why:** Resetting a shared checkout and rewriting settings after sync could discard edits or another writer's configuration, and fetch timestamps could suggest authority that had never been validated.
+- **How it went:** Focused process/Git fixtures cover concurrent writers, semantic refusal, unchanged-commit refresh, enrollment mismatch, exact expiry, source recovery and retention. Broad validation, packed recovery integration, behavioral evaluations, independent review and live qualification remain open.
+- **Changed:** Version2 settings transactions · immutable snapshot publisher · separate telemetry checkout · canonical CLI/dashboard freshness · source inspection and recovery APIs.
+- **Decisions:** none.
+
+— approved by (kmanojkumar) · built by codex · branch codex/productionization-133
+
 ## 07-09-2026 — A recorder cannot invent operator approval ([#135](https://github.com/vegastack/vegafactory/issues/135))
 
 - **What:** Session approval now requires a publisher in current operator policy. Another recorder can relay only an independently verified identical scoped grant, inheriting its authority and revocation history. Launch, preparation and research results retain the original source comment and body identity.
