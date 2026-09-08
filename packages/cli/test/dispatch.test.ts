@@ -24,9 +24,9 @@ const issue = (number: number, labels: string[], assignees: string[] = []): Boar
 describe('searchQueries', () => {
   test('one query per state, scoped to the repo, ready excluding assignees', () => {
     const q = searchQueries('acme/app')
-    expect(q.needsPlan).toBe('repo:acme/app is:issue is:open label:needs-plan')
-    expect(q.ready).toBe('repo:acme/app is:issue is:open label:ready no:assignee')
-    expect(q.corrections).toBe('repo:acme/app is:issue is:open label:for-operator')
+    expect(q.needsPlan).toBe('repo:acme/app is:issue is:open label:"needs-plan"')
+    expect(q.ready).toBe('repo:acme/app is:issue is:open label:"ready" no:assignee')
+    expect(q.corrections).toBe('repo:acme/app is:issue is:open label:"for-operator"')
   })
 
   test('every tick asks for every for-operator issue — a reaction never moves updated_at, so no window could find it', () => {
@@ -50,7 +50,7 @@ describe('planLabelRuns', () => {
   test('an issue carrying two state labels is refused, never guessed', () => {
     const plan = planLabelRuns({ repo: 'acme/app', needsPlan: [issue(10, ['needs-plan', 'working'])], ready: [] })
     expect(plan.runs).toEqual([])
-    expect(plan.refusals[0]!.reason).toContain('two state labels')
+    expect(plan.refusals[0]!.reason).toContain('conflicting state labels')
   })
 
   test('an epic never starts a run, whatever state label it carries', () => {
@@ -302,16 +302,16 @@ describe('redact', () => {
 })
 
 describe('failureComment', () => {
-  test('is a handback comment naming the exit code and carrying the redacted last 40 lines', () => {
+  test('is a handback comment with reason and no private path or transcript', () => {
     const log = Array.from({ length: 60 }, (_, i) => `line ${i} ghp_abcdefghijklmnopqrstuvwxyz0123456789`).join('\n')
     const body = failureComment({ issue: 12, stage: 'implement', exitCode: 1, timedOut: false, log, worktree: '/w/12-thing', at: '2026-09-03T10:04:05Z' })
     expect(body.startsWith('<!-- vsk:v1 type=handback -->')).toBe(true)
     expect(body).toContain('## Hand-back')
     expect(body).toContain('exit 1')
-    expect(body).toContain('/w/12-thing')
+    expect(body).not.toContain('/w/12-thing')
     expect(body).not.toContain('ghp_abcdefghijklmnopqrstuvwxyz0123456789')
     expect(tailLines(log, 40).split('\n')).toHaveLength(40)
-    expect(body).toContain('line 59')
+    expect(body).not.toContain('line 59')
     expect(body).not.toContain('line 19')
   })
 
@@ -338,36 +338,17 @@ async function statusRuns(home: string) {
 describe('executeRun', () => {
   function harnessStub(body: string): string {
     const dir = mkdtempSync(join(tmpdir(), 'vsk-run-'))
-    const path = join(dir, 'harness.sh')
-    writeFileSync(path, body)
-    chmodSync(path, 0o755)
-    return path
+    const path = join(dir, 'harness.sh');writeFileSync(path, body);chmodSync(path, 0o755);return path
   }
-
   const runFor = (home: string) => parseFactoryConfig({ repos: [{ path: '/w', repo: 'acme/app', org: 'acme' }] }, home)
   const planned = { repo: 'acme/app', issue: 12, title: 'feat: thing', stage: 'implement' as const, commentId: null, reactionId: null }
-
-  test('a clean run logs its streams and its exit, pushes the branch, and hands nothing back', async () => {
-    const home = mkdtempSync(join(tmpdir(), 'vsk-home-'))
-    const command = harnessStub('#!/bin/sh\necho hello\n')
-    const calls: string[][] = []
-    const outcome = await executeRun(planned, { command, args: [], env: {}, cwd: home, prompt: 'p' }, runFor(home), { operator: 'mk' }, {
-      now: () => new Date('2026-09-03T10:04:05Z'),
-      gh: async args => { calls.push(args); return '' },
-      git: async args => { calls.push(['git', ...args]); return { ok: true, message: '' } },
-    })
-    expect(outcome.exitCode).toBe(0)
-    expect(outcome.handedBack).toBe(false)
-    expect(outcome.pushed).toBe(true)
-    expect(calls.some(call => call.join(' ') === 'git push -u origin HEAD')).toBe(true)
-    expect(calls.some(call => call[0] === 'issue')).toBe(false)
-    const log = readFileSync(outcome.logFile, 'utf8').trim().split('\n').map(line => JSON.parse(line))
-    expect(log[0]).toMatchObject({ event: 'start', repo: 'acme/app', issue: 12, stage: 'implement' })
-    expect(log.some(row => row.event === 'start')).toBe(true)
-    expect(log.some(row => row.text?.includes('hello'))).toBe(true)
-    expect(log.at(-1).event).toBe('exit')
+  test('successful execution persists lifecycle metadata without implicit source delivery or raw output', async () => {
+    const home=mkdtempSync(join(tmpdir(),'vsk-home-')),command=harnessStub('#!/bin/sh\necho private-transcript-canary\n')
+    let sends=0
+    const result=await executeRun(planned,{command,args:[],env:{},cwd:home,prompt:'private-prompt'},runFor(home),{operator:null},{wrapperPath:join(import.meta.dir,'../src/run-wrapper.ts'),gh:async()=>{sends++;return ''},git:async()=>{sends++;return{ok:true,message:''}}})
+    expect(result.terminationCause).toBe('succeeded');expect(result.exitCode).toBe(0);expect(result.pushed).toBe(false);expect(sends).toBe(0)
+    const log=readFileSync(result.logFile,'utf8');expect(log).toContain('"event":"start"');expect(log).toContain('"event":"exit"');expect(log).not.toContain('private-transcript-canary');expect(log).not.toContain('private-prompt')
   })
-
   test('silent actual spawn persists corrections identity before output or exit', async () => {
     const home = mkdtempSync(join(tmpdir(), 'vsk-silent-'))
     const release = join(home, 'release')
@@ -377,7 +358,7 @@ describe('executeRun', () => {
     const running = executeRun({ ...planned, stage: 'corrections' },
       { command, args: [release], env: {}, cwd: home, prompt: 'p' }, runFor(home),
       { operator: null, onSpawn: acknowledge }, {
-        timeoutMs: 3000, gh: async () => '', git: async () => ({ ok: true, message: '' }),
+        wrapperPath: join(import.meta.dir,'../src/run-wrapper.ts'),timeoutMs: 3000, gh: async () => '', git: async () => ({ ok: true, message: '' }),
       })
     try {
       await acknowledged
@@ -398,64 +379,13 @@ describe('executeRun', () => {
     expect((await statusRuns(home))[0]).toMatchObject({ issue: 12, stage: 'corrections', exitCode: 0 })
   })
 
-  test('OS spawn refusal keeps its audit outside status runs and a real retry starts', async () => {
-    const home = mkdtempSync(join(tmpdir(), 'vsk-refusal-'))
-    const command = join(home, 'retry.sh')
-    let starts = 0, deliveries = 0
-    const deps = { gh: async () => { deliveries++; return '' }, git: async () => { deliveries++; return { ok: true, message: '' } } }
-    const launch = () => executeRun({ ...planned, stage: 'corrections' },
-      { command, args: [], env: {}, cwd: home, prompt: 'p' }, runFor(home),
-      { operator: null, onSpawn: () => { starts++ } }, deps)
-    const refused = await launch()
-    expect(refused).toMatchObject({ started: false, refusal: 'harness process did not start', pushed: false, handedBack: false })
-    expect(starts).toBe(0)
-    expect(deliveries).toBe(0)
-    const audit = readFileSync(refused.logFile, 'utf8').trim().split('\n').map(line => JSON.parse(line))
-    expect(audit[0]).toMatchObject({ event: 'prepared', repo: 'acme/app', issue: 12, stage: 'corrections' })
-    expect(audit.at(-1)).toMatchObject({ event: 'launch-refused', reason: refused.refusal })
-    expect(audit.some(row => row.event === 'start' || row.event === 'exit')).toBe(false)
-    expect(await statusRuns(home)).toEqual([])
-    writeFileSync(command, '#!/bin/sh\nexit 0\n')
-    chmodSync(command, 0o755)
-    const retried = await launch()
-    expect(retried.started).toBe(true)
-    expect(starts).toBe(1)
-    expect((await statusRuns(home))[0]).toMatchObject({ issue: 12, stage: 'corrections', exitCode: 0 })
-    expect(readFileSync(refused.logFile, 'utf8')).toContain('launch-refused')
-  })
-
-  test('a failing run posts the hand-back, moves the label and assigns the operator', async () => {
-    const home = mkdtempSync(join(tmpdir(), 'vsk-home-'))
-    const command = harnessStub('#!/bin/sh\necho "boom ghp_abcdefghijklmnopqrstuvwxyz0123456789" >&2\nexit 3\n')
-    const calls: { args: string[]; input?: string }[] = []
-    const outcome = await executeRun(planned, { command, args: [], env: {}, cwd: home, prompt: 'p' }, runFor(home), { operator: 'mk' }, {
-      now: () => new Date('2026-09-03T10:04:05Z'),
-      gh: async (args, options) => { calls.push({ args, input: options?.input }); return '' },
-      git: async () => ({ ok: true, message: '' }),
-    })
-    expect(outcome.exitCode).toBe(3)
-    expect(outcome.handedBack).toBe(true)
-    const comment = calls.find(call => call.args[0] === 'issue' && call.args[1] === 'comment')!
-    expect(comment.args).toContain('--body-file')
-    expect(comment.input).toContain('exit 3')
-    expect(comment.input).not.toContain('ghp_abcdefghijklmnopqrstuvwxyz0123456789')
-    const edit = calls.find(call => call.args[1] === 'edit')!
-    expect(edit.args).toEqual(['issue', 'edit', '12', '--repo', 'acme/app', '--add-label', 'needs-operator', '--remove-label', 'working', '--add-assignee', 'mk'])
-  })
-
-  test('a hand-back gh cannot post is logged, and never throws out of the tick', async () => {
-    const home = mkdtempSync(join(tmpdir(), 'vsk-home-'))
-    const command = harnessStub('#!/bin/sh\nexit 1\n')
-    const outcome = await executeRun(planned, { command, args: [], env: {}, cwd: home, prompt: 'p' }, runFor(home), { operator: null }, {
-      now: () => new Date('2026-09-03T10:04:05Z'),
-      gh: async () => { throw new Error('gh issue comment failed: HTTP 403') },
-      git: async () => ({ ok: false, message: 'no upstream' }),
-    })
-    expect(outcome.handedBack).toBe(false)
-    expect(outcome.pushed).toBe(false)
-    const log = readFileSync(outcome.logFile, 'utf8')
-    expect(log).toContain('handback-failed')
-    expect(log).toContain('push-failed')
+  test('spawn failure has durable diagnostic identity and no delivery; a subsequent explicit attempt starts',async()=>{
+    const home=mkdtempSync(join(tmpdir(),'vsk-refusal-')),command=join(home,'retry.sh');let starts=0
+    const launch=()=>executeRun(planned,{command,args:[],env:{},cwd:home,prompt:''},runFor(home),{operator:null,onSpawn:()=>{starts++}},{wrapperPath:join(import.meta.dir,'../src/run-wrapper.ts')})
+    const first=await launch();expect(first.started).toBe(false);expect(first.terminationCause).toBe('spawn-failed');expect(starts).toBe(0)
+    expect((await statusRuns(home))[0]).toMatchObject({state:'terminal',terminationCause:'spawn-failed'})
+    writeFileSync(command,'#!/bin/sh\nexit 0\n');chmodSync(command,0o755)
+    const next=await launch();expect(next.started).toBe(true);expect(next.runId).not.toBe(first.runId);expect(starts).toBe(1)
   })
 })
 
@@ -502,10 +432,10 @@ describe('locks', () => {
     expect((await readLock(path)).held).toBe(false)
   })
 
-  test('a lock left by a dead process is stale, not a wedge', async () => {
+  test('a legacy PID-only lock is preserved for explicit recovery', async () => {
     const path = join(mkdtempSync(join(tmpdir(), 'vsk-lock-')), 'app.lock')
     writeFileSync(path, JSON.stringify({ pid: 2147483000, at: '2026-09-03T10:00:00Z' }))
-    expect(await readLock(path)).toEqual({ held: false, pid: 2147483000 })
+    expect((await readLock(path)).held).toBe(true)
   })
 })
 
@@ -749,10 +679,10 @@ else fs.writeFileSync(${JSON.stringify(marker)}, 'entered');
       gh: async () => { deliveries++; return '' }, git: async () => { deliveries++; return { ok: true, message: '' } },
     })
   expect(outcome.started).toBe(false)
-  expect(outcome.refusal).toContain('unsupported Claude version')
+  expect(outcome.refusal).toContain('managed launch configuration refused')
   expect(starts).toBe(0)
   expect(deliveries).toBe(0)
-  expect(await statusRuns(home)).toEqual([])
+  expect((await statusRuns(home))[0]).toMatchObject({state:'terminal',terminationCause:'spawn-failed'})
   expect(outcome.pushed).toBe(false)
   expect(outcome.handedBack).toBe(false)
   expect(readFileSync(outcome.logFile, 'utf8')).toContain('launch-refused')

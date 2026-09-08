@@ -1,3 +1,5 @@
+import { verifiedSharedTarget } from './dispatch.ts'
+import { readRuns, runsRoot, type RunRecord, type TerminalCause } from './runs.ts'
 import { readSharedStatus, type CoordinationTarget, type SharedStatus } from './shared-claims.ts'
 import { labelsDigest, resolveState, resolveLabels } from '../../../skills/dev/dev-setup/scripts/effective-policy.mjs'
 import { boundedGhJson, readBudget } from './gh.ts'
@@ -17,6 +19,11 @@ import type { FactoryConfig, RepoPolicy, Stage } from './config.ts'
 export interface WorktreeRow { path: string; branch: string; issue: number | null; state: string }
 
 export interface RunSummary {
+  runId?: string
+  state?: string
+  terminationCause?: TerminalCause | null
+  pendingDelivery?: number
+  lastError?: string | null
   issue: number
   stage: Stage
   startedAt: string
@@ -87,11 +94,11 @@ export function buildStatus(input: {
   state: DispatchState
   lockPid: number | null
   lockRefusal?: string
-  repos: { repo: string; policy: RepoPolicy; shared?: SharedStatus; snapshot?: RepoStatus['snapshot']; boardComplete?: boolean; boardReason?: string | null; observedAt?: string; board: BoardIssue[]; worktrees: WorktreeRow[]; logs: { file: string; body: string }[] }[]
+  repos: { repo: string; policy: RepoPolicy; shared?: SharedStatus; snapshot?: RepoStatus['snapshot']; boardComplete?: boolean; boardReason?: string | null; observedAt?: string; board: BoardIssue[]; worktrees: WorktreeRow[]; logs: { file: string; body: string }[]; durableRuns?: RunRecord[]; runRefusal?: string }[]
 }): StatusReport {
   const repos: RepoStatus[] = input.repos.map(entry => {
     let labelMap: LabelMap | null = null
-    const blocks = [entry.policy.refusal, entry.boardReason, entry.snapshot?.reason].filter((reason): reason is string => Boolean(reason))
+    const blocks = [entry.policy.refusal, entry.boardReason, entry.snapshot?.reason, entry.runRefusal].filter((reason): reason is string => Boolean(reason))
     try { labelMap = resolveLabels(entry.policy.labelMap ?? entry.policy.effective?.values['workflow-labels']) } catch (error) { blocks.push((error as Error).message) }
     const workflow: WorkflowStateSnapshot = {
       repo: entry.repo, policyDigest: entry.policy.effective?.policyDigest ?? '',
@@ -104,7 +111,14 @@ export function buildStatus(input: {
       }),
     }
     const count = (state: State): number => workflow.issues.filter(issue => issue.state === state).length
-    const runs: RunSummary[] = entry.logs.map(log => {
+    const runs: RunSummary[] = (entry.durableRuns ?? []).toSorted((a,b)=>b.startedAt.localeCompare(a.startedAt)).map(run => ({
+      runId:run.runId,state:run.state,terminationCause:run.terminationCause,
+      pendingDelivery:run.pendingDelivery.filter(p=>p.status!=='acknowledged').length,
+      lastError:run.pendingDelivery.find(p=>p.lastError)?.lastError??null,
+      issue:run.issue,stage:run.stage as Stage,startedAt:run.startedAt,exitCode:run.exitCode,
+      lastMessage:run.terminationCause??run.state,logFile:'',
+    }))
+    runs.push(...entry.logs.map(log => {
       const rows = rowsOf(log.body)
       const start = rows.find(row => row.event === 'start')
       const summary = summariseLog(log.body)
@@ -113,10 +127,10 @@ export function buildStatus(input: {
         stage: start?.stage ?? 'implement',
         startedAt: start?.at ?? '',
         exitCode: summary.exitCode,
-        lastMessage: summary.lastMessage,
+        lastMessage: 'legacy unverified run',
         logFile: log.file,
       }
-    })
+    }))
     return {
       repo: entry.repo,
       ...(entry.shared ? { shared: entry.shared } : {}),
@@ -156,7 +170,7 @@ export function renderStatus(report: StatusReport): string {
       lines.push(`  worktree ${worktree.branch} (${worktree.state}) ${worktree.path}`)
     }
     for (const run of repo.runs) {
-      const how = run.exitCode === null ? 'in flight' : `exit ${run.exitCode}`
+      const how = run.state ? `${run.terminationCause ?? run.state}${run.pendingDelivery ? ` · ${run.pendingDelivery} deliveries pending` : ''}` : 'legacy unverified'
       lines.push(`  run #${run.issue} ${run.stage} — ${how}${run.lastMessage ? ` — ${run.lastMessage}` : ''}`)
     }
   }
@@ -264,10 +278,12 @@ export async function runStatusCli(argv: string[], home: string, deps?: Partial<
       } catch (error) { policy = { ...policy, refusal: (error as Error).message }; snapshot = { state: 'unavailable', sourceCommit: null, policyDigest: null, validatedAt: null, ageSeconds: null, reason: (error as Error).message } }
     }
     const shared = config.executionMode === 'shared'
-      ? deps?.sharedTarget ? await readSharedStatus(await deps.sharedTarget(entry.repo, config), [entry.repo])
-        : { head: null, tasks: [], refusal: 'verified coordination reader unavailable' }
+      ? await (async()=>{try{return await readSharedStatus(await (deps?.sharedTarget??verifiedSharedTarget)(entry.repo,config),[entry.repo])}catch{return{head:null,tasks:[],refusal:'verified coordination reader unavailable'}}})()
       : undefined
+    let durableRuns:RunRecord[]=[],runRefusal:string|undefined
+    try { durableRuns=(await readRuns(runsRoot(home))).filter(run=>run.repo===entry.repo) } catch { runRefusal='durable run records unavailable; preserved for reconciliation' }
     repos.push({
+      durableRuns,runRefusal,
       shared,
       snapshot,
       repo: entry.repo,

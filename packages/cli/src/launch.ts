@@ -24,6 +24,8 @@ export interface LaunchInput {
 }
 
 export interface LaunchPlan {
+  // Set only by the authority/qualification controller; never inferred from environment flags.
+  approvedRunInput?: import('./runs.ts').RunInput
   command: string
   args: string[]
   env: Record<string, string>

@@ -72,3 +72,10 @@ test('the run record carries the issue\'s rework when the comments can be read, 
   await recordRun(input, { home: blind, hostname: 'mini', policy, rework: async () => { throw new Error('HTTP 403') } })
   expect((await listOutbox(blind))[0]!.records[0]).toMatchObject({ review_rounds: null, fix_rounds: null, handbacks: null })
 })
+
+test('terminal timeout overrides vendor success in capture',async()=>{
+  const {fromClaudeHeadless,fromCodexExec}=await import('../src/stats/capture.ts')
+  const context={repo:'acme/app',ts:'2026-09-08T08:00:00Z',terminationCause:'timed-out' as const}
+  expect(fromClaudeHeadless({is_error:false},context).outcome).toBe('failed')
+  expect(fromCodexExec([{type:'turn.completed',usage:{input_tokens:1}}],context).outcome).toBe('failed')
+})

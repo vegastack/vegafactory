@@ -13,6 +13,10 @@ export interface StatusWorktree {
 }
 
 export interface StatusRun {
+  state?: string
+  terminationCause?: string
+  pendingDelivery?: number
+  lastError?: string
   issue: number | null
   stage: string
   startedAt: string
@@ -106,6 +110,7 @@ function toReport(parsed: unknown): StatusReport | null {
         runs: (Array.isArray(row.runs) ? row.runs : []).map((entryRun) => {
           const r = (entryRun ?? {}) as Record<string, unknown>
           return {
+            state:text(r.state),terminationCause:text(r.terminationCause),pendingDelivery:count(r.pendingDelivery),lastError:text(r.lastError),
             issue: number(r.issue), stage: text(r.stage), startedAt: text(r.startedAt),
             exitCode: number(r.exitCode), lastMessage: text(r.lastMessage), logFile: text(r.logFile),
           }

@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { runCheckpointCli } from './checkpoints.ts'
 import { createHash, randomUUID } from 'node:crypto'
 import { constants as fsConstants } from 'node:fs'
 import { access, cp, lstat, mkdir, open, readFile, readdir, rename, rm, stat, writeFile } from 'node:fs/promises'
@@ -20,7 +21,7 @@ import { runWorktree, worktreeUsage } from './worktree.ts'
 type Agent = 'codex' | 'claude' | 'hermes'
 type AgentChoice = Agent | 'both' | 'all'
 type Mode = 'project' | 'global'
-type Command = 'add' | 'verify' | 'doctor' | 'remove' | 'list' | 'version' | 'help' | 'worktree' | 'sync' | 'dispatch' | 'service' | 'status' | 'stats' | 'dashboard' | 'guard'
+type Command = 'add' | 'verify' | 'doctor' | 'remove' | 'list' | 'version' | 'help' | 'worktree' | 'sync' | 'dispatch' | 'service' | 'status' | 'stats' | 'dashboard' | 'guard' | 'checkpoint'
 // Top-level verbs the factory reserves; they are named in usage and refuse until they land.
 const reservedTopLevel: readonly string[] = [] as const
 const installerVerbs: readonly string[] = ['add', 'verify', 'doctor', 'remove', 'list'] as const
@@ -73,6 +74,10 @@ Options:
   --json                                 machine-readable output (sync)
   --non-interactive
   --version
+
+Source checkpoints:
+  vegafactory checkpoint --run-id ID [--json] [--write]
+  Inspect saved progress; writing requires the recorded exact approved task intent.
 
 Worktrees (one feature, one worktree — the main checkout never leaves the default branch):
   vegafactory worktree <list|create|restore|remove|prune|status> [options]
@@ -143,7 +148,7 @@ function parse(argv: string[]): Options {
       if (!installerVerbs.includes(verb) && verb !== 'help' && verb !== 'version') throw new Error(`Unknown command: skills ${verb}`)
       command = verb as Command
     }
-    else if (head === 'worktree' || head === 'dispatch' || head === 'service' || head === 'status' || head === 'stats' || head === 'dashboard' || head === 'guard') return { command: head, all: false, dryRun: false, force: false, nonInteractive: false, json: false, rest: argv.splice(0) }
+    else if (head === 'worktree' || head === 'dispatch' || head === 'service' || head === 'status' || head === 'stats' || head === 'dashboard' || head === 'guard' || head === 'checkpoint') return { command: head, all: false, dryRun: false, force: false, nonInteractive: false, json: false, rest: argv.splice(0) }
     else if (reservedTopLevel.includes(head)) throw new Error(`${head} is not available yet — it lands in a later release of vegafactory`)
     else if (installerVerbs.includes(head)) throw new Error(`Unknown command: ${head} — installer verbs moved under the skills namespace: run "vegafactory skills ${head} …"`)
     else if (head === 'sync' || head === 'help' || head === 'version') command = head
@@ -807,6 +812,7 @@ async function main() {
     process.exitCode = await runDashboard({ rest, home: homedir(), version: packageVersion })
     return
   }
+  if (options.command === 'checkpoint') { process.exitCode=await runCheckpointCli(options.rest??[],homedir());return }
   if (options.command === 'status') {
     const rest = options.rest ?? []
     if (rest[0] === 'help') return console.log(statusUsage())

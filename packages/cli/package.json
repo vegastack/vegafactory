@@ -36,7 +36,7 @@
   },
   "scripts": {
     "sync": "bun scripts/sync-skill.mjs",
-    "build": "node -e \"require('node:fs').rmSync('dist/dashboard-artifact.json', {force:true})\" && bun run sync && bun build src/index.ts --target=node --outfile dist/index.js && chmod +x dist/index.js",
+    "build": "node -e \"require('node:fs').rmSync('dist/dashboard-artifact.json', {force:true})\" && bun run sync && bun build src/index.ts --target=node --outfile dist/index.js && bun build src/run-wrapper.ts --target=node --outfile dist/run-wrapper.js && chmod +x dist/index.js",
     "lint": "bun scripts/lint.mjs",
     "typecheck": "bunx tsc -p tsconfig.json --noEmit",
     "test": "bun test test",

@@ -1,3 +1,4 @@
+import { createRun, readRun, transitionRun, runsRoot, type RunRecord, type TerminalCause, type RunInput } from './runs.ts'
 import { resolveLabels, resolveState } from '../../../skills/dev/dev-setup/scripts/effective-policy.mjs'
 import type { LabelMap } from './config.ts'
 // The dispatcher: what a tick would do, and then doing it. Everything that decides is a pure
@@ -8,7 +9,7 @@ import type { LabelMap } from './config.ts'
 // Refusals are first-class output, never silence: a repo that is skipped says why, in the JSON and
 // in the log, because "nothing happened" and "the ship guard is unwired" look identical otherwise.
 import { spawn, spawnSync } from 'node:child_process'
-import { createHash } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import { acquireClaim, releaseClaim, inspectClaim, processIdentity, type Claim } from './claims.ts'
 import { acquireSharedTask, transitionSharedTask, type EffectiveMachine, type MachineSession, type VerifiedCandidate, type SharedClaim, type TaskTransition } from './shared-claims.ts'
 import { existsSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
@@ -536,6 +537,8 @@ export function tailLines(text: string, count: number): string {
 export function failureComment(input: {
   issue: number
   stage: Stage
+  runId?: string
+  terminationCause?: TerminalCause
   exitCode: number | null
   timedOut: boolean
   log: string
@@ -543,23 +546,12 @@ export function failureComment(input: {
   at: string
 }): string {
   const how = input.timedOut ? 'timed out' : `failed with exit ${input.exitCode ?? 'unknown'}`
-  return [
-    '<!-- vsk:v1 type=handback -->',
-    '## Hand-back',
-    '',
-    `The headless ${input.stage} run ${how} at ${input.at}. Nothing was handed back as finished, and no label beyond this one was moved.`,
-    '',
-    `The worktree is left in place at \`${input.worktree}\` — whatever the run had done is still there, and the ledger comment is the last checkpoint it reached.`,
-    '',
-    'Last 40 log lines (secrets redacted by pattern):',
-    '',
-    '```',
-    redact(tailLines(input.log, 40)),
-    '```',
-  ].join('\n')
+  return ['<!-- vsk:v1 type=handback -->','## Hand-back','',`The ${input.stage} execution ${how}. Saved work is preserved; reconciliation is required.`].join('\n')
 }
 
 export interface RunOutcome {
+  runId?: string
+  terminationCause?: TerminalCause
   exitCode: number | null
   timedOut: boolean
   logFile: string
@@ -578,7 +570,10 @@ export interface ExecuteDeps {
   now: () => Date
   gh: (args: string[], options?: GhOptions) => Promise<string>
   git: (args: string[], cwd: string) => Promise<{ ok: boolean; message: string }>
-  timeoutMs: number
+  timeoutMs: number | null
+  wrapperPath: string
+  runInput: RunInput
+  preparedRun: RunRecord
 }
 
 function defaultGit(args: string[], cwd: string): Promise<{ ok: boolean; message: string }> {
@@ -631,133 +626,76 @@ export async function executeRun(
   deps?: Partial<ExecuteDeps>,
 ): Promise<RunOutcome> {
   const now = deps?.now ?? (() => new Date())
-  const gh = deps?.gh ?? ((args: string[], ghOptions?: GhOptions) => ghText(args, ghOptions))
-  const git = deps?.git ?? defaultGit
-  const timeoutMs = deps?.timeoutMs ?? 6 * 60 * 60 * 1000
-  let startedAt = now()
-  const file = logPath(config, run.repo, run.issue, startedAt)
-  // Status discovers only .jsonl run logs. Keep every preparation/refusal audit,
-  // but expose a run log only after the OS acknowledges an actual process.
-  const attemptFile = `${file}.attempt`
-  let destination = attemptFile
-  await mkdir(dirname(file), { recursive: true })
-  await refuseSymlink(file)
-  await refuseSymlink(attemptFile)
-  const lines: string[] = []
-  const record = (row: Record<string, unknown>): void => { lines.push(JSON.stringify(row)) }
-  // One append at a time, chained: two concurrent appends can land out of order, and a log whose
-  // lines are shuffled is worse than one that lags.
-  let writing: Promise<void> = Promise.resolve()
-  const flush = (): Promise<void> => {
-    writing = writing.then(async () => {
-      if (lines.length === 0) return
-      const pending = lines.splice(0, lines.length)
-      await appendFile(destination, `${pending.join('\n')}\n`)
-    })
-    return writing
+  const timeoutMs = deps?.timeoutMs
+  if(timeoutMs != null && (!Number.isFinite(timeoutMs)||timeoutMs<=0))throw Error('invalid explicit execution timeout')
+  const root=runsRoot(config.home),startedAt=now().toISOString()
+  const gitHead=spawnSync('git',['rev-parse','HEAD'],{cwd:plan.cwd,encoding:'utf8'}).stdout?.trim()??''
+  const branch=spawnSync('git',['symbolic-ref','--short','HEAD'],{cwd:plan.cwd,encoding:'utf8'}).stdout?.trim()??''
+  let record:RunRecord=deps?.preparedRun??await createRun(deps?.runInput??{root,repo:run.repo,issue:run.issue,parent:null,checkout:plan.cwd,branch,baseSha:gitHead,headSha:gitHead||null,stage:run.stage,harness:plan.command,model:'unknown',effort:'unknown',execution:null,approvalBindings:[],recordBinding:null,approvalRefs:[],policyDigest:plan.guardPolicyDigest??'',claimToken:randomUUID(),startedAt,taskKey:{repo:run.repo,issue:run.issue,taskId:'unknown',scopeDigest:''},activeElapsedMs:null,taskOwner:null,agentAccountOwner:null,accountRef:null,waitReason:null,machine:null,sharedClaim:null,checkpoint:null,remoteEffectCoverage:plan.remoteEffectCoverage??{kind:'unmanaged-possible',reasonCode:'unqualified-local-attempt'}})
+  const recordRoot=deps?.runInput?.root??root
+  const file=join(recordRoot,record.runId,'events.jsonl')
+  const event=async(event:string,fields:Record<string,unknown>={})=>{await appendFile(file,JSON.stringify({at:now().toISOString(),event,...fields})+'\n',{mode:0o600})}
+  let mutations=Promise.resolve()
+  const transition=(patch:Parameters<typeof transitionRun>[2])=>{mutations=mutations.then(async()=>{record=await transitionRun(record.runId,record.generation,patch,recordRoot)});return mutations}
+  await event('prepared')
+  const refuse=async(reason:string):Promise<RunOutcome>=>{await transition({state:'terminal',terminationCause:'spawn-failed',finishedAt:now().toISOString()});await event('launch-refused',{reasonCode:'launch-refused'});return{runId:record.runId,started:false,refusal:reason,terminationCause:'spawn-failed',exitCode:null,timedOut:false,logFile:file,pushed:false,handedBack:false}}
+  if(options.signal?.aborted)return refuse('cancelled before launch')
+  if(run.parallel?.length)return refuse('parallel launch requires child gateway')
+  if(!['darwin','linux'].includes(process.platform))return refuse('owned process cancellation unsupported on this platform')
+  if(plan.command==='claude'||plan.command==='codex'){
+    const controls=validateManagedLaunch(plan,await inspectManagedHarness(plan));if(!controls.ok)return refuse('managed launch configuration refused')
+    const guard=await shipGuardWired(plan.cwd,plan.command,{home:config.home,repo:run.repo,policyDigest:plan.guardPolicyDigest});if(!guard.wired)return refuse('prepared guard refused')
+    if(!record.execution || !record.approvalBindings.length)return refuse('verified execution and approval provenance unavailable')
   }
-  record({ at: startedAt.toISOString(), event: 'prepared', repo: run.repo, issue: run.issue, stage: run.stage, command: plan.command, args: plan.args, cwd: plan.cwd })
-  await flush()
-
-  const refuseLaunch = async (reason: string): Promise<RunOutcome> => {
-    record({ at: now().toISOString(), event: 'launch-refused', reason })
-    await flush()
-    return { started: false, refusal: reason, exitCode: null, timedOut: false, logFile: attemptFile, pushed: false, handedBack: false }
-  }
-  if (options.signal?.aborted) return refuseLaunch('GitHub read cancelled before launch')
-  if (run.parallel?.length) return refuseLaunch('parallel child execution requires the checked child gateway; preparation-only launch descriptions do not qualify')
-  if (plan.command === 'claude' || plan.command === 'codex') {
-    const controls = validateManagedLaunch(plan, await inspectManagedHarness(plan))
-    if (!controls.ok) return refuseLaunch(`managed launch refused: ${controls.problems.join('; ')}`)
-    // Log I/O and metadata inspection above can yield; repeat the real guard/compiler check
-    // here so the next operation is the actual spawn, not another awaited preparation step.
-    const guard = await shipGuardWired(plan.cwd, plan.command, { home: config.home, repo: run.repo, policyDigest: plan.guardPolicyDigest })
-    if (!guard.wired) return refuseLaunch(`prepared guard refused immediately before spawn: ${guard.detail}`)
-  }
-
-  if (options.signal?.aborted) return refuseLaunch('GitHub read cancelled before launch')
-  let tail = ''
-  // The harness's own machine-readable result: `claude -p --output-format json` prints one object,
-  // `codex exec --json` one event per line. Capped at 2 MB, keeping the END, because both formats
-  // put what the record needs last.
-  let stdout = ''
-  let started = false
-  const outcome = await new Promise<{ exitCode: number | null; timedOut: boolean }>(resolve => {
-    const child = spawn(plan.command, plan.args, { cwd: plan.cwd, env: { ...process.env, ...plan.env }, stdio: ['ignore', 'pipe', 'pipe'] })
-    child.once('spawn', () => {
-      started = true
-      startedAt = now()
-      destination = file
-      record({ at: startedAt.toISOString(), event: 'start', repo: run.repo, issue: run.issue, stage: run.stage, command: plan.command, args: plan.args, cwd: plan.cwd, attemptFile })
-      void flush()
-      options.onSpawn?.()
-    })
-    let timedOut = false
-    const timer = setTimeout(() => { timedOut = true; child.kill('SIGTERM') }, timeoutMs)
-    for (const stream of ['stdout', 'stderr'] as const) {
-      child[stream].setEncoding('utf8')
-      child[stream].on('data', (chunk: string) => {
-        if (stream === 'stdout') {
-          stdout = `${stdout}${chunk}`
-          if (stdout.length > 2_000_000) stdout = stdout.slice(-2_000_000)
+  const wrapperPath=deps?.wrapperPath??join(dirname(fileURLToPath(import.meta.url)),'run-wrapper.js')
+  if(!existsSync(wrapperPath))return refuse('packaged run wrapper unavailable')
+  let started=false,stdout='',cause:TerminalCause|null=null,exitCode:number|null=null,identity:Awaited<ReturnType<typeof processIdentity>>|null=null
+  let activeStart=performance.now()
+  await new Promise<void>(resolve=>{
+    const child=spawn(process.execPath,[wrapperPath,join(recordRoot,record.runId),record.runId],{cwd:plan.cwd,env:{...process.env},detached:true,stdio:['ignore','pipe','pipe','ipc']})
+    let finalizing=false,timeout:ReturnType<typeof setTimeout>|undefined,kill:ReturnType<typeof setTimeout>|undefined
+    const heartbeat=setInterval(()=>{if(child.connected)child.send({kind:'heartbeat'});if(started)void transition({activeElapsedMs:Math.max(0,performance.now()-activeStart)}).catch(()=>cancel('termination-unconfirmed'))},5000)
+    const cancel=(reason:TerminalCause)=>{cause??=reason;if(child.connected)child.send({kind:'cancel'});if(identity&&!kill)kill=setTimeout(()=>{try{process.kill(-identity!.pid,'SIGKILL')}catch{}},5000)}
+    const aborted=()=>cancel('cancelled');options.signal?.addEventListener('abort',aborted,{once:true})
+    let messages=Promise.resolve()
+    child.on('message',(message:unknown)=>{messages=messages.then(async()=>{
+      const m=message as {kind:string;runId:string;identity:Awaited<ReturnType<typeof processIdentity>>;pgid:number;exitCode:number|null;cause:TerminalCause}
+      if(m.kind==='handshake'){
+        if(m.runId!==record.runId||m.identity.pid!==child.pid||m.pgid!==child.pid)throw Error('wrapper identity mismatch')
+        const actual=await processIdentity(child.pid!);if(JSON.stringify(actual)!==JSON.stringify(m.identity))throw Error('wrapper identity changed')
+        identity=actual;await transition({pid:actual.pid,processStartId:actual.startId,processGroupId:m.pgid,processIdentity:actual})
+        if(options.signal?.aborted){cancel('cancelled');return}
+        child.send({kind:'acknowledge',command:plan.command,args:plan.args,cwd:plan.cwd,env:{...process.env,...plan.env}})
+      }else if(m.kind==='spawn'){
+        activeStart=performance.now();started=true;await transition({state:'running'});await event('start');options.onSpawn?.()
+        if(timeoutMs!=null)timeout=setTimeout(()=>cancel('timed-out'),timeoutMs)
+      }else if(m.kind==='result'){exitCode=m.exitCode;cause??=m.cause}
+    }).catch(()=>{cancel('termination-unconfirmed')})})
+    child.stdout!.setEncoding('utf8');child.stdout!.on('data',(chunk:string)=>{stdout=(stdout+chunk).slice(-2_000_000)})
+    child.stderr!.resume() // No transcript, argv or raw error tail is persisted.
+    const finish=async()=>{if(finalizing)return;finalizing=true;await messages;clearInterval(heartbeat);if(timeout)clearTimeout(timeout);if(kill)clearTimeout(kill);options.signal?.removeEventListener('abort',aborted)
+      if(identity){
+        const groupAlive=()=>{try{process.kill(-identity!.pid,0);return true}catch(e){return (e as NodeJS.ErrnoException).code!=='ESRCH'}}
+        if(groupAlive()){
+          // Parent owns this still-reserved group from the verified handshake. Never signal a recovered PID blindly.
+          try{process.kill(-identity.pid,'SIGTERM')}catch{}
+          const grace=performance.now()+5000;while(groupAlive()&&performance.now()<grace)await new Promise(r=>setTimeout(r,25))
+          if(groupAlive())try{process.kill(-identity.pid,'SIGKILL')}catch{}
+          const until=performance.now()+2000;while(groupAlive()&&performance.now()<until)await new Promise(r=>setTimeout(r,25))
+          if(groupAlive())cause='termination-unconfirmed'
         }
-        tail = `${tail}${chunk}`.split('\n').slice(-200).join('\n')
-        record({ at: new Date().toISOString(), stream, text: chunk })
-        void flush()
-      })
+      }
+      cause??=started?'interrupted':'spawn-failed';resolve()
     }
-    child.on('error', error => {
-      clearTimeout(timer)
-      record({ at: new Date().toISOString(), stream: 'stderr', text: `could not start ${plan.command}: ${(error as Error).message}` })
-      resolve({ exitCode: null, timedOut })
-    })
-    child.on('close', code => {
-      clearTimeout(timer)
-      resolve({ exitCode: code, timedOut })
-    })
+    child.once('error',()=>{cause='spawn-failed';void finish()});child.once('exit',()=>void finish())
   })
+  const terminalCause:TerminalCause=(cause as TerminalCause|null)??'interrupted'
+  await transition({state:'terminal',terminationCause:terminalCause,exitCode,finishedAt:now().toISOString(),activeElapsedMs:started?Math.max(0,performance.now()-activeStart):0})
+  await event('exit',{terminationCause:terminalCause,exitCode})
+  try { await (await import('./checkpoints.ts')).flushRunCheckpoint(record,config) } catch { await event('checkpoint-pending',{reasonCode:'checkpoint-unavailable'}) }
+  // Source and public delivery require a separately durable, exact action intent. Process completion grants none.
+  return{runId:record.runId,started,terminationCause:terminalCause,exitCode,timedOut:terminalCause==='timed-out',logFile:file,pushed:false,handedBack:false,stdout,startedAt,finishedAt:record.finishedAt!}
 
-  if (!started) return refuseLaunch('harness process did not start')
-  const push = await git(['push', '-u', 'origin', 'HEAD'], plan.cwd)
-  if (!push.ok) record({ at: new Date().toISOString(), event: 'push-failed', message: redact(push.message) })
-
-  let handedBack = false
-  const failed = outcome.timedOut || outcome.exitCode !== 0
-  if (failed) {
-    const body = failureComment({
-      issue: run.issue,
-      stage: run.stage,
-      exitCode: outcome.exitCode,
-      timedOut: outcome.timedOut,
-      log: tail,
-      worktree: plan.cwd,
-      at: new Date().toISOString(),
-    })
-    try {
-      await gh(['issue', 'comment', String(run.issue), '--repo', run.repo, '--body-file', '-'], { input: body })
-      const edit = ['issue', 'edit', String(run.issue), '--repo', run.repo, '--add-label', 'needs-operator', '--remove-label', 'working']
-      if (options.operator) edit.push('--add-assignee', options.operator)
-      await gh(edit)
-      handedBack = true
-    } catch (error) {
-      // A hand-back that cannot be posted must not take the dispatcher down with it; the log is
-      // then the only record, and `vegafactory status` surfaces the run as failed either way.
-      record({ at: new Date().toISOString(), event: 'handback-failed', message: redact((error as Error).message) })
-    }
-  }
-  record({ at: new Date().toISOString(), event: 'exit', exitCode: outcome.exitCode, timedOut: outcome.timedOut, pushed: push.ok, handedBack })
-  await flush()
-  return {
-    started: true,
-    exitCode: outcome.exitCode,
-    timedOut: outcome.timedOut,
-    logFile: file,
-    pushed: push.ok,
-    handedBack,
-    stdout,
-    startedAt: startedAt.toISOString(),
-    finishedAt: new Date().toISOString(),
-  }
 }
 
 // --- statistics -------------------------------------------------------------------------
@@ -770,6 +708,7 @@ export interface RunOutcomeInput {
   harness: Harness
   stdout: string
   exitCode: number
+  terminationCause?: TerminalCause
   startedAt: string
   finishedAt: string
   repo: string
@@ -824,7 +763,7 @@ export async function recordRun(
     parent: input.parent,
     // The exit code is the authority on failure: a harness that printed a happy result object and
     // then died is a failed run, whatever its own JSON claims.
-    outcome: input.exitCode !== 0 ? ('failed' as const) : undefined,
+    outcome: input.terminationCause && input.terminationCause !== 'succeeded' || input.exitCode !== 0 ? ('failed' as const) : undefined,
   }
   let record: StatsRecord
   try {
@@ -949,6 +888,7 @@ export interface TickDeps {
   // dependency rather than in a second copy here.
   parentCandidates: (repo: string, repoPath: string, ready: BoardIssue[], operators: string[]) => Promise<ParentCandidate[]>
   tracker: RunTracker
+  quotaRecovery?: import('./runs.ts').QuotaRecoveryController
   harnessMetadata: (plan: LaunchPlan) => HarnessMetadata | Promise<HarnessMetadata>
   // #138 supplies fresh authority locators and the durable wrapper; missing adapters refuse.
   sharedAdmission?: (input: { run: PlannedRun; entry: RepoEntry; policy: RepoPolicy; approvalBindings: NonNullable<RunReport['approvalBindings']>; bindings: NonNullable<RunReport['bindings']> }) => Promise<{ machine: EffectiveMachine; session: MachineSession; candidate: VerifiedCandidate; operationId: string }>
@@ -1050,6 +990,17 @@ export async function releaseLock(path: string, expected?: Claim): Promise<void>
 // The worktree the run will happen in. Creating it is the packaged script's job — the CLI is a
 // caller here, exactly as `vegafactory worktree` is, so one removal and creation rule exists.
 export function defaultEnsureWorktree(repoPath: string, issue: number, title: string): Promise<WorktreeTarget> {
+  const inventory = spawnSync('git', ['worktree', 'list', '--porcelain'], { cwd: repoPath, encoding: 'utf8' })
+  if (inventory.status !== 0) throw Error('worktree inventory unavailable')
+  const matches = inventory.stdout.split('\n\n').map(block => ({ path: /^worktree (.+)$/m.exec(block)?.[1], branch: /^branch refs\/heads\/(.+)$/m.exec(block)?.[1] }))
+    .filter(row => row.path && row.branch && new RegExp(`(?:^|/)${issue}-`).test(row.branch))
+  if (matches.length > 1) throw Error('multiple worktrees match repository and issue; takeover requires reconciliation')
+  if (matches.length === 1) {
+    const row=matches[0]!, inferred=worktreeFor(repoPath,issue,title)
+    const dirty=spawnSync('git',['status','--porcelain'],{cwd:row.path!,encoding:'utf8'})
+    if(dirty.status!==0||dirty.stdout.trim())throw Error('existing checkout has user edits; verified takeover handover required')
+    return Promise.resolve({...inferred,path:row.path!,branch:row.branch!,slug:row.branch!.replace(new RegExp(`^.*?${issue}-`),'')})
+  }
   const target = worktreeFor(repoPath, issue, title)
   const script = process.env.VSK_WORKTREE_SCRIPT
     || join(dirname(dirname(fileURLToPath(import.meta.url))), 'skill', 'dev-implement', 'scripts', 'worktree.mjs')
@@ -1177,6 +1128,15 @@ export async function runTick(
   const gh = deps?.gh ?? ((args: string[], ghOptions?: GhOptions) => ghText(args, ghOptions))
   const now = deps?.now ?? (() => new Date())
   const shipGuard = deps?.shipGuard ?? shipGuardWired
+  if (config.executionMode === 'shared') deps = { ...sharedRunAdapters(config), ...deps }
+  if(!options.dryRun) { const {readRuns}=await import('./runs.ts');const {flushRunCheckpoint}=await import('./checkpoints.ts');for(const record of await readRuns(runsRoot(config.home)))if(record.checkpointIntent)try{await flushRunCheckpoint(record,config)}catch{/* Preserve current local source and its durable pending intent. */} }
+  if(!options.dryRun&&deps?.quotaRecovery){
+    const {readRuns,resumeSubscriptionWork}=await import('./runs.ts'),quotaTracker=deps.tracker??processTracker
+    for(const saved of await readRuns(runsRoot(config.home)))if(saved.waitReason==='subscription-quota'){
+      const key=`${saved.repo}#${saved.issue}`
+      if(!quotaTracker.has(key)){const done=resumeSubscriptionWork(runsRoot(config.home),saved.runId,deps.quotaRecovery,options.signal).then(()=>{}).finally(()=>quotaTracker.delete(key));quotaTracker.set(key,{repo:saved.repo,issue:saved.issue,done})}
+    }
+  }
   const ensure = deps?.ensureWorktree ?? defaultEnsureWorktree
   const execute = deps?.execute ?? ((run, plan, cfg, opts) => executeRun(run, plan, cfg, opts))
   const tracker = deps?.tracker ?? processTracker
@@ -1327,6 +1287,11 @@ export async function runTick(
       } catch (error) {
         refusals.push({ repo: entry.repo, issue: run.issue, reason: `#${run.issue}: launch preflight refused — ${(error as Error).message}` })
         continue
+      }
+      if(!options.dryRun){
+        const {reconcileRuns}=await import('./runs.ts')
+        const existing=(await reconcileRuns(runsRoot(config.home))).filter(r=>r.repo===run.repo&&r.issue===run.issue&&(r.state==='running'||r.state==='interrupted'||r.state==='prepared'&&(r.pid!==null||existsSync(join(runsRoot(config.home),r.runId,'events.jsonl'))||existsSync(join(runsRoot(config.home),r.runId,'handshake.json')))))
+        if(existing.length){refusals.push({repo:run.repo,issue:run.issue,reason:'saved unfinished execution requires verified recovery; duplicate launch refused'});continue}
       }
       let issueOutcome: string
       try {
@@ -1493,6 +1458,7 @@ export async function runTick(
             harness: runStage.harness,
             stdout: outcome.stdout ?? '',
             exitCode: outcome.exitCode ?? 1,
+            terminationCause: outcome.terminationCause,
             startedAt: outcome.startedAt ?? now().toISOString(),
             finishedAt: outcome.finishedAt ?? now().toISOString(),
             repo: entry.repo,
@@ -1745,3 +1711,104 @@ const defaultStatsGit: GitRunner = (args, cwd) => new Promise(resolve => {
   child.on('error', error => resolve({ code: 1, stdout, stderr: `${stderr}${(error as Error).message}` }))
   child.on('close', code => resolve({ code: code ?? 1, stdout, stderr }))
 })
+
+// Production shared adapters consume the configured immutable policy. Missing qualification
+// remains a refusal before acquisition; controlled transaction fixtures do not activate a fleet.
+const sharedMachineContexts=new WeakMap<import('./shared-claims.ts').CoordinationTarget,EffectiveMachine>()
+export async function verifiedSharedTarget(repo:string,config:FactoryConfig):Promise<import('./shared-claims.ts').CoordinationTarget>{
+  const {resolveMachinePolicy}=await import('../../../skills/dev/dev-setup/scripts/effective-policy.mjs')
+  const {readHostBinding}=await import('./machine-identity.ts')
+  const {githubCoordinationProvider}=await import('./shared-claims.ts')
+  const entry=config.repos.find(row=>row.repo===repo);if(!entry)throw Error('repository is not configured')
+  const devMd=await readFile(join(entry.path,'.vegastack/dev.md'),'utf8')
+  const settingsPath=config.settingsPath??factoryConfigPath(config.home)
+  const policy=loadConfiguredPolicy({home:config.home,repo,devMd,settingsPath})
+  if(!policy.ok)throw Error('current machine policy unavailable')
+  const settings=await readSettingsFile(settingsPath)
+  const bootstrap=settings.settings.machine as {id?:string;installationId?:string;group?:string}|undefined
+  if(!bootstrap)throw Error('machine registration unavailable')
+  const login=JSON.parse(await ghText(['api','user'],{timeoutMs:10_000})) as {login:string}
+  const host=await readHostBinding()
+  const resolution=resolveMachinePolicy({policy:policy.policy,machineId:bootstrap.id,installationId:bootstrap.installationId,hostBindingDigest:host.digest,executionLogin:login.login})
+  if(!resolution.ok||!resolution.machine?.allowedRepositories.includes(repo)||resolution.machine.group!==bootstrap.group)throw Error('machine identity or repository scope refused')
+  const machine=resolution.machine as EffectiveMachine
+  const target:import('./shared-claims.ts').CoordinationTarget={host:'github.com',...machine.coordination,localRoot:join(config.home,'.vegastack','coordination'),provider:githubCoordinationProvider(),
+    verifyCandidate:async(candidate,current,session)=>{
+      if(current.id!==machine.id||current.policyDigest!==machine.policyDigest||session.hostBindingDigest!==host.digest||candidate.repo!==repo||candidate.repositoryNodeId!==machine.repositoryIds[repo])throw Error('shared candidate identity mismatch')
+      const record=await readRun(runsRoot(config.home),candidate.runId)
+      if(!record.execution||record.state!=='prepared'||JSON.stringify(record.approvalBindings)!==JSON.stringify(candidate.approvalBindings)||record.taskKey.scopeDigest!==candidate.scopeDigest)throw Error('shared prepared candidate differs')
+      if(JSON.stringify(await processIdentity())!==JSON.stringify(session.identity))throw Error('shared session process identity differs')
+      await (await import('./shared-claims.ts')).resolveEvidence(target,record.execution.qualification)
+    },
+    verifyTransition:async(task,transition)=>{
+      if(task.repo!==repo||task.machineId!==machine.id)throw Error('shared transition owner mismatch')
+      if(transition.kind==='block'&&transition.stopProof===null)return
+      throw Error('verified execution/recovery transition evidence unavailable')
+    },
+    verifyEvidence:async()=>{throw Error('qualified evidence verifier unavailable')},
+  }
+  sharedMachineContexts.set(target,machine)
+  return target
+}
+export function sharedRunAdapters(config:FactoryConfig):Pick<TickDeps,'sharedAdmission'|'persistSharedRun'|'executeShared'|'finishSharedRun'>{
+  return{
+    sharedAdmission:async input=>{
+      const target=await verifiedSharedTarget(input.entry.repo,config)
+      const {bindVerifiedApprovalSources}=await import('./runs.ts')
+      const script=process.env.VSK_PREFLIGHT_SCRIPT??join(dirname(dirname(fileURLToPath(import.meta.url))),'skill','dev-implement','scripts','preflight.mjs')
+      const owner=await import(pathToFileURL(script).href),reads:unknown[]=[]
+      const readJson=async(args:string[])=>{const result=await boundedGhJson(ghText,args,readBudget());reads.push(result);return result}
+      const devMd=await readFile(join(input.entry.path,'.vegastack/dev.md'),'utf8')
+      const checked=await owner.gatherAndEvaluate({repo:input.run.repo,issue:String(input.run.issue),stage:input.run.stage==='plan'?'plan':'implement',expect:input.run.stage==='plan'?'needs-plan':input.run.stage==='corrections'?'for-operator':'ready'},{readJson,devMd,configuredPolicy:loadConfiguredPolicy({home:config.home,repo:input.run.repo,devMd,settingsPath:config.settingsPath})})
+      if(checked.blocks.length||JSON.stringify(checked.approvalBindings)!==JSON.stringify(input.approvalBindings))throw Error('shared current authority changed')
+      const authorities=await bindVerifiedApprovalSources(checked.approvalBindings,reads,readJson)
+      const coordination=await import('./shared-claims.ts'),{readRuns}=await import('./runs.ts'),{readBootIdentityDigest}=await import('./machine-identity.ts')
+      const stage=stagePolicy(input.policy,input.run.stage),machine=sharedMachineContexts.get(target)!
+      const records=(await readRuns(runsRoot(config.home))).filter(r=>r.repo===input.run.repo&&r.issue===input.run.issue&&r.state==='prepared'&&r.execution&&r.harness===stage.harness&&r.model===stage.model&&r.effort===stage.effort&&JSON.stringify(r.approvalBindings)===JSON.stringify(authorities)&&JSON.stringify(r.approvalRefs)===JSON.stringify(input.bindings))
+      if(records.length!==1)throw Error('unique qualified subscription run preparation unavailable; shared acquisition deferred')
+      const record=records[0]!
+      await coordination.resolveEvidence(target,record.execution!.qualification)
+      if(!record.machine||record.machine.id!==machine.id||record.machine.installationId!==machine.installationId||record.machine.hostBindingDigest!==machine.hostBindingDigest)throw Error('prepared machine identity differs')
+      const subject=await readJson(['api',`repos/${input.run.repo}/issues/${input.run.issue}`]) as {node_id:string}
+      const session:MachineSession={target,localRoot:target.localRoot,machineId:machine.id,installationId:machine.installationId,sessionId:record.machine.sessionId,hostBindingDigest:machine.hostBindingDigest,bootIdDigest:await readBootIdentityDigest(),identity:await processIdentity()}
+      const candidate:VerifiedCandidate={host:target.host,repo:record.repo,issue:record.issue,repositoryNodeId:machine.repositoryIds[record.repo]!,issueNodeId:subject.node_id,scopeDigest:record.taskKey.scopeDigest,approvalDigest:createHash('sha256').update(coordination.canonical(authorities)).digest('hex'),approvalBindings:authorities,runId:record.runId,stage:record.stage,paths:[],resources:[],independent:false,parentTaskKey:null,approvedTaskIds:[record.taskKey.taskId]}
+      return{machine,session,candidate,operationId:randomUUID()}
+    },
+    persistSharedRun:async(claim,planned,plan)=>{
+      const existing=await readRun(runsRoot(config.home),claim.runId)
+      const input=plan.approvedRunInput??{...existing,root:runsRoot(config.home)}
+      if(!input?.execution||!input.approvalBindings.length||input.repo!==planned.repo||input.issue!==planned.issue||input.checkout!==plan.cwd||input.execution.harness!==plan.command||input.root!==runsRoot(config.home))throw Error('verified shared run preparation unavailable')
+      const owner=await import('./shared-claims.ts')
+      const remote=await owner.readCoordination(claim.target),task=remote.tasks[claim.taskKey]
+      if(!task||task.ownerToken!==claim.ownerToken||task.runId!==claim.runId||task.generation!==claim.generation||JSON.stringify(task.approvalBindings)!==JSON.stringify(input.approvalBindings))throw Error('shared acquisition cannot be reconciled')
+      let record:RunRecord
+      try{record=await readRun(input.root,claim.runId);if(record.state!=='prepared'||record.sharedClaim&&record.sharedClaim.ownerToken!==claim.ownerToken||JSON.stringify(record.execution)!==JSON.stringify(input.execution))throw Error('shared run already attempted or differs')}
+      catch(error){if((error as NodeJS.ErrnoException).code!=='ENOENT')throw error;record=await createRun({...input,runId:claim.runId,sharedClaim:{taskKey:claim.taskKey,generation:claim.generation,ownerToken:claim.ownerToken,stateCommit:claim.stateCommit}})}
+      const recovery:import('./shared-claims.ts').RecoveryEnvelope={schemaVersion:2,taskKey:claim.taskKey,runId:record.runId,generation:claim.generation,approvalBindings:record.approvalBindings,recordBinding:record.recordBinding,scopeDigest:record.taskKey.scopeDigest,approvalDigest:task.approvalDigest,execution:record.execution!,checkpoint:record.checkpoint,completed:[],children:[],joins:[],effects:[],remoteEffectCoverage:record.remoteEffectCoverage}
+      const linked=await owner.transitionSharedTask({claim,operationId:randomUUID(),transition:{kind:'recovery',recovery}})
+      if(linked.kind!=='owned')throw Error('shared envelope acknowledgment unavailable')
+      Object.assign(claim,linked.claim)
+      await transitionRun(record.runId,record.generation,{sharedClaim:{taskKey:claim.taskKey,generation:claim.generation,ownerToken:claim.ownerToken,stateCommit:claim.stateCommit}},input.root)
+    },
+    executeShared:async(run,plan,cfg,options)=>{
+      const claim=options.sharedClaim;if(!claim)throw Error('shared execution requires a claim')
+      const root=runsRoot(cfg.home),record=await readRun(root,claim.runId)
+      const owner=await import('./shared-claims.ts'),snapshot=await owner.readCoordination(claim.target),task=snapshot.tasks[claim.taskKey]
+      if(record.sharedClaim?.ownerToken!==claim.ownerToken||!task?.recovery||task.ownerToken!==claim.ownerToken||task.generation!==claim.generation||task.runId!==record.runId||task.state!=='running'||JSON.stringify(task.recovery.execution)!==JSON.stringify(record.execution))throw Error('shared envelope or owner acknowledgment unavailable')
+      if(!record.execution)throw Error('shared execution identity unavailable')
+      await owner.resolveEvidence(claim.target,record.execution.qualification)
+      return executeRun(run,plan,cfg,options,{preparedRun:record,runInput:{...record,root}})
+    },
+    finishSharedRun:async(claim,outcome)=>{
+      const root=runsRoot(config.home)
+      const record=await readRun(root,claim.runId)
+      if(record.sharedClaim?.ownerToken!==claim.ownerToken||outcome?.runId&&outcome.runId!==record.runId)throw Error('shared finish identity mismatch')
+      if(!outcome||outcome.terminationCause==='termination-unconfirmed'){
+        if(record.state!=='terminal')await transitionRun(record.runId,record.generation,{state:'interrupted',terminationCause:'termination-unconfirmed'},root)
+      }
+      // Process success is not accepted task completion. #144/#139 must provide the verified
+      // stop and accepted-scope receipts; retaining the reservation is the truthful finish.
+      return{kind:'block',stopProof:null}
+    },
+  }
+}

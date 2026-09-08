@@ -353,3 +353,29 @@ SessionStart/Stop/SessionEnd use a bounded local adapter with explicit harness,6
 
 
 Codex0.153.4 applicability uses bounded read-only stdio hooks/config/requirements metadata APIs, with no thread, turn or hook execution. Only relevant sanitized fields survive; individual disabling and managed-only restrictions can refuse a locally present guard. Claude applicability currently remains unsupported and refuses: CLI version/help is not effective managed-settings evidence. Parallel dispatch also refuses until the checked child gateway is integrated. Neither refusal changes personal settings or permits native-memory fallback. Pre-spawn refusal preserves a pending corrections reaction, and configuration evidence retains explicit unmanaged-possible effect coverage.
+
+
+### Recoverable execution and source checkpoints
+
+Each execution attempt has a private record under `~/.vegastack/runs/<run-id>/`.
+The wrapper records its process identity before admitting the vendor command. Ordinary
+work has no elapsed-time cutoff. Cancellation allows five seconds for termination,
+then up to two seconds to verify forced cleanup. Unknown termination retains ownership
+and requires reconciliation; process completion does not imply accepted issue completion.
+Default event logs contain lifecycle events and reason codes, without raw streams or argv.
+
+`vegafactory status --json` reports durable state, terminal cause and pending delivery
+counts. Legacy logs remain unverified diagnostics. The same task resumes only after its
+original authority, ownership, saved source and execution setup are verified.
+
+`vegafactory checkpoint --run-id ID --json` inspects saved progress. `--write` requires
+an existing recorded exact checkpoint intent and freshly verified canonical approval.
+Checkpoint preparation checks all newly exported commits, merge ancestry, paths and blobs,
+including files removed by later commits. Delivery uses the approved task ref without force,
+implicit tags or submodule pushes, and remote readback precedes acknowledgment. A failed
+upload preserves local source. The dispatcher never stages an actively changing worktree.
+
+This source checkpoint does not qualify unattended operation. Shared execution refuses
+without the pinned execution-evidence verifier. Provider quota detection/availability,
+shared checkpoint/status effect controllers and complete recovery/acceptance qualification
+remain integration work; local fixtures do not establish those capabilities.

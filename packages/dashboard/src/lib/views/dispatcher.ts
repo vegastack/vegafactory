@@ -35,6 +35,6 @@ export function buildDispatcherView({ context, status, now }: {
     interval: status.data.dispatcher.interval,
     repos: status.data.repos,
     freshness: freshnessAt({ syncedAt: context.freshness.syncedAt, now, liveOk: true }),
-    reasons: [],
+    reasons: status.data.repos.flatMap(repo=>repo.runs.filter(run=>(run.pendingDelivery??0)>0||run.terminationCause==='termination-unconfirmed').map(run=>`${repo.repo} #${run.issue}: ${run.terminationCause??run.state??'unknown'}${run.pendingDelivery?` · ${run.pendingDelivery} deliveries pending`:''}`)),
   }
 }

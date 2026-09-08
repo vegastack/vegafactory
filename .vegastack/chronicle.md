@@ -2,6 +2,16 @@
 
 The project's story, newest first: what got built, why, and how it went — for the operator's future recall. Format home: the dev-chronicle skill.
 
+## 08-09-2026 — Execution survives its process ([#138](https://github.com/vegastack/vegafactory/issues/138))
+
+- **What:** Source work adds private run records, an owned cancellation wrapper, durable delivery markers, checkpoint history validation and visible pending status.
+- **Why:** Logs alone lost crash boundaries, timeout exit zero could look successful, and a generic push lacked exact action authority.
+- **How it went:** Harmless actual processes exercised timeout and forced cancellation; temporary bare repositories rejected removed secret and out-of-scope history before export. Source integration is partial: live qualification, quota-provider wiring, shared effect controllers and final acceptance remain open.
+- **Changed:** CLI lifecycle/checkpoint/status source · dashboard status data · focused filesystem/process/Git fixtures.
+- **Decisions:** none.
+
+— approved by (kmanojkumar) · built by codex · branch codex/productionization-133
+
 ## 08-09-2026 — Dispatch claims have an owner ([#137](https://github.com/vegastack/vegafactory/issues/137))
 
 - **What:** Local repository/watch claims now serialize mutation and retain exact owner tokens. Shared task state uses conditional commits, reservations and immutable recovery evidence.
