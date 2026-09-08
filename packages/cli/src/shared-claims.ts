@@ -688,6 +688,9 @@ async function pinnedJson(target: CoordinationTarget, head: string, path: string
     }
 }
 export async function readCoordination(target: CoordinationTarget): Promise<CoordinationSnapshot> {
+    return readCoordinationSnapshot(target, true);
+}
+async function readCoordinationSnapshot(target: CoordinationTarget, rememberHead: boolean, total = { bytes: 0 }): Promise<CoordinationSnapshot> {
     if (!/^[a-z0-9.-]+$/.test(target.host) || !repo(target.repository) || !node(target.repositoryId) || !branch(target.branch) || !sha(target.rootCommit) || !uuid(target.installationId))
         throw Error('invalid coordination target');
     const remote = await bounded(target.provider.branch(target));
@@ -697,7 +700,7 @@ export async function readCoordination(target: CoordinationTarget): Promise<Coor
     for (const base of new Set([target.rootCommit, ...(memory ? [memory.head] : [])]))
         if (!['ahead', 'identical'].includes(await bounded(target.provider.compare(target, base, remote.head))))
             throw Error('coordination history is not verified forward ancestry');
-    const total = { bytes: 0 }, index = parse<Index>(await pinnedJson(target, remote.head, 'coordination/index.json', 1024 * 1024, total), indexSchema, 'coordination index', 1024 * 1024);
+    const index = parse<Index>(await pinnedJson(target, remote.head, 'coordination/index.json', 1024 * 1024, total), indexSchema, 'coordination index', 1024 * 1024);
     if (index.installationId !== target.installationId || memory && index.revision < memory.revision)
         throw Error('coordination installation/revision rollback');
     const tasks: Record<string, TaskRecord> = {}, machines: Record<string, MachineRecord> = {};
@@ -726,6 +729,8 @@ export async function readCoordination(target: CoordinationTarget): Promise<Coor
     }
     if (Object.values(tasks).some(t => !machines[t.machineId]))
         throw Error('missing reserved machine');
+    if (!rememberHead)
+        return { head: remote.head, branchId: remote.id, index, tasks, machines };
     // Serialize local read pointers: concurrent older reads must not regress remembered state.
     const lock = await acquireClaim(localPath(target, 'read-pointer.lock'), await processIdentity());
     if (lock.kind !== 'owned')
@@ -740,6 +745,51 @@ export async function readCoordination(target: CoordinationTarget): Promise<Coor
         await releaseClaim(lock.claim);
     }
     return { head: remote.head, branchId: remote.id, index, tasks, machines };
+}
+// Inspection is a projection of retained private state, never completion/effect
+// qualification. Consumers must still retain every unresolved recovery/delivery ref.
+export type CoordinationTaskInspection = {
+    kind: 'active' | 'completed';
+    head: string;
+    task: TaskRecord;
+} | {
+    kind: 'absent';
+    head: string;
+} | {
+    kind: 'invalid-or-unavailable';
+    reason: string;
+};
+export async function inspectCoordinationTask(
+    target: CoordinationTarget,
+    key: string,
+    expected: Partial<Pick<TaskRecord, 'runId' | 'generation' | 'ownerToken' | 'machineId' | 'installationId' | 'sessionId' | 'scopeDigest'>> = {},
+): Promise<CoordinationTaskInspection> {
+    try {
+        const path = taskPath(key);
+        const bindings: Record<string, Check> = { runId: uuid, generation: positive, ownerToken: uuid, machineId: id, installationId: uuid, sessionId: uuid, scopeDigest: digest };
+        if (!expected || typeof expected !== 'object' || Array.isArray(expected) || Object.entries(expected).some(([name, value]) => !Object.hasOwn(bindings, name) || !bindings[name]!(value)))
+            throw Error('invalid expected task binding');
+        // Reuse the current-head, private branch, ancestry, bounds and full index
+        // consistency checks, without writing even the local accepted-head pointer.
+        const total = { bytes: 0 }, snapshot = await readCoordinationSnapshot(target, false, total);
+        const raw = snapshot.tasks[key] ?? await pinnedJson(target, snapshot.head, path, 256 * 1024, total);
+        if (raw === null) return { kind: 'absent', head: snapshot.head };
+        const task = parse<TaskRecord>(raw, recordSchema, 'retained task record');
+        const indexed = snapshot.index.active.some(row => row.taskKey === key);
+        if (task.taskKey !== key || task.host !== target.host || key !== taskKey(task.host, task.repositoryNodeId, task.issueNodeId) || indexed !== (task.state !== 'completed'))
+            throw Error('retained task/index identity mismatch');
+        if (Object.entries(expected).some(([name, value]) => task[name as keyof TaskRecord] !== value))
+            throw Error('retained task binding mismatch');
+        if (task.recovery) {
+            const e = parseRecoveryEnvelope(task.recovery);
+            if (e.taskKey !== key || e.runId !== task.runId || e.generation !== task.generation || e.scopeDigest !== task.scopeDigest || e.approvalDigest !== task.approvalDigest || canonical(e.approvalBindings) !== canonical(task.approvalBindings))
+                throw Error('retained recovery identity mismatch');
+        }
+        return { kind: indexed ? 'active' : 'completed', head: snapshot.head, task };
+    }
+    catch {
+        return { kind: 'invalid-or-unavailable', reason: 'retained coordination task could not be verified' };
+    }
 }
 function validateSession(machine: EffectiveMachine, session: MachineSession, target: CoordinationTarget) {
     if (!machine.enabled || !id(machine.id) || !uuid(session.sessionId) || !digest(session.bootIdDigest) || machine.id !== session.machineId || machine.installationId !== session.installationId || machine.hostBindingDigest !== session.hostBindingDigest || !positive(machine.defaults.maxRuns) || !positive(machine.defaults.childConcurrent) || canonical(machine.coordination) !== canonical({ repositoryId: target.repositoryId, repository: target.repository, branch: target.branch, rootCommit: target.rootCommit, installationId: target.installationId }))

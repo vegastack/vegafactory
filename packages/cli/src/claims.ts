@@ -40,7 +40,29 @@ function validIdentity(x: unknown): x is ProcessIdentity {
     const o = x as ProcessIdentity;
     return !!o && typeof o === 'object' && Object.keys(o).sort().join(',') === 'bootId,pid,startId,uid' && Number.isSafeInteger(o.pid) && o.pid > 0 && Number.isSafeInteger(o.uid) && o.uid >= 0 && typeof o.bootId === 'string' && o.bootId.length > 0 && o.bootId.length < 256 && typeof o.startId === 'string' && o.startId.length > 0 && o.startId.length < 256;
 }
+// Only this live process's boot/start tuple is immutable. Never cache another PID,
+// liveness, ownership records or decisions. Include both Unix identities in the key.
+let selfIdentity: { key: string; probe: Promise<ProcessIdentity> } | undefined;
+const selfKey = () => `${process.pid}:${process.getuid?.()}:${process.geteuid?.()}`;
 export async function processIdentity(pid = process.pid): Promise<ProcessIdentity> {
+    if (pid !== process.pid)
+        return probeProcessIdentity(pid);
+    const key = selfKey();
+    if (selfIdentity?.key !== key) selfIdentity = undefined;
+    const entry = selfIdentity ?? { key, probe: probeProcessIdentity(pid) };
+    selfIdentity = entry;
+    try {
+        const identity = await entry.probe;
+        if (selfKey() !== key || identity.pid !== process.pid || identity.uid !== process.getuid?.())
+            throw new ClaimRefusal('self process identity changed during verification');
+        return { ...identity };
+    }
+    catch (error) {
+        if (selfIdentity === entry) selfIdentity = undefined;
+        throw error;
+    }
+}
+async function probeProcessIdentity(pid: number): Promise<ProcessIdentity> {
     if (!Number.isSafeInteger(pid) || pid <= 0)
         throw new ClaimRefusal('process identity requires a positive PID');
     try {

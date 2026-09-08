@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { processIdentity } from '../src/claims.ts';
-import { acquireSharedTask, transitionSharedTask, readCoordination, readSharedStatus, taskKey, parseRecoveryEnvelope, parseRecoveryPayload, publishRecoveryReceipt, resolveEvidence, beginManagedEffect, verifyManagedEffect, canonical, sha256, githubCoordinationProvider, type CoordinationTarget, type CoordinationProvider, type VerifiedCandidate, type EffectiveMachine, type MachineSession, type RecoveryEvidencePayload, type RecoveryEnvelope } from '../src/shared-claims.ts';
+import { acquireSharedTask, transitionSharedTask, inspectCoordinationTask, readCoordination, readSharedStatus, taskKey, parseRecoveryEnvelope, parseRecoveryPayload, publishRecoveryReceipt, resolveEvidence, beginManagedEffect, verifyManagedEffect, canonical, sha256, githubCoordinationProvider, type CoordinationTarget, type CoordinationProvider, type VerifiedCandidate, type EffectiveMachine, type MachineSession, type RecoveryEvidencePayload, type RecoveryEnvelope } from '../src/shared-claims.ts';
 const d = 'd'.repeat(64), root = '1'.repeat(40), installation = '11111111-1111-4111-8111-111111111111';
 async function fixture() {
     let head = root, version = 1, ambiguous = false, conflicts = 0, mutations = 0;
@@ -445,6 +445,13 @@ test.each(['prepared', 'ambiguous'] as const)('reconciled %s telemetry does not 
     expect(JSON.parse(raw!).recovery.effects).toEqual(p.recovery.effects);
     expect(JSON.parse(raw!).state).toBe('completed');
     expect((await readCoordination(p.target)).index.active).toEqual([]);
+    const inspected = await inspectCoordinationTask(p.target, p.claim.taskKey, { runId: p.claim.runId, generation: p.claim.generation, ownerToken: p.claim.ownerToken, scopeDigest: d });
+    expect(inspected.kind).toBe('completed');
+    if (inspected.kind !== 'completed') throw Error('inspection');
+    expect(inspected.head).toBe(complete.claim.stateCommit);
+    expect(inspected.task).toEqual(JSON.parse(raw!));
+    expect(inspected.task.recovery!.effects).toEqual(p.recovery.effects);
+    expect(inspected.task.acceptedScopes).toEqual([{ scopeDigest: d, receipt: accepted.reference }]);
 });
 
 test('reporting exception preserves unmanaged coverage, code reconciliation and telemetry intent validation', async () => {
@@ -468,4 +475,54 @@ test('telemetry kind on a code/control target does not obtain the reporting exem
     p.recovery.effects.push({ operationId: effectId, runId: p.claim.runId, generation: 1, kind: 'telemetry-push', target, payloadDigest: d, state: 'prepared', intent: intent.reference, outcome: null });
     expect((await transitionSharedTask({ claim: p.claim, operationId: randomUUID(), transition: { kind: 'recovery', recovery: p.recovery } })).kind).toBe('owned');
     expect(await transitionSharedTask({ claim: p.claim, operationId: randomUUID(), transition: { kind: 'complete', stopProof: p.stopProof, acceptedScope: p.recovery.execution.qualification as any } })).toMatchObject({ kind: 'refused', reason: 'unresolved remote effects retain ownership' });
+});
+
+test('retained inspector binds a single current head and refuses missing, invalid and mismatched records without writes', async () => {
+    const f = await fixture(), key = taskKey(f.candidate.host, f.candidate.repositoryNodeId, f.candidate.issueNodeId);
+    const before = await (await import('node:fs/promises')).readdir(f.target.localRoot);
+    expect(await inspectCoordinationTask(f.target, key)).toEqual({ kind: 'absent', head: root });
+    expect(await (await import('node:fs/promises')).readdir(f.target.localRoot)).toEqual(before);
+    const owned = await acquireSharedTask({ ...f, operationId: randomUUID() });
+    if (owned.kind !== 'owned') throw Error('claim');
+    const pointer = await readFile(join(f.target.localRoot, sha256(`${f.target.host}\n${f.target.repositoryId}\n${f.target.branch}`), 'accepted.json'), 'utf8');
+    const reads: string[] = [], read = f.target.provider.read;
+    f.target.provider.read = async (target, head, path) => { reads.push(head); return read(target, head, path); };
+    const count = f.mutations;
+    const active = await inspectCoordinationTask(f.target, key);
+    expect(active.kind).toBe('active');
+    expect(new Set(reads)).toEqual(new Set([f.head]));
+    expect(f.mutations).toBe(count);
+    expect(await readFile(join(f.target.localRoot, sha256(`${f.target.host}\n${f.target.repositoryId}\n${f.target.branch}`), 'accepted.json'), 'utf8')).toBe(pointer);
+    for (const expected of [{ runId: randomUUID() }, { generation: 2 }, { ownerToken: randomUUID() }, { scopeDigest: 'a'.repeat(64) }, { machineId: 'foreign' }, { installationId: randomUUID() }, { sessionId: randomUUID() }])
+        expect((await inspectCoordinationTask(f.target, key, expected)).kind).toBe('invalid-or-unavailable');
+    const files = f.versions.get(f.head)!, path = 'coordination/tasks/' + key + '.json', saved = files[path]!;
+    for (const corrupt of [null, '{}', canonical({ ...JSON.parse(saved), state: 'completed' }), canonical({ ...JSON.parse(saved), issueNodeId: 'I_other' }), canonical({ ...JSON.parse(saved), extra: true })]) {
+        if (corrupt === null) delete files[path]; else files[path] = corrupt;
+        expect((await inspectCoordinationTask(f.target, key)).kind).toBe('invalid-or-unavailable');
+    }
+    files[path] = saved;
+    const index = JSON.parse(files['coordination/index.json']!); index.active = []; files['coordination/index.json'] = canonical(index);
+    // An orphaned claimed task is not an archival completion.
+    const machinePath = 'coordination/machines/' + f.machine.id + '.json';
+    const machine = JSON.parse(files[machinePath]!); machine.activeTaskKeys = []; files[machinePath] = canonical(machine);
+    expect((await inspectCoordinationTask(f.target, key)).kind).toBe('invalid-or-unavailable');
+    f.target.provider.branch = async () => { throw Error('offline'); };
+    expect((await inspectCoordinationTask(f.target, key)).kind).toBe('invalid-or-unavailable');
+});
+
+test('retained inspector preserves unresolved refs and rejects malformed or foreign recovery envelopes', async () => {
+    const p = await pendingEffectFixture('telemetry-push'), key = p.claim.taskKey;
+    const snapshot = await readCoordination(p.target), task = snapshot.tasks[key]!;
+    task.unresolvedEffects = [p.recovery.effects[0]!.intent];
+    const path = 'coordination/tasks/' + key + '.json';
+    const write = async (value: unknown) => p.target.provider.commit(p.target, { branchId: snapshot.branchId, expectedHeadOid: (await p.target.provider.branch(p.target)).head, files: { [path]: canonical(value) }, operationId: randomUUID() });
+    await write(task);
+    const inspected = await inspectCoordinationTask(p.target, key);
+    expect(inspected.kind).toBe('active');
+    if (inspected.kind !== 'active') throw Error('inspection');
+    expect(inspected.task).toEqual(task);
+    for (const recovery of [{ ...task.recovery, extra: true }, { ...task.recovery, runId: randomUUID() }, { ...task.recovery, generation: 2 }, { ...task.recovery, approvalDigest: 'a'.repeat(64) }, { ...task.recovery, effects: [{ ...task.recovery!.effects[0]!, state: 'acknowledged' }] }]) {
+        await write({ ...task, recovery });
+        expect((await inspectCoordinationTask(p.target, key)).kind).toBe('invalid-or-unavailable');
+    }
 });
