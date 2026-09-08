@@ -173,7 +173,7 @@ export async function captureTerminalRun(home: string, runId: string, destinatio
   if (!policy.enabled || policy.refusal) return null
   const { readRun, runsRoot, acknowledgeTerminalCapture, terminalCaptureDescriptor, terminalCaptureAttempts, readRunAttemptSnapshot, runReportingHold } = await import('../runs.ts')
   const { hashBytes, validateDestination, parseTerminalCaptureKey } = await import('./types.ts')
-  const { enqueueEvent, spoolRoot } = await import('./outbox.ts')
+  const { enqueueEvent, spoolRoot, readCaptureProof } = await import('./outbox.ts')
   const current = await readRun(runsRoot(home), runId)
   const reportingHold=runReportingHold(current)
   if(reportingHold)throw Error(reportingHold) // Never invent receiving-home ordinal or reporting identity.
@@ -199,13 +199,18 @@ export async function captureTerminalRun(home: string, runId: string, destinatio
   if (!delivery?.payload || !delivery.payloadDigest || hashBytes(delivery.payload) !== delivery.payloadDigest) return null
   const record = parseLocalRecord(JSON.parse(delivery.payload))
   if (recordProblems(record).length || record.repo !== run.repo || record.issue !== run.issue || record.session_id !== (run.vendorSessionId ?? null)) throw Error('terminal-measurement-identity-mismatch')
-  // A trusted supervisor grants the one local flush phase only after these reads.
-  // Await it before UUID/ordinal preparation and every directory, claim, map, event or ACK write.
-  await beforeFlush?.()
-  const event = await enqueueEvent(spoolRoot(home), {
-    schemaVersion: 2, eventId: crypto.randomUUID(), destination, captureKey,
+  const input:Pick<import('./types.ts').SpoolEnvelope,'destination'|'captureKey'|'payload'>={destination,captureKey,
     payload: { schemaVersion: 2, recordKind: 'execution', utcDay: new Date(record.ts).toISOString().slice(0, 10), stage: run.stage, outcome: run.terminationCause ?? 'interrupted', values: JSON.parse(delivery.payload), localRunId:run.runId, taskRef:{repo:run.repo,issue:run.issue,taskId:run.taskKey.taskId === 'unknown' ? null : run.taskKey.taskId}, taskOwner:run.taskOwner, agentAccountOwner:run.agentAccountOwner, attempt:(run.attempts?.length??0)+1, startedAt:run.terminalSegment?(terminalCaptureAttempts(run)[0]?.startedAt??run.startedAt):run.startedAt, endedAt:run.finishedAt },
-  })
+  }
+  if(delivery.status==='acknowledged'){
+    const captured=await readCaptureProof(spoolRoot(home),input)
+    if(!captured)throw Error('acknowledged-capture-proof-unavailable')
+    return captured // The flag alone never authorizes replay or repairs missing evidence.
+  }
+  // A trusted supervisor grants the one local flush phase only after these reads.
+  // Await it before UUID allocation and every directory, claim, map, event or ACK write.
+  await beforeFlush?.()
+  const event = await enqueueEvent(spoolRoot(home), {schemaVersion:2,eventId:crypto.randomUUID(),...input})
   await acknowledgeTerminalCapture(runsRoot(home), runId, captureKey, delivery.payloadDigest)
   return event.eventId
 }

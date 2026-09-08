@@ -1,4 +1,4 @@
-import { expect, test, beforeEach } from 'bun:test'
+import { expect, test, beforeEach, spyOn } from 'bun:test'
 import { mkdtemp } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -93,8 +93,21 @@ test('durable terminal payload survives capture retry and shares exactly one ide
   expect(await captureTerminalRun(home,run.runId,destination,{...policy,enabled:false})).toBeNull()
   expect((await readRun(root,run.runId)).pendingDelivery[0]?.status).toBe('pending')
   const first=await captureTerminalRun(home,run.runId,destination,policy)
-  const retry=await captureTerminalRun(home,run.runId,destination,policy)
-  expect(first).toBe(retry)
+  const fs=await import('node:fs/promises'),runFile=join(root,run.runId,'run.json')
+  const acknowledgedBytes=await fs.readFile(runFile,'utf8'),acknowledgedGeneration=(await readRun(root,run.runId)).generation
+  const {canonicalJson,destinationId,hashBytes}=await import('../src/stats/types.ts'),did=destinationId(destination)
+  const proofFiles=[join(spoolRoot(home),'captures',hashBytes(canonicalJson([did,run.runId+':terminal:0']))+'.json'),join(spoolRoot(home),'identities',first+'.json'),join(spoolRoot(home),'events',did,first+'.json')]
+  const proofBytes=await Promise.all(proofFiles.map(file=>fs.readFile(file,'utf8')))
+  const claims=join(spoolRoot(home),'claims')
+  await fs.chmod(claims,0o500)
+  const random=spyOn(crypto,'randomUUID').mockImplementation(()=>{throw Error('replay must not allocate UUID')})
+  let retry:string|null
+  try{retry=await captureTerminalRun(home,run.runId,destination,policy,undefined,async()=>{throw Error('verified replay must not request a write grant')})}
+  finally{random.mockRestore();await fs.chmod(claims,0o700)}
+  expect(first).toBe(retry!)
+  expect(await fs.readFile(runFile,'utf8')).toBe(acknowledgedBytes)
+  expect((await readRun(root,run.runId)).generation).toBe(acknowledgedGeneration)
+  expect(await Promise.all(proofFiles.map(file=>fs.readFile(file,'utf8')))).toEqual(proofBytes)
   expect(first).not.toBe(run.runId)
   expect((await inspectSpool(spoolRoot(home))).events).toHaveLength(1)
   expect((await readRun(root,run.runId)).pendingDelivery[0]?.status).toBe('acknowledged')
@@ -102,6 +115,11 @@ test('durable terminal payload survives capture retry and shares exactly one ide
   const {spoolEventFile}=await import('../src/stats/outbox.ts')
   const initialEvent=(await inspectSpool(spoolRoot(home))).events[0]!
   const initialBytes=await readFile(spoolEventFile(spoolRoot(home),initialEvent),'utf8')
+  const initialFile=spoolEventFile(spoolRoot(home),initialEvent)
+  await fs.rename(initialFile,initialFile+'.held')
+  try{await expect(captureTerminalRun(home,run.runId,destination,policy,undefined,async()=>{throw Error('missing proof must not request repair')})).rejects.toThrow('acknowledged-capture-proof-unavailable')}
+  finally{await fs.rename(initialFile+'.held',initialFile)}
+  expect(await readFile(runFile,'utf8')).toBe(acknowledgedBytes)
   const saved=await readRun(root,run.runId),sequence=crypto.randomUUID()
   //138 separately proves continuation admission. This transport fixture supplies its exact
   // admitted private shape and checks that143 never substitutes the earlier segment payload.
@@ -270,14 +288,14 @@ record({status:result.status,signal:result.signal,error:result.error?.code??null
 cp.spawn=function(command,args,options){if(!args?.includes('managed-hook'))return originalSpawn.call(this,command,args,options);
 const start=performance.now(),stdio=[...options.stdio];stdio[2]='pipe';const child=originalSpawn.call(this,command,args,{...options,stdio});let error=null,stderr='',phaseStart=null,phaseFinish=null;
 child.stderr?.on('data',data=>{stderr=(stderr+data).slice(0,4096)});child.on('error',value=>{error=value.code});
-const send=child.send?.bind(child);if(send)child.send=function(message,...rest){if(message?.vskManagedHook===1&&message.phase==='start')phaseStart=performance.now();return send(message,...rest)};
+const send=child.send?.bind(child);if(send)child.send=function(message,...rest){if(message?.vskManagedHook===1&&message.phase==='flush')phaseStart=performance.now();return send(message,...rest)};
 child.on('message',message=>{if(message?.vskManagedHook===1&&message.phase==='finish')phaseFinish=performance.now()});
 child.once('close',(status,signal)=>record({status,signal,error,stderr,elapsedMs:performance.now()-start,finished:phaseFinish!==null,phaseMs:phaseStart===null?null:(phaseFinish??performance.now())-phaseStart}));return child;};mod.syncBuiltinESMExports();`)
   const assertChildSucceeded=async()=>{
     const results=(await fs.readFile(childResults,'utf8')).trim().split('\n').map(line=>JSON.parse(line))
     const last=results.at(-1)
     expect(last).toMatchObject({status:0,signal:null,error:null,stderr:''})
-    if(Object.hasOwn(last,'finished')){expect(last.finished).toBe(true);expect(last.phaseMs).toBeLessThanOrEqual(500)}
+    if(Object.hasOwn(last,'finished')){expect(last.finished).toBe(true);expect(last.phaseMs).toBeLessThanOrEqual(500);expect(last.elapsedMs).toBeLessThanOrEqual(1000)}
   }
   const node=Bun.which('node')!,invoke=(name:string,event:string,session='owned-vendor-session',cwd=repo)=>execFileSync(node,[join(hooks,name),'--harness','codex'],{cwd:repo,encoding:'utf8',input:JSON.stringify({hook_event_name:event,session_id:session,cwd,transcript_path:'/never/read/private-transcript'}),env:{...process.env,HOME:canonicalHome,NODE_OPTIONS:`--require=${probe}`,VSK_VEGAFACTORY:join(installed,'dist','index.js')},timeout:2000})
   const before=(await runtime.readRun(runtime.runsRoot(canonicalHome),run.runId)).generation

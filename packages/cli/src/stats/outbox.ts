@@ -162,7 +162,7 @@ export async function takeSkillInvocations(home: string, sessionId: string): Pro
 
 // schema2 never mutates legacy JSONL. Migration is explicit and preserves originals.
 export const spoolRoot = (home: string): string => join(home, '.vegastack', 'stats', 'events-v2')
-export async function safeSpoolDirectory(path: string): Promise<void> {
+async function checkSpoolDirectory(path: string, create:boolean): Promise<boolean> {
   const absolute = resolve(path), root = parse(absolute).root
   let at = root
   for (const part of absolute.slice(root.length).split('/').filter(Boolean)) {
@@ -170,6 +170,7 @@ export async function safeSpoolDirectory(path: string): Promise<void> {
     let info
     try { info = await lstat(at) } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
+      if(!create)return false
       try { await mkdir(at, { mode: 0o700 }) } catch (e) { if ((e as NodeJS.ErrnoException).code !== 'EEXIST') throw e }
       info = await lstat(at)
     }
@@ -178,7 +179,9 @@ export async function safeSpoolDirectory(path: string): Promise<void> {
   }
   const info = await lstat(absolute)
   if (!info.isDirectory() || info.isSymbolicLink() || info.uid !== process.getuid?.() || (info.mode & 0o077)) throw Error('unsafe-private-spool')
+  return true
 }
+export async function safeSpoolDirectory(path:string):Promise<void>{await checkSpoolDirectory(path,true)}
 export async function readSpoolJson<T>(path: string, maxBytes = 2 * 1024 * 1024): Promise<T | null> {
   let info
   try { info = await lstat(path) } catch (e) { if ((e as NodeJS.ErrnoException).code === 'ENOENT') return null; throw e }
@@ -289,6 +292,55 @@ export async function enqueueEvent(root: string, input: SpoolEnvelope): Promise<
       return {eventId:event.eventId,persisted:true}
     })
   })
+}
+// Read-only evidence for an already-acknowledged local capture. No mkdir, claim,
+// UUID, repair or quarantine is allowed here; missing proof cannot license a new event.
+export async function readCaptureProof(root:string,input:Pick<SpoolEnvelope,'destination'|'captureKey'|'payload'>):Promise<string|null>{
+  try{
+    if(input.payload.recordKind!=='execution'||!input.payload.localRunId)throw Error('invalid')
+    const runId=input.payload.localRunId,segment=parseTerminalCaptureKey(input.captureKey),did=destinationId(input.destination)
+    if(!segment||segment.runId!==runId)throw Error('invalid')
+    const read=async<T>(path:string):Promise<T|undefined>=>{
+      if(!await checkSpoolDirectory(dirname(path),false))return undefined
+      const value=await readSpoolJson<T>(path)
+      if(value!==null)return value
+      try{await lstat(path)}catch(error){if((error as NodeJS.ErrnoException).code==='ENOENT')return undefined;throw error}
+      throw Error('invalid') // JSON null is not an absent proof file.
+    }
+    const closed=(value:unknown,keys:string)=>!!value&&typeof value==='object'&&!Array.isArray(value)&&Object.keys(value).sort().join(',')===keys
+    type Mapping={eventId:string;payloadDigest:string;destination:string;captureKey:string;executionRef:string}
+    const mapAt=(key:string)=>join(root,'captures',hashBytes(canonicalJson([did,key]))+'.json')
+    const validMap=(value:Mapping,key:string)=>{
+      if(!closed(value,'captureKey,destination,eventId,executionRef,payloadDigest')||!UUID.test(value.eventId)||!UUID.test(value.executionRef)||value.executionRef===runId||value.destination!==did||value.captureKey!==key||typeof value.payloadDigest!=='string'||!/^[a-f0-9]{64}$/.test(value.payloadDigest))throw Error('invalid')
+    }
+    const mapping=await read<Mapping>(mapAt(input.captureKey))
+    if(!mapping)return null
+    validMap(mapping,input.captureKey)
+    const logicalKey=terminalCaptureKey(runId),original=logicalKey===input.captureKey?mapping:await read<Mapping>(mapAt(logicalKey))
+    if(original)validMap(original,logicalKey)
+    const prepared=await read<{executionRef:string}>(join(root,'reporting-identities',hashBytes(canonicalJson([did,logicalKey]))+'.json'))
+    if(prepared&&(!closed(prepared,'executionRef')||!UUID.test(prepared.executionRef)||prepared.executionRef===runId))throw Error('invalid')
+    if(!original&&!prepared)return null
+    if((original&&original.executionRef!==mapping.executionRef)||(prepared&&prepared.executionRef!==mapping.executionRef)||(input.payload.executionRef!==undefined&&input.payload.executionRef!==mapping.executionRef))throw Error('invalid')
+    const event=validateEnvelope({schemaVersion:2,eventId:mapping.eventId,destination:input.destination,captureKey:input.captureKey,payload:{...input.payload,executionRef:mapping.executionRef}})
+    const digest=hashBytes(canonicalJson(event.payload))
+    if(mapping.payloadDigest!==digest)throw Error('invalid')
+    const identity=await read<unknown>(join(root,'identities',event.eventId+'.json'))
+    if(identity===undefined)return null
+    if(canonicalJson(identity)!==canonicalJson({destination:did,captureKey:input.captureKey,payloadDigest:digest}))throw Error('invalid')
+    const saved=await read<SpoolEnvelope>(spoolEventFile(root,event))
+    if(saved!==undefined){if(canonicalJson(saved)!==canonicalJson(event))throw Error('invalid');return event.eventId}
+    const receipt=await read<unknown>(join(root,'receipts',did,event.eventId+'.json'))
+    if(receipt!==undefined){
+      if(!closed(receipt,'acknowledgedAt,attemptHash,destination,eventId,localPayloadDigest,payloadSha256,policyDigest,remoteCommit'))throw Error('invalid')
+      if(await(await import('./push.ts')).readDeliveryReceipt(root,event))return event.eventId
+      return null
+    }
+    const suppressed=await read<{eventId:string;localPayloadDigest:string;disposition:string;recordedAt:string}>(join(root,'suppressed',did,event.eventId+'.json'))
+    if(suppressed===undefined)return null
+    if(!closed(suppressed,'disposition,eventId,localPayloadDigest,recordedAt')||suppressed.eventId!==event.eventId||suppressed.disposition!=='policy-suppressed'||suppressed.localPayloadDigest!==digest||typeof suppressed.recordedAt!=='string'||!Number.isFinite(Date.parse(suppressed.recordedAt)))throw Error('invalid')
+    return event.eventId
+  }catch{throw Error('capture-proof-invalid')}
 }
 export interface SpoolInspection { events: SpoolEnvelope[]; quarantine: QuarantineEntry[]; pendingBytes: number; oldestAgeMs: number; delivered: number; suppressed: number; quarantineBytes:number; quarantineOldestAgeMs:number }
 export async function inspectSpool(root: string): Promise<SpoolInspection> {

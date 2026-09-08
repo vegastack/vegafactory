@@ -282,3 +282,54 @@ test('terminal capture keys preserve legacy zero and accept only private UUID co
   const destination={host:'github.com' as const,org:'o',repo:'o/r',controlRoom:'o/room'}
   expect(semanticCaptureKey(destination,{schemaVersion:2,recordKind:'execution',utcDay:'2026-09-08',stage:'implement',outcome:'succeeded'},runId,sequence)).toBe(terminalCaptureKey(runId,sequence))
 })
+
+test('capture replay proof requires immutable map, logical identity and event identity before event or tombstone evidence',async()=>{
+  const fs=await import('node:fs/promises'),{enqueueEvent,readCaptureProof,inspectSpool,writeSpoolJson,spoolEventFile}=await import('../src/stats/outbox.ts')
+  const {canonicalJson,destinationId,hashBytes}=await import('../src/stats/types.ts')
+  const root=join(home,'proof'),runId=crypto.randomUUID(),sequence=crypto.randomUUID(),destination={host:'github.com' as const,org:'o',repo:'o/r',controlRoom:'o/room'}
+  const input={destination,captureKey:`${runId}:terminal:${sequence}`,payload:{schemaVersion:2 as const,recordKind:'execution' as const,utcDay:'2026-09-08',stage:'implement',outcome:'succeeded',localRunId:runId}}
+  const {eventId}=await enqueueEvent(root,{schemaVersion:2,eventId:crypto.randomUUID(),...input}),event=(await inspectSpool(root)).events[0]!
+  const did=destinationId(destination),capture=hashBytes(canonicalJson([did,input.captureKey])),logical=hashBytes(canonicalJson([did,runId+':terminal:0']))
+  const map=join(root,'captures',capture+'.json'),identity=join(root,'identities',eventId+'.json'),logicalIdentity=join(root,'reporting-identities',logical+'.json'),eventFile=spoolEventFile(root,event)
+  expect(await readCaptureProof(root,input)).toBe(eventId)
+  for(const file of [map,identity,logicalIdentity,eventFile]){
+    const bytes=await readFile(file,'utf8')
+    await fs.rename(file,file+'.held')
+    try{expect(await readCaptureProof(root,input)).toBeNull()}finally{await fs.rename(file+'.held',file)}
+    await fs.writeFile(file,'null\n')
+    try{await expect(readCaptureProof(root,input)).rejects.toThrow('capture-proof-invalid');expect(await readFile(file,'utf8')).toBe('null\n')}
+    finally{await fs.writeFile(file,bytes)}
+  }
+  for(const [file,change] of [[map,{executionRef:crypto.randomUUID()}],[map,{destination:'f'.repeat(64)}],[identity,{payloadDigest:'0'.repeat(64)}],[logicalIdentity,{executionRef:crypto.randomUUID()}]] as const){
+    const bytes=await readFile(file,'utf8'),tampered=canonicalJson({...JSON.parse(bytes),...change})+'\n'
+    await fs.writeFile(file,tampered)
+    try{await expect(readCaptureProof(root,input)).rejects.toThrow('capture-proof-invalid');expect(await readFile(file,'utf8')).toBe(tampered)}
+    finally{await fs.writeFile(file,bytes)}
+  }
+  const before=await readFile(eventFile,'utf8')
+  await fs.writeFile(eventFile,canonicalJson({...event,payload:{...event.payload,outcome:'failed'}})+'\n')
+  try{await expect(readCaptureProof(root,input)).rejects.toThrow('capture-proof-invalid')}
+  finally{await fs.writeFile(eventFile,before)}
+  await fs.symlink(root,join(home,'proof-link'))
+  await expect(readCaptureProof(join(home,'proof-link'),input)).rejects.toThrow('capture-proof-invalid')
+  await fs.chmod(eventFile,0o644)
+  try{await expect(readCaptureProof(root,input)).rejects.toThrow('capture-proof-invalid')}
+  finally{await fs.chmod(eventFile,0o600)}
+  // Retention can remove event bytes only while retaining these validated tombstones.
+  await fs.rename(eventFile,eventFile+'.held')
+  const receiptFile=join(root,'receipts',did,eventId+'.json'),digest=hashBytes(canonicalJson(event.payload))
+  const receipt={eventId,destination,remoteCommit:'a'.repeat(40),payloadSha256:'b'.repeat(64),attemptHash:'b'.repeat(64),policyDigest:'c'.repeat(64),acknowledgedAt:'2026-09-08T00:00:00.000Z',localPayloadDigest:digest}
+  await writeSpoolJson(receiptFile,receipt)
+  expect(await readCaptureProof(root,input)).toBe(eventId)
+  await fs.writeFile(receiptFile,canonicalJson({...receipt,localPayloadDigest:'f'.repeat(64)}))
+  await expect(readCaptureProof(root,input)).rejects.toThrow('capture-proof-invalid')
+  await fs.rm(receiptFile)
+  const suppression=join(root,'suppressed',did,eventId+'.json')
+  await writeSpoolJson(suppression,{eventId,localPayloadDigest:digest,disposition:'policy-suppressed',recordedAt:'2026-09-08T00:00:00.000Z'})
+  expect(await readCaptureProof(root,input)).toBe(eventId)
+  await fs.writeFile(suppression,canonicalJson({eventId,localPayloadDigest:digest,disposition:'delivered',recordedAt:'2026-09-08T00:00:00.000Z'}))
+  await expect(readCaptureProof(root,input)).rejects.toThrow('capture-proof-invalid')
+  await fs.rm(suppression)
+  expect(await readCaptureProof(root,input)).toBeNull()
+  expect(await readFile(eventFile+'.held','utf8')).toBe(before)
+})
