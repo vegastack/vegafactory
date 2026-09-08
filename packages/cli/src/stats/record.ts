@@ -168,21 +168,37 @@ export function statsPolicyFromEffective(resolved: ReturnType<typeof resolvePoli
 
 // The local durable run record is the only terminal capture authority. Vendor stdout
 // has already been reduced by #138; hook inputs never supply measurement payloads.
-export async function captureTerminalRun(home: string, runId: string, destination: import('./types.ts').Destination, policy: StatsPolicy): Promise<string | null> {
+export async function captureTerminalRun(home: string, runId: string, destination: import('./types.ts').Destination, policy: StatsPolicy, exactCaptureKey?:string): Promise<string | null> {
   if (!policy.enabled || policy.refusal) return null
-  const { readRun, runsRoot, acknowledgeTerminalCapture } = await import('../runs.ts')
-  const { hashBytes, validateDestination } = await import('./types.ts')
+  const { readRun, runsRoot, acknowledgeTerminalCapture, terminalCaptureDescriptor, terminalCaptureAttempts, readRunAttemptSnapshot } = await import('../runs.ts')
+  const { hashBytes, validateDestination, parseTerminalCaptureKey } = await import('./types.ts')
   const { enqueueEvent, spoolRoot } = await import('./outbox.ts')
-  const run = await readRun(runsRoot(home), runId)
-  if (run.state !== 'terminal' || run.waitReason || !run.execution || run.terminationCause === 'termination-unconfirmed' || run.repo !== validateDestination(destination).repo) return null
-  const captureKey = `${run.runId}:terminal:0`
-  const delivery = run.pendingDelivery.find(p => p.kind === 'telemetry-capture' && 'captureKey' in p.target && p.target.captureKey === captureKey)
+  const current = await readRun(runsRoot(home), runId)
+  if(current.repo!==validateDestination(destination).repo)return null
+  const currentKey=terminalCaptureDescriptor(current).captureKey,captureKey=exactCaptureKey??currentKey
+  const parsed=parseTerminalCaptureKey(captureKey)
+  if(!parsed||parsed.runId!==runId)throw Error('terminal-capture-key-unavailable')
+  const deliveries=current.pendingDelivery.filter(p=>p.kind==='telemetry-capture'&&'captureKey'in p.target&&p.target.captureKey===captureKey)
+  if(deliveries.length>1)throw Error('terminal-capture-key-unavailable')
+  const delivery=deliveries[0]
+  let run=current
+  if(captureKey!==currentKey){
+    if(!delivery)throw Error('terminal-capture-key-unavailable')
+    const attempts=(current.attempts??[]).filter(a=>a.terminalSequence===parsed.sequence&&a.snapshotDigest)
+    if(attempts.length!==1)throw Error('terminal-capture-history-unavailable')
+    const attempt=attempts[0]!
+    try{run=await readRunAttemptSnapshot(runsRoot(home),runId,attempt)}catch{throw Error('terminal-capture-history-unavailable')}
+    const original=run.pendingDelivery.find(p=>p.kind==='telemetry-capture'&&'captureKey'in p.target&&p.target.captureKey===captureKey)
+    if(terminalCaptureDescriptor(run).captureKey!==captureKey||run.generation>=current.generation||run.repo!==current.repo||run.issue!==current.issue||run.startedAt!==attempt.startedAt||run.finishedAt!==attempt.finishedAt||run.terminationCause!==attempt.terminationCause||!original||original.id!==delivery.id||original.payload!==delivery.payload||original.payloadDigest!==delivery.payloadDigest)throw Error('terminal-capture-history-differs')
+    if(!delivery.payload||!delivery.payloadDigest)throw Error('terminal-capture-payload-unavailable')
+  }
+  if (run.state !== 'terminal' || run.waitReason || !run.execution || run.terminationCause === 'termination-unconfirmed') return null
   if (!delivery?.payload || !delivery.payloadDigest || hashBytes(delivery.payload) !== delivery.payloadDigest) return null
   const record = parseLocalRecord(JSON.parse(delivery.payload))
   if (recordProblems(record).length || record.repo !== run.repo || record.issue !== run.issue || record.session_id !== (run.vendorSessionId ?? null)) throw Error('terminal-measurement-identity-mismatch')
   const event = await enqueueEvent(spoolRoot(home), {
     schemaVersion: 2, eventId: crypto.randomUUID(), destination, captureKey,
-    payload: { schemaVersion: 2, recordKind: 'execution', utcDay: new Date(record.ts).toISOString().slice(0, 10), stage: run.stage, outcome: run.terminationCause ?? 'interrupted', values: JSON.parse(delivery.payload), localRunId:run.runId, taskRef:{repo:run.repo,issue:run.issue,taskId:run.taskKey.taskId === 'unknown' ? null : run.taskKey.taskId}, taskOwner:run.taskOwner, agentAccountOwner:run.agentAccountOwner, attempt:(run.attempts?.length??0)+1, startedAt:run.startedAt, endedAt:run.finishedAt },
+    payload: { schemaVersion: 2, recordKind: 'execution', utcDay: new Date(record.ts).toISOString().slice(0, 10), stage: run.stage, outcome: run.terminationCause ?? 'interrupted', values: JSON.parse(delivery.payload), localRunId:run.runId, taskRef:{repo:run.repo,issue:run.issue,taskId:run.taskKey.taskId === 'unknown' ? null : run.taskKey.taskId}, taskOwner:run.taskOwner, agentAccountOwner:run.agentAccountOwner, attempt:(run.attempts?.length??0)+1, startedAt:run.terminalSegment?(terminalCaptureAttempts(run)[0]?.startedAt??run.startedAt):run.startedAt, endedAt:run.finishedAt },
   })
   await acknowledgeTerminalCapture(runsRoot(home), runId, captureKey, delivery.payloadDigest)
   return event.eventId
@@ -200,7 +216,12 @@ export function parseManagedHook(raw: string): ManagedHookInput | null {
   } catch { return null }
 }
 
-export async function registeredCaptureContext(home: string, repo: string, checkout: string): Promise<{destination: import('./types.ts').Destination; policy: StatsPolicy; learningEnabled:boolean} | null> {
+export interface RegisteredCaptureContext {
+  destination:import('./types.ts').Destination;policy:StatsPolicy;learningEnabled:boolean
+  effectivePolicy:ReturnType<typeof import('../../../../skills/dev/dev-setup/scripts/effective-policy.mjs').loadConfiguredPolicy>
+}
+export interface ValidatedManagedHookContext {input:ManagedHookInput;run:import('../runs.ts').RunRecord;context:RegisteredCaptureContext}
+export async function registeredCaptureContext(home: string, repo: string, checkout: string): Promise<RegisteredCaptureContext | null> {
   const { readFile } = await import('node:fs/promises'), { join, resolve } = await import('node:path')
   const { readPrivateRunFile } = await import('../runs.ts')
   const { parseControlRoomKnob, readFactoryConfig } = await import('../control-room.ts')
@@ -216,10 +237,10 @@ export async function registeredCaptureContext(home: string, repo: string, check
   const effective = loadConfiguredPolicy({home,repo,devMd})
   const policy = statsPolicyFromEffective(effective)
   if (!effective.ok || !policy.enabled || policy.refusal) return null
-  return { destination:validateDestination({host:'github.com',org:knob.org,repo,controlRoom:knob.repo}), policy, learningEnabled:effective.policy.values.learning!=='off' }
+  return { destination:validateDestination({host:'github.com',org:knob.org,repo,controlRoom:knob.repo}), policy, learningEnabled:effective.policy.values.learning!=='off', effectivePolicy:effective }
 }
 
-export async function consumeManagedHook(home: string, raw: string): Promise<{ok:true} | null> {
+export async function consumeManagedHook(home: string, raw: string, afterValidated?:(value:ValidatedManagedHookContext)=>Promise<void>): Promise<{ok:true} | null> {
   const input = parseManagedHook(raw)
   if (!input) return null
   try {
@@ -232,9 +253,13 @@ export async function consumeManagedHook(home: string, raw: string): Promise<{ok
     if (!run || run.harness !== input.harness) return null
     const context = await registeredCaptureContext(home,run.repo,run.checkout)
     if (!context || !context.learningEnabled) return null
-    // #144 may later return a verified context pointer. No pointer is invented here.
-    if (input.event === 'SessionStart' || run.state !== 'terminal') return null
-    return await captureTerminalRun(home,run.runId,context.destination,context.policy) ? {ok:true} : null
+    const captured=input.event!=='SessionStart'&&run.state==='terminal'
+      ? await captureTerminalRun(home,run.runId,context.destination,context.policy) : null
+    // Trusted same-phase144 composition can reuse this actual fresh validation, never
+    // a caller-supplied verdict. It re-reads the current generation after our durable ACK.
+    // A callback cannot manufacture capture success or a public context pointer here.
+    await afterValidated?.({input,run,context})
+    return captured ? {ok:true} : null
   } catch { return null }
 }
 

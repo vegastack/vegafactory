@@ -73,9 +73,19 @@ export function validateMeasurement(value: unknown): LocalMeasurement {
   if (canonicalJson(p).length > 256 * 1024) throw Error('measurement-too-large')
   return p
 }
-export function semanticCaptureKey(destination: Destination, payload: LocalMeasurement, runId?: string): string {
+// Private capture identity only: opaque exported event/execution IDs never contain these keys.
+export function terminalCaptureKey(runId:string,sequence='0'):string {
+  if(!UUID.test(runId)||(sequence!=='0'&&!UUID.test(sequence)))throw Error('run-identity-unavailable')
+  return `${runId}:terminal:${sequence}`
+}
+export function parseTerminalCaptureKey(key:string):{runId:string;sequence:string}|null {
+  const parts=key.split(':')
+  if(parts.length!==3||parts[1]!=='terminal'||!UUID.test(parts[0]!)||(parts[2]!=='0'&&!UUID.test(parts[2]!)))return null
+  return{runId:parts[0]!,sequence:parts[2]!}
+}
+export function semanticCaptureKey(destination: Destination, payload: LocalMeasurement, runId?: string, terminalSequence='0'): string {
   validateMeasurement(payload)
-  if (payload.recordKind === 'execution') { if (!runId || !UUID.test(runId)) throw Error('run-identity-unavailable'); return `${runId}:terminal:0` }
+  if (payload.recordKind === 'execution') { if (!runId) throw Error('run-identity-unavailable'); return terminalCaptureKey(runId,terminalSequence) }
   return payload.recordKind === 'activity'
     ? 'activity:' + hashBytes(canonicalJson([destinationKey(destination), payload.taskRef, payload.activity?.activityId ?? payload.activityId]))
     : 'snapshot:' + hashBytes(canonicalJson([destinationKey(destination), payload.taskRef, payload.reworkSnapshot?.counterEpoch ?? payload.counterEpoch, payload.reworkSnapshot?.asOf ?? payload.asOf, payload.reworkSnapshot?.sourceRef ?? payload.sourceRef]))

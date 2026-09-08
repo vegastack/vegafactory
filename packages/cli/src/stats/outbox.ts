@@ -7,7 +7,7 @@ import { dirname, join, resolve, parse, relative, isAbsolute } from 'node:path'
 import { constants } from 'node:fs'
 import { randomUUID } from 'node:crypto'
 import { acquireClaim, releaseClaim, processIdentity } from '../claims.ts'
-import { canonicalJson, destinationId, hashBytes, validateEnvelope, semanticCaptureKey, UUID, type SpoolEnvelope, type Destination } from './types.ts'
+import { canonicalJson, destinationId, hashBytes, validateEnvelope, semanticCaptureKey, terminalCaptureKey, parseTerminalCaptureKey, UUID, type SpoolEnvelope, type Destination } from './types.ts'
 import {
   monthToken, recordProblems, repoSegment, serializeRecord,
   type SkillInvocation, type StatsRecord,
@@ -217,6 +217,7 @@ export async function withSpoolClaim<T>(root: string, key: string, work: () => P
           for (;;) { try { await releaseClaim(held.claim); break } catch (error) { if(Date.now() >= releaseUntil) throw error; await new Promise(r => setTimeout(r,10)) } }
         }
       }
+      if (held.kind === 'refused') throw Error('spool-claim-refused: ' + held.reason)
       if (Date.now() >= until) throw Error('spool-claim-unavailable: ' + held.reason)
       await new Promise(resolveWait => setTimeout(resolveWait, 10))
     }
@@ -234,16 +235,31 @@ export function spoolEventFile(root: string, event: Pick<SpoolEnvelope,'destinat
 export async function enqueueEvent(root: string, input: SpoolEnvelope): Promise<{eventId: string; persisted: boolean}> {
   let supplied = validateEnvelope({...input,captureKey:input.payload.recordKind==='execution'?input.captureKey:semanticCaptureKey(input.destination,input.payload)})
   const capture = hashBytes(canonicalJson([destinationId(supplied.destination), supplied.captureKey]))
-  return withSpoolClaim(root,'capture:' + capture, async () => {
+  const runId=supplied.payload.recordKind==='execution'?supplied.payload.localRunId:undefined
+  const segment=runId!==undefined?parseTerminalCaptureKey(supplied.captureKey):null
+  if(runId!==undefined&&(!segment||segment.runId!==runId))throw Error('privacy-reporting-identity-unavailable')
+  const logical=runId!==undefined?hashBytes(canonicalJson([destinationId(supplied.destination),terminalCaptureKey(runId)])):capture
+  // Lock order: logical execution's legacy :0 capture claim, then event claim. All
+  // terminal segments share the former; no nested segment claim can invert this order.
+  //149's pre-capture reportingExecutionRef uses this same stable logical claim.
+  return withSpoolClaim(root,'capture:' + logical, async () => {
+    type Mapping={eventId:string;payloadDigest:string;destination:string;captureKey:string;executionRef?:string}
     const mappingPath = join(root,'captures',capture + '.json')
-    const previous = await readSpoolJson<{eventId:string;payloadDigest:string;destination:string;captureKey:string;executionRef?:string}>(mappingPath)
-    if(supplied.payload.recordKind==='execution'&&supplied.payload.localRunId){
-      const runId=supplied.payload.localRunId
-      if(!UUID.test(runId)||supplied.captureKey!==runId+':terminal:0')throw Error('privacy-reporting-identity-unavailable')
-      const prepared=await readSpoolJson<{executionRef:string}>(join(root,'reporting-identities',capture+'.json'))
-      const saved=previous?.executionRef??prepared?.executionRef
-      if(saved&&!UUID.test(saved)||previous?.executionRef&&prepared?.executionRef&&previous.executionRef!==prepared.executionRef||supplied.payload.executionRef&&supplied.payload.executionRef!==saved)throw Error('privacy-reporting-identity-rebound')
-      supplied={...supplied,payload:{...supplied.payload,executionRef:saved??randomUUID()}}
+    const previous = await readSpoolJson<Mapping>(mappingPath)
+    if(runId!==undefined&&supplied.payload.recordKind==='execution'){
+      const original=logical===capture?previous:await readSpoolJson<Mapping>(join(root,'captures',logical+'.json'))
+      const preparedPath=join(root,'reporting-identities',logical+'.json')
+      const prepared=await readSpoolJson<{executionRef:string}>(preparedPath)
+      if(prepared&&(Object.keys(prepared).join(',')!=='executionRef'||!UUID.test(prepared.executionRef)))throw Error('privacy-reporting-identity-rebound')
+      if(original&&(!original.executionRef||original.destination!==destinationId(supplied.destination)||original.captureKey!==terminalCaptureKey(runId)||!UUID.test(original.eventId)))throw Error('privacy-reporting-identity-unavailable')
+      if(previous&&!previous.executionRef)throw Error('privacy-reporting-identity-unavailable')
+      const saved=original?.executionRef??prepared?.executionRef
+      if(saved&&(!UUID.test(saved)||saved===runId)||original?.executionRef&&prepared?.executionRef&&original.executionRef!==prepared.executionRef||previous?.executionRef&&previous.executionRef!==saved||supplied.payload.executionRef&&supplied.payload.executionRef!==saved)throw Error('privacy-reporting-identity-rebound')
+      const executionRef=saved??randomUUID()
+      // A continuation may arrive before :0. Persist its logical identity before its
+      // own map/event, without inventing or rewriting an earlier terminal capture.
+      if(!saved&&logical!==capture)await writeSpoolJson(preparedPath,{executionRef})
+      supplied={...supplied,payload:{...supplied.payload,executionRef}}
     }
     const digest = hashBytes(canonicalJson(supplied.payload))
     if (previous && (previous.payloadDigest !== digest || previous.destination !== destinationId(supplied.destination) || previous.captureKey !== supplied.captureKey || !UUID.test(previous.eventId))) {

@@ -98,6 +98,25 @@ test('durable terminal payload survives capture retry and shares exactly one ide
   expect(first).not.toBe(run.runId)
   expect((await inspectSpool(spoolRoot(home))).events).toHaveLength(1)
   expect((await readRun(root,run.runId)).pendingDelivery[0]?.status).toBe('acknowledged')
+  const {atomicRunFile,parseRun}=await import('../src/runs.ts'),{readFile}=await import('node:fs/promises')
+  const {spoolEventFile}=await import('../src/stats/outbox.ts')
+  const initialEvent=(await inspectSpool(spoolRoot(home))).events[0]!
+  const initialBytes=await readFile(spoolEventFile(spoolRoot(home),initialEvent),'utf8')
+  const saved=await readRun(root,run.runId),sequence=crypto.randomUUID()
+  //138 separately proves continuation admission. This transport fixture supplies its exact
+  // admitted private shape and checks that143 never substitutes the earlier segment payload.
+  const continued=parseRun({...saved,attemptId:sequence,terminalSegment:{sequence,firstAttemptId:sequence},startedAt:'2026-09-08T10:01:00.000Z',finishedAt:'2026-09-08T10:02:00.000Z',attempts:[{id:saved.attemptId!,startedAt:saved.startedAt,finishedAt:saved.finishedAt,processIdentity:null,processGroupId:null,terminationCause:saved.terminationCause,exitCode:null,activeElapsedMs:10,terminalSequence:'0'}]})
+  await atomicRunFile(join(root,run.runId,'run.json'),continued)
+  await prepareTerminalCapture(root,run.runId,normalizeRecord({repo:'o/r',issue:1,ts:continued.finishedAt!,stage:'implement',outcome:'complete',duration_s:60}))
+  const second=await captureTerminalRun(home,run.runId,destination,policy)
+  expect(second).not.toBe(first);expect(await captureTerminalRun(home,run.runId,destination,policy)).toBe(second)
+  const events=(await inspectSpool(spoolRoot(home))).events
+  expect(events).toHaveLength(2)
+  const next=events.find(e=>e.eventId===second)!
+  expect(next.captureKey).toBe(`${run.runId}:terminal:${sequence}`)
+  expect(next.payload).toMatchObject({executionRef:initialEvent.payload.recordKind==='execution'?initialEvent.payload.executionRef:null,startedAt:continued.startedAt,values:{duration_s:60}})
+  expect(await readFile(spoolEventFile(spoolRoot(home),initialEvent),'utf8')).toBe(initialBytes)
+  expect((await readRun(root,run.runId)).pendingDelivery.filter(p=>p.kind==='telemetry-capture').map(p=>p.status)).toEqual(['acknowledged','acknowledged'])
 })
 
 test('managed hook refuses unknown identities, malformed IDs and reentered Stop without storage', async () => {
@@ -108,11 +127,13 @@ test('managed hook refuses unknown identities, malformed IDs and reentered Stop 
   expect(parseManagedHook(JSON.stringify({...hook,sessionId:undefined}))).toBeNull()
   expect(parseManagedHook(JSON.stringify({...hook,event:'Stop',stopHookActive:true}))).toBeNull()
   expect(parseManagedHook(JSON.stringify({...hook,transcript_path:'/private/data'}))).toBeNull()
-  expect(await consumeManagedHook(home,JSON.stringify(hook))).toBeNull()
+  let callbacks=0
+  expect(await consumeManagedHook(home,JSON.stringify(hook),async()=>{callbacks++})).toBeNull()
+  expect(callbacks).toBe(0)
   expect(await readdir(home)).toEqual([])
 })
 
-test.each(['source', 'bundled'] as const)('installed managed hook (%s) resolves owned terminal session and Stop/SessionEnd share one durable capture',async(route)=>{
+async function managedHookFixtureProof(route:'source'|'bundled'|'callback'):Promise<void>{
   const fs=await import('node:fs/promises'),{execFileSync,spawn}=await import('node:child_process'),{resolve}=await import('node:path'),{pathToFileURL}=await import('node:url')
   const runtime=await import('../src/runs.ts'),recordOwner=await import('../src/stats/record.ts'),{processIdentity}=await import('../src/claims.ts'),policyOwner=await import('../../../skills/dev/dev-setup/scripts/effective-policy.mjs')
   const canonicalHome=await fs.realpath(home),repo=join(canonicalHome,'repo'),room=join(canonicalHome,'room'),installed=join(canonicalHome,'installed'),hooks=join(repo,'.vegastack','hooks'),sourceHooks=resolve('skills/dev/dev-setup/assets/hooks')
@@ -137,16 +158,35 @@ test.each(['source', 'bundled'] as const)('installed managed hook (%s) resolves 
   await runtime.prepareTerminalCapture(runtime.runsRoot(canonicalHome),run.runId,recordOwner.normalizeRecord({repo:'a/r',issue:1,ts:run.finishedAt!,session_id:'owned-vendor-session',stage:'implement',outcome:'complete'}))
   expect(await runtime.findOwnedRunSession(runtime.runsRoot(canonicalHome),{sessionId:'owned-vendor-session',cwd:repo})).not.toBeNull()
   expect(await recordOwner.registeredCaptureContext(canonicalHome,'a/r',repo)).not.toBeNull()
+  if(route==='callback'){
+    const raw=(event:string)=>JSON.stringify({harness:'codex',event,sessionId:'owned-vendor-session',cwd:repo,stopHookActive:false})
+    let callbacks=0
+    expect(await recordOwner.consumeManagedHook(canonicalHome,raw('SessionStart'),async value=>{
+      callbacks++;expect(value.context.effectivePolicy.ok).toBe(true)
+      expect(value.context.effectivePolicy.policy.policyDigest).toBe(snapshot.policyDigest)
+    })).toBeNull() // A callback cannot turn SessionStart into terminal capture success.
+    const {inspectSpool,spoolRoot}=await import('../src/stats/outbox.ts')
+    expect((await inspectSpool(spoolRoot(canonicalHome))).events).toHaveLength(0)
+    expect(await recordOwner.consumeManagedHook(canonicalHome,raw('Stop'),async value=>{
+      callbacks++;expect(value.input.sessionId).toBe('owned-vendor-session')
+      expect((await inspectSpool(spoolRoot(canonicalHome))).events).toHaveLength(1)
+      expect((await runtime.readRun(runtime.runsRoot(canonicalHome),value.run.runId)).pendingDelivery[0]?.status).toBe('acknowledged')
+    })).toEqual({ok:true})
+    expect(callbacks).toBe(2)
+    expect(await recordOwner.consumeManagedHook(canonicalHome,raw('Stop'),async()=>{throw Error('lesson refused')})).toBeNull()
+    expect((await inspectSpool(spoolRoot(canonicalHome))).events).toHaveLength(1)
+    return
+  }
   const shared=await fs.readFile(join(sourceHooks,'session-start.mjs')),{hashBytes}=await import('../src/stats/types.ts')
   for(const name of ['session-start.mjs','stop-heartbeat.mjs','session-end.mjs'])await fs.copyFile(join(sourceHooks,name),join(hooks,name))
   await fs.writeFile(join(installed,'skill','dev-setup','assets','hooks','session-start.mjs'),shared)
   await fs.writeFile(join(installed,'package.json'),JSON.stringify({name:'@vegastack/vegafactory',type:'module',bin:{vegafactory:'dist/index.js'}}))
   await fs.writeFile(join(installed,'skill-integrity.json'),JSON.stringify({schemaVersion:2,skills:{'dev-setup':{files:{'assets/hooks/session-start.mjs':hashBytes(shared)}}}}))
-  // Exercise both the authored consumer and the actual bundled command router. Runtime scripts
+  // Exercise both the actual source index and its bundled command router. Runtime scripts
   // come from authored packaging entries, never the possibly stale generated skill tree.
   // Release packing and actual vendor qualification remain #158.
   if(route === 'source') {
-    await fs.writeFile(join(installed,'dist','index.js'),`import {runStatsCli} from ${JSON.stringify(pathToFileURL(resolve('packages/cli/src/stats/cli.ts')).href)};process.exitCode=await runStatsCli(process.argv.slice(3),${JSON.stringify(canonicalHome)});`)
+    await fs.writeFile(join(installed,'dist','index.js'),`await import(${JSON.stringify(pathToFileURL(resolve('packages/cli/src/index.ts')).href)});`)
   } else {
     const packaging=JSON.parse(await fs.readFile(resolve('packages/cli/packaging.json'),'utf8')) as Record<string,string[]>
     const skillPaths=new Map<string,string>()
@@ -166,13 +206,22 @@ test.each(['source', 'bundled'] as const)('installed managed hook (%s) resolves 
   // Keep the adapter's silent outward behavior, but retain its actual child result in this
   // controlled fixture so a timeout or module-load error cannot masquerade as capture success.
   const probe=join(canonicalHome,'hook-child-probe.cjs'),childResults=join(canonicalHome,'hook-child-results.jsonl')
-  await fs.writeFile(probe,`const cp=require('node:child_process'),fs=require('node:fs'),mod=require('node:module'),original=cp.spawnSync;
-cp.spawnSync=function(command,args,options){if(!args?.includes('managed-hook'))return original.call(this,command,args,options);
-const start=performance.now(),result=original.call(this,command,args,{...options,stdio:['pipe','pipe','pipe']});
-fs.appendFileSync(${JSON.stringify(childResults)},JSON.stringify({status:result.status,signal:result.signal,error:result.error?.code??null,stderr:result.stderr,elapsedMs:performance.now()-start,timeoutMs:options.timeout})+'\\n');return result;};mod.syncBuiltinESMExports();`)
+  await fs.writeFile(probe,`const cp=require('node:child_process'),fs=require('node:fs'),mod=require('node:module'),originalSync=cp.spawnSync,originalSpawn=cp.spawn;
+const record=value=>fs.appendFileSync(${JSON.stringify(childResults)},JSON.stringify(value)+'\\n');
+cp.spawnSync=function(command,args,options){if(!args?.includes('managed-hook'))return originalSync.call(this,command,args,options);
+const start=performance.now(),result=originalSync.call(this,command,args,{...options,stdio:['pipe','pipe','pipe']});
+record({status:result.status,signal:result.signal,error:result.error?.code??null,stderr:result.stderr,elapsedMs:performance.now()-start,timeoutMs:options.timeout});return result;};
+cp.spawn=function(command,args,options){if(!args?.includes('managed-hook'))return originalSpawn.call(this,command,args,options);
+const start=performance.now(),stdio=[...options.stdio];stdio[2]='pipe';const child=originalSpawn.call(this,command,args,{...options,stdio});let error=null,stderr='',phaseStart=null,phaseFinish=null;
+child.stderr?.on('data',data=>{stderr=(stderr+data).slice(0,4096)});child.on('error',value=>{error=value.code});
+const send=child.send?.bind(child);if(send)child.send=function(message,...rest){if(message?.vskManagedHook===1&&message.phase==='start')phaseStart=performance.now();return send(message,...rest)};
+child.on('message',message=>{if(message?.vskManagedHook===1&&message.phase==='finish')phaseFinish=performance.now()});
+child.once('close',(status,signal)=>record({status,signal,error,stderr,elapsedMs:performance.now()-start,finished:phaseFinish!==null,phaseMs:phaseStart===null?null:(phaseFinish??performance.now())-phaseStart}));return child;};mod.syncBuiltinESMExports();`)
   const assertChildSucceeded=async()=>{
     const results=(await fs.readFile(childResults,'utf8')).trim().split('\n').map(line=>JSON.parse(line))
-    expect(results.at(-1)).toMatchObject({status:0,signal:null,error:null,stderr:''})
+    const last=results.at(-1)
+    expect(last).toMatchObject({status:0,signal:null,error:null,stderr:''})
+    if(Object.hasOwn(last,'finished')){expect(last.finished).toBe(true);expect(last.phaseMs).toBeLessThanOrEqual(500)}
   }
   const node=Bun.which('node')!,invoke=(name:string,event:string,session='owned-vendor-session',cwd=repo)=>execFileSync(node,[join(hooks,name),'--harness','codex'],{cwd:repo,encoding:'utf8',input:JSON.stringify({hook_event_name:event,session_id:session,cwd,transcript_path:'/never/read/private-transcript'}),env:{...process.env,HOME:canonicalHome,NODE_OPTIONS:`--require=${probe}`,VSK_VEGAFACTORY:join(installed,'dist','index.js')},timeout:2000})
   const before=(await runtime.readRun(runtime.runsRoot(canonicalHome),run.runId)).generation
@@ -186,6 +235,17 @@ fs.appendFileSync(${JSON.stringify(childResults)},JSON.stringify({status:result.
     expect((await inspectSpool(spoolRoot(canonicalHome))).events).toHaveLength(1)
     expect((await runtime.readRun(runtime.runsRoot(canonicalHome),run.runId)).pendingDelivery[0]?.status).toBe('acknowledged')
   }
+  let validatedCalls=0
+  const normalized=JSON.stringify({harness:'codex',event:'Stop',sessionId:'owned-vendor-session',cwd:repo,stopHookActive:false})
+  expect(await recordOwner.consumeManagedHook(canonicalHome,normalized,async value=>{
+    validatedCalls++
+    expect(value.input.sessionId).toBe('owned-vendor-session')
+    expect(value.context.effectivePolicy.ok).toBe(true)
+    expect(value.context.effectivePolicy.policy.policyDigest).toBe(snapshot.policyDigest)
+    expect((await runtime.readRun(runtime.runsRoot(canonicalHome),value.run.runId)).pendingDelivery[0]?.status).toBe('acknowledged')
+  })).toEqual({ok:true})
+  expect(validatedCalls).toBe(1)
+  expect(await recordOwner.consumeManagedHook(canonicalHome,normalized,async()=>{throw Error('lesson refused')})).toBeNull()
   await fs.writeFile(join(room,'org.md'),'stats: on\nlearning: off\nsync-max-age: 2h\n');git(room,'add','.');git(room,'commit','-m','disable learning')
   snapshot.sourceCommit=git(room,'rev-parse','HEAD');snapshot.policyDigest='0'.repeat(64)
   snapshot.policyDigest=policyOwner.loadSnapshotPolicy({snapshot,repo:'a/r',devMd}).policy.policyDigest
@@ -194,7 +254,11 @@ fs.appendFileSync(${JSON.stringify(childResults)},JSON.stringify({status:result.
   const disabledGeneration=(await runtime.readRun(runtime.runsRoot(canonicalHome),run.runId)).generation
   expect(invoke('stop-heartbeat.mjs','Stop')).toBe('')
   expect((await runtime.readRun(runtime.runsRoot(canonicalHome),run.runId)).generation).toBe(disabledGeneration)
-},10000)
+  expect(await recordOwner.consumeManagedHook(canonicalHome,normalized,async()=>{validatedCalls++})).toBeNull()
+  expect(validatedCalls).toBe(1)
+}
+test.each(['source','bundled'] as const)('installed managed hook (%s) resolves owned terminal session and Stop/SessionEnd share one durable capture',managedHookFixtureProof,10000)
+test('managed hook callback receives fresh private authority only after durable capture',()=>managedHookFixtureProof('callback'),10000)
 
 test('actual failed child argv and stdout never enter basic diagnostic files',async()=>{
  const {executeRun}=await import('../src/dispatch.ts'),{parseFactoryConfig}=await import('../src/config.ts')
@@ -217,4 +281,43 @@ test('CLI legacy hooks do not read a supplied transcript or native-memory path',
  let reads=0
  const code=await runStats(parseStatsArgs(['record','--source','claude-session-end']),{home,hostname:'fixture',ghUser:'alice',login:'alice',isLead:false,policy,repo:'o/r',cloneRoot:home,git:async()=>({code:0,stdout:'',stderr:''}),gh:async()=>[],readStdin:async()=>JSON.stringify({session_id:'fixture',transcript_path:'/Users/private/.claude/NATIVE_MEMORY_CANARY'}),readTranscript:async()=>{reads++;throw Error('native-memory-read')},now:()=>new Date(),log:()=>{}})
  expect(code).toBe(0);expect(reads).toBe(0)
+})
+
+test('an older pending terminal segment replays only its immutable snapshot after continuation',async()=>{
+  const runtime=await import('../src/runs.ts'),{captureTerminalRun,normalizeRecord}=await import('../src/stats/record.ts')
+  const {inspectSpool,spoolRoot,spoolEventFile}=await import('../src/stats/outbox.ts')
+  const {hashBytes}=await import('../src/stats/types.ts'),fs=await import('node:fs/promises')
+  const source={kind:'github-comment' as const,repositoryId:'R_repo',issueNodeId:'I_parent',commentId:'12',bodySha256:'a'.repeat(64)},root=runtime.runsRoot(home)
+  const destination={host:'github.com' as const,org:'o',repo:'o/r',controlRoom:'o/room'}
+  let prior=await runtime.createRun({root,repo:'o/r',issue:1,parent:null,checkout:home,branch:'feat/1-work',baseSha:'a'.repeat(40),headSha:null,stage:'implement',harness:'codex',model:'fixture',effort:'high',execution:{providerMode:'subscription',harness:'codex',harnessVersion:'fixture',model:'fixture',effort:'high',accountRef:'fixture',qualification:source},approvalBindings:[{approvalId:'original',source}],recordBinding:null,approvalRefs:[],policyDigest:'b'.repeat(64),claimToken:crypto.randomUUID(),startedAt:'2026-09-08T09:59:00.000Z',taskKey:{repo:'o/r',issue:1,taskId:'1-T1',scopeDigest:'c'.repeat(64)},activeElapsedMs:10,taskOwner:null,agentAccountOwner:null,accountRef:'fixture',waitReason:null,machine:null,sharedClaim:null,checkpoint:null,remoteEffectCoverage:{kind:'unmanaged-possible',reasonCode:'fixture'}})
+  prior=await runtime.transitionRun(prior.runId,prior.generation,{state:'terminal',terminationCause:'interrupted',finishedAt:'2026-09-08T10:00:00.000Z'},root)
+  await runtime.prepareTerminalCapture(root,prior.runId,normalizeRecord({repo:'o/r',issue:1,ts:prior.finishedAt!,duration_s:10,outcome:'failed'}))
+  prior=await runtime.readRun(root,prior.runId)
+  const runFile=join(root,prior.runId,'run.json'),priorBytes=await fs.readFile(runFile,'utf8'),snapshotDigest=hashBytes(priorBytes),history=join(root,prior.runId,'history')
+  await fs.mkdir(history,{mode:0o700})
+  const snapshotFile=join(history,`${prior.attemptId}.${snapshotDigest}.json`)
+  await fs.writeFile(snapshotFile,priorBytes,{mode:0o600})
+  const sequence=crypto.randomUUID(),previous={id:prior.attemptId!,startedAt:prior.startedAt,finishedAt:prior.finishedAt,processIdentity:null,processGroupId:null,terminationCause:prior.terminationCause,exitCode:null,activeElapsedMs:10,terminalSequence:'0',snapshotDigest}
+  // Exact138 continuation output shape, with the original pending bytes and digest-bound
+  // snapshot intact.138 tests the admission constructor; this case tests143 replay selection.
+  const current=runtime.parseRun({...prior,generation:prior.generation+1,attemptId:sequence,terminalSegment:{sequence,firstAttemptId:sequence},attempts:[previous],startedAt:'2026-09-08T10:01:00.000Z',finishedAt:'2026-09-08T10:02:00.000Z',terminationCause:'succeeded'})
+  await runtime.atomicRunFile(runFile,current)
+  await runtime.prepareTerminalCapture(root,current.runId,normalizeRecord({repo:'o/r',issue:1,ts:current.finishedAt!,duration_s:60,outcome:'complete'}))
+  const laterId=await captureTerminalRun(home,current.runId,destination,policy)
+  expect((await runtime.readRun(root,current.runId)).pendingDelivery.map(p=>p.status)).toEqual(['pending','acknowledged'])
+  const later=(await inspectSpool(spoolRoot(home))).events[0]!,laterBytes=await fs.readFile(spoolEventFile(spoolRoot(home),later),'utf8')
+  const oldKey=runtime.terminalCaptureDescriptor(prior).captureKey
+  await fs.rename(snapshotFile,snapshotFile+'.held')
+  try{await expect(captureTerminalRun(home,current.runId,destination,policy,oldKey)).rejects.toThrow('terminal-capture-history-unavailable')}
+  finally{await fs.rename(snapshotFile+'.held',snapshotFile)}
+  expect((await runtime.readRun(root,current.runId)).pendingDelivery[0]?.status).toBe('pending')
+  await expect(captureTerminalRun(home,current.runId,destination,policy,`${crypto.randomUUID()}:terminal:0`)).rejects.toThrow('terminal-capture-key-unavailable')
+  const oldId=await captureTerminalRun(home,current.runId,destination,policy,oldKey)
+  expect(oldId).not.toBe(laterId);expect(await captureTerminalRun(home,current.runId,destination,policy,oldKey)).toBe(oldId)
+  const events=(await inspectSpool(spoolRoot(home))).events,old=events.find(e=>e.eventId===oldId)!
+  expect(events).toHaveLength(2)
+  expect(old.payload).toMatchObject({outcome:'interrupted',startedAt:prior.startedAt,endedAt:prior.finishedAt,executionRef:later.payload.recordKind==='execution'?later.payload.executionRef:null,values:{duration_s:10}})
+  expect((await runtime.readRun(root,current.runId)).pendingDelivery.map(p=>p.status)).toEqual(['acknowledged','acknowledged'])
+  expect(await fs.readFile(snapshotFile,'utf8')).toBe(priorBytes)
+  expect(await fs.readFile(spoolEventFile(spoolRoot(home),later),'utf8')).toBe(laterBytes)
 })

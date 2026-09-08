@@ -50,7 +50,7 @@ test('immutable delivery isolates organizations and preserves a concurrent produ
   expect(g(home,['--git-dir='+remote,'log','-1','--format=%an <%ae> %cn <%ce> %B'])).toMatch(/^VegaFactory telemetry <telemetry@example.invalid> VegaFactory telemetry/)
   expect(g(home,['--git-dir='+remote,'log','-1','--format=%B'])).not.toMatch(/private-person|private-host|terminal|implement/)
   expect((await pushOutbox(options())).pushed).toBe(1)
-})
+},10000) // Two real Git deliveries; this is a test-runner allowance, not a hook deadline.
 
 test('lost local acknowledgment recognizes historical bytes after policy tightening',async()=>{
   const e=event();await enqueueEvent(spoolRoot(home),e)
