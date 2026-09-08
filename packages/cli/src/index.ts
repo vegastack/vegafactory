@@ -9,7 +9,7 @@ import { fileURLToPath } from 'node:url'
 import { createInterface } from 'node:readline/promises'
 import { factoryConfigPath, parseSyncMaxAge, readFactoryConfig } from './control-room.ts'
 import { selectSkills, type SkillEntry } from './selection.ts'
-import { resolveTarget, syncControlRoom } from './sync.ts'
+import { resolveTarget, syncControlRoom, inspectSnapshots, restoreSnapshot } from './sync.ts'
 import { dashboardUsage, runDashboard } from './dashboard.ts'
 import { dispatchUsage, runDispatchCli } from './dispatch.ts'
 import { runChildrenCli } from './children.ts'
@@ -40,6 +40,8 @@ interface Options {
   nonInteractive: boolean
   json: boolean
   rest?: string[]
+  apply?: boolean
+  backup?: number
 }
 interface SkillIntegrity { files: Record<string, string>; group?: string | null; repoOnly?: boolean }
 interface Integrity { schemaVersion: number; skills: Record<string, SkillIntegrity> }
@@ -88,11 +90,15 @@ Worktrees (one feature, one worktree — the main checkout never leaves the defa
 
 Control room (skills read the local clone, never the network):
   vegafactory sync [--org ORG] [--dry-run] [--force] [--json] [--dir PATH]
+  vegafactory sync inspect
+  vegafactory sync restore [--backup N] [--apply]
+  Recovery previews by default; --apply selects recovery content and requires a fresh
+  successful fetch before authority resumes. --backup selects a non-negative index (default 0).
   Refreshes this machine's shallow clone of the control room named by the project's
   control-room: knob. --org ORG is the bootstrap path for a repo whose profile has no
   knob yet (the first dev-setup run): the room is <org>/vegafactory-control-room by
-  convention. Exit 0 synced, already fresh, or no control room · 1 the fetch
-  failed and the existing clone stands · 2 a refusal (dirty clone, symlink, bad state file).
+  convention. Exit 0 synced, already fresh, or no control room · 1 a command error or
+  failed fetch (the existing clone stands) · 2 a refusal (dirty clone, symlink, bad state file).
 
 Verified children:
   vegafactory children run|join --parent N --groups FILE --repo owner/name [--write] [--json]
@@ -178,6 +184,12 @@ function parse(argv: string[]): Options {
       const value = argv.shift()
       if (value === undefined || value === '' || value.startsWith('-')) throw new Error('--org requires a value')
       options.org = value
+    }
+    else if (flag === '--apply' && command === 'sync') options.apply = true
+    else if (flag === '--backup' && command === 'sync') {
+      const value = argv.shift()
+      if (!value || !/^\d+$/.test(value) || !Number.isSafeInteger(Number(value))) throw new Error('--backup requires a non-negative integer')
+      options.backup = Number(value)
     }
     else if (flag === '--dry-run') options.dryRun = true
     else if (flag === '--force') options.force = true
@@ -711,6 +723,9 @@ async function doctor(options: Options) {
 // It refreshes by default — a hook or a dispatcher tick calling a dry-run-by-default verb would be
 // a silent no-op — and writes nothing outside the clone path and ~/.vegastack/factory.json.
 async function sync(options: Options) {
+  if (options.skill && !['inspect', 'restore'].includes(options.skill)) throw new Error('sync accepts inspect or restore')
+  if (options.apply && (options.skill !== 'restore' || options.dryRun)) throw new Error('--apply requires sync restore without --dry-run')
+  if (options.backup !== undefined && options.skill !== 'restore') throw new Error('--backup requires sync restore')
   const base = baseFor('project', options.dir)
   const devMdPath = join(base, '.vegastack', 'dev.md')
   const devMdText = await exists(devMdPath) ? await readFile(devMdPath, 'utf8') : ''
@@ -732,6 +747,14 @@ async function sync(options: Options) {
   }
   if (!target) {
     return report(options, { command: 'sync', ok: true, action: 'none', org: null, path: null, sha: null, lastSyncedAt: null, ageMinutes: null, message: 'this repo names no control room — skill defaults apply' }, 0)
+  }
+
+  if (options.skill === 'inspect' || options.skill === 'restore') {
+    const context = { target: { ...target, repoPath: base }, now: Date.now() }
+    const result = options.skill === 'inspect' ? await inspectSnapshots(context)
+      : await restoreSnapshot({ ...context, index: options.backup ?? 0, apply: options.apply === true })
+    console.log(JSON.stringify(result, null, 2))
+    return
   }
 
   const result = await syncControlRoom({
