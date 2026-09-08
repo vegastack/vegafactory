@@ -2,6 +2,16 @@
 
 The project's story, newest first: what got built, why, and how it went — for the operator's future recall. Format home: the dev-chronicle skill.
 
+## 08-09-2026 — Interrupted work keeps its verified progress ([#144](https://github.com/vegastack/vegafactory/issues/144))
+
+- **What:** Recovery now retains verified completed tasks and reconstructs a receiving run from its exact shared handoff. Unavailable earlier history stays unknown, while accepted child deliveries give reporting a verifiable source. Local lessons carry evidence for adoption and undo.
+- **Why:** Resuming interrupted work must preserve what was actually completed without inventing ownership, history or acceptance.
+- **How it went:** Capture and duplicate replay initially missed the existing hook deadlines. The final source, bundled and learning checks passed with those limits unchanged and left Git indexes untouched. Source is integrated; broad verification, independent review, native admission and vendor qualification remain pending.
+- **Changed:** Task evidence reconciliation · verified continuation and receiving runs · accepted child-delivery evidence · bounded lessons · safe hook replay. Retained parent/child group transfer remains refused under the current approved scope.
+- **Decisions:** none.
+
+— approved by (kmanojkumar) · built by Codex · branch codex/productionization-133
+
 ## 08-09-2026 — Broker deployment requires a reviewed artifact ([#155](https://github.com/vegastack/vegafactory/issues/155))
 
 - **What:** Prepared the two canonical broker domains and an explicit deployment workflow that checks the merged source, Worker digest and protected environment before deploying the retained bundle. The existing App and OIDC audience stay paired across preview and production.
