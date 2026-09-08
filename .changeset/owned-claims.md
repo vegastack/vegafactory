@@ -14,3 +14,4 @@ Protect dispatcher ownership with atomic local claims and conditional shared tas
 - Treat in-progress local guard publication as bounded contention while preserving unknown or abandoned guard evidence.
 - Recover a committed handoff after response loss only from its exact receipt, original owner and revalidated transfer authority.
 - Inspect handoff receipts as verified predecessor and successor records without treating null handoff payloads as recovery evidence.
+- Reconcile a new session on the same machine against unchanged stopped task records before replacing handoff ownership.

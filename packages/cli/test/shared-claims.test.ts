@@ -182,7 +182,7 @@ test('verified transfer keeps remote recovery, one takeover wins and old owner c
  const missing=await transitionSharedTask({claim:q.claim,operationId:randomUUID(),transition:{kind:'handoff',machine,session,candidate:f.candidate,stopProof:{...stopProof,generation:2},recovery}})
  expect(missing.kind).toBe('refused')
  const results=await Promise.all([0,1].map(()=>transitionSharedTask({claim:q.claim,operationId:randomUUID(),transition:{kind:'handoff',machine,session,candidate:f.candidate,stopProof,recovery}})))
- expect(results.filter(x=>x.kind==='owned')).toHaveLength(1)
+ expect(results.filter(x=>x.kind==='owned'), JSON.stringify(results.map(x=>({kind:x.kind,reason:'reason' in x?x.reason:null})))).toHaveLength(1)
  const current=await readCoordination(f.target),task=current.tasks[owned.claim.taskKey]!
  expect(task.generation).toBe(2);expect(task.recovery?.generation).toBe(2);expect(task.recovery?.execution).toEqual(recovery.execution)
  expect((await transitionSharedTask({claim:q.claim,operationId:randomUUID(),transition:{kind:'start'}})).kind).toBe('refused')
@@ -801,4 +801,59 @@ test('handoff history reads actual null-payload receipt and preserves both pinne
     f.rewrite();
     expect((await inspectHandoffCoordinationTask(f.target, input)).kind).toBe('invalid-or-unavailable');
     expect(writes).toBe(0);
+});
+
+test('same-machine new-session handoff verifies original stopped target before replacing ownership', async () => {
+    const f = await pendingEffectFixture('telemetry-push', 'ambiguous');
+    expect((await transitionSharedTask({ claim: f.claim, operationId: randomUUID(), transition: { kind: 'stop', stopProof: f.stopProof } })).kind).toBe('owned');
+    const original = (await readCoordination(f.target)).tasks[f.claim.taskKey]!;
+    const session = { ...f.session, sessionId: randomUUID() };
+    let verifications = 0;
+    f.target.verifySession = async (previous, machine, receiving) => {
+        expect(previous.sessionId).toBe(f.session.sessionId);
+        expect(previous.activeTaskKeys).toContain(f.claim.taskKey);
+        expect(machine).toEqual(f.machine);
+        expect(receiving.sessionId).toBe(session.sessionId);
+        verifications++;
+    };
+    const result = await transitionSharedTask({ claim: f.claim, operationId: randomUUID(), transition: { kind: 'handoff', machine: f.machine, session, candidate: f.candidate, stopProof: f.stopProof, recovery: f.recovery } });
+    expect(result).toMatchObject({ kind: 'owned' });
+    if (result.kind !== 'owned') throw Error(result.reason);
+    const current = await readCoordination(f.target), next = current.tasks[f.claim.taskKey]!;
+    expect(verifications).toBe(1);
+    expect(next).toMatchObject({ state: 'claimed', machineId: original.machineId, sessionId: session.sessionId, generation: 2, stopProof: original.stopProof });
+    expect(next.ownerToken).not.toBe(original.ownerToken);
+    expect(next.recovery!.effects).toEqual(original.recovery!.effects);
+    expect(current.machines[f.machine.id]!.activeTaskKeys).toContain(f.claim.taskKey);
+    expect((await transitionSharedTask({ claim: f.claim, operationId: randomUUID(), transition: { kind: 'start' } })).kind).toBe('refused');
+});
+
+test.each(['running', 'claimed', 'blocked', 'wrong-other-proof', 'wrong-target-proof', 'wrong-session', 'denied-session', 'missing-verifier'] as const)('same-machine new-session handoff refuses %s without changing old reservations', async mode => {
+    const f = await pendingEffectFixture('telemetry-push');
+    expect((await transitionSharedTask({ claim: f.claim, operationId: randomUUID(), transition: { kind: 'stop', stopProof: f.stopProof } })).kind).toBe('owned');
+    if (['running', 'claimed', 'blocked', 'wrong-other-proof'].includes(mode)) {
+        const acquired = await acquireSharedTask({ ...f, operationId: randomUUID(), candidate: { ...f.candidate, issue: 138, issueNodeId: 'I_138', runId: randomUUID(), paths: ['src/other'] } });
+        if (acquired.kind !== 'owned') throw Error(acquired.reason);
+        if (mode === 'running')
+            expect((await transitionSharedTask({ claim: acquired.claim, operationId: randomUUID(), transition: { kind: 'start' } })).kind).toBe('owned');
+        if (mode === 'blocked')
+            expect((await transitionSharedTask({ claim: acquired.claim, operationId: randomUUID(), transition: { kind: 'block', stopProof: null } })).kind).toBe('owned');
+        if (mode === 'wrong-other-proof') {
+            const proof = { ...f.stopProof, runIds: [acquired.claim.runId] };
+            expect((await transitionSharedTask({ claim: acquired.claim, operationId: randomUUID(), transition: { kind: 'stop', stopProof: proof } })).kind).toBe('owned');
+            const snapshot = await readCoordination(f.target), task = snapshot.tasks[acquired.claim.taskKey]!;
+            task.stopProof = { ...proof, sessionId: randomUUID() };
+            await f.target.provider.commit(f.target, { branchId: snapshot.branchId, expectedHeadOid: snapshot.head, files: { [`coordination/tasks/${task.taskKey}.json`]: canonical(task) }, operationId: randomUUID() });
+        }
+    }
+    const before = await readCoordination(f.target), session = { ...f.session, sessionId: randomUUID() };
+    if (mode === 'wrong-session') session.installationId = randomUUID();
+    if (mode !== 'missing-verifier') f.target.verifySession = async () => { if (mode === 'denied-session') throw Error('session authority denied'); };
+    let commits = 0;
+    const commit = f.target.provider.commit;
+    f.target.provider.commit = async (...args) => { commits++; return commit(...args); };
+    const result = await transitionSharedTask({ claim: f.claim, operationId: randomUUID(), transition: { kind: 'handoff', machine: f.machine, session, candidate: f.candidate, stopProof: mode === 'wrong-target-proof' ? { ...f.stopProof, sessionId: randomUUID() } : f.stopProof, recovery: f.recovery } });
+    expect(result.kind).toBe(mode === 'missing-verifier' ? 'busy' : 'refused');
+    expect(commits).toBe(0);
+    expect(await readCoordination(f.target)).toEqual(before);
 });

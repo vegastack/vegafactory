@@ -1328,17 +1328,17 @@ export async function transitionSharedTask(input: {
             const c = transition.candidate;
             if (taskKey(c.host, c.repositoryNodeId, c.issueNodeId) !== t.taskKey || c.scopeDigest !== t.scopeDigest || c.approvalDigest !== t.approvalDigest || canonical(c.approvalBindings) !== canonical(t.approvalBindings) || c.parentTaskKey !== t.parentTaskKey || canonical(c.parentBinding ?? null) !== canonical(t.parentBinding ?? null))
                 throw Error('handoff must preserve verified original scope and parent binding');
-            s.machines[t.machineId]!.activeTaskKeys = s.machines[t.machineId]!.activeTaskKeys.filter(k => k !== t.taskKey);
-            t.machineId = transition.machine.id;
-            t.installationId = transition.machine.installationId;
-            t.sessionId = transition.session.sessionId;
-            t.generation++;
-            t.ownerToken = randomUUID();
-            t.state = 'claimed';
-            t.stopProof = transition.stopProof;
-            // Carry remotely sufficient original execution/effect history into the new ownership generation.
-            t.recovery = { ...transition.recovery, generation: t.generation };
-            await reserve(s, t, transition.machine, transition.session, target, true);
+            const previousMachineId = t.machineId;
+            // Keep the stopped predecessor and its machine reservation intact while
+            // reserve verifies every task belonging to the previous session.
+            const successor: TaskRecord = { ...t, machineId: transition.machine.id, installationId: transition.machine.installationId,
+                sessionId: transition.session.sessionId, generation: t.generation + 1, ownerToken: randomUUID(),
+                state: 'claimed', stopProof: transition.stopProof,
+                recovery: { ...transition.recovery, generation: t.generation + 1 } };
+            await reserve(s, successor, transition.machine, transition.session, target, true);
+            if (previousMachineId !== successor.machineId)
+                s.machines[previousMachineId]!.activeTaskKeys = s.machines[previousMachineId]!.activeTaskKeys.filter(k => k !== t.taskKey);
+            return { task: successor, type: transition.kind, payload: recoveryPayload };
         }
         return { task: t, type: transition.kind, payload: recoveryPayload };
     }, claim, requestDigest);
