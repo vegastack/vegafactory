@@ -47,16 +47,49 @@ import { spawn } from 'node:child_process'
 import { createServer } from 'node:http'
 import { dashboardDescriptor, CLI, DASHBOARD } from './release-artifacts.mjs'
 const sha=(b:Buffer)=>createHash('sha256').update(b).digest('hex')
-function tar(files:Record<string,string>) {
+type TarFile=string|{data:string,mode?:0o644|0o755}
+function tar(files:Record<string,TarFile>) {
  const chunks:Buffer[]=[]
- for(const [path,data] of Object.entries(files)){const b=Buffer.from(data),h=Buffer.alloc(512);h.write('package/'+path,0,100);h.write('0000644\0',100);h.write(b.length.toString(8).padStart(11,'0')+'\0',124);h.fill(32,148,156);h.write('0',156);h.write([...h].reduce((a,v)=>a+v,0).toString(8).padStart(6,'0')+'\0 ',148);chunks.push(h,b,Buffer.alloc((512-b.length%512)%512))}
+ for(const [path,file] of Object.entries(files)){const data=typeof file==='string'?file:file.data,mode=typeof file==='string'?0o644:file.mode??0o644,b=Buffer.from(data),h=Buffer.alloc(512);h.write('package/'+path,0,100);h.write(mode.toString(8).padStart(7,'0')+'\0',100);h.write(b.length.toString(8).padStart(11,'0')+'\0',124);h.fill(32,148,156);h.write('0',156);h.write([...h].reduce((a,v)=>a+v,0).toString(8).padStart(6,'0')+'\0 ',148);chunks.push(h,b,Buffer.alloc((512-b.length%512)%512))}
  return gzipSync(Buffer.concat([...chunks,Buffer.alloc(1024)]))
 }
 async function pairFixture(version='1.0.0',badSmoke=false) {
  const dir=await mkdtemp(join(tmpdir(),'release-command-'))
- const dashboard=tar({'package.json':JSON.stringify({name:DASHBOARD,version}),'dist-standalone/packages/dashboard/server.js':`require('node:http').createServer((q,r)=>{r.statusCode=${badSmoke?500:200};r.end('fixture route')}).listen(Number(process.env.PORT),'127.0.0.1')`})
+ const dashboard=tar({'package.json':JSON.stringify({name:DASHBOARD,version}),'dist-standalone/packages/dashboard/server.js':'// retained exact dashboard fixture'})
  const descriptor=dashboardDescriptor(dashboard,version)
- const cli=tar({'package.json':JSON.stringify({name:CLI,version}),'dist/dashboard-artifact.json':JSON.stringify(descriptor),'dist/index.js':`const fs=require('node:fs'),p=require('node:path'),a=process.argv.slice(2);if(a[0]==='--version')console.log('${version}');else if(a[1]==='list')console.log('dev-implement');else if(a[1]==='add'){const d=p.join(a[a.indexOf('--dir')+1],'.agents/skills/dev-implement/scripts');fs.mkdirSync(d,{recursive:true});fs.writeFileSync(p.join(d,'preflight.mjs'),'fixture helper')}else if(a[1]==='verify'){if(!fs.existsSync(p.join(a[a.indexOf('--dir')+1],'.agents/skills/dev-implement/scripts/preflight.mjs')))process.exit(1)}else process.exit(2)`})
+ const child=`import {createServer} from 'node:http';
+const [port,instanceId,org,version,badSmoke]=process.argv.slice(2);
+const pages={
+ '/':'Needs your decision Blocked or failed Running Recently merged',
+ '/performance':'Performance report is unavailable. Unlinked terminal segments Unavailable',
+ '/activity':'Activity report is unavailable. Task activity is unavailable',
+ '/people':'People reporting is unavailable for the current policy and scope.',
+ '/people/fixture-user':'This person report is unavailable for the current verified identity, policy, and repository scope.',
+ '/skills':'No skill invocations recorded for this month.',
+ '/repo/fixture/project':'This repository is outside the current verified reporting scope.',
+ '/board':'Some data is incomplete or unavailable.',
+ '/dispatcher':'Running Unavailable Last tick Unavailable',
+};
+const server=createServer((request,response)=>{const path=new URL(request.url,'http://fixture').pathname;if(path==='/api/health'){if(badSmoke==='true'){response.statusCode=500;response.end('fixture readiness unavailable');return}response.setHeader('content-type','application/json');response.end(JSON.stringify({ok:true,org,version,instanceId,cacheSchema:2,dataState:'unavailable',sourceAgeSeconds:null}));return}response.setHeader('content-type','text/html');response.statusCode=Object.hasOwn(pages,path)?200:404;response.end(pages[path]??'not found')});
+server.listen(Number(port),'127.0.0.1',()=>console.log('ready'));const stop=()=>server.close(()=>process.exit(0));process.on('SIGTERM',stop);process.on('SIGINT',stop);`
+ const cliEntry=`#!/usr/bin/env node
+import {copyFileSync,existsSync,mkdirSync,readFileSync} from 'node:fs';import {isAbsolute,join} from 'node:path';import {spawn} from 'node:child_process';import {randomUUID} from 'node:crypto';import {fileURLToPath} from 'node:url';
+const [verb,...rest]=process.argv.slice(2);const home=process.env.HOME;const packageVersion=${JSON.stringify(version)};
+if(verb==='--version'){console.log('vegafactory '+packageVersion);process.exit(0)}
+if(verb==='skills'){if(rest[0]==='list'){console.log('dev-implement');process.exit(0)}const root=rest[rest.indexOf('--dir')+1],destination=join(root,'.agents/skills/dev-implement/scripts/preflight.mjs');if(rest[0]==='add'){mkdirSync(join(root,'.agents/skills/dev-implement/scripts'),{recursive:true});copyFileSync(fileURLToPath(new URL('../skill/dev-implement/scripts/preflight.mjs',import.meta.url)),destination);process.exit(0)}if(rest[0]==='verify'){if(!existsSync(destination))process.exit(74);process.exit(0)}}
+if(verb!=='dashboard'||rest.includes('--dir')||!rest.includes('--json'))process.exit(75);
+const config=JSON.parse(readFileSync(join(home,'.vegastack/factory.json'),'utf8')),org=rest[rest.indexOf('--org')+1],start=Number(rest[rest.indexOf('--port')+1]),room=config.controlRooms?.[org],repos=config.repos;
+if(config.schemaVersion!==2||config.revision!==0||!room||!isAbsolute(room.path)||!Array.isArray(repos)||repos.length!==1||repos[0].org!==org||repos[0].repo!=='fixture/project'||!isAbsolute(repos[0].path))process.exit(77);
+const retained=join(home,'.vegastack/dashboard',packageVersion,'node_modules/@vegastack/vegafactory-dashboard/dist-standalone/packages/dashboard/server.js');if(!existsSync(retained))process.exit(78);
+const instanceId=randomUUID(),port=start+1,child=spawn(process.execPath,[fileURLToPath(new URL('./fixture-dashboard-child.mjs',import.meta.url)),String(port),instanceId,org,packageVersion,${JSON.stringify(String(badSmoke))}],{detached:true,stdio:['ignore','pipe','inherit']});
+child.stdout.once('data',()=>console.log(JSON.stringify({command:'dashboard',ok:true,org,version:packageVersion,instanceId,cacheSchema:2,url:'http://127.0.0.1:'+port,dir:join(home,'.vegastack/dashboard',packageVersion),entry:retained,fetched:false,pid:child.pid})));const stop=()=>{child.once('close',()=>process.exit(0));child.kill('SIGTERM')};process.on('SIGTERM',stop);process.on('SIGINT',stop);await new Promise(()=>{});`
+ const cli=tar({
+  'package.json':JSON.stringify({name:CLI,version,type:'module',bin:{vegafactory:'dist/index.js'}}),
+  'dist/index.js':{data:cliEntry,mode:0o755},'dist/run-wrapper.js':'// retained runtime wrapper',
+  'dist/fixture-dashboard-child.mjs':child,'dist/dashboard-artifact.json':JSON.stringify(descriptor),
+  'skill/dev-implement/SKILL.md':'name: dev-implement','skill/dev-implement/scripts/preflight.mjs':'// fixture helper',
+  'skill-integrity.json':'{}','README.md':'fixture CLI','LICENSE':'fixture license',
+ })
  const artifacts=[]
  for(const [name,bytes,file] of [[DASHBOARD,dashboard,'dashboard.tgz'],[CLI,cli,'cli.tgz']] as const){await writeFile(join(dir,file),bytes);artifacts.push({name,file,sha256:sha(bytes),integrity:'sha512-'+createHash('sha512').update(bytes).digest('base64'),bytes:bytes.length})}
  const sbomFiles=[]
@@ -165,7 +198,7 @@ test('real CLI registry auth, outage and integrity conflict never create an abse
 },30000)
 test('actual fixture server failure stops first-use smoke before promotion',async()=>{
  const p=await pairFixture('1.0.0',true),r=await processRegistry()
- try{const result=await launchPair(p,r).result;expect(result.code).toBe(2);expect(result.output).toContain('readiness timeout');expect(r.tags.size).toBe(0);expect(JSON.parse(await readFile(join(p.dir,'release-state.json'),'utf8')).state).toBe('pair-present')}finally{await r.close()}
+ try{const result=await launchPair(p,r).result;expect(result.code).toBe(2);expect(result.output).toContain('dashboard readiness: HTTP 500');expect(r.tags.size).toBe(0);expect(JSON.parse(await readFile(join(p.dir,'release-state.json'),'utf8')).state).toBe('pair-present')}finally{await r.close()}
 },30000)
 
 test('one workflow queue covers interleaved version requests and the queued older CLI cannot roll latest backward',async()=>{
