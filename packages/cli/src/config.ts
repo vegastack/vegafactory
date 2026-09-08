@@ -36,7 +36,11 @@ export interface FactoryConfig {
   settingsPath?: string
 }
 
+export type State = 'needsOperator' | 'needsPlan' | 'ready' | 'working' | 'forOperator'
+export type LabelMap = Record<State, string>
+
 export interface RepoPolicy {
+  labelMap?: LabelMap
   dispatch: 'off' | 'local'
   operators: string[]
   stages: Partial<Record<StageName, StagePolicy>>
@@ -150,6 +154,7 @@ export function repoPolicyFromEffective(resolved: ReturnType<typeof resolvePolic
     stages: resolved.policy.values.stages ?? {},
     refusal: resolved.ok ? null : resolved.blocks.join('; '),
     effective: resolved.policy,
+    labelMap: resolved.policy.values['workflow-labels'],
   }
 }
 

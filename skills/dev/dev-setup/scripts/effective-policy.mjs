@@ -69,6 +69,48 @@ function policyJson(text) {
   return parsed
 }
 
+/** @typedef {'needsOperator'|'needsPlan'|'ready'|'working'|'forOperator'} State */
+/** @typedef {Record<State,string>} LabelMap */
+/** @type {LabelMap} */
+export const DEFAULT_LABELS = Object.freeze({ needsOperator: 'needs-operator', needsPlan: 'needs-plan', ready: 'ready', working: 'working', forOperator: 'for-operator' })
+export const WORKFLOW_STATES = Object.freeze(Object.keys(DEFAULT_LABELS))
+
+/** @param {unknown} value @returns {LabelMap} */
+export function resolveLabels(value) {
+  if (value === undefined) return { ...DEFAULT_LABELS }
+  if (typeof value === 'string' || Array.isArray(value)) {
+    const names = typeof value === 'string' ? value.trim().split(/[,\s]+/) : value
+    if (!names.length || names.some(name => typeof name !== 'string' || !name.trim())
+      || new Set(names).size !== names.length || !Object.values(DEFAULT_LABELS).every(name => names.includes(name))) {
+      throw new Error('ambiguous legacy labels: preview an explicit workflow-labels semantic mapping; no labels or board options changed')
+    }
+    return { ...DEFAULT_LABELS }
+  }
+  if (!object(value) || Object.keys(value).length !== WORKFLOW_STATES.length
+    || !WORKFLOW_STATES.every(key => own(value, key) && typeof value[key] === 'string' && value[key].trim() === value[key]
+      && value[key].length > 0 && value[key].length <= 50 && !/[\x00-\x1f\x7f]/.test(value[key]))
+    || new Set(Object.values(value).map(name => name.toLowerCase())).size !== WORKFLOW_STATES.length) {
+    throw new Error('workflow-labels requires exactly five semantic keys with distinct nonempty label names')
+  }
+  return Object.fromEntries(WORKFLOW_STATES.map(key => [key, value[key]]))
+}
+
+/** @param {string[]} labels @param {LabelMap} map @returns {{state:State|null,blocks:string[]}} */
+export function resolveState(labels, map) {
+  try { map = resolveLabels(map) } catch (error) { return { state: null, blocks: [error.message] } }
+  if (!Array.isArray(labels) || labels.some(label => typeof label !== 'string')) return { state: null, blocks: ['unreadable issue labels'] }
+  const states = WORKFLOW_STATES.filter(key => labels.includes(map[key]))
+  return states.length === 1 ? { state: states[0], blocks: [] }
+    : { state: null, blocks: [states.length ? 'conflicting state labels: ' + states.map(key => map[key]).join(', ') : 'no known workflow state label'] }
+}
+
+export const labelsDigest = labels => policyHash([...new Set(labels)].sort())
+
+// Presentation-only preview; callers obtain an explicit mapping before writing any profile.
+export function previewLabelMigration(value, proposed) {
+  return { oldNames: typeof value === 'string' ? value.trim().split(/[,\s]+/) : value ?? [], proposed: proposed === undefined ? null : resolveLabels(proposed), writes: false }
+}
+
 function parseStage(value) {
   const parts = value.trim().split(/\s+/)
   return parts.length === 3 && ['claude', 'codex'].includes(parts[0]) && parts.every(Boolean)
@@ -86,9 +128,9 @@ function knobValue(key, text) {
   if (key.startsWith('stats-') && !enums[key]) return /^[1-9]\d*$/.test(text) && Number.isSafeInteger(Number(text)) ? Number(text) : undefined
   if (key === 'control-room') return text === 'none' || /^[a-z\d][a-z\d-]*\/[a-z\d_.-]+(?:#[a-z\d-]+)?(?:@[a-f\d]{7,40})?$/i.test(text) ? text : undefined
   if (key === 'branch') return text && /^[a-z\d_/-]+$/i.test(text.replace(/<(?:type|issue|slug)>/g, 'value')) ? text : undefined
-  if (key === 'labels') return text && text.split(/\s+/).every(label => /^[\w-]+$/.test(label)) ? text.split(/\s+/) : undefined
+  if (key === 'labels') return text && text.split(/[,\s]+/).every(label => /^[\w-]+$/.test(label)) ? text.split(/[,\s]+/) : undefined
   if (key === 'workflow-labels') {
-    try { const parsed = JSON.parse(text); return object(parsed) && safeTree(parsed) && Object.values(parsed).every(v => typeof v === 'string' && v.trim()) ? parsed : undefined } catch { return undefined }
+    try { return resolveLabels(policyJson(text)) } catch { return undefined }
   }
   return undefined
 }
@@ -201,6 +243,11 @@ export function resolvePolicy({ org = '', group = '', repo = '', identity = {}, 
     }
     if (layer.scope === 'org') for (const [key, value] of Object.entries(locked)) { values[key] = value; sources[key] = source(layer) }
   }
+  try {
+    const map = resolveLabels(values['workflow-labels'] ?? values.labels)
+    if (values['workflow-labels'] !== undefined && values.labels !== undefined && !same(map, resolveLabels(values.labels))) blocks.push('labels and workflow-labels disagree; explicit migration required')
+    values['workflow-labels'] = map
+  } catch (error) { blocks.push(error.message) }
   const configured = freshness.configured === true || Boolean(values['control-room'] && values['control-room'] !== 'none')
   const now = typeof freshness.now === 'number' ? freshness.now : Date.parse(freshness.now ?? '')
   const validated = Date.parse(freshness.validatedAt ?? '')
