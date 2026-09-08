@@ -119,7 +119,7 @@ export function buildLaunchPlan(input: LaunchInput): LaunchPlan {
   return {
     command: 'claude',
     args: [
-      '-p', prompt, '--permission-mode', 'bypassPermissions', '--output-format', 'json',
+      '-p', prompt, '--permission-mode', 'bypassPermissions', '--output-format', 'stream-json', '--verbose',
       '--model', input.model, '--effort', input.effort,
       '--settings', CLAUDE_SETTINGS,
     ],
@@ -182,4 +182,131 @@ export function buildPrompt(input: LaunchInput): string {
     sections.push(`This run resumes work already in progress in ${input.worktree}. Before touching code: print the working directory, read the brief, then the plan, then the ledger, then git log on the branch — nothing else — and run the project's check command once so you know the state you inherited.`)
   }
   return sections.join('\n\n')
+}
+
+export interface SubscriptionState {
+  accountRef:string
+  available:boolean|null
+  retryAt:number|null
+}
+export interface VendorObservation {sessionId?:string;failed?:boolean;quota?:{retryAt:number|null}}
+const objectValue=(v:unknown):Record<string,unknown>|null=>v!==null&&typeof v==='object'&&!Array.isArray(v)?v as Record<string,unknown>:null
+const epochMillis=(v:unknown):number|null=>Number.isSafeInteger(v)&&Number(v)>0&&Number(v)<8_640_000_000_000?Number(v)*1000:null
+const sessionIdentity=(v:unknown):v is string=>typeof v==='string'&&/^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/.test(v)
+// Only structured vendor fields enter lifecycle state. Assistant/tool text is never parsed as policy.
+export function observeVendorEvent(harness:string,value:unknown):VendorObservation {
+  const event=objectValue(value);if(!event)return{}
+  if(harness==='claude'){
+    const sessionId=sessionIdentity(event.session_id)?event.session_id:undefined
+    if(event.type==='rate_limit_event'){
+      const rate=objectValue(event.rate_limit_info)
+      if(rate?.status==='rejected')return{sessionId,quota:{retryAt:epochMillis(rate.resetsAt??rate.resets_at)}}
+    }
+    if(event.type==='assistant'&&event.error==='rate_limit')return{sessionId,failed:true,quota:{retryAt:null}}
+    if(event.type==='result'&&event.is_error===true)return{sessionId,failed:true}
+    return sessionId?{sessionId}:{}
+  }
+  if(harness==='codex'){
+    if(event.type==='thread.started'&&sessionIdentity(event.thread_id))return{sessionId:event.thread_id}
+    if(event.type==='turn.failed'||event.type==='error')return{failed:true}
+  }
+  return{}
+}
+export function subscriptionEnvironment(plan:LaunchPlan):NodeJS.ProcessEnv {
+  const env={...process.env,...plan.env}
+  const paid=['OPENAI_API_KEY','ANTHROPIC_API_KEY','ANTHROPIC_AUTH_TOKEN','ANTHROPIC_PROFILE','ANTHROPIC_BASE_URL','OPENAI_BASE_URL']
+  if(paid.some(key=>typeof env[key]==='string'&&env[key]!.trim())||['CLAUDE_CODE_USE_BEDROCK','CLAUDE_CODE_USE_VERTEX','CLAUDE_CODE_USE_FOUNDRY'].some(key=>env[key]==='1'))throw Error('subscription-only provider configuration required')
+  return env
+}
+export async function subscriptionAccountRef(harness:'claude'|'codex',identity:{email:string;accountId?:string|null;orgId?:string|null}):Promise<string>{
+  if(typeof identity.email!=='string'||!identity.email.includes('@')||identity.email.length>320)throw Error('subscription account identity unavailable')
+  const {createHash}=await import('node:crypto')
+  return createHash('sha256').update('VegaFactory/subscription/v1\n'+harness+'\n'+JSON.stringify({email:identity.email.toLowerCase(),accountId:identity.accountId??null,orgId:identity.orgId??null})).digest('hex')
+}
+export async function parseSubscriptionMetadata(harness:'claude'|'codex',metadata:unknown):Promise<SubscriptionState>{
+  const value=objectValue(metadata);if(!value)throw Error('subscription metadata unavailable')
+  if(harness==='claude'){
+    if(value.loggedIn!==true||value.authMethod!=='claude.ai'||value.apiProvider!=='firstParty'||!['pro','max','team','enterprise'].includes(String(value.subscriptionType)))throw Error('Claude subscription authentication unavailable')
+    const accountRef=await subscriptionAccountRef('claude',{email:String(value.email??''),orgId:typeof value.orgId==='string'?value.orgId:null})
+    // The supported auth command does not report usage. After a saved reset/backoff,
+    // the original resumed attempt is the availability check; no probe task or paid route.
+    return{accountRef,available:null,retryAt:null}
+  }
+  const accountReply=objectValue(value.account),account=objectValue(accountReply?.account),limitsReply=objectValue(value.limits),configReply=objectValue(value.config),config=objectValue(configReply?.config)
+  if(accountReply?.requiresOpenaiAuth!==true||account?.type!=='chatgpt'||typeof account.email!=='string'||!limitsReply||!config)throw Error('Codex subscription authentication unavailable')
+  if(config.model_provider!=null&&config.model_provider!=='openai')throw Error('Codex alternate provider refused')
+  const providers=objectValue(config.model_providers),openai=objectValue(providers?.openai)
+  if(openai&&Object.keys(openai).length)throw Error('Codex provider override requires separate qualification')
+  const accountRef=await subscriptionAccountRef('codex',{email:account.email,accountId:typeof limitsReply.accountId==='string'?limitsReply.accountId:null})
+  const limits=objectValue(limitsReply.rateLimits)
+  if(!limits)throw Error('Codex rate-limit metadata unavailable')
+  const windows=[limits.primary,limits.secondary].filter(v=>v!=null).map(objectValue)
+  if(!windows.length||windows.some(v=>!v||typeof v.usedPercent!=='number'||!Number.isFinite(v.usedPercent)||v.usedPercent<0))return{accountRef,available:null,retryAt:null}
+  const exhausted=windows.filter(v=>Number(v!.usedPercent)>=100)
+  const reached=limits.rateLimitReachedType!=null||limits.spendControlReached===true
+  return{accountRef,available:!reached&&!exhausted.length,retryAt:exhausted.map(v=>epochMillis(v!.resetsAt)).filter((v):v is number=>v!==null).reduce<number|null>((max,v)=>Math.max(max??0,v),null)}
+}
+export type SubscriptionMetadataReader=(plan:LaunchPlan)=>Promise<unknown>
+// Read-only CLI metadata, never login, credits, threads, turns or a model request.
+export const readSubscriptionMetadata:SubscriptionMetadataReader=async plan=>{
+  const {spawn,execFile}=await import('node:child_process'),{promisify}=await import('node:util')
+  const env=subscriptionEnvironment(plan)
+  if(plan.command==='claude'){
+    try{const result=await promisify(execFile)(plan.command,['auth','status'],{cwd:plan.cwd,env,timeout:5000,maxBuffer:256*1024});return JSON.parse(result.stdout)}catch{throw Error('Claude subscription metadata unavailable')}
+  }
+  if(plan.command!=='codex')throw Error('unsupported subscription harness')
+  const configArgs=plan.args.flatMap((arg,index)=>arg==='--strict-config'?[arg]:['-c','--config','--enable','--disable'].includes(arg)?[arg,plan.args[index+1]??'']:[])
+  return new Promise((resolve,reject)=>{
+    const child=spawn(plan.command,[...configArgs,'app-server','--listen','stdio://'],{cwd:plan.cwd,env,stdio:['pipe','pipe','pipe']})
+    let buffer='',bytes=0,settled=false,initialized=false
+    const replies:Record<string,unknown>={},keys:Record<number,string>={1:'account',2:'limits',3:'config'}
+    const finish=(error?:Error)=>{
+      if(settled)return;settled=true;clearTimeout(timer);child.stdin.destroy()
+      const done=()=>error?reject(error):resolve(replies)
+      const bound=setTimeout(()=>{child.kill('SIGKILL');reject(Error('subscription metadata teardown unconfirmed'))},1000)
+      child.once('close',()=>{clearTimeout(bound);done()});child.kill('SIGTERM')
+    }
+    const timer=setTimeout(()=>finish(Error('subscription metadata timed out')),5000)
+    const send=(message:unknown)=>child.stdin.write(JSON.stringify(message)+'\n')
+    child.stdin.on('error',()=>finish(Error('subscription metadata transport unavailable')))
+    child.stderr.on('data',(chunk:Buffer)=>{bytes+=chunk.length;if(bytes>256*1024)finish(Error('subscription metadata exceeded bound'))})
+    child.stdout.setEncoding('utf8');child.stdout.on('data',(chunk:string)=>{
+      bytes+=Buffer.byteLength(chunk);if(bytes>256*1024){finish(Error('subscription metadata exceeded bound'));return}
+      buffer+=chunk
+      while(buffer.includes('\n')&&!settled){
+        const end=buffer.indexOf('\n'),line=buffer.slice(0,end);buffer=buffer.slice(end+1);if(!line.trim())continue
+        let reply:Record<string,unknown>|null
+        try{reply=objectValue(JSON.parse(line))}catch{finish(Error('subscription metadata malformed'));return}
+        if(!reply){finish(Error('subscription metadata malformed'));return}
+        if(reply.id===undefined){if(typeof reply.method==='string'&&/^(thread|turn|item|hook)\//.test(reply.method))finish(Error('unexpected task during metadata read'));continue}
+        if(reply.error||reply.result===undefined){finish(Error('subscription metadata request refused'));return}
+        if(reply.id===0&&!initialized){initialized=true;send({method:'initialized'});send({id:1,method:'account/read',params:{refreshToken:false}});send({id:2,method:'account/rateLimits/read'});send({id:3,method:'config/read',params:{cwd:plan.cwd,includeLayers:false}})}
+        else if(typeof reply.id==='number'&&keys[reply.id]&&initialized&&!Object.hasOwn(replies,keys[reply.id]!)){replies[keys[reply.id]!]=reply.result;if(Object.keys(replies).length===3)finish()}
+        else{finish(Error('subscription metadata response identity mismatch'));return}
+      }
+    })
+    child.once('error',()=>finish(Error('subscription metadata launch failed')))
+    child.once('close',()=>{if(!settled){settled=true;clearTimeout(timer);reject(Error('subscription metadata closed early'))}})
+    send({id:0,method:'initialize',params:{clientInfo:{name:'vegafactory-subscription-inspection',version:'1'},capabilities:{experimentalApi:true}}})
+  })
+}
+export async function inspectSubscription(plan:LaunchPlan,expectedAccountRef?:string,reader:SubscriptionMetadataReader=readSubscriptionMetadata):Promise<SubscriptionState>{
+  subscriptionEnvironment(plan)
+  if(plan.command!=='claude'&&plan.command!=='codex')throw Error('unsupported subscription harness')
+  const state=await parseSubscriptionMetadata(plan.command,await reader(plan))
+  if(expectedAccountRef!==undefined&&state.accountRef!==expectedAccountRef)throw Error('subscription account changed')
+  return state
+}
+export function resumeLaunchPlan(plan:LaunchPlan,sessionId:string):LaunchPlan {
+  if(!sessionIdentity(sessionId))throw Error('verified vendor session identity unavailable')
+  const args=[...plan.args]
+  if(plan.command==='claude'){
+    if(args.includes('--resume')||args.includes('--continue'))throw Error('ambiguous Claude resume invocation')
+    args.push('--resume',sessionId)
+  }else if(plan.command==='codex'){
+    if(args[0]!=='exec'||args.includes('resume'))throw Error('ambiguous Codex resume invocation')
+    // The same process-scoped controls precede the selected session. No --last discovery.
+    args.splice(args.length-1,0,'resume',sessionId)
+  }else throw Error('unsupported resume harness')
+  return{...plan,args}
 }

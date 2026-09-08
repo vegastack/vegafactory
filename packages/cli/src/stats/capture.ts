@@ -238,3 +238,10 @@ export function fromSkillHook(hook: unknown, source: SkillHookSource): { session
   }
   return { sessionId, invocations }
 }
+
+export function claudeHeadlessResult(stdout:string):unknown {
+  try{return JSON.parse(stdout)}catch{}
+  let result:unknown={}
+  for(const line of stdout.split('\n'))try{const row=JSON.parse(line);if(row?.type==='result')result=row}catch{}
+  return result
+}
