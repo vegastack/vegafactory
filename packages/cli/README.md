@@ -295,10 +295,18 @@ readiness only when org, version, instance, schema and data-state match while th
 still alive. Your `gh` token is passed only to that server process and never appears in readiness or
 client data: the browser receives projected view models, not credentials.
 
-Six views — org, repo, people, skills, board, dispatcher — read the control-room clone; the board and
-dispatcher views also read live GitHub and `vegafactory status --json`. When the live half is
-unreachable the page still renders from the clone, behind a banner naming what failed and how stale
-the clone is.
+Nine destinations cover Attention, Performance, Activity, People, person detail, Skills, repository
+detail, Board and Dispatcher. Attention orders decisions, blocked or failed tasks, running work and
+recent merges. Performance keeps reported usage, coverage, subscription fee evidence and
+API-equivalent estimates separate. Activity keeps task owner, agent-account owner, shared machine,
+checkpoint uncertainty and compact handoff history on one repository/issue row. Every live/status
+read is projected to the current verified repository scope before totals, rows or links. When a live
+source is unavailable, safely retained data stays visible with explicit unavailable, stale and
+partial state; unavailable dispatcher observation is not reported as idle.
+
+This source revision still uses the dashboard's native semantic table and existing root setup.
+Signature-verified provider/Table copy-in and descriptor-backed packed browser evidence remain
+pending; no registry credential, hash-only component or completed accessibility claim is implied.
 
 ## Flags
 

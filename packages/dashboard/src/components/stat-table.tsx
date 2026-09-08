@@ -45,6 +45,8 @@ export function StatTable<Row>({ caption, columns, rows, rowKey, empty }: {
   )
 }
 
-export const money = (value: number): string => `$${value.toFixed(2)}`
-export const hours = (value: number | null): string => (value === null ? '—' : `${value.toFixed(1)}h`)
-export const ratio = (value: number): string => value.toFixed(2)
+export const money = (value: number | null): string => value === null ? 'Unavailable' : `$${value.toFixed(2)}`
+export const quantity = (value: number | null): string => value === null ? 'Unavailable' : String(value)
+export const hours = (value: number | null): string => value === null ? 'Unavailable' : `${value.toFixed(1)}h`
+export const seconds = (value: number | null): string => value === null ? 'Unavailable' : `${value.toFixed(1)}s`
+export const ratio = (value: number | null): string => value === null ? 'Unavailable' : value.toFixed(2)

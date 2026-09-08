@@ -1,5 +1,9 @@
 import { expect, test } from 'bun:test'
+import { resolvePolicy } from '../../../skills/dev/dev-setup/scripts/effective-policy.mjs'
+import type { ExportedEvent } from '../../cli/src/stats/types'
+import { filterOptions, parseFilters } from '../src/lib/cache/filters'
 import { buildPeopleView, buildPersonView } from '../src/lib/views/people'
+import { scopePeopleEvents, type PeoplePolicies } from '../src/lib/views/people'
 import { buildSkillsView } from '../src/lib/views/skills'
 import { contextFixture } from './helpers/context'
 
@@ -13,17 +17,13 @@ test('a descriptive legacy lead receives no rows without current canonical polic
   expect(off.rows.map((r) => r.login)).toEqual([])
 })
 
-test('missing current people policy refuses both list and detail; skills remain independently readable', async () => {
+test('missing current people policy refuses both list and detail', async () => {
   const context = await contextFixture({ month: 'SEP-2026', viewer: 'dev1', statsPeople: 'on' })
   const view = await buildPeopleView({ context })
   expect(view.gated).toBe(true)
   expect(view.rows.map((r) => r.login)).toEqual([])
   expect(await buildPersonView({ context, login: 'kmanojkumar' }))
     .toMatchObject({ gate: { allowed: false }, person: null, totals: null })
-  const skills = buildSkillsView({ context, orgSkills: { 'dev-plan': 40 } })
-  expect(skills.rows[0]).toMatchObject({ name: 'dev-plan', invocations: 1, triggers: { model: 1 }, outcomes: { 'for-operator': 1 } })
-  expect(skills.rows[0]!.costPerInvocation).toBeCloseTo(0.4, 6)
-  expect(skills.orgTotals).toEqual({ 'dev-plan': 40 })
 })
 
 
@@ -38,9 +38,6 @@ test.each([
   expect(view.rows.map(row => row.login)).toEqual([])
 })
 
-import { resolvePolicy } from '../../../skills/dev/dev-setup/scripts/effective-policy.mjs'
-import { scopePeopleEvents, type PeoplePolicies } from '../src/lib/views/people'
-import type { ExportedEvent } from '../../cli/src/stats/types'
 function policies(context:Awaited<ReturnType<typeof contextFixture>>,offRepo:string|null=null):PeoplePolicies{
  const authority={schemaVersion:2,locked:{},delegations:[],administration:{orgAdmins:['kmanojkumar'],groupAdmins:{dev:['dev1']},groupAdminCapabilities:{dev:['group.people.read']}}}
  const org='stats: on\nstats-people: on\nstats-export: attributed\n```vsk-policy\n'+JSON.stringify(authority)+'\n```'
@@ -50,6 +47,28 @@ function policies(context:Awaited<ReturnType<typeof contextFixture>>,offRepo:str
   return[repo,result.policy]
  }))
 }
+
+async function authorizedSkillsContext() {
+ const context=await contextFixture({month:'SEP-2026',viewer:'dev1',statsPeople:'on'})
+ const allowed=['vegastack/vegafactory'],access={kind:'aggregate' as const},current=policies(context).get(allowed[0]!)!
+ const options=filterOptions(context.db,context.repoGroups,allowed,access)
+ context.policy={stats:'on',statsPeople:'on',refusal:null,effective:current}
+ context.allowedRepos=allowed;context.access=access;context.options=options
+ context.filters={...parseFilters({month:'SEP-2026'},options,context.repoGroups,allowed),month:'SEP-2026',allowedRepos:allowed,attributedRepos:allowed,access}
+ return context
+}
+
+test('explicit valid scoped policy exposes only permitted skill rows and no whole-org rollup',async()=>{
+ const context=await authorizedSkillsContext()
+ const skills=buildSkillsView({context,orgSkills:{'dev-plan':40}})
+ expect(skills.rows).toHaveLength(1)
+ expect(skills.rows[0]).toMatchObject({name:'dev-plan',invocations:1,triggers:{model:1},outcomes:{'for-operator':1}})
+ expect(skills.rows[0]!.meanAssociatedRunCostUsd).toBeCloseTo(0.4,6)
+ expect(skills.orgTotals).toBeNull()
+ const denied={...context,allowedRepos:[],filters:{...context.filters,allowedRepos:[],attributedRepos:[]}}
+ expect(buildSkillsView({context:denied,orgSkills:{'dev-plan':40}})).toMatchObject({rows:[],orgTotals:null})
+})
+
 test('current repository scopes precede SQL totals and separate task/account owner dimensions',async()=>{
  const context=await contextFixture({month:'SEP-2026',viewer:'dev1',statsPeople:'on'})
  const p=policies(context),loadPolicies=async()=>p

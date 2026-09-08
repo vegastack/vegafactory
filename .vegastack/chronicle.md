@@ -2,6 +2,16 @@
 
 The project's story, newest first: what got built, why, and how it went — for the operator's future recall. Format home: the dev-chronicle skill.
 
+## 09-09-2026 — The dashboard opens on what needs attention ([#151](https://github.com/vegastack/vegafactory/issues/151))
+
+- **What:** Registry-independent source now opens on decisions, blocked or failed work, running tasks and recent merges, with separate scoped Performance and Activity destinations. Every old page uses the request-lifetime context callback, and task and agent-account ownership remain separate.
+- **Why:** An operator needed current priorities before aggregate reports, while missing usage, liveness, ownership or checkpoint evidence could not safely look like zero, idle or complete.
+- **How it went:** A failing caller test identified the removed context API, then all seven pages and the two new routes passed focused adapter, renderer and strict-launch fixtures. A personal-report regression caught account-owner execution rows being denied until the adapter supplied the exact person dimension. Signed provider/Table input and packed browser evidence remain blocked and unperformed.
+- **Changed:** Attention-first route · scoped Performance and Activity views · one-row task handoffs · nullable metric copy · semantic filter-preserving navigation · honest loading and failure states.
+- **Decisions:** none.
+
+— approved by (kmanojkumar) · built by Codex · branch codex/productionization-133
+
 ## 09-09-2026 — Each dashboard opens one verified organization ([#150](https://github.com/vegastack/vegafactory/issues/150))
 
 - **What:** Dashboard source now selects one configured organization, keeps its repositories and cache generations isolated, and accepts readiness only from the exact owned child. Descriptor-bound package bytes are staged and verified before an installed version becomes selectable.

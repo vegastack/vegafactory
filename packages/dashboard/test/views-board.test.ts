@@ -36,7 +36,7 @@ test('a failed live source sets offline, names the reason, and keeps the page us
   expect(view.columns.every((c) => c.issues.length === 0)).toBe(true)
   expect(view.worktrees).toHaveLength(1)
   const blind = buildDispatcherView({ context, now, status: { ok: false, reason: 'no vegafactory binary was passed to the dashboard' } })
-  expect(blind).toMatchObject({ running: false, reasons: ['no vegafactory binary was passed to the dashboard'] })
+  expect(blind).toMatchObject({ running: null, reasons: ['no vegafactory binary was passed to the dashboard'] })
   expect(blind.freshness.offline).toBe(true)
 })
 
@@ -81,34 +81,68 @@ test('142 actual page renders successful and partial repositories without false 
     import React from 'react';
     import { renderToStaticMarkup } from 'react-dom/server';
     import { fixtureRoom } from './test/helpers/fixture-room.ts';
+    import { dashboardCacheNamespace } from '../cli/src/dashboard.ts';
+    import { loadSnapshotPolicy } from '../../skills/dev/dev-setup/scripts/effective-policy.mjs';
+    import { readValidatedPolicies } from './src/lib/control-room/policy.ts';
+    import { mkdir, mkdtemp, realpath, writeFile } from 'node:fs/promises';
+    import { execFileSync } from 'node:child_process';
     globalThis.React = React;
-    const {root} = await fixtureRoom();
+    const fixture = await fixtureRoom();
+    const root = await realpath(fixture.root);
+    const home = await realpath(await mkdtemp('/tmp/vf-board-page-'));
+    const code = {'a/ok': home + '/code-ok', 'a/fail': home + '/code-fail'};
+    await mkdir(code['a/ok'] + '/.vegastack', {recursive:true});
+    await mkdir(code['a/fail'] + '/.vegastack', {recursive:true});
+    await mkdir(root + '/groups/dev', {recursive:true});
+    const profile = 'repo: a/ok\\ncontrol-room: a/room#dev\\n';
+    const authority = {schemaVersion:2,locked:{},delegations:[],administration:{orgAdmins:['robot'],groupAdmins:{dev:[]},groupAdminCapabilities:{dev:[]}}};
+    await writeFile(code['a/ok'] + '/.vegastack/dev.md', profile);
+    await writeFile(code['a/fail'] + '/.vegastack/dev.md', profile.replace('a/ok','a/fail'));
+    await writeFile(root + '/org.md', 'stats: on\\nstats-people: on\\nstats-export: attributed\\n\`\`\`vsk-policy\\n' + JSON.stringify(authority) + '\\n\`\`\`\\n');
+    await writeFile(root + '/groups/dev/group.md', 'review: subagent\\n');
+    await writeFile(root + '/repos.md', '| repo | group | owner | repository-id |\\n|---|---|---|---|\\n| a/ok | dev | robot | R_ok |\\n| a/fail | dev | robot | R_fail |\\n');
+    await writeFile(root + '/people.csv', 'login,name,role,slack,timezone,groups\\nrobot,Robot,member,,UTC,dev\\n');
+    const git = (...args) => execFileSync('git', args, {cwd:root,encoding:'utf8',env:{...process.env,GIT_AUTHOR_NAME:'Fixture',GIT_AUTHOR_EMAIL:'fixture@example.test',GIT_COMMITTER_NAME:'Fixture',GIT_COMMITTER_EMAIL:'fixture@example.test'}}).trim();
+    git('init','-b','main'); git('remote','add','origin','https://github.com/a/room.git'); git('add','.'); git('commit','-m','fixture policy');
+    const sourceCommit = git('rev-parse','HEAD'), validatedAt = new Date().toISOString();
+    const snapshots = {};
+    for (const repo of ['a/ok','a/fail']) {
+      const snapshot = {schemaVersion:2,org:'a',group:'dev',repository:'a/room',origin:'https://github.com/a/room.git',sourceCommit,policyDigest:'0'.repeat(64),validatedAt,contentPath:root};
+      snapshot.policyDigest = loadSnapshotPolicy({snapshot,repo,devMd:profile.replace('a/ok',repo)}).policy.policyDigest;
+      snapshots[repo] = snapshot;
+    }
+    await mkdir(home + '/.vegastack', {recursive:true});
+    const state = home + '/.vegastack/factory.json';
+    await writeFile(state, JSON.stringify({schemaVersion:2,revision:1,repos:['a/ok','a/fail'].map(repo=>({repo,org:'a',path:code[repo]})),controlRooms:{a:{repo:'a/room',path:root,branch:'main',remote:'https://github.com/a/room.git',lastSyncedAt:validatedAt,sha:sourceCommit,snapshots}}}));
     Object.assign(process.env, {
-      VEGAFACTORY_CONTROL_ROOM: root, VEGAFACTORY_CACHE: root + '/page-cache.db',
-      VEGAFACTORY_ORG: 'a', VEGAFACTORY_STATE: root + '/factory.json',
-      VEGAFACTORY_REPOS: 'a/ok,b/fail', VEGAFACTORY_GH_TOKEN: '', VEGAFACTORY_BIN: '',
-      VEGAFACTORY_VIEWER: '',
+      VEGAFACTORY_CONTROL_ROOM: root, VEGAFACTORY_CACHE: dashboardCacheNamespace(home, 'a'),
+      VEGAFACTORY_ORG: 'a', VEGAFACTORY_STATE: state, VEGAFACTORY_VERSION: '0.0.0',
+      VEGAFACTORY_INSTANCE_ID: crypto.randomUUID(), VEGAFACTORY_CACHE_SCHEMA: '2',
+      VEGAFACTORY_REPOS: 'a/ok,a/fail', VEGAFACTORY_GH_TOKEN: '', VEGAFACTORY_BIN: '',
+      VEGAFACTORY_VIEWER: 'robot',
     });
     const calls = [];
     globalThis.fetch = async (url) => {
       calls.push(url);
       const path = new URL(url);
-      if(path.pathname.includes('/b/fail/')) return new Response('denied',{status:403});
+      if(path.pathname.includes('/a/fail/')) return new Response('denied',{status:403});
       if(path.pathname.endsWith('/pulls')) return new Response('[]');
       if(path.searchParams.get('page') === '2') return new Response('denied',{status:403});
       return new Response(JSON.stringify([{id:1,node_id:'I1',number:1,title:'Visible successful page',labels:[{name:'ready'}],assignees:[],html_url:'https://github.com/a/ok/issues/1'}]),{headers:{link:'<https://api.github.com/repos/a/ok/issues?page=2>; rel="next"'}});
     };
+    const validation = await readValidatedPolicies({settingsPath:state,org:'a',repos:['a/ok','a/fail'],now:Date.now()});
     const Page = (await import('./src/app/board/page.tsx')).default;
     const html = renderToStaticMarkup(await Page({searchParams:Promise.resolve({})}));
-    console.log(JSON.stringify({html,calls}));
+    console.log(JSON.stringify({html,calls,refusal:validation.policy.refusal}));
   `
   const child = spawnSync(process.execPath, ['--eval', script], { cwd: resolve(import.meta.dir, '..'), encoding: 'utf8', timeout: 30_000 })
-  expect(child.status).toBe(0)
   if (child.status !== 0) throw new Error(child.stderr)
-  const result = JSON.parse(child.stdout.trim()) as { html: string; calls: string[] }
+  expect(child.status).toBe(0)
+  const result = JSON.parse(child.stdout.trim()) as { html: string; calls: string[]; refusal: string | null }
+  if (result.refusal) throw new Error(result.refusal)
   expect(result.html).toContain('Visible successful page')
   expect(result.html).toContain('a/ok: Incomplete')
-  expect(result.html).toContain('b/fail: Incomplete')
+  expect(result.html).toContain('a/fail: Incomplete')
   expect(result.html).toContain('GitHub returned HTTP 403 for a/ok')
   expect(result.html).toContain('Issue list incomplete.')
   expect(result.html).toContain('Pull request list incomplete.')

@@ -10,19 +10,23 @@ The CLI selects one configured organization (or requires `--org` when selection 
 verifies this package against its bundled artifact descriptor, and starts the Next.js standalone
 server under Bun on `127.0.0.1`. Nothing here writes to GitHub or to the control room.
 
-## The six views
+## The nine destinations
 
 | View | Reads | Shows |
 |---|---|---|
-| Org (`/`) | the cache | terminal segments, nullable usage coverage, measured operator minutes, and per-repo/per-stage totals |
+| Attention (`/`) | scoped live workflow/status plus cached activity | needs your decision, blocked or failed, running, then recently merged work |
+| Performance (`/performance`) | the metric-v2 cache | reported usage and coverage, API-equivalent estimates, subscription fee evidence, monthly outcomes and lifetime rework snapshots |
+| Activity (`/activity`) | the metric-v2 cache and scoped `status --json` | one row per repository/issue with separate owners, attempts, recovery, current machine, checkpoint uncertainty and bounded handoff history |
 | Repo (`/repo/<owner>/<name>`) | the cache and the month's rollup | verified merged work, monthly/lifetime rework, nullable usage and separately labelled legacy lead/cycle summaries |
-| People (`/people`, `/people/<login>`) | the cache and `people.csv` | authorized task/account-owner metrics and a separate unknown-owner aggregate bucket |
+| People (`/people`) | the cache, current policy and `people.csv` | authorized task-owner metrics, resolved organization/group administration and separate unknown-owner aggregate buckets |
+| Person (`/people/<login>`) | a subject-bound cache generation and current policy | task-owner or agent-account-owner metrics without transferring authority between dimensions |
 | Skills (`/skills`) | the cache and the org skills rollup | invocations, trigger, outcome and nonadditive whole-run cost association |
 | Board (`/board`) | live GitHub and `vegafactory status --json` | the five workflow-state columns, open PRs, worktrees |
-| Dispatcher (`/dispatcher`) | `vegafactory status --json` | whether it is alive, its last tick, and the runs in flight |
+| Dispatcher (`/dispatcher`) | scoped `vegafactory status --json` | running, idle or unavailable observation, its last tick, and sanitized run/recovery state |
 
-Every view takes the same filters — month, repo, group, harness, model — as search parameters, so a
-filtered view is a URL you can bookmark or paste into an issue.
+Navigation preserves validated month, repo, group, harness and model filters in the URL. Clearing or
+switching a visible filter never expands the current policy scope, and a person ownership dimension
+is preserved separately. The selected organization is launcher-bound rather than browser-selected.
 
 ## The environment contract
 
@@ -46,7 +50,7 @@ rather than weakening validation.
 
 ## Offline behaviour
 
-Current verified policy is required before every cached read. A stale or missing policy never becomes an authorization grant. The live board retains successfully read pages and healthy repositories when another read is partial or unavailable, displaying each repository’s reason and observation time; an incomplete empty result is unknown, not “no issues” or “no pull requests”. GitHub reads are bounded to 100 pages or 10,000 records, 10 seconds per request and 60 seconds per repository, with at most two retries and three repositories in flight. After connectivity recovers or the reported rate reset, reload to retry. Repeated unchanged failures stay visible without repeated notifications. Status preserves the CLI workflow/shared/policy/recovery projections. Missing source identity and recovery history remain unavailable.
+Current verified policy is required before every cached read. A stale or missing policy never becomes an authorization grant. The live board retains successfully read pages and healthy repositories when another read is partial or unavailable, displaying each repository’s reason and observation time; an incomplete empty result is unknown, not “no issues” or “no pull requests”. GitHub reads are bounded to 100 pages or 10,000 records, 10 seconds per request and 60 seconds per repository, with at most two retries and three repositories in flight. After connectivity recovers or the reported rate reset, reload to retry. Repeated unchanged failures stay visible without repeated notifications. Status preserves the CLI workflow/shared/policy/recovery projections. Missing source identity, remote liveness, checkpoint availability and recovery history remain unavailable rather than becoming idle or complete.
 
 Readiness is separate from data availability. `/api/health` returns only
 `{ok,org,version,instanceId,cacheSchema,dataState,sourceAgeSeconds}`; an `empty` or `unavailable`
@@ -67,12 +71,12 @@ them. `--dir` launches a built tree in place and is never fetched over.
 
 ## Design system
 
-Layout and type come from `@vegastack/design`'s Tailwind v4 preset, and every colour, radius and
-spacing value on these pages is one of its tokens — no literal is declared here. The registry
-components themselves (`src/components/ui/`) are copied in through `vegastack-consume`'s fail-closed
-flow, which needs the `CF_ACCESS_CLIENT_ID` and `CF_ACCESS_CLIENT_SECRET` service tokens in
-`packages/dashboard/.env.local`. Until that copy-in runs, the pages render semantic markup over the
-same tokens.
+Layout and type come from `@vegastack/design`'s Tailwind v4 preset, and page styling uses its
+semantic tokens. This source checkpoint deliberately retains the existing native semantic table
+and root setup. Signature-verified VegaStack provider and Table registry bytes were unavailable, so
+no component copy-in, dependency change or provider claim was made. That integration must use
+`vegastack-consume`'s fail-closed pre-write, copy-in and post-write verification once the authorized
+registry input exists; hash-only substitution is not accepted.
 
 ## Metric and reader contracts
 
@@ -87,8 +91,10 @@ closes and its persistent reader pin is released; callers must not retain `conte
 after the callback settles. Generic aggregates refuse person-only grants; only the matching central
 person query may use that scope. `allowedRepos:[]` denies access even when group/repo filters are
 cleared. Current attribution is applied again on cached fallback; stale person and issue identities
-cannot survive a downgrade. Null owners are aggregate buckets, not person profiles. The seven page
-callers migrate to this lease in #151.
+cannot survive a downgrade. Null owners are aggregate buckets, not person profiles. All seven
+pre-existing page callers, plus Performance and Activity, keep their reads and returned JSX inside
+the awaited callback. Person detail passes its explicit subject and task-owner or account-owner
+dimension as the third argument.
 
 Successful rebuilds publish a new immutable generation only after SQLite integrity and org/scope
 metadata match. Failed refreshes retain the previous eligible rows and derive generation source age
@@ -96,3 +102,11 @@ and digest from those persisted rows, not the failed attempt's timestamp. Active
 reader ownership conservatively retains an old generation. An ordinary caught install failure cleans
 only its owned current staging; crash-interrupted or unrelated staging, legacy shared `stats.db` and
 wrong-org caches remain preserved for explicit recovery. None is silently relabelled or executed.
+
+## Qualification status
+
+Focused source tests cover scoped adapters, all callback callers, nullable formatting, navigation,
+state copy and a real strict-launch board render. A descriptor-backed packed browser run has not yet
+been performed for this source checkpoint. Keyboard history, automated accessibility, light/dark
+and 320/768/1280 viewport evidence remain required together with the verified provider/Table input;
+they are pending, not passed or waived.

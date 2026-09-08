@@ -1,5 +1,5 @@
 import { expect, test } from 'bun:test'
-import { readFileSync } from 'node:fs'
+import { existsSync, readFileSync } from 'node:fs'
 import { mkdtemp, realpath, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -24,6 +24,21 @@ test('standalone runtime declares Node and Bun requirements separately from plat
   const manifest = JSON.parse(read('package.json'))
   expect(manifest.engines.node).toBe('>=24')
   expect(manifest.engines.bun).toBe('>=1.3')
+})
+
+test('registry-independent source exposes every report destination through scoped callbacks', () => {
+  const pages = [
+    'src/app/page.tsx', 'src/app/performance/page.tsx', 'src/app/activity/page.tsx',
+    'src/app/people/page.tsx', 'src/app/people/[login]/page.tsx', 'src/app/skills/page.tsx',
+    'src/app/repo/[owner]/[name]/page.tsx', 'src/app/board/page.tsx', 'src/app/dispatcher/page.tsx',
+  ]
+  for (const page of pages) {
+    expect(existsSync(join(import.meta.dirname, '..', page)), page).toBe(true)
+    expect(read(page), page).toContain('withContext')
+  }
+  expect(read('src/components/stat-table.tsx')).toContain('<table')
+  expect(existsSync(join(import.meta.dirname, '../src/components/vegastack-provider.tsx'))).toBe(false)
+  expect(existsSync(join(import.meta.dirname, '../src/components/ui/table.tsx'))).toBe(false)
 })
 
 test('first-use health proves exact launcher identity without exposing paths or credentials', async () => {

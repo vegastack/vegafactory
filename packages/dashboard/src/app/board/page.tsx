@@ -1,6 +1,7 @@
+import { FilterBar } from '@/components/filter-bar'
 import { Shell } from '@/components/shell'
 import { StatTable } from '@/components/stat-table'
-import { loadContext } from '@/lib/context'
+import { withContext } from '@/lib/context'
 import { fetchBoardRepositories } from '@/lib/live/github'
 import { readStatus } from '@/lib/live/status'
 import { buildBoardView } from '@/lib/views/board'
@@ -8,22 +9,27 @@ import { buildBoardView } from '@/lib/views/board'
 export const dynamic = 'force-dynamic'
 
 export default async function BoardPage({ searchParams }: { searchParams: Promise<Record<string, string | string[] | undefined>> }) {
-  const context = await loadContext(await searchParams)
-  const repos = context.filters.repo ? [context.filters.repo] : context.env.repos
-  // The board is one org-wide column set: a repo that fails names itself in the banner, and the
-  // repos that answered still fill the columns.
-  const [{ issues, pulls }, status] = await Promise.all([
-    fetchBoardRepositories(repos, context.env.token),
-    readStatus({ bin: context.env.bin }),
-  ])
-  const view = buildBoardView({
-    context, issues: issues.live, pulls: pulls.live, status, now: Date.now(),
-    warnings: [...issues.reasons, ...pulls.reasons],
-    issueRepositories: issues.repositories, pullRepositories: pulls.repositories,
-  })
+  return withContext(await searchParams, async context => {
+    const allowed = context.allowedRepos ?? []
+    const repos = context.filters.repo
+      ? allowed.filter(repo => repo === context.filters.repo)
+      : context.filters.group
+        ? allowed.filter(repo => context.repoGroups[repo] === context.filters.group)
+        : allowed
+    // Authorization is projected before either live read, count, link, or renderer sees a row.
+    const [{ issues, pulls }, status] = await Promise.all([
+      fetchBoardRepositories(repos, context.env.token),
+      readStatus({ bin: context.env.bin, configPath: context.env.stateFile, org: context.env.org, repos }),
+    ])
+    const view = buildBoardView({
+      context, issues: issues.live, pulls: pulls.live, status, now: Date.now(),
+      warnings: [...issues.reasons, ...pulls.reasons],
+      issueRepositories: issues.repositories, pullRepositories: pulls.repositories,
+    })
 
-  return (
-    <Shell title="Board" freshness={view.freshness}>
+    return (
+    <Shell title={`${context.env.org} · board`} freshness={view.freshness} pathname="/board" filters={context.filters}>
+      <FilterBar base="/board" options={context.options} filters={context.filters} />
       {view.reasons.length > 0 && (
         <section aria-label="Data availability" className="border-border bg-muted text-muted-foreground mb-6 rounded-lg border px-4 py-3 text-sm">
           <p>Some data is incomplete or unavailable. Available rows are shown.</p>
@@ -66,7 +72,7 @@ export default async function BoardPage({ searchParams }: { searchParams: Promis
       </section>
 
       <section className="mb-8">
-        <h2 className="mb-3 text-lg font-semibold">Open pull requests</h2>
+        <h2 className="mb-3 text-lg font-medium">Open pull requests</h2>
         <StatTable
           caption="Open pull requests across the passed repos"
           rows={view.pulls}
@@ -81,20 +87,20 @@ export default async function BoardPage({ searchParams }: { searchParams: Promis
       </section>
 
       <section>
-        <h2 className="mb-3 text-lg font-semibold">Worktrees</h2>
+        <h2 className="mb-3 text-lg font-medium">Worktrees</h2>
         <StatTable
           caption="Feature worktrees the dispatcher reports"
           rows={view.worktrees}
-          rowKey={(row) => row.path}
+          rowKey={(row) => `${row.branch}-${row.issue ?? 'none'}-${row.state}`}
           empty="No worktrees reported."
           columns={[
             { key: 'branch', label: 'Branch', render: (row) => row.branch },
-            { key: 'issue', label: 'Issue', render: (row) => (row.issue === null ? '—' : `#${row.issue}`) },
+            { key: 'issue', label: 'Issue', render: (row) => (row.issue === null ? 'Unavailable' : `#${row.issue}`) },
             { key: 'state', label: 'State', render: (row) => row.state },
-            { key: 'path', label: 'Path', render: (row) => row.path },
           ]}
         />
       </section>
     </Shell>
-  )
+    )
+  })
 }
