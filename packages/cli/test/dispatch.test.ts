@@ -495,16 +495,16 @@ describe('parentParallelLaunch', () => {
     expect(parentParallelLaunch([ready[0]!, { ...ready[1]!, assignee: 'kmanojkumar' }], groups, parent)).toBeNull()
     expect(parentParallelLaunch(ready, [groups[0]!], parent)).toBeNull()
   })
-  test('the launch asks for the workflow in plain words and allows the Workflow tool', () => {
+  test('the parent launch names the verified CLI owner without an alternate workflow allowance', () => {
     const plan = parentParallelLaunchPlan(parentParallelLaunch(ready, groups, parent)!, parent, {
       harness: 'claude', model: 'fable-5-1', effort: 'high', operator: 'kmanojkumar', subagents: { spawnDepth: 2, concurrent: 4 },
     })
     expect(plan.args).toContain('--permission-mode')
     expect(plan.args).toContain('bypassPermissions')
-    expect(plan.args.join(' ')).toContain('--allowed-tools Workflow')
-    expect(plan.prompt).toContain('implement-children')
+    expect(plan.args).not.toContain('--allowed-tools')
+    expect(plan.prompt).toContain('vegafactory children run')
   })
-  test('the parent launch reuses the launch table, adding only the Workflow allowance', () => {
+  test('the parent launch reuses the shared launch table', () => {
     const base = buildLaunchPlan({
       harness: 'claude', model: 'fable-5-1', effort: 'high', stage: 'implement', worktree: parent.worktree,
       issue: { number: 104, title: 'parent' }, operator: 'kmanojkumar', outcome: 'x', stopList: [],
@@ -513,13 +513,12 @@ describe('parentParallelLaunch', () => {
     const plan = parentParallelLaunchPlan(parentParallelLaunch(ready, groups, parent)!, parent, {
       harness: 'claude', model: 'fable-5-1', effort: 'high', operator: 'kmanojkumar', subagents: { spawnDepth: 2, concurrent: 4 },
     })
-    expect(plan.args.filter(a => a !== plan.prompt)).toEqual([...base.args.filter(a => a !== base.prompt), '--allowed-tools', 'Workflow'])
+    expect(plan.args.filter(a => a !== plan.prompt)).toEqual(base.args.filter(a => a !== base.prompt))
     expect(plan.env).toEqual(base.env)
   })
-  // F28: the parallel path launches the repo's implement harness. On Codex there is no saved
-  // workflow and no Workflow tool: the parent is asked to drive children.mjs, whose Codex path is
-  // one `codex exec -C <child worktree>` per child.
-  test('a codex implement stage launches codex for the parent, with no Workflow allowance and the children.mjs path in the prompt', () => {
+  // Both parent harnesses direct execution to the verified CLI gateway, which
+  // prepares each child and uses the shared launch/runtime owner.
+  test('a Codex parent uses the same verified child CLI gateway', () => {
     const run = parentParallelLaunch(ready, groups, parent)!
     const plan = parentParallelLaunchPlan(run, parent, {
       harness: 'codex', model: 'gpt-5.6', effort: 'high', operator: 'kmanojkumar', subagents: { spawnDepth: 2, concurrent: 4 },
@@ -532,7 +531,8 @@ describe('parentParallelLaunch', () => {
     expect(plan.command).toBe('codex')
     expect(plan.args.filter(a => a !== plan.prompt)).toEqual(base.args.filter(a => a !== base.prompt))
     expect(plan.args).not.toContain('--allowed-tools')
-    expect(plan.prompt).toContain('--harness codex')
+    expect(plan.prompt).toContain('vegafactory children run')
+    expect(plan.prompt).toContain('CLI owns execution for codex')
     expect(plan.prompt).not.toContain('saved workflow')
   })
   test('a parent-parallel run replaces its children in the tick', () => {
