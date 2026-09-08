@@ -515,12 +515,33 @@ export interface CoordinationSnapshot {
     tasks: Record<string, TaskRecord>;
     machines: Record<string, MachineRecord>;
 }
+export type SharedHistoryCoverage = 'complete' | 'partial' | 'unsupported' | 'unavailable' | 'bounded';
+export type SharedTransitionKind = 'acquire' | 'start' | 'checkpoint' | 'stop' | 'handoff' | 'complete' | 'block' | 'recovery' | 'receipt' | 'effect-send' | 'accept-scope';
+export interface SharedTaskStatus extends Pick<TaskRecord, 'taskKey' | 'repo' | 'issue' | 'state' | 'machineId' | 'generation'> {
+    sourceCommit: string;
+    originMachineId: string | null;
+    // Recorded commit time of a verified task operation, never process liveness.
+    lastTransitionObservedAt: string | null;
+    checkpoint: { headSha: string; publishedAt: string; sourceCommit: string; availability: 'unknown' } | null;
+    history: { coverage: SharedHistoryCoverage; events: Array<{
+        kind: SharedTransitionKind; generation: number; machineId: string;
+        previousMachineId: string | null; sourceCommit: string; observedAt: string | null;
+    }> };
+}
 export interface SharedStatus {
     head: string | null;
-    tasks: Array<Pick<TaskRecord, 'taskKey' | 'repo' | 'issue' | 'state' | 'machineId' | 'generation'>>;
+    tasks: SharedTaskStatus[];
     refusal: string | null;
+    // Missing in older/unavailable adapters means unknown, never complete.
+    history?: { coverage: SharedHistoryCoverage; archiveCoverage: 'active-only' | 'partial'; sourceCommit: string };
+}
+export interface CoordinationHistoryPage {
+    commits: Array<{ oid: string; parents: string[]; headline: string; committedAt: string | null }>;
+    nextCursor: string | null;
 }
 export interface CoordinationProvider {
+    // Read-only discovery on the existing state branch. Unsupported providers keep current status usable.
+    history?(target: CoordinationTarget, head: string, cursor: string | null, first: number): Promise<CoordinationHistoryPage>;
     branch(target: CoordinationTarget): Promise<{
         id: string;
         head: string;
@@ -1385,19 +1406,179 @@ export async function verifyManagedEffect(claim: SharedClaim, effectId: string):
         throw Error('effect not prepared or already sent; reconcile before retry');
     return effect;
 }
+const sharedStatusLimits = { pages: 4, pageSize: 25, requests: 256, milliseconds: 10000, pageBytes: 64 * 1024 } as const;
+class StatusBoundExceeded extends Error {}
+function statusTask(t: TaskRecord, head: string, coverage: SharedHistoryCoverage): SharedTaskStatus {
+    if (t.checkpoint && (t.checkpoint.repo !== t.repo || t.checkpoint.repositoryId !== t.repositoryNodeId || t.checkpoint.runId !== t.runId || t.checkpoint.scopeDigest !== t.scopeDigest))
+        throw Error('checkpoint task binding mismatch');
+    return { taskKey: t.taskKey, repo: t.repo, issue: t.issue, state: t.state, machineId: t.machineId, generation: t.generation,
+        sourceCommit: head, originMachineId: null, lastTransitionObservedAt: null,
+        checkpoint: t.checkpoint ? { headSha: t.checkpoint.headSha, publishedAt: t.checkpoint.publishedAt, sourceCommit: head, availability: 'unknown' } : null,
+        history: { coverage, events: [] } };
+}
+// Validate historical facts without invoking current authorization or effect verifiers.
+function statusTransition(receipt: OperationReceipt, before: TaskRecord | null, after: TaskRecord): SharedTransitionKind {
+    const kind = receipt.type;
+    if (!['acquire', 'start', 'checkpoint', 'stop', 'handoff', 'complete', 'block', 'recovery', 'receipt', 'effect-send', 'accept-scope'].includes(kind) ||
+        receipt.taskKey !== after.taskKey || receipt.generation !== after.generation || canonical(receipt.resultOwner) !== canonical(ownerOf(after)))
+        throw Error('unverified status operation');
+    if (kind === 'acquire') {
+        if (after.state !== 'claimed' || after.generation !== (before ? before.generation + 1 : 1) || before && before.state !== 'completed' ||
+            before && (before.taskKey !== after.taskKey || before.repositoryNodeId !== after.repositoryNodeId || before.issueNodeId !== after.issueNodeId))
+            throw Error('unverified acquisition');
+    } else {
+        if (!before || before.state === 'completed') throw Error('missing original task');
+        const changes: Record<string, string[]> = {
+            start: ['state'], stop: ['state', 'stopProof'], block: ['state', 'stopProof'],
+            checkpoint: ['checkpoint', 'recovery'], recovery: ['recovery'], receipt: [],
+            'effect-send': ['recovery'], 'accept-scope': ['acceptedScopes'], complete: ['state', 'stopProof', 'acceptedScopes'],
+            handoff: ['machineId', 'installationId', 'sessionId', 'generation', 'ownerToken', 'state', 'stopProof', 'recovery'],
+        };
+        const changed = new Set(changes[kind]);
+        for (const field of new Set([...Object.keys(before), ...Object.keys(after)]))
+            if (!changed.has(field) && canonical(before[field as keyof TaskRecord] ?? null) !== canonical(after[field as keyof TaskRecord] ?? null))
+                throw Error('unverified task mutation');
+        if (['handoff', 'stop', 'complete'].includes(kind) || kind === 'block' && after.stopProof) {
+            const proof = after.stopProof;
+            if (!proof || proof.machineId !== before.machineId || proof.installationId !== before.installationId || proof.sessionId !== before.sessionId || proof.generation !== before.generation || !proof.runIds.includes(before.runId))
+                throw Error('historical stop owner mismatch');
+        }
+        if (kind === 'handoff') {
+            if (after.state !== 'claimed' || after.generation !== before.generation + 1 || after.ownerToken === before.ownerToken || !after.stopProof || !before.checkpoint ||
+                !after.recovery || after.recovery.generation !== after.generation)
+                throw Error('unverified handoff');
+        } else if (canonical(ownerOf(before)) !== canonical(ownerOf(after)) || before.generation !== after.generation) throw Error('unexpected owner change');
+        if (kind === 'start' && (before.state !== 'claimed' || after.state !== 'running') ||
+            kind === 'stop' && (after.state !== 'stopped' || !after.stopProof) || kind === 'block' && after.state !== 'blocked' ||
+            kind === 'complete' && (after.state !== 'completed' || !after.stopProof) ||
+            kind === 'checkpoint' && (!after.checkpoint || canonical(after.checkpoint) !== canonical(after.recovery?.checkpoint ?? null)))
+            throw Error('unverified task state');
+    }
+    if (kind === 'receipt' ? receipt.recoveryPayload === null : receipt.recoveryPayload !== null) throw Error('unexpected operation payload');
+    if (receipt.recoveryPayload) parseRecoveryPayload(receipt.recoveryPayload);
+    return kind as SharedTransitionKind;
+}
 export async function readSharedStatus(target: CoordinationTarget, allowedRepos: string[]): Promise<SharedStatus> {
-    try {
-        const s = await readCoordination(target);
-        return { head: s.head, tasks: Object.values(s.tasks).filter(t => allowedRepos.includes(t.repo)).map(({ taskKey, repo, issue, state, machineId, generation }) => ({ taskKey, repo, issue, state, machineId, generation })), refusal: null };
-    }
-    catch (error) {
-        return { head: null, tasks: [], refusal: (error as Error).message };
-    }
+    return transactionClock.run({ deadline: Date.now() + sharedStatusLimits.milliseconds, decodedBytes: 0 }, async () => {
+        let exhausted = false, requests = 0;
+        let observedBranch: Awaited<ReturnType<CoordinationProvider['branch']>>;
+        const source = target.provider;
+        async function request<T>(call: () => Promise<T>): Promise<T> {
+            if (++requests > sharedStatusLimits.requests || Date.now() >= transactionClock.getStore()!.deadline) {
+                exhausted = true;
+                throw new StatusBoundExceeded();
+            }
+            try { return await bounded(call()); }
+            catch (error) {
+                if (Date.now() >= transactionClock.getStore()!.deadline) exhausted = true;
+                throw error;
+            }
+        }
+        // Every provider operation counts; this reader cannot mutate remote state.
+        const provider: CoordinationProvider = {
+            branch: async t => (observedBranch = await request(() => source.branch(t))), read: (t, h, p) => request(() => source.read(t, h, p)),
+            compare: (t, a, b) => request(() => source.compare(t, a, b)),
+            commit: async () => { throw Error('status is read-only'); },
+        };
+        const viewTarget = { ...target, provider }, total = { bytes: 0 };
+        let snapshot: CoordinationSnapshot;
+        try {
+            if (!Array.isArray(allowedRepos) || allowedRepos.some(r => !repo(r))) throw Error('invalid repository scope');
+            snapshot = await readCoordinationSnapshot(viewTarget, false, total);
+        } catch { return { head: null, tasks: [], refusal: 'coordination-status-unavailable' }; }
+        const rows = new Map<string, SharedTaskStatus>(), expected = new Map<string, TaskRecord | null>();
+        try {
+            for (const t of Object.values(snapshot.tasks).filter(t => allowedRepos.includes(t.repo))) {
+                await inspectTaskAtSnapshot(viewTarget, t.taskKey, {}, snapshot, total);
+                rows.set(t.taskKey, statusTask(t, snapshot.head, source.history ? 'partial' : 'unsupported'));
+                expected.set(t.taskKey, t);
+            }
+        } catch { return { head: null, tasks: [], refusal: 'coordination-status-unavailable' }; }
+        let coverage: SharedHistoryCoverage = source.history ? 'partial' : 'unsupported';
+        // Full historical validation is pinned to this already verified branch observation.
+        provider.branch = async () => observedBranch;
+        const cache = new Map<string, CoordinationSnapshot>([[snapshot.head, snapshot]]);
+        async function at(head: string): Promise<CoordinationSnapshot> {
+            let value = cache.get(head);
+            if (!value) { value = await readCoordinationSnapshot(viewTarget, false, total, head); cache.set(head, value); }
+            return value;
+        }
+        async function taskAt(head: string, key: string): Promise<TaskRecord | null> {
+            const inspected = await inspectTaskAtSnapshot(viewTarget, key, {}, await at(head), total);
+            if (inspected.kind === 'absent') return null;
+            if (inspected.kind !== 'active' && inspected.kind !== 'completed') throw Error('unverified historical task');
+            return inspected.task;
+        }
+        if (source.history && allowedRepos.length) {
+            let cursor: string | null = null, nextHead = snapshot.head;
+            const cursors = new Set<string>(), seen = new Set<string>();
+            try {
+                for (let pageNumber = 0; pageNumber < sharedStatusLimits.pages; pageNumber++) {
+                    const page = await request(() => source.history!(viewTarget, snapshot.head, cursor, sharedStatusLimits.pageSize));
+                    const bytes = Buffer.byteLength(JSON.stringify(page));
+                    transactionClock.getStore()!.decodedBytes += bytes;
+                    if (bytes > sharedStatusLimits.pageBytes || transactionClock.getStore()!.decodedBytes > 8 * 1024 * 1024) { exhausted = true; throw new StatusBoundExceeded(); }
+                    if (!closed({ commits: array(closed({ oid: sha, parents: array(sha), headline: (v: unknown) => typeof v === 'string' && v.length <= 256, committedAt: nullable(date) })), nextCursor: nullable((v: unknown) => typeof v === 'string' && v.length > 0 && v.length <= 1024) })(page) ||
+                        !page.commits.length || page.commits.length > sharedStatusLimits.pageSize) throw Error('invalid history page');
+                    let reachedRoot = false;
+                    for (const commit of page.commits) {
+                        if (commit.oid !== nextHead || seen.has(commit.oid)) throw Error('noncontiguous history');
+                        seen.add(commit.oid);
+                        if (commit.oid === target.rootCommit) { reachedRoot = true; break; }
+                        if (commit.parents.length !== 1 || commit.parents[0] === commit.oid) throw Error('nonlinear history');
+                        nextHead = commit.parents[0]!;
+                        const operationId = /^factory coordination ([0-9a-f-]+)$/.exec(commit.headline)?.[1];
+                        if (!operationId || !uuid(operationId)) throw Error('history operation unavailable');
+                        const receipt = parse<OperationReceipt>(await pinnedJson(viewTarget, commit.oid, operationPath(operationId), 32 * 1024, total), receiptSchema, 'history receipt', 32 * 1024);
+                        if (receipt.operationId !== operationId || receipt.previousHead !== nextHead) throw Error('history receipt parent mismatch');
+                        // Scope discovery uses the pinned task only; foreign tasks produce no detail or counts.
+                        const rawTask = parse<TaskRecord>(await pinnedJson(viewTarget, commit.oid, taskPath(receipt.taskKey), 256 * 1024, total), recordSchema, 'history task');
+                        if (!allowedRepos.includes(rawTask.repo)) continue;
+                        if (await pinnedJson(viewTarget, nextHead, operationPath(operationId), 32 * 1024, total) !== null) throw Error('receipt was not introduced at this commit');
+                        // Immutable receipts must still have exactly their original closed value at the pinned head.
+                        const retained = await pinnedJson(viewTarget, snapshot.head, operationPath(operationId), 32 * 1024, total);
+                        if (canonical(receipt) !== canonical(retained)) throw Error('history receipt changed');
+                        const after = await taskAt(commit.oid, receipt.taskKey), before = await taskAt(nextHead, receipt.taskKey);
+                        if (!after) throw Error('history task missing');
+                        if (!expected.has(receipt.taskKey)) {
+                            const current = await taskAt(snapshot.head, receipt.taskKey);
+                            if (!current || !allowedRepos.includes(current.repo)) throw Error('current retained task missing');
+                            expected.set(receipt.taskKey, current);
+                            rows.set(receipt.taskKey, statusTask(current, snapshot.head, 'partial'));
+                        }
+                        if (canonical(expected.get(receipt.taskKey)) !== canonical(after)) throw Error('task history discontinuity');
+                        const kind = statusTransition(receipt, before, after), row = rows.get(receipt.taskKey)!;
+                        row.history.events.push({ kind, generation: after.generation, machineId: after.machineId, previousMachineId: before?.machineId ?? null, sourceCommit: commit.oid, observedAt: commit.committedAt });
+                        if (row.history.events.length === 1) row.lastTransitionObservedAt = commit.committedAt;
+                        expected.set(receipt.taskKey, before);
+                    }
+                    if (reachedRoot) { coverage = 'complete'; break; }
+                    if (page.nextCursor === null) throw Error('history ended before configured root');
+                    if (cursors.has(page.nextCursor)) throw Error('repeated history cursor');
+                    cursors.add(page.nextCursor); cursor = page.nextCursor;
+                    coverage = 'bounded';
+                }
+            } catch (error) { coverage = error instanceof StatusBoundExceeded || exhausted || transactionClock.getStore()!.decodedBytes > 8 * 1024 * 1024 ? 'bounded' : 'unavailable'; }
+        }
+        for (const [key, row] of rows) {
+            // A verified suffix alone cannot establish the task's first owner.
+            const first = row.history.events.at(-1);
+            row.history.coverage = coverage === 'complete' && (expected.get(key) !== null || first?.kind !== 'acquire') ? 'partial' : coverage;
+            if (row.history.coverage === 'complete') row.originMachineId = first!.machineId;
+        }
+        return { head: snapshot.head, tasks: [...rows.values()], refusal: null,
+            history: { coverage, archiveCoverage: source.history ? 'partial' : 'active-only', sourceCommit: snapshot.head } };
+    });
 }
 // No state-branch creation or ref fallback exists. gh retains the configured local credentials.
 export function githubCoordinationProvider(gh: (args: string[], options?: GhOptions) => Promise<string> = ghText): CoordinationProvider {
-    async function graphql(target: CoordinationTarget, query: string, variables: Record<string, unknown>) {
+    async function graphql(target: CoordinationTarget, query: string, variables: Record<string, unknown>, maxBytes?: number) {
         const raw = await gh(['api', '--hostname', target.host, 'graphql', '--input', '-'], { input: JSON.stringify({ query, variables }), timeoutMs: requestTimeout() });
+        if (maxBytes !== undefined) {
+            const bytes = Buffer.byteLength(raw), budget = transactionClock.getStore();
+            if (budget) budget.decodedBytes += bytes;
+            if (bytes > maxBytes || budget && budget.decodedBytes > 8 * 1024 * 1024) throw new StatusBoundExceeded();
+        }
         const body = JSON.parse(raw);
         if (body.errors?.length)
             throw Error(`GraphQL refused: ${body.errors.map((x: {
@@ -1408,6 +1589,20 @@ export function githubCoordinationProvider(gh: (args: string[], options?: GhOpti
         return body.data;
     }
     return {
+        async history(t, head, cursor, first) {
+            if (!sha(head) || !Number.isInteger(first) || first < 1 || first > sharedStatusLimits.pageSize || cursor !== null && (typeof cursor !== 'string' || !cursor.length || cursor.length > 1024))
+                throw Error('invalid history request');
+            const [owner, name] = t.repository.split('/');
+            const data = await graphql(t, 'query($owner:String!,$name:String!,$head:GitObjectID!,$cursor:String,$first:Int!){repository(owner:$owner,name:$name){id object(oid:$head){... on Commit{oid history(first:$first,after:$cursor){nodes{oid messageHeadline committedDate parents(first:2){nodes{oid} pageInfo{hasNextPage}}} pageInfo{hasNextPage endCursor}}}}}}', { owner, name, head, cursor, first }, sharedStatusLimits.pageBytes);
+            const commit = data.repository?.object, history = commit?.history;
+            if (data.repository?.id !== t.repositoryId || commit?.oid !== head || !history || !Array.isArray(history.nodes) || history.nodes.length > first ||
+                typeof history.pageInfo?.hasNextPage !== 'boolean' || history.pageInfo.hasNextPage && typeof history.pageInfo.endCursor !== 'string')
+                throw Error('history identity unavailable');
+            return { commits: history.nodes.map((c: { oid: string; messageHeadline: string; committedDate: string; parents: { nodes: Array<{ oid: string }>; pageInfo: { hasNextPage: boolean } } }) => {
+                if (!c || !Array.isArray(c.parents?.nodes) || c.parents.nodes.length > 1 || c.parents.pageInfo?.hasNextPage !== false) throw Error('nonlinear history');
+                return { oid: c.oid, parents: c.parents.nodes.map(p => p.oid), headline: c.messageHeadline, committedAt: c.committedDate };
+            }), nextCursor: history.pageInfo.hasNextPage ? history.pageInfo.endCursor : null };
+        },
         async branch(t) { const [owner, name] = t.repository.split('/'); const data = await graphql(t, 'query($owner:String!,$name:String!,$branch:String!){repository(owner:$owner,name:$name){id isPrivate defaultBranchRef{name} ref(qualifiedName:$branch){id target{oid}}}}', { owner, name, branch: t.branch.startsWith('refs/heads/') ? t.branch : 'refs/heads/' + t.branch }); const r = data.repository; if (!r?.ref)
             throw Error('configured coordination branch missing'); return { id: r.ref.id, head: r.ref.target.oid, repositoryId: r.id, private: r.isPrivate, defaultBranch: r.defaultBranchRef.name }; },
         async read(t, commit, path) { if (!sha(commit) || !/^coordination\/(?:index\.json|(?:tasks|machines|operations)\/[A-Za-z0-9_-]+\.json)$/.test(path))

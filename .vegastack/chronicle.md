@@ -64,7 +64,7 @@ The project's story, newest first: what got built, why, and how it went — for 
 
 ## 08-09-2026 — Dispatch claims have an owner ([#137](https://github.com/vegastack/vegafactory/issues/137))
 
-- **What:** Local repository/watch claims now serialize mutation and retain exact owner tokens. Shared task state uses conditional commits, reservations and immutable recovery evidence. Partial accepted scopes can be linked without completing the task, and pinned historical reads preserve original parent/child identities without granting current ownership.
+- **What:** Local repository/watch claims now serialize mutation and retain exact owner tokens. Shared task state uses conditional commits, reservations and immutable recovery evidence. Partial accepted scopes can be linked without completing the task, and pinned historical reads preserve original parent/child identities without granting current ownership. Shared status now shows sanitized current ownership and checkpoint details alongside bounded, verified task history, preserving unknown provenance and incomplete archive coverage when evidence runs out.
 - **Why:** Two processes previously passed the same unlocked read and both executed. Pathname-only release could remove a replacement owner's claim.
 - **How it went:** The actual two-process race reproduced double entry, then passed with one execute entry. Controlled separate-home shared fixtures distinguish same-task exclusion from independent work. Provider qualification, full reboot acceptance, final evaluation and assembled review remain open.
 - **Changed:** Claims and machine identity APIs · shared state/recovery wires · dispatch/status adapters · offline recovery instructions.

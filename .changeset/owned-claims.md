@@ -15,3 +15,4 @@ Protect dispatcher ownership with atomic local claims and conditional shared tas
 - Recover a committed handoff after response loss only from its exact receipt, original owner and revalidated transfer authority.
 - Inspect handoff receipts as verified predecessor and successor records without treating null handoff payloads as recovery evidence.
 - Reconcile a new session on the same machine against unchanged stopped task records before replacing handoff ownership.
+- Project sanitized current task ownership and checkpoint summaries with bounded, receipt-verified history; retain unknown provenance and explicit incomplete archive coverage without writing status pointers.

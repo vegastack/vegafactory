@@ -1,5 +1,5 @@
 import { test, expect } from 'bun:test';
-import { mkdtemp, readFile, writeFile } from 'node:fs/promises';
+import { mkdtemp, readFile, writeFile, readdir } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
@@ -453,6 +453,12 @@ test.each(['prepared', 'ambiguous'] as const)('reconciled %s telemetry does not 
     expect(inspected.task).toEqual(JSON.parse(raw!));
     expect(inspected.task.recovery!.effects).toEqual(p.recovery.effects);
     expect(inspected.task.acceptedScopes).toEqual([{ scopeDigest: d, receipt: accepted.reference }]);
+    statusHistory(p);
+    const status = await readSharedStatus(p.target, [p.candidate.repo]);
+    expect(status.tasks).toHaveLength(1);
+    expect(status.tasks[0]).toMatchObject({ state: 'completed', sourceCommit: complete.claim.stateCommit, originMachineId: p.machine.id, history: { coverage: 'complete' } });
+    expect(status.tasks[0]!.history.events[0]!.kind).toBe('complete');
+    expect(status.history!.archiveCoverage).toBe('partial');
 });
 
 test('reporting exception preserves unmanaged coverage, code reconciliation and telemetry intent validation', async () => {
@@ -856,4 +862,226 @@ test.each(['running', 'claimed', 'blocked', 'wrong-other-proof', 'wrong-target-p
     expect(result.kind).toBe(mode === 'missing-verifier' ? 'busy' : 'refused');
     expect(commits).toBe(0);
     expect(await readCoordination(f.target)).toEqual(before);
+});
+
+
+// Provider history is independent metadata, captured before fault injection.
+function statusHistory(f: Pick<Awaited<ReturnType<typeof fixture>>, 'target' | 'versions'>, pageSize = 25) {
+    const versions = [...f.versions.entries()];
+    const commits = versions.map(([oid, files], i) => {
+        const previous = versions[i - 1];
+        const path = Object.keys(files).find(p => p.startsWith('coordination/operations/') && !previous?.[1][p]);
+        return { oid, parents: previous ? [previous[0]] : [], headline: path ? 'factory coordination ' + path.slice('coordination/operations/'.length, -5) : 'initial state', committedAt: new Date(Date.UTC(2026, 8, 8, 12, i)).toISOString() };
+    }).reverse();
+    f.target.provider.history = async (_t, head, cursor, first) => {
+        expect(head).toBe(commits[0]!.oid);
+        const start = Number(cursor ?? 0), size = Math.min(first, pageSize);
+        return { commits: commits.slice(start, start + size), nextCursor: start + size < commits.length ? String(start + size) : null };
+    };
+    return commits;
+}
+
+test('status projects current owner/checkpoint without claiming availability, origin or liveness and performs no writes', async () => {
+    const f = await pendingEffectFixture('telemetry-push');
+    const snapshot = await readCoordination(f.target), current = snapshot.tasks[f.claim.taskKey]!;
+    const directory = await mkdtemp(join(tmpdir(), 'vf-status-readonly-'));
+    const target = { ...f.target, localRoot: directory };
+    target.provider.commit = async () => { throw Error('status attempted a write'); };
+    const status = await readSharedStatus(target, ['acme/app']);
+    expect(status).toMatchObject({ head: snapshot.head, refusal: null, history: { coverage: 'unsupported', archiveCoverage: 'active-only' } });
+    expect(status.tasks).toHaveLength(1);
+    expect(status.tasks[0]).toMatchObject({ machineId: f.machine.id, generation: 1, sourceCommit: snapshot.head, originMachineId: null, lastTransitionObservedAt: null,
+        checkpoint: { headSha: current.checkpoint!.headSha, publishedAt: current.checkpoint!.publishedAt, sourceCommit: snapshot.head, availability: 'unknown' }, history: { coverage: 'unsupported', events: [] } });
+    expect(await readdir(directory)).toEqual([]);
+    const serialized = JSON.stringify(status);
+    for (const privateValue of [current.ownerToken, current.installationId, current.sessionId, f.target.localRoot, 'accountRef', 'recoveryPayload', 'evidenceRef', 'hostBindingDigest', 'ownerToken', 'operations/'])
+        expect(serialized).not.toContain(privateValue);
+});
+
+test('status pins the exact task transition independently of another task machine observation', async () => {
+    const f = await fixture();
+    const first = await acquireSharedTask({ ...f, operationId: randomUUID() });
+    if (first.kind !== 'owned') throw Error('claim');
+    const firstHead = first.claim.stateCommit;
+    expect((await acquireSharedTask({ ...f, candidate: { ...f.candidate, issue: 138, issueNodeId: 'I_138', runId: randomUUID(), paths: ['src/b'] }, operationId: randomUUID() })).kind).toBe('owned');
+    const commits = statusHistory(f);
+    const current = await readSharedStatus(f.target, ['acme/app']);
+    const row = current.tasks.find(t => t.issue === 137)!;
+    expect(row.history.coverage).toBe('complete');
+    expect(row.originMachineId).toBe(f.machine.id);
+    expect(row.lastTransitionObservedAt).toBe(commits.find(c => c.oid === firstHead)!.committedAt);
+    expect(row.lastTransitionObservedAt).not.toBe(commits[0]!.committedAt);
+    expect(row.history.events).toEqual([{ kind: 'acquire', generation: 1, machineId: f.machine.id, previousMachineId: null, sourceCommit: firstHead, observedAt: row.lastTransitionObservedAt }]);
+    expect(current.history!.archiveCoverage).toBe('partial');
+});
+
+test('status verifies A to B to C as one task, but a bounded suffix cannot establish origin', async () => {
+    const f = await pendingEffectFixture('telemetry-push');
+    let claim = f.claim, recovery = f.recovery, proof = f.stopProof;
+    for (const [id, host] of [['machine-b', 'b'], ['machine-c', 'c']] as const) {
+        const machine = { ...f.machine, id, installationId: randomUUID(), hostBindingDigest: host.repeat(64) };
+        const session = { ...f.session, machineId: id, installationId: machine.installationId, hostBindingDigest: machine.hostBindingDigest, sessionId: randomUUID() };
+        const result = await transitionSharedTask({ claim, operationId: randomUUID(), transition: { kind: 'handoff', machine, session, candidate: f.candidate, stopProof: proof, recovery } });
+        if (result.kind !== 'owned') throw Error(result.reason);
+        claim = result.claim;
+        recovery = (await readCoordination(f.target)).tasks[claim.taskKey]!.recovery!;
+        proof = { ...proof, machineId: id, installationId: machine.installationId, sessionId: session.sessionId, hostBindingDigest: machine.hostBindingDigest, generation: claim.generation };
+    }
+    statusHistory(f);
+    const full = await readSharedStatus(f.target, ['acme/app']);
+    expect(full.tasks).toHaveLength(1);
+    expect(full.tasks[0]).toMatchObject({ machineId: 'machine-c', generation: 3, originMachineId: 'mac-one', history: { coverage: 'complete' } });
+    expect(full.tasks[0]!.history.events.filter(e => e.kind === 'handoff').map(e => [e.previousMachineId, e.machineId])).toEqual([['machine-b', 'machine-c'], ['mac-one', 'machine-b']]);
+    statusHistory(f, 1);
+    const partial = await readSharedStatus(f.target, ['acme/app']);
+    expect(partial.tasks[0]).toMatchObject({ machineId: 'machine-c', originMachineId: null, history: { coverage: 'bounded' } });
+    expect(partial.tasks[0]!.history.events.filter(e => e.kind === 'handoff')).toHaveLength(2);
+});
+
+test.each(['missing', 'edited', 'foreign-owner', 'wrong-parent', 'reused-receipt', 'unknown-operation', 'noncontiguous', 'merge'] as const)('status refuses %s history evidence while preserving verified current state', async mode => {
+    const f = await fixture(), operationId = randomUUID();
+    const acquired = await acquireSharedTask({ ...f, operationId });
+    if (acquired.kind !== 'owned') throw Error('claim');
+    const started = await transitionSharedTask({ claim: acquired.claim, operationId: randomUUID(), transition: { kind: 'start' } });
+    if (started.kind !== 'owned') throw Error('start');
+    const commits = statusHistory(f), operationPath = 'coordination/operations/' + operationId + '.json';
+    const raw = f.versions.get(acquired.claim.stateCommit)![operationPath]!;
+    if (mode === 'missing') delete f.versions.get(acquired.claim.stateCommit)![operationPath];
+    if (mode === 'edited') f.versions.get(f.head)![operationPath] = canonical({ ...JSON.parse(raw), requestDigest: 'e'.repeat(64) });
+    if (mode === 'foreign-owner') {
+        const value = JSON.parse(raw); value.resultOwner.machineId = 'foreign';
+        f.versions.get(acquired.claim.stateCommit)![operationPath] = f.versions.get(f.head)![operationPath] = canonical(value);
+    }
+    if (mode === 'wrong-parent') {
+        const value = JSON.parse(raw); value.previousHead = started.claim.stateCommit;
+        f.versions.get(acquired.claim.stateCommit)![operationPath] = f.versions.get(f.head)![operationPath] = canonical(value);
+    }
+    if (mode === 'reused-receipt') f.versions.get(root)![operationPath] = raw;
+    if (mode === 'unknown-operation') commits[0]!.headline = 'not a typed operation';
+    if (mode === 'noncontiguous') commits[1]!.oid = 'f'.repeat(40);
+    if (mode === 'merge') commits[0]!.parents.push(root);
+    const status = await readSharedStatus(f.target, ['acme/app']);
+    expect(status.refusal).toBeNull();
+    expect(status.tasks[0]).toMatchObject({ state: 'running', machineId: 'mac-one', originMachineId: null, history: { coverage: 'unavailable' } });
+    expect(status.tasks[0]!.history.events.some(e => e.kind === 'acquire')).toBe(false);
+});
+
+test('status history omits foreign repositories and source errors never leak provider messages', async () => {
+    const f = await fixture();
+    f.machine.allowedRepositories.push('acme/foreign'); f.machine.repositoryIds['acme/foreign'] = 'R_foreign';
+    expect((await acquireSharedTask({ ...f, operationId: randomUUID() })).kind).toBe('owned');
+    expect((await acquireSharedTask({ ...f, candidate: { ...f.candidate, repo: 'acme/foreign', repositoryNodeId: 'R_foreign', issueNodeId: 'I_foreign', paths: ['src/b'], runId: randomUUID() }, operationId: randomUUID() })).kind).toBe('owned');
+    statusHistory(f);
+    const scoped = await readSharedStatus(f.target, ['acme/app']);
+    expect(scoped.tasks).toHaveLength(1);
+    expect(JSON.stringify(scoped)).not.toContain('acme/foreign');
+    expect(await readSharedStatus(f.target, [])).toMatchObject({ tasks: [], refusal: null });
+    f.target.provider.branch = async () => { throw Error('sensitive provider credential and local path'); };
+    expect(await readSharedStatus(f.target, ['acme/app'])).toEqual({ head: null, tasks: [], refusal: 'coordination-status-unavailable' });
+});
+
+test.each(['unavailable', 'oversized', 'repeated-cursor', 'short-page'] as const)('status preserves current data with explicit %s history disposition', async mode => {
+    const f = await fixture();
+    expect((await acquireSharedTask({ ...f, operationId: randomUUID() })).kind).toBe('owned');
+    const commits = statusHistory(f);
+    f.target.provider.history = async () => {
+        if (mode === 'unavailable') throw Error('private path');
+        if (mode === 'oversized') return { commits: [{ ...commits[0]!, headline: 'x'.repeat(65536) }], nextCursor: null };
+        return { commits: [commits[0]!], nextCursor: mode === 'repeated-cursor' ? 'same' : null };
+    };
+    const result = await readSharedStatus(f.target, ['acme/app']);
+    expect(result.tasks[0]).toMatchObject({ state: 'claimed', originMachineId: null, history: { coverage: mode === 'oversized' ? 'bounded' : 'unavailable' } });
+    expect(result.refusal).toBeNull();
+});
+
+test('GitHub status history adapter uses an immutable head, bounded pagination and checked repository/commit identities', async () => {
+    const f = await fixture(); let request: any;
+    const provider = githubCoordinationProvider(async (_args, options) => {
+        request = JSON.parse(options!.input!);
+        return JSON.stringify({ data: { repository: { id: 'R_state', object: { oid: root, history: {
+            nodes: [{ oid: root, messageHeadline: 'initial state', committedDate: '2026-09-08T12:00:00Z', parents: { nodes: [], pageInfo: { hasNextPage: false } } }],
+            pageInfo: { hasNextPage: true, endCursor: 'next-page' },
+        } } } } });
+    });
+    expect(await provider.history!(f.target, root, null, 25)).toEqual({ commits: [{ oid: root, parents: [], headline: 'initial state', committedAt: '2026-09-08T12:00:00Z' }], nextCursor: 'next-page' });
+    expect(request.variables).toMatchObject({ head: root, cursor: null, first: 25 });
+    expect(request.query).toContain('object(oid:$head)');
+    await expect(provider.history!(f.target, root, null, 26)).rejects.toThrow();
+    await expect(provider.history!({ ...f.target, repositoryId: 'R_foreign' }, root, null, 25)).rejects.toThrow('identity');
+});
+
+
+test('status keeps one immutable source head when the live branch later advances', async () => {
+    const f = await fixture();
+    const acquired = await acquireSharedTask({ ...f, operationId: randomUUID() });
+    if (acquired.kind !== 'owned') throw Error('claim');
+    const commits = statusHistory(f), original = f.target.provider.branch;
+    let branchReads = 0;
+    f.target.provider.branch = async t => { branchReads++; return branchReads === 1 ? original(t) : { ...await original(t), head: 'f'.repeat(40) }; };
+    const result = await readSharedStatus(f.target, ['acme/app']);
+    expect(result).toMatchObject({ head: acquired.claim.stateCommit, refusal: null });
+    expect(result.tasks[0]!.history.events[0]!.sourceCommit).toBe(commits[0]!.oid);
+    expect(result.tasks[0]!.history.coverage).toBe('complete');
+    expect(branchReads).toBe(1);
+});
+
+test.each(['privacy', 'installation', 'rollback'] as const)('status refuses current %s corruption without returning private source details', async mode => {
+    const f = await fixture();
+    expect((await acquireSharedTask({ ...f, operationId: randomUUID() })).kind).toBe('owned');
+    if (mode === 'privacy') { const branch = f.target.provider.branch; f.target.provider.branch = async t => ({ ...await branch(t), private: false }); }
+    if (mode === 'installation') { const index = JSON.parse(f.versions.get(f.head)!['coordination/index.json']!); index.installationId = randomUUID(); f.versions.get(f.head)!['coordination/index.json'] = canonical(index); }
+    if (mode === 'rollback') f.rewrite();
+    expect(await readSharedStatus(f.target, ['acme/app'])).toEqual({ head: null, tasks: [], refusal: 'coordination-status-unavailable' });
+});
+
+test.each(['requests', 'bytes', 'time'] as const)('status enforces the aggregate %s budget and keeps already verified current fields', async mode => {
+    const f = await fixture();
+    const candidate = mode === 'bytes' ? { ...f.candidate, approvedTaskIds: Array.from({ length: 1800 }, (_, i) => 'task-' + i + '-' + 'x'.repeat(100)) } : f.candidate;
+    const acquired = await acquireSharedTask({ ...f, candidate, operationId: randomUUID() });
+    if (acquired.kind !== 'owned') throw Error(acquired.reason);
+    for (let i = 0; i < (mode === 'time' ? 1 : 32); i++)
+        expect((await transitionSharedTask({ claim: acquired.claim, operationId: randomUUID(), transition: { kind: 'block', stopProof: null } })).kind).toBe('owned');
+    statusHistory(f);
+    let calls = 0;
+    for (const name of ['branch', 'read', 'compare', 'history'] as const) {
+        const original = f.target.provider[name]!;
+        (f.target.provider as any)[name] = (...args: any[]) => { calls++; return (original as any)(...args); };
+    }
+    const originalNow = Date.now;
+    let shift = 0;
+    try {
+        if (mode === 'time') {
+            Date.now = () => originalNow() + shift;
+            const original = f.target.provider.history!;
+            f.target.provider.history = async (...args) => { const result = await original(...args); shift = 10001; return result; };
+        }
+        const result = await readSharedStatus(f.target, ['acme/app']);
+        expect(result).toMatchObject({ refusal: null, tasks: [{ state: 'blocked', machineId: 'mac-one', originMachineId: null, history: { coverage: 'bounded' } }] });
+        expect(calls).toBeLessThanOrEqual(256);
+        if (mode === 'requests') expect(calls).toBe(256);
+    } finally { Date.now = originalNow; }
+});
+
+
+test('status refuses a structurally valid checkpoint bound to another task', async () => {
+    const f = await pendingEffectFixture('telemetry-push');
+    const head = (await f.target.provider.branch(f.target)).head, path = 'coordination/tasks/' + f.claim.taskKey + '.json';
+    const task = JSON.parse(f.versions.get(head)![path]!);
+    task.checkpoint.runId = randomUUID();
+    f.versions.get(head)![path] = canonical(task);
+    expect(await readSharedStatus(f.target, ['acme/app'])).toEqual({ head: null, tasks: [], refusal: 'coordination-status-unavailable' });
+});
+
+
+test('status does not treat a handoff with a foreign stopped owner as verified history', async () => {
+    const f = await pendingEffectFixture('telemetry-push');
+    const machine = { ...f.machine, id: 'receiver', installationId: randomUUID(), hostBindingDigest: 'b'.repeat(64) };
+    const session = { ...f.session, machineId: machine.id, installationId: machine.installationId, hostBindingDigest: machine.hostBindingDigest, sessionId: randomUUID() };
+    const handedOff = await transitionSharedTask({ claim: f.claim, operationId: randomUUID(), transition: { kind: 'handoff', machine, session, candidate: f.candidate, stopProof: f.stopProof, recovery: f.recovery } });
+    if (handedOff.kind !== 'owned') throw Error(handedOff.reason);
+    statusHistory(f);
+    const path = 'coordination/tasks/' + f.claim.taskKey + '.json', files = f.versions.get(handedOff.claim.stateCommit)!;
+    const task = JSON.parse(files[path]!); task.stopProof.machineId = 'foreign'; files[path] = canonical(task);
+    const result = await readSharedStatus(f.target, ['acme/app']);
+    expect(result.tasks[0]).toMatchObject({ machineId: 'receiver', generation: 2, originMachineId: null, history: { coverage: 'unavailable', events: [] } });
 });
