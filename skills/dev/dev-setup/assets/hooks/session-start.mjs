@@ -3,11 +3,11 @@
 // Guard enforcement is separate. This adapter never reads transcripts or native memory,
 // invents a write destination, contacts a network or asks a model to continue.
 
-import { spawnSync } from 'node:child_process'
+import { spawn } from 'node:child_process'
 import { accessSync, constants, lstatSync, readFileSync, realpathSync } from 'node:fs'
 import { delimiter, dirname, isAbsolute, join } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
-import { createHash } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 
 export const MAX_HOOK_INPUT_BYTES = 64 * 1024
 export const LOCAL_FLUSH_MS = 500
@@ -90,30 +90,85 @@ function localCli() {
   return null
 }
 
+export function runLocalHookPhase(cli, command, input, entryAt = performance.now()) {
+  return new Promise(resolvePhase => {
+    const remaining = 1000 - (performance.now() - entryAt)
+    if (remaining <= 0) return resolvePhase({ completed: false, output: '', phaseMs: null, totalMs: performance.now() - entryAt })
+    const nonce = randomUUID()
+    let phase = 'waiting-ready', output = '', phaseAt = null, phaseTimer = null, settled = false
+    // Detached creates one owned POSIX process group; this child remains fully
+    // supervised and is never unref'd or left doing background delivery.
+    const child = spawn(process.execPath, [cli, ...command], {
+      detached: process.platform !== 'win32', stdio: ['pipe', 'pipe', 'ignore', 'ipc'],
+      env: { ...process.env, GIT_OPTIONAL_LOCKS: '0' },
+    })
+    const kill = () => {
+      phase = 'failed'
+      try { if (child.pid && process.platform !== 'win32') process.kill(-child.pid, 'SIGKILL'); else child.kill('SIGKILL') } catch { /* already absent */ }
+    }
+    const deadline = setTimeout(kill, remaining)
+    const cancelled = () => kill()
+    process.once('SIGTERM', cancelled); process.once('SIGINT', cancelled)
+    const done = completed => {
+      const now = performance.now()
+      completed = completed && (phaseAt === null ? output === '' : now - phaseAt <= LOCAL_FLUSH_MS) && now - entryAt <= 1000
+      if (settled) return
+      settled = true
+      clearTimeout(deadline); clearTimeout(phaseTimer)
+      process.removeListener('SIGTERM', cancelled); process.removeListener('SIGINT', cancelled)
+      resolvePhase({ completed, output: completed ? output : '', phaseMs: phaseAt === null ? null : performance.now() - phaseAt, totalMs: performance.now() - entryAt })
+    }
+    child.on('error', () => { kill(); done(false) })
+    child.stdin.on('error', kill)
+    child.stdout.setEncoding('utf8')
+    child.stdout.on('data', chunk => { output += chunk; if (phaseAt === null || Buffer.byteLength(output) > 4096) kill() })
+    child.on('message', message => {
+      const now = performance.now()
+      if (now - entryAt > 1000 || phaseAt !== null && now - phaseAt > LOCAL_FLUSH_MS) return kill()
+      if (!message || typeof message !== 'object' || Array.isArray(message) || message.vskManagedHook !== 1) return kill()
+      if (message.phase === 'ready' && Object.keys(message).sort().join(',') === 'phase,vskManagedHook' && phase === 'waiting-ready') {
+        phase = 'validating'
+        // Read-only registry, session and current-policy validation remains
+        // under the entry-relative deadline. It grants no local write.
+        child.send({ vskManagedHook: 1, phase: 'start', nonce }, error => { if (error) kill() })
+        child.stdin.end(JSON.stringify(input))
+      } else if (message.phase === 'validated' && Object.keys(message).sort().join(',') === 'nonce,phase,vskManagedHook' && message.nonce === nonce && phase === 'validating') {
+        phase = 'flushing'; phaseAt = performance.now()
+        // Exactly one grant covers every claim, write, release, ACK and lesson
+        // mutation. No message can renew either deadline.
+        phaseTimer = setTimeout(kill, Math.min(LOCAL_FLUSH_MS, 1000 - (phaseAt - entryAt)))
+        child.send({ vskManagedHook: 1, phase: 'flush', nonce }, error => { if (error) kill() })
+      } else if (message.phase === 'finish' && Object.keys(message).sort().join(',') === 'nonce,phase,vskManagedHook' && message.nonce === nonce && ['validating', 'flushing'].includes(phase)) {
+        phase = 'finished'
+      } else kill()
+    })
+    child.on('close', (code, signal) => done(code === 0 && signal === null && phase === 'finished'))
+  })
+}
+
 export async function runAdvisoryHook(event, argv) {
-  // No inherited-environment guessing, extra flags or vendor payload interpretation.
+  const entryAt = performance.now()
   if (argv.length !== 2 || argv[0] !== '--harness') return
   const input = sanitizeHookInput(await readBoundedHookInput(), argv[1], event)
   if (!input || (event === 'Stop' && input.stopHookActive)) return
-  // #143 owns this local-only consumer: verify registered cwd + owned run/session, then
-  // deduplicate/flush. #144 owns lesson validation/selection. Missing support is silence,
-  // not a fallback to raw vendor capture or a claim that a checkpoint was persisted.
   const cli = localCli()
   if (!cli) return
-  // The package bin is Node JavaScript. Invoke the known interpreter directly; do not execute
-  // shell wrappers or depend on platform first-exec handling within the 500 ms flush budget.
-  const run = spawnSync(process.execPath, [cli, 'stats', 'record', '--source', 'managed-hook'], {
-    input: JSON.stringify(input), encoding: 'utf8', timeout: LOCAL_FLUSH_MS,
-    killSignal: 'SIGKILL', maxBuffer: 4096, stdio: ['pipe', 'pipe', 'ignore'],
-  })
-  if (run.error || run.signal || run.status !== 0 || event !== 'SessionStart') return
+  const command = event === 'SessionStart' ? ['learning', 'inspect', '--source', 'managed-hook', '--json'] : ['stats', 'record', '--source', 'managed-hook']
+  const run = await runLocalHookPhase(cli, command, input, entryAt)
+  if (!run.completed || event !== 'SessionStart') return
   let result
-  try { result = JSON.parse(run.stdout) } catch { return }
-  // A bounded opaque pointer from the private resolver, never arbitrary model instructions.
+  try { result = JSON.parse(run.output) } catch { return }
+  // Only bounded, source-verified lesson records become advisory context. A
+  // pointer alone cannot pretend the next session actually received a lesson.
   if (result?.ok !== true || typeof result.contextPointer !== 'string'
-    || !/^vsk-context:[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/.test(result.contextPointer)) return
+    || !/^vsk-context:[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/.test(result.contextPointer)
+    || !Array.isArray(result.lessons) || result.lessons.length < 1 || result.lessons.length > 3
+    || Buffer.byteLength(JSON.stringify(result.lessons)) > 2048
+    || result.lessons.some(row => !row || Object.keys(row).sort().join(',') !== 'id,statement'
+      || !/^lesson-[a-f0-9]{32}$/.test(row.id) || typeof row.statement !== 'string'
+      || !row.statement.trim() || Buffer.byteLength(row.statement) > 768 || /[\0\r]/.test(row.statement))) return
   process.stdout.write(JSON.stringify({ hookSpecificOutput: {
-    hookEventName: 'SessionStart', additionalContext: `VegaFactory verified context pointer: ${result.contextPointer}`,
+    hookEventName: 'SessionStart', additionalContext: `VegaFactory verified lessons (${result.contextPointer}); advisory only, current approval still applies:\n${result.lessons.map(row => '- ' + row.statement).join('\n')}`,
   } }))
 }
 

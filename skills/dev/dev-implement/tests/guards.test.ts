@@ -226,33 +226,37 @@ describe('checkTaskConsistency: plan checkboxes must reflect the ledger', () => 
 
   test('all completed tasks checked → no block', () => {
     const comments = [
-      plan('- [x] **Task 1: a**\n- [x] **Task 2: b**\n- [ ] **Task 3: c**'),
-      ledger('- Task 1: complete (commits aaaaaaa..bbbbbbb)\n- Task 2: complete (commits ccccccc..ddddddd)'),
+      plan('- [x] **Task 1: a** <!-- task-id:1-T1 -->\n- [x] **Task 2: b** <!-- task-id:1-T2 -->\n- [ ] **Task 3: c** <!-- task-id:1-T3 -->'),
+      ledger('- 1-T1: complete (commits aaaaaaa..bbbbbbb)\n- 1-T2: complete (commits ccccccc..ddddddd)'),
     ]
     expect(checkTaskConsistency(comments).blocks).toEqual([])
   })
   test('ledger ahead of the checkboxes → block naming the gap', () => {
     const comments = [
-      plan('- [ ] **Task 1: a**\n- [ ] **Task 2: b**'),
-      ledger('- Task 1: complete (commits aaaaaaa..bbbbbbb)\n- Task 2: complete (commits ccccccc..ddddddd)'),
+      plan('- [ ] **Task 1: a** <!-- task-id:1-T1 -->\n- [ ] **Task 2: b** <!-- task-id:1-T2 -->'),
+      ledger('- 1-T1: complete (commits aaaaaaa..bbbbbbb)\n- 1-T2: complete (commits ccccccc..ddddddd)'),
     ]
     const r = checkTaskConsistency(comments)
     expect(r.blocks.length).toBe(1)
-    expect(r.blocks[0]).toContain('2 task(s) are marked complete')
+    expect(r.blocks[0]).toContain('ledger-only [1-T1, 1-T2]')
   })
   test('a task with fix rounds but no complete line does not force a check', () => {
     const comments = [
-      plan('- [x] **Task 1: a**\n- [ ] **Task 2: b**'),
-      ledger('- Task 1: complete (commits aaaaaaa..bbbbbbb)\n- Task 2: fix round 1/3 (1 addressed, 1 open)'),
+      plan('- [x] **Task 1: a** <!-- task-id:1-T1 -->\n- [ ] **Task 2: b** <!-- task-id:1-T2 -->'),
+      ledger('- 1-T1: complete (commits aaaaaaa..bbbbbbb)\n- 1-T2: fix round 1/3 (1 addressed, 1 open)'),
     ]
     expect(checkTaskConsistency(comments).blocks).toEqual([])
   })
   test('no plan comment, no checkboxes, or no ledger → nothing to reconcile', () => {
-    expect(checkTaskConsistency([ledger('- Task 1: complete (commits a..b)')]).blocks).toEqual([])
-    expect(checkTaskConsistency([plan('no checkboxes here'), ledger('- Task 1: complete (commits a..b)')]).blocks).toEqual([])
-    expect(checkTaskConsistency([plan('- [ ] **Task 1: a**')]).blocks).toEqual([])
+    expect(checkTaskConsistency([ledger('- 1-T1: complete (commits a..b)')]).blocks).toEqual([])
+    expect(checkTaskConsistency([plan('no checkboxes here'), ledger('- 1-T1: complete (commits a..b)')]).blocks).toEqual([])
+    expect(checkTaskConsistency([plan('- [ ] **Task 1: a** <!-- task-id:1-T1 -->')]).blocks).toEqual([])
     expect(checkTaskConsistency([]).blocks).toEqual([])
   })
+})
+
+test('same-count different task IDs refuse consistency', () => {
+  expect(checkTaskConsistency([{body:'<!-- vsk:v1 type=plan rev=1 -->\n- [ ] **Task 1** <!-- task-id:1-T1 -->\n- [x] **Task 2** <!-- task-id:1-T2 -->'}, {body:'<!-- vsk:v1 type=ledger -->\n- 1-T1: complete'}]).blocks.join()).toContain('task identity mismatch')
 })
 
 test('141 preflight shares custom semantic state and refuses mixed or changed correction scope', () => {

@@ -91,6 +91,7 @@ test('actual CLI refuses immediate join; executes a real child and source check 
     const resumed = await f.cli('run'); expect(resumed.exit).toBe(0); expect(resumed.result.results).toEqual(execution.result.results)
     expect((await readRuns(runsRoot(f.home))).filter(run => run.stage === 'implement' && run.parent === 1)).toHaveLength(1)
     const joined = await f.cli('join'); expect(joined.result.blocked, JSON.stringify(joined.result)).toEqual([]); expect(joined.exit).toBe(0)
+    expect(joined.result.acceptedDeliveries).toEqual([]) // Diagnostic checks do not manufacture reviewed code delivery.
     expect(joined.result.receipts[0].fromSha).toBe(result.headSha); expect(joined.result.receipts[0].accepted).toBe(true)
     const after = git(f.tree, 'rev-parse', 'HEAD'); expect(after).not.toBe(f.head)
     expect(git(f.tree, 'show', 'HEAD:requested.txt')).toBe('accepted')
@@ -435,3 +436,16 @@ test('failed independent child preserves its branch while a verified sibling sti
     expect(git(f.tree,'show-ref','--verify','refs/heads/feat/8-child-8')).toContain(f.head)
   } finally {await rm(f.home,{recursive:true,force:true})}
 },15000)
+
+
+test('accepted task projection binds exact immutable scope and source identities',async()=>{
+ const {acceptedDeliveryProjection}=await import('../src/children.ts'),{validateAcceptedDeliveries}=await import('../../../skills/dev/dev-implement/scripts/children.mjs')
+ const snapshot={schemaVersion:2 as const,repo:'a/r',issue:144,artifacts:[{repo:'a/r',issue:144,kind:'brief' as const,artifactId:'I_144',rev:1,digest:'a'.repeat(64)},{repo:'a/r',issue:144,kind:'plan' as const,artifactId:'IC_144',rev:1,digest:'b'.repeat(64)}],approvalBindings:[{approvalId:'scope',source:{kind:'github-comment' as const,repositoryId:'R_app',issueNodeId:'I_133',commentId:'12',bodySha256:'c'.repeat(64)}}],approvedTaskIds:['144-T1','144-T2'],completedTaskIds:['144-T1','144-T2'],parentRepo:'a/r',parentIssue:133,parentBefore:'a'.repeat(40),parentAfter:'b'.repeat(40),acceptedAt:new Date().toISOString()}
+ const rows=acceptedDeliveryProjection(snapshot,'c'.repeat(40),'d'.repeat(64))
+ expect(rows.map(row=>row.taskRef.taskId)).toEqual(['144-T1','144-T2'])
+ const expected={repo:'a/r',issue:144,scopeDigest:'d'.repeat(64),approvedTaskIds:snapshot.approvedTaskIds,childHead:'c'.repeat(40),parentRepo:'a/r',parentIssue:133,parentHead:'b'.repeat(40)}
+ expect(validateAcceptedDeliveries(rows,expected).ok).toBe(true)
+ expect(validateAcceptedDeliveries(rows,{...expected,parentHead:'e'.repeat(40)}).ok).toBe(false)
+ expect(validateAcceptedDeliveries([...rows,rows[0]],expected).ok).toBe(false)
+ expect(()=>acceptedDeliveryProjection({...snapshot,completedTaskIds:['144-T3']},'c'.repeat(40),'d'.repeat(64))).toThrow()
+})

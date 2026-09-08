@@ -41,6 +41,8 @@
     "scripts/lib/approval.mjs",
     "scripts/preflight.mjs",
     "scripts/evidence-check.mjs",
+    "scripts/recovery.mjs",
+    "scripts/learning.mjs",
     "scripts/reclaim.mjs",
     "scripts/evidence-upload.mjs",
     "scripts/worktree.mjs",

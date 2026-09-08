@@ -1,5 +1,4 @@
 #!/usr/bin/env node
-import { runCheckpointCli } from './checkpoints.ts'
 import { createHash, randomUUID } from 'node:crypto'
 import { constants as fsConstants } from 'node:fs'
 import { access, cp, lstat, mkdir, open, readFile, readdir, rename, rm, stat, writeFile } from 'node:fs/promises'
@@ -7,22 +6,12 @@ import { homedir } from 'node:os'
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { createInterface } from 'node:readline/promises'
-import { factoryConfigPath, parseSyncMaxAge, readFactoryConfig } from './control-room.ts'
-import { selectSkills, type SkillEntry } from './selection.ts'
-import { resolveTarget, syncControlRoom, inspectSnapshots, restoreSnapshot } from './sync.ts'
-import { dashboardUsage, runDashboard } from './dashboard.ts'
-import { dispatchUsage, runDispatchCli } from './dispatch.ts'
-import { runChildrenCli } from './children.ts'
-import { guardUsage, runGuardCli } from './guard.ts'
-import { runServiceCli, serviceUsage } from './service.ts'
-import { runStatsCli } from './stats/cli.ts'
-import { runStatusCli, statusUsage } from './status.ts'
-import { runWorktree, worktreeUsage } from './worktree.ts'
+import type { SkillEntry } from './selection.ts'
 
 type Agent = 'codex' | 'claude' | 'hermes'
 type AgentChoice = Agent | 'both' | 'all'
 type Mode = 'project' | 'global'
-type Command = 'add' | 'verify' | 'doctor' | 'remove' | 'list' | 'version' | 'help' | 'worktree' | 'sync' | 'dispatch' | 'service' | 'status' | 'stats' | 'dashboard' | 'guard' | 'checkpoint' | 'children'
+type Command = 'add' | 'verify' | 'doctor' | 'remove' | 'list' | 'version' | 'help' | 'worktree' | 'sync' | 'dispatch' | 'service' | 'status' | 'stats' | 'dashboard' | 'guard' | 'checkpoint' | 'children' | 'learning'
 // Top-level verbs the factory reserves; they are named in usage and refuse until they land.
 const reservedTopLevel: readonly string[] = [] as const
 const installerVerbs: readonly string[] = ['add', 'verify', 'doctor', 'remove', 'list'] as const
@@ -77,6 +66,10 @@ Options:
   --json                                 machine-readable output (sync)
   --non-interactive
   --version
+
+Verified lessons:
+  vegafactory learning checkpoint|inspect --run-id ID --json
+  vegafactory learning revert --run-id ID --id ID --dry-run|--apply --json
 
 Source checkpoints:
   vegafactory checkpoint --run-id ID [--json] [--write]
@@ -158,7 +151,7 @@ function parse(argv: string[]): Options {
       if (!installerVerbs.includes(verb) && verb !== 'help' && verb !== 'version') throw new Error(`Unknown command: skills ${verb}`)
       command = verb as Command
     }
-    else if (head === 'worktree' || head === 'dispatch' || head === 'service' || head === 'status' || head === 'stats' || head === 'dashboard' || head === 'guard' || head === 'checkpoint' || head === 'children') return { command: head, all: false, dryRun: false, force: false, nonInteractive: false, json: false, rest: argv.splice(0) }
+    else if (head === 'worktree' || head === 'dispatch' || head === 'service' || head === 'status' || head === 'stats' || head === 'dashboard' || head === 'guard' || head === 'checkpoint' || head === 'children' || head === 'learning') return { command: head, all: false, dryRun: false, force: false, nonInteractive: false, json: false, rest: argv.splice(0) }
     else if (reservedTopLevel.includes(head)) throw new Error(`${head} is not available yet — it lands in a later release of vegafactory`)
     else if (installerVerbs.includes(head)) throw new Error(`Unknown command: ${head} — installer verbs moved under the skills namespace: run "vegafactory skills ${head} …"`)
     else if (head === 'sync' || head === 'help' || head === 'version') command = head
@@ -220,6 +213,7 @@ function hasSelector(options: Options): boolean {
 }
 
 async function requireSelection(options: Options, verb = 'install'): Promise<string[]> {
+  const {selectSkills}=await import('./selection.ts')
   return selectSkills({ skill: options.skill, group: options.group, all: options.all }, await skillCatalog(), verb)
 }
 
@@ -723,6 +717,8 @@ async function doctor(options: Options) {
 // It refreshes by default — a hook or a dispatcher tick calling a dry-run-by-default verb would be
 // a silent no-op — and writes nothing outside the clone path and ~/.vegastack/factory.json.
 async function sync(options: Options) {
+  const {factoryConfigPath,parseSyncMaxAge,readFactoryConfig}=await import('./control-room.ts')
+  const {resolveTarget,syncControlRoom,inspectSnapshots,restoreSnapshot}=await import('./sync.ts')
   if (options.skill && !['inspect', 'restore'].includes(options.skill)) throw new Error('sync accepts inspect or restore')
   if (options.apply && (options.skill !== 'restore' || options.dryRun)) throw new Error('--apply requires sync restore without --dry-run')
   if (options.backup !== undefined && options.skill !== 'restore') throw new Error('--backup requires sync restore')
@@ -805,25 +801,30 @@ function report(options: Options, payload: SyncReport, code: number) {
 async function main() {
   const options = parse(process.argv.slice(2))
   if (options.command === 'worktree') {
+    const {runWorktree, worktreeUsage}=await import('./worktree.ts')
     const rest = options.rest ?? []
     if (rest.length === 0 || rest[0] === 'help' || rest[0] === '--help' || rest[0] === '-h') return console.log(worktreeUsage())
     process.exitCode = await runWorktree(rest)
     return
   }
   if (options.command === 'guard') {
+    const {guardUsage, runGuardCli}=await import('./guard.ts')
     const rest = options.rest ?? []
     if (rest.length === 0 || rest[0] === 'help' || rest[0] === '--help' || rest[0] === '-h') return console.log(guardUsage())
     process.exitCode = await runGuardCli(rest)
     return
   }
-  if (options.command === 'children') { process.exitCode = await runChildrenCli(options.rest ?? [], homedir()); return }
+  if (options.command === 'learning') { const {runLearningCli}=await import('./learning.ts'); process.exitCode = await runLearningCli(options.rest ?? [], homedir()); return }
+  if (options.command === 'children') { const {runChildrenCli}=await import('./children.ts'); process.exitCode = await runChildrenCli(options.rest ?? [], homedir()); return }
   if (options.command === 'dispatch') {
+    const {dispatchUsage, runDispatchCli}=await import('./dispatch.ts')
     const rest = options.rest ?? []
     if (rest[0] === 'help' || rest[0] === '--help' || rest[0] === '-h') return console.log(dispatchUsage())
     process.exitCode = await runDispatchCli(rest, homedir())
     return
   }
   if (options.command === 'service') {
+    const {runServiceCli, serviceUsage}=await import('./service.ts')
     const rest = options.rest ?? []
     if (rest.length === 0 || rest[0] === 'help' || rest[0] === '--help' || rest[0] === '-h') return console.log(serviceUsage())
     process.exitCode = await runServiceCli(rest, homedir())
@@ -831,17 +832,21 @@ async function main() {
   }
   if (options.command === 'stats') {
     const rest = options.rest ?? []
-    process.exitCode = await runStatsCli(rest, homedir())
+    process.exitCode = rest.length === 4 && rest.join(' ') === 'record --source managed-hook --json' || rest.length === 3 && rest.join(' ') === 'record --source managed-hook'
+      ? await (await import('./learning.ts')).runLearningCli(['checkpoint', '--source', 'managed-hook', '--json'], homedir())
+      : await (await import('./stats/cli.ts')).runStatsCli(rest, homedir())
     return
   }
   if (options.command === 'dashboard') {
+    const {dashboardUsage, runDashboard}=await import('./dashboard.ts')
     const rest = options.rest ?? []
     if (rest[0] === 'help') return console.log(dashboardUsage())
     process.exitCode = await runDashboard({ rest, home: homedir(), version: packageVersion })
     return
   }
-  if (options.command === 'checkpoint') { process.exitCode=await runCheckpointCli(options.rest??[],homedir());return }
+  if (options.command === 'checkpoint') { const {runCheckpointCli}=await import('./checkpoints.ts'); process.exitCode=await runCheckpointCli(options.rest??[],homedir());return }
   if (options.command === 'status') {
+    const {runStatusCli, statusUsage}=await import('./status.ts')
     const rest = options.rest ?? []
     if (rest[0] === 'help') return console.log(statusUsage())
     process.exitCode = await runStatusCli(rest, homedir())

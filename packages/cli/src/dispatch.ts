@@ -1,3 +1,4 @@
+import { realpath } from 'node:fs/promises'
 import { inspectSpool, spoolRoot } from './stats/outbox.ts'
 import { basicDiagnostic, probePressure, privacyReason } from './stats/privacy.ts'
 import { canonical as canonicalWire } from './shared-claims.ts'
@@ -672,7 +673,7 @@ export async function executeRun(
     if(subscription.available===false){
       const {nextQuotaCheck}=await import('./runs.ts')
       await transition({state:'terminal',terminationCause:'failed',finishedAt:now().toISOString(),waitReason:'subscription-quota',quotaWait:{checks:record.quotaChecks??0,nextCheckAt:new Date(nextQuotaCheck(record.quotaChecks??0,now().getTime(),subscription.retryAt??undefined)).toISOString()}})
-      try{await transition({worktreeDigest:await runtime.worktreeFingerprint(record.checkout),attemptElapsedMs:0,activeElapsedMs:record.activeElapsedMs??0})}catch{}
+      try{await transition({worktreeDigest:await runtime.worktreeFingerprint(record.checkout),attemptElapsedMs:0,activeElapsedMs:runtime.priorRunElapsedMs(record)})}catch{}
       return{runId:record.runId,attemptId:record.attemptId,started:false,terminationCause:'failed',waitReason:'subscription-quota',exitCode:null,timedOut:false,logFile:file,pushed:false,handedBack:false}
     }
   }
@@ -683,7 +684,7 @@ export async function executeRun(
   const directory=await prepareRunAttemptDirectory(recordRoot,record),attemptId=record.attemptId??record.runId
   const monotonic=deps?.monotonic??(()=>performance.now())
   let started=false,stdout='',cause:TerminalCause|null=null,exitCode:number|null=null,identity:Awaited<ReturnType<typeof processIdentity>>|null=null
-  const historicalElapsed=(record.attempts??[]).some(a=>a.activeElapsedMs===null)?null:(record.attempts??[]).reduce((sum,a)=>sum+a.activeElapsedMs!,0)
+  const historicalElapsed=(await import('./runs.ts')).priorRunElapsedMs(record)
   let activeStart=monotonic(),elapsed=0,quota:{retryAt:number|null}|null=null,vendorFailed=false
   await new Promise<void>((resolveOutcome,rejectOutcome)=>{
     const child=spawn(process.execPath,[wrapperPath,directory,record.runId,attemptId],{cwd:plan.cwd,env:{...process.env},detached:true,stdio:['ignore','pipe','pipe','ipc']})
@@ -808,11 +809,13 @@ export async function executeRun(
   try{const helpers=await import('./runs.ts');await transition({headSha:spawnSync('git',['rev-parse','HEAD'],{cwd:record.checkout,encoding:'utf8'}).stdout?.trim()||record.headSha,worktreeDigest:await helpers.worktreeFingerprint(record.checkout)})}catch{/* Unverifiable saved work cannot be automatically resumed. */}
   try{await persistAttemptCapture(record,stdout,recordRoot,terminalCause)}catch{
     // The process outcome stays terminal and pending persistence stays visible; no ACK.
-    await (await import('./runs.ts')).updateRun(recordRoot,record.runId,current=>({pendingDelivery:current.pendingDelivery.map(p=>p.kind==='telemetry-capture'&&'captureKey' in p.target&&p.target.captureKey===current.runId+':terminal:0'?{...p,lastError:'capture-unavailable'}:p)})).catch(()=>{})
+    const captureOwner=await import('./runs.ts')
+    await captureOwner.updateRun(recordRoot,record.runId,current=>({pendingDelivery:current.pendingDelivery.map(p=>p.kind==='telemetry-capture'&&'captureKey' in p.target&&p.target.captureKey===captureOwner.terminalCaptureDescriptor(current).captureKey?{...p,lastError:'capture-unavailable'}:p)})).catch(()=>{})
     await event('capture-pending',{reasonCode:'capture-unavailable'}).catch(()=>{})
   }
   await event('exit',{terminationCause:terminalCause,exitCode,durationSeconds:elapsed/1000})
   try { await (await import('./checkpoints.ts')).flushRunCheckpoint(record,config) } catch { await event('checkpoint-pending',{reasonCode:'checkpoint-unavailable'}) }
+  if(record.execution&&record.approvalRefs.some(ref=>ref.kind==='plan')){try{await checkpointRecoveryContext(await readRun(recordRoot,record.runId),config,{gh:deps?.gh})}catch{await event('checkpoint-pending',{reasonCode:'checkpoint-unavailable'})}}
   try{await flushRunHandback(record,config)}catch{await event('handback-pending',{reasonCode:'handback-unavailable'})}
   // Source and public delivery require a separately durable, exact action intent. Process completion grants none.
   return{runId:record.runId,attemptId:record.attemptId,waitReason:record.waitReason,started,terminationCause:terminalCause,exitCode,timedOut:terminalCause==='timed-out',logFile:file,pushed:false,handedBack:false,stdout,startedAt,finishedAt:record.finishedAt!}
@@ -1273,7 +1276,7 @@ export async function runTick(
   let state = await withinRead(readBudget(options.signal), () => readState(config.stateFile))
   const runs: RunReport[] = []
   const refusals: Refusal[] = []
-  if(!options.dryRun&&!suppliedExecutor)await scheduleSavedQuotaRuns(config,options,tracker,runs,refusals)
+  if(!options.dryRun&&!suppliedExecutor){await scheduleSavedQuotaRuns(config,options,tracker,runs,refusals);await inspectSavedRecoveryWork(config,options,tracker,runs,refusals)}
 
   for (const entry of config.repos) {
     const budget = readBudget(options.signal)
@@ -1321,7 +1324,7 @@ export async function runTick(
       if ((error as NodeJS.ErrnoException).code !== 'ENOENT') { refusals.push({ repo: entry.repo, issue: null, reason: 'legacy claim cannot be inspected; ownership unavailable' }); continue }
     }
     const protectedRuns=(await (await import('./runs.ts')).readRuns(runsRoot(config.home))).filter(r=>r.repo===entry.repo&&(r.terminationCause==='termination-unconfirmed'||['prepared','running','interrupted'].includes(r.state)&&r.processIdentity&&!tracker.has(`${r.repo}#${r.issue}`)))
-    if(protectedRuns.length){refusals.push({repo:entry.repo,issue:null,reason:'owned execution termination is unconfirmed; repository protection retained'});continue}
+    if(protectedRuns.length&&(config.executionMode!=='shared'||protectedRuns.some(run=>!run.sharedClaim))){refusals.push({repo:entry.repo,issue:null,reason:'owned execution termination is unconfirmed; repository protection retained'});continue}
     const inFlight = inFlightIssues(tracker, entry.repo)
     // This process holds the repo lock for as long as it has a run in flight there; its own lock is
     // not "another run", and maxRuns against the in-flight count is what bounds it.
@@ -1760,6 +1763,9 @@ export async function watch(
 export function dispatchUsage(): string {
   return `Usage: vegafactory dispatch [--once] [--watch] [--dry-run] [--json] [--config PATH]
 
+  --checkpoint-task ID --run-id ID
+                checkpoint one checked task in its live owned run; preview by
+                default, --once runs only the approved-base configured check
   --once        run exactly one tick and wait for the runs it started
   --watch       tick every interval seconds until stopped (the service form); runs
                 finish out-of-band, and stopping waits for the ones in flight
@@ -1773,14 +1779,18 @@ Exit 0 runs planned or launched · 1 nothing ran and every candidate was refused
 `
 }
 
-export interface DispatchArgs { once: boolean; watch: boolean; dryRun: boolean; json: boolean; config: string | null; help: boolean }
+export interface DispatchArgs { checkpointTask?:string;runId?:string; once: boolean; watch: boolean; dryRun: boolean; json: boolean; config: string | null; help: boolean }
 
 export function parseDispatchArgs(argv: string[]): DispatchArgs {
   const args: DispatchArgs = { once: false, watch: false, dryRun: false, json: false, config: null, help: false }
   const rest = [...argv]
   while (rest.length) {
     const token = rest.shift()!
-    if (token === '--once') args.once = true
+    if (token === '--checkpoint-task' || token === '--run-id') {
+      const value=rest.shift();if(!value||value.startsWith('-'))throw Error(token+' requires an identity')
+      if(token==='--checkpoint-task'){if(args.checkpointTask)throw Error('duplicate checkpoint task');args.checkpointTask=value}else{if(args.runId)throw Error('duplicate run ID');args.runId=value}
+    }
+    else if (token === '--once') args.once = true
     else if (token === '--watch') args.watch = true
     else if (token === '--dry-run') args.dryRun = true
     else if (token === '--json') args.json = true
@@ -1792,6 +1802,7 @@ export function parseDispatchArgs(argv: string[]): DispatchArgs {
     }
     else throw new Error(`Unknown option: ${token}`)
   }
+  if(Boolean(args.checkpointTask)!==Boolean(args.runId)||args.checkpointTask&&(!/^[1-9]\d*-T[1-9]\d*$/.test(args.checkpointTask)||!/^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/i.test(args.runId!)||args.watch))throw Error('checkpoint-task requires one exact run/task and cannot watch')
   if (args.once && args.watch) throw new Error('--once and --watch are mutually exclusive: one tick, or the loop')
   // Anything that can start a dark build is dry-run until asked for explicitly.
   if (!args.once && !args.watch) args.dryRun = true
@@ -1828,6 +1839,16 @@ export async function runDispatchCli(argv: string[], home: string): Promise<numb
     return 2
   }
 
+  if(args.checkpointTask&&args.runId){
+    try{
+      const run=await readRun(runsRoot(home),args.runId)
+      if(process.env.VSK_RUN_ID!==run.runId||await realpath(process.cwd())!==run.checkout||!await callerBelongsToRun(run))throw Error('task checkpoint requires its live owned session/worktree')
+      const result=await checkpointTaskForRecovery({run,taskId:args.checkpointTask,config,write:args.once&&!args.dryRun})
+      console.log(args.json?JSON.stringify({command:'dispatch',...result}):result.reason)
+      return 0
+    }catch(error){console.error((error as Error).message);return 2}
+  }
+
   const emit = (result: TickResult): void => {
     if (args.json) console.log(JSON.stringify({ command: 'dispatch', ...result }, null, 2))
     else console.log(renderTick(result))
@@ -1851,6 +1872,7 @@ const defaultStatsGit: GitRunner = async (args,cwd,options) => (await import('./
 const sharedAuthorityContexts=new WeakMap<import('./shared-claims.ts').CoordinationTarget,string>()
 const sharedRunContexts=new WeakMap<import('./shared-claims.ts').CoordinationTarget,string>()
 const sharedTaskContexts=new WeakMap<import('./shared-claims.ts').CoordinationTarget,import('./shared-claims.ts').TaskRecord>()
+const sharedContinuationContexts=new WeakMap<import('./shared-claims.ts').CoordinationTarget,{runId:string;attemptId:string;checkpoint:NonNullable<RunRecord['checkpoint']>;scopeDigest:string;approvalBindings:RunRecord['approvalBindings']}>()
 const sharedMachineContexts=new WeakMap<import('./shared-claims.ts').CoordinationTarget,EffectiveMachine>()
 export async function verifiedSharedTarget(repo:string,config:FactoryConfig,runId?:string):Promise<import('./shared-claims.ts').CoordinationTarget>{
   const {resolveMachinePolicy}=await import('../../../skills/dev/dev-setup/scripts/effective-policy.mjs')
@@ -1874,7 +1896,9 @@ export async function verifiedSharedTarget(repo:string,config:FactoryConfig,runI
       if(current.id!==machine.id||current.policyDigest!==machine.policyDigest||session.hostBindingDigest!==host.digest||candidate.repo!==repo||candidate.repositoryNodeId!==machine.repositoryIds[repo])throw Error('shared candidate identity mismatch')
       sharedRunContexts.set(target,candidate.runId)
       const record=await readRun(runsRoot(config.home),candidate.runId)
-      if(!record.execution||record.state!=='prepared'||record.pid!==null||existsSync((await import('./runs.ts')).runAttemptDirectory(runsRoot(config.home),record))||canonicalWire(record.approvalBindings)!==canonicalWire(candidate.approvalBindings)||record.taskKey.scopeDigest!==candidate.scopeDigest)throw Error('shared prepared candidate differs')
+      const continuation=sharedContinuationContexts.get(target),runtime=await import('./runs.ts')
+      const continuing=continuation&&continuation.runId===record.runId&&continuation.attemptId===(record.attemptId??record.runId)&&continuation.scopeDigest===record.taskKey.scopeDigest&&canonicalWire(continuation.approvalBindings)===canonicalWire(record.approvalBindings)&&canonicalWire(continuation.checkpoint)===canonicalWire(record.checkpoint)&&['terminal','interrupted'].includes(record.state)&&await runtime.verifyLocalRunStopped(record)
+      if(!record.execution||(!continuing&&(record.state!=='prepared'||record.pid!==null||existsSync(runtime.runAttemptDirectory(runsRoot(config.home),record))))||canonicalWire(record.approvalBindings)!==canonicalWire(candidate.approvalBindings)||record.taskKey.scopeDigest!==candidate.scopeDigest)throw Error('shared prepared candidate differs')
       if(canonicalWire(await processIdentity())!==canonicalWire(session.identity))throw Error('shared session process identity differs')
       await(await import('./runs.ts')).verifyRunAuthority(record,config,'launch')
       await (await import('./shared-claims.ts')).resolveEvidence(target,record.execution.qualification)
@@ -1895,7 +1919,8 @@ export async function verifiedSharedTarget(repo:string,config:FactoryConfig,runI
       await helpers.verifyRunAuthority(run,config)
       sharedAuthorityContexts.set(target,canonicalWire({runId:run.runId,bindings:run.approvalBindings,recordBinding:run.recordBinding}))
       if(transition.kind==='receipt'){
-        if(transition.payload.kind==='acceptance'||transition.payload.kind==='join')await(await import('./children.ts')).verifyChildrenEvidence({run,task,payload:transition.payload,publishing:true},config)
+        if(transition.payload.kind==='acceptance'&&await verifyTaskCheckpointEvidence(run,transition.payload,config)){}
+        else if(transition.payload.kind==='acceptance'||transition.payload.kind==='join')await(await import('./children.ts')).verifyChildrenEvidence({run,task,payload:transition.payload,publishing:true},config)
         else await helpers.verifyRunEvidencePayload(null,transition.payload,{run,task,publishing:true,verifyAuthority:()=>helpers.verifyRunAuthority(run,config),stopped:()=>helpers.verifyLocalRunStopped(run)})
       }
       if(transition.kind==='start'&&(run.state!=='prepared'||!run.execution||!run.runtimeBinding))throw Error('shared durable preparation unavailable')
@@ -1919,7 +1944,8 @@ export async function verifiedSharedTarget(repo:string,config:FactoryConfig,runI
         if(!task||task.runId!==sibling.runId||task.ownerToken!==sibling.sharedClaim.ownerToken||task.generation!==sibling.sharedClaim.generation||task.machineId!==sibling.machine?.id||task.sessionId!==sibling.machine.sessionId)throw Error('stopped sibling owner differs')
       }
       const run=await helpers.readRun(runsRoot(config.home),runId)
-      if(payload?.kind==='acceptance'||payload?.kind==='join')await(await import('./children.ts')).verifyChildrenEvidence({run,task,payload,publishing:false,ref},config)
+      if(payload?.kind==='acceptance'&&(await verifyTaskCheckpointEvidence(run,payload,config)||await verifyRetainedTaskCompletion(run,payload,ref,target,config))){}
+      else if(payload?.kind==='acceptance'||payload?.kind==='join')await(await import('./children.ts')).verifyChildrenEvidence({run,task,payload,publishing:false,ref},config)
       else await helpers.verifyRunEvidencePayload(ref,payload,{run,task,verifyAuthority:async()=>{if(sharedAuthorityContexts.get(target)!==canonicalWire({runId:run.runId,bindings:run.approvalBindings,recordBinding:run.recordBinding}))await helpers.verifyRunAuthority(run,config)},stopped:()=>helpers.verifyLocalRunStopped(run)})
     },
   }
@@ -1934,7 +1960,7 @@ export function sharedRunAdapters(config:FactoryConfig,processDeps?:Pick<Execute
       const helpers=await import('./runs.ts')
       const coordination=await import('./shared-claims.ts'),{readRuns}=await import('./runs.ts'),{readBootIdentityDigest}=await import('./machine-identity.ts')
       const stage=stagePolicy(input.policy,input.run.stage),machine=sharedMachineContexts.get(target)!
-      const records=(await readRuns(runsRoot(config.home))).filter(r=>r.repo===input.run.repo&&r.issue===input.run.issue&&r.state==='prepared'&&r.execution&&r.harness===stage.harness&&r.model===stage.model&&r.effort===stage.effort&&canonicalWire(r.approvalBindings.map(a=>({approvalId:a.approvalId,commentId:Number(a.source.commentId),bodySha256:a.source.bodySha256})))===canonicalWire(input.approvalBindings)&&canonicalWire(r.recordBinding?{approvalId:r.recordBinding.approvalId,commentId:Number(r.recordBinding.source.commentId),bodySha256:r.recordBinding.source.bodySha256}:null)===canonicalWire(input.recordBinding??null)&&canonicalWire(r.approvalRefs)===canonicalWire(input.bindings))
+      const records=(await readRuns(runsRoot(config.home))).filter(r=>r.repo===input.run.repo&&r.issue===input.run.issue&&r.state==='prepared'&&!r.remoteRecovery&&!r.continuations?.length&&r.execution&&r.harness===stage.harness&&r.model===stage.model&&r.effort===stage.effort&&canonicalWire(r.approvalBindings.map(a=>({approvalId:a.approvalId,commentId:Number(a.source.commentId),bodySha256:a.source.bodySha256})))===canonicalWire(input.approvalBindings)&&canonicalWire(r.recordBinding?{approvalId:r.recordBinding.approvalId,commentId:Number(r.recordBinding.source.commentId),bodySha256:r.recordBinding.source.bodySha256}:null)===canonicalWire(input.recordBinding??null)&&canonicalWire(r.approvalRefs)===canonicalWire(input.bindings))
       if(records.length!==1)throw Error('unique qualified subscription run preparation unavailable; shared acquisition deferred')
       const record=records[0]!,authorities=record.approvalBindings
       await helpers.verifyRunAuthority(record,config,'launch')
@@ -1971,6 +1997,7 @@ export function sharedRunAdapters(config:FactoryConfig,processDeps?:Pick<Execute
       if(linked.kind!=='owned')throw Error('shared envelope acknowledgment unavailable')
       Object.assign(claim,linked.claim)
       await transitionRun(record.runId,record.generation,{sharedClaim:{taskKey:claim.taskKey,generation:claim.generation,ownerToken:claim.ownerToken,stateCommit:claim.stateCommit}},input.root)
+      await checkpointRecoveryContext(await readRun(input.root,record.runId),config)
     },
     executeShared:async(run,plan,cfg,options)=>{
       const claim=options.sharedClaim;if(!claim)throw Error('shared execution requires a claim')
@@ -2119,19 +2146,21 @@ export async function executeApprovedRun(run:PlannedRun,initialPlan:LaunchPlan,c
 async function persistAttemptCapture(record:RunRecord,stdout:string,root:string,cause:TerminalCause):Promise<void>{
   if(!record.execution)return
   const helpers=await import('./runs.ts')
-  const context={repo:record.repo,ts:record.finishedAt??new Date().toISOString(),stage:record.stage,model:record.model,effort:record.effort,human:record.taskOwner,worktree:record.checkout,parent:record.parent,terminationCause:cause}
+  if(!record.finishedAt)throw Error('current terminal finish time unavailable')
+  const context={repo:record.repo,ts:record.finishedAt,stage:record.stage,model:record.model,effort:record.effort,human:record.taskOwner,worktree:record.checkout,parent:record.parent,terminationCause:cause}
   let captured:StatsRecord
   try{captured=record.harness==='claude'?fromClaudeHeadless(claudeHeadlessResult(stdout),context):fromCodexExec(stdout.split('\n').filter(Boolean).flatMap(line=>{try{return[JSON.parse(line)]}catch{return[]}}),context)}catch{captured=normalizeRecord({...context,outcome:cause==='succeeded'?'complete':'failed'})}
   captured.issue=record.issue;captured.session_id=record.vendorSessionId??null;captured.duration_s=record.attemptElapsedMs==null?null:record.attemptElapsedMs/1000
   await helpers.atomicRunFile(join(helpers.runAttemptDirectory(root,record),'capture.json'),captured)
   if(record.waitReason==='subscription-quota')return
-  const previous:StatsRecord[]=[]
-  for(const attempt of record.attempts??[]){
-    try{previous.push(JSON.parse(await helpers.readPrivateRunFile(join(root,record.runId,'attempts',attempt.id,'capture.json'))) as StatsRecord)}catch{previous.push(normalizeRecord({repo:record.repo,ts:attempt.finishedAt}))}
+  const previous:Array<Pick<StatsRecord,'turns'|'tool_calls'|'subagents'|'cost_usd'|'tokens'>>=[]
+  for(const attempt of helpers.terminalCaptureAttempts(record)){
+    try{previous.push(JSON.parse(await helpers.readPrivateRunFile(join(root,record.runId,'attempts',attempt.id,'capture.json'))) as StatsRecord)}catch{previous.push({turns:null,tool_calls:null,subagents:null,cost_usd:null,tokens:{in:null,out:null,cache_read:null,cache_write:null}})}
   }
   for(const field of ['turns','tool_calls','subagents','cost_usd'] as const){const values=[...previous,captured].map(r=>r[field]);captured[field]=values.every(v=>typeof v==='number'&&Number.isFinite(v))?values.reduce<number>((sum,v)=>sum+v!,0):null}
   for(const field of ['in','out','cache_read','cache_write'] as const){const values=[...previous,captured].map(r=>r.tokens[field]);captured.tokens[field]=values.every(v=>typeof v==='number'&&Number.isFinite(v))?values.reduce<number>((sum,v)=>sum+v!,0):null}
-  captured.duration_s=record.activeElapsedMs===null?null:record.activeElapsedMs/1000
+  const segmentElapsed=helpers.terminalCaptureElapsedMs(record)
+  captured.duration_s=segmentElapsed===null?null:segmentElapsed/1000
   await helpers.prepareTerminalCapture(root,record.runId,captured)
 }
 
@@ -2224,4 +2253,794 @@ export async function registerExecutionRequest(request:unknown,config:FactoryCon
   if(stage.harness!==r.execution.harness||stage.model!==r.execution.model||stage.effort!==r.execution.effort)throw Error('registration differs from selected harness/model/effort')
   const plan=buildLaunchPlan({harness:stage.harness,model:stage.model,effort:stage.effort,stage:r.stage,worktree:checkout,issue:{number:0,title:'execution registration'},operator:'the operator',outcome:'',stopList:stopList(devMd),resume:false,skillPath:null,subagents:config.subagents})
   return registerQualifiedExecution({config,repo:r.repo,plan,execution:r.execution,runtimeBinding:r.runtimeBinding})
+}
+
+// #144 recovery reads immutable remote facts before constructing any target-local
+// attempt. No old-home paths, vendor memories or latest-parent defaults enter it.
+export interface RemoteRecoveryMaterial {
+  stateCommit:string;task:import('./shared-claims.ts').TaskRecord
+  artifacts:import('./shared-claims.ts').ArtifactRef[];briefBody:string;planBody:string;title:string
+  authorityRequest:import('./runs.ts').RunAuthorityRequest
+  packet:Record<string,unknown>;evidence:Array<{ref:import('./shared-claims.ts').EvidenceRef;payload:import('./shared-claims.ts').RecoveryEvidencePayload|null}>
+  children:Array<{task:import('./shared-claims.ts').TaskRecord;stateCommit:string}>
+  historicalParents:Array<{task:import('./shared-claims.ts').TaskRecord;stateCommit:string}>
+  sourceRefs:Array<{id:string;updatedAt:string;bodySha256:string}>;unavailableContext:Array<'original-private-notes'|'original-learning-context'>;blocks:string[]
+}
+const verifiedRecoveryMaterials=new WeakMap<RemoteRecoveryMaterial,string>()
+export function assertRemoteRecoveryMaterial(material:RemoteRecoveryMaterial):void {
+ if(material.blocks.length||verifiedRecoveryMaterials.get(material)!==createHash('sha256').update(canonicalWire(material)).digest('hex'))throw Error('remote recovery material is unverified or changed')
+}
+const recoveryScript=async()=>{
+  const source=fileURLToPath(import.meta.url).endsWith('.ts')
+  return await import(new URL(source?'../../../skills/dev/dev-implement/scripts/recovery.mjs':'../skill/dev-implement/scripts/recovery.mjs',import.meta.url).href) as typeof import('../../../skills/dev/dev-implement/scripts/recovery.mjs')
+}
+function recoveryFiles(body:string,ids:string[]):string[] {
+ const tasks=[...body.matchAll(/^-\s*\[[ x]\].*<!--\s*task-id:([1-9]\d*-T[1-9]\d*)\s*-->.*$/gim)]
+ const result=tasks.flatMap((row,index)=>ids.includes(row[1]!)?[...(body.slice(row.index,tasks[index+1]?.index).split('\n').find(line=>/^\s*- Files\s/.test(line))??'').matchAll(/`([^`]+)`/g)].map(row=>row[1]!):[])
+ if(!result.length||result.some(path=>path.startsWith('/')||path.includes('\\')||path.split('/').some(part=>part==='..'||part==='.')||/[\0\r\n]/.test(path)))throw Error('exact approved recovery files unavailable')
+ return [...new Set(result)]
+}
+async function recoveryAuthority(task:import('./shared-claims.ts').TaskRecord,config:FactoryConfig,gh:TickDeps['gh']) {
+ const helpers=await import('./runs.ts'),core=await recoveryScript(),{approval,preflight}=await helpers.approvalTools(),reads:unknown[]=[],budget=readBudget()
+ const readJson=async(args:string[])=>{const row=await boundedGhJson<any>(gh,args,budget);reads.push(row);return row}
+ const entry=config.repos.find(row=>row.repo===task.repo);if(!entry)throw Error('recovery repository is not configured')
+ const devMd=await readFile(join(entry.path,'.vegastack/dev.md'),'utf8'),resolved=loadConfiguredPolicy({home:config.home,repo:task.repo,devMd,settingsPath:config.settingsPath})
+ if(!resolved.ok)throw Error('current recovery policy unavailable')
+ const policy=repoPolicyFromEffective(resolved),brief=await readJson(['api',`repos/${task.repo}/issues/${task.issue}`]),comments=await approval.readPages(readJson,['api',`repos/${task.repo}/issues/${task.issue}/comments`])
+ if(brief.node_id!==task.issueNodeId)throw Error('recovery issue identity changed')
+ const sources=[]
+ for(const wire of task.approvalBindings){
+  const tuple=core.localApprovalBinding(wire)
+  const node=await readJson(['api','graphql','-f','query=query($id:ID!){node(id:$id){... on Issue{id number repository{id nameWithOwner}}}}','-F','id='+wire.source.issueNodeId])
+  const subject=node?.data?.node
+  if(subject?.id!==wire.source.issueNodeId||subject.repository?.id!==wire.source.repositoryId||subject.repository.nameWithOwner!==task.repo||!Number.isSafeInteger(subject.number)||subject.number<=0)throw Error('canonical recovery authority locator differs')
+  const direct=await readJson(['api',`repos/${task.repo}/issues/comments/${tuple.commentId}`])
+  const history=await approval.readPages(readJson,['api',`repos/${task.repo}/issues/${subject.number}/comments`])
+  if(direct.id!==tuple.commentId||createHash('sha256').update(direct.body).digest('hex')!==tuple.bodySha256||direct.issue_url!==`https://api.github.com/repos/${task.repo}/issues/${subject.number}`||history.filter((row:any)=>row.id===direct.id&&row.body===direct.body).length!==1)throw Error('canonical recovery source changed or inaccessible')
+  sources.push({wire,tuple,subject,comment:direct,record:approval.parseApproval(direct)})
+ }
+ const consolidated=sources.filter(row=>row.record.kind==='consolidated')
+ let checked:any,authorityRequest:import('./runs.ts').RunAuthorityRequest={kind:'native'}
+ if(consolidated.length){
+  if(consolidated.length!==1||sources.length!==1||!task.checkpoint)throw Error('ambiguous original consolidated recovery context')
+  const source=consolidated[0]!,selection=source.record.items.find((row:any)=>row.repo===task.repo&&row.issue===task.issue)
+  if(!selection||selection.mode!=='code'||task.approvedTaskIds.some(id=>!selection.taskIds.includes(id)))throw Error('recovery selected scope differs')
+  const currentPlan=comments.find((row:any)=>row.node_id===selection.artifacts.find((ref:any)=>ref.kind==='plan')?.artifactId)
+  if(!currentPlan)throw Error('original approved plan unavailable')
+  const paths=recoveryFiles(currentPlan.body,task.approvedTaskIds)
+  const actions=source.record.actions.filter((action:any)=>selection.actionIds.includes(action.id)&&action.kind==='local'&&action.operations?.includes('edit'))
+  // Closed local action name is supplied by the approved record. No latest
+  // configuration or guessed checkpoint action replaces a missing grant.
+  if(actions.length!==1)throw Error('unique original local recovery action unavailable')
+  const request={parentRepo:task.repo,parentIssue:source.subject.number,approvalBinding:{commentId:source.tuple.commentId,bodySha256:source.tuple.bodySha256},requested:{repo:task.repo,issue:task.issue,taskIds:task.approvedTaskIds,actionId:actions[0].id,branch:task.checkpoint.branch,baseSha:task.checkpoint.baseSha,paths,operation:'edit' as const}}
+  checked=await approval.gatherConsolidatedApproval({...request,operators:policy.operators,readJson})
+  authorityRequest={kind:'consolidated',...request}
+ }else{
+  const sourceComments=await approval.readApprovalSources(comments,readJson)
+  checked=approval.evaluateApprovals({repo:task.repo,issue:task.issue,brief,comments,sourceComments,operators:policy.operators,requiredScope:'brief+plan'})
+  const admission=await preflight.gatherAndEvaluate({repo:task.repo,issue:String(task.issue),expect:'working',stage:'implement'},{readJson,devMd,configuredPolicy:resolved})
+  if(admission.blocks.length)throw Error('current native recovery prerequisites unavailable')
+ }
+ if(checked.ok===false||checked.blocks.length)throw Error('current canonical recovery approval refused')
+ const bound=await helpers.bindVerifiedApprovalSources(checked.approvalBindings,reads,readJson,gh)
+ if(canonicalWire(bound)!==canonicalWire(task.approvalBindings))throw Error('original recovery authority changed')
+ const selected=await helpers.approvedTaskSelection(checked.bindings,reads,task.stage,{},task.approvedTaskIds)
+ if(selected.scopeDigest!==task.scopeDigest||canonicalWire(selected.approvedTaskIds)!==canonicalWire(task.approvedTaskIds))throw Error('recovery approved task identity differs')
+ if(task.recovery?.recordBinding){
+  const wire=task.recovery.recordBinding,tuple=core.localApprovalBinding(wire)
+  const direct=await readJson(['api',`repos/${task.repo}/issues/comments/${tuple.commentId}`])
+  if(createHash('sha256').update(direct.body).digest('hex')!==tuple.bodySha256)throw Error('original requested record changed')
+  const record=approval.parseApproval(direct),canonical=sources[0]!
+  if(record.kind!=='consolidated'||canonical.record.kind!=='consolidated')throw Error('requested record provenance unavailable')
+  const issue=/\/issues\/([1-9]\d*)$/.exec(direct.issue_url)?.[1]
+  if(!issue)throw Error('requested record containing history unavailable')
+  await approval.readPages(readJson,['api',`repos/${task.repo}/issues/${issue}/comments`])
+  const audit=await helpers.bindVerifiedApprovalSources([tuple],reads,readJson,gh)
+  if(canonicalWire(audit[0])!==canonicalWire(wire))throw Error('requested record locator changed')
+  // Preserve requested relay pin for subsequent normal-owner verification;
+  // canonical authority was separately read/evaluated above.
+  if(authorityRequest.kind==='consolidated')authorityRequest={...authorityRequest,parentIssue:Number(issue),approvalBinding:{commentId:tuple.commentId,bodySha256:tuple.bodySha256}}
+ }
+ const planRef=checked.bindings.find((ref:any)=>ref.kind==='plan'),briefRef=checked.bindings.find((ref:any)=>ref.kind==='brief')
+ const plan=comments.find((row:any)=>row.node_id===planRef?.artifactId)
+ if(!plan||!briefRef||!planRef)throw Error('original recovery artifacts unavailable')
+ const approvalObservedAt=Math.max(...sources.map(row=>Date.parse(row.comment.updated_at)))
+ if(!Number.isFinite(approvalObservedAt))throw Error('original approval source timestamp unavailable')
+ return {approvalObservedAt,artifacts:checked.bindings as import('./shared-claims.ts').ArtifactRef[],briefBody:brief.body as string,planBody:plan.body as string,title:brief.title as string,authorityRequest,comments,briefRef,planRef,policy}
+}
+export async function inspectRemoteRecovery(input:{repo:string;taskKey:string;config:FactoryConfig},transport:{target?:import('./shared-claims.ts').CoordinationTarget;gh?:TickDeps['gh'];source?:Parameters<typeof import('./children.ts').fetchChildCheckpoint>[1]}={}):Promise<RemoteRecoveryMaterial> {
+ const owner=await import('./shared-claims.ts'),core=await recoveryScript(),target=transport.target??await verifiedSharedTarget(input.repo,input.config),gh=transport.gh??ghText
+ const inspected=await owner.inspectCoordinationTask(target,input.taskKey)
+ if(inspected.kind!=='active'||inspected.task.repo!==input.repo||!inspected.task.recovery)throw Error('active original remote recovery unavailable')
+ return inspectRemoteRecoveryRecord(input,inspected,{...transport,target,gh})
+}
+type RemoteRecoveryTransport={target?:import('./shared-claims.ts').CoordinationTarget;gh?:TickDeps['gh'];source?:Parameters<typeof import('./children.ts').fetchChildCheckpoint>[1]}
+async function inspectRemoteRecoveryRecord(input:{repo:string;taskKey:string;config:FactoryConfig},inspected:{head:string;task:import('./shared-claims.ts').TaskRecord},transport:RemoteRecoveryTransport,retainedStop?:import('./shared-claims.ts').StopProof):Promise<RemoteRecoveryMaterial> {
+ const owner=await import('./shared-claims.ts'),core=await recoveryScript(),target=transport.target!,gh=transport.gh??ghText
+ const task=inspected.task,envelope=owner.parseRecoveryEnvelope(task.recovery),authority=await recoveryAuthority(task,input.config,gh),stopProof=retainedStop??task.stopProof
+ if(stopProof){owner.parseStopProof(stopProof);if(stopProof.machineId!==task.machineId||stopProof.installationId!==task.installationId||stopProof.sessionId!==task.sessionId||stopProof.generation!==task.generation||!stopProof.runIds.includes(task.runId))throw Error('remote stopped owner differs')}
+ const evidence:RemoteRecoveryMaterial['evidence']=[],blocks:string[]=[]
+ const refs:Array<{ref:import('./shared-claims.ts').EvidenceRef;check:(payload:import('./shared-claims.ts').RecoveryEvidencePayload|null)=>void}>=[]
+ const insist=(value:unknown,message:string):void=>{if(!value)throw Error(message)}
+ refs.push({ref:envelope.execution.qualification,check:p=>{insist(p?.kind==='execution-qualification'&&p.result==='qualified'&&['harness','harnessVersion','model','effort','accountRef'].every(key=>(p as any)[key]===(envelope.execution as any)[key]),'original qualification differs')}})
+ for(const completed of envelope.completed)refs.push({ref:completed.acceptance.evidence,check:p=>{insist(p?.kind==='acceptance'&&p.result==='passed'&&p.taskId===completed.taskId&&p.runId===task.runId&&p.scopeDigest===task.scopeDigest&&p.sourceSha===completed.headSha&&p.validationId===completed.acceptance.validationId&&p.commandDigest===completed.acceptance.commandDigest&&task.approvedTaskIds.includes(p.taskId),'completed acceptance differs')}})
+ for(const child of envelope.children)refs.push({ref:child.acceptance.evidence,check:p=>{insist(p?.kind==='acceptance'&&p.result==='passed'&&p.runId===child.childRunId&&p.scopeDigest===child.scopeDigest&&p.sourceSha===child.headSha&&p.validationId===child.acceptance.validationId&&p.commandDigest===child.acceptance.commandDigest,'child acceptance differs')}})
+ for(const join of envelope.joins){
+  refs.push({ref:join.evidence,check:p=>{insist(p?.kind==='join'&&p.childRunId===join.childRunId&&p.generation===join.generation&&p.fromSha===join.fromSha&&p.parentBefore===join.parentBefore&&p.parentAfter===join.parentAfter&&p.state===join.state,'join evidence differs')}})
+  if(join.acceptance)refs.push({ref:join.acceptance.evidence,check:p=>{insist(p?.kind==='acceptance'&&p.result==='passed'&&p.runId===task.runId&&p.scopeDigest===task.scopeDigest&&p.sourceSha===join.parentAfter&&p.validationId===join.acceptance!.validationId&&p.commandDigest===join.acceptance!.commandDigest,'parent join acceptance differs')}})
+ }
+ for(const effect of envelope.effects){
+  refs.push({ref:effect.intent,check:p=>{insist(p?.kind==='effect-intent'&&p.effectId===effect.operationId&&p.runId===effect.runId&&p.generation===effect.generation&&p.effectKind===effect.kind&&canonicalWire(p.target)===canonicalWire(effect.target)&&p.payloadDigest===effect.payloadDigest&&canonicalWire(p.approvalBindings)===canonicalWire(envelope.approvalBindings),'effect intent differs')}})
+  if(effect.outcome)refs.push({ref:effect.outcome,check:p=>{insist(p?.kind==='effect-outcome'&&p.effectId===effect.operationId&&p.runId===effect.runId&&p.generation===effect.generation&&p.effectKind===effect.kind&&canonicalWire(p.target)===canonicalWire(effect.target)&&p.payloadDigest===effect.payloadDigest&&p.result===effect.state&&canonicalWire(p.approvalBindings)===canonicalWire(envelope.approvalBindings)&&(p.result!=='acknowledged'||p.observedDigest===p.payloadDigest&&!!p.observedRemoteId),'effect outcome differs')}})
+ }
+ const coverage=envelope.remoteEffectCoverage
+ if(coverage.kind==='unmanaged-possible')blocks.push('remote effect coverage unresolved')
+ if(coverage.kind==='qualified-managed-only'&&canonicalWire(coverage.qualification)!==canonicalWire(envelope.execution.qualification))blocks.push('effect qualification differs')
+ if(coverage.kind==='reconciled')refs.push({ref:coverage.evidence,check:p=>{insist(p?.kind==='effect-reconciliation'&&p.result==='complete'&&p.runId===task.runId&&p.scopeDigest===task.scopeDigest&&canonicalWire(p.approvalBindings)===canonicalWire(envelope.approvalBindings)&&envelope.effects.filter(row=>row.kind!=='telemetry-push').every(row=>p.checkedEffectIds.includes(row.operationId)),'effect reconciliation incomplete')}})
+ if(!stopProof)blocks.push('verified stopped owner evidence unavailable')
+ else refs.push({ref:stopProof.evidenceRef,check:p=>{insist(p?.kind==='effect-reconciliation'&&p.runId===task.runId&&p.scopeDigest===task.scopeDigest&&p.reasonCode==='owned-process-group-stopped'&&p.inspector.kind==='qualified-adapter'&&p.inspector.identityRef===task.machineId&&canonicalWire(p.approvalBindings)===canonicalWire(envelope.approvalBindings),'original stopped owner attestation differs')}})
+ for(const entry of refs){
+  try{
+   if(entry.ref.kind!=='state-receipt')throw Error('exact immutable recovery receipt required')
+   const reader={...target,verifyEvidence:async(ref:import('./shared-claims.ts').EvidenceRef,payload:import('./shared-claims.ts').RecoveryEvidencePayload|null)=>{if(canonicalWire(ref)!==canonicalWire(entry.ref))throw Error('recovery receipt binding differs');entry.check(payload)}}
+   const payload=await owner.resolveEvidence(reader,entry.ref)
+   if(stopProof&&canonicalWire(entry.ref)===canonicalWire(stopProof.evidenceRef)){
+    const raw=await target.provider.read(target,entry.ref.commitSha,owner.operationPath(entry.ref.operationId))
+    if(!raw||owner.sha256(raw)!==entry.ref.blobSha256)throw Error('stop receipt readback changed')
+    const receipt=JSON.parse(raw) as import('./shared-claims.ts').OperationReceipt,proof=stopProof
+    if(receipt.taskKey!==task.taskKey||receipt.generation!==task.generation||receipt.resultOwner.runId!==task.runId||receipt.resultOwner.ownerToken!==task.ownerToken||receipt.resultOwner.machineId!==proof.machineId||receipt.resultOwner.installationId!==proof.installationId||receipt.resultOwner.sessionId!==proof.sessionId||proof.generation!==task.generation||!proof.runIds.includes(task.runId))throw Error('stop receipt original owner differs')
+   }
+   evidence.push({ref:entry.ref,payload})
+  }catch(error){blocks.push((error as Error).message)}
+ }
+ if(!task.checkpoint||canonicalWire(task.checkpoint)!==canonicalWire(envelope.checkpoint))blocks.push('original exact source checkpoint unavailable')
+ if(envelope.effects.some(row=>row.kind!=='telemetry-push'&&!['acknowledged','cancelled-before-send'].includes(row.state)))blocks.push('blocking run or control effect pending')
+ if(task.unresolvedEffects.some(ref=>!envelope.effects.some(effect=>effect.kind==='telemetry-push'&&(canonicalWire(effect.intent)===canonicalWire(ref)||canonicalWire(effect.outcome)===canonicalWire(ref)))))blocks.push('unclassified unresolved remote effects')
+ const comments=authority.comments as Array<{id:number;updated_at:string;body:string;user?:{login?:string}}>
+ for(const comment of comments){
+  if(Date.parse(comment.updated_at)<=authority.approvalObservedAt||/^<!-- vsk:v1 type=(plan|approval)\b/m.test(comment.body))continue
+  if(!authority.policy.operators.includes(comment.user?.login??'')&&!/^<!-- vsk:v1 type=(correction|ruling|handback)\b/m.test(comment.body))continue
+  const digest=createHash('sha256').update(comment.body).digest('hex')
+  const emitted=evidence.some(row=>row.payload?.kind==='effect-outcome'&&row.payload.effectKind==='handback'&&row.payload.result==='acknowledged'&&row.payload.observedRemoteId===String(comment.id)&&row.payload.observedDigest===digest&&row.payload.payloadDigest===digest)
+  if(!emitted)blocks.push('operator instruction after original approval requires reconciliation: '+comment.id)
+ }
+ const newest=[...comments].sort((a,b)=>Date.parse(b.updated_at)-Date.parse(a.updated_at))[0]
+ if(!newest)throw Error('recovery source cursor unavailable')
+ const packet={schemaVersion:3,repo:task.repo,issue:task.issue,briefRef:authority.briefRef,planRef:authority.planRef,approvalIds:envelope.approvalBindings.map(row=>row.approvalId),approvalBindings:envelope.approvalBindings,recordBinding:envelope.recordBinding,taskIds:task.approvedTaskIds,completed:envelope.completed.map(row=>({taskId:row.taskId,headSha:row.headSha,evidenceUrl:row.acceptance.evidence.kind==='state-receipt'?'vsk-state:'+row.acceptance.evidence.commitSha+':'+row.acceptance.evidence.operationId:'github-comment:'+row.acceptance.evidence.commentId})),lastVerifiedCommit:task.checkpoint?.headSha??'',openFindings:[],rulings:comments.filter(row=>/^- Ruling:/m.test(row.body)).flatMap(row=>row.body.split('\n').filter(line=>/^- Ruling:/.test(line))),commentCursor:{id:String(newest.id),updatedAt:newest.updated_at},pendingRunIds:[task.runId],learning:[]}
+ if(task.checkpoint)core.validateRecoveryPacket(packet)
+ const children:RemoteRecoveryMaterial['children']=[]
+ const current=await owner.readCoordination(target)
+ for(const child of Object.values(current.tasks).filter(row=>row.parentTaskKey===task.taskKey)){
+  if(!child.parentBinding||child.parentBinding.runId!==task.runId||child.parentBinding.ownerToken!==task.ownerToken||child.parentBinding.generation!==task.generation){blocks.push('original parent binding differs for child '+child.issue);continue}
+  children.push({task:child,stateCommit:current.head})
+ }
+ const historicalParents:RemoteRecoveryMaterial['historicalParents']=[]
+ // Historical readers authenticate the same immutable receipts already checked
+ // above. They cannot depend on an original machine's private RunRecord.
+ const historicalTarget:import('./shared-claims.ts').CoordinationTarget={...target,
+  verifyCandidate:async()=>{throw Error('historical recovery reader is read-only')},
+  verifyTransition:async()=>{throw Error('historical recovery reader is read-only')},
+  verifyEvidence:async(ref,payload)=>{
+   const retained=evidence.find(row=>canonicalWire(row.ref)===canonicalWire(ref))
+   if(!retained||canonicalWire(retained.payload)!==canonicalWire(payload))throw Error('historical recovery receipt was not verified')
+  }}
+ const historical=owner.inspectHistoricalCoordinationTask
+ for(const accepted of envelope.children){
+  if(children.some(row=>row.task.runId===accepted.childRunId))continue
+  const retained=await owner.inspectCoordinationTask(target,accepted.childTaskKey)
+  if((retained.kind==='active'||retained.kind==='completed')&&retained.task.runId===accepted.childRunId&&retained.task.generation===accepted.generation&&retained.task.machineId===accepted.machineId&&retained.task.installationId===accepted.installationId&&retained.task.sessionId===accepted.sessionId&&retained.task.scopeDigest===accepted.scopeDigest){children.push({task:retained.task,stateCommit:retained.head});continue}
+  try{
+   if(!historical||accepted.acceptance.evidence.kind!=='state-receipt')throw Error('historical accepted child context requires pinned task reader')
+   const ref=accepted.acceptance.evidence,raw=await target.provider.read(target,ref.commitSha,owner.operationPath(ref.operationId))
+   if(!raw||owner.sha256(raw)!==ref.blobSha256)throw Error('historical child receipt changed')
+   const receipt=JSON.parse(raw) as import('./shared-claims.ts').OperationReceipt
+   if(receipt.taskKey!==task.taskKey||receipt.recoveryPayload?.kind!=='acceptance'||receipt.recoveryPayload.runId!==accepted.childRunId)throw Error('original parent publication binding unavailable')
+   const parent={taskKey:receipt.taskKey,generation:receipt.generation,...receipt.resultOwner}
+   const child={taskKey:accepted.childTaskKey,runId:accepted.childRunId,generation:accepted.generation,machineId:accepted.machineId,installationId:accepted.installationId,sessionId:accepted.sessionId}
+   const found=await historical(historicalTarget,{taskKey:child.taskKey,expected:{child,parent},evidence:ref,at:'receipt'})
+   if(found.kind!=='historical'||found.task.scopeDigest!==accepted.scopeDigest||found.task.checkpoint?.headSha!==accepted.headSha)throw Error('historical accepted child identity differs')
+   const originalParent=await historical(historicalTarget,{taskKey:parent.taskKey,expected:parent,evidence:ref,at:'receipt'})
+   if(originalParent.kind!=='historical')throw Error('historical original parent unavailable')
+   children.push({task:found.task,stateCommit:found.head});historicalParents.push({task:originalParent.task,stateCommit:originalParent.head})
+  }catch(error){blocks.push((error as Error).message)}
+ }
+ if(task.parentBinding){
+  const original=current.tasks[task.parentBinding.taskKey]
+  if(!original||canonicalWire({taskKey:original.taskKey,runId:original.runId,generation:original.generation,ownerToken:original.ownerToken,machineId:original.machineId,installationId:original.installationId,sessionId:original.sessionId})!==canonicalWire(task.parentBinding)){
+   try{
+    if(!historical||stopProof?.evidenceRef.kind!=='state-receipt')throw Error('historical original parent context requires pinned task reader')
+    const found=await historical(historicalTarget,{taskKey:task.parentBinding.taskKey,expected:task.parentBinding,evidence:stopProof.evidenceRef,at:'receipt'})
+    if(found.kind!=='historical')throw Error('historical original parent identity differs')
+    historicalParents.push({task:found.task,stateCommit:found.head})
+   }catch(error){blocks.push((error as Error).message)}
+  }
+ }
+ if(task.checkpoint){
+  try{
+   const checkout=input.config.repos.find(row=>row.repo===task.repo)!.path,fetch=(await import('./children.ts')).fetchChildCheckpoint
+   const sourceRun={repo:task.repo,runId:task.runId,branch:task.checkpoint.branch,baseSha:task.checkpoint.baseSha,headSha:task.checkpoint.headSha,taskKey:{repo:task.repo,issue:task.issue,taskId:task.approvedTaskIds[0]!,scopeDigest:task.scopeDigest},checkpoint:task.checkpoint}
+   await fetch({checkout,run:sourceRun,config:input.config},transport.source)
+   for(const completed of envelope.completed){const checked=spawnSync('git',['merge-base','--is-ancestor',completed.headSha,task.checkpoint.headSha],{cwd:checkout,timeout:3000});if(checked.status!==0)throw Error('completed source is not in recovered checkpoint')}
+   for(const child of envelope.children)await fetch({checkout,run:{repo:task.repo,runId:child.childRunId,branch:child.checkpoint.branch,baseSha:child.baseSha,headSha:child.headSha,taskKey:{repo:task.repo,issue:task.issue,taskId:task.approvedTaskIds[0]!,scopeDigest:child.scopeDigest},checkpoint:child.checkpoint},config:input.config},transport.source)
+   for(const joined of envelope.joins){if(joined.state==='accepted'&&joined.parentAfter){const checked=spawnSync('git',['merge-base','--is-ancestor',joined.parentAfter,task.checkpoint.headSha],{cwd:checkout,timeout:3000});if(checked.status!==0)throw Error('accepted parent join is missing from recovered checkpoint')}}
+  }catch(error){blocks.push((error as Error).message)}
+ }
+ const material={stateCommit:inspected.head,task,artifacts:authority.artifacts,briefBody:authority.briefBody,planBody:authority.planBody,title:authority.title,authorityRequest:authority.authorityRequest,packet,evidence,children,historicalParents,unavailableContext:['original-private-notes','original-learning-context'] as RemoteRecoveryMaterial['unavailableContext'],sourceRefs:comments.map(row=>({id:String(row.id),updatedAt:row.updated_at,bodySha256:createHash('sha256').update(row.body).digest('hex')})),blocks:[...new Set(blocks)]}
+ if(!material.blocks.length)verifiedRecoveryMaterials.set(material,createHash('sha256').update(canonicalWire(material)).digest('hex'))
+ return material
+}
+
+export interface ReceivingRecoveryMaterial {
+ original:RemoteRecoveryMaterial;current:{stateCommit:string;task:import('./shared-claims.ts').TaskRecord}
+ handoff:{ref:Extract<import('./shared-claims.ts').EvidenceRef,{kind:'state-receipt'}>;receipt:import('./shared-claims.ts').OperationReceipt}
+ taskIds:string[]
+}
+const verifiedReceivingMaterials=new WeakMap<ReceivingRecoveryMaterial,string>()
+export async function inspectReceivingRecovery(request:import('./runs.ts').ReceivingRunRequest,originalOwner:import('./shared-claims.ts').ParentClaimBinding,config:FactoryConfig,transport:RemoteRecoveryTransport={}):Promise<ReceivingRecoveryMaterial> {
+ const owner=await import('./shared-claims.ts'),target=transport.target??await verifiedSharedTarget(config.repos.find(row=>row.path===request.checkout)?.repo??'',config)
+ if(request.root!==runsRoot(config.home)||originalOwner.taskKey!==request.taskKey||originalOwner.runId!==request.runId)throw Error('receiving original request differs')
+ const history=await owner.inspectHandoffCoordinationTask(target,{taskKey:request.taskKey,expected:originalOwner,evidence:request.handoff})
+ if(history.kind!=='historical-handoff')throw Error(history.reason)
+ const next=history.handedOff,current=await owner.inspectCoordinationTask(target,request.taskKey,{runId:next.runId,generation:next.generation,ownerToken:next.ownerToken,machineId:next.machineId,installationId:next.installationId,sessionId:next.sessionId})
+ if(current.kind!=='active'||current.task.state!=='claimed'||current.task.generation!==request.expectedSharedGeneration||!current.task.stopProof||current.task.parentTaskKey!==null||current.task.parentBinding!=null)throw Error('receiving current standalone owner unavailable')
+ for(const key of ['checkpoint','recovery','approvedTaskIds','acceptedScopes','stopProof'] as const)if(canonicalWire(current.task[key])!==canonicalWire(next[key]))throw Error('receiving handoff source changed')
+ const original=await inspectRemoteRecoveryRecord({repo:next.repo,taskKey:next.taskKey,config},{head:history.receipt.previousHead,task:history.predecessor},{...transport,target},current.task.stopProof)
+ assertRemoteRecoveryMaterial(original)
+ if(original.children.length)throw Error('retained child reservations require explicit group recovery')
+ const completed=new Set((original.packet.completed as Array<{taskId:string}>).map(row=>row.taskId)),taskIds=original.task.approvedTaskIds.filter(id=>!completed.has(id))
+ if(!taskIds.length)throw Error('receiving implementation is already complete; inspect delivery separately')
+ const checked=[...original.planBody.matchAll(/^-\s*\[x\].*<!--\s*task-id:([1-9]\d*-T[1-9]\d*)\s*-->/gim)].map(match=>match[1]!)
+ if(checked.some(id=>!completed.has(id)))throw Error('checked task lacks verified completion evidence; no blind replay')
+ const material={original,current:{stateCommit:current.head,task:current.task},handoff:{ref:request.handoff,receipt:history.receipt},taskIds}
+ verifiedReceivingMaterials.set(material,createHash('sha256').update(canonicalWire(material)).digest('hex'))
+ return material
+}
+
+async function receivingExecutionSetup(material:RemoteRecoveryMaterial,checkout:string,config:FactoryConfig,target:import('./shared-claims.ts').CoordinationTarget,localClaim:Claim,sessionId:string):Promise<{receiver:import('./runs.ts').VerifiedReceivingRunDecision['receiver'];plan:LaunchPlan}> {
+ assertRemoteRecoveryMaterial(material)
+ const helpers=await import('./runs.ts'),machine=sharedMachineContexts.get(target)
+ if(!machine||machine.defaults.recovery!=='verified-transfer'||localClaim.path!==repoLockPath(config,material.task.repo))throw Error('receiving machine or local repository ownership unavailable')
+ await(await import('./claims.ts')).renewClaim(localClaim)
+ const devMd=await readFile(join(checkout,'.vegastack/dev.md'),'utf8'),effective=loadConfiguredPolicy({home:config.home,repo:material.task.repo,devMd,settingsPath:config.settingsPath})
+ if(!effective.ok)throw Error('receiving current policy unavailable')
+ const policy=repoPolicyFromEffective(effective),stage=stagePolicy(policy,material.task.stage as Stage),execution=material.task.recovery!.execution
+ if(stage.harness!==execution.harness||stage.model!==execution.model||stage.effort!==execution.effort)throw Error('receiving original harness/model/effort changed')
+ const plan=buildLaunchPlan({harness:stage.harness,model:stage.model,effort:stage.effort,stage:material.task.stage as Stage,worktree:checkout,issue:{number:material.task.issue,title:material.title},operator:machine.executionLogin,outcome:outcomeOf(material.briefBody),stopList:stopList(devMd),resume:false,skillPath:null,subagents:config.subagents})
+ await inspectSubscription(plan,execution.accountRef)
+ const metadata=await inspectManagedHarness(plan)
+ if(metadata.version!==execution.harnessVersion||!validateManagedLaunch(plan,metadata).ok)throw Error('original receiving harness version or effective controls changed')
+ const seeds=(await helpers.readQualifiedExecutions(runsRoot(config.home))).filter(row=>canonicalWire(row.execution)===canonicalWire(execution))
+ const qualification=material.evidence.find(row=>canonicalWire(row.ref)===canonicalWire(execution.qualification))?.payload
+ let selected:import('./runs.ts').QualifiedExecutionRecord|undefined
+ for(const seed of seeds){
+  try{
+   await helpers.verifyInstalledRuntimeBinding(seed.runtimeBinding,dirname(dirname(fileURLToPath(import.meta.url))),fileURLToPath(import.meta.url))
+   if(await helpers.executionConfigurationDigest({binding:seed.runtimeBinding,execution,plan,metadata})!==seed.configurationDigest)continue
+   helpers.verifyExecutionQualification(qualification,execution,seed.runtimeBinding,seed.configurationDigest)
+   if(selected)throw Error('multiple original receiving runtime registrations')
+   selected=seed
+  }catch(error){if((error as Error).message==='multiple original receiving runtime registrations')throw error}
+ }
+ if(!selected)throw Error('original verified installed runtime/account configuration unavailable on receiver')
+ return {receiver:{machine:{id:machine.id,installationId:machine.installationId,sessionId,hostBindingDigest:machine.hostBindingDigest},claimToken:localClaim.token,policyDigest:effective.policy.policyDigest,runtimeBinding:selected.runtimeBinding,configurationDigest:selected.configurationDigest,worktreeDigest:await helpers.worktreeFingerprint(checkout)},plan}
+}
+export async function verifyReceivingRunRecovery(request:import('./runs.ts').ReceivingRunRequest,originalOwner:import('./shared-claims.ts').ParentClaimBinding,config:FactoryConfig,localClaim:Claim):Promise<import('./runs.ts').VerifiedReceivingRunDecision> {
+ const entry=config.repos.find(row=>row.repo===originalOwnerRepository.get(originalOwner));
+ // The request's local checkout must belong to one configured source repository.
+ const candidates=entry?[entry]:config.repos.filter(row=>{const r=spawnSync('git',['rev-parse','--path-format=absolute','--git-common-dir'],{cwd:row.path,encoding:'utf8',timeout:3000});const c=spawnSync('git',['rev-parse','--path-format=absolute','--git-common-dir'],{cwd:request.checkout,encoding:'utf8',timeout:3000});return r.status===0&&c.status===0&&r.stdout.trim()===c.stdout.trim()})
+ if(candidates.length!==1)throw Error('receiving configured source repository unavailable')
+ const target=await verifiedSharedTarget(candidates[0]!.repo,config),material=await inspectReceivingRecovery(request,originalOwner,config,{target})
+ const setup=await receivingExecutionSetup(material.original,request.checkout,config,target,localClaim,material.current.task.sessionId)
+ if(setup.receiver.machine.id!==material.current.task.machineId||setup.receiver.machine.installationId!==material.current.task.installationId)throw Error('receiving current machine differs')
+ const retained=(await(await import('./runs.ts')).readRuns(runsRoot(config.home))).find(run=>run.runId===request.runId)
+ if(retained){if(retained.state!=='prepared'||retained.processIdentity||retained.remoteRecovery?.requestId!==request.requestId||canonicalWire(retained.remoteRecovery.handoff)!==canonicalWire(request.handoff))throw Error('receiving existing run requires reconciliation');setup.receiver.claimToken=retained.claimToken}
+ return {action:'resume-task',reason:'fresh original source, stopped owner and current receiving ownership verified',original:{stateCommit:material.original.stateCommit,task:material.original.task},current:material.current,handoff:material.handoff,artifacts:material.original.artifacts,authorityRequest:material.original.authorityRequest,taskIds:material.taskIds,sourceRefs:material.original.sourceRefs,receiver:setup.receiver}
+}
+const originalOwnerRepository=new WeakMap<import('./shared-claims.ts').ParentClaimBinding,string>()
+interface ReceivingIntent {
+ schemaVersion:1;repo:string;taskKey:string;runId:string;operationId:string;requestId:string
+ original:import('./shared-claims.ts').ParentClaimBinding;stateCommit:string
+ session:Omit<MachineSession,'target'|'localRoot'>;machine:EffectiveMachine;candidate:VerifiedCandidate
+ stopProof:import('./shared-claims.ts').StopProof;recovery:import('./shared-claims.ts').RecoveryEnvelope
+ checkout:string;handoff:Extract<import('./shared-claims.ts').EvidenceRef,{kind:'state-receipt'}>|null
+}
+async function receivingCheckout(material:RemoteRecoveryMaterial,config:FactoryConfig):Promise<string> {
+ const entry=config.repos.find(row=>row.repo===material.task.repo)!,checkpoint=material.task.checkpoint!
+ const git=(args:string[])=>{const r=spawnSync('git',args,{cwd:entry.path,encoding:'utf8',timeout:5000,maxBuffer:4*1024*1024});if(r.status!==0)throw Error('receiving checkout source unavailable');return r.stdout.trim()}
+ const inventory=git(['worktree','list','--porcelain']).split('\n\n')
+ for(const row of inventory){
+  if(!row.split('\n').includes('branch refs/heads/'+checkpoint.branch))continue
+  const path=row.split('\n').find(line=>line.startsWith('worktree '))?.slice(9)
+  if(!path||!row.split('\n').includes('HEAD '+checkpoint.headSha))throw Error('original recovery branch holds different source')
+  return realpath(path)
+ }
+ const named=/^([^/]+)\/([1-9]\d*)-(.+)$/.exec(checkpoint.branch)
+ if(!named||Number(named[2])!==material.task.issue||!BRANCH_TYPES.includes(named[1]!))throw Error('original recovery branch cannot be restored by the worktree owner')
+ const helper=await import(new URL(fileURLToPath(import.meta.url).endsWith('.ts')?'../../../skills/dev/dev-implement/scripts/worktree.mjs':'../skill/dev-implement/scripts/worktree.mjs',import.meta.url).href) as typeof import('../../../skills/dev/dev-implement/scripts/worktree.mjs')
+ const existing=spawnSync('git',['rev-parse','--verify','refs/heads/'+checkpoint.branch],{cwd:entry.path,encoding:'utf8',timeout:3000})
+ if(existing.status===0&&existing.stdout.trim()!==checkpoint.headSha)throw Error('existing original recovery branch differs; source preserved')
+ const args={repoRoot:entry.path,issue:material.task.issue,slug:named[3]!,type:named[1]!,home:config.home,devMd:await readFile(join(entry.path,'.vegastack/dev.md'),'utf8'),write:true}
+ const restored=existing.status===0?helper.restoreWorktree(args):helper.createChildWorktree({...args,baseSha:checkpoint.headSha})
+ if(restored.blocks.length||restored.branch!==checkpoint.branch)throw Error('original recovery checkout unavailable: '+restored.blocks.join('; '))
+ return realpath(restored.path)
+}
+export async function prepareVerifiedReceivingRun(input:{repo:string;taskKey:string;runId?:string},config:FactoryConfig,localClaim:Claim):Promise<{run:RunRecord;claim:SharedClaim;plan:LaunchPlan;taskIds:string[]}> {
+ const helpers=await import('./runs.ts'),owner=await import('./shared-claims.ts'),root=runsRoot(config.home),target=await verifiedSharedTarget(input.repo,config),machine=sharedMachineContexts.get(target)!
+ if(localClaim.path!==repoLockPath(config,input.repo)||machine.defaults.recovery!=='verified-transfer')throw Error('receiving repository recovery ownership unavailable')
+ await(await import('./claims.ts')).renewClaim(localClaim)
+ const observed=await owner.inspectCoordinationTask(target,input.taskKey)
+ if(observed.kind!=='active'||input.runId&&observed.task.runId!==input.runId)throw Error('receiving current logical run differs')
+ const intentPath=join(root,'receiving-'+input.taskKey+'-'+observed.task.runId+'.json')
+ let intent:ReceivingIntent|null=null
+ try{intent=JSON.parse(await helpers.readPrivateRunFile(intentPath)) as ReceivingIntent}catch(error){if((error as NodeJS.ErrnoException).code!=='ENOENT')throw error}
+ if(!intent){
+  const original=await inspectRemoteRecovery({...input,config},{target});assertRemoteRecoveryMaterial(original)
+  if(original.task.parentTaskKey!==null||original.children.length||!original.task.stopProof||!original.task.recovery)throw Error('standalone receiving recovery requires original stopped ownership')
+  if((await helpers.readRuns(root)).some(run=>run.runId===original.task.runId))throw Error('original local run exists; use same-home recovery')
+  const checkout=await receivingCheckout(original,config)
+  await receivingExecutionSetup(original,checkout,config,target,localClaim,dispatcherSessionId)
+  const task=original.task,originalBinding={taskKey:task.taskKey,runId:task.runId,generation:task.generation,ownerToken:task.ownerToken,machineId:task.machineId,installationId:task.installationId,sessionId:task.sessionId}
+  intent={schemaVersion:1,repo:input.repo,taskKey:input.taskKey,runId:task.runId,operationId:randomUUID(),requestId:randomUUID(),original:originalBinding,stateCommit:original.stateCommit,machine,checkout,
+   session:{machineId:machine.id,installationId:machine.installationId,sessionId:dispatcherSessionId,hostBindingDigest:machine.hostBindingDigest,bootIdDigest:await(await import('./machine-identity.ts')).readBootIdentityDigest(),identity:await processIdentity()},
+   candidate:{host:task.host,repo:task.repo,issue:task.issue,repositoryNodeId:task.repositoryNodeId,issueNodeId:task.issueNodeId,scopeDigest:task.scopeDigest,approvalDigest:task.approvalDigest,approvalBindings:task.approvalBindings,runId:task.runId,stage:task.stage,paths:task.paths,resources:task.resources,independent:task.independent,parentTaskKey:null,parentBinding:null,approvedTaskIds:task.approvedTaskIds},stopProof:task.stopProof!,recovery:task.recovery!,handoff:null}
+  await helpers.atomicRunFile(intentPath,intent)
+ }
+ if(!intent)throw Error('receiving intent unavailable')
+ if(intent.schemaVersion!==1||intent.repo!==input.repo||intent.taskKey!==input.taskKey||intent.runId!==observed.task.runId||canonicalWire(intent.machine)!==canonicalWire(machine))throw Error('receiving intent identity differs')
+ if(!intent.handoff&&observed.task.generation===intent.original.generation+1){
+  const raw=await target.provider.read(target,observed.head,owner.operationPath(intent.operationId))
+  if(raw){
+   const ref={kind:'state-receipt' as const,operationId:intent.operationId,commitSha:observed.head,blobSha256:owner.sha256(raw)}
+   const retained=await owner.inspectHandoffCoordinationTask(target,{taskKey:intent.taskKey,expected:intent.original,evidence:ref})
+   if(retained.kind!=='historical-handoff'||retained.handedOff.ownerToken!==observed.task.ownerToken||retained.handedOff.machineId!==machine.id||retained.handedOff.sessionId!==intent.session.sessionId)throw Error('receiving prior handoff requires reconciliation')
+   intent.handoff=ref;await helpers.atomicRunFile(intentPath,intent)
+  }
+ }
+ if(!intent.handoff&&canonicalWire(intent.session.identity)!==canonicalWire(await processIdentity()))throw Error('receiving intent requires current session reconciliation')
+ originalOwnerRepository.set(intent.original,input.repo)
+ if(!intent.handoff){
+  const currentIntent=intent
+  const freshOriginal=async()=>{
+   const value=await inspectRemoteRecovery({...input,config},{target});assertRemoteRecoveryMaterial(value)
+   if(canonicalWire({taskKey:value.task.taskKey,runId:value.task.runId,generation:value.task.generation,ownerToken:value.task.ownerToken,machineId:value.task.machineId,installationId:value.task.installationId,sessionId:value.task.sessionId})!==canonicalWire(currentIntent.original)||canonicalWire(value.task.recovery)!==canonicalWire(currentIntent.recovery)||canonicalWire(value.task.stopProof)!==canonicalWire(currentIntent.stopProof))throw Error('original receiving source or owner changed')
+   await receivingExecutionSetup(value,currentIntent.checkout,config,target,localClaim,currentIntent.session.sessionId)
+   return value
+  }
+  target.verifyCandidate=async(candidate,current,session)=>{if(canonicalWire(candidate)!==canonicalWire(currentIntent.candidate)||canonicalWire(current)!==canonicalWire(machine)||canonicalWire(session.identity)!==canonicalWire(currentIntent.session.identity))throw Error('receiving candidate differs');await freshOriginal()}
+  target.verifyTransition=async(task,transition)=>{if(transition.kind!=='handoff'||task.taskKey!==currentIntent.taskKey||canonicalWire(transition.candidate)!==canonicalWire(currentIntent.candidate)||canonicalWire(transition.stopProof)!==canonicalWire(currentIntent.stopProof)||canonicalWire(transition.recovery)!==canonicalWire(currentIntent.recovery))throw Error('receiving target permits only its exact handoff');await freshOriginal()}
+  const initial=await freshOriginal()
+  target.verifyEvidence=async(ref,payload)=>{const proof=initial.evidence.find(row=>canonicalWire(row.ref)===canonicalWire(ref));if(!proof||canonicalWire(proof.payload)!==canonicalWire(payload))throw Error('receiving handoff evidence differs')}
+  const moved=await owner.transitionSharedTask({claim:{...intent.original,stateCommit:intent.stateCommit,target},operationId:intent.operationId,transition:{kind:'handoff',machine,session:{...intent.session,target,localRoot:target.localRoot},candidate:intent.candidate,stopProof:intent.stopProof,recovery:intent.recovery}})
+  if(moved.kind!=='owned')throw Error('receiving ownership remains pending: '+moved.reason)
+  const raw=await target.provider.read(target,moved.claim.stateCommit,owner.operationPath(intent.operationId));if(!raw)throw Error('receiving handoff receipt unavailable')
+  intent.handoff={kind:'state-receipt',operationId:intent.operationId,commitSha:moved.claim.stateCommit,blobSha256:owner.sha256(raw)}
+  await helpers.atomicRunFile(intentPath,intent)
+ }
+ const request:import('./runs.ts').ReceivingRunRequest={root,requestId:intent.requestId,runId:intent.runId,taskKey:intent.taskKey,expectedSharedGeneration:intent.original.generation+1,checkout:intent.checkout,handoff:intent.handoff}
+ let decision:import('./runs.ts').VerifiedReceivingRunDecision|undefined
+ const run=await helpers.createVerifiedReceivingRun(request,{verifyRecovery:async value=>decision=await verifyReceivingRunRecovery(value,intent!.original,config,localClaim)})
+ if(!decision)throw Error('fresh receiving launch decision unavailable')
+ const material=await inspectReceivingRecovery(request,intent.original,config,{target}),setup=await receivingExecutionSetup(material.original,request.checkout,config,target,localClaim,run.machine!.sessionId)
+ const claim=await sharedClaimForRun(run,config),packet=await checkpointRecoveryContext(run,config,{claim})
+ const rechecked=await inspectReceivingRecovery(request,intent.original,config,{target})
+ if(canonicalWire(rechecked.taskIds)!==canonicalWire(decision.taskIds))throw Error('receiving outstanding tasks changed before launch')
+ const plan=continuationLaunchPlan(setup.plan,{taskIds:decision.taskIds,sourceRefs:rechecked.original.sourceRefs},packet,material.original.unavailableContext)
+ return {run,claim,plan,taskIds:decision.taskIds}
+}
+
+export async function checkpointRecoveryContext(run:RunRecord,config:FactoryConfig,transport:{gh?:TickDeps['gh'];claim?:SharedClaim}={}):Promise<Record<string,unknown>> {
+ const helpers=await import('./runs.ts'),core=await recoveryScript(),root=runsRoot(config.home)
+ await helpers.verifyRunAuthority(run,config,'effect',{gh:transport.gh})
+ const {approval}=await helpers.approvalTools(),readJson=(args:string[])=>boundedGhJson<any>(transport.gh??ghText,args,readBudget())
+ const brief=await readJson(['api',`repos/${run.repo}/issues/${run.issue}`]),comments=await approval.readPages(readJson,['api',`repos/${run.repo}/issues/${run.issue}/comments`]) as Array<{id:number;node_id:string;body:string;updated_at:string}>
+ const briefRef=run.approvalRefs.find(ref=>ref.kind==='brief'),planRef=run.approvalRefs.find(ref=>ref.kind==='plan'),plan=comments.find(row=>row.node_id===planRef?.artifactId)
+ if(!briefRef||!planRef||!plan||approval.scopeDigest(plan.body,'plan')!==planRef.digest||approval.scopeDigest(brief.body,'brief')!==briefRef.digest||!run.approvedTaskIds?.length)throw Error('current recovery source unavailable')
+ const result=spawnSync('git',['rev-parse','--verify',run.headSha+'^{commit}'],{cwd:run.checkout,encoding:'utf8',timeout:3000,maxBuffer:4096})
+ if(result.status!==0||result.stdout.trim()!==run.headSha)throw Error('recovery source commit unavailable')
+ let previous:any=null
+ try{previous=core.validateRecoveryPacket(JSON.parse(await helpers.readPrivateRunFile(join(root,run.runId,'recovery.json'))))}catch(error){if((error as NodeJS.ErrnoException).code!=='ENOENT')throw error}
+ if(previous&&(canonicalWire(previous.approvalBindings)!==canonicalWire(run.approvalBindings)||canonicalWire(previous.recordBinding)!==canonicalWire(run.recordBinding)||canonicalWire(previous.taskIds)!==canonicalWire(run.approvedTaskIds)||canonicalWire(previous.planRef)!==canonicalWire(planRef)||canonicalWire(previous.briefRef)!==canonicalWire(briefRef)))throw Error('prior recovery authority changed; original packet retained')
+ let completed:Array<{taskId:string;headSha:string;evidenceUrl:string}>=previous?.completed??[]
+ if(run.sharedClaim){
+  const claim=transport.claim??await sharedClaimForRun(run,config),owner=await import('./shared-claims.ts'),snapshot=await owner.inspectCoordinationTask(claim.target,claim.taskKey,{runId:run.runId,generation:claim.generation,ownerToken:claim.ownerToken})
+  if(snapshot.kind!=='active'&&snapshot.kind!=='completed')throw Error('recovery current shared task unavailable')
+  for(const row of snapshot.task.recovery?.completed??[]){
+   const payload=await owner.resolveEvidence(claim.target,row.acceptance.evidence)
+   if(payload?.kind!=='acceptance'||payload.result!=='passed'||payload.taskId!==row.taskId||payload.sourceSha!==row.headSha||payload.scopeDigest!==run.taskKey.scopeDigest)throw Error('completed recovery source evidence differs')
+   if(row.acceptance.evidence.kind!=='state-receipt')throw Error('immutable completed task evidence unavailable')
+   const entry={taskId:row.taskId,headSha:row.headSha,evidenceUrl:'vsk-state:'+row.acceptance.evidence.commitSha+':'+row.acceptance.evidence.operationId}
+   if(completed.some(old=>old.taskId===entry.taskId&&canonicalWire(old)!==canonicalWire(entry)))throw Error('completed task evidence changed')
+   if(!completed.some(old=>old.taskId===entry.taskId))completed=[...completed,entry]
+  }
+ }
+ const newest=[...comments].sort((a,b)=>Date.parse(b.updated_at)-Date.parse(a.updated_at))[0]
+ if(!newest)throw Error('complete recovery comment cursor unavailable')
+ const gate=await import(new URL(fileURLToPath(import.meta.url).endsWith('.ts')?'../../../skills/dev/dev-ship/scripts/ship-gate.mjs':'../skill/dev-ship/scripts/ship-gate.mjs',import.meta.url).href) as typeof import('../../../skills/dev/dev-ship/scripts/ship-gate.mjs')
+ const reviews=comments.filter(row=>/^<!-- vsk:v1 type=review\b/m.test(row.body)).sort((a,b)=>Date.parse(a.updated_at)-Date.parse(b.updated_at)).slice(-16).flatMap(row=>{
+  const binding=gate.typedSection(row.body,'reviewBinding')
+  if(!gate.validReview(binding)||binding.baseSha!==run.baseSha||binding.scopeDigest!==planRef.digest)return[]
+  const ancestry=spawnSync('git',['merge-base','--is-ancestor',binding.sha,run.headSha!],{cwd:run.checkout,timeout:3000})
+  return ancestry.status===0?[{commentId:row.id,bodySha256:createHash('sha256').update(row.body).digest('hex'),agent:/\bagent=(claude|codex)\b/.exec(row.body)?.[1]??'',binding}]:[]
+ })
+ const findingState=new Map<string,{id:string;status:string;sourceRef:string;sha:string}>()
+ for(const review of reviews){if(!['claude','codex'].includes(review.agent)||review.agent===run.harness)continue;for(const finding of review.binding.findings)findingState.set(finding.id,{...finding,sourceRef:'review:'+review.commentId+':'+review.bodySha256,sha:review.binding.sha})}
+ const openFindings=[...(previous?.openFindings??[]).filter((finding:any)=>!finding||typeof finding!=='object'||!findingState.has(finding.id)),...[...findingState.values()].filter(finding=>finding.status==='open')]
+ const packet={schemaVersion:3,repo:run.repo,issue:run.issue,briefRef,planRef,approvalIds:run.approvalBindings.map(row=>row.approvalId),approvalBindings:run.approvalBindings,recordBinding:run.recordBinding,taskIds:run.approvedTaskIds,completed,lastVerifiedCommit:run.headSha,openFindings,rulings:comments.flatMap(row=>row.body.split('\n').filter(line=>/^- Ruling:/.test(line))),commentCursor:previous?.commentCursor??{id:String(newest.id),updatedAt:newest.updated_at},pendingRunIds:run.state==='terminal'&&run.terminationCause==='succeeded'?[...new Set(run.pendingDelivery.filter(row=>row.status!=='acknowledged').map(()=>run.runId))]:[run.runId],learning:previous?.learning??[]}
+ core.validateRecoveryPacket(packet)
+ const lock=await acquireClaim(join(root,run.runId,'learning-mutation'),await processIdentity())
+ if(lock.kind!=='owned')throw Error('recovery context mutation unavailable')
+ try{
+  if((await readRun(root,run.runId)).generation!==run.generation)throw Error('recovery run changed during source inspection')
+  let atWrite:any=null
+  try{atWrite=JSON.parse(await helpers.readPrivateRunFile(join(root,run.runId,'recovery.json')))}catch(error){if((error as NodeJS.ErrnoException).code!=='ENOENT')throw error}
+  if(canonicalWire(atWrite)!==canonicalWire(previous))throw Error('recovery packet changed during source inspection')
+  await helpers.atomicRunFile(join(root,run.runId,'recovery-source.json'),{schemaVersion:1,planRef,planBody:plan.body,reviews})
+  await helpers.atomicRunFile(join(root,run.runId,'recovery.json'),packet)
+ }finally{await releaseClaim(lock.claim)}
+ return packet
+}
+
+export async function inspectLocalRecovery(run:RunRecord,config:FactoryConfig,options:{currentOwner?:import('./runs.ts').RunContinuationRequest['currentOwner'];gh?:TickDeps['gh'];claim?:SharedClaim}={}):Promise<{action:string;taskIds:string[];reason:string;sourceRefs:unknown[]}> {
+ const helpers=await import('./runs.ts'),core=await recoveryScript(),root=runsRoot(config.home)
+ const owned=options.currentOwner?{...run,...options.currentOwner}:run
+ const currentClaim=async()=>{
+  const claim=options.claim??await sharedClaimForRun(owned,config)
+  if(!owned.machine||!owned.sharedClaim||claim.taskKey!==owned.sharedClaim.taskKey||claim.runId!==owned.runId||claim.generation!==owned.sharedClaim.generation||claim.ownerToken!==owned.sharedClaim.ownerToken||claim.machineId!==owned.machine.id||claim.installationId!==owned.machine.installationId||claim.sessionId!==owned.machine.sessionId)throw Error('recovery supplied owner differs')
+  const checked=await(await import('./shared-claims.ts')).inspectCoordinationTask(claim.target,claim.taskKey,{runId:claim.runId,generation:claim.generation,ownerToken:claim.ownerToken,machineId:claim.machineId,installationId:claim.installationId,sessionId:claim.sessionId})
+  if(checked.kind!=='active'&&checked.kind!=='completed')throw Error('recovery current owner unavailable')
+  return claim
+ }
+ try{
+  const packet=core.validateRecoveryPacket(JSON.parse(await helpers.readPrivateRunFile(join(root,run.runId,'recovery.json'))))
+  await helpers.verifyRunAuthority(run,config,run.terminationCause==='succeeded'?'effect':'launch',{gh:options.gh})
+  const entry=config.repos.find(row=>row.repo===run.repo);if(!entry)throw Error('recovery repository is not configured')
+  const devMd=await readFile(join(entry.path,'.vegastack/dev.md'),'utf8'),effective=loadConfiguredPolicy({home:config.home,repo:run.repo,devMd,settingsPath:config.settingsPath})
+  if(!effective.ok)throw Error('current recovery policy unavailable')
+  const {approval}=await helpers.approvalTools(),readJson=(args:string[])=>boundedGhJson<any>(options.gh??ghText,args,readBudget())
+  const current=await core.readRecoverySources(packet,{readJson,operators:repoPolicyFromEffective(effective).operators,checkout:run.checkout,
+   consolidatedRequest:run.authorityRequest?.kind==='consolidated'?run.authorityRequest:undefined,
+   readCompletionEvidence:async(row:{taskId:string;headSha:string;evidenceUrl:string})=>{
+    if(!run.sharedClaim)return false
+    const claim=await currentClaim(),owner=await import('./shared-claims.ts'),snapshot=await owner.inspectCoordinationTask(claim.target,claim.taskKey,{runId:run.runId,generation:claim.generation,ownerToken:claim.ownerToken})
+    if(snapshot.kind!=='active'&&snapshot.kind!=='completed')return false
+    const found=snapshot.task.recovery?.completed.find(entry=>entry.taskId===row.taskId&&entry.headSha===row.headSha)
+    if(!found||found.acceptance.evidence.kind!=='state-receipt'||row.evidenceUrl!=='vsk-state:'+found.acceptance.evidence.commitSha+':'+found.acceptance.evidence.operationId)return false
+    const payload=await owner.resolveEvidence(claim.target,found.acceptance.evidence)
+    return payload?.kind==='acceptance'&&payload.result==='passed'&&payload.taskId===row.taskId&&payload.sourceSha===row.headSha
+   }})
+  const reconciled=core.reconcileRecovery(packet,current)
+  const checked=[...((current as any).comments??[])].filter((row:any)=>row.node_id===packet.planRef.artifactId).flatMap((row:any)=>[...row.body.matchAll(/^-\s*\[x\].*<!--\s*task-id:([1-9]\d*-T[1-9]\d*)\s*-->/gim)].map((match:any)=>match[1]))
+  if(checked.some((id:string)=>!packet.completed.some((row:any)=>row.taskId===id)))reconciled.blocks.push('checked task lacks verified completion evidence; no blind replay')
+  if(!await helpers.verifyLocalRunStopped(run))reconciled.blocks.push('original local execution remains unconfirmed')
+  if(!run.worktreeDigest||await helpers.worktreeFingerprint(run.checkout)!==run.worktreeDigest)reconciled.blocks.push('original worktree changed; preserved for reconciliation')
+  if(run.cancelRequestedAt)reconciled.blocks.push('explicit cancellation requires fresh resume authority')
+  if(run.sharedClaim)await currentClaim()
+  if(run.terminationCause==='succeeded'&&reconciled.outstandingTaskIds.length)reconciled.blocks.push('successful execution requires verified task acceptance; implementation is not replayed')
+  const decision=core.chooseResumeAction({...reconciled,pendingDelivery:run.pendingDelivery.filter(row=>row.status!=='acknowledged')})
+  return {...decision,sourceRefs:reconciled.sourceRefs}
+ }catch(error){return{action:'refuse',taskIds:[],reason:(error as Error).message,sourceRefs:[]}}
+}
+
+export async function retryRecoveredDelivery(run:RunRecord,config:FactoryConfig):Promise<{pending:string[];reason:string}> {
+ const helpers=await import('./runs.ts')
+ await helpers.verifyRunAuthority(run,config,'effect')
+ const original=run.pendingDelivery.map(row=>({id:row.id,kind:row.kind,target:row.target,payloadDigest:row.payloadDigest}))
+ if(run.terminationCause==='termination-unconfirmed'||run.waitReason)throw Error('run terminal identity remains unresolved')
+ if(run.pendingDelivery.some(row=>row.kind==='feature-push'&&row.status!=='acknowledged'))await(await import('./checkpoints.ts')).flushRunCheckpoint(run,config)
+ if(run.pendingDelivery.some(row=>row.kind==='handback'&&row.status!=='acknowledged'))await flushRunHandback(await readRun(runsRoot(config.home),run.runId),config)
+ const records=await import('./stats/record.ts')
+ const context=await records.registeredCaptureContext(config.home,run.repo,run.checkout)
+ if(context)for(const pending of run.pendingDelivery.filter(row=>row.kind==='telemetry-capture'&&row.status!=='acknowledged')){
+  if(!('captureKey'in pending.target))throw Error('original terminal capture identity unavailable')
+  await records.captureTerminalRun(config.home,run.runId,context.destination,context.policy,pending.target.captureKey)
+ }
+ const current=await readRun(runsRoot(config.home),run.runId)
+ if(original.some(row=>!current.pendingDelivery.some(next=>next.id===row.id&&next.kind===row.kind&&canonicalWire(next.target)===canonicalWire(row.target)&&next.payloadDigest===row.payloadDigest)))throw Error('original delivery identity changed')
+ const pending=current.pendingDelivery.filter(row=>row.status!=='acknowledged').map(row=>row.id)
+ return {pending,reason:pending.length?'original-delivery-remains-pending':'original-delivery-reconciled'}
+}
+export function durableRecoverySummary(run:RunRecord):{action:'wait'|'retry-delivery'|'inspect';reason:string;checkpointHead:string|null;unbackedTail:boolean;terminalCapturePreserved:boolean}|null {
+ const pending=run.pendingDelivery.some(row=>row.status!=='acknowledged'),capture=run.pendingDelivery.some(row=>row.kind==='telemetry-capture'&&(row.status==='acknowledged'||!!row.payloadDigest))
+ const source={checkpointHead:run.checkpoint?.headSha??null,unbackedTail:!!run.headSha&&run.headSha!==run.checkpoint?.headSha,terminalCapturePreserved:capture}
+ if(run.terminationCause==='termination-unconfirmed')return{action:'wait',reason:'original execution termination unconfirmed',...source}
+ if(run.waitReason==='subscription-quota')return{action:'wait',reason:'subscription availability; original setup retained',...source}
+ if(run.state==='interrupted'||run.state==='terminal'&&run.terminationCause!=='succeeded')return{action:'inspect',reason:capture?'prior terminal capture preserved; verified continuation required':'fresh task, source, stop and effect reconciliation required',...source}
+ if(run.state==='terminal'&&pending)return{action:'retry-delivery',reason:'implementation is not replayed for pending delivery',...source}
+ return null
+}
+async function inspectSavedRecoveryWork(config:FactoryConfig,options:{signal?:AbortSignal},tracker:RunTracker,reports:RunReport[],refusals:Refusal[]):Promise<void> {
+ const helpers=await import('./runs.ts'),saved=await helpers.readRuns(runsRoot(config.home))
+ type Seed=Pick<RunRecord,'repo'|'issue'|'stage'|'harness'|'checkout'>
+ type Prepared={run:RunRecord;claim:SharedClaim;plan:LaunchPlan}
+ const schedule=async(seed:Seed,prepare:(claim:Claim)=>Promise<Prepared|null>)=>{
+  const key=`${seed.repo}#${seed.issue}`
+  if(tracker.has(key)||inFlightIssues(tracker,seed.repo).length>=config.maxRuns)return
+  const lockPath=repoLockPath(config,seed.repo)
+  let local:Claim
+  try{local=ownedLocks.get(lockPath)??await holdLock(lockPath,process.pid)}catch{return}
+  const report:RunReport={repo:seed.repo,issue:seed.issue,title:`#${seed.issue}`,stage:seed.stage as Stage,launch:{command:seed.harness,args:[],env:{},cwd:seed.checkout},launched:false,remoteEffectCoverage:{kind:'unmanaged-possible',reasonCode:'awaiting-current-verification'}}
+  reports.push(report)
+  const done=(async()=>{
+   let outcome:RunOutcome|null=null
+   try{
+    const prepared=await prepare(local);if(!prepared)return
+    await helpers.verifyRunAuthority(prepared.run,config,'launch')
+    const start=await transitionSharedTask({claim:prepared.claim,operationId:prepared.run.attemptOperationIds!.start,transition:{kind:'start'}})
+    if(start.kind!=='owned')throw Error('recovery start not acknowledged: '+start.reason)
+    const current=await helpers.readRun(runsRoot(config.home),prepared.run.runId)
+    report.launch={command:prepared.plan.command,args:prepared.plan.args,env:prepared.plan.env,cwd:prepared.plan.cwd}
+    outcome=await executeApprovedRun({repo:seed.repo,issue:seed.issue,title:report.title,stage:seed.stage as Stage,commentId:null,reactionId:null},prepared.plan,config,{operator:null,signal:options.signal,sharedClaim:start.claim,onSpawn:()=>{report.launched=true}},{preparedRun:current,runInput:{...current,root:runsRoot(config.home)}})
+    report.exitCode=outcome.exitCode;report.logFile=outcome.logFile
+    const latest=await helpers.readRun(runsRoot(config.home),current.runId),claim=await sharedClaimForRun(latest,config),finish=await finishDurableSharedRun(claim,outcome,config)
+    const finished=await transitionSharedTask({claim,operationId:finish.kind==='stop'?latest.stopReceiptIds?.transition??randomUUID():randomUUID(),transition:finish})
+    if(finished.kind!=='owned')throw Error('recovery final state pending: '+finished.reason)
+   }catch(error){refusals.push({repo:seed.repo,issue:seed.issue,reason:(error as Error).message})}
+   finally{tracker.delete(key);if(!inFlightIssues(tracker,seed.repo).length&&outcome?.terminationCause!=='termination-unconfirmed')await releaseLock(lockPath,local)}
+  })()
+  tracker.set(key,{repo:seed.repo,issue:seed.issue,done})
+ }
+ for(const run of saved){
+  if(!config.repos.some(row=>row.repo===run.repo)||run.waitReason||!run.execution)continue
+  const allocated=run.state==='prepared'&&!run.processIdentity&&(run.remoteRecovery||run.continuations?.length)
+  if(!allocated&&!durableRecoverySummary(run))continue
+  await schedule(run,async local=>{
+   if(allocated){
+    if(run.remoteRecovery)return prepareVerifiedReceivingRun({repo:run.repo,taskKey:run.sharedClaim!.taskKey,runId:run.runId},config,local)
+    const request=run.continuations!.at(-1)!,attempt=run.attempts?.find(row=>row.id===request.previousAttemptId)
+    if(!attempt)throw Error('original continuation snapshot unavailable')
+    const original=await helpers.readRunAttemptSnapshot(runsRoot(config.home),run.runId,attempt)
+    return prepareVerifiedContinuation(original,config,local)
+   }
+   try{
+    await helpers.readPrivateRunFile(join(runsRoot(config.home),run.runId,'continuation-'+(run.attemptId??run.runId)+'.json'))
+    return prepareVerifiedContinuation(run,config,local)
+   }catch(error){if((error as NodeJS.ErrnoException).code!=='ENOENT')throw error}
+   const decision=await inspectLocalRecovery(run,config)
+   if(decision.action==='retry-delivery'){
+    const retried=await retryRecoveredDelivery(run,config)
+    if(retried.pending.length)refusals.push({repo:run.repo,issue:run.issue,reason:retried.reason})
+    return null
+   }
+   if(decision.action==='resume-task')return prepareVerifiedContinuation(run,config,local)
+   if(decision.action==='refuse')throw Error(decision.reason)
+   return null
+  })
+ }
+ // Receiving discovery uses the private current task index, never a source
+ // branch name or the absence of an old local file as ownership evidence.
+ for(const entry of config.repos){
+  if(inFlightIssues(tracker,entry.repo).length>=config.maxRuns)continue
+  try{
+   const target=await verifiedSharedTarget(entry.repo,config),machine=sharedMachineContexts.get(target)!
+   if(machine.defaults.recovery!=='verified-transfer')continue
+   const snapshot=await(await import('./shared-claims.ts')).readCoordination(target)
+   for(const task of Object.values(snapshot.tasks)){
+    if(task.repo!==entry.repo||task.parentTaskKey!==null||!task.recovery||!task.stopProof||saved.some(run=>run.runId===task.runId)||!['stopped','blocked','claimed'].includes(task.state))continue
+    if(task.state==='claimed'){try{await helpers.readPrivateRunFile(join(runsRoot(config.home),'receiving-'+task.taskKey+'-'+task.runId+'.json'))}catch{continue}}
+    await schedule({repo:task.repo,issue:task.issue,stage:task.stage,harness:task.recovery.execution.harness,checkout:entry.path},claim=>prepareVerifiedReceivingRun({repo:task.repo,taskKey:task.taskKey,runId:task.runId},config,claim))
+   }
+  }catch(error){if(!/machine registration unavailable|current machine policy unavailable/.test((error as Error).message))refusals.push({repo:entry.repo,issue:0,reason:'receiving recovery inspection: '+(error as Error).message})}
+ }
+}
+
+export async function verifyRunContinuationRecovery(input:{run:RunRecord;request:import('./runs.ts').RunContinuationRequest},config:FactoryConfig,transport:{gh?:TickDeps['gh'];claim?:SharedClaim}={}):Promise<import('./runs.ts').RecoveryContinuationDecision> {
+ const {run,request}=input,helpers=await import('./runs.ts')
+ if(request.root!==runsRoot(config.home)||request.runId!==run.runId||request.expectedGeneration!==run.generation||request.previousAttemptId!==(run.attemptId??run.runId)||!run.execution||!run.approvedTaskIds?.length||!run.checkpoint||!run.worktreeDigest||canonicalWire(run.checkpoint)!==canonicalWire(request.checkpoint)||run.worktreeDigest!==request.worktreeDigest)throw Error('continuation original identity differs')
+ const decision=await inspectLocalRecovery(run,config,{currentOwner:request.currentOwner,...transport})
+ if(decision.action!=='resume-task'||!decision.taskIds.length)throw Error('continuation recovery refused: '+decision.reason)
+ const owned={...run,...request.currentOwner},claim=transport.claim??await sharedClaimForRun(owned,config),owner=await import('./shared-claims.ts')
+ const current=await owner.inspectCoordinationTask(claim.target,claim.taskKey,{runId:run.runId,generation:claim.generation,ownerToken:claim.ownerToken,machineId:claim.machineId,installationId:claim.installationId,sessionId:claim.sessionId})
+ if(current.kind!=='active'||current.task.state!=='claimed'||canonicalWire(current.task.checkpoint)!==canonicalWire(request.checkpoint)||current.task.scopeDigest!==run.taskKey.scopeDigest)throw Error('continuation shared state is not launch-ready')
+ await helpers.verifyRunAuthority(run,config,'launch',{gh:transport.gh})
+ return {action:'resume-task',reason:'fresh source and verified outstanding tasks',runId:run.runId,expectedGeneration:run.generation,previousAttemptId:request.previousAttemptId,taskIds:decision.taskIds,approvedTaskIds:run.approvedTaskIds,approvalBindings:run.approvalBindings,recordBinding:run.recordBinding,artifacts:run.approvalRefs,execution:run.execution,checkpoint:run.checkpoint,worktreeDigest:run.worktreeDigest,currentOwner:request.currentOwner,sourceRefs:decision.sourceRefs as Array<{id:string;updatedAt:string;bodySha256:string}>}
+}
+interface LocalContinuationIntent {
+ schemaVersion:1;requestId:string;operationId:string;runId:string;attemptId:string
+ originalClaim:Omit<SharedClaim,'target'>;machine:EffectiveMachine
+ session:Omit<MachineSession,'target'|'localRoot'>;candidate:VerifiedCandidate
+ stopProof:import('./shared-claims.ts').StopProof;recovery:import('./shared-claims.ts').RecoveryEnvelope
+ currentOwner:import('./runs.ts').RunContinuationRequest['currentOwner']|null
+ allocation:import('./runs.ts').RunContinuationRequest|null
+}
+function continuationClaim(value:SharedClaim):Omit<SharedClaim,'target'> {
+ const {target:_target,...claim}=value;return claim
+}
+export function continuationLaunchPlan(plan:LaunchPlan,decision:Pick<import('./runs.ts').RecoveryContinuationDecision,'taskIds'|'sourceRefs'>,packet:Record<string,unknown>,unavailableContext:RemoteRecoveryMaterial['unavailableContext']=[]):LaunchPlan {
+ if(!decision.taskIds.length||new Set(decision.taskIds).size!==decision.taskIds.length)throw Error('verified outstanding task selection required')
+ const completed=(packet.completed as Array<{taskId:string;headSha:string}>|undefined)??[]
+ if(decision.taskIds.some(id=>completed.some(row=>row.taskId===id)))throw Error('completed recovery task cannot be replayed')
+ const context='\nVerified recovery context (current approval still applies):\n'+JSON.stringify({outstandingTaskIds:decision.taskIds,completed:completed.map(row=>({taskId:row.taskId,headSha:row.headSha})),openFindings:packet.openFindings??[],rulings:packet.rulings??[],sourceRefs:decision.sourceRefs,unavailableContext})+'\nContinue only the outstanding tasks; retry delivery separately and preserve prior source work.\n'
+ if(Buffer.byteLength(context)>32*1024)throw Error('recovery launch context exceeds bound')
+ const prompt=plan.prompt+context
+ // The launch owner's prompt is one complete argv element; change only that
+ // element, retaining every original account/model/configuration flag.
+ const matches=plan.args.flatMap((arg,index)=>arg===plan.prompt?[index]:[])
+ if(matches.length!==1)throw Error('managed launch prompt binding unavailable')
+ return {...plan,prompt,args:plan.args.map((arg,index)=>index===matches[0]?prompt:arg)}
+}
+export async function prepareVerifiedContinuation(saved:RunRecord,config:FactoryConfig,localClaim:Claim):Promise<{run:RunRecord;claim:SharedClaim;decision:import('./runs.ts').RecoveryContinuationDecision;plan:LaunchPlan}> {
+ const helpers=await import('./runs.ts'),owner=await import('./shared-claims.ts'),root=runsRoot(config.home)
+ if(localClaim.path!==repoLockPath(config,saved.repo))throw Error('continuation local repository claim differs')
+ await(await import('./claims.ts')).renewClaim(localClaim)
+ if(!saved.execution||!saved.sharedClaim||!saved.machine||!saved.checkpoint||!saved.worktreeDigest)throw Error('original continuation execution/checkpoint/owner unavailable')
+ const entry=config.repos.find(row=>row.repo===saved.repo);if(!entry)throw Error('continuation repository is not configured')
+ const devMd=await readFile(join(entry.path,'.vegastack/dev.md'),'utf8'),resolved=loadConfiguredPolicy({home:config.home,repo:saved.repo,devMd,settingsPath:config.settingsPath})
+ if(!resolved.ok)throw Error('current continuation policy unavailable')
+ const policy=repoPolicyFromEffective(resolved),stage=stagePolicy(policy,saved.stage as Stage)
+ if(stage.harness!==saved.harness||stage.model!==saved.model||stage.effort!==saved.effort)throw Error('original continuation setup changed')
+ const issue=await boundedGhJson<{title:string;body:string}>(ghText,['api',`repos/${saved.repo}/issues/${saved.issue}`],readBudget())
+ const basePlan=buildLaunchPlan({harness:stage.harness,model:stage.model,effort:stage.effort,stage:saved.stage as Stage,worktree:saved.checkout,issue:{number:saved.issue,title:issue.title},operator:saved.taskOwner??'the operator',outcome:outcomeOf(issue.body),stopList:stopList(devMd),resume:false,skillPath:null,subagents:config.subagents})
+ await inspectSubscription(basePlan,saved.execution.accountRef)
+ if(!saved.runtimeBinding||!saved.configurationDigest)throw Error('original qualified runtime unavailable')
+ await helpers.verifyInstalledRuntimeBinding(saved.runtimeBinding,dirname(dirname(fileURLToPath(import.meta.url))),fileURLToPath(import.meta.url))
+ const metadata=await inspectManagedHarness(basePlan)
+ if(metadata.version!==saved.execution.harnessVersion||!validateManagedLaunch(basePlan,metadata).ok||await helpers.executionConfigurationDigest({binding:saved.runtimeBinding,execution:saved.execution,plan:basePlan,metadata})!==saved.configurationDigest)throw Error('original qualified runtime configuration changed')
+ const intentPath=join(root,saved.runId,'continuation-'+(saved.attemptId??saved.runId)+'.json')
+ let intent:LocalContinuationIntent|null=null
+ try{intent=JSON.parse(await helpers.readPrivateRunFile(intentPath)) as LocalContinuationIntent}catch(error){if((error as NodeJS.ErrnoException).code!=='ENOENT')throw error}
+ const target=await verifiedSharedTarget(saved.repo,config,saved.runId),machine=sharedMachineContexts.get(target)!
+ sharedContinuationContexts.set(target,{runId:saved.runId,attemptId:saved.attemptId??saved.runId,checkpoint:saved.checkpoint,scopeDigest:saved.taskKey.scopeDigest,approvalBindings:saved.approvalBindings})
+ if(!intent){
+  const initial=await inspectLocalRecovery(saved,config)
+  if(initial.action!=='resume-task')throw Error(initial.reason)
+  const original=await sharedClaimForRun(saved,config),snapshot=await owner.readCoordination(target),task=snapshot.tasks[original.taskKey]
+  if(!task?.recovery||!task.stopProof||task.parentTaskKey!==null||snapshot.index.active.some(row=>row.parentTaskKey===task.taskKey))throw Error('retained child reservations require explicit group recovery; original ownership preserved')
+  await helpers.verifySharedStopProof(task.stopProof,task,target,saved)
+  const session:LocalContinuationIntent['session']={machineId:machine.id,installationId:machine.installationId,sessionId:dispatcherSessionId,hostBindingDigest:machine.hostBindingDigest,bootIdDigest:await(await import('./machine-identity.ts')).readBootIdentityDigest(),identity:await processIdentity()}
+  const candidate:VerifiedCandidate={host:task.host,repo:task.repo,issue:task.issue,repositoryNodeId:task.repositoryNodeId,issueNodeId:task.issueNodeId,scopeDigest:task.scopeDigest,approvalDigest:task.approvalDigest,approvalBindings:task.approvalBindings,runId:task.runId,stage:task.stage,paths:task.paths,resources:task.resources,independent:task.independent,parentTaskKey:null,parentBinding:null,approvedTaskIds:task.approvedTaskIds}
+  intent={schemaVersion:1,requestId:randomUUID(),operationId:randomUUID(),runId:saved.runId,attemptId:saved.attemptId??saved.runId,originalClaim:continuationClaim(original),machine,session,candidate,stopProof:task.stopProof,recovery:task.recovery,currentOwner:null,allocation:null}
+  await helpers.atomicRunFile(intentPath,intent)
+ }
+ if(intent.schemaVersion!==1||intent.runId!==saved.runId||intent.attemptId!==(saved.attemptId??saved.runId)||canonicalWire(intent.candidate.approvalBindings)!==canonicalWire(saved.approvalBindings)||intent.candidate.scopeDigest!==saved.taskKey.scopeDigest||canonicalWire(intent.machine)!==canonicalWire(machine))throw Error('saved continuation intent requires reconciliation')
+ if(!intent.currentOwner){
+  const observed=await owner.inspectCoordinationTask(target,intent.originalClaim.taskKey)
+  if(observed.kind==='active'&&observed.task.generation===intent.originalClaim.generation+1){
+   const raw=await target.provider.read(target,observed.head,owner.operationPath(intent.operationId))
+   if(raw){
+    const {stateCommit:_state,...expected}=intent.originalClaim
+    const ref={kind:'state-receipt' as const,operationId:intent.operationId,commitSha:observed.head,blobSha256:owner.sha256(raw)}
+    const history=await owner.inspectHandoffCoordinationTask(target,{taskKey:expected.taskKey,expected,evidence:ref})
+    if(history.kind!=='historical-handoff'||history.handedOff.ownerToken!==observed.task.ownerToken||history.handedOff.machineId!==machine.id||history.handedOff.sessionId!==intent.session.sessionId)throw Error('continuation prior handoff requires reconciliation')
+    intent.currentOwner={machine:{id:observed.task.machineId,installationId:observed.task.installationId,sessionId:observed.task.sessionId,hostBindingDigest:machine.hostBindingDigest},sharedClaim:{taskKey:observed.task.taskKey,generation:observed.task.generation,ownerToken:observed.task.ownerToken,stateCommit:observed.head}}
+    await helpers.atomicRunFile(intentPath,intent)
+   }
+  }
+ }
+ if(!intent.currentOwner&&canonicalWire(intent.session.identity)!==canonicalWire(await processIdentity()))throw Error('saved continuation session requires reconciliation')
+ if(!intent.currentOwner){
+  const transitioned=await owner.transitionSharedTask({claim:{...intent.originalClaim,target},operationId:intent.operationId,transition:{kind:'handoff',machine:intent.machine,session:{...intent.session,target,localRoot:target.localRoot},candidate:intent.candidate,stopProof:intent.stopProof,recovery:intent.recovery}})
+  if(transitioned.kind!=='owned')throw Error('continuation ownership pending: '+transitioned.reason)
+  intent.currentOwner={machine:{id:transitioned.claim.machineId,installationId:transitioned.claim.installationId,sessionId:transitioned.claim.sessionId,hostBindingDigest:machine.hostBindingDigest},sharedClaim:{taskKey:transitioned.claim.taskKey,generation:transitioned.claim.generation,ownerToken:transitioned.claim.ownerToken,stateCommit:transitioned.claim.stateCommit}}
+  await helpers.atomicRunFile(intentPath,intent)
+ }
+ let current=await readRun(root,saved.runId)
+ if(!intent.allocation){intent.allocation={root,runId:saved.runId,expectedGeneration:current.generation,requestId:intent.requestId,previousAttemptId:intent.attemptId,checkpoint:saved.checkpoint,worktreeDigest:saved.worktreeDigest,currentOwner:intent.currentOwner};await helpers.atomicRunFile(intentPath,intent)}
+ let decision:import('./runs.ts').RecoveryContinuationDecision|undefined
+ current=await helpers.beginVerifiedRunContinuation(intent.allocation,{verifyRecovery:async input=>decision=await verifyRunContinuationRecovery(input,config)})
+ if(!decision){
+  // Idempotent allocation is not launch authority. Re-read the immutable original
+  // attempt and repeat current source/owner reconciliation before any spawn.
+  const prior=current.attempts?.find(attempt=>attempt.id===intent!.attemptId)
+  if(!prior)throw Error('continuation original attempt unavailable')
+  const original=await helpers.readRunAttemptSnapshot(root,current.runId,prior)
+  decision=await verifyRunContinuationRecovery({run:original,request:intent.allocation},config)
+ }
+ const packet=JSON.parse(await helpers.readPrivateRunFile(join(root,saved.runId,'recovery.json'))) as Record<string,unknown>
+ const plan=continuationLaunchPlan(basePlan,decision,packet),claim=await sharedClaimForRun(current,config)
+ return {run:current,claim,decision,plan}
+}
+
+interface TaskCheckpointProgress {
+ schemaVersion:1;taskId:string;receiptId:string;linkId:string
+ payload:Extract<import('./shared-claims.ts').RecoveryEvidencePayload,{kind:'acceptance'}>
+ reference:Extract<import('./shared-claims.ts').EvidenceRef,{kind:'state-receipt'}>|null
+}
+async function callerBelongsToRun(run:RunRecord):Promise<boolean> {
+ if(run.state!=='running'||!run.processIdentity)return false
+ try{
+  if(canonicalWire(await processIdentity(run.processIdentity.pid))!==canonicalWire(run.processIdentity))return false
+  const listing=spawnSync('/bin/ps',['-ax','-o','pid=,ppid='],{encoding:'utf8',timeout:1000,maxBuffer:4*1024*1024})
+  if(listing.status!==0)return false
+  const parents=new Map<number,number>()
+  for(const line of listing.stdout.split('\n')){if(!line.trim())continue;const match=/^\s*(\d+)\s+(\d+)\s*$/.exec(line);if(!match)return false;parents.set(Number(match[1]),Number(match[2]))}
+  let pid=process.pid
+  for(let depth=0;depth<128;depth++){if(pid===run.processIdentity.pid)return true;const parent=parents.get(pid);if(!parent||parent===pid)return false;pid=parent}
+ }catch{/* An absent or foreign process cannot authorize a checkpoint. */}
+ return false
+}
+async function taskCheckSource(run:RunRecord,taskId:string,config:FactoryConfig,gh:TickDeps['gh']=ghText):Promise<{planBody:string;command:string;headSha:string}> {
+ const helpers=await import('./runs.ts');await helpers.verifyRunAuthority(run,config,'launch',{gh})
+ if(!run.approvedTaskIds?.includes(taskId)||!new RegExp('^'+run.issue+'-T[1-9]\\d*$').test(taskId))throw Error('checkpoint task is outside approved selection')
+ const {approval}=await helpers.approvalTools(),comments=await approval.readPages((args:string[])=>boundedGhJson<any>(gh,args,readBudget()),['api',`repos/${run.repo}/issues/${run.issue}/comments`])
+ const planRef=run.approvalRefs.find(ref=>ref.kind==='plan'),plans=comments.filter((row:any)=>row.node_id===planRef?.artifactId)
+ if(plans.length!==1||approval.scopeDigest(plans[0].body,'plan')!==planRef?.digest)throw Error('checkpoint canonical plan differs')
+ const git=(args:string[])=>{const result=spawnSync('git',args,{cwd:run.checkout,encoding:'utf8',timeout:5000,maxBuffer:4*1024*1024});if(result.status!==0||result.error)throw Error('checkpoint source unavailable');return result.stdout.trim()}
+ const headSha=git(['rev-parse','HEAD']),branch=git(['symbolic-ref','--short','HEAD'])
+ if(branch!==run.branch||!sha40(headSha))throw Error('checkpoint branch or source differs')
+ git(['merge-base','--is-ancestor',run.baseSha,headSha])
+ if(git(['status','--porcelain','--untracked-files=all']))throw Error('checkpoint requires committed clean source')
+ const files=recoveryFiles(plans[0].body,run.approvedTaskIds)
+ const commits=git(['rev-list',run.baseSha+'..'+headSha]).split('\n').filter(Boolean)
+ const changed=[...new Set(commits.flatMap(commit=>git(['diff-tree','--root','--no-commit-id','--name-only','--no-renames','-r','-m','-z',commit]).split('\0').filter(Boolean)))]
+ if(changed.some(path=>!files.some(file=>path===file||path.startsWith(file.replace(/\/$/,'')+'/'))))throw Error('checkpoint source escaped approved files')
+ const command=/^commands:.*?\bcheck\s+`([^`]+)`/m.exec(git(['show',run.baseSha+':.vegastack/dev.md']))?.[1]
+ if(!command)throw Error('approved-base configured check unavailable')
+ return {planBody:plans[0].body,command,headSha}
+}
+function sha40(value:string):boolean{return /^[a-f0-9]{40}$/.test(value)}
+async function verifyTaskCheckpointEvidence(run:RunRecord,payload:Extract<import('./shared-claims.ts').RecoveryEvidencePayload,{kind:'acceptance'}>,config:FactoryConfig):Promise<boolean> {
+ if(payload.acceptedScope!==null||!new RegExp('^'+run.issue+'-T[1-9]\\d*$').test(payload.taskId))return false
+ const helpers=await import('./runs.ts'),root=runsRoot(config.home),label='task-'+payload.taskId
+ let progress:TaskCheckpointProgress
+ try{progress=JSON.parse(await helpers.readPrivateRunFile(join(root,run.runId,label+'-proof.json')))}catch(error){if((error as NodeJS.ErrnoException).code==='ENOENT')return false;throw error}
+ if(progress.schemaVersion!==1||progress.taskId!==payload.taskId||canonicalWire(progress.payload)!==canonicalWire(payload)||!run.approvedTaskIds?.includes(payload.taskId)||payload.runId!==run.runId||payload.scopeDigest!==run.taskKey.scopeDigest||payload.result!=='passed')throw Error('task checkpoint receipt differs from prepared proof')
+ const check=JSON.parse(await helpers.readPrivateRunFile(join(root,run.runId,label+'-acceptance.json'))) as import('./children.ts').ChildCheck
+ const intent=JSON.parse(await helpers.readPrivateRunFile(join(root,run.runId,label+'-check-intent.json'))) as {runId:string;checkRunId:string;headSha:string;command:string;validationId:string}
+ const executed=await readRun(root,check.checkRunId)
+ const base=spawnSync('git',['show',run.baseSha+':.vegastack/dev.md'],{cwd:run.checkout,encoding:'utf8',timeout:5000,maxBuffer:1024*1024}),command=/^commands:.*?\bcheck\s+`([^`]+)`/m.exec(base.stdout??'')?.[1]
+ if(base.status!==0||!command||check.schemaVersion!==1||check.runId!==run.runId||check.baseSha!==run.baseSha||check.headSha!==payload.sourceSha||check.scopeDigest!==run.taskKey.scopeDigest||check.command!==command||!check.ok||check.exitCode!==0||check.validationId!==payload.validationId||createHash('sha256').update(command).digest('hex')!==payload.commandDigest||intent.runId!==run.runId||intent.checkRunId!==check.checkRunId||intent.headSha!==check.headSha||intent.command!==command||intent.validationId!==check.validationId||executed.repo!==run.repo||executed.issue!==run.issue||executed.parent!==run.issue||executed.stage!=='acceptance'||executed.state!=='terminal'||executed.terminationCause!=='succeeded'||executed.exitCode!==0||!executed.processIdentity||executed.headSha!==check.headSha||executed.baseSha!==check.headSha)throw Error('task checkpoint lacks actual configured-check success')
+ return true
+}
+export async function verifyRetainedTaskCompletion(run:RunRecord,payload:Extract<import('./shared-claims.ts').RecoveryEvidencePayload,{kind:'acceptance'}>,ref:import('./shared-claims.ts').EvidenceRef,target:import('./shared-claims.ts').CoordinationTarget,config:FactoryConfig,gh:TickDeps['gh']=ghText):Promise<boolean> {
+ if(!run.remoteRecovery||ref.kind!=='state-receipt'||payload.acceptedScope!==null)return false
+ const owner=await import('./shared-claims.ts'),provenance=run.remoteRecovery
+ // Extract only the binding for the owner's reader. Never treat this JSON as a
+ // locally parsed TaskRecord or infer an old owner from the current task.
+ const bytes=JSON.parse(provenance.originalTask.bytes) as Record<string,unknown>
+ const expected={taskKey:bytes.taskKey,runId:bytes.runId,generation:bytes.generation,ownerToken:bytes.ownerToken,machineId:bytes.machineId,installationId:bytes.installationId,sessionId:bytes.sessionId} as import('./shared-claims.ts').ParentClaimBinding
+ const history=await owner.inspectHandoffCoordinationTask(target,{taskKey:run.sharedClaim?.taskKey??'',expected,evidence:provenance.handoff})
+ if(history.kind!=='historical-handoff'||history.receipt.previousHead!==provenance.originalStateCommit||owner.canonical(history.predecessor)!==provenance.originalTask.bytes)throw Error('retained completion predecessor unavailable')
+ const original=history.predecessor,completed=original.recovery?.completed.find(row=>owner.canonical(row.acceptance.evidence)===owner.canonical(ref))
+ if(!completed)return false
+ if(payload.result!=='passed'||payload.runId!==original.runId||payload.runId!==run.runId||payload.taskId!==completed.taskId||!run.approvedTaskIds?.includes(payload.taskId)||payload.scopeDigest!==original.scopeDigest||payload.scopeDigest!==run.taskKey.scopeDigest||payload.sourceSha!==completed.headSha||payload.validationId!==completed.acceptance.validationId||payload.commandDigest!==completed.acceptance.commandDigest)throw Error('retained completed-task evidence differs')
+ await(await import('./runs.ts')).verifyRunAuthority(run,config,'effect',{gh})
+ const inherited=spawnSync('git',['merge-base','--is-ancestor',completed.headSha,run.headSha??''],{cwd:run.checkout,timeout:3000})
+ if(inherited.status!==0)throw Error('retained completed source is missing from receiving checkout')
+ return true
+}
+
+export async function checkpointTaskForRecovery(input:{run:RunRecord;taskId:string;config:FactoryConfig;write?:boolean},transport:{gh?:TickDeps['gh'];claim?:SharedClaim;wrapperPath?:string}={}):Promise<{taskId:string;headSha:string;reference:import('./shared-claims.ts').EvidenceRef|null;wrote:boolean;replayed:boolean;reason:string}> {
+ let {run}=input;const {taskId,config}=input,helpers=await import('./runs.ts'),owner=await import('./shared-claims.ts'),root=runsRoot(config.home)
+ if(run.state!=='running'||!run.processIdentity)throw Error('checkpoint requires a running local execution')
+ const source=await taskCheckSource(run,taskId,config,transport.gh??ghText),claim=transport.claim??await sharedClaimForRun(run,config)
+ const inspected=await owner.inspectCoordinationTask(claim.target,claim.taskKey,{runId:run.runId,generation:claim.generation,ownerToken:claim.ownerToken,machineId:claim.machineId,installationId:claim.installationId,sessionId:claim.sessionId})
+ if(inspected.kind!=='active'||inspected.task.state!=='running'||!inspected.task.recovery||inspected.task.scopeDigest!==run.taskKey.scopeDigest)throw Error('checkpoint current running owner unavailable')
+ const previous=inspected.task.recovery.completed.find(row=>row.taskId===taskId)
+ if(previous){
+  const proof=await owner.resolveEvidence(claim.target,previous.acceptance.evidence)
+  if(proof?.kind!=='acceptance'||proof.taskId!==taskId||proof.runId!==run.runId||proof.sourceSha!==previous.headSha||proof.scopeDigest!==run.taskKey.scopeDigest||proof.result!=='passed'||proof.validationId!==previous.acceptance.validationId||proof.commandDigest!==previous.acceptance.commandDigest)throw Error('existing task completion proof unavailable')
+  const inherited=spawnSync('git',['merge-base','--is-ancestor',previous.headSha,source.headSha],{cwd:run.checkout,timeout:3000})
+  if(inherited.status!==0)throw Error('completed task source is missing from current checkout')
+  return {taskId,headSha:previous.headSha,reference:previous.acceptance.evidence,wrote:false,replayed:true,reason:'verified completion retained; configured check not replayed'}
+ }
+ if(!new RegExp('^-\\s*\\[x\\].*<!--\\s*task-id:'+taskId+'\\s*-->','im').test(source.planBody))throw Error('unchecked task cannot enter completed recovery')
+ if(!input.write)return{taskId,headSha:source.headSha,reference:null,wrote:false,replayed:false,reason:'would run approved-base configured check and retain task-only proof'}
+ const held=await acquireClaim(join(root,run.runId,'task-checkpoint'),await processIdentity())
+ if(held.kind!=='owned')throw Error('task checkpoint is already in progress')
+ try{
+  if((await readRun(root,run.runId)).generation!==run.generation)throw Error('checkpoint run changed')
+  run=await helpers.updateRun(root,run.runId,()=>({headSha:source.headSha}))
+  const check=await(await import('./children.ts')).sourceCheck({...run,taskKey:{...run.taskKey,taskId}},source.command,config,undefined,transport.wrapperPath?{wrapperPath:transport.wrapperPath}:undefined,'task-'+taskId)
+  if(!check.ok)throw Error('configured task check failed; no completion was recorded')
+  const proofPath=join(root,run.runId,'task-'+taskId+'-proof.json')
+  let progress:TaskCheckpointProgress
+  try{progress=JSON.parse(await helpers.readPrivateRunFile(proofPath)) as TaskCheckpointProgress}catch(error){if((error as NodeJS.ErrnoException).code!=='ENOENT')throw error;progress={schemaVersion:1,taskId,receiptId:randomUUID(),linkId:randomUUID(),payload:{schemaVersion:2,kind:'acceptance',taskId,runId:run.runId,sourceSha:source.headSha,scopeDigest:run.taskKey.scopeDigest,validationId:check.validationId,commandDigest:createHash('sha256').update(source.command).digest('hex'),result:'passed',acceptedScope:null},reference:null};await helpers.atomicRunFile(proofPath,progress)}
+  await verifyTaskCheckpointEvidence(run,progress.payload,config)
+  if(progress.payload.sourceSha!==source.headSha||progress.payload.validationId!==check.validationId)throw Error('prior checkpoint attempt requires reconciliation')
+  const publicationSource=await taskCheckSource(run,taskId,config,transport.gh??ghText)
+  if(publicationSource.headSha!==source.headSha||publicationSource.command!==source.command)throw Error('task checkpoint source changed before publication')
+  if(!progress.reference){const published=await owner.publishRecoveryReceipt({claim,operationId:progress.receiptId,payload:progress.payload});progress.reference=published.reference;await helpers.atomicRunFile(proofPath,progress)}
+  const fetched=await owner.resolveEvidence(claim.target,progress.reference)
+  if(canonicalWire(fetched)!==canonicalWire(progress.payload))throw Error('task checkpoint immutable readback differs')
+  const current=await owner.inspectCoordinationTask(claim.target,claim.taskKey,{runId:run.runId,generation:claim.generation,ownerToken:claim.ownerToken})
+  if(current.kind!=='active'||current.task.state!=='running'||!current.task.recovery)throw Error('checkpoint owner changed before completion append')
+  const entry={taskId,headSha:source.headSha,acceptance:{sourceSha:source.headSha,validationId:check.validationId,commandDigest:progress.payload.commandDigest,evidence:progress.reference}}
+  const prior=current.task.recovery.completed.find(row=>row.taskId===taskId)
+  if(prior&&canonicalWire(prior)!==canonicalWire(entry))throw Error('task completion identity changed')
+  const linked=await owner.transitionSharedTask({claim,operationId:progress.linkId,transition:{kind:'recovery',recovery:{...current.task.recovery,completed:prior?current.task.recovery.completed:[...current.task.recovery.completed,entry]}}})
+  if(linked.kind!=='owned')throw Error('task completion link pending: '+linked.reason)
+  await helpers.updateRun(root,run.runId,r=>({sharedClaim:r.sharedClaim?{...r.sharedClaim,stateCommit:linked.claim.stateCommit}:null}))
+  await checkpointRecoveryContext(await readRun(root,run.runId),config,{gh:transport.gh,claim:linked.claim})
+  return{taskId,headSha:source.headSha,reference:progress.reference,wrote:true,replayed:false,reason:'configured check and task-only recovery receipt verified'}
+ }finally{await releaseClaim(held.claim)}
 }

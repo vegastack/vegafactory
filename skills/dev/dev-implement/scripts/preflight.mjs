@@ -7,12 +7,15 @@
 // Usage: node preflight.mjs --issue <n> [--repo owner/name] [--me <login>] [--dev-md <path>] --json
 // --stage plan requires brief intent; implementation requires brief+plan.
 // --consolidated-request <json> reads an exact pinned parent selection.
+import { spawnSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
+import { preparationTaskContracts } from './recovery.mjs';
 import { existsSync, readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { GhUnavailable, ghJson, parseFlags, renderResult } from './lib/gh.mjs';
-import { evaluateApprovals, readApprovalSources, gatherConsolidatedApproval, parseStrictJson, readPages } from './lib/approval.mjs';
+import { evaluateApprovals, readApprovalSources, gatherConsolidatedApproval, parseStrictJson, readPages, scopeDigest } from './lib/approval.mjs';
 const policyUrl = new URL('./effective-policy.mjs', import.meta.url);
 const { resolveState, readWorkflowLabels, loadConfiguredPolicy, DEFAULT_LABELS } = await import(existsSync(policyUrl) ? policyUrl.href : new URL('../../dev-setup/scripts/effective-policy.mjs', import.meta.url).href);
 
@@ -40,10 +43,11 @@ export function evaluatePreflight({ issue, comments, devMd, me, expect = 'ready'
   blocks.push(...approval.blocks);
   if (scope[0] === 'research' && stage !== 'plan') blocks.push('research execution requires consolidated protocol, candidate and shared allowance admission');
 
-  // The brief-template rule: a resolved Assumptions section is deleted, so the
-  // heading's presence at all means unresolved entries remain.
-  if (/^##\s+Assumptions\b/m.test(issue.body ?? '')) {
-    blocks.push('the brief still carries a "## Assumptions" section — resolve every entry (the section is deleted once resolved) before starting');
+  // Resolved entries and explicitly later live requirements are retained as
+  // context. Unclassified assumptions still require reconciliation.
+  const assumptions = /^##\s+Assumptions\b[^\n]*\n([\s\S]*?)(?=^##\s|$(?![\s\S]))/m.exec(issue.body ?? '')?.[1];
+  if (assumptions?.split('\n').some(line => /^\s*-\s+/.test(line) && !/^\s*-\s+\[x\]/i.test(line) && !/\b(?:resolved|verified):/i.test(line))) {
+    blocks.push('unresolved execution-scope Assumptions require reconciliation before full execution');
   }
 
   const openBlockers = issue.blockedBy ?? [];
@@ -81,7 +85,7 @@ export function evaluatePreflight({ issue, comments, devMd, me, expect = 'ready'
 
 // Both CLI and dispatcher use this owner reader and evaluator. The injected
 // reader is transport only, never an approval verdict or policy override.
-export async function gatherAndEvaluate(flags, { readJson = async (args) => ghJson(args), devMd: suppliedDevMd, configuredPolicy } = {}) {
+export async function gatherAndEvaluate(flags, { readJson = async (args) => ghJson(args), devMd: suppliedDevMd, configuredPolicy, preparationAdapter } = {}) {
   const pages = (args) => readPages(readJson, args);
   const repo = flags.repo || (await readJson(['repo', 'view', '--json', 'nameWithOwner'])).nameWithOwner;
   if (flags['consolidated-request']) {
@@ -91,7 +95,7 @@ export async function gatherAndEvaluate(flags, { readJson = async (args) => ghJs
     const policyRepo = /^repo:\s*(\S+)/m.exec(devMd)?.[1];
     if (policyRepo !== repo || request.parentRepo !== repo || request.requested?.repo !== repo) throw new Error('consolidated request and current policy repository differ');
     const operators = (/^operators:\s*([^#\n]+)/m.exec(devMd)?.[1] ?? '').split(',').map((name) => name.trim()).filter(Boolean);
-    return { ...(await gatherConsolidatedApproval({ ...request, operators, readJson })), warns: [] };
+    return { ...(await gatherConsolidatedApproval({ ...request, operators, readJson, preparationAdapter: preparationAdapter ?? packagedPreparationAdapter({ readJson }) })), warns: [] };
   }
   const issueNumber = flags.issue;
   const raw = await readJson(['api', 'repos/' + repo + '/issues/' + issueNumber]);
@@ -104,6 +108,34 @@ export async function gatherAndEvaluate(flags, { readJson = async (args) => ghJs
   const me = flags.me || (await readJson(['api', 'user'])).login;
   return evaluatePreflight({ issue: { ...raw, repo, blockedBy }, comments, devMd, me, sourceComments, configuredPolicy: configuredPolicy ?? loadConfiguredPolicy({ home: homedir(), repo, devMd }),
     expect: flags.expect || 'ready', stage: flags.stage || 'implement' });
+}
+
+export function packagedPreparationAdapter({readJson, inspectAcceptedIntegration} = {}) {
+  return {
+    async readTaskPrerequisites(request) {
+      const {parent,plan,taskIds,approvalBinding}=request;
+      const source=await readJson(['api','repos/'+parent.repo+'/issues/comments/'+approvalBinding.commentId]);
+      if(source.id!==approvalBinding.commentId || createHash('sha256').update(source.body).digest('hex')!==approvalBinding.bodySha256 || source.issue_url!=='https://api.github.com/repos/'+parent.repo+'/issues/'+parent.issue) throw Error('canonical preparation source changed');
+      const comments=await readPages(readJson,['api','repos/'+plan.repo+'/issues/'+plan.issue+'/comments']);
+      const matching=comments.filter(row=>row.node_id===plan.artifactId);
+      if(matching.length!==1||scopeDigest(matching[0].body,'plan')!==plan.digest)throw Error('canonical preparation plan changed');
+      // canonicalScope is intentionally opaque to consumers. Its parser exposes
+      // exact files through the validated source task declarations below.
+      const selectedFiles=(body,ids)=>{
+        const starts=[...body.matchAll(/^-\s*\[[ x]\].*<!--\s*task-id:([1-9]\d*-T[1-9]\d*)\s*-->.*$/gim)];
+        return starts.flatMap((row,index)=>ids.includes(row[1])?[...body.slice(row.index,starts[index+1]?.index??body.length).split('\n').find(line=>/^\s*- Files\s/.test(line)).matchAll(/`([^`]+)`/g)].map(match=>match[1]):[]);
+      };
+      return {parent,plan,tasks:preparationTaskContracts(matching[0].body,taskIds,selectedFiles),approvalBinding};
+    },
+    async inspectAcceptedIntegration(contract) {
+      if(inspectAcceptedIntegration)return inspectAcceptedIntegration(contract);
+      const cli=fileURLToPath(new URL('../../../dist/index.js',import.meta.url));
+      if(!existsSync(cli))throw Error('installed preparation integration owner unavailable');
+      const result=spawnSync(process.execPath,[cli,'children','inspect-preparation','--json'],{input:JSON.stringify(contract),encoding:'utf8',timeout:30000,maxBuffer:1024*1024});
+      if(result.status!==0||result.error||result.signal)throw Error('accepted preparation integration unavailable');
+      return parseStrictJson(result.stdout);
+    },
+  };
 }
 
 const invokedDirectly = process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url);

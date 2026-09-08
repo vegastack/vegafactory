@@ -1,5 +1,5 @@
 import { privacyStatus, privacyReason, type PrivacyStatus } from './stats/privacy.ts'
-import { verifiedSharedTarget } from './dispatch.ts'
+import { verifiedSharedTarget, durableRecoverySummary } from './dispatch.ts'
 import { readRuns, runsRoot, type RunRecord, type TerminalCause } from './runs.ts'
 import { readSharedStatus, type CoordinationTarget, type SharedStatus } from './shared-claims.ts'
 import { labelsDigest, resolveState, resolveLabels } from '../../../skills/dev/dev-setup/scripts/effective-policy.mjs'
@@ -20,6 +20,7 @@ import type { FactoryConfig, RepoPolicy, Stage } from './config.ts'
 export interface WorktreeRow { path: string; branch: string; issue: number | null; state: string }
 
 export interface RunSummary {
+  recovery?:ReturnType<typeof durableRecoverySummary>
   runId?: string
   state?: string
   terminationCause?: TerminalCause | null
@@ -113,8 +114,8 @@ export function buildStatus(input: {
       }),
     }
     const count = (state: State): number => workflow.issues.filter(issue => issue.state === state).length
-    const runs: RunSummary[] = (entry.durableRuns ?? []).toSorted((a,b)=>b.startedAt.localeCompare(a.startedAt)).map(run => ({
-      runId:run.runId,state:run.state,terminationCause:run.terminationCause,
+    const runs: RunSummary[] = [...(entry.durableRuns ?? [])].sort((a,b)=>b.startedAt.localeCompare(a.startedAt)).map(run => ({
+      runId:run.runId,state:run.state,terminationCause:run.terminationCause,recovery:durableRecoverySummary(run),
       pendingDelivery:run.pendingDelivery.filter(p=>p.status!=='acknowledged').length,
       lastError:run.pendingDelivery.find(p=>p.lastError)?privacyReason(new Error(run.pendingDelivery.find(p=>p.lastError)!.lastError!)):null,
       issue:run.issue,stage:run.stage as Stage,startedAt:run.startedAt,exitCode:run.exitCode,
@@ -172,7 +173,7 @@ export function renderStatus(report: StatusReport): string {
       lines.push(`  worktree ${worktree.branch} (${worktree.state}) ${worktree.path}`)
     }
     for (const run of repo.runs) {
-      const how = run.state ? `${run.terminationCause ?? run.state}${run.pendingDelivery ? ` · ${run.pendingDelivery} deliveries pending` : ''}` : 'legacy unverified'
+      const how = run.state ? `${run.terminationCause ?? run.state}${run.pendingDelivery ? ` · ${run.pendingDelivery} deliveries pending` : ''}${run.recovery ? ` · ${run.recovery.reason}` : ''}` : 'legacy unverified'
       lines.push(`  run #${run.issue} ${run.stage} — ${how}${run.lastMessage ? ` — ${run.lastMessage}` : ''}`)
     }
   }

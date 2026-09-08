@@ -88,15 +88,15 @@ One implementation ledger:
 ```markdown
 <!-- vsk:v1 type=ledger branch=<branch> -->
 ## Ledger — <branch>
-- Task <N>: complete (commits <base7>..<head7>[, review clean | K parked])
-- Task <N>: fix round <R>/3 (<X> addressed, <Y> open — <one-liners>; commits <a>..<b>)
+- <issue>-T<N>: complete (commits <base7>..<head7>[, review clean | K parked])
+- <issue>-T<N>: fix round <R>/3 (<X> addressed, <Y> open — <one-liners>; commits <a>..<b>)
 - Ruling: <what> — <why> — cost if wrong: <cost>
-- Task <N>: parked — <finding> — Ruling: <why the code stands>
+- <issue>-T<N>: parked — <finding> — Ruling: <why the code stands>
 - Deferred minor: <one-liner>
 ```
 
 
-**Resume protocol:** fresh, compacted, or handed-over sessions read only: brief → plan comment → ledger → `git log`, in order.
+**Resume protocol:** start with brief → plan comment → ledger → `git log`, then reconcile exact task IDs, current canonical approval sources and updated/edited authoritative comments. Complete history, source/evidence and current ownership are required before resume or delivery retry. Completed work and prior provenance remain intact; a stale heartbeat is not death proof. Preparation records exact task contracts separately from full native issue completion.
 
 ## `.vegastack/` workspaces
 

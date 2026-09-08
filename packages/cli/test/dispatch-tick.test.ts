@@ -981,3 +981,155 @@ test('137 hashed repository key preserves legacy lock evidence rather than bypas
  expect(calls).toBe(0);expect(result.refusals.some(r=>r.reason.includes('legacy repository claim'))).toBe(true)
  expect(readFileSync(legacy,'utf8')).toContain('99999999')
 })
+
+// Real Git-backed immutable state transport. These source-contract fixtures do
+// not assert vendor/platform qualification or production provider activation.
+async function recoveryGitFixture(options:{actualTask?:boolean;sameHome?:boolean}={}){
+ const fs=await import('node:fs/promises'),{randomUUID}=await import('node:crypto'),{spawnSync}=await import('node:child_process')
+ const owner=await import('../src/shared-claims.ts'),runtime=await import('../src/runs.ts'),{processIdentity}=await import('../src/claims.ts')
+ const f=fixture({devMd:'repo: acme/app\noperators: mk\ncommands: check `test -f src/a`\n'}),tree=f.repos[0]!.path,state=join(f.home,'state')
+ const git=(cwd:string,...args:string[])=>{const r=spawnSync('git',args,{cwd,encoding:'utf8',env:{...process.env,GIT_AUTHOR_NAME:'Fixture',GIT_AUTHOR_EMAIL:'fixture@example.test',GIT_COMMITTER_NAME:'Fixture',GIT_COMMITTER_EMAIL:'fixture@example.test'}});if(r.status!==0)throw Error(r.stderr);return r.stdout.trim()}
+ await fs.mkdir(join(tree,'src'));await fs.writeFile(join(tree,'src/a'),'completed source\n');git(tree,'add','.');git(tree,'commit','-m','approved source');const sourceHead=git(tree,'rev-parse','HEAD')
+ const body='<!-- vsk:v1 type=brief rev=1 scope=full-plan -->\nContinue approved work.'
+ const plan='<!-- vsk:v1 type=plan rev=1 -->\n- [x] **Task 1: verified source** <!-- task-id:144-T1 -->\n  - Files — Modify: `src/a`\n- [ ] **Task 2: remaining source** <!-- task-id:144-T2 -->\n  - Files — Modify: `src/b`\n'
+ const artifacts=[{repo:'acme/app',issue:144,kind:'brief' as const,artifactId:'I_144',rev:1,digest:scopeDigest(body,'brief')},{repo:'acme/app',issue:144,kind:'plan' as const,artifactId:'IC_plan',rev:1,digest:scopeDigest(plan,'plan')}]
+ const intent={schemaVersion:2,id:'approved144',operator:'mk',scope:'brief+plan',source:{kind:'session',ref:'session:fixture',quote:'Approve these exact tasks.'},artifacts,supersedes:[],revokes:[]}
+ const approvalBody='<!-- vsk:v1 type=approval scope=brief+plan -->\n```json\n'+JSON.stringify(intent)+'\n```'
+ const subject={number:144,node_id:'I_144',title:'implementation',body,state:'open',labels:[{name:'working'},{name:'full-plan'}],assignees:[{login:'mk'}]}
+ const source={kind:'github-comment' as const,repositoryId:'R_app',issueNodeId:'I_144',commentId:'12',bodySha256:owner.sha256(approvalBody)}
+ const approvalBindings=[{approvalId:'approved144',source}],comments=[{id:11,node_id:'IC_plan',body:plan,user:{login:'mk'},issue_url:'https://api.github.com/repos/acme/app/issues/144',updated_at:'2026-09-08T01:00:00Z'},{id:12,node_id:'IC_approval',body:approvalBody,user:{login:'mk'},issue_url:'https://api.github.com/repos/acme/app/issues/144',updated_at:'2026-09-08T01:01:00Z'}]
+ const gh=async(args:string[])=>{const endpoint=args[1];let value:unknown;if(endpoint==='graphql')value={data:{node:{id:'I_144',number:144,repository:{id:'R_app',nameWithOwner:'acme/app'}}}};else if(endpoint==='user')value={login:'mk'};else if(endpoint==='repos/acme/app')value={node_id:'R_app'};else if(endpoint==='repos/acme/app/issues/144')value=subject;else if(endpoint?.split('?')[0]==='repos/acme/app/issues/144/comments')value=args.includes('--slurp')?[comments]:comments;else if(endpoint==='repos/acme/app/issues/comments/12')value=comments[1];else if(endpoint?.includes('/dependencies/blocked_by'))value=args.includes('--slurp')?[[]]:[];else throw Error('unexpected fixture source endpoint '+endpoint);return(args.includes('--include')?'HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n':'')+JSON.stringify(value)}
+ const selection=await runtime.approvedTaskSelection(artifacts,[subject,comments],'implement',{},['144-T1','144-T2'])
+ const installation=randomUUID();await fs.mkdir(join(state,'coordination'),{recursive:true});await fs.writeFile(join(state,'coordination/index.json'),owner.canonical({schemaVersion:1,installationId:installation,revision:0,active:[],machines:[]}));git(state,'init','-b','factory-state');git(state,'add','.');git(state,'commit','-m','private fixture root');const rootCommit=git(state,'rev-parse','HEAD')
+ let mutations=0
+ const target:import('../src/shared-claims.ts').CoordinationTarget={host:'github.com',repository:'acme/control',repositoryId:'R_state',branch:'factory-state',rootCommit,installationId:installation,localRoot:join(f.home,'coordination'),provider:{branch:async()=>({id:'REF_state',head:git(state,'rev-parse','HEAD'),repositoryId:'R_state',private:true,defaultBranch:'main'}),read:async(_t,sha,path)=>{const r=spawnSync('git',['show',sha+':'+path],{cwd:state,encoding:'utf8'});return r.status===0?r.stdout:null},compare:async(_t,base,head)=>base===head?'identical':spawnSync('git',['merge-base','--is-ancestor',base,head],{cwd:state}).status===0?'ahead':'diverged',commit:async(_t,input)=>{if(input.expectedHeadOid!==git(state,'rev-parse','HEAD'))return{kind:'conflict',reason:'changed'};for(const [path,body]of Object.entries(input.files)){await fs.mkdir(join(state,path,'..'),{recursive:true});await fs.writeFile(join(state,path),body)}git(state,'add','.');git(state,'commit','-m','fixture operation '+input.operationId);mutations++;return{kind:'committed',head:git(state,'rev-parse','HEAD')}}},verifyCandidate:async candidate=>{if(candidate.repo!=='acme/app'||candidate.scopeDigest!==selection.scopeDigest||owner.canonical(candidate.approvalBindings)!==owner.canonical(approvalBindings))throw Error('fixture candidate differs')},verifyTransition:async task=>{if(task.scopeDigest!==selection.scopeDigest)throw Error('fixture task scope differs')},verifyEvidence:async(ref,payload)=>{if(ref.kind==='github-comment'&&owner.canonical(ref)!==owner.canonical(source))throw Error('fixture source differs');if(payload?.kind==='acceptance'&&payload.sourceSha!==sourceHead)throw Error('fixture source check differs')}}
+ const identity=await processIdentity(),host=(await import('../src/machine-identity.ts').then(row=>row.readHostBinding())).digest,boot=owner.sha256('VegaFactory/boot/v1\n'+identity.bootId)
+ const machine:import('../src/shared-claims.ts').EffectiveMachine={id:'original',installationId:randomUUID(),hostBindingDigest:host,executionLogin:'mk',group:'dev',enabled:true,allowedRepositories:['acme/app'],repositoryIds:{'acme/app':'R_app'},policyDigest:'d'.repeat(64),coordination:{repositoryId:'R_state',repository:'acme/control',branch:'factory-state',rootCommit,installationId:installation},defaults:{maxRuns:1,childConcurrent:3,recovery:'verified-transfer'}}
+ const session={machineId:machine.id,installationId:machine.installationId,sessionId:randomUUID(),hostBindingDigest:host,bootIdDigest:boot,identity,localRoot:target.localRoot,target}
+ const candidate={host:'github.com',repo:'acme/app',issue:144,repositoryNodeId:'R_app',issueNodeId:'I_144',scopeDigest:selection.scopeDigest,approvalDigest:owner.sha256(owner.canonical(approvalBindings)),approvalBindings,runId:randomUUID(),stage:'implement',paths:['src/a','src/b'],resources:[],independent:true,parentTaskKey:null,approvedTaskIds:['144-T1','144-T2']}
+ const acquired=await owner.acquireSharedTask({machine,session,candidate,operationId:randomUUID()});if(acquired.kind!=='owned')throw Error(acquired.reason);let claim=acquired.claim
+ const ordinaryCheck=options.actualTask?null:spawnSync('sh',['-c','test -f src/a'],{cwd:tree});if(ordinaryCheck)expect(ordinaryCheck.status).toBe(0)
+ const qualification=await owner.publishRecoveryReceipt({claim,operationId:randomUUID(),payload:{schemaVersion:2,kind:'execution-qualification',harness:'codex',harnessVersion:'controlled',model:'fixture',effort:'high',accountRef:'local-fixture',configurationDigest:'e'.repeat(64),candidateSha:sourceHead,validationIds:['fixture/check/'+owner.sha256(sourceHead)],managedKinds:['checkpoint-push','handback','evidence','telemetry-push'],unmanagedDenied:true,result:'qualified'}});claim=qualification.claim
+ const acceptance=options.actualTask?null:await owner.publishRecoveryReceipt({claim,operationId:randomUUID(),payload:{schemaVersion:2,kind:'acceptance',taskId:'144-T1',runId:candidate.runId,sourceSha:sourceHead,scopeDigest:selection.scopeDigest,validationId:'144-T1/check/'+owner.sha256(sourceHead),commandDigest:owner.sha256('test -f src/a'),result:ordinaryCheck!.status===0?'passed':'failed',acceptedScope:null}});if(acceptance)claim=acceptance.claim
+ const sourceStore=join(f.home,'source.git'),targetTree=join(f.home,'target-checkout'),retainedOldTree=join(f.home,'old-machine-preserved')
+ git(f.home,'clone','--bare',tree,sourceStore)
+ const checkpoint={schemaVersion:1 as const,id:randomUUID(),repo:'acme/app',repositoryId:'R_app',branch:git(tree,'symbolic-ref','--short','HEAD'),baseSha:sourceHead,headSha:sourceHead,treeSha:git(tree,'rev-parse','HEAD^{tree}'),scopeDigest:selection.scopeDigest,runId:candidate.runId,publishedAt:new Date().toISOString()}
+ const recovery:import('../src/shared-claims.ts').RecoveryEnvelope={schemaVersion:2,taskKey:claim.taskKey,runId:candidate.runId,generation:claim.generation,approvalBindings,recordBinding:null,scopeDigest:selection.scopeDigest,approvalDigest:candidate.approvalDigest,execution:{providerMode:'subscription',harness:'codex',harnessVersion:'controlled',model:'fixture',effort:'high',accountRef:'local-fixture',qualification:qualification.reference},checkpoint,completed:options.actualTask?[]:[{taskId:'144-T1',headSha:sourceHead,acceptance:{sourceSha:sourceHead,validationId:'144-T1/check/'+owner.sha256(sourceHead),commandDigest:owner.sha256('test -f src/a'),evidence:acceptance!.reference}}],children:[],joins:[],effects:[],remoteEffectCoverage:{kind:'qualified-managed-only',qualification:qualification.reference}}
+ const linked=await owner.transitionSharedTask({claim,operationId:randomUUID(),transition:{kind:'checkpoint',checkpoint,recovery}});if(linked.kind!=='owned')throw Error(linked.reason);claim=linked.claim
+ const child=(await import('node:child_process')).spawn(process.execPath,['-e','setInterval(()=>{},1000)','144-fixture-owner'],{detached:true,stdio:'ignore'}),childExit=new Promise<void>(resolve=>child.once('exit',()=>resolve()));if(!child.pid)throw Error('controlled process unavailable');const childIdentity=await processIdentity(child.pid)
+ try{
+ let producedRun:import('../src/runs.ts').RunRecord|null=null
+ let produced:Awaited<ReturnType<typeof import('../src/dispatch.ts')['checkpointTaskForRecovery']>>|null=null
+ if(options.actualTask){
+  const started=await owner.transitionSharedTask({claim,operationId:randomUUID(),transition:{kind:'start'}});if(started.kind!=='owned')throw Error(started.reason);claim=started.claim
+  let run=await runtime.createRun({root:runtime.runsRoot(f.home),runId:candidate.runId,repo:candidate.repo,issue:144,parent:null,checkout:tree,branch:checkpoint.branch,baseSha:sourceHead,headSha:sourceHead,stage:'implement',harness:'codex',model:'fixture',effort:'high',execution:recovery.execution,approvalBindings,recordBinding:null,approvalRefs:artifacts,policyDigest:machine.policyDigest,claimToken:randomUUID(),startedAt:new Date().toISOString(),taskKey:{repo:candidate.repo,issue:144,taskId:selection.taskId,scopeDigest:selection.scopeDigest},approvedTaskIds:candidate.approvedTaskIds,activeElapsedMs:null,taskOwner:'mk',agentAccountOwner:null,accountRef:'local-fixture',waitReason:null,machine:{id:machine.id,installationId:machine.installationId,sessionId:session.sessionId,hostBindingDigest:host},sharedClaim:{taskKey:claim.taskKey,generation:claim.generation,ownerToken:claim.ownerToken,stateCommit:claim.stateCommit},checkpoint,remoteEffectCoverage:recovery.remoteEffectCoverage})
+  run=await runtime.updateRun(runtime.runsRoot(f.home),run.runId,()=>({state:'running',pid:child.pid!,processIdentity:childIdentity,processGroupId:child.pid!,processStartId:childIdentity.startId}))
+  const producer=await import('../src/dispatch.ts')
+  produced=await producer.checkpointTaskForRecovery({run,taskId:'144-T1',config:f.config,write:true},{gh,claim,wrapperPath:resolve('packages/cli/src/run-wrapper.ts')})
+  expect(produced.wrote).toBe(true)
+  const proofPath=join(runtime.runsRoot(f.home),run.runId,'task-144-T1-acceptance.json'),beforeCheck=await fs.readFile(proofPath,'utf8')
+  run=await runtime.readRun(runtime.runsRoot(f.home),run.runId)
+  const replay=await producer.checkpointTaskForRecovery({run,taskId:'144-T1',config:f.config,write:true},{gh,claim,wrapperPath:resolve('packages/cli/src/run-wrapper.ts')})
+  expect(replay.replayed).toBe(true);expect(await fs.readFile(proofPath,'utf8')).toBe(beforeCheck)
+  await expect(producer.checkpointTaskForRecovery({run,taskId:'144-T2',config:f.config,write:true},{gh,claim})).rejects.toThrow('unchecked task')
+  producedRun=run
+ }
+ // A real process is stopped before the owned stop attestation is published.
+ child.kill('SIGTERM');await childExit
+ expect((await import('../src/run-wrapper.ts').then(row=>row.inspectOwnedGroup(childIdentity))).kind).toBe('absent')
+ const stopped=await owner.publishRecoveryReceipt({claim,operationId:randomUUID(),payload:{schemaVersion:2,kind:'effect-reconciliation',runId:candidate.runId,scopeDigest:selection.scopeDigest,approvalBindings,allowedActionIds:[],checkedEffectIds:[],inspector:{kind:'qualified-adapter',identityRef:machine.id},result:'complete',reasonCode:'owned-process-group-stopped'}});claim=stopped.claim
+ const proof={kind:'process-exit' as const,machineId:machine.id,installationId:machine.installationId,sessionId:session.sessionId,hostBindingDigest:host,bootIdDigest:boot,runIds:[candidate.runId],generation:claim.generation,observedAt:new Date().toISOString(),evidenceRef:stopped.reference}
+ const halted=await owner.transitionSharedTask({claim,operationId:randomUUID(),transition:{kind:'stop',stopProof:proof}});if(halted.kind!=='owned')throw Error(halted.reason);claim=halted.claim
+ if(producedRun){const worktreeDigest=await runtime.worktreeFingerprint(tree);producedRun=await runtime.updateRun(runtime.runsRoot(f.home),producedRun.runId,()=>({state:'terminal',terminationCause:'interrupted',finishedAt:new Date().toISOString(),exitCode:child.exitCode,attemptElapsedMs:null,activeElapsedMs:null,worktreeDigest,stopProof:proof}))}
+
+ if(!options.sameHome){git(f.home,'clone',sourceStore,targetTree);await fs.rename(tree,retainedOldTree);f.config.repos[0]!.path=targetTree}
+ const tamperCheckpoint=async()=>{const path=join(state,'coordination/tasks/'+claim.taskKey+'.json'),task=JSON.parse(await fs.readFile(path,'utf8'));task.checkpoint=null;task.recovery.checkpoint=null;await fs.writeFile(path,owner.canonical(task));git(state,'add','.');git(state,'commit','-m','fixture missing checkpoint')}
+ return {...f,produced,producedRun,machine,session,candidate,tree:options.sameHome?tree:targetTree,retainedOldTree,state,target,claim,recovery,checkpoint,comments,subject,sourceHead,gh,tamperCheckpoint,get mutations(){return mutations},transport:{target,gh,source:{repository:async()=>({node_id:'R_app'}),fetch:async(checkout:string,_repo:string,head:string)=>{git(checkout,'fetch','--no-tags',sourceStore,head)}}}}
+ }finally{if(child.exitCode===null){child.kill('SIGTERM');await childExit}}
+}
+test('144 remote-only recovery reads exact Git receipts, fresh authority and source without old home',async()=>{
+ const f=await recoveryGitFixture(),{inspectRemoteRecovery,assertRemoteRecoveryMaterial}=await import('../src/dispatch.ts')
+ const before=f.mutations,material=await inspectRemoteRecovery({repo:'acme/app',taskKey:f.claim.taskKey,config:f.config},f.transport)
+ expect(material.blocks).toEqual([]);expect(material.packet.completed).toMatchObject([{taskId:'144-T1',headSha:f.sourceHead}]);expect(material.packet.taskIds).toEqual(['144-T1','144-T2']);expect(f.mutations).toBe(before)
+ expect(()=>assertRemoteRecoveryMaterial(material)).not.toThrow();expect(JSON.stringify(material)).not.toContain(f.retainedOldTree)
+ const clone=structuredClone(material);expect(()=>assertRemoteRecoveryMaterial(clone)).toThrow('unverified')
+ f.comments.push({id:13,node_id:'IC_constraint',body:'<!-- vsk:v1 type=correction -->\nStop and reconcile the new constraint.',user:{login:'mk'},issue_url:'https://api.github.com/repos/acme/app/issues/144',updated_at:'2026-09-08T02:00:00Z'})
+ const constrained=await inspectRemoteRecovery({repo:'acme/app',taskKey:f.claim.taskKey,config:f.config},f.transport)
+ expect(constrained.blocks.join()).toContain('operator instruction after original approval requires reconciliation');expect(()=>assertRemoteRecoveryMaterial(constrained)).toThrow('unverified')
+ f.comments.pop()
+ f.comments[1]!.user.login='foreign-actor'
+ await expect(inspectRemoteRecovery({repo:'acme/app',taskKey:f.claim.taskKey,config:f.config},f.transport)).rejects.toThrow('current native recovery prerequisites unavailable')
+ expect(f.mutations).toBe(before)
+ f.comments[1]!.user.login='mk';await f.tamperCheckpoint()
+ const missing=await inspectRemoteRecovery({repo:'acme/app',taskKey:f.claim.taskKey,config:f.config},f.transport);expect(missing.blocks.join()).toContain('checkpoint unavailable')
+},60000)
+test('144 completed terminal identity is never represented as quota or silently reopened',async()=>{
+ const {durableRecoverySummary}=await import('../src/dispatch.ts'),{createRun,updateRun,runsRoot,readRun}=await import('../src/runs.ts'),{randomUUID}=await import('node:crypto')
+ const f=fixture(),root=runsRoot(f.home),run=await createRun({root,repo:'acme/app',issue:144,parent:null,checkout:f.repos[0]!.path,branch:'',baseSha:'',headSha:null,stage:'implement',harness:'diagnostic',model:'none',effort:'none',execution:null,approvalBindings:[],recordBinding:null,approvalRefs:[],policyDigest:'',claimToken:randomUUID(),startedAt:new Date().toISOString(),taskKey:{repo:'acme/app',issue:144,taskId:'unknown',scopeDigest:''},activeElapsedMs:null,taskOwner:null,agentAccountOwner:null,accountRef:null,waitReason:null,machine:null,sharedClaim:null,checkpoint:null,remoteEffectCoverage:{kind:'unmanaged-possible',reasonCode:'fixture'}})
+ const terminal=await updateRun(root,run.runId,()=>({state:'terminal',terminationCause:'interrupted',finishedAt:new Date().toISOString(),pendingDelivery:[{id:randomUUID(),kind:'telemetry-capture',target:{captureKey:run.runId+':terminal:0'},intentRef:null,status:'acknowledged',attempts:1,lastError:null,payload:'{}',payloadDigest:'a'.repeat(64)}]}))
+ expect(durableRecoverySummary(terminal)).toMatchObject({action:'inspect',terminalCapturePreserved:true});expect((await readRun(root,run.runId)).waitReason).toBeNull()
+},15000)
+
+test('144 task checkpoint executes configured check once and preserves T1 across interrupted T2',async()=>{
+ const f=await recoveryGitFixture({actualTask:true}),{inspectRemoteRecovery}=await import('../src/dispatch.ts')
+ const recovered=await inspectRemoteRecovery({repo:'acme/app',taskKey:f.claim.taskKey,config:f.config},f.transport)
+ const completed=recovered.packet.completed as Array<{taskId:string}>,taskIds=recovered.packet.taskIds as string[]
+ expect(recovered.blocks).toEqual([]);expect(completed.map(row=>row.taskId)).toEqual(['144-T1'])
+ expect(taskIds.filter(id=>!completed.some(row=>row.taskId===id))).toEqual(['144-T2'])
+ expect(f.produced?.reference).not.toBeNull()
+},60000)
+
+test('144 same-home controller verifies fresh task evidence after real ownership handoff',async()=>{
+ const f=await recoveryGitFixture({actualTask:true,sameHome:true}),owner=await import('../src/shared-claims.ts'),runtime=await import('../src/runs.ts'),dispatch=await import('../src/dispatch.ts'),{randomUUID}=await import('node:crypto')
+ const original=f.producedRun!,current=await owner.inspectCoordinationTask(f.target,f.claim.taskKey)
+ f.target.verifySession=async previous=>{if(previous.sessionId!==f.session.sessionId||!await runtime.verifyLocalRunStopped(original))throw Error('original session process is not stopped')}
+ if(current.kind!=='active'||!current.task.stopProof||!current.task.recovery)throw Error('stopped original unavailable')
+ const moved=await owner.transitionSharedTask({claim:f.claim,operationId:randomUUID(),transition:{kind:'handoff',machine:f.machine,session:{...f.session,sessionId:randomUUID()},candidate:f.candidate,stopProof:current.task.stopProof,recovery:current.task.recovery}})
+ if(moved.kind!=='owned')throw Error(moved.reason)
+ const request:import('../src/runs.ts').RunContinuationRequest={root:runtime.runsRoot(f.home),runId:original.runId,expectedGeneration:original.generation,requestId:randomUUID(),previousAttemptId:original.attemptId??original.runId,checkpoint:original.checkpoint!,worktreeDigest:original.worktreeDigest!,currentOwner:{machine:{...original.machine!,sessionId:moved.claim.sessionId},sharedClaim:{taskKey:moved.claim.taskKey,generation:moved.claim.generation,ownerToken:moved.claim.ownerToken,stateCommit:moved.claim.stateCommit}}}
+ const decision=await dispatch.verifyRunContinuationRecovery({run:original,request},f.config,{gh:f.gh,claim:moved.claim})
+ expect(decision.taskIds).toEqual(['144-T2'])
+ await expect(dispatch.verifyRunContinuationRecovery({run:original,request:{...request,currentOwner:{...request.currentOwner,sharedClaim:{...request.currentOwner.sharedClaim!,ownerToken:randomUUID()}}}},f.config,{gh:f.gh,claim:moved.claim})).rejects.toThrow('owner')
+ const continued=await runtime.beginVerifiedRunContinuation(request,{verifyRecovery:input=>dispatch.verifyRunContinuationRecovery(input,f.config,{gh:f.gh,claim:moved.claim})})
+ expect(continued.state).toBe('prepared');expect(continued.runId).toBe(original.runId);expect(continued.attemptId).not.toBe(original.attemptId??original.runId)
+ expect(continued.attempts?.[0]?.terminationCause).toBe('interrupted');expect(continued.approvedTaskIds).toEqual(['144-T1','144-T2'])
+ expect(JSON.parse(await (await import('node:fs/promises')).readFile(join(runtime.runsRoot(f.home),original.runId,'recovery.json'),'utf8')).completed.map((row:{taskId:string})=>row.taskId)).toEqual(['144-T1'])
+},60000)
+
+test('144 receiving inspection binds real handoff history and a fresh claimed owner without local run history',async()=>{
+ const f=await recoveryGitFixture(),owner=await import('../src/shared-claims.ts'),runtime=await import('../src/runs.ts'),dispatch=await import('../src/dispatch.ts'),{randomUUID}=await import('node:crypto')
+ const inspected=await owner.inspectCoordinationTask(f.target,f.claim.taskKey);if(inspected.kind!=='active'||!inspected.task.stopProof||!inspected.task.recovery)throw Error('original stopped evidence unavailable')
+ const operationId=randomUUID(),moved=await owner.transitionSharedTask({claim:f.claim,operationId,transition:{kind:'handoff',machine:f.machine,session:f.session,candidate:f.candidate,stopProof:inspected.task.stopProof,recovery:inspected.task.recovery}});if(moved.kind!=='owned')throw Error(moved.reason)
+ const raw=await f.target.provider.read(f.target,moved.claim.stateCommit,owner.operationPath(operationId));if(!raw)throw Error('handoff receipt missing')
+ const newHome=join(f.home,'receiver-home'),config=parseFactoryConfig({repos:[{repo:'acme/app',org:'acme',path:f.tree}]},newHome)
+ const request:import('../src/runs.ts').ReceivingRunRequest={root:runtime.runsRoot(newHome),requestId:randomUUID(),runId:f.claim.runId,taskKey:f.claim.taskKey,expectedSharedGeneration:moved.claim.generation,checkout:f.tree,handoff:{kind:'state-receipt',commitSha:moved.claim.stateCommit,operationId,blobSha256:owner.sha256(raw)}}
+ const expected={taskKey:f.claim.taskKey,runId:f.claim.runId,generation:f.claim.generation,ownerToken:f.claim.ownerToken,machineId:f.claim.machineId,installationId:f.claim.installationId,sessionId:f.claim.sessionId}
+ const material=await dispatch.inspectReceivingRecovery(request,expected,config,f.transport)
+ expect(material.taskIds).toEqual(['144-T2']);expect(material.original.task).toEqual(inspected.task)
+ expect(material.handoff.receipt.previousHead).toBe(material.original.stateCommit);expect(material.current.task.ownerToken).toBe(moved.claim.ownerToken)
+ expect(await runtime.readRuns(runtime.runsRoot(newHome))).toEqual([])
+ // Assemble the actual source entry/wrapper into an isolated runtime inventory.
+ // This proves source/constructor integration, not vendor qualification or launch.
+ const fs=await import('node:fs/promises'),packageRoot=join(newHome,'controlled-runtime'),dist=join(packageRoot,'dist')
+ await fs.mkdir(dist,{recursive:true})
+ const built=await Bun.build({entrypoints:[resolve('packages/cli/src/index.ts'),resolve('packages/cli/src/run-wrapper.ts')],outdir:dist,target:'node',naming:'[name].js'});expect(built.success).toBe(true)
+ await fs.writeFile(join(packageRoot,'package.json'),JSON.stringify({name:'@vegastack/vegafactory',version:'0.18.0',type:'module'}))
+ const files:Array<{path:string;mode:number;sha256:string}>=[]
+ const inventory=async(path:string,prefix:string)=>{for(const row of await fs.readdir(path,{withFileTypes:true})){if(row.isDirectory())await inventory(join(path,row.name),prefix+row.name+'/');else files.push({path:prefix+row.name,mode:(await fs.stat(join(path,row.name))).mode&0o777,sha256:owner.sha256(await fs.readFile(join(path,row.name),'utf8'))})}}
+ await inventory(packageRoot,'');files.sort((a,b)=>a.path<b.path?-1:a.path>b.path?1:0)
+ const binding:import('../src/runs.ts').InstalledRuntimeBinding={schemaVersion:1,sourceSha:f.sourceHead,treeSha:f.checkpoint.treeSha,packageName:'@vegastack/vegafactory',version:'0.18.0',tarballSha256:'e'.repeat(64),inventoryDigest:owner.sha256(JSON.stringify(files))}
+ await runtime.verifyInstalledRuntimeBinding(binding,packageRoot,join(dist,'index.js'))
+ const localToken=randomUUID(),receiving=await runtime.createVerifiedReceivingRun(request,{verifyRecovery:async value=>{
+  const fresh=await dispatch.inspectReceivingRecovery(value,expected,config,f.transport)
+  await runtime.verifyInstalledRuntimeBinding(binding,packageRoot,join(dist,'index.js'))
+  return{action:'resume-task',reason:'controlled source/constructor proof',original:{stateCommit:fresh.original.stateCommit,task:fresh.original.task},current:fresh.current,handoff:fresh.handoff,artifacts:fresh.original.artifacts,authorityRequest:fresh.original.authorityRequest,taskIds:fresh.taskIds,sourceRefs:fresh.original.sourceRefs,receiver:{machine:{id:f.machine.id,installationId:f.machine.installationId,sessionId:moved.claim.sessionId,hostBindingDigest:f.machine.hostBindingDigest},claimToken:localToken,policyDigest:f.machine.policyDigest,runtimeBinding:binding,configurationDigest:'e'.repeat(64),worktreeDigest:await runtime.worktreeFingerprint(f.tree)}}
+ }})
+ expect(receiving.remoteRecovery?.originalTask.bytes).toBe(owner.canonical(inspected.task));expect(receiving.activeElapsedMs).toBeNull();expect(runtime.runReportingHold(receiving)).toBe('original-reporting-context-unavailable')
+ const retained=material.original.task.recovery!.completed[0]!,payload=material.original.evidence.find(row=>owner.canonical(row.ref)===owner.canonical(retained.acceptance.evidence))!.payload
+ if(payload?.kind!=='acceptance')throw Error('original task completion missing')
+ expect(await dispatch.verifyRetainedTaskCompletion(receiving,payload,retained.acceptance.evidence,f.target,config,f.gh)).toBe(true)
+ await expect(dispatch.verifyRetainedTaskCompletion(receiving,{...payload,sourceSha:'f'.repeat(40)},retained.acceptance.evidence,f.target,config,f.gh)).rejects.toThrow('evidence differs')
+ await expect(dispatch.inspectReceivingRecovery(request,{...expected,ownerToken:randomUUID()},config,f.transport)).rejects.toThrow('historical handoff')
+ const started=await owner.transitionSharedTask({claim:moved.claim,operationId:randomUUID(),transition:{kind:'start'}});expect(started.kind).toBe('owned')
+ await expect(dispatch.inspectReceivingRecovery(request,expected,config,f.transport)).rejects.toThrow('current standalone owner')
+},60000)

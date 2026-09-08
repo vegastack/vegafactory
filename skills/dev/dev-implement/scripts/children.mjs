@@ -462,3 +462,18 @@ if (invokedDirectly) {
   }
   process.exit(exitCode);
 }
+
+// Public projection is data only. The CLI emits it after review, accepted join
+// and immutable scope readback/linking; this parser grants no execution.
+export function validateAcceptedDeliveries(rows, expected) {
+  const keys=(value,names)=>value&&typeof value==='object'&&!Array.isArray(value)&&Object.keys(value).length===names.length&&names.every(key=>Object.hasOwn(value,key));
+  if(!Array.isArray(rows)||!rows.length)return {ok:false,reason:'implemented task delivery rows unavailable'};
+  const seen=new Set();
+  for(const row of rows){
+    if(!keys(row,['taskRef','scopeDigest','childHead','parentRepo','parentIssue','parentHead','acceptance'])||!keys(row.taskRef,['repo','issue','taskId'])||row.acceptance!=='implemented'||!/^[a-f0-9]{64}$/.test(row.scopeDigest)||!['childHead','parentHead'].every(key=>/^[a-f0-9]{40}$/.test(row[key])))return {ok:false,reason:'invalid accepted delivery projection'};
+    const ref=row.taskRef;
+    if(ref.repo!==expected.repo||ref.issue!==expected.issue||!expected.approvedTaskIds.includes(ref.taskId)||seen.has(ref.taskId)||row.scopeDigest!==expected.scopeDigest||row.childHead!==expected.childHead||row.parentRepo!==expected.parentRepo||row.parentIssue!==expected.parentIssue||row.parentHead!==expected.parentHead)return {ok:false,reason:'accepted delivery source or task differs'};
+    seen.add(ref.taskId);
+  }
+  return {ok:true,reason:'exact accepted task projection'};
+}
