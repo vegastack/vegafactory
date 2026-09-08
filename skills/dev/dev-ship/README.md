@@ -23,8 +23,8 @@ npx @vegastack/vegafactory skills add --group dev --global
 | Path | Purpose |
 |---|---|
 | [SKILL.md](SKILL.md) | Agent entry point: the gates, PR and merge mechanics, decision recording, failure handling |
-| [scripts/ship-gate.mjs](scripts/ship-gate.mjs) | The Gate 1 deterministic guard (fresh check re-run, sha equality, changelog/chronicle, verdicts, tag grep) |
 | scripts/lib/approval.mjs (installed copy) | Canonical dev-implement strict JSON and ArtifactRef/scope parser; no second approval interpretation |
+| [scripts/ship-gate.mjs](scripts/ship-gate.mjs) | The Gate 1 deterministic guard (fresh check re-run, sha equality, changelog/chronicle, verdicts, tag grep) |
 | references/conventions.md (installed copy) | The workflow artifact spec, duplicated into every dev-family install |
 | [agents/openai.yaml](agents/openai.yaml) | Codex interface metadata |
 | [references/runbook.md](references/runbook.md) | Runbook execution semantics (auto/ask/guard), release batching, direct-to-main, bot PRs, rollback |
