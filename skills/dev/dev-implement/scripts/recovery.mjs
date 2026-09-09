@@ -86,6 +86,47 @@ export function evaluateSharedRecovery({task,stopProof,checkpoint,targetMachine,
   if (recovery.joins?.some(row=>row.state!=='accepted')) return wait('parent child integration unresolved');
   return {action:targetMachine.machineId===task.machineId&&targetMachine.installationId===task.installationId&&targetMachine.sessionId===task.sessionId?'resume-original':'transfer',reason:'verified-recovery-predicates'};
 }
+const stoppedGroupBinding = task => ({taskKey:task.taskKey,runId:task.runId,generation:task.generation,ownerToken:task.ownerToken,machineId:task.machineId,installationId:task.installationId,sessionId:task.sessionId});
+const stoppedGroupCandidate = task => ({host:task.host,repo:task.repo,issue:task.issue,repositoryNodeId:task.repositoryNodeId,issueNodeId:task.issueNodeId,scopeDigest:task.scopeDigest,approvalDigest:task.approvalDigest,approvalBindings:task.approvalBindings,runId:task.runId,stage:task.stage,paths:task.paths,resources:task.resources,independent:task.independent,parentTaskKey:task.parentTaskKey,parentBinding:task.parentBinding??null,approvedTaskIds:task.approvedTaskIds});
+export function evaluateStoppedGroupRecovery(input) {
+  const refuse=reason=>({action:'refuse',reason,request:null}),wait=reason=>({action:'wait',reason,request:null});
+  if(!input||typeof input!=='object'||Array.isArray(input))return refuse('stopped group recovery input unavailable');
+  const {operationId,expectedHead,parentTaskKey,groupPlan,groupsDigest,approvedGroups,members}=input;
+  if(!/^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/i.test(operationId)||!sha.test(expectedHead)||!digest.test(parentTaskKey)||!digest.test(groupsDigest)||groupPlan?.kind!=='plan'||!digest.test(groupPlan.digest))return refuse('stopped group recovery identity unavailable');
+  if(!Array.isArray(approvedGroups)||!approvedGroups.length||!Array.isArray(members)||members.length!==approvedGroups.length+1)return refuse('complete approved stopped group required');
+  if(hash(canonicalRecovery(approvedGroups))!==groupsDigest)return refuse('stopped group digest differs from approved groups');
+  const expectedChildren=approvedGroups.map(group=>({issue:Number(/^#([1-9]\d*)$/.exec(group?.members?.length===1?group.members[0]:'')?.[1]),files:group?.files}));
+  if(expectedChildren.some(row=>!Number.isSafeInteger(row.issue)||row.issue<=0||!Array.isArray(row.files)||!row.files.length||!unique(row.files)))return refuse('approved stopped group declaration unavailable');
+  if(!unique(members.map(row=>row?.task?.taskKey))||!unique(members.map(row=>row?.task?.runId))||!unique(members.map(row=>row?.task?.issue)))return refuse('stopped group members must be unique');
+  const parent=members.find(row=>row?.task?.taskKey===parentTaskKey);
+  if(!parent||parent.task.parentTaskKey!==null||parent.task.parentBinding!=null)return refuse('one top-level stopped group parent required');
+  const childIssues=members.filter(row=>row!==parent).map(row=>row.task.issue).sort((a,b)=>a-b),approvedIssues=expectedChildren.map(row=>row.issue).sort((a,b)=>a-b);
+  if(!same(childIssues,approvedIssues))return refuse('stopped group omitted or added an approved child');
+  for(const row of members){
+    const task=row?.task,recovery=task?.recovery,verification=row?.verification;
+    if(!row||Object.keys(row).sort().join(',')!=='candidate,expected,stateCommit,task,verification')return refuse('unknown or missing stopped group member field');
+    if(!task||row.stateCommit!==expectedHead)return refuse('stopped group members do not share the expected head');
+    if(!['stopped','blocked'].includes(task.state)||!task.stopProof)return wait('every stopped group member needs verified stop evidence');
+    if(task.schemaVersion!==1&&task.schemaVersion!==2)return refuse('unsupported stopped group task schema');
+    if(!recovery||recovery.schemaVersion!==2)return refuse('unsupported stopped group recovery schema');
+    if(!same(row.expected,stoppedGroupBinding(task))||!same(row.candidate,stoppedGroupCandidate(task)))return refuse('stopped group owner or candidate changed');
+    if(task.taskKey!==recovery.taskKey||task.runId!==recovery.runId||task.generation!==recovery.generation||task.scopeDigest!==recovery.scopeDigest||task.approvalDigest!==recovery.approvalDigest||!same(task.approvalBindings,recovery.approvalBindings))return refuse('stopped group recovery identity differs');
+    const checkpoint=task.checkpoint,stop=task.stopProof;
+    if(!checkpoint||!same(checkpoint,recovery.checkpoint)||checkpoint.runId!==task.runId||checkpoint.repo!==task.repo||checkpoint.scopeDigest!==task.scopeDigest)return wait('exact stopped group checkpoint unavailable');
+    if(stop.machineId!==task.machineId||stop.installationId!==task.installationId||stop.sessionId!==task.sessionId||stop.generation!==task.generation||!stop.runIds?.includes(task.runId))return refuse('stopped group stop owner or generation differs');
+    if(task.parentTaskKey!==null){
+      if(task.parentTaskKey!==parentTaskKey||!same(task.parentBinding,stoppedGroupBinding(parent.task)))return refuse('stopped group child original parent differs');
+      const approved=expectedChildren.find(group=>group.issue===task.issue);
+      if(!approved||!same(task.paths,approved.files))return refuse('stopped group child scope differs from approved group');
+    }
+    const verified=['source','authority','checkpoint','stop','execution','effects','history','launch','check','join'];
+    if(!verification||Object.keys(verification).sort().join(',')!==[...verified].sort().join(',')||verified.some(key=>verification[key]!==true))return wait('complete stopped group verification unavailable');
+    if(recovery.remoteEffectCoverage?.kind==='unmanaged-possible'||[...(recovery.effects??[])].some(effect=>effect.kind!=='telemetry-push'&&!['acknowledged','cancelled-before-send'].includes(effect.state)))return wait('stopped group blocking effects unresolved');
+    if((recovery.joins??[]).some(join=>!['accepted','prepared'].includes(join.state)))return refuse('stopped group join history is not recoverable');
+  }
+  const request={schemaVersion:1,kind:'recover-stopped-group',operationId,expectedHead,parentTaskKey,groupPlan,groupsDigest,members:members.map(({expected,candidate})=>({expected:structuredClone(expected),candidate:structuredClone(candidate)})).sort((a,b)=>a.expected.taskKey.localeCompare(b.expected.taskKey))};
+  return {action:'recover-stopped-group',reason:'verified-complete-stopped-group',request};
+}
 // The provider reader is transport, not a cached approval verdict. Re-read old
 // authoritative comments too: cursor filtering alone misses edited old records.
 export async function readRecoverySources(packet,{readJson,operators,checkout,readCompletionEvidence,consolidatedRequest}) {

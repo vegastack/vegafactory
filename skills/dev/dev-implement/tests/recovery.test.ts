@@ -27,7 +27,7 @@ test('real completed commit is preserved when an interrupted subprocess resumes 
 })
 
 import {createHash} from 'node:crypto'
-import {readRecoverySources,evaluateSharedRecovery} from '../scripts/recovery.mjs'
+import {readRecoverySources,evaluateSharedRecovery,evaluateStoppedGroupRecovery} from '../scripts/recovery.mjs'
 import {scopeDigest} from '../scripts/lib/approval.mjs'
 function sourceFixture(){
  const cwd=mkdtempSync(join(tmpdir(),'vsk-recovery-source-'))
@@ -77,4 +77,40 @@ test('shared recovery preserves nonblocking telemetry but rejects identity, effe
  expect(evaluateSharedRecovery({...input,targetMachine:{...input.targetMachine,execution:{...execution,accountRef:'other'}}}).action).toBe('refuse')
  expect(evaluateSharedRecovery({...input,recovery:{...recovery,remoteEffectCoverage:{kind:'unmanaged-possible'}}}).action).toBe('wait')
  expect(evaluateSharedRecovery({...input,pendingEffects:[{kind:'handback',state:'ambiguous'}]}).action).toBe('wait')
+})
+
+test('complete verified stopped group yields one exact recovery request without mutating evidence',()=>{
+ const f=sourceFixture(),operationId='11111111-1111-4111-8111-111111111111',head=f.head,approvedGroups=[{id:'child',members:['#145'],files:['child.ts']}]
+ const groupsDigest=createHash('sha256').update(JSON.stringify(approvedGroups,(_key,item)=>item&&typeof item==='object'&&!Array.isArray(item)?Object.fromEntries(Object.entries(item).sort(([a],[b])=>a.localeCompare(b))):item)).digest('hex')
+ const groupPlan={repo:'o/r',issue:144,kind:'plan',artifactId:'plan144',rev:13,digest:'8'.repeat(64)}
+ const binding=(key:string,runId:string,generation=1)=>({taskKey:key,runId,generation,ownerToken:'22222222-2222-4222-8222-'+key.slice(0,12),machineId:'old',installationId:'33333333-3333-4333-8333-333333333333',sessionId:'44444444-4444-4444-8444-444444444444'})
+ const parent=binding('a'.repeat(64),'55555555-5555-4555-8555-555555555555'),child=binding('b'.repeat(64),'66666666-6666-4666-8666-666666666666')
+ const member=(expected:any,parentTaskKey:string|null)=>{const checkpoint={id:'checkpoint',repo:'o/r',runId:expected.runId,scopeDigest:'c'.repeat(64)};return({
+  stateCommit:head,expected,candidate:{host:'github.com',repo:'o/r',issue:parentTaskKey?145:144,repositoryNodeId:'R_repo',issueNodeId:parentTaskKey?'I_145':'I_144',scopeDigest:'c'.repeat(64),approvalDigest:'d'.repeat(64),approvalBindings:f.packet.approvalBindings,runId:expected.runId,stage:'implement',paths:[parentTaskKey?'child.ts':'parent.ts'],resources:[],independent:true,parentTaskKey,parentBinding:parentTaskKey?parent:null,approvedTaskIds:[parentTaskKey?'145-T1':'144-T1']},
+  task:{schemaVersion:1,state:'stopped',...expected,host:'github.com',repo:'o/r',issue:parentTaskKey?145:144,repositoryNodeId:'R_repo',issueNodeId:parentTaskKey?'I_145':'I_144',scopeDigest:'c'.repeat(64),approvalDigest:'d'.repeat(64),approvalBindings:f.packet.approvalBindings,stage:'implement',paths:[parentTaskKey?'child.ts':'parent.ts'],resources:[],independent:true,parentTaskKey,parentBinding:parentTaskKey?parent:null,approvedTaskIds:[parentTaskKey?'145-T1':'144-T1'],checkpoint,stopProof:{machineId:expected.machineId,installationId:expected.installationId,sessionId:expected.sessionId,generation:expected.generation,runIds:[expected.runId]},unresolvedEffects:[],recovery:{schemaVersion:2,taskKey:expected.taskKey,runId:expected.runId,generation:expected.generation,scopeDigest:'c'.repeat(64),approvalDigest:'d'.repeat(64),approvalBindings:f.packet.approvalBindings,checkpoint,execution:{id:'qualified'},remoteEffectCoverage:{kind:'qualified-managed-only'},effects:[],completed:[],joins:[]},acceptedScopes:[]},
+  verification:{source:true,authority:true,checkpoint:true,stop:true,execution:true,effects:true,history:true,launch:true,check:true,join:true},
+ })}
+ const input={operationId,expectedHead:head,parentTaskKey:parent.taskKey,groupPlan,groupsDigest,approvedGroups,members:[member(parent,null),member(child,parent.taskKey)]}
+ const before=JSON.stringify(input),decision=evaluateStoppedGroupRecovery(input)
+ expect(decision).toEqual({action:'recover-stopped-group',reason:'verified-complete-stopped-group',request:{schemaVersion:1,kind:'recover-stopped-group',operationId,expectedHead:head,parentTaskKey:parent.taskKey,groupPlan,groupsDigest,members:input.members.map(({expected,candidate})=>({expected,candidate}))}})
+ expect(JSON.stringify(input)).toBe(before)
+ const cases:Array<[string,(value:any)=>void,'wait'|'refuse']>=[
+  ['live member',value=>{value.members[1].task.state='running'},'wait'],
+  ['missing member',value=>{value.members.pop()},'refuse'],
+  ['duplicate member',value=>{value.members.push(structuredClone(value.members[1]))},'refuse'],
+  ['wrong shared head',value=>{value.members[1].stateCommit='f'.repeat(40)},'refuse'],
+  ['wrong group digest',value=>{value.groupsDigest='0'.repeat(64)},'refuse'],
+  ['unknown original launch context',value=>{value.members[1].verification.launch=false},'wait'],
+  ['changed child candidate',value=>{value.members[1].candidate.paths=['other.ts']},'refuse'],
+  ['changed canonical authority',value=>{value.members[1].task.recovery.approvalBindings=[]},'refuse'],
+  ['changed checkpoint',value=>{value.members[1].task.recovery.checkpoint={id:'other',runId:value.members[1].task.runId}},'wait'],
+  ['unsupported task version',value=>{value.members[1].task.schemaVersion=3},'refuse'],
+  ['unsupported recovery version',value=>{value.members[1].task.recovery.schemaVersion=1},'refuse'],
+  ['unresolved non-telemetry effect',value=>{value.members[1].task.recovery.effects=[{kind:'handback',state:'ambiguous'}]},'wait'],
+ ]
+ for(const [name,mutate,action] of cases){
+  const value=structuredClone(input);mutate(value);const snapshot=JSON.stringify(value)
+  expect(evaluateStoppedGroupRecovery(value).action,name).toBe(action)
+  expect(JSON.stringify(value),name+' mutation').toBe(snapshot)
+ }
 })
