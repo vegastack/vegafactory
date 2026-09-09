@@ -549,19 +549,12 @@ describe('parentParallelLaunch', () => {
   })
 })
 
-describe('the Codex child launch and the launch table cannot drift', () => {
-  test('one child argv is the table argv with -C pointed at the child worktree', async () => {
+describe('the retired Codex child launcher cannot become an alternate execution owner', () => {
+  test('the compatibility export refuses and names the shared CLI gateway', async () => {
     const { codexChildLaunch } = await import('../../../skills/dev/dev-implement/scripts/children.mjs')
-    const child = { path: '/r/.vegastack/.worktrees/131-x', branch: 'feat/131-x', baseSha: 'abc1234', issue: 131, title: 'x', files: ['a.ts'] }
-    const launch = codexChildLaunch(child, { model: 'gpt-5.6', effort: 'high', parentIssue: 104, parentBranch: 'feat/104-p' })
-    const table = buildLaunchPlan({
-      harness: 'codex', model: 'gpt-5.6', effort: 'high', stage: 'implement', worktree: child.path,
-      issue: { number: 131, title: 'x' }, operator: 'kmanojkumar', outcome: 'x', stopList: [],
-      resume: false, skillPath: null, subagents: { spawnDepth: 2, concurrent: 4 },
-    })
-    expect(launch.command).toBe(table.command)
-    expect(launch.args.map(a => (a === launch.prompt ? '<prompt>' : a)))
-      .toEqual(table.args.map(a => (a === table.prompt ? '<prompt>' : a)))
+    expect(() => codexChildLaunch()).toThrow(
+      'legacy argv launch is unavailable; use vegafactory children run',
+    )
   })
 })
 
