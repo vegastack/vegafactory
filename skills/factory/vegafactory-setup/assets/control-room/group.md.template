@@ -11,6 +11,7 @@ gates: 3                    # 3 = approve/PR/merge · 2 = approve + one "ship it
 merge: rebase               # rebase | squash | merge
 branch: <type>/<slug>       # type: feat | fix | docs | chore | refactor
 labels: needs-operator needs-plan ready working for-operator risky research quick-build full-plan epic
+workflow-labels: {"needsOperator":"needs-operator","needsPlan":"needs-plan","ready":"ready","working":"working","forOperator":"for-operator"}   # custom names need explicit mapping; if labels: remains, both must agree
 tests: required             # required | best-effort | none
 ui-evidence: playwright     # playwright | none
 worktree-retention: 14d     # how long a parked worktree survives with no session

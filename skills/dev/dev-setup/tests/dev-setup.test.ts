@@ -30,7 +30,8 @@ describe('dev-setup contract', () => {
     const skill = readFileSync(join(skillRoot, 'SKILL.md'), 'utf8')
     const roundC = skill.split('**Round C')[1].split('\n## ')[0]
     expect(roundC).toContain('assets/factory-board.yml.template')
-    expect(roundC).toContain('{{state-labels}}')
+    expect(roundC).toContain('{{product-revision}}')
+    expect(roundC).toContain('packaged compiler resolves JSON event labels')
     expect(roundC).toContain('cosmetic until the next label change')
   })
 
@@ -204,8 +205,10 @@ describe('dev-setup contract', () => {
     const skill = readFileSync(join(skillRoot, 'SKILL.md'), 'utf8')
     const roundC = skill.split('**Round C')[1].split('## Step 3')[0]
     expect(roundC).toContain('Hooks package')
-    for (const phrase of ['ship guard', 'SessionStart context', 'Stop heartbeat', 'decision nudge']) expect(roundC).toContain(phrase)
-    expect(roundC).toContain('merging into existing hook config')
+    for (const phrase of ['ship guard', 'SessionStart context', 'Stop heartbeat', 'legacy decision hook']) expect(roundC).toContain(phrase)
+    expect(roundC).toContain('the same nonblocking flush')
+    expect(roundC).toContain('Directional choices stay session proposals')
+    expect(roundC).toContain('Deduplicate both config layers while preserving user hooks')
     const step3 = skill.split('## Step 3 — Write')[1].split('## Step 4')[0]
     expect(step3).toContain('.vegastack/hooks/')
     expect(step3).toContain('<repo>/.codex/hooks.json')

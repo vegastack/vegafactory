@@ -575,7 +575,7 @@ export function parseControlRoomReference(text) {
 }
 
 function gitRead(cwd, args) {
-  return execFileSync('git', args, { cwd, encoding: 'utf8', stdio: 'pipe', timeout: 5000, maxBuffer: 4 * 1024 * 1024 })
+  return execFileSync('git', args, { cwd, encoding: 'utf8', stdio: 'pipe', timeout: 5000, maxBuffer: 4 * 1024 * 1024, env: { ...process.env } })
 }
 
 // Git batch output is byte framed, not line-oriented policy text. Keep the existing
@@ -585,6 +585,7 @@ function gitReadBlobs(cwd, oids) {
   const output = execFileSync('git', ['cat-file', '--batch'], {
     cwd, input: oids.join('\n') + '\n', stdio: 'pipe', timeout: 5000,
     maxBuffer: Math.min(oids.length * (blobLimit + 64), aggregateLimit + oids.length * 64),
+    env: { ...process.env },
   })
   const blobs = new Map()
   let offset = 0, total = 0
