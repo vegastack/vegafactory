@@ -1266,7 +1266,7 @@ export async function runTick(
   const now = deps?.now ?? (() => new Date())
   const shipGuard = deps?.shipGuard ?? shipGuardWired
   const suppliedExecutor=!!(deps?.execute||deps?.executeShared)
-  if (config.executionMode === 'shared') deps = { ...sharedRunAdapters(config,deps?.processDeps), ...deps }
+  if (config.executionMode === 'shared') deps = { ...sharedRunAdapters(config,deps?.processDeps,gh), ...deps }
   if(!options.dryRun) { const {readRuns}=await import('./runs.ts');const {flushRunCheckpoint}=await import('./checkpoints.ts');for(const record of await readRuns(runsRoot(config.home))){if(record.checkpointIntent)try{await flushRunCheckpoint(record,config)}catch{/* Preserve current local source and its durable pending intent. */}if(record.handbackIntent)try{await flushRunHandback(record,config)}catch{/* The stable pending marker remains private and retryable. */}} }
 
   const ensure = deps?.ensureWorktree ?? defaultEnsureWorktree
@@ -1564,6 +1564,7 @@ export async function runTick(
           const owner = await import(pathToFileURL(script).href)
           const fresh = await owner.gatherAndEvaluate({ repo: entry.repo, issue: String(run.issue), stage: run.stage === 'plan' ? 'plan' : 'implement', expect: run.stage === 'plan' ? 'needs-plan' : run.stage === 'corrections' ? 'for-operator' : 'ready' }, { readJson: (args: string[]) => ghJsonVia(gh, args, budget), devMd, configuredPolicy: loadConfiguredPolicy({ home: config.home, repo: entry.repo, devMd, settingsPath, now: now().toISOString() }) })
           if (fresh.blocks.length || canonicalWire(fresh.approvalBindings) !== canonicalWire(admission.approvalBindings) || canonicalWire(fresh.bindings) !== canonicalWire(admission.bindings)||canonicalWire(fresh.recordBinding??null)!==canonicalWire(admission.recordBinding??null)) throw new Error('approval changed after shared acquisition')
+          await verifyFleetCandidate(await readRun(runsRoot(config.home),sharedClaim.runId),input.candidate,gh)
           if (!active(run.issue)) throw new Error('shared launch cancelled before durable preparation')
           await deps!.persistSharedRun!(sharedClaim, run, launch)
           const preparedRun=!suppliedExecutor?await readRun(runsRoot(config.home),sharedClaim.runId):null
@@ -1874,7 +1875,40 @@ const sharedRunContexts=new WeakMap<import('./shared-claims.ts').CoordinationTar
 const sharedTaskContexts=new WeakMap<import('./shared-claims.ts').CoordinationTarget,import('./shared-claims.ts').TaskRecord>()
 const sharedContinuationContexts=new WeakMap<import('./shared-claims.ts').CoordinationTarget,{runId:string;attemptId:string;checkpoint:NonNullable<RunRecord['checkpoint']>;scopeDigest:string;approvalBindings:RunRecord['approvalBindings']}>()
 const sharedMachineContexts=new WeakMap<import('./shared-claims.ts').CoordinationTarget,EffectiveMachine>()
-export async function verifiedSharedTarget(repo:string,config:FactoryConfig,runId?:string):Promise<import('./shared-claims.ts').CoordinationTarget>{
+export type FleetParallelProjection={eligible:boolean;independent:boolean;taskIds:string[];paths:string[];resources:string[];reason:string|null}
+const exclusiveFleet=(reason:string):FleetParallelProjection=>({eligible:false,independent:false,taskIds:[],paths:[],resources:[],reason})
+export async function fleetParallelProjection(record:Pick<RunRecord,'repo'|'approvalRefs'|'approvedTaskIds'>,gh:TickDeps['gh']=ghText):Promise<FleetParallelProjection>{
+  try{
+    const plans=record.approvalRefs.filter(ref=>ref.kind==='plan')
+    if(plans.length!==1||!record.approvedTaskIds?.length)return exclusiveFleet('exact approved plan/task selection unavailable')
+    const plan=plans[0]!,comments=await fetchGhPages<{node_id?:string;body?:string}>(gh,`repos/${plan.repo}/issues/${plan.issue}/comments`,readBudget())
+    if(!comments.complete)return exclusiveFleet('complete current plan history unavailable')
+    const candidates=comments.items.filter(row=>row.node_id===plan.artifactId&&typeof row.body==='string').map(row=>row.body!)
+    const bodies=[...new Set(candidates)]
+    if(bodies.length!==1)return exclusiveFleet('canonical current plan unavailable')
+    const preflight=process.env.VSK_PREFLIGHT_SCRIPT||join(dirname(dirname(fileURLToPath(import.meta.url))),'skill','dev-implement','scripts','preflight.mjs')
+    const tools=await(await import('./runs.ts')).approvalTools({preflightScript:preflight})
+    if(tools.approval.scopeDigest(bodies[0],'plan')!==plan.digest)return exclusiveFleet('canonical current plan digest changed')
+    const parserPath=process.env.VSK_PLAN_LINT_SCRIPT||join(dirname(dirname(dirname(preflight))),'dev-plan','scripts','plan-lint.mjs')
+    const parser=await import(pathToFileURL(parserPath).href)
+    const projected=parser.parseFleetParallelDeclaration(bodies[0],record.approvedTaskIds) as FleetParallelProjection
+    if(!projected||typeof projected!=='object'||typeof projected.independent!=='boolean'||!Array.isArray(projected.taskIds)||!Array.isArray(projected.paths)||!Array.isArray(projected.resources))return exclusiveFleet('canonical fleet projection unavailable')
+    return projected
+  }catch(error){return exclusiveFleet((error as Error).message||'canonical fleet projection unavailable')}
+}
+async function verifyFleetCandidate(record:RunRecord,candidate:VerifiedCandidate,gh:TickDeps['gh']):Promise<void>{
+  if(record.parent!==null)return
+  const projected=await fleetParallelProjection(record,gh)
+  if(projected.independent&&canonicalWire(projected.taskIds)!==canonicalWire(record.approvedTaskIds))throw Error('fleet task selection differs')
+  const expected=projected.independent?{paths:projected.paths,resources:projected.resources,independent:true}:{paths:[],resources:[],independent:false}
+  if(canonicalWire({paths:candidate.paths,resources:candidate.resources,independent:candidate.independent})!==canonicalWire(expected))throw Error('fresh fleet parallel projection differs')
+}
+export interface SharedIdentitySources{
+  readHostBinding?:()=>Promise<{digest:string;platform:'darwin'|'linux'}>
+  readBootIdentityDigest?:()=>Promise<string>
+  processIdentity?:()=>Promise<import('./claims.ts').ProcessIdentity>
+}
+export async function verifiedSharedTarget(repo:string,config:FactoryConfig,runId?:string,gh:TickDeps['gh']=ghText,identitySources:SharedIdentitySources={}):Promise<import('./shared-claims.ts').CoordinationTarget>{
   const {resolveMachinePolicy}=await import('../../../skills/dev/dev-setup/scripts/effective-policy.mjs')
   const {readHostBinding}=await import('./machine-identity.ts')
   const {githubCoordinationProvider}=await import('./shared-claims.ts')
@@ -1886,12 +1920,12 @@ export async function verifiedSharedTarget(repo:string,config:FactoryConfig,runI
   const settings=await readSettingsFile(settingsPath)
   const bootstrap=settings.settings.machine as {id?:string;installationId?:string;group?:string}|undefined
   if(!bootstrap)throw Error('machine registration unavailable')
-  const login=JSON.parse(await ghText(['api','user'],{timeoutMs:10_000})) as {login:string}
-  const host=await readHostBinding()
+  const login=JSON.parse(await gh(['api','user'],{timeoutMs:10_000})) as {login:string}
+  const host=await (identitySources.readHostBinding??readHostBinding)()
   const resolution=resolveMachinePolicy({policy:policy.policy,machineId:bootstrap.id,installationId:bootstrap.installationId,hostBindingDigest:host.digest,executionLogin:login.login})
   if(!resolution.ok||!resolution.machine?.allowedRepositories.includes(repo)||resolution.machine.group!==bootstrap.group)throw Error('machine identity or repository scope refused')
   const machine=resolution.machine as EffectiveMachine
-  const target:import('./shared-claims.ts').CoordinationTarget={host:'github.com',...machine.coordination,localRoot:join(config.home,'.vegastack','coordination'),provider:githubCoordinationProvider(),
+  const target:import('./shared-claims.ts').CoordinationTarget={host:'github.com',...machine.coordination,localRoot:join(config.home,'.vegastack','coordination'),provider:githubCoordinationProvider(gh),
     verifyCandidate:async(candidate,current,session)=>{
       if(current.id!==machine.id||current.policyDigest!==machine.policyDigest||session.hostBindingDigest!==host.digest||candidate.repo!==repo||candidate.repositoryNodeId!==machine.repositoryIds[repo])throw Error('shared candidate identity mismatch')
       sharedRunContexts.set(target,candidate.runId)
@@ -1899,8 +1933,9 @@ export async function verifiedSharedTarget(repo:string,config:FactoryConfig,runI
       const continuation=sharedContinuationContexts.get(target),runtime=await import('./runs.ts')
       const continuing=continuation&&continuation.runId===record.runId&&continuation.attemptId===(record.attemptId??record.runId)&&continuation.scopeDigest===record.taskKey.scopeDigest&&canonicalWire(continuation.approvalBindings)===canonicalWire(record.approvalBindings)&&canonicalWire(continuation.checkpoint)===canonicalWire(record.checkpoint)&&['terminal','interrupted'].includes(record.state)&&await runtime.verifyLocalRunStopped(record)
       if(!record.execution||(!continuing&&(record.state!=='prepared'||record.pid!==null||existsSync(runtime.runAttemptDirectory(runsRoot(config.home),record))))||canonicalWire(record.approvalBindings)!==canonicalWire(candidate.approvalBindings)||record.taskKey.scopeDigest!==candidate.scopeDigest)throw Error('shared prepared candidate differs')
-      if(canonicalWire(await processIdentity())!==canonicalWire(session.identity))throw Error('shared session process identity differs')
-      await(await import('./runs.ts')).verifyRunAuthority(record,config,'launch')
+      if(canonicalWire(await (identitySources.processIdentity??processIdentity)())!==canonicalWire(session.identity))throw Error('shared session process identity differs')
+      await(await import('./runs.ts')).verifyRunAuthority(record,config,'launch',{gh})
+      await verifyFleetCandidate(record,candidate,gh)
       await (await import('./shared-claims.ts')).resolveEvidence(target,record.execution.qualification)
     },
     verifyChildRelationship: input => import('./children.ts').then(owner => owner.verifyChildRelationship(input,config)),
@@ -1916,12 +1951,12 @@ export async function verifiedSharedTarget(repo:string,config:FactoryConfig,runI
       if(transition.kind!=='handoff'&&(task.machineId!==machine.id||task.installationId!==machine.installationId||run.machine?.sessionId!==task.sessionId))throw Error('shared transition owner mismatch')
       sharedRunContexts.set(target,run.runId);sharedTaskContexts.set(target,task)
       sharedAuthorityContexts.delete(target)
-      await helpers.verifyRunAuthority(run,config)
+      await helpers.verifyRunAuthority(run,config,'effect',{gh})
       sharedAuthorityContexts.set(target,canonicalWire({runId:run.runId,bindings:run.approvalBindings,recordBinding:run.recordBinding}))
       if(transition.kind==='receipt'){
         if(transition.payload.kind==='acceptance'&&await verifyTaskCheckpointEvidence(run,transition.payload,config)){}
         else if(transition.payload.kind==='acceptance'||transition.payload.kind==='join')await(await import('./children.ts')).verifyChildrenEvidence({run,task,payload:transition.payload,publishing:true},config)
-        else await helpers.verifyRunEvidencePayload(null,transition.payload,{run,task,publishing:true,verifyAuthority:()=>helpers.verifyRunAuthority(run,config),stopped:()=>helpers.verifyLocalRunStopped(run)})
+        else await helpers.verifyRunEvidencePayload(null,transition.payload,{run,task,publishing:true,verifyAuthority:()=>helpers.verifyRunAuthority(run,config,'effect',{gh}),stopped:()=>helpers.verifyLocalRunStopped(run)})
       }
       if(transition.kind==='start'&&(run.state!=='prepared'||!run.execution||!run.runtimeBinding))throw Error('shared durable preparation unavailable')
       if((transition.kind==='stop'||transition.kind==='complete'||transition.kind==='handoff'||transition.kind==='block')&&transition.stopProof)await helpers.verifySharedStopProof(transition.stopProof,task,target,run)
@@ -1946,30 +1981,31 @@ export async function verifiedSharedTarget(repo:string,config:FactoryConfig,runI
       const run=await helpers.readRun(runsRoot(config.home),runId)
       if(payload?.kind==='acceptance'&&(await verifyTaskCheckpointEvidence(run,payload,config)||await verifyRetainedTaskCompletion(run,payload,ref,target,config))){}
       else if(payload?.kind==='acceptance'||payload?.kind==='join')await(await import('./children.ts')).verifyChildrenEvidence({run,task,payload,publishing:false,ref},config)
-      else await helpers.verifyRunEvidencePayload(ref,payload,{run,task,verifyAuthority:async()=>{if(sharedAuthorityContexts.get(target)!==canonicalWire({runId:run.runId,bindings:run.approvalBindings,recordBinding:run.recordBinding}))await helpers.verifyRunAuthority(run,config)},stopped:()=>helpers.verifyLocalRunStopped(run)})
+      else await helpers.verifyRunEvidencePayload(ref,payload,{run,task,verifyAuthority:async()=>{if(sharedAuthorityContexts.get(target)!==canonicalWire({runId:run.runId,bindings:run.approvalBindings,recordBinding:run.recordBinding}))await helpers.verifyRunAuthority(run,config,'effect',{gh})},stopped:()=>helpers.verifyLocalRunStopped(run)})
     },
   }
   sharedMachineContexts.set(target,machine)
   if(runId)sharedRunContexts.set(target,runId)
   return target
 }
-export function sharedRunAdapters(config:FactoryConfig,processDeps?:Pick<ExecuteDeps,'wrapperPath'>):Pick<TickDeps,'sharedAdmission'|'persistSharedRun'|'executeShared'|'finishSharedRun'>{
+export function sharedRunAdapters(config:FactoryConfig,processDeps?:Pick<ExecuteDeps,'wrapperPath'>,gh:TickDeps['gh']=ghText,identitySources:SharedIdentitySources={}):Pick<TickDeps,'sharedAdmission'|'persistSharedRun'|'executeShared'|'finishSharedRun'>{
   return{
     sharedAdmission:async input=>{
-      const target=await verifiedSharedTarget(input.entry.repo,config)
+      const target=await verifiedSharedTarget(input.entry.repo,config,undefined,gh,identitySources)
       const helpers=await import('./runs.ts')
       const coordination=await import('./shared-claims.ts'),{readRuns}=await import('./runs.ts'),{readBootIdentityDigest}=await import('./machine-identity.ts')
       const stage=stagePolicy(input.policy,input.run.stage),machine=sharedMachineContexts.get(target)!
       const records=(await readRuns(runsRoot(config.home))).filter(r=>r.repo===input.run.repo&&r.issue===input.run.issue&&r.state==='prepared'&&!r.remoteRecovery&&!r.continuations?.length&&r.execution&&r.harness===stage.harness&&r.model===stage.model&&r.effort===stage.effort&&canonicalWire(r.approvalBindings.map(a=>({approvalId:a.approvalId,commentId:Number(a.source.commentId),bodySha256:a.source.bodySha256})))===canonicalWire(input.approvalBindings)&&canonicalWire(r.recordBinding?{approvalId:r.recordBinding.approvalId,commentId:Number(r.recordBinding.source.commentId),bodySha256:r.recordBinding.source.bodySha256}:null)===canonicalWire(input.recordBinding??null)&&canonicalWire(r.approvalRefs)===canonicalWire(input.bindings))
       if(records.length!==1)throw Error('unique qualified subscription run preparation unavailable; shared acquisition deferred')
       const record=records[0]!,authorities=record.approvalBindings
-      await helpers.verifyRunAuthority(record,config,'launch')
+      await helpers.verifyRunAuthority(record,config,'launch',{gh})
       sharedRunContexts.set(target,record.runId)
       await coordination.resolveEvidence(target,record.execution!.qualification)
       if(!record.machine||record.machine.id!==machine.id||record.machine.installationId!==machine.installationId||record.machine.hostBindingDigest!==machine.hostBindingDigest)throw Error('prepared machine identity differs')
-      const subject=await boundedGhJson(ghText,['api',`repos/${input.run.repo}/issues/${input.run.issue}`],readBudget()) as {node_id:string}
-      const session:MachineSession={target,localRoot:target.localRoot,machineId:machine.id,installationId:machine.installationId,sessionId:record.machine.sessionId,hostBindingDigest:machine.hostBindingDigest,bootIdDigest:await readBootIdentityDigest(),identity:await processIdentity()}
-      const candidate:VerifiedCandidate={host:target.host,repo:record.repo,issue:record.issue,repositoryNodeId:machine.repositoryIds[record.repo]!,issueNodeId:subject.node_id,scopeDigest:record.taskKey.scopeDigest,approvalDigest:createHash('sha256').update(coordination.canonical(authorities)).digest('hex'),approvalBindings:authorities,runId:record.runId,stage:record.stage,paths:[],resources:[],independent:false,parentTaskKey:null,approvedTaskIds:record.approvedTaskIds??[record.taskKey.taskId]}
+      const subject=await boundedGhJson(gh,['api',`repos/${input.run.repo}/issues/${input.run.issue}`],readBudget()) as {node_id:string}
+      const session:MachineSession={target,localRoot:target.localRoot,machineId:machine.id,installationId:machine.installationId,sessionId:record.machine.sessionId,hostBindingDigest:machine.hostBindingDigest,bootIdDigest:await (identitySources.readBootIdentityDigest??readBootIdentityDigest)(),identity:await (identitySources.processIdentity??processIdentity)()}
+      const fleet=record.parent===null?await fleetParallelProjection(record,gh):exclusiveFleet('child scope is owned by the parent group')
+      const candidate:VerifiedCandidate={host:target.host,repo:record.repo,issue:record.issue,repositoryNodeId:machine.repositoryIds[record.repo]!,issueNodeId:subject.node_id,scopeDigest:record.taskKey.scopeDigest,approvalDigest:createHash('sha256').update(coordination.canonical(authorities)).digest('hex'),approvalBindings:authorities,runId:record.runId,stage:record.stage,paths:fleet.independent?fleet.paths:[],resources:fleet.independent?fleet.resources:[],independent:fleet.independent,parentTaskKey:null,approvedTaskIds:record.approvedTaskIds??[record.taskKey.taskId]}
       if(record.parent!==null){
         const parentRuns=(await helpers.readRuns(runsRoot(config.home))).filter(r=>r.repo===record.repo&&r.issue===record.parent&&r.parent===null&&r.state==='running')
         if(parentRuns.length!==1)throw Error('unique original parent run unavailable')
@@ -2030,7 +2066,7 @@ export async function prepareDispatchRun(input:{run:PlannedRun;plan:LaunchPlan;c
   const seeds=(await helpers.readQualifiedExecutions(root)).filter(r=>r.execution&&r.runtimeBinding&&r.configurationDigest&&r.execution.harness===stage.harness&&r.execution.model===stage.model&&r.execution.effort===stage.effort&&r.execution.accountRef===subscription.accountRef&&r.execution.harnessVersion===metadata.version)
   let seed:import('./runs.ts').QualifiedExecutionRecord|undefined,coverage:import('./shared-claims.ts').RecoveryEnvelope['remoteEffectCoverage']={kind:'unmanaged-possible',reasonCode:'execution-coverage-unqualified'}
   for(const candidate of seeds){
-    try{await helpers.verifyInstalledRuntimeBinding(candidate.runtimeBinding!,dirname(dirname(fileURLToPath(import.meta.url))),fileURLToPath(import.meta.url));if(await helpers.executionConfigurationDigest({binding:candidate.runtimeBinding!,execution:candidate.execution!,plan,metadata})!==candidate.configurationDigest)continue;const target=await verifiedSharedTarget(run.repo,config);const reader={...target,verifyEvidence:async(ref:import('./shared-claims.ts').EvidenceRef,payload:import('./shared-claims.ts').RecoveryEvidencePayload|null)=>{if(owner.canonical(ref)!==owner.canonical(candidate.execution.qualification)||payload===null)throw Error('qualification reference differs');helpers.verifyExecutionQualification(payload,candidate.execution,candidate.runtimeBinding,candidate.configurationDigest)}};const evidence=await owner.resolveEvidence(reader,candidate.execution.qualification);if(evidence?.kind==='execution-qualification'&&evidence.result==='qualified')coverage={kind:'qualified-managed-only',qualification:candidate.execution.qualification};seed=candidate;break}catch{/* A stale/unqualified seed grants no execution. */}
+    try{await helpers.verifyInstalledRuntimeBinding(candidate.runtimeBinding!,dirname(dirname(fileURLToPath(import.meta.url))),fileURLToPath(import.meta.url));if(await helpers.executionConfigurationDigest({binding:candidate.runtimeBinding!,execution:candidate.execution!,plan,metadata})!==candidate.configurationDigest)continue;const target=await verifiedSharedTarget(run.repo,config,undefined,gh);const reader={...target,verifyEvidence:async(ref:import('./shared-claims.ts').EvidenceRef,payload:import('./shared-claims.ts').RecoveryEvidencePayload|null)=>{if(owner.canonical(ref)!==owner.canonical(candidate.execution.qualification)||payload===null)throw Error('qualification reference differs');helpers.verifyExecutionQualification(payload,candidate.execution,candidate.runtimeBinding,candidate.configurationDigest)}};const evidence=await owner.resolveEvidence(reader,candidate.execution.qualification);if(evidence?.kind==='execution-qualification'&&evidence.result==='qualified')coverage={kind:'qualified-managed-only',qualification:candidate.execution.qualification};seed=candidate;break}catch{/* A stale/unqualified seed grants no execution. */}
   }
   if(!seed)throw Error('matching qualified subscription/runtime evidence unavailable')
   const readJson=(args:string[])=>boundedGhJson(gh,args,readBudget())
@@ -2042,7 +2078,7 @@ export async function prepareDispatchRun(input:{run:PlannedRun;plan:LaunchPlan;c
   const branch=spawnSync('git',['symbolic-ref','--short','HEAD'],{cwd:plan.cwd,encoding:'utf8'}),head=spawnSync('git',['rev-parse','HEAD'],{cwd:plan.cwd,encoding:'utf8'})
   if(branch.status!==0||head.status!==0||!head.stdout.trim())throw Error('run source identity unavailable')
   const host=(await (await import('./machine-identity.ts')).readHostBinding()).digest
-  const target=await verifiedSharedTarget(run.repo,config),machine=sharedMachineContexts.get(target)!
+  const target=await verifiedSharedTarget(run.repo,config,undefined,gh),machine=sharedMachineContexts.get(target)!
   const selection=await helpers.approvedTaskSelection(input.bindings as import('./shared-claims.ts').ArtifactRef[],input.authorityReads,run.stage,{},input.authorityRequest?.kind==='consolidated'?input.authorityRequest.requested.taskIds:undefined)
   const runInput:RunInput={root,repo:run.repo,issue:run.issue,parent:input.parent?.run.issue??null,checkout:plan.cwd,branch:branch.stdout.trim(),baseSha:input.authorityRequest?.kind==='consolidated'?input.authorityRequest.requested.baseSha:head.stdout.trim(),headSha:head.stdout.trim(),stage:run.stage,harness:stage.harness,model:stage.model,effort:stage.effort,execution:seed.execution!,runtimeBinding:seed.runtimeBinding,configurationDigest:seed.configurationDigest,approvalBindings:authorities,recordBinding,approvalRefs:input.bindings as import('./shared-claims.ts').ArtifactRef[],policyDigest:policy.effective?.policyDigest??'',claimToken:input.claim.token,startedAt:new Date().toISOString(),taskKey:{repo:run.repo,issue:run.issue,taskId:selection.taskId,scopeDigest:selection.scopeDigest},approvedTaskIds:selection.approvedTaskIds,activeElapsedMs:null,taskOwner:null,agentAccountOwner:null,accountRef:subscription.accountRef,waitReason:null,hostBindingDigest:host,machine:{id:machine.id,installationId:machine.installationId,sessionId:input.parent?.run.machine?.id===machine.id?input.parent.run.machine.sessionId:dispatcherSessionId,hostBindingDigest:host},sharedClaim:null,checkpoint:null,remoteEffectCoverage:coverage,authorityRequest:input.authorityRequest??{kind:'native'},handbackIntent:{id:'run-handback',approvalBindings:authorities},dispatchRequest:{commentId:run.commentId,reactionId:run.reactionId}}
   {const intent=await(await import('./checkpoints.ts')).checkpointIntentFromApproval({...runInput,runId:runInput.runId??randomUUID(),schemaVersion:2,generation:1,state:'prepared',terminationCause:null,exitCode:null,pid:null,processStartId:null,processGroupId:null,processIdentity:null,finishedAt:null,pendingDelivery:[]} as RunRecord,config);if(intent)runInput.checkpointIntent=intent}

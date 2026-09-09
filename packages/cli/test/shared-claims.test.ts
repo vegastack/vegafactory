@@ -1,10 +1,11 @@
 import { test, expect } from 'bun:test';
 import { mkdtemp, readFile, writeFile, readdir } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
+import { pathToFileURL } from 'node:url';
 import { randomUUID } from 'node:crypto';
 import { processIdentity } from '../src/claims.ts';
-import { acquireSharedTask, transitionSharedTask, linkAcceptedScope, inspectHandoffCoordinationTask, inspectHistoricalCoordinationTask, inspectCoordinationTask, readCoordination, readSharedStatus, taskKey, parseRecoveryEnvelope, parseRecoveryPayload, publishRecoveryReceipt, resolveEvidence, beginManagedEffect, verifyManagedEffect, canonical, sha256, githubCoordinationProvider, type CoordinationTarget, type CoordinationProvider, type VerifiedCandidate, type EffectiveMachine, type MachineSession, type RecoveryEvidencePayload, type RecoveryEnvelope } from '../src/shared-claims.ts';
+import { acquireSharedTask, transitionSharedTask, recoverStoppedGroup, inspectGroupSuccession, linkAcceptedScope, inspectHandoffCoordinationTask, inspectHistoricalCoordinationTask, inspectCoordinationTask, readCoordination, readSharedStatus, taskKey, parseRecoveryEnvelope, parseRecoveryPayload, publishRecoveryReceipt, resolveEvidence, beginManagedEffect, verifyManagedEffect, canonical, sha256, githubCoordinationProvider, type CoordinationTarget, type CoordinationProvider, type VerifiedCandidate, type EffectiveMachine, type MachineSession, type GroupSuccessionRequest, type RecoveryEvidencePayload, type RecoveryEnvelope } from '../src/shared-claims.ts';
 const d = 'd'.repeat(64), root = '1'.repeat(40), installation = '11111111-1111-4111-8111-111111111111';
 async function fixture() {
     let head = root, version = 1, ambiguous = false, conflicts = 0, mutations = 0;
@@ -23,6 +24,10 @@ async function fixture() {
     const candidate: VerifiedCandidate = { host: 'github.com', repo: 'acme/app', issue: 137, repositoryNodeId: 'R_app', issueNodeId: 'I_137', scopeDigest: d, approvalDigest: d, approvalBindings: [{ approvalId: 'approved', source: { kind: 'github-comment', repositoryId: 'R_app', issueNodeId: 'I_parent', commentId: '123', bodySha256: d } }], runId: randomUUID(), stage: 'implement', paths: ['src/a'], resources: [], independent: true, parentTaskKey: null, approvedTaskIds: ['137-T1'] };
     return { target, machine, session, candidate, versions, get head() { return head; }, get mutations() { return mutations; }, setAmbiguous: () => { ambiguous = true; }, setConflicts: (n: number) => { conflicts = n; }, rewrite: () => { head = 'f'.repeat(40); } };
 }
+test('stopped-group succession exposes one atomic owner operation and its dedicated inspector', () => {
+    expect(typeof recoverStoppedGroup).toBe('function');
+    expect(typeof inspectGroupSuccession).toBe('function');
+});
 test('shared acquisition binds one task independent of scope/machine, receipts reconcile lost responses', async () => {
     const f = await fixture();
     f.setAmbiguous();
@@ -194,7 +199,8 @@ test('operation path injection refuses before local intent or remote mutation', 
 
 async function parentFixture() {
     const f = await fixture();
-    const parent = await acquireSharedTask({ ...f, candidate: { ...f.candidate, independent: false, paths: [] }, operationId: randomUUID() });
+    const parentCandidate = { ...f.candidate, independent: false, paths: [] };
+    const parent = await acquireSharedTask({ ...f, candidate: parentCandidate, operationId: randomUUID() });
     if (parent.kind !== 'owned') throw Error('parent claim');
     expect((await transitionSharedTask({ claim: parent.claim, operationId: randomUUID(), transition: { kind: 'start' } })).kind).toBe('owned');
     const { taskKey, runId, generation, ownerToken, machineId, installationId, sessionId } = parent.claim;
@@ -205,7 +211,7 @@ async function parentFixture() {
         expect(incoming.parentBinding).toEqual(parentBinding);
         return { maxChildren: 3 };
     };
-    return { ...f, f, parent: parent.claim, child };
+    return { ...f, f, parent: parent.claim, parentCandidate, child };
 }
 
 test('verified original parent permits coordinator overlap and persists the immutable child binding', async () => {
@@ -418,6 +424,170 @@ async function pendingEffectFixture(kind: 'telemetry-push' | 'handback', state: 
     const stopProof = { kind: 'operator-confirmed' as const, machineId: f.machine.id, installationId: f.machine.installationId, sessionId: f.session.sessionId, hostBindingDigest: d, bootIdDigest: d, runIds: [owned.claim.runId], generation: 1, observedAt: new Date().toISOString(), evidenceRef: f.candidate.approvalBindings[0]!.source };
     return { ...f, claim: owned.claim, recovery, stopProof, effectId };
 }
+
+async function stoppedGroupFixture() {
+    const p = await parentFixture();
+    const childCandidates = [p.child, { ...p.child, issue: 139, issueNodeId: 'I_139', runId: randomUUID(), paths: ['src/second-child'], approvedTaskIds: ['139-T1'] }];
+    const childClaims = [] as typeof p.parent[];
+    for (const candidate of childCandidates) {
+        const child = await acquireSharedTask({ ...p, candidate, operationId: randomUUID() });
+        if (child.kind !== 'owned') throw Error(child.reason);
+        childClaims.push(child.claim);
+    }
+    const prepared = [] as Array<{ candidate: VerifiedCandidate; claim: typeof p.parent; recovery: RecoveryEnvelope; checkpoint: NonNullable<RecoveryEnvelope['checkpoint']>; stopProof: import('../src/shared-claims.ts').StopProof }>;
+    for (const [candidate, claim] of [[p.parentCandidate, p.parent], ...childCandidates.map((candidate, index) => [candidate, childClaims[index]!] as const)] as const) {
+        const qualified = await publishRecoveryReceipt({ claim, operationId: randomUUID(), payload: { schemaVersion: 2, kind: 'execution-qualification', harness: 'codex', harnessVersion: 'fixture', model: 'model', effort: 'high', accountRef: 'account', configurationDigest: d, candidateSha: root, validationIds: ['137-T4/check/' + d], managedKinds: ['checkpoint-push', 'handback', 'evidence', 'telemetry-push'], unmanagedDenied: true, result: 'qualified' } });
+        const checkpoint = { schemaVersion: 1 as const, id: randomUUID(), repo: candidate.repo, repositoryId: candidate.repositoryNodeId, branch: `task/${candidate.issue}`, baseSha: root, headSha: root, treeSha: root, scopeDigest: candidate.scopeDigest, runId: candidate.runId, publishedAt: new Date().toISOString() };
+        const accepted = await publishRecoveryReceipt({ claim, operationId: randomUUID(), payload: { schemaVersion: 2, kind: 'acceptance', taskId: candidate.approvedTaskIds[0]!, runId: claim.runId, sourceSha: root, scopeDigest: candidate.scopeDigest, validationId: candidate.approvedTaskIds[0]! + '/check/' + d, commandDigest: d, result: 'passed', acceptedScope: { schemaVersion: 2, repo: candidate.repo, issue: candidate.issue, artifacts: [{ repo: candidate.repo, issue: candidate.issue, kind: 'plan', artifactId: 'IC_fixture', rev: 1, digest: d }], approvalBindings: candidate.approvalBindings, approvedTaskIds: candidate.approvedTaskIds, completedTaskIds: candidate.approvedTaskIds, parentRepo: candidate.repo, parentIssue: 133, parentBefore: root, parentAfter: root, acceptedAt: new Date().toISOString() } } });
+        const effectId = randomUUID(), effectTarget = { kind: 'telemetry' as const, destinationRepositoryId: 'R_stats', destinationPath: `stats/${candidate.issue}.jsonl`, eventId: randomUUID(), batchId: randomUUID() };
+        const intent = await publishRecoveryReceipt({ claim, operationId: randomUUID(), payload: { schemaVersion: 2, kind: 'effect-intent', effectId, runId: claim.runId, generation: claim.generation, approvalBindings: candidate.approvalBindings, effectKind: 'telemetry-push', target: effectTarget, payloadDigest: d, result: 'prepared', observedRemoteId: null, observedDigest: null, reasonCode: null } });
+        const joinOperationId = randomUUID(), joinEvidence = await publishRecoveryReceipt({ claim, operationId: randomUUID(), payload: { schemaVersion: 2, kind: 'join', childRunId: claim.runId, generation: claim.generation, fromSha: root, parentBefore: root, parentAfter: null, state: 'prepared', validationId: null, commandDigest: null, result: null } });
+        const recovery: RecoveryEnvelope = { schemaVersion: 2, taskKey: claim.taskKey, runId: claim.runId, generation: claim.generation, approvalBindings: candidate.approvalBindings, recordBinding: null, scopeDigest: candidate.scopeDigest, approvalDigest: d, execution: { providerMode: 'subscription', harness: 'codex', harnessVersion: 'fixture', model: 'model', effort: 'high', accountRef: 'account', qualification: qualified.reference }, checkpoint, completed: [{ taskId: candidate.approvedTaskIds[0]!, headSha: root, acceptance: { sourceSha: root, validationId: candidate.approvedTaskIds[0]! + '/check/' + d, commandDigest: d, evidence: accepted.reference } }], children: [], joins: [{ operationId: joinOperationId, childRunId: claim.runId, generation: claim.generation, fromSha: root, parentBefore: root, parentAfter: null, state: 'prepared', acceptance: null, evidence: joinEvidence.reference }], effects: [{ operationId: effectId, runId: claim.runId, generation: claim.generation, kind: 'telemetry-push', target: effectTarget, payloadDigest: d, state: 'prepared', intent: intent.reference, outcome: null }], remoteEffectCoverage: { kind: 'qualified-managed-only', qualification: qualified.reference } };
+        const checkpointed = await transitionSharedTask({ claim, operationId: randomUUID(), transition: { kind: 'checkpoint', checkpoint, recovery } });
+        if (checkpointed.kind !== 'owned') throw Error(checkpointed.reason);
+        const linked = await linkAcceptedScope({ claim, operationId: randomUUID(), acceptedScope: accepted.reference });
+        if (linked.kind !== 'owned') throw Error(linked.reason);
+        const stopProof = { kind: 'operator-confirmed' as const, machineId: p.machine.id, installationId: p.machine.installationId, sessionId: p.session.sessionId, hostBindingDigest: p.machine.hostBindingDigest, bootIdDigest: p.session.bootIdDigest, runIds: [claim.runId], generation: claim.generation, observedAt: new Date().toISOString(), evidenceRef: candidate.approvalBindings[0]!.source };
+        const stopped = await transitionSharedTask({ claim, operationId: randomUUID(), transition: { kind: 'stop', stopProof } });
+        if (stopped.kind !== 'owned') throw Error(stopped.reason);
+        prepared.push({ candidate, claim, recovery, checkpoint, stopProof });
+    }
+    const machine = { ...p.machine, id: 'receiver', installationId: randomUUID(), hostBindingDigest: 'a'.repeat(64), defaults: { ...p.machine.defaults, maxRuns: 1, childConcurrent: 1 } };
+    const session = { ...p.session, machineId: machine.id, installationId: machine.installationId, hostBindingDigest: machine.hostBindingDigest, sessionId: randomUUID(), localRoot: await mkdtemp(join(tmpdir(), 'vf-group-receiver-')) };
+    const before = await readCoordination(p.target);
+    const request: GroupSuccessionRequest = { schemaVersion: 1, kind: 'recover-stopped-group', operationId: randomUUID(), expectedHead: before.head, parentTaskKey: p.parent.taskKey, groupPlan: { repo: p.candidate.repo, issue: 133, kind: 'plan', artifactId: 'IC_group_plan', rev: 1, digest: d }, groupsDigest: 'e'.repeat(64), members: prepared.map(({ candidate, claim }) => ({ expected: { taskKey: claim.taskKey, runId: claim.runId, generation: claim.generation, ownerToken: claim.ownerToken, machineId: claim.machineId, installationId: claim.installationId, sessionId: claim.sessionId }, candidate })).sort((a, b) => a.expected.taskKey.localeCompare(b.expected.taskKey)) };
+    let groupChecks = 0;
+    p.target.verifyGroupSuccession = async ({ parent, members, groupPlan, groupsDigest }) => {
+        groupChecks++;
+        expect(parent.taskKey).toBe(p.parent.taskKey);
+        expect(members.map(row => row.task.taskKey).sort()).toEqual(prepared.map(row => row.claim.taskKey).sort());
+        expect(groupPlan).toEqual(request.groupPlan);
+        expect(groupsDigest).toBe(request.groupsDigest);
+        return { maxChildren: 2 };
+    };
+    return { ...p, prepared, machine, session, request, before, get groupChecks() { return groupChecks; } };
+}
+
+test('atomic stopped-group succession preserves authority and reservations, queues children and fences old owners', async () => {
+    const f = await stoppedGroupFixture(), mutations = f.f.mutations;
+    const result = await recoverStoppedGroup({ machine: f.machine, session: f.session, request: f.request });
+    expect(result.kind).toBe('owned');
+    if (result.kind !== 'owned') throw Error(result.reason);
+    expect(f.f.mutations).toBe(mutations + 1);
+    expect(result.children).toHaveLength(2);
+    const after = await readCoordination(f.target);
+    const beforeParent = f.before.tasks[result.parent.taskKey]!, afterParent = after.tasks[result.parent.taskKey]!;
+    expect(afterParent).toMatchObject({ schemaVersion: 2, state: 'claimed', generation: beforeParent.generation + 1, successionOperationId: f.request.operationId, machineId: f.machine.id, sessionId: f.session.sessionId });
+    for (const child of result.children) expect(after.tasks[child.taskKey]).toMatchObject({ schemaVersion: 2, state: 'recovery-queued', generation: f.before.tasks[child.taskKey]!.generation + 1, successionOperationId: f.request.operationId, machineId: f.machine.id, sessionId: f.session.sessionId });
+    for (const key of [result.parent.taskKey, ...result.children.map(child => child.taskKey)]) {
+        const before = f.before.tasks[key]!, current = after.tasks[key]!;
+        for (const field of ['taskKey', 'host', 'repo', 'issue', 'repositoryNodeId', 'issueNodeId', 'scopeDigest', 'approvalDigest', 'approvalBindings', 'runId', 'stage', 'paths', 'resources', 'independent', 'parentTaskKey', 'parentBinding', 'approvedTaskIds', 'checkpoint', 'stopProof', 'unresolvedEffects', 'acceptedScopes'] as const)
+            expect(current[field]).toEqual(before[field]);
+        expect(current.recovery).toEqual({ ...before.recovery!, generation: before.generation + 1 });
+        expect(before.recovery!.completed).toHaveLength(1);
+        expect(before.recovery!.joins).toHaveLength(1);
+        expect(before.recovery!.effects).toHaveLength(1);
+        expect(before.acceptedScopes).toHaveLength(1);
+    }
+    expect(after.index.active.map(row => ({ taskKey: row.taskKey, paths: row.paths, resources: row.resources })).sort((a, b) => a.taskKey.localeCompare(b.taskKey))).toEqual(f.before.index.active.map(row => ({ taskKey: row.taskKey, paths: row.paths, resources: row.resources })).sort((a, b) => a.taskKey.localeCompare(b.taskKey)));
+    expect(after.machines[f.machine.id]!.activeTaskKeys.sort()).toEqual([result.parent.taskKey, ...result.children.map(child => child.taskKey)].sort());
+    expect(after.machines[f.prepared[0]!.claim.machineId]!.activeTaskKeys).toEqual([]);
+    expect(await inspectGroupSuccession(f.target, { operationId: f.request.operationId, parent: { taskKey: result.parent.taskKey, runId: result.parent.runId, generation: result.parent.generation, ownerToken: result.parent.ownerToken, machineId: result.parent.machineId, installationId: result.parent.installationId, sessionId: result.parent.sessionId } })).toMatchObject({ kind: 'verified', reference: result.reference });
+    const oldMutationCount = f.f.mutations, oldParent = f.prepared.find(row => row.claim.taskKey === f.request.parentTaskKey)!;
+    const oldOwnerTransitions = [
+        { kind: 'start' },
+        { kind: 'checkpoint', checkpoint: oldParent.checkpoint, recovery: oldParent.recovery },
+        { kind: 'recovery', recovery: oldParent.recovery },
+        { kind: 'receipt', payload: { schemaVersion: 2, kind: 'join', childRunId: f.prepared[1]!.claim.runId, generation: 1, fromSha: root, parentBefore: root, parentAfter: null, state: 'prepared', validationId: null, commandDigest: null, result: null } },
+        { kind: 'effect-send', effectId: randomUUID() },
+        { kind: 'accept-scope', acceptedScope: oldParent.recovery.execution.qualification },
+        { kind: 'complete', stopProof: oldParent.stopProof, acceptedScope: oldParent.recovery.execution.qualification },
+        { kind: 'handoff', machine: f.machine, session: f.session, candidate: oldParent.candidate, stopProof: oldParent.stopProof, recovery: oldParent.recovery },
+    ] as import('../src/shared-claims.ts').TaskTransition[];
+    for (const transition of oldOwnerTransitions) expect((await transitionSharedTask({ claim: oldParent.claim, operationId: randomUUID(), transition })).kind).toBe('refused');
+    await expect(beginManagedEffect({ claim: oldParent.claim, effectId: randomUUID(), operationId: randomUUID() })).rejects.toThrow('current owner');
+    for (const old of f.prepared) expect((await transitionSharedTask({ claim: old.claim, operationId: randomUUID(), transition: { kind: 'start' } })).kind).toBe('refused');
+    expect(f.f.mutations).toBe(oldMutationCount);
+    for (const child of result.children) expect((await transitionSharedTask({ claim: child, operationId: randomUUID(), transition: { kind: 'start' } })).kind).toBe('refused');
+    const parentStarted = await transitionSharedTask({ claim: result.parent, operationId: randomUUID(), transition: { kind: 'start' } });
+    expect(parentStarted.kind).toBe('owned');
+    const childStarts = await Promise.all(result.children.map(child => transitionSharedTask({ claim: child, operationId: randomUUID(), transition: { kind: 'start' } })));
+    expect(childStarts.filter(start => start.kind === 'owned'), JSON.stringify(childStarts)).toHaveLength(1);
+    expect(childStarts.filter(start => start.kind !== 'owned'), JSON.stringify(childStarts)).toHaveLength(1);
+});
+
+test('two receivers race one stopped group and only one owner set is committed', async () => {
+    const f = await stoppedGroupFixture(), secondMachine = { ...f.machine, id: 'receiver-two', installationId: randomUUID(), hostBindingDigest: 'b'.repeat(64) };
+    const secondSession = { ...f.session, machineId: secondMachine.id, installationId: secondMachine.installationId, hostBindingDigest: secondMachine.hostBindingDigest, sessionId: randomUUID(), localRoot: await mkdtemp(join(tmpdir(), 'vf-group-receiver-two-')) };
+    const results = await Promise.all([
+        recoverStoppedGroup({ machine: f.machine, session: f.session, request: f.request }),
+        recoverStoppedGroup({ machine: secondMachine, session: secondSession, request: { ...f.request, operationId: randomUUID() } }),
+    ]);
+    expect(results.filter(result => result.kind === 'owned'), JSON.stringify(results)).toHaveLength(1);
+    const winner = results.find(result => result.kind === 'owned');
+    if (!winner || winner.kind !== 'owned') throw Error('winner');
+    const current = await readCoordination(f.target);
+    expect(current.index.revision).toBe(f.before.index.revision + 1);
+    expect(new Set(Object.values(current.tasks).map(task => task.machineId))).toEqual(new Set([winner.parent.machineId]));
+    expect(new Set(Object.values(current.tasks).map(task => task.sessionId))).toEqual(new Set([winner.parent.sessionId]));
+});
+
+test('lost stopped-group CAS response recovers the exact receipt and tokens without a second mutation', async () => {
+    const f = await stoppedGroupFixture(), commit = f.target.provider.commit, branch = f.target.provider.branch;
+    let lost = false, sends = 0;
+    f.target.provider.commit = async (...args) => { sends++; await commit(...args); lost = true; return { kind: 'ambiguous', reason: 'response lost after commit' }; };
+    f.target.provider.branch = async (...args) => { if (lost) throw Error('readback unavailable'); return branch(...args); };
+    const first = await recoverStoppedGroup({ machine: f.machine, session: f.session, request: f.request });
+    expect(first.kind).toBe('ambiguous');
+    lost = false;
+    const retry = await recoverStoppedGroup({ machine: f.machine, session: f.session, request: f.request });
+    expect(retry.kind).toBe('owned');
+    if (retry.kind !== 'owned') throw Error(retry.reason);
+    expect(sends).toBe(1);
+    const again = await recoverStoppedGroup({ machine: f.machine, session: f.session, request: f.request });
+    expect(again).toEqual(retry);
+    expect(sends).toBe(1);
+});
+
+test.each(['live-member', 'missing-stop', 'missing-checkpoint', 'unmanaged-effects', 'authority-denied', 'context-denied', 'omitted-member', 'foreign-member', 'nested-member', 'over-bound'] as const)('stopped-group %s refusal leaves every remote byte unchanged', async mode => {
+    const f = await stoppedGroupFixture(), request = structuredClone(f.request);
+    const path = `coordination/tasks/${request.parentTaskKey}.json`, files = f.versions.get(f.f.head)!;
+    const parent = JSON.parse(files[path]!);
+    if (mode === 'live-member') { parent.state = 'running'; parent.stopProof = null; files[path] = canonical(parent); }
+    if (mode === 'missing-stop') { parent.stopProof = null; files[path] = canonical(parent); }
+    if (mode === 'missing-checkpoint') { parent.checkpoint = null; files[path] = canonical(parent); }
+    if (mode === 'unmanaged-effects') { parent.recovery.remoteEffectCoverage = { kind: 'unmanaged-possible', reasonCode: 'unknown-vendor' }; files[path] = canonical(parent); }
+    if (mode === 'authority-denied') f.target.verifyCandidate = async () => { throw Error('current authority denied'); };
+    if (mode === 'context-denied') f.target.verifyGroupSuccession = async () => { throw Error('private source/context unavailable'); };
+    if (mode === 'omitted-member') request.members = request.members.filter(member => member.expected.taskKey === request.parentTaskKey);
+    if (mode === 'foreign-member') request.members[0]!.candidate.issueNodeId = 'I_foreign';
+    if (mode === 'nested-member') request.members.find(member => member.expected.taskKey !== request.parentTaskKey)!.candidate.parentTaskKey = 'f'.repeat(64);
+    if (mode === 'over-bound') request.members = Array.from({ length: 18 }, (_, index) => ({ ...structuredClone(request.members[index % request.members.length]!), expected: { ...structuredClone(request.members[index % request.members.length]!.expected), taskKey: index.toString(16).padStart(64, '0'), runId: randomUUID() }, candidate: { ...structuredClone(request.members[index % request.members.length]!.candidate), issueNodeId: `I_bound_${index}`, runId: randomUUID() } })).sort((a, b) => a.expected.taskKey.localeCompare(b.expected.taskKey));
+    const beforeHead = f.f.head, beforeFiles = structuredClone(f.versions.get(beforeHead)), beforeMutations = f.f.mutations;
+    const result = await recoverStoppedGroup({ machine: f.machine, session: f.session, request });
+    expect(result.kind).not.toBe('owned');
+    expect(f.f.head).toBe(beforeHead);
+    expect(f.versions.get(beforeHead)).toEqual(beforeFiles);
+    expect(f.f.mutations).toBe(beforeMutations);
+});
+
+test('new reader retains v1 state while the exact pre-amendment reader refuses v2 task and group receipt bytes', async () => {
+    const f = await stoppedGroupFixture();
+    expect((await readCoordination(f.target)).tasks[f.request.parentTaskKey]!.schemaVersion).toBe(1);
+    const recovered = await recoverStoppedGroup({ machine: f.machine, session: f.session, request: f.request });
+    if (recovered.kind !== 'owned') throw Error(recovered.reason);
+    const directory = await mkdtemp(join(tmpdir(), 'vf-old-shared-reader-')), source = join(directory, 'src');
+    await (await import('node:fs/promises')).mkdir(source, { recursive: true });
+    for (const file of ['shared-claims.ts', 'claims.ts', 'gh.ts']) {
+        const shown = Bun.spawnSync(['git', 'show', `216e600603e949b4459f74eb34789c0ea988a9b7:packages/cli/src/${file}`], { cwd: resolve(import.meta.dir, '../../..') });
+        expect(shown.exitCode, shown.stderr.toString()).toBe(0);
+        await writeFile(join(source, file), shown.stdout);
+    }
+    const old = await import(pathToFileURL(join(source, 'shared-claims.ts')).href + '?' + randomUUID());
+    const oldTarget = { ...f.target, localRoot: await mkdtemp(join(tmpdir(), 'vf-old-reader-home-')) };
+    await expect(old.readCoordination(oldTarget)).rejects.toThrow('task record');
+    await expect(old.resolveEvidence(oldTarget, recovered.reference)).rejects.toThrow('schema');
+});
 
 test.each(['prepared', 'ambiguous'] as const)('typed %s telemetry remains pending through verified transfer while code/control effects block', async state => {
     for (const kind of ['telemetry-push', 'handback'] as const) {

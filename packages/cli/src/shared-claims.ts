@@ -261,6 +261,7 @@ const date: Check = v => typeof v === 'string' && /^\d{4}-\d\d-\d\dT/.test(v) &&
 const repo = pattern(/^[a-z\d][a-z\d-]*\/[a-z\d_.-]+$/i);
 const branch: Check = v => text(v) && !v.startsWith('-') && !v.startsWith('/') && !v.endsWith('/') && !/[\s~^:?*\[\\]/.test(v) && !v.includes('..') && !v.includes('@{') && v.split('/').every(p => p && !p.startsWith('.') && !p.endsWith('.') && !p.endsWith('.lock'));
 const relative: Check = v => text(v) && !v.startsWith('/') && !v.includes('\\') && v.split('/').every(p => p && p !== '.' && p !== '..');
+const resource = pattern(/^[a-z0-9][a-z0-9._:/-]{0,127}$/);
 const literal = (...values: unknown[]): Check => v => values.includes(v);
 const nullable = (check: Check): Check => v => v === null || check(v);
 const array = (check: Check): Check => v => Array.isArray(v) && v.length <= 4096 && v.every(check);
@@ -427,7 +428,48 @@ export type SharedClaimResult = {
     reason: string;
     claim?: SharedClaim;
 };
-export interface TaskRecord {
+export type GroupSuccessionRequest = {
+    schemaVersion: 1;
+    kind: 'recover-stopped-group';
+    operationId: string;
+    expectedHead: string;
+    parentTaskKey: string;
+    groupPlan: ArtifactRef;
+    groupsDigest: string;
+    members: Array<{ expected: ParentClaimBinding; candidate: VerifiedCandidate }>;
+};
+export type GroupSuccessionReceipt = {
+    schemaVersion: 2;
+    type: 'group-succession';
+    operationId: string;
+    parentTaskKey: string;
+    previousHead: string;
+    requestDigest: string;
+    groupPlan: ArtifactRef;
+    groupsDigest: string;
+    transferredAt: string;
+    receiver: {
+        machineId: string;
+        installationId: string;
+        sessionId: string;
+        hostBindingDigest: string;
+        bootIdDigest: string;
+    };
+    members: Array<{
+        before: ParentClaimBinding;
+        after: ParentClaimBinding;
+        beforeTaskSha256: string;
+        afterTaskSha256: string;
+        previousSuccession: Extract<EvidenceRef, { kind: 'state-receipt' }> | null;
+    }>;
+};
+export type GroupSuccessionResult = {
+    kind: 'owned';
+    parent: SharedClaim;
+    children: SharedClaim[];
+    reference: Extract<EvidenceRef, { kind: 'state-receipt' }>;
+} | { kind: 'busy' | 'refused' | 'ambiguous'; reason: string };
+export interface TaskRecordV1 {
     schemaVersion: 1;
     taskKey: string;
     host: string;
@@ -464,6 +506,13 @@ export interface TaskRecord {
         }>;
     }>;
 }
+export interface TaskRecordV2 extends Omit<TaskRecordV1, 'schemaVersion' | 'state' | 'parentBinding'> {
+    schemaVersion: 2;
+    state: TaskRecordV1['state'] | 'recovery-queued';
+    parentBinding: ParentClaimBinding | null;
+    successionOperationId: string;
+}
+export type TaskRecord = TaskRecordV1 | TaskRecordV2;
 export interface MachineRecord {
     schemaVersion: 1;
     machineId: string;
@@ -578,6 +627,7 @@ export interface CoordinationTarget {
     verifyCandidate: (candidate: VerifiedCandidate, machine: EffectiveMachine, session: MachineSession) => Promise<void>;
     // The controller binds canonical group/current authority to these pinned records.
     verifyChildRelationship?: (input: { parent: TaskRecord; child: TaskRecord }) => Promise<{ maxChildren: number }>;
+    verifyGroupSuccession?: (input: { parent: TaskRecord; members: Array<{ task: TaskRecord; candidate: VerifiedCandidate }>; groupPlan: ArtifactRef; groupsDigest: string; machine: EffectiveMachine; session: MachineSession }) => Promise<{ maxChildren: number }>;
     verifySession?: (previous: MachineRecord, machine: EffectiveMachine, session: MachineSession) => Promise<void>;
     verifyTransition: (task: TaskRecord, transition: TaskTransition) => Promise<void>;
     verifyEvidence: (ref: EvidenceRef, payload: RecoveryEvidencePayload | null) => Promise<void>;
@@ -619,13 +669,23 @@ export type TaskTransition = {
     kind: 'effect-send';
     effectId: string;
 };
-const summary = closed({ taskKey: digest, repo, issueNodeId: node, machineId: id, parentTaskKey: nullable(digest), paths: unique(relative), resources: unique(id), independent: boolean });
+const summary = closed({ taskKey: digest, repo, issueNodeId: node, machineId: id, parentTaskKey: nullable(digest), paths: unique(relative), resources: unique(resource), independent: boolean });
 const indexSchema = closed({ schemaVersion: literal(1), installationId: uuid, revision: integer, active: unique(summary), machines: unique(id) });
 const machineSchema = closed({ schemaVersion: literal(1), machineId: id, installationId: uuid, sessionId: uuid, hostBindingDigest: digest, bootIdDigest: digest, observedAt: date, activeTaskKeys: unique(digest) });
-const recordFields = { schemaVersion: literal(1), taskKey: digest, host: pattern(/^[a-z0-9.-]+$/), repo, issue: positive, repositoryNodeId: node, issueNodeId: node, scopeDigest: digest, approvalDigest: digest, approvalBindings: authorities, generation: positive, machineId: id, installationId: uuid, sessionId: uuid, ownerToken: uuid, runId: uuid, stage: id, state: literal('claimed', 'running', 'stopped', 'blocked', 'completed'), paths: unique(relative), resources: unique(id), independent: boolean, parentTaskKey: nullable(digest), approvedTaskIds: unique(id), checkpoint: nullable(checkpoint), stopProof: nullable(stopProof), unresolvedEffects: unique(evidence), recovery: nullable(envelope), acceptedScopes: unique(closed({ scopeDigest: digest, receipt: stateEvidence })) };
+const recordFields = { schemaVersion: literal(1), taskKey: digest, host: pattern(/^[a-z0-9.-]+$/), repo, issue: positive, repositoryNodeId: node, issueNodeId: node, scopeDigest: digest, approvalDigest: digest, approvalBindings: authorities, generation: positive, machineId: id, installationId: uuid, sessionId: uuid, ownerToken: uuid, runId: uuid, stage: id, state: literal('claimed', 'running', 'stopped', 'blocked', 'completed'), paths: unique(relative), resources: unique(resource), independent: boolean, parentTaskKey: nullable(digest), approvedTaskIds: unique(id), checkpoint: nullable(checkpoint), stopProof: nullable(stopProof), unresolvedEffects: unique(evidence), recovery: nullable(envelope), acceptedScopes: unique(closed({ scopeDigest: digest, receipt: stateEvidence })) };
 const parentBindingSchema = closed({ taskKey: digest, runId: uuid, generation: positive, ownerToken: uuid, machineId: id, installationId: uuid, sessionId: uuid });
-const recordSchema = union(closed(recordFields), closed({ ...recordFields, parentBinding: nullable(parentBindingSchema) }));
+const recordV1Schema = union(closed(recordFields), closed({ ...recordFields, parentBinding: nullable(parentBindingSchema) }));
+const { schemaVersion: _recordVersion, state: _recordState, ...recordBodyFields } = recordFields;
+const recordV2Schema = closed({ schemaVersion: literal(2), ...recordBodyFields, state: literal('claimed', 'running', 'stopped', 'blocked', 'completed', 'recovery-queued'), parentBinding: nullable(parentBindingSchema), successionOperationId: uuid });
+const recordSchema = union(recordV1Schema, recordV2Schema);
 const receiptSchema = closed({ schemaVersion: literal(1), operationId: uuid, type: id, taskKey: digest, generation: positive, previousHead: sha, requestDigest: digest, resultOwner: closed({ ownerToken: uuid, machineId: id, installationId: uuid, sessionId: uuid, runId: uuid }), recoveryPayload: nullable(payload) });
+const candidateFields = { host: pattern(/^[a-z0-9.-]+$/), repo, issue: positive, repositoryNodeId: node, issueNodeId: node, scopeDigest: digest, approvalDigest: digest, approvalBindings: authorities, runId: uuid, stage: id, paths: unique(relative), resources: unique(resource), independent: boolean, parentTaskKey: nullable(digest), approvedTaskIds: unique(id) };
+const candidateSchema = union(closed(candidateFields), closed({ ...candidateFields, parentBinding: nullable(parentBindingSchema) }));
+const stateReceiptSchema = closed({ kind: literal('state-receipt'), operationId: uuid, commitSha: sha, blobSha256: digest });
+const groupMemberSchema = closed({ before: parentBindingSchema, after: parentBindingSchema, beforeTaskSha256: digest, afterTaskSha256: digest, previousSuccession: nullable(stateReceiptSchema) });
+const receiverSchema = closed({ machineId: id, installationId: uuid, sessionId: uuid, hostBindingDigest: digest, bootIdDigest: digest });
+const groupReceiptSchema = closed({ schemaVersion: literal(2), type: literal('group-succession'), operationId: uuid, parentTaskKey: digest, previousHead: sha, requestDigest: digest, groupPlan: artifact, groupsDigest: digest, transferredAt: date, receiver: receiverSchema, members: unique(groupMemberSchema) });
+const groupRequestSchema = closed({ schemaVersion: literal(1), kind: literal('recover-stopped-group'), operationId: uuid, expectedHead: sha, parentTaskKey: digest, groupPlan: artifact, groupsDigest: digest, members: unique(closed({ expected: parentBindingSchema, candidate: candidateSchema })) });
 export function taskKey(host: string, repositoryNodeId: string, issueNodeId: string): string {
     if (!/^[a-z0-9.-]+$/.test(host) || !node(repositoryNodeId) || !node(issueNodeId))
         throw new Error('invalid canonical task identity');
@@ -639,6 +699,7 @@ export const operationPath = (key: string) => { if (!uuid(key))
     throw Error('invalid operation ID'); return `coordination/operations/${key}.json`; };
 function summaryOf(t: TaskRecord): Summary { return { taskKey: t.taskKey, repo: t.repo, issueNodeId: t.issueNodeId, machineId: t.machineId, parentTaskKey: t.parentTaskKey, paths: t.paths, resources: t.resources, independent: t.independent }; }
 function ownerOf(t: TaskRecord) { return { ownerToken: t.ownerToken, machineId: t.machineId, installationId: t.installationId, sessionId: t.sessionId, runId: t.runId }; }
+function bindingOf(t: TaskRecord): ParentClaimBinding { return { taskKey: t.taskKey, runId: t.runId, generation: t.generation, ownerToken: t.ownerToken, machineId: t.machineId, installationId: t.installationId, sessionId: t.sessionId }; }
 function claimOf(t: TaskRecord, head: string, target: CoordinationTarget): SharedClaim { return { taskKey: t.taskKey, generation: t.generation, ...ownerOf(t), stateCommit: head, target }; }
 function owns(t: TaskRecord, c: SharedClaim) { return t.taskKey === c.taskKey && t.generation === c.generation && canonical(ownerOf(t)) === canonical({ ownerToken: c.ownerToken, machineId: c.machineId, installationId: c.installationId, sessionId: c.sessionId, runId: c.runId }); }
 async function privateWrite(path: string, value: unknown) {
@@ -907,6 +968,111 @@ export async function inspectHandoffCoordinationTask(target: CoordinationTarget,
     }
 }
 
+function groupSuccessor(before: TaskRecord, receipt: Pick<GroupSuccessionReceipt, 'operationId' | 'parentTaskKey' | 'receiver'>, after: ParentClaimBinding): TaskRecordV2 {
+    return {
+        ...before,
+        schemaVersion: 2,
+        parentBinding: before.parentBinding ?? null,
+        successionOperationId: receipt.operationId,
+        machineId: receipt.receiver.machineId,
+        installationId: receipt.receiver.installationId,
+        sessionId: receipt.receiver.sessionId,
+        ownerToken: after.ownerToken,
+        generation: before.generation + 1,
+        state: before.taskKey === receipt.parentTaskKey ? 'claimed' : 'recovery-queued',
+        recovery: before.recovery ? { ...before.recovery, generation: before.generation + 1 } : null,
+    };
+}
+
+async function groupReceiptAt(target: CoordinationTarget, head: string, operationId: string, total = { bytes: 0 }): Promise<{ receipt: GroupSuccessionReceipt; raw: string } | null> {
+    const raw = await bounded(target.provider.read(target, head, operationPath(operationId)));
+    if (raw === null) return null;
+    const bytes = Buffer.byteLength(raw), budget = transactionClock.getStore();
+    total.bytes += bytes;
+    if (bytes > 32 * 1024 || total.bytes > 8 * 1024 * 1024 || budget && (budget.decodedBytes += bytes) > 8 * 1024 * 1024)
+        throw Error('coordination payload bound exceeded');
+    const receipt = parse<GroupSuccessionReceipt>(JSON.parse(raw), groupReceiptSchema, 'group succession receipt', 32 * 1024);
+    if (receipt.operationId !== operationId || receipt.members.length < 2 || receipt.members.length > 17)
+        throw Error('group succession receipt identity/cardinality mismatch');
+    return { receipt, raw };
+}
+
+type SuccessionValidationState = { visited: Set<string>; trail: Set<string>; cache: Map<string, Array<{ before: TaskRecord; after: TaskRecordV2 }>> };
+async function validateGroupReceipt(target: CoordinationTarget, observed: CoordinationSnapshot, receipt: GroupSuccessionReceipt, total: { bytes: number }, requestedParent?: ParentClaimBinding, lineage: SuccessionValidationState = { visited: new Set(), trail: new Set(), cache: new Map() }): Promise<Array<{ before: TaskRecord; after: TaskRecordV2 }>> {
+    if (lineage.trail.has(receipt.operationId)) throw Error('group succession predecessor cycle');
+    if (!lineage.visited.has(receipt.operationId)) {
+        if (lineage.visited.size >= 32) throw Error('group succession predecessor bound exceeded');
+        lineage.visited.add(receipt.operationId);
+    }
+    lineage.trail.add(receipt.operationId);
+    if (receipt.groupPlan.kind !== 'plan' || receipt.members.map(row => row.before.taskKey).join('\n') !== [...receipt.members].map(row => row.before.taskKey).sort().join('\n') ||
+        new Set(receipt.members.map(row => row.before.taskKey)).size !== receipt.members.length || new Set(receipt.members.map(row => row.before.runId)).size !== receipt.members.length)
+        throw Error('group succession receipt membership invalid');
+    if (!['ahead', 'identical'].includes(await bounded(target.provider.compare(target, target.rootCommit, receipt.previousHead))) ||
+        await bounded(target.provider.compare(target, receipt.previousHead, observed.head)) !== 'ahead')
+        throw Error('group succession receipt ancestry invalid');
+    const previous = await readCoordinationSnapshot(target, false, total, receipt.previousHead);
+    const expectedKeys = [receipt.parentTaskKey, ...previous.index.active.filter(row => row.parentTaskKey === receipt.parentTaskKey).map(row => row.taskKey)].sort();
+    if (canonical(expectedKeys) !== canonical(receipt.members.map(row => row.before.taskKey)))
+        throw Error('group succession receipt omitted or added a retained member');
+    const result: Array<{ before: TaskRecord; after: TaskRecordV2 }> = [];
+    for (const member of receipt.members) {
+        const before = previous.tasks[member.before.taskKey];
+        if (!before || canonical(bindingOf(before)) !== canonical(member.before) || sha256(canonical(before)) !== member.beforeTaskSha256)
+            throw Error('group succession predecessor changed');
+        if (before.taskKey === receipt.parentTaskKey ? before.parentTaskKey !== null : before.parentTaskKey !== receipt.parentTaskKey)
+            throw Error('group succession predecessor relationship invalid');
+        const after = groupSuccessor(before, receipt, member.after);
+        if (canonical(bindingOf(after)) !== canonical(member.after) || sha256(canonical(after)) !== member.afterTaskSha256)
+            throw Error('group succession successor hash/owner invalid');
+        if (before.schemaVersion === 1) {
+            if (member.previousSuccession !== null) throw Error('v1 predecessor cannot cite succession history');
+        } else {
+            if (!member.previousSuccession || member.previousSuccession.operationId !== before.successionOperationId)
+                throw Error('v2 predecessor succession history missing');
+            const prior = await groupReceiptAt(target, member.previousSuccession.commitSha, member.previousSuccession.operationId, total);
+            if (!prior || sha256(prior.raw) !== member.previousSuccession.blobSha256)
+                throw Error('v2 predecessor succession history invalid');
+            let priorRows = lineage.cache.get(prior.receipt.operationId);
+            if (!priorRows) {
+                const priorObserved = await readCoordinationSnapshot(target, false, total, member.previousSuccession.commitSha);
+                priorRows = await validateGroupReceipt(target, priorObserved, prior.receipt, total, undefined, lineage);
+                lineage.cache.set(prior.receipt.operationId, priorRows);
+            }
+            const predecessor = priorRows.find(row => row.after.taskKey === before.taskKey);
+            if (!predecessor)
+                throw Error('v2 predecessor succession endpoint invalid');
+        }
+        result.push({ before, after });
+    }
+    const parent = receipt.members.find(row => row.before.taskKey === receipt.parentTaskKey);
+    if (!parent || requestedParent && canonical(parent.after) !== canonical(requestedParent))
+        throw Error('group succession current parent binding differs');
+    lineage.trail.delete(receipt.operationId);
+    lineage.cache.set(receipt.operationId, result);
+    return result;
+}
+
+export type GroupSuccessionInspection = { kind: 'verified'; reference: Extract<EvidenceRef, { kind: 'state-receipt' }>; receipt: GroupSuccessionReceipt } | { kind: 'invalid-or-unavailable'; reason: string };
+export async function inspectGroupSuccession(target: CoordinationTarget, input: { operationId: string; parent: ParentClaimBinding }): Promise<GroupSuccessionInspection> {
+    try {
+        if (!closed({ operationId: uuid, parent: parentBindingSchema })(input)) throw Error('group succession operation/current parent required');
+        const total = { bytes: 0 }, current = await readCoordinationSnapshot(target, false, total);
+        const found = await groupReceiptAt(target, current.head, input.operationId, total);
+        if (!found) throw Error('group succession receipt missing');
+        const rows = await validateGroupReceipt(target, current, found.receipt, total, input.parent);
+        for (const { after } of rows) {
+            const task = current.tasks[after.taskKey];
+            if (!task || canonical(bindingOf(task)) !== canonical(bindingOf(after)))
+                throw Error('group succession ownership progressed');
+        }
+        const reference = { kind: 'state-receipt' as const, operationId: input.operationId, commitSha: current.head, blobSha256: sha256(found.raw) };
+        return { kind: 'verified', reference, receipt: found.receipt };
+    } catch {
+        return { kind: 'invalid-or-unavailable', reason: 'group succession could not be verified' };
+    }
+}
+
 function validateSession(machine: EffectiveMachine, session: MachineSession, target: CoordinationTarget) {
     if (!machine.enabled || !id(machine.id) || !uuid(session.sessionId) || !digest(session.bootIdDigest) || machine.id !== session.machineId || machine.installationId !== session.installationId || machine.hostBindingDigest !== session.hostBindingDigest || !positive(machine.defaults.maxRuns) || !positive(machine.defaults.childConcurrent) || canonical(machine.coordination) !== canonical({ repositoryId: target.repositoryId, repository: target.repository, branch: target.branch, rootCommit: target.rootCommit, installationId: target.installationId }))
         throw Error('machine session/coordination mismatch');
@@ -933,7 +1099,12 @@ async function verifyChildAdmission(snapshot: CoordinationSnapshot, child: TaskR
     const parent = snapshot.tasks[child.parentTaskKey];
     if (!parent || !snapshot.index.active.some(row => row.taskKey === parent.taskKey) || parent.taskKey === child.taskKey || parent.parentTaskKey !== null || parent.state !== 'running' || parent.stopProof || parent.host !== child.host || parent.repo !== child.repo || parent.repositoryNodeId !== child.repositoryNodeId)
         throw Error('active running top-level parent required');
-    if (canonical(child.parentBinding) !== canonical({ taskKey: parent.taskKey, generation: parent.generation, ...ownerOf(parent) }))
+    if (child.schemaVersion === 2) {
+        if (parent.schemaVersion !== 2 || parent.successionOperationId !== child.successionOperationId)
+            throw Error('recovery-queued child lacks its current parent succession');
+        const inspected = await inspectGroupSuccession(target, { operationId: child.successionOperationId, parent: bindingOf(parent) });
+        if (inspected.kind !== 'verified') throw Error(inspected.reason);
+    } else if (canonical(child.parentBinding) !== canonical({ taskKey: parent.taskKey, generation: parent.generation, ...ownerOf(parent) }))
         throw Error('original parent owner/run/generation changed');
     if (!target.verifyChildRelationship) throw Error('verified parent group authority required');
     const result = await bounded(target.verifyChildRelationship({ parent: structuredClone(parent), child: structuredClone(child) }));
@@ -941,10 +1112,27 @@ async function verifyChildAdmission(snapshot: CoordinationSnapshot, child: TaskR
         throw Error('approved parent child limit must be an integer from 1 to 3');
     return result.maxChildren;
 }
+async function verifyRecoveryQueued(snapshot: CoordinationSnapshot, task: TaskRecord, target: CoordinationTarget): Promise<void> {
+    if (task.schemaVersion !== 2 || task.state !== 'recovery-queued') throw Error('queued succession state required');
+    const total = { bytes: 0 }, found = await groupReceiptAt(target, snapshot.head, task.successionOperationId, total);
+    if (!found) throw Error('queued succession receipt missing');
+    const rows = await validateGroupReceipt(target, snapshot, found.receipt, total);
+    const row = rows.find(value => value.after.taskKey === task.taskKey);
+    if (!row || canonical(row.after) !== canonical(task) || !row.before.stopProof || !['stopped', 'blocked'].includes(row.before.state))
+        throw Error('queued predecessor was not proved stopped and never restarted');
+    await bounded(target.verifyTransition(structuredClone(row.before), { kind: 'stop', stopProof: structuredClone(row.before.stopProof) }));
+    await verifyStop(target, row.before, row.before.stopProof);
+    if (!row.before.recovery) throw Error('queued predecessor recovery unavailable');
+    await validateRemoteRecovery(target, row.before.recovery, row.before, true);
+}
 async function occupiedChildSlots(snapshot: CoordinationSnapshot, rows: Summary[], target: CoordinationTarget): Promise<Summary[]> {
     const occupied: Summary[] = [];
     for (const row of rows) {
         const task = snapshot.tasks[row.taskKey];
+        if (task?.schemaVersion === 2 && task.state === 'recovery-queued') {
+            try { await verifyRecoveryQueued(snapshot, task, target); continue; }
+            catch { /* Invalid succession still occupies a vendor-process slot. */ }
+        }
         if (task && ['stopped', 'blocked'].includes(task.state) && task.stopProof) {
             try {
                 // Revalidate physical termination through the real controller, not just
@@ -1240,6 +1428,198 @@ async function verifyStop(target: CoordinationTarget, t: TaskRecord, proof: Stop
     if (machine.hostBindingDigest !== proof.hostBindingDigest || machine.sessionId === proof.sessionId && machine.bootIdDigest !== proof.bootIdDigest) throw Error('stop proof host/boot binding mismatch');
     await resolveEvidence(target, proof.evidenceRef);
 }
+function sameCandidate(task: TaskRecord, candidate: VerifiedCandidate): boolean {
+    return task.taskKey === taskKey(candidate.host, candidate.repositoryNodeId, candidate.issueNodeId) &&
+        canonical({ host: task.host, repo: task.repo, issue: task.issue, repositoryNodeId: task.repositoryNodeId, issueNodeId: task.issueNodeId,
+            scopeDigest: task.scopeDigest, approvalDigest: task.approvalDigest, approvalBindings: task.approvalBindings, runId: task.runId,
+            stage: task.stage, paths: task.paths, resources: task.resources, independent: task.independent, parentTaskKey: task.parentTaskKey,
+            parentBinding: task.parentBinding ?? null, approvedTaskIds: task.approvedTaskIds }) ===
+        canonical({ host: candidate.host, repo: candidate.repo, issue: candidate.issue, repositoryNodeId: candidate.repositoryNodeId,
+            issueNodeId: candidate.issueNodeId, scopeDigest: candidate.scopeDigest, approvalDigest: candidate.approvalDigest,
+            approvalBindings: candidate.approvalBindings, runId: candidate.runId, stage: candidate.stage, paths: candidate.paths,
+            resources: candidate.resources, independent: candidate.independent, parentTaskKey: candidate.parentTaskKey,
+            parentBinding: candidate.parentBinding ?? null, approvedTaskIds: candidate.approvedTaskIds });
+}
+function groupFilesFor(snapshot: CoordinationSnapshot, tasks: TaskRecordV2[], machines: Set<string>, receipt: GroupSuccessionReceipt): Record<string, string> {
+    snapshot.index.revision++;
+    parse(snapshot.index, indexSchema, 'index', 1024 * 1024);
+    parse(receipt, groupReceiptSchema, 'group succession receipt', 32 * 1024);
+    const files: Record<string, string> = {
+        'coordination/index.json': canonical(snapshot.index),
+        [operationPath(receipt.operationId)]: canonical(receipt),
+    };
+    for (const task of tasks) {
+        parse(task, recordV2Schema, 'group successor task');
+        files[taskPath(task.taskKey)] = canonical(task);
+    }
+    for (const machineId of machines) {
+        const machine = snapshot.machines[machineId];
+        if (!machine) throw Error('affected group machine missing');
+        parse(machine, machineSchema, 'group machine');
+        files[machinePath(machineId)] = canonical(machine);
+    }
+    if (Object.values(files).reduce((sum, value) => sum + Buffer.byteLength(value), 0) > 8 * 1024 * 1024)
+        throw Error('transaction size exceeded');
+    return files;
+}
+function groupOwnedResult(target: CoordinationTarget, snapshot: CoordinationSnapshot, receipt: GroupSuccessionReceipt, reference: Extract<EvidenceRef, { kind: 'state-receipt' }>): GroupSuccessionResult {
+    const members = receipt.members.map(row => snapshot.tasks[row.after.taskKey]);
+    if (members.some((task, index) => !task || canonical(bindingOf(task!)) !== canonical(receipt.members[index]!.after)))
+        return { kind: 'refused', reason: 'group receipt no longer owns every current member' };
+    const parent = members.find(task => task!.taskKey === receipt.parentTaskKey)!;
+    return { kind: 'owned', parent: claimOf(parent!, snapshot.head, target), children: members.filter(task => task!.taskKey !== receipt.parentTaskKey).map(task => claimOf(task!, snapshot.head, target)), reference };
+}
+export async function recoverStoppedGroup(input: { machine: EffectiveMachine; session: MachineSession; request: GroupSuccessionRequest }): Promise<GroupSuccessionResult> {
+    const { machine, session, request } = input, target = session.target;
+    return transactionClock.run({ deadline: Date.now() + 45000, decodedBytes: 0 }, async () => {
+        try {
+            if (!groupRequestSchema(request) || request.members.length < 2 || request.members.length > 17 || request.groupPlan.kind !== 'plan')
+                throw Error('invalid stopped-group succession request');
+            const keys = request.members.map(row => row.expected.taskKey);
+            if (canonical(keys) !== canonical([...keys].sort()) || new Set(keys).size !== keys.length ||
+                new Set(request.members.map(row => row.expected.runId)).size !== request.members.length ||
+                new Set(request.members.map(row => row.candidate.issueNodeId)).size !== request.members.length)
+                throw Error('group members must be sorted and unique');
+            validateSession(machine, session, target);
+            if (machine.defaults.recovery !== 'verified-transfer' || !positive(machine.defaults.childConcurrent) || machine.defaults.childConcurrent > 3)
+                throw Error('machine recovery/capacity policy forbids group succession');
+            const receiver = { machineId: machine.id, installationId: machine.installationId, sessionId: session.sessionId, hostBindingDigest: session.hostBindingDigest, bootIdDigest: session.bootIdDigest };
+            const requestDigest = sha256(canonical({ request, receiver }));
+            const intentPath = localPath(target, `group-intent-${request.operationId}.json`);
+            let intent: { operationId: string; requestDigest: string; receiver: typeof receiver; transferredAt: string; tokens: Array<{ taskKey: string; ownerToken: string }> };
+            const intentSchema = closed({ operationId: uuid, requestDigest: digest, receiver: receiverSchema, transferredAt: date, tokens: unique(closed({ taskKey: digest, ownerToken: uuid })) });
+            const intentGuard = await acquireClaim(intentPath + '.lock', await processIdentity());
+            if (intentGuard.kind !== 'owned') throw Error(intentGuard.reason);
+            try {
+                try {
+                    const stat = await lstat(intentPath);
+                    if (stat.isSymbolicLink() || !stat.isFile() || stat.uid !== process.getuid?.() || (stat.mode & 0o077) || stat.size > 32 * 1024) throw Error('unsafe prepared group intent');
+                    intent = parse(JSON.parse(await readFile(intentPath, 'utf8')), intentSchema, 'prepared group intent', 32 * 1024);
+                    if (intent.operationId !== request.operationId || intent.requestDigest !== requestDigest || canonical(intent.receiver) !== canonical(receiver) || canonical(intent.tokens.map(row => row.taskKey)) !== canonical(keys))
+                        throw Error('prepared group intent mismatch');
+                } catch (error) {
+                    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+                    intent = { operationId: request.operationId, requestDigest, receiver, transferredAt: new Date(target.now?.() ?? Date.now()).toISOString(), tokens: keys.map(taskKey => ({ taskKey, ownerToken: randomUUID() })) };
+                }
+                await privateWrite(intentPath, intent!);
+            } finally { await releaseClaim(intentGuard.claim); }
+
+            const current = await readCoordination(target), existing = await groupReceiptAt(target, current.head, request.operationId);
+            if (existing) {
+                if (existing.receipt.requestDigest !== requestDigest || canonical(existing.receipt.receiver) !== canonical(receiver))
+                    return { kind: 'refused', reason: 'operation ID reused for different group succession' };
+                const total = { bytes: 0 }, rows = await validateGroupReceipt(target, current, existing.receipt, total);
+                if (!target.verifyGroupSuccession) throw Error('trusted stopped-group verifier unavailable');
+                const predecessor = await readCoordinationSnapshot(target, false, total, existing.receipt.previousHead);
+                for (let index = 0; index < request.members.length; index++) {
+                    const member = request.members[index]!, task = rows[index]?.before;
+                    if (!task || canonical(bindingOf(task)) !== canonical(member.expected) || !sameCandidate(task, member.candidate))
+                        throw Error('group receipt request/member scope differs');
+                    await target.verifyCandidate(member.candidate, machine, session);
+                    if (task.state === 'recovery-queued') await verifyRecoveryQueued(predecessor, task, target);
+                    else {
+                        if (!['stopped', 'blocked'].includes(task.state) || !task.stopProof) throw Error('group receipt predecessor is not stopped');
+                        await bounded(target.verifyTransition(structuredClone(task), { kind: 'stop', stopProof: structuredClone(task.stopProof) }));
+                        await verifyStop(target, task, task.stopProof);
+                    }
+                    if (!task.checkpoint || !task.recovery || canonical(task.checkpoint) !== canonical(task.recovery.checkpoint)) throw Error('group receipt predecessor recovery unavailable');
+                    await validateRemoteRecovery(target, task.recovery, task, true);
+                }
+                const parent = rows.find(row => row.before.taskKey === request.parentTaskKey)?.before;
+                if (!parent) throw Error('group receipt parent unavailable');
+                const verified = await bounded(target.verifyGroupSuccession({ parent: structuredClone(parent), members: rows.map((row, index) => ({ task: structuredClone(row.before), candidate: structuredClone(request.members[index]!.candidate) })), groupPlan: structuredClone(request.groupPlan), groupsDigest: request.groupsDigest, machine, session }));
+                if (!closed({ maxChildren: positive })(verified) || verified.maxChildren > 3) throw Error('approved group child limit must be an integer from 1 to 3');
+                const reference = { kind: 'state-receipt' as const, operationId: request.operationId, commitSha: current.head, blobSha256: sha256(existing.raw) };
+                return groupOwnedResult(target, current, existing.receipt, reference);
+            }
+            if (current.head !== request.expectedHead) return { kind: 'busy', reason: 'expected group head changed; prepare the complete set again' };
+            const expectedKeys = [request.parentTaskKey, ...current.index.active.filter(row => row.parentTaskKey === request.parentTaskKey).map(row => row.taskKey)].sort();
+            if (canonical(expectedKeys) !== canonical(keys)) throw Error('group request omitted or added a retained member');
+            const rows: Array<{ task: TaskRecord; candidate: VerifiedCandidate; previousSuccession: Extract<EvidenceRef, { kind: 'state-receipt' }> | null }> = [];
+            for (const member of request.members) {
+                const task = current.tasks[member.expected.taskKey];
+                if (!task || canonical(bindingOf(task)) !== canonical(member.expected) || !sameCandidate(task, member.candidate))
+                    throw Error('group member current owner/scope differs');
+                if (task.taskKey === request.parentTaskKey ? task.parentTaskKey !== null : task.parentTaskKey !== request.parentTaskKey || task.parentBinding == null)
+                    throw Error('group must contain one top-level parent and direct retained children');
+                if (task.host !== target.host || !machine.allowedRepositories.includes(task.repo) || machine.repositoryIds[task.repo] !== task.repositoryNodeId)
+                    throw Error('group member outside verified machine repositories');
+                await target.verifyCandidate(member.candidate, machine, session);
+                let previousSuccession: Extract<EvidenceRef, { kind: 'state-receipt' }> | null = null;
+                if (task.schemaVersion === 2) {
+                    const previous = await groupReceiptAt(target, current.head, task.successionOperationId);
+                    if (!previous) throw Error('prior group succession receipt unavailable');
+                    await validateGroupReceipt(target, current, previous.receipt, { bytes: 0 });
+                    previousSuccession = { kind: 'state-receipt', operationId: task.successionOperationId, commitSha: current.head, blobSha256: sha256(previous.raw) };
+                }
+                if (task.state === 'recovery-queued') await verifyRecoveryQueued(current, task, target);
+                else {
+                    if (!['stopped', 'blocked'].includes(task.state) || !task.stopProof) throw Error('every group member must be verified stopped');
+                    await bounded(target.verifyTransition(structuredClone(task), { kind: 'stop', stopProof: structuredClone(task.stopProof) }));
+                    await verifyStop(target, task, task.stopProof);
+                }
+                if (!task.checkpoint || !task.recovery || canonical(task.checkpoint) !== canonical(task.recovery.checkpoint))
+                    throw Error('group member checkpoint/recovery unavailable');
+                await validateRemoteRecovery(target, task.recovery, task, true);
+                rows.push({ task, candidate: member.candidate, previousSuccession });
+            }
+            if (!target.verifyGroupSuccession) throw Error('trusted stopped-group verifier unavailable');
+            const parent = rows.find(row => row.task.taskKey === request.parentTaskKey)!.task;
+            const group = await bounded(target.verifyGroupSuccession({ parent: structuredClone(parent), members: rows.map(row => ({ task: structuredClone(row.task), candidate: structuredClone(row.candidate) })), groupPlan: structuredClone(request.groupPlan), groupsDigest: request.groupsDigest, machine, session }));
+            if (!closed({ maxChildren: positive })(group) || group.maxChildren > 3) throw Error('approved group child limit must be an integer from 1 to 3');
+            const memberKeys = new Set(keys), nonmembers = current.index.active.filter(row => !memberKeys.has(row.taskKey));
+            if (nonmembers.filter(row => row.machineId === machine.id && row.parentTaskKey === null).length + 1 > machine.defaults.maxRuns)
+                throw Error('machine at maxRuns');
+            if (rows.some(row => nonmembers.some(other => conflicting(summaryOf(row.task), other))))
+                throw Error('incompatible nonmember resource reservation busy');
+            for (let index = 0; index < rows.length; index++) for (let other = index + 1; other < rows.length; other++) {
+                const a = rows[index]!.task, b = rows[other]!.task;
+                if (a.taskKey !== b.parentTaskKey && b.taskKey !== a.parentTaskKey && conflicting(summaryOf(a), summaryOf(b)))
+                    throw Error('incompatible sibling resource reservation busy');
+            }
+            const receiverMachine = current.machines[machine.id];
+            if (receiverMachine && (receiverMachine.installationId !== machine.installationId || receiverMachine.hostBindingDigest !== machine.hostBindingDigest))
+                throw Error('registered machine installation/host mismatch');
+            if (receiverMachine?.sessionId !== undefined && receiverMachine.sessionId !== session.sessionId) {
+                if (!target.verifySession) throw Error('registered machine already has another session; verified session reconciliation required');
+                await target.verifySession(receiverMachine, machine, session);
+                for (const task of Object.values(current.tasks).filter(task => task.machineId === machine.id && !memberKeys.has(task.taskKey))) {
+                    if (!['stopped', 'blocked'].includes(task.state) || !task.stopProof) throw Error('prior machine execution stop remains unknown');
+                    await verifyStop(target, task, task.stopProof);
+                }
+            }
+            if (Object.values(current.machines).some(row => row.machineId !== machine.id && row.hostBindingDigest === machine.hostBindingDigest))
+                throw Error('host binding already reserved');
+            const receiptBase = { operationId: request.operationId, parentTaskKey: request.parentTaskKey, receiver };
+            const nextTasks = rows.map(row => groupSuccessor(row.task, receiptBase, { ...bindingOf(row.task), machineId: machine.id, installationId: machine.installationId, sessionId: session.sessionId, ownerToken: intent!.tokens.find(token => token.taskKey === row.task.taskKey)!.ownerToken, generation: row.task.generation + 1 }));
+            const receipt: GroupSuccessionReceipt = { schemaVersion: 2, type: 'group-succession', operationId: request.operationId, parentTaskKey: request.parentTaskKey, previousHead: current.head, requestDigest, groupPlan: request.groupPlan, groupsDigest: request.groupsDigest, transferredAt: intent!.transferredAt, receiver,
+                members: rows.map((row, index) => ({ before: bindingOf(row.task), after: bindingOf(nextTasks[index]!), beforeTaskSha256: sha256(canonical(row.task)), afterTaskSha256: sha256(canonical(nextTasks[index]!)), previousSuccession: row.previousSuccession })) };
+            const affectedMachines = new Set<string>([machine.id]);
+            for (const row of rows) affectedMachines.add(row.task.machineId);
+            for (const machineId of affectedMachines) {
+                const machineRow = current.machines[machineId];
+                if (machineRow) machineRow.activeTaskKeys = machineRow.activeTaskKeys.filter(key => !memberKeys.has(key));
+            }
+            current.index.active = current.index.active.map(row => memberKeys.has(row.taskKey) ? { ...row, machineId: machine.id } : row);
+            for (const task of nextTasks) current.tasks[task.taskKey] = task;
+            current.machines[machine.id] = { schemaVersion: 1, machineId: machine.id, installationId: machine.installationId, sessionId: session.sessionId, hostBindingDigest: session.hostBindingDigest, bootIdDigest: session.bootIdDigest, observedAt: intent!.transferredAt, activeTaskKeys: current.index.active.filter(row => row.machineId === machine.id).map(row => row.taskKey) };
+            if (!current.index.machines.includes(machine.id)) current.index.machines.push(machine.id);
+            const result = await bounded(target.provider.commit(target, { branchId: current.branchId, expectedHeadOid: current.head, files: groupFilesFor(current, nextTasks, affectedMachines, receipt), operationId: request.operationId })).catch(() => ({ kind: 'ambiguous' as const, reason: 'mutation response timed out' }));
+            if (result.kind === 'conflict') return { kind: 'busy', reason: 'expected group head changed; prepare the complete set again' };
+            if (result.kind === 'refused') return { kind: 'refused', reason: result.reason };
+            try {
+                const readback = await readCoordination(target), found = await groupReceiptAt(target, readback.head, request.operationId);
+                if (!found || canonical(found.receipt) !== canonical(receipt)) throw Error('group receipt readback differs');
+                await validateGroupReceipt(target, readback, found.receipt, { bytes: 0 });
+                return groupOwnedResult(target, readback, found.receipt, { kind: 'state-receipt', operationId: request.operationId, commitSha: readback.head, blobSha256: sha256(found.raw) });
+            } catch {
+                return { kind: 'ambiguous', reason: 'group receipt/current owner readback unavailable' };
+            }
+        } catch (error) {
+            return { kind: /busy|maxRuns|capacity|another session|expected group head/.test((error as Error).message) ? 'busy' : 'refused', reason: (error as Error).message };
+        }
+    });
+}
 export async function transitionSharedTask(input: {
     claim: SharedClaim;
     operationId: string;
@@ -1269,10 +1649,11 @@ export async function transitionSharedTask(input: {
             effect.state = 'ambiguous';
         }
         else if (transition.kind === 'start') {
-            if (t.state !== 'claimed')
+            if (t.state !== 'claimed' && !(t.schemaVersion === 2 && t.state === 'recovery-queued'))
                 throw Error('task cannot start from current state');
             await verifyChildAdmission(s, t, target);
             t.state = 'running';
+            if (t.schemaVersion === 2) t.stopProof = null;
         }
         else if (transition.kind === 'stop' || transition.kind === 'block') {
             if (transition.stopProof)

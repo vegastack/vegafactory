@@ -16,3 +16,5 @@ Protect dispatcher ownership with atomic local claims and conditional shared tas
 - Inspect handoff receipts as verified predecessor and successor records without treating null handoff payloads as recovery evidence.
 - Reconcile a new session on the same machine against unchanged stopped task records before replacing handoff ownership.
 - Project sanitized current task ownership and checkpoint summaries with bounded, receipt-verified history; retain unknown provenance and explicit incomplete archive coverage without writing status pointers.
+- Transfer one exactly verified stopped parent/direct-child group in a single conditional commit, preserving every reservation and accepted/effect/history field while queuing unfinished children behind fresh capacity checks.
+- Admit top-level fleet parallelism only from #135's current closed declaration and canonical selected-task file projection; every missing, invalid, stale or mismatched declaration remains repository-exclusive.

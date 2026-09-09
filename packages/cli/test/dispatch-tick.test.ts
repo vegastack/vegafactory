@@ -9,7 +9,7 @@ import { join, resolve } from 'node:path'
 import { scopeDigest } from '../../../skills/dev/dev-implement/scripts/lib/approval.mjs'
 
 process.env.VSK_PREFLIGHT_SCRIPT = resolve(import.meta.dir, '../../../skills/dev/dev-implement/scripts/preflight.mjs')
-import { executeRun, shipGuardWired, fetchBoard, fetchRockets, readLock, readState, repoLockPath, runOnce, runTick, settleRuns, watch, writeState, type PlannedRun, type RunOutcome, type RunTracker, type TickDeps } from '../src/dispatch.ts'
+import { executeRun, shipGuardWired, fetchBoard, fetchRockets, fleetParallelProjection, readLock, readState, repoLockPath, runOnce, runTick, settleRuns, watch, writeState, type PlannedRun, type RunOutcome, type RunTracker, type TickDeps } from '../src/dispatch.ts'
 import { parseFactoryConfig } from '../src/config.ts'
 
 const SHIP_POLICY = resolve(import.meta.dir, '../../../skills/dev/dev-setup/scripts/ship-policy.mjs')
@@ -542,6 +542,28 @@ for (const harness of ['claude', 'codex'] as const) for (const parallel of [fals
 }
 
 const responsePage = (rows: unknown[], next?: string, status = 200) => `HTTP/2.0 ${status} Status\r\nx-test: 1\r\n${next ? `link: <${next}>; rel="next"\r\n` : ''}\r\n${JSON.stringify(rows)}`
+
+test('137 top-level fleet projection consumes the canonical #135 parser and exact selected plan tasks', async () => {
+  const plan = `<!-- vsk:v1 type=plan rev=1 -->
+## Plan (v1)
+**Goal:** disjoint work.
+**Approach:** approved implementation.
+**Constraints:** current approval and closed dependencies.
+**Fleet parallel:** {"schemaVersion":1,"eligible":true,"taskIds":["137-T1","137-T2"],"resources":["fixture:one"]}
+
+### Tasks
+- [ ] **Task 1: one** <!-- task-id:137-T1 -->
+  - Files — Modify: \`src/one.ts\`
+- [ ] **Task 2: two** <!-- task-id:137-T2 -->
+  - Files — Modify: \`src/two.ts\`
+`
+  const binding = { repo: 'acme/app', issue: 137, kind: 'plan' as const, artifactId: 'IC_plan_137', rev: 1, digest: scopeDigest(plan, 'plan') }
+  const gh = async () => responsePage([{ id: 1, node_id: binding.artifactId, body: plan }])
+  expect(await fleetParallelProjection({ repo: 'acme/app', approvalRefs: [binding], approvedTaskIds: ['137-T1', '137-T2'] }, gh)).toEqual({
+    eligible: true, independent: true, taskIds: ['137-T1', '137-T2'], paths: ['src/one.ts', 'src/two.ts'], resources: ['fixture:one'], reason: null,
+  })
+  expect((await fleetParallelProjection({ repo: 'acme/app', approvalRefs: [binding], approvedTaskIds: ['137-T1'] }, gh)).independent).toBe(false)
+})
 
 test('142 reproduction: fetchBoard returns all 31 repository rows instead of three truncated searches', async () => {
   const calls: string[][] = []
