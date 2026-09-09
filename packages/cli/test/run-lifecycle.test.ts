@@ -12,7 +12,7 @@ test('owned process ignoring TERM is killed within cancellation bound',async()=>
 test('cancellation removes the owned nondetached descendant too',async()=>{const {result}=await fixture("const {spawn}=require('node:child_process');const c=spawn(process.execPath,['-e',\"process.on('SIGTERM',()=>{});setInterval(()=>{},100)\"],{stdio:'ignore'});console.log(c.pid);process.on('SIGTERM',()=>{});setInterval(()=>{},100)",200);expect(result.terminationCause).toBe('timed-out');const pid=Number(result.stdout?.trim());expect(pid).toBeGreaterThan(0);expect(()=>process.kill(pid,0)).toThrow()},12000)
 
 test('default qualified admission runs, waits for quota, resumes the same session and preserves terminal delivery',async()=>{
-  const {spyOn}=await import('bun:test'),fs=await import('node:fs/promises'),{execFileSync}=await import('node:child_process'),crypto=await import('node:crypto')
+  const {spyOn}=await import('bun:test'),fs=await import('node:fs/promises'),{execFileSync,spawn}=await import('node:child_process'),crypto=await import('node:crypto')
   const runtime=await import('../src/runs.ts'),dispatch=await import('../src/dispatch.ts'),launch=await import('../src/launch.ts'),wire=await import('../src/shared-claims.ts'),policyOwner=await import('../../../skills/dev/dev-setup/scripts/effective-policy.mjs'),approvalOwner=await import('../../../skills/dev/dev-implement/scripts/lib/approval.mjs')
   const home=await fs.realpath(await mkdtemp(join(tmpdir(),'runtime-138-'))),repo=join(home,'app'),tree=join(repo,'.vegastack','.worktrees','1-fixture'),room=join(home,'room'),installed=join(home,'installed'),bin=join(home,'bin'),phasePath=join(home,'vendor-phase.json')
   const sourceRoot=resolve('skills'),actualGit=Bun.which('git')!,oldEnv={PATH:process.env.PATH,HOME:process.env.HOME,CODEX_HOME:process.env.CODEX_HOME,VSK_GH:process.env.VSK_GH,VSK_PREFLIGHT_SCRIPT:process.env.VSK_PREFLIGHT_SCRIPT,VSK_SHIP_POLICY_SCRIPT:process.env.VSK_SHIP_POLICY_SCRIPT}
@@ -42,7 +42,7 @@ test('default qualified admission runs, waits for quota, resumes the same sessio
     const planBody='<!-- vsk:v1 type=plan rev=1 -->\n- [ ] **Task 1: fixture** <!-- task-id:1-T1 -->\n  - Files — `allowed.txt`\n  - Interfaces — existing CLI\n  - Steps: finish fixture\n'
     const artifacts=[{repo:'acme/app',issue:1,kind:'brief',artifactId:'I_1',rev:1,digest:approvalOwner.scopeDigest(issueBody,'brief')},{repo:'acme/app',issue:1,kind:'plan',artifactId:'PLAN_1',rev:1,digest:approvalOwner.scopeDigest(planBody,'plan')}]
     const event={schemaVersion:2,id:'approved-fixture',operator:'robot',scope:'brief+plan',source:{kind:'session',ref:'session:fixture',quote:'I approve this exact fixture.'},artifacts,supersedes:[],revokes:[]}
-    const baseComment={issue_url:'https://api.github.com/repos/acme/app/issues/1',user:{login:'robot'}}
+    const baseComment={issue_url:'https://api.github.com/repos/acme/app/issues/1',user:{login:'robot'},updated_at:'2026-09-08T12:14:45Z'}
     const comments=[{...baseComment,id:11,node_id:'PLAN_1',body:planBody,html_url:'https://github.com/acme/app/issues/1#issuecomment-11'},{...baseComment,id:12,node_id:'APPROVAL_1',body:'<!-- vsk:v1 type=approval scope=brief+plan -->\n```json\n'+JSON.stringify(event)+'\n```\n',html_url:'https://github.com/acme/app/issues/1#issuecomment-12'}]
     const issue={id:1,node_id:'I_1',number:1,title:'feat: fixture',body:issueBody,state:'open',labels:[{name:'ready'},{name:'quick-build'}],assignees:[],updated_at:new Date().toISOString()}
     const extraIssues=new Map<number,Record<string,unknown>>(),extraComments=new Map<number,Array<Record<string,unknown>>>()
@@ -171,8 +171,12 @@ if(args.includes('app-server')){
       await expect(runtime.verifySharedStopProof({...proof,evidenceRef:{...proof.evidenceRef,blobSha256:'7'.repeat(64)}},task,shared.target,retained)).rejects.toThrow('changed')
       await expect(runtime.verifySharedStopProof(proof,{...task,ownerToken:crypto.randomUUID()},shared.target,retained)).rejects.toThrow()
       await expect(runtime.verifySharedStopProof(proof,task,shared.target,{...retained,processIdentity:null})).rejects.toThrow('unconfirmed')
-      const currentIdentity=await(await import('../src/claims.ts')).processIdentity()
-      await expect(runtime.verifySharedStopProof(proof,task,shared.target,{...retained,processIdentity:currentIdentity})).rejects.toThrow('unconfirmed')
+      const live=spawn(process.execPath,['-e','setInterval(()=>{},100)'],{detached:true,stdio:'ignore'}),exited=new Promise(resolve=>live.once('exit',resolve))
+      await new Promise<void>((resolve,reject)=>live.once('spawn',resolve).once('error',reject))
+      try{
+        const liveIdentity=await(await import('../src/claims.ts')).processIdentity(live.pid!)
+        await expect(runtime.verifySharedStopProof(proof,task,shared.target,{...retained,processIdentity:liveIdentity})).rejects.toThrow('unconfirmed')
+      }finally{try{process.kill(-live.pid!,'SIGKILL')}catch{}await exited}
       // Pending code delivery also yields an unresolved stop, even with qualified
       // coverage. Lose the receipt acknowledgment, then retry after local delivery
       // changes: the original operation/payload must be reused, never rebound.
