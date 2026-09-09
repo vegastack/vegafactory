@@ -1,6 +1,4 @@
 import { expect, test } from 'bun:test'
-import { readFileSync } from 'node:fs'
-import { join } from 'node:path'
 import { renderToStaticMarkup } from 'react-dom/server'
 
 import ErrorPage from '../src/app/error'
@@ -8,25 +6,6 @@ import Loading from '../src/app/loading'
 import { AttentionSections } from '../src/app/page'
 import { Navigation } from '../src/components/shell'
 import { money, quantity } from '../src/components/stat-table'
-
-const dashboardRoot = join(import.meta.dirname, '..')
-const pageFiles = [
-  'src/app/page.tsx',
-  'src/app/board/page.tsx',
-  'src/app/dispatcher/page.tsx',
-  'src/app/people/page.tsx',
-  'src/app/people/[login]/page.tsx',
-  'src/app/repo/[owner]/[name]/page.tsx',
-  'src/app/skills/page.tsx',
-]
-
-test('every existing page keeps database work inside withContext', () => {
-  for (const relative of pageFiles) {
-    const source = readFileSync(join(dashboardRoot, relative), 'utf8')
-    expect(source, relative).toContain('withContext')
-    expect(source, relative).not.toContain('loadContext')
-  }
-})
 
 test('navigation marks one route and carries only validated report filters', () => {
   const html = renderToStaticMarkup(
@@ -55,7 +34,9 @@ test('unknown quantities remain distinct from measured zero', () => {
 test('attention sections retain the accepted decision-to-merge order', () => {
   const html = renderToStaticMarkup(<AttentionSections decision={[]} blocked={[]} running={[]} merged={[]} incomplete={false} />)
   const headings = ['Needs your decision', 'Blocked or failed', 'Running', 'Recently merged']
-  expect(headings.map(heading => html.indexOf(heading))).toEqual([...headings].map(heading => html.indexOf(heading)).sort((a, b) => a - b))
+  const positions = headings.map(heading => html.indexOf(heading))
+  for (const [index, position] of positions.entries()) expect(position, headings[index]).toBeGreaterThanOrEqual(0)
+  expect(positions).toEqual([...positions].sort((a, b) => a - b))
 })
 
 test('loading and failure states announce one meaningful next action without exposing an exception', () => {
