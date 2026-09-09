@@ -565,7 +565,7 @@ export interface CoordinationSnapshot {
     machines: Record<string, MachineRecord>;
 }
 export type SharedHistoryCoverage = 'complete' | 'partial' | 'unsupported' | 'unavailable' | 'bounded';
-export type SharedTransitionKind = 'acquire' | 'start' | 'checkpoint' | 'stop' | 'handoff' | 'complete' | 'block' | 'recovery' | 'receipt' | 'effect-send' | 'accept-scope';
+export type SharedTransitionKind = 'acquire' | 'start' | 'checkpoint' | 'stop' | 'handoff' | 'complete' | 'block' | 'recovery' | 'receipt' | 'effect-send' | 'accept-scope' | 'group-succession';
 export interface SharedTaskStatus extends Pick<TaskRecord, 'taskKey' | 'repo' | 'issue' | 'state' | 'machineId' | 'generation'> {
     sourceCommit: string;
     originMachineId: string | null;
@@ -998,6 +998,58 @@ async function groupReceiptAt(target: CoordinationTarget, head: string, operatio
 }
 
 type SuccessionValidationState = { visited: Set<string>; trail: Set<string>; cache: Map<string, Array<{ before: TaskRecord; after: TaskRecordV2 }>> };
+const immutableSuccessionFields = ['taskKey', 'host', 'repo', 'issue', 'repositoryNodeId', 'issueNodeId', 'scopeDigest', 'approvalDigest', 'approvalBindings', 'runId', 'stage', 'paths', 'resources', 'independent', 'parentTaskKey', 'parentBinding', 'approvedTaskIds'] as const;
+function validateImmutableSuccessionLineage(initial: TaskRecord, current: TaskRecord): void {
+    for (const field of immutableSuccessionFields)
+        if (canonical(initial[field] ?? null) !== canonical(current[field] ?? null))
+            throw Error('group succession immutable task/run/scope/parent lineage changed');
+}
+async function validateOwnershipProgression(target: CoordinationTarget, initial: TaskRecord, current: TaskRecord, currentHead: string, total: { bytes: number }): Promise<void> {
+    validateImmutableSuccessionLineage(initial, current);
+    if (canonical(bindingOf(initial)) === canonical(bindingOf(current))) return;
+    if (current.generation <= initial.generation || !target.provider.history) throw Error('intervening ownership history unavailable');
+    let cursor: string | null = null, nextHead = currentHead, tracked = current, transitions = 0;
+    const cursors = new Set<string>(), commits = new Set<string>();
+    for (let pageNumber = 0; pageNumber < sharedStatusLimits.pages; pageNumber++) {
+        const page: CoordinationHistoryPage = await bounded(target.provider.history(target, currentHead, cursor, sharedStatusLimits.pageSize));
+        const bytes = Buffer.byteLength(JSON.stringify(page));
+        if (bytes > sharedStatusLimits.pageBytes || (total.bytes += bytes) > 8 * 1024 * 1024 || !closed({ commits: array(closed({ oid: sha, parents: array(sha), headline: (v: unknown) => typeof v === 'string' && v.length <= 256, committedAt: nullable(date) })), nextCursor: nullable((v: unknown) => typeof v === 'string' && v.length > 0 && v.length <= 1024) })(page))
+            throw Error('intervening ownership history invalid or over bound');
+        for (const commit of page.commits) {
+            if (commit.oid !== nextHead || commits.has(commit.oid)) throw Error('intervening ownership history is noncontiguous');
+            commits.add(commit.oid);
+            if (commit.oid === target.rootCommit) break;
+            if (commit.parents.length !== 1 || commit.parents[0] === commit.oid) throw Error('intervening ownership history is nonlinear');
+            nextHead = commit.parents[0]!;
+            const operationId = /^factory coordination ([0-9a-f-]+)$/.exec(commit.headline)?.[1];
+            if (!operationId || !uuid(operationId)) throw Error('intervening ownership operation unavailable');
+            const raw = await pinnedJson(target, commit.oid, operationPath(operationId), 32 * 1024, total);
+            if (receiptSchema(raw)) {
+                const receipt = parse<OperationReceipt>(raw, receiptSchema, 'intervening handoff receipt', 32 * 1024);
+                if (receipt.previousHead !== nextHead) throw Error('intervening handoff parent mismatch');
+                if (await pinnedJson(target, nextHead, operationPath(operationId), 32 * 1024, total) !== null || canonical(await pinnedJson(target, currentHead, operationPath(operationId), 32 * 1024, total)) !== canonical(raw))
+                    throw Error('intervening handoff receipt is not immutable');
+                if (receipt.type === 'handoff' && receipt.taskKey === current.taskKey) {
+                    if (++transitions > 32) throw Error('group succession predecessor bound exceeded');
+                    const after = (await inspectTaskAtSnapshot(target, current.taskKey, {}, await readCoordinationSnapshot(target, false, total, commit.oid), total));
+                    const before = (await inspectTaskAtSnapshot(target, current.taskKey, {}, await readCoordinationSnapshot(target, false, total, nextHead), total));
+                    if ((after.kind !== 'active' && after.kind !== 'completed') || (before.kind !== 'active' && before.kind !== 'completed') || canonical(bindingOf(after.task)) !== canonical(bindingOf(tracked)) || statusTransition(receipt, before.task, after.task) !== 'handoff')
+                        throw Error('intervening handoff lineage invalid');
+                    validateImmutableSuccessionLineage(initial, before.task);
+                    tracked = before.task;
+                    if (canonical(bindingOf(tracked)) === canonical(bindingOf(initial))) return;
+                }
+            } else if (groupReceiptSchema(raw)) {
+                if (await pinnedJson(target, nextHead, operationPath(operationId), 32 * 1024, total) !== null || canonical(await pinnedJson(target, currentHead, operationPath(operationId), 32 * 1024, total)) !== canonical(raw))
+                    throw Error('intervening group receipt is not immutable');
+            } else throw Error('intervening ownership receipt schema invalid');
+        }
+        if (page.nextCursor === null) break;
+        if (cursors.has(page.nextCursor)) throw Error('intervening ownership cursor repeated');
+        cursors.add(page.nextCursor); cursor = page.nextCursor;
+    }
+    throw Error('intervening ownership lineage does not reach succession endpoint');
+}
 async function validateGroupReceipt(target: CoordinationTarget, observed: CoordinationSnapshot, receipt: GroupSuccessionReceipt, total: { bytes: number }, requestedParent?: ParentClaimBinding, lineage: SuccessionValidationState = { visited: new Set(), trail: new Set(), cache: new Map() }): Promise<Array<{ before: TaskRecord; after: TaskRecordV2 }>> {
     if (lineage.trail.has(receipt.operationId)) throw Error('group succession predecessor cycle');
     if (!lineage.visited.has(receipt.operationId)) {
@@ -1042,6 +1094,7 @@ async function validateGroupReceipt(target: CoordinationTarget, observed: Coordi
             const predecessor = priorRows.find(row => row.after.taskKey === before.taskKey);
             if (!predecessor)
                 throw Error('v2 predecessor succession endpoint invalid');
+            await validateOwnershipProgression(target, predecessor.after, before, member.previousSuccession.commitSha, total);
         }
         result.push({ before, after });
     }
@@ -1053,7 +1106,7 @@ async function validateGroupReceipt(target: CoordinationTarget, observed: Coordi
     return result;
 }
 
-export type GroupSuccessionInspection = { kind: 'verified'; reference: Extract<EvidenceRef, { kind: 'state-receipt' }>; receipt: GroupSuccessionReceipt } | { kind: 'invalid-or-unavailable'; reason: string };
+export type GroupSuccessionInspection = { kind: 'verified'; reference: Extract<EvidenceRef, { kind: 'state-receipt' }>; receipt: GroupSuccessionReceipt; currentMembers: Array<{ initial: TaskRecordV2; current: TaskRecord }> } | { kind: 'invalid-or-unavailable'; reason: string };
 export async function inspectGroupSuccession(target: CoordinationTarget, input: { operationId: string; parent: ParentClaimBinding }): Promise<GroupSuccessionInspection> {
     try {
         if (!closed({ operationId: uuid, parent: parentBindingSchema })(input)) throw Error('group succession operation/current parent required');
@@ -1061,13 +1114,17 @@ export async function inspectGroupSuccession(target: CoordinationTarget, input: 
         const found = await groupReceiptAt(target, current.head, input.operationId, total);
         if (!found) throw Error('group succession receipt missing');
         const rows = await validateGroupReceipt(target, current, found.receipt, total, input.parent);
+        const currentMembers: Array<{ initial: TaskRecordV2; current: TaskRecord }> = [];
         for (const { after } of rows) {
             const task = current.tasks[after.taskKey];
-            if (!task || canonical(bindingOf(task)) !== canonical(bindingOf(after)))
-                throw Error('group succession ownership progressed');
+            if (!task) throw Error('group succession current member unavailable');
+            if (after.taskKey === found.receipt.parentTaskKey) {
+                if (canonical(bindingOf(task)) !== canonical(input.parent)) throw Error('group succession current parent differs');
+            } else await validateOwnershipProgression(target, after, task, current.head, total);
+            currentMembers.push({ initial: after, current: task });
         }
         const reference = { kind: 'state-receipt' as const, operationId: input.operationId, commitSha: current.head, blobSha256: sha256(found.raw) };
-        return { kind: 'verified', reference, receipt: found.receipt };
+        return { kind: 'verified', reference, receipt: found.receipt, currentMembers };
     } catch {
         return { kind: 'invalid-or-unavailable', reason: 'group succession could not be verified' };
     }
@@ -1469,6 +1526,45 @@ function groupOwnedResult(target: CoordinationTarget, snapshot: CoordinationSnap
     const parent = members.find(task => task!.taskKey === receipt.parentTaskKey)!;
     return { kind: 'owned', parent: claimOf(parent!, snapshot.head, target), children: members.filter(task => task!.taskKey !== receipt.parentTaskKey).map(task => claimOf(task!, snapshot.head, target)), reference };
 }
+async function validateStoppedGroupReadback(input: {
+    target: CoordinationTarget;
+    snapshot: CoordinationSnapshot;
+    found: { receipt: GroupSuccessionReceipt; raw: string };
+    request: GroupSuccessionRequest;
+    machine: EffectiveMachine;
+    session: MachineSession;
+    requestDigest: string;
+    receiver: GroupSuccessionReceipt['receiver'];
+}): Promise<GroupSuccessionResult> {
+    const { target, snapshot, found, request, machine, session, requestDigest, receiver } = input;
+    if (found.receipt.requestDigest !== requestDigest || canonical(found.receipt.receiver) !== canonical(receiver))
+        throw Error('operation ID reused for different group succession');
+    const total = { bytes: 0 }, rows = await validateGroupReceipt(target, snapshot, found.receipt, total);
+    if (!target.verifyGroupSuccession) throw Error('trusted stopped-group verifier unavailable');
+    const predecessor = await readCoordinationSnapshot(target, false, total, found.receipt.previousHead);
+    for (let index = 0; index < request.members.length; index++) {
+        const member = request.members[index]!, task = rows[index]?.before;
+        if (!task || canonical(bindingOf(task)) !== canonical(member.expected) || !sameCandidate(task, member.candidate))
+            throw Error('group receipt request/member scope differs');
+        await target.verifyCandidate(member.candidate, machine, session);
+        if (task.state === 'recovery-queued') await verifyRecoveryQueued(predecessor, task, target);
+        else {
+            if (!['stopped', 'blocked'].includes(task.state) || !task.stopProof) throw Error('group receipt predecessor is not stopped');
+            await bounded(target.verifyTransition(structuredClone(task), { kind: 'stop', stopProof: structuredClone(task.stopProof) }));
+            await verifyStop(target, task, task.stopProof);
+        }
+        if (!task.checkpoint || !task.recovery || canonical(task.checkpoint) !== canonical(task.recovery.checkpoint)) throw Error('group receipt predecessor recovery unavailable');
+        await validateRemoteRecovery(target, task.recovery, task, true);
+    }
+    const parent = rows.find(row => row.before.taskKey === request.parentTaskKey)?.before;
+    if (!parent) throw Error('group receipt parent unavailable');
+    const verified = await bounded(target.verifyGroupSuccession({ parent: structuredClone(parent), members: rows.map((row, index) => ({ task: structuredClone(row.before), candidate: structuredClone(request.members[index]!.candidate) })), groupPlan: structuredClone(request.groupPlan), groupsDigest: request.groupsDigest, machine, session }));
+    if (!closed({ maxChildren: positive })(verified) || verified.maxChildren > 3) throw Error('approved group child limit must be an integer from 1 to 3');
+    const reference = { kind: 'state-receipt' as const, operationId: request.operationId, commitSha: snapshot.head, blobSha256: sha256(found.raw) };
+    const owned = groupOwnedResult(target, snapshot, found.receipt, reference);
+    if (owned.kind !== 'owned') throw Error(owned.reason);
+    return owned;
+}
 export async function recoverStoppedGroup(input: { machine: EffectiveMachine; session: MachineSession; request: GroupSuccessionRequest }): Promise<GroupSuccessionResult> {
     const { machine, session, request } = input, target = session.target;
     return transactionClock.run({ deadline: Date.now() + 45000, decodedBytes: 0 }, async () => {
@@ -1506,31 +1602,7 @@ export async function recoverStoppedGroup(input: { machine: EffectiveMachine; se
 
             const current = await readCoordination(target), existing = await groupReceiptAt(target, current.head, request.operationId);
             if (existing) {
-                if (existing.receipt.requestDigest !== requestDigest || canonical(existing.receipt.receiver) !== canonical(receiver))
-                    return { kind: 'refused', reason: 'operation ID reused for different group succession' };
-                const total = { bytes: 0 }, rows = await validateGroupReceipt(target, current, existing.receipt, total);
-                if (!target.verifyGroupSuccession) throw Error('trusted stopped-group verifier unavailable');
-                const predecessor = await readCoordinationSnapshot(target, false, total, existing.receipt.previousHead);
-                for (let index = 0; index < request.members.length; index++) {
-                    const member = request.members[index]!, task = rows[index]?.before;
-                    if (!task || canonical(bindingOf(task)) !== canonical(member.expected) || !sameCandidate(task, member.candidate))
-                        throw Error('group receipt request/member scope differs');
-                    await target.verifyCandidate(member.candidate, machine, session);
-                    if (task.state === 'recovery-queued') await verifyRecoveryQueued(predecessor, task, target);
-                    else {
-                        if (!['stopped', 'blocked'].includes(task.state) || !task.stopProof) throw Error('group receipt predecessor is not stopped');
-                        await bounded(target.verifyTransition(structuredClone(task), { kind: 'stop', stopProof: structuredClone(task.stopProof) }));
-                        await verifyStop(target, task, task.stopProof);
-                    }
-                    if (!task.checkpoint || !task.recovery || canonical(task.checkpoint) !== canonical(task.recovery.checkpoint)) throw Error('group receipt predecessor recovery unavailable');
-                    await validateRemoteRecovery(target, task.recovery, task, true);
-                }
-                const parent = rows.find(row => row.before.taskKey === request.parentTaskKey)?.before;
-                if (!parent) throw Error('group receipt parent unavailable');
-                const verified = await bounded(target.verifyGroupSuccession({ parent: structuredClone(parent), members: rows.map((row, index) => ({ task: structuredClone(row.before), candidate: structuredClone(request.members[index]!.candidate) })), groupPlan: structuredClone(request.groupPlan), groupsDigest: request.groupsDigest, machine, session }));
-                if (!closed({ maxChildren: positive })(verified) || verified.maxChildren > 3) throw Error('approved group child limit must be an integer from 1 to 3');
-                const reference = { kind: 'state-receipt' as const, operationId: request.operationId, commitSha: current.head, blobSha256: sha256(existing.raw) };
-                return groupOwnedResult(target, current, existing.receipt, reference);
+                return await validateStoppedGroupReadback({ target, snapshot: current, found: existing, request, machine, session, requestDigest, receiver });
             }
             if (current.head !== request.expectedHead) return { kind: 'busy', reason: 'expected group head changed; prepare the complete set again' };
             const expectedKeys = [request.parentTaskKey, ...current.index.active.filter(row => row.parentTaskKey === request.parentTaskKey).map(row => row.taskKey)].sort();
@@ -1549,7 +1621,10 @@ export async function recoverStoppedGroup(input: { machine: EffectiveMachine; se
                 if (task.schemaVersion === 2) {
                     const previous = await groupReceiptAt(target, current.head, task.successionOperationId);
                     if (!previous) throw Error('prior group succession receipt unavailable');
-                    await validateGroupReceipt(target, current, previous.receipt, { bytes: 0 });
+                    const priorRows = await validateGroupReceipt(target, current, previous.receipt, { bytes: 0 });
+                    const priorMember = priorRows.find(row => row.after.taskKey === task.taskKey);
+                    if (!priorMember) throw Error('prior group succession member unavailable');
+                    await validateOwnershipProgression(target, priorMember.after, task, current.head, { bytes: 0 });
                     previousSuccession = { kind: 'state-receipt', operationId: task.successionOperationId, commitSha: current.head, blobSha256: sha256(previous.raw) };
                 }
                 if (task.state === 'recovery-queued') await verifyRecoveryQueued(current, task, target);
@@ -1610,8 +1685,7 @@ export async function recoverStoppedGroup(input: { machine: EffectiveMachine; se
             try {
                 const readback = await readCoordination(target), found = await groupReceiptAt(target, readback.head, request.operationId);
                 if (!found || canonical(found.receipt) !== canonical(receipt)) throw Error('group receipt readback differs');
-                await validateGroupReceipt(target, readback, found.receipt, { bytes: 0 });
-                return groupOwnedResult(target, readback, found.receipt, { kind: 'state-receipt', operationId: request.operationId, commitSha: readback.head, blobSha256: sha256(found.raw) });
+                return await validateStoppedGroupReadback({ target, snapshot: readback, found, request, machine, session, requestDigest, receiver });
             } catch {
                 return { kind: 'ambiguous', reason: 'group receipt/current owner readback unavailable' };
             }
@@ -1910,7 +1984,33 @@ export async function readSharedStatus(target: CoordinationTarget, allowedRepos:
                         nextHead = commit.parents[0]!;
                         const operationId = /^factory coordination ([0-9a-f-]+)$/.exec(commit.headline)?.[1];
                         if (!operationId || !uuid(operationId)) throw Error('history operation unavailable');
-                        const receipt = parse<OperationReceipt>(await pinnedJson(viewTarget, commit.oid, operationPath(operationId), 32 * 1024, total), receiptSchema, 'history receipt', 32 * 1024);
+                        const rawReceipt = await pinnedJson(viewTarget, commit.oid, operationPath(operationId), 32 * 1024, total);
+                        if (groupReceiptSchema(rawReceipt)) {
+                            const receipt = parse<GroupSuccessionReceipt>(rawReceipt, groupReceiptSchema, 'history group succession receipt', 32 * 1024);
+                            if (receipt.operationId !== operationId || receipt.previousHead !== nextHead) throw Error('history group receipt parent mismatch');
+                            if (await pinnedJson(viewTarget, nextHead, operationPath(operationId), 32 * 1024, total) !== null) throw Error('group receipt was not introduced at this commit');
+                            const retained = await pinnedJson(viewTarget, snapshot.head, operationPath(operationId), 32 * 1024, total);
+                            if (canonical(receipt) !== canonical(retained)) throw Error('history group receipt changed');
+                            const groupRows = await validateGroupReceipt(viewTarget, await at(commit.oid), receipt, total);
+                            for (const transition of groupRows) {
+                                const after = await taskAt(commit.oid, transition.after.taskKey), before = await taskAt(nextHead, transition.before.taskKey);
+                                if (!after || !before || canonical(after) !== canonical(transition.after) || canonical(before) !== canonical(transition.before)) throw Error('history group member task mismatch');
+                                if (!allowedRepos.includes(after.repo)) continue;
+                                if (!expected.has(after.taskKey)) {
+                                    const current = await taskAt(snapshot.head, after.taskKey);
+                                    if (!current || !allowedRepos.includes(current.repo)) throw Error('current retained group member missing');
+                                    expected.set(after.taskKey, current);
+                                    rows.set(after.taskKey, statusTask(current, snapshot.head, 'partial'));
+                                }
+                                if (canonical(expected.get(after.taskKey)) !== canonical(after)) throw Error('group member history discontinuity');
+                                const row = rows.get(after.taskKey)!;
+                                row.history.events.push({ kind: 'group-succession', generation: after.generation, machineId: after.machineId, previousMachineId: before.machineId, sourceCommit: commit.oid, observedAt: commit.committedAt });
+                                if (row.history.events.length === 1) row.lastTransitionObservedAt = commit.committedAt;
+                                expected.set(after.taskKey, before);
+                            }
+                            continue;
+                        }
+                        const receipt = parse<OperationReceipt>(rawReceipt, receiptSchema, 'history receipt', 32 * 1024);
                         if (receipt.operationId !== operationId || receipt.previousHead !== nextHead) throw Error('history receipt parent mismatch');
                         // Scope discovery uses the pinned task only; foreign tasks produce no detail or counts.
                         const rawTask = parse<TaskRecord>(await pinnedJson(viewTarget, commit.oid, taskPath(receipt.taskKey), 256 * 1024, total), recordSchema, 'history task');
