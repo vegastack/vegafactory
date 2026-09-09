@@ -7,7 +7,7 @@ import { type ApprovalAuthorityRef, type CheckpointRef } from './shared-claims.t
 const exec=promisify(execFile)
 const digest=(s:string)=>createHash('sha256').update(s).digest('hex')
 export interface CheckpointIntent {
-  approvalRequest?:{parentRepo:string;parentIssue:number;approvalBinding:{commentId:number;bodySha256:string};requested:{repo:string;issue:number;taskIds:string[];actionId:string;branch:string;baseSha:string;paths:string[];operation:"checkpoint"}}
+  approvalRequest?:{parentRepo:string;parentIssue:number;approvalBinding:{commentId:number;bodySha256:string};requested:{repo:string;issue:number;taskIds:string[];actionId:string;branch:string;ref?:string;baseSha:string;paths:string[];operation:"checkpoint"}}
   nativeApproval?:{action:'task-branch';plan:import('./shared-claims.ts').ArtifactRef;taskIds:string[];admittedHeadSha:string}
   id:string; repo:string; repositoryId:string; remote:string; remoteUrl:string; branch:string; baseRef:string; baseSha:string; scopeDigest:string; paths:string[]
   approvalBindings:ApprovalAuthorityRef[]
@@ -53,26 +53,31 @@ async function validateGitSource(run:RunRecord,intent:CheckpointIntent):Promise<
 const sha=/^[a-f0-9]{40}$/
 const sensitive=/(?:-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----|(?:gh[pousr]_[A-Za-z0-9_]{20,}|github_pat_[A-Za-z0-9_]{20,}|AKIA[A-Z0-9]{16})|(?:credential|secret|token)[-_ ]?canary|(?:api[_-]?key|access[_-]?token|password|secret)\s*[:=]\s*["']?[A-Za-z0-9_\-/+]{16,})/i
 function permitted(path:string,paths:string[]){return paths.some(p=>path===p || p.endsWith('/')&&path.startsWith(p))}
+function checkpointRemoteRef(intent:CheckpointIntent){return intent.approvalRequest?.requested.ref??`refs/heads/${intent.branch}`}
+function localAuthority(binding:ApprovalAuthorityRef|null){if(!binding)return null;const commentId=Number(binding.source.commentId);if(!Number.isSafeInteger(commentId)||commentId<1)throw Error('checkpoint authority locator refused');return{approvalId:binding.approvalId,commentId,bodySha256:binding.source.bodySha256}}
 async function remoteState(run:RunRecord,intent:CheckpointIntent){
   await validateGitSource(run,intent)
   if((await git(run.checkout,['remote','get-url',intent.remote])).trim()!==intent.remoteUrl)throw Error('checkpoint-remote-identity-mismatch')
-  const advertised=await git(run.checkout,['ls-remote','--symref',intent.remoteUrl,'HEAD',intent.baseRef,`refs/heads/${intent.branch}`])
+  const remoteRef=checkpointRemoteRef(intent),advertised=await git(run.checkout,['ls-remote','--symref',intent.remoteUrl,'HEAD',remoteRef])
   const defaultRef=/^ref: (refs\/heads\/[^\t]+)\tHEAD$/m.exec(advertised)?.[1]
-  if(!defaultRef || defaultRef===`refs/heads/${intent.branch}`)throw Error('checkpoint-default-branch-refused')
-  const rows=advertised.split('\n').map(x=>x.split('\t'));const tip=rows.find(x=>x[1]===`refs/heads/${intent.branch}`)?.[0]??null
-  const baseTip=rows.find(x=>x[1]===intent.baseRef)?.[0];if(!baseTip||!sha.test(baseTip))throw Error('checkpoint-base-unverified')
-  await git(run.checkout,['fetch','--no-tags','--no-recurse-submodules',intent.remoteUrl,intent.baseRef])
+  if(!defaultRef || defaultRef===remoteRef)throw Error('checkpoint-default-branch-refused')
+  const rows=advertised.split('\n').map(x=>x.split('\t'));const tip=rows.find(x=>x[1]===remoteRef)?.[0]??null
+  const baseTip=rows.find(x=>x[1]==='HEAD'&&sha.test(x[0]??''))?.[0];if(!baseTip)throw Error('checkpoint-base-unverified')
+  await git(run.checkout,['fetch','--no-tags','--no-recurse-submodules',intent.remoteUrl,defaultRef])
   await git(run.checkout,['merge-base','--is-ancestor',intent.baseSha,baseTip])
-  if(tip){if(!sha.test(tip))throw Error('checkpoint-remote-tip-invalid');await git(run.checkout,['fetch','--no-tags','--no-recurse-submodules',intent.remoteUrl,`refs/heads/${intent.branch}`])}
+  if(tip){if(!sha.test(tip))throw Error('checkpoint-remote-tip-invalid');await git(run.checkout,['fetch','--no-tags','--no-recurse-submodules',intent.remoteUrl,remoteRef])}
   return tip
 }
 export async function prepareCheckpoint(input:{run:RunRecord;approvedIntent:CheckpointIntent;headSha:string},controller:CheckpointController):Promise<CheckpointCandidate>{
   const {run,approvedIntent:i,headSha}=input
   validateCheckpointIntentShape(i)
-  if(i.repo!==run.repo||i.branch!==run.branch||i.baseSha!==run.baseSha||i.scopeDigest!==run.taskKey.scopeDigest||!sha.test(headSha)||!sha.test(i.baseSha)||!i.id||!i.repositoryId||!i.approvalBindings.length||!i.paths.length||i.paths.some(p=>!p||p.startsWith('/')||p.split('/').includes('..')||/[\x00-\x1f*?\[\]{}]/.test(p))||!/^[A-Za-z0-9][A-Za-z0-9._/-]*$/.test(i.branch)||i.branch.includes('..')||!/^[A-Za-z0-9][A-Za-z0-9_-]*$/.test(i.remote)||!i.baseRef.startsWith('refs/heads/'))throw Error('checkpoint-intent-refused')
+  const childRef=i.approvalRequest?.requested.ref
+  if(i.repo!==run.repo||i.branch!==run.branch||childRef===undefined&&i.baseSha!==run.baseSha||childRef!==undefined&&(run.parent===null||i.baseRef!==childRef)||run.parent!==null&&childRef===undefined||i.scopeDigest!==run.taskKey.scopeDigest||!sha.test(headSha)||!sha.test(i.baseSha)||!i.id||!i.repositoryId||!i.approvalBindings.length||!i.paths.length||i.paths.some(p=>!p||p.startsWith('/')||p.split('/').includes('..')||/[\x00-\x1f*?\[\]{}]/.test(p))||!/^[A-Za-z0-9][A-Za-z0-9._/-]*$/.test(i.branch)||i.branch.includes('..')||!/^[A-Za-z0-9][A-Za-z0-9_-]*$/.test(i.remote)||!i.baseRef.startsWith('refs/heads/')||run.checkpointIntent&&canonicalWire(run.checkpointIntent)!==canonicalWire(i))throw Error('checkpoint-intent-refused')
   i.approvalBindings.forEach(validateAuthority)
   if(canonicalWire(i.approvalBindings)!==canonicalWire(run.approvalBindings))throw Error('checkpoint-authority-rebound')
   await controller.verifyAuthority(i)
+  const branch=(await git(run.checkout,['symbolic-ref','--short','HEAD'])).trim(),actualHead=(await git(run.checkout,['rev-parse','HEAD'])).trim(),dirty=(await git(run.checkout,['status','--porcelain=v1','--untracked-files=all'])).trim()
+  if(branch!==run.branch||actualHead!==headSha||dirty)throw Error('checkpoint-source-changed')
   const tip=await remoteState(run,i)
   await git(run.checkout,['merge-base','--is-ancestor',i.baseSha,headSha])
   if(tip){try{await git(run.checkout,['merge-base','--is-ancestor',tip,headSha])}catch{await git(run.checkout,['merge-base','--is-ancestor',headSha,tip])}}
@@ -98,7 +103,7 @@ export async function prepareCheckpoint(input:{run:RunRecord;approvedIntent:Chec
     closure.push(oid+':'+createHash('sha256').update(content).digest('hex'))
   }
 
-  return{run,approvedIntent:i,headSha,treeSha:(await git(run.checkout,['rev-parse',`${headSha}^{tree}`])).trim(),noChange:tip===headSha||headSha===i.baseSha,exportProof:{repositoryId:i.repositoryId,remoteRef:`refs/heads/${i.branch}`,verifiedRemoteHead:tip,approvedBaseSha:i.baseSha,headSha,closureDigest:digest(closure.sort().join('\n')),validatorVersion:1}}
+  return{run,approvedIntent:i,headSha,treeSha:(await git(run.checkout,['rev-parse',`${headSha}^{tree}`])).trim(),noChange:tip===headSha||headSha===i.baseSha,exportProof:{repositoryId:i.repositoryId,remoteRef:checkpointRemoteRef(i),verifiedRemoteHead:tip,approvedBaseSha:i.baseSha,headSha,closureDigest:digest(closure.sort().join('\n')),validatorVersion:1}}
 }
 export async function publishCheckpoint(candidate:CheckpointCandidate,controller:CheckpointController):Promise<{kind:'acknowledged'|'pending'|'refused';checkpoint:CheckpointRef|null;reason:string|null}>{
   try{return await withRunDelivery(controller.root,candidate.run.runId,async()=>{
@@ -122,12 +127,11 @@ export async function publishCheckpoint(candidate:CheckpointCandidate,controller
       // An ambiguous source send is reconciled before reserving or retrying any operation.
       if(record.sharedClaim&&delivery.effect&&delivery.status==='ambiguous'&&!present){if(!controller.retryEffect){await update({lastError:'checkpoint-source-unconfirmed'});return{kind:'pending' as const,checkpoint:record.checkpoint,reason:'checkpoint-source-unconfirmed'}}await controller.retryEffect(fresh,delivery)}
       else if(!delivery.effect||!present){await controller.prepareEffect?.(fresh,delivery);record=await readRun(controller.root,record.runId);delivery=record.pendingDelivery.find(p=>p.id===id)!}
+      if(!present){const sending=await prepareCheckpoint({run:record,approvedIntent:i,headSha:fresh.headSha},controller);if(canonicalWire(sending.exportProof)!==canonicalWire(fresh.exportProof)||sending.treeSha!==fresh.treeSha)throw Error('checkpoint-proof-stale')}
       try{
         if(!present){
-          await controller.verifyAuthority(i)
-          await validateGitSource(record,i)
           await update({status:'ambiguous',attempts:delivery.attempts+1,lastError:null})
-          await git(record.checkout,['-c','push.followTags=false','push','--no-follow-tags','--recurse-submodules=no',i.remoteUrl,`${fresh.headSha}:refs/heads/${i.branch}`])
+          await git(record.checkout,['-c','push.followTags=false','push','--no-follow-tags','--recurse-submodules=no',i.remoteUrl,`${fresh.headSha}:${checkpointRemoteRef(i)}`])
         }
         const tip=await remoteState(record,i);if(!tip)throw Error('checkpoint-readback-missing')
         await git(record.checkout,['merge-base','--is-ancestor',fresh.headSha,tip])
@@ -161,16 +165,22 @@ export async function configuredCheckpointController(run:RunRecord,config:import
       if(repository.node_id!==intent.repositoryId||intent.baseRef!==`refs/heads/${repository.default_branch}`||!new Set([`https://github.com/${intent.repo}.git`,`git@github.com:${intent.repo}.git`,`https://github.com/${intent.repo}`]).has(intent.remoteUrl))throw Error('checkpoint remote repository identity refused')
       return
     }
-    if(intent.nativeApproval||request.requested.repo!==run.repo||request.requested.issue!==run.issue||request.requested.operation!=='checkpoint'||request.requested.branch!==run.branch||request.requested.baseSha!==run.baseSha||canonicalWire(request.requested.paths)!==canonicalWire(intent.paths))throw Error('checkpoint canonical approval request unavailable')
+    const childRef=request.requested.ref,execution=run.authorityRequest
+    if(intent.nativeApproval||request.requested.repo!==run.repo||request.requested.issue!==run.issue||request.requested.operation!=='checkpoint'||request.requested.branch!==run.branch||request.requested.baseSha!==intent.baseSha||canonicalWire(request.requested.paths)!==canonicalWire(intent.paths)||childRef!==undefined&&intent.baseRef!==childRef||childRef===undefined&&(run.parent!==null||intent.baseSha!==run.baseSha))throw Error('checkpoint canonical approval request unavailable')
+    if(childRef!==undefined&&(run.parent===null||execution?.kind!=='consolidated'||request.parentRepo!==execution.parentRepo||request.parentIssue!==execution.parentIssue||request.parentIssue!==run.parent||canonicalWire(request.approvalBinding)!==canonicalWire(execution.approvalBinding)||canonicalWire(request.requested.taskIds)!==canonicalWire(execution.requested.taskIds)||canonicalWire(request.requested.taskIds)!==canonicalWire(run.approvedTaskIds)||canonicalWire(request.requested.paths)!==canonicalWire(execution.requested.paths)))throw Error('checkpoint child execution authority differs')
     const devMd=await readFile(join(entry.path,'.vegastack/dev.md'),'utf8')
     const policy=loadConfiguredPolicy({home:config.home,repo:run.repo,devMd,settingsPath:config.settingsPath});if(!policy.ok)throw Error('checkpoint current policy unavailable')
     const script=join(dirname(dirname(fileURLToPath(import.meta.url))),'skill','dev-implement','scripts','lib','approval.mjs')
     const owner=await import(pathToFileURL(script).href)
     const operators=String(policy.policy.values.operators??'').split(',').map(s=>s.trim()).filter(Boolean)
-    const remote=await boundedGhJson<{node_id:string}>(ghText,['api',`repos/${intent.repo}`],readBudget())
-    if(remote.node_id!==intent.repositoryId||!new Set([`https://github.com/${intent.repo}.git`,`git@github.com:${intent.repo}.git`,`https://github.com/${intent.repo}`]).has(intent.remoteUrl))throw Error('checkpoint remote repository identity refused')
+    const remote=await boundedGhJson<{node_id:string;default_branch:string}>(ghText,['api',`repos/${intent.repo}`],readBudget())
+    if(remote.node_id!==intent.repositoryId||childRef===undefined&&intent.baseRef!==`refs/heads/${remote.default_branch}`||!new Set([`https://github.com/${intent.repo}.git`,`git@github.com:${intent.repo}.git`,`https://github.com/${intent.repo}`]).has(intent.remoteUrl))throw Error('checkpoint remote repository identity refused')
     const verified=await owner.gatherConsolidatedApproval({...request,operators,readJson:(args:string[])=>boundedGhJson(ghText,args,readBudget())})
-    if(!verified.ok||verified.action?.kind!=='checkpoint'||verified.action.branch!==intent.branch)throw Error('checkpoint source authority refused')
+    if(!verified.ok||canonicalWire(verified.bindings)!==canonicalWire(run.approvalRefs)||canonicalWire(verified.recordBinding??null)!==canonicalWire(localAuthority(run.recordBinding)))throw Error('checkpoint source authority refused')
+    if(childRef!==undefined){
+      const action=verified.action
+      if(action?.kind!=='child-source-checkpoint'||canonicalWire(action.parent)!==canonicalWire({issue:request.parentIssue,branch:(execution as Extract<RunRecord['authorityRequest'],{kind:'consolidated'}>).requested.branch,baseSha:(execution as Extract<RunRecord['authorityRequest'],{kind:'consolidated'}>).requested.baseSha})||canonicalWire(action.child)!==canonicalWire({issue:run.issue,branch:intent.branch,ref:childRef,baseSha:intent.baseSha,taskIds:request.requested.taskIds,paths:intent.paths})||canonicalWire(verified.files)!==canonicalWire(intent.paths))throw Error('checkpoint child action scope refused')
+    }else if(verified.action?.kind!=='checkpoint'||verified.action.branch!==intent.branch)throw Error('checkpoint source authority refused')
     const tuples=intent.approvalBindings.map(a=>({approvalId:a.approvalId,commentId:Number(a.source.commentId),bodySha256:a.source.bodySha256}))
     if(tuples.some(t=>!Number.isSafeInteger(t.commentId))||canonicalWire(tuples)!==canonicalWire(verified.approvalBindings))throw Error('checkpoint canonical authority changed')
   }
@@ -205,7 +215,7 @@ export async function configuredCheckpointController(run:RunRecord,config:import
   return controller
 }
 export async function flushRunCheckpoint(run:RunRecord,config:import('./config.ts').FactoryConfig):Promise<void>{
-  if(!run.checkpointIntent)return
+  if(!run.checkpointIntent){if(run.parent!==null&&run.authorityRequest?.kind==='consolidated')throw Error('checkpoint child intent unavailable');return}
   const controller=await configuredCheckpointController(run,config)
   const head=(await git(run.checkout,['rev-parse','HEAD'])).trim()
   const candidate=await prepareCheckpoint({run,approvedIntent:run.checkpointIntent,headSha:head},controller)
@@ -258,14 +268,23 @@ export async function checkpointIntentFromApproval(run:RunRecord,config:import('
   const event=approval.parseApproval(comment)
   if(event.kind!=='consolidated')throw Error('checkpoint source is not consolidated authority')
   const selected=event.items.find((item:{repo:string;issue:number})=>item.repo===run.repo&&item.issue===run.issue)
-  const actions=event.actions.filter((action:{kind:string;id:string;branch?:string})=>action.kind==='checkpoint'&&selected?.actionIds.includes(action.id)&&action.branch===run.branch)
-  if(!actions.length)return null
+  if(!selected||selected.mode!=='code')throw Error('checkpoint selected code scope unavailable')
+  const child=run.parent!==null
+  const actions=event.actions.filter((action:{kind:string;id:string;branch?:string;repo?:string;child?:{issue:number;branch:string;ref:string}})=>selected.actionIds.includes(action.id)&&(child?action.kind==='child-source-checkpoint'&&action.repo===run.repo&&action.child?.issue===run.issue&&action.child.branch===run.branch&&action.child.ref===`refs/heads/${run.branch}`:action.kind==='checkpoint'&&action.branch===run.branch))
+  if(!actions.length){if(child)throw Error('checkpoint child action unavailable');return null}
   if(actions.length!==1)throw Error('checkpoint action is ambiguous')
-  const request:NonNullable<CheckpointIntent['approvalRequest']>={...source,requested:{...source.requested,actionId:actions[0].id,paths:validated.files,operation:'checkpoint'}}
+  const action=actions[0] as {id:string;kind:'checkpoint';branch:string}|{id:string;kind:'child-source-checkpoint';repo:string;parent:{issue:number;branch:string;baseSha:string};child:{issue:number;branch:string;ref:string;baseSha:string;taskIds:string[];paths:string[]}}
+  if(child){
+    if(action.kind!=='child-source-checkpoint'||action.parent.issue!==source.parentIssue||action.parent.branch!==source.requested.branch||action.parent.baseSha!==source.requested.baseSha||canonicalWire(action.child.taskIds)!==canonicalWire(source.requested.taskIds)||canonicalWire(action.child.paths)!==canonicalWire(source.requested.paths))throw Error('checkpoint child action differs from execution authority')
+  }else if(action.kind!=='checkpoint')throw Error('checkpoint parent action unavailable')
+  const request:NonNullable<CheckpointIntent['approvalRequest']>={...source,requested:action.kind==='child-source-checkpoint'?{repo:run.repo,issue:run.issue,taskIds:action.child.taskIds,actionId:action.id,branch:action.child.branch,ref:action.child.ref,baseSha:action.child.baseSha,paths:action.child.paths,operation:'checkpoint'}:{...source.requested,actionId:action.id,paths:validated.files,operation:'checkpoint'}}
   const allowed=await approval.gatherConsolidatedApproval({...request,operators:policy.operators,readJson})
-  if(!allowed.ok||allowed.action.kind!=='checkpoint')throw Error('checkpoint action scope refused')
+  if(!allowed.ok||allowed.action.kind!==action.kind||canonicalWire(allowed.bindings)!==canonicalWire(run.approvalRefs)||canonicalWire(allowed.recordBinding??null)!==canonicalWire(localAuthority(run.recordBinding))||canonicalWire(allowed.files)!==canonicalWire(request.requested.paths))throw Error('checkpoint action scope refused')
   const repository=await readJson(['api',`repos/${run.repo}`]) as {node_id:string;default_branch:string}
-  const intent:CheckpointIntent={id:allowed.action.id,repo:run.repo,repositoryId:repository.node_id,remote:'origin',remoteUrl:(await git(run.checkout,['remote','get-url','origin'])).trim(),branch:run.branch,baseRef:`refs/heads/${repository.default_branch}`,baseSha:run.baseSha,scopeDigest:run.taskKey.scopeDigest,paths:allowed.files,approvalBindings:run.approvalBindings,approvalRequest:request}
+  const branch=(await git(run.checkout,['symbolic-ref','--short','HEAD'])).trim(),head=(await git(run.checkout,['rev-parse','HEAD'])).trim()
+  if(branch!==run.branch||head!==run.headSha)throw Error('checkpoint admitted source changed')
+  await git(run.checkout,['merge-base','--is-ancestor',request.requested.baseSha,head])
+  const intent:CheckpointIntent={id:allowed.action.id,repo:run.repo,repositoryId:repository.node_id,remote:'origin',remoteUrl:(await git(run.checkout,['remote','get-url','origin'])).trim(),branch:run.branch,baseRef:request.requested.ref??`refs/heads/${repository.default_branch}`,baseSha:request.requested.baseSha,scopeDigest:run.taskKey.scopeDigest,paths:allowed.files,approvalBindings:run.approvalBindings,approvalRequest:request}
   validateCheckpointIntentShape(intent)
   return intent
 }

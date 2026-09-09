@@ -151,7 +151,7 @@ function validatePending(value:unknown,run:RunRecord):void {
   if(p.kind==='feature-push'){
     if(!closed(p.target,['repo','remote','branch','sha']))throw Error('invalid source delivery target')
     const target=p.target as {repo:string;remote:string;branch:string;sha:string}
-    if(target.repo!==run.repo||target.branch!==run.branch||!sha(target.sha)||!text(target.remote))throw Error('source delivery escaped run')
+    if(target.repo!==run.repo||target.branch!==run.branch||!sha(target.sha)||!text(target.remote)||run.checkpointIntent&&p.intentRef!==run.checkpointIntent.id)throw Error('source delivery escaped run')
   }else if(p.kind==='telemetry-capture'){
     if(!closed(p.target,['captureKey'])||!text((p.target as {captureKey:string}).captureKey))throw Error('invalid telemetry target')
   }else{
@@ -162,12 +162,12 @@ function validatePending(value:unknown,run:RunRecord):void {
   if(p.payload!==undefined&&(typeof p.payload!=='string'||Buffer.byteLength(p.payload)>1024*1024))throw Error('invalid delivery payload')
   if(p.payloadDigest!==undefined&&!digest(p.payloadDigest))throw Error('invalid delivery digest')
   if(p.sourceAcknowledged!==undefined&&typeof p.sourceAcknowledged!=='boolean')throw Error('invalid source acknowledgment')
-  if(p.checkpoint!==undefined)parseCheckpointRef(p.checkpoint)
+  if(p.checkpoint!==undefined){const checkpoint=parseCheckpointRef(p.checkpoint),intent=run.checkpointIntent,baseSha=intent?.baseSha??run.baseSha;if(checkpoint.runId!==run.runId||checkpoint.repo!==run.repo||checkpoint.branch!==run.branch||checkpoint.baseSha!==baseSha||checkpoint.scopeDigest!==run.taskKey.scopeDigest||p.kind==='feature-push'&&'sha'in p.target&&checkpoint.headSha!==p.target.sha)throw Error('delivery checkpoint identity differs')}
   if(p.retryReceiptIds!==undefined&&(!Array.isArray(p.retryReceiptIds)||new Set(p.retryReceiptIds).size!==p.retryReceiptIds.length||p.retryReceiptIds.some(id=>!uuid.test(id))))throw Error('invalid retry receipt identity')
   if(p.receiptIds!==undefined&&(!closed(p.receiptIds,['intent','link','send','outcome','outcomeLink','checkpointLink'])||Object.values(p.receiptIds).some(id=>!uuid.test(id))))throw Error('invalid delivery receipt IDs')
   if(p.effect!==undefined){const e=p.effect;if(!closed(e,['kind','target','payloadDigest','generation','intent','outcome'])||!['checkpoint-push','handback','evidence','telemetry-push'].includes(e.kind)||!digest(e.payloadDigest)||!number(e.generation)||e.generation<1)throw Error('invalid managed delivery effect');parseRecoveryPayload({schemaVersion:2,kind:'effect-intent',effectId:p.id,runId:run.runId,generation:e.generation,approvalBindings:run.approvalBindings,effectKind:e.kind,target:e.target,payloadDigest:e.payloadDigest,result:'prepared',observedRemoteId:null,observedDigest:null,reasonCode:null});if(e.intent)parseEvidenceRef(e.intent);if(e.outcome)parseEvidenceRef(e.outcome)}
   if(p.approvalBindings){p.approvalBindings.forEach(validateAuthority);if(!sameJson(p.approvalBindings,run.approvalBindings))throw Error('delivery authority differs')}
-  if(p.exportProof){const proof=p.exportProof;if(!closed(proof,['repositoryId','remoteRef','verifiedRemoteHead','approvedBaseSha','headSha','closureDigest','validatorVersion'])||!text(proof.repositoryId)||proof.remoteRef!==`refs/heads/${run.branch}`||!nullable(proof.verifiedRemoteHead,sha)||proof.approvedBaseSha!==run.baseSha||!sha(proof.headSha)||!digest(proof.closureDigest)||proof.validatorVersion!==1)throw Error('invalid export proof')}
+  if(p.exportProof){const proof=p.exportProof,intent=run.checkpointIntent,remoteRef=intent?.approvalRequest?.requested.ref??`refs/heads/${run.branch}`,baseSha=intent?.baseSha??run.baseSha;if(!closed(proof,['repositoryId','remoteRef','verifiedRemoteHead','approvedBaseSha','headSha','closureDigest','validatorVersion'])||!text(proof.repositoryId)||intent&&proof.repositoryId!==intent.repositoryId||proof.remoteRef!==remoteRef||!nullable(proof.verifiedRemoteHead,sha)||proof.approvedBaseSha!==baseSha||!sha(proof.headSha)||p.kind==='feature-push'&&'sha'in p.target&&proof.headSha!==p.target.sha||!digest(proof.closureDigest)||proof.validatorVersion!==1)throw Error('invalid export proof')}
 }
 export function parseRun(value:unknown):RunRecord {
   const required=['schemaVersion','runId','generation','repo','issue','parent','checkout','branch','baseSha','headSha','stage','harness','model','effort','execution','approvalBindings','recordBinding','approvalRefs','policyDigest','claimToken','state','terminationCause','exitCode','pid','processStartId','processGroupId','processIdentity','startedAt','finishedAt','pendingDelivery','taskKey','activeElapsedMs','taskOwner','agentAccountOwner','accountRef','waitReason','machine','sharedClaim','checkpoint','remoteEffectCoverage']
@@ -197,10 +197,18 @@ export function parseRun(value:unknown):RunRecord {
   if(!plain(r.remoteEffectCoverage)||!['unmanaged-possible','qualified-managed-only','reconciled'].includes(r.remoteEffectCoverage.kind))throw Error('invalid effect coverage')
   if(r.remoteEffectCoverage.kind==='unmanaged-possible'){if(!closed(r.remoteEffectCoverage,['kind','reasonCode'])||!text(r.remoteEffectCoverage.reasonCode))throw Error('invalid unknown coverage')}
   else{const key=r.remoteEffectCoverage.kind==='reconciled'?'evidence':'qualification';if(!closed(r.remoteEffectCoverage,['kind',key]))throw Error('invalid coverage evidence');parseEvidenceRef((r.remoteEffectCoverage as unknown as Record<string,unknown>)[key])}
-  if(r.authorityRequest!==undefined){if(r.authorityRequest.kind==='native'){if(!closed(r.authorityRequest,['kind']))throw Error('invalid native authority request')}else{const {kind,...request}=r.authorityRequest;if(kind!=='consolidated')throw Error('unknown authority request');validateApprovalRequest(request)}}
+  if(r.authorityRequest!==undefined){if(r.authorityRequest.kind==='native'){if(!closed(r.authorityRequest,['kind']))throw Error('invalid native authority request')}else{const {kind,...request}=r.authorityRequest;if(kind!=='consolidated')throw Error('unknown authority request');validateApprovalRequest(request,'execution')}}
   if(r.handbackIntent!==undefined&&(!closed(r.handbackIntent,['id','approvalBindings'])||!text(r.handbackIntent.id)||!sameJson(r.handbackIntent.approvalBindings,r.approvalBindings)))throw Error('invalid handback intent')
   if(r.dispatchRequest!==undefined&&(!closed(r.dispatchRequest,['commentId','reactionId'])||Object.values(r.dispatchRequest).some(v=>!nullable(v,x=>number(x)&&x>0))))throw Error('invalid dispatch request')
-  if(r.checkpointIntent!==undefined)validateCheckpointIntentShape(r.checkpointIntent)
+  if(r.checkpointIntent!==undefined){
+    validateCheckpointIntentShape(r.checkpointIntent)
+    const checkpointRequest=r.checkpointIntent.approvalRequest
+    if(checkpointRequest?.requested.ref!==undefined){
+      const execution=r.authorityRequest
+      if(r.parent===null||execution?.kind!=='consolidated'||checkpointRequest.parentRepo!==execution.parentRepo||checkpointRequest.parentIssue!==execution.parentIssue||checkpointRequest.parentIssue!==r.parent||!sameJson(checkpointRequest.approvalBinding,execution.approvalBinding)||checkpointRequest.requested.repo!==r.repo||checkpointRequest.requested.issue!==r.issue||checkpointRequest.requested.branch!==r.branch||checkpointRequest.requested.ref!==r.checkpointIntent.baseRef||checkpointRequest.requested.baseSha!==r.checkpointIntent.baseSha||checkpointRequest.requested.actionId!==r.checkpointIntent.id||!sameJson(checkpointRequest.requested.taskIds,execution.requested.taskIds)||!sameJson(checkpointRequest.requested.taskIds,r.approvedTaskIds)||!sameJson(checkpointRequest.requested.paths,execution.requested.paths)||!sameJson(checkpointRequest.requested.paths,r.checkpointIntent.paths))throw Error('child checkpoint authority differs')
+    }
+    if(r.checkpoint&&(r.checkpoint.branch!==r.branch||r.checkpoint.baseSha!==r.checkpointIntent.baseSha||r.checkpoint.repositoryId!==r.checkpointIntent.repositoryId))throw Error('checkpoint intent/source identity differs')
+  }
   if(r.acceptedScopeRef!=null&&parseEvidenceRef(r.acceptedScopeRef).kind!=='state-receipt')throw Error('invalid accepted scope reference')
   if(r.stopReceiptIds!==undefined&&(!closed(r.stopReceiptIds,['receipt','transition'])||Object.values(r.stopReceiptIds).some(id=>!uuid.test(id))))throw Error('invalid stop operation identity')
   if(r.stopReceiptPayload!==undefined){const p=parseRecoveryPayload(r.stopReceiptPayload);if(!r.stopReceiptIds||p.kind!=='effect-reconciliation'||p.runId!==r.runId||p.scopeDigest!==r.taskKey.scopeDigest||!sameJson(p.approvalBindings,r.approvalBindings)||p.reasonCode!=='owned-process-group-stopped')throw Error('invalid saved stop receipt payload')}
@@ -351,7 +359,8 @@ export async function beginVerifiedRunContinuation(request:RunContinuationReques
   return mutateRun(runId,expectedGeneration,root,async old=>{
     if((old.attemptId??old.runId)!==previousAttemptId||!['terminal','interrupted'].includes(old.state)||!old.terminationCause||old.terminationCause==='termination-unconfirmed'||old.cancelRequestedAt||old.waitReason==='subscription-quota')throw Error('continuation requires the original stopped attempt')
     if(!old.execution||!old.approvedTaskIds?.length||!old.approvalBindings.length||!old.machine||!old.sharedClaim||!request.currentOwner.machine||!request.currentOwner.sharedClaim)throw Error('continuation original authority/owner unavailable')
-    if(!sameJson(old.checkpoint,request.checkpoint)||old.worktreeDigest!==request.worktreeDigest||request.checkpoint.runId!==runId||request.checkpoint.repo!==old.repo||request.checkpoint.branch!==old.branch||request.checkpoint.baseSha!==old.baseSha||request.checkpoint.headSha!==old.headSha||request.checkpoint.scopeDigest!==old.taskKey.scopeDigest)throw Error('continuation source checkpoint differs')
+    const checkpointBase=old.checkpointIntent?.baseSha??old.baseSha
+    if(!sameJson(old.checkpoint,request.checkpoint)||old.worktreeDigest!==request.worktreeDigest||request.checkpoint.runId!==runId||request.checkpoint.repo!==old.repo||request.checkpoint.branch!==old.branch||request.checkpoint.baseSha!==checkpointBase||request.checkpoint.headSha!==old.headSha||request.checkpoint.scopeDigest!==old.taskKey.scopeDigest)throw Error('continuation source checkpoint differs')
     if(request.currentOwner.sharedClaim.taskKey!==old.sharedClaim.taskKey||request.currentOwner.sharedClaim.generation<old.sharedClaim.generation||request.currentOwner.sharedClaim.generation===old.sharedClaim.generation&&(!sameJson(request.currentOwner.machine,old.machine)||request.currentOwner.sharedClaim.ownerToken!==old.sharedClaim.ownerToken))throw Error('continuation owner generation differs')
     // This operation consumes an existing private same-home record. Remote-only
     // reconstruction must not turn foreign PIDs or missing history into local proof.
@@ -771,7 +780,10 @@ export function verifyExecutionQualification(payload:unknown,execution:Execution
   if(requireManagedCoverage&&(p.result!=='qualified'||!p.unmanagedDenied||!p.validationIds.length||!['checkpoint-push','handback','evidence','telemetry-push'].every(kind=>p.managedKinds.includes(kind as typeof p.managedKinds[number]))))throw Error('complete managed-effect coverage is unverified')
 }
 
-export type RunAuthorityRequest={kind:'native'}|({kind:'consolidated'}&Omit<NonNullable<import('./checkpoints.ts').CheckpointIntent['approvalRequest']>,'requested'>&{requested:Omit<NonNullable<import('./checkpoints.ts').CheckpointIntent['approvalRequest']>['requested'],'operation'>&{operation:'edit'|'check'|'review'|'integrate'|'checkpoint'}})
+export type RunAuthorityRequest={kind:'native'}|{
+  kind:'consolidated';parentRepo:string;parentIssue:number;approvalBinding:{commentId:number;bodySha256:string}
+  requested:{repo:string;issue:number;taskIds:string[];actionId:string;branch:string;baseSha:string;paths:string[];operation:'edit'|'check'|'review'|'integrate'}
+}
 export interface RunAuthorityDependencies {
   gh?:(args:string[],options?:import('./gh.ts').GhOptions)=>Promise<string>
   approvalScript?:string
@@ -795,7 +807,7 @@ export async function verifyRunAuthority(run:RunRecord,config:import('./config.t
   let checked:{ok?:boolean;blocks:string[];bindings:ArtifactRef[];approvalBindings:Array<{approvalId:string;commentId:number;bodySha256:string}>;recordBinding?:{approvalId:string;commentId:number;bodySha256:string}}
   if(run.authorityRequest?.kind==='consolidated'){
     const {kind:_,...request}=run.authorityRequest
-    if(request.requested.repo!==run.repo||request.requested.issue!==run.issue||request.requested.branch!==run.branch||request.requested.baseSha!==run.baseSha)throw Error('run request identity differs')
+    if(request.parentRepo!==run.repo||request.requested.repo!==run.repo||request.requested.issue!==run.issue||request.requested.baseSha!==run.baseSha||run.parent===null&&request.requested.branch!==run.branch||run.parent!==null&&request.parentIssue!==run.parent)throw Error('run request identity differs')
     checked=await approval.gatherConsolidatedApproval({...request,operators:policy.operators,readJson})
   }else{
     const issue=await readJson(['api',`repos/${run.repo}/issues/${run.issue}`]) as {body:string;node_id:string;labels:Array<{name:string}>}
@@ -1087,12 +1099,16 @@ export async function reserveIdempotentSourceRetry(input:{claim:import('./shared
   return receipt.claim
 }
 
-function validateApprovalRequest(value:unknown):void{
+function validateApprovalRequest(value:unknown,purpose:'execution'|'checkpoint'):void{
   if(!closed(value,['parentRepo','parentIssue','approvalBinding','requested']))throw Error('invalid canonical approval request')
   const r=value as NonNullable<import('./checkpoints.ts').CheckpointIntent['approvalRequest']>
-  if(!validRepo(r.parentRepo)||!number(r.parentIssue)||r.parentIssue<1||!closed(r.approvalBinding,['commentId','bodySha256'])||!number(r.approvalBinding.commentId)||r.approvalBinding.commentId<1||!digest(r.approvalBinding.bodySha256)||!closed(r.requested,['repo','issue','taskIds','actionId','branch','baseSha','paths','operation']))throw Error('invalid approval locator/selection')
+  const child='ref'in r.requested
+  if(!validRepo(r.parentRepo)||!number(r.parentIssue)||r.parentIssue<1||!closed(r.approvalBinding,['commentId','bodySha256'])||!number(r.approvalBinding.commentId)||r.approvalBinding.commentId<1||!digest(r.approvalBinding.bodySha256)||!closed(r.requested,['repo','issue','taskIds','actionId','branch','baseSha','paths','operation',...(child?['ref']:[])]))throw Error('invalid approval locator/selection')
   const q=r.requested
-  if(!validRepo(q.repo)||!number(q.issue)||q.issue<1||!Array.isArray(q.taskIds)||!q.taskIds.length||q.taskIds.some(id=>typeof id!=='string'||!new RegExp(`^${q.issue}-T[1-9]\\d*$`).test(id))||!text(q.actionId)||!validBranch(q.branch)||!sha(q.baseSha)||!Array.isArray(q.paths)||q.paths.some(path=>!text(path,8192)||path.startsWith('/')||path.split('/').includes('..'))||!['edit','check','review','integrate','checkpoint'].includes(q.operation))throw Error('invalid approved action selection')
+  if(!validRepo(q.repo)||!number(q.issue)||q.issue<1||!Array.isArray(q.taskIds)||!q.taskIds.length||q.taskIds.some(id=>typeof id!=='string'||!new RegExp(`^${q.issue}-T[1-9]\\d*$`).test(id))||!text(q.actionId)||!validBranch(q.branch)||!sha(q.baseSha)||!Array.isArray(q.paths)||q.paths.some(path=>!text(path,8192)||path.startsWith('/')||path.split('/').includes('..')))throw Error('invalid approved action selection')
+  if(purpose==='execution'){
+    if(child||!['edit','check','review','integrate'].includes(q.operation))throw Error('execution action kind differs')
+  }else if(q.operation!=='checkpoint'||child&&((q as {ref?:unknown}).ref!==`refs/heads/${q.branch}`))throw Error('checkpoint action kind differs')
 }
 export function validateCheckpointIntentShape(value:unknown):void{
   const fields=['id','repo','repositoryId','remote','remoteUrl','branch','baseRef','baseSha','scopeDigest','paths','approvalBindings']
@@ -1101,7 +1117,7 @@ export function validateCheckpointIntentShape(value:unknown):void{
   if(!text(i.id)||!validRepo(i.repo)||!text(i.repositoryId)||!text(i.remote)||!text(i.remoteUrl,8192)||!validBranch(i.branch)||!i.baseRef.startsWith('refs/heads/')||!validBranch(i.baseRef.slice(11))||!sha(i.baseSha)||!digest(i.scopeDigest)||!Array.isArray(i.paths)||!i.paths.length||i.paths.some(p=>!text(p,8192)||p.startsWith('/')||p.split('/').some(part=>part==='..'||part==='.')||/[\\*?\[\]{}]/.test(p))||!Array.isArray(i.approvalBindings)||!i.approvalBindings.length)throw Error('checkpoint intent identity refused')
   i.approvalBindings.forEach(validateAuthority)
   if(i.approvalRequest&&i.nativeApproval)throw Error('checkpoint authority form is ambiguous')
-  if(i.approvalRequest){validateApprovalRequest(i.approvalRequest);if(i.approvalRequest.requested.operation!=='checkpoint')throw Error('checkpoint action kind differs')}
+  if(i.approvalRequest)validateApprovalRequest(i.approvalRequest,'checkpoint')
   if(i.nativeApproval){const n=i.nativeApproval,p=n.plan;if(!closed(n,['action','plan','taskIds','admittedHeadSha'])||n.action!=='task-branch'||!closed(p,['repo','issue','kind','artifactId','rev','digest'])||p.repo!==i.repo||!number(p.issue)||p.issue<1||p.kind!=='plan'||!text(p.artifactId)||!number(p.rev)||p.rev<1||!digest(p.digest)||!Array.isArray(n.taskIds)||!n.taskIds.length||new Set(n.taskIds).size!==n.taskIds.length||n.taskIds.some(id=>typeof id!=='string'||!new RegExp(`^${p.issue}-T[1-9]\\d*$`).test(id))||!sha(n.admittedHeadSha))throw Error('native checkpoint authority refused')}
 }
 
