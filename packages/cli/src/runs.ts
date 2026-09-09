@@ -1020,27 +1020,32 @@ export async function readQualifiedExecutions(root:string):Promise<QualifiedExec
   return result
 }
 
-export async function approvedTaskSelection(bindings:ArtifactRef[],reads:unknown[],stage:string,deps:RunAuthorityDependencies={},selectedIds?:string[]):Promise<{taskId:string;approvedTaskIds:string[];scopeDigest:string}>{
+export async function approvedTaskSelection(bindings:ArtifactRef[],reads:unknown[],stage:string,deps:RunAuthorityDependencies={},selectedIds?:string[]):Promise<{taskId:string;approvedTaskIds:string[];scopeDigest:string;paths:string[]}>{
   const binding=bindings.find(b=>b.kind==='plan')??bindings.find(b=>b.kind==='brief')
   if(!binding)throw Error('approved task scope unavailable')
   const wire=await import('./shared-claims.ts')
-  if(stage==='plan')return{taskId:'plan',approvedTaskIds:['plan'],scopeDigest:wire.sha256(wire.canonical({artifacts:bindings,taskIds:['plan']}))}
+  if(stage==='plan')return{taskId:'plan',approvedTaskIds:['plan'],scopeDigest:wire.sha256(wire.canonical({artifacts:bindings,taskIds:['plan']})),paths:[]}
   const {approval}=await approvalTools(deps)
   const candidates=reads.flat(Infinity).filter((row):row is {node_id:string;body:string}=>!!row&&typeof row==='object'&&(row as {node_id?:string}).node_id===binding.artifactId&&typeof(row as {body?:string}).body==='string')
   const bodies=[...new Set(candidates.map(c=>c.body))]
   if(bodies.length!==1||approval.scopeDigest(bodies[0],'plan')!==binding.digest)throw Error('canonical selected plan is unavailable')
-  const ids:string[]=[];let fence:string|null=null
+  const ids:string[]=[],files=new Map<string,string[]>();let fence:string|null=null,current:string|null=null
   for(const line of bodies[0]!.split('\n')){
-    const marker=/^\s{0,3}(`{3,}|~{3,})/.exec(line)
-    if(marker){if(fence===null)fence=marker[1]!;else if(marker[1]![0]===fence[0]&&marker[1]!.length>=fence.length)fence=null;continue}
+    const marker=/^\s{0,3}(`{3,}|~{3,})(.*)$/.exec(line)
+    if(marker){if(fence===null)fence=marker[1]!;else if(marker[1]![0]===fence[0]&&marker[1]!.length>=fence.length&&!marker[2]!.trim())fence=null;continue}
     if(fence!==null)continue
+    if(/^(?: {4}|\t)/.test(line))continue
     const task=/^- \[[ xX]\] \*\*Task .*?<!-- task-id:([1-9]\d*-T[1-9]\d*) -->/.exec(line)
-    if(task)ids.push(task[1]!)
+    if(task){current=task[1]!;ids.push(current);files.set(current,[]);continue}
+    if(/^#{1,6}\s/.test(line)){current=null;continue}
+    if(current&&/^\s*(?:- )?Files —/.test(line))files.get(current)!.push(...[...line.matchAll(/`([^`]+)`/g)].map(row=>row[1]!))
   }
   if(!ids.length||new Set(ids).size!==ids.length||ids.some(id=>!id.startsWith(binding.issue+'-T')))throw Error('selected task identities unavailable')
   const selected=selectedIds??ids
   if(!selected.length||new Set(selected).size!==selected.length||selected.some(id=>!ids.includes(id)))throw Error('requested task is outside canonical scope')
-  return{taskId:selected.length===1?selected[0]!:'whole-issue',approvedTaskIds:selected,scopeDigest:wire.sha256(wire.canonical({artifacts:bindings,taskIds:selected}))}
+  const paths=[...new Set(selected.flatMap(id=>files.get(id)??[]))]
+  if(!paths.length||paths.some(path=>!text(path,8192)||path.startsWith('/')||/[\\\x00-\x1f*?\[\]{}]/.test(path)||path.split('/').some(part=>!part||part==='.'||part==='..')))throw Error('unverifiable task file scope')
+  return{taskId:selected.length===1?selected[0]!:'whole-issue',approvedTaskIds:selected,scopeDigest:wire.sha256(wire.canonical({artifacts:bindings,taskIds:selected})),paths}
 }
 
 export async function worktreeFingerprint(checkout:string):Promise<string>{
@@ -1091,11 +1096,13 @@ function validateApprovalRequest(value:unknown):void{
 }
 export function validateCheckpointIntentShape(value:unknown):void{
   const fields=['id','repo','repositoryId','remote','remoteUrl','branch','baseRef','baseSha','scopeDigest','paths','approvalBindings']
-  if(!plain(value)||fields.some(k=>!Object.hasOwn(value,k))||Object.keys(value).some(k=>!fields.includes(k)&&k!=='approvalRequest'))throw Error('checkpoint intent schema refused')
+  if(!plain(value)||fields.some(k=>!Object.hasOwn(value,k))||Object.keys(value).some(k=>!fields.includes(k)&&!['approvalRequest','nativeApproval'].includes(k)))throw Error('checkpoint intent schema refused')
   const i=value as unknown as import('./checkpoints.ts').CheckpointIntent
   if(!text(i.id)||!validRepo(i.repo)||!text(i.repositoryId)||!text(i.remote)||!text(i.remoteUrl,8192)||!validBranch(i.branch)||!i.baseRef.startsWith('refs/heads/')||!validBranch(i.baseRef.slice(11))||!sha(i.baseSha)||!digest(i.scopeDigest)||!Array.isArray(i.paths)||!i.paths.length||i.paths.some(p=>!text(p,8192)||p.startsWith('/')||p.split('/').some(part=>part==='..'||part==='.')||/[\\*?\[\]{}]/.test(p))||!Array.isArray(i.approvalBindings)||!i.approvalBindings.length)throw Error('checkpoint intent identity refused')
   i.approvalBindings.forEach(validateAuthority)
+  if(i.approvalRequest&&i.nativeApproval)throw Error('checkpoint authority form is ambiguous')
   if(i.approvalRequest){validateApprovalRequest(i.approvalRequest);if(i.approvalRequest.requested.operation!=='checkpoint')throw Error('checkpoint action kind differs')}
+  if(i.nativeApproval){const n=i.nativeApproval,p=n.plan;if(!closed(n,['action','plan','taskIds','admittedHeadSha'])||n.action!=='task-branch'||!closed(p,['repo','issue','kind','artifactId','rev','digest'])||p.repo!==i.repo||!number(p.issue)||p.issue<1||p.kind!=='plan'||!text(p.artifactId)||!number(p.rev)||p.rev<1||!digest(p.digest)||!Array.isArray(n.taskIds)||!n.taskIds.length||new Set(n.taskIds).size!==n.taskIds.length||n.taskIds.some(id=>typeof id!=='string'||!new RegExp(`^${p.issue}-T[1-9]\\d*$`).test(id))||!sha(n.admittedHeadSha))throw Error('native checkpoint authority refused')}
 }
 
 export async function refreshAttemptCoverage(root:string,runId:string,target:import('./shared-claims.ts').CoordinationTarget):Promise<RunRecord>{

@@ -14,7 +14,7 @@ test('cancellation removes the owned nondetached descendant too',async()=>{const
 test('default qualified admission runs, waits for quota, resumes the same session and preserves terminal delivery',async()=>{
   const {spyOn}=await import('bun:test'),fs=await import('node:fs/promises'),{execFileSync,spawn}=await import('node:child_process'),crypto=await import('node:crypto')
   const runtime=await import('../src/runs.ts'),dispatch=await import('../src/dispatch.ts'),launch=await import('../src/launch.ts'),wire=await import('../src/shared-claims.ts'),policyOwner=await import('../../../skills/dev/dev-setup/scripts/effective-policy.mjs'),approvalOwner=await import('../../../skills/dev/dev-implement/scripts/lib/approval.mjs')
-  const home=await fs.realpath(await mkdtemp(join(tmpdir(),'runtime-138-'))),repo=join(home,'app'),tree=join(repo,'.vegastack','.worktrees','1-fixture'),room=join(home,'room'),installed=join(home,'installed'),bin=join(home,'bin'),phasePath=join(home,'vendor-phase.json')
+  const home=await fs.realpath(await mkdtemp(join(tmpdir(),'runtime-138-'))),repo=join(home,'app'),tree=join(repo,'.vegastack','.worktrees','1-fixture'),sourceRemote=join(home,'source.git'),room=join(home,'room'),installed=join(home,'installed'),bin=join(home,'bin'),phasePath=join(home,'vendor-phase.json')
   const sourceRoot=resolve('skills'),actualGit=Bun.which('git')!,oldEnv={PATH:process.env.PATH,HOME:process.env.HOME,CODEX_HOME:process.env.CODEX_HOME,VSK_GH:process.env.VSK_GH,VSK_PREFLIGHT_SCRIPT:process.env.VSK_PREFLIGHT_SCRIPT,VSK_SHIP_POLICY_SCRIPT:process.env.VSK_SHIP_POLICY_SCRIPT}
   let server:ReturnType<typeof Bun.serve>|undefined,inventorySpy:ReturnType<typeof spyOn>|undefined
   const g=(cwd:string,...args:string[])=>execFileSync(actualGit,args,{cwd,encoding:'utf8',env:{...process.env,GIT_AUTHOR_NAME:'Fixture',GIT_AUTHOR_EMAIL:'fixture@example.test',GIT_COMMITTER_NAME:'Fixture',GIT_COMMITTER_EMAIL:'fixture@example.test'}}).trim()
@@ -26,7 +26,7 @@ test('default qualified admission runs, waits for quota, resumes the same sessio
     await fs.writeFile(join(repo,'.vegastack','hooks','ship-guard.mjs'),await fs.readFile(join(sourceRoot,'dev/dev-setup/assets/hooks/ship-guard.mjs')))
     await fs.writeFile(join(repo,'.codex','hooks.json'),JSON.stringify({hooks:{PreToolUse:[{hooks:[{type:'command',command:'node .vegastack/hooks/ship-guard.mjs --harness codex'}]}]}}))
     await fs.writeFile(join(repo,'.codex','config.toml'),'# features are enabled by the exact CLI overrides\n')
-    await fs.writeFile(join(repo,'allowed.txt'),'base\n');g(repo,'init','-b','main');g(repo,'remote','add','origin','https://github.com/acme/app.git');g(repo,'add','.');g(repo,'commit','-m','base');g(repo,'worktree','add','-b','feat/1-fixture',tree)
+    await fs.writeFile(join(repo,'allowed.txt'),'base\n');g(repo,'init','-b','main');g(repo,'remote','add','origin','https://github.com/acme/app.git');g(repo,'add','.');g(repo,'commit','-m','base');execFileSync(actualGit,['init','--bare',sourceRemote]);execFileSync(actualGit,['--git-dir',sourceRemote,'symbolic-ref','HEAD','refs/heads/main']);execFileSync(actualGit,['push',sourceRemote,'HEAD:main'],{cwd:repo});g(repo,'worktree','add','-b','feat/1-fixture',tree)
     const sourceSha=g(repo,'rev-parse','HEAD'),treeSha=g(repo,'rev-parse','HEAD^{tree}')
     const fleet={schemaVersion:1,coordination:{repositoryId:'R_room',repository:'acme/room',branch:'factory-state',rootCommit:coordRoot,installationId:coordinationInstallation},defaults:{pollSeconds:120,maxRuns:1,childConcurrent:3,checkpoints:'task-branch',recovery:'verified-transfer'},groupDefaults:{},machines:{box:{installationId:installation,hostBindingDigest:host,executionLogin:'robot',group:'dev',repositories:['acme/app'],enabled:true,overrides:{}}}}
     await fs.writeFile(join(room,'org.md'),'sync-max-age: 2h\npolicy-schema: 2\n```vsk-policy\n'+JSON.stringify({schemaVersion:2,fleet})+'\n```\n')
@@ -80,8 +80,9 @@ test('default qualified admission runs, waits for quota, resumes the same sessio
     }
     server=Bun.serve({port:0,fetch:async request=>{const body=await request.json() as {args:string[];input:string};try{const data=reply(body.args,body.input);const text=JSON.stringify(data);return new Response(body.args.includes('--include')?'HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n'+text:text)}catch(error){return new Response(String(error),{status:500})}}})
     await fs.writeFile(join(bin,'gh'),`#!${process.execPath}\nconst args=process.argv.slice(2);let input='';if(args.includes('--input'))for await(const c of process.stdin)input+=c;const response=await fetch('http://127.0.0.1:${server.port}',{method:'POST',body:JSON.stringify({args,input})});process.stdout.write(await response.text());process.exit(response.ok?0:1);\n`);await fs.chmod(join(bin,'gh'),0o755)
+    await fs.writeFile(join(bin,'git'),`#!${process.execPath}\nconst {spawnSync}=require('node:child_process');const args=process.argv.slice(2).map(value=>value==='https://github.com/acme/app.git'?${JSON.stringify(sourceRemote)}:value);const result=spawnSync(${JSON.stringify(actualGit)},args,{stdio:'inherit',env:process.env});process.exit(result.status??1);\n`);await fs.chmod(join(bin,'git'),0o755)
     const codex=`#!${process.execPath}
-import fs from 'node:fs';import readline from 'node:readline';
+import fs from 'node:fs';import readline from 'node:readline';import {spawnSync} from 'node:child_process';
 const args=process.argv.slice(2),cwd=process.cwd(),phasePath=${JSON.stringify(phasePath)};
 const phase=()=>{try{return JSON.parse(fs.readFileSync(phasePath,'utf8'))}catch{return{starts:0,reset:0}}};
 if(args.includes('--version')){console.log('codex-cli 0.153.4');process.exit(0)}
@@ -98,6 +99,7 @@ if(args.includes('app-server')){
  console.log(JSON.stringify({type:'thread.started',thread_id:'fixture-session'}));
  if(p.starts===1){console.log(JSON.stringify({type:'turn.failed',error:{message:'controlled quota failure'}}));process.exit(1)}
  if(!args.includes('resume')||!args.includes('fixture-session')){console.log(JSON.stringify({type:'turn.failed',error:{message:'wrong resume'}}));process.exit(2)}
+ fs.writeFileSync(cwd+'/allowed.txt','checkpointed source\\n');for(const gitArgs of [['add','allowed.txt'],['commit','-m','checkpoint safe progress']]){const result=spawnSync('git',gitArgs,{cwd,stdio:'inherit'});if(result.status!==0)process.exit(3)}
  console.log(JSON.stringify({type:'turn.completed',usage:{input_tokens:3,output_tokens:2}}));process.exit(0)
 }
 `
@@ -138,6 +140,19 @@ if(args.includes('app-server')){
       expect(saved.terminationCause).toBe('succeeded');expect(saved.attempts).toHaveLength(1);expect(saved.vendorSessionId).toBe('fixture-session');expect(saved.waitReason).toBe(null)
       expect(saved.pendingDelivery.find(p=>p.kind==='telemetry-capture')?.target).toEqual({captureKey:saved.runId+':terminal:0'})
       expect(saved.approvedTaskIds).toEqual(['1-T1']);expect(saved.approvalBindings[0]?.source.issueNodeId).toBe('I_1');expect(saved.stopProof?.kind).toBe('process-exit')
+      expect(saved.checkpointIntent?.nativeApproval?.action).toBe('task-branch');expect(saved.checkpointIntent?.paths).toEqual(['allowed.txt'])
+      expect(saved.checkpoint?.headSha).toBe(g(tree,'rev-parse','HEAD'));expect(g(repo,'ls-remote',sourceRemote,'refs/heads/feat/1-fixture').split(/\s/)[0]).toBe(saved.checkpoint?.headSha)
+      const checkpointOwner=await import('../src/checkpoints.ts'),intent=saved.checkpointIntent!
+      const {nativeApproval:_,...absentAction}=intent
+      await expect((await checkpointOwner.configuredCheckpointController({...saved,checkpointIntent:absentAction},config)).verifyAuthority(absentAction)).rejects.toThrow('native authority')
+      expect(()=>runtime.validateCheckpointIntentShape({...intent,nativeApproval:{...intent.nativeApproval!,action:'feature-push'}})).toThrow('native checkpoint authority')
+      expect(()=>runtime.validateCheckpointIntentShape({...intent,unexpected:true})).toThrow('schema refused')
+      const changedPlan={...intent,nativeApproval:{...intent.nativeApproval!,plan:{...intent.nativeApproval!.plan,digest:'9'.repeat(64)}}}
+      await expect((await checkpointOwner.configuredCheckpointController({...saved,checkpointIntent:changedPlan},config)).verifyAuthority(changedPlan)).rejects.toThrow('native authority')
+      const changedRef={...intent,baseRef:'refs/heads/other'}
+      await expect((await checkpointOwner.configuredCheckpointController({...saved,checkpointIntent:changedRef},config)).verifyAuthority(changedRef)).rejects.toThrow('repository identity')
+      const changedFiles={...intent,paths:['other.txt']}
+      await expect((await checkpointOwner.configuredCheckpointController({...saved,checkpointIntent:changedFiles},config)).verifyAuthority(changedFiles)).rejects.toThrow('native scope')
       expect(publicWrites).toBe(0)
       await dispatch.runOnce(config,{dryRun:false},{processDeps:{wrapperPath:resolve('packages/cli/src/run-wrapper.ts')}})
       expect(JSON.parse(await fs.readFile(phasePath,'utf8')).starts).toBe(2)
@@ -227,4 +242,4 @@ if(args.includes('app-server')){
     for(const [key,value]of Object.entries(oldEnv)){if(value===undefined)delete process.env[key];else process.env[key]=value}
     await fs.rm(home,{recursive:true,force:true})
   }
-},120000)
+},180000)

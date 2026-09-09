@@ -8,6 +8,13 @@ test('private durable records survive reload; competing stale CAS cannot overwri
 test('terminal identity/cause and interrupted recovery never imply replay',async()=>{const root=await mkdtemp(join(tmpdir(),'runs-'));try{const r=await createRun(input(root));await expect(transitionRun(r.runId,1,{state:'terminal'},root)).rejects.toThrow();const done=await transitionRun(r.runId,1,{state:'terminal',terminationCause:'succeeded',finishedAt:new Date().toISOString()},root);await expect(transitionRun(r.runId,done.generation,{state:'running'},root)).rejects.toThrow();expect(classifyRecovery({state:'running',ownerAlive:false,pendingDelivery:[]})).toEqual({state:'interrupted',replay:false});expect(()=>parseRun({...done,schemaVersion:7})).toThrow()}finally{await rm(root,{recursive:true,force:true})}})
 test('quota checks back off without a task elapsed allowance',()=>{expect(nextQuotaCheck(0,0)).toBe(900000);expect(nextQuotaCheck(4,0)).toBe(3600000);expect(nextQuotaCheck(0,0,42)).toBe(42)})
 
+test('approved task files use only structural canonical plan lines',async()=>{
+  const runtime=await import('../src/runs.ts'),approval=await import('../../../skills/dev/dev-implement/scripts/lib/approval.mjs')
+  const body='<!-- vsk:v1 type=plan rev=1 -->\n- [ ] **Task 1: fixture** <!-- task-id:1-T1 -->\n  - Files — `allowed.ts`\n    Files — `indented-code.ts`\n```text\nFiles — `fenced.ts`\n``` still-fenced\nFiles — `also-fenced.ts`\n```\n'
+  const binding={repo:'o/r',issue:1,kind:'plan' as const,artifactId:'PLAN_1',rev:1,digest:approval.scopeDigest(body,'plan')}
+  expect((await runtime.approvedTaskSelection([binding],[{node_id:'PLAN_1',body}],'implement',{},['1-T1'])).paths).toEqual(['allowed.ts'])
+})
+
 test('terminal measurement segments exclude earlier published attempts and preserve unknown intervals',async()=>{
   const runtime=await import('../src/runs.ts'),root=await mkdtemp(join(tmpdir(),'segments-'))
   try{

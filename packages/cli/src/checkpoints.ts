@@ -8,6 +8,7 @@ const exec=promisify(execFile)
 const digest=(s:string)=>createHash('sha256').update(s).digest('hex')
 export interface CheckpointIntent {
   approvalRequest?:{parentRepo:string;parentIssue:number;approvalBinding:{commentId:number;bodySha256:string};requested:{repo:string;issue:number;taskIds:string[];actionId:string;branch:string;baseSha:string;paths:string[];operation:"checkpoint"}}
+  nativeApproval?:{action:'task-branch';plan:import('./shared-claims.ts').ArtifactRef;taskIds:string[];admittedHeadSha:string}
   id:string; repo:string; repositoryId:string; remote:string; remoteUrl:string; branch:string; baseRef:string; baseSha:string; scopeDigest:string; paths:string[]
   approvalBindings:ApprovalAuthorityRef[]
 }
@@ -143,11 +144,24 @@ export async function publishCheckpoint(candidate:CheckpointCandidate,controller
 }
 
 export async function configuredCheckpointController(run:RunRecord,config:import('./config.ts').FactoryConfig):Promise<CheckpointController>{
-  const {loadConfiguredPolicy}=await import('./control-room.ts'),{readFile}=await import('node:fs/promises'),{join,dirname}=await import('node:path'),{fileURLToPath,pathToFileURL}=await import('node:url'),{ghText,boundedGhJson,readBudget}=await import('./gh.ts')
+  const {loadConfiguredPolicy}=await import('./control-room.ts'),{readFile}=await import('node:fs/promises'),{join,dirname}=await import('node:path'),{fileURLToPath,pathToFileURL}=await import('node:url'),{ghText,boundedGhJson,fetchGhPages,readBudget}=await import('./gh.ts')
+  const helpers=await import('./runs.ts'),dispatch=await import('./dispatch.ts'),owner=await import('./shared-claims.ts')
   const entry=config.repos.find(r=>r.repo===run.repo);if(!entry||run.checkout!==await (await import('node:fs/promises')).realpath(run.checkout))throw Error('checkpoint checkout unavailable')
   const verifyAuthority=async(intent:CheckpointIntent)=>{
     const request=intent.approvalRequest
-    if(!request||request.requested.repo!==run.repo||request.requested.issue!==run.issue||request.requested.operation!=='checkpoint'||request.requested.branch!==run.branch||request.requested.baseSha!==run.baseSha||canonicalWire(request.requested.paths)!==canonicalWire(intent.paths))throw Error('checkpoint canonical approval request unavailable')
+    if(!request){
+      const native=intent.nativeApproval,plan=run.approvalRefs.find(ref=>ref.kind==='plan')
+      if(!native||native.action!=='task-branch'||!plan||canonicalWire(native.plan)!==canonicalWire(plan)||canonicalWire(native.taskIds)!==canonicalWire(run.approvedTaskIds)||native.admittedHeadSha!==run.baseSha||canonicalWire(run.checkpointIntent)!==canonicalWire(intent))throw Error('checkpoint canonical native authority unavailable')
+      await helpers.verifyRunAuthority(run,config)
+      const comments=await fetchGhPages<Record<string,unknown>>(ghText,`repos/${run.repo}/issues/${run.issue}/comments`,readBudget())
+      if(!comments.complete)throw Error('complete native checkpoint plan unavailable')
+      const selection=await helpers.approvedTaskSelection(run.approvalRefs,comments.items,run.stage,{},run.approvedTaskIds)
+      if(selection.scopeDigest!==intent.scopeDigest||canonicalWire(selection.paths)!==canonicalWire(intent.paths)||canonicalWire(selection.approvedTaskIds)!==canonicalWire(native.taskIds))throw Error('checkpoint canonical native scope changed')
+      const repository=await boundedGhJson<{node_id:string;default_branch:string}>(ghText,['api',`repos/${intent.repo}`],readBudget())
+      if(repository.node_id!==intent.repositoryId||intent.baseRef!==`refs/heads/${repository.default_branch}`||!new Set([`https://github.com/${intent.repo}.git`,`git@github.com:${intent.repo}.git`,`https://github.com/${intent.repo}`]).has(intent.remoteUrl))throw Error('checkpoint remote repository identity refused')
+      return
+    }
+    if(intent.nativeApproval||request.requested.repo!==run.repo||request.requested.issue!==run.issue||request.requested.operation!=='checkpoint'||request.requested.branch!==run.branch||request.requested.baseSha!==run.baseSha||canonicalWire(request.requested.paths)!==canonicalWire(intent.paths))throw Error('checkpoint canonical approval request unavailable')
     const devMd=await readFile(join(entry.path,'.vegastack/dev.md'),'utf8')
     const policy=loadConfiguredPolicy({home:config.home,repo:run.repo,devMd,settingsPath:config.settingsPath});if(!policy.ok)throw Error('checkpoint current policy unavailable')
     const script=join(dirname(dirname(fileURLToPath(import.meta.url))),'skill','dev-implement','scripts','lib','approval.mjs')
@@ -160,7 +174,6 @@ export async function configuredCheckpointController(run:RunRecord,config:import
     const tuples=intent.approvalBindings.map(a=>({approvalId:a.approvalId,commentId:Number(a.source.commentId),bodySha256:a.source.bodySha256}))
     if(tuples.some(t=>!Number.isSafeInteger(t.commentId))||canonicalWire(tuples)!==canonicalWire(verified.approvalBindings))throw Error('checkpoint canonical authority changed')
   }
-  const helpers=await import('./runs.ts'),dispatch=await import('./dispatch.ts'),owner=await import('./shared-claims.ts')
   const controller:CheckpointController={root:helpers.runsRoot(config.home),verifyAuthority:async intent=>{
     if(!await dispatch.checkpointPolicyEnabled(run.repo,config))throw Error('checkpoint-policy-disabled')
     await verifyAuthority(intent)
@@ -215,14 +228,30 @@ export async function runCheckpointCli(args:string[],home:string):Promise<number
   }catch{console.error('checkpoint refused; saved local work is preserved');return 2}
 }
 
-// The producer reads a real canonical action from135; profile defaults alone never create intent.
+// Consolidated runs use their exact action grant. Native runs bind the freshly
+// approved canonical plan/task files to the selected task-branch policy and Git facts.
 export async function checkpointIntentFromApproval(run:RunRecord,config:import('./config.ts').FactoryConfig):Promise<CheckpointIntent|null>{
-  if(run.authorityRequest?.kind!=='consolidated')return null
-  const helpers=await import('./runs.ts'),{ghText,boundedGhJson,readBudget}=await import('./gh.ts'),{loadConfiguredPolicy}=await import('./control-room.ts'),{repoPolicyFromEffective}=await import('./config.ts'),{readFile}=await import('node:fs/promises'),{join}=await import('node:path')
+  const helpers=await import('./runs.ts'),{ghText,boundedGhJson,fetchGhPages,readBudget}=await import('./gh.ts'),{loadConfiguredPolicy}=await import('./control-room.ts'),{repoPolicyFromEffective}=await import('./config.ts'),{readFile}=await import('node:fs/promises'),{join}=await import('node:path')
   await helpers.verifyRunAuthority(run,config)
   const entry=config.repos.find(e=>e.repo===run.repo);if(!entry)throw Error('checkpoint repository unconfigured')
   const devMd=await readFile(join(entry.path,'.vegastack','dev.md'),'utf8'),policy=repoPolicyFromEffective(loadConfiguredPolicy({home:config.home,repo:run.repo,devMd,settingsPath:config.settingsPath})),{approval}=await helpers.approvalTools()
-  const {kind:_,...source}=run.authorityRequest,readJson=(args:string[])=>boundedGhJson(ghText,args,readBudget())
+  const readJson=(args:string[])=>boundedGhJson(ghText,args,readBudget())
+  if(run.authorityRequest?.kind!=='consolidated'){
+    if(run.stage==='plan'||!await (await import('./dispatch.ts')).checkpointPolicyEnabled(run.repo,config))return null
+    const comments=await fetchGhPages<Record<string,unknown>>(ghText,`repos/${run.repo}/issues/${run.issue}/comments`,readBudget())
+    if(!comments.complete)throw Error('complete native checkpoint plan unavailable')
+    const selection=await helpers.approvedTaskSelection(run.approvalRefs,comments.items,run.stage,{},run.approvedTaskIds)
+    const plan=run.approvalRefs.find(ref=>ref.kind==='plan')
+    const branch=(await git(run.checkout,['symbolic-ref','--short','HEAD'])).trim(),head=(await git(run.checkout,['rev-parse','HEAD'])).trim()
+    if(!plan||branch!==run.branch||head!==run.headSha||head!==run.baseSha)throw Error('native checkpoint admitted source changed')
+    const repository=await readJson(['api',`repos/${run.repo}`]) as {node_id:string;default_branch:string}
+    const nativeApproval:NonNullable<CheckpointIntent['nativeApproval']>={action:'task-branch',plan,taskIds:selection.approvedTaskIds,admittedHeadSha:head}
+    const remoteUrl=(await git(run.checkout,['remote','get-url','origin'])).trim()
+    const intent:CheckpointIntent={id:'native-task-branch-'+digest(canonicalWire({repo:run.repo,issue:run.issue,branch,baseSha:head,scopeDigest:selection.scopeDigest,paths:selection.paths,approvalBindings:run.approvalBindings,nativeApproval})),repo:run.repo,repositoryId:repository.node_id,remote:'origin',remoteUrl,branch,baseRef:`refs/heads/${repository.default_branch}`,baseSha:head,scopeDigest:selection.scopeDigest,paths:selection.paths,approvalBindings:run.approvalBindings,nativeApproval}
+    validateCheckpointIntentShape(intent)
+    return intent
+  }
+  const {kind:_,...source}=run.authorityRequest
   const validated=await approval.gatherConsolidatedApproval({...source,operators:policy.operators,readJson})
   if(!validated.ok)throw Error('original checkpoint source authority unavailable')
   const comment=await readJson(['api',`repos/${source.parentRepo}/issues/comments/${source.approvalBinding.commentId}`]) as {body:string;id:number;user:{login:string}}

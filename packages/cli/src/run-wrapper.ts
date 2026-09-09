@@ -78,7 +78,7 @@ export async function runWrapper(directory:string,runId:string,attemptId:string)
   }
   process.on('message',(message:unknown)=>{
     if(!message||typeof message!=='object')return
-    const m=message as {kind:string;command:string;args:string[];cwd:string;env:Record<string,string>;runId?:string;attemptId?:string}
+    const m=message as {kind:string;command:string;args:string[];cwd:string;env:NodeJS.ProcessEnv;runId?:string;attemptId?:string}
     if(m.kind==='heartbeat'){lastHeartbeat=performance.now();return}
     if(m.kind==='cancel'){terminate();return}
     if(m.kind==='release'&&completed){clearTimeout(acknowledgment);clearInterval(lease);if(escalation)clearTimeout(escalation);process.exit(0)}
