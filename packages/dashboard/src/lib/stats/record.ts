@@ -1,4 +1,5 @@
 import { RECORD_FIELDS } from '../../../../cli/src/stats/record.js'
+import { projectLegacyStats } from '../../../../cli/src/stats/privacy.js'
 // Production event validation is shared with transport and survives the dashboard bundle.
 export { readExport, validateExport } from '../../../../cli/src/stats/privacy.js'
 export type { ExportMeasurement } from '../../../../cli/src/stats/types.js'
@@ -44,21 +45,7 @@ export interface StatsRecord {
   skills: SkillHit[]
 }
 
-const asString = (value: unknown): string | null => (typeof value === 'string' && value !== '' ? value : null)
 const asNumber = (value: unknown): number | null => (typeof value === 'number' && Number.isFinite(value) ? value : null)
-
-function asSkills(value: unknown): SkillHit[] {
-  if (!Array.isArray(value)) return []
-  const hits: SkillHit[] = []
-  for (const entry of value) {
-    if (!entry || typeof entry !== 'object') continue
-    const row = entry as Record<string, unknown>
-    const name = asString(row.name)
-    if (!name) continue
-    hits.push({ name, trigger: asString(row.trigger), harness: asString(row.harness) })
-  }
-  return hits
-}
 
 // A line is only a record when it carries a parseable timestamp and an `owner/name` repo — the
 // two fields every query groups by. Anything else is counted as skipped rather than guessed at,
@@ -77,26 +64,33 @@ export function parseRecordLine(line: string): StatsRecord | null {
   if(row.tokens!==undefined&&(!row.tokens||typeof row.tokens!=='object'||Array.isArray(row.tokens)||Object.entries(row.tokens).some(([key,value])=>!['in','out','cache_read','cache_write'].includes(key)||value!==null&&(typeof value!=='number'||!Number.isFinite(value)||value<0))))return null
   if(row.skills!==undefined&&(!Array.isArray(row.skills)||row.skills.length>128||row.skills.some(raw=>!raw||typeof raw!=='object'||Object.keys(raw).some(key=>!['name','trigger','harness'].includes(key)))))return null
 
-  const ts = asString(row.ts)
-  const repo = asString(row.repo)
-  if (!ts || !repo || !/^[^/\s]+\/[^/\s]+$/.test(repo)) return null
-  const at = new Date(ts)
-  if (Number.isNaN(at.getTime())) return null
+  let retained:ReturnType<typeof projectLegacyStats>
+  try {
+    const skills=Array.isArray(row.skills)?row.skills.map(raw=>{
+      if(!raw||typeof raw!=='object'||Array.isArray(raw))return raw
+      const skill=raw as Record<string,unknown>
+      return {name:skill.name??null,trigger:skill.trigger??null,harness:skill.harness??null}
+    }):row.skills??[]
+    retained=projectLegacyStats({ts:row.ts??null,repo:row.repo??null,stage:row.stage??null,harness:row.harness??null,model:row.model??null,effort:row.effort??null,mode:row.mode??null,human:row.human??null,outcome:row.outcome??null,skills})
+  } catch {
+    return null
+  }
+  const at = new Date(retained.ts)
 
   const tokens = (row.tokens && typeof row.tokens === 'object' ? row.tokens : {}) as Record<string, unknown>
 
   return {
-    ts,
+    ts: retained.ts,
     month: monthToken(at),
-    repo,
+    repo: retained.repo,
     issue: asNumber(row.issue),
     parent: asNumber(row.parent),
-    stage: asString(row.stage),
-    harness: asString(row.harness),
-    model: asString(row.model),
-    effort: asString(row.effort),
-    mode: asString(row.mode),
-    human: asString(row.human),
+    stage: retained.stage,
+    harness: retained.harness,
+    model: retained.model,
+    effort: retained.effort,
+    mode: retained.mode,
+    human: retained.human,
     sessionId: null,
     worktree: null,
     durationS: asNumber(row.duration_s),
@@ -108,11 +102,11 @@ export function parseRecordLine(line: string): StatsRecord | null {
     cacheRead: asNumber(tokens.cache_read),
     cacheWrite: asNumber(tokens.cache_write),
     costUsd: asNumber(row.cost_usd),
-    outcome: asString(row.outcome),
+    outcome: retained.outcome,
     reviewRounds: asNumber(row.review_rounds),
     fixRounds: asNumber(row.fix_rounds),
     handbacks: asNumber(row.handbacks),
-    skills: asSkills(row.skills),
+    skills: retained.skills,
   }
 }
 

@@ -83,7 +83,7 @@ test('group cannot unlock org stats and malformed known knobs refuse capture', (
   expect(resolveStatsPolicy({ repo: 'stats: nonsense' }).refusal).toMatch(/stats/)
 })
 
-import { serializeExport as privacySerialize, validateExport, readExport as privacyRead, reportingExecutionRef } from '../src/stats/privacy.ts'
+import { serializeExport as privacySerialize, validateExport, readExport as privacyRead, reportingExecutionRef, projectLegacyStats } from '../src/stats/privacy.ts'
 import { canonicalJson, type Destination, type LocalMeasurement } from '../src/stats/types.ts'
 import { mkdtemp, rm, stat, readFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
@@ -92,6 +92,23 @@ const destination:Destination={host:'github.com',org:'o',repo:'o/r',controlRoom:
 const eventId='9d31a521-53ea-4c39-bb58-213739ab6d47'
 const localExecution:Extract<LocalMeasurement,{recordKind:'execution'}>={schemaVersion:2,recordKind:'execution',utcDay:'2026-09-06',stage:'implement',outcome:'succeeded',costUsd:null,turns:0}
 const nonAttributed={values:{'stats-export':'non-attributed'}}
+const legacyProjection={ts:'2026-09-06T00:00:00.000Z',repo:'o/r',stage:'corrections',harness:null,model:null,effort:null,mode:null,human:null,outcome:'handback',skills:[{name:'dev-implement',trigger:'typed',harness:'codex'}]}
+test('legacy compatibility projection keeps historical nulls and rejects every retained unsafe string',()=>{
+ expect(projectLegacyStats(legacyProjection)).toEqual(legacyProjection)
+ expect(projectLegacyStats({...legacyProjection,outcome:'for-operator'})).toEqual({...legacyProjection,outcome:'handback'})
+ expect(projectLegacyStats({...legacyProjection,stage:'ship'})).toEqual({...legacyProjection,stage:'ship'})
+ const encode=(value:string)=>Buffer.from(value).toString('base64').replace(/=+$/,'')
+ const encoded=(value:string)=>[encode(value),encode(encode(value)),encode(encode(encode(value)))]
+ const canaries=['ghp_12345678901234567890','%67%68%70%5f12345678901234567890',...encoded('ghp_12345678901234567890'),'/Users/private/project','%2FUsers%2Fprivate%2Fproject',...encoded('/Users/private/project'),'C:\\Users\\private\\project','C%3A%5CUsers%5Cprivate%5Cproject',...encoded('C:\\Users\\private\\project'),'-----BEGIN PRIVATE KEY-----',...encoded('-----BEGIN PRIVATE KEY-----'),encode('private\ncontent-long'),encode('private\0content-long')]
+ for(const canary of canaries){
+  for(const field of ['ts','repo','stage','harness','model','effort','mode','human','outcome'] as const)expect(()=>projectLegacyStats({...legacyProjection,[field]:field==='repo'?`o/${canary}`:canary})).toThrow()
+  for(const field of ['name','trigger','harness'] as const)expect(()=>projectLegacyStats({...legacyProjection,skills:[{...legacyProjection.skills[0]!,[field]:canary}]})).toThrow()
+ }
+ for(const [field,value] of [['stage','deploy'],['mode','batch'],['outcome','ready']] as const)expect(()=>projectLegacyStats({...legacyProjection,[field]:value})).toThrow()
+ expect(()=>projectLegacyStats({...legacyProjection,harness:'x'.repeat(129)})).toThrow('privacy-invalid-identifier')
+ expect(()=>projectLegacyStats({...legacyProjection,skills:[{...legacyProjection.skills[0]!,trigger:'implicit'}]})).toThrow('privacy-invalid-skill-trigger')
+ expect(()=>projectLegacyStats({...legacyProjection,skills:Array.from({length:129},()=>legacyProjection.skills[0])})).toThrow('privacy-invalid-skills')
+})
 test('privacy schema projects private canaries away and distinguishes zero from unknown',()=>{
  const local={...localExecution,hostname:'PRIVATE_HOST_CANARY',stdout:'ghp_SECRET_CANARY',argv:['/Users/CANARY'],values:{human:'PRIVATE_HUMAN_CANARY',session_id:'PRIVATE_SESSION_CANARY',worktree:'/Users/CANARY'}}
  const wire=privacySerialize(local,destination,eventId,nonAttributed)!

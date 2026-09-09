@@ -16,10 +16,14 @@ export const EXECUTION_FIELDS = ['stage','harness','model','mode','outcome','dur
 export const ATTRIBUTION_FIELDS = ['taskRef','taskOwner','agentAccountOwner','executionRef','attempt','startedAt','endedAt','operatorMinutes','apiEquivalentUsd','estimateBasis'] as const
 const STAGES = ['intake','plan','implement','review','status','chronicle']
 const OUTCOMES = ['succeeded','failed','spawn-failed','timed-out','cancelled','interrupted','termination-unconfirmed']
+const LEGACY_STAGES = [...STAGES,'corrections','ship']
+const LEGACY_OUTCOMES = ['complete','handback','failed']
 const HEX = /^[a-f0-9]{64}$/
 const GIT = /^[a-f0-9]{40}$/
 const ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/
 const LOGIN = /^[a-z0-9](?:[a-z0-9-]{0,37}[a-z0-9])?$/
+const REPOSITORY = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}\/[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/
+const SENSITIVE = /(?:gh[pousr]_[A-Za-z0-9]|github_pat_|sk-(?:ant-|proj-)?[A-Za-z0-9]{12}|Bearer\s|-----BEGIN|(?:^|\s)(?:\/Users\/|\/home\/|[A-Z]:\\)|[\r\n\0])/i
 const COUNTERS = new Set<string>(['turns','toolCalls','subagents','tokensIn','tokensOut','cacheReadTokens','cacheWriteTokens'])
 const fail = (reason:string):never => {throw Error(reason)}
 function object(value:unknown):Record<string,unknown> {
@@ -34,8 +38,11 @@ function closed(value:unknown,keys:readonly string[]):Record<string,unknown> {
 function sensitive(value:string):boolean {
   let decoded=value
   for(let n=0;n<3;n++){try{const next=decodeURIComponent(decoded);if(next===decoded)break;decoded=next}catch{return true}}
-  if(/^[A-Za-z0-9+/_=-]{16,}$/.test(decoded)){try{const raw=Buffer.from(decoded,'base64').toString('utf8');if(/gh[pousr]_|github_pat_|sk-(?:ant-|proj-)?|\/Users\/|\/home\/|Bearer /i.test(raw))return true}catch{/* not encoded text */}}
-  return /(?:gh[pousr]_[A-Za-z0-9]|github_pat_|sk-(?:ant-|proj-)?[A-Za-z0-9]{12}|Bearer\s|-----BEGIN|(?:^|\s)(?:\/Users\/|\/home\/|[A-Z]:\\)|[\r\n\0])/i.test(decoded)
+  let encoded=decoded
+  for(let n=0;n<3&&/^[A-Za-z0-9+/_=-]{16,}$/.test(encoded);n++){
+    try{const raw=Buffer.from(encoded,'base64').toString('utf8');if(SENSITIVE.test(raw))return true;if(raw===encoded)break;encoded=raw}catch{break}
+  }
+  return SENSITIVE.test(decoded)
 }
 function identifier(value:unknown,nullable=false,pattern=ID):void {
   if(nullable&&value===null)return
@@ -63,6 +70,45 @@ function evidence(value:unknown,destination:Destination):void {
   if(row.issue===null&&row.commentId===null&&row.nodeId===null&&row.bodySha256===null)fail('privacy-evidence-unavailable')
 }
 function sameTask(outer:unknown,inner:unknown):void {if(canonicalJson(outer)!==canonicalJson(inner))fail('privacy-task-reference-mismatch')}
+
+export interface LegacyStatsSkill {
+  name:string
+  trigger:string|null
+  harness:string|null
+}
+export interface LegacyStatsProjection {
+  ts:string
+  repo:string
+  stage:string|null
+  harness:string|null
+  model:string|null
+  effort:string|null
+  mode:string|null
+  human:string|null
+  outcome:string|null
+  skills:LegacyStatsSkill[]
+}
+
+// Legacy JSONL remains source data, but only this closed compatibility projection may enter
+// dashboard caches. Legacy-only stage and outcome compatibility never widens schema2 exports.
+export function projectLegacyStats(value:unknown):LegacyStatsProjection {
+  const row=closed(value,['ts','repo','stage','harness','model','effort','mode','human','outcome','skills'])
+  timestamp(row.ts);identifier(row.repo,false,REPOSITORY)
+  for(const segment of (row.repo as string).split('/'))if(sensitive(segment))fail('privacy-invalid-identifier')
+  if(row.stage!==null&&!LEGACY_STAGES.includes(row.stage as string))fail('privacy-invalid-legacy-stage')
+  identifier(row.harness,true);identifier(row.model,true);identifier(row.effort,true);identifier(row.human,true,LOGIN)
+  if(row.mode!==null&&!['headless','interactive'].includes(row.mode as string))fail('privacy-invalid-mode')
+  const outcome=row.outcome==='for-operator'?'handback':row.outcome
+  if(outcome!==null&&!LEGACY_OUTCOMES.includes(outcome as string))fail('privacy-invalid-legacy-outcome')
+  if(!Array.isArray(row.skills)||row.skills.length>128)fail('privacy-invalid-skills')
+  const skills=(row.skills as unknown[]).map(raw=>{
+    const skill=closed(raw,['name','trigger','harness'])
+    identifier(skill.name);identifier(skill.harness,true)
+    if(skill.trigger!==null&&!['model','typed','mention'].includes(skill.trigger as string))fail('privacy-invalid-skill-trigger')
+    return {name:skill.name as string,trigger:skill.trigger as string|null,harness:skill.harness as string|null}
+  })
+  return {ts:row.ts as string,repo:row.repo as string,stage:row.stage as string|null,harness:row.harness as string|null,model:row.model as string|null,effort:row.effort as string|null,mode:row.mode as string|null,human:row.human as string|null,outcome:outcome as string|null,skills}
+}
 
 export function exportMode(policy:ExportPolicy | {org?:Record<string,unknown>;repo?:Record<string,unknown>;delegations?:unknown[]}):ExportMode {
   if(!('values' in policy)){

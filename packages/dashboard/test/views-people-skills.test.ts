@@ -62,7 +62,7 @@ test('explicit valid scoped policy exposes only permitted skill rows and no whol
  const context=await authorizedSkillsContext()
  const skills=buildSkillsView({context,orgSkills:{'dev-plan':40}})
  expect(skills.rows).toHaveLength(1)
- expect(skills.rows[0]).toMatchObject({name:'dev-plan',invocations:1,triggers:{model:1},outcomes:{'for-operator':1}})
+ expect(skills.rows[0]).toMatchObject({name:'dev-plan',invocations:1,triggers:{model:1},outcomes:{handback:1}})
  expect(skills.rows[0]!.meanAssociatedRunCostUsd).toBeCloseTo(0.4,6)
  expect(skills.orgTotals).toBeNull()
  const denied={...context,allowedRepos:[],filters:{...context.filters,allowedRepos:[],attributedRepos:[]}}
