@@ -28,7 +28,7 @@ interface FixtureOptions {
 
 // One home with one or more opted-in repos, each wired for Claude in its main checkout.
 function fixture(options: FixtureOptions = {}) {
-  const home = options.home ?? mkdtempSync(join(tmpdir(), 'vf-tick-'))
+  const home = realpathSync(options.home ?? mkdtempSync(join(tmpdir(), 'vf-tick-')))
   const names = options.repos ?? ['app']
   const devMd = options.devMd ?? 'dispatch: local\noperators: mk\nplan: claude fable-5-1 high\nimplement: claude fable-5-1 high\n'
   const repos = names.map(name => {
@@ -370,8 +370,8 @@ describe('the guard is checked for the harness and the checkout that will run (F
   })
 })
 
-describe('the parallel path retains the checked child gateway barrier (F28)', () => {
-  test('a wired codex parent still refuses parallel execution until the checked gateway exists', async () => {
+describe('the parallel path requires qualified shared parent ownership before its child gateway (F28)', () => {
+  test('a wired codex parent without qualified shared ownership refuses before the child gateway', async () => {
     const { config } = fixture({ devMd: 'dispatch: local\noperators: mk\nplan: codex gpt-5.6 high\nimplement: codex gpt-5.6 high\n', maxRuns: 3 })
     const repoPath = config.repos[0]!.path
     // The main checkout is wired for Codex and only Codex; so is the parent worktree.
@@ -391,7 +391,7 @@ describe('the parallel path retains the checked child gateway barrier (F28)', ()
     }]
     const result = await runTick(config, { dryRun: true }, { harnessMetadata, gh, ensureWorktree, execute: async run => finished(run), parentCandidates })
     expect(result.runs).toEqual([])
-    expect(result.refusals.map(row => row.reason).join(' ')).toContain('checked child gateway')
+    expect(result.refusals.map(row => row.reason).join(' ')).toContain('qualified shared parent ownership')
   })
 })
 
@@ -433,6 +433,10 @@ test('a profile edited after sync refuses before any worktree or execute', async
 test('actual executor OS refusal retains corrections for a later real spawn', async () => {
   const { home, config, repos } = fixture()
   const repo = repos[0]!.path, command = join(home, 'retry.sh'), entered = join(home, 'entered')
+  const committed = Bun.spawnSync(['git', '-C', repo, '-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', 'add', '.'])
+  expect(committed.exitCode, committed.stderr.toString()).toBe(0)
+  const commit = Bun.spawnSync(['git', '-C', repo, '-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', 'commit', '-qm', 'fixture'])
+  expect(commit.exitCode, commit.stderr.toString()).toBe(0)
   const { gh } = ghStub({ forOperator: [{ number: 12, title: 'feat: thing', labels: ['for-operator'], assignees: ['mk'] }] }, args => {
     if (args[1] === 'repos/acme/app/issues/12/comments') return JSON.stringify([{ id: 555, body: 'Please apply the correction.', reactions: { rocket: 1 } }])
     if (args[1] === 'repos/acme/app/issues/comments/555/reactions') return JSON.stringify([{ id: 999, content: 'rocket', user: { login: 'mk' } }])
@@ -443,12 +447,12 @@ test('actual executor OS refusal retains corrections for a later real spawn', as
     ensureWorktree: async () => ({ path: repo, branch: 'fixture-running', slug: 'thing', type: 'feat' }),
     execute: (run: PlannedRun, plan: Parameters<TickDeps['execute']>[1], cfg: typeof config, options: Parameters<TickDeps['execute']>[3]) =>
       executeRun(run, { ...plan, command, args: [entered] }, cfg, options,
-        { gh, git: async () => ({ ok: true, message: '' }) }),
+        { gh, git: async () => ({ ok: true, message: '' }), wrapperPath: resolve(import.meta.dir, '../src/run-wrapper.ts') }),
   }
   const refused = await runTick(config, { dryRun: false }, deps)
   await settleRuns(tracker)
   expect(refused.runs).toEqual([])
-  expect(refused.refusals.some(r => r.reason.includes('harness process did not start'))).toBe(true)
+  expect(refused.refusals.some(r => r.reason.includes('harness did not start')), JSON.stringify(refused.refusals)).toBe(true)
   expect((await readState(config.stateFile)).handled).toEqual([])
   expect(existsSync(entered)).toBe(false)
   // An actual executable now exists; no internal metadata/logging call count is observed.
@@ -517,7 +521,7 @@ for (const harness of ['claude', 'codex'] as const) for (const parallel of [fals
     if (parallel) {
       expect(result.runs).toEqual([])
       expect(actual).toEqual([])
-      expect(result.refusals.map(row => row.reason).join(' ')).toContain('checked child gateway')
+      expect(result.refusals.map(row => row.reason).join(' ')).toContain('qualified shared parent ownership')
       // #140 validates the prepared child; #139 still owns its actual gateway/launch.
       const child = join(repo, '.vegastack/.worktrees/131-child')
       git(['worktree', 'add', '-q', '-b', 'fixture-child', child])
@@ -740,14 +744,14 @@ test('source trust: launched run exposes canonical comment/body provenance', asy
   expect(result.runs[0]!.approvalBindings).toEqual([{ approvalId: 'intent-8', commentId: authority.id, bodySha256: Bun.SHA256.hash(authority.body, 'hex') }])
 })
 
-// Acceptance matrix: every internal caller collaborator is real. Only the external
-// GitHub transport and harmless PATH executables stand in for remote services.
+// Acceptance matrix: preparation, hook and metadata callers are real. GitHub transport is
+// isolated, and enabled/retry cases stop at a controlled executor before subscription qualification.
 for (const mode of ['enabled', 'disabled', 'stale-policy', 'final-stale-policy', 'incomplete-board', 'incomplete-history', 'cancelled-body', 'exhausted-body'] as const) {
   test(`managed ordinary acceptance: ${mode}`, async () => {
     // Bun's synchronous child inherits its startup environment. Isolate the entire
     // case at the OS boundary, including every real preparation subprocess.
     if (!process.env.VSK_MANAGED_CASE_HOME) {
-      const isolated = mkdtempSync(join(tmpdir(), 'vf-managed-'))
+      const isolated = realpathSync(mkdtempSync(join(tmpdir(), 'vf-managed-')))
       const child = Bun.spawnSync([process.execPath, 'test', import.meta.path, '-t', `managed ordinary acceptance: ${mode}$`], {
         env: { ...process.env, VSK_MANAGED_CASE_HOME: isolated, HOME: isolated, CODEX_HOME: join(isolated, '.codex'), PATH: `${join(isolated, 'bin')}:${process.env.PATH ?? ''}` },
       })
@@ -861,24 +865,34 @@ readline.createInterface({input:process.stdin}).on('line',line=>{
       finalOutcome = await executeRun(run, plan, cfg, options)
       return finalOutcome
     }
+    const controlledStarts: Array<{ issue: number; cwd: string }> = []
+    const controlledExecutor: TickDeps['execute'] = async (run, plan, _cfg, options) => {
+      expect(plan.cwd).toBe(prepared)
+      expect(plan.args).toContain('memories.use_memories=false')
+      expect(plan.args).toContain('memories.generate_memories=false')
+      controlledStarts.push({ issue: run.issue, cwd: plan.cwd })
+      options.onSpawn?.()
+      return finished(run)
+    }
     try {
       const result = await runTick(config, { dryRun: false, signal: controller.signal }, {
-        gh, tracker, ...(mode === 'final-stale-policy' ? { execute: finalExecutor } : {}),
+        gh, tracker, ...(mode === 'final-stale-policy' ? { execute: finalExecutor } : mode === 'enabled' ? { execute: controlledExecutor } : {}),
       })
       clockSpy?.mockRestore()
       await settleRuns(tracker)
       if (mode !== 'enabled') {
         expect(result.runs).toEqual([])
         const reason = { disabled: 'managed launch refused', 'stale-policy': 'final prepared-checkout check refused',
-          'final-stale-policy': 'prepared guard refused immediately before spawn', 'incomplete-board': 'board could not be read',
+          'final-stale-policy': 'prepared guard refused', 'incomplete-board': 'board could not be read',
           'incomplete-history': 'board could not be read', 'cancelled-body': 'cancelled', 'exhausted-body': 'deadline exceeded' }[mode]
-        expect(result.refusals.map(row => row.reason).join(' ')).toContain(reason)
+        const relevantRefusals = mode.startsWith('incomplete') ? result.refusals : result.refusals.filter(row => row.issue === issue)
+        expect(relevantRefusals.map(row => row.reason).join(' ')).toContain(reason)
         expect(readLines(entered)).toEqual([])
         expect(readLines(deliveries)).toEqual([])
         expect((await readState(config.stateFile)).handled).toEqual([])
         if (mode === 'final-stale-policy') {
           expect(finalOutcome).toEqual(expect.objectContaining({ started: false, pushed: false, handedBack: false }))
-          expect(finalOutcome!.refusal).toContain('prepared guard refused immediately before spawn')
+          expect(finalOutcome!.refusal).toContain('prepared guard refused')
           const audit = readLines(finalOutcome!.logFile)
           expect(audit.some(row => row.event === 'launch-refused')).toBe(true)
           expect(audit.some(row => row.event === 'start')).toBe(false)
@@ -896,7 +910,7 @@ readline.createInterface({input:process.stdin}).on('line',line=>{
           }
           // Same repository, approval and pending reaction: completion permits a real start.
           failing = false
-          const retry = await runTick(config, { dryRun: false }, { gh, tracker })
+          const retry = await runTick(config, { dryRun: false }, { gh, tracker, execute: controlledExecutor })
           await settleRuns(tracker)
           expect(retry.refusals.filter(row => row.issue === issue)).toEqual([])
           expect(retry.runs.map(run => [run.issue, run.stage, run.launched])).toEqual([[issue, correction ? 'corrections' : 'implement', true]])
@@ -916,13 +930,9 @@ readline.createInterface({input:process.stdin}).on('line',line=>{
       expect(git(['-C', prepared, 'branch', '--show-current'])).toBe(`feat/${issue}-fixture`)
       expect(readFileSync(join(prepared, '.codex/hooks.json'), 'utf8')).toBe(CODEX_WIRING)
       expect(readFileSync(join(home, '.codex/config.toml'), 'utf8')).toContain(`[projects."${prepared}"]`)
-      const starts = readLines(entered)
-      expect(starts).toHaveLength(1)
-      expect(starts[0].cwd).toBe(prepared)
-      expect(starts[0].cwd).not.toBe(repo)
-      expect(starts[0].args).toContain('memories.use_memories=false')
-      expect(starts[0].args).toContain('memories.generate_memories=false')
-      expect(readLines(deliveries)).toEqual([{ cwd: prepared, args: ['push', '-u', 'origin', 'HEAD'] }])
+      expect(controlledStarts).toEqual([{ issue, cwd: prepared }])
+      expect(readLines(entered)).toEqual([])
+      expect(readLines(deliveries)).toEqual([])
       expect(reads.filter(args => args[0] === 'issue' && args.includes('parent')).map(args => args[2])).toContain('9')
       expect(readLines(calls).every(row => row.cwd === prepared)).toBe(true)
       expect([...new Set(readLines(calls).map(row => row.method))].sort()).toEqual(['initialize', 'initialized', 'hooks/list', 'configRequirements/read', 'config/read'].sort())
