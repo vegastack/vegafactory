@@ -64,10 +64,10 @@ The project's story, newest first: what got built, why, and how it went — for 
 
 ## 08-09-2026 — A child branch must prove its work ([#139](https://github.com/vegastack/vegafactory/issues/139))
 
-- **What:** Source work adds a CLI owner for independent children, records their actual processes and checks, and joins exact accepted commits in order. An untouched branch can no longer pass as completed work.
-- **Why:** The previous helper could join branches that had never executed a child, and separate launch descriptions did not own cancellation or recovery.
-- **How it went:** Real Git and process fixtures exercised committed output, cancellation, missing checks and interrupted joins. Shared stopped-process capacity needs the queued owner corrections; the old workflow compatibility patch, final evaluation, independent review and actual platform qualification remain open.
-- **Changed:** Registered child CLI · durable source acceptance and join receipts · original parent ownership · required checkout setup · parent worktree retention.
+- **What:** The CLI now derives a child’s execution and checkpoint permissions separately from one current consolidated parent record, runs only the exact selected code scope, and preserves original launch provenance when a stopped group changes coordinator. An untouched or merely checkpointed branch still cannot pass as completed work.
+- **Why:** The earlier gateway still expected native child approval and could not safely carry queued children across a parent-owner succession; a parent branch or checkpoint must never become child authority by substitution.
+- **How it went:** The first red exposed the missing consolidated child-request seam. Synthetic closed-action cases then covered branch, ref, base, task, path, mode, action and source drift, while real Git/process fixtures retained cancellation, partial joins and trusted review behavior. The focused child/dispatch and upstream approval/checkpoint/shared-owner suites passed; final immutable review and actual platform qualification remain open.
+- **Changed:** Separate execution/checkpoint requests · exact child ref delivery · closed version 2 launch provenance · verified stopped-group succession · recovery-queued atomic starts · accepted join replay prevention.
 - **Decisions:** none.
 
 — approved by (kmanojkumar) · built by codex · branch codex/productionization-133

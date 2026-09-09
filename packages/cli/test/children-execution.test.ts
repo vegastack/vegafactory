@@ -298,7 +298,7 @@ test('shared queued fourth child follows verified stopped process without forged
   } finally { await rm(f.home,{recursive:true,force:true}) }
 }, 30000)
 
-test('production relationship callback revalidates canonical parent/child approval and original claim', async () => {
+test('legacy v1 launch remains readable evidence but cannot authorize a new relationship without shared provenance', async () => {
   const { spyOn } = await import('bun:test'), gh = await import('../src/gh.ts'), runtime = await import('../src/runs.ts')
   const { verifyChildRelationship } = await import('../src/children.ts'), wire = await import('../src/shared-claims.ts'), { processIdentity } = await import('../src/claims.ts')
   const { parseFactoryConfig } = await import('../src/config.ts'), { loadConfiguredPolicy } = await import('../src/control-room.ts')
@@ -350,14 +350,52 @@ test('production relationship callback revalidates canonical parent/child approv
     await runtime.atomicRunFile(join(runsRoot(f.home),parent.runId,'children.json'),launch)
     const parentTask: import('../src/shared-claims.ts').TaskRecord = {schemaVersion:1,host:'github.com',repo:parent.repo,issue:parent.issue,repositoryNodeId:'R_fixture',issueNodeId:'I_1',scopeDigest:parent.taskKey.scopeDigest,approvalDigest:wire.sha256(wire.canonical(parent.approvalBindings)),approvalBindings:parent.approvalBindings,stage:'implement',state:'running',paths:[],resources:[],independent:false,parentTaskKey:null,parentBinding:null,approvedTaskIds:['1-T1'],checkpoint:null,stopProof:null,unresolvedEffects:[],recovery:null,acceptedScopes:[],taskKey:binding.taskKey,runId:parent.runId,generation:1,ownerToken:originalOwner,machineId:machine.id,installationId:machine.installationId,sessionId:machine.sessionId}
     const childTask: import('../src/shared-claims.ts').TaskRecord = {...parentTask,issueNodeId:'I_8',issue:8,repo:child.repo,runId:child.runId,parentTaskKey:binding.taskKey,parentBinding:binding,scopeDigest:child.taskKey.scopeDigest,paths:['requested.txt'],resources:[],independent:true,approvedTaskIds:['8-T1']}
-    expect(await verifyChildRelationship({parent:parentTask,child:childTask},config)).toEqual({maxChildren:1})
-    expect(reads).toContain('repos/fixture/repo/issues/1/comments');expect(reads).toContain('repos/fixture/repo/issues/8/comments')
-    await expect(verifyChildRelationship({parent:{...parentTask,ownerToken:randomUUID()},child:childTask},config)).rejects.toThrow('original parent')
-    await expect(verifyChildRelationship({parent:parentTask,child:{...childTask,paths:['outside.txt']}},config)).rejects.toThrow('exact approved parent group')
-    rows.get(1)!.comments[0]!.body+='\nChanged scope\n'
-    await expect(verifyChildRelationship({parent:parentTask,child:childTask},config)).rejects.toThrow()
+    expect((await (await import('../src/children.ts')).readChildrenRecord(runsRoot(f.home),parent.runId)).schemaVersion).toBe(1)
+    await expect(verifyChildRelationship({parent:parentTask,child:childTask},config)).rejects.toThrow('v1 child original shared parent facts unavailable')
   } finally { ghSpy.mockRestore(); if(previousScript===undefined)delete process.env.VSK_PREFLIGHT_SCRIPT;else process.env.VSK_PREFLIGHT_SCRIPT=previousScript;await rm(f.home,{recursive:true,force:true}) }
 },30000)
+
+test('verified v1 child launch preserves exact original bytes before atomic v2 upgrade',async()=>{
+  const {spyOn}=await import('bun:test'),dispatch=await import('../src/dispatch.ts'),wire=await import('../src/shared-claims.ts'),runtime=await import('../src/runs.ts')
+  const {readExecutableChildrenRecord}=await import('../src/children.ts'),{parseFactoryConfig}=await import('../src/config.ts')
+  const home=await realpath(await mkdtemp(join(tmpdir(),'children-v1-upgrade-'))),tree=join(home,'repo');await mkdir(tree,{recursive:true})
+  git(tree,'init','-b','feat/parent');git(tree,'config','user.name','Fixture');git(tree,'config','user.email','fixture@example.invalid');await writeFile(join(tree,'base.txt'),'base\n');git(tree,'add','.');git(tree,'commit','-m','base')
+  const base=git(tree,'rev-parse','HEAD'),root=runsRoot(home),authority={approvalId:'scope',source:{kind:'github-comment' as const,repositoryId:'R_repo',issueNodeId:'I_8',commentId:'12',bodySha256:'a'.repeat(64)}}
+  const parent=await createRun(diagnostic(root,tree,1,base)),machine={id:'machine',installationId:randomUUID(),sessionId:randomUUID(),hostBindingDigest:'b'.repeat(64)}
+  const child=await createRun({...diagnostic(root,tree,8,base),parent:1,branch:'feat/8-child',harness:'codex',model:'fixture',effort:'high',execution:{providerMode:'subscription',harness:'codex',harnessVersion:'fixture',model:'fixture',effort:'high',accountRef:'fixture',qualification:authority.source},approvalBindings:[authority],recordBinding:authority,approvalRefs:[{repo:'fixture/repo',issue:8,kind:'brief',artifactId:'I_8',rev:1,digest:'c'.repeat(64)},{repo:'fixture/repo',issue:8,kind:'plan',artifactId:'P_8',rev:1,digest:'d'.repeat(64)}],policyDigest:'e'.repeat(64),accountRef:'fixture',machine,sharedClaim:{taskKey:'f'.repeat(64),generation:1,ownerToken:randomUUID(),stateCommit:'1'.repeat(40)}})
+  const original={taskKey:'9'.repeat(64),runId:parent.runId,generation:1,ownerToken:randomUUID(),machineId:'old-parent',installationId:randomUUID(),sessionId:randomUUID()}
+  const launch={schemaVersion:1,parentRunId:parent.runId,parentIssue:1,repo:'fixture/repo',parentBranch:'feat/parent',baseSha:base,parentBinding:original,concurrency:1,groups:[{id:'g',members:['#8'],files:['requested.txt']}],children:[{group:'g',issue:8,title:'child',type:'feat',branch:'feat/8-child',path:tree,files:['requested.txt'],resources:[],baseSha:base,runId:child.runId,scopeDigest:child.taskKey.scopeDigest,taskIds:['8-T1'],acceptanceCommand:'true'}]}
+  await runtime.atomicRunFile(join(root,parent.runId,'children.json'),launch);const raw=await readFile(join(root,parent.runId,'children.json'),'utf8')
+  const childBinding={...original,taskKey:original.taskKey},claim={taskKey:child.sharedClaim!.taskKey,generation:1,ownerToken:child.sharedClaim!.ownerToken,machineId:machine.id,installationId:machine.installationId,sessionId:machine.sessionId,runId:child.runId,stateCommit:'1'.repeat(40),target:{}}
+  const task={schemaVersion:1,host:'github.com',repo:'fixture/repo',issue:8,repositoryNodeId:'R_repo',issueNodeId:'I_8',scopeDigest:child.taskKey.scopeDigest,approvalDigest:'a'.repeat(64),approvalBindings:[authority],generation:1,machineId:machine.id,installationId:machine.installationId,sessionId:machine.sessionId,ownerToken:claim.ownerToken,runId:child.runId,stage:'implement',state:'claimed',paths:['requested.txt'],resources:[],independent:true,parentTaskKey:original.taskKey,parentBinding:childBinding,approvedTaskIds:['8-T1'],checkpoint:null,stopProof:null,unresolvedEffects:[],recovery:null,acceptedScopes:[],taskKey:claim.taskKey} as import('../src/shared-claims.ts').TaskRecord
+  const shared=spyOn(dispatch,'sharedClaimForRun').mockResolvedValue(claim as any),coordination=spyOn(wire,'readCoordination').mockResolvedValue({tasks:{[claim.taskKey]:task}} as any)
+  try{
+    const upgraded=await readExecutableChildrenRecord(parent,parseFactoryConfig({repos:[{repo:'fixture/repo',org:'fixture',path:tree}]},home))
+    expect(upgraded.schemaVersion).toBe(2);expect(upgraded.children[0]!.parentBinding).toEqual(childBinding)
+    const archived=JSON.parse(await readFile(join(root,parent.runId,'children-v1-'+createHash('sha256').update(raw).digest('hex')+'.json'),'utf8'))
+    expect(archived).toEqual({schemaVersion:1,kind:'children-v1-original',sha256:createHash('sha256').update(raw).digest('hex'),bytes:raw})
+  }finally{shared.mockRestore();coordination.mockRestore();await rm(home,{recursive:true,force:true})}
+})
+
+test('changed coordinator is accepted only through the exact current group succession receipt',async()=>{
+  const {spyOn}=await import('bun:test'),dispatch=await import('../src/dispatch.ts'),wire=await import('../src/shared-claims.ts'),runtime=await import('../src/runs.ts')
+  const {executeChildren}=await import('../src/children.ts'),{parseFactoryConfig}=await import('../src/config.ts')
+  const home=await realpath(await mkdtemp(join(tmpdir(),'children-succession-'))),tree=join(home,'repo');await mkdir(tree,{recursive:true})
+  git(tree,'init','-b','feat/parent');git(tree,'config','user.name','Fixture');git(tree,'config','user.email','fixture@example.invalid');await writeFile(join(tree,'base.txt'),'base\n');git(tree,'add','.');git(tree,'commit','-m','base')
+  const base=git(tree,'rev-parse','HEAD'),parent=await createRun(diagnostic(runsRoot(home),tree,1,base)),groups={guard:'plan-lint',ok:true,groups:[{id:'g',members:['#8'],files:['requested.txt']}]}
+  const original={taskKey:'a'.repeat(64),runId:parent.runId,generation:1,ownerToken:randomUUID(),machineId:'old',installationId:randomUUID(),sessionId:randomUUID()},current={...original,generation:2,ownerToken:randomUUID(),machineId:'new',installationId:randomUUID(),sessionId:randomUUID()}
+  const operationId=randomUUID(),claim={...current,stateCommit:'2'.repeat(40),target:{}},task={schemaVersion:2,taskKey:current.taskKey,runId:current.runId,generation:current.generation,ownerToken:current.ownerToken,machineId:current.machineId,installationId:current.installationId,sessionId:current.sessionId,parentTaskKey:null,state:'running',stopProof:null,successionOperationId:operationId}
+  const launch={schemaVersion:2,parentRunId:parent.runId,parentIssue:1,repo:'fixture/repo',parentBranch:'feat/parent',baseSha:base,parentBinding:original,concurrency:1,groups:groups.groups,children:[{group:'g',issue:8,title:'child',type:'feat',branch:'feat/8-child',path:join(tree,'.vegastack/.worktrees/8-child'),files:['requested.txt'],resources:[],baseSha:base,runId:null,scopeDigest:null,taskIds:[],acceptanceCommand:'true',parentBinding:null}]}
+  await runtime.atomicRunFile(join(runsRoot(home),parent.runId,'children.json'),launch)
+  const shared=spyOn(dispatch,'sharedClaimForRun').mockResolvedValue(claim as any),coordination=spyOn(wire,'readCoordination').mockResolvedValue({tasks:{[current.taskKey]:task},index:{active:[{taskKey:current.taskKey}]}} as any),succession=spyOn(wire,'inspectGroupSuccession').mockResolvedValue({kind:'verified',reference:{kind:'state-receipt',operationId,commitSha:'2'.repeat(40),blobSha256:'d'.repeat(64)},receipt:{members:[{before:original,after:current}]}} as any)
+  const config=parseFactoryConfig({repos:[{repo:'fixture/repo',org:'fixture',path:tree}]},home)
+  try{
+    const preview=await executeChildren({parent,groups,config},{groups:async()=>groups.groups})
+    expect(preview.plan.parentBinding).toEqual(original);expect(succession).toHaveBeenCalled()
+    succession.mockResolvedValue({kind:'invalid-or-unavailable',reason:'group succession could not be verified'})
+    await expect(executeChildren({parent,groups,config},{groups:async()=>groups.groups})).rejects.toThrow('group succession')
+  }finally{shared.mockRestore();coordination.mockRestore();succession.mockRestore();await rm(home,{recursive:true,force:true})}
+})
 
 test('packaged CLI entrypoint loads the authored helper owner and refuses an unregistered parent', async () => {
   const f = await fixture(), { cp } = await import('node:fs/promises')
@@ -375,6 +413,84 @@ test('packaged CLI entrypoint loads the authored helper owner and refuses an unr
     const refused=Bun.spawnSync(['node',join(dist,'index.js'),'children','run','--parent','1','--groups',f.groupsFile,'--repo','fixture/repo','--config',config,'--write','--json'],{cwd:f.tree,env:{...process.env,HOME:f.home}})
     expect(refused.exitCode).toBe(2);expect(refused.stdout.toString()).toContain('unique active owned parent run')
     expect(git(f.tree,'rev-parse','HEAD')).toBe(f.head)
+  } finally { await rm(f.home,{recursive:true,force:true}) }
+},15000)
+
+test('default packaged child gateway derives separate exact execution and checkpoint authority', async () => {
+  const gatewayOwner = await import('../src/children.ts'), approval = await import('../../../skills/dev/dev-implement/scripts/lib/approval.mjs')
+  const { parseFactoryConfig } = await import('../src/config.ts')
+  const home=await realpath(await mkdtemp(join(tmpdir(),'default-child-authority-'))),tree=join(home,'repo')
+  await mkdir(join(tree,'.vegastack'),{recursive:true})
+  await writeFile(join(tree,'.vegastack/dev.md'),'repo: fixture/repo · default branch main\noperators: fixture\ncommands: check `true`\n')
+  git(tree,'init','-b','feat/parent');git(tree,'config','user.name','Fixture');git(tree,'config','user.email','fixture@example.invalid');git(tree,'add','.');git(tree,'commit','-m','base')
+  const base=git(tree,'rev-parse','HEAD'),brief='<!-- vsk:v1 type=brief rev=1 scope=quick-build -->\n## Outcome\nEdit requested.txt.\n'
+  const plan='<!-- vsk:v1 type=plan rev=1 -->\n- [ ] **Task 1: edit** <!-- task-id:8-T1 -->\n  - Files — `requested.txt`\n  - Interfaces — exact child\n  - Steps: edit it\n'
+  const issue={id:8,node_id:'I_8',number:8,title:'feat: child',body:brief,state:'open'},planComment={id:81,node_id:'PLAN_8',body:plan,user:{login:'fixture'}}
+  const artifacts=[approval.artifactRef({repo:'fixture/repo',issue:8,kind:'brief',artifact:issue}),approval.artifactRef({repo:'fixture/repo',issue:8,kind:'plan',artifact:planComment})]
+  const local={id:'local-child',kind:'local',repo:'fixture/repo',parentBranch:'feat/parent',operations:['edit','integrate']}
+  const checkpoint={id:'checkpoint-child',kind:'child-source-checkpoint',repo:'fixture/repo',parent:{issue:1,branch:'feat/parent',baseSha:base},child:{issue:8,branch:'feat/8-child',ref:'refs/heads/feat/8-child',baseSha:base,taskIds:['8-T1'],paths:['requested.txt']}}
+  const selected={repo:'fixture/repo',issue:8,mode:'code',artifacts,taskIds:['8-T1'],actionIds:[local.id,checkpoint.id]}
+  const manifest={schemaVersion:1,parent:{repo:'fixture/repo',issue:1,branch:'feat/parent',baseSha:base},codeIssues:[8],preparationTaskIds:[],candidateProtocols:[],excludedIssues:[],laterResearch:[],selections:[selected],actionBounds:{[local.id]:local,[checkpoint.id]:checkpoint}}
+  const manifestBytes=JSON.stringify(manifest),record={schemaVersion:2,kind:'consolidated',id:'parent-scope',operator:'fixture',scope:'consolidated',source:{kind:'session',ref:'session:fixture',quote:'Approve exact child fixture.'},manifest:{sha256:createHash('sha256').update(manifestBytes).digest('hex'),source:{kind:'inline',utf8:manifestBytes}},items:[selected],actions:[local,checkpoint],supersedes:[],revokes:[]}
+  const approvalBody='<!-- vsk:v1 type=approval scope=consolidated -->\n```json\n'+JSON.stringify(record)+'\n```\n',approvalComment={id:12,node_id:'APPROVAL_1',body:approvalBody,user:{login:'fixture'}}
+  const pages=new Map<string,unknown[]>([['repos/fixture/repo/issues/1/comments',[approvalComment]],['repos/fixture/repo/issues/8/comments',[planComment]],['repos/fixture/repo/issues/8/dependencies/blocked_by',[]]])
+  const gh=async(args:string[])=>{const endpoint=(args[1]??'').split('?')[0]!,value=endpoint==='repos/fixture/repo/issues/8'?issue:pages.get(endpoint);if(value===undefined)throw Error('unexpected endpoint '+endpoint);return args.includes('--include')?'HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n'+JSON.stringify(value):JSON.stringify(value)}
+  const parent={...diagnostic(runsRoot(home),tree,1,base),runId:randomUUID(),schemaVersion:2,generation:1,state:'running',terminationCause:null,exitCode:null,pid:null,processStartId:null,processGroupId:null,processIdentity:null,finishedAt:null,pendingDelivery:[],authorityRequest:{kind:'consolidated' as const,parentRepo:'fixture/repo',parentIssue:1,approvalBinding:{commentId:12,bodySha256:createHash('sha256').update(approvalBody).digest('hex')},requested:{repo:'fixture/repo',issue:1,taskIds:['1-T1'],actionId:'local-child',branch:'feat/parent',baseSha:base,paths:['requested.txt'],operation:'edit' as const}}}
+  const binding={taskKey:'a'.repeat(64),runId:parent.runId,generation:1,ownerToken:randomUUID(),machineId:'fixture',installationId:randomUUID(),sessionId:randomUUID()}
+  const child={group:'g',issue:8,title:'child',type:'feat',branch:'feat/8-child',path:join(tree,'.vegastack/.worktrees/8-child'),files:['requested.txt'],resources:[],baseSha:base,runId:null,scopeDigest:null,taskIds:[],acceptanceCommand:'true',parentBinding:null}
+  const children={schemaVersion:2 as const,parentRunId:parent.runId,parentIssue:1,repo:'fixture/repo',parentBranch:'feat/parent',baseSha:base,parentBinding:binding,concurrency:1,groups:[{id:'g',members:['#8'],files:['requested.txt']}],children:[child]}
+  try {
+    const derived=await gatewayOwner.deriveConsolidatedChildRequests(parent as any,child,children,parseFactoryConfig({repos:[{repo:'fixture/repo',org:'fixture',path:tree}]},home),{gh})
+    expect(derived.executionRequest.requested).toEqual({repo:'fixture/repo',issue:8,taskIds:['8-T1'],actionId:'local-child',branch:'feat/parent',baseSha:base,paths:['requested.txt'],operation:'edit'})
+    expect(derived.checkpointRequest.requested).toEqual({repo:'fixture/repo',issue:8,taskIds:['8-T1'],actionId:'checkpoint-child',branch:'feat/8-child',ref:'refs/heads/feat/8-child',baseSha:base,paths:['requested.txt'],operation:'checkpoint'})
+    expect(derived.checked.bindings).toEqual(artifacts)
+    const badInputs=[
+      ['child branch',{child:{...child,branch:'feat/wrong'}}],
+      ['child base',{child:{...child,baseSha:'f'.repeat(40)}}],
+      ['child path',{child:{...child,files:['other.txt']}}],
+      ['parent branch',{children:{...children,parentBranch:'feat/wrong'}}],
+      ['parent base',{children:{...children,baseSha:'f'.repeat(40)}}],
+      ['parent issue',{children:{...children,parentIssue:2}}],
+      ['parent locator',{parent:{...parent,authorityRequest:{...parent.authorityRequest,parentIssue:2}}}],
+    ] as const
+    for(const [name,change] of badInputs){
+      let vendorEffects=0
+      await expect(gatewayOwner.deriveConsolidatedChildRequests((change as any).parent??parent,(change as any).child??child,(change as any).children??children,parseFactoryConfig({repos:[{repo:'fixture/repo',org:'fixture',path:tree}]},home),{gh}),name).rejects.toThrow()
+      expect(vendorEffects).toBe(0)
+    }
+    const changedRecord=structuredClone(record) as any
+    changedRecord.items[0].mode='preparation'
+    const changedBody='<!-- vsk:v1 type=approval scope=consolidated -->\n```json\n'+JSON.stringify(changedRecord)+'\n```\n',changedComment={...approvalComment,body:changedBody}
+    const changedGh=async(args:string[])=>{const endpoint=(args[1]??'').split('?')[0]!,value=endpoint==='repos/fixture/repo/issues/1/comments'?[changedComment]:endpoint==='repos/fixture/repo/issues/8'?issue:pages.get(endpoint);if(value===undefined)throw Error('unexpected endpoint '+endpoint);return args.includes('--include')?'HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n'+JSON.stringify(value):JSON.stringify(value)}
+    const changedParent={...parent,authorityRequest:{...parent.authorityRequest,approvalBinding:{commentId:12,bodySha256:createHash('sha256').update(changedBody).digest('hex')}}}
+    await expect(gatewayOwner.deriveConsolidatedChildRequests(changedParent as any,child,children,parseFactoryConfig({repos:[{repo:'fixture/repo',org:'fixture',path:tree}]},home),{gh:changedGh})).rejects.toThrow(/code child/)
+    const variants:Array<[string,(value:any)=>void]>=[
+      ['missing checkpoint',value=>{value.items[0].actionIds=value.items[0].actionIds.filter((id:string)=>id!=='checkpoint-child');value.actions=value.actions.filter((action:any)=>action.id!=='checkpoint-child')}],
+      ['duplicate checkpoint',value=>{const copy=structuredClone(value.actions.find((action:any)=>action.id==='checkpoint-child'));copy.id='checkpoint-child-2';value.actions.push(copy);value.items[0].actionIds.push(copy.id)}],
+      ['unselected checkpoint',value=>{value.items[0].actionIds=value.items[0].actionIds.filter((id:string)=>id!=='checkpoint-child')}],
+      ['wrong checkpoint ref',value=>{value.actions.find((action:any)=>action.id==='checkpoint-child').child.ref='refs/heads/feat/wrong'}],
+      ['wrong checkpoint parent',value=>{value.actions.find((action:any)=>action.id==='checkpoint-child').parent.issue=2}],
+      ['wrong task superset',value=>{value.items[0].taskIds.push('8-T2');value.actions.find((action:any)=>action.id==='checkpoint-child').child.taskIds.push('8-T2')}],
+      ['duplicate task',value=>{value.items[0].taskIds.push('8-T1')}],
+      ['wrong action id',value=>{value.items[0].actionIds=value.items[0].actionIds.map((id:string)=>id==='checkpoint-child'?'different-checkpoint':id)}],
+    ]
+    for(const [name,mutate] of variants){
+      const value=structuredClone(record);mutate(value)
+      const body='<!-- vsk:v1 type=approval scope=consolidated -->\n```json\n'+JSON.stringify(value)+'\n```\n',comment={...approvalComment,body}
+      const variantGh=async(args:string[])=>{const endpoint=(args[1]??'').split('?')[0]!,result=endpoint==='repos/fixture/repo/issues/1/comments'?[comment]:endpoint==='repos/fixture/repo/issues/8'?issue:pages.get(endpoint);if(result===undefined)throw Error('unexpected endpoint '+endpoint);return args.includes('--include')?'HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n'+JSON.stringify(result):JSON.stringify(result)}
+      const variantParent={...parent,authorityRequest:{...parent.authorityRequest,approvalBinding:{commentId:12,bodySha256:createHash('sha256').update(body).digest('hex')}}}
+      await expect(gatewayOwner.deriveConsolidatedChildRequests(variantParent as any,child,children,parseFactoryConfig({repos:[{repo:'fixture/repo',org:'fixture',path:tree}]},home),{gh:variantGh}),name).rejects.toThrow()
+    }
+  } finally {await rm(home,{recursive:true,force:true})}
+},15000)
+
+test('new child launch records bind immutable per-child parent provenance in schema v2', async () => {
+  const f = await fixture()
+  try {
+    const executed = await f.cli('run')
+    expect(executed.exit).toBe(0)
+    expect(executed.result.plan.schemaVersion).toBe(2)
+    expect(executed.result.plan.children[0].parentBinding).toEqual(executed.result.plan.parentBinding)
   } finally { await rm(f.home,{recursive:true,force:true}) }
 },15000)
 

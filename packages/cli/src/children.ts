@@ -11,9 +11,9 @@ import { loadFactoryConfig, repoPolicyFromEffective, stagePolicy, type FactoryCo
 import { loadConfiguredPolicy } from './control-room.ts'
 import { ghText, boundedGhJson, fetchGhPages, readBudget } from './gh.ts'
 import { buildLaunchPlan, validateManagedLaunch, type LaunchPlan } from './launch.ts'
-import { atomicRunFile, readPrivateRunFile, readRun, readRuns, runsRoot, verifyRunAuthority, approvalTools, type RunRecord } from './runs.ts'
-import { acquireSharedTask, transitionSharedTask, publishRecoveryReceipt, readCoordination, canonical, parseAcceptedScope, type ParentClaimBinding, type TaskRecord, type SharedClaim, type RecoveryEvidencePayload, type AcceptanceRef, type ChildAcceptance, type JoinRef } from './shared-claims.ts'
-import { executeApprovedRun, inspectManagedHarness, shipGuardWired, sharedClaimForRun, sharedRunAdapters, prepareDispatchRun, type PlannedRun, type ExecuteDeps } from './dispatch.ts'
+import { atomicRunFile, readPrivateRunFile, readRun, readRuns, runsRoot, verifyRunAuthority, approvalTools, type RunAuthorityRequest, type RunRecord } from './runs.ts'
+import { acquireSharedTask, transitionSharedTask, publishRecoveryReceipt, readCoordination, inspectGroupSuccession, canonical, parseAcceptedScope, type ParentClaimBinding, type TaskRecord, type SharedClaim, type RecoveryEvidencePayload, type AcceptanceRef, type ChildAcceptance, type JoinRef } from './shared-claims.ts'
+import { executeApprovedRun, inspectManagedHarness, shipGuardWired, sharedClaimForRun, sharedRunAdapters, prepareDispatchRun, verifyDispatchRunAuthority, type PlannedRun, type ExecuteDeps } from './dispatch.ts'
 // Load executable helpers as packaged files, never inline their CLI entrypoints
 // into dist/index.js. Source tests use the same authored files before packaging.
 const sourceModule = fileURLToPath(import.meta.url).endsWith('.ts')
@@ -36,9 +36,10 @@ export interface ChildCheck {
 export interface ChildLaunch {
   group: string; issue: number; title: string; type: string; branch: string; path: string; files: string[]; resources: string[]
   baseSha: string; runId: string | null; scopeDigest: string | null; taskIds: string[]; acceptanceCommand: string
+  parentBinding?: ParentClaimBinding | null
 }
 export interface ChildrenRecord {
-  schemaVersion: 1; parentRunId: string; parentIssue: number; repo: string; parentBranch: string; baseSha: string
+  schemaVersion: 1 | 2; parentRunId: string; parentIssue: number; repo: string; parentBranch: string; baseSha: string
   parentBinding: ParentClaimBinding; concurrency: number; groups: ChildGroup[]; children: ChildLaunch[]
 }
 export interface IntegrationRecord {
@@ -95,12 +96,16 @@ function checkedGroups(value: unknown): ChildGroup[] {
 }
 function parseChildrenRecord(value: unknown): ChildrenRecord {
   const record = value as ChildrenRecord
-  if (!closed(record, ['schemaVersion','parentRunId','parentIssue','repo','parentBranch','baseSha','parentBinding','concurrency','groups','children']) || !uuid.test(record.parentRunId) || record.schemaVersion !== 1 || !sha.test(record.baseSha) || !Array.isArray(record.children) || !Number.isSafeInteger(record.concurrency) || record.concurrency < 1 || record.concurrency > 3) throw Error('invalid saved child launch')
+  if (!closed(record, ['schemaVersion','parentRunId','parentIssue','repo','parentBranch','baseSha','parentBinding','concurrency','groups','children']) || !uuid.test(record.parentRunId) || ![1,2].includes(record.schemaVersion) || !sha.test(record.baseSha) || !Array.isArray(record.children) || !Number.isSafeInteger(record.concurrency) || record.concurrency < 1 || record.concurrency > 3) throw Error('invalid saved child launch')
+  const parent=record.parentBinding
+  if(!closed(parent,['taskKey','runId','generation','ownerToken','machineId','installationId','sessionId'])||!/^[a-f0-9]{64}$/.test(parent.taskKey)||!uuid.test(parent.runId)||!Number.isSafeInteger(parent.generation)||parent.generation<1||![parent.ownerToken,parent.installationId,parent.sessionId].every(id=>uuid.test(id))||typeof parent.machineId!=='string'||!parent.machineId)throw Error('saved parent provenance differs')
   const groups = checkedGroups({ guard: 'plan-lint', ok: true, groups: record.groups })
   if (groups.length !== record.children.length || record.parentBinding?.runId !== record.parentRunId) throw Error('saved parent/group identity differs')
   for (let i = 0; i < groups.length; i++) {
     const child = record.children[i]!, group = groups[i]!
-    if (!closed(child, ['group','issue','title','type','branch','path','files','resources','baseSha','runId','scopeDigest','taskIds','acceptanceCommand']) || child.runId !== null && !uuid.test(child.runId) || child.scopeDigest !== null && !/^[a-f0-9]{64}$/.test(child.scopeDigest) || child.group !== group.id || '#' + child.issue !== group.members[0] || !same(child.files, group.files) || child.baseSha !== record.baseSha || !Array.isArray(child.resources) || child.resources.length || !Array.isArray(child.taskIds) || !child.acceptanceCommand) throw Error('saved child scope differs')
+    const fields = ['group','issue','title','type','branch','path','files','resources','baseSha','runId','scopeDigest','taskIds','acceptanceCommand',...(record.schemaVersion===2?['parentBinding']:[])]
+    if (!closed(child, fields) || record.schemaVersion===1&&Object.hasOwn(child,'parentBinding') || child.runId !== null && !uuid.test(child.runId) || child.scopeDigest !== null && !/^[a-f0-9]{64}$/.test(child.scopeDigest) || child.group !== group.id || '#' + child.issue !== group.members[0] || !same(child.files, group.files) || child.baseSha !== record.baseSha || !Array.isArray(child.resources) || child.resources.length || !Array.isArray(child.taskIds) || !child.acceptanceCommand) throw Error('saved child scope differs')
+    if(record.schemaVersion===2){const binding=child.parentBinding;if(binding!=null&&(!closed(binding,['taskKey','runId','generation','ownerToken','machineId','installationId','sessionId'])||!/^[a-f0-9]{64}$/.test(binding.taskKey)||!uuid.test(binding.runId)||!Number.isSafeInteger(binding.generation)||binding.generation<1||![binding.ownerToken,binding.installationId,binding.sessionId].every(id=>uuid.test(id))||typeof binding.machineId!=='string'||!binding.machineId))throw Error('saved child parent provenance differs')}
   }
   return record
 }
@@ -128,6 +133,43 @@ async function currentPolicy(config: FactoryConfig, repo: string): Promise<{ pol
   if (!resolved.ok) throw Error('current child policy unavailable')
   return { policy: repoPolicyFromEffective(resolved), devMd, resolved }
 }
+async function currentParentContext(parent:RunRecord,record:ChildrenRecord,config:FactoryConfig):Promise<{claim:SharedClaim;task:TaskRecord;binding:ParentClaimBinding}> {
+  const claim=await sharedClaimForRun(parent,config),binding=parentClaimBinding(claim),snapshot=await readCoordination(claim.target),task=snapshot.tasks[claim.taskKey]
+  if(!task||task.runId!==claim.runId||task.generation!==claim.generation||task.ownerToken!==claim.ownerToken||task.machineId!==claim.machineId||task.installationId!==claim.installationId||task.sessionId!==claim.sessionId||task.parentTaskKey!==null)throw Error('current parent coordination owner differs')
+  if(!same(binding,record.parentBinding)){
+    if(task.schemaVersion!==2)throw Error('changed parent owner lacks verified group succession')
+    const succession=await inspectGroupSuccession(claim.target,{operationId:task.successionOperationId,parent:binding})
+    if(succession.kind!=='verified')throw Error(succession.reason)
+  }
+  return{claim,task,binding}
+}
+export async function readExecutableChildrenRecord(parent:RunRecord,config:FactoryConfig):Promise<ChildrenRecord>{
+  const root=runsRoot(config.home),path=recordPath(root,parent.runId),raw=await readPrivateRunFile(path),parsed=parseChildrenRecord(JSON.parse(raw))
+  if(parsed.schemaVersion===2)return parsed
+  const children:ChildLaunch[]=[]
+  for(const child of parsed.children){
+    if(!child.runId){children.push({...child,parentBinding:null});continue}
+    const run=await readRun(root,child.runId)
+    if(!run.sharedClaim)throw Error('v1 child original shared parent facts unavailable')
+    const claim=await sharedClaimForRun(run,config),snapshot=await readCoordination(claim.target),task=snapshot.tasks[claim.taskKey]
+    if(!task||task.runId!==run.runId||task.issue!==child.issue||task.scopeDigest!==child.scopeDigest||!task.parentBinding)throw Error('v1 child original shared parent facts unavailable')
+    children.push({...child,parentBinding:task.parentBinding})
+  }
+  const upgraded=parseChildrenRecord({...parsed,schemaVersion:2,children}),lock=await acquireClaim(join(root,parent.runId,'children-upgrade.lock'),await processIdentity())
+  if(lock.kind!=='owned')throw Error('child record upgrade is owned by another operation')
+  try{
+    const current=await readPrivateRunFile(path)
+    if(current!==raw){const winner=parseChildrenRecord(JSON.parse(current));if(winner.schemaVersion!==2||!same(winner,upgraded))throw Error('child record changed during v1 upgrade');return winner}
+    const archive=join(root,parent.runId,'children-v1-'+hash(raw)+'.json'),copy=await readOptional<{schemaVersion:number;kind:string;sha256:string;bytes:string}>(archive)
+    const exact={schemaVersion:1,kind:'children-v1-original',sha256:hash(raw),bytes:raw}
+    if(copy&&!same(copy,exact))throw Error('preserved v1 child bytes differ')
+    if(!copy)await atomicRunFile(archive,exact)
+    const readback=await readOptional<typeof exact>(archive)
+    if(!readback||readback.bytes!==raw||readback.sha256!==hash(raw))throw Error('preserved v1 child bytes unavailable')
+    await atomicRunFile(path,upgraded)
+    return parseChildrenRecord(JSON.parse(await readPrivateRunFile(path)))
+  }finally{await releaseClaim(lock.claim)}
+}
 async function authoritativeGroups(parent: RunRecord, config: FactoryConfig): Promise<ChildGroup[]> {
   await verifyRunAuthority(parent, config, 'launch')
   const body = await canonicalPlan(parent), lint = lintPlan(body)
@@ -139,11 +181,11 @@ async function authoritativeGroups(parent: RunRecord, config: FactoryConfig): Pr
 // Resolve the ORIGINAL launch binding; a latest-owner lookup cannot authorize it.
 export async function verifyChildRelationship(input: { parent: TaskRecord; child: TaskRecord }, config: FactoryConfig): Promise<{ maxChildren: number }> {
   const root = runsRoot(config.home), parent = await readRun(root, input.parent.runId)
-  const launch = await readChildrenRecord(root, parent.runId)
+  const launch = await readExecutableChildrenRecord(parent,config)
   validateRecordedSource(parent, launch)
-  const expected = launch.parentBinding
+  const current=await currentParentContext(parent,launch,config),expected=current.binding
   const actual = { taskKey: input.parent.taskKey, runId: input.parent.runId, generation: input.parent.generation, ownerToken: input.parent.ownerToken, machineId: input.parent.machineId, installationId: input.parent.installationId, sessionId: input.parent.sessionId }
-  if (!same(actual, expected) || !same(input.child.parentBinding, expected) || input.child.parentTaskKey !== expected.taskKey
+  if (!same(actual, expected) || input.child.parentTaskKey !== expected.taskKey
     || parent.sharedClaim?.taskKey !== expected.taskKey || parent.sharedClaim.ownerToken !== expected.ownerToken || parent.sharedClaim.generation !== expected.generation
     || parent.machine?.id !== expected.machineId || parent.machine.installationId !== expected.installationId || parent.machine.sessionId !== expected.sessionId
     || parent.state !== 'running' || parent.cancelRequestedAt || parent.terminationRequest || parent.parent !== null) throw Error('original parent coordination authority differs')
@@ -154,11 +196,11 @@ export async function verifyChildRelationship(input: { parent: TaskRecord; child
   const { policy } = await currentPolicy(config, parent.repo)
   if (policy.effective?.policyDigest !== parent.policyDigest) throw Error('parent policy changed')
   const child = launch.children.find(row => row.issue === input.child.issue && row.runId === input.child.runId)
-  if (!child || input.child.repo !== launch.repo || input.child.scopeDigest !== child.scopeDigest || !same(input.child.paths, child.files)
+  if (!child || !child.parentBinding || !same(input.child.parentBinding,child.parentBinding) || input.child.repo !== launch.repo || input.child.scopeDigest !== child.scopeDigest || !same(input.child.paths, child.files)
     || !same(input.child.resources, child.resources) || !input.child.independent || !same(input.child.approvedTaskIds, child.taskIds)) throw Error('child is outside exact approved parent group')
   const childRun = await readRun(root, input.child.runId)
   if (childRun.parent !== parent.issue || childRun.baseSha !== launch.baseSha || childRun.branch !== child.branch || childRun.checkout !== child.path || childRun.taskKey.scopeDigest !== child.scopeDigest || !same(childRun.approvedTaskIds, child.taskIds)) throw Error('child run differs from selected group')
-  await verifyRunAuthority(childRun, config, 'launch')
+  await verifyDispatchRunAuthority(childRun, config, 'launch')
   return { maxChildren: Math.min(launch.concurrency, config.subagents.concurrent, 3) }
 }
 
@@ -181,9 +223,8 @@ async function verifyParent(record: ChildrenRecord, config: FactoryConfig, uncha
   const parent = await readRun(runsRoot(config.home), record.parentRunId)
   validateRecordedSource(parent, record)
   if (parent.state !== 'running' || parent.cancelRequestedAt || parent.terminationRequest) throw Error('parent stopped or cancelled')
-  const claim = await sharedClaimForRun(parent, config)
-  if (!same(parentClaimBinding(claim), record.parentBinding)) throw Error('original parent owner changed')
-  const snapshot = await readCoordination(claim.target), task = snapshot.tasks[claim.taskKey]
+  const current=await currentParentContext(parent,record,config),{claim}=current
+  const snapshot = await readCoordination(claim.target),task=snapshot.tasks[claim.taskKey]
   if (!task || task.state !== 'running' || task.stopProof || !snapshot.index.active.some(row => row.taskKey === task.taskKey)) throw Error('parent no longer owns active coordination')
   if (!same(await authoritativeGroups(parent, config), record.groups)) throw Error('approved independent groups changed')
   if (git(parent.checkout, ['symbolic-ref', '--short', 'HEAD']) !== record.parentBranch) throw Error('parent checkout branch changed')
@@ -192,19 +233,75 @@ async function verifyParent(record: ChildrenRecord, config: FactoryConfig, uncha
 async function issueDetails(repo: string, issue: number): Promise<{ number: number; title: string }> {
   return boundedGhJson(ghText, ['api', `repos/${repo}/issues/${issue}`], readBudget())
 }
-async function childAdmission(repo: string, issue: number, config: FactoryConfig) {
-  const policy = await currentPolicy(config, repo), reads: unknown[] = [], { preflight } = await approvalTools()
-  const subject = await boundedGhJson<{ labels: { name: string }[] }>(ghText, ['api', `repos/${repo}/issues/${issue}`], readBudget())
-  const working = subject.labels.some(label => label.name === (policy.policy.labelMap?.working ?? 'working'))
-  const checked = await preflight.gatherAndEvaluate({ repo, issue: String(issue), stage: 'implement', expect: working ? 'working' : 'ready' }, {
-    readJson: async (args: string[]) => { const value = await boundedGhJson(ghText, args, readBudget()); reads.push(value); return value }, devMd: policy.devMd, configuredPolicy: policy.resolved,
-  })
-  if (checked.blocks.length) throw Error('child native admission refused: ' + checked.blocks.join('; '))
-  return { ...policy, checked, reads }
+type ConsolidatedExecutionRequest = Extract<RunAuthorityRequest, { kind: 'consolidated' }>
+type ChildCheckpointRequest = NonNullable<import('./checkpoints.ts').CheckpointIntent['approvalRequest']>
+export interface ConsolidatedChildRequests {
+  executionRequest: ConsolidatedExecutionRequest
+  checkpointRequest: ChildCheckpointRequest
+  policy: RepoPolicy
+  reads: unknown[]
+  checked: {
+    bindings: import('./shared-claims.ts').ArtifactRef[]
+    approvalBindings: Array<{ approvalId: string; commentId: number; bodySha256: string }>
+    recordBinding?: { approvalId: string; commentId: number; bodySha256: string }
+    files: string[]
+  }
+  taskIds: string[]
 }
+
+// A child has no independent approval event. Both permissions are selected from
+// one freshly read, pinned parent record and evaluated by the approval owner.
+export async function deriveConsolidatedChildRequests(
+  parent: RunRecord,
+  child: ChildLaunch,
+  record: ChildrenRecord,
+  config: FactoryConfig,
+  transport: { gh?: typeof ghText } = {},
+): Promise<ConsolidatedChildRequests> {
+  const saved=parseChildrenRecord(record),matchesSaved=saved.children.filter(row=>row.issue===child.issue&&row.group===child.group)
+  if(saved.schemaVersion!==2||matchesSaved.length!==1||!same(matchesSaved[0],child)||child.baseSha!==saved.baseSha||!same(child.files,saved.groups.find(group=>group.id===child.group)?.files))throw Error('prepared child differs from canonical launch record')
+  const source = parent.authorityRequest
+  if (source?.kind !== 'consolidated' || parent.parent !== null || source.parentRepo !== record.repo || source.parentIssue!==parent.issue || source.requested.repo !== record.repo
+    || source.requested.issue !== parent.issue || source.requested.branch !== record.parentBranch || source.requested.baseSha !== record.baseSha
+    || record.parentRunId !== parent.runId || record.parentIssue !== parent.issue) throw Error('consolidated parent execution locator differs')
+  const gh = transport.gh ?? ghText, current = await currentPolicy(config, record.repo), reads: unknown[] = [], { approval } = await approvalTools()
+  const readJson = async (args: string[]) => { const value = await boundedGhJson(gh, args, readBudget()); reads.push(value); return value }
+  const history = await approval.readPages(readJson, ['api', `repos/${source.parentRepo}/issues/${source.parentIssue}/comments`])
+  const matches = history.filter((row: { id?: number; body?: string }) => row.id === source.approvalBinding.commentId && typeof row.body === 'string' && hash(row.body) === source.approvalBinding.bodySha256)
+  if (matches.length !== 1) throw Error('pinned consolidated parent record is absent, duplicate or changed')
+  const grant = approval.parseApproval(matches[0])
+  if (grant.kind !== 'consolidated') throw Error('pinned parent record is not consolidated authority')
+  const selections = grant.items.filter((item: { repo: string; issue: number }) => item.repo === record.repo && item.issue === child.issue)
+  if (selections.length !== 1 || selections[0]!.mode !== 'code') throw Error('exactly one consolidated code child is required')
+  const selected = selections[0]!, taskIds = [...selected.taskIds]
+  if (!taskIds.length || new Set(taskIds).size !== taskIds.length) throw Error('exact consolidated child task set unavailable')
+  const selectedActions = grant.actions.filter((action: { id: string }) => selected.actionIds.includes(action.id))
+  const local = selectedActions.filter((action: { kind: string; operations?: string[] }) => action.kind === 'local' && action.operations?.includes('edit'))
+  if (local.length !== 1) throw Error('unique selected child edit action unavailable')
+  const checkpoints = selectedActions.filter((action: { kind: string }) => action.kind === 'child-source-checkpoint')
+  if (checkpoints.length !== 1) throw Error('unique selected child-source-checkpoint action unavailable')
+  const checkpoint = checkpoints[0] as { id: string; kind: 'child-source-checkpoint'; repo: string; parent: { issue: number; branch: string; baseSha: string }; child: { issue: number; branch: string; ref: string; baseSha: string; taskIds: string[]; paths: string[] } }
+  const parentTuple = { issue: source.parentIssue, branch: record.parentBranch, baseSha: record.baseSha }
+  const childTuple = { issue: child.issue, branch: child.branch, ref: `refs/heads/${child.branch}`, baseSha: record.baseSha, taskIds, paths: child.files }
+  if (checkpoint.repo !== record.repo || !same(checkpoint.parent, parentTuple) || !same(checkpoint.child, childTuple)) throw Error('selected child checkpoint action differs from prepared child tuple')
+  const request = { parentRepo: source.parentRepo, parentIssue: source.parentIssue, approvalBinding: source.approvalBinding }
+  const executionRequest: ConsolidatedExecutionRequest = { kind: 'consolidated', ...request, requested: { repo: record.repo, issue: child.issue, taskIds, actionId: local[0]!.id,
+    branch: record.parentBranch, baseSha: record.baseSha, paths: [...child.files], operation: 'edit' } }
+  const checkpointRequest: ChildCheckpointRequest = { ...request, requested: { repo: record.repo, issue: child.issue, taskIds, actionId: checkpoint.id,
+    branch: child.branch, ref: `refs/heads/${child.branch}`, baseSha: record.baseSha, paths: [...child.files], operation: 'checkpoint' } }
+  const execution = await approval.gatherConsolidatedApproval({ ...executionRequest, operators: current.policy.operators, readJson })
+  const checkpointScope = await approval.gatherConsolidatedApproval({ ...checkpointRequest, operators: current.policy.operators, readJson })
+  if (!execution.ok || execution.blocks.length || execution.action?.kind !== 'local' || !execution.action.operations.includes('edit')
+    || !same(execution.taskIds, taskIds) || !same([...execution.files].sort(), [...child.files].sort())) throw Error('consolidated child execution authority refused')
+  if (!checkpointScope.ok || checkpointScope.blocks.length || checkpointScope.action?.kind !== 'child-source-checkpoint'
+    || !same(checkpointScope.taskIds, taskIds) || !same(checkpointScope.files, child.files)
+    || !same(checkpointScope.bindings, execution.bindings) || !same(checkpointScope.approvalBindings, execution.approvalBindings)
+    || !same(checkpointScope.recordBinding ?? null, execution.recordBinding ?? null)) throw Error('consolidated child checkpoint authority refused')
+  return { executionRequest, checkpointRequest, policy: current.policy, reads, checked: execution, taskIds }
+}
+
 async function prepareChild(child: ChildLaunch, record: ChildrenRecord, parent: RunRecord, config: FactoryConfig): Promise<PreparedChild> {
-  const admission = await childAdmission(record.repo, child.issue, config)
-  const stage = stagePolicy(admission.policy, 'implement')
+  const policy=await currentPolicy(config,record.repo),stage = stagePolicy(policy.policy, 'implement')
   if (stage.harness !== parent.harness || stage.model !== parent.model || stage.effort !== parent.effort) throw Error('child must retain the selected parent subscription setup')
   const localPath = join(runsRoot(config.home), parent.runId, 'child-' + child.issue + '.lock')
   const acquired = await acquireClaim(localPath, await processIdentity())
@@ -218,6 +315,7 @@ async function prepareChild(child: ChildLaunch, record: ChildrenRecord, parent: 
     }
     clean(child.path)
     if (git(child.path, ['rev-parse', 'HEAD']) !== record.baseSha || git(child.path, ['symbolic-ref', '--short', 'HEAD']) !== child.branch) throw Error('prepared child base/branch differs')
+    const admission = await deriveConsolidatedChildRequests(parent, child, record, config)
     const plan = buildLaunchPlan({ harness: stage.harness, model: stage.model, effort: stage.effort, stage: 'implement', worktree: child.path,
       issue: { number: child.issue, title: child.title }, operator: admission.policy.operators[0] ?? 'the operator',
       outcome: 'Complete the approved child scope. Only these paths are owned: ' + child.files.join(', ') + '. Commit the result and leave integration to the parent CLI.',
@@ -227,20 +325,34 @@ async function prepareChild(child: ChildLaunch, record: ChildrenRecord, parent: 
     const guard = await shipGuardWired(child.path, stage.harness, { home: config.home, repo: record.repo, policyDigest: admission.policy.effective?.policyDigest })
     if (!guard.wired) throw Error('prepared child hooks refused: ' + guard.detail)
     if (guard.policyDigest) plan.guardPolicyDigest = guard.policyDigest
+    const coordinator=(await currentParentContext(parent,record,config)).binding
+    if(child.runId){if(!child.parentBinding)throw Error('existing child launch provenance unavailable')}
+    else child.parentBinding=coordinator
     const run = child.runId ? await readRun(runsRoot(config.home), child.runId) : await prepareDispatchRun({
       run: planned(record.repo, child), plan, config, policy: admission.policy, approvalBindings: admission.checked.approvalBindings,
       bindings: admission.checked.bindings, recordBinding: admission.checked.recordBinding, authorityReads: admission.reads,
-      gh: ghText, metadata, claim: acquired.claim, parent: { run: parent, binding: record.parentBinding, childIssue: child.issue },
+      gh: ghText, metadata, claim: acquired.claim, parent: { run: parent, binding: child.parentBinding!, childIssue: child.issue },
+      authorityRequest: admission.executionRequest, checkpointRequest: admission.checkpointRequest,
     })
     if (run.parent !== parent.issue || run.branch !== child.branch || run.baseSha !== record.baseSha || run.checkout !== child.path
       || run.execution?.accountRef !== parent.execution?.accountRef) throw Error('prepared child execution identity differs')
-    await verifyRunAuthority(run, config, 'launch')
+    await verifyDispatchRunAuthority(run, config, 'launch')
     plan.approvedRunInput = { ...run, root: runsRoot(config.home) }
     return { run, plan, localClaim: acquired.claim }
   } catch (error) { await releaseClaim(acquired.claim); throw error }
 }
 async function acquireChild(child: ChildLaunch, record: ChildrenRecord, prepared: PreparedChild, config: FactoryConfig): Promise<SharedClaim> {
-  const admission = await childAdmission(record.repo, child.issue, config), adapters = sharedRunAdapters(config)
+  const parent = await readRun(runsRoot(config.home), record.parentRunId)
+  const admission = await deriveConsolidatedChildRequests(parent, child, record, config), adapters = sharedRunAdapters(config)
+  if (!same(prepared.run.authorityRequest, admission.executionRequest) || !same(prepared.run.checkpointIntent?.approvalRequest, admission.checkpointRequest)) throw Error('prepared child authority requests changed before acquisition')
+  if(prepared.run.sharedClaim){
+    const claim=await sharedClaimForRun(prepared.run,config),snapshot=await readCoordination(claim.target),task=snapshot.tasks[claim.taskKey]
+    if(task?.schemaVersion!==2||task.state!=='recovery-queued'||!child.parentBinding||!same(task.parentBinding,child.parentBinding))throw Error('existing child is not a verified recovery-queued successor')
+    await verifyDispatchRunAuthority(prepared.run,config,'launch')
+    const started=await transitionSharedTask({claim,operationId:prepared.run.attemptOperationIds!.start,transition:{kind:'start'}})
+    if(started.kind!=='owned')throw Error('recovery-queued child start not acknowledged: '+started.reason)
+    return started.claim
+  }
   const entry = config.repos.find(row => row.repo === record.repo)!
   const request = await adapters.sharedAdmission!({ run: planned(record.repo, child), entry, policy: admission.policy,
     approvalBindings: admission.checked.approvalBindings, bindings: admission.checked.bindings, recordBinding: admission.checked.recordBinding })
@@ -254,7 +366,7 @@ async function acquireChild(child: ChildLaunch, record: ChildrenRecord, prepared
     throw Error(result.kind + ': ' + result.reason)
   }
   const claim = result.claim
-  await verifyRunAuthority(prepared.run, config, 'launch')
+  await verifyDispatchRunAuthority(prepared.run, config, 'launch')
   await adapters.persistSharedRun!(claim, planned(record.repo, child), prepared.plan)
   const current = await readRun(runsRoot(config.home), prepared.run.runId)
   const snapshot = await readCoordination(claim.target), task = snapshot.tasks[claim.taskKey]
@@ -302,6 +414,7 @@ export async function sourceCheck(run: RunRecord, command: string, config: Facto
   return check
 }
 async function verifiedResult(run: RunRecord, child: ChildLaunch, config: FactoryConfig): Promise<ChildResult> {
+  if(run.parent!==null&&run.authorityRequest?.kind==='consolidated'&&(!run.checkpoint||run.checkpoint.headSha!==run.headSha||run.checkpoint.branch!==run.branch||run.checkpoint.baseSha!==run.checkpointIntent?.baseSha))throw Error('exact child checkpoint result unavailable')
   const check = await readOptional<ChildCheck>(checkPath(runsRoot(config.home), run.runId))
   if (check) await verifyExecutedCheck(run, check, config)
   const result: ChildResult = { schemaVersion: 1, runId: run.runId, repo: run.repo, issue: run.issue, baseSha: run.baseSha, headSha: run.headSha ?? '', branch: run.branch,
@@ -326,7 +439,9 @@ export async function executeChildren(input: { parent: RunRecord; groups: unknow
   let record = await readOptional<ChildrenRecord>(recordPath(root, parent.runId))
   if (record) {
     record = parseChildrenRecord(record)
-    if (!same(record.parentBinding, parentClaimBinding(parentClaim)) || !same(record.groups, groups) || record.parentBranch !== parent.branch || record.repo !== parent.repo) throw Error('saved original parent launch differs')
+    if(record.schemaVersion===1)record=await readExecutableChildrenRecord(parent,config)
+    if(!deps.parentClaim)await currentParentContext(parent,record,config)
+    if (!same(record.groups, groups) || record.parentBranch !== parent.branch || record.repo !== parent.repo) throw Error('saved original parent launch differs')
   } else {
     clean(parent.checkout)
     const baseSha = git(parent.checkout, ['rev-parse', 'HEAD'])
@@ -342,9 +457,9 @@ export async function executeChildren(input: { parent: RunRecord; groups: unknow
     const devMd = git(parent.checkout, ['show', baseSha + ':.vegastack/dev.md'])
     const command = /^commands:.*?\bcheck\s+`([^`]+)`/m.exec(devMd)?.[1]
     if (!command) throw Error('approved base lacks an explicit check command')
-    record = { schemaVersion: 1, parentRunId: parent.runId, parentIssue: parent.issue, repo: parent.repo, parentBranch: parent.branch, baseSha,
+    record = { schemaVersion: 2, parentRunId: parent.runId, parentIssue: parent.issue, repo: parent.repo, parentBranch: parent.branch, baseSha,
       parentBinding: parentClaimBinding(parentClaim), concurrency: Math.min(3, config.subagents.concurrent, groups.length), groups,
-      children: plan.children.map(child => ({ ...child, resources: [], runId: null, scopeDigest: null, taskIds: [], acceptanceCommand: command })) }
+      children: plan.children.map(child => ({ ...child, resources: [], runId: null, scopeDigest: null, taskIds: [], acceptanceCommand: command, parentBinding:null })) }
   }
   const result: ChildrenOutcome = { results: [], blocked: [], plan: record, wrote: false }
   if (!input.write) return result
@@ -382,10 +497,12 @@ export async function executeChildren(input: { parent: RunRecord; groups: unknow
             const run = await readRun(root, child.runId)
             if (run.state === 'terminal') {
               if (run.terminationCause !== 'succeeded') throw Error('terminal child failed; execution will not be replayed')
-              await (deps.verifyChild ?? verifyRunAuthority)(run, config)
+              await (deps.verifyChild ?? verifyDispatchRunAuthority)(run, config)
+              if(run.parent!==null&&run.authorityRequest?.kind==='consolidated'&&(!run.checkpoint||run.checkpoint.headSha!==run.headSha))await (await import('./checkpoints.ts')).flushRunCheckpoint(run,config)
+              const checkpointed=await readRun(root,run.runId)
               const saved = await readOptional<ChildResult>(resultPath(root, run.runId))
-              if (!saved) await sourceCheck(run, child.acceptanceCommand, config, stop.signal, deps.processDeps)
-              const verified = await verifiedResult(run, child, config)
+              if (!saved) await sourceCheck(checkpointed, child.acceptanceCommand, config, stop.signal, deps.processDeps)
+              const verified = await verifiedResult(checkpointed, child, config)
               if (saved && !same(saved, verified)) throw Error('saved terminal result differs')
               if (!saved) await atomicRunFile(resultPath(root, run.runId), verified)
               result.results.push(verified); continue
@@ -395,7 +512,11 @@ export async function executeChildren(input: { parent: RunRecord; groups: unknow
             const prior = (await readRuns(root)).filter(run => run.parent === parent.issue && run.repo === parent.repo && run.branch === child.branch && run.stage === 'implement')
             if (prior.length) throw Error('unlinked original child execution requires reconciliation; duplicate refused')
           }
+          const preparingNew=!child.runId
+          if(!preparingNew){if(!child.parentBinding)throw Error('existing child launch provenance unavailable')}
+          else child.parentBinding=parentClaimBinding(parentClaim)
           prepared = await controlled(() => (deps.prepare ?? prepareChild)(child, record!, parent, config))
+          if(preparingNew&&!same(child.parentBinding,parentClaimBinding(parentClaim)))throw Error('parent changed during child preparation')
           child.runId = prepared.run.runId; child.scopeDigest = prepared.run.taskKey.scopeDigest; child.taskIds = prepared.run.approvedTaskIds ?? [prepared.run.taskKey.taskId]
           await save() // original parent binding + child run identity precede any shared acquisition
           for (;;) {
@@ -413,7 +534,12 @@ export async function executeChildren(input: { parent: RunRecord; groups: unknow
             { ...deps.processDeps, preparedRun: run, runInput: { ...run, root } })
           let terminal = await readRun(root, child.runId)
           if (terminal.terminationCause !== 'succeeded' || terminal.state !== 'terminal') throw Error('child execution ended: ' + terminal.terminationCause)
-          await verify(); await (deps.verifyChild ?? verifyRunAuthority)(terminal, config)
+          await verify(); await (deps.verifyChild ?? verifyDispatchRunAuthority)(terminal, config)
+          if(terminal.parent!==null&&terminal.authorityRequest?.kind==='consolidated'){
+            await (await import('./checkpoints.ts')).flushRunCheckpoint(terminal,config)
+            terminal=await readRun(root,child.runId)
+            if(!terminal.checkpoint||terminal.checkpoint.headSha!==terminal.headSha||terminal.checkpoint.branch!==terminal.branch)throw Error('child checkpoint readback unavailable')
+          }
           const check = await sourceCheck(terminal, child.acceptanceCommand, config, stop.signal, deps.processDeps)
           if (!check.ok) throw Error('child acceptance failed')
           terminal = await readRun(root, child.runId)
@@ -461,9 +587,9 @@ export async function verifyChildrenEvidence(input: { run: RunRecord; task?: Tas
   if (payload.kind === 'acceptance') {
     const subject = payload.runId === run.runId ? run : await readRun(root, payload.runId)
     if (subject.repo !== run.repo || subject.parent !== run.issue && subject.runId !== run.runId) throw Error('foreign child acceptance')
-    await verifyRunAuthority(subject, config)
+    await verifyDispatchRunAuthority(subject, config)
     if (subject.runId !== run.runId) {
-      const launch = await readChildrenRecord(root, run.runId)
+      const launch = await readExecutableChildrenRecord(run,config)
       validateRecordedSource(run, launch)
       const child = launch.children.find(row => row.runId === subject.runId)
       if (!child || child.issue !== subject.issue || child.scopeDigest !== subject.taskKey.scopeDigest || child.baseSha !== subject.baseSha || child.branch !== subject.branch) throw Error('acceptance is outside selected parent group')
@@ -476,7 +602,7 @@ export async function verifyChildrenEvidence(input: { run: RunRecord; task?: Tas
     }
     let label = 'child'
     if (subject.parent === null) {
-      const record = await readChildrenRecord(root, subject.runId)
+      const record = await readExecutableChildrenRecord(subject,config)
       const matches = []
       for (const child of record.children) {
         if (!child.runId) continue
@@ -497,7 +623,7 @@ export async function verifyChildrenEvidence(input: { run: RunRecord; task?: Tas
     return
   }
   if (payload.kind !== 'join') throw Error('unsupported child evidence kind')
-  const record = await readChildrenRecord(root, run.runId), child = record.children.find(row => row.runId === payload.childRunId)
+  const record = await readExecutableChildrenRecord(run,config), child = record.children.find(row => row.runId === payload.childRunId)
   if (!child) throw Error('join is outside the original parent group')
   await verifyIntegrationAuthority(run, record, config)
   if (!input.publishing && input.ref && input.task?.recovery) {
@@ -583,12 +709,13 @@ export interface JoinDependencies {
   processDeps?: Partial<ExecuteDeps>
 }
 export async function joinChildren(input: { parent: RunRecord; groups: unknown; config: FactoryConfig; write?: boolean; signal?: AbortSignal }, deps: JoinDependencies = {}): Promise<{ receipts: IntegrationRecord[]; acceptedDeliveries:AcceptedDelivery[]; blocked: Array<{ issue: number; reason: string }>; wrote: boolean }> {
-  const { parent, config } = input, root = runsRoot(config.home), record = await readChildrenRecord(root, parent.runId)
+  const { parent, config } = input, root = runsRoot(config.home), record = await readExecutableChildrenRecord(parent,config)
   if (!same(checkedGroups(input.groups), record.groups)) throw Error('join groups differ from original launch')
   await (deps.verifyAuthority ?? verifyIntegrationAuthority)(parent, record, config)
   await (deps.verifyParent ?? verifyParent)(record, config)
   let claim = await (deps.parentClaim ?? sharedClaimForRun)(parent, config)
-  if (!same(parentClaimBinding(claim), record.parentBinding)) throw Error('integration owner differs from original parent')
+  if(deps.parentClaim){if(!record.children.every(child=>!child.runId||child.parentBinding))throw Error('integration child provenance unavailable')}
+  else await currentParentContext(parent,record,config)
   const lock = input.write ? await acquireClaim(join(root, parent.runId, 'children.lock'), await processIdentity()) : null
   if (lock && lock.kind !== 'owned') throw Error('child execution or another integration owns this parent')
   const output = { receipts: [] as IntegrationRecord[], acceptedDeliveries: [] as AcceptedDelivery[], blocked: [] as Array<{ issue: number; reason: string }>, wrote: false }
@@ -597,7 +724,21 @@ export async function joinChildren(input: { parent: RunRecord; groups: unknown; 
       try {
         if (input.signal?.aborted) throw Error('parent integration cancelled')
         await (deps.verifyParent ?? verifyParent)(record, config)
-        await (deps.verifyAuthority ?? verifyIntegrationAuthority)(await readRun(root, parent.runId), record, config)
+        const currentParentRun=await readRun(root,parent.runId)
+        await (deps.verifyAuthority ?? verifyIntegrationAuthority)(currentParentRun, record, config)
+        if(child.runId&&currentParentRun.remoteRecovery){
+          const retained=await readOptional<IntegrationRecord>(joinPath(root,parent.runId,child.runId))
+          if(retained?.state==='accepted'){
+            validateIntegrationRecord(retained)
+            if(!retained.acceptedRef||retained.runId!==child.runId||retained.issue!==child.issue||retained.baseSha!==record.baseSha||!retained.parentAfter||retained.fromSha!==retained.acceptedRef.fromSha)throw Error('historical accepted join identity differs')
+            const snapshot=await readCoordination(claim.target),task=snapshot.tasks[claim.taskKey],known=task?.recovery?.joins.find(join=>same(join,retained.acceptedRef))
+            if(!task||!known||known.state!=='accepted'||!known.acceptance)throw Error('historical accepted join receipt unavailable')
+            const payload:Extract<RecoveryEvidencePayload,{kind:'join'}>={schemaVersion:2,kind:'join',childRunId:known.childRunId,generation:known.generation,fromSha:known.fromSha,parentBefore:known.parentBefore,parentAfter:known.parentAfter,state:'accepted',validationId:known.acceptance.validationId,commandDigest:known.acceptance.commandDigest,result:'passed'}
+            await verifyChildrenEvidence({run:currentParentRun,task,payload,publishing:false,ref:known.evidence},config)
+            const head=git(parent.checkout,['rev-parse','HEAD']);git(parent.checkout,['merge-base','--is-ancestor',retained.parentAfter,head])
+            output.receipts.push(retained);continue
+          }
+        }
         const resolved = await resolveJoinChild(child, parent, config, deps).catch(error => {
           output.blocked.push({ issue: child.issue, reason: (error as Error).message }); return null
         })
@@ -823,7 +964,7 @@ async function resolveJoinChild(child: ChildLaunch, parent: RunRecord, config: F
   if (!saved) throw Error('child has no durable accepted result')
   const result = await verifiedResult(run, child, config)
   if (!same(result, saved)) throw Error('child result changed')
-  await (deps.verifyChild ?? verifyRunAuthority)(run, config)
+  await (deps.verifyChild ?? verifyDispatchRunAuthority)(run, config)
   if (spawnSync('git', ['cat-file','-e',result.headSha + '^{commit}'], { cwd: parent.checkout, stdio: 'ignore' }).status !== 0) await fetchChildCheckpoint({ checkout: parent.checkout, run, config })
   const check = await readOptional<ChildCheck>(checkPath(root, run.runId))
   if (!check) throw Error('source-bound acceptance unavailable')
@@ -854,7 +995,7 @@ export async function exactReviewedChild(run:RunRecord,config:FactoryConfig):Pro
     const open=selected.binding.findings.filter((finding:{id:string;status:string})=>finding.status==='open').map((finding:{id:string})=>finding.id)
     throw Error('child review requires fixes'+(open.length?': '+open.join(', '):''))
   }
-  await verifyRunAuthority(run,config)
+  await verifyDispatchRunAuthority(run,config)
 }
 export function acceptedDeliveryProjection(snapshot:import('./shared-claims.ts').AcceptedScopeSnapshot,childHead:string,scopeDigest:string):AcceptedDelivery[] {
   parseAcceptedScope(snapshot)
@@ -865,7 +1006,7 @@ export function acceptedDeliveryProjection(snapshot:import('./shared-claims.ts')
 // an implemented-delivery row; no parent completion is fabricated to link it.
 export async function publishAcceptedChildScope(parent:RunRecord,child:RunRecord,joined:IntegrationRecord,config:FactoryConfig):Promise<AcceptedDelivery[]> {
   if(joined.state!=='accepted'||!joined.acceptedRef||!joined.accepted||joined.runId!==child.runId||joined.fromSha!==child.headSha||!joined.parentAfter)throw Error('accepted parent join unavailable')
-  const record=await readChildrenRecord(runsRoot(config.home),parent.runId)
+  const record=await readExecutableChildrenRecord(parent,config)
   await verifyIntegrationAuthority(parent,record,config)
   await exactReviewedChild(child,config)
   const plan=await canonicalPlan(child)
@@ -937,7 +1078,7 @@ async function verifyAcceptedScopePayload(child:RunRecord,payload:Extract<Recove
  const parents=(await readRuns(runsRoot(config.home))).filter(run=>run.repo===snapshot.parentRepo&&run.issue===snapshot.parentIssue&&run.parent===null)
  const matches=[]
  for(const parent of parents){
-  const record=await readOptional<ChildrenRecord>(recordPath(runsRoot(config.home),parent.runId));if(!record?.children.some(row=>row.runId===child.runId))continue
+  const record=await readExecutableChildrenRecord(parent,config).catch(()=>null);if(!record?.children.some(row=>row.runId===child.runId))continue
   const joined=await readOptional<IntegrationRecord>(joinPath(runsRoot(config.home),parent.runId,child.runId))
   if(!joined||joined.state!=='accepted'||joined.fromSha!==payload.sourceSha||joined.parentBefore!==snapshot.parentBefore||joined.parentAfter!==snapshot.parentAfter)continue
   await verifyIntegrationAuthority(parent,record,config);await exactReviewedChild(child,config)
@@ -962,8 +1103,16 @@ export async function reconstructChildrenContext(input:{parent:RunRecord;materia
  dispatch.assertRemoteRecoveryMaterial(material)
  if(parent.runId!==material.task.runId||parent.repo!==material.task.repo||parent.issue!==material.task.issue||parent.parent!==null||parent.branch!==material.task.checkpoint?.branch||parent.headSha!==material.task.checkpoint?.headSha||!same(parent.approvalRefs,material.artifacts)||!same(parent.approvalBindings,material.task.approvalBindings))throw Error('recovered parent source context differs')
  const groups=checkedGroups({guard:'plan-lint',ok:lintPlan(material.planBody).blocks.length===0,groups:parseIndependentGroups(material.planBody).map(group=>({id:group.id,members:group.members,files:group.files}))})
- const original:ParentClaimBinding={taskKey:material.task.taskKey,runId:material.task.runId,generation:material.task.generation,ownerToken:material.task.ownerToken,machineId:material.task.machineId,installationId:material.task.installationId,sessionId:material.task.sessionId}
  const target=transport.target??await dispatch.verifiedSharedTarget(parent.repo,config),gh=transport.gh??ghText
+ const current:ParentClaimBinding={taskKey:material.task.taskKey,runId:material.task.runId,generation:material.task.generation,ownerToken:material.task.ownerToken,machineId:material.task.machineId,installationId:material.task.installationId,sessionId:material.task.sessionId}
+ let original=current
+ if(material.task.schemaVersion===2){
+  const succession=await owner.inspectGroupSuccession(target,{operationId:material.task.successionOperationId,parent:current})
+  if(succession.kind!=='verified')throw Error(succession.reason)
+  const row=succession.receipt.members.find(row=>same(row.after,current))
+  if(!row)throw Error('group succession origin parent unavailable')
+  original=row.before
+ }
  const known:Array<{group:ChildGroup;task:TaskRecord;stateCommit:string;title:string}>=[],fresh:Array<{group:ChildGroup;title:string}>=[]
  for(const group of groups){
   const issue=Number(group.members[0]!.slice(1)),subject=await boundedGhJson<{number:number;node_id:string;title:string}>(gh,['api',`repos/${parent.repo}/issues/${issue}`],readBudget())
@@ -977,7 +1126,7 @@ export async function reconstructChildrenContext(input:{parent:RunRecord;materia
   }
   if(retained.kind==='invalid-or-unavailable')throw Error('child retained state unavailable; absence cannot be inferred')
   const source=historical[0]??{task:retained.task,stateCommit:retained.head},child=source.task
-  if(child.repo!==parent.repo||child.issue!==issue||child.parentTaskKey!==original.taskKey||!same(child.parentBinding,original)||!same(child.paths,group.files)||child.resources.length||!child.checkpoint||!child.recovery||!same(child.checkpoint,child.recovery.checkpoint))throw Error('original child binding or exact checkpoint unavailable')
+  if(child.repo!==parent.repo||child.issue!==issue||child.parentTaskKey!==original.taskKey||!child.parentBinding||!same(child.paths,group.files)||child.resources.length||!child.checkpoint||!child.recovery||!same(child.checkpoint,child.recovery.checkpoint))throw Error('original child binding or exact checkpoint unavailable')
   if(retained.task.runId!==child.runId||retained.task.generation!==child.generation||retained.task.ownerToken!==child.ownerToken)throw Error('child now has another owner; historical facts cannot authorize recovery')
   known.push({group,task:child,stateCommit:source.stateCommit,title:subject.title})
  }
@@ -992,31 +1141,60 @@ export async function reconstructChildrenContext(input:{parent:RunRecord;materia
  const generated=planParallelRun({groups,issues,parentBranch:parent.branch,parentHead:baseSha,repoRoot:parent.checkout,parentIssue:parent.issue})
  const children:ChildLaunch[]=groups.map(group=>{
   const issue=Number(group.members[0]!.slice(1)),old=known.find(row=>row.task.issue===issue),planned=generated.children.find(row=>row.issue===issue)!
-  if(!old)return {...planned,resources:[],runId:null,scopeDigest:null,taskIds:[],acceptanceCommand:command}
+  if(!old)return {...planned,resources:[],runId:null,scopeDigest:null,taskIds:[],acceptanceCommand:command,parentBinding:null}
   // Paths and titles describe this new local context; branch/base/source/run and
   // original parent binding come only from the retained verified task.
-  return {...planned,branch:old.task.checkpoint!.branch,baseSha:old.task.checkpoint!.baseSha,resources:[...old.task.resources],runId:old.task.runId,scopeDigest:old.task.scopeDigest,taskIds:[...old.task.approvedTaskIds],acceptanceCommand:command}
+  return {...planned,branch:old.task.checkpoint!.branch,baseSha:old.task.checkpoint!.baseSha,resources:[...old.task.resources],runId:old.task.runId,scopeDigest:old.task.scopeDigest,taskIds:[...old.task.approvedTaskIds],acceptanceCommand:command,parentBinding:old.task.parentBinding!}
  })
- const record=parseChildrenRecord({schemaVersion:1,parentRunId:parent.runId,parentIssue:parent.issue,repo:parent.repo,parentBranch:parent.branch,baseSha,parentBinding:original,concurrency:Math.min(3,config.subagents.concurrent,groups.length),groups,children})
+ const retainedJoins=material.task.recovery!.joins
+ if(retainedJoins.some(join=>!children.some(child=>child.runId===join.childRunId)))throw Error('retained join names a child outside the recovered group')
+ let explainedHead=baseSha
+ for(const child of children){
+  if(!child.runId)continue
+  const joins=retainedJoins.filter(join=>join.childRunId===child.runId)
+  if(joins.length>1)throw Error('ambiguous retained child join history')
+  const joined=joins[0]
+  if(!joined)continue
+  const sourceHead=known.find(row=>row.task.runId===child.runId)?.task.checkpoint?.headSha
+  if(joined.parentBefore!==explainedHead||joined.fromSha!==sourceHead)throw Error('retained join order or source differs')
+  if(joined.state==='accepted'){
+   if(!joined.parentAfter||!joined.acceptance||joined.acceptance.sourceSha!==joined.parentAfter)throw Error('retained accepted join is incomplete')
+   explainedHead=joined.parentAfter
+  }else if(joined.state!=='prepared'||joined.parentAfter!==null||joined.acceptance!==null)throw Error('retained join state is ambiguous')
+ }
+ if(retainedJoins.some(join=>join.state==='accepted')&&explainedHead!==parent.headSha)throw Error('recovered parent head is not fully explained by ordered accepted joins')
+ const record=parseChildrenRecord({schemaVersion:2,parentRunId:parent.runId,parentIssue:parent.issue,repo:parent.repo,parentBranch:parent.branch,baseSha,parentBinding:original,concurrency:Math.min(3,config.subagents.concurrent,groups.length),groups,children})
  return {record,existing:known.map(row=>({task:row.task,stateCommit:row.stateCommit,checkpoint:row.task.checkpoint!})),newPreparations:fresh.map(row=>Number(row.group.members[0]!.slice(1))),currentTitles:[...known.map(row=>({issue:row.task.issue,title:row.title})),...fresh.map(row=>({issue:Number(row.group.members[0]!.slice(1)),title:row.title}))]}
 }
 export async function installRecoveredChildrenContext(input:{parent:RunRecord;material:import('./dispatch.ts').RemoteRecoveryMaterial;config:FactoryConfig}):Promise<RecoveredChildrenContext> {
- const reconstructed=await reconstructChildrenContext(input),root=runsRoot(input.config.home)
- const claim=await sharedClaimForRun(input.parent,input.config)
- if(!same(parentClaimBinding(claim),reconstructed.record.parentBinding))throw Error('current parent ownership differs; original token is never borrowed')
+  const reconstructed=await reconstructChildrenContext(input),root=runsRoot(input.config.home)
+  await currentParentContext(input.parent,reconstructed.record,input.config)
  for(const child of reconstructed.existing){
   const run=await readRun(root,child.task.runId)
   if(run.repo!==child.task.repo||run.issue!==child.task.issue||run.parent!==input.parent.issue||!same(run.execution,child.task.recovery?.execution)||await realpath(run.checkout)!==run.checkout||run.headSha!==child.checkpoint.headSha||run.branch!==child.checkpoint.branch||run.baseSha!==child.checkpoint.baseSha||!same(run.approvalBindings,child.task.approvalBindings)||run.taskKey.scopeDigest!==child.task.scopeDigest)throw Error('runtime owner has not reconstructed original child source')
   reconstructed.record.children.find(row=>row.runId===run.runId)!.path=run.checkout
  }
- const held=await acquireClaim(join(root,input.parent.runId,'children.lock'),await processIdentity())
+ const restoreAcceptedJoins=async()=>{
+  for(const joined of input.material.task.recovery!.joins.filter(join=>join.state==='accepted')){
+   const child=reconstructed.record.children.find(row=>row.runId===joined.childRunId)
+   if(!child||!joined.parentAfter||!joined.acceptance||joined.evidence.kind!=='state-receipt'||joined.acceptance.evidence.kind!=='state-receipt')throw Error('retained accepted join child unavailable')
+   const path=joinPath(root,input.parent.runId,joined.childRunId),existing=await readOptional<IntegrationRecord>(path)
+   const restored:IntegrationRecord={schemaVersion:1,operationId:joined.operationId,issue:child.issue,runId:joined.childRunId,generation:joined.generation,fromSha:joined.fromSha,baseSha:reconstructed.record.baseSha,parentBefore:joined.parentBefore,parentAfter:joined.parentAfter,accepted:true,reason:'verified historical accepted join',receiptIds:{preparedLink:joined.operationId,accepted:joined.evidence.operationId,acceptedLink:joined.evidence.operationId,acceptance:joined.acceptance.evidence.operationId},state:'accepted',preparedRef:null,acceptedRef:joined}
+   validateIntegrationRecord(restored)
+   if(existing&&!same(existing,restored))throw Error('retained accepted join differs from local receipt')
+   if(!existing)await atomicRunFile(path,restored)
+  }
+ }
+  let existingRecord=await readOptional<ChildrenRecord>(recordPath(root,input.parent.runId))
+  if(existingRecord?.schemaVersion===1)existingRecord=await readExecutableChildrenRecord(input.parent,input.config)
+  const held=await acquireClaim(join(root,input.parent.runId,'children.lock'),await processIdentity())
  if(held.kind!=='owned')throw Error('child context is owned by another operation')
  try{
-  const path=recordPath(root,input.parent.runId),previous=await readOptional<ChildrenRecord>(path)
-  if(previous){if(!same(parseChildrenRecord(previous),reconstructed.record))throw Error('existing private child context retained for reconciliation');return reconstructed}
-  const current=await sharedClaimForRun(input.parent,input.config)
-  if(!same(parentClaimBinding(current),reconstructed.record.parentBinding))throw Error('parent changed before context installation')
+  const path=recordPath(root,input.parent.runId),previous=existingRecord??await readOptional<ChildrenRecord>(path)
+  if(previous){if(!same(parseChildrenRecord(previous),reconstructed.record))throw Error('existing private child context retained for reconciliation');await restoreAcceptedJoins();return reconstructed}
+  await currentParentContext(input.parent,reconstructed.record,input.config)
   await atomicRunFile(path,reconstructed.record)
+  await restoreAcceptedJoins()
   return reconstructed
  }finally{await releaseClaim(held.claim)}
 }
