@@ -449,3 +449,34 @@ test('accepted task projection binds exact immutable scope and source identities
  expect(validateAcceptedDeliveries([...rows,rows[0]],expected).ok).toBe(false)
  expect(()=>acceptedDeliveryProjection({...snapshot,completedTaskIds:['144-T3']},'c'.repeat(40),'d'.repeat(64))).toThrow()
 })
+
+test('accepted-scope consumer trusts exactly one current operator review',async()=>{
+  const {spyOn}=await import('bun:test'),gh=await import('../src/gh.ts'),runtime=await import('../src/runs.ts')
+  const {exactReviewedChild}=await import('../src/children.ts'),{parseFactoryConfig}=await import('../src/config.ts')
+  const home=await realpath(await mkdtemp(join(tmpdir(),'child-review-consumer-'))),tree=join(home,'repo')
+  await mkdir(join(tree,'.vegastack'),{recursive:true})
+  await writeFile(join(tree,'.vegastack/dev.md'),'repo: fixture/repo · default branch main\noperators: operator\n')
+  const base='a'.repeat(40),head='b'.repeat(40),scope='c'.repeat(64)
+  const run=await createRun({...diagnostic(runsRoot(home),tree,8,head),baseSha:base,headSha:head,
+    approvalRefs:[{repo:'fixture/repo',issue:8,kind:'plan' as const,artifactId:'PLAN_8',rev:1,digest:scope}]})
+  const review=(verdict:'clean'|'needs-fixes'='clean',findings:Array<{id:string;status:'open'|'resolved'}>=[])=>
+    `<!-- vsk:v1 type=review sha=${head} verdict=${verdict} agent=codex -->\n\`\`\`json\n${JSON.stringify({reviewBinding:{sha:head,baseSha:base,scopeDigest:scope,verdict,findings}})}\n\`\`\`\n`
+  let comments:Array<{id:number;body:string;user?:{login:string}}> = []
+  const ghSpy=spyOn(gh,'ghText').mockImplementation(async()=>`HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n${JSON.stringify(comments)}`)
+  const authority=spyOn(runtime,'verifyRunAuthority').mockResolvedValue(undefined)
+  const config=parseFactoryConfig({repos:[{repo:'fixture/repo',org:'fixture',path:tree}]},home)
+  try {
+    comments=[{id:41,user:{login:'operator'},body:review('needs-fixes',[{id:'X1',status:'open'}])},{id:42,user:{login:'outsider'},body:review()}]
+    await expect(exactReviewedChild(run,config)).rejects.toThrow(/X1/)
+    expect(authority).not.toHaveBeenCalled()
+    comments=[{id:41,user:{login:'operator'},body:review()}]
+    await expect(exactReviewedChild(run,config)).resolves.toBeUndefined()
+    expect(authority).toHaveBeenCalledTimes(1)
+    comments=[{id:41,user:{login:'operator'},body:review()},{id:42,user:{login:'operator'},body:review()}]
+    await expect(exactReviewedChild(run,config)).rejects.toThrow(/multiple|ambiguous/i)
+    comments=[{id:41,body:review()}]
+    await expect(exactReviewedChild(run,config)).rejects.toThrow(/source|publisher|metadata/i)
+    comments=[{id:41,user:{login:'operator'},body:review()+review()}]
+    await expect(exactReviewedChild(run,config)).rejects.toThrow(/duplicate|typed section|review/i)
+  } finally {authority.mockRestore();ghSpy.mockRestore();await rm(home,{recursive:true,force:true})}
+})

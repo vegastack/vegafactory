@@ -840,15 +840,20 @@ interface AcceptedScopeProgress {
   reference:Extract<import('./shared-claims.ts').EvidenceRef,{kind:'state-receipt'}>|null
   state:'prepared'|'published'|'linked'
 }
-async function exactReviewedChild(run:RunRecord,config:FactoryConfig):Promise<void> {
-  const comments=await fetchGhPages<{id:number;body:string}>(ghText,`repos/${run.repo}/issues/${run.issue}/comments`,readBudget())
-  if(!comments.complete)throw Error('complete child review history unavailable')
+export async function exactReviewedChild(run:RunRecord,config:FactoryConfig):Promise<void> {
+  const comments=await fetchGhPages<{id:number;body:string;user:{login:string}}>(ghText,`repos/${run.repo}/issues/${run.issue}/comments`,readBudget())
   const shipUrl=new URL(sourceModule?'../../../skills/dev/dev-ship/scripts/ship-gate.mjs':'../skill/dev-ship/scripts/ship-gate.mjs',import.meta.url)
-  const {typedSection,validReview}=await import(shipUrl.href) as typeof import('../../../skills/dev/dev-ship/scripts/ship-gate.mjs')
-  const active=comments.items.filter(row=>/^<!-- vsk:v1 type=review\b/m.test(row.body)).at(-1)
-  const review=typedSection(active?.body,'reviewBinding')
+  const {selectCurrentTrustedReview}=await import(shipUrl.href) as typeof import('../../../skills/dev/dev-ship/scripts/ship-gate.mjs')
   const plan=run.approvalRefs.find(ref=>ref.kind==='plan')
-  if(!validReview(review)||review.sha!==run.headSha||review.baseSha!==run.baseSha||review.scopeDigest!==plan?.digest||review.verdict!=='clean'||!new RegExp('\\bsha='+run.headSha+'(?:\\s|\\s*-->)').test(active?.body??''))throw Error('exact complete child review unavailable')
+  if(!run.headSha||!plan)throw Error('exact complete child review unavailable')
+  const {policy}=await currentPolicy(config,run.repo)
+  const selected=selectCurrentTrustedReview(comments.items,{complete:comments.complete,operators:policy.operators,
+    sha:run.headSha,baseSha:run.baseSha,scopeDigest:plan.digest})
+  if(!selected)throw Error('exact complete child review unavailable')
+  if(selected.binding.verdict!=='clean'){
+    const open=selected.binding.findings.filter((finding:{id:string;status:string})=>finding.status==='open').map((finding:{id:string})=>finding.id)
+    throw Error('child review requires fixes'+(open.length?': '+open.join(', '):''))
+  }
   await verifyRunAuthority(run,config)
 }
 export function acceptedDeliveryProjection(snapshot:import('./shared-claims.ts').AcceptedScopeSnapshot,childHead:string,scopeDigest:string):AcceptedDelivery[] {
