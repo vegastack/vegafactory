@@ -18,9 +18,9 @@ When the operator asks in chat for a change, their words are the approval — bu
 ## Preflight — all must hold, or stop and say which failed
 
 - Run the guard first: `node <path-to-this-skill>/scripts/preflight.mjs --issue <n> --me $(gh api user -q .login) --json` (add `--repo <o/r> --dev-md <path>` outside the project root). Exit 2 stops you with its reasons; exit 1 passes with warnings, which go into the ledger. Resume and corrections runs pass `--expect working` / `--expect for-operator`.
-- Scoped intent follows conventions: policy-operator session publisher or verified identical grant relay. Preserve canonical `approvalBindings`; relay `recordBinding` is audit only. Legacy records need reconfirmation; preparation/research adapters retain source provenance. Recovery needs fresh authority reads.
+- Scoped intent follows conventions: policy-operator session publisher or verified identical grant relay. Preserve canonical `approvalBindings`; relay `recordBinding` is audit-only. Reconfirm legacy records; preserve preparation/research provenance; reread recovery authority.
 - Then the judgment checks: read the complete brief plus parent issue and milestone; read the brief's touch points in the current code, because they drift between approval and execution — the version-impact line, volatile dependency claims per `dev-architect`'s verify protocol, and a full-plan issue's plan included. A material decision left open — even outside a formal Assumptions section — or reality contradicting brief or plan is a stop: one `handback` comment with the smallest question, `needs-operator`.
-- Resuming verified unfinished work within its original authority follows the resume protocol in [ledger-and-resume](references/ledger-and-resume.md): brief → plan → ledger → `git log`, followed by targeted fresh source reconciliation — in the branch's worktree, restored with `worktree.mjs restore --issue <n> --slug <slug> --write` when its directory is gone. A claim being abandoned instead is released by the operator with `node <path-to-this-skill>/scripts/reclaim.mjs --issue <n>` (`working` → `ready`, unassign; refuses a still-fresh ledger unless `--force`) — a claim is released on their word only.
+- Resume verified unfinished work only within its original authority, using [ledger-and-resume](references/ledger-and-resume.md): brief → plan → ledger → `git log` → fresh source reconciliation. Restore a missing worktree with `worktree.mjs restore --issue <n> --slug <slug> --write`. Only the operator may abandon a claim, via `node <path-to-this-skill>/scripts/reclaim.mjs --issue <n>` (`working` → `ready`, unassign; a fresh ledger requires `--force`).
 
 ## Claim
 
@@ -39,7 +39,7 @@ The approved brief and plan are the scope. Extras you notice go in the evidence 
 
 **Honesty over green**: a failing test gets fixed at the root or reported as failing, because weakening a test, an assertion, or acceptance to pass is a cover-up, and cover-ups surface at review with interest.
 
-Verified lessons live in the existing recovery packet, not vendor memory. Use the owned `learning checkpoint`/`inspect` commands for normal-work evidence and bounded next-session context; protected rules remain proposals. [Ledger and resume](references/ledger-and-resume.md) defines validation and undo.
+Verified lessons live in the recovery packet, never vendor memory. [Ledger and resume](references/ledger-and-resume.md) defines their owned commands, validation, bounded next-session context, undo and protected-rule limits.
 
 ## Changelog and chronicle — before hand-back
 
