@@ -1,6 +1,6 @@
 # One feature, one worktree
 
-The main checkout never leaves the default branch and never carries uncommitted work. Every branch — feature, epic parent, trivial chat fix, research spike, release — is checked out at `.vegastack/.worktrees/<n>-<slug>/` on `<type>/<n>-<slug>`, per `references/conventions.md`. All of it is decided by one script, `scripts/worktree.mjs` (`create|restore|remove|list|prune|status --json`), which `vegafactory worktree …` wraps; anything destructive is dry-run until `--write`, and every verb exits `0` pass · `1` warn · `2` blocked.
+The main checkout never leaves the default branch and never carries uncommitted work. Every branch — feature, epic parent, trivial chat fix, research spike, release — is checked out at `.vegastack/.worktrees/<n>-<slug>/` on `<type>/<n>-<slug>`, per `references/conventions.md`. All of it is decided by `scripts/worktree.mjs`, with `vegafactory worktree …` wrapping its create, restore, remove, list, prune, and `status --json` commands; anything destructive remains a dry run until `--write`, and every verb exits `0` pass · `1` warn · `2` blocked.
 
 ## Scenario matrix
 
