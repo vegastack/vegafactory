@@ -1,4 +1,5 @@
 import { expect, test } from 'bun:test'
+import { createHash } from 'node:crypto'
 import { execFileSync, spawnSync } from 'node:child_process'
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -18,14 +19,14 @@ function fixture(check = 'test "$(cat check.txt)" = PASS', content = 'PASS') {
   git('add', '.'); git('commit', '-qm', 'seed'); const base = git('rev-parse', 'HEAD')
   git('checkout', '-qb', 'codex/fixture'); writeFileSync(join(dir, 'feature.txt'), 'feature'); git('add', '.'); git('commit', '-qm', 'feature')
   const sha = git('rev-parse', 'HEAD')
-  const plan = { id: 2, node_id: 'PLAN', body: '<!-- vsk:v1 type=plan rev=1 -->\n## Plan\n' }
+  const plan = { id: 2, node_id: 'PLAN', user: { login: 'fixture' }, body: '<!-- vsk:v1 type=plan rev=1 -->\n## Plan\n' }
   const brief = { number: 1, node_id: 'ISSUE', body: '<!-- vsk:v1 type=brief rev=1 scope=full-plan -->\n## Outcome\nship\n' }
   const scope = execFileSync(process.execPath, ['--input-type=module', '-e', `import {scopeDigest} from ${JSON.stringify(resolve(import.meta.dir, '../../dev-implement/scripts/lib/approval.mjs'))}; process.stdout.write(scopeDigest(${JSON.stringify(plan.body)}, 'plan'))`], { encoding: 'utf8' })
   const binding = { sha, baseSha: base, scopeDigest: scope, verdict: 'clean', findings: [] }
-  const comments: any[] = [plan, { id: 3, body: `<!-- vsk:v1 type=evidence rev=1 sha=${sha} -->` }, { id: 4, body: `<!-- vsk:v1 type=review round=1 sha=${sha} verdict=clean -->\n\`\`\`json\n${JSON.stringify({ reviewBinding: binding })}\n\`\`\`` }]
+  const comments: any[] = [plan, { id: 3, user: { login: 'fixture' }, body: `<!-- vsk:v1 type=evidence rev=1 sha=${sha} -->` }, { id: 4, user: { login: 'fixture' }, body: `<!-- vsk:v1 type=review round=1 sha=${sha} verdict=clean -->\n\`\`\`json\n${JSON.stringify({ reviewBinding: binding })}\n\`\`\`` }]
   const gh = join(root, 'gh'); const data = join(root, 'comments.json')
-  writeFileSync(gh, `#!/usr/bin/env node\nconst fs=require('node:fs');process.stdout.write(process.argv.includes('--paginate')?JSON.stringify(process.argv.includes('--slurp')?[JSON.parse(fs.readFileSync(${JSON.stringify(data)},'utf8'))]:JSON.parse(fs.readFileSync(${JSON.stringify(data)},'utf8'))):${JSON.stringify(JSON.stringify(brief))});\n`, { mode: 0o700 })
-  return { dir, git, sha, base, comments, run: () => { writeFileSync(data, JSON.stringify(comments)); return spawnSync(process.execPath, [cli, '--issue', '1', '--repo', 'o/r', '--branch', 'codex/fixture', '--base', 'main', '--worktree', dir, '--json'], { cwd: dir, env: { ...process.env, VSK_GH: gh }, encoding: 'utf8' }) }, cleanup: () => rmSync(root, { recursive: true, force: true }) }
+  writeFileSync(gh, `#!/usr/bin/env node\nconst fs=require('node:fs'),pages=JSON.parse(fs.readFileSync(${JSON.stringify(data)},'utf8'));process.stdout.write(process.argv.includes('--paginate')?JSON.stringify(process.argv.includes('--slurp')?pages:pages.flat()):${JSON.stringify(JSON.stringify(brief))});\n`, { mode: 0o700 })
+  return { dir, git, sha, base, comments, run: (pages: any = [comments]) => { writeFileSync(data, JSON.stringify(pages)); return spawnSync(process.execPath, [cli, '--issue', '1', '--repo', 'o/r', '--branch', 'codex/fixture', '--base', 'main', '--worktree', dir, '--json'], { cwd: dir, env: { ...process.env, VSK_GH: gh }, encoding: 'utf8' }) }, cleanup: () => rmSync(root, { recursive: true, force: true }) }
 }
 
 for (const [name, check, content, mutation, passes] of [
@@ -59,4 +60,43 @@ test('dirty candidate refuses before running the command and preserves files', (
     const r=f.run();expect(r.status).toBe(2);expect(JSON.parse(r.stdout).candidate.checkExit).toBeNull()
     expect(execFileSync('cat',[join(f.dir,'check.txt')],{encoding:'utf8'})).toBe('PASS')
   } finally {f.cleanup()}
+})
+
+test('actual CLI retains trusted open findings when a later outsider posts an exact clean review', () => {
+  const f = fixture()
+  try {
+    f.comments[2].body = f.comments[2].body.replaceAll('clean', 'needs-fixes').replace('findings":[]', 'findings":[{"id":"X1","status":"open"}]')
+    f.comments.push({ id: 5, user: { login: 'outsider' }, body: f.comments[2].body.replaceAll('needs-fixes', 'clean').replace('findings":[{"id":"X1","status":"open"}]', 'findings":[]') })
+    const result = f.run()
+    expect(result.status, result.stdout + result.stderr).toBe(2)
+    const output = JSON.parse(result.stdout)
+    expect(output.blocks.some((block: string) => block.includes('review verdict needs-fixes'))).toBe(true)
+    expect(output.candidate.review.findings).toEqual([{ id: 'X1', status: 'open' }])
+    expect(output.candidate.reviewSource.commentId).toBe(4)
+  } finally { f.cleanup() }
+})
+
+test('actual CLI reports the exact trusted clean comment ID and body SHA', () => {
+  const f = fixture()
+  try {
+    const result = f.run()
+    expect(result.status, result.stdout + result.stderr).toBe(0)
+    expect(JSON.parse(result.stdout).candidate.reviewSource).toEqual({
+      commentId: 4,
+      bodySha256: createHash('sha256').update(f.comments[2].body, 'utf8').digest('hex'),
+      publisher: 'fixture',
+    })
+  } finally { f.cleanup() }
+})
+
+test('actual CLI refuses two trusted exact matches, missing publisher metadata, and incomplete pagination', () => {
+  for (const mutate of [
+    (f: any) => f.comments.push({ ...f.comments[2], id: 5 }),
+    (f: any) => { delete f.comments[2].user },
+  ]) {
+    const f = fixture()
+    try { mutate(f); expect(f.run().status).toBe(2) } finally { f.cleanup() }
+  }
+  const f = fixture()
+  try { expect(f.run(f.comments).status).toBe(2) } finally { f.cleanup() }
 })

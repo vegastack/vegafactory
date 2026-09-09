@@ -31,7 +31,7 @@ Each axis uses a fresh subagent without implementation memory and reports separa
 
 ## The review comment — one per cycle, rounds appended, marker always current
 
-One comment per cycle. Edit its top marker every round to the newest `round`/`sha`/`verdict`, because the first marker is the one consumers (ship-gate) read. Prior rounds stay as plain sections below, without markers or active JSON bindings. Publish one fenced JSON `reviewBinding` as defined in installed `references/conventions.md`: full commit/base IDs, canonical plan scope digest, verdict and stable open/resolved finding IDs. Keep the marker and binding identical; legacy reviews need renewal.
+Use one cycle comment. Update its top marker each round; ship-gate reads it. Keep prior rounds as plain text without markers/bindings. Publish one fenced `reviewBinding` JSON per `references/conventions.md`: full commit/base IDs, plan digest, verdict, stable finding IDs/statuses. Marker/binding stay identical; renew legacy reviews. Consumers accept one SHA/base/scope match from a current `operators:` publisher in the fresh provider comment envelope; zero or multiple refuse. `agent=` records the harness, not cryptographic model/publisher identity.
 
 ```markdown
 <!-- vsk:v1 type=review round=<n> sha=<full-head-sha> agent=<claude|codex> verdict=<clean|needs-fixes> -->

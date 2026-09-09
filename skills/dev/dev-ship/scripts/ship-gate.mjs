@@ -14,6 +14,7 @@
 // check command there, so its checkout test passes by construction rather than
 // forcing the operator to switch branches in the main checkout.
 import { execFileSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 
 // An epic-sized branch produces a `git diff base...branch` and a check-suite log well
 // past execFileSync's 1 MiB default, and ENOBUFS then reads as "cannot verify" — a
@@ -56,6 +57,49 @@ export function validReview(binding) {
     && binding.findings.every((finding) => exactKeys(finding, ['id', 'status']) && nonempty(finding.id) && ['open', 'resolved'].includes(finding.status))
     && new Set(binding.findings.map((finding) => finding.id)).size === binding.findings.length
     && (binding.verdict !== 'clean' || binding.findings.every((finding) => finding.status === 'resolved'));
+}
+
+// Select the one current review whose publisher is authenticated by the fresh
+// provider envelope and is still named by current project policy. Marker text
+// (including agent=) describes the review; it never authenticates its author.
+// Consumers may pass a previously returned source to detect any later edit.
+export function selectCurrentTrustedReview(comments, { complete, operators, sha, baseSha, scopeDigest, source } = {}) {
+  if (complete !== true) throw new Error('complete fresh review comment history unavailable');
+  if (!Array.isArray(comments) || !Array.isArray(operators) || operators.length === 0
+    || operators.some((operator) => !nonempty(operator)) || new Set(operators).size !== operators.length
+    || !fullSha(sha) || !fullSha(baseSha) || !digest(scopeDigest)) throw new Error('invalid trusted review selection input');
+
+  // Validate provider envelopes before consulting any comment body. This keeps
+  // identity at the provider boundary and makes missing publisher data a refusal.
+  for (const comment of comments) {
+    if (!Number.isSafeInteger(comment?.id) || comment.id <= 0 || typeof comment.body !== 'string' || !nonempty(comment.user?.login)) {
+      throw new Error('review comment source identity/body metadata missing');
+    }
+  }
+
+  const matches = [];
+  for (const comment of comments.filter((entry) => operators.includes(entry.user.login))) {
+    const marker = parseMarker(comment.body);
+    if (marker?.keys.type !== 'review' || marker.keys.sha !== sha) continue;
+    const binding = typedSection(comment.body, 'reviewBinding');
+    if (!validReview(binding) || binding.sha !== sha || binding.baseSha !== baseSha
+      || binding.scopeDigest !== scopeDigest || marker.keys.verdict !== binding.verdict) continue;
+    matches.push({
+      binding,
+      source: {
+        commentId: comment.id,
+        bodySha256: createHash('sha256').update(comment.body, 'utf8').digest('hex'),
+        publisher: comment.user.login,
+      },
+    });
+  }
+  if (matches.length === 0) throw new Error('no trusted review matches exact candidate SHA/base/scope and marker/binding');
+  if (matches.length !== 1) throw new Error('multiple trusted reviews match exact candidate; review source is ambiguous');
+  const selected = matches[0];
+  if (source !== undefined && (!exactKeys(source, ['commentId', 'bodySha256', 'publisher'])
+    || source.commentId !== selected.source.commentId || source.bodySha256 !== selected.source.bodySha256
+    || source.publisher !== selected.source.publisher)) throw new Error('trusted review source changed since qualification');
+  return selected;
 }
 
 const RATIONALIZATIONS = [
@@ -219,7 +263,9 @@ export function evaluateShipGate(facts) {
     warns.push(`--allow-no-changelog exercised ("${allowNoChangelog}") — it excused: ${[!changelogTouched ? 'changelog' : null, facts.chronicleOn && !facts.chronicleTouched ? 'chronicle' : null].filter(Boolean).join(' + ')}`);
   }
 
-  if (!validReview(facts.review) || facts.review.sha !== headSha || facts.review.baseSha !== facts.baseSha
+  if (facts.reviewSelectionError) {
+    blocks.push(`trusted review unavailable: ${facts.reviewSelectionError}`);
+  } else if (!validReview(facts.review) || facts.review.sha !== headSha || facts.review.baseSha !== facts.baseSha
     || facts.review.scopeDigest !== facts.scopeDigest || facts.review.verdict !== reviewVerdict) {
     blocks.push('review binding is absent, invalid or differs from exact candidate SHA/base/scope');
   } else if (reviewVerdict !== 'clean' && !adjudicated) {
@@ -272,9 +318,6 @@ export function gatherFacts(flags) {
   const evidenceComments = ofType('evidence');
   if (evidenceComments.length > 1) throw new Error('duplicate evidence comments');
   const evidence = evidenceComments[0] ?? null;
-  const reviewComment = ofType('review').at(-1) ?? null;
-  const review = typedSection(reviewComment?.body, 'reviewBinding');
-  const reviewVerdict = parseMarker(reviewComment?.body)?.keys.verdict ?? null;
   const plans = ofType('plan');
   if (plans.length !== 1) throw new Error('missing or duplicate canonical plan');
   const planBinding = artifactRef({ repo, issue: Number(flags.issue), kind: 'plan', artifact: plans[0] });
@@ -286,12 +329,28 @@ export function gatherFacts(flags) {
   };
   const headSha = commit(branch);
   const baseSha = commit(base);
+  const profileRoot = realpathSync(sh('git', ['rev-parse', '--show-toplevel'], cwd));
+  const profile = realpathSync(flags['dev-md'] || join(cwd ?? '.', '.vegastack', 'dev.md'));
+  const profilePath = relative(profileRoot, profile);
+  if (isAbsolute(profilePath) || profilePath === '..' || profilePath.startsWith('../')) throw new Error('check profile must belong to the exact committed checkout');
+  sh('git', ['ls-files', '--error-unmatch', '--', profilePath], cwd);
+  const devMd = readFileSync(profile, 'utf8');
+  const operators = (/^operators:\s*([^\n#]+)/m.exec(devMd)?.[1] ?? '').split(',').map((name) => name.trim()).filter(Boolean);
+  let selectedReview = null; let reviewSelectionError = null;
+  try {
+    selectedReview = selectCurrentTrustedReview(comments, { complete: true, operators, sha: headSha, baseSha, scopeDigest });
+  } catch (error) {
+    reviewSelectionError = error.message;
+  }
+  const review = selectedReview?.binding ?? null;
+  const reviewSource = selectedReview?.source ?? null;
+  const reviewComment = reviewSource ? comments.find((comment) => comment.id === reviewSource.commentId) : null;
+  const reviewVerdict = review?.verdict ?? null;
   const evidenceSha = parseMarker(evidence?.body)?.keys.sha ?? '';
-  const reviewSha = parseMarker(reviewComment?.body)?.keys.sha ?? '';
+  const reviewSha = review?.sha ?? '';
   for (const candidate of [evidenceSha, reviewSha]) {
     if (candidate && (!fullSha(candidate) || commit(candidate) !== candidate)) throw new Error('evidence/review requires a full known commit SHA');
   }
-  if (review && review.sha !== reviewSha) throw new Error('review marker and binding SHA differ');
   const diffText = sh('git', ['diff', baseSha + '...' + headSha], cwd);
   const snapshot = () => ({ head: commit('HEAD'), branch: commit(branch), base: commit(base),
     index: sh('git', ['write-tree'], cwd), indexFlags: sh('git', ['ls-files', '-v'], cwd), status: sh('git', ['status', '--porcelain=v1', '--untracked-files=all', '--ignore-submodules=none'], cwd) });
@@ -302,12 +361,6 @@ export function gatherFacts(flags) {
 
   // dev.md is read from the worktree too: the knobs that gate this branch are
   // the ones on this branch, not whatever the main checkout happens to hold.
-  const root = realpathSync(sh('git', ['rev-parse', '--show-toplevel'], cwd));
-  const profile = realpathSync(flags['dev-md'] || join(cwd ?? '.', '.vegastack', 'dev.md'));
-  const profilePath = relative(root, profile);
-  if (isAbsolute(profilePath) || profilePath === '..' || profilePath.startsWith('../')) throw new Error('check profile must belong to the exact committed checkout');
-  sh('git', ['ls-files', '--error-unmatch', '--', profilePath], cwd);
-  const devMd = readFileSync(profile, 'utf8');
   const changelogKnob = (/^changelog:\s*(\S+)/m.exec(devMd) || [])[1] ?? 'none';
   // Added files/lines only — a deleted changeset or the +++ diff header must
   // not count as an entry.
@@ -334,7 +387,6 @@ export function gatherFacts(flags) {
 
   const after = snapshot();
   const cleanAfter = cleanBefore && JSON.stringify(before) === JSON.stringify(after);
-  const operators = (/^operators:\s*([^\n#]+)/m.exec(devMd)?.[1] ?? '').split(',').map((name) => name.trim()).filter(Boolean);
   const decision = typedSection(evidence?.body, 'adjudication');
   let sourceComment;
   if (decision?.source?.kind === 'github-comment') {
@@ -344,7 +396,7 @@ export function gatherFacts(flags) {
   const adjudicated = reviewAdjudicated(evidence?.body, { review, reviewCommentId: reviewComment?.id,
     operators, publisher: evidence?.user?.login, sourceComment });
   return {
-    evidence, review, reviewVerdict, adjudicated, headSha, baseSha, reviewSha, evidenceSha, scopeDigest, planBinding, cleanBefore, cleanAfter, diffText,
+    evidence, review, reviewSource, reviewSelectionError, reviewVerdict, adjudicated, headSha, baseSha, reviewSha, evidenceSha, scopeDigest, planBinding, cleanBefore, cleanAfter, diffText,
     checkCommand: checkCmd ?? null, environment: { runtime: process.version, platform: process.platform, arch: process.arch, git: sh('git', ['--version'], cwd) },
     changelogTouched, chronicleOn, chronicleTouched,
     allowNoChangelog: flags['allow-no-changelog'], checkExit, checkMissing, checkoutMismatch,
@@ -366,7 +418,7 @@ if (invokedDirectly) {
   } else {
     try {
       const facts = gatherFacts(flags);
-      outcome = { ...evaluateShipGate(facts), candidate: { headSha: facts.headSha, baseSha: facts.baseSha, reviewSha: facts.reviewSha, evidenceSha: facts.evidenceSha, scopeDigest: facts.scopeDigest, planBinding: facts.planBinding, cleanBefore: facts.cleanBefore, cleanAfter: facts.cleanAfter, checkExit: facts.checkExit, checkCommand: facts.checkCommand, environment: facts.environment } };
+      outcome = { ...evaluateShipGate(facts), candidate: { headSha: facts.headSha, baseSha: facts.baseSha, reviewSha: facts.reviewSha, review: facts.review, reviewSource: facts.reviewSource, evidenceSha: facts.evidenceSha, scopeDigest: facts.scopeDigest, planBinding: facts.planBinding, cleanBefore: facts.cleanBefore, cleanAfter: facts.cleanAfter, checkExit: facts.checkExit, checkCommand: facts.checkCommand, environment: facts.environment } };
     } catch (error) {
       outcome = { blocks: [`cannot verify: ${error.message}`], warns: [] };
     }

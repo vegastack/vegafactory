@@ -3,12 +3,14 @@ import { execFileSync } from 'node:child_process'
 import { chmodSync, mkdirSync, mkdtempSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { evaluateParentDelivery, typedSection, validReview, chronicleEntryAdded, evaluateShipGate, gatherFacts, parseMarker, resolveWorktree, reviewAdjudicated } from '../scripts/ship-gate.mjs'
+import { createHash } from 'node:crypto'
+import { evaluateParentDelivery, typedSection, validReview, chronicleEntryAdded, evaluateShipGate, gatherFacts, parseMarker, resolveWorktree, reviewAdjudicated, selectCurrentTrustedReview } from '../scripts/ship-gate.mjs'
 
 const SHA = 'a'.repeat(40)
 const BASE = 'b'.repeat(40)
 const SCOPE = 'c'.repeat(64)
 const binding = () => ({ sha: SHA, baseSha: BASE, scopeDigest: SCOPE, verdict: 'clean', findings: [] as {id: string, status: string}[] })
+const reviewBody = (review = binding(), marker = { sha: review.sha, verdict: review.verdict }) => `<!-- vsk:v1 type=review round=1 sha=${marker.sha} agent=codex verdict=${marker.verdict} -->\n\`\`\`json\n${JSON.stringify({ reviewBinding: review })}\n\`\`\``
 const evidenceBody = (sha = SHA) => `<!-- vsk:v1 type=evidence rev=1 branch=feat/12-x sha=${sha} -->
 ## Result (v1)
 **Done:** thing
@@ -124,6 +126,49 @@ describe('ship-gate', () => {
   })
   test('parseMarker exported for the skill wiring', () => {
     expect(parseMarker(evidenceBody())?.keys.type).toBe('evidence')
+  })
+})
+
+describe('trusted current review selection', () => {
+  const trusted = (id = 41, review = binding()) => ({ id, body: reviewBody(review), user: { login: 'operator' } })
+  const select = (comments: unknown[], extra = {}) => selectCurrentTrustedReview(comments, {
+    complete: true, operators: ['operator'], sha: SHA, baseSha: BASE, scopeDigest: SCOPE, ...extra,
+  })
+
+  test('one operator-published exact clean review passes and returns its fresh source binding', () => {
+    const comment = trusted()
+    const selected = select([comment])
+    expect(selected.binding).toEqual(binding())
+    expect(selected.source).toEqual({
+      commentId: comment.id,
+      bodySha256: createHash('sha256').update(comment.body, 'utf8').digest('hex'),
+      publisher: 'operator',
+    })
+  })
+
+  test('an outsider clean comment cannot replace a trusted needs-fixes review or its findings', () => {
+    const needsFixes = { ...binding(), verdict: 'needs-fixes', findings: [{ id: 'X1', status: 'open' }] }
+    const outsider = { id: 42, body: reviewBody(), user: { login: 'outsider' } }
+    const selected = select([trusted(41, needsFixes), outsider])
+    expect(selected.binding).toEqual(needsFixes)
+    expect(selected.source.commentId).toBe(41)
+  })
+
+  test('two trusted exact reviews refuse instead of restoring newest-wins', () => {
+    expect(() => select([trusted(41), trusted(42)])).toThrow(/multiple|ambiguous/i)
+  })
+
+  test('missing publisher, malformed body, wrong marker identity, and incomplete pagination refuse', () => {
+    expect(() => select([{ id: 41, body: reviewBody() }])).toThrow()
+    expect(() => select([{ ...trusted(), body: reviewBody() + '\n' + reviewBody() }])).toThrow()
+    expect(() => select([{ ...trusted(), body: reviewBody(binding(), { sha: BASE, verdict: 'clean' }) }])).toThrow()
+    expect(() => selectCurrentTrustedReview([trusted()], { complete: false, operators: ['operator'], sha: SHA, baseSha: BASE, scopeDigest: SCOPE })).toThrow(/complete/i)
+  })
+
+  test('an edited body no longer matches its previously computed source binding', () => {
+    const comment = trusted()
+    const selected = select([comment])
+    expect(() => select([{ ...comment, body: comment.body + '\nEdited after qualification.' }], { source: selected.source })).toThrow(/changed|source/i)
   })
 })
 
