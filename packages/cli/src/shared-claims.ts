@@ -1884,7 +1884,7 @@ function statusTransition(receipt: OperationReceipt, before: TaskRecord | null, 
     } else {
         if (!before || before.state === 'completed') throw Error('missing original task');
         const changes: Record<string, string[]> = {
-            start: ['state'], stop: ['state', 'stopProof'], block: ['state', 'stopProof'],
+            start: before.schemaVersion === 2 ? ['state', 'stopProof'] : ['state'], stop: ['state', 'stopProof'], block: ['state', 'stopProof'],
             checkpoint: ['checkpoint', 'recovery'], recovery: ['recovery'], receipt: [],
             'effect-send': ['recovery'], 'accept-scope': ['acceptedScopes'], complete: ['state', 'stopProof', 'acceptedScopes'],
             handoff: ['machineId', 'installationId', 'sessionId', 'generation', 'ownerToken', 'state', 'stopProof', 'recovery'],
@@ -1903,7 +1903,7 @@ function statusTransition(receipt: OperationReceipt, before: TaskRecord | null, 
                 !after.recovery || after.recovery.generation !== after.generation)
                 throw Error('unverified handoff');
         } else if (canonical(ownerOf(before)) !== canonical(ownerOf(after)) || before.generation !== after.generation) throw Error('unexpected owner change');
-        if (kind === 'start' && (before.state !== 'claimed' || after.state !== 'running') ||
+        if (kind === 'start' && ((before.state !== 'claimed' && !(before.schemaVersion === 2 && before.state === 'recovery-queued')) || after.state !== 'running' || before.schemaVersion === 2 && after.stopProof !== null) ||
             kind === 'stop' && (after.state !== 'stopped' || !after.stopProof) || kind === 'block' && after.state !== 'blocked' ||
             kind === 'complete' && (after.state !== 'completed' || !after.stopProof) ||
             kind === 'checkpoint' && (!after.checkpoint || canonical(after.checkpoint) !== canonical(after.recovery?.checkpoint ?? null)))
@@ -1929,11 +1929,15 @@ export async function readSharedStatus(target: CoordinationTarget, allowedRepos:
                 throw error;
             }
         }
-        // Every provider operation counts; this reader cannot mutate remote state.
+        // Every distinct provider operation counts; repeated immutable pins reuse the
+        // first bounded result. This reader cannot mutate remote state.
+        const reads = new Map<string, Promise<string | null>>(), comparisons = new Map<string, Promise<'ahead' | 'identical' | 'behind' | 'diverged'>>(), histories = new Map<string, Promise<CoordinationHistoryPage>>();
         const provider: CoordinationProvider = {
-            branch: async t => (observedBranch = await request(() => source.branch(t))), read: (t, h, p) => request(() => source.read(t, h, p)),
-            compare: (t, a, b) => request(() => source.compare(t, a, b)),
+            branch: async t => (observedBranch = await request(() => source.branch(t))),
+            read: (t, h, p) => { const key = `${h}\n${p}`; let value = reads.get(key); if (!value) { value = request(() => source.read(t, h, p)); reads.set(key, value); } return value; },
+            compare: (t, a, b) => { const key = `${a}\n${b}`; let value = comparisons.get(key); if (!value) { value = request(() => source.compare(t, a, b)); comparisons.set(key, value); } return value; },
             commit: async () => { throw Error('status is read-only'); },
+            ...(source.history ? { history: (t: CoordinationTarget, head: string, cursor: string | null, first: number) => { const key = `${head}\n${cursor ?? ''}\n${first}`; let value = histories.get(key); if (!value) { value = request(() => source.history!(t, head, cursor, first)); histories.set(key, value); } return value; } } : {}),
         };
         const viewTarget = { ...target, provider }, total = { bytes: 0 };
         let snapshot: CoordinationSnapshot;
@@ -1991,10 +1995,10 @@ export async function readSharedStatus(target: CoordinationTarget, allowedRepos:
                             if (await pinnedJson(viewTarget, nextHead, operationPath(operationId), 32 * 1024, total) !== null) throw Error('group receipt was not introduced at this commit');
                             const retained = await pinnedJson(viewTarget, snapshot.head, operationPath(operationId), 32 * 1024, total);
                             if (canonical(receipt) !== canonical(retained)) throw Error('history group receipt changed');
-                            const groupRows = await validateGroupReceipt(viewTarget, await at(commit.oid), receipt, total);
+                            const groupSnapshot = await at(commit.oid), groupRows = await validateGroupReceipt(viewTarget, groupSnapshot, receipt, total);
                             for (const transition of groupRows) {
-                                const after = await taskAt(commit.oid, transition.after.taskKey), before = await taskAt(nextHead, transition.before.taskKey);
-                                if (!after || !before || canonical(after) !== canonical(transition.after) || canonical(before) !== canonical(transition.before)) throw Error('history group member task mismatch');
+                                const after = groupSnapshot.tasks[transition.after.taskKey], before = transition.before;
+                                if (!after || canonical(after) !== canonical(transition.after)) throw Error('history group member task mismatch');
                                 if (!allowedRepos.includes(after.repo)) continue;
                                 if (!expected.has(after.taskKey)) {
                                     const current = await taskAt(snapshot.head, after.taskKey);
@@ -2013,14 +2017,14 @@ export async function readSharedStatus(target: CoordinationTarget, allowedRepos:
                         const receipt = parse<OperationReceipt>(rawReceipt, receiptSchema, 'history receipt', 32 * 1024);
                         if (receipt.operationId !== operationId || receipt.previousHead !== nextHead) throw Error('history receipt parent mismatch');
                         // Scope discovery uses the pinned task only; foreign tasks produce no detail or counts.
-                        const rawTask = parse<TaskRecord>(await pinnedJson(viewTarget, commit.oid, taskPath(receipt.taskKey), 256 * 1024, total), recordSchema, 'history task');
-                        if (!allowedRepos.includes(rawTask.repo)) continue;
+                        const after = await taskAt(commit.oid, receipt.taskKey);
+                        if (!after) throw Error('history task missing');
+                        if (!allowedRepos.includes(after.repo)) continue;
                         if (await pinnedJson(viewTarget, nextHead, operationPath(operationId), 32 * 1024, total) !== null) throw Error('receipt was not introduced at this commit');
                         // Immutable receipts must still have exactly their original closed value at the pinned head.
                         const retained = await pinnedJson(viewTarget, snapshot.head, operationPath(operationId), 32 * 1024, total);
                         if (canonical(receipt) !== canonical(retained)) throw Error('history receipt changed');
-                        const after = await taskAt(commit.oid, receipt.taskKey), before = await taskAt(nextHead, receipt.taskKey);
-                        if (!after) throw Error('history task missing');
+                        const before = await taskAt(nextHead, receipt.taskKey);
                         if (!expected.has(receipt.taskKey)) {
                             const current = await taskAt(snapshot.head, receipt.taskKey);
                             if (!current || !allowedRepos.includes(current.repo)) throw Error('current retained task missing');

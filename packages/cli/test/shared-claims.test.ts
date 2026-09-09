@@ -592,7 +592,7 @@ test('new reader retains v1 state while the exact pre-amendment reader refuses v
 });
 
 test('historical group inspection survives a verified later child handoff and exposes initial plus current facts', async () => {
-    const f = await stoppedGroupFixture(), recovered = await recoverStoppedGroup({ machine: f.machine, session: f.session, request: f.request });
+    const f = await stoppedGroupFixture(false), recovered = await recoverStoppedGroup({ machine: f.machine, session: f.session, request: f.request });
     if (recovered.kind !== 'owned') throw Error(recovered.reason);
     expect((await transitionSharedTask({ claim: recovered.parent, operationId: randomUUID(), transition: { kind: 'start' } })).kind).toBe('owned');
     const child = recovered.children[0]!, original = f.prepared.find(row => row.claim.taskKey === child.taskKey)!;
@@ -626,6 +626,9 @@ test('historical group inspection survives a verified later child handoff and ex
     expect(second.kind).toBe('owned');
     if (second.kind !== 'owned') throw Error(second.reason);
     expect(second.children.find(current => current.taskKey === child.taskKey)).toMatchObject({ generation: handed.claim.generation + 1, machineId: receiver.id });
+    const status = await readSharedStatus(f.target, ['acme/app']);
+    expect(status.history?.coverage).toBe('complete');
+    for (const row of status.tasks) expect(row.history.events.filter(event => event.kind === 'group-succession')).toHaveLength(2);
 });
 
 test.each(['parent-binding', 'run', 'broken-link'] as const)('a second succession refuses a forged %s lineage even when the prior receipt has the same task key', async mode => {
