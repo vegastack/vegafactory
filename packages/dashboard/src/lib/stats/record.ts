@@ -1,8 +1,8 @@
-import { RECORD_FIELDS } from '../../../../cli/src/stats/record'
+import { RECORD_FIELDS } from '../../../../cli/src/stats/record.js'
 // Production event validation is shared with transport and survives the dashboard bundle.
-export { readExport, validateExport } from '../../../../cli/src/stats/privacy'
-export type { ExportMeasurement } from '../../../../cli/src/stats/types'
-import { monthToken } from './month'
+export { readExport, validateExport } from '../../../../cli/src/stats/privacy.js'
+export type { ExportMeasurement } from '../../../../cli/src/stats/types.js'
+import { monthToken } from './month.js'
 
 // The run record #121 writes, re-declared here rather than imported: the dashboard is fetched
 // as its own tarball onto machines that have no CLI source tree. Every field but `ts`, `repo`
@@ -133,4 +133,4 @@ export function readRecords(body: string, source: string): { records: StatsRecor
 
 // Both package consumers use the same versioned definitions; release packaging
 // verifies this shared code is bundled rather than requiring a sibling checkout.
-export { METRIC_DICTIONARY, summarizeMeasured, summarizeExecutions } from '../../../../cli/src/stats/metrics'
+export { METRIC_DICTIONARY, summarizeMeasured, summarizeExecutions } from '../../../../cli/src/stats/metrics.js'
