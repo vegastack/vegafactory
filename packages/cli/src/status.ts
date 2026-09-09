@@ -46,6 +46,7 @@ export interface WorkflowStateSnapshot {
 
 export interface RepoStatus {
   shared?: SharedStatus
+  recovery?: SharedRecoveryProjection[]
   workflow?: WorkflowStateSnapshot
   repo: string
   dispatch: 'off' | 'local'
@@ -53,6 +54,21 @@ export interface RepoStatus {
   worktrees: WorktreeRow[]
   runs: RunSummary[]
   snapshot?: { state: string; sourceCommit: string | null; policyDigest: string | null; validatedAt: string | null; ageSeconds: number | null; reason: string | null; machine?: Awaited<ReturnType<typeof getPolicySnapshot>>['machine'] }
+}
+
+export interface SharedRecoveryProjection {taskKey:string|null;issue:number|null;state:string;action:'recover'|'wait'|'refuse';reason:string}
+// Shared state is durable ownership, not process liveness. Project only states
+// explicitly established by the validated reader and its succession history.
+export function projectSharedRecovery(shared:SharedStatus|undefined):SharedRecoveryProjection[]{
+ if(!shared)return[]
+ if(shared.refusal)return[{taskKey:null,issue:null,state:'unavailable',action:'refuse',reason:shared.refusal}]
+ const rows:SharedRecoveryProjection[]=[]
+ for(const task of shared.tasks){
+  if(task.state==='recovery-queued')rows.push({taskKey:task.taskKey,issue:task.issue,state:task.state,action:'wait',reason:'parent must start before this recovered child'})
+  else if(task.state==='claimed'&&task.history.events.some(event=>'kind'in event&&event.kind==='group-succession'))rows.push({taskKey:task.taskKey,issue:task.issue,state:task.state,action:'recover',reason:'group succession verified; parent lifecycle checks required'})
+  else if(['stopped','blocked'].includes(task.state))rows.push({taskKey:task.taskKey,issue:task.issue,state:task.state,action:'wait',reason:'verified complete recovery predicates and current succession are required'})
+ }
+ return rows
 }
 
 export interface StatusReport {
@@ -137,6 +153,7 @@ export function buildStatus(input: {
     return {
       repo: entry.repo,
       ...(entry.shared ? { shared: entry.shared } : {}),
+      ...(entry.shared ? { recovery: projectSharedRecovery(entry.shared) } : {}),
       dispatch: entry.policy.dispatch,
       ...(entry.snapshot ? { snapshot: entry.snapshot } : {}),
       workflow,
@@ -166,6 +183,7 @@ export function renderStatus(report: StatusReport): string {
   for (const repo of report.repos) {
     lines.push(`${repo.repo} — dispatch: ${repo.dispatch}`)
     if (repo.shared) lines.push(`  ownership: ${repo.shared.refusal ?? `${repo.shared.tasks.length} recorded tasks at ${repo.shared.head}`}; observed state is not liveness proof`)
+    for(const recovery of repo.recovery??[])lines.push(`  recovery #${recovery.issue??'?'} ${recovery.state} — ${recovery.action}: ${recovery.reason}`)
     if (repo.snapshot) lines.push(`  policy: ${repo.snapshot.state} · ${repo.snapshot.sourceCommit ?? 'no validated source'}${repo.snapshot.reason ? ` · ${repo.snapshot.reason}` : ''}`)
     lines.push(`  board: ${repo.board.needsPlan} needs-plan · ${repo.board.ready} ready · ${repo.board.working} working · ${repo.board.forOperator} for-operator`)
     if (repo.workflow) lines.push(`  workflow: ${repo.workflow.complete ? 'complete' : 'incomplete'} · observed ${repo.workflow.observedAt}${repo.workflow.blocks.length ? ' · ' + repo.workflow.blocks.join('; ') : ''}`)

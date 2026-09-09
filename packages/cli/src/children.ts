@@ -223,6 +223,27 @@ export interface ChildrenDependencies {
   processDeps?: Partial<ExecuteDeps>
 }
 export interface ChildrenOutcome { results: ChildResult[]; blocked: Array<{ issue: number; reason: string }>; plan: ChildrenRecord; wrote: boolean }
+
+type RecoveredStartMember={task:TaskRecord;claim:SharedClaim;startOperationId:string}
+// Succession transfers reservations; it does not launch anything. Once the
+// exact current set has been reconstructed, start the parent first, then only
+// queued children without an already accepted historical join.
+export async function startRecoveredGroupMembers(input:{parent:RecoveredStartMember;children:RecoveredStartMember[]},start:(input:{claim:SharedClaim;operationId:string;transition:{kind:'start'}})=>Promise<import('./shared-claims.ts').SharedClaimResult>=transitionSharedTask):Promise<{parent:SharedClaim;children:SharedClaim[];acceptedRunIds:string[]}>{
+ const parent=input.parent,operation=parent.task.schemaVersion===2?parent.task.successionOperationId:null
+ const binding=(task:TaskRecord)=>({taskKey:task.taskKey,runId:task.runId,generation:task.generation,ownerToken:task.ownerToken,machineId:task.machineId,installationId:task.installationId,sessionId:task.sessionId})
+ const claimBinding=(claim:SharedClaim)=>({taskKey:claim.taskKey,runId:claim.runId,generation:claim.generation,ownerToken:claim.ownerToken,machineId:claim.machineId,installationId:claim.installationId,sessionId:claim.sessionId})
+ if(parent.task.schemaVersion!==2||parent.task.state!=='claimed'||parent.task.parentTaskKey!==null||!operation||!same(binding(parent.task),claimBinding(parent.claim)))throw Error('recovered parent is not an exact claimed successor')
+ if(new Set(input.children.map(row=>row.task.taskKey)).size!==input.children.length||new Set(input.children.map(row=>row.task.runId)).size!==input.children.length)throw Error('recovered children are not unique')
+ const acceptedRunIds=[...new Set((parent.task.recovery?.joins??[]).filter(join=>join.state==='accepted').map(join=>join.childRunId))]
+ if(acceptedRunIds.some(runId=>!input.children.some(row=>row.task.runId===runId)))throw Error('accepted recovered join names a missing child')
+ for(const row of input.children)if(row.task.schemaVersion!==2||row.task.state!=='recovery-queued'||row.task.parentTaskKey!==parent.task.taskKey||row.task.successionOperationId!==operation||!row.task.parentBinding||!same(binding(row.task),claimBinding(row.claim)))throw Error('recovered child is not an exact recovery-queued successor')
+ const outstanding=input.children.filter(row=>!acceptedRunIds.includes(row.task.runId))
+ const parentStarted=await start({claim:parent.claim,operationId:parent.startOperationId,transition:{kind:'start'}})
+ if(parentStarted.kind!=='owned')throw Error('recovered parent start not acknowledged: '+parentStarted.reason)
+ const children:SharedClaim[]=[]
+ for(const row of outstanding){const started=await start({claim:row.claim,operationId:row.startOperationId,transition:{kind:'start'}});if(started.kind!=='owned')throw Error('recovery-queued child start not acknowledged: '+started.reason);children.push(started.claim)}
+ return{parent:parentStarted.claim,children,acceptedRunIds}
+}
 async function verifyParent(record: ChildrenRecord, config: FactoryConfig, unchangedSource = false): Promise<void> {
   const parent = await readRun(runsRoot(config.home), record.parentRunId)
   validateRecordedSource(parent, record)
@@ -1119,7 +1140,7 @@ async function verifyAcceptedScopePayload(child:RunRecord,payload:Extract<Recove
 
 export interface RecoveredChildrenContext {
  record:ChildrenRecord
- existing:Array<{task:TaskRecord;stateCommit:string;checkpoint:NonNullable<RunRecord['checkpoint']>}>
+ existing:Array<{task:TaskRecord;stateCommit:string;checkpoint:NonNullable<RunRecord['checkpoint']>;authorityRequest:RunAuthorityRequest;checkpointRequest:NonNullable<import('./checkpoints.ts').CheckpointIntent['approvalRequest']>}>
  newPreparations:number[]
  currentTitles:Array<{issue:number;title:string}>
 }
@@ -1159,7 +1180,7 @@ export async function reconstructChildrenContext(input:{parent:RunRecord;materia
   if(!row)throw Error('group succession origin parent unavailable')
   original=row.before
  }
- const known:Array<{group:ChildGroup;task:TaskRecord;stateCommit:string;title:string}>=[],fresh:Array<{group:ChildGroup;title:string}>=[]
+ const known:Array<{group:ChildGroup;task:TaskRecord;stateCommit:string;title:string;authorityRequest:RunAuthorityRequest;checkpointRequest:NonNullable<import('./checkpoints.ts').CheckpointIntent['approvalRequest']>}>=[],fresh:Array<{group:ChildGroup;title:string}>=[]
  for(const group of groups){
   const issue=Number(group.members[0]!.slice(1)),subject=await boundedGhJson<{number:number;node_id:string;title:string}>(gh,['api',`repos/${parent.repo}/issues/${issue}`],readBudget())
   if(subject.number!==issue||typeof subject.title!=='string'||!subject.title.trim()||subject.title.length>512)throw Error('current child identity unavailable')
@@ -1173,10 +1194,12 @@ export async function reconstructChildrenContext(input:{parent:RunRecord;materia
   if(retained.kind==='invalid-or-unavailable')throw Error('child retained state unavailable; absence cannot be inferred')
   const progressed=succession?.currentMembers.find(row=>row.current.taskKey===key)
   if(progressed&&!same(progressed.current,retained.task))throw Error('current child differs from verified succession history')
-  const source=progressed?{task:progressed.current,stateCommit:retained.head}:historical[0]??{task:retained.task,stateCommit:retained.head},child=source.task
+  const verified=historical[0],checkpointRequest=verified?.checkpointRequest
+  if(!verified||!checkpointRequest)throw Error('exact child checkpoint request unavailable')
+  const source=progressed?{...verified,task:progressed.current,stateCommit:retained.head}:verified,child=source.task
   if(child.repo!==parent.repo||child.issue!==issue||child.parentTaskKey!==original.taskKey||!child.parentBinding||!same(child.paths,group.files)||child.resources.length||!child.checkpoint||!child.recovery||!same(child.checkpoint,child.recovery.checkpoint))throw Error('original child binding or exact checkpoint unavailable')
   if(retained.task.runId!==child.runId||retained.task.generation!==child.generation||retained.task.ownerToken!==child.ownerToken)throw Error('child now has another owner; historical facts cannot authorize recovery')
-  known.push({group,task:child,stateCommit:source.stateCommit,title:subject.title})
+  known.push({group,task:child,stateCommit:source.stateCommit,title:subject.title,authorityRequest:source.authorityRequest,checkpointRequest})
  }
  const bases=[...new Set([...known.map(row=>row.task.checkpoint!.baseSha),...material.task.recovery!.children.map(row=>row.baseSha)])]
  if(bases.length>1)throw Error('original child base is ambiguous')
@@ -1213,14 +1236,14 @@ export async function reconstructChildrenContext(input:{parent:RunRecord;materia
  }
  if(retainedJoins.some(join=>join.state==='accepted')&&explainedHead!==parent.headSha)throw Error('recovered parent head is not fully explained by ordered accepted joins')
  const record=parseChildrenRecord({schemaVersion:2,parentRunId:parent.runId,parentIssue:parent.issue,repo:parent.repo,parentBranch:parent.branch,baseSha,parentBinding:original,concurrency:Math.min(3,config.subagents.concurrent,groups.length),groups,children})
- return {record,existing:known.map(row=>({task:row.task,stateCommit:row.stateCommit,checkpoint:row.task.checkpoint!})),newPreparations:fresh.map(row=>Number(row.group.members[0]!.slice(1))),currentTitles:[...known.map(row=>({issue:row.task.issue,title:row.title})),...fresh.map(row=>({issue:Number(row.group.members[0]!.slice(1)),title:row.title}))]}
+ return {record,existing:known.map(row=>({task:row.task,stateCommit:row.stateCommit,checkpoint:row.task.checkpoint!,authorityRequest:row.authorityRequest,checkpointRequest:row.checkpointRequest})),newPreparations:fresh.map(row=>Number(row.group.members[0]!.slice(1))),currentTitles:[...known.map(row=>({issue:row.task.issue,title:row.title})),...fresh.map(row=>({issue:Number(row.group.members[0]!.slice(1)),title:row.title}))]}
 }
 export async function installRecoveredChildrenContext(input:{parent:RunRecord;material:import('./dispatch.ts').RemoteRecoveryMaterial;config:FactoryConfig}):Promise<RecoveredChildrenContext> {
   const reconstructed=await reconstructChildrenContext(input),root=runsRoot(input.config.home)
   await currentParentContext(input.parent,reconstructed.record,input.config)
  for(const child of reconstructed.existing){
   const run=await readRun(root,child.task.runId)
-  if(run.repo!==child.task.repo||run.issue!==child.task.issue||run.parent!==input.parent.issue||!same(run.execution,child.task.recovery?.execution)||await realpath(run.checkout)!==run.checkout||run.headSha!==child.checkpoint.headSha||run.branch!==child.checkpoint.branch||run.baseSha!==child.checkpoint.baseSha||!same(run.approvalBindings,child.task.approvalBindings)||run.taskKey.scopeDigest!==child.task.scopeDigest)throw Error('runtime owner has not reconstructed original child source')
+  if(run.repo!==child.task.repo||run.issue!==child.task.issue||run.parent!==input.parent.issue||!same(run.execution,child.task.recovery?.execution)||await realpath(run.checkout)!==run.checkout||run.headSha!==child.checkpoint.headSha||run.branch!==child.checkpoint.branch||run.baseSha!==child.checkpoint.baseSha||!same(run.approvalBindings,child.task.approvalBindings)||run.taskKey.scopeDigest!==child.task.scopeDigest||!same(run.authorityRequest,child.authorityRequest)||!same(run.checkpointIntent?.approvalRequest,child.checkpointRequest))throw Error('runtime owner has not reconstructed original child source and checkpoint authority')
   reconstructed.record.children.find(row=>row.runId===run.runId)!.path=run.checkout
  }
  const restoreAcceptedJoins=async()=>{

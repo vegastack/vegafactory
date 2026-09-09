@@ -1095,6 +1095,41 @@ test('144 remote-only recovery reads exact Git receipts, fresh authority and sou
  f.comments[1]!.user.login='mk';await f.tamperCheckpoint()
  const missing=await inspectRemoteRecovery({repo:'acme/app',taskKey:f.claim.taskKey,config:f.config},f.transport);expect(missing.blocks.join()).toContain('checkpoint unavailable')
 },60000)
+
+test('144 stopped-group controller resolves an ambiguous succession through exact current receipt readback',async()=>{
+ const dispatch=await import('../src/dispatch.ts'),{randomUUID}=await import('node:crypto'),operationId=randomUUID(),parentKey='a'.repeat(64),childKey='b'.repeat(64)
+ const binding=(taskKey:string,runId:string,generation:number,ownerToken:string)=>({taskKey,runId,generation,ownerToken,machineId:'receiver',installationId:'11111111-1111-4111-8111-111111111111',sessionId:'22222222-2222-4222-8222-222222222222'})
+ const beforeParent=binding(parentKey,'33333333-3333-4333-8333-333333333333',1,'44444444-4444-4444-8444-444444444444')
+ const beforeChild=binding(childKey,'55555555-5555-4555-8555-555555555555',1,'66666666-6666-4666-8666-666666666666')
+ const afterParent=binding(parentKey,beforeParent.runId,2,'77777777-7777-4777-8777-777777777777')
+ const afterChild=binding(childKey,beforeChild.runId,2,'88888888-8888-4888-8888-888888888888')
+ const task=(value:any,parentTaskKey:string|null,state:'claimed'|'recovery-queued')=>({schemaVersion:2,...value,parentTaskKey,state,successionOperationId:operationId})
+ const currentParent=task(afterParent,null,'claimed'),currentChild=task(afterChild,parentKey,'recovery-queued'),head='9'.repeat(40)
+ const request={schemaVersion:1 as const,kind:'recover-stopped-group' as const,operationId,expectedHead:'8'.repeat(40),parentTaskKey:parentKey,groupPlan:{repo:'acme/app',issue:144,kind:'plan' as const,artifactId:'P',rev:13,digest:'c'.repeat(64)},groupsDigest:'d'.repeat(64),members:[{expected:beforeParent,candidate:{issue:144}},{expected:beforeChild,candidate:{issue:145}}] as any[]}
+ const reference={kind:'state-receipt' as const,operationId,commitSha:head,blobSha256:'e'.repeat(64)},receipt={schemaVersion:2 as const,type:'group-succession' as const,operationId,parentTaskKey:parentKey,members:[{before:beforeParent,after:afterParent},{before:beforeChild,after:afterChild}]}
+ let recoveries=0,inspections=0
+ const receiver={id:'receiver',installationId:'11111111-1111-4111-8111-111111111111'} as any,session={target:{},machineId:'receiver',installationId:receiver.installationId,sessionId:'22222222-2222-4222-8222-222222222222'} as any
+ const result=await dispatch.recoverVerifiedStoppedGroup({evaluation:{},machine:receiver,session,evidence:[]},{
+  evaluate:()=>({action:'recover-stopped-group',reason:'verified-complete-stopped-group',request}),
+  recover:async()=>{recoveries++;return{kind:'ambiguous',reason:'lost response'}},
+  read:async()=>({head,tasks:{[parentKey]:currentParent,[childKey]:currentChild}} as any),
+  inspect:async(_target,value)=>{inspections++;expect(value).toEqual({operationId,parent:afterParent});return{kind:'verified',reference,receipt,currentMembers:[{initial:currentParent,current:currentParent},{initial:currentChild,current:currentChild}]} as any},
+ })
+ expect(recoveries).toBe(1);expect(inspections).toBe(1)
+ expect(result).toMatchObject({kind:'owned',lostResponse:true,reference,parent:afterParent,children:[afterChild]})
+ const changed=structuredClone(currentChild);changed.ownerToken=randomUUID()
+ await expect(dispatch.recoverVerifiedStoppedGroup({evaluation:{},machine:receiver,session,evidence:[]},{evaluate:()=>({action:'recover-stopped-group',reason:'verified-complete-stopped-group',request}),recover:async()=>({kind:'ambiguous',reason:'lost response'}),read:async()=>({head,tasks:{[parentKey]:currentParent,[childKey]:changed}} as any),inspect:async()=>({kind:'verified',reference,receipt,currentMembers:[{initial:currentParent,current:currentParent},{initial:currentChild,current:currentChild}]} as any)})).rejects.toThrow('current member')
+})
+
+test('144 status projects recovery-queued, launch-ready and refusal states without inferring liveness',async()=>{
+ const {projectSharedRecovery}=await import('../src/status.ts'),head='a'.repeat(40),history=(kind:string)=>({coverage:'complete',events:[{kind,generation:2,machineId:'receiver',previousMachineId:'old',sourceCommit:head,observedAt:'2026-09-09T00:00:00Z'}]})
+ const task=(taskKey:string,issue:number,state:string,parentTaskKey:string|null)=>({taskKey,repo:'acme/app',issue,state,machineId:'receiver',generation:2,parentTaskKey,sourceCommit:head,originMachineId:'old',lastTransitionObservedAt:'2026-09-09T00:00:00Z',checkpoint:null,history:history('group-succession')})
+ expect(projectSharedRecovery({head,tasks:[task('p',144,'claimed',null),task('c',145,'recovery-queued','p')],refusal:null,history:{coverage:'complete',archiveCoverage:'partial',sourceCommit:head}} as any)).toEqual([
+  {taskKey:'p',issue:144,state:'claimed',action:'recover',reason:'group succession verified; parent lifecycle checks required'},
+  {taskKey:'c',issue:145,state:'recovery-queued',action:'wait',reason:'parent must start before this recovered child'},
+ ])
+ expect(projectSharedRecovery({head:null,tasks:[],refusal:'verified coordination reader unavailable'} as any)).toEqual([{taskKey:null,issue:null,state:'unavailable',action:'refuse',reason:'verified coordination reader unavailable'}])
+})
 test('144 completed terminal identity is never represented as quota or silently reopened',async()=>{
  const {durableRecoverySummary}=await import('../src/dispatch.ts'),{createRun,updateRun,runsRoot,readRun}=await import('../src/runs.ts'),{randomUUID}=await import('node:crypto')
  const f=fixture(),root=runsRoot(f.home),run=await createRun({root,repo:'acme/app',issue:144,parent:null,checkout:f.repos[0]!.path,branch:'',baseSha:'',headSha:null,stage:'implement',harness:'diagnostic',model:'none',effort:'none',execution:null,approvalBindings:[],recordBinding:null,approvalRefs:[],policyDigest:'',claimToken:randomUUID(),startedAt:new Date().toISOString(),taskKey:{repo:'acme/app',issue:144,taskId:'unknown',scopeDigest:''},activeElapsedMs:null,taskOwner:null,agentAccountOwner:null,accountRef:null,waitReason:null,machine:null,sharedClaim:null,checkpoint:null,remoteEffectCoverage:{kind:'unmanaged-possible',reasonCode:'fixture'}})

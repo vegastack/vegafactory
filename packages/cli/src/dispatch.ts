@@ -2361,14 +2361,82 @@ export interface RemoteRecoveryMaterial {
   stateCommit:string;task:import('./shared-claims.ts').TaskRecord
   artifacts:import('./shared-claims.ts').ArtifactRef[];briefBody:string;planBody:string;title:string
   authorityRequest:import('./runs.ts').RunAuthorityRequest
+  checkpointRequest:NonNullable<import('./checkpoints.ts').CheckpointIntent['approvalRequest']>|null
   packet:Record<string,unknown>;evidence:Array<{ref:import('./shared-claims.ts').EvidenceRef;payload:import('./shared-claims.ts').RecoveryEvidencePayload|null}>
-  children:Array<{task:import('./shared-claims.ts').TaskRecord;stateCommit:string}>
+  children:Array<{task:import('./shared-claims.ts').TaskRecord;stateCommit:string;authorityRequest:import('./runs.ts').RunAuthorityRequest;checkpointRequest:NonNullable<import('./checkpoints.ts').CheckpointIntent['approvalRequest']>|null}>
   historicalParents:Array<{task:import('./shared-claims.ts').TaskRecord;stateCommit:string}>
   sourceRefs:Array<{id:string;updatedAt:string;bodySha256:string}>;unavailableContext:Array<'original-private-notes'|'original-learning-context'>;blocks:string[]
+}
+
+type StoppedGroupDecision={action:string;reason:string;request:import('./shared-claims.ts').GroupSuccessionRequest|null}
+type StoppedGroupRecoveryDeps={
+ evaluate:(input:unknown)=>StoppedGroupDecision
+ recover:(input:{machine:EffectiveMachine;session:MachineSession;request:import('./shared-claims.ts').GroupSuccessionRequest})=>Promise<import('./shared-claims.ts').GroupSuccessionResult>
+ read:(target:import('./shared-claims.ts').CoordinationTarget)=>Promise<import('./shared-claims.ts').CoordinationSnapshot>
+ inspect:(target:import('./shared-claims.ts').CoordinationTarget,input:{operationId:string;parent:import('./shared-claims.ts').ParentClaimBinding})=>Promise<import('./shared-claims.ts').GroupSuccessionInspection>
+}
+const groupBinding=(task:Pick<import('./shared-claims.ts').TaskRecord,'taskKey'|'runId'|'generation'|'ownerToken'|'machineId'|'installationId'|'sessionId'>):import('./shared-claims.ts').ParentClaimBinding=>({taskKey:task.taskKey,runId:task.runId,generation:task.generation,ownerToken:task.ownerToken,machineId:task.machineId,installationId:task.installationId,sessionId:task.sessionId})
+const groupCandidate=(task:import('./shared-claims.ts').TaskRecord):VerifiedCandidate=>({host:task.host,repo:task.repo,issue:task.issue,repositoryNodeId:task.repositoryNodeId,issueNodeId:task.issueNodeId,scopeDigest:task.scopeDigest,approvalDigest:task.approvalDigest,approvalBindings:task.approvalBindings,runId:task.runId,stage:task.stage,paths:task.paths,resources:task.resources,independent:task.independent,parentTaskKey:task.parentTaskKey,parentBinding:task.parentBinding??null,approvedTaskIds:task.approvedTaskIds})
+
+// The pure helper decides whether the complete same-head set is admissible. This
+// runtime boundary owns the one succession attempt and treats its response as
+// advisory until the immutable receipt and every current member are read back.
+export async function recoverVerifiedStoppedGroup(input:{evaluation:unknown;machine:EffectiveMachine;session:MachineSession;evidence:Array<{ref:import('./shared-claims.ts').EvidenceRef;payload:import('./shared-claims.ts').RecoveryEvidencePayload|null}>},overrides:Partial<StoppedGroupRecoveryDeps>={}):Promise<
+ | {kind:'wait'|'refused'|'busy';reason:string}
+ | {kind:'owned';reason:string;lostResponse:boolean;reference:Extract<import('./shared-claims.ts').EvidenceRef,{kind:'state-receipt'}>;parent:import('./shared-claims.ts').ParentClaimBinding;children:import('./shared-claims.ts').ParentClaimBinding[];inspection:Extract<import('./shared-claims.ts').GroupSuccessionInspection,{kind:'verified'}>}
+>{
+ const owner=await import('./shared-claims.ts'),core=await recoveryScript(),deps:StoppedGroupRecoveryDeps={evaluate:value=>core.evaluateStoppedGroupRecovery(value) as StoppedGroupDecision,recover:owner.recoverStoppedGroup,read:owner.readCoordination,inspect:owner.inspectGroupSuccession,...overrides}
+ const decision=deps.evaluate(structuredClone(input.evaluation)),request=decision.request
+ if(decision.action!=='recover-stopped-group'||!request)return{kind:decision.action==='wait'?'wait':'refused',reason:decision.reason}
+ const target=input.session.target,members=new Map(request.members.map(row=>[row.expected.taskKey,row])),evidence=new Map(input.evidence.map(row=>[canonicalWire(row.ref),row]))
+ if(members.size!==request.members.length||input.machine.id!==input.session.machineId||input.machine.installationId!==input.session.installationId)throw Error('stopped group receiver identity differs')
+ const previous={verifyCandidate:target.verifyCandidate,verifyTransition:target.verifyTransition,verifyEvidence:target.verifyEvidence,verifyGroupSuccession:target.verifyGroupSuccession}
+ try{
+  target.verifyCandidate=async(candidate,machine,session)=>{const expected=request.members.find(row=>row.candidate.runId===candidate.runId);if(!expected||canonicalWire(expected.candidate)!==canonicalWire(candidate)||canonicalWire(machine)!==canonicalWire(input.machine)||session.machineId!==input.session.machineId||session.installationId!==input.session.installationId||session.sessionId!==input.session.sessionId)throw Error('stopped group candidate changed')}
+  target.verifyTransition=async(task,transition)=>{const expected=members.get(task.taskKey);if(!expected||transition.kind!=='stop'||canonicalWire(expected.expected)!==canonicalWire(groupBinding(task))||canonicalWire(task.stopProof)!==canonicalWire(transition.stopProof))throw Error('stopped group stop verification changed')}
+  target.verifyEvidence=async(ref,payload)=>{const expected=evidence.get(canonicalWire(ref));if(!expected||canonicalWire(expected.payload)!==canonicalWire(payload))throw Error('stopped group evidence changed')}
+  target.verifyGroupSuccession=async value=>{if(value.parent.taskKey!==request.parentTaskKey||canonicalWire(value.groupPlan)!==canonicalWire(request.groupPlan)||value.groupsDigest!==request.groupsDigest||canonicalWire(value.machine)!==canonicalWire(input.machine)||value.session.sessionId!==input.session.sessionId||value.members.length!==request.members.length)throw Error('stopped group verifier input changed');for(const row of value.members){const expected=members.get(row.task.taskKey);if(!expected||canonicalWire(groupBinding(row.task))!==canonicalWire(expected.expected)||canonicalWire(row.candidate)!==canonicalWire(expected.candidate))throw Error('stopped group verifier member changed')}return{maxChildren:Math.min(3,request.members.length-1)}}
+  const attempted=await deps.recover({machine:input.machine,session:input.session,request})
+  if(attempted.kind==='busy'||attempted.kind==='refused')return{kind:attempted.kind,reason:attempted.reason}
+  const snapshot=await deps.read(target),parentTask=snapshot.tasks[request.parentTaskKey]
+  if(!parentTask)throw Error('stopped group current parent unavailable')
+  const parent=groupBinding(parentTask),inspection=await deps.inspect(target,{operationId:request.operationId,parent})
+  if(inspection.kind!=='verified')throw Error('stopped group receipt/current owner readback unavailable: '+inspection.reason)
+  if(inspection.receipt.operationId!==request.operationId||inspection.receipt.parentTaskKey!==request.parentTaskKey||attempted.kind==='owned'&&canonicalWire(attempted.reference)!==canonicalWire(inspection.reference))throw Error('stopped group receipt identity differs')
+  const receiptAfter=new Map(inspection.receipt.members.map(row=>[row.after.taskKey,row.after])),current=new Map(inspection.currentMembers.map(row=>[row.current.taskKey,row.current]))
+  if(receiptAfter.size!==request.members.length||current.size!==request.members.length||[...members.keys()].some(key=>!receiptAfter.has(key)||!current.has(key)))throw Error('stopped group current member set differs')
+  for(const key of members.keys()){
+   const task=snapshot.tasks[key],seen=current.get(key)!,after=receiptAfter.get(key)!
+   if(!task||canonicalWire(task)!==canonicalWire(seen)||canonicalWire(groupBinding(inspection.currentMembers.find(row=>row.current.taskKey===key)!.initial))!==canonicalWire(after))throw Error('stopped group current member readback differs')
+  }
+  if(parentTask.schemaVersion!==2||parentTask.state!=='claimed'||parentTask.successionOperationId!==request.operationId)throw Error('stopped group current parent is not launch-ready')
+  const children=[...members.keys()].filter(key=>key!==request.parentTaskKey).map(key=>snapshot.tasks[key]!)
+  if(children.some(task=>task.schemaVersion!==2||task.state!=='recovery-queued'||task.parentTaskKey!==request.parentTaskKey||task.successionOperationId!==request.operationId))throw Error('stopped group current child is not recovery-queued')
+  return{kind:'owned',reason:'exact group succession/current owners verified',lostResponse:attempted.kind==='ambiguous',reference:inspection.reference,parent,children:children.map(groupBinding),inspection}
+ }finally{target.verifyCandidate=previous.verifyCandidate;target.verifyTransition=previous.verifyTransition;target.verifyEvidence=previous.verifyEvidence;target.verifyGroupSuccession=previous.verifyGroupSuccession}
 }
 const verifiedRecoveryMaterials=new WeakMap<RemoteRecoveryMaterial,string>()
 export function assertRemoteRecoveryMaterial(material:RemoteRecoveryMaterial):void {
  if(material.blocks.length||verifiedRecoveryMaterials.get(material)!==createHash('sha256').update(canonicalWire(material)).digest('hex'))throw Error('remote recovery material is unverified or changed')
+}
+
+// Discover the exact parent/direct-child set from separately verified remote
+// materials. Each member's full reader must have succeeded; a parent summary is
+// not allowed to vouch for a child's stop, authority, effects, or checkpoint.
+export async function recoverStoppedGroupMaterials(input:{operationId:string;parentTaskKey:string;materials:RemoteRecoveryMaterial[];machine:EffectiveMachine;session:MachineSession},overrides:Partial<StoppedGroupRecoveryDeps>={}):ReturnType<typeof recoverVerifiedStoppedGroup>{
+ for(const material of input.materials)assertRemoteRecoveryMaterial(material)
+ const parentRows=input.materials.filter(row=>row.task.taskKey===input.parentTaskKey&&row.task.parentTaskKey===null)
+ if(parentRows.length!==1)throw Error('unique verified stopped group parent unavailable')
+ const parent=parentRows[0]!,source=fileURLToPath(import.meta.url).endsWith('.ts'),planner=await import(new URL(source?'../../../skills/dev/dev-plan/scripts/plan-lint.mjs':'../skill/dev-plan/scripts/plan-lint.mjs',import.meta.url).href) as typeof import('../../../skills/dev/dev-plan/scripts/plan-lint.mjs')
+ const approvedGroups=planner.parseIndependentGroups(parent.planBody).map(group=>({id:group.id,members:group.members,files:group.files})),groupPlan=parent.artifacts.find(ref=>ref.kind==='plan')
+ if(!approvedGroups.length||!groupPlan)throw Error('approved stopped group declaration unavailable')
+ const children=input.materials.filter(row=>row!==parent)
+ if(children.some(row=>row.task.parentTaskKey!==parent.task.taskKey)||children.length!==approvedGroups.length)throw Error('complete verified stopped group material required')
+ const heads=[...new Set(input.materials.map(row=>row.stateCommit))]
+ if(heads.length!==1)throw Error('stopped group materials do not share one state head')
+ const owner=await import('./shared-claims.ts'),groupsDigest=owner.sha256(owner.canonical(approvedGroups)),verification={source:true,authority:true,checkpoint:true,stop:true,execution:true,effects:true,history:true,launch:true,check:true,join:true}
+ const evaluation={operationId:input.operationId,expectedHead:heads[0],parentTaskKey:input.parentTaskKey,groupPlan,groupsDigest,approvedGroups,members:input.materials.map(material=>({stateCommit:material.stateCommit,task:material.task,expected:groupBinding(material.task),candidate:groupCandidate(material.task),verification}))}
+ return recoverVerifiedStoppedGroup({evaluation,machine:input.machine,session:input.session,evidence:input.materials.flatMap(row=>row.evidence)},overrides)
 }
 const recoveryScript=async()=>{
   const source=fileURLToPath(import.meta.url).endsWith('.ts')
@@ -2400,7 +2468,7 @@ async function recoveryAuthority(task:import('./shared-claims.ts').TaskRecord,co
   sources.push({wire,tuple,subject,comment:direct,record:approval.parseApproval(direct)})
  }
  const consolidated=sources.filter(row=>row.record.kind==='consolidated')
- let checked:any,authorityRequest:import('./runs.ts').RunAuthorityRequest={kind:'native'}
+ let checked:any,authorityRequest:import('./runs.ts').RunAuthorityRequest={kind:'native'},checkpointRequest:NonNullable<import('./checkpoints.ts').CheckpointIntent['approvalRequest']>|null=null
  if(consolidated.length){
   if(consolidated.length!==1||sources.length!==1||!task.checkpoint)throw Error('ambiguous original consolidated recovery context')
   const source=consolidated[0]!,selection=source.record.items.find((row:any)=>row.repo===task.repo&&row.issue===task.issue)
@@ -2412,9 +2480,20 @@ async function recoveryAuthority(task:import('./shared-claims.ts').TaskRecord,co
   // Closed local action name is supplied by the approved record. No latest
   // configuration or guessed checkpoint action replaces a missing grant.
   if(actions.length!==1)throw Error('unique original local recovery action unavailable')
-  const request={parentRepo:task.repo,parentIssue:source.subject.number,approvalBinding:{commentId:source.tuple.commentId,bodySha256:source.tuple.bodySha256},requested:{repo:task.repo,issue:task.issue,taskIds:task.approvedTaskIds,actionId:actions[0].id,branch:task.checkpoint.branch,baseSha:task.checkpoint.baseSha,paths,operation:'edit' as const}}
+  const childActions=source.record.actions.filter((action:any)=>selection.actionIds.includes(action.id)&&action.kind==='child-source-checkpoint')
+  if(task.parentTaskKey!==null&&childActions.length!==1)throw Error('unique original child checkpoint action unavailable')
+  const childAction=childActions[0] as {id:string;repo:string;parent:{issue:number;branch:string;baseSha:string};child:{issue:number;branch:string;ref:string;baseSha:string;taskIds:string[];paths:string[]}}|undefined
+  if(childAction&&(childAction.repo!==task.repo||childAction.child.issue!==task.issue||childAction.child.branch!==task.checkpoint.branch||childAction.child.baseSha!==task.checkpoint.baseSha||canonicalWire(childAction.child.taskIds)!==canonicalWire(task.approvedTaskIds)||canonicalWire(childAction.child.paths)!==canonicalWire(paths)))throw Error('original child checkpoint action differs')
+  const executionBranch=childAction?.parent.branch??task.checkpoint.branch,executionBase=childAction?.parent.baseSha??task.checkpoint.baseSha
+  const request={parentRepo:task.repo,parentIssue:source.subject.number,approvalBinding:{commentId:source.tuple.commentId,bodySha256:source.tuple.bodySha256},requested:{repo:task.repo,issue:task.issue,taskIds:task.approvedTaskIds,actionId:actions[0].id,branch:executionBranch,baseSha:executionBase,paths,operation:'edit' as const}}
   checked=await approval.gatherConsolidatedApproval({...request,operators:policy.operators,readJson})
   authorityRequest={kind:'consolidated',...request}
+  if(childAction){
+   const checkpoint={parentRepo:task.repo,parentIssue:source.subject.number,approvalBinding:request.approvalBinding,requested:{repo:task.repo,issue:task.issue,taskIds:task.approvedTaskIds,actionId:childAction.id,branch:childAction.child.branch,ref:childAction.child.ref,baseSha:childAction.child.baseSha,paths,operation:'checkpoint' as const}}
+   const verified=await approval.gatherConsolidatedApproval({...checkpoint,operators:policy.operators,readJson})
+   if(!verified.ok||verified.blocks.length||verified.action?.kind!=='child-source-checkpoint'||canonicalWire(verified.bindings)!==canonicalWire(checked.bindings)||canonicalWire(verified.approvalBindings)!==canonicalWire(checked.approvalBindings)||canonicalWire(verified.recordBinding??null)!==canonicalWire(checked.recordBinding??null))throw Error('original child checkpoint authority refused')
+   checkpointRequest=checkpoint
+  }
  }else{
   const sourceComments=await approval.readApprovalSources(comments,readJson)
   checked=approval.evaluateApprovals({repo:task.repo,issue:task.issue,brief,comments,sourceComments,operators:policy.operators,requiredScope:'brief+plan'})
@@ -2446,7 +2525,7 @@ async function recoveryAuthority(task:import('./shared-claims.ts').TaskRecord,co
  if(!plan||!briefRef||!planRef)throw Error('original recovery artifacts unavailable')
  const approvalObservedAt=Math.max(...sources.map(row=>Date.parse(row.comment.updated_at)))
  if(!Number.isFinite(approvalObservedAt))throw Error('original approval source timestamp unavailable')
- return {approvalObservedAt,artifacts:checked.bindings as import('./shared-claims.ts').ArtifactRef[],briefBody:brief.body as string,planBody:plan.body as string,title:brief.title as string,authorityRequest,comments,briefRef,planRef,policy}
+ return {approvalObservedAt,artifacts:checked.bindings as import('./shared-claims.ts').ArtifactRef[],briefBody:brief.body as string,planBody:plan.body as string,title:brief.title as string,authorityRequest,checkpointRequest,comments,briefRef,planRef,policy}
 }
 export async function inspectRemoteRecovery(input:{repo:string;taskKey:string;config:FactoryConfig},transport:{target?:import('./shared-claims.ts').CoordinationTarget;gh?:TickDeps['gh'];source?:Parameters<typeof import('./children.ts').fetchChildCheckpoint>[1]}={}):Promise<RemoteRecoveryMaterial> {
  const owner=await import('./shared-claims.ts'),core=await recoveryScript(),target=transport.target??await verifiedSharedTarget(input.repo,input.config),gh=transport.gh??ghText
@@ -2535,7 +2614,7 @@ async function inspectRemoteRecoveryRecord(input:{repo:string;taskKey:string;con
   const progressed=succession?.kind==='verified'?succession.currentMembers.find(row=>row.current.taskKey===child.taskKey):undefined
   const succeeded=!!progressed&&progressed.initial.successionOperationId===successionId&&canonicalWire(progressed.current)===canonicalWire(child)
   if(!child.parentBinding||!direct&&!succeeded){blocks.push('original parent binding or current group succession differs for child '+child.issue);continue}
-  children.push({task:child,stateCommit:current.head})
+  try{const childAuthority=await recoveryAuthority(child,input.config,gh);children.push({task:child,stateCommit:current.head,authorityRequest:childAuthority.authorityRequest,checkpointRequest:childAuthority.checkpointRequest})}catch(error){blocks.push((error as Error).message)}
  }
  const historicalParents:RemoteRecoveryMaterial['historicalParents']=[]
  // Historical readers authenticate the same immutable receipts already checked
@@ -2551,7 +2630,7 @@ async function inspectRemoteRecoveryRecord(input:{repo:string;taskKey:string;con
  for(const accepted of envelope.children){
   if(children.some(row=>row.task.runId===accepted.childRunId))continue
   const retained=await owner.inspectCoordinationTask(target,accepted.childTaskKey)
-  if((retained.kind==='active'||retained.kind==='completed')&&retained.task.runId===accepted.childRunId&&retained.task.generation===accepted.generation&&retained.task.machineId===accepted.machineId&&retained.task.installationId===accepted.installationId&&retained.task.sessionId===accepted.sessionId&&retained.task.scopeDigest===accepted.scopeDigest){children.push({task:retained.task,stateCommit:retained.head});continue}
+  if((retained.kind==='active'||retained.kind==='completed')&&retained.task.runId===accepted.childRunId&&retained.task.generation===accepted.generation&&retained.task.machineId===accepted.machineId&&retained.task.installationId===accepted.installationId&&retained.task.sessionId===accepted.sessionId&&retained.task.scopeDigest===accepted.scopeDigest){const childAuthority=await recoveryAuthority(retained.task,input.config,gh);children.push({task:retained.task,stateCommit:retained.head,authorityRequest:childAuthority.authorityRequest,checkpointRequest:childAuthority.checkpointRequest});continue}
   try{
    if(!historical||accepted.acceptance.evidence.kind!=='state-receipt')throw Error('historical accepted child context requires pinned task reader')
    const ref=accepted.acceptance.evidence,raw=await target.provider.read(target,ref.commitSha,owner.operationPath(ref.operationId))
@@ -2564,7 +2643,7 @@ async function inspectRemoteRecoveryRecord(input:{repo:string;taskKey:string;con
    if(found.kind!=='historical'||found.task.scopeDigest!==accepted.scopeDigest||found.task.checkpoint?.headSha!==accepted.headSha)throw Error('historical accepted child identity differs')
    const originalParent=await historical(historicalTarget,{taskKey:parent.taskKey,expected:parent,evidence:ref,at:'receipt'})
    if(originalParent.kind!=='historical')throw Error('historical original parent unavailable')
-   children.push({task:found.task,stateCommit:found.head});historicalParents.push({task:originalParent.task,stateCommit:originalParent.head})
+   const childAuthority=await recoveryAuthority(found.task,input.config,gh);children.push({task:found.task,stateCommit:found.head,authorityRequest:childAuthority.authorityRequest,checkpointRequest:childAuthority.checkpointRequest});historicalParents.push({task:originalParent.task,stateCommit:originalParent.head})
   }catch(error){blocks.push((error as Error).message)}
  }
  if(task.parentBinding){
@@ -2588,7 +2667,7 @@ async function inspectRemoteRecoveryRecord(input:{repo:string;taskKey:string;con
    for(const joined of envelope.joins){if(joined.state==='accepted'&&joined.parentAfter){const checked=spawnSync('git',['merge-base','--is-ancestor',joined.parentAfter,task.checkpoint.headSha],{cwd:checkout,timeout:3000});if(checked.status!==0)throw Error('accepted parent join is missing from recovered checkpoint')}}
   }catch(error){blocks.push((error as Error).message)}
  }
- const material={stateCommit:inspected.head,task,artifacts:authority.artifacts,briefBody:authority.briefBody,planBody:authority.planBody,title:authority.title,authorityRequest:authority.authorityRequest,packet,evidence,children,historicalParents,unavailableContext:['original-private-notes','original-learning-context'] as RemoteRecoveryMaterial['unavailableContext'],sourceRefs:comments.map(row=>({id:String(row.id),updatedAt:row.updated_at,bodySha256:createHash('sha256').update(row.body).digest('hex')})),blocks:[...new Set(blocks)]}
+ const material={stateCommit:inspected.head,task,artifacts:authority.artifacts,briefBody:authority.briefBody,planBody:authority.planBody,title:authority.title,authorityRequest:authority.authorityRequest,checkpointRequest:authority.checkpointRequest,packet,evidence,children,historicalParents,unavailableContext:['original-private-notes','original-learning-context'] as RemoteRecoveryMaterial['unavailableContext'],sourceRefs:comments.map(row=>({id:String(row.id),updatedAt:row.updated_at,bodySha256:createHash('sha256').update(row.body).digest('hex')})),blocks:[...new Set(blocks)]}
  if(!material.blocks.length)verifiedRecoveryMaterials.set(material,createHash('sha256').update(canonicalWire(material)).digest('hex'))
  return material
 }

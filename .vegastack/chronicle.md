@@ -36,8 +36,8 @@ The project's story, newest first: what got built, why, and how it went — for 
 
 - **What:** Recovery now retains verified completed tasks and reconstructs a receiving run from its exact shared handoff. Unavailable earlier history stays unknown, while accepted child deliveries give reporting a verifiable source. Local lessons carry evidence for adoption and undo.
 - **Why:** Resuming interrupted work must preserve what was actually completed without inventing ownership, history or acceptance.
-- **How it went:** Capture and duplicate replay initially missed the existing hook deadlines. The final source, bundled and learning checks passed with those limits unchanged and left Git indexes untouched. Source is integrated; broad verification, independent review, native admission and vendor qualification remain pending.
-- **Changed:** Task evidence reconciliation · verified continuation and receiving runs · accepted child-delivery evidence · bounded lessons · safe hook replay. Retained parent/child group transfer remains refused under the current approved scope.
+- **How it went:** Capture and duplicate replay initially missed the existing hook deadlines. Later recovery work first stopped when child-owner replay coverage was incomplete; after that owner contract was repaired and independently cleared, focused runtime fixtures proved exact succession readback, parent-first queued starts, accepted-result/join reuse and distinct child checkpoint authority. Broad assembled verification, independent final review, native admission and vendor/platform qualification remain pending.
+- **Changed:** Task evidence reconciliation · verified continuation and receiving runs · one-CAS stopped-group recovery · parent-first unfinished child starts · separate child checkpoint authority · accepted child-delivery evidence · bounded lessons · safe hook replay.
 - **Decisions:** none.
 
 — approved by (kmanojkumar) · built by Codex · branch codex/productionization-133
