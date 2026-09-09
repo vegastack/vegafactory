@@ -133,15 +133,19 @@ async function currentPolicy(config: FactoryConfig, repo: string): Promise<{ pol
   if (!resolved.ok) throw Error('current child policy unavailable')
   return { policy: repoPolicyFromEffective(resolved), devMd, resolved }
 }
-async function currentParentContext(parent:RunRecord,record:ChildrenRecord,config:FactoryConfig):Promise<{claim:SharedClaim;task:TaskRecord;binding:ParentClaimBinding}> {
+async function currentParentContext(parent:RunRecord,record:ChildrenRecord,config:FactoryConfig):Promise<{claim:SharedClaim;task:TaskRecord;binding:ParentClaimBinding;succession:Extract<import('./shared-claims.ts').GroupSuccessionInspection,{kind:'verified'}>|null}> {
   const claim=await sharedClaimForRun(parent,config),binding=parentClaimBinding(claim),snapshot=await readCoordination(claim.target),task=snapshot.tasks[claim.taskKey]
   if(!task||task.runId!==claim.runId||task.generation!==claim.generation||task.ownerToken!==claim.ownerToken||task.machineId!==claim.machineId||task.installationId!==claim.installationId||task.sessionId!==claim.sessionId||task.parentTaskKey!==null)throw Error('current parent coordination owner differs')
+  let succession:Extract<import('./shared-claims.ts').GroupSuccessionInspection,{kind:'verified'}>|null=null
   if(!same(binding,record.parentBinding)){
     if(task.schemaVersion!==2)throw Error('changed parent owner lacks verified group succession')
-    const succession=await inspectGroupSuccession(claim.target,{operationId:task.successionOperationId,parent:binding})
-    if(succession.kind!=='verified')throw Error(succession.reason)
+    const inspected=await inspectGroupSuccession(claim.target,{operationId:task.successionOperationId,parent:binding})
+    if(inspected.kind!=='verified')throw Error(inspected.reason)
+    succession=inspected
+    const current=inspected.currentMembers.find(row=>row.current.taskKey===task.taskKey)
+    if(!current||!same(current.current,task)||current.initial.successionOperationId!==task.successionOperationId)throw Error('current parent succession member differs')
   }
-  return{claim,task,binding}
+  return{claim,task,binding,succession}
 }
 export async function readExecutableChildrenRecord(parent:RunRecord,config:FactoryConfig):Promise<ChildrenRecord>{
   const root=runsRoot(config.home),path=recordPath(root,parent.runId),raw=await readPrivateRunFile(path),parsed=parseChildrenRecord(JSON.parse(raw))
@@ -436,11 +440,12 @@ export async function executeChildren(input: { parent: RunRecord; groups: unknow
   const { parent, config } = input, root = runsRoot(config.home), groups = checkedGroups(input.groups)
   if (!same(await (deps.groups ?? authoritativeGroups)(parent, config), groups)) throw Error('groups file differs from canonical approved parent plan')
   const parentClaim = await (deps.parentClaim ?? sharedClaimForRun)(parent, config)
+  const retainedAccepted=new Map<string,ChildAcceptance>()
   let record = await readOptional<ChildrenRecord>(recordPath(root, parent.runId))
   if (record) {
     record = parseChildrenRecord(record)
     if(record.schemaVersion===1)record=await readExecutableChildrenRecord(parent,config)
-    if(!deps.parentClaim)await currentParentContext(parent,record,config)
+    if(!deps.parentClaim){const context=await currentParentContext(parent,record,config);if(context.succession&&context.task.recovery){const classified=reconcileProgressedChildren(context.succession,context.task.recovery);for(const joined of classified.accepted){const accepted=context.task.recovery.children.find(row=>row.childRunId===joined.childRunId);if(!accepted)throw Error('retained accepted child result unavailable');retainedAccepted.set(accepted.childRunId,accepted)}}}
     if (!same(record.groups, groups) || record.parentBranch !== parent.branch || record.repo !== parent.repo) throw Error('saved original parent launch differs')
   } else {
     clean(parent.checkout)
@@ -493,12 +498,19 @@ export async function executeChildren(input: { parent: RunRecord; groups: unknow
         let prepared: PreparedChild | null = null, shared: SharedClaim | null = null
         try {
           await verify()
+          const retained=child.runId?retainedAccepted.get(child.runId):undefined
+          if(retained){
+            const run=await readRun(root,retained.childRunId)
+            if(!child.scopeDigest||run.runId!==retained.childRunId||run.repo!==record!.repo||run.issue!==child.issue||run.branch!==child.branch||run.baseSha!==retained.baseSha||run.headSha!==retained.headSha||run.taskKey.scopeDigest!==retained.scopeDigest||!same(run.checkpoint,retained.checkpoint)||!run.machine)throw Error('retained accepted child runtime differs')
+            const acceptedResult:ChildResult={schemaVersion:1,runId:run.runId,repo:run.repo,issue:run.issue,baseSha:retained.baseSha,headSha:retained.headSha,branch:run.branch,scopeDigest:retained.scopeDigest,terminationCause:'succeeded',acceptance:{ok:true,command:child.acceptanceCommand,sha:retained.headSha},noChange:retained.noChange,machine:run.machine,sharedGeneration:retained.generation,checkpoint:retained.checkpoint}
+            const saved=await readOptional<ChildResult>(resultPath(root,run.runId));if(saved&&!same(saved,acceptedResult))throw Error('retained accepted child result differs');if(!saved)await atomicRunFile(resultPath(root,run.runId),acceptedResult);result.results.push(acceptedResult);continue
+          }
           if (child.runId) {
             const run = await readRun(root, child.runId)
             if (run.state === 'terminal') {
               if (run.terminationCause !== 'succeeded') throw Error('terminal child failed; execution will not be replayed')
               await (deps.verifyChild ?? verifyDispatchRunAuthority)(run, config)
-              if(run.parent!==null&&run.authorityRequest?.kind==='consolidated'&&(!run.checkpoint||run.checkpoint.headSha!==run.headSha))await (await import('./checkpoints.ts')).flushRunCheckpoint(run,config)
+              if(run.parent!==null&&run.authorityRequest?.kind==='consolidated'&&(!run.checkpoint||run.checkpoint.headSha!==run.headSha))await controlled(async()=>{await (await import('./checkpoints.ts')).flushRunCheckpoint(run,config)})
               const checkpointed=await readRun(root,run.runId)
               const saved = await readOptional<ChildResult>(resultPath(root, run.runId))
               if (!saved) await sourceCheck(checkpointed, child.acceptanceCommand, config, stop.signal, deps.processDeps)
@@ -531,17 +543,17 @@ export async function executeChildren(input: { parent: RunRecord; groups: unknow
           await verify()
           const run = await readRun(root, child.runId)
           await executeApprovedRun(planned(parent.repo, child), prepared.plan, config, { operator: null, signal: stop.signal, ...(shared ? { sharedClaim: shared } : {}) },
-            { ...deps.processDeps, preparedRun: run, runInput: { ...run, root } })
+            { ...deps.processDeps, checkpoint:'deferred', preparedRun: run, runInput: { ...run, root } })
           let terminal = await readRun(root, child.runId)
           if (terminal.terminationCause !== 'succeeded' || terminal.state !== 'terminal') throw Error('child execution ended: ' + terminal.terminationCause)
           await verify(); await (deps.verifyChild ?? verifyDispatchRunAuthority)(terminal, config)
           if(terminal.parent!==null&&terminal.authorityRequest?.kind==='consolidated'){
-            await (await import('./checkpoints.ts')).flushRunCheckpoint(terminal,config)
+            await controlled(async()=>{await (await import('./checkpoints.ts')).flushRunCheckpoint(terminal,config)})
             terminal=await readRun(root,child.runId)
             if(!terminal.checkpoint||terminal.checkpoint.headSha!==terminal.headSha||terminal.checkpoint.branch!==terminal.branch)throw Error('child checkpoint readback unavailable')
           }
           const check = await sourceCheck(terminal, child.acceptanceCommand, config, stop.signal, deps.processDeps)
-          if (!check.ok) throw Error('child acceptance failed')
+          if (!check.ok) throw Error('child acceptance failed: '+(stop.signal.aborted?(parentFailure??'parent cancelled'):'exit '+String(check.exitCode)))
           terminal = await readRun(root, child.runId)
           const verified = await verifiedResult(terminal, child, config)
           await atomicRunFile(resultPath(root, child.runId), verified)
@@ -1095,6 +1107,18 @@ export interface RecoveredChildrenContext {
  newPreparations:number[]
  currentTitles:Array<{issue:number;title:string}>
 }
+export function reconcileProgressedChildren(inspection:import('./shared-claims.ts').GroupSuccessionInspection,recovery:import('./shared-claims.ts').RecoveryEnvelope):{accepted:JoinRef[];unfinished:TaskRecord[]} {
+ if(inspection.kind!=='verified')throw Error(inspection.reason)
+ const children=inspection.currentMembers.filter(row=>row.initial.parentTaskKey!==null),runs=new Set<string>(),accepted:JoinRef[]=[]
+ for(const joined of recovery.joins.filter(row=>row.state==='accepted')){
+  const member=children.find(row=>row.initial.runId===joined.childRunId),result=recovery.children.find(row=>row.childRunId===joined.childRunId)
+  if(!member||runs.has(joined.childRunId)||!joined.parentAfter||!joined.acceptance||!result||result.generation!==joined.generation||result.headSha!==joined.fromSha||result.acceptance.sourceSha!==joined.fromSha)throw Error('accepted progressed child/join identity differs')
+  runs.add(joined.childRunId);accepted.push(joined)
+ }
+ const unfinished=children.filter(row=>!runs.has(row.initial.runId)).map(row=>row.current)
+ if(unfinished.some(task=>task.schemaVersion!==2||task.state!=='recovery-queued'))throw Error('progressed unfinished child is not recovery-queued')
+ return{accepted,unfinished}
+}
 // Reconstruct authority/source facts, not old process results. Missing retained
 // tasks become explicitly NEW preparation only after the full owner reader says
 // absent and no accepted/checkpoint reference names that task.
@@ -1105,11 +1129,12 @@ export async function reconstructChildrenContext(input:{parent:RunRecord;materia
  const groups=checkedGroups({guard:'plan-lint',ok:lintPlan(material.planBody).blocks.length===0,groups:parseIndependentGroups(material.planBody).map(group=>({id:group.id,members:group.members,files:group.files}))})
  const target=transport.target??await dispatch.verifiedSharedTarget(parent.repo,config),gh=transport.gh??ghText
  const current:ParentClaimBinding={taskKey:material.task.taskKey,runId:material.task.runId,generation:material.task.generation,ownerToken:material.task.ownerToken,machineId:material.task.machineId,installationId:material.task.installationId,sessionId:material.task.sessionId}
- let original=current
+ let original=current,succession:Extract<import('./shared-claims.ts').GroupSuccessionInspection,{kind:'verified'}>|null=null
  if(material.task.schemaVersion===2){
-  const succession=await owner.inspectGroupSuccession(target,{operationId:material.task.successionOperationId,parent:current})
-  if(succession.kind!=='verified')throw Error(succession.reason)
-  const row=succession.receipt.members.find(row=>same(row.after,current))
+  const inspected=await owner.inspectGroupSuccession(target,{operationId:material.task.successionOperationId,parent:current})
+  if(inspected.kind!=='verified')throw Error(inspected.reason)
+  succession=inspected
+  const row=inspected.receipt.members.find(row=>same(row.after,current))
   if(!row)throw Error('group succession origin parent unavailable')
   original=row.before
  }
@@ -1125,7 +1150,9 @@ export async function reconstructChildrenContext(input:{parent:RunRecord;materia
    fresh.push({group,title:subject.title});continue
   }
   if(retained.kind==='invalid-or-unavailable')throw Error('child retained state unavailable; absence cannot be inferred')
-  const source=historical[0]??{task:retained.task,stateCommit:retained.head},child=source.task
+  const progressed=succession?.currentMembers.find(row=>row.current.taskKey===key)
+  if(progressed&&!same(progressed.current,retained.task))throw Error('current child differs from verified succession history')
+  const source=progressed?{task:progressed.current,stateCommit:retained.head}:historical[0]??{task:retained.task,stateCommit:retained.head},child=source.task
   if(child.repo!==parent.repo||child.issue!==issue||child.parentTaskKey!==original.taskKey||!child.parentBinding||!same(child.paths,group.files)||child.resources.length||!child.checkpoint||!child.recovery||!same(child.checkpoint,child.recovery.checkpoint))throw Error('original child binding or exact checkpoint unavailable')
   if(retained.task.runId!==child.runId||retained.task.generation!==child.generation||retained.task.ownerToken!==child.ownerToken)throw Error('child now has another owner; historical facts cannot authorize recovery')
   known.push({group,task:child,stateCommit:source.stateCommit,title:subject.title})
@@ -1146,6 +1173,7 @@ export async function reconstructChildrenContext(input:{parent:RunRecord;materia
   // original parent binding come only from the retained verified task.
   return {...planned,branch:old.task.checkpoint!.branch,baseSha:old.task.checkpoint!.baseSha,resources:[...old.task.resources],runId:old.task.runId,scopeDigest:old.task.scopeDigest,taskIds:[...old.task.approvedTaskIds],acceptanceCommand:command,parentBinding:old.task.parentBinding!}
  })
+ if(succession){const reconciled=reconcileProgressedChildren(succession,material.task.recovery!);if(reconciled.unfinished.some(task=>!children.some(child=>child.runId===task.runId))||reconciled.accepted.some(join=>!children.some(child=>child.runId===join.childRunId)))throw Error('recovered succession member classification differs')}
  const retainedJoins=material.task.recovery!.joins
  if(retainedJoins.some(join=>!children.some(child=>child.runId===join.childRunId)))throw Error('retained join names a child outside the recovered group')
  let explainedHead=baseSha

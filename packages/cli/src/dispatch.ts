@@ -576,6 +576,7 @@ export interface ExecuteDeps {
   preparedRun: RunRecord
   monotonic: () => number
   subscriptionMetadata: import('./launch.ts').SubscriptionMetadataReader
+  checkpoint: 'auto'|'deferred'
 }
 
 function defaultGit(args: string[], cwd: string): Promise<{ ok: boolean; message: string }> {
@@ -867,7 +868,7 @@ export async function executeRun(
     await event('capture-pending',{reasonCode:'capture-unavailable'}).catch(()=>{})
   }
   await event('exit',{terminationCause:terminalCause,exitCode,durationSeconds:elapsed/1000})
-  try { await (await import('./checkpoints.ts')).flushRunCheckpoint(record,config) } catch { await event('checkpoint-pending',{reasonCode:'checkpoint-unavailable'}) }
+  if(deps?.checkpoint!=='deferred')try { await (await import('./checkpoints.ts')).flushRunCheckpoint(record,config) } catch { await event('checkpoint-pending',{reasonCode:'checkpoint-unavailable'}) }
   if(record.execution&&record.approvalRefs.some(ref=>ref.kind==='plan')){try{await checkpointRecoveryContext(await readRun(recordRoot,record.runId),config,{gh:deps?.gh})}catch{await event('checkpoint-pending',{reasonCode:'checkpoint-unavailable'})}}
   try{await flushRunHandback(record,config)}catch{await event('handback-pending',{reasonCode:'handback-unavailable'})}
   // Source and public delivery require a separately durable, exact action intent. Process completion grants none.
@@ -2517,7 +2518,8 @@ async function inspectRemoteRecoveryRecord(input:{repo:string;taskKey:string;con
  }
  for(const child of Object.values(current.tasks).filter(row=>row.parentTaskKey===task.taskKey)){
   const direct=child.parentBinding&&child.parentBinding.runId===task.runId&&child.parentBinding.ownerToken===task.ownerToken&&child.parentBinding.generation===task.generation
-  const succeeded=succession?.kind==='verified'&&child.schemaVersion===2&&child.successionOperationId===successionId&&succession.receipt.members.some(row=>canonicalWire(row.after)===canonicalWire({taskKey:child.taskKey,runId:child.runId,generation:child.generation,ownerToken:child.ownerToken,machineId:child.machineId,installationId:child.installationId,sessionId:child.sessionId}))
+  const progressed=succession?.kind==='verified'?succession.currentMembers.find(row=>row.current.taskKey===child.taskKey):undefined
+  const succeeded=!!progressed&&progressed.initial.successionOperationId===successionId&&canonicalWire(progressed.current)===canonicalWire(child)
   if(!child.parentBinding||!direct&&!succeeded){blocks.push('original parent binding or current group succession differs for child '+child.issue);continue}
   children.push({task:child,stateCommit:current.head})
  }
