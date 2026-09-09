@@ -1,5 +1,5 @@
 import { expect, test, beforeEach, afterEach } from 'bun:test'
-import { mkdir, mkdtemp, readFile, writeFile, rm, readdir } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, writeFile, rm, readdir, realpath } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { execFileSync } from 'node:child_process'
@@ -13,7 +13,7 @@ const env={...process.env,GIT_AUTHOR_NAME:'Fixture',GIT_AUTHOR_EMAIL:'fixture@ex
 const g=(cwd:string,args:string[]):string=>execFileSync('git',args,{cwd,env,encoding:'utf8',stdio:['ignore','pipe','pipe']}).trim()
 let git:GitRunner
 beforeEach(async()=>{
-  home=await mkdtemp(join(tmpdir(),'telemetry-git-'));clone=join(home,'writer');remote=join(home,'remote.git')
+  home=await realpath(await mkdtemp(join(tmpdir(),'telemetry-git-')));clone=join(home,'writer');remote=join(home,'remote.git')
   const seed=join(home,'seed');await mkdir(seed)
   g(home,['init','--bare','--initial-branch=main',remote]);g(seed,['init','--initial-branch=main']);await writeFile(join(seed,'README'),'fixture');g(seed,['add','.']);g(seed,['commit','-m','seed']);g(seed,['push',remote,'main']);g(home,['clone',remote,clone]);g(clone,['remote','set-url','origin',url])
   const actual=boundedTelemetryGit()
