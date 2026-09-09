@@ -2458,7 +2458,21 @@ type RemoteRecoveryTransport={target?:import('./shared-claims.ts').CoordinationT
 async function inspectRemoteRecoveryRecord(input:{repo:string;taskKey:string;config:FactoryConfig},inspected:{head:string;task:import('./shared-claims.ts').TaskRecord},transport:RemoteRecoveryTransport,retainedStop?:import('./shared-claims.ts').StopProof):Promise<RemoteRecoveryMaterial> {
  const owner=await import('./shared-claims.ts'),core=await recoveryScript(),target=transport.target!,gh=transport.gh??ghText
  const task=inspected.task,envelope=owner.parseRecoveryEnvelope(task.recovery),authority=await recoveryAuthority(task,input.config,gh),stopProof=retainedStop??task.stopProof
- if(stopProof){owner.parseStopProof(stopProof);if(stopProof.machineId!==task.machineId||stopProof.installationId!==task.installationId||stopProof.sessionId!==task.sessionId||stopProof.generation!==task.generation||!stopProof.runIds.includes(task.runId))throw Error('remote stopped owner differs')}
+ let stoppedOwner={taskKey:task.taskKey,runId:task.runId,generation:task.generation,ownerToken:task.ownerToken,machineId:task.machineId,installationId:task.installationId,sessionId:task.sessionId}
+ if(stopProof){
+  owner.parseStopProof(stopProof)
+  const proofMatches=(binding:typeof stoppedOwner)=>stopProof.machineId===binding.machineId&&stopProof.installationId===binding.installationId&&stopProof.sessionId===binding.sessionId&&stopProof.generation===binding.generation&&stopProof.runIds.includes(binding.runId)
+  if(!proofMatches(stoppedOwner)){
+   // Atomic group succession retains the predecessor's stop proof while moving
+   // the logical run. Only its verified receipt may supply that predecessor.
+   if(task.schemaVersion!==2)throw Error('remote stopped owner differs')
+   const succession=await owner.inspectGroupSuccession(target,{operationId:task.successionOperationId,parent:stoppedOwner})
+   if(succession.kind!=='verified')throw Error('remote stopped owner differs')
+   const member=succession.receipt.members.find(row=>canonicalWire(row.after)===canonicalWire(stoppedOwner))
+   if(!member||!proofMatches(member.before))throw Error('remote stopped owner differs')
+   stoppedOwner=member.before
+  }
+ }
  const evidence:RemoteRecoveryMaterial['evidence']=[],blocks:string[]=[]
  const refs:Array<{ref:import('./shared-claims.ts').EvidenceRef;check:(payload:import('./shared-claims.ts').RecoveryEvidencePayload|null)=>void}>=[]
  const insist=(value:unknown,message:string):void=>{if(!value)throw Error(message)}
@@ -2478,7 +2492,7 @@ async function inspectRemoteRecoveryRecord(input:{repo:string;taskKey:string;con
  if(coverage.kind==='qualified-managed-only'&&canonicalWire(coverage.qualification)!==canonicalWire(envelope.execution.qualification))blocks.push('effect qualification differs')
  if(coverage.kind==='reconciled')refs.push({ref:coverage.evidence,check:p=>{insist(p?.kind==='effect-reconciliation'&&p.result==='complete'&&p.runId===task.runId&&p.scopeDigest===task.scopeDigest&&canonicalWire(p.approvalBindings)===canonicalWire(envelope.approvalBindings)&&envelope.effects.filter(row=>row.kind!=='telemetry-push').every(row=>p.checkedEffectIds.includes(row.operationId)),'effect reconciliation incomplete')}})
  if(!stopProof)blocks.push('verified stopped owner evidence unavailable')
- else refs.push({ref:stopProof.evidenceRef,check:p=>{insist(p?.kind==='effect-reconciliation'&&p.runId===task.runId&&p.scopeDigest===task.scopeDigest&&p.reasonCode==='owned-process-group-stopped'&&p.inspector.kind==='qualified-adapter'&&p.inspector.identityRef===task.machineId&&canonicalWire(p.approvalBindings)===canonicalWire(envelope.approvalBindings),'original stopped owner attestation differs')}})
+ else refs.push({ref:stopProof.evidenceRef,check:p=>{insist(p?.kind==='effect-reconciliation'&&p.runId===task.runId&&p.scopeDigest===task.scopeDigest&&p.reasonCode==='owned-process-group-stopped'&&p.inspector.kind==='qualified-adapter'&&p.inspector.identityRef===stoppedOwner.machineId&&canonicalWire(p.approvalBindings)===canonicalWire(envelope.approvalBindings),'original stopped owner attestation differs')}})
  for(const entry of refs){
   try{
    if(entry.ref.kind!=='state-receipt')throw Error('exact immutable recovery receipt required')
@@ -2488,7 +2502,7 @@ async function inspectRemoteRecoveryRecord(input:{repo:string;taskKey:string;con
     const raw=await target.provider.read(target,entry.ref.commitSha,owner.operationPath(entry.ref.operationId))
     if(!raw||owner.sha256(raw)!==entry.ref.blobSha256)throw Error('stop receipt readback changed')
     const receipt=JSON.parse(raw) as import('./shared-claims.ts').OperationReceipt,proof=stopProof
-    if(receipt.taskKey!==task.taskKey||receipt.generation!==task.generation||receipt.resultOwner.runId!==task.runId||receipt.resultOwner.ownerToken!==task.ownerToken||receipt.resultOwner.machineId!==proof.machineId||receipt.resultOwner.installationId!==proof.installationId||receipt.resultOwner.sessionId!==proof.sessionId||proof.generation!==task.generation||!proof.runIds.includes(task.runId))throw Error('stop receipt original owner differs')
+    if(receipt.taskKey!==task.taskKey||receipt.generation!==stoppedOwner.generation||receipt.resultOwner.runId!==task.runId||receipt.resultOwner.ownerToken!==stoppedOwner.ownerToken||receipt.resultOwner.machineId!==proof.machineId||receipt.resultOwner.installationId!==proof.installationId||receipt.resultOwner.sessionId!==proof.sessionId||proof.generation!==stoppedOwner.generation||!proof.runIds.includes(task.runId))throw Error('stop receipt original owner differs')
    }
    evidence.push({ref:entry.ref,payload})
   }catch(error){blocks.push((error as Error).message)}

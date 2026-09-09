@@ -445,7 +445,23 @@ export async function executeChildren(input: { parent: RunRecord; groups: unknow
   if (record) {
     record = parseChildrenRecord(record)
     if(record.schemaVersion===1)record=await readExecutableChildrenRecord(parent,config)
-    if(!deps.parentClaim){const context=await currentParentContext(parent,record,config);if(context.succession&&context.task.recovery){const classified=reconcileProgressedChildren(context.succession,context.task.recovery);for(const joined of classified.accepted){const accepted=context.task.recovery.children.find(row=>row.childRunId===joined.childRunId);if(!accepted)throw Error('retained accepted child result unavailable');retainedAccepted.set(accepted.childRunId,accepted)}}}
+    if(!deps.parentClaim){
+      const context=await currentParentContext(parent,record,config)
+      if(context.succession&&context.task.recovery){
+        const settled=new Set<string>()
+        for(const child of record.children){
+          if(!child.runId)continue
+          const run=await readRun(root,child.runId),saved=await readOptional<ChildResult>(resultPath(root,child.runId))
+          if(run.state==='terminal'&&run.terminationCause==='succeeded'&&saved?.runId===run.runId&&saved.repo===run.repo&&saved.issue===run.issue&&saved.headSha===run.headSha&&saved.scopeDigest===run.taskKey.scopeDigest)settled.add(child.runId)
+        }
+        const classified=reconcileProgressedChildrenState(context.succession,context.task.recovery,settled)
+        for(const joined of classified.accepted){
+          const accepted=context.task.recovery.children.find(row=>row.childRunId===joined.childRunId)
+          if(!accepted)throw Error('retained accepted child result unavailable')
+          retainedAccepted.set(accepted.childRunId,accepted)
+        }
+      }
+    }
     if (!same(record.groups, groups) || record.parentBranch !== parent.branch || record.repo !== parent.repo) throw Error('saved original parent launch differs')
   } else {
     clean(parent.checkout)
@@ -1107,7 +1123,7 @@ export interface RecoveredChildrenContext {
  newPreparations:number[]
  currentTitles:Array<{issue:number;title:string}>
 }
-export function reconcileProgressedChildren(inspection:import('./shared-claims.ts').GroupSuccessionInspection,recovery:import('./shared-claims.ts').RecoveryEnvelope):{accepted:JoinRef[];unfinished:TaskRecord[]} {
+function reconcileProgressedChildrenState(inspection:import('./shared-claims.ts').GroupSuccessionInspection,recovery:import('./shared-claims.ts').RecoveryEnvelope,settledRunIds:ReadonlySet<string>):{accepted:JoinRef[];unfinished:TaskRecord[]} {
  if(inspection.kind!=='verified')throw Error(inspection.reason)
  const children=inspection.currentMembers.filter(row=>row.initial.parentTaskKey!==null),runs=new Set<string>(),accepted:JoinRef[]=[]
  for(const joined of recovery.joins.filter(row=>row.state==='accepted')){
@@ -1116,8 +1132,13 @@ export function reconcileProgressedChildren(inspection:import('./shared-claims.t
   runs.add(joined.childRunId);accepted.push(joined)
  }
  const unfinished=children.filter(row=>!runs.has(row.initial.runId)).map(row=>row.current)
- if(unfinished.some(task=>task.schemaVersion!==2||task.state!=='recovery-queued'))throw Error('progressed unfinished child is not recovery-queued')
+ // Reconstruction supplies no settled IDs and remains queued-only. Execution
+ // replay may consume its exact local result after the successor is stopped.
+ if(unfinished.some(task=>task.schemaVersion!==2||task.state!=='recovery-queued'&&!(settledRunIds.has(task.runId)&&task.state==='stopped'&&!!task.stopProof)))throw Error('progressed unfinished child is not recovery-queued or durably settled')
  return{accepted,unfinished}
+}
+export function reconcileProgressedChildren(inspection:import('./shared-claims.ts').GroupSuccessionInspection,recovery:import('./shared-claims.ts').RecoveryEnvelope):{accepted:JoinRef[];unfinished:TaskRecord[]} {
+ return reconcileProgressedChildrenState(inspection,recovery,new Set())
 }
 // Reconstruct authority/source facts, not old process results. Missing retained
 // tasks become explicitly NEW preparation only after the full owner reader says
