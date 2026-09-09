@@ -59,10 +59,10 @@ export async function fetchTimelines(repo: string, issues: number[], gh: GhJson)
 // Metric-v2 collection owns transport enumeration; the coordination owner still
 // validates every retained task and immutable receipt. No state pointer is written.
 import { join } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { boundedGhJson, fetchGhPages, readBudget, withinRead, type GhReader } from '../gh.ts'
 import { acceptedDeliveryProjection } from '../children.ts'
 import { githubCoordinationProvider, inspectCoordinationTask, inspectHistoricalCoordinationTask, resolveEvidence, parseAcceptedScope, parseRecoveryPayload, operationPath, taskKey, type CoordinationTarget, type TaskRecord, type OperationReceipt } from '../shared-claims.ts'
-import { typedSection, evaluateParentDelivery } from '../../../../skills/dev/dev-ship/scripts/ship-gate.mjs'
 import { canonicalJson, hashBytes, type TaskActivity, type ReworkSnapshot, type StatsEvidenceRef } from './types.ts'
 import { inMonth, uniqueActivities, utcMonthBounds } from './metrics.ts'
 
@@ -117,6 +117,8 @@ export async function collectTaskActivities(input:{repo:string;period:string;gh:
   try {
     insist(/^[a-z0-9][a-z0-9._-]*\/[a-z0-9][a-z0-9._-]*$/i.test(input.repo),'activity-invalid-repository')
     utcMonthBounds(input.period)
+    const shipGateUrl=new URL(fileURLToPath(import.meta.url).endsWith('.ts')?'../../../../skills/dev/dev-ship/scripts/ship-gate.mjs':'../skill/dev-ship/scripts/ship-gate.mjs',import.meta.url)
+    const {typedSection,evaluateParentDelivery}=await import(shipGateUrl.href) as typeof import('../../../../skills/dev/dev-ship/scripts/ship-gate.mjs')
     const repository=await json(`repos/${input.repo}`)
     insist(repository.full_name===input.repo&&stableId(repository.node_id),'activity-repository-identity-changed')
     // PR rows are removed only after the full all-state issue enumeration.

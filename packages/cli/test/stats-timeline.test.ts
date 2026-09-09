@@ -41,6 +41,33 @@ test('fetchTimelines reads each issue once and fails closed as a whole when gh c
   expect(refused).toEqual({ ok: false, reason: 'HTTP 403: rate limited' })
 })
 
+test('packaged stats help and argument errors do not initialize activity-only ship helpers', async () => {
+  const { cp, mkdir, mkdtemp, realpath, rm, writeFile } = await import('node:fs/promises')
+  const { tmpdir } = await import('node:os')
+  const { join, resolve } = await import('node:path')
+  const home = await realpath(await mkdtemp(join(tmpdir(), 'vf-stats-module-boundary-')))
+  try {
+    const packaged = join(home, 'package'), dist = join(packaged, 'dist')
+    await mkdir(dist, { recursive: true })
+    const built = await Bun.build({ entrypoints: [resolve('packages/cli/src/index.ts')], target: 'node', outdir: dist })
+    expect(built.success, built.logs.map(log => log.message).join('\n')).toBe(true)
+    await writeFile(join(packaged, 'package.json'), JSON.stringify({ type: 'module', name: '@vegastack/vegafactory', version: '0.0.0-fixture' }))
+    // Other CLI owners initialize from the flattened package today. Deliberately
+    // omit dev-ship: stats parsing must not touch its activity-only parser.
+    for (const name of ['dev-implement', 'dev-plan']) {
+      await cp(resolve('skills/dev', name), join(packaged, 'skill', name), { recursive: true })
+    }
+    const help = Bun.spawnSync(['node', join(dist, 'index.js'), 'stats', 'help'], { env: { ...process.env, HOME: home } })
+    expect(help.exitCode, help.stderr.toString()).toBe(0)
+    expect(help.stdout.toString()).toContain('vegafactory stats')
+    const malformed = Bun.spawnSync(['node', join(dist, 'index.js'), 'stats', '--since', 'Sept-26'], { env: { ...process.env, HOME: home } })
+    expect(malformed.exitCode).toBe(2)
+    expect(malformed.stderr.toString()).toContain('MON-YYYY')
+  } finally {
+    await rm(home, { recursive: true, force: true })
+  }
+}, 15000)
+
 test('activity discovery refuses incomplete all-state enumeration and retains the last complete observation', async () => {
   const { collectTaskActivities } = await import('../src/stats/timeline.ts')
   const prior = { activities: [], snapshots: [], complete: true, reason: null, observedAt: '2026-09-01T00:00:00.000Z', sourceDigest: 'a'.repeat(64) }
