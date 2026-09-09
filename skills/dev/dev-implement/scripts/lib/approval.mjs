@@ -20,7 +20,7 @@ Record the operator's actual words and source, then the exact approved bindings.
 
 Events have unique IDs. A changed scope needs fresh intent; conflicting grants require explicit `supersedes`, never newest-wins. A revocation event names exact earlier IDs and grants no new binding when its artifact list is empty. Preserve originals. Legacy marker-only or malformed records refuse. An explicitly authorized `scope=none` correction can neutralize exact malformed or demonstrably invalid-source targets, and a separate valid approval still supplies current intent. Missing, ambiguous or inconsistent publisher/source reads are unavailable evidence, never correction-eligible invalidity; resolve required source facts before applying corrections. The correction JSON has exactly `schemaVersion:2`, `kind:"correction"`, `scope:"none"`, `operator`, `source`, `targets:[{commentId,bodySha256}]`, `supersedes:[]`, `revokes:[]`. Changed/missing targets, invalid operator/source, self-reference and malformed corrections refuse.
 
-For a reviewed parent scope, use a separate `scope=consolidated` event on the parent issue. Its closed JSON has `schemaVersion:2`, `kind:"consolidated"`, `id`, `operator`, `scope:"consolidated"`, `source`, `manifest`, `items`, `actions`, `supersedes` and `revokes`. Each item names exact repository/issue/mode (`code`, `preparation`, `research`), artifact bindings, task IDs and action IDs. Each action is one reviewed local operation set, an exact source-checkpoint ref/scope, or a protocol-bound research allowance. Unknown keys/kinds and excess or missing selections refuse. The completion index is not a plan.
+For a reviewed parent scope, use a separate `scope=consolidated` event on the parent issue. Its closed JSON has `schemaVersion:2`, `kind:"consolidated"`, `id`, `operator`, `scope:"consolidated"`, `source`, `manifest`, `items`, `actions`, `supersedes` and `revokes`. Each item names exact repository/issue/mode (`code`, `preparation`, `research`), artifact bindings, task IDs and action IDs. Each action is one reviewed local operation set, an exact parent source-checkpoint ref/scope, one exact child-source-checkpoint tuple, or a protocol-bound research allowance. The child action binds one selected code item's full task/file scope and exact prepared branch/ref/base; it cannot derive authority from the local action or parent checkpoint. Unknown keys/kinds and excess or missing selections refuse. The completion index is not a plan.
 
 The manifest locator is `{sha256,source:{kind:"inline",utf8}}` or `{sha256,source:{kind:"git-blob",repositoryId,commitSha,path,blobSha256}}`. Keep the reviewed manifest bytes frozen; authority lives in the separate actual approval event. A Git locator requires its own authorized immutable destination; a local filename alone cannot locate runtime authority. The parent ledger pins the approval's comment ID/body SHA-256 and manifest SHA-256. Children consume that exact record, without synthetic child approval comments. Source checkpoints still require the complete export proof and durable delivery intent; research still requires the protocol's candidate, prerequisite and shared allowance checks. Local approval never supplies production/private-state, service/reboot, merge, publication or destructive-cleanup authority.
 
@@ -30,7 +30,7 @@ The canonicalizer reads artifact/task markers outside fenced examples. Plan task
 
 Keep old comments verbatim. In report-only inventory, read every open issue and all comment pages, call `artifactRef` for its current brief/unique plan, and call `evaluateApprovals` for the intended stage. Report refusal reasons plus current artifact IDs/revisions/digests; never emit a fabricated grant or alter labels. Ask for the operator’s exact current-scope intent and, when needed, their exact malformed-target correction. Record each new event separately, refresh again and run the evaluator before work starts.
 
-`preflight.mjs --stage plan` requires brief intent; implementation requires brief+plan, including quick-build’s separate plan comment. Research preparation does not start a vendor process. `--consolidated-request <json>` accepts `{parentRepo,parentIssue,approvalBinding:{commentId,bodySha256},requested:{repo,issue,taskIds,actionId,branch,baseSha,paths,operation}}`; the approved manifest is fetched from the pinned record, never a local path. Approval bodies/source comments, canonical singleton comments, manifests and dependencies are fresh reads. Successful scope results expose canonical `approvalIds`, `approvalBindings` and artifact `bindings`; each authority tuple is `{approvalId,commentId,bodySha256}`, with a positive safe-integer comment ID and exact source-body hash. Consolidated `recordBinding` separately preserves the requested record for audit, while the input `approvalBinding:{commentId,bodySha256}` pins that requested record. Neither a relay pin nor recordBinding replaces canonical authority. Preflight/RunReport consumers preserve the canonical tuples; fresh recovery admission deliberately selects the source comment-ID/body-hash pair.
+`preflight.mjs --stage plan` requires brief intent; implementation requires brief+plan, including quick-build’s separate plan comment. Research preparation does not start a vendor process. `--consolidated-request <json>` accepts `{parentRepo,parentIssue,approvalBinding:{commentId,bodySha256},requested:{repo,issue,taskIds,actionId,branch,ref?,baseSha,paths,operation}}`; `ref` is required only for the exact child checkpoint action. The approved manifest is fetched from the pinned record, never a local path. Approval bodies/source comments, canonical singleton comments, manifests and dependencies are fresh reads. Successful scope results expose canonical `approvalIds`, `approvalBindings` and artifact `bindings`; each authority tuple is `{approvalId,commentId,bodySha256}`, with a positive safe-integer comment ID and exact source-body hash. Consolidated `recordBinding` separately preserves the requested record for audit, while the input `approvalBinding:{commentId,bodySha256}` pins that requested record. Neither a relay pin nor recordBinding replaces canonical authority. Preflight/RunReport consumers preserve the canonical tuples; fresh recovery admission deliberately selects the source comment-ID/body-hash pair.
 
 Preparation adds `requested.preparation:{commentId,bodySha256}` and the #144 owner’s exact source-bound projection: parent identity, current plan ref, selected task IDs/files/prerequisite issues and accepted code-contract receipts with child/parent SHA and evidence pins. These are checked against the canonical selected scope; the recovery owner establishes mapping completeness and actual accepted integration. Missing receipts or the recovery owner’s readTaskPrerequisites/inspectAcceptedIntegration adapter refuse. The evaluated preparation carries canonical `approvalBinding`; `readTaskPrerequisites` receives and returns that same tuple alongside parent/plan/tasks, and an inconsistent outer result or receipt refuses before integration inspection. Fetched receipt hashes alone are not proof of accepted code. Full issue execution keeps every native blocker and is not authorized by preparation.
 
@@ -52,6 +52,7 @@ const integer = (value) => Number.isSafeInteger(value) && value > 0;
 const repo = (value) => typeof value === 'string' && /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(value);
 const taskId = (value) => typeof value === 'string' && /^[1-9]\d*-T[1-9]\d*$/.test(value);
 const branch = (value) => text(value) && !/\s|[~^:?*\[\\]|\.\.|@\{|\/\/|^\/|\/$|\.$|\.lock(?:\/|$)/.test(value) && value !== '@' && !value.startsWith('-');
+const literalBranch = (value) => branch(value) && /^[A-Za-z0-9][A-Za-z0-9._/-]*$/.test(value);
 const keys = (value, names, optional = []) => {
   check(isObject(value), 'expected an object');
   check(Object.keys(value).every((key) => names.includes(key) || optional.includes(key)), 'unknown record field');
@@ -221,6 +222,23 @@ function safePath(value) {
   return text(value) && !value.startsWith('/') && !/[\\\x00-\x1f]/.test(value) && value.split('/').every((part) => part !== '' && part !== '.' && part !== '..') && !/^[a-z]:/i.test(value);
 }
 
+function literalPath(value) {
+  return safePath(value) && !/[*?\[\]{}]/.test(value);
+}
+
+export function validateChildSourceCheckpointAction(value) {
+  keys(value, ['id', 'kind', 'repo', 'parent', 'child']);
+  check(text(value.id) && value.kind === 'child-source-checkpoint' && repo(value.repo), 'invalid child checkpoint action');
+  keys(value.parent, ['issue', 'branch', 'baseSha']);
+  check(integer(value.parent.issue) && literalBranch(value.parent.branch) && sha(value.parent.baseSha), 'invalid child checkpoint parent');
+  keys(value.child, ['issue', 'branch', 'ref', 'baseSha', 'taskIds', 'paths']);
+  check(integer(value.child.issue) && value.child.issue !== value.parent.issue && literalBranch(value.child.branch) && sha(value.child.baseSha), 'invalid child checkpoint source');
+  check(value.child.ref === 'refs/heads/' + value.child.branch && value.child.branch !== value.parent.branch, 'invalid child checkpoint ref or parent substitution');
+  list(value.child.taskIds, (id) => taskId(id) && id.startsWith(value.child.issue + '-T'), 'child checkpoint tasks', { nonempty: true });
+  list(value.child.paths, literalPath, 'child checkpoint paths', { nonempty: true });
+  return value;
+}
+
 function validateAction(value, frozen = false) {
   if (value?.kind === 'local') {
     keys(value, ['id', 'kind', 'repo', 'parentBranch', 'operations']);
@@ -229,6 +247,8 @@ function validateAction(value, frozen = false) {
   } else if (value?.kind === 'checkpoint') {
     keys(value, ['id', 'kind', 'repo', 'branch', 'sourceScopeDigest']);
     check(repo(value.repo) && branch(value.branch) && digest(value.sourceScopeDigest), 'invalid checkpoint target');
+  } else if (value?.kind === 'child-source-checkpoint') {
+    validateChildSourceCheckpointAction(value);
   } else {
     keys(value, ['id', 'kind', 'issue', 'protocolArtifactId', 'protocolDigest', 'candidateRule', 'scenarioIds', 'maxStarts', 'aggregateActiveMs', 'providerMode']);
     check(value.kind === 'research-tests' && integer(value.issue) && text(value.protocolArtifactId) && digest(value.protocolDigest), 'invalid research protocol');
@@ -519,6 +539,12 @@ export function validateExecutionManifest(bytes) {
     if (action.kind === 'local' || action.kind === 'checkpoint') {
       check(action.repo === value.parent.repo && (action.parentBranch ?? action.branch) === value.parent.branch, 'action escapes parent');
       if (action.kind === 'checkpoint') check(action.sourceScopeDigest === hash(sortedJson({ parent: value.parent, selections: value.selections.filter((item) => item.mode !== 'research') })), 'checkpoint source scope mismatch');
+    } else if (action.kind === 'child-source-checkpoint') {
+      check(action.repo === value.parent.repo && sortedJson(action.parent) === sortedJson({ issue: value.parent.issue, branch: value.parent.branch, baseSha: value.parent.baseSha }), 'child checkpoint parent differs from manifest');
+      check(action.child.baseSha === value.parent.baseSha, 'child checkpoint source base differs from frozen parent');
+      const selectedBy = value.selections.filter((item) => item.actionIds.includes(action.id));
+      check(selectedBy.length === 1 && selectedBy[0].mode === 'code' && selectedBy[0].repo === action.repo && selectedBy[0].issue === action.child.issue, 'child checkpoint action is not selected only by one code child');
+      check(JSON.stringify(action.child.taskIds) === JSON.stringify(selectedBy[0].taskIds), 'child checkpoint tasks differ from selected child');
     } else {
       check(action.candidateRule.repo === value.parent.repo && action.candidateRule.parentBranch === value.parent.branch && action.candidateRule.baseSha === value.parent.baseSha, 'research candidate escapes parent');
       const selection = value.selections.find((item) => item.issue === action.issue && item.mode === 'research');
@@ -539,12 +565,14 @@ function selectedTaskFiles(body, ids) {
     if (match) { current = match[1]; result.set(current, []); }
     if (/^#{1,6}\s/.test(line)) current = null;
     if (current && /^\s*(?:- )?Files —/.test(line)) {
-      result.get(current).push(...[...line.matchAll(/`([^`]+)`/g)].map((entry) => entry[1]));
+      check(!line.includes('``'), 'empty task file path');
+      result.get(current).push([...line.matchAll(/`([^`]+)`/g)].map((entry) => entry[1]));
     }
   }
   check(ids.every((id) => result.has(id)), 'selected task is absent from canonical plan');
-  const files = ids.flatMap((id) => result.get(id));
-  check(files.length > 0 && files.every(safePath), 'unverifiable task file scope');
+  check(ids.every((id) => result.get(id).length === 1 && result.get(id)[0].length > 0), 'selected task lacks one canonical Files clause');
+  const files = ids.flatMap((id) => result.get(id)[0]);
+  check(files.length > 0 && files.every(literalPath), 'unverifiable task file scope');
   return [...new Set(files)];
 }
 
@@ -595,12 +623,19 @@ export function evaluateConsolidatedApproval({ record, manifestBytes, currentArt
       const bindings = event.kind === 'consolidated' ? event.items : event.artifacts;
       check(!bindings.some((entry) => entry.repo === item.repo && entry.issue === item.issue), 'conflicting consolidated approval needs explicit supersedes');
     }
-    keys(requested, ['repo', 'issue', 'taskIds', 'actionId', 'branch', 'baseSha', 'paths', 'operation'], ['scenarioId', 'research', 'preparation']);
+    keys(requested, ['repo', 'issue', 'taskIds', 'actionId', 'branch', 'baseSha', 'paths', 'operation'], ['ref', 'scenarioId', 'research', 'preparation']);
     check(item.actionIds.includes(requested.actionId), 'action is not selected for this issue');
     const action = record.actions.find((entry) => entry.id === requested.actionId);
-    check(requested.branch === manifest.parent.branch && requested.baseSha === manifest.parent.baseSha, 'requested parent branch/base differs');
     list(requested.taskIds, taskId, 'requested tasks', { nonempty: item.mode !== 'research' });
-    check(requested.taskIds.every((id) => item.taskIds.includes(id)), 'requested task is outside selected subset');
+    if (action.kind === 'child-source-checkpoint') {
+      check(item.mode === 'code' && action.repo === item.repo && action.child.issue === item.issue, 'child checkpoint target differs from selected code child');
+      check(requested.branch === action.child.branch && requested.ref === action.child.ref && requested.baseSha === action.child.baseSha, 'requested child branch/ref/base differs');
+      check(JSON.stringify(requested.taskIds) === JSON.stringify(action.child.taskIds) && JSON.stringify(requested.taskIds) === JSON.stringify(item.taskIds), 'requested child tasks differ');
+    } else {
+      check(requested.ref === undefined, 'unexpected source ref on parent request');
+      check(requested.branch === manifest.parent.branch && requested.baseSha === manifest.parent.baseSha, 'requested parent branch/base differs');
+      check(requested.taskIds.every((id) => item.taskIds.includes(id)), 'requested task is outside selected subset');
+    }
     check(Array.isArray(currentDependencies), 'current dependency reads unavailable');
     const dependencies = currentDependencies.filter((entry) => entry.repo === item.repo && entry.issue === item.issue);
     check(dependencies.length === 1 && Array.isArray(dependencies[0].blockedBy), 'current dependency identity unavailable');
@@ -618,10 +653,15 @@ export function evaluateConsolidatedApproval({ record, manifestBytes, currentArt
     check(item.mode !== 'research', 'research selection cannot execute code');
     const currentPlan = context.artifacts.find((entry) => entry.repo === item.repo && entry.issue === item.issue && entry.kind === 'plan');
     const files = selectedTaskFiles(currentPlan.artifact.body, requested.taskIds);
-    list(requested.paths, safePath, 'requested paths');
-    check(requested.paths.every((path) => files.includes(path)), 'requested file escapes selected task scope');
+    list(requested.paths, literalPath, 'requested paths');
+    if (action.kind === 'child-source-checkpoint') {
+      check(requested.operation === 'checkpoint', 'child checkpoint action permits only checkpoint');
+      check(JSON.stringify(action.child.paths) === JSON.stringify(files) && JSON.stringify(requested.paths) === JSON.stringify(files), 'child checkpoint paths differ from canonical task files');
+    } else {
+      check(requested.paths.every((path) => files.includes(path)), 'requested file escapes selected task scope');
+    }
     if (action.kind === 'local') check(action.operations.includes(requested.operation), 'unapproved local operation');
-    else {
+    else if (action.kind === 'checkpoint') {
       check(requested.operation === 'checkpoint' && requested.paths.length > 0, 'invalid checkpoint request');
       // This result validates intent scope only. #138 must separately prove
       // complete exported history and persist delivery intent before pushing.

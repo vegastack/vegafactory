@@ -174,10 +174,10 @@ The project's story, newest first: what got built, why, and how it went — for 
 
 ## 07-09-2026 — Approval follows the work that was actually approved ([#135](https://github.com/vegastack/vegafactory/issues/135))
 
-- **What:** Scoped approval records now bind the operator’s quoted intent to current brief and plan identities. Task progress keeps its approval; changed requirements require fresh intent. Parent selections distinguish code, preparation and research permissions.
+- **What:** Scoped approval records now bind the operator’s quoted intent to current brief and plan identities. Task progress keeps its approval; changed requirements require fresh intent. Parent selections distinguish code, preparation and research permissions, while child checkpoint authority binds one exact prepared child. Fleet overlap is eligible only through a closed plan declaration whose paths come from the selected tasks.
 - **Why:** The old preflight accepted a bare approval marker even after the brief changed. That could start work whose actual scope had never been approved.
-- **How it went:** Subprocess tests reproduced both failures. The shared parser and launch gate reject them; preparation and research adapters retain their separate evidence requirements. Final acceptance still needs the recorded scope, evaluation and review gates.
-- **Changed:** Current-scope preflight · dispatcher admission · inspectable legacy reconfirmation · frozen-manifest retrieval · counted research reservations.
+- **How it went:** Subprocess tests reproduced both failures. The shared parser and launch gate reject them; preparation and research adapters retain their separate evidence requirements. Later fail-closed cases separated child execution from checkpoint requests and made invalid fleet declarations serialize. Final acceptance still needs the recorded scope, evaluation and review gates.
+- **Changed:** Current-scope preflight · dispatcher admission · inspectable legacy reconfirmation · frozen-manifest retrieval · counted research reservations · exact child checkpoint actions · canonical fleet declarations.
 - **Decisions:** none.
 
 — approved by (kmanojkumar) · built by codex · branch codex/productionization-133

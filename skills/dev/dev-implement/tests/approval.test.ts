@@ -4,12 +4,14 @@ import { mkdtempSync, writeFileSync, readFileSync, openSync, closeSync, unlinkSy
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { createHash } from 'node:crypto'
-import { canonicalScope, scopeDigest, parseApproval, evaluateApprovals, evaluateConsolidatedApproval, protocolLimits, gatherConsolidatedApproval, admitConsolidatedResearch, admitConsolidatedPreparation, checkpointSuiteDigest } from '../scripts/lib/approval.mjs'
+import { canonicalScope, scopeDigest, parseApproval, evaluateApprovals, evaluateConsolidatedApproval, protocolLimits, gatherConsolidatedApproval, admitConsolidatedResearch, admitConsolidatedPreparation, checkpointSuiteDigest, validateChildSourceCheckpointAction, validateExecutionManifest } from '../scripts/lib/approval.mjs'
 
 const plan = '<!-- vsk:v1 type=plan rev=1 -->\n- [ ] **Task 1: verify** <!-- task-id:1-T1 -->\nFiles — `a.ts`\nInterfaces — none\nSteps: run check\n'
 const artifact = { repo: 'acme/app', issue: 1, kind: 'plan', artifactId: 'plan-node', rev: 1, digest: 'a'.repeat(64) }
 const record = () => ({ schemaVersion: 2, id: 'approval-1', operator: 'ada', scope: 'plan', source: { kind: 'session', ref: 'session:1', quote: 'I approve this plan.' }, artifacts: [artifact], supersedes: [], revokes: [] })
 const comment = (value: unknown) => ({ user: { login: 'ada' }, body: '<!-- vsk:v1 type=approval scope=plan -->\n```json\n' + JSON.stringify(value) + '\n```\n' })
+const sortedJson = (value: unknown) => JSON.stringify(value, (_, item) => item !== null && typeof item === 'object' && !Array.isArray(item)
+  ? Object.fromEntries(Object.keys(item).sort().map((key) => [key, item[key]])) : item)
 
 test('task progress preserves scope; files, interfaces, actions and revisions do not', () => {
   expect(scopeDigest(plan, 'plan')).toBe(scopeDigest(plan.replace('[ ]', '[x]'), 'plan'))
@@ -130,6 +132,109 @@ test('consolidated local admission binds actual approval, immutable manifest, ta
   expect(evaluateConsolidatedApproval({ ...fixture, manifestBytes: fixture.manifestBytes + ' ' }).ok).toBe(false)
   fixture.currentDependencies[0]!.blockedBy.push({ number: 4, state: 'open' })
   expect(evaluateConsolidatedApproval(fixture).ok).toBe(false)
+})
+
+test('child source checkpoint action is closed and binds the exact selected child request', () => {
+  const fixture: any = consolidatedFixture()
+  const action = {
+    id: 'checkpoint-1', kind: 'child-source-checkpoint', repo: 'acme/app',
+    parent: { issue: 10, branch: 'codex/fixture', baseSha: 'a'.repeat(40) },
+    child: { issue: 1, branch: 'fix/1-child', ref: 'refs/heads/fix/1-child', baseSha: 'a'.repeat(40), taskIds: ['1-T1'], paths: ['a.ts'] },
+  }
+  expect(validateChildSourceCheckpointAction(action)).toEqual(action)
+  expect(() => validateChildSourceCheckpointAction({ ...action, unknown: true })).toThrow()
+  const manifest = JSON.parse(fixture.manifestBytes)
+  manifest.selections[0].actionIds.push(action.id)
+  manifest.actionBounds[action.id] = action
+  fixture.manifestBytes = JSON.stringify(manifest)
+  fixture.record.manifest = { sha256: Bun.SHA256.hash(fixture.manifestBytes, 'hex'), source: { kind: 'inline', utf8: fixture.manifestBytes } }
+  fixture.record.items[0].actionIds.push(action.id)
+  fixture.record.actions.push(action)
+  fixture.requested = { ...fixture.requested, actionId: action.id, operation: 'checkpoint', branch: action.child.branch, ref: action.child.ref }
+  refreshRecord(fixture)
+  expect(evaluateConsolidatedApproval(fixture).ok).toBe(true)
+  for (const patch of [{ ref: 'refs/heads/other' }, { taskIds: [] }, { paths: ['other.ts'] }, { branch: 'codex/fixture' }]) {
+    expect(evaluateConsolidatedApproval({ ...fixture, requested: { ...fixture.requested, ...patch } }).ok).toBe(false)
+  }
+  const wrongPaths = structuredClone(fixture)
+  const frozen = JSON.parse(wrongPaths.manifestBytes)
+  frozen.actionBounds[action.id].child.paths = ['other.ts']
+  wrongPaths.manifestBytes = JSON.stringify(frozen)
+  wrongPaths.record.manifest = { sha256: Bun.SHA256.hash(wrongPaths.manifestBytes, 'hex'), source: { kind: 'inline', utf8: wrongPaths.manifestBytes } }
+  wrongPaths.record.actions.find((entry: any) => entry.id === action.id).child.paths = ['other.ts']
+  refreshRecord(wrongPaths)
+  expect(evaluateConsolidatedApproval(wrongPaths).ok).toBe(false)
+  fixture.currentDependencies[0]!.blockedBy.push({ number: 4, state: 'open' })
+  expect(evaluateConsolidatedApproval(fixture).ok).toBe(false)
+})
+
+test('child checkpoint structure rejects inference, patterns, duplicates and nested extensions', () => {
+  const action: any = {
+    id: 'checkpoint-1', kind: 'child-source-checkpoint', repo: 'acme/app',
+    parent: { issue: 10, branch: 'codex/fixture', baseSha: 'a'.repeat(40) },
+    child: { issue: 1, branch: 'fix/1-child', ref: 'refs/heads/fix/1-child', baseSha: 'a'.repeat(40), taskIds: ['1-T1'], paths: ['src/a.ts'] },
+  }
+  for (const mutate of [
+    (x: any) => { x.parent.extra = true },
+    (x: any) => { x.child.extra = true },
+    (x: any) => { x.child.issue = 10 },
+    (x: any) => { x.child.branch = 'fix/*'; x.child.ref = 'refs/heads/fix/*' },
+    (x: any) => { x.child.branch = 'fix/(one|two)'; x.child.ref = 'refs/heads/fix/(one|two)' },
+    (x: any) => { x.child.branch = x.parent.branch; x.child.ref = 'refs/heads/' + x.parent.branch },
+    (x: any) => { x.child.ref = 'refs/heads/other' },
+    (x: any) => { x.child.taskIds.push('1-T1') },
+    (x: any) => { x.child.paths.push('src/a.ts') },
+    (x: any) => { x.child.paths = ['../escape.ts'] },
+    (x: any) => { x.child.paths = ['src/*.ts'] },
+    (x: any) => { x.child.paths = ['C:\\source\\a.ts'] },
+  ]) {
+    const changed = structuredClone(action); mutate(changed)
+    expect(() => validateChildSourceCheckpointAction(changed)).toThrow()
+  }
+})
+
+test('child checkpoint action must belong only to one exact code selection at the frozen parent', () => {
+  const make = () => {
+    const fixture: any = consolidatedFixture()
+    const action = {
+      id: 'checkpoint-1', kind: 'child-source-checkpoint', repo: 'acme/app',
+      parent: { issue: 10, branch: 'codex/fixture', baseSha: 'a'.repeat(40) },
+      child: { issue: 1, branch: 'fix/1-child', ref: 'refs/heads/fix/1-child', baseSha: 'a'.repeat(40), taskIds: ['1-T1'], paths: ['a.ts'] },
+    }
+    const manifest = JSON.parse(fixture.manifestBytes)
+    manifest.selections[0].actionIds.push(action.id)
+    manifest.actionBounds[action.id] = action
+    return manifest
+  }
+  for (const mutate of [
+    (x: any) => { x.actionBounds['checkpoint-1'].parent.issue = 11 },
+    (x: any) => { x.actionBounds['checkpoint-1'].parent.baseSha = 'b'.repeat(40) },
+    (x: any) => { x.actionBounds['checkpoint-1'].child.baseSha = 'b'.repeat(40) },
+    (x: any) => { x.actionBounds['checkpoint-1'].child.issue = 2 },
+    (x: any) => { x.actionBounds['checkpoint-1'].child.taskIds = ['1-T2'] },
+    (x: any) => { x.selections[0].mode = 'preparation'; x.codeIssues = []; x.preparationTaskIds = ['1-T1'] },
+  ]) {
+    const manifest = make(); mutate(manifest)
+    expect(() => validateExecutionManifest(JSON.stringify(manifest))).toThrow()
+  }
+})
+
+test('local and parent-only checkpoint actions cannot authorize a child checkpoint request', () => {
+  const local = consolidatedFixture()
+  expect(evaluateConsolidatedApproval({ ...local, requested: { ...local.requested, operation: 'checkpoint', ref: 'refs/heads/fix/1-child' } }).ok).toBe(false)
+  const parent: any = consolidatedFixture()
+  const manifest = JSON.parse(parent.manifestBytes)
+  manifest.selections[0].actionIds.push('parent-checkpoint')
+  const checkpoint = { id: 'parent-checkpoint', kind: 'checkpoint', repo: 'acme/app', branch: manifest.parent.branch,
+    sourceScopeDigest: Bun.SHA256.hash(sortedJson({ parent: manifest.parent, selections: manifest.selections }), 'hex') }
+  manifest.actionBounds[checkpoint.id] = checkpoint
+  parent.manifestBytes = JSON.stringify(manifest)
+  parent.record.manifest = { sha256: Bun.SHA256.hash(parent.manifestBytes, 'hex'), source: { kind: 'inline', utf8: parent.manifestBytes } }
+  parent.record.items[0].actionIds.push(checkpoint.id); parent.record.actions.push(checkpoint)
+  parent.requested = { ...parent.requested, actionId: checkpoint.id, operation: 'checkpoint' }
+  refreshRecord(parent)
+  expect(evaluateConsolidatedApproval(parent).ok).toBe(true)
+  expect(evaluateConsolidatedApproval({ ...parent, requested: { ...parent.requested, branch: 'fix/1-child', ref: 'refs/heads/fix/1-child' } }).ok).toBe(false)
 })
 
 test('changed quotation, artifact identities or absent history cannot pass a frozen binding', () => {

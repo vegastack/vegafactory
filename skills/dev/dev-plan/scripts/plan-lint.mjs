@@ -44,6 +44,118 @@ const NEVER_PARALLEL = [
   '.vegastack/skillspector-baseline.json',
 ];
 
+const FLEET_HEADING = '**Fleet parallel:**';
+const FLEET_RESOURCE = /^[a-z0-9][a-z0-9._:/-]{0,127}$/;
+const TASK_ID = /^[1-9]\d*-T[1-9]\d*$/;
+
+function structuralLines(text) {
+  let fence = null;
+  return String(text).split('\n').map((line, index) => {
+    const opening = /^ {0,3}(`{3,}|~{3,})(.*?)$/.exec(line);
+    const structural = fence === null && opening === null && !/^(?: {4}|\t)/.test(line);
+    if (opening) {
+      if (fence === null) fence = opening[1];
+      else if (opening[1][0] === fence[0] && opening[1].length >= fence.length && opening[2].trim() === '') fence = null;
+    }
+    return { line, index, structural };
+  });
+}
+
+function parseClosedJson(raw) {
+  if (typeof raw !== 'string' || Buffer.byteLength(raw, 'utf8') > 8192) throw new Error('fleet declaration exceeds 8 KiB');
+  const value = JSON.parse(raw);
+  const tokens = raw.match(/"(?:[^"\\]|\\.)*"|[{}\[\],:]|[^\s{}\[\],:]+/g) ?? [];
+  let cursor = 0;
+  function visit(depth = 0) {
+    if (depth > 16) throw new Error('fleet declaration nesting is too deep');
+    const token = tokens[cursor++];
+    if (token === '{') {
+      const seen = new Set();
+      while (tokens[cursor] !== '}') {
+        const key = JSON.parse(tokens[cursor++]);
+        if (seen.has(key) || ['__proto__', 'prototype', 'constructor'].includes(key)) throw new Error('duplicate or unsafe fleet declaration key');
+        seen.add(key); cursor++; visit(depth + 1);
+        if (tokens[cursor] === ',') cursor++;
+      }
+      cursor++;
+    } else if (token === '[') {
+      while (tokens[cursor] !== ']') {
+        visit(depth + 1);
+        if (tokens[cursor] === ',') cursor++;
+      }
+      cursor++;
+    }
+  }
+  visit();
+  if (cursor !== tokens.length) throw new Error('invalid fleet declaration JSON');
+  return value;
+}
+
+function literalPlanPath(value) {
+  return typeof value === 'string' && value.length > 0 && !value.startsWith('/') && !/[\\\x00-\x1f*?\[\]{}]/.test(value)
+    && !/^[a-z]:/i.test(value) && value.split('/').every((part) => part !== '' && part !== '.' && part !== '..');
+}
+
+function selectedTaskFiles(text, selectedTaskIds) {
+  const tasks = new Map();
+  let current = null;
+  for (const row of structuralLines(text)) {
+    if (!row.structural) continue;
+    const header = /^- \[[ xX]\] \*\*Task .*?<!-- task-id:([1-9]\d*-T[1-9]\d*) -->/.exec(row.line);
+    if (header) {
+      current = header[1];
+      if (tasks.has(current)) throw new Error('duplicate structural task identity');
+      tasks.set(current, []);
+      continue;
+    }
+    if (/^#{1,6}\s/.test(row.line) || /^- \[[ xX]\] \*\*Task /.test(row.line)) current = null;
+    if (current && /^\s*(?:- )?Files —/.test(row.line)) {
+      if (row.line.includes('``')) throw new Error('selected task has an empty Files path');
+      tasks.get(current).push([...row.line.matchAll(/`([^`]+)`/g)].map((match) => match[1]));
+    }
+  }
+  const files = [];
+  for (const id of selectedTaskIds) {
+    const clauses = tasks.get(id);
+    if (!clauses || clauses.length !== 1 || clauses[0].length === 0) throw new Error('selected task lacks one canonical Files clause');
+    files.push(...clauses[0]);
+  }
+  if (!files.every(literalPlanPath)) throw new Error('selected task has a nonliteral repository path');
+  const unique = [...new Set(files)];
+  if (unique.length === 0 || unique.some(sharedByEveryChild)) throw new Error('selected task has repository-wide shared or empty file scope');
+  return unique;
+}
+
+const exclusiveFleet = (reason) => ({ eligible: false, independent: false, taskIds: [], paths: [], resources: [], reason });
+
+export function parseFleetParallelDeclaration(text, selectedTaskIds) {
+  try {
+    if (!Array.isArray(selectedTaskIds) || selectedTaskIds.length === 0 || selectedTaskIds.length > 64
+      || !selectedTaskIds.every((id) => TASK_ID.test(id)) || new Set(selectedTaskIds).size !== selectedTaskIds.length) throw new Error('invalid selected task IDs');
+    const rows = structuralLines(text);
+    const declarations = rows.filter((row) => row.structural && row.line.startsWith(FLEET_HEADING));
+    if (declarations.length === 0) return exclusiveFleet('fleet declaration absent');
+    if (declarations.length !== 1) throw new Error('duplicate fleet declaration');
+    const declaration = declarations[0];
+    const constraints = rows.find((row) => row.structural && row.line.startsWith('**Constraints:**'));
+    const boundary = rows.find((row) => row.structural && (row.line.startsWith(GROUPS_HEADING) || /^### Tasks\s*$/.test(row.line)));
+    if (!constraints || !boundary || declaration.index <= constraints.index || declaration.index >= boundary.index) throw new Error('fleet declaration is outside its structural location');
+    const raw = declaration.line.slice(FLEET_HEADING.length).trim();
+    const value = parseClosedJson(raw);
+    if (value === null || typeof value !== 'object' || Array.isArray(value)) throw new Error('fleet declaration must be an object');
+    if (Object.keys(value).sort().join(',') !== 'eligible,resources,schemaVersion,taskIds') throw new Error('unknown or missing fleet declaration field');
+    if (value.schemaVersion !== 1 || value.eligible !== true) throw new Error('unsupported fleet declaration');
+    if (!Array.isArray(value.taskIds) || value.taskIds.length === 0 || value.taskIds.length > 64
+      || !value.taskIds.every((id) => TASK_ID.test(id)) || new Set(value.taskIds).size !== value.taskIds.length) throw new Error('invalid fleet task IDs');
+    if (JSON.stringify(value.taskIds) !== JSON.stringify(selectedTaskIds)) throw new Error('fleet task IDs differ from selected tasks');
+    if (!Array.isArray(value.resources) || value.resources.length > 64 || !value.resources.every((resource) => FLEET_RESOURCE.test(resource))
+      || new Set(value.resources).size !== value.resources.length) throw new Error('invalid fleet resources');
+    return { eligible: true, independent: true, taskIds: value.taskIds, paths: selectedTaskFiles(text, value.taskIds), resources: value.resources, reason: null };
+  } catch (error) {
+    return exclusiveFleet(error instanceof Error ? error.message : 'invalid fleet declaration');
+  }
+}
+
 export function sharedByEveryChild(path) {
   const normalized = normalizeGroupPath(path);
   return normalized.endsWith('README.md') || NEVER_PARALLEL.includes(normalized);
@@ -155,6 +267,13 @@ export function lintPlan(text) {
   }
   for (const clash of groupOverlaps(groups)) {
     blocks.push(`independent groups "${clash.a}" and "${clash.b}" overlap on ${clash.path}`);
+  }
+
+  const fleetRows = structuralLines(text).filter((row) => row.structural && row.line.startsWith(FLEET_HEADING));
+  if (fleetRows.length > 0) {
+    const selected = [...String(text).matchAll(/^- \[[ xX]\] \*\*Task .*?<!-- task-id:([1-9]\d*-T[1-9]\d*) -->/gm)].map((match) => match[1]);
+    const fleet = parseFleetParallelDeclaration(text, selected);
+    if (!fleet.independent) blocks.push('invalid fleet declaration: ' + fleet.reason);
   }
 
   return { blocks, warns: [] };
