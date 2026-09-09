@@ -580,9 +580,9 @@ function gitRead(cwd, args) {
 
 // Git batch output is byte framed, not line-oriented policy text. Keep the existing
 // 4 MiB per-file ceiling, with a separate bounded allowance for the whole snapshot.
-function gitReadBlobs(cwd, oids) {
+export function gitReadBlobs(cwd, oids, run = execFileSync) {
   const blobLimit = 4 * 1024 * 1024, aggregateLimit = 64 * 1024 * 1024
-  const output = execFileSync('git', ['cat-file', '--batch'], {
+  const output = run('git', ['cat-file', '--batch'], {
     cwd, input: oids.join('\n') + '\n', stdio: 'pipe', timeout: 5000,
     maxBuffer: Math.min(oids.length * (blobLimit + 64), aggregateLimit + oids.length * 64),
     env: { ...process.env },

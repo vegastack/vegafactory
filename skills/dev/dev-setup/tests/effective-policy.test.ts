@@ -1,5 +1,5 @@
 import { expect, test } from 'bun:test'
-import { parsePolicy, resolvePolicy } from '../scripts/effective-policy.mjs'
+import { gitReadBlobs, parsePolicy, resolvePolicy } from '../scripts/effective-policy.mjs'
 
 const identity = { org: 'acme', repo: 'acme/app', group: 'dev', roomSha: 'a'.repeat(40) }
 const freshness = { configured: true, validatedAt: '2026-09-06T00:00:00Z', now: '2026-09-06T00:01:00Z', maxAgeSeconds: 7200 }
@@ -274,17 +274,14 @@ test('mutating the resolved admin map cannot supply a previous trusted self-gran
 })
 
 
-test('private policy batch reader validates exact byte framing and separate file/aggregate bounds', async () => {
-  // Exercise the private protocol parser without adding an exported testing API.
-  const { readFileSync } = await import('node:fs')
-  const source = readFileSync(`${__dirname}/../scripts/effective-policy.mjs`, 'utf8')
-  const body = source.slice(source.indexOf('function gitReadBlobs('), source.indexOf('// A per-code-repository pointer'))
+test('policy batch reader validates exact byte framing and separate file/aggregate bounds', () => {
   const oid = 'a'.repeat(40), other = 'b'.repeat(40)
   let output: Buffer
   const calls: Array<{ args: string[], options: { input: string, maxBuffer: number, timeout: number } }> = []
-  const read = new Function('execFileSync', body + '; return gitReadBlobs')((command: string, args: string[], options: { input: string, maxBuffer: number, timeout: number }) => {
+  const run = (command: string, args: string[], options: { input: string, maxBuffer: number, timeout: number }) => {
     expect(command).toBe('git'); calls.push({ args, options }); return output
-  }) as (cwd: string, oids: string[]) => Map<string, string>
+  }
+  const read = (cwd: string, oids: string[]) => gitReadBlobs(cwd, oids, run)
   const frame = (id: string, text: string) => Buffer.concat([Buffer.from(`${id} blob ${Buffer.byteLength(text)}\n`), Buffer.from(text), Buffer.from('\n')])
   output = Buffer.concat([frame(oid, 'é\n'), frame(other, '')])
   expect([...read('/fixture', [oid, other])]).toEqual([[oid, 'é\n'], [other, '']])
