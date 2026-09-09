@@ -13,7 +13,27 @@ function archive(entries: {path:string, data?:string, type?:string, mode?:number
 const packed=()=>archive([{path:'package/package.json',data:JSON.stringify({name:'@vegastack/vegafactory-dashboard',version:'1.0.0'})},{path:'package/dist-standalone/server.js',data:'server'}])
 test('changing packed bytes invalidates identity',()=>{const b=Buffer.from('reviewed');const sha256=createHash('sha256').update(b).digest('hex');expect(verifyArtifactBytes(b,{sha256})).toBe(true);expect(verifyArtifactBytes(Buffer.from('rebuilt'),{sha256})).toBe(false)})
 test('pair and tag versions must match',()=>{expect(()=>assertPairVersions({cli:'1.0.0',dashboard:'1.0.1',tag:'v1.0.0'})).toThrow();expect(()=>assertPairVersions({cli:'1.0.0',dashboard:'1.0.0',tag:'v1.0.0'})).not.toThrow()})
-test('scanner unavailable, skipped or partial coverage blocks',()=>{for(const x of [{ok:false},{ok:true,skipped:true},{ok:true,skills:[]},{ok:true,skills:[{name:'a',completeness:{limitations:['unread']}}]}])expect(()=>assertScanEvidence(x,['a'])).toThrow()})
+const scanWith=(completeness:any)=>({ok:true,skipped:false,blocks:[],skills:[{name:'a',completeness}]})
+test('scanner unavailable, skipped, blocked or with mismatched skills is refused',()=>{
+ const healthy=scanWith({status:'complete',limitations:[]})
+ for(const x of [{...healthy,ok:false},{...healthy,ok:'true'},{...healthy,skipped:true},{...healthy,skipped:undefined},{...healthy,blocks:['blocked']},{...healthy,blocks:undefined},{...healthy,skills:[]}])expect(()=>assertScanEvidence(x,['a'])).toThrow()
+ expect(()=>assertScanEvidence({...scanWith({status:'complete',limitations:[]}),skills:[{name:'a',completeness:{status:'complete',limitations:[]}},{name:'b',completeness:{status:'complete',limitations:[]}}]},['a'])).toThrow()
+ expect(()=>assertScanEvidence({...healthy,skills:[healthy.skills[0],healthy.skills[0]]},['a','a'])).toThrow()
+})
+test('healthy label-only partial scanner status passes in normalized and raw field forms',()=>{
+ expect(()=>assertScanEvidence(scanWith({status:'partial',limitations:[],entirelyUninspected:0,partiallyInspected:0,coveragePercent:100}),['a'])).not.toThrow()
+ expect(()=>assertScanEvidence(scanWith({status:'partial',limitations:[],entirely_uninspected_files:0,partially_inspected_files:0,coverage_percent:100}),['a'])).not.toThrow()
+})
+test('unknown, missing or genuinely incomplete partial scanner evidence is refused',()=>{
+ const partial={status:'partial',limitations:[],entirelyUninspected:0,partiallyInspected:0,coveragePercent:100}
+ const missing=(field:string)=>{const value={...partial};delete value[field as keyof typeof value];return value}
+ for(const completeness of [
+  undefined,{...partial,status:'unknown'},{...partial,limitations:['analyzer stopped']},
+  missing('entirelyUninspected'),missing('partiallyInspected'),missing('coveragePercent'),
+  {...partial,entirelyUninspected:1},{...partial,partiallyInspected:1},{...partial,coveragePercent:99.9},
+  {...partial,entirely_uninspected_files:1},{...partial,partially_inspected_files:1},{...partial,coverage_percent:99.9},
+ ])expect(()=>assertScanEvidence(scanWith(completeness),['a'])).toThrow()
+})
 test('descriptor binds bytes, identity and every file',()=>{const b=packed();const d=dashboardDescriptor(b,'1.0.0');expect(verifyDashboardDescriptor(d,b,'1.0.0')).toBe(true);for(const bad of [undefined,{...d,version:'0.9.0'},{...d,files:[]},{...d,files:d.files.map((f:any)=>({...f,sha256:'0'.repeat(64)}))}])expect(()=>verifyDashboardDescriptor(bad,b,'1.0.0')).toThrow();expect(()=>verifyDashboardDescriptor(d,Buffer.concat([b,Buffer.from('changed')]),'1.0.0')).toThrow()})
 test('tar rejects traversal, absolute, duplicate, links and devices before extraction',()=>{for(const e of [[{path:'/package/a'}],[{path:'package/../a'}],[{path:'package/a'},{path:'package/a'}],[{path:'package/a',type:'2'}],[{path:'package/a',type:'1'}],[{path:'package/a',type:'3'}],[{path:'package/a//b'}]])expect(()=>readPackageArchive(archive(e))).toThrow()})
 test('assembly materializes internal links and rejects escapes',async()=>{const root=await mkdtemp(join(tmpdir(),'release-links-'));const src=join(root,'src');await mkdir(src);await writeFile(join(src,'a'),'actual');await symlink('a',join(src,'b'));await materializeTree(src,join(root,'out'));expect(await readFile(join(root,'out/b'),'utf8')).toBe('actual');await symlink('../outside',join(src,'escape'));await writeFile(join(root,'outside'),'secret');await expect(materializeTree(src,join(root,'bad'))).rejects.toThrow()})
@@ -26,7 +46,7 @@ test('extracted content, modes and links remain bound to the descriptor',async()
 })
 
 test('complete exact scanner coverage passes while a copied previous dashboard descriptor fails',()=>{
- expect(()=>assertScanEvidence({ok:true,skills:[{name:'a',completeness:{status:'complete',limitations:[],entirelyUninspected:0,partiallyInspected:0,coveragePercent:100}}]},['a'])).not.toThrow()
+ expect(()=>assertScanEvidence(scanWith({status:'complete',limitations:[],entirelyUninspected:0,partiallyInspected:0,coveragePercent:100}),['a'])).not.toThrow()
  const old=dashboardDescriptor(packed(),'1.0.0')
  const changed=archive([{path:'package/package.json',data:JSON.stringify({name:'@vegastack/vegafactory-dashboard',version:'1.0.0'})},{path:'package/dist-standalone/server.js',data:'new build same version'}])
  expect(()=>verifyDashboardDescriptor(old,changed,'1.0.0')).toThrow()
@@ -63,7 +83,7 @@ test('actual preparation CLI stops at dashboard build and scanner failures, leav
 const fs=require('node:fs'),a=process.argv.slice(2);fs.mkdirSync('work',{recursive:true});fs.appendFileSync('work/commands.jsonl',JSON.stringify(a)+'\\n');if(a[0]==='--version')console.log('1.3.14');else if(a.join(' ')==='run --cwd packages/dashboard build' && process.env.FIXTURE_FAILURE==='dashboard'){console.error('fixture dashboard build failed');process.exit(2)}else if(a.join(' ')==='run build')fs.mkdirSync('packages/cli/skill/fixture',{recursive:true});else if(a.join(' ')==='run check')console.log('fixture check');else if(!['install','run'].includes(a[0]))process.exit(91)
 `,{mode:0o755})
  for(const [name,version] of [['python3.12','Python 3.12.0'],['skillspector','fixture-scanner']])await writeFile(join(bin,name!),`#!/usr/bin/env node\nif(process.argv[2]!=='--version')process.exit(92);console.log(${JSON.stringify(version)})\n`,{mode:0o755})
- await writeFile(join(root,'skills/skills-tooling/skill-scan/scripts/skill-scan.mjs'),`if(process.env.FIXTURE_FAILURE==='unavailable'){console.error('fixture scanner unavailable');process.exit(2)};console.log(JSON.stringify({ok:process.env.FIXTURE_FAILURE!=='blocked',skills:[{name:'fixture',completeness:{status:'partial',limitations:['fixture coverage gap']}}]}))`)
+ await writeFile(join(root,'skills/skills-tooling/skill-scan/scripts/skill-scan.mjs'),`if(process.env.FIXTURE_FAILURE==='unavailable'){console.error('fixture scanner unavailable');process.exit(2)};console.log(JSON.stringify({ok:process.env.FIXTURE_FAILURE!=='blocked',skipped:false,blocks:[],skills:[{name:'fixture',completeness:{status:'partial',limitations:['fixture coverage gap']}}]}))`)
  const git=(a:string[])=>{const r=spawnSync('git',a,{cwd:root,encoding:'utf8'});if(r.status!==0)throw Error(r.stderr)}
  git(['init','-q']);git(['add','.']);git(['-c','user.name=Fixture','-c','user.email=fixture@example.invalid','-c','core.hooksPath=/dev/null','commit','-qm','synthetic preparation source'])
  for(const [failure,reason] of [['dashboard','fixture dashboard build failed'],['unavailable','fixture scanner unavailable'],['blocked','scanner unavailable or incomplete'],['partial','partial scanner coverage']]) {

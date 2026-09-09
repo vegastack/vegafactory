@@ -17,12 +17,22 @@ export function assertPairVersions({ cli, dashboard, tag }) {
   if (!/^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/.test(cli) || cli !== dashboard || tag !== `v${cli}`) throw new Error('CLI/dashboard/tag version mismatch')
 }
 export function assertScanEvidence(scan, expectedSkills) {
-  if (!scan?.ok || scan.skipped || scan.blocks?.length || !expectedSkills?.length || !Array.isArray(scan.skills)) throw new Error('scanner unavailable or incomplete')
+  if (scan?.ok !== true || scan.skipped !== false || !Array.isArray(scan.blocks) || scan.blocks.length || !Array.isArray(expectedSkills) || !expectedSkills.length || !Array.isArray(scan.skills)) throw new Error('scanner unavailable or incomplete')
+  if (expectedSkills.some(name => typeof name !== 'string' || !name) || new Set(expectedSkills).size !== expectedSkills.length || scan.skills.some(s => typeof s?.name !== 'string' || !s.name) || new Set(scan.skills.map(s => s.name)).size !== scan.skills.length) throw new Error('scanner skill coverage mismatch')
   const actual = scan.skills.map(s => s.name).sort()
   if (JSON.stringify(actual) !== JSON.stringify([...expectedSkills].sort())) throw new Error('scanner skill coverage mismatch')
   for (const s of scan.skills) {
     const c = s.completeness
-    if (!c || c.status !== 'complete' || c.limitations?.length || c.entirelyUninspected > 0 || c.partiallyInspected > 0 || c.partially_inspected > 0 || (c.coveragePercent != null && c.coveragePercent < 100)) throw new Error(`partial scanner coverage: ${s.name}`)
+    const entirelyFields = ['entirelyUninspected','entirely_uninspected_files']
+    const partiallyFields = ['partiallyInspected','partially_inspected_files','partially_inspected']
+    const coverageFields = ['coveragePercent','coverage_percent']
+    const present = fields => fields.filter(field => Object.hasOwn(c ?? {},field))
+    const hasGap = [...entirelyFields,...partiallyFields].some(field => c?.[field] > 0)
+    const belowFullCoverage = coverageFields.some(field => c?.[field] != null && c[field] < 100)
+    const healthyPartial = c?.status === 'partial' && Array.isArray(c.limitations) && c.limitations.length === 0 &&
+      [entirelyFields,partiallyFields].every(fields => present(fields).length > 0 && present(fields).every(field => c[field] === 0)) &&
+      present(coverageFields).length > 0 && present(coverageFields).every(field => c[field] === 100)
+    if (!c || !['complete','partial'].includes(c.status) || c.limitations?.length || hasGap || belowFullCoverage || (c.status === 'partial' && !healthyPartial)) throw new Error(`partial scanner coverage: ${s.name}`)
   }
 }
 export function packagePath(path) {
