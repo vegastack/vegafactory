@@ -1108,10 +1108,11 @@ test('144 stopped-group controller resolves an ambiguous succession through exac
  const request={schemaVersion:1 as const,kind:'recover-stopped-group' as const,operationId,expectedHead:'8'.repeat(40),parentTaskKey:parentKey,groupPlan:{repo:'acme/app',issue:144,kind:'plan' as const,artifactId:'P',rev:13,digest:'c'.repeat(64)},groupsDigest:'d'.repeat(64),members:[{expected:beforeParent,candidate:{issue:144}},{expected:beforeChild,candidate:{issue:145}}] as any[]}
  const reference={kind:'state-receipt' as const,operationId,commitSha:head,blobSha256:'e'.repeat(64)},receipt={schemaVersion:2 as const,type:'group-succession' as const,operationId,parentTaskKey:parentKey,members:[{before:beforeParent,after:afterParent},{before:beforeChild,after:afterChild}]}
  let recoveries=0,inspections=0
- const receiver={id:'receiver',installationId:'11111111-1111-4111-8111-111111111111'} as any,session={target:{},machineId:'receiver',installationId:receiver.installationId,sessionId:'22222222-2222-4222-8222-222222222222'} as any
+ const verifiers={verifyCandidate:async()=>{},verifyTransition:async()=>{},verifyEvidence:async()=>{},verifyGroupSuccession:async()=>({maxChildren:1})}
+ const receiver={id:'receiver',installationId:'11111111-1111-4111-8111-111111111111'} as any,session={target:{...verifiers},machineId:'receiver',installationId:receiver.installationId,sessionId:'22222222-2222-4222-8222-222222222222'} as any
  const result=await dispatch.recoverVerifiedStoppedGroup({evaluation:{},machine:receiver,session,evidence:[]},{
   evaluate:()=>({action:'recover-stopped-group',reason:'verified-complete-stopped-group',request}),
-  recover:async()=>{recoveries++;return{kind:'ambiguous',reason:'lost response'}},
+  recover:async()=>{recoveries++;for(const [name,fn] of Object.entries(verifiers))expect((session.target as any)[name]).toBe(fn);return{kind:'ambiguous',reason:'lost response'}},
   read:async()=>({head,tasks:{[parentKey]:currentParent,[childKey]:currentChild}} as any),
   inspect:async(_target,value)=>{inspections++;expect(value).toEqual({operationId,parent:afterParent});return{kind:'verified',reference,receipt,currentMembers:[{initial:currentParent,current:currentParent},{initial:currentChild,current:currentChild}]} as any},
  })
@@ -1121,13 +1122,27 @@ test('144 stopped-group controller resolves an ambiguous succession through exac
  await expect(dispatch.recoverVerifiedStoppedGroup({evaluation:{},machine:receiver,session,evidence:[]},{evaluate:()=>({action:'recover-stopped-group',reason:'verified-complete-stopped-group',request}),recover:async()=>({kind:'ambiguous',reason:'lost response'}),read:async()=>({head,tasks:{[parentKey]:currentParent,[childKey]:changed}} as any),inspect:async()=>({kind:'verified',reference,receipt,currentMembers:[{initial:currentParent,current:currentParent},{initial:currentChild,current:currentChild}]} as any)})).rejects.toThrow('current member')
 })
 
-test('144 status projects recovery-queued, launch-ready and refusal states without inferring liveness',async()=>{
- const {projectSharedRecovery}=await import('../src/status.ts'),head='a'.repeat(40),history=(kind:string)=>({coverage:'complete',events:[{kind,generation:2,machineId:'receiver',previousMachineId:'old',sourceCommit:head,observedAt:'2026-09-09T00:00:00Z'}]})
+test('144 status projects only the exact inspected current parent as recoverable',async()=>{
+ const {projectSharedRecovery,inspectSharedRecovery}=await import('../src/status.ts'),head='a'.repeat(40),history=(kind:string)=>({coverage:'complete',events:[{kind,generation:2,machineId:'receiver',previousMachineId:'old',sourceCommit:head,observedAt:'2026-09-09T00:00:00Z'}]})
  const task=(taskKey:string,issue:number,state:string,parentTaskKey:string|null)=>({taskKey,repo:'acme/app',issue,state,machineId:'receiver',generation:2,parentTaskKey,sourceCommit:head,originMachineId:'old',lastTransitionObservedAt:'2026-09-09T00:00:00Z',checkpoint:null,history:history('group-succession')})
- expect(projectSharedRecovery({head,tasks:[task('p',144,'claimed',null),task('c',145,'recovery-queued','p')],refusal:null,history:{coverage:'complete',archiveCoverage:'partial',sourceCommit:head}} as any)).toEqual([
-  {taskKey:'p',issue:144,state:'claimed',action:'recover',reason:'group succession verified; parent lifecycle checks required'},
+ const shared={head,tasks:[task('p',144,'claimed',null),task('c',145,'recovery-queued','p'),task('later',146,'claimed','p')],refusal:null,history:{coverage:'complete',archiveCoverage:'partial',sourceCommit:head}} as any
+ expect(projectSharedRecovery(shared)[0]).toMatchObject({taskKey:'p',action:'wait'})
+ const binding={taskKey:'p',runId:'11111111-1111-4111-8111-111111111111',generation:2,ownerToken:'22222222-2222-4222-8222-222222222222',machineId:'receiver',installationId:'33333333-3333-4333-8333-333333333333',sessionId:'44444444-4444-4444-8444-444444444444'}
+ const parent={schemaVersion:2,...binding,repo:'acme/app',issue:144,parentTaskKey:null,state:'claimed',successionOperationId:'55555555-5555-4555-8555-555555555555'},child={...parent,taskKey:'c',runId:'66666666-6666-4666-8666-666666666666',issue:145,parentTaskKey:'p',state:'recovery-queued'},later={...child,taskKey:'later',runId:'77777777-7777-4777-8777-777777777777',issue:146,state:'claimed'}
+ const current:any={p:parent,c:child,later},inspection={kind:'verified',reference:{kind:'state-receipt',operationId:parent.successionOperationId,commitSha:head,blobSha256:'e'.repeat(64)},receipt:{operationId:parent.successionOperationId,parentTaskKey:'p'},currentMembers:Object.values(current).map(value=>({initial:value,current:value}))}
+ const projected=await inspectSharedRecovery(shared,{} as any,{task:async(_target:any,key:string)=>({kind:'active',head,task:current[key]}),group:async()=>inspection as any})
+ expect(projected).toEqual([
+  {taskKey:'p',issue:144,state:'claimed',action:'recover',reason:'exact current group parent verified; lifecycle checks required'},
   {taskKey:'c',issue:145,state:'recovery-queued',action:'wait',reason:'parent must start before this recovered child'},
+  {taskKey:'later',issue:146,state:'claimed',action:'wait',reason:'claimed child is not a recoverable group parent'},
  ])
+ const missing=await inspectSharedRecovery({...shared,tasks:[shared.tasks[0]]},{} as any,{task:async()=>({kind:'active',head,task:parent}),group:async()=>({kind:'invalid-or-unavailable',reason:'group succession could not be verified'}) as any} as any)
+ expect(missing[0]).toMatchObject({taskKey:'p',action:'refuse'});expect(missing[0]!.reason).toContain('could not be verified')
+ const moving=await inspectSharedRecovery({...shared,tasks:[shared.tasks[0]]},{} as any,{task:async()=>({kind:'active',head:'b'.repeat(40),task:parent}),group:async()=>inspection as any} as any)
+ expect(moving[0]).toMatchObject({taskKey:'p',action:'refuse'});expect(moving[0]!.reason).toContain('status snapshot')
+ const rebound:any=structuredClone(inspection);rebound.currentMembers[0].current.ownerToken=crypto.randomUUID()
+ const endpoint=await inspectSharedRecovery({...shared,tasks:[shared.tasks[0]]},{} as any,{task:async()=>({kind:'active',head,task:parent}),group:async()=>rebound as any} as any)
+ expect(endpoint[0]).toMatchObject({taskKey:'p',action:'refuse'});expect(endpoint[0]!.reason).toContain('member endpoint')
  expect(projectSharedRecovery({head:null,tasks:[],refusal:'verified coordination reader unavailable'} as any)).toEqual([{taskKey:null,issue:null,state:'unavailable',action:'refuse',reason:'verified coordination reader unavailable'}])
 })
 test('144 completed terminal identity is never represented as quota or silently reopened',async()=>{

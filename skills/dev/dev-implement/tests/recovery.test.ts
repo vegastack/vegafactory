@@ -88,7 +88,6 @@ test('complete verified stopped group yields one exact recovery request without 
  const member=(expected:any,parentTaskKey:string|null)=>{const checkpoint={id:'checkpoint',repo:'o/r',runId:expected.runId,scopeDigest:'c'.repeat(64)};return({
   stateCommit:head,expected,candidate:{host:'github.com',repo:'o/r',issue:parentTaskKey?145:144,repositoryNodeId:'R_repo',issueNodeId:parentTaskKey?'I_145':'I_144',scopeDigest:'c'.repeat(64),approvalDigest:'d'.repeat(64),approvalBindings:f.packet.approvalBindings,runId:expected.runId,stage:'implement',paths:[parentTaskKey?'child.ts':'parent.ts'],resources:[],independent:true,parentTaskKey,parentBinding:parentTaskKey?parent:null,approvedTaskIds:[parentTaskKey?'145-T1':'144-T1']},
   task:{schemaVersion:1,state:'stopped',...expected,host:'github.com',repo:'o/r',issue:parentTaskKey?145:144,repositoryNodeId:'R_repo',issueNodeId:parentTaskKey?'I_145':'I_144',scopeDigest:'c'.repeat(64),approvalDigest:'d'.repeat(64),approvalBindings:f.packet.approvalBindings,stage:'implement',paths:[parentTaskKey?'child.ts':'parent.ts'],resources:[],independent:true,parentTaskKey,parentBinding:parentTaskKey?parent:null,approvedTaskIds:[parentTaskKey?'145-T1':'144-T1'],checkpoint,stopProof:{machineId:expected.machineId,installationId:expected.installationId,sessionId:expected.sessionId,generation:expected.generation,runIds:[expected.runId]},unresolvedEffects:[],recovery:{schemaVersion:2,taskKey:expected.taskKey,runId:expected.runId,generation:expected.generation,scopeDigest:'c'.repeat(64),approvalDigest:'d'.repeat(64),approvalBindings:f.packet.approvalBindings,checkpoint,execution:{id:'qualified'},remoteEffectCoverage:{kind:'qualified-managed-only'},effects:[],completed:[],joins:[]},acceptedScopes:[]},
-  verification:{source:true,authority:true,checkpoint:true,stop:true,execution:true,effects:true,history:true,launch:true,check:true,join:true},
  })}
  const input={operationId,expectedHead:head,parentTaskKey:parent.taskKey,groupPlan,groupsDigest,approvedGroups,members:[member(parent,null),member(child,parent.taskKey)]}
  const before=JSON.stringify(input),decision=evaluateStoppedGroupRecovery(input)
@@ -100,7 +99,7 @@ test('complete verified stopped group yields one exact recovery request without 
   ['duplicate member',value=>{value.members.push(structuredClone(value.members[1]))},'refuse'],
   ['wrong shared head',value=>{value.members[1].stateCommit='f'.repeat(40)},'refuse'],
   ['wrong group digest',value=>{value.groupsDigest='0'.repeat(64)},'refuse'],
-  ['unknown original launch context',value=>{value.members[1].verification.launch=false},'wait'],
+  ['caller-created verification flags',value=>{value.members[1].verification={launch:true}},'refuse'],
   ['changed child candidate',value=>{value.members[1].candidate.paths=['other.ts']},'refuse'],
   ['changed canonical authority',value=>{value.members[1].task.recovery.approvalBindings=[]},'refuse'],
   ['changed checkpoint',value=>{value.members[1].task.recovery.checkpoint={id:'other',runId:value.members[1].task.runId}},'wait'],

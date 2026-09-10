@@ -12,8 +12,8 @@ import { loadConfiguredPolicy } from './control-room.ts'
 import { ghText, boundedGhJson, fetchGhPages, readBudget } from './gh.ts'
 import { buildLaunchPlan, validateManagedLaunch, type LaunchPlan } from './launch.ts'
 import { atomicRunFile, readPrivateRunFile, readRun, readRuns, runsRoot, verifyRunAuthority, approvalTools, type RunAuthorityRequest, type RunRecord } from './runs.ts'
-import { acquireSharedTask, transitionSharedTask, publishRecoveryReceipt, readCoordination, inspectGroupSuccession, canonical, parseAcceptedScope, type ParentClaimBinding, type TaskRecord, type SharedClaim, type RecoveryEvidencePayload, type AcceptanceRef, type ChildAcceptance, type JoinRef } from './shared-claims.ts'
-import { executeApprovedRun, inspectManagedHarness, shipGuardWired, sharedClaimForRun, sharedRunAdapters, prepareDispatchRun, verifyDispatchRunAuthority, type PlannedRun, type ExecuteDeps } from './dispatch.ts'
+import { acquireSharedTask, transitionSharedTask, publishRecoveryReceipt, readCoordination, inspectGroupSuccession, canonical, parseAcceptedScope, type ParentClaimBinding, type TaskRecord, type SharedClaim, type TaskTransition, type RecoveryEvidencePayload, type AcceptanceRef, type ChildAcceptance, type JoinRef } from './shared-claims.ts'
+import { executeApprovedRun, inspectManagedHarness, shipGuardWired, sharedClaimForRun, sharedRunAdapters, prepareDispatchRun, verifyDispatchRunAuthority, stableGroupRequestId, type PlannedRun, type ExecuteDeps } from './dispatch.ts'
 // Load executable helpers as packaged files, never inline their CLI entrypoints
 // into dist/index.js. Source tests use the same authored files before packaging.
 const sourceModule = fileURLToPath(import.meta.url).endsWith('.ts')
@@ -133,8 +133,8 @@ async function currentPolicy(config: FactoryConfig, repo: string): Promise<{ pol
   if (!resolved.ok) throw Error('current child policy unavailable')
   return { policy: repoPolicyFromEffective(resolved), devMd, resolved }
 }
-async function currentParentContext(parent:RunRecord,record:ChildrenRecord,config:FactoryConfig):Promise<{claim:SharedClaim;task:TaskRecord;binding:ParentClaimBinding;succession:Extract<import('./shared-claims.ts').GroupSuccessionInspection,{kind:'verified'}>|null}> {
-  const claim=await sharedClaimForRun(parent,config),binding=parentClaimBinding(claim),snapshot=await readCoordination(claim.target),task=snapshot.tasks[claim.taskKey]
+async function currentParentContext(parent:RunRecord,record:ChildrenRecord,config:FactoryConfig,gh:typeof ghText=ghText):Promise<{claim:SharedClaim;task:TaskRecord;binding:ParentClaimBinding;succession:Extract<import('./shared-claims.ts').GroupSuccessionInspection,{kind:'verified'}>|null}> {
+  const claim=await sharedClaimForRun(parent,config,gh),binding=parentClaimBinding(claim),snapshot=await readCoordination(claim.target),task=snapshot.tasks[claim.taskKey]
   if(!task||task.runId!==claim.runId||task.generation!==claim.generation||task.ownerToken!==claim.ownerToken||task.machineId!==claim.machineId||task.installationId!==claim.installationId||task.sessionId!==claim.sessionId||task.parentTaskKey!==null)throw Error('current parent coordination owner differs')
   let succession:Extract<import('./shared-claims.ts').GroupSuccessionInspection,{kind:'verified'}>|null=null
   if(!same(binding,record.parentBinding)){
@@ -174,20 +174,20 @@ export async function readExecutableChildrenRecord(parent:RunRecord,config:Facto
     return parseChildrenRecord(JSON.parse(await readPrivateRunFile(path)))
   }finally{await releaseClaim(lock.claim)}
 }
-async function authoritativeGroups(parent: RunRecord, config: FactoryConfig): Promise<ChildGroup[]> {
-  await verifyRunAuthority(parent, config, 'launch')
-  const body = await canonicalPlan(parent), lint = lintPlan(body)
+async function authoritativeGroups(parent: RunRecord, config: FactoryConfig,gh:typeof ghText=ghText): Promise<ChildGroup[]> {
+  await verifyRunAuthority(parent, config, 'launch',{gh})
+  const body = await canonicalPlan(parent,gh), lint = lintPlan(body)
   if (lint.blocks.length) throw Error('approved independent plan is invalid: ' + lint.blocks.join('; '))
   return checkedGroups({ guard: 'plan-lint', ok: true, groups: parseIndependentGroups(body).map(group => ({ id: group.id, members: group.members, files: group.files })) })
 }
 
 // Called by #137 inside each pinned transaction, including ambiguous readback.
 // Resolve the ORIGINAL launch binding; a latest-owner lookup cannot authorize it.
-export async function verifyChildRelationship(input: { parent: TaskRecord; child: TaskRecord }, config: FactoryConfig): Promise<{ maxChildren: number }> {
+export async function verifyChildRelationship(input: { parent: TaskRecord; child: TaskRecord }, config: FactoryConfig,gh:typeof ghText=ghText): Promise<{ maxChildren: number }> {
   const root = runsRoot(config.home), parent = await readRun(root, input.parent.runId)
   const launch = await readExecutableChildrenRecord(parent,config)
   validateRecordedSource(parent, launch)
-  const current=await currentParentContext(parent,launch,config),expected=current.binding
+  const current=await currentParentContext(parent,launch,config,gh),expected=current.binding
   const actual = { taskKey: input.parent.taskKey, runId: input.parent.runId, generation: input.parent.generation, ownerToken: input.parent.ownerToken, machineId: input.parent.machineId, installationId: input.parent.installationId, sessionId: input.parent.sessionId }
   if (!same(actual, expected) || input.child.parentTaskKey !== expected.taskKey
     || parent.sharedClaim?.taskKey !== expected.taskKey || parent.sharedClaim.ownerToken !== expected.ownerToken || parent.sharedClaim.generation !== expected.generation
@@ -195,7 +195,7 @@ export async function verifyChildRelationship(input: { parent: TaskRecord; child
     || parent.state !== 'running' || parent.cancelRequestedAt || parent.terminationRequest || parent.parent !== null) throw Error('original parent coordination authority differs')
   clean(parent.checkout)
   if (git(parent.checkout, ['rev-parse', 'HEAD']) !== launch.baseSha) throw Error('parent source edits cannot overlap child reservations')
-  const groups = await authoritativeGroups(parent, config)
+  const groups = await authoritativeGroups(parent, config,gh)
   if (!same(groups, launch.groups)) throw Error('approved parent groups changed')
   const { policy } = await currentPolicy(config, parent.repo)
   if (policy.effective?.policyDigest !== parent.policyDigest) throw Error('parent policy changed')
@@ -204,7 +204,7 @@ export async function verifyChildRelationship(input: { parent: TaskRecord; child
     || !same(input.child.resources, child.resources) || !input.child.independent || !same(input.child.approvedTaskIds, child.taskIds)) throw Error('child is outside exact approved parent group')
   const childRun = await readRun(root, input.child.runId)
   if (childRun.parent !== parent.issue || childRun.baseSha !== launch.baseSha || childRun.branch !== child.branch || childRun.checkout !== child.path || childRun.taskKey.scopeDigest !== child.scopeDigest || !same(childRun.approvedTaskIds, child.taskIds)) throw Error('child run differs from selected group')
-  await verifyDispatchRunAuthority(childRun, config, 'launch')
+  await verifyDispatchRunAuthority(childRun, config, 'launch',{gh})
   return { maxChildren: Math.min(launch.concurrency, config.subagents.concurrent, 3) }
 }
 
@@ -221,6 +221,7 @@ export interface ChildrenDependencies {
   verifyParent?: (record: ChildrenRecord, config: FactoryConfig) => Promise<void>
   verifyChild?: (run: RunRecord, config: FactoryConfig) => Promise<void>
   processDeps?: Partial<ExecuteDeps>
+  gh?: typeof ghText
 }
 export interface ChildrenOutcome { results: ChildResult[]; blocked: Array<{ issue: number; reason: string }>; plan: ChildrenRecord; wrote: boolean }
 
@@ -228,30 +229,31 @@ type RecoveredStartMember={task:TaskRecord;claim:SharedClaim;startOperationId:st
 // Succession transfers reservations; it does not launch anything. Once the
 // exact current set has been reconstructed, start the parent first, then only
 // queued children without an already accepted historical join.
-export async function startRecoveredGroupMembers(input:{parent:RecoveredStartMember;children:RecoveredStartMember[]},start:(input:{claim:SharedClaim;operationId:string;transition:{kind:'start'}})=>Promise<import('./shared-claims.ts').SharedClaimResult>=transitionSharedTask):Promise<{parent:SharedClaim;children:SharedClaim[];acceptedRunIds:string[]}>{
+export async function startRecoveredGroupMembers(input:{parent:RecoveredStartMember;children:RecoveredStartMember[];deferChildren?:boolean},transition:(input:{claim:SharedClaim;operationId:string;transition:TaskTransition})=>Promise<import('./shared-claims.ts').SharedClaimResult>=transitionSharedTask):Promise<{parent:SharedClaim;children:SharedClaim[];acceptedRunIds:string[]}>{
  const parent=input.parent,operation=parent.task.schemaVersion===2?parent.task.successionOperationId:null
  const binding=(task:TaskRecord)=>({taskKey:task.taskKey,runId:task.runId,generation:task.generation,ownerToken:task.ownerToken,machineId:task.machineId,installationId:task.installationId,sessionId:task.sessionId})
  const claimBinding=(claim:SharedClaim)=>({taskKey:claim.taskKey,runId:claim.runId,generation:claim.generation,ownerToken:claim.ownerToken,machineId:claim.machineId,installationId:claim.installationId,sessionId:claim.sessionId})
- if(parent.task.schemaVersion!==2||parent.task.state!=='claimed'||parent.task.parentTaskKey!==null||!operation||!same(binding(parent.task),claimBinding(parent.claim)))throw Error('recovered parent is not an exact claimed successor')
+ if(parent.task.schemaVersion!==2||!['claimed','running'].includes(parent.task.state)||parent.task.parentTaskKey!==null||!operation||!same(binding(parent.task),claimBinding(parent.claim)))throw Error('recovered parent is not an exact claimed successor')
  if(new Set(input.children.map(row=>row.task.taskKey)).size!==input.children.length||new Set(input.children.map(row=>row.task.runId)).size!==input.children.length)throw Error('recovered children are not unique')
  const acceptedRunIds=[...new Set((parent.task.recovery?.joins??[]).filter(join=>join.state==='accepted').map(join=>join.childRunId))]
  if(acceptedRunIds.some(runId=>!input.children.some(row=>row.task.runId===runId)))throw Error('accepted recovered join names a missing child')
- for(const row of input.children)if(row.task.schemaVersion!==2||row.task.state!=='recovery-queued'||row.task.parentTaskKey!==parent.task.taskKey||row.task.successionOperationId!==operation||!row.task.parentBinding||!same(binding(row.task),claimBinding(row.claim)))throw Error('recovered child is not an exact recovery-queued successor')
+ for(const row of input.children)if(row.task.schemaVersion!==2||!['recovery-queued','running','completed'].includes(row.task.state)||row.task.parentTaskKey!==parent.task.taskKey||row.task.successionOperationId!==operation||!row.task.parentBinding||!same(binding(row.task),claimBinding(row.claim)))throw Error('recovered child is not an exact recovery-queued successor')
  const outstanding=input.children.filter(row=>!acceptedRunIds.includes(row.task.runId))
- const parentStarted=await start({claim:parent.claim,operationId:parent.startOperationId,transition:{kind:'start'}})
+ const parentStarted=await transition({claim:parent.claim,operationId:parent.startOperationId,transition:{kind:'start'}})
  if(parentStarted.kind!=='owned')throw Error('recovered parent start not acknowledged: '+parentStarted.reason)
  const children:SharedClaim[]=[]
- for(const row of outstanding){const started=await start({claim:row.claim,operationId:row.startOperationId,transition:{kind:'start'}});if(started.kind!=='owned')throw Error('recovery-queued child start not acknowledged: '+started.reason);children.push(started.claim)}
+ if(input.deferChildren)return{parent:parentStarted.claim,children,acceptedRunIds}
+ for(const row of outstanding){const started=await transition({claim:row.claim,operationId:row.startOperationId,transition:{kind:'start'}});if(started.kind!=='owned')throw Error('recovery-queued child start not acknowledged: '+started.reason);children.push(started.claim)}
  return{parent:parentStarted.claim,children,acceptedRunIds}
 }
-async function verifyParent(record: ChildrenRecord, config: FactoryConfig, unchangedSource = false): Promise<void> {
+async function verifyParent(record: ChildrenRecord, config: FactoryConfig, unchangedSource = false, gh:typeof ghText=ghText): Promise<void> {
   const parent = await readRun(runsRoot(config.home), record.parentRunId)
   validateRecordedSource(parent, record)
   if (parent.state !== 'running' || parent.cancelRequestedAt || parent.terminationRequest) throw Error('parent stopped or cancelled')
-  const current=await currentParentContext(parent,record,config),{claim}=current
+  const current=await currentParentContext(parent,record,config,gh),{claim}=current
   const snapshot = await readCoordination(claim.target),task=snapshot.tasks[claim.taskKey]
   if (!task || task.state !== 'running' || task.stopProof || !snapshot.index.active.some(row => row.taskKey === task.taskKey)) throw Error('parent no longer owns active coordination')
-  if (!same(await authoritativeGroups(parent, config), record.groups)) throw Error('approved independent groups changed')
+  if (!same(await authoritativeGroups(parent, config,gh), record.groups)) throw Error('approved independent groups changed')
   if (git(parent.checkout, ['symbolic-ref', '--short', 'HEAD']) !== record.parentBranch) throw Error('parent checkout branch changed')
   if (unchangedSource) { clean(parent.checkout); if (git(parent.checkout, ['rev-parse', 'HEAD']) !== record.baseSha) throw Error('parent source changed during independent child execution') }
 }
@@ -325,7 +327,7 @@ export async function deriveConsolidatedChildRequests(
   return { executionRequest, checkpointRequest, policy: current.policy, reads, checked: execution, taskIds }
 }
 
-async function prepareChild(child: ChildLaunch, record: ChildrenRecord, parent: RunRecord, config: FactoryConfig): Promise<PreparedChild> {
+async function prepareChild(child: ChildLaunch, record: ChildrenRecord, parent: RunRecord, config: FactoryConfig, gh:typeof ghText=ghText): Promise<PreparedChild> {
   const policy=await currentPolicy(config,record.repo),stage = stagePolicy(policy.policy, 'implement')
   if (stage.harness !== parent.harness || stage.model !== parent.model || stage.effort !== parent.effort) throw Error('child must retain the selected parent subscription setup')
   const localPath = join(runsRoot(config.home), parent.runId, 'child-' + child.issue + '.lock')
@@ -340,7 +342,7 @@ async function prepareChild(child: ChildLaunch, record: ChildrenRecord, parent: 
     }
     clean(child.path)
     if (git(child.path, ['rev-parse', 'HEAD']) !== record.baseSha || git(child.path, ['symbolic-ref', '--short', 'HEAD']) !== child.branch) throw Error('prepared child base/branch differs')
-    const admission = await deriveConsolidatedChildRequests(parent, child, record, config)
+    const admission = await deriveConsolidatedChildRequests(parent, child, record, config,{gh})
     const plan = buildLaunchPlan({ harness: stage.harness, model: stage.model, effort: stage.effort, stage: 'implement', worktree: child.path,
       issue: { number: child.issue, title: child.title }, operator: admission.policy.operators[0] ?? 'the operator',
       outcome: 'Complete the approved child scope. Only these paths are owned: ' + child.files.join(', ') + '. Commit the result and leave integration to the parent CLI.',
@@ -350,7 +352,7 @@ async function prepareChild(child: ChildLaunch, record: ChildrenRecord, parent: 
     const guard = await shipGuardWired(child.path, stage.harness, { home: config.home, repo: record.repo, policyDigest: admission.policy.effective?.policyDigest })
     if (!guard.wired) throw Error('prepared child hooks refused: ' + guard.detail)
     if (guard.policyDigest) plan.guardPolicyDigest = guard.policyDigest
-    const coordinator=(await currentParentContext(parent,record,config)).binding
+    const coordinator=(await currentParentContext(parent,record,config,gh)).binding
     if(child.runId){if(!child.parentBinding)throw Error('existing child launch provenance unavailable')}
     else child.parentBinding=coordinator
     const run = child.runId ? await readRun(runsRoot(config.home), child.runId) : await prepareDispatchRun({
@@ -361,19 +363,32 @@ async function prepareChild(child: ChildLaunch, record: ChildrenRecord, parent: 
     })
     if (run.parent !== parent.issue || run.branch !== child.branch || run.baseSha !== record.baseSha || run.checkout !== child.path
       || run.execution?.accountRef !== parent.execution?.accountRef) throw Error('prepared child execution identity differs')
-    await verifyDispatchRunAuthority(run, config, 'launch')
+    await verifyDispatchRunAuthority(run, config, 'launch',{gh})
     plan.approvedRunInput = { ...run, root: runsRoot(config.home) }
     return { run, plan, localClaim: acquired.claim }
   } catch (error) { await releaseClaim(acquired.claim); throw error }
 }
-async function acquireChild(child: ChildLaunch, record: ChildrenRecord, prepared: PreparedChild, config: FactoryConfig): Promise<SharedClaim> {
+async function acquireChild(child: ChildLaunch, record: ChildrenRecord, prepared: PreparedChild, config: FactoryConfig, gh:typeof ghText=ghText): Promise<SharedClaim> {
   const parent = await readRun(runsRoot(config.home), record.parentRunId)
-  const admission = await deriveConsolidatedChildRequests(parent, child, record, config), adapters = sharedRunAdapters(config)
+  const admission = await deriveConsolidatedChildRequests(parent, child, record, config,{gh}), adapters = sharedRunAdapters(config,undefined,gh)
   if (!same(prepared.run.authorityRequest, admission.executionRequest) || !same(prepared.run.checkpointIntent?.approvalRequest, admission.checkpointRequest)) throw Error('prepared child authority requests changed before acquisition')
   if(prepared.run.sharedClaim){
-    const claim=await sharedClaimForRun(prepared.run,config),snapshot=await readCoordination(claim.target),task=snapshot.tasks[claim.taskKey]
-    if(task?.schemaVersion!==2||task.state!=='recovery-queued'||!child.parentBinding||!same(task.parentBinding,child.parentBinding))throw Error('existing child is not a verified recovery-queued successor')
-    await verifyDispatchRunAuthority(prepared.run,config,'launch')
+    const claim=await sharedClaimForRun(prepared.run,config,gh),snapshot=await readCoordination(claim.target),task=snapshot.tasks[claim.taskKey]
+    if(task?.schemaVersion!==2||!child.parentBinding||!same(task.parentBinding,child.parentBinding))throw Error('existing child is not a verified recovery-queued successor')
+    await verifyDispatchRunAuthority(prepared.run,config,'launch',{gh})
+    if(task.state==='running'){
+      const provenance=prepared.run.remoteRecovery,owner=await import('./shared-claims.ts'),operationId=prepared.run.attemptOperationIds?.start
+      const requestId=stableGroupRequestId(task.successionOperationId,task.taskKey),continuations=prepared.run.continuations?.filter(row=>row.requestId===requestId)??[]
+      const receiving=provenance?.kind==='receiving-group'&&provenance.role==='child'&&provenance.parentTaskKey===task.parentTaskKey&&provenance.succession.operationId===task.successionOperationId
+      const sameHome=!provenance&&continuations.length===1&&continuations[0]!.attemptId===prepared.run.attemptId&&prepared.run.sharedClaim?.taskKey===task.taskKey&&prepared.run.sharedClaim.generation===task.generation&&prepared.run.sharedClaim.ownerToken===task.ownerToken
+      if((!receiving&&!sameHome)||!operationId)throw Error('running recovered child lacks exact group provenance')
+      const raw=await claim.target.provider.read(claim.target,snapshot.head,owner.operationPath(operationId))
+      if(!raw)throw Error('running recovered child start receipt unavailable')
+      const receipt=JSON.parse(raw) as import('./shared-claims.ts').OperationReceipt
+      if(receipt.operationId!==operationId||receipt.type!=='start'||receipt.taskKey!==task.taskKey||receipt.generation!==task.generation||receipt.requestDigest!==owner.sha256(owner.canonical({kind:'start'}))||!same(receipt.resultOwner,{ownerToken:task.ownerToken,machineId:task.machineId,installationId:task.installationId,sessionId:task.sessionId,runId:task.runId}))throw Error('running recovered child start receipt differs')
+      return claim
+    }
+    if(task.state!=='recovery-queued')throw Error('existing child is not a verified recovery-queued successor')
     const started=await transitionSharedTask({claim,operationId:prepared.run.attemptOperationIds!.start,transition:{kind:'start'}})
     if(started.kind!=='owned')throw Error('recovery-queued child start not acknowledged: '+started.reason)
     return started.claim
@@ -391,7 +406,7 @@ async function acquireChild(child: ChildLaunch, record: ChildrenRecord, prepared
     throw Error(result.kind + ': ' + result.reason)
   }
   const claim = result.claim
-  await verifyDispatchRunAuthority(prepared.run, config, 'launch')
+  await verifyDispatchRunAuthority(prepared.run, config, 'launch',{gh})
   await adapters.persistSharedRun!(claim, planned(record.repo, child), prepared.plan)
   const current = await readRun(runsRoot(config.home), prepared.run.runId)
   const snapshot = await readCoordination(claim.target), task = snapshot.tasks[claim.taskKey]
@@ -400,9 +415,9 @@ async function acquireChild(child: ChildLaunch, record: ChildrenRecord, prepared
   if (started.kind !== 'owned') throw Error('child start not acknowledged: ' + started.reason)
   return started.claim
 }
-async function finishChild(claim: SharedClaim | null, run: RunRecord, config: FactoryConfig): Promise<void> {
+async function finishChild(claim: SharedClaim | null, run: RunRecord, config: FactoryConfig, gh:typeof ghText=ghText): Promise<void> {
   if (!claim) throw Error('shared child owner unavailable')
-  const adapters = sharedRunAdapters(config), transition = await adapters.finishSharedRun!(claim, {
+  const adapters = sharedRunAdapters(config,undefined,gh), transition = await adapters.finishSharedRun!(claim, {
     runId: run.runId, terminationCause: run.terminationCause ?? 'failed', exitCode: run.exitCode, timedOut: false, logFile: '', pushed: false, handedBack: false,
   })
   const result = await transitionSharedTask({ claim, operationId: transition.kind === 'stop' ? (await readRun(runsRoot(config.home), run.runId)).stopReceiptIds!.transition : randomUUID(), transition })
@@ -459,23 +474,25 @@ async function verifiedResult(run: RunRecord, child: ChildLaunch, config: Factor
 
 export async function executeChildren(input: { parent: RunRecord; groups: unknown; config: FactoryConfig; write?: boolean; signal?: AbortSignal }, deps: ChildrenDependencies = {}): Promise<ChildrenOutcome> {
   const { parent, config } = input, root = runsRoot(config.home), groups = checkedGroups(input.groups)
-  if (!same(await (deps.groups ?? authoritativeGroups)(parent, config), groups)) throw Error('groups file differs from canonical approved parent plan')
-  const parentClaim = await (deps.parentClaim ?? sharedClaimForRun)(parent, config)
+  const currentGroups=deps.groups?await deps.groups(parent,config):await authoritativeGroups(parent,config,deps.gh)
+  if (!same(currentGroups, groups)) throw Error('groups file differs from canonical approved parent plan')
+  const parentClaim=deps.parentClaim?await deps.parentClaim(parent,config):await sharedClaimForRun(parent,config,deps.gh)
   const retainedAccepted=new Map<string,ChildAcceptance>()
   let record = await readOptional<ChildrenRecord>(recordPath(root, parent.runId))
   if (record) {
     record = parseChildrenRecord(record)
     if(record.schemaVersion===1)record=await readExecutableChildrenRecord(parent,config)
     if(!deps.parentClaim){
-      const context=await currentParentContext(parent,record,config)
+      const context=await currentParentContext(parent,record,config,deps.gh)
       if(context.succession&&context.task.recovery){
-        const settled=new Set<string>()
+        const settled=new Set<string>(),started=new Set<string>()
         for(const child of record.children){
           if(!child.runId)continue
           const run=await readRun(root,child.runId),saved=await readOptional<ChildResult>(resultPath(root,child.runId))
           if(run.state==='terminal'&&run.terminationCause==='succeeded'&&saved?.runId===run.runId&&saved.repo===run.repo&&saved.issue===run.issue&&saved.headSha===run.headSha&&saved.scopeDigest===run.taskKey.scopeDigest)settled.add(child.runId)
+          if(run.state==='prepared'||run.state==='running')started.add(child.runId)
         }
-        const classified=reconcileProgressedChildrenState(context.succession,context.task.recovery,settled)
+        const classified=reconcileProgressedChildrenState(context.succession,context.task.recovery,settled,started)
         for(const joined of classified.accepted){
           const accepted=context.task.recovery.children.find(row=>row.childRunId===joined.childRunId)
           if(!accepted)throw Error('retained accepted child result unavailable')
@@ -517,7 +534,7 @@ export async function executeChildren(input: { parent: RunRecord; groups: unknow
     return result
   }
   let monitorBusy = false, parentFailure: string | null = null
-  const verify = () => controlled(() => deps.verifyParent ? deps.verifyParent(record!, config) : verifyParent(record!, config, true))
+  const verify = () => controlled(() => deps.verifyParent ? deps.verifyParent(record!, config) : verifyParent(record!, config, true,deps.gh)).catch(error=>{throw Error('current parent verification: '+(error as Error).message)})
   const monitor = setInterval(() => {
     if (monitorBusy) return
     monitorBusy = true
@@ -546,7 +563,7 @@ export async function executeChildren(input: { parent: RunRecord; groups: unknow
             const run = await readRun(root, child.runId)
             if (run.state === 'terminal') {
               if (run.terminationCause !== 'succeeded') throw Error('terminal child failed; execution will not be replayed')
-              await (deps.verifyChild ?? verifyDispatchRunAuthority)(run, config)
+              if(deps.verifyChild)await deps.verifyChild(run,config);else await verifyDispatchRunAuthority(run,config,'effect',{gh:deps.gh})
               if(run.parent!==null&&run.authorityRequest?.kind==='consolidated'&&(!run.checkpoint||run.checkpoint.headSha!==run.headSha))await controlled(async()=>{await (await import('./checkpoints.ts')).flushRunCheckpoint(run,config)})
               const checkpointed=await readRun(root,run.runId)
               const saved = await readOptional<ChildResult>(resultPath(root, run.runId))
@@ -564,13 +581,13 @@ export async function executeChildren(input: { parent: RunRecord; groups: unknow
           const preparingNew=!child.runId
           if(!preparingNew){if(!child.parentBinding)throw Error('existing child launch provenance unavailable')}
           else child.parentBinding=parentClaimBinding(parentClaim)
-          prepared = await controlled(() => (deps.prepare ?? prepareChild)(child, record!, parent, config))
+          prepared = await controlled(() => deps.prepare?deps.prepare(child,record!,parent,config):prepareChild(child,record!,parent,config,deps.gh))
           if(preparingNew&&!same(child.parentBinding,parentClaimBinding(parentClaim)))throw Error('parent changed during child preparation')
           child.runId = prepared.run.runId; child.scopeDigest = prepared.run.taskKey.scopeDigest; child.taskIds = prepared.run.approvedTaskIds ?? [prepared.run.taskKey.taskId]
           await save() // original parent binding + child run identity precede any shared acquisition
           for (;;) {
             if (stop.signal.aborted) throw Error('parent cancelled before child admission')
-            try { shared = await controlled(() => (deps.acquire ?? acquireChild)(child, record!, prepared!, config)); break }
+            try { shared = await controlled(() => deps.acquire?deps.acquire(child,record!,prepared!,config):acquireChild(child,record!,prepared!,config,deps.gh)); break }
             catch (error) {
               if (!(error instanceof ChildCapacityWait)) throw error
               if (result.blocked.length) throw Error('child capacity retained by affected work; recovery required')
@@ -579,27 +596,27 @@ export async function executeChildren(input: { parent: RunRecord; groups: unknow
           }
           await verify()
           const run = await readRun(root, child.runId)
-          await executeApprovedRun(planned(parent.repo, child), prepared.plan, config, { operator: null, signal: stop.signal, ...(shared ? { sharedClaim: shared } : {}) },
-            { ...deps.processDeps, checkpoint:'deferred', preparedRun: run, runInput: { ...run, root } })
+          try{await executeApprovedRun(planned(parent.repo,child),prepared.plan,config,{operator:null,signal:stop.signal,...(shared?{sharedClaim:shared}:{})},
+            {...deps.processDeps,gh:deps.gh,checkpoint:'deferred',preparedRun:run,runInput:{...run,root}})}catch(error){throw Error('recovered child process: '+(error as Error).message)}
           let terminal = await readRun(root, child.runId)
           if (terminal.terminationCause !== 'succeeded' || terminal.state !== 'terminal') throw Error('child execution ended: ' + terminal.terminationCause)
-          await verify(); await (deps.verifyChild ?? verifyDispatchRunAuthority)(terminal, config)
+          await verify();try{if(deps.verifyChild)await deps.verifyChild(terminal,config);else await verifyDispatchRunAuthority(terminal,config,'effect',{gh:deps.gh})}catch(error){throw Error('recovered child authority: '+(error as Error).message)}
           if(terminal.parent!==null&&terminal.authorityRequest?.kind==='consolidated'){
-            await controlled(async()=>{await (await import('./checkpoints.ts')).flushRunCheckpoint(terminal,config)})
+            if(!terminal.checkpoint||terminal.checkpoint.headSha!==terminal.headSha)try{await controlled(async()=>{await(await import('./checkpoints.ts')).flushRunCheckpoint(terminal,config)})}catch(error){throw Error('recovered child checkpoint: '+(error as Error).message)}
             terminal=await readRun(root,child.runId)
             if(!terminal.checkpoint||terminal.checkpoint.headSha!==terminal.headSha||terminal.checkpoint.branch!==terminal.branch)throw Error('child checkpoint readback unavailable')
           }
-          const check = await sourceCheck(terminal, child.acceptanceCommand, config, stop.signal, deps.processDeps)
+          let check:ChildCheck;try{check=await sourceCheck(terminal,child.acceptanceCommand,config,stop.signal,deps.processDeps)}catch(error){throw Error('recovered child source check: '+(error as Error).message)}
           if (!check.ok) throw Error('child acceptance failed: '+(stop.signal.aborted?(parentFailure??'parent cancelled'):'exit '+String(check.exitCode)))
           terminal = await readRun(root, child.runId)
-          const verified = await verifiedResult(terminal, child, config)
+          let verified:ChildResult;try{verified=await verifiedResult(terminal,child,config)}catch(error){throw Error('recovered child result verification: '+(error as Error).message)}
           await atomicRunFile(resultPath(root, child.runId), verified)
           result.results.push(verified)
         } catch (error) { result.blocked.push({ issue: child.issue, reason: (error as Error).message }) }
         finally {
           if (prepared) {
-            try { await controlled(async () => (deps.finish ?? finishChild)(shared, await readRun(root, prepared!.run.runId), config)) }
-            catch (error) { result.blocked.push({ issue: child.issue, reason: (error as Error).message }) }
+            try { await controlled(async () => deps.finish?deps.finish(shared,await readRun(root,prepared!.run.runId),config):finishChild(shared,await readRun(root,prepared!.run.runId),config,deps.gh)) }
+            catch (error) { result.blocked.push({ issue: child.issue, reason: 'child finalization: '+(error as Error).message }) }
             if (prepared.localClaim) await releaseClaim(prepared.localClaim)
           }
         }
@@ -622,21 +639,21 @@ async function verifyExecutedCheck(run: RunRecord, check: ChildCheck, config: Fa
   if (executed.parent !== run.issue || executed.repo !== run.repo || executed.issue !== run.issue || executed.stage !== 'acceptance' || executed.state !== 'terminal'
     || executed.terminationCause !== 'succeeded' || executed.exitCode !== 0 || !executed.processIdentity || executed.baseSha !== check.headSha || executed.headSha !== check.headSha || !check.ok) throw Error('acceptance process did not verify this source')
 }
-async function verifyIntegrationAuthority(parent: RunRecord, record: ChildrenRecord, config: FactoryConfig): Promise<void> {
+async function verifyIntegrationAuthority(parent: RunRecord, record: ChildrenRecord, config: FactoryConfig,gh:typeof ghText=ghText): Promise<void> {
   if (parent.authorityRequest?.kind !== 'consolidated') throw Error('explicit canonical integration action required; ordinary implementation approval is insufficient')
   await verifyRunAuthority({ ...parent, authorityRequest: { ...parent.authorityRequest, requested: { ...parent.authorityRequest.requested,
-    operation: 'integrate', paths: [...new Set(record.children.flatMap(child => child.files))] } } }, config)
+    operation: 'integrate', paths: [...new Set(record.children.flatMap(child => child.files))] } } }, config,'effect',{gh})
 }
 
 // #137 invokes this producer verifier before publishing or consuming immutable
 // acceptance/join receipts. It checks the actual local source-check execution;
 // the wire payload cannot assert that a check ran by itself.
-export async function verifyChildrenEvidence(input: { run: RunRecord; task?: TaskRecord; payload: RecoveryEvidencePayload; publishing: boolean; ref?: import('./shared-claims.ts').EvidenceRef | null }, config: FactoryConfig): Promise<void> {
+export async function verifyChildrenEvidence(input: { run: RunRecord; task?: TaskRecord; payload: RecoveryEvidencePayload; publishing: boolean; ref?: import('./shared-claims.ts').EvidenceRef | null }, config: FactoryConfig,gh:typeof ghText=ghText): Promise<void> {
   const { payload, run } = input, root = runsRoot(config.home)
   if (payload.kind === 'acceptance') {
     const subject = payload.runId === run.runId ? run : await readRun(root, payload.runId)
     if (subject.repo !== run.repo || subject.parent !== run.issue && subject.runId !== run.runId) throw Error('foreign child acceptance')
-    await verifyDispatchRunAuthority(subject, config)
+    await verifyDispatchRunAuthority(subject, config,'effect',{gh})
     if (subject.runId !== run.runId) {
       const launch = await readExecutableChildrenRecord(run,config)
       validateRecordedSource(run, launch)
@@ -667,14 +684,14 @@ export async function verifyChildrenEvidence(input: { run: RunRecord; task?: Tas
     const check = await readOptional<ChildCheck>(join(root, subject.runId, label + '-acceptance.json'))
     if (!check || payload.sourceSha !== check.headSha || payload.scopeDigest !== subject.taskKey.scopeDigest || payload.validationId !== check.validationId
       || payload.commandDigest !== hash(check.command) || payload.result !== 'passed') throw Error('receipt differs from executed source acceptance')
-    if(payload.acceptedScope) await verifyAcceptedScopePayload(subject,payload,config)
+    if(payload.acceptedScope) await verifyAcceptedScopePayload(subject,payload,config,gh)
     await verifyExecutedCheck(subject, check, config, label)
     return
   }
   if (payload.kind !== 'join') throw Error('unsupported child evidence kind')
   const record = await readExecutableChildrenRecord(run,config), child = record.children.find(row => row.runId === payload.childRunId)
   if (!child) throw Error('join is outside the original parent group')
-  await verifyIntegrationAuthority(run, record, config)
+  await verifyIntegrationAuthority(run, record, config,gh)
   if (!input.publishing && input.ref && input.task?.recovery) {
     const known = input.task.recovery.joins.find(row => same(row.evidence, input.ref))
     if (known && known.childRunId === payload.childRunId && known.generation === payload.generation && known.fromSha === payload.fromSha
@@ -721,7 +738,7 @@ export async function linkChildAcceptance(parentClaim: SharedClaim, childRun: Ru
   if (prior && !same(prior, accepted)) throw Error('existing child acceptance differs')
   if (prior) return published.claim
   const linked = await transitionSharedTask({ claim: published.claim, operationId: ids.link, transition: { kind: 'recovery', recovery: { ...task.recovery, children: [...task.recovery.children, accepted] } } })
-  if (linked.kind !== 'owned') throw Error('child acceptance was not linked')
+  if (linked.kind !== 'owned') throw Error('child acceptance was not linked: '+linked.kind+': '+linked.reason)
   return linked.claim
 }
 export async function publishJoin(claim: SharedClaim, receipt: IntegrationRecord, check: ChildCheck | null, config: FactoryConfig): Promise<{ claim: SharedClaim; reference: JoinRef }> {
@@ -756,15 +773,18 @@ export interface JoinDependencies {
   persistChild?: typeof linkChildAcceptance
   persistJoin?: typeof publishJoin
   processDeps?: Partial<ExecuteDeps>
+  gh?: typeof ghText
 }
 export async function joinChildren(input: { parent: RunRecord; groups: unknown; config: FactoryConfig; write?: boolean; signal?: AbortSignal }, deps: JoinDependencies = {}): Promise<{ receipts: IntegrationRecord[]; acceptedDeliveries:AcceptedDelivery[]; blocked: Array<{ issue: number; reason: string }>; wrote: boolean }> {
   const { parent, config } = input, root = runsRoot(config.home), record = await readExecutableChildrenRecord(parent,config)
+  const verifyAuthority=(run:RunRecord)=>deps.verifyAuthority?deps.verifyAuthority(run,record,config):verifyIntegrationAuthority(run,record,config,deps.gh)
+  const verifyCurrentParent=()=>deps.verifyParent?deps.verifyParent(record,config):verifyParent(record,config,false,deps.gh)
   if (!same(checkedGroups(input.groups), record.groups)) throw Error('join groups differ from original launch')
-  await (deps.verifyAuthority ?? verifyIntegrationAuthority)(parent, record, config)
-  await (deps.verifyParent ?? verifyParent)(record, config)
-  let claim = await (deps.parentClaim ?? sharedClaimForRun)(parent, config)
+  await verifyAuthority(parent)
+  await verifyCurrentParent()
+  let claim=deps.parentClaim?await deps.parentClaim(parent,config):await sharedClaimForRun(parent,config,deps.gh)
   if(deps.parentClaim){if(!record.children.every(child=>!child.runId||child.parentBinding))throw Error('integration child provenance unavailable')}
-  else await currentParentContext(parent,record,config)
+  else await currentParentContext(parent,record,config,deps.gh)
   const lock = input.write ? await acquireClaim(join(root, parent.runId, 'children.lock'), await processIdentity()) : null
   if (lock && lock.kind !== 'owned') throw Error('child execution or another integration owns this parent')
   const output = { receipts: [] as IntegrationRecord[], acceptedDeliveries: [] as AcceptedDelivery[], blocked: [] as Array<{ issue: number; reason: string }>, wrote: false }
@@ -772,9 +792,9 @@ export async function joinChildren(input: { parent: RunRecord; groups: unknown; 
     for (const child of record.children) {
       try {
         if (input.signal?.aborted) throw Error('parent integration cancelled')
-        await (deps.verifyParent ?? verifyParent)(record, config)
+        await verifyCurrentParent()
         const currentParentRun=await readRun(root,parent.runId)
-        await (deps.verifyAuthority ?? verifyIntegrationAuthority)(currentParentRun, record, config)
+        await verifyAuthority(currentParentRun)
         if(child.runId&&currentParentRun.remoteRecovery){
           const retained=await readOptional<IntegrationRecord>(joinPath(root,parent.runId,child.runId))
           if(retained?.state==='accepted'){
@@ -783,7 +803,7 @@ export async function joinChildren(input: { parent: RunRecord; groups: unknown; 
             const snapshot=await readCoordination(claim.target),task=snapshot.tasks[claim.taskKey],known=task?.recovery?.joins.find(join=>same(join,retained.acceptedRef))
             if(!task||!known||known.state!=='accepted'||!known.acceptance)throw Error('historical accepted join receipt unavailable')
             const payload:Extract<RecoveryEvidencePayload,{kind:'join'}>={schemaVersion:2,kind:'join',childRunId:known.childRunId,generation:known.generation,fromSha:known.fromSha,parentBefore:known.parentBefore,parentAfter:known.parentAfter,state:'accepted',validationId:known.acceptance.validationId,commandDigest:known.acceptance.commandDigest,result:'passed'}
-            await verifyChildrenEvidence({run:currentParentRun,task,payload,publishing:false,ref:known.evidence},config)
+            await verifyChildrenEvidence({run:currentParentRun,task,payload,publishing:false,ref:known.evidence},config,deps.gh)
             const head=git(parent.checkout,['rev-parse','HEAD']);git(parent.checkout,['merge-base','--is-ancestor',retained.parentAfter,head])
             output.receipts.push(retained);continue
           }
@@ -803,7 +823,10 @@ export async function joinChildren(input: { parent: RunRecord; groups: unknown; 
           if (receipt.state === 'accepted') {
             if (!receipt.parentAfter || !receipt.accepted) throw Error('incomplete accepted join receipt')
             git(parent.checkout, ['merge-base', '--is-ancestor', receipt.parentAfter, head])
-            output.receipts.push(receipt); if(input.write && run.execution) output.acceptedDeliveries.push(...await publishAcceptedChildScope(parent,run,receipt,config)); continue
+            // This join was accepted under the retained predecessor evidence.
+            // Recovery consumes it; it does not replay review or create a newer
+            // accepted-scope publication from historical success.
+            output.receipts.push(receipt);continue
           }
           if (receipt.state === 'refused') throw Error('prior integration requires conflict/check recovery: ' + receipt.reason)
           if (head !== receipt.parentBefore) {
@@ -821,7 +844,7 @@ export async function joinChildren(input: { parent: RunRecord; groups: unknown; 
           receipt = { schemaVersion: 1, operationId: randomUUID(), issue: child.issue, runId: child.runId, generation: run.sharedClaim?.generation ?? run.generation,
             fromSha: result.headSha, baseSha: record.baseSha, parentBefore: head, parentAfter: null, accepted: false, reason: '', receiptIds: { preparedLink: randomUUID(), accepted: randomUUID(), acceptedLink: randomUUID(), acceptance: randomUUID() }, state: 'prepared', preparedRef: null, acceptedRef: null }
         }
-        if (!input.write) { output.receipts.push(receipt); if(input.write && run.execution) output.acceptedDeliveries.push(...await publishAcceptedChildScope(parent,run,receipt,config)); continue }
+        if (!input.write) { output.receipts.push(receipt); if(input.write && run.execution) output.acceptedDeliveries.push(...await publishAcceptedChildScope(parent,run,receipt,config,deps.gh)); continue }
         await atomicRunFile(joinPath(root, parent.runId, child.runId), receipt)
         claim = await (deps.persistChild ?? linkChildAcceptance)(claim, run, check, config)
         if (!receipt.preparedRef) {
@@ -829,8 +852,8 @@ export async function joinChildren(input: { parent: RunRecord; groups: unknown; 
           claim = prepared.claim; receipt.preparedRef = prepared.reference
           await atomicRunFile(joinPath(root, parent.runId, child.runId), receipt)
         }
-        await (deps.verifyParent ?? verifyParent)(record, config)
-        await (deps.verifyAuthority ?? verifyIntegrationAuthority)(await readRun(root, parent.runId), record, config)
+        await verifyCurrentParent()
+        await verifyAuthority(await readRun(root,parent.runId))
         if (receipt.state === 'prepared') {
           clean(parent.checkout)
           if (git(parent.checkout, ['rev-parse','HEAD']) !== receipt.parentBefore) throw Error('parent changed after prepared integration intent')
@@ -852,7 +875,7 @@ export async function joinChildren(input: { parent: RunRecord; groups: unknown; 
           }
         }
         const currentParent = { ...await readRun(root, parent.runId), headSha: receipt.parentAfter }
-        const parentCheck = await sourceCheck(currentParent, child.acceptanceCommand, config, input.signal, deps.processDeps, 'join-' + child.runId)
+        const parentCheck = await sourceCheck(currentParent, child.acceptanceCommand, config, input.signal, {...deps.processDeps,gh:deps.gh}, 'join-' + child.runId)
         if (!parentCheck.ok) {
           receipt.state = 'refused'; receipt.reason = 'assembled parent acceptance failed'
           await atomicRunFile(joinPath(root, parent.runId, child.runId), receipt); throw Error(receipt.reason)
@@ -862,9 +885,10 @@ export async function joinChildren(input: { parent: RunRecord; groups: unknown; 
         // Record local success first. Remote accepted state additionally requires
         // #138 to acknowledge the exact new parent checkpoint; no placeholder.
         const helpers = await import('./runs.ts')
-        await helpers.updateRun(root, parent.runId, () => ({ headSha: receipt!.parentAfter }))
+        let savedParent=await readRun(root,parent.runId)
+        if(savedParent.headSha!==receipt.parentAfter)savedParent=await helpers.updateRun(root,parent.runId,()=>({headSha:receipt!.parentAfter}))
         try {
-          await (await import('./checkpoints.ts')).flushRunCheckpoint(await readRun(root, parent.runId), config)
+          if(savedParent.checkpoint?.headSha!==receipt.parentAfter)await (await import('./checkpoints.ts')).flushRunCheckpoint(savedParent,config)
           const accepted = await (deps.persistJoin ?? publishJoin)(claim, receipt, parentCheck, config)
           claim = accepted.claim; receipt.acceptedRef = accepted.reference
           receipt.state = 'accepted'
@@ -875,7 +899,7 @@ export async function joinChildren(input: { parent: RunRecord; groups: unknown; 
         await appendFile(join(root, parent.runId, 'events.jsonl'), JSON.stringify({ at: new Date().toISOString(), event: 'child-integration', operationId: receipt.operationId, childRunId: receipt.runId, generation: receipt.generation, fromSha: receipt.fromSha, parentBefore: receipt.parentBefore, parentAfter: receipt.parentAfter, accepted: receipt.accepted, remoteAccepted: !!receipt.acceptedRef }) + '\n', { mode: 0o600 })
         output.receipts.push(receipt)
         if (!receipt.acceptedRef) { output.blocked.push({ issue: child.issue, reason: receipt.reason }); break }
-        if(run.execution) output.acceptedDeliveries.push(...await publishAcceptedChildScope(parent,run,receipt,config))
+        if(run.execution) output.acceptedDeliveries.push(...await publishAcceptedChildScope(parent,run,receipt,config,deps.gh))
       } catch (error) { output.blocked.push({ issue: child.issue, reason: (error as Error).message }); break }
     }
     return output
@@ -1013,7 +1037,7 @@ async function resolveJoinChild(child: ChildLaunch, parent: RunRecord, config: F
   if (!saved) throw Error('child has no durable accepted result')
   const result = await verifiedResult(run, child, config)
   if (!same(result, saved)) throw Error('child result changed')
-  await (deps.verifyChild ?? verifyDispatchRunAuthority)(run, config)
+  if(deps.verifyChild)await deps.verifyChild(run,config);else await verifyDispatchRunAuthority(run,config,'effect',{gh:deps.gh})
   if (spawnSync('git', ['cat-file','-e',result.headSha + '^{commit}'], { cwd: parent.checkout, stdio: 'ignore' }).status !== 0) await fetchChildCheckpoint({ checkout: parent.checkout, run, config })
   const check = await readOptional<ChildCheck>(checkPath(root, run.runId))
   if (!check) throw Error('source-bound acceptance unavailable')
@@ -1030,8 +1054,8 @@ interface AcceptedScopeProgress {
   reference:Extract<import('./shared-claims.ts').EvidenceRef,{kind:'state-receipt'}>|null
   state:'prepared'|'published'|'linked'
 }
-export async function exactReviewedChild(run:RunRecord,config:FactoryConfig):Promise<void> {
-  const comments=await fetchGhPages<{id:number;body:string;user:{login:string}}>(ghText,`repos/${run.repo}/issues/${run.issue}/comments`,readBudget())
+export async function exactReviewedChild(run:RunRecord,config:FactoryConfig,gh:typeof ghText=ghText):Promise<void> {
+  const comments=await fetchGhPages<{id:number;body:string;user:{login:string}}>(gh,`repos/${run.repo}/issues/${run.issue}/comments`,readBudget())
   const shipUrl=new URL(sourceModule?'../../../skills/dev/dev-ship/scripts/ship-gate.mjs':'../skill/dev-ship/scripts/ship-gate.mjs',import.meta.url)
   const {selectCurrentTrustedReview}=await import(shipUrl.href) as typeof import('../../../skills/dev/dev-ship/scripts/ship-gate.mjs')
   const plan=run.approvalRefs.find(ref=>ref.kind==='plan')
@@ -1044,7 +1068,7 @@ export async function exactReviewedChild(run:RunRecord,config:FactoryConfig):Pro
     const open=selected.binding.findings.filter((finding:{id:string;status:string})=>finding.status==='open').map((finding:{id:string})=>finding.id)
     throw Error('child review requires fixes'+(open.length?': '+open.join(', '):''))
   }
-  await verifyDispatchRunAuthority(run,config)
+  await verifyDispatchRunAuthority(run,config,'effect',{gh})
 }
 export function acceptedDeliveryProjection(snapshot:import('./shared-claims.ts').AcceptedScopeSnapshot,childHead:string,scopeDigest:string):AcceptedDelivery[] {
   parseAcceptedScope(snapshot)
@@ -1053,16 +1077,16 @@ export function acceptedDeliveryProjection(snapshot:import('./shared-claims.ts')
 }
 // Read back immutable accepted scope before linking it. A pending receipt is not
 // an implemented-delivery row; no parent completion is fabricated to link it.
-export async function publishAcceptedChildScope(parent:RunRecord,child:RunRecord,joined:IntegrationRecord,config:FactoryConfig):Promise<AcceptedDelivery[]> {
+export async function publishAcceptedChildScope(parent:RunRecord,child:RunRecord,joined:IntegrationRecord,config:FactoryConfig,gh:typeof ghText=ghText):Promise<AcceptedDelivery[]> {
   if(joined.state!=='accepted'||!joined.acceptedRef||!joined.accepted||joined.runId!==child.runId||joined.fromSha!==child.headSha||!joined.parentAfter)throw Error('accepted parent join unavailable')
   const record=await readExecutableChildrenRecord(parent,config)
-  await verifyIntegrationAuthority(parent,record,config)
-  await exactReviewedChild(child,config)
-  const plan=await canonicalPlan(child)
+  await verifyIntegrationAuthority(parent,record,config,gh)
+  await exactReviewedChild(child,config,gh)
+  const plan=await canonicalPlan(child,gh)
   const completed=[...plan.matchAll(/^-\s*\[x\].*<!--\s*task-id:([1-9]\d*-T[1-9]\d*)\s*-->/gim)].map(row=>row[1]!)
   if(!child.approvedTaskIds?.length||!same([...completed].sort(),[...child.approvedTaskIds].sort()))throw Error('unchecked or partial child scope cannot be reported implemented')
   if(child.authorityRequest?.kind==='consolidated'){
-    const request=child.authorityRequest,comment=await boundedGhJson<{body:string}>(ghText,['api',`repos/${request.parentRepo}/issues/comments/${request.approvalBinding.commentId}`],readBudget())
+    const request=child.authorityRequest,comment=await boundedGhJson<{body:string}>(gh,['api',`repos/${request.parentRepo}/issues/comments/${request.approvalBinding.commentId}`],readBudget())
     const {approval}=await approvalTools(),grant=approval.parseApproval(comment)
     if(grant.kind!=='consolidated'||grant.items.find((item:{repo:string;issue:number})=>item.repo===child.repo&&item.issue===child.issue)?.mode!=='code')throw Error('preparation scope is not implemented code')
   }
@@ -1078,7 +1102,7 @@ export async function publishAcceptedChildScope(parent:RunRecord,child:RunRecord
   }
   if(!closed(progress,['schemaVersion','joinOperationId','receiptId','linkId','payload','reference','state'])||progress.schemaVersion!==1||progress.joinOperationId!==joined.operationId||!uuid.test(progress.receiptId)||!uuid.test(progress.linkId)||progress.payload.sourceSha!==child.headSha||progress.payload.acceptedScope?.parentAfter!==joined.parentAfter||!same(progress.payload.acceptedScope?.approvalBindings,child.approvalBindings))throw Error('accepted scope persistence identity changed')
   const owner=await import('./shared-claims.ts');owner.parseRecoveryPayload(progress.payload)
-  let claim=await sharedClaimForRun(child,config)
+  let claim=await sharedClaimForRun(child,config,gh)
   if(!progress.reference){const published=await publishRecoveryReceipt({claim,operationId:progress.receiptId,payload:progress.payload});claim=published.claim;progress.reference=published.reference;progress.state='published';await atomicRunFile(path,progress)}
   const readback=await owner.resolveEvidence(claim.target,progress.reference)
   if(!same(readback,progress.payload))throw Error('accepted scope readback differs')
@@ -1121,7 +1145,7 @@ export async function inspectAcceptedPreparationIntegration(contract:Preparation
  return {contract,ancestorShas:ancestors,reviewedHead:contract.childHead,acceptedTaskIds:matches[0]!.completedTaskIds}
 }
 
-async function verifyAcceptedScopePayload(child:RunRecord,payload:Extract<RecoveryEvidencePayload,{kind:'acceptance'}>,config:FactoryConfig):Promise<void> {
+async function verifyAcceptedScopePayload(child:RunRecord,payload:Extract<RecoveryEvidencePayload,{kind:'acceptance'}>,config:FactoryConfig,gh:typeof ghText=ghText):Promise<void> {
  const owner=await import('./shared-claims.ts'),snapshot=owner.parseAcceptedScope(payload.acceptedScope)
  if(snapshot.repo!==child.repo||snapshot.issue!==child.issue||snapshot.parentRepo!==child.repo||snapshot.parentIssue!==child.parent||!same(snapshot.artifacts,child.approvalRefs)||!same(snapshot.approvalBindings,child.approvalBindings)||!same([...snapshot.approvedTaskIds].sort(),[...(child.approvedTaskIds??[])].sort())||!same([...snapshot.completedTaskIds].sort(),[...snapshot.approvedTaskIds].sort()))throw Error('accepted scope differs from complete approved child')
  const parents=(await readRuns(runsRoot(config.home))).filter(run=>run.repo===snapshot.parentRepo&&run.issue===snapshot.parentIssue&&run.parent===null)
@@ -1130,7 +1154,7 @@ async function verifyAcceptedScopePayload(child:RunRecord,payload:Extract<Recove
   const record=await readExecutableChildrenRecord(parent,config).catch(()=>null);if(!record?.children.some(row=>row.runId===child.runId))continue
   const joined=await readOptional<IntegrationRecord>(joinPath(runsRoot(config.home),parent.runId,child.runId))
   if(!joined||joined.state!=='accepted'||joined.fromSha!==payload.sourceSha||joined.parentBefore!==snapshot.parentBefore||joined.parentAfter!==snapshot.parentAfter)continue
-  await verifyIntegrationAuthority(parent,record,config);await exactReviewedChild(child,config)
+  await verifyIntegrationAuthority(parent,record,config,gh);await exactReviewedChild(child,config,gh)
   const progress=await readOptional<AcceptedScopeProgress>(join(runsRoot(config.home),parent.runId,'accepted-scope-'+child.runId+'.json'))
   if(!progress||!same(progress.payload,payload))throw Error('accepted scope publication intent differs')
   matches.push(parent.runId)
@@ -1144,7 +1168,7 @@ export interface RecoveredChildrenContext {
  newPreparations:number[]
  currentTitles:Array<{issue:number;title:string}>
 }
-function reconcileProgressedChildrenState(inspection:import('./shared-claims.ts').GroupSuccessionInspection,recovery:import('./shared-claims.ts').RecoveryEnvelope,settledRunIds:ReadonlySet<string>):{accepted:JoinRef[];unfinished:TaskRecord[]} {
+function reconcileProgressedChildrenState(inspection:import('./shared-claims.ts').GroupSuccessionInspection,recovery:import('./shared-claims.ts').RecoveryEnvelope,settledRunIds:ReadonlySet<string>,startedRunIds:ReadonlySet<string>=new Set()):{accepted:JoinRef[];unfinished:TaskRecord[]} {
  if(inspection.kind!=='verified')throw Error(inspection.reason)
  const children=inspection.currentMembers.filter(row=>row.initial.parentTaskKey!==null),runs=new Set<string>(),accepted:JoinRef[]=[]
  for(const joined of recovery.joins.filter(row=>row.state==='accepted')){
@@ -1155,7 +1179,7 @@ function reconcileProgressedChildrenState(inspection:import('./shared-claims.ts'
  const unfinished=children.filter(row=>!runs.has(row.initial.runId)).map(row=>row.current)
  // Reconstruction supplies no settled IDs and remains queued-only. Execution
  // replay may consume its exact local result after the successor is stopped.
- if(unfinished.some(task=>task.schemaVersion!==2||task.state!=='recovery-queued'&&!(settledRunIds.has(task.runId)&&task.state==='stopped'&&!!task.stopProof)))throw Error('progressed unfinished child is not recovery-queued or durably settled')
+ if(unfinished.some(task=>task.schemaVersion!==2||task.state!=='recovery-queued'&&!(startedRunIds.has(task.runId)&&task.state==='running')&&!(settledRunIds.has(task.runId)&&task.state==='stopped'&&!!task.stopProof)))throw Error('progressed unfinished child is not recovery-queued, exactly started or durably settled')
  return{accepted,unfinished}
 }
 export function reconcileProgressedChildren(inspection:import('./shared-claims.ts').GroupSuccessionInspection,recovery:import('./shared-claims.ts').RecoveryEnvelope):{accepted:JoinRef[];unfinished:TaskRecord[]} {
@@ -1238,9 +1262,9 @@ export async function reconstructChildrenContext(input:{parent:RunRecord;materia
  const record=parseChildrenRecord({schemaVersion:2,parentRunId:parent.runId,parentIssue:parent.issue,repo:parent.repo,parentBranch:parent.branch,baseSha,parentBinding:original,concurrency:Math.min(3,config.subagents.concurrent,groups.length),groups,children})
  return {record,existing:known.map(row=>({task:row.task,stateCommit:row.stateCommit,checkpoint:row.task.checkpoint!,authorityRequest:row.authorityRequest,checkpointRequest:row.checkpointRequest})),newPreparations:fresh.map(row=>Number(row.group.members[0]!.slice(1))),currentTitles:[...known.map(row=>({issue:row.task.issue,title:row.title})),...fresh.map(row=>({issue:Number(row.group.members[0]!.slice(1)),title:row.title}))]}
 }
-export async function installRecoveredChildrenContext(input:{parent:RunRecord;material:import('./dispatch.ts').RemoteRecoveryMaterial;config:FactoryConfig}):Promise<RecoveredChildrenContext> {
-  const reconstructed=await reconstructChildrenContext(input),root=runsRoot(input.config.home)
-  await currentParentContext(input.parent,reconstructed.record,input.config)
+export async function installRecoveredChildrenContext(input:{parent:RunRecord;material:import('./dispatch.ts').RemoteRecoveryMaterial;config:FactoryConfig},transport:{gh?:typeof ghText;target?:import('./shared-claims.ts').CoordinationTarget}={}):Promise<RecoveredChildrenContext> {
+  const reconstructed=await reconstructChildrenContext(input,transport),root=runsRoot(input.config.home)
+  await currentParentContext(input.parent,reconstructed.record,input.config,transport.gh)
  for(const child of reconstructed.existing){
   const run=await readRun(root,child.task.runId)
   if(run.repo!==child.task.repo||run.issue!==child.task.issue||run.parent!==input.parent.issue||!same(run.execution,child.task.recovery?.execution)||await realpath(run.checkout)!==run.checkout||run.headSha!==child.checkpoint.headSha||run.branch!==child.checkpoint.branch||run.baseSha!==child.checkpoint.baseSha||!same(run.approvalBindings,child.task.approvalBindings)||run.taskKey.scopeDigest!==child.task.scopeDigest||!same(run.authorityRequest,child.authorityRequest)||!same(run.checkpointIntent?.approvalRequest,child.checkpointRequest))throw Error('runtime owner has not reconstructed original child source and checkpoint authority')
@@ -1264,7 +1288,7 @@ export async function installRecoveredChildrenContext(input:{parent:RunRecord;ma
  try{
   const path=recordPath(root,input.parent.runId),previous=existingRecord??await readOptional<ChildrenRecord>(path)
   if(previous){if(!same(parseChildrenRecord(previous),reconstructed.record))throw Error('existing private child context retained for reconciliation');await restoreAcceptedJoins();return reconstructed}
-  await currentParentContext(input.parent,reconstructed.record,input.config)
+  await currentParentContext(input.parent,reconstructed.record,input.config,transport.gh)
   await atomicRunFile(path,reconstructed.record)
   await restoreAcceptedJoins()
   return reconstructed

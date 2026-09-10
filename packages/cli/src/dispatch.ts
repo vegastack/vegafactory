@@ -693,7 +693,16 @@ export async function executeRun(
   const file=join(recordRoot,record.runId,'events.jsonl')
   const event=async(event:string,fields:Record<string,unknown>={})=>{await appendFile(file,JSON.stringify(basicDiagnostic(now().toISOString(),event,fields))+'\n',{mode:0o600})}
   let mutations=Promise.resolve()
-  const transition=(patch:Parameters<typeof transitionRun>[2])=>{mutations=mutations.then(async()=>{record=await transitionRun(record.runId,record.generation,patch,recordRoot)});return mutations}
+  const transition=(patch:Parameters<typeof transitionRun>[2])=>{mutations=mutations.then(async()=>{
+    // Child integration/checkpoint controllers may advance other fields on the
+    // same parent while its wrapper is alive. Rebase this lifecycle-only patch
+    // on the current durable record; attempt-directory ownership still prevents
+    // a second executor from sharing this attempt.
+    for(let retry=0;retry<4;retry++){
+      const current=await readRun(recordRoot,record.runId)
+      try{record=await transitionRun(record.runId,current.generation,patch,recordRoot);return}catch(error){if((error as Error).message!=='stale run generation'||retry===3)throw error}
+    }
+  });return mutations}
   await event('prepared')
   const refuse=async(reason:string):Promise<RunOutcome>=>{await transition({state:'terminal',terminationCause:'spawn-failed',finishedAt:now().toISOString()});await event('launch-refused',{reasonCode:'launch-refused'});return{runId:record.runId,started:false,refusal:reason,terminationCause:'spawn-failed',exitCode:null,timedOut:false,logFile:file,pushed:false,handedBack:false}}
   let pendingBytes=0
@@ -716,8 +725,13 @@ export async function executeRun(
       await runtime.verifyInstalledRuntimeBinding(record.runtimeBinding,dirname(dirname(fileURLToPath(import.meta.url))),fileURLToPath(import.meta.url))
       const currentDigest=await runtime.executionConfigurationDigest({binding:record.runtimeBinding,execution:record.execution,plan,metadata:await inspectManagedHarness(plan)})
       if(currentDigest!==record.configurationDigest)throw Error('qualified configuration changed')
-      await verifyDispatchRunAuthority(record,config,'launch')
-      const target=options.sharedClaim?.target??await verifiedSharedTarget(record.repo,config,record.runId)
+      await verifyDispatchRunAuthority(record,config,'launch',{gh:deps?.gh})
+      const target=await verifiedSharedTarget(record.repo,config,record.runId,deps?.gh??ghText)
+      if(options.sharedClaim){
+        const snapshot=await(await import('./shared-claims.ts')).readCoordination(target),task=snapshot.tasks[options.sharedClaim.taskKey]
+        if(!task||task.runId!==options.sharedClaim.runId||task.generation!==options.sharedClaim.generation||task.ownerToken!==options.sharedClaim.ownerToken||task.machineId!==options.sharedClaim.machineId||task.installationId!==options.sharedClaim.installationId||task.sessionId!==options.sharedClaim.sessionId||task.state!=='running')throw Error('fresh shared execution owner differs')
+        options.sharedClaim={...options.sharedClaim,stateCommit:snapshot.head,target}
+      }
       sharedRunContexts.set(target,record.runId)
       record=await runtime.refreshAttemptCoverage(recordRoot,record.runId,target)
     }catch{return refuse('current source or runtime qualification unavailable')}
@@ -1078,6 +1092,7 @@ export interface TickDeps {
   parentCandidates: (repo: string, repoPath: string, ready: BoardIssue[], operators: string[]) => Promise<ParentCandidate[]>
   tracker: RunTracker
   processDeps?:Pick<ExecuteDeps,'wrapperPath'>
+  recoveredChildPrepare?:NonNullable<import('./children.ts').ChildrenDependencies['prepare']>
   quotaRecovery?: import('./runs.ts').QuotaRecoveryController
   harnessMetadata: (plan: LaunchPlan) => HarnessMetadata | Promise<HarnessMetadata>
   // #138 supplies fresh authority locators and the durable wrapper; missing adapters refuse.
@@ -1085,6 +1100,7 @@ export interface TickDeps {
   executeShared?: TickDeps['execute']
   persistSharedRun?: (claim: SharedClaim, run: PlannedRun, plan: LaunchPlan) => Promise<void>
   finishSharedRun?: (claim: SharedClaim, outcome: RunOutcome | null) => Promise<TaskTransition>
+  recoveryTransport?: (repo:string,config:FactoryConfig)=>Promise<{target:import('./shared-claims.ts').CoordinationTarget;source?:RemoteRecoveryTransport['source']}>
 }
 
 async function ghJsonVia<T>(gh: TickDeps['gh'], args: string[], budget?: ReadBudget): Promise<T> {
@@ -1330,7 +1346,7 @@ export async function runTick(
   let state = await withinRead(readBudget(options.signal), () => readState(config.stateFile))
   const runs: RunReport[] = []
   const refusals: Refusal[] = []
-  if(!options.dryRun&&!suppliedExecutor){await scheduleSavedQuotaRuns(config,options,tracker,runs,refusals);await inspectSavedRecoveryWork(config,options,tracker,runs,refusals)}
+  if(!options.dryRun&&!suppliedExecutor){await scheduleSavedQuotaRuns(config,options,tracker,runs,refusals);await inspectSavedRecoveryWork(config,options,tracker,runs,refusals,gh,deps?.recoveryTransport,deps?.processDeps,deps?.recoveredChildPrepare)}
 
   for (const entry of config.repos) {
     const budget = readBudget(options.signal)
@@ -1929,6 +1945,20 @@ const sharedRunContexts=new WeakMap<import('./shared-claims.ts').CoordinationTar
 const sharedTaskContexts=new WeakMap<import('./shared-claims.ts').CoordinationTarget,import('./shared-claims.ts').TaskRecord>()
 const sharedContinuationContexts=new WeakMap<import('./shared-claims.ts').CoordinationTarget,{runId:string;attemptId:string;checkpoint:NonNullable<RunRecord['checkpoint']>;scopeDigest:string;approvalBindings:RunRecord['approvalBindings']}>()
 const sharedMachineContexts=new WeakMap<import('./shared-claims.ts').CoordinationTarget,EffectiveMachine>()
+const stoppedGroupSetupOverride=Symbol.for('vegafactory.test.stopped-group-receiving-setup')
+type StoppedGroupTarget=import('./shared-claims.ts').CoordinationTarget&{[stoppedGroupSetupOverride]?:typeof receivingExecutionSetup}
+interface ActiveStoppedGroupContext {
+  request:import('./shared-claims.ts').GroupSuccessionRequest
+  materials:RemoteRecoveryMaterial[];config:FactoryConfig;gh:TickDeps['gh'];localClaim:Claim
+  checkouts:Map<string,string>;setupDigests:Map<string,string>;setup:typeof receivingExecutionSetup;source?:RemoteRecoveryTransport['source'];machine:EffectiveMachine;session:MachineSession
+}
+const stoppedGroupSerialTails=new Map<string,Promise<void>>()
+async function stoppedGroupSerial<T>(target:import('./shared-claims.ts').CoordinationTarget,phase:'prepare'|'verify',work:()=>Promise<T>):Promise<T>{
+  const key=canonicalWire({phase,host:target.host,repositoryId:target.repositoryId,branch:target.branch,localRoot:target.localRoot}),previous=stoppedGroupSerialTails.get(key)??Promise.resolve()
+  let release!:()=>void;const gate=new Promise<void>(resolve=>{release=resolve}),tail=previous.then(()=>gate);stoppedGroupSerialTails.set(key,tail)
+  await previous
+  try{return await work()}finally{release();if(stoppedGroupSerialTails.get(key)===tail)stoppedGroupSerialTails.delete(key)}
+}
 export type FleetParallelProjection={eligible:boolean;independent:boolean;taskIds:string[];paths:string[];resources:string[];reason:string|null}
 const exclusiveFleet=(reason:string):FleetParallelProjection=>({eligible:false,independent:false,taskIds:[],paths:[],resources:[],reason})
 export async function fleetParallelProjection(record:Pick<RunRecord,'repo'|'approvalRefs'|'approvedTaskIds'>,gh:TickDeps['gh']=ghText):Promise<FleetParallelProjection>{
@@ -1992,7 +2022,7 @@ export async function verifiedSharedTarget(repo:string,config:FactoryConfig,runI
       await verifyFleetCandidate(record,candidate,gh)
       await (await import('./shared-claims.ts')).resolveEvidence(target,record.execution.qualification)
     },
-    verifyChildRelationship: input => import('./children.ts').then(owner => owner.verifyChildRelationship(input,config)),
+    verifyChildRelationship: input => import('./children.ts').then(owner => owner.verifyChildRelationship(input,config,gh)),
     verifySession:async(previous,current,session)=>{
       if(previous.machineId!==current.id||previous.installationId!==current.installationId||previous.hostBindingDigest!==session.hostBindingDigest)throw Error('machine session identity differs')
       const helpers=await import('./runs.ts'),prior=(await helpers.readRuns(runsRoot(config.home))).filter(r=>r.machine?.sessionId===previous.sessionId)
@@ -2009,7 +2039,7 @@ export async function verifiedSharedTarget(repo:string,config:FactoryConfig,runI
       sharedAuthorityContexts.set(target,canonicalWire({runId:run.runId,bindings:run.approvalBindings,recordBinding:run.recordBinding}))
       if(transition.kind==='receipt'){
         if(transition.payload.kind==='acceptance'&&await verifyTaskCheckpointEvidence(run,transition.payload,config)){}
-        else if(transition.payload.kind==='acceptance'||transition.payload.kind==='join')await(await import('./children.ts')).verifyChildrenEvidence({run,task,payload:transition.payload,publishing:true},config)
+        else if(transition.payload.kind==='acceptance'||transition.payload.kind==='join')await(await import('./children.ts')).verifyChildrenEvidence({run,task,payload:transition.payload,publishing:true},config,gh)
         else await helpers.verifyRunEvidencePayload(null,transition.payload,{run,task,publishing:true,verifyAuthority:()=>verifyDispatchRunAuthority(run,config,'effect',{gh}),stopped:()=>helpers.verifyLocalRunStopped(run)})
       }
       if(transition.kind==='start'&&(run.state!=='prepared'||!run.execution||!run.runtimeBinding))throw Error('shared durable preparation unavailable')
@@ -2034,8 +2064,11 @@ export async function verifiedSharedTarget(repo:string,config:FactoryConfig,runI
       }
       const run=await helpers.readRun(runsRoot(config.home),runId)
       if(payload?.kind==='acceptance'&&(await verifyTaskCheckpointEvidence(run,payload,config)||await verifyRetainedTaskCompletion(run,payload,ref,target,config))){}
-      else if(payload?.kind==='acceptance'||payload?.kind==='join')await(await import('./children.ts')).verifyChildrenEvidence({run,task,payload,publishing:false,ref},config)
+      else if(payload?.kind==='acceptance'||payload?.kind==='join')await(await import('./children.ts')).verifyChildrenEvidence({run,task,payload,publishing:false,ref},config,gh)
       else await helpers.verifyRunEvidencePayload(ref,payload,{run,task,verifyAuthority:async()=>{if(sharedAuthorityContexts.get(target)!==canonicalWire({runId:run.runId,bindings:run.approvalBindings,recordBinding:run.recordBinding}))await verifyDispatchRunAuthority(run,config,'effect',{gh})},stopped:()=>helpers.verifyLocalRunStopped(run)})
+    },
+    verifyGroupSuccession:async input=>{
+      throw Error('stopped-group verification requires an operation-scoped controller')
     },
   }
   sharedMachineContexts.set(target,machine)
@@ -2099,7 +2132,7 @@ export function sharedRunAdapters(config:FactoryConfig,processDeps?:Pick<Execute
       await owner.resolveEvidence(claim.target,record.execution.qualification)
       return executeApprovedRun(run,plan,cfg,options,{...processDeps,preparedRun:record,runInput:{...record,root}})
     },
-    finishSharedRun:(claim,outcome)=>finishDurableSharedRun(claim,outcome,config),
+    finishSharedRun:(claim,outcome)=>finishDurableSharedRun(claim,outcome,config,gh),
   }
 }
 
@@ -2167,14 +2200,17 @@ export async function registerQualifiedExecution(input:{config:FactoryConfig;rep
   return helpers.storeQualifiedExecution(runsRoot(input.config.home),{schemaVersion:1,execution:input.execution,runtimeBinding:input.runtimeBinding,configurationDigest})
 }
 
-export async function sharedClaimForRun(run:RunRecord,config:FactoryConfig):Promise<SharedClaim>{
+export async function sharedClaimForRun(run:RunRecord,config:FactoryConfig,gh:TickDeps['gh']=ghText):Promise<SharedClaim>{
   if(!run.sharedClaim||!run.machine)throw Error('run has no shared claim')
-  const target=await verifiedSharedTarget(run.repo,config,run.runId),owner=await import('./shared-claims.ts'),snapshot=await owner.readCoordination(target),task=snapshot.tasks[run.sharedClaim.taskKey]
+  // Re-resolve the target for every operation. Its callbacks capture machine
+  // enrollment, repository scope, installation, login and host authorization;
+  // retaining an older target would retain older authority too.
+  const target=await verifiedSharedTarget(run.repo,config,run.runId,gh),owner=await import('./shared-claims.ts'),snapshot=await owner.readCoordination(target),task=snapshot.tasks[run.sharedClaim.taskKey]
   if(!task||task.runId!==run.runId||task.ownerToken!==run.sharedClaim.ownerToken||task.generation!==run.sharedClaim.generation||task.machineId!==run.machine.id||task.installationId!==run.machine.installationId||task.sessionId!==run.machine.sessionId)throw Error('current shared run owner differs')
   sharedTaskContexts.set(target,task)
   return{taskKey:task.taskKey,generation:task.generation,ownerToken:task.ownerToken,machineId:task.machineId,installationId:task.installationId,sessionId:task.sessionId,runId:task.runId,stateCommit:snapshot.head,target}
 }
-export async function checkpointPolicyEnabled(repo:string,config:FactoryConfig):Promise<boolean>{const target=await verifiedSharedTarget(repo,config);return sharedMachineContexts.get(target)!.defaults.checkpoints==='task-branch'}
+export async function checkpointPolicyEnabled(repo:string,config:FactoryConfig,gh:TickDeps['gh']=ghText):Promise<boolean>{const target=await verifiedSharedTarget(repo,config,undefined,gh);return sharedMachineContexts.get(target)!.defaults.checkpoints==='task-branch'}
 
 export async function configuredRunStatusController(run:RunRecord,config:FactoryConfig):Promise<import('./runs.ts').RunStatusController>{
   const helpers=await import('./runs.ts'),owner=await import('./shared-claims.ts'),budget=readBudget()
@@ -2264,18 +2300,29 @@ async function persistAttemptCapture(record:RunRecord,stdout:string,root:string,
   await helpers.prepareTerminalCapture(root,record.runId,captured)
 }
 
-async function finishDurableSharedRun(claim:SharedClaim,outcome:RunOutcome|null,config:FactoryConfig):Promise<TaskTransition>{
+async function finishDurableSharedRun(claim:SharedClaim,outcome:RunOutcome|null,config:FactoryConfig,gh:TickDeps['gh']=ghText):Promise<TaskTransition>{
   const helpers=await import('./runs.ts'),owner=await import('./shared-claims.ts'),root=runsRoot(config.home)
   let record=await helpers.readRun(root,claim.runId)
   if(!record.sharedClaim||record.sharedClaim.taskKey!==claim.taskKey||record.sharedClaim.generation!==claim.generation||record.sharedClaim.ownerToken!==claim.ownerToken||record.machine?.id!==claim.machineId||record.machine.installationId!==claim.installationId||record.machine.sessionId!==claim.sessionId||outcome?.runId&&outcome.runId!==record.runId)throw Error('shared finish identity mismatch')
   if(record.waitReason==='subscription-quota'||record.terminationCause==='termination-unconfirmed'||!await helpers.verifyLocalRunStopped(record))return{kind:'block',stopProof:null}
   try{await(await import('./checkpoints.ts')).flushRunCheckpoint(record,config);await flushRunHandback(record,config)}catch{/* Unresolved code/control delivery retains ownership below. */}
-  record=await helpers.readRun(root,record.runId);claim=await sharedClaimForRun(record,config)
-  const snapshot=await owner.readCoordination(claim.target),task=snapshot.tasks[claim.taskKey]
+  record=await helpers.readRun(root,record.runId);claim=await sharedClaimForRun(record,config,gh)
+  let snapshot=await owner.readCoordination(claim.target);const task=snapshot.tasks[claim.taskKey]
   if(!task?.recovery)return{kind:'block',stopProof:null}
+  if(task.schemaVersion===2){
+    const accepted=new Set(task.recovery.joins.filter(join=>join.state==='accepted').map(join=>join.childRunId))
+    for(const child of Object.values(snapshot.tasks).filter(row=>row.parentTaskKey===task.taskKey&&accepted.has(row.runId))){
+      const scope=child.acceptedScopes.find(row=>row.scopeDigest===child.scopeDigest)
+      if(!scope||!child.stopProof)continue
+      const value=createHash('sha256').update(`VegaFactory/recovered-accepted-complete/v1\n${task.successionOperationId}\n${child.taskKey}`).digest('hex'),operationId=`${value.slice(0,8)}-${value.slice(8,12)}-4${value.slice(13,16)}-${((Number.parseInt(value[16]!,16)&3)|8).toString(16)}${value.slice(17,20)}-${value.slice(20,32)}`
+      const completed=await transitionSharedTask({claim:groupClaim(child,snapshot.head,claim.target),operationId,transition:{kind:'complete',stopProof:child.stopProof,acceptedScope:scope.receipt}})
+      if(completed.kind!=='owned')return{kind:'block',stopProof:null}
+      snapshot=await owner.readCoordination(claim.target)
+    }
+  }
   // Physical absence permits a stop attestation; unresolved effects still retain
   // task ownership and prevent accepted completion or automatic transfer.
-  const reconciled=task.recovery.remoteEffectCoverage.kind!=='unmanaged-possible'&&!task.recovery.effects.some(e=>e.kind!=='telemetry-push'&&e.state!=='acknowledged'&&e.state!=='cancelled-before-send')&&!record.pendingDelivery.some(p=>p.kind!=='telemetry-capture'&&p.status!=='acknowledged')
+  const reconciled=task.recovery.remoteEffectCoverage.kind!=='unmanaged-possible'&&!task.recovery.effects.some(e=>e.kind!=='telemetry-push'&&e.state!=='acknowledged'&&e.state!=='cancelled-before-send')&&!record.pendingDelivery.some(p=>p.kind!=='telemetry-capture'&&p.status!=='acknowledged')&&!Object.values(snapshot.tasks).some(row=>row.parentTaskKey===task.taskKey)
   if(record.stopProof){await helpers.verifySharedStopProof(record.stopProof,task,claim.target,record);if(reconciled&&record.acceptedScopeRef&&record.terminationCause==='succeeded'){await owner.resolveEvidence(claim.target,record.acceptedScopeRef);return{kind:'complete',stopProof:record.stopProof,acceptedScope:record.acceptedScopeRef}}return{kind:'stop',stopProof:record.stopProof}}
   const allowedActionIds=[...new Set([record.handbackIntent?.id,record.checkpointIntent?.id,record.authorityRequest?.kind==='consolidated'?record.authorityRequest.requested.actionId:null].filter((id):id is string=>!!id))].sort()
   const payload:import('./shared-claims.ts').RecoveryEvidencePayload={schemaVersion:2,kind:'effect-reconciliation',runId:record.runId,scopeDigest:record.taskKey.scopeDigest,approvalBindings:record.approvalBindings,allowedActionIds,checkedEffectIds:task.recovery.effects.filter(e=>e.state==='acknowledged'||e.state==='cancelled-before-send').map(e=>e.operationId).sort(),inspector:{kind:'qualified-adapter',identityRef:record.machine!.id},result:reconciled?'complete':'unresolved',reasonCode:'owned-process-group-stopped'}
@@ -2377,6 +2424,39 @@ type StoppedGroupRecoveryDeps={
 }
 const groupBinding=(task:Pick<import('./shared-claims.ts').TaskRecord,'taskKey'|'runId'|'generation'|'ownerToken'|'machineId'|'installationId'|'sessionId'>):import('./shared-claims.ts').ParentClaimBinding=>({taskKey:task.taskKey,runId:task.runId,generation:task.generation,ownerToken:task.ownerToken,machineId:task.machineId,installationId:task.installationId,sessionId:task.sessionId})
 const groupCandidate=(task:import('./shared-claims.ts').TaskRecord):VerifiedCandidate=>({host:task.host,repo:task.repo,issue:task.issue,repositoryNodeId:task.repositoryNodeId,issueNodeId:task.issueNodeId,scopeDigest:task.scopeDigest,approvalDigest:task.approvalDigest,approvalBindings:task.approvalBindings,runId:task.runId,stage:task.stage,paths:task.paths,resources:task.resources,independent:task.independent,parentTaskKey:task.parentTaskKey,parentBinding:task.parentBinding??null,approvedTaskIds:task.approvedTaskIds})
+const stoppedMaterialFacts=(row:RemoteRecoveryMaterial)=>({stateCommit:row.stateCommit,task:row.task,artifacts:row.artifacts,briefBody:row.briefBody,planBody:row.planBody,title:row.title,authorityRequest:row.authorityRequest,checkpointRequest:row.checkpointRequest,packet:row.packet,evidence:row.evidence,children:row.children.map(child=>({candidate:groupCandidate(child.task),authorityRequest:child.authorityRequest,checkpointRequest:child.checkpointRequest})).sort((a,b)=>a.candidate.runId.localeCompare(b.candidate.runId)),sourceRefs:row.sourceRefs,unavailableContext:row.unavailableContext,blocks:row.blocks})
+
+// Every callback made by #137 re-runs the complete source/authority/private
+// reconstruction proof. Equality is only the final comparison with the frozen
+// intent; it never substitutes for the fresh reads.
+async function verifyFreshStoppedGroup(context:ActiveStoppedGroupContext,actual:{candidate?:VerifiedCandidate;current?:EffectiveMachine;session?:MachineSession;task?:import('./shared-claims.ts').TaskRecord;transition?:TaskTransition;ref?:import('./shared-claims.ts').EvidenceRef;payload?:import('./shared-claims.ts').RecoveryEvidencePayload|null;group?:{parent:import('./shared-claims.ts').TaskRecord;members:Array<{task:import('./shared-claims.ts').TaskRecord;candidate:VerifiedCandidate}>;groupPlan:import('./shared-claims.ts').ArtifactRef;groupsDigest:string;machine:EffectiveMachine;session:MachineSession}}):Promise<void>{
+ const expected=new Map(context.request.members.map(row=>[row.expected.taskKey,row]))
+ const sessionFacts=(value:MachineSession)=>({machineId:value.machineId,installationId:value.installationId,sessionId:value.sessionId,hostBindingDigest:value.hostBindingDigest,bootIdDigest:value.bootIdDigest,identity:value.identity})
+ const compareActual=()=>{
+  if(actual.candidate){const row=context.request.members.find(member=>member.candidate.runId===actual.candidate!.runId);if(!row||canonicalWire(row.candidate)!==canonicalWire(actual.candidate)||canonicalWire(actual.current)!==canonicalWire(context.machine)||!actual.session||canonicalWire(sessionFacts(actual.session))!==canonicalWire(sessionFacts(context.session)))throw Error('stopped group candidate changed')}
+  if(actual.transition){const row=actual.task&&expected.get(actual.task.taskKey);if(!row||actual.transition.kind!=='stop'||canonicalWire(row.expected)!==canonicalWire(groupBinding(actual.task!))||canonicalWire(actual.task!.stopProof)!==canonicalWire(actual.transition.stopProof))throw Error('stopped group stop verification changed')}
+  if(actual.group){const value=actual.group;if(value.parent.taskKey!==context.request.parentTaskKey||canonicalWire(value.groupPlan)!==canonicalWire(context.request.groupPlan)||value.groupsDigest!==context.request.groupsDigest||canonicalWire(value.machine)!==canonicalWire(context.machine)||canonicalWire(sessionFacts(value.session))!==canonicalWire(sessionFacts(context.session))||value.members.length!==context.request.members.length)throw Error('stopped group verifier input changed');for(const row of value.members){const frozen=expected.get(row.task.taskKey);if(!frozen||canonicalWire(groupBinding(row.task))!==canonicalWire(frozen.expected)||canonicalWire(row.candidate)!==canonicalWire(frozen.candidate))throw Error('stopped group verifier member changed')}}
+ }
+ compareActual()
+ {
+  const freshRows:RemoteRecoveryMaterial[]=[]
+  for(const frozen of context.materials){
+   const fresh=await inspectRemoteRecoveryRecord({repo:frozen.task.repo,taskKey:frozen.task.taskKey,config:context.config},{head:frozen.stateCommit,task:frozen.task},{target:context.session.target,gh:context.gh,source:context.source},frozen.task.stopProof??undefined)
+   if(fresh.blocks.length)throw Error('stopped group fresh material blocked: '+fresh.blocks.join('; '))
+   assertRemoteRecoveryMaterial(fresh)
+   if(canonicalWire(stoppedMaterialFacts(fresh))!==canonicalWire(stoppedMaterialFacts(frozen)))throw Error('stopped group fresh source, authority or evidence changed')
+   for(const historical of fresh.historicalParents){const expectedParent=context.request.members.find(row=>row.expected.taskKey===historical.task.taskKey);if(!expectedParent||canonicalWire(groupCandidate(historical.task))!==canonicalWire(expectedParent.candidate))throw Error('stopped group historical parent changed')}
+   const checkout=context.checkouts.get(frozen.task.taskKey);if(!checkout)throw Error('stopped group checkout unavailable')
+   const setup=await context.setup(fresh,checkout,context.config,context.session.target,context.localClaim,context.session.sessionId),digest=createHash('sha256').update(canonicalWire(setup)).digest('hex')
+   if(setup.receiver.machine.id!==context.machine.id||setup.receiver.machine.installationId!==context.machine.installationId||setup.receiver.machine.sessionId!==context.session.sessionId||context.setupDigests.get(frozen.task.taskKey)!==digest)throw Error('stopped group receiver setup changed')
+   freshRows.push(fresh)
+  }
+  if(actual.ref){
+   if(actual.ref.kind==='github-comment'){const sources=freshRows.flatMap(row=>row.task.approvalBindings.map(binding=>binding.source)).filter(ref=>canonicalWire(ref)===canonicalWire(actual.ref));if(!sources.length||actual.payload!==null)throw Error('stopped group approval evidence changed')}
+   else{const proof=freshRows.flatMap(row=>row.evidence).filter(row=>canonicalWire(row.ref)===canonicalWire(actual.ref));if(!proof.length||proof.some(row=>canonicalWire(row.payload)!==canonicalWire(actual.payload)))throw Error('stopped group evidence changed: '+actual.ref.operationId+':'+proof.length)}
+  }
+ }
+}
 
 // The pure helper decides whether the complete same-head set is admissible. This
 // runtime boundary owns the one succession attempt and treats its response as
@@ -2388,15 +2468,9 @@ export async function recoverVerifiedStoppedGroup(input:{evaluation:unknown;mach
  const owner=await import('./shared-claims.ts'),core=await recoveryScript(),deps:StoppedGroupRecoveryDeps={evaluate:value=>core.evaluateStoppedGroupRecovery(value) as StoppedGroupDecision,recover:owner.recoverStoppedGroup,read:owner.readCoordination,inspect:owner.inspectGroupSuccession,...overrides}
  const decision=deps.evaluate(structuredClone(input.evaluation)),request=decision.request
  if(decision.action!=='recover-stopped-group'||!request)return{kind:decision.action==='wait'?'wait':'refused',reason:decision.reason}
- const target=input.session.target,members=new Map(request.members.map(row=>[row.expected.taskKey,row])),evidence=new Map(input.evidence.map(row=>[canonicalWire(row.ref),row]))
+ const target=input.session.target,members=new Map(request.members.map(row=>[row.expected.taskKey,row]))
  if(members.size!==request.members.length||input.machine.id!==input.session.machineId||input.machine.installationId!==input.session.installationId)throw Error('stopped group receiver identity differs')
- const previous={verifyCandidate:target.verifyCandidate,verifyTransition:target.verifyTransition,verifyEvidence:target.verifyEvidence,verifyGroupSuccession:target.verifyGroupSuccession}
- try{
-  target.verifyCandidate=async(candidate,machine,session)=>{const expected=request.members.find(row=>row.candidate.runId===candidate.runId);if(!expected||canonicalWire(expected.candidate)!==canonicalWire(candidate)||canonicalWire(machine)!==canonicalWire(input.machine)||session.machineId!==input.session.machineId||session.installationId!==input.session.installationId||session.sessionId!==input.session.sessionId)throw Error('stopped group candidate changed')}
-  target.verifyTransition=async(task,transition)=>{const expected=members.get(task.taskKey);if(!expected||transition.kind!=='stop'||canonicalWire(expected.expected)!==canonicalWire(groupBinding(task))||canonicalWire(task.stopProof)!==canonicalWire(transition.stopProof))throw Error('stopped group stop verification changed')}
-  target.verifyEvidence=async(ref,payload)=>{const expected=evidence.get(canonicalWire(ref));if(!expected||canonicalWire(expected.payload)!==canonicalWire(payload))throw Error('stopped group evidence changed')}
-  target.verifyGroupSuccession=async value=>{if(value.parent.taskKey!==request.parentTaskKey||canonicalWire(value.groupPlan)!==canonicalWire(request.groupPlan)||value.groupsDigest!==request.groupsDigest||canonicalWire(value.machine)!==canonicalWire(input.machine)||value.session.sessionId!==input.session.sessionId||value.members.length!==request.members.length)throw Error('stopped group verifier input changed');for(const row of value.members){const expected=members.get(row.task.taskKey);if(!expected||canonicalWire(groupBinding(row.task))!==canonicalWire(expected.expected)||canonicalWire(row.candidate)!==canonicalWire(expected.candidate))throw Error('stopped group verifier member changed')}return{maxChildren:Math.min(3,request.members.length-1)}}
-  const attempted=await deps.recover({machine:input.machine,session:input.session,request})
+ const attempted=await deps.recover({machine:input.machine,session:input.session,request})
   if(attempted.kind==='busy'||attempted.kind==='refused')return{kind:attempted.kind,reason:attempted.reason}
   const snapshot=await deps.read(target),parentTask=snapshot.tasks[request.parentTaskKey]
   if(!parentTask)throw Error('stopped group current parent unavailable')
@@ -2409,11 +2483,10 @@ export async function recoverVerifiedStoppedGroup(input:{evaluation:unknown;mach
    const task=snapshot.tasks[key],seen=current.get(key)!,after=receiptAfter.get(key)!
    if(!task||canonicalWire(task)!==canonicalWire(seen)||canonicalWire(groupBinding(inspection.currentMembers.find(row=>row.current.taskKey===key)!.initial))!==canonicalWire(after))throw Error('stopped group current member readback differs')
   }
-  if(parentTask.schemaVersion!==2||parentTask.state!=='claimed'||parentTask.successionOperationId!==request.operationId)throw Error('stopped group current parent is not launch-ready')
+  if(parentTask.schemaVersion!==2||!['claimed','running'].includes(parentTask.state)||parentTask.successionOperationId!==request.operationId)throw Error('stopped group current parent is not launch-ready')
   const children=[...members.keys()].filter(key=>key!==request.parentTaskKey).map(key=>snapshot.tasks[key]!)
-  if(children.some(task=>task.schemaVersion!==2||task.state!=='recovery-queued'||task.parentTaskKey!==request.parentTaskKey||task.successionOperationId!==request.operationId))throw Error('stopped group current child is not recovery-queued')
-  return{kind:'owned',reason:'exact group succession/current owners verified',lostResponse:attempted.kind==='ambiguous',reference:inspection.reference,parent,children:children.map(groupBinding),inspection}
- }finally{target.verifyCandidate=previous.verifyCandidate;target.verifyTransition=previous.verifyTransition;target.verifyEvidence=previous.verifyEvidence;target.verifyGroupSuccession=previous.verifyGroupSuccession}
+  if(children.some(task=>task.schemaVersion!==2||!['recovery-queued','running','completed'].includes(task.state)||task.parentTaskKey!==request.parentTaskKey||task.successionOperationId!==request.operationId))throw Error('stopped group current child is not recovery-queued')
+ return{kind:'owned',reason:'exact group succession/current owners verified',lostResponse:attempted.kind==='ambiguous',reference:inspection.reference,parent,children:children.map(groupBinding),inspection}
 }
 const verifiedRecoveryMaterials=new WeakMap<RemoteRecoveryMaterial,string>()
 export function assertRemoteRecoveryMaterial(material:RemoteRecoveryMaterial):void {
@@ -2423,7 +2496,7 @@ export function assertRemoteRecoveryMaterial(material:RemoteRecoveryMaterial):vo
 // Discover the exact parent/direct-child set from separately verified remote
 // materials. Each member's full reader must have succeeded; a parent summary is
 // not allowed to vouch for a child's stop, authority, effects, or checkpoint.
-export async function recoverStoppedGroupMaterials(input:{operationId:string;parentTaskKey:string;materials:RemoteRecoveryMaterial[];machine:EffectiveMachine;session:MachineSession},overrides:Partial<StoppedGroupRecoveryDeps>={}):ReturnType<typeof recoverVerifiedStoppedGroup>{
+export async function recoverStoppedGroupMaterials(input:{operationId:string;parentTaskKey:string;materials:RemoteRecoveryMaterial[];machine:EffectiveMachine;session:MachineSession;runtime?:{config:FactoryConfig;gh:TickDeps['gh'];localClaim:Claim;checkouts:Map<string,string>;setupDigests:Map<string,string>;setup:typeof receivingExecutionSetup;source?:RemoteRecoveryTransport['source']}},overrides:Partial<StoppedGroupRecoveryDeps>={}):ReturnType<typeof recoverVerifiedStoppedGroup>{
  for(const material of input.materials)assertRemoteRecoveryMaterial(material)
  const parentRows=input.materials.filter(row=>row.task.taskKey===input.parentTaskKey&&row.task.parentTaskKey===null)
  if(parentRows.length!==1)throw Error('unique verified stopped group parent unavailable')
@@ -2434,9 +2507,28 @@ export async function recoverStoppedGroupMaterials(input:{operationId:string;par
  if(children.some(row=>row.task.parentTaskKey!==parent.task.taskKey)||children.length!==approvedGroups.length)throw Error('complete verified stopped group material required')
  const heads=[...new Set(input.materials.map(row=>row.stateCommit))]
  if(heads.length!==1)throw Error('stopped group materials do not share one state head')
- const owner=await import('./shared-claims.ts'),groupsDigest=owner.sha256(owner.canonical(approvedGroups)),verification={source:true,authority:true,checkpoint:true,stop:true,execution:true,effects:true,history:true,launch:true,check:true,join:true}
- const evaluation={operationId:input.operationId,expectedHead:heads[0],parentTaskKey:input.parentTaskKey,groupPlan,groupsDigest,approvedGroups,members:input.materials.map(material=>({stateCommit:material.stateCommit,task:material.task,expected:groupBinding(material.task),candidate:groupCandidate(material.task),verification}))}
- return recoverVerifiedStoppedGroup({evaluation,machine:input.machine,session:input.session,evidence:input.materials.flatMap(row=>row.evidence)},overrides)
+ const owner=await import('./shared-claims.ts'),groupsDigest=owner.sha256(owner.canonical(approvedGroups))
+ const evaluation={operationId:input.operationId,expectedHead:heads[0],parentTaskKey:input.parentTaskKey,groupPlan,groupsDigest,approvedGroups,members:input.materials.map(material=>({stateCommit:material.stateCommit,task:material.task,expected:groupBinding(material.task),candidate:groupCandidate(material.task)}))}
+ const core=await recoveryScript(),decision=(overrides.evaluate??(value=>core.evaluateStoppedGroupRecovery(value) as StoppedGroupDecision))(structuredClone(evaluation))
+ let session=input.session,context:ActiveStoppedGroupContext|null=null
+ if(input.runtime&&decision.action==='recover-stopped-group'&&decision.request){
+  // One repository may recover several independent groups concurrently. Give
+  // each succession its own controller object so verifier calls cannot observe
+  // or clear another operation's frozen context on the shared provider target.
+  const base=input.session.target
+  const target:import('./shared-claims.ts').CoordinationTarget={...base,
+   verifyCandidate:(candidate,current,actualSession)=>stoppedGroupSerial(base,'verify',async()=>{if(!context)throw Error('stopped-group verification context unavailable');await verifyFreshStoppedGroup(context,{candidate,current,session:actualSession})}),
+   verifyTransition:(task,transition)=>stoppedGroupSerial(base,'verify',async()=>{if(!context)throw Error('stopped-group verification context unavailable');await verifyFreshStoppedGroup(context,{task,transition})}),
+   verifyEvidence:(ref,payload)=>stoppedGroupSerial(base,'verify',async()=>{if(!context)throw Error('stopped-group verification context unavailable');await verifyFreshStoppedGroup(context,{ref,payload})}),
+   verifyGroupSuccession:group=>stoppedGroupSerial(base,'verify',async()=>{if(!context)throw Error('stopped-group verification context unavailable');await verifyFreshStoppedGroup(context,{group});return{maxChildren:Math.min(3,context.request.members.length-1)}}),
+  }
+  session={...input.session,target,localRoot:target.localRoot}
+  sharedMachineContexts.set(target,input.machine)
+  context={request:decision.request,materials:input.materials,config:input.runtime.config,gh:input.runtime.gh,localClaim:input.runtime.localClaim,checkouts:input.runtime.checkouts,setupDigests:input.runtime.setupDigests,setup:input.runtime.setup,source:input.runtime.source,machine:input.machine,session}
+ }
+ const recovered=await recoverVerifiedStoppedGroup({evaluation,machine:input.machine,session,evidence:input.materials.flatMap(row=>row.evidence)},{...overrides,evaluate:()=>decision})
+ if(recovered.kind==='owned'&&context)await stoppedGroupSerial(input.session.target,'verify',()=>verifyFreshStoppedGroup(context!,{}))
+ return recovered
 }
 const recoveryScript=async()=>{
   const source=fileURLToPath(import.meta.url).endsWith('.ts')
@@ -2746,6 +2838,45 @@ interface ReceivingIntent {
  stopProof:import('./shared-claims.ts').StopProof;recovery:import('./shared-claims.ts').RecoveryEnvelope
  checkout:string;handoff:Extract<import('./shared-claims.ts').EvidenceRef,{kind:'state-receipt'}>|null
 }
+interface StoppedGroupRecoveryIntent {
+ schemaVersion:1;operationId:string;parentTaskKey:string;expectedHead:string
+ groupPlan:import('./shared-claims.ts').ArtifactRef;groupsDigest:string
+ members:Array<{taskKey:string;runId:string;expectedBinding:import('./shared-claims.ts').ParentClaimBinding;candidateDigest:string;materialDigest:string}>
+}
+type PreparedStoppedGroup={run:RunRecord;claim:SharedClaim;plan:LaunchPlan;started:true;group:{guard:'plan-lint';ok:true;groups:Array<{id:string;members:string[];files:string[]}>;starts:{parent:{task:import('./shared-claims.ts').TaskRecord;claim:SharedClaim;startOperationId:string};children:Array<{task:import('./shared-claims.ts').TaskRecord;claim:SharedClaim;startOperationId:string}>}}}
+const stoppedUuid=/^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/i,stoppedDigest=/^[a-f0-9]{64}$/i,stoppedSha=/^[a-f0-9]{40}$/i
+export const stableGroupRequestId=(operationId:string,taskKey:string):string=>{
+ const value=createHash('sha256').update(`VegaFactory/group-receiving-request/v1\n${operationId}\n${taskKey}`).digest('hex')
+ return `${value.slice(0,8)}-${value.slice(8,12)}-4${value.slice(13,16)}-${((Number.parseInt(value[16]!,16)&3)|8).toString(16)}${value.slice(17,20)}-${value.slice(20,32)}`
+}
+function groupCheckpointIntent(material:RemoteRecoveryMaterial,checkout:string):import('./checkpoints.ts').CheckpointIntent|null{
+ const request=material.checkpointRequest,checkpoint=material.task.checkpoint
+ if(!request)return null
+ if(!checkpoint)throw Error('stopped group checkpoint unavailable')
+ const remote=spawnSync('git',['remote','get-url','origin'],{cwd:checkout,encoding:'utf8',timeout:3000})
+ if(remote.status!==0||!remote.stdout.trim())throw Error('stopped group source remote unavailable')
+ return{id:request.requested.actionId,repo:material.task.repo,repositoryId:material.task.repositoryNodeId,remote:'origin',remoteUrl:remote.stdout.trim(),branch:checkpoint.branch,baseRef:request.requested.ref??`refs/heads/${checkpoint.branch}`,baseSha:checkpoint.baseSha,scopeDigest:material.task.scopeDigest,paths:[...material.task.paths],approvalBindings:structuredClone(material.task.approvalBindings),approvalRequest:structuredClone(request)}
+}
+async function stoppedGroupDescriptor(materials:RemoteRecoveryMaterial[],parentTaskKey:string,operationId:string):Promise<StoppedGroupRecoveryIntent>{
+ const owner=await import('./shared-claims.ts'),parent=materials.find(row=>row.task.taskKey===parentTaskKey)
+ if(!parent||materials.some(row=>row.stateCommit!==parent.stateCommit))throw Error('complete same-head stopped group unavailable')
+ const groupPlan=parent.artifacts.find(row=>row.kind==='plan'&&row.issue===parent.task.issue)
+ if(!groupPlan)throw Error('stopped group plan artifact unavailable')
+ const source=fileURLToPath(import.meta.url).endsWith('.ts'),planner=await import(new URL(source?'../../../skills/dev/dev-plan/scripts/plan-lint.mjs':'../skill/dev-plan/scripts/plan-lint.mjs',import.meta.url).href) as typeof import('../../../skills/dev/dev-plan/scripts/plan-lint.mjs')
+ const approvedGroups=planner.parseIndependentGroups(parent.planBody).map(group=>({id:group.id,members:group.members,files:group.files}))
+ if(!approvedGroups.length||approvedGroups.length!==materials.length-1)throw Error('stopped group approved member set differs')
+ const members=materials.map(material=>({taskKey:material.task.taskKey,runId:material.task.runId,expectedBinding:groupBinding(material.task),candidateDigest:owner.sha256(owner.canonical(groupCandidate(material.task))),materialDigest:owner.sha256(owner.canonical(stoppedMaterialFacts(material)))})).sort((a,b)=>a.taskKey.localeCompare(b.taskKey))
+ return{schemaVersion:1,operationId,parentTaskKey,expectedHead:parent.stateCommit,groupPlan,groupsDigest:owner.sha256(owner.canonical(approvedGroups)),members}
+}
+function assertStoppedGroupIntent(value:unknown):asserts value is StoppedGroupRecoveryIntent{
+ if(!value||typeof value!=='object'||Array.isArray(value))throw Error('stopped group intent unavailable')
+ const row=value as StoppedGroupRecoveryIntent,keys=Object.keys(row).sort().join(',')
+ if(keys!=='expectedHead,groupPlan,groupsDigest,members,operationId,parentTaskKey,schemaVersion'||row.schemaVersion!==1||!stoppedUuid.test(row.operationId)||!stoppedDigest.test(row.parentTaskKey)||!stoppedSha.test(row.expectedHead)||!stoppedDigest.test(row.groupsDigest)||!Array.isArray(row.members)||row.members.length<2||row.members.length>17)throw Error('stopped group intent schema differs')
+ if(row.members.map(member=>member.taskKey).join('\n')!==[...row.members].map(member=>member.taskKey).sort().join('\n')||new Set(row.members.map(member=>member.taskKey)).size!==row.members.length||new Set(row.members.map(member=>member.runId)).size!==row.members.length)throw Error('stopped group intent member set differs')
+ for(const member of row.members){const binding=member.expectedBinding
+  if(Object.keys(member).sort().join(',')!=='candidateDigest,expectedBinding,materialDigest,runId,taskKey'||!stoppedDigest.test(member.taskKey)||!stoppedUuid.test(member.runId)||!stoppedDigest.test(member.candidateDigest)||!stoppedDigest.test(member.materialDigest)||!binding||Object.keys(binding).sort().join(',')!=='generation,installationId,machineId,ownerToken,runId,sessionId,taskKey'||binding.taskKey!==member.taskKey||binding.runId!==member.runId||!Number.isSafeInteger(binding.generation)||binding.generation<1||!binding.machineId||!stoppedUuid.test(binding.installationId)||!stoppedUuid.test(binding.sessionId)||!stoppedUuid.test(binding.ownerToken))throw Error('stopped group intent member differs')
+ }
+}
 async function receivingCheckout(material:RemoteRecoveryMaterial,config:FactoryConfig):Promise<string> {
  const entry=config.repos.find(row=>row.repo===material.task.repo)!,checkpoint=material.task.checkpoint!
  const git=(args:string[])=>{const r=spawnSync('git',args,{cwd:entry.path,encoding:'utf8',timeout:5000,maxBuffer:4*1024*1024});if(r.status!==0)throw Error('receiving checkout source unavailable');return r.stdout.trim()}
@@ -2765,6 +2896,159 @@ async function receivingCheckout(material:RemoteRecoveryMaterial,config:FactoryC
  const restored=existing.status===0?helper.restoreWorktree(args):helper.createChildWorktree({...args,baseSha:checkpoint.headSha})
  if(restored.blocks.length||restored.branch!==checkpoint.branch)throw Error('original recovery checkout unavailable: '+restored.blocks.join('; '))
  return realpath(restored.path)
+}
+async function stoppedGroupMaterialsAt(input:{repo:string;parentTaskKey:string;head:string;tasks:import('./shared-claims.ts').TaskRecord[];config:FactoryConfig;target:import('./shared-claims.ts').CoordinationTarget;gh:TickDeps['gh'];source?:RemoteRecoveryTransport['source']}):Promise<RemoteRecoveryMaterial[]>{
+ const byKey=new Map(input.tasks.map(task=>[task.taskKey,task])),parent=byKey.get(input.parentTaskKey)
+ if(!parent||parent.parentTaskKey!==null)throw Error('unique stopped group parent unavailable')
+ const members=[parent,...input.tasks.filter(task=>task.parentTaskKey===parent.taskKey)].sort((a,b)=>a.taskKey.localeCompare(b.taskKey))
+ if(members.length<2||new Set(members.map(task=>task.runId)).size!==members.length)throw Error('complete stopped group membership unavailable')
+ const materials:RemoteRecoveryMaterial[]=[]
+ for(const task of members){
+  const material=await inspectRemoteRecoveryRecord({repo:input.repo,taskKey:task.taskKey,config:input.config},{head:input.head,task},{target:input.target,gh:input.gh,source:input.source},task.stopProof??undefined)
+  assertRemoteRecoveryMaterial(material);materials.push(material)
+ }
+ const parentMaterial=materials.find(row=>row.task.taskKey===parent.taskKey)!,declared=[...new Set(parentMaterial.children.map(row=>row.task.taskKey))].sort(),actual=members.filter(task=>task.taskKey!==parent.taskKey).map(task=>task.taskKey).sort()
+ if(canonicalWire(declared)!==canonicalWire(actual))throw Error('separately authenticated stopped group member set differs: '+declared.join(',')+' != '+actual.join(','))
+ return materials
+}
+async function stoppedGroupMaterialsFromReceipt(input:{repo:string;intent:StoppedGroupRecoveryIntent;currentParent:import('./shared-claims.ts').TaskRecord;config:FactoryConfig;target:import('./shared-claims.ts').CoordinationTarget;gh:TickDeps['gh'];source?:RemoteRecoveryTransport['source']}):Promise<{materials:RemoteRecoveryMaterial[];inspection:Extract<import('./shared-claims.ts').GroupSuccessionInspection,{kind:'verified'}>}>
+{
+ const owner=await import('./shared-claims.ts'),parent=groupBinding(input.currentParent),inspection=await owner.inspectGroupSuccession(input.target,{operationId:input.intent.operationId,parent})
+ if(inspection.kind!=='verified'||inspection.receipt.previousHead!==input.intent.expectedHead||inspection.receipt.parentTaskKey!==input.intent.parentTaskKey)throw Error('stopped group prior receipt unavailable')
+ const materials:RemoteRecoveryMaterial[]=[]
+ for(const member of input.intent.members){
+  const receiptMember=inspection.receipt.members.find(row=>row.before.taskKey===member.taskKey),raw=await input.target.provider.read(input.target,input.intent.expectedHead,`coordination/tasks/${member.taskKey}.json`)
+  if(!receiptMember||!raw||Buffer.byteLength(raw)>256*1024)throw Error('stopped group predecessor unavailable')
+  let task:import('./shared-claims.ts').TaskRecord;try{task=JSON.parse(raw)}catch{throw Error('stopped group predecessor is unreadable')}
+  if(raw!==owner.canonical(task)||owner.sha256(raw)!==receiptMember.beforeTaskSha256||canonicalWire(groupBinding(task))!==canonicalWire(member.expectedBinding)||owner.sha256(owner.canonical(groupCandidate(task)))!==member.candidateDigest)throw Error('stopped group predecessor identity changed')
+  const material=await inspectRemoteRecoveryRecord({repo:input.repo,taskKey:member.taskKey,config:input.config},{head:input.intent.expectedHead,task},{target:input.target,gh:input.gh,source:input.source},task.stopProof??undefined)
+  assertRemoteRecoveryMaterial(material);materials.push(material)
+ }
+ return{materials,inspection}
+}
+async function readStoppedGroupIntent(path:string):Promise<StoppedGroupRecoveryIntent|null>{
+ try{const value=JSON.parse(await (await import('./runs.ts')).readPrivateRunFile(path,128*1024));assertStoppedGroupIntent(value);return value}catch(error){if((error as NodeJS.ErrnoException).code==='ENOENT')return null;throw error}
+}
+async function stoppedGroupDecision(input:{repo:string;intent:StoppedGroupRecoveryIntent;request:import('./runs.ts').GroupReceivingRunRequest;config:FactoryConfig;target:import('./shared-claims.ts').CoordinationTarget;gh:TickDeps['gh'];localClaim:Claim;checkouts:Map<string,string>;source?:RemoteRecoveryTransport['source']},progressed=false):Promise<import('./runs.ts').VerifiedGroupReceivingRunDecision>{
+ const owner=await import('./shared-claims.ts'),current=await owner.inspectCoordinationTask(input.target,input.intent.parentTaskKey)
+ if(current.kind!=='active'||current.task.schemaVersion!==2||!(progressed?['claimed','running'].includes(current.task.state):current.task.state==='claimed')||current.task.successionOperationId!==input.intent.operationId)throw Error('stopped group current parent unavailable')
+ const refreshed=await stoppedGroupMaterialsFromReceipt({repo:input.repo,intent:input.intent,currentParent:current.task,config:input.config,target:input.target,gh:input.gh,source:input.source})
+ const descriptor=await stoppedGroupDescriptor(refreshed.materials,input.intent.parentTaskKey,input.intent.operationId)
+ if(canonicalWire(descriptor)!==canonicalWire(input.intent)||canonicalWire(refreshed.inspection.reference)!==canonicalWire(input.request.succession))throw Error('stopped group intent or receipt changed')
+ const currentByKey=new Map(refreshed.inspection.currentMembers.map(row=>[row.current.taskKey,row.current]))
+ const members:import('./runs.ts').VerifiedGroupReceivingRunDecision['members']=[]
+ for(const material of refreshed.materials){
+  const currentTask=currentByKey.get(material.task.taskKey)
+  if(!currentTask||currentTask.schemaVersion!==2||currentTask.successionOperationId!==input.intent.operationId)throw Error('stopped group current member changed')
+  const completed=new Set((material.packet.completed as Array<{taskId:string}>|undefined)?.map(row=>row.taskId)??[]),taskIds=material.task.approvedTaskIds.filter(id=>!completed.has(id)),checkout=input.checkouts.get(material.task.taskKey)
+  if(!checkout||!taskIds.length)throw Error('stopped group member source or outstanding work unavailable')
+  members.push({original:{stateCommit:material.stateCommit,task:structuredClone(material.task)},current:{stateCommit:refreshed.inspection.reference.commitSha,task:structuredClone(currentTask)},artifacts:structuredClone(material.artifacts),authorityRequest:structuredClone(material.authorityRequest),checkpointIntent:groupCheckpointIntent(material,checkout),taskIds,sourceRefs:structuredClone(material.sourceRefs)})
+ }
+ members.sort((a,b)=>a.original.task.taskKey.localeCompare(b.original.task.taskKey))
+ const selected=refreshed.materials.find(row=>row.task.taskKey===input.request.taskKey),checkout=input.checkouts.get(input.request.taskKey)
+ if(!selected||!checkout)throw Error('stopped group selected member unavailable')
+ const setup=await ((input.target as StoppedGroupTarget)[stoppedGroupSetupOverride]??receivingExecutionSetup)(selected,checkout,input.config,input.target,input.localClaim,input.request.currentMember.sessionId),existing=(await (await import('./runs.ts')).readRuns(runsRoot(input.config.home))).find(run=>run.runId===input.request.runId)
+ if(existing)setup.receiver.claimToken=existing.claimToken
+ return{action:'resume-group-member',reason:'fresh stopped group source, authority, receipt and receiver verified',succession:{ref:refreshed.inspection.reference,receipt:refreshed.inspection.receipt},members,receiver:setup.receiver}
+}
+const groupClaim=(task:import('./shared-claims.ts').TaskRecord,stateCommit:string,target:import('./shared-claims.ts').CoordinationTarget):SharedClaim=>({...groupBinding(task),stateCommit,target})
+async function refreshRecoveredGroupStarts(starts:PreparedStoppedGroup['group']['starts'],config:FactoryConfig,gh:TickDeps['gh']):Promise<PreparedStoppedGroup['group']['starts']>{
+ const owner=await import('./shared-claims.ts'),operation=starts.parent.task.schemaVersion===2?starts.parent.task.successionOperationId:null
+ if(!operation)throw Error('recovered group succession unavailable before child start')
+ const target=await verifiedSharedTarget(starts.parent.task.repo,config,starts.parent.task.runId,gh),parent=await owner.inspectCoordinationTask(target,starts.parent.task.taskKey)
+ if(parent.kind!=='active'||parent.task.schemaVersion!==2||parent.task.successionOperationId!==operation)throw Error('recovered group parent authorization changed before child start')
+ const inspected=await owner.inspectGroupSuccession(target,{operationId:operation,parent:groupBinding(parent.task)})
+ if(inspected.kind!=='verified')throw Error('recovered group ownership unavailable before child start: '+inspected.reason)
+ const expected=[starts.parent,...starts.children],current=new Map(inspected.currentMembers.map(row=>[row.current.taskKey,row.current]))
+ if(current.size!==expected.length||expected.some(row=>{const task=current.get(row.task.taskKey);return!task||canonicalWire(groupBinding(task))!==canonicalWire(groupBinding(row.task))}))throw Error('recovered group member changed before child start')
+ const project=(row:typeof starts.parent)=>{const task=current.get(row.task.taskKey)!;return{task,claim:groupClaim(task,inspected.reference.commitSha,target),startOperationId:row.startOperationId}}
+ return{parent:project(starts.parent),children:starts.children.map(project)}
+}
+async function continueSameHomeGroupMember(input:{repo:string;intent:StoppedGroupRecoveryIntent;parentIssue:number;material:RemoteRecoveryMaterial;current:import('./shared-claims.ts').TaskRecordV2;succession:Extract<import('./shared-claims.ts').EvidenceRef,{kind:'state-receipt'}>;checkout:string;config:FactoryConfig;target:import('./shared-claims.ts').CoordinationTarget;gh:TickDeps['gh'];localClaim:Claim;checkouts:Map<string,string>;source?:RemoteRecoveryTransport['source'];saved:RunRecord}):Promise<RunRecord>{
+ const helpers=await import('./runs.ts'),saved=input.saved,requestId=stableGroupRequestId(input.intent.operationId,input.material.task.taskKey),prior=saved.continuations?.find(row=>row.requestId===requestId),previousAttemptId=prior?.previousAttemptId??saved.attemptId??saved.runId,expectedGeneration=prior?saved.generation-1:saved.generation
+ const original=input.material.task,expectedParent=original.taskKey===input.intent.parentTaskKey?null:input.parentIssue
+ if(!saved.checkpoint||!saved.worktreeDigest||saved.runId!==original.runId||saved.repo!==original.repo||saved.issue!==original.issue||saved.parent!==expectedParent||saved.machine?.id!==original.machineId||saved.machine.installationId!==original.installationId||saved.machine.sessionId!==original.sessionId||saved.machine.hostBindingDigest!==original.stopProof?.hostBindingDigest||saved.sharedClaim?.taskKey!==original.taskKey||saved.sharedClaim.generation!==original.generation||saved.sharedClaim.ownerToken!==original.ownerToken||canonicalWire(saved.checkpoint)!==canonicalWire(original.checkpoint)||canonicalWire(saved.execution)!==canonicalWire(original.recovery?.execution)||canonicalWire(saved.remoteEffectCoverage)!==canonicalWire(original.recovery?.remoteEffectCoverage)||canonicalWire(saved.approvalBindings)!==canonicalWire(original.approvalBindings)||canonicalWire(saved.approvalRefs)!==canonicalWire(input.material.artifacts)||canonicalWire(saved.authorityRequest)!==canonicalWire(input.material.authorityRequest))throw Error('same-home stopped group run identity differs')
+ const selectedRequest:import('./runs.ts').GroupReceivingRunRequest={root:runsRoot(input.config.home),requestId,runId:saved.runId,taskKey:input.current.taskKey,expectedSharedGeneration:input.current.generation,checkout:input.checkout,parentTaskKey:input.intent.parentTaskKey,role:input.current.taskKey===input.intent.parentTaskKey?'parent':'child',currentMember:groupBinding(input.current),succession:input.succession}
+ const fresh=await stoppedGroupDecision({...input,request:selectedRequest})
+ const selected=fresh.members.find(row=>row.original.task.taskKey===input.current.taskKey)
+ if(!selected||canonicalWire(selected.artifacts)!==canonicalWire(saved.approvalRefs)||canonicalWire(selected.authorityRequest)!==canonicalWire(saved.authorityRequest)||fresh.receiver.worktreeDigest!==saved.worktreeDigest)throw Error('same-home stopped group decision differs')
+ const currentOwner={machine:fresh.receiver.machine,sharedClaim:{taskKey:input.current.taskKey,generation:input.current.generation,ownerToken:input.current.ownerToken,stateCommit:input.succession.commitSha}},request:import('./runs.ts').RunContinuationRequest={root:runsRoot(input.config.home),runId:saved.runId,expectedGeneration,requestId,previousAttemptId,checkpoint:saved.checkpoint,worktreeDigest:saved.worktreeDigest,currentOwner}
+ return helpers.beginVerifiedRunContinuation(request,{verifyRecovery:async({run,request:actual})=>{
+  const decision=await stoppedGroupDecision({...input,request:selectedRequest}),member=decision.members.find(row=>row.original.task.taskKey===input.current.taskKey)
+  if(!member||run.runId!==saved.runId||canonicalWire(actual)!==canonicalWire(request)||canonicalWire(member.artifacts)!==canonicalWire(run.approvalRefs)||canonicalWire(member.authorityRequest)!==canonicalWire(run.authorityRequest)||decision.receiver.worktreeDigest!==run.worktreeDigest)throw Error('same-home stopped group fresh decision differs')
+  return{action:'resume-task',reason:'fresh stopped group same-home continuation verified',runId:run.runId,expectedGeneration:actual.expectedGeneration,previousAttemptId:actual.previousAttemptId,taskIds:member.taskIds,approvedTaskIds:run.approvedTaskIds!,approvalBindings:run.approvalBindings,recordBinding:run.recordBinding,artifacts:run.approvalRefs,execution:run.execution!,checkpoint:actual.checkpoint,worktreeDigest:actual.worktreeDigest,currentOwner:actual.currentOwner,sourceRefs:member.sourceRefs}
+ }})
+}
+export async function prepareVerifiedStoppedGroup(input:{repo:string;parentTaskKey:string;config:FactoryConfig;localClaim:Claim;target?:import('./shared-claims.ts').CoordinationTarget;gh?:TickDeps['gh'];source?:RemoteRecoveryTransport['source']}):Promise<PreparedStoppedGroup>{
+ const helpers=await import('./runs.ts'),owner=await import('./shared-claims.ts'),gh=input.gh??ghText,root=runsRoot(input.config.home),target=input.target??await verifiedSharedTarget(input.repo,input.config,undefined,gh)
+ return stoppedGroupSerial(target,'prepare',async()=>{
+ await mkdir(root,{recursive:true,mode:0o700})
+ const machine=sharedMachineContexts.get(target)
+ if(!machine||machine.defaults.recovery!=='verified-transfer'||input.localClaim.path!==repoLockPath(input.config,input.repo))throw Error('stopped group recovery owner unavailable')
+ await(await import('./claims.ts')).renewClaim(input.localClaim)
+ const snapshot=await owner.readCoordination(target),currentParent=snapshot.tasks[input.parentTaskKey]
+ if(!currentParent||currentParent.repo!==input.repo||currentParent.parentTaskKey!==null)throw Error('stopped group current parent unavailable')
+ const intentPath=join(root,'receiving-group-'+input.parentTaskKey+'-'+currentParent.runId+'.json')
+ let intent=await readStoppedGroupIntent(intentPath),materials:RemoteRecoveryMaterial[]
+ if(intent&&currentParent.schemaVersion===2&&currentParent.successionOperationId===intent.operationId){materials=(await stoppedGroupMaterialsFromReceipt({repo:input.repo,intent,currentParent,config:input.config,target,gh,source:input.source})).materials}
+ else materials=await stoppedGroupMaterialsAt({repo:input.repo,parentTaskKey:input.parentTaskKey,head:snapshot.head,tasks:Object.values(snapshot.tasks),config:input.config,target,gh,source:input.source})
+ if(!intent){intent=await stoppedGroupDescriptor(materials,input.parentTaskKey,randomUUID());await helpers.atomicRunFile(intentPath,intent);const readback=await readStoppedGroupIntent(intentPath);if(!readback||canonicalWire(readback)!==canonicalWire(intent))throw Error('stopped group durable intent readback differs')}
+ else{const current=await stoppedGroupDescriptor(materials,input.parentTaskKey,intent.operationId);if(canonicalWire(current)!==canonicalWire(intent))throw Error('stopped group durable intent differs')}
+ const saved=await helpers.readRuns(root),checkouts=new Map<string,string>()
+ for(const material of materials){const local=saved.find(run=>run.runId===material.task.runId),checkout=local?await realpath(local.checkout):await receivingCheckout(material,input.config),checkpoint=material.task.checkpoint
+  if(!checkpoint)throw Error('stopped group member checkpoint unavailable')
+  const branch=spawnSync('git',['symbolic-ref','--short','HEAD'],{cwd:checkout,encoding:'utf8',timeout:3000}),head=spawnSync('git',['rev-parse','HEAD'],{cwd:checkout,encoding:'utf8',timeout:3000})
+  if(branch.status!==0||head.status!==0||branch.stdout.trim()!==checkpoint.branch||head.stdout.trim()!==checkpoint.headSha)throw Error('stopped group member checkout differs')
+  checkouts.set(material.task.taskKey,checkout)
+ }
+ const sessionId=currentParent.schemaVersion===2&&currentParent.successionOperationId===intent.operationId?currentParent.sessionId:dispatcherSessionId
+ const session:MachineSession={target,localRoot:target.localRoot,machineId:machine.id,installationId:machine.installationId,sessionId,hostBindingDigest:machine.hostBindingDigest,bootIdDigest:await(await import('./machine-identity.ts')).readBootIdentityDigest(),identity:await processIdentity()}
+ const setupOwner=(target as StoppedGroupTarget)[stoppedGroupSetupOverride]??receivingExecutionSetup,setupDigests=new Map<string,string>()
+ for(const material of materials){const setup=await setupOwner(material,checkouts.get(material.task.taskKey)!,input.config,target,input.localClaim,session.sessionId);setupDigests.set(material.task.taskKey,createHash('sha256').update(canonicalWire(setup)).digest('hex'))}
+ let recovered:Awaited<ReturnType<typeof recoverStoppedGroupMaterials>>
+ try{recovered=await recoverStoppedGroupMaterials({operationId:intent.operationId,parentTaskKey:intent.parentTaskKey,materials,machine,session,runtime:{config:input.config,gh,localClaim:input.localClaim,checkouts,setupDigests,setup:setupOwner,source:input.source}})}catch(error){throw Error('stopped group succession verification: '+(error as Error).message)}
+ if(recovered.kind!=='owned')throw Error('stopped group ownership unavailable: '+recovered.reason)
+ const currentByKey=new Map(recovered.inspection.currentMembers.map(row=>[row.current.taskKey,row.current])),runs:RunRecord[]=[],progressed=[...currentByKey.values()].some(task=>task.taskKey===intent!.parentTaskKey?task.state!=='claimed':task.state!=='recovery-queued')
+ for(const material of materials){
+  const current=currentByKey.get(material.task.taskKey)
+  if(!current||current.schemaVersion!==2)throw Error('stopped group current member unavailable')
+  const checkout=checkouts.get(current.taskKey)!,request:import('./runs.ts').GroupReceivingRunRequest={root,requestId:stableGroupRequestId(intent.operationId,current.taskKey),runId:current.runId,taskKey:current.taskKey,expectedSharedGeneration:current.generation,checkout,parentTaskKey:intent.parentTaskKey,role:current.taskKey===intent.parentTaskKey?'parent':'child',currentMember:groupBinding(current),succession:recovered.reference}
+  const local=saved.find(run=>run.runId===current.runId)
+  if(progressed){
+   if(!local||!local.sharedClaim||local.sharedClaim.taskKey!==current.taskKey||local.sharedClaim.generation!==current.generation||local.sharedClaim.ownerToken!==current.ownerToken||!['prepared','running'].includes(local.state))throw Error('partially started stopped group lacks complete local attempts')
+   let decision:Awaited<ReturnType<typeof stoppedGroupDecision>>
+   try{decision=await stoppedGroupDecision({repo:input.repo,intent,request,config:input.config,target,gh,localClaim:input.localClaim,checkouts,source:input.source},true)}catch(error){throw Error('partially started stopped group member verification: '+(error as Error).message)}
+   const selected=decision.members.find(row=>row.original.task.taskKey===current.taskKey)
+   if(!selected||canonicalWire(local.approvalRefs)!==canonicalWire(selected.artifacts)||canonicalWire(local.authorityRequest)!==canonicalWire(selected.authorityRequest)||local.worktreeDigest!==decision.receiver.worktreeDigest)throw Error('partially started stopped group attempt differs')
+   if(local.remoteRecovery?.kind==='receiving-group'){if(local.remoteRecovery.requestId!==request.requestId||local.remoteRecovery.succession.operationId!==intent.operationId||local.remoteRecovery.parentTaskKey!==intent.parentTaskKey||local.remoteRecovery.role!==request.role)throw Error('partially started receiving provenance differs')}
+   else if(!local.continuations?.some(row=>row.requestId===request.requestId))throw Error('partially started same-home continuation differs')
+   runs.push(local)
+  }
+  else if(local&&!local.remoteRecovery){runs.push(await continueSameHomeGroupMember({repo:input.repo,intent,parentIssue:materials.find(row=>row.task.taskKey===intent!.parentTaskKey)!.task.issue,material,current,succession:recovered.reference,checkout,config:input.config,target,gh,localClaim:input.localClaim,checkouts,source:input.source,saved:local}))}
+  else runs.push(await helpers.createVerifiedGroupReceivingRun(request,{verifyRecovery:value=>stoppedGroupDecision({repo:input.repo,intent,request:value,config:input.config,target,gh,localClaim:input.localClaim,checkouts,source:input.source})}))
+ }
+  const readback=await Promise.all(runs.map(run=>helpers.readRun(root,run.runId)))
+ if(canonicalWire(readback.map(run=>run.runId).sort())!==canonicalWire(materials.map(row=>row.task.runId).sort()))throw Error('stopped group local attempt set incomplete')
+  const parent=readback.find(run=>run.sharedClaim?.taskKey===intent!.parentTaskKey)
+  if(!parent)throw Error('stopped group local parent unavailable')
+ const parentMaterial=materials.find(row=>row.task.taskKey===intent!.parentTaskKey)!
+ let installed:Awaited<ReturnType<typeof import('./children.ts')['installRecoveredChildrenContext']>>
+ try{installed=await(await import('./children.ts')).installRecoveredChildrenContext({parent,material:parentMaterial,config:input.config},{target,gh})}catch(error){throw Error('stopped group child context verification: '+(error as Error).message)}
+ const freshTarget=await verifiedSharedTarget(input.repo,input.config,parent.runId,gh),freshMachine=sharedMachineContexts.get(freshTarget)
+ if(!freshMachine||freshMachine.id!==machine.id||freshMachine.installationId!==machine.installationId||freshMachine.hostBindingDigest!==machine.hostBindingDigest)throw Error('stopped group receiver authorization changed before start')
+ const startRead=await owner.inspectGroupSuccession(freshTarget,{operationId:intent.operationId,parent:recovered.parent})
+ if(startRead.kind!=='verified'||canonicalWire(startRead.reference)!==canonicalWire(recovered.reference)||canonicalWire(startRead.currentMembers)!==canonicalWire(recovered.inspection.currentMembers))throw Error('stopped group ownership changed before start')
+ const startByKey=new Map(startRead.currentMembers.map(row=>[row.current.taskKey,row.current]))
+ const members=readback.map(run=>{const task=startByKey.get(run.sharedClaim!.taskKey);if(!task)throw Error('stopped group member unavailable before start');return{task,claim:groupClaim(task,startRead.reference.commitSha,freshTarget),startOperationId:run.attemptOperationIds!.start}}),parentMember=members.find(row=>row.task.taskKey===intent!.parentTaskKey)!,children=members.filter(row=>row!==parentMember)
+ let started:Awaited<ReturnType<typeof import('./children.ts')['startRecoveredGroupMembers']>>
+ try{started=await(await import('./children.ts')).startRecoveredGroupMembers({parent:parentMember,children,deferChildren:true})}catch(error){throw Error('stopped group parent start failed: '+(error as Error).message)}
+ const material=materials.find(row=>row.task.taskKey===intent!.parentTaskKey)!,setup=await setupOwner(material,parent.checkout,input.config,target,input.localClaim,parent.machine!.sessionId),completed=new Set((material.packet.completed as Array<{taskId:string}>|undefined)?.map(row=>row.taskId)??[]),taskIds=material.task.approvedTaskIds.filter(id=>!completed.has(id))
+ let plan=continuationLaunchPlan(setup.plan,{taskIds,sourceRefs:material.sourceRefs},material.packet,material.unavailableContext)
+ const note='\nThe recovery controller owns the already-admitted child run and join operations for this group. Do not launch, re-claim, or replay child work yourself; consume only its verified results.\n',positions=plan.args.flatMap((value,index)=>value===plan.prompt?[index]:[])
+ if(positions.length!==1)throw Error('stopped group parent prompt binding unavailable')
+ const prompt=plan.prompt+note;plan={...plan,prompt,args:plan.args.map((value,index)=>index===positions[0]?prompt:value)}
+ return{run:parent,claim:started.parent,plan,started:true,group:{guard:'plan-lint',ok:true,groups:installed.record.groups,starts:{parent:parentMember,children}}}
+ })
 }
 export async function prepareVerifiedReceivingRun(input:{repo:string;taskKey:string;runId?:string},config:FactoryConfig,localClaim:Claim):Promise<{run:RunRecord;claim:SharedClaim;plan:LaunchPlan;taskIds:string[]}> {
  const helpers=await import('./runs.ts'),owner=await import('./shared-claims.ts'),root=runsRoot(config.home),target=await verifiedSharedTarget(input.repo,config),machine=sharedMachineContexts.get(target)!
@@ -2950,10 +3234,11 @@ export function durableRecoverySummary(run:RunRecord):{action:'wait'|'retry-deli
  if(run.state==='terminal'&&pending)return{action:'retry-delivery',reason:'implementation is not replayed for pending delivery',...source}
  return null
 }
-async function inspectSavedRecoveryWork(config:FactoryConfig,options:{signal?:AbortSignal},tracker:RunTracker,reports:RunReport[],refusals:Refusal[]):Promise<void> {
+async function inspectSavedRecoveryWork(config:FactoryConfig,options:{signal?:AbortSignal},tracker:RunTracker,reports:RunReport[],refusals:Refusal[],gh:TickDeps['gh']=ghText,recoveryTransport?:TickDeps['recoveryTransport'],processDeps?:Pick<ExecuteDeps,'wrapperPath'>,recoveredChildPrepare?:TickDeps['recoveredChildPrepare']):Promise<void> {
  const helpers=await import('./runs.ts'),saved=await helpers.readRuns(runsRoot(config.home))
+ const recoveryFor=async(repo:string):Promise<{target:import('./shared-claims.ts').CoordinationTarget;source?:RemoteRecoveryTransport['source']}>=>recoveryTransport?recoveryTransport(repo,config):{target:await verifiedSharedTarget(repo,config,undefined,gh)}
  type Seed=Pick<RunRecord,'repo'|'issue'|'stage'|'harness'|'checkout'>
- type Prepared={run:RunRecord;claim:SharedClaim;plan:LaunchPlan}
+ type Prepared={run:RunRecord;claim:SharedClaim;plan:LaunchPlan;started?:true;group?:PreparedStoppedGroup['group']}
  const schedule=async(seed:Seed,prepare:(claim:Claim)=>Promise<Prepared|null>)=>{
   const key=`${seed.repo}#${seed.issue}`
   if(tracker.has(key)||inFlightIssues(tracker,seed.repo).length>=config.maxRuns)return
@@ -2966,28 +3251,42 @@ async function inspectSavedRecoveryWork(config:FactoryConfig,options:{signal?:Ab
    let outcome:RunOutcome|null=null
    try{
     const prepared=await prepare(local);if(!prepared)return
-    await verifyDispatchRunAuthority(prepared.run,config,'launch')
-    const start=await transitionSharedTask({claim:prepared.claim,operationId:prepared.run.attemptOperationIds!.start,transition:{kind:'start'}})
+    await verifyDispatchRunAuthority(prepared.run,config,'launch',{gh})
+    const start=prepared.started?{kind:'owned' as const,claim:prepared.claim}:await transitionSharedTask({claim:prepared.claim,operationId:prepared.run.attemptOperationIds!.start,transition:{kind:'start'}})
     if(start.kind!=='owned')throw Error('recovery start not acknowledged: '+start.reason)
     const current=await helpers.readRun(runsRoot(config.home),prepared.run.runId)
     report.launch={command:prepared.plan.command,args:prepared.plan.args,env:prepared.plan.env,cwd:prepared.plan.cwd}
-    outcome=await executeApprovedRun({repo:seed.repo,issue:seed.issue,title:report.title,stage:seed.stage as Stage,commentId:null,reactionId:null},prepared.plan,config,{operator:null,signal:options.signal,sharedClaim:start.claim,onSpawn:()=>{report.launched=true}},{preparedRun:current,runInput:{...current,root:runsRoot(config.home)}})
+    let groupWork:Promise<Error|null>|null=null
+    const groupAbort=new AbortController(),runSignal=prepared.group?AbortSignal.any([groupAbort.signal,...(options.signal?[options.signal]:[])]):options.signal
+    const onSpawn=()=>{report.launched=true;if(prepared.group&&!groupWork)groupWork=(async()=>{const children=await import('./children.ts'),starts=await refreshRecoveredGroupStarts(prepared.group!.starts,config,gh);await children.startRecoveredGroupMembers(starts);const parent=await helpers.readRun(runsRoot(config.home),prepared.run.runId),executed=await children.executeChildren({parent,groups:prepared.group!,config,write:true,signal:runSignal},{processDeps,gh,...(recoveredChildPrepare?{prepare:recoveredChildPrepare}:{})});if(executed.blocked.length)throw Error('recovered child execution blocked: '+executed.blocked.map(row=>`#${row.issue} ${row.reason}`).join('; '));const joined=await children.joinChildren({parent:await helpers.readRun(runsRoot(config.home),parent.runId),groups:prepared.group!,config,write:true,signal:runSignal},{processDeps,gh});if(joined.blocked.length)throw Error('recovered child join blocked: '+joined.blocked.map(row=>`#${row.issue} ${row.reason}`).join('; '));return null})().catch(error=>{groupAbort.abort();return error as Error})}
+    outcome=await executeApprovedRun({repo:seed.repo,issue:seed.issue,title:report.title,stage:seed.stage as Stage,commentId:null,reactionId:null},prepared.plan,config,{operator:null,signal:runSignal,sharedClaim:start.claim,onSpawn},{...processDeps,gh,preparedRun:current,runInput:{...current,root:runsRoot(config.home)}})
+    let groupError:Error|null=null
+    if(outcome.refusal)groupError=Error(outcome.refusal)
+    if(groupWork)groupError=await groupWork
     report.exitCode=outcome.exitCode;report.logFile=outcome.logFile
-    const latest=await helpers.readRun(runsRoot(config.home),current.runId),claim=await sharedClaimForRun(latest,config),finish=await finishDurableSharedRun(claim,outcome,config)
+    const latest=await helpers.readRun(runsRoot(config.home),current.runId),claim=await sharedClaimForRun(latest,config,gh),finish=await finishDurableSharedRun(claim,outcome,config,gh)
     const finished=await transitionSharedTask({claim,operationId:finish.kind==='stop'?latest.stopReceiptIds?.transition??randomUUID():randomUUID(),transition:finish})
     if(finished.kind!=='owned')throw Error('recovery final state pending: '+finished.reason)
+    if(groupError)throw groupError
    }catch(error){refusals.push({repo:seed.repo,issue:seed.issue,reason:(error as Error).message})}
    finally{tracker.delete(key);if(!inFlightIssues(tracker,seed.repo).length&&outcome?.terminationCause!=='termination-unconfirmed')await releaseLock(lockPath,local)}
   })()
   tracker.set(key,{repo:seed.repo,issue:seed.issue,done})
  }
+ const retainedGroupRuns=new Set<string>()
+ for(const entry of config.repos){try{const transport=await recoveryFor(entry.repo),snapshot=await(await import('./shared-claims.ts')).readCoordination(transport.target);for(const task of Object.values(snapshot.tasks))if(task.recovery&&(task.parentTaskKey!==null||Object.values(snapshot.tasks).some(row=>row.parentTaskKey===task.taskKey)))retainedGroupRuns.add(task.runId)}catch{/* Normal recovery reports the unreadable owner below. */}}
  for(const run of saved){
   if(!config.repos.some(row=>row.repo===run.repo)||run.waitReason||!run.execution)continue
+  if(run.remoteRecovery?.kind==='receiving-group'&&run.remoteRecovery.role==='child')continue
+  const resumableGroupParent=run.parent===null&&(run.remoteRecovery?.kind==='receiving-group'||!!run.continuations?.length)
+  if(retainedGroupRuns.has(run.runId)&&!resumableGroupParent)continue
   const allocated=run.state==='prepared'&&!run.processIdentity&&(run.remoteRecovery||run.continuations?.length)
   if(!allocated&&!durableRecoverySummary(run))continue
   await schedule(run,async local=>{
    if(allocated){
+    if(run.remoteRecovery?.kind==='receiving-group'){const transport=await recoveryFor(run.repo);return prepareVerifiedStoppedGroup({repo:run.repo,parentTaskKey:run.remoteRecovery.parentTaskKey,config,localClaim:local,gh,...transport})}
     if(run.remoteRecovery)return prepareVerifiedReceivingRun({repo:run.repo,taskKey:run.sharedClaim!.taskKey,runId:run.runId},config,local)
+    if(run.parent===null&&run.sharedClaim){try{await helpers.readPrivateRunFile(join(runsRoot(config.home),'receiving-group-'+run.sharedClaim.taskKey+'-'+run.runId+'.json'));const transport=await recoveryFor(run.repo);return prepareVerifiedStoppedGroup({repo:run.repo,parentTaskKey:run.sharedClaim.taskKey,config,localClaim:local,gh,...transport})}catch(error){if((error as NodeJS.ErrnoException).code!=='ENOENT')throw error}}
     const request=run.continuations!.at(-1)!,attempt=run.attempts?.find(row=>row.id===request.previousAttemptId)
     if(!attempt)throw Error('original continuation snapshot unavailable')
     const original=await helpers.readRunAttemptSnapshot(runsRoot(config.home),run.runId,attempt)
@@ -3013,11 +3312,15 @@ async function inspectSavedRecoveryWork(config:FactoryConfig,options:{signal?:Ab
  for(const entry of config.repos){
   if(inFlightIssues(tracker,entry.repo).length>=config.maxRuns)continue
   try{
-   const target=await verifiedSharedTarget(entry.repo,config),machine=sharedMachineContexts.get(target)!
+   const transport=await recoveryFor(entry.repo),target=transport.target,machine=sharedMachineContexts.get(target)!
    if(machine.defaults.recovery!=='verified-transfer')continue
    const snapshot=await(await import('./shared-claims.ts')).readCoordination(target)
+   const scheduledGroups=new Set<string>()
    for(const task of Object.values(snapshot.tasks)){
-    if(task.repo!==entry.repo||task.parentTaskKey!==null||!task.recovery||!task.stopProof||saved.some(run=>run.runId===task.runId)||!['stopped','blocked','claimed'].includes(task.state))continue
+    if(task.repo!==entry.repo||task.parentTaskKey!==null||!task.recovery||!task.stopProof||!['stopped','blocked','claimed'].includes(task.state))continue
+    const children=Object.values(snapshot.tasks).filter(row=>row.parentTaskKey===task.taskKey)
+    if(children.length){if(scheduledGroups.has(task.taskKey))continue;scheduledGroups.add(task.taskKey);await schedule({repo:task.repo,issue:task.issue,stage:task.stage,harness:task.recovery.execution.harness,checkout:entry.path},claim=>prepareVerifiedStoppedGroup({repo:task.repo,parentTaskKey:task.taskKey,config,localClaim:claim,gh,...transport}));continue}
+    if(saved.some(run=>run.runId===task.runId))continue
     if(task.state==='claimed'){try{await helpers.readPrivateRunFile(join(runsRoot(config.home),'receiving-'+task.taskKey+'-'+task.runId+'.json'))}catch{continue}}
     await schedule({repo:task.repo,issue:task.issue,stage:task.stage,harness:task.recovery.execution.harness,checkout:entry.path},claim=>prepareVerifiedReceivingRun({repo:task.repo,taskKey:task.taskKey,runId:task.runId},config,claim))
    }
@@ -3184,7 +3487,7 @@ async function verifyTaskCheckpointEvidence(run:RunRecord,payload:Extract<import
  return true
 }
 export async function verifyRetainedTaskCompletion(run:RunRecord,payload:Extract<import('./shared-claims.ts').RecoveryEvidencePayload,{kind:'acceptance'}>,ref:import('./shared-claims.ts').EvidenceRef,target:import('./shared-claims.ts').CoordinationTarget,config:FactoryConfig,gh:TickDeps['gh']=ghText):Promise<boolean> {
- if(!run.remoteRecovery||ref.kind!=='state-receipt'||payload.acceptedScope!==null)return false
+ if(run.remoteRecovery?.kind!=='receiving-home'||ref.kind!=='state-receipt'||payload.acceptedScope!==null)return false
  const owner=await import('./shared-claims.ts'),provenance=run.remoteRecovery
  // Extract only the binding for the owner's reader. Never treat this JSON as a
  // locally parsed TaskRecord or infer an old owner from the current task.

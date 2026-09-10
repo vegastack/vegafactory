@@ -1,7 +1,7 @@
 import { privacyStatus, privacyReason, type PrivacyStatus } from './stats/privacy.ts'
 import { verifiedSharedTarget, durableRecoverySummary } from './dispatch.ts'
 import { readRuns, runsRoot, type RunRecord, type TerminalCause } from './runs.ts'
-import { readSharedStatus, type CoordinationTarget, type SharedStatus } from './shared-claims.ts'
+import { readSharedStatus, inspectCoordinationTask, inspectGroupSuccession, canonical, type CoordinationTarget, type SharedStatus } from './shared-claims.ts'
 import { labelsDigest, resolveState, resolveLabels } from '../../../skills/dev/dev-setup/scripts/effective-policy.mjs'
 import { boundedGhJson, readBudget } from './gh.ts'
 import type { LabelMap, State } from './config.ts'
@@ -65,8 +65,45 @@ export function projectSharedRecovery(shared:SharedStatus|undefined):SharedRecov
  const rows:SharedRecoveryProjection[]=[]
  for(const task of shared.tasks){
   if(task.state==='recovery-queued')rows.push({taskKey:task.taskKey,issue:task.issue,state:task.state,action:'wait',reason:'parent must start before this recovered child'})
-  else if(task.state==='claimed'&&task.history.events.some(event=>'kind'in event&&event.kind==='group-succession'))rows.push({taskKey:task.taskKey,issue:task.issue,state:task.state,action:'recover',reason:'group succession verified; parent lifecycle checks required'})
+  else if(task.state==='claimed'&&task.history.events.some(event=>'kind'in event&&event.kind==='group-succession'))rows.push({taskKey:task.taskKey,issue:task.issue,state:task.state,action:'wait',reason:'exact current group role inspection required'})
   else if(['stopped','blocked'].includes(task.state))rows.push({taskKey:task.taskKey,issue:task.issue,state:task.state,action:'wait',reason:'verified complete recovery predicates and current succession are required'})
+ }
+ return rows
+}
+type RecoveryInspectionDeps={
+ task:(target:CoordinationTarget,taskKey:string)=>ReturnType<typeof inspectCoordinationTask>
+ group:(target:CoordinationTarget,input:Parameters<typeof inspectGroupSuccession>[1])=>ReturnType<typeof inspectGroupSuccession>
+}
+const statusBinding=(task:{taskKey:string;runId:string;generation:number;ownerToken:string;machineId:string;installationId:string;sessionId:string})=>({taskKey:task.taskKey,runId:task.runId,generation:task.generation,ownerToken:task.ownerToken,machineId:task.machineId,installationId:task.installationId,sessionId:task.sessionId})
+// Status owns a read-only, same-snapshot projection. Historical event labels
+// never become launch authority: the exact current parent endpoint and every
+// displayed child are checked through the current task/succession readers.
+export async function inspectSharedRecovery(shared:SharedStatus|undefined,target:CoordinationTarget,deps:RecoveryInspectionDeps={task:inspectCoordinationTask,group:inspectGroupSuccession}):Promise<SharedRecoveryProjection[]>{
+ if(!shared||shared.refusal||!shared.head)return projectSharedRecovery(shared)
+ const rows:SharedRecoveryProjection[]=[]
+ for(const summary of shared.tasks){
+  if(!['claimed','recovery-queued','stopped','blocked'].includes(summary.state))continue
+  if(['stopped','blocked'].includes(summary.state)){rows.push({taskKey:summary.taskKey,issue:summary.issue,state:summary.state,action:shared.history?.coverage==='complete'?'wait':'refuse',reason:shared.history?.coverage==='complete'?'verified complete recovery predicates and current succession are required':'current recovery role unavailable: complete coordination history unavailable'});continue}
+  try{
+   const current=await deps.task(target,summary.taskKey)
+   if(current.kind!=='active'||current.head!==shared.head||summary.sourceCommit!==shared.head||current.task.taskKey!==summary.taskKey||current.task.repo!==summary.repo||current.task.issue!==summary.issue||current.task.machineId!==summary.machineId||current.task.generation!==summary.generation||current.task.state!==summary.state)throw Error('current task differs from status snapshot')
+   if(current.task.schemaVersion===1){if(current.task.state==='claimed')continue;throw Error('ordinary task has no group recovery role')}
+   if(current.task.schemaVersion!==2)throw Error('current recovery task schema differs')
+   if(shared.history?.coverage!=='complete')throw Error('complete coordination history unavailable')
+   const parentKey=current.task.parentTaskKey??current.task.taskKey,parentRead=parentKey===current.task.taskKey?current:await deps.task(target,parentKey)
+   if(parentRead.kind!=='active'||parentRead.head!==shared.head||parentRead.task.schemaVersion!==2||parentRead.task.taskKey!==parentKey||parentRead.task.parentTaskKey!==null)throw Error('current group parent endpoint unavailable')
+   const operationId=parentRead.task.successionOperationId
+   if(current.task.successionOperationId!==operationId)throw Error('current group succession differs')
+   const inspected=await deps.group(target,{operationId,parent:statusBinding(parentRead.task)})
+   if(inspected.kind!=='verified'||inspected.reference.operationId!==operationId||inspected.reference.commitSha!==shared.head||inspected.receipt.operationId!==operationId||inspected.receipt.parentTaskKey!==parentKey)throw Error(inspected.kind==='verified'?'current group receipt differs':inspected.reason)
+   const parentMember=inspected.currentMembers.find(row=>row.current.taskKey===parentKey),member=inspected.currentMembers.find(row=>row.current.taskKey===current.task.taskKey)
+   if(!parentMember||!member||canonical(parentMember.current)!==canonical(parentRead.task)||canonical(member.current)!==canonical(current.task))throw Error('current group member endpoint differs')
+   if(current.task.taskKey===parentKey){
+    if(current.task.state!=='claimed')throw Error('current group parent is not claimed')
+    rows.push({taskKey:summary.taskKey,issue:summary.issue,state:summary.state,action:'recover',reason:'exact current group parent verified; lifecycle checks required'})
+   }else if(current.task.state==='recovery-queued')rows.push({taskKey:summary.taskKey,issue:summary.issue,state:summary.state,action:'wait',reason:'parent must start before this recovered child'})
+   else rows.push({taskKey:summary.taskKey,issue:summary.issue,state:summary.state,action:'wait',reason:'claimed child is not a recoverable group parent'})
+  }catch(error){rows.push({taskKey:summary.taskKey,issue:summary.issue,state:summary.state,action:'refuse',reason:'current recovery role unavailable: '+(error as Error).message})}
  }
  return rows
 }
@@ -113,7 +150,7 @@ export function buildStatus(input: {
   state: DispatchState
   lockPid: number | null
   lockRefusal?: string
-  repos: { repo: string; policy: RepoPolicy; shared?: SharedStatus; snapshot?: RepoStatus['snapshot']; boardComplete?: boolean; boardReason?: string | null; observedAt?: string; board: BoardIssue[]; worktrees: WorktreeRow[]; logs: { file: string; body: string }[]; durableRuns?: RunRecord[]; runRefusal?: string }[]
+  repos: { repo: string; policy: RepoPolicy; shared?: SharedStatus; recovery?:SharedRecoveryProjection[]; snapshot?: RepoStatus['snapshot']; boardComplete?: boolean; boardReason?: string | null; observedAt?: string; board: BoardIssue[]; worktrees: WorktreeRow[]; logs: { file: string; body: string }[]; durableRuns?: RunRecord[]; runRefusal?: string }[]
 }): StatusReport {
   const repos: RepoStatus[] = input.repos.map(entry => {
     let labelMap: LabelMap | null = null
@@ -153,7 +190,7 @@ export function buildStatus(input: {
     return {
       repo: entry.repo,
       ...(entry.shared ? { shared: entry.shared } : {}),
-      ...(entry.shared ? { recovery: projectSharedRecovery(entry.shared) } : {}),
+      ...(entry.shared ? { recovery: entry.recovery??projectSharedRecovery(entry.shared) } : {}),
       dispatch: entry.policy.dispatch,
       ...(entry.snapshot ? { snapshot: entry.snapshot } : {}),
       workflow,
@@ -299,14 +336,14 @@ export async function runStatusCli(argv: string[], home: string, deps?: Partial<
         snapshot = { state: result.state, sourceCommit: result.snapshot?.sourceCommit ?? null, policyDigest: result.snapshot?.policyDigest ?? null, validatedAt: result.snapshot?.validatedAt ?? null, ageSeconds: result.ageSeconds, reason: result.reason, machine: result.machine }
       } catch (error) { policy = { ...policy, refusal: privacyReason(error) }; snapshot = { state: 'unavailable', sourceCommit: null, policyDigest: null, validatedAt: null, ageSeconds: null, reason: privacyReason(error) } }
     }
-    const shared = config.executionMode === 'shared'
-      ? await (async()=>{try{return await readSharedStatus(await (deps?.sharedTarget??verifiedSharedTarget)(entry.repo,config),[entry.repo])}catch{return{head:null,tasks:[],refusal:'verified coordination reader unavailable'}}})()
-      : undefined
+    let shared:SharedStatus|undefined,sharedTarget:CoordinationTarget|undefined
+    if(config.executionMode==='shared')try{sharedTarget=await (deps?.sharedTarget??verifiedSharedTarget)(entry.repo,config);shared=await readSharedStatus(sharedTarget,[entry.repo])}catch{shared={head:null,tasks:[],refusal:'verified coordination reader unavailable'}}
+    const recovery=sharedTarget&&shared?await inspectSharedRecovery(shared,sharedTarget):projectSharedRecovery(shared)
     let durableRuns:RunRecord[]=[],runRefusal:string|undefined
     try { durableRuns=(await readRuns(runsRoot(home))).filter(run=>run.repo===entry.repo) } catch { runRefusal='durable run records unavailable; preserved for reconciliation' }
     repos.push({
       durableRuns,runRefusal,
-      shared,
+      shared,recovery,
       snapshot,
       repo: entry.repo,
       policy,

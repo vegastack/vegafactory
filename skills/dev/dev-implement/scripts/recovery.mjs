@@ -103,8 +103,8 @@ export function evaluateStoppedGroupRecovery(input) {
   const childIssues=members.filter(row=>row!==parent).map(row=>row.task.issue).sort((a,b)=>a-b),approvedIssues=expectedChildren.map(row=>row.issue).sort((a,b)=>a-b);
   if(!same(childIssues,approvedIssues))return refuse('stopped group omitted or added an approved child');
   for(const row of members){
-    const task=row?.task,recovery=task?.recovery,verification=row?.verification;
-    if(!row||Object.keys(row).sort().join(',')!=='candidate,expected,stateCommit,task,verification')return refuse('unknown or missing stopped group member field');
+    const task=row?.task,recovery=task?.recovery;
+    if(!row||Object.keys(row).sort().join(',')!=='candidate,expected,stateCommit,task')return refuse('unknown or missing stopped group member field');
     if(!task||row.stateCommit!==expectedHead)return refuse('stopped group members do not share the expected head');
     if(!['stopped','blocked'].includes(task.state)||!task.stopProof)return wait('every stopped group member needs verified stop evidence');
     if(task.schemaVersion!==1&&task.schemaVersion!==2)return refuse('unsupported stopped group task schema');
@@ -119,8 +119,6 @@ export function evaluateStoppedGroupRecovery(input) {
       const approved=expectedChildren.find(group=>group.issue===task.issue);
       if(!approved||!same(task.paths,approved.files))return refuse('stopped group child scope differs from approved group');
     }
-    const verified=['source','authority','checkpoint','stop','execution','effects','history','launch','check','join'];
-    if(!verification||Object.keys(verification).sort().join(',')!==[...verified].sort().join(',')||verified.some(key=>verification[key]!==true))return wait('complete stopped group verification unavailable');
     if(recovery.remoteEffectCoverage?.kind==='unmanaged-possible'||[...(recovery.effects??[])].some(effect=>effect.kind!=='telemetry-push'&&!['acknowledged','cancelled-before-send'].includes(effect.state)))return wait('stopped group blocking effects unresolved');
     if((recovery.joins??[]).some(join=>!['accepted','prepared'].includes(join.state)))return refuse('stopped group join history is not recoverable');
   }
