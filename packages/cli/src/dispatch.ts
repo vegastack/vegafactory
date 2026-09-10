@@ -728,6 +728,8 @@ export async function executeRun(
       await verifyDispatchRunAuthority(record,config,'launch',{gh:deps?.gh})
       const target=await verifiedSharedTarget(record.repo,config,record.runId,deps?.gh??ghText)
       if(options.sharedClaim){
+        const resolved=sharedMachineContexts.get(target)
+        if(!record.machine||!resolved||resolved.id!==record.machine.id||resolved.installationId!==record.machine.installationId||resolved.hostBindingDigest!==record.machine.hostBindingDigest||!resolved.allowedRepositories.includes(record.repo))throw Error('fresh shared execution machine differs')
         const snapshot=await(await import('./shared-claims.ts')).readCoordination(target),task=snapshot.tasks[options.sharedClaim.taskKey]
         if(!task||task.runId!==options.sharedClaim.runId||task.generation!==options.sharedClaim.generation||task.ownerToken!==options.sharedClaim.ownerToken||task.machineId!==options.sharedClaim.machineId||task.installationId!==options.sharedClaim.installationId||task.sessionId!==options.sharedClaim.sessionId||task.state!=='running')throw Error('fresh shared execution owner differs')
         options.sharedClaim={...options.sharedClaim,stateCommit:snapshot.head,target}
@@ -2205,7 +2207,8 @@ export async function sharedClaimForRun(run:RunRecord,config:FactoryConfig,gh:Ti
   // Re-resolve the target for every operation. Its callbacks capture machine
   // enrollment, repository scope, installation, login and host authorization;
   // retaining an older target would retain older authority too.
-  const target=await verifiedSharedTarget(run.repo,config,run.runId,gh),owner=await import('./shared-claims.ts'),snapshot=await owner.readCoordination(target),task=snapshot.tasks[run.sharedClaim.taskKey]
+  const target=await verifiedSharedTarget(run.repo,config,run.runId,gh),resolved=sharedMachineContexts.get(target),owner=await import('./shared-claims.ts'),snapshot=await owner.readCoordination(target),task=snapshot.tasks[run.sharedClaim.taskKey]
+  if(!resolved||resolved.id!==run.machine.id||resolved.installationId!==run.machine.installationId||resolved.hostBindingDigest!==run.machine.hostBindingDigest||!resolved.allowedRepositories.includes(run.repo))throw Error('current shared run machine authorization differs')
   if(!task||task.runId!==run.runId||task.ownerToken!==run.sharedClaim.ownerToken||task.generation!==run.sharedClaim.generation||task.machineId!==run.machine.id||task.installationId!==run.machine.installationId||task.sessionId!==run.machine.sessionId)throw Error('current shared run owner differs')
   sharedTaskContexts.set(target,task)
   return{taskKey:task.taskKey,generation:task.generation,ownerToken:task.ownerToken,machineId:task.machineId,installationId:task.installationId,sessionId:task.sessionId,runId:task.runId,stateCommit:snapshot.head,target}
