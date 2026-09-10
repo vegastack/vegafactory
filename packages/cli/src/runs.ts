@@ -7,7 +7,7 @@ import { lstat, mkdir, open, readFile, readdir, rename, rm, realpath } from 'nod
 import { join, dirname, isAbsolute, resolve } from 'node:path'
 import { homedir } from 'node:os'
 import { acquireClaim, releaseClaim, processIdentity, type ProcessIdentity } from './claims.ts'
-import { parseEvidenceRef, parseCheckpointRef, parseStopProof, parseRecoveryPayload, parseRecoveryEnvelope, type ApprovalAuthorityRef, type ArtifactRef, type ExecutionIdentity, type CheckpointRef, type RecoveryEnvelope, type EvidenceRef, type TaskRecord, type OperationReceipt } from './shared-claims.ts'
+import { parseEvidenceRef, parseCheckpointRef, parseStopProof, parseRecoveryPayload, parseRecoveryEnvelope, type ApprovalAuthorityRef, type ArtifactRef, type ExecutionIdentity, type CheckpointRef, type RecoveryEnvelope, type EvidenceRef, type TaskRecord, type TaskRecordV2, type OperationReceipt, type ParentClaimBinding, type GroupSuccessionReceipt } from './shared-claims.ts'
 export type TerminalCause = 'succeeded' | 'failed' | 'spawn-failed' | 'timed-out' | 'cancelled' | 'interrupted' | 'termination-unconfirmed'
 export interface PendingDelivery {
   payload?:string
@@ -27,6 +27,16 @@ export interface RunAttempt {
   terminationCause:TerminalCause; exitCode:number|null; activeElapsedMs:number|null
   vendorSessionId?:string|null; terminalSequence?:string; snapshotDigest?:string
 }
+export type GroupReceivingProvenance = {
+  kind:'receiving-group';requestId:string;requestDigest:string
+  succession:Extract<EvidenceRef,{kind:'state-receipt'}>;role:'parent'|'child';parentTaskKey:string
+  originalStateCommit:string;stopProof:NonNullable<TaskRecord['stopProof']>
+  // The predecessor is evidence. Missing private timing/reporting state stays unknown.
+  originalTask:{bytes:string;sha256:string};priorHistory:'unavailable';reportingContext:'unavailable'
+}
+// The existing standalone consumer reads `.handoff` before #144 adds its kind
+// branch. `never` is type-only compatibility; the closed group JSON has no key.
+type StoredGroupReceivingProvenance = GroupReceivingProvenance & {readonly handoff:never}
 export interface RunRecord {
   remoteRecovery?:{
     kind:'receiving-home';requestId:string;requestDigest:string
@@ -35,7 +45,7 @@ export interface RunRecord {
     // Historical bytes are retained, not decoded into ownership or send authority.
     originalTask:{bytes:string;sha256:string}
     priorHistory:'unavailable';reportingContext:'unavailable'
-  }
+  }|StoredGroupReceivingProvenance
   terminalSegment?:{sequence:string;firstAttemptId:string}
   continuations?:Array<{requestId:string;requestDigest:string;previousAttemptId:string;attemptId:string}>
   acceptedScopeRef?:Extract<import('./shared-claims.ts').EvidenceRef,{kind:'state-receipt'}>|null
@@ -234,7 +244,17 @@ export function parseRun(value:unknown):RunRecord {
   }
   if(r.remoteRecovery!==undefined){
     const p=r.remoteRecovery
-    if(!closed(p,['kind','requestId','requestDigest','handoff','originalStateCommit','stopProof','originalTask','priorHistory','reportingContext'])||p.kind!=='receiving-home'||!uuid.test(p.requestId)||!digest(p.requestDigest)||!sha(p.originalStateCommit)||!closed(p.originalTask,['bytes','sha256'])||typeof p.originalTask.bytes!=='string'||!p.originalTask.bytes.length||Buffer.byteLength(p.originalTask.bytes)>256*1024||!digest(p.originalTask.sha256)||hashBytes(p.originalTask.bytes)!==p.originalTask.sha256||p.priorHistory!=='unavailable'||p.reportingContext!=='unavailable'||parseEvidenceRef(p.handoff).kind!=='state-receipt')throw Error('invalid receiving run provenance')
+    const common=!uuid.test(p.requestId)||!digest(p.requestDigest)||!sha(p.originalStateCommit)||!closed(p.originalTask,['bytes','sha256'])||typeof p.originalTask.bytes!=='string'||!p.originalTask.bytes.length||Buffer.byteLength(p.originalTask.bytes)>256*1024||!digest(p.originalTask.sha256)||hashBytes(p.originalTask.bytes)!==p.originalTask.sha256||p.priorHistory!=='unavailable'||p.reportingContext!=='unavailable'
+    if(common)throw Error('invalid receiving run provenance')
+    if(p.kind==='receiving-home'){
+      if(!closed(p,['kind','requestId','requestDigest','handoff','originalStateCommit','stopProof','originalTask','priorHistory','reportingContext'])||parseEvidenceRef(p.handoff).kind!=='state-receipt')throw Error('invalid receiving run provenance')
+    }else if(p.kind==='receiving-group'){
+      if(!closed(p,['kind','requestId','requestDigest','succession','role','parentTaskKey','originalStateCommit','stopProof','originalTask','priorHistory','reportingContext'])||!['parent','child'].includes(p.role)||!digest(p.parentTaskKey)||parseEvidenceRef(p.succession).kind!=='state-receipt')throw Error('invalid group receiving provenance')
+      let original:TaskRecord
+      try{original=parseStrictJson(p.originalTask.bytes) as TaskRecord}catch{throw Error('invalid group receiving provenance')}
+      validateGroupTask(original)
+      if(!r.sharedClaim||original.runId!==r.runId||original.taskKey!==r.sharedClaim.taskKey||original.scopeDigest!==r.taskKey.scopeDigest||original.repo!==r.repo||original.issue!==r.issue||!sameJson(original.stopProof,p.stopProof)||(p.role==='parent'?(original.taskKey!==p.parentTaskKey||original.parentTaskKey!==null):(original.taskKey===p.parentTaskKey||original.parentTaskKey!==p.parentTaskKey)))throw Error('group receiving provenance identity differs')
+    }else throw Error('invalid receiving run provenance')
     parseStopProof(p.stopProof)
     if(r.activeElapsedMs!==null||!r.execution||!r.machine||!r.sharedClaim||!r.approvedTaskIds?.length||!r.terminalSegment)throw Error('receiving run history must remain unknown')
   }
@@ -510,6 +530,165 @@ export async function createVerifiedReceivingRun(request:ReceivingRunRequest,con
       // directory atomically: a crash never exposes an empty receiving run.
       await rename(staging,join(request.root,run.runId))
       for(const directory of [join(request.root,run.runId),request.root]){const handle=await open(directory,constants.O_RDONLY|constants.O_NOFOLLOW);try{await handle.sync()}finally{await handle.close()}}
+    }finally{await rm(staging,{recursive:true,force:true})}
+    roots.set(run.runId,request.root)
+    return run
+  }finally{await releaseClaim(lock.claim)}
+}
+
+export interface GroupReceivingRunRequest {
+  root:string;requestId:string;runId:string;taskKey:string;expectedSharedGeneration:number;checkout:string
+  parentTaskKey:string;role:'parent'|'child';currentMember:ParentClaimBinding
+  succession:Extract<EvidenceRef,{kind:'state-receipt'}>
+}
+export interface VerifiedGroupReceivingRunDecision {
+  action:'resume-group-member';reason:string
+  succession:{ref:Extract<EvidenceRef,{kind:'state-receipt'}>;receipt:GroupSuccessionReceipt}
+  members:Array<{
+    original:{stateCommit:string;task:TaskRecord};current:{stateCommit:string;task:TaskRecordV2}
+    artifacts:ArtifactRef[];authorityRequest:RunAuthorityRequest;checkpointIntent:import('./checkpoints.ts').CheckpointIntent|null
+    taskIds:string[];sourceRefs:Array<{id:string;updatedAt:string;bodySha256:string}>
+  }>
+  receiver:{machine:NonNullable<RunRecord['machine']>;claimToken:string;policyDigest:string;runtimeBinding:InstalledRuntimeBinding;configurationDigest:string;worktreeDigest:string}
+}
+export interface GroupReceivingRunController {
+  // #144 owns all fresh provider/authority reads. A decision is accepted only
+  // when two complete calls and two real checkout inspections agree.
+  verifyRecovery:(request:GroupReceivingRunRequest)=>Promise<VerifiedGroupReceivingRunDecision>
+}
+
+const taskBinding=(task:TaskRecord):ParentClaimBinding=>({taskKey:task.taskKey,runId:task.runId,generation:task.generation,ownerToken:task.ownerToken,machineId:task.machineId,installationId:task.installationId,sessionId:task.sessionId})
+function validTaskBinding(value:unknown):value is ParentClaimBinding{
+  if(!closed(value,['taskKey','runId','generation','ownerToken','machineId','installationId','sessionId']))return false
+  const binding=value as ParentClaimBinding
+  return digest(binding.taskKey)&&uuid.test(binding.runId)&&number(binding.generation)&&binding.generation>0&&uuid.test(binding.ownerToken)&&text(binding.machineId)&&uuid.test(binding.installationId)&&uuid.test(binding.sessionId)
+}
+function validateGroupTask(task:TaskRecord):void{
+  const required=['schemaVersion','taskKey','host','repo','issue','repositoryNodeId','issueNodeId','scopeDigest','approvalDigest','approvalBindings','generation','machineId','installationId','sessionId','ownerToken','runId','stage','state','paths','resources','independent','parentTaskKey','approvedTaskIds','checkpoint','stopProof','unresolvedEffects','recovery','acceptedScopes']
+  const allowed=[...required,'parentBinding',...(task.schemaVersion===2?['successionOperationId']:[])]
+  if(!plain(task)||![1,2].includes(task.schemaVersion)||required.some(key=>!Object.hasOwn(task,key))||Object.keys(task).some(key=>!allowed.includes(key))||task.schemaVersion===2&&(!Object.hasOwn(task,'parentBinding')||!Object.hasOwn(task,'successionOperationId')))throw Error('group receiving task schema differs')
+  const id=(value:unknown)=>typeof value==='string'&&/^[A-Za-z0-9_-]{1,128}$/.test(value),nodeId=(value:unknown)=>typeof value==='string'&&/^[A-Za-z0-9_=-]{3,200}$/.test(value)
+  if(!digest(task.taskKey)||typeof task.host!=='string'||!/^[a-z0-9.-]+$/.test(task.host)||!validRepo(task.repo)||!number(task.issue)||task.issue<1||!nodeId(task.repositoryNodeId)||!nodeId(task.issueNodeId)||!digest(task.scopeDigest)||!digest(task.approvalDigest)||!number(task.generation)||task.generation<1||!id(task.machineId)||!uuid.test(task.installationId)||!uuid.test(task.sessionId)||!uuid.test(task.ownerToken)||!uuid.test(task.runId)||!id(task.stage)||!['claimed','running','stopped','blocked','completed','recovery-queued'].includes(task.state))throw Error('group receiving task identity differs')
+  if(!Array.isArray(task.approvalBindings)||!task.approvalBindings.length||new Set(task.approvalBindings.map(canonicalWire)).size!==task.approvalBindings.length)throw Error('group receiving task authority differs')
+  task.approvalBindings.forEach(validateAuthority)
+  if(!Array.isArray(task.paths)||new Set(task.paths).size!==task.paths.length||task.paths.some(path=>!text(path,8192)||path.startsWith('/')||path.includes('\\')||path.split('/').some(part=>!part||part==='.'||part==='..'))||!Array.isArray(task.resources)||new Set(task.resources).size!==task.resources.length||task.resources.some(resource=>typeof resource!=='string'||!/^[a-z0-9][a-z0-9._:/-]{0,127}$/.test(resource))||typeof task.independent!=='boolean'||!nullable(task.parentTaskKey,digest)||task.parentBinding!==undefined&&!nullable(task.parentBinding,validTaskBinding))throw Error('group receiving task scope differs')
+  if(!Array.isArray(task.approvedTaskIds)||!task.approvedTaskIds.length||new Set(task.approvedTaskIds).size!==task.approvedTaskIds.length||task.approvedTaskIds.some(value=>!id(value)))throw Error('group receiving task selection differs')
+  if(task.checkpoint!==null)parseCheckpointRef(task.checkpoint)
+  if(task.stopProof!==null)parseStopProof(task.stopProof)
+  if(!Array.isArray(task.unresolvedEffects)||new Set(task.unresolvedEffects.map(canonicalWire)).size!==task.unresolvedEffects.length)throw Error('group receiving task effect evidence differs')
+  task.unresolvedEffects.forEach(parseEvidenceRef)
+  if(task.recovery!==null)parseRecoveryEnvelope(task.recovery)
+  if(!Array.isArray(task.acceptedScopes))throw Error('group receiving accepted scope differs')
+  if(new Set(task.acceptedScopes.map(canonicalWire)).size!==task.acceptedScopes.length)throw Error('group receiving accepted scope differs')
+  for(const scope of task.acceptedScopes)if(!closed(scope,['scopeDigest','receipt'])||!digest(scope.scopeDigest)||parseEvidenceRef(scope.receipt).kind!=='state-receipt')throw Error('group receiving accepted scope differs')
+  if(task.schemaVersion===2&&(!uuid.test(task.successionOperationId)||!['claimed','running','stopped','blocked','completed','recovery-queued'].includes(task.state)))throw Error('group receiving succession task differs')
+}
+function validateGroupArtifact(artifact:ArtifactRef):void{
+  if(!closed(artifact,['repo','issue','kind','artifactId','rev','digest'])||!validRepo(artifact.repo)||!number(artifact.issue)||artifact.issue<1||!['brief','plan'].includes(artifact.kind)||!text(artifact.artifactId)||!number(artifact.rev)||artifact.rev<1||!digest(artifact.digest))throw Error('group receiving artifact differs')
+}
+function groupReceivingFacts(request:GroupReceivingRunRequest,decision:VerifiedGroupReceivingRunDecision){
+  if(!closed(decision,['action','reason','succession','members','receiver'])||decision.action!=='resume-group-member'||!text(decision.reason)||!closed(decision.succession,['ref','receipt'])||!Array.isArray(decision.members)||decision.members.length<2||decision.members.length>17||!decision.receiver)throw Error('verified group receiving recovery unavailable')
+  const receipt=decision.succession.receipt,reference=decision.succession.ref,receiver=decision.receiver
+  if(parseEvidenceRef(reference).kind!=='state-receipt'||!sameJson(reference,request.succession)||!closed(receipt,['schemaVersion','type','operationId','parentTaskKey','previousHead','requestDigest','groupPlan','groupsDigest','transferredAt','receiver','members'])||receipt.schemaVersion!==2||receipt.type!=='group-succession'||receipt.operationId!==reference.operationId||receipt.parentTaskKey!==request.parentTaskKey||!sha(receipt.previousHead)||!digest(receipt.requestDigest)||!digest(receipt.groupsDigest)||!date(receipt.transferredAt)||hashBytes(canonicalWire(receipt))!==reference.blobSha256)throw Error('group receiving succession receipt differs')
+  validateGroupArtifact(receipt.groupPlan)
+  if(!closed(receipt.receiver,['machineId','installationId','sessionId','hostBindingDigest','bootIdDigest'])||receipt.receiver.machineId!==receiver.machine.id||receipt.receiver.installationId!==receiver.machine.installationId||receipt.receiver.sessionId!==receiver.machine.sessionId||receipt.receiver.hostBindingDigest!==receiver.machine.hostBindingDigest||!digest(receipt.receiver.bootIdDigest))throw Error('group receiving receiver differs')
+  if(!closed(receiver,['machine','claimToken','policyDigest','runtimeBinding','configurationDigest','worktreeDigest'])||!uuid.test(receiver.claimToken)||!digest(receiver.policyDigest)||!digest(receiver.configurationDigest)||!digest(receiver.worktreeDigest))throw Error('group receiving receiver setup differs')
+  parseInstalledRuntimeBinding(receiver.runtimeBinding)
+  if(!closed(receiver.machine,['id','installationId','sessionId','hostBindingDigest'])||!text(receiver.machine.id)||!uuid.test(receiver.machine.installationId)||!uuid.test(receiver.machine.sessionId)||!digest(receiver.machine.hostBindingDigest))throw Error('group receiving machine differs')
+  if(!Array.isArray(receipt.members)||receipt.members.length!==decision.members.length)throw Error('group receiving member set differs')
+  const keys=decision.members.map(member=>member.original?.task?.taskKey),receiptKeys=receipt.members.map(member=>member.before.taskKey)
+  if(keys.join('\n')!==[...keys].sort().join('\n')||receiptKeys.join('\n')!==[...receiptKeys].sort().join('\n')||new Set(keys).size!==keys.length||!sameJson(keys,receiptKeys))throw Error('group receiving member coverage differs')
+  const parent=decision.members.find(member=>member.original.task.taskKey===request.parentTaskKey)
+  if(!parent)throw Error('group receiving parent unavailable')
+  for(let index=0;index<decision.members.length;index++){
+    const member=decision.members[index]!,row=receipt.members[index]!,old=member.original.task,current=member.current.task
+    validateGroupTask(old);validateGroupTask(current)
+    if(!closed(member,['original','current','artifacts','authorityRequest','checkpointIntent','taskIds','sourceRefs'])||!closed(member.original,['stateCommit','task'])||!closed(member.current,['stateCommit','task'])||!closed(row,['before','after','beforeTaskSha256','afterTaskSha256','previousSuccession'])||member.original.stateCommit!==receipt.previousHead||member.current.stateCommit!==reference.commitSha||!validTaskBinding(row.before)||!validTaskBinding(row.after)||!digest(row.beforeTaskSha256)||!digest(row.afterTaskSha256)||row.previousSuccession!==null&&parseEvidenceRef(row.previousSuccession).kind!=='state-receipt'||old.schemaVersion===1&&row.previousSuccession!==null||old.schemaVersion===2&&row.previousSuccession?.operationId!==old.successionOperationId)throw Error('group receiving member receipt differs')
+    if(!sameJson(taskBinding(old),row.before)||!sameJson(taskBinding(current),row.after)||hashBytes(canonicalWire(old))!==row.beforeTaskSha256||hashBytes(canonicalWire(current))!==row.afterTaskSha256||current.schemaVersion!==2||current.successionOperationId!==receipt.operationId)throw Error('group receiving member hash/owner differs')
+    const expectedCurrent:TaskRecordV2={...structuredClone(old),schemaVersion:2,parentBinding:old.parentBinding??null,successionOperationId:receipt.operationId,machineId:receiver.machine.id,installationId:receiver.machine.installationId,sessionId:receiver.machine.sessionId,ownerToken:row.after.ownerToken,generation:old.generation+1,state:old.taskKey===request.parentTaskKey?'claimed':'recovery-queued',recovery:old.recovery?{...structuredClone(old.recovery),generation:old.generation+1}:null}
+    if(!sameJson(current,expectedCurrent)||old.state==='completed'||(old.taskKey===request.parentTaskKey?(old.parentTaskKey!==null||old.parentBinding!=null):(old.parentTaskKey!==request.parentTaskKey||!sameJson(old.parentBinding,taskBinding(parent.original.task)))))throw Error('group receiving member lineage differs')
+    const stop=parseStopProof(old.stopProof)
+    if(stop.machineId!==old.machineId||stop.installationId!==old.installationId||stop.sessionId!==old.sessionId||stop.generation!==old.generation||!stop.runIds.includes(old.runId)||old.unresolvedEffects.length)throw Error('group receiving predecessor stop/effects differ')
+    const envelope=parseRecoveryEnvelope(old.recovery),currentEnvelope=parseRecoveryEnvelope(current.recovery),checkpoint=parseCheckpointRef(old.checkpoint)
+    if(envelope.taskKey!==old.taskKey||envelope.runId!==old.runId||envelope.generation!==old.generation||envelope.scopeDigest!==old.scopeDigest||envelope.approvalDigest!==old.approvalDigest||!sameJson(envelope.approvalBindings,old.approvalBindings)||!sameJson(currentEnvelope,{...envelope,generation:current.generation})||!sameJson(checkpoint,envelope.checkpoint)||!sameJson(checkpoint,current.checkpoint)||checkpoint.runId!==old.runId||checkpoint.repo!==old.repo||checkpoint.repositoryId!==old.repositoryNodeId||checkpoint.scopeDigest!==old.scopeDigest)throw Error('group receiving checkpoint/effects differ')
+    if(envelope.remoteEffectCoverage.kind==='unmanaged-possible'||envelope.effects.some(effect=>(effect.kind!=='telemetry-push'||effect.target.kind!=='telemetry')&&['prepared','ambiguous'].includes(effect.state)))throw Error('group receiving unresolved code/control effects')
+    if(!Array.isArray(member.artifacts)||!member.artifacts.length||member.artifacts.some(artifact=>{validateGroupArtifact(artifact);return artifact.repo!==old.repo||artifact.issue!==old.issue})||hashBytes(canonicalWire({artifacts:member.artifacts,taskIds:old.approvedTaskIds}))!==old.scopeDigest)throw Error('group receiving approved artifact scope differs')
+    if(!Array.isArray(member.taskIds)||!member.taskIds.length||new Set(member.taskIds).size!==member.taskIds.length||member.taskIds.some(id=>!old.approvedTaskIds.includes(id)||envelope.completed.some(done=>done.taskId===id)))throw Error('group receiving outstanding task selection differs')
+    if(!Array.isArray(member.sourceRefs)||!member.sourceRefs.length||member.sourceRefs.some(ref=>!closed(ref,['id','updatedAt','bodySha256'])||!text(ref.id)||!date(ref.updatedAt)||!digest(ref.bodySha256)))throw Error('group receiving fresh source evidence unavailable')
+    if(!member.authorityRequest||!['native','consolidated'].includes(member.authorityRequest.kind))throw Error('group receiving launch authority unavailable')
+    if(member.authorityRequest.kind==='native'){if(!closed(member.authorityRequest,['kind']))throw Error('group receiving native authority differs')}
+    else{const {kind:_,...authority}=member.authorityRequest;validateApprovalRequest(authority,'execution');const q=authority.requested;if(q.repo!==old.repo||q.issue!==old.issue||!sameJson(q.taskIds,old.approvedTaskIds)||!sameJson(q.paths,old.paths)||!old.approvalBindings.some(binding=>Number(binding.source.commentId)===authority.approvalBinding.commentId&&binding.source.bodySha256===authority.approvalBinding.bodySha256))throw Error('group receiving execution authority differs')}
+    if(member.checkpointIntent!==null){validateCheckpointIntentShape(member.checkpointIntent);const approval=member.checkpointIntent.approvalRequest;if(!sameJson(member.checkpointIntent.approvalBindings,old.approvalBindings)||member.checkpointIntent.repo!==old.repo||member.checkpointIntent.repositoryId!==old.repositoryNodeId||member.checkpointIntent.branch!==checkpoint.branch||member.checkpointIntent.baseSha!==checkpoint.baseSha||member.checkpointIntent.scopeDigest!==old.scopeDigest||!sameJson(member.checkpointIntent.paths,old.paths)||approval&&(approval.requested.repo!==old.repo||approval.requested.issue!==old.issue||!sameJson(approval.requested.taskIds,old.approvedTaskIds)||!sameJson(approval.requested.paths,old.paths)))throw Error('group receiving checkpoint intent differs')}
+    if(old.taskKey!==request.parentTaskKey&&(!member.checkpointIntent?.approvalRequest||member.checkpointIntent.approvalRequest.requested.ref!==`refs/heads/${checkpoint.branch}`))throw Error('group receiving child checkpoint authority unavailable')
+    if(!validExecution(envelope.execution))throw Error('group receiving original execution unavailable')
+    const bytes=canonicalWire(old);if(Buffer.byteLength(bytes)>256*1024)throw Error('group receiving original provenance exceeds bound')
+  }
+  const selected=decision.members.find(member=>member.original.task.taskKey===request.taskKey)
+  if(!selected||selected.original.task.runId!==request.runId||selected.current.task.runId!==request.runId||selected.current.task.generation!==request.expectedSharedGeneration||!sameJson(taskBinding(selected.current.task),request.currentMember))throw Error('group receiving selected member differs')
+  const selectedRole=selected.original.task.taskKey===request.parentTaskKey?'parent':'child'
+  if(selectedRole!==request.role||request.role==='parent'&&selected.current.task.state!=='claimed'||request.role==='child'&&(selected.current.task.state!=='recovery-queued'||selected.current.task.parentTaskKey!==request.parentTaskKey))throw Error('group receiving selected role differs')
+  const requestDigest=hashBytes(canonicalWire({request,decision}))
+  return{selected,parent,receipt,reference,receiver,requestDigest,bytes:canonicalWire(selected.original.task),envelope:parseRecoveryEnvelope(selected.original.task.recovery),checkpoint:parseCheckpointRef(selected.original.task.checkpoint)}
+}
+async function verifyGroupReceivingCheckout(request:GroupReceivingRunRequest,facts:ReturnType<typeof groupReceivingFacts>):Promise<void>{
+  const {readHostBinding}=await import('./machine-identity.ts')
+  if(facts.receiver.machine.hostBindingDigest!==(await readHostBinding()).digest)throw Error('group receiving target host differs')
+  const {execFile}=await import('node:child_process'),{promisify}=await import('node:util'),execute=promisify(execFile)
+  const git=async(args:string[])=>(await execute('git',args,{cwd:request.checkout,encoding:'utf8',timeout:5000,env:{...process.env,GIT_NO_REPLACE_OBJECTS:'1',GIT_TERMINAL_PROMPT:'0'}})).stdout.trim()
+  const [head,tree,branch,fingerprint]=await Promise.all([git(['rev-parse','HEAD']),git(['rev-parse','HEAD^{tree}']),git(['symbolic-ref','--short','HEAD']),worktreeFingerprint(request.checkout)])
+  if(head!==facts.checkpoint.headSha||tree!==facts.checkpoint.treeSha||branch!==facts.checkpoint.branch||fingerprint!==facts.receiver.worktreeDigest)throw Error('group receiving checkout changed')
+}
+export async function createVerifiedGroupReceivingRun(request:GroupReceivingRunRequest,controller:GroupReceivingRunController):Promise<RunRecord>{
+  if(!closed(request,['root','requestId','runId','taskKey','expectedSharedGeneration','checkout','parentTaskKey','role','currentMember','succession'])||!isAbsolute(request.root)||!isAbsolute(request.checkout)||!uuid.test(request.requestId)||!uuid.test(request.runId)||!digest(request.taskKey)||!digest(request.parentTaskKey)||!number(request.expectedSharedGeneration)||request.expectedSharedGeneration<2||!['parent','child'].includes(request.role)||!validTaskBinding(request.currentMember)||request.currentMember.taskKey!==request.taskKey||request.currentMember.runId!==request.runId||request.currentMember.generation!==request.expectedSharedGeneration||parseEvidenceRef(request.succession).kind!=='state-receipt'||!controller||typeof controller.verifyRecovery!=='function')throw Error('group receiving request unavailable')
+  request=structuredClone(request)
+  await mkdir(request.root,{recursive:true,mode:0o700});await privatePath(request.root,true)
+  if((await lstat(dirname(request.root))).isSymbolicLink())throw Error('run root parent is a symlink')
+  const lock=await acquireClaim(join(request.root,request.runId+'.creation'),await processIdentity())
+  if(lock.kind!=='owned')throw Error('group receiving run creation unavailable')
+  try{
+    const first=groupReceivingFacts(request,structuredClone(await controller.verifyRecovery(structuredClone(request))))
+    await verifyGroupReceivingCheckout(request,first)
+    let existing=false
+    try{await lstat(join(request.root,request.runId));existing=true}catch(error){if((error as NodeJS.ErrnoException).code!=='ENOENT')throw error}
+    const freshDecision=structuredClone(await controller.verifyRecovery(structuredClone(request))),fresh=groupReceivingFacts(request,freshDecision)
+    if(fresh.requestDigest!==first.requestDigest)throw Error('group receiving authority/setup changed during verification')
+    await verifyGroupReceivingCheckout(request,fresh)
+    const {selected,receiver,requestDigest,bytes,envelope,checkpoint}=fresh,old=selected.original.task,current=selected.current.task
+    const checkpointIntent=selected.checkpointIntent??undefined,parentIssue=selected.authorityRequest.kind==='consolidated'?selected.authorityRequest.parentIssue:null
+    const identity={
+      runId:request.runId,repo:old.repo,issue:old.issue,parent:parentIssue,checkout:request.checkout,
+      branch:checkpointIntent?.branch??checkpoint.branch,baseSha:checkpointIntent?.baseSha??checkpoint.baseSha,headSha:checkpoint.headSha,stage:old.stage,
+      harness:envelope.execution.harness,model:envelope.execution.model,effort:envelope.execution.effort,execution:envelope.execution,
+      approvalBindings:old.approvalBindings,recordBinding:envelope.recordBinding,approvalRefs:selected.artifacts,authorityRequest:selected.authorityRequest,
+      policyDigest:receiver.policyDigest,claimToken:receiver.claimToken,taskKey:{repo:old.repo,issue:old.issue,taskId:old.approvedTaskIds.length===1?old.approvedTaskIds[0]:'whole-issue',scopeDigest:old.scopeDigest},
+      approvedTaskIds:old.approvedTaskIds,accountRef:envelope.execution.accountRef,machine:receiver.machine,hostBindingDigest:receiver.machine.hostBindingDigest,
+      checkpoint,runtimeBinding:receiver.runtimeBinding,configurationDigest:receiver.configurationDigest,worktreeDigest:receiver.worktreeDigest,
+      ...(checkpointIntent?{checkpointIntent}:{}),
+    }
+    const provenance:GroupReceivingProvenance={kind:'receiving-group',requestId:request.requestId,requestDigest,succession:request.succession,role:request.role,parentTaskKey:request.parentTaskKey,originalStateCommit:selected.original.stateCommit,stopProof:current.stopProof!,originalTask:{bytes,sha256:hashBytes(bytes)},priorHistory:'unavailable',reportingContext:'unavailable'}
+    const saved=existing?await readRun(request.root,request.runId):null
+    if(saved){
+      if(saved.remoteRecovery?.kind!=='receiving-group'||saved.remoteRecovery.requestId!==request.requestId||saved.remoteRecovery.requestDigest!==requestDigest)throw Error('group receiving request identity rebound')
+      if(Object.entries(identity).some(([key,value])=>!sameJson(saved[key as keyof RunRecord],value))||!sameJson(saved.remoteRecovery,provenance))throw Error('group receiving saved identity differs')
+      if(saved.generation!==1||saved.state!=='prepared'||saved.pid!==null||saved.processIdentity!==null||saved.finishedAt!==null||saved.terminationCause!==null||saved.pendingDelivery.length||saved.stopProof!==null||saved.vendorSessionId!==null||saved.attemptElapsedMs!==0||saved.terminationRequest!=null||saved.cancelRequestedAt!=null||saved.quotaWait!=null||saved.waitReason!==null||saved.acceptedScopeRef!=null||saved.stopReceiptIds!==undefined||saved.stopReceiptPayload!==undefined||!saved.attemptOperationIds||saved.continuations?.length||saved.attemptId!==saved.terminalSegment?.firstAttemptId||saved.attempts?.length||saved.sharedClaim?.generation!==current.generation||saved.sharedClaim.ownerToken!==current.ownerToken||saved.sharedClaim.stateCommit!==selected.current.stateCommit)throw Error('group receiving allocation already advanced')
+      try{await lstat(runAttemptDirectory(request.root,saved));throw Error('group receiving wrapper already prepared')}catch(error){if((error as NodeJS.ErrnoException).code!=='ENOENT')throw error}
+      return saved
+    }
+    const attemptId=randomUUID(),run=parseRun({
+      ...identity,schemaVersion:2,generation:1,state:'prepared',terminationCause:null,exitCode:null,pid:null,processStartId:null,processGroupId:null,processIdentity:null,
+      startedAt:new Date().toISOString(),finishedAt:null,pendingDelivery:[],activeElapsedMs:null,taskOwner:null,agentAccountOwner:null,waitReason:null,
+      sharedClaim:{taskKey:current.taskKey,generation:current.generation,ownerToken:current.ownerToken,stateCommit:selected.current.stateCommit},remoteEffectCoverage:envelope.remoteEffectCoverage,
+      attemptId,attempts:[],attemptElapsedMs:0,attemptOperationIds:{recovery:randomUUID(),start:randomUUID(),coverage:randomUUID()},terminalSegment:{sequence:attemptId,firstAttemptId:attemptId},
+      vendorSessionId:null,stopProof:null,acceptedScopeRef:null,remoteRecovery:provenance,
+    })
+    const staging=join(request.root,'.receiving-group-'+randomUUID())
+    await mkdir(staging,{mode:0o700})
+    try{
+      await atomicRunFile(join(staging,'run.json'),run)
+      await rename(staging,join(request.root,run.runId))
+      for(const directory of [join(request.root,run.runId),request.root]){const handle=await open(directory,constants.O_RDONLY|constants.O_NOFOLLOW);try{await handle.sync()}finally{await handle.close()}}
+      const published=await readRun(request.root,run.runId)
+      if(!sameJson(published,run))throw Error('group receiving publication readback differs')
     }finally{await rm(staging,{recursive:true,force:true})}
     roots.set(run.runId,request.root)
     return run

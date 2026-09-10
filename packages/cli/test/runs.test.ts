@@ -298,3 +298,133 @@ test('receiving startup reconciliation keeps historical usage unknown after rece
     await rm(f.directory,{recursive:true,force:true})
   }
 })
+
+// A real two-checkout group fixture. The controller is still a controlled
+// authority boundary; #144 owns the live conditional-provider orchestration.
+async function groupReceivingFixture(){
+  const runtime=await import('../src/runs.ts'),wire=await import('../src/shared-claims.ts')
+  const {execFileSync}=await import('node:child_process'),{mkdir}=await import('node:fs/promises'),{readHostBinding}=await import('../src/machine-identity.ts')
+  const directory=await mkdtemp(join(tmpdir(),'group-receiving-')),root=join(directory,'runs'),source=join(directory,'source'),remote=join(directory,'remote.git')
+  await mkdir(source);const git=(cwd:string,args:string[])=>execFileSync('git',args,{cwd,encoding:'utf8',stdio:['ignore','pipe','pipe']}).trim()
+  git(source,['init','-q','-b','feat/parent']);await writeFile(join(source,'parent.txt'),'parent\n');git(source,['add','.']);git(source,['-c','user.name=Fixture','-c','user.email=fixture@example.test','commit','-qm','parent'])
+  git(source,['checkout','-qb','feat/child']);await writeFile(join(source,'child.txt'),'child\n');git(source,['add','.']);git(source,['-c','user.name=Fixture','-c','user.email=fixture@example.test','commit','-qm','child'])
+  git(directory,['clone','-q','--bare',source,remote])
+  const parentCheckout=join(directory,'parent-checkout'),childCheckout=join(directory,'child-checkout')
+  git(directory,['clone','-q','-b','feat/parent',remote,parentCheckout]);git(directory,['clone','-q','-b','feat/child',remote,childCheckout])
+  const host=(await readHostBinding()).digest,authority={approvalId:'fixture',source:{kind:'github-comment' as const,repositoryId:'R_repo',issueNodeId:'I_parent',commentId:'12',bodySha256:'a'.repeat(64)}}
+  const evidence=()=>({kind:'state-receipt' as const,operationId:crypto.randomUUID(),commitSha:'e'.repeat(40),blobSha256:'f'.repeat(64)})
+  const receiver={machine:{id:'receiver',installationId:crypto.randomUUID(),sessionId:crypto.randomUUID(),hostBindingDigest:host},claimToken:crypto.randomUUID(),policyDigest:'b'.repeat(64),runtimeBinding:{schemaVersion:1 as const,sourceSha:'5'.repeat(40),treeSha:'6'.repeat(40),packageName:'@vegastack/vegafactory' as const,version:'0.1.0',tarballSha256:'7'.repeat(64),inventoryDigest:'8'.repeat(64)},configurationDigest:'9'.repeat(64),worktreeDigest:''}
+  const operationId=crypto.randomUUID(),previousHead='3'.repeat(40),currentHead='4'.repeat(40),parentTaskKey='1'.repeat(64)
+  const makeOriginal=(input:{issue:number;taskKey:string;branch:string;checkout:string;parentBinding:import('../src/shared-claims.ts').ParentClaimBinding|null})=>{
+    const runId=crypto.randomUUID(),taskIds=[`${input.issue}-T1`],artifacts:import('../src/shared-claims.ts').ArtifactRef[]=[{repo:'o/r',issue:input.issue,kind:'plan',artifactId:`PLAN_${input.issue}`,rev:1,digest:'a'.repeat(64)}]
+    const scopeDigest=wire.sha256(wire.canonical({artifacts,taskIds})),headSha=git(input.checkout,['rev-parse','HEAD'])
+    const checkpoint:import('../src/shared-claims.ts').CheckpointRef={schemaVersion:1,id:crypto.randomUUID(),repo:'o/r',repositoryId:'R_repo',branch:input.branch,baseSha:headSha,headSha,treeSha:git(input.checkout,['rev-parse','HEAD^{tree}']),scopeDigest,runId,publishedAt:'2026-09-09T00:00:00.000Z'}
+    const execution:import('../src/shared-claims.ts').ExecutionIdentity={providerMode:'subscription',harness:'codex',harnessVersion:'fixture',model:'fixture',effort:'high',accountRef:'original-account',qualification:evidence()}
+    const stopProof:import('../src/shared-claims.ts').StopProof={kind:'verified-reboot',machineId:'old-machine',installationId:'11111111-1111-4111-8111-111111111111',sessionId:'22222222-2222-4222-8222-222222222222',hostBindingDigest:'1'.repeat(64),bootIdDigest:'2'.repeat(64),runIds:[runId],generation:3,observedAt:'2026-09-09T01:00:00.000Z',evidenceRef:evidence()}
+    const recovery:import('../src/shared-claims.ts').RecoveryEnvelope={schemaVersion:2,taskKey:input.taskKey,runId,generation:3,approvalBindings:[authority],recordBinding:authority,scopeDigest,approvalDigest:'c'.repeat(64),execution,checkpoint,completed:[],children:[],joins:[],effects:[],remoteEffectCoverage:{kind:'reconciled',evidence:evidence()}}
+    const task:import('../src/shared-claims.ts').TaskRecord={schemaVersion:1,taskKey:input.taskKey,host:'github.com',repo:'o/r',issue:input.issue,repositoryNodeId:'R_repo',issueNodeId:`I_${input.issue}`,scopeDigest,approvalDigest:'c'.repeat(64),approvalBindings:[authority],generation:3,machineId:stopProof.machineId,installationId:stopProof.installationId,sessionId:stopProof.sessionId,ownerToken:crypto.randomUUID(),runId,stage:'implement',state:'stopped',paths:[input.issue===1?'parent.txt':'child.txt'],resources:[],independent:true,parentTaskKey:input.parentBinding?.taskKey??null,parentBinding:input.parentBinding,approvedTaskIds:taskIds,checkpoint,stopProof,unresolvedEffects:[],recovery,acceptedScopes:[]}
+    return{task,artifacts,taskIds,checkout:input.checkout}
+  }
+  const parent=makeOriginal({issue:1,taskKey:parentTaskKey,branch:'feat/parent',checkout:parentCheckout,parentBinding:null})
+  const parentBinding:import('../src/shared-claims.ts').ParentClaimBinding={taskKey:parent.task.taskKey,runId:parent.task.runId,generation:parent.task.generation,ownerToken:parent.task.ownerToken,machineId:parent.task.machineId,installationId:parent.task.installationId,sessionId:parent.task.sessionId}
+  const child=makeOriginal({issue:2,taskKey:'2'.repeat(64),branch:'feat/child',checkout:childCheckout,parentBinding})
+  const originals=[parent,child]
+  const currents=originals.map((member,index)=>({...structuredClone(member.task),schemaVersion:2 as const,generation:4,machineId:receiver.machine.id,installationId:receiver.machine.installationId,sessionId:receiver.machine.sessionId,ownerToken:crypto.randomUUID(),state:index===0?'claimed' as const:'recovery-queued' as const,parentBinding:member.task.parentBinding??null,successionOperationId:operationId,recovery:{...structuredClone(member.task.recovery!),generation:4}}))
+  const binding=(task:import('../src/shared-claims.ts').TaskRecord):import('../src/shared-claims.ts').ParentClaimBinding=>({taskKey:task.taskKey,runId:task.runId,generation:task.generation,ownerToken:task.ownerToken,machineId:task.machineId,installationId:task.installationId,sessionId:task.sessionId})
+  const groupPlan:import('../src/shared-claims.ts').ArtifactRef={repo:'o/r',issue:144,kind:'plan',artifactId:'GROUP_PLAN',rev:14,digest:'d'.repeat(64)}
+  const receipt:import('../src/shared-claims.ts').GroupSuccessionReceipt={schemaVersion:2,type:'group-succession',operationId,parentTaskKey,previousHead,requestDigest:'5'.repeat(64),groupPlan,groupsDigest:'6'.repeat(64),transferredAt:'2026-09-09T02:00:00.000Z',receiver:{machineId:receiver.machine.id,installationId:receiver.machine.installationId,sessionId:receiver.machine.sessionId,hostBindingDigest:receiver.machine.hostBindingDigest,bootIdDigest:'7'.repeat(64)},members:originals.map((member,index)=>({before:binding(member.task),after:binding(currents[index]!),beforeTaskSha256:wire.sha256(wire.canonical(member.task)),afterTaskSha256:wire.sha256(wire.canonical(currents[index]!)),previousSuccession:null}))}
+  const succession={kind:'state-receipt' as const,operationId,commitSha:currentHead,blobSha256:wire.sha256(wire.canonical(receipt))}
+  const approvalBinding={commentId:12,bodySha256:'a'.repeat(64)}
+  const members:import('../src/runs.ts').VerifiedGroupReceivingRunDecision['members']=originals.map((member,index)=>{
+    const isChild=index===1,authorityRequest:import('../src/runs.ts').RunAuthorityRequest={kind:'consolidated',parentRepo:'o/r',parentIssue:133,approvalBinding,requested:{repo:'o/r',issue:member.task.issue,taskIds:member.task.approvedTaskIds,actionId:'local-code',branch:member.task.checkpoint!.branch,baseSha:member.task.checkpoint!.baseSha,paths:member.task.paths,operation:'edit'}}
+    const checkpointIntent:import('../src/checkpoints.ts').CheckpointIntent|null=isChild?{id:'child-checkpoint',repo:'o/r',repositoryId:'R_repo',remote:'origin',remoteUrl:remote,branch:member.task.checkpoint!.branch,baseRef:`refs/heads/${member.task.checkpoint!.branch}`,baseSha:member.task.checkpoint!.baseSha,scopeDigest:member.task.scopeDigest,paths:member.task.paths,approvalBindings:[authority],approvalRequest:{parentRepo:'o/r',parentIssue:133,approvalBinding,requested:{repo:'o/r',issue:member.task.issue,taskIds:member.task.approvedTaskIds,actionId:'child-checkpoint',branch:member.task.checkpoint!.branch,ref:`refs/heads/${member.task.checkpoint!.branch}`,baseSha:member.task.checkpoint!.baseSha,paths:member.task.paths,operation:'checkpoint'}}}:null
+    return{original:{stateCommit:previousHead,task:member.task},current:{stateCommit:currentHead,task:currents[index]!},artifacts:member.artifacts,authorityRequest,checkpointIntent,taskIds:member.task.approvedTaskIds,sourceRefs:[{id:`source-${member.task.issue}`,updatedAt:'2026-09-09T02:00:00.000Z',bodySha256:'a'.repeat(64)}]}
+  })
+  const decision:import('../src/runs.ts').VerifiedGroupReceivingRunDecision={action:'resume-group-member',reason:'verified complete stopped group',succession:{ref:succession,receipt},members,receiver:{...receiver,worktreeDigest:''}}
+  const request=(role:'parent'|'child'):import('../src/runs.ts').GroupReceivingRunRequest=>{const index=role==='parent'?0:1,member=members[index]!;return{root,requestId:crypto.randomUUID(),runId:member.original.task.runId,taskKey:member.original.task.taskKey,expectedSharedGeneration:member.current.task.generation,checkout:originals[index]!.checkout,parentTaskKey,role,currentMember:binding(member.current.task),succession}}
+  const controller={verifyRecovery:async(request:import('../src/runs.ts').GroupReceivingRunRequest)=>{const selected=members.find(m=>m.original.task.taskKey===request.taskKey)!;const checkout=selected.original.task.issue===1?parentCheckout:childCheckout;const copy=structuredClone(decision);copy.receiver.worktreeDigest=await runtime.worktreeFingerprint(checkout);return copy}}
+  return{runtime,wire,directory,root,parentCheckout,childCheckout,decision,members,request,controller,receipt,succession}
+}
+
+test('verified group receiving creates exact parent and child attempts without fabricated history',async()=>{
+  const f=await groupReceivingFixture()
+  try{
+    for(const role of ['parent','child'] as const){
+      const request=f.request(role);let checks=0
+      const run=await f.runtime.createVerifiedGroupReceivingRun(request,{verifyRecovery:async r=>{checks++;return f.controller.verifyRecovery(r)}})
+      const selected=f.members.find(m=>m.original.task.taskKey===request.taskKey)!
+      expect(checks).toBe(2);expect(run.runId).toBe(request.runId);expect(run.state).toBe('prepared');expect(run.attempts).toEqual([]);expect(run.activeElapsedMs).toBeNull()
+      expect(run.sharedClaim).toEqual({taskKey:request.taskKey,generation:request.expectedSharedGeneration,ownerToken:request.currentMember.ownerToken,stateCommit:f.succession.commitSha})
+      expect(run.remoteRecovery).toMatchObject({kind:'receiving-group',succession:f.succession,role,parentTaskKey:request.parentTaskKey,priorHistory:'unavailable',reportingContext:'unavailable'})
+      expect(run.remoteRecovery!.originalTask).toEqual({bytes:f.wire.canonical(selected.original.task),sha256:f.wire.sha256(f.wire.canonical(selected.original.task))})
+      expect(run.checkpointIntent??null).toEqual(selected.checkpointIntent);expect((await stat(join(f.root,run.runId,'run.json'))).mode&0o777).toBe(0o600)
+    }
+  }finally{await rm(f.directory,{recursive:true,force:true})}
+})
+
+test('verified group receiving rechecks replay and refuses rebound or advanced allocations',async()=>{
+  const f=await groupReceivingFixture()
+  try{
+    const request=f.request('child');let checks=0,controller={verifyRecovery:async(r:import('../src/runs.ts').GroupReceivingRunRequest)=>{checks++;return f.controller.verifyRecovery(r)}}
+    const run=await f.runtime.createVerifiedGroupReceivingRun(request,controller)
+    expect(await f.runtime.createVerifiedGroupReceivingRun(request,controller)).toEqual(run);expect(checks).toBe(4)
+    await expect(f.runtime.createVerifiedGroupReceivingRun({...request,requestId:crypto.randomUUID()},controller)).rejects.toThrow()
+    await expect(f.runtime.createVerifiedGroupReceivingRun({...request,role:'parent'},controller)).rejects.toThrow()
+    await expect(f.runtime.createVerifiedGroupReceivingRun({...request,currentMember:{...request.currentMember,ownerToken:crypto.randomUUID()}},controller)).rejects.toThrow()
+    await f.runtime.atomicRunFile(join(f.root,run.runId,'run.json'),parseRun({...run,attemptElapsedMs:1}))
+    await expect(f.runtime.createVerifiedGroupReceivingRun(request,controller)).rejects.toThrow('advanced')
+    await f.runtime.atomicRunFile(join(f.root,run.runId,'run.json'),run)
+    await f.runtime.prepareRunAttemptDirectory(f.root,run)
+    await expect(f.runtime.createVerifiedGroupReceivingRun(request,controller)).rejects.toThrow('wrapper')
+  }finally{await rm(f.directory,{recursive:true,force:true})}
+})
+
+test('verified group receiving refuses drift, incomplete publication and conflicting record kinds',async()=>{
+  const f=await groupReceivingFixture(),{mkdir}=await import('node:fs/promises')
+  try{
+    const request=f.request('parent');let pass=0
+    await expect(f.runtime.createVerifiedGroupReceivingRun(request,{verifyRecovery:async r=>{const d=await f.controller.verifyRecovery(r);if(++pass===2)d.members[0]!.sourceRefs[0]!.bodySha256='f'.repeat(64);return d}})).rejects.toThrow('changed during verification')
+    expect(await f.runtime.readRuns(f.root)).toEqual([])
+    const partial=join(f.root,request.runId);await mkdir(partial,{recursive:true,mode:0o700});await writeFile(join(partial,'run.json'),'partial',{mode:0o600})
+    await expect(f.runtime.createVerifiedGroupReceivingRun(request,f.controller)).rejects.toThrow();expect(await readFile(join(partial,'run.json'),'utf8')).toBe('partial')
+    await rm(partial,{recursive:true,force:true})
+    const ordinary=await createRun({...input(f.root),runId:request.runId})
+    await expect(f.runtime.createVerifiedGroupReceivingRun(request,f.controller)).rejects.toThrow();expect(await f.runtime.readRun(f.root,ordinary.runId)).toEqual(ordinary)
+  }finally{await rm(f.directory,{recursive:true,force:true})}
+})
+
+test('verified group receiving rejects receipt, member, authority, checkpoint and checkout drift',async()=>{
+  const f=await groupReceivingFixture()
+  try{
+    const request=f.request('child')
+    const cases:Array<(decision:import('../src/runs.ts').VerifiedGroupReceivingRunDecision)=>void>=[
+      decision=>{decision.succession.receipt.groupsDigest='f'.repeat(64)},
+      decision=>{decision.members.pop()},
+      decision=>{decision.members[1]!.current.task.ownerToken=crypto.randomUUID()},
+      decision=>{decision.members[1]!.current.task.state='claimed'},
+      decision=>{decision.members[1]!.original.task.stopProof!.generation++},
+      decision=>{const authority=decision.members[1]!.authorityRequest;if(authority.kind==='consolidated')authority.approvalBinding.bodySha256='f'.repeat(64)},
+      decision=>{decision.members[1]!.checkpointIntent!.approvalRequest!.requested.ref='refs/heads/feat/other'},
+      decision=>{decision.members[1]!.sourceRefs=[]},
+    ]
+    for(const change of cases){await expect(f.runtime.createVerifiedGroupReceivingRun(request,{verifyRecovery:async r=>{const decision=await f.controller.verifyRecovery(r);change(decision);return decision}})).rejects.toThrow();expect(await f.runtime.readRuns(f.root)).toEqual([])}
+    let reads=0
+    await expect(f.runtime.createVerifiedGroupReceivingRun(request,{verifyRecovery:async r=>{const decision=await f.controller.verifyRecovery(r);if(++reads===2)await writeFile(join(f.childCheckout,'unbacked.txt'),'preserve me');return decision}})).rejects.toThrow('checkout changed')
+    expect(await readFile(join(f.childCheckout,'unbacked.txt'),'utf8')).toBe('preserve me');expect(await f.runtime.readRuns(f.root)).toEqual([])
+  }finally{await rm(f.directory,{recursive:true,force:true})}
+})
+
+test('verified group receiving serializes duplicate creators and ignores unpublished staging evidence',async()=>{
+  const f=await groupReceivingFixture(),{mkdir}=await import('node:fs/promises')
+  try{
+    const request=f.request('parent'),staging=join(f.root,'.receiving-group-crashed-before-publication')
+    await mkdir(staging,{recursive:true,mode:0o700});await writeFile(join(staging,'run.json'),'partial',{mode:0o600})
+    const outcomes=await Promise.allSettled([f.runtime.createVerifiedGroupReceivingRun(request,f.controller),f.runtime.createVerifiedGroupReceivingRun(request,f.controller)])
+    expect(outcomes.filter(outcome=>outcome.status==='fulfilled')).toHaveLength(1);expect(await readFile(join(staging,'run.json'),'utf8')).toBe('partial')
+    const [saved]=await f.runtime.readRuns(f.root);expect(saved!.runId).toBe(request.runId);expect(saved!.attempts).toEqual([])
+    expect(await f.runtime.createVerifiedGroupReceivingRun(request,f.controller)).toEqual(saved!)
+    const changed=structuredClone(saved!),original=JSON.parse(changed.remoteRecovery!.originalTask.bytes);original.taskKey='f'.repeat(64)
+    changed.remoteRecovery!.originalTask={bytes:f.wire.canonical(original),sha256:f.wire.sha256(f.wire.canonical(original))}
+    expect(()=>parseRun(changed)).toThrow('identity')
+  }finally{await rm(f.directory,{recursive:true,force:true})}
+})
