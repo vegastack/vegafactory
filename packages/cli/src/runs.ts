@@ -215,7 +215,8 @@ export function parseRun(value:unknown):RunRecord {
     const checkpointRequest=r.checkpointIntent.approvalRequest
     if(checkpointRequest?.requested.ref!==undefined){
       const execution=r.authorityRequest
-      if(r.parent===null||execution?.kind!=='consolidated'||checkpointRequest.parentRepo!==execution.parentRepo||checkpointRequest.parentIssue!==execution.parentIssue||checkpointRequest.parentIssue!==r.parent||!sameJson(checkpointRequest.approvalBinding,execution.approvalBinding)||checkpointRequest.requested.repo!==r.repo||checkpointRequest.requested.issue!==r.issue||checkpointRequest.requested.branch!==r.branch||checkpointRequest.requested.ref!==r.checkpointIntent.baseRef||checkpointRequest.requested.baseSha!==r.checkpointIntent.baseSha||checkpointRequest.requested.actionId!==r.checkpointIntent.id||!sameJson(checkpointRequest.requested.taskIds,execution.requested.taskIds)||!sameJson(checkpointRequest.requested.taskIds,r.approvedTaskIds)||!sameJson(checkpointRequest.requested.paths,execution.requested.paths)||!sameJson(checkpointRequest.requested.paths,r.checkpointIntent.paths))throw Error('child checkpoint authority differs')
+      const groupChild=r.remoteRecovery?.kind==='receiving-group'&&r.remoteRecovery.role==='child'
+      if(r.parent===null||execution?.kind!=='consolidated'||checkpointRequest.parentRepo!==execution.parentRepo||checkpointRequest.parentIssue!==execution.parentIssue||!groupChild&&checkpointRequest.parentIssue!==r.parent||!sameJson(checkpointRequest.approvalBinding,execution.approvalBinding)||checkpointRequest.requested.repo!==r.repo||checkpointRequest.requested.issue!==r.issue||checkpointRequest.requested.branch!==r.branch||checkpointRequest.requested.ref!==r.checkpointIntent.baseRef||checkpointRequest.requested.baseSha!==r.checkpointIntent.baseSha||checkpointRequest.requested.actionId!==r.checkpointIntent.id||!sameJson(checkpointRequest.requested.taskIds,execution.requested.taskIds)||!sameJson(checkpointRequest.requested.taskIds,r.approvedTaskIds)||!sameJson(checkpointRequest.requested.paths,execution.requested.paths)||!sameJson(checkpointRequest.requested.paths,r.checkpointIntent.paths))throw Error('child checkpoint authority differs')
     }
     if(r.checkpoint&&(r.checkpoint.branch!==r.branch||r.checkpoint.baseSha!==r.checkpointIntent.baseSha||r.checkpoint.repositoryId!==r.checkpointIntent.repositoryId))throw Error('checkpoint intent/source identity differs')
   }
@@ -586,8 +587,10 @@ function validateGroupTask(task:TaskRecord):void{
 function validateGroupArtifact(artifact:ArtifactRef):void{
   if(!closed(artifact,['repo','issue','kind','artifactId','rev','digest'])||!validRepo(artifact.repo)||!number(artifact.issue)||artifact.issue<1||!['brief','plan'].includes(artifact.kind)||!text(artifact.artifactId)||!number(artifact.rev)||artifact.rev<1||!digest(artifact.digest))throw Error('group receiving artifact differs')
 }
+const groupReceivingLimits={artifactsPerMember:16,sourceRefsPerMember:64,decisionBytes:512*1024,claimWaitMs:5000}
 function groupReceivingFacts(request:GroupReceivingRunRequest,decision:VerifiedGroupReceivingRunDecision){
   if(!closed(decision,['action','reason','succession','members','receiver'])||decision.action!=='resume-group-member'||!text(decision.reason)||!closed(decision.succession,['ref','receipt'])||!Array.isArray(decision.members)||decision.members.length<2||decision.members.length>17||!decision.receiver)throw Error('verified group receiving recovery unavailable')
+  if(decision.members.some(member=>!Array.isArray(member?.artifacts)||member.artifacts.length<1||member.artifacts.length>groupReceivingLimits.artifactsPerMember||!Array.isArray(member.sourceRefs)||member.sourceRefs.length<1||member.sourceRefs.length>groupReceivingLimits.sourceRefsPerMember))throw Error('group receiving decision collection bounds exceeded')
   const receipt=decision.succession.receipt,reference=decision.succession.ref,receiver=decision.receiver
   if(parseEvidenceRef(reference).kind!=='state-receipt'||!sameJson(reference,request.succession)||!closed(receipt,['schemaVersion','type','operationId','parentTaskKey','previousHead','requestDigest','groupPlan','groupsDigest','transferredAt','receiver','members'])||receipt.schemaVersion!==2||receipt.type!=='group-succession'||receipt.operationId!==reference.operationId||receipt.parentTaskKey!==request.parentTaskKey||!sha(receipt.previousHead)||!digest(receipt.requestDigest)||!digest(receipt.groupsDigest)||!date(receipt.transferredAt)||hashBytes(canonicalWire(receipt))!==reference.blobSha256)throw Error('group receiving succession receipt differs')
   validateGroupArtifact(receipt.groupPlan)
@@ -598,6 +601,10 @@ function groupReceivingFacts(request:GroupReceivingRunRequest,decision:VerifiedG
   if(!Array.isArray(receipt.members)||receipt.members.length!==decision.members.length)throw Error('group receiving member set differs')
   const keys=decision.members.map(member=>member.original?.task?.taskKey),receiptKeys=receipt.members.map(member=>member.before.taskKey)
   if(keys.join('\n')!==[...keys].sort().join('\n')||receiptKeys.join('\n')!==[...receiptKeys].sort().join('\n')||new Set(keys).size!==keys.length||!sameJson(keys,receiptKeys))throw Error('group receiving member coverage differs')
+  const originals=decision.members.map(member=>member.original.task),currents=decision.members.map(member=>member.current.task)
+  const unique=(values:unknown[])=>new Set(values.map(value=>String(value))).size===values.length
+  for(const tasks of [originals,currents])if(!unique(tasks.map(task=>task.taskKey))||!unique(tasks.map(task=>task.runId))||!unique(tasks.map(task=>task.issue))||!unique(tasks.map(task=>task.issueNodeId))||tasks.some(task=>task.repo!==originals[0]!.repo||task.repositoryNodeId!==originals[0]!.repositoryNodeId))throw Error('group receiving member identity is not unique')
+  for(let index=0;index<originals.length;index++)for(const field of ['taskKey','runId','repo','issue','repositoryNodeId','issueNodeId'] as const)if(originals[index]![field]!==currents[index]![field])throw Error('group receiving before/after identity differs')
   const parent=decision.members.find(member=>member.original.task.taskKey===request.parentTaskKey)
   if(!parent)throw Error('group receiving parent unavailable')
   for(let index=0;index<decision.members.length;index++){
@@ -612,9 +619,10 @@ function groupReceivingFacts(request:GroupReceivingRunRequest,decision:VerifiedG
     const envelope=parseRecoveryEnvelope(old.recovery),currentEnvelope=parseRecoveryEnvelope(current.recovery),checkpoint=parseCheckpointRef(old.checkpoint)
     if(envelope.taskKey!==old.taskKey||envelope.runId!==old.runId||envelope.generation!==old.generation||envelope.scopeDigest!==old.scopeDigest||envelope.approvalDigest!==old.approvalDigest||!sameJson(envelope.approvalBindings,old.approvalBindings)||!sameJson(currentEnvelope,{...envelope,generation:current.generation})||!sameJson(checkpoint,envelope.checkpoint)||!sameJson(checkpoint,current.checkpoint)||checkpoint.runId!==old.runId||checkpoint.repo!==old.repo||checkpoint.repositoryId!==old.repositoryNodeId||checkpoint.scopeDigest!==old.scopeDigest)throw Error('group receiving checkpoint/effects differ')
     if(envelope.remoteEffectCoverage.kind==='unmanaged-possible'||envelope.effects.some(effect=>(effect.kind!=='telemetry-push'||effect.target.kind!=='telemetry')&&['prepared','ambiguous'].includes(effect.state)))throw Error('group receiving unresolved code/control effects')
-    if(!Array.isArray(member.artifacts)||!member.artifacts.length||member.artifacts.some(artifact=>{validateGroupArtifact(artifact);return artifact.repo!==old.repo||artifact.issue!==old.issue})||hashBytes(canonicalWire({artifacts:member.artifacts,taskIds:old.approvedTaskIds}))!==old.scopeDigest)throw Error('group receiving approved artifact scope differs')
-    if(!Array.isArray(member.taskIds)||!member.taskIds.length||new Set(member.taskIds).size!==member.taskIds.length||member.taskIds.some(id=>!old.approvedTaskIds.includes(id)||envelope.completed.some(done=>done.taskId===id)))throw Error('group receiving outstanding task selection differs')
-    if(!Array.isArray(member.sourceRefs)||!member.sourceRefs.length||member.sourceRefs.some(ref=>!closed(ref,['id','updatedAt','bodySha256'])||!text(ref.id)||!date(ref.updatedAt)||!digest(ref.bodySha256)))throw Error('group receiving fresh source evidence unavailable')
+    if(!Array.isArray(member.artifacts)||!member.artifacts.length||new Set(member.artifacts.map(canonicalWire)).size!==member.artifacts.length||member.artifacts.some(artifact=>{validateGroupArtifact(artifact);return artifact.repo!==old.repo||artifact.issue!==old.issue})||hashBytes(canonicalWire({artifacts:member.artifacts,taskIds:old.approvedTaskIds}))!==old.scopeDigest)throw Error('group receiving approved artifact scope differs')
+    const completed=new Set(envelope.completed.map(done=>done.taskId)),outstanding=old.approvedTaskIds.filter(id=>!completed.has(id))
+    if(envelope.completed.some(done=>!old.approvedTaskIds.includes(done.taskId))||!outstanding.length||!Array.isArray(member.taskIds)||new Set(member.taskIds).size!==member.taskIds.length||!sameJson(member.taskIds,outstanding))throw Error('group receiving outstanding task selection differs')
+    if(!Array.isArray(member.sourceRefs)||!member.sourceRefs.length||new Set(member.sourceRefs.map(ref=>ref.id)).size!==member.sourceRefs.length||member.sourceRefs.some(ref=>!closed(ref,['id','updatedAt','bodySha256'])||!text(ref.id)||!date(ref.updatedAt)||!digest(ref.bodySha256)))throw Error('group receiving fresh source evidence unavailable')
     if(!member.authorityRequest||!['native','consolidated'].includes(member.authorityRequest.kind))throw Error('group receiving launch authority unavailable')
     if(member.authorityRequest.kind==='native'){if(!closed(member.authorityRequest,['kind']))throw Error('group receiving native authority differs')}
     else{const {kind:_,...authority}=member.authorityRequest;validateApprovalRequest(authority,'execution');const q=authority.requested;if(q.repo!==old.repo||q.issue!==old.issue||!sameJson(q.taskIds,old.approvedTaskIds)||!sameJson(q.paths,old.paths)||!old.approvalBindings.some(binding=>Number(binding.source.commentId)===authority.approvalBinding.commentId&&binding.source.bodySha256===authority.approvalBinding.bodySha256))throw Error('group receiving execution authority differs')}
@@ -627,7 +635,9 @@ function groupReceivingFacts(request:GroupReceivingRunRequest,decision:VerifiedG
   if(!selected||selected.original.task.runId!==request.runId||selected.current.task.runId!==request.runId||selected.current.task.generation!==request.expectedSharedGeneration||!sameJson(taskBinding(selected.current.task),request.currentMember))throw Error('group receiving selected member differs')
   const selectedRole=selected.original.task.taskKey===request.parentTaskKey?'parent':'child'
   if(selectedRole!==request.role||request.role==='parent'&&selected.current.task.state!=='claimed'||request.role==='child'&&(selected.current.task.state!=='recovery-queued'||selected.current.task.parentTaskKey!==request.parentTaskKey))throw Error('group receiving selected role differs')
-  const requestDigest=hashBytes(canonicalWire({request,decision}))
+  const decisionBytes=canonicalWire(decision)
+  if(Buffer.byteLength(decisionBytes)>groupReceivingLimits.decisionBytes)throw Error('group receiving aggregate decision bounds exceeded')
+  const requestDigest=hashBytes(canonicalWire(request)+'\n'+decisionBytes)
   return{selected,parent,receipt,reference,receiver,requestDigest,bytes:canonicalWire(selected.original.task),envelope:parseRecoveryEnvelope(selected.original.task.recovery),checkpoint:parseCheckpointRef(selected.original.task.checkpoint)}
 }
 async function verifyGroupReceivingCheckout(request:GroupReceivingRunRequest,facts:ReturnType<typeof groupReceivingFacts>):Promise<void>{
@@ -638,23 +648,30 @@ async function verifyGroupReceivingCheckout(request:GroupReceivingRunRequest,fac
   const [head,tree,branch,fingerprint]=await Promise.all([git(['rev-parse','HEAD']),git(['rev-parse','HEAD^{tree}']),git(['symbolic-ref','--short','HEAD']),worktreeFingerprint(request.checkout)])
   if(head!==facts.checkpoint.headSha||tree!==facts.checkpoint.treeSha||branch!==facts.checkpoint.branch||fingerprint!==facts.receiver.worktreeDigest)throw Error('group receiving checkout changed')
 }
+const groupReceivingPublicationBarrier=Symbol.for('vegafactory.test.group-receiving-publication-barrier')
+type GroupReceivingBarrierController=GroupReceivingRunController&{[groupReceivingPublicationBarrier]?:(event:{phase:'staged-before-final-verification'|'replay-before-final-verification';staging:string|null;final:string})=>Promise<void>}
+async function acquireGroupReceivingClaim(path:string){
+  const identity=await processIdentity(),deadline=Date.now()+groupReceivingLimits.claimWaitMs
+  for(;;){
+    const result=await acquireClaim(path,identity)
+    if(result.kind==='owned')return result.claim
+    if(result.kind==='refused'||Date.now()>=deadline)throw Error('group receiving run creation unavailable: '+result.reason)
+    await new Promise<void>(resolve=>setTimeout(resolve,25))
+  }
+}
 export async function createVerifiedGroupReceivingRun(request:GroupReceivingRunRequest,controller:GroupReceivingRunController):Promise<RunRecord>{
   if(!closed(request,['root','requestId','runId','taskKey','expectedSharedGeneration','checkout','parentTaskKey','role','currentMember','succession'])||!isAbsolute(request.root)||!isAbsolute(request.checkout)||!uuid.test(request.requestId)||!uuid.test(request.runId)||!digest(request.taskKey)||!digest(request.parentTaskKey)||!number(request.expectedSharedGeneration)||request.expectedSharedGeneration<2||!['parent','child'].includes(request.role)||!validTaskBinding(request.currentMember)||request.currentMember.taskKey!==request.taskKey||request.currentMember.runId!==request.runId||request.currentMember.generation!==request.expectedSharedGeneration||parseEvidenceRef(request.succession).kind!=='state-receipt'||!controller||typeof controller.verifyRecovery!=='function')throw Error('group receiving request unavailable')
   request=structuredClone(request)
   await mkdir(request.root,{recursive:true,mode:0o700});await privatePath(request.root,true)
   if((await lstat(dirname(request.root))).isSymbolicLink())throw Error('run root parent is a symlink')
-  const lock=await acquireClaim(join(request.root,request.runId+'.creation'),await processIdentity())
-  if(lock.kind!=='owned')throw Error('group receiving run creation unavailable')
+  const lock=await acquireGroupReceivingClaim(join(request.root,request.runId+'.creation'))
   try{
     const first=groupReceivingFacts(request,structuredClone(await controller.verifyRecovery(structuredClone(request))))
     await verifyGroupReceivingCheckout(request,first)
     let existing=false
     try{await lstat(join(request.root,request.runId));existing=true}catch(error){if((error as NodeJS.ErrnoException).code!=='ENOENT')throw error}
-    const freshDecision=structuredClone(await controller.verifyRecovery(structuredClone(request))),fresh=groupReceivingFacts(request,freshDecision)
-    if(fresh.requestDigest!==first.requestDigest)throw Error('group receiving authority/setup changed during verification')
-    await verifyGroupReceivingCheckout(request,fresh)
-    const {selected,receiver,requestDigest,bytes,envelope,checkpoint}=fresh,old=selected.original.task,current=selected.current.task
-    const checkpointIntent=selected.checkpointIntent??undefined,parentIssue=selected.authorityRequest.kind==='consolidated'?selected.authorityRequest.parentIssue:null
+    const {selected,parent,receiver,requestDigest,bytes,envelope,checkpoint}=first,old=selected.original.task,current=selected.current.task
+    const checkpointIntent=selected.checkpointIntent??undefined,parentIssue=request.role==='parent'?null:parent.original.task.issue
     const identity={
       runId:request.runId,repo:old.repo,issue:old.issue,parent:parentIssue,checkout:request.checkout,
       branch:checkpointIntent?.branch??checkpoint.branch,baseSha:checkpointIntent?.baseSha??checkpoint.baseSha,headSha:checkpoint.headSha,stage:old.stage,
@@ -663,6 +680,7 @@ export async function createVerifiedGroupReceivingRun(request:GroupReceivingRunR
       policyDigest:receiver.policyDigest,claimToken:receiver.claimToken,taskKey:{repo:old.repo,issue:old.issue,taskId:old.approvedTaskIds.length===1?old.approvedTaskIds[0]:'whole-issue',scopeDigest:old.scopeDigest},
       approvedTaskIds:old.approvedTaskIds,accountRef:envelope.execution.accountRef,machine:receiver.machine,hostBindingDigest:receiver.machine.hostBindingDigest,
       checkpoint,runtimeBinding:receiver.runtimeBinding,configurationDigest:receiver.configurationDigest,worktreeDigest:receiver.worktreeDigest,
+      remoteEffectCoverage:envelope.remoteEffectCoverage,activeElapsedMs:null,taskOwner:null,agentAccountOwner:null,waitReason:null,
       ...(checkpointIntent?{checkpointIntent}:{}),
     }
     const provenance:GroupReceivingProvenance={kind:'receiving-group',requestId:request.requestId,requestDigest,succession:request.succession,role:request.role,parentTaskKey:request.parentTaskKey,originalStateCommit:selected.original.stateCommit,stopProof:current.stopProof!,originalTask:{bytes,sha256:hashBytes(bytes)},priorHistory:'unavailable',reportingContext:'unavailable'}
@@ -670,8 +688,12 @@ export async function createVerifiedGroupReceivingRun(request:GroupReceivingRunR
     if(saved){
       if(saved.remoteRecovery?.kind!=='receiving-group'||saved.remoteRecovery.requestId!==request.requestId||saved.remoteRecovery.requestDigest!==requestDigest)throw Error('group receiving request identity rebound')
       if(Object.entries(identity).some(([key,value])=>!sameJson(saved[key as keyof RunRecord],value))||!sameJson(saved.remoteRecovery,provenance))throw Error('group receiving saved identity differs')
-      if(saved.generation!==1||saved.state!=='prepared'||saved.pid!==null||saved.processIdentity!==null||saved.finishedAt!==null||saved.terminationCause!==null||saved.pendingDelivery.length||saved.stopProof!==null||saved.vendorSessionId!==null||saved.attemptElapsedMs!==0||saved.terminationRequest!=null||saved.cancelRequestedAt!=null||saved.quotaWait!=null||saved.waitReason!==null||saved.acceptedScopeRef!=null||saved.stopReceiptIds!==undefined||saved.stopReceiptPayload!==undefined||!saved.attemptOperationIds||saved.continuations?.length||saved.attemptId!==saved.terminalSegment?.firstAttemptId||saved.attempts?.length||saved.sharedClaim?.generation!==current.generation||saved.sharedClaim.ownerToken!==current.ownerToken||saved.sharedClaim.stateCommit!==selected.current.stateCommit)throw Error('group receiving allocation already advanced')
+      if(saved.generation!==1||saved.state!=='prepared'||saved.pid!==null||saved.processIdentity!==null||saved.finishedAt!==null||saved.terminationCause!==null||saved.pendingDelivery.length||saved.stopProof!==null||saved.vendorSessionId!==null||saved.attemptElapsedMs!==0||saved.terminationRequest!=null||saved.cancelRequestedAt!=null||saved.quotaWait!=null||saved.acceptedScopeRef!=null||saved.stopReceiptIds!==undefined||saved.stopReceiptPayload!==undefined||saved.claimOperationId!==undefined||saved.dispatchRequest!==undefined||saved.handbackIntent!==undefined||saved.quotaChecks!==undefined||Object.hasOwn(saved,'deliveryError')||!saved.attemptOperationIds||saved.continuations!==undefined||saved.attemptId!==saved.terminalSegment?.firstAttemptId||!Array.isArray(saved.attempts)||saved.attempts.length||saved.sharedClaim?.generation!==current.generation||saved.sharedClaim.ownerToken!==current.ownerToken||saved.sharedClaim.stateCommit!==selected.current.stateCommit)throw Error('group receiving allocation already advanced')
       try{await lstat(runAttemptDirectory(request.root,saved));throw Error('group receiving wrapper already prepared')}catch(error){if((error as NodeJS.ErrnoException).code!=='ENOENT')throw error}
+      await (controller as GroupReceivingBarrierController)[groupReceivingPublicationBarrier]?.({phase:'replay-before-final-verification',staging:null,final:join(request.root,request.runId)})
+      const fresh=groupReceivingFacts(request,structuredClone(await controller.verifyRecovery(structuredClone(request))))
+      if(fresh.requestDigest!==first.requestDigest)throw Error('group receiving authority/setup changed during verification')
+      await verifyGroupReceivingCheckout(request,fresh)
       return saved
     }
     const attemptId=randomUUID(),run=parseRun({
@@ -685,14 +707,20 @@ export async function createVerifiedGroupReceivingRun(request:GroupReceivingRunR
     await mkdir(staging,{mode:0o700})
     try{
       await atomicRunFile(join(staging,'run.json'),run)
-      await rename(staging,join(request.root,run.runId))
+      const final=join(request.root,run.runId)
+      await (controller as GroupReceivingBarrierController)[groupReceivingPublicationBarrier]?.({phase:'staged-before-final-verification',staging,final})
+      const fresh=groupReceivingFacts(request,structuredClone(await controller.verifyRecovery(structuredClone(request))))
+      if(fresh.requestDigest!==first.requestDigest)throw Error('group receiving authority/setup changed during verification')
+      await verifyGroupReceivingCheckout(request,fresh)
+      try{await lstat(final);throw Error('group receiving final directory appeared before publication')}catch(error){if((error as NodeJS.ErrnoException).code!=='ENOENT')throw error}
+      await rename(staging,final)
       for(const directory of [join(request.root,run.runId),request.root]){const handle=await open(directory,constants.O_RDONLY|constants.O_NOFOLLOW);try{await handle.sync()}finally{await handle.close()}}
       const published=await readRun(request.root,run.runId)
       if(!sameJson(published,run))throw Error('group receiving publication readback differs')
     }finally{await rm(staging,{recursive:true,force:true})}
     roots.set(run.runId,request.root)
     return run
-  }finally{await releaseClaim(lock.claim)}
+  }finally{await releaseClaim(lock)}
 }
 
 export function classifyRecovery(input:{state:RunRecord['state'];ownerAlive:boolean;pendingDelivery:unknown[]}):{state:RunRecord['state'];replay:false}{return{state:!input.ownerAlive&&['prepared','running'].includes(input.state)?'interrupted':input.state,replay:false}}
@@ -986,7 +1014,8 @@ export async function verifyRunAuthority(run:RunRecord,config:import('./config.t
   let checked:{ok?:boolean;blocks:string[];bindings:ArtifactRef[];approvalBindings:Array<{approvalId:string;commentId:number;bodySha256:string}>;recordBinding?:{approvalId:string;commentId:number;bodySha256:string}}
   if(run.authorityRequest?.kind==='consolidated'){
     const {kind:_,...request}=run.authorityRequest
-    if(request.parentRepo!==run.repo||request.requested.repo!==run.repo||request.requested.issue!==run.issue||request.requested.baseSha!==run.baseSha||run.parent===null&&request.requested.branch!==run.branch||run.parent!==null&&request.parentIssue!==run.parent)throw Error('run request identity differs')
+    const groupChild=run.remoteRecovery?.kind==='receiving-group'&&run.remoteRecovery.role==='child'
+    if(request.parentRepo!==run.repo||request.requested.repo!==run.repo||request.requested.issue!==run.issue||request.requested.baseSha!==run.baseSha||run.parent===null&&request.requested.branch!==run.branch||run.parent!==null&&!groupChild&&request.parentIssue!==run.parent)throw Error('run request identity differs')
     checked=await approval.gatherConsolidatedApproval({...request,operators:policy.operators,readJson})
   }else{
     const issue=await readJson(['api',`repos/${run.repo}/issues/${run.issue}`]) as {body:string;node_id:string;labels:Array<{name:string}>}

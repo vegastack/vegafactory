@@ -301,7 +301,7 @@ test('receiving startup reconciliation keeps historical usage unknown after rece
 
 // A real two-checkout group fixture. The controller is still a controlled
 // authority boundary; #144 owns the live conditional-provider orchestration.
-async function groupReceivingFixture(){
+async function groupReceivingFixture(options:{parentTaskIds?:string[];parentCompleted?:string[]}={}){
   const runtime=await import('../src/runs.ts'),wire=await import('../src/shared-claims.ts')
   const {execFileSync}=await import('node:child_process'),{mkdir}=await import('node:fs/promises'),{readHostBinding}=await import('../src/machine-identity.ts')
   const directory=await mkdtemp(join(tmpdir(),'group-receiving-')),root=join(directory,'runs'),source=join(directory,'source'),remote=join(directory,'remote.git')
@@ -315,17 +315,18 @@ async function groupReceivingFixture(){
   const evidence=()=>({kind:'state-receipt' as const,operationId:crypto.randomUUID(),commitSha:'e'.repeat(40),blobSha256:'f'.repeat(64)})
   const receiver={machine:{id:'receiver',installationId:crypto.randomUUID(),sessionId:crypto.randomUUID(),hostBindingDigest:host},claimToken:crypto.randomUUID(),policyDigest:'b'.repeat(64),runtimeBinding:{schemaVersion:1 as const,sourceSha:'5'.repeat(40),treeSha:'6'.repeat(40),packageName:'@vegastack/vegafactory' as const,version:'0.1.0',tarballSha256:'7'.repeat(64),inventoryDigest:'8'.repeat(64)},configurationDigest:'9'.repeat(64),worktreeDigest:''}
   const operationId=crypto.randomUUID(),previousHead='3'.repeat(40),currentHead='4'.repeat(40),parentTaskKey='1'.repeat(64)
-  const makeOriginal=(input:{issue:number;taskKey:string;branch:string;checkout:string;parentBinding:import('../src/shared-claims.ts').ParentClaimBinding|null})=>{
-    const runId=crypto.randomUUID(),taskIds=[`${input.issue}-T1`],artifacts:import('../src/shared-claims.ts').ArtifactRef[]=[{repo:'o/r',issue:input.issue,kind:'plan',artifactId:`PLAN_${input.issue}`,rev:1,digest:'a'.repeat(64)}]
+  const makeOriginal=(input:{issue:number;taskKey:string;branch:string;checkout:string;parentBinding:import('../src/shared-claims.ts').ParentClaimBinding|null;taskIds?:string[];completed?:string[]})=>{
+    const runId=crypto.randomUUID(),taskIds=input.taskIds??[`${input.issue}-T1`],artifacts:import('../src/shared-claims.ts').ArtifactRef[]=[{repo:'o/r',issue:input.issue,kind:'plan',artifactId:`PLAN_${input.issue}`,rev:1,digest:'a'.repeat(64)}]
     const scopeDigest=wire.sha256(wire.canonical({artifacts,taskIds})),headSha=git(input.checkout,['rev-parse','HEAD'])
     const checkpoint:import('../src/shared-claims.ts').CheckpointRef={schemaVersion:1,id:crypto.randomUUID(),repo:'o/r',repositoryId:'R_repo',branch:input.branch,baseSha:headSha,headSha,treeSha:git(input.checkout,['rev-parse','HEAD^{tree}']),scopeDigest,runId,publishedAt:'2026-09-09T00:00:00.000Z'}
     const execution:import('../src/shared-claims.ts').ExecutionIdentity={providerMode:'subscription',harness:'codex',harnessVersion:'fixture',model:'fixture',effort:'high',accountRef:'original-account',qualification:evidence()}
     const stopProof:import('../src/shared-claims.ts').StopProof={kind:'verified-reboot',machineId:'old-machine',installationId:'11111111-1111-4111-8111-111111111111',sessionId:'22222222-2222-4222-8222-222222222222',hostBindingDigest:'1'.repeat(64),bootIdDigest:'2'.repeat(64),runIds:[runId],generation:3,observedAt:'2026-09-09T01:00:00.000Z',evidenceRef:evidence()}
-    const recovery:import('../src/shared-claims.ts').RecoveryEnvelope={schemaVersion:2,taskKey:input.taskKey,runId,generation:3,approvalBindings:[authority],recordBinding:authority,scopeDigest,approvalDigest:'c'.repeat(64),execution,checkpoint,completed:[],children:[],joins:[],effects:[],remoteEffectCoverage:{kind:'reconciled',evidence:evidence()}}
+    const completed=(input.completed??[]).map(taskId=>({taskId,headSha,acceptance:{sourceSha:headSha,validationId:`fixture/check/${'a'.repeat(64)}`,commandDigest:'b'.repeat(64),evidence:evidence()}}))
+    const recovery:import('../src/shared-claims.ts').RecoveryEnvelope={schemaVersion:2,taskKey:input.taskKey,runId,generation:3,approvalBindings:[authority],recordBinding:authority,scopeDigest,approvalDigest:'c'.repeat(64),execution,checkpoint,completed,children:[],joins:[],effects:[],remoteEffectCoverage:{kind:'reconciled',evidence:evidence()}}
     const task:import('../src/shared-claims.ts').TaskRecord={schemaVersion:1,taskKey:input.taskKey,host:'github.com',repo:'o/r',issue:input.issue,repositoryNodeId:'R_repo',issueNodeId:`I_${input.issue}`,scopeDigest,approvalDigest:'c'.repeat(64),approvalBindings:[authority],generation:3,machineId:stopProof.machineId,installationId:stopProof.installationId,sessionId:stopProof.sessionId,ownerToken:crypto.randomUUID(),runId,stage:'implement',state:'stopped',paths:[input.issue===1?'parent.txt':'child.txt'],resources:[],independent:true,parentTaskKey:input.parentBinding?.taskKey??null,parentBinding:input.parentBinding,approvedTaskIds:taskIds,checkpoint,stopProof,unresolvedEffects:[],recovery,acceptedScopes:[]}
     return{task,artifacts,taskIds,checkout:input.checkout}
   }
-  const parent=makeOriginal({issue:1,taskKey:parentTaskKey,branch:'feat/parent',checkout:parentCheckout,parentBinding:null})
+  const parent=makeOriginal({issue:1,taskKey:parentTaskKey,branch:'feat/parent',checkout:parentCheckout,parentBinding:null,taskIds:options.parentTaskIds,completed:options.parentCompleted})
   const parentBinding:import('../src/shared-claims.ts').ParentClaimBinding={taskKey:parent.task.taskKey,runId:parent.task.runId,generation:parent.task.generation,ownerToken:parent.task.ownerToken,machineId:parent.task.machineId,installationId:parent.task.installationId,sessionId:parent.task.sessionId}
   const child=makeOriginal({issue:2,taskKey:'2'.repeat(64),branch:'feat/child',checkout:childCheckout,parentBinding})
   const originals=[parent,child]
@@ -338,12 +339,14 @@ async function groupReceivingFixture(){
   const members:import('../src/runs.ts').VerifiedGroupReceivingRunDecision['members']=originals.map((member,index)=>{
     const isChild=index===1,authorityRequest:import('../src/runs.ts').RunAuthorityRequest={kind:'consolidated',parentRepo:'o/r',parentIssue:133,approvalBinding,requested:{repo:'o/r',issue:member.task.issue,taskIds:member.task.approvedTaskIds,actionId:'local-code',branch:member.task.checkpoint!.branch,baseSha:member.task.checkpoint!.baseSha,paths:member.task.paths,operation:'edit'}}
     const checkpointIntent:import('../src/checkpoints.ts').CheckpointIntent|null=isChild?{id:'child-checkpoint',repo:'o/r',repositoryId:'R_repo',remote:'origin',remoteUrl:remote,branch:member.task.checkpoint!.branch,baseRef:`refs/heads/${member.task.checkpoint!.branch}`,baseSha:member.task.checkpoint!.baseSha,scopeDigest:member.task.scopeDigest,paths:member.task.paths,approvalBindings:[authority],approvalRequest:{parentRepo:'o/r',parentIssue:133,approvalBinding,requested:{repo:'o/r',issue:member.task.issue,taskIds:member.task.approvedTaskIds,actionId:'child-checkpoint',branch:member.task.checkpoint!.branch,ref:`refs/heads/${member.task.checkpoint!.branch}`,baseSha:member.task.checkpoint!.baseSha,paths:member.task.paths,operation:'checkpoint'}}}:null
-    return{original:{stateCommit:previousHead,task:member.task},current:{stateCommit:currentHead,task:currents[index]!},artifacts:member.artifacts,authorityRequest,checkpointIntent,taskIds:member.task.approvedTaskIds,sourceRefs:[{id:`source-${member.task.issue}`,updatedAt:'2026-09-09T02:00:00.000Z',bodySha256:'a'.repeat(64)}]}
+    const completed=new Set(member.task.recovery!.completed.map(row=>row.taskId))
+    return{original:{stateCommit:previousHead,task:member.task},current:{stateCommit:currentHead,task:currents[index]!},artifacts:member.artifacts,authorityRequest,checkpointIntent,taskIds:member.task.approvedTaskIds.filter(id=>!completed.has(id)),sourceRefs:[{id:`source-${member.task.issue}`,updatedAt:'2026-09-09T02:00:00.000Z',bodySha256:'a'.repeat(64)}]}
   })
   const decision:import('../src/runs.ts').VerifiedGroupReceivingRunDecision={action:'resume-group-member',reason:'verified complete stopped group',succession:{ref:succession,receipt},members,receiver:{...receiver,worktreeDigest:''}}
   const request=(role:'parent'|'child'):import('../src/runs.ts').GroupReceivingRunRequest=>{const index=role==='parent'?0:1,member=members[index]!;return{root,requestId:crypto.randomUUID(),runId:member.original.task.runId,taskKey:member.original.task.taskKey,expectedSharedGeneration:member.current.task.generation,checkout:originals[index]!.checkout,parentTaskKey,role,currentMember:binding(member.current.task),succession}}
-  const controller={verifyRecovery:async(request:import('../src/runs.ts').GroupReceivingRunRequest)=>{const selected=members.find(m=>m.original.task.taskKey===request.taskKey)!;const checkout=selected.original.task.issue===1?parentCheckout:childCheckout;const copy=structuredClone(decision);copy.receiver.worktreeDigest=await runtime.worktreeFingerprint(checkout);return copy}}
-  return{runtime,wire,directory,root,parentCheckout,childCheckout,decision,members,request,controller,receipt,succession}
+  const controllerFor=(source=decision)=>({verifyRecovery:async(request:import('../src/runs.ts').GroupReceivingRunRequest)=>{const selected=source.members.find(m=>m.original.task.taskKey===request.taskKey)!;const checkout=selected.original.task.taskKey===parentTaskKey?parentCheckout:childCheckout;const copy=structuredClone(source);copy.receiver.worktreeDigest=await runtime.worktreeFingerprint(checkout);return copy}})
+  const controller=controllerFor()
+  return{runtime,wire,directory,root,parentCheckout,childCheckout,decision,members,request,controller,controllerFor,receipt,succession}
 }
 
 test('verified group receiving creates exact parent and child attempts without fabricated history',async()=>{
@@ -355,6 +358,7 @@ test('verified group receiving creates exact parent and child attempts without f
       const selected=f.members.find(m=>m.original.task.taskKey===request.taskKey)!
       expect(checks).toBe(2);expect(run.runId).toBe(request.runId);expect(run.state).toBe('prepared');expect(run.attempts).toEqual([]);expect(run.activeElapsedMs).toBeNull()
       expect(run.sharedClaim).toEqual({taskKey:request.taskKey,generation:request.expectedSharedGeneration,ownerToken:request.currentMember.ownerToken,stateCommit:f.succession.commitSha})
+      expect(run.parent).toBe(role==='parent'?null:1)
       expect(run.remoteRecovery).toMatchObject({kind:'receiving-group',succession:f.succession,role,parentTaskKey:request.parentTaskKey,priorHistory:'unavailable',reportingContext:'unavailable'})
       expect(run.remoteRecovery!.originalTask).toEqual({bytes:f.wire.canonical(selected.original.task),sha256:f.wire.sha256(f.wire.canonical(selected.original.task))})
       expect(run.checkpointIntent??null).toEqual(selected.checkpointIntent);expect((await stat(join(f.root,run.runId,'run.json'))).mode&0o777).toBe(0o600)
@@ -419,12 +423,119 @@ test('verified group receiving serializes duplicate creators and ignores unpubli
   try{
     const request=f.request('parent'),staging=join(f.root,'.receiving-group-crashed-before-publication')
     await mkdir(staging,{recursive:true,mode:0o700});await writeFile(join(staging,'run.json'),'partial',{mode:0o600})
-    const outcomes=await Promise.allSettled([f.runtime.createVerifiedGroupReceivingRun(request,f.controller),f.runtime.createVerifiedGroupReceivingRun(request,f.controller)])
-    expect(outcomes.filter(outcome=>outcome.status==='fulfilled')).toHaveLength(1);expect(await readFile(join(staging,'run.json'),'utf8')).toBe('partial')
+    let checks=0;const controller={verifyRecovery:async(r:import('../src/runs.ts').GroupReceivingRunRequest)=>{checks++;return f.controller.verifyRecovery(r)}}
+    const outcomes=await Promise.allSettled([f.runtime.createVerifiedGroupReceivingRun(request,controller),f.runtime.createVerifiedGroupReceivingRun(request,controller)])
+    expect(outcomes.every(outcome=>outcome.status==='fulfilled')).toBe(true);expect((outcomes[0] as PromiseFulfilledResult<unknown>).value).toEqual((outcomes[1] as PromiseFulfilledResult<unknown>).value);expect(await readFile(join(staging,'run.json'),'utf8')).toBe('partial')
+    expect(checks).toBe(4)
     const [saved]=await f.runtime.readRuns(f.root);expect(saved!.runId).toBe(request.runId);expect(saved!.attempts).toEqual([])
     expect(await f.runtime.createVerifiedGroupReceivingRun(request,f.controller)).toEqual(saved!)
     const changed=structuredClone(saved!),original=JSON.parse(changed.remoteRecovery!.originalTask.bytes);original.taskKey='f'.repeat(64)
     changed.remoteRecovery!.originalTask={bytes:f.wire.canonical(original),sha256:f.wire.sha256(f.wire.canonical(original))}
     expect(()=>parseRun(changed)).toThrow('identity')
+  }finally{await rm(f.directory,{recursive:true,force:true})}
+})
+
+test('group receiving serializes conflicting contenders but publishes only one identity',async()=>{
+  const f=await groupReceivingFixture()
+  try{
+    const request=f.request('parent'),conflict={...request,requestId:crypto.randomUUID()}
+    const outcomes=await Promise.allSettled([f.runtime.createVerifiedGroupReceivingRun(request,f.controller),f.runtime.createVerifiedGroupReceivingRun(conflict,f.controller)])
+    expect(outcomes.filter(outcome=>outcome.status==='fulfilled')).toHaveLength(1);expect(outcomes.filter(outcome=>outcome.status==='rejected')).toHaveLength(1)
+    const [saved]=await f.runtime.readRuns(f.root);expect([request.requestId,conflict.requestId]).toContain(saved!.remoteRecovery!.requestId);expect(saved!.attempts).toEqual([])
+  }finally{await rm(f.directory,{recursive:true,force:true})}
+})
+
+test('group receiving binds effect coverage and complete outstanding task selection on replay',async()=>{
+  const f=await groupReceivingFixture({parentTaskIds:['1-T1','1-T2','1-T3'],parentCompleted:['1-T1']})
+  try{
+    const request=f.request('parent'),run=await f.runtime.createVerifiedGroupReceivingRun(request,f.controller)
+    expect(f.members[0]!.taskIds).toEqual(['1-T2','1-T3']);expect(run.approvedTaskIds).toEqual(['1-T1','1-T2','1-T3'])
+    const changed=parseRun({...run,remoteEffectCoverage:{kind:'reconciled',evidence:{kind:'state-receipt',operationId:crypto.randomUUID(),commitSha:'e'.repeat(40),blobSha256:'f'.repeat(64)}}})
+    await f.runtime.atomicRunFile(join(f.root,run.runId,'run.json'),changed);const bytes=await readFile(join(f.root,run.runId,'run.json'),'utf8')
+    await expect(f.runtime.createVerifiedGroupReceivingRun(request,f.controller)).rejects.toThrow('identity');expect(await readFile(join(f.root,run.runId,'run.json'),'utf8')).toBe(bytes)
+  }finally{await rm(f.directory,{recursive:true,force:true})}
+  for(const selected of [['1-T2'],['1-T3','1-T2'],['1-T1','1-T2','1-T3']]){
+    const x=await groupReceivingFixture({parentTaskIds:['1-T1','1-T2','1-T3'],parentCompleted:['1-T1']})
+    try{const decision=structuredClone(x.decision);decision.members[0]!.taskIds=selected;await expect(x.runtime.createVerifiedGroupReceivingRun(x.request('parent'),x.controllerFor(decision))).rejects.toThrow('outstanding');expect(await x.runtime.readRuns(x.root)).toEqual([])}finally{await rm(x.directory,{recursive:true,force:true})}
+  }
+})
+
+test('group receiving rejects aliased run, issue, node and before-after identities',async()=>{
+  const mutations:Array<(decision:Awaited<ReturnType<Awaited<ReturnType<typeof groupReceivingFixture>>['controller']['verifyRecovery']>>)=>void>=[
+    decision=>{decision.members[1]!.original.task.runId=decision.members[0]!.original.task.runId;decision.members[1]!.current.task.runId=decision.members[0]!.current.task.runId},
+    decision=>{decision.members[1]!.original.task.issue=decision.members[0]!.original.task.issue;decision.members[1]!.current.task.issue=decision.members[0]!.current.task.issue},
+    decision=>{decision.members[1]!.original.task.issueNodeId=decision.members[0]!.original.task.issueNodeId;decision.members[1]!.current.task.issueNodeId=decision.members[0]!.current.task.issueNodeId},
+  ]
+  for(const mutate of mutations){const f=await groupReceivingFixture();try{const decision=structuredClone(f.decision);mutate(decision);await expect(f.runtime.createVerifiedGroupReceivingRun(f.request('parent'),f.controllerFor(decision))).rejects.toThrow('unique');expect(await f.runtime.readRuns(f.root)).toEqual([])}finally{await rm(f.directory,{recursive:true,force:true})}}
+  const f=await groupReceivingFixture();try{const decision=structuredClone(f.decision);decision.members[1]!.current.task.issueNodeId='I_other';await expect(f.runtime.createVerifiedGroupReceivingRun(f.request('parent'),f.controllerFor(decision))).rejects.toThrow('before/after identity');expect(await f.runtime.readRuns(f.root)).toEqual([])}finally{await rm(f.directory,{recursive:true,force:true})}
+})
+
+test('group receiving repeats final verification after staging and before replay return',async()=>{
+  const barrier=Symbol.for('vegafactory.test.group-receiving-publication-barrier'),f=await groupReceivingFixture()
+  try{
+    const request=f.request('parent'),source=structuredClone(f.decision),controller=f.controllerFor(source) as typeof f.controller&Record<symbol,(event:{phase:string})=>Promise<void>>
+    controller[barrier]=async event=>{if(event.phase==='staged-before-final-verification')source.members[0]!.sourceRefs[0]!.bodySha256='f'.repeat(64)}
+    await expect(f.runtime.createVerifiedGroupReceivingRun(request,controller)).rejects.toThrow('changed during verification');expect(await f.runtime.readRuns(f.root)).toEqual([])
+    const saved=await f.runtime.createVerifiedGroupReceivingRun(request,f.controller),replaySource=structuredClone(f.decision),replay=f.controllerFor(replaySource) as typeof f.controller&Record<symbol,(event:{phase:string})=>Promise<void>>
+    replay[barrier]=async event=>{if(event.phase==='replay-before-final-verification')replaySource.members[0]!.sourceRefs[0]!.bodySha256='e'.repeat(64)}
+    await expect(f.runtime.createVerifiedGroupReceivingRun(request,replay)).rejects.toThrow('changed during verification');expect(await f.runtime.readRun(f.root,saved.runId)).toEqual(saved)
+  }finally{await rm(f.directory,{recursive:true,force:true})}
+})
+
+test('group receiving decision collection limit accepts boundary and refuses one over',async()=>{
+  for(const count of [64,65]){const f=await groupReceivingFixture();try{const decision=structuredClone(f.decision);decision.members[0]!.sourceRefs=Array.from({length:count},(_,i)=>({id:`source-${i}`,updatedAt:'2026-09-09T02:00:00.000Z',bodySha256:'a'.repeat(64)}));const call=f.runtime.createVerifiedGroupReceivingRun(f.request('parent'),f.controllerFor(decision));if(count===64)expect((await call).runId).toBe(f.request('parent').runId);else{await expect(call).rejects.toThrow('bounds');expect(await f.runtime.readRuns(f.root)).toEqual([])}}finally{await rm(f.directory,{recursive:true,force:true})}}
+})
+
+test('group receiving aggregate canonical decision limit accepts exact bytes and refuses one over',async()=>{
+  const target=512*1024
+  for(const over of [0,1]){
+    const f=await groupReceivingFixture()
+    try{
+      const request=f.request('parent'),decision=structuredClone(f.decision),member=decision.members[0]!,receipt=decision.succession.receipt
+      decision.receiver.worktreeDigest=await f.runtime.worktreeFingerprint(f.parentCheckout)
+      const applyPaths=(paths:string[])=>{member.original.task.paths=paths;member.current.task.paths=paths;if(member.authorityRequest.kind==='consolidated')member.authorityRequest.requested.paths=paths}
+      const reseal=()=>{for(let i=0;i<decision.members.length;i++){const row=receipt.members[i]!,entry=decision.members[i]!;row.beforeTaskSha256=f.wire.sha256(f.wire.canonical(entry.original.task));row.afterTaskSha256=f.wire.sha256(f.wire.canonical(entry.current.task))}decision.succession.ref.blobSha256=f.wire.sha256(f.wire.canonical(receipt));request.succession=structuredClone(decision.succession.ref)}
+      const paths=[...member.original.task.paths]
+      applyPaths(paths);reseal()
+      while(target-Buffer.byteLength(f.wire.canonical(decision))>24_300){paths.push(`padding/fixed-${paths.length}-`+'x'.repeat(8000));applyPaths(paths);reseal()}
+      paths.push('padding/final-x');applyPaths(paths);reseal()
+      let remaining=target-Buffer.byteLength(f.wire.canonical(decision)),grow=Math.max(0,Math.floor((remaining-100)/3));paths[paths.length-1]+='x'.repeat(grow);applyPaths(paths);reseal()
+      remaining=target-Buffer.byteLength(f.wire.canonical(decision));decision.reason+='r'.repeat(remaining+over);reseal()
+      expect(Buffer.byteLength(f.wire.canonical(decision))).toBe(target+over)
+      const call=f.runtime.createVerifiedGroupReceivingRun(request,f.controllerFor(decision))
+      if(over===0)expect((await call).runId).toBe(request.runId);else{await expect(call).rejects.toThrow('aggregate decision bounds');expect(await f.runtime.readRuns(f.root)).toEqual([])}
+    }finally{await rm(f.directory,{recursive:true,force:true})}
+  }
+},15000)
+
+test('group receiving crash after staged fsync exposes no partial final record and replays cleanly',async()=>{
+  const f=await groupReceivingFixture(),{spawn}=await import('node:child_process'),{lstat,mkdir}=await import('node:fs/promises')
+  let child:ReturnType<typeof spawn>|undefined
+  try{
+    const request=f.request('parent'),decision=await f.controller.verifyRecovery(request),payloadPath=join(f.directory,'child-input.json'),readyPath=join(f.directory,'child-ready.json'),unrelated=join(f.root,'.unrelated-staging')
+    await mkdir(unrelated,{recursive:true,mode:0o700});await writeFile(join(unrelated,'keep'),'unchanged',{mode:0o600})
+    await writeFile(payloadPath,JSON.stringify({request,decision,readyPath,moduleUrl:new URL('../src/runs.ts',import.meta.url).href}))
+    const script=`import {readFile,writeFile} from 'node:fs/promises';const p=JSON.parse(await readFile(process.env.VSK_GROUP_FIXTURE,'utf8'));const m=await import(p.moduleUrl);const c={verifyRecovery:async()=>structuredClone(p.decision)};c[Symbol.for('vegafactory.test.group-receiving-publication-barrier')]=async e=>{await writeFile(p.readyPath,JSON.stringify(e));await new Promise(()=>{})};await m.createVerifiedGroupReceivingRun(p.request,c)`
+    const errors:string[]=[];child=spawn(process.execPath,['-e',script],{env:{...process.env,VSK_GROUP_FIXTURE:payloadPath},stdio:['ignore','ignore','pipe']});child.stderr!.on('data',chunk=>errors.push(String(chunk)))
+    let event:{phase:string;staging:string;final:string}|undefined
+    for(let i=0;i<500&&!event;i++){try{event=JSON.parse(await readFile(readyPath,'utf8'))}catch(error){if((error as NodeJS.ErrnoException).code!=='ENOENT')throw error}if(!event)await new Promise(resolve=>setTimeout(resolve,10))}
+    if(!event)throw Error('child publication barrier unavailable: '+errors.join(''))
+    expect(event.phase).toBe('staged-before-final-verification');const exited=new Promise<void>(resolve=>child!.once('exit',()=>resolve()));child.kill('SIGKILL');await exited
+    await expect(lstat(event.final)).rejects.toMatchObject({code:'ENOENT'});expect((await stat(f.root)).mode&0o777).toBe(0o700);expect((await stat(event.staging)).mode&0o777).toBe(0o700)
+    const stagedFile=join(event.staging,'run.json'),stagedStat=await lstat(stagedFile);expect(stagedStat.isFile()).toBe(true);expect(stagedStat.isSymbolicLink()).toBe(false);expect(stagedStat.mode&0o777).toBe(0o600);expect(parseRun(JSON.parse(await readFile(stagedFile,'utf8'))).runId).toBe(request.runId)
+    expect(await f.runtime.readRuns(f.root)).toEqual([]);expect(await readFile(join(unrelated,'keep'),'utf8')).toBe('unchanged')
+    const run=await f.runtime.createVerifiedGroupReceivingRun(request,f.controller),finalStat=await lstat(join(f.root,run.runId)),fileStat=await lstat(join(f.root,run.runId,'run.json'))
+    expect(finalStat.isDirectory()).toBe(true);expect(finalStat.mode&0o777).toBe(0o700);expect(fileStat.isFile()).toBe(true);expect(fileStat.isSymbolicLink()).toBe(false);expect(fileStat.mode&0o777).toBe(0o600);expect(await f.runtime.readRun(f.root,run.runId)).toEqual(run)
+    expect(await readFile(stagedFile,'utf8')).not.toBe('');expect(await readFile(join(unrelated,'keep'),'utf8')).toBe('unchanged')
+  }finally{if(child&&child.exitCode===null&&child.signalCode===null){const exited=new Promise<void>(resolve=>child!.once('exit',()=>resolve()));child.kill('SIGKILL');await exited}await rm(f.directory,{recursive:true,force:true})}
+},15000)
+
+test('group receiving refuses an empty final-directory publication race without replacement',async()=>{
+  const f=await groupReceivingFixture(),{mkdir,lstat}=await import('node:fs/promises'),barrier=Symbol.for('vegafactory.test.group-receiving-publication-barrier')
+  try{
+    const request=f.request('parent'),controller=f.controllerFor() as typeof f.controller&Record<symbol,(event:{phase:string;final:string})=>Promise<void>>
+    controller[barrier]=async event=>{if(event.phase==='staged-before-final-verification')await mkdir(event.final,{mode:0o700})}
+    await expect(f.runtime.createVerifiedGroupReceivingRun(request,controller)).rejects.toThrow('appeared before publication')
+    const preserved=await lstat(join(f.root,request.runId));expect(preserved.isDirectory()).toBe(true);expect(preserved.mode&0o777).toBe(0o700)
   }finally{await rm(f.directory,{recursive:true,force:true})}
 })
