@@ -420,30 +420,81 @@ test('verified group receiving rejects receipt, member, authority, checkpoint an
 
 test('verified group receiving serializes duplicate creators and ignores unpublished staging evidence',async()=>{
   const f=await groupReceivingFixture(),{mkdir}=await import('node:fs/promises')
+  let releasePublication!:()=>void
+  const publicationReleased=new Promise<void>(resolve=>{releasePublication=resolve})
   try{
     const request=f.request('parent'),staging=join(f.root,'.receiving-group-crashed-before-publication')
     await mkdir(staging,{recursive:true,mode:0o700});await writeFile(join(staging,'run.json'),'partial',{mode:0o600})
-    let checks=0;const controller={verifyRecovery:async(r:import('../src/runs.ts').GroupReceivingRunRequest)=>{checks++;return f.controller.verifyRecovery(r)}}
-    const outcomes=await Promise.allSettled([f.runtime.createVerifiedGroupReceivingRun(request,controller),f.runtime.createVerifiedGroupReceivingRun(request,controller)])
+    let checks=0,publicationStaged!:()=>void
+    const staged=new Promise<void>(resolve=>{publicationStaged=resolve})
+    const winner=f.controllerFor() as typeof f.controller&Record<symbol,(event:{phase:string})=>Promise<void>>
+    winner[Symbol.for('vegafactory.test.group-receiving-publication-barrier')]=async event=>{if(event.phase==='staged-before-final-verification'){publicationStaged();await publicationReleased}}
+    const first=f.runtime.createVerifiedGroupReceivingRun(request,{...winner,verifyRecovery:async r=>{checks++;return winner.verifyRecovery(r)}})
+    await staged
+    let busyObserved!:()=>void
+    const busy=new Promise<void>(resolve=>{busyObserved=resolve})
+    const contender={verifyRecovery:async(r:import('../src/runs.ts').GroupReceivingRunRequest)=>{checks++;return f.controller.verifyRecovery(r)}} as typeof f.controller&Record<symbol,(event:{phase:string;ownerPid?:number})=>Promise<void>>
+    contender[Symbol.for('vegafactory.test.group-receiving-publication-barrier')]=async event=>{if(event.phase==='claim-busy'){expect(event.ownerPid).toBe(process.pid);busyObserved()}}
+    const second=f.runtime.createVerifiedGroupReceivingRun(request,contender)
+    await busy
+    await new Promise(resolve=>setTimeout(resolve,5250))
+    releasePublication()
+    const outcomes=await Promise.allSettled([first,second])
     expect(outcomes.every(outcome=>outcome.status==='fulfilled')).toBe(true);expect((outcomes[0] as PromiseFulfilledResult<unknown>).value).toEqual((outcomes[1] as PromiseFulfilledResult<unknown>).value);expect(await readFile(join(staging,'run.json'),'utf8')).toBe('partial')
     expect(checks).toBe(4)
-    const [saved]=await f.runtime.readRuns(f.root);expect(saved!.runId).toBe(request.runId);expect(saved!.attempts).toEqual([])
+    const [saved]=await f.runtime.readRuns(f.root),published=await readFile(join(f.root,request.runId,'run.json'),'utf8');expect(saved!.runId).toBe(request.runId);expect(saved!.attempts).toEqual([])
+    expect(published).toBe(JSON.stringify((outcomes[0] as PromiseFulfilledResult<unknown>).value)+'\n');expect(published).toBe(JSON.stringify((outcomes[1] as PromiseFulfilledResult<unknown>).value)+'\n')
     expect(await f.runtime.createVerifiedGroupReceivingRun(request,f.controller)).toEqual(saved!)
     const changed=structuredClone(saved!),original=JSON.parse(changed.remoteRecovery!.originalTask.bytes);original.taskKey='f'.repeat(64)
     changed.remoteRecovery!.originalTask={bytes:f.wire.canonical(original),sha256:f.wire.sha256(f.wire.canonical(original))}
     expect(()=>parseRun(changed)).toThrow('identity')
-  }finally{await rm(f.directory,{recursive:true,force:true})}
-})
+  }finally{releasePublication();await rm(f.directory,{recursive:true,force:true})}
+},10000)
 
 test('group receiving serializes conflicting contenders but publishes only one identity',async()=>{
   const f=await groupReceivingFixture()
+  let releasePublication!:()=>void
+  const publicationReleased=new Promise<void>(resolve=>{releasePublication=resolve})
   try{
     const request=f.request('parent'),conflict={...request,requestId:crypto.randomUUID()}
-    const outcomes=await Promise.allSettled([f.runtime.createVerifiedGroupReceivingRun(request,f.controller),f.runtime.createVerifiedGroupReceivingRun(conflict,f.controller)])
-    expect(outcomes.filter(outcome=>outcome.status==='fulfilled')).toHaveLength(1);expect(outcomes.filter(outcome=>outcome.status==='rejected')).toHaveLength(1)
-    const [saved]=await f.runtime.readRuns(f.root);expect([request.requestId,conflict.requestId]).toContain(saved!.remoteRecovery!.requestId);expect(saved!.attempts).toEqual([])
-  }finally{await rm(f.directory,{recursive:true,force:true})}
+    let publicationStaged!:()=>void,busyObserved!:()=>void
+    const staged=new Promise<void>(resolve=>{publicationStaged=resolve}),busy=new Promise<void>(resolve=>{busyObserved=resolve})
+    const winner=f.controllerFor() as typeof f.controller&Record<symbol,(event:{phase:string})=>Promise<void>>
+    winner[Symbol.for('vegafactory.test.group-receiving-publication-barrier')]=async event=>{if(event.phase==='staged-before-final-verification'){publicationStaged();await publicationReleased}}
+    const contender=f.controllerFor() as typeof f.controller&Record<symbol,(event:{phase:string})=>Promise<void>>
+    contender[Symbol.for('vegafactory.test.group-receiving-publication-barrier')]=async event=>{if(event.phase==='claim-busy')busyObserved()}
+    const first=f.runtime.createVerifiedGroupReceivingRun(request,winner);await staged
+    const second=f.runtime.createVerifiedGroupReceivingRun(conflict,contender);await busy;releasePublication()
+    const outcomes=await Promise.allSettled([first,second])
+    expect(outcomes[0]!.status).toBe('fulfilled');expect(outcomes[1]!.status).toBe('rejected');expect((outcomes[1] as PromiseRejectedResult).reason.message).toContain('identity rebound')
+    const [saved]=await f.runtime.readRuns(f.root),published=await readFile(join(f.root,request.runId,'run.json'),'utf8');expect(saved!.remoteRecovery!.requestId).toBe(request.requestId);expect(saved!.attempts).toEqual([])
+    expect(published).toBe(JSON.stringify((outcomes[0] as PromiseFulfilledResult<unknown>).value)+'\n')
+    await expect(f.runtime.createVerifiedGroupReceivingRun(conflict,f.controller)).rejects.toThrow('identity rebound');expect(await readFile(join(f.root,request.runId,'run.json'),'utf8')).toBe(published)
+  }finally{releasePublication();await rm(f.directory,{recursive:true,force:true})}
 })
+
+test('group receiving recovers a verified dead owner and bounds an abandoned claim guard',async()=>{
+  const dead=await groupReceivingFixture(),{spawn}=await import('node:child_process'),{mkdir,lstat}=await import('node:fs/promises')
+  let child:ReturnType<typeof spawn>|undefined
+  try{
+    const request=dead.request('parent'),claimPath=join(dead.root,request.runId+'.creation'),ready=join(dead.directory,'dead-owner-ready')
+    await mkdir(dead.root,{recursive:true,mode:0o700})
+    const script=`const m=await import(process.env.VSK_CLAIMS_MODULE);const result=await m.acquireClaim(process.env.VSK_CLAIM_PATH,await m.processIdentity());if(result.kind!=='owned')throw Error(result.reason);await Bun.write(process.env.VSK_CLAIM_READY,'ready')`
+    child=spawn(process.execPath,['-e',script],{env:{...process.env,VSK_CLAIMS_MODULE:new URL('../src/claims.ts',import.meta.url).href,VSK_CLAIM_PATH:claimPath,VSK_CLAIM_READY:ready},stdio:['ignore','ignore','pipe']})
+    const errors:string[]=[];child.stderr!.on('data',chunk=>errors.push(String(chunk)))
+    await new Promise<void>((resolve,reject)=>{child!.once('exit',code=>code===0?resolve():reject(Error('claim owner failed: '+errors.join(''))));child!.once('error',reject)})
+    expect(await readFile(ready,'utf8')).toBe('ready');expect((await import('../src/claims.ts')).inspectClaim(claimPath)).resolves.toMatchObject({kind:'stopped'})
+    const run=await dead.runtime.createVerifiedGroupReceivingRun(request,dead.controller);expect(run.runId).toBe(request.runId);expect(await dead.runtime.readRun(dead.root,run.runId)).toEqual(run)
+  }finally{if(child&&child.exitCode===null&&child.signalCode===null)child.kill('SIGKILL');await rm(dead.directory,{recursive:true,force:true})}
+
+  const abandoned=await groupReceivingFixture()
+  try{
+    const request=abandoned.request('parent'),guard=join(abandoned.root,request.runId+'.creation.guard')
+    await mkdir(guard,{recursive:true,mode:0o700})
+    await expect(abandoned.runtime.createVerifiedGroupReceivingRun(request,abandoned.controller)).rejects.toThrow('absent creation owner after busy claim')
+    expect((await lstat(guard)).isDirectory()).toBe(true);expect(await abandoned.runtime.readRuns(abandoned.root)).toEqual([])
+  }finally{await rm(abandoned.directory,{recursive:true,force:true})}
+},10000)
 
 test('group receiving binds effect coverage and complete outstanding task selection on replay',async()=>{
   const f=await groupReceivingFixture({parentTaskIds:['1-T1','1-T2','1-T3'],parentCompleted:['1-T1']})

@@ -6,7 +6,7 @@ import { constants } from 'node:fs'
 import { lstat, mkdir, open, readFile, readdir, rename, rm, realpath } from 'node:fs/promises'
 import { join, dirname, isAbsolute, resolve } from 'node:path'
 import { homedir } from 'node:os'
-import { acquireClaim, releaseClaim, processIdentity, type ProcessIdentity } from './claims.ts'
+import { acquireClaim, inspectClaim, releaseClaim, processIdentity, type ProcessIdentity } from './claims.ts'
 import { parseEvidenceRef, parseCheckpointRef, parseStopProof, parseRecoveryPayload, parseRecoveryEnvelope, type ApprovalAuthorityRef, type ArtifactRef, type ExecutionIdentity, type CheckpointRef, type RecoveryEnvelope, type EvidenceRef, type TaskRecord, type TaskRecordV2, type OperationReceipt, type ParentClaimBinding, type GroupSuccessionReceipt } from './shared-claims.ts'
 export type TerminalCause = 'succeeded' | 'failed' | 'spawn-failed' | 'timed-out' | 'cancelled' | 'interrupted' | 'termination-unconfirmed'
 export interface PendingDelivery {
@@ -587,7 +587,7 @@ function validateGroupTask(task:TaskRecord):void{
 function validateGroupArtifact(artifact:ArtifactRef):void{
   if(!closed(artifact,['repo','issue','kind','artifactId','rev','digest'])||!validRepo(artifact.repo)||!number(artifact.issue)||artifact.issue<1||!['brief','plan'].includes(artifact.kind)||!text(artifact.artifactId)||!number(artifact.rev)||artifact.rev<1||!digest(artifact.digest))throw Error('group receiving artifact differs')
 }
-const groupReceivingLimits={artifactsPerMember:16,sourceRefsPerMember:64,decisionBytes:512*1024,claimWaitMs:5000}
+const groupReceivingLimits={artifactsPerMember:16,sourceRefsPerMember:64,decisionBytes:512*1024,unverifiedClaimWaitMs:2500}
 function groupReceivingFacts(request:GroupReceivingRunRequest,decision:VerifiedGroupReceivingRunDecision){
   if(!closed(decision,['action','reason','succession','members','receiver'])||decision.action!=='resume-group-member'||!text(decision.reason)||!closed(decision.succession,['ref','receipt'])||!Array.isArray(decision.members)||decision.members.length<2||decision.members.length>17||!decision.receiver)throw Error('verified group receiving recovery unavailable')
   if(decision.members.some(member=>!Array.isArray(member?.artifacts)||member.artifacts.length<1||member.artifacts.length>groupReceivingLimits.artifactsPerMember||!Array.isArray(member.sourceRefs)||member.sourceRefs.length<1||member.sourceRefs.length>groupReceivingLimits.sourceRefsPerMember))throw Error('group receiving decision collection bounds exceeded')
@@ -649,13 +649,26 @@ async function verifyGroupReceivingCheckout(request:GroupReceivingRunRequest,fac
   if(head!==facts.checkpoint.headSha||tree!==facts.checkpoint.treeSha||branch!==facts.checkpoint.branch||fingerprint!==facts.receiver.worktreeDigest)throw Error('group receiving checkout changed')
 }
 const groupReceivingPublicationBarrier=Symbol.for('vegafactory.test.group-receiving-publication-barrier')
-type GroupReceivingBarrierController=GroupReceivingRunController&{[groupReceivingPublicationBarrier]?:(event:{phase:'staged-before-final-verification'|'replay-before-final-verification';staging:string|null;final:string})=>Promise<void>}
-async function acquireGroupReceivingClaim(path:string){
-  const identity=await processIdentity(),deadline=Date.now()+groupReceivingLimits.claimWaitMs
+type GroupReceivingBarrierController=GroupReceivingRunController&{[groupReceivingPublicationBarrier]?:(event:{phase:'claim-busy'|'staged-before-final-verification'|'replay-before-final-verification';staging:string|null;final:string;ownerPid?:number})=>Promise<void>}
+async function acquireGroupReceivingClaim(path:string,controller:GroupReceivingRunController,final:string){
+  const identity=await processIdentity()
+  let unverifiedSince:number|null=null,followedClaimToken:string|null=null
   for(;;){
     const result=await acquireClaim(path,identity)
     if(result.kind==='owned')return result.claim
-    if(result.kind==='refused'||Date.now()>=deadline)throw Error('group receiving run creation unavailable: '+result.reason)
+    if(result.kind==='refused')throw Error('group receiving run creation unavailable: '+result.reason)
+    const observed=await inspectClaim(path)
+    if(observed.kind==='refused')throw Error('group receiving run creation unavailable: '+observed.reason)
+    if(observed.kind==='held'){
+      unverifiedSince=null
+      if(observed.token!==followedClaimToken){
+        followedClaimToken=observed.token!
+        await (controller as GroupReceivingBarrierController)[groupReceivingPublicationBarrier]?.({phase:'claim-busy',staging:null,final,ownerPid:observed.pid!})
+      }
+    }else{
+      unverifiedSince??=Date.now()
+      if(Date.now()-unverifiedSince>=groupReceivingLimits.unverifiedClaimWaitMs)throw Error(`group receiving run creation unavailable: ${observed.kind} creation owner after busy claim`)
+    }
     await new Promise<void>(resolve=>setTimeout(resolve,25))
   }
 }
@@ -664,7 +677,8 @@ export async function createVerifiedGroupReceivingRun(request:GroupReceivingRunR
   request=structuredClone(request)
   await mkdir(request.root,{recursive:true,mode:0o700});await privatePath(request.root,true)
   if((await lstat(dirname(request.root))).isSymbolicLink())throw Error('run root parent is a symlink')
-  const lock=await acquireGroupReceivingClaim(join(request.root,request.runId+'.creation'))
+  const final=join(request.root,request.runId)
+  const lock=await acquireGroupReceivingClaim(final+'.creation',controller,final)
   try{
     const first=groupReceivingFacts(request,structuredClone(await controller.verifyRecovery(structuredClone(request))))
     await verifyGroupReceivingCheckout(request,first)
@@ -707,7 +721,6 @@ export async function createVerifiedGroupReceivingRun(request:GroupReceivingRunR
     await mkdir(staging,{mode:0o700})
     try{
       await atomicRunFile(join(staging,'run.json'),run)
-      const final=join(request.root,run.runId)
       await (controller as GroupReceivingBarrierController)[groupReceivingPublicationBarrier]?.({phase:'staged-before-final-verification',staging,final})
       const fresh=groupReceivingFacts(request,structuredClone(await controller.verifyRecovery(structuredClone(request))))
       if(fresh.requestDigest!==first.requestDigest)throw Error('group receiving authority/setup changed during verification')
