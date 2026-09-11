@@ -287,13 +287,19 @@ async function waitForExit(child,timeout) {
 }
 async function startStaleDashboard(expected) {
   const body=JSON.stringify({ok:true,org:expected.org,version:expected.version,instanceId:expected.instanceId,cacheSchema:2,dataState:'ready',sourceAgeSeconds:0})
-  const server=createServer(socket=>socket.end(`HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: ${Buffer.byteLength(body)}\r\nConnection: close\r\n\r\n${body}`))
+  const sockets=new Set()
+  // Keep the probe socket open deliberately: cleanup must not depend on the
+  // launcher's HTTP client releasing an idle connection before the CLI stops.
+  const server=createServer(socket=>{sockets.add(socket);socket.once('close',()=>sockets.delete(socket));socket.write(`HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: ${Buffer.byteLength(body)}\r\nConnection: keep-alive\r\n\r\n${body}`)})
   await new Promise((ok,fail)=>{server.once('error',fail);server.listen(0,'127.0.0.1',ok)})
-  return {server,port:server.address().port}
+  return {server,sockets,port:server.address().port}
 }
-async function closeServer(server) {
+async function closeServer(stale) {
+  const {server,sockets}=stale
   if(!server.listening)return
-  await new Promise((ok,fail)=>server.close(error=>error?fail(error):ok()))
+  const closed=new Promise((ok,fail)=>server.close(error=>error?fail(error):ok(true)))
+  for(const socket of sockets)socket.destroy()
+  if(!await Promise.race([closed,new Promise(ok=>setTimeout(()=>ok(false),1_000))]))throw new Error('stale dashboard cleanup timeout')
 }
 export async function smokePair(manifest,directory) {
   const pair=await verifyPair(manifest,directory)
@@ -371,7 +377,6 @@ export async function smokePair(manifest,directory) {
     result={platform:process.platform,arch:process.arch,node:process.version,npm:command(['npm','--version']),bun:command(['bun','--version']),artifactHashes:manifest.artifacts.map(a=>a.sha256),runtimeBinding,
       installedCli:true,staleListenerRejected:true,ownedChildAlive:true,launcher:{command:launcher.command,ok:launcher.ok,org:launcher.org,version:launcher.version,instanceId:launcher.instanceId,cacheSchema:launcher.cacheSchema,fetched:launcher.fetched},readiness,routes,cleanup}
   } finally {
-    if(stale)await closeServer(stale.server)
     if(launcherProcess) {
       if(launcherProcess.exitCode===null&&launcherProcess.signalCode===null)launcherProcess.kill('SIGTERM')
       cleanup.cliStopped=await waitForExit(launcherProcess,7_000)
@@ -379,8 +384,10 @@ export async function smokePair(manifest,directory) {
     } else cleanup.cliStopped=true
     if(dashboardPid) {
       const deadline=Date.now()+1_000;while(processAlive(dashboardPid)&&Date.now()<deadline)await new Promise(ok=>setTimeout(ok,50))
+      if(processAlive(dashboardPid)){try{process.kill(dashboardPid,'SIGKILL')}catch(error){if(error.code!=='ESRCH')throw error};const killed=Date.now()+1_000;while(processAlive(dashboardPid)&&Date.now()<killed)await new Promise(ok=>setTimeout(ok,50))}
       cleanup.dashboardStopped=!processAlive(dashboardPid)
     } else cleanup.dashboardStopped=true
+    if(stale)await closeServer(stale)
     await rm(home,{recursive:true,force:true});cleanup.isolatedHomeRemoved=true
     if(!cleanup.cliStopped||!cleanup.dashboardStopped)throw new Error('installed CLI dashboard cleanup is unverified')
   }
