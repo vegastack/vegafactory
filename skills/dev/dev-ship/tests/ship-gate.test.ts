@@ -308,7 +308,7 @@ function parentFixture() {
   const pr = {number:200, node_id:'PR200', head:{repo:{full_name:'o/r'},sha:SHA}, base:{repo:{full_name:'o/r'},ref:'main',sha:BASE}, merged:true, merged_at:parentDelivery.mergedAt, merge_commit_sha:merged}
   const requiredDeliveries = [
     {taskRef:{repo:'o/r',issue:135,taskId:'135-T1'},scopeDigest:'1'.repeat(64),childHead:'1'.repeat(40),parentRepo:'o/r',parentIssue:133,parentHead:SHA,acceptance:'implemented'},
-    {taskRef:{repo:'o/r',issue:144,taskId:'144-T1'},scopeDigest:'2'.repeat(64),childHead:'2'.repeat(40),parentRepo:'o/r',parentIssue:133,parentHead:SHA,acceptance:'implemented'},
+    {taskRef:{repo:'o/r',issue:144,taskId:null},scopeDigest:'2'.repeat(64),childHead:'2'.repeat(40),parentRepo:'o/r',parentIssue:133,parentHead:SHA,acceptance:'implemented'},
   ]
   const requiredScopeMatrix = [
     {repo:'o/r',issue:135,mode:'code',taskIds:['135-T1'],disposition:'accepted-code',evidenceRefs:['https://github.com/o/r/issues/135#issuecomment-1']},
@@ -330,6 +330,10 @@ test('verified rebase maps exact reviewed and merged candidate', () => {
 for (const mutation of [
   (f:any)=>{f.acceptedDeliveries.pop()},
   (f:any)=>{f.acceptedDeliveries[0].taskRef.taskId='135-T9'},
+  (f:any)=>{f.requiredDeliveries.push({...f.requiredDeliveries[1],taskRef:{...f.requiredDeliveries[1].taskRef,taskId:'144-T1'}});f.acceptedDeliveries=structuredClone(f.requiredDeliveries)},
+  (f:any)=>{f.requiredDeliveries[0].parentRepo='attacker/other';f.acceptedDeliveries=structuredClone(f.requiredDeliveries)},
+  (f:any)=>{f.requiredDeliveries[0].parentIssue=999;f.acceptedDeliveries=structuredClone(f.requiredDeliveries)},
+  (f:any)=>{f.requiredDeliveries[0].parentHead=BASE;f.acceptedDeliveries=structuredClone(f.requiredDeliveries)},
   (f:any)=>{f.scopeMatrix=f.scopeMatrix.filter((row:any)=>row.disposition!=='partial-code')},
   (f:any)=>{f.scopeMatrix=f.scopeMatrix.filter((row:any)=>row.disposition!=='prepared')},
   (f:any)=>{f.requiredDeliveries[0].acceptance='prepared';f.acceptedDeliveries=structuredClone(f.requiredDeliveries)},

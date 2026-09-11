@@ -177,6 +177,7 @@ export function parseMarker(body) {
 export function evaluateParentDelivery({ parentDelivery: delivery, pr, expected, acceptedDeliveries, requiredDeliveries, scopeMatrix, requiredScopeMatrix, verification }) {
   const blocks = [];
   const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
+  const rowKey = (...parts) => parts.join('#');
   if (!exactKeys(delivery, ['repo', 'parentIssue', 'pr', 'prNodeId', 'acceptedParentHead', 'baseRepo', 'baseRef', 'mergedAt', 'mergedCommit', 'transformation'])
     || !exactKeys(expected, ['repo', 'parentIssue', 'pr', 'prNodeId', 'acceptedParentHead', 'baseRepo', 'baseRef', 'baseSha'])
     || !/^[^/\s]+\/[^/\s]+$/.test(expected.repo) || !/^[^/\s]+\/[^/\s]+$/.test(expected.baseRepo)
@@ -197,11 +198,13 @@ export function evaluateParentDelivery({ parentDelivery: delivery, pr, expected,
     || verification.check?.exit !== 0) blocks.push('exact merged commit range/tree/check proof missing or mismatched');
   const validDelivery = (row) => exactKeys(row, ['taskRef', 'scopeDigest', 'childHead', 'parentRepo', 'parentIssue', 'parentHead', 'acceptance'])
     && exactKeys(row.taskRef, ['repo', 'issue', 'taskId']) && /^[^/\s]+\/[^/\s]+$/.test(row.taskRef.repo)
-    && Number.isSafeInteger(row.taskRef.issue) && row.taskRef.issue > 0 && /^[1-9]\d*-T[1-9]\d*$/.test(row.taskRef.taskId)
+    && Number.isSafeInteger(row.taskRef.issue) && row.taskRef.issue > 0
+    && (row.taskRef.taskId === null || /^[1-9]\d*-T[1-9]\d*$/.test(row.taskRef.taskId))
     && digest(row.scopeDigest) && fullSha(row.childHead) && /^[^/\s]+\/[^/\s]+$/.test(row.parentRepo)
-    && Number.isSafeInteger(row.parentIssue) && row.parentIssue > 0 && fullSha(row.parentHead) && row.acceptance === 'implemented';
+    && Number.isSafeInteger(row.parentIssue) && row.parentIssue > 0 && fullSha(row.parentHead) && row.acceptance === 'implemented'
+    && row.parentRepo === expected.repo && row.parentIssue === expected.parentIssue && row.parentHead === delivery.acceptedParentHead;
   if (!Array.isArray(requiredDeliveries) || requiredDeliveries.length === 0 || !requiredDeliveries.every(validDelivery)
-    || new Set(requiredDeliveries.map((row) => `${row.taskRef.repo}#${row.taskRef.issue}#${row.taskRef.taskId}`)).size !== requiredDeliveries.length
+    || new Set(requiredDeliveries.map((row) => rowKey(row.taskRef.repo, row.taskRef.issue, row.taskRef.taskId))).size !== requiredDeliveries.length
     || !Array.isArray(acceptedDeliveries) || !acceptedDeliveries.every(validDelivery)
     || !same(acceptedDeliveries, requiredDeliveries)) blocks.push('accepted child scope projection is incomplete, invalid or changed');
   const dispositions = ['accepted-code', 'partial-code', 'prepared', 'unperformed-live'];
@@ -214,14 +217,21 @@ export function evaluateParentDelivery({ parentDelivery: delivery, pr, expected,
     && Array.isArray(row.evidenceRefs) && row.evidenceRefs.every((ref) => /^https:\/\//.test(ref))
     && new Set(row.evidenceRefs).size === row.evidenceRefs.length && (row.disposition === 'unperformed-live' || row.evidenceRefs.length > 0);
   if (!Array.isArray(requiredScopeMatrix) || !requiredScopeMatrix.every(validMatrixRow)
-    || new Set(requiredScopeMatrix.map((row) => `${row.repo}#${row.issue}#${row.mode}`)).size !== requiredScopeMatrix.length
+    || new Set(requiredScopeMatrix.map((row) => rowKey(row.repo, row.issue, row.mode))).size !== requiredScopeMatrix.length
     || dispositions.some((disposition) => !requiredScopeMatrix.some((row) => row.disposition === disposition))
     || !Array.isArray(scopeMatrix) || !scopeMatrix.every(validMatrixRow) || !same(scopeMatrix, requiredScopeMatrix)) {
     blocks.push('child acceptance and pending-operations matrix is incomplete, invalid or changed');
   } else if (Array.isArray(requiredDeliveries) && requiredDeliveries.every(validDelivery)) {
-    const delivered = [...requiredDeliveries].map((row) => `${row.taskRef.repo}#${row.taskRef.issue}#${row.taskRef.taskId}`).sort();
-    const accepted = requiredScopeMatrix.filter((row) => row.disposition === 'accepted-code').flatMap((row) => row.taskIds.map((taskId) => `${row.repo}#${row.issue}#${taskId}`)).sort();
-    if (!same(delivered, accepted)) blocks.push('implemented delivery projection differs from accepted-code matrix rows');
+    const acceptedRows = requiredScopeMatrix.filter((row) => row.disposition === 'accepted-code');
+    const covered = acceptedRows.every((matrixRow) => {
+      const deliveries = requiredDeliveries.filter((row) => row.taskRef.repo === matrixRow.repo && row.taskRef.issue === matrixRow.issue);
+      if (deliveries.some((row) => row.taskRef.taskId === null)) return deliveries.length === 1;
+      return same(deliveries.map((row) => row.taskRef.taskId).sort(), [...matrixRow.taskIds].sort());
+    });
+    const namedRows = new Set(acceptedRows.map((row) => rowKey(row.repo, row.issue)));
+    if (!covered || requiredDeliveries.some((row) => !namedRows.has(rowKey(row.taskRef.repo, row.taskRef.issue)))) {
+      blocks.push('implemented delivery projection differs from accepted-code matrix rows');
+    }
   }
   const transform = delivery.transformation;
   if (transform === null) {
