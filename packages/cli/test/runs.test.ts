@@ -491,7 +491,7 @@ test('group receiving recovers a verified dead owner and bounds an abandoned cla
   try{
     const request=abandoned.request('parent'),guard=join(abandoned.root,request.runId+'.creation.guard')
     await mkdir(guard,{recursive:true,mode:0o700})
-    await expect(abandoned.runtime.createVerifiedGroupReceivingRun(request,abandoned.controller)).rejects.toThrow('absent creation owner after busy claim')
+    await expect(abandoned.runtime.createVerifiedGroupReceivingRun(request,abandoned.controller)).rejects.toThrow(/ownerless mutation guard.*offline operator recovery/)
     expect((await lstat(guard)).isDirectory()).toBe(true);expect(await abandoned.runtime.readRuns(abandoned.root)).toEqual([])
   }finally{await rm(abandoned.directory,{recursive:true,force:true})}
 },10000)

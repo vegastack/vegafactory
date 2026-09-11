@@ -615,7 +615,8 @@ export interface CoordinationProvider {
     }>;
 }
 class CoordinationRateLimit extends Error {
-    constructor(readonly retryAfterMs: number) { super('provider rate limited'); }
+    readonly retryAfterMs: number;
+    constructor(retryAfterMs: number) { super('provider rate limited'); this.retryAfterMs = retryAfterMs; }
 }
 // These functions are controller dependencies. Nothing decoded from shared state can provide them.
 export interface CoordinationTarget {
