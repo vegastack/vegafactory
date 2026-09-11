@@ -130,6 +130,7 @@ describe('vegafactory-setup contract', () => {
       '## Accounts',
       '## Toolchain',
       '## Power and login',
+      '## Dispatcher ownership and offline recovery',
       '## Grant the group',
       '## Register the runner',
       '## Verify',
