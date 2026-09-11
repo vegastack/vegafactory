@@ -2,7 +2,7 @@ import { realpath } from 'node:fs/promises'
 import { inspectSpool, spoolRoot } from './stats/outbox.ts'
 import { basicDiagnostic, probePressure, privacyReason } from './stats/privacy.ts'
 import { canonical as canonicalWire } from './shared-claims.ts'
-import { createRun, readRun, transitionRun, updateRun, runsRoot, trustedGitSync, type RunRecord, type TerminalCause, type RunInput, prepareRunAttemptDirectory } from './runs.ts'
+import { createRun, readRun, transitionRun, updateRun, runsRoot, trustedGitResult, trustedGitSync, type RunRecord, type TerminalCause, type RunInput, prepareRunAttemptDirectory } from './runs.ts'
 import { resolveLabels, resolveState } from '../../../skills/dev/dev-setup/scripts/effective-policy.mjs'
 import type { LabelMap } from './config.ts'
 // The dispatcher: what a tick would do, and then doing it. Everything that decides is a pure
@@ -3042,7 +3042,7 @@ async function receivingCheckout(material:RemoteRecoveryMaterial,config:FactoryC
  const existing=trustedGitSync(entry.path,['rev-parse','--verify','refs/heads/'+checkpoint.branch],{timeout:3000})
  if(existing.status===0&&existing.stdout.trim()!==checkpoint.headSha)throw Error('existing original recovery branch differs; source preserved')
  const args={repoRoot:entry.path,issue:material.task.issue,slug:named[3]!,type:named[1]!,home:config.home,devMd:await readFile(join(entry.path,'.vegastack/dev.md'),'utf8'),write:true}
- const restored=existing.status===0?helper.restoreWorktree(args):helper.createChildWorktree({...args,baseSha:checkpoint.headSha})
+ const restored=existing.status===0?helper.restoreWorktree({...args,gitRunner:trustedGitResult}):helper.createChildWorktree({...args,baseSha:checkpoint.headSha,gitRunner:trustedGitResult})
  if(restored.blocks.length||restored.branch!==checkpoint.branch)throw Error('original recovery checkout unavailable: '+restored.blocks.join('; '))
  return realpath(restored.path)
 }

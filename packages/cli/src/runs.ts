@@ -109,12 +109,20 @@ function assertTrustedGitConfiguration(bytes:Buffer|string):void {
     if(executableGitConfig.test(row.slice(0,split)))throw Error('git-executable-config-refused')
   }
 }
-export function trustedGitSync(checkout:string,args:string[],options:{encoding?:BufferEncoding;timeout?:number;maxBuffer?:number;hooksPath?:string}={}):SpawnSyncReturns<string>{
+export function trustedGitSync(checkout:string,args:string[],options:{encoding?:BufferEncoding;timeout?:number;maxBuffer?:number;hooksPath?:string;input?:string|Buffer}={}):SpawnSyncReturns<string>{
   const env=trustedGitEnvironment()
   const config=spawnSync('git',['config','--null','--list'],{cwd:checkout,encoding:'buffer',timeout:options.timeout??5000,maxBuffer:1024*1024,env})
   if(config.status!==0||config.error)throw Error('git-configuration-unavailable')
   assertTrustedGitConfiguration(config.stdout)
-  return spawnSync('git',[...trustedGitConfigArgs(options.hooksPath),...args],{cwd:checkout,encoding:options.encoding??'utf8',timeout:options.timeout??5000,maxBuffer:options.maxBuffer??32*1024*1024,env}) as SpawnSyncReturns<string>
+  return spawnSync('git',[...trustedGitConfigArgs(options.hooksPath),...args],{cwd:checkout,encoding:options.encoding??'utf8',timeout:options.timeout??5000,maxBuffer:options.maxBuffer??32*1024*1024,input:options.input,env}) as SpawnSyncReturns<string>
+}
+export function trustedGitResult(checkout:string,args:string[],options:{input?:string|Buffer;raw?:boolean;timeout?:number;maxBuffer?:number}={}):{ok:boolean;out:string}{
+  try{
+    const result=trustedGitSync(checkout,args,{input:options.input,timeout:options.timeout,maxBuffer:options.maxBuffer})
+    if(result.status!==0||result.error||result.signal)return{ok:false,out:result.stderr?.trim()||result.error?.message||String(result.signal??'git failed')}
+    return{ok:true,out:options.raw?result.stdout:result.stdout.trim()}
+  }catch(error){return{ok:false,out:(error as Error).message}
+  }
 }
 export async function trustedGitBytes(checkout:string,args:string[],timeout=5000,hooksPath?:string):Promise<Buffer>{
   const {execFile}=await import('node:child_process'),{promisify}=await import('node:util'),execute=promisify(execFile),env=trustedGitEnvironment()

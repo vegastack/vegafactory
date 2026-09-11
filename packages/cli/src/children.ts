@@ -11,7 +11,7 @@ import { loadFactoryConfig, repoPolicyFromEffective, stagePolicy, type FactoryCo
 import { loadConfiguredPolicy } from './control-room.ts'
 import { ghText, boundedGhJson, fetchGhPages, readBudget } from './gh.ts'
 import { buildLaunchPlan, validateManagedLaunch, type LaunchPlan } from './launch.ts'
-import { atomicRunFile, readPrivateRunFile, readRun, readRuns, runsRoot, verifyRunAuthority, approvalTools, type RunAuthorityRequest, type RunRecord } from './runs.ts'
+import { atomicRunFile, readPrivateRunFile, readRun, readRuns, runsRoot, trustedGitResult, trustedGitSync, verifyRunAuthority, approvalTools, type RunAuthorityRequest, type RunRecord } from './runs.ts'
 import { acquireSharedTask, transitionSharedTask, publishRecoveryReceipt, readCoordination, inspectGroupSuccession, canonical, parseAcceptedScope, type ParentClaimBinding, type TaskRecord, type SharedClaim, type TaskTransition, type RecoveryEvidencePayload, type AcceptanceRef, type ChildAcceptance, type JoinRef } from './shared-claims.ts'
 import { executeApprovedRun, inspectManagedHarness, shipGuardWired, sharedClaimForRun, sharedRunAdapters, prepareDispatchRun, verifyDispatchRunAuthority, stableGroupRequestId, type PlannedRun, type ExecuteDeps } from './dispatch.ts'
 // Load executable helpers as packaged files, never inline their CLI entrypoints
@@ -60,9 +60,9 @@ const resultPath = (root: string, runId: string) => join(root, runId, 'child-res
 const checkPath = (root: string, runId: string) => join(root, runId, 'child-acceptance.json')
 const joinPath = (root: string, parentRunId: string, childRunId: string) => join(root, parentRunId, 'join-' + childRunId + '.json')
 function git(cwd: string, args: string[]): string {
-  const result = spawnSync('git', args, { cwd, encoding: 'utf8', maxBuffer: 8 * 1024 * 1024 })
-  if (result.status !== 0 || result.error || result.signal) throw Error('git ' + args[0] + ' failed: ' + (result.stderr?.trim() || result.error?.message || result.signal))
-  return result.stdout.trim()
+  const result = trustedGitResult(cwd, args, { maxBuffer: 8 * 1024 * 1024 })
+  if (!result.ok) throw Error('git ' + args[0] + ' failed: ' + result.out)
+  return result.out
 }
 function clean(cwd: string): void {
   if (git(cwd, ['status', '--porcelain', '--untracked-files=all'])) throw Error('checkout has uncommitted work')
@@ -347,7 +347,7 @@ async function prepareChild(child: ChildLaunch, record: ChildrenRecord, parent: 
   try {
     if (!child.runId) {
       const prepared = createChildWorktree({ repoRoot: parent.checkout, issue: child.issue, slug: child.title, type: child.type, baseSha: record.baseSha,
-        devMd: git(parent.checkout, ['show', record.baseSha + ':.vegastack/dev.md']), home: config.home, write: true })
+        devMd: git(parent.checkout, ['show', record.baseSha + ':.vegastack/dev.md']), home: config.home, write: true, gitRunner: trustedGitResult })
       if (prepared.blocks.length) throw Error(prepared.blocks.join('; '))
       if (await realpath(prepared.path) !== child.path || prepared.branch !== child.branch) throw Error('prepared child checkout differs')
     }
@@ -1005,8 +1005,8 @@ export async function fetchChildCheckpoint(input: { checkout: string; run: Pick<
   const repository = await (transport.repository ?? (repo => boundedGhJson<{ node_id: string }>(ghText, ['api', 'repos/' + repo], readBudget())))(run.repo)
   if (repository.node_id !== checkpoint.repositoryId) throw Error('checkpoint repository identity changed')
   await (transport.fetch ?? (async (checkout, repo, headSha) => {
-    const fetched = spawnSync('git', ['-c','credential.interactive=false','fetch','--no-tags','--no-recurse-submodules','https://github.com/' + repo + '.git', headSha],
-      { cwd: checkout, encoding: 'utf8', timeout: 30_000, maxBuffer: 1024 * 1024, env: { ...process.env, GIT_TERMINAL_PROMPT: '0' } })
+    const fetched = trustedGitSync(checkout, ['-c','credential.interactive=false','fetch','--no-tags','--no-recurse-submodules','https://github.com/' + repo + '.git', headSha],
+      { timeout: 30_000, maxBuffer: 1024 * 1024 })
     if (fetched.status !== 0 || fetched.signal || fetched.error) throw Error('exact checkpoint commit fetch unavailable')
   }))(input.checkout, run.repo, checkpoint.headSha)
   if (git(input.checkout, ['rev-parse', checkpoint.headSha + '^{commit}']) !== checkpoint.headSha
@@ -1057,7 +1057,7 @@ async function resolveJoinChild(child: ChildLaunch, parent: RunRecord, config: F
   const result = await verifiedResult(run, child, config)
   if (!same(result, saved)) throw Error('child result changed')
   if(deps.verifyChild)await deps.verifyChild(run,config);else await verifyDispatchRunAuthority(run,config,'effect',{gh:deps.gh})
-  if (spawnSync('git', ['cat-file','-e',result.headSha + '^{commit}'], { cwd: parent.checkout, stdio: 'ignore' }).status !== 0) await fetchChildCheckpoint({ checkout: parent.checkout, run, config })
+  if (trustedGitSync(parent.checkout, ['cat-file','-e',result.headSha + '^{commit}']).status !== 0) await fetchChildCheckpoint({ checkout: parent.checkout, run, config })
   const check = await readOptional<ChildCheck>(checkPath(root, run.runId))
   if (!check) throw Error('source-bound acceptance unavailable')
   return { run, result, check }

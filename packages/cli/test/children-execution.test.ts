@@ -1,5 +1,5 @@
 import { test, expect, spyOn } from 'bun:test'
-import { mkdtemp, mkdir, writeFile, readFile, rm, realpath } from 'node:fs/promises'
+import { mkdtemp, mkdir, writeFile, readFile, rm, realpath, chmod } from 'node:fs/promises'
 import { spawnSync } from 'node:child_process'
 import { writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -822,7 +822,11 @@ test.serial('actual packaged default gateway executes, checkpoints and joins one
     expect(child.checkpoint?.headSha).toBe(result.headSha);expect(git(f.tree,'show',result.headSha+':requested.txt')).toBe('accepted')
     expect(git(f.tree,'ls-remote',f.remote,'refs/heads/'+f.plannedChild.branch).split(/\s/)[0]).toBe(result.headSha);expect(git(f.tree,'ls-remote',f.remote,'refs/heads/main').split(/\s/)[0]).toBe(beforeMain);expect(git(f.tree,'ls-remote',f.remote,'refs/heads/feat/1-parent')).toBe(beforeParent);expect(f.publicWrites).toBe(0)
     await f.addReview(result.headSha)
+    const marker=join(f.home,'untrusted-git-executed'),common=git(f.tree,'rev-parse','--path-format=absolute','--git-common-dir'),hook=join(common,'hooks','pre-merge-commit')
+    await writeFile(hook,`#!/bin/sh\nprintf executed > ${JSON.stringify(marker)}\n`);await chmod(hook,0o755);git(f.tree,'config','core.fsmonitor',hook)
+    const unsafe=await f.cli('join');expect(unsafe.exit).toBe(2);expect(unsafe.result.blocked.some((row:any)=>row.reason.includes('git-executable-config-refused'))).toBe(true);expect(await Bun.file(marker).exists()).toBe(false);git(f.tree,'config','--unset','core.fsmonitor')
     const joined=await f.cli('join');expect(joined.result.blocked,joined.stderr+JSON.stringify(joined.result)).toEqual([]);expect(joined.exit).toBe(0);expect(joined.result.receipts[0]).toMatchObject({fromSha:result.headSha,accepted:true,state:'accepted'})
+    expect(await Bun.file(marker).exists()).toBe(false)
     const parentHead=git(f.tree,'rev-parse','HEAD');expect(git(f.tree,'show','HEAD:requested.txt')).toBe('accepted')
     const replay=await f.cli('join');expect(replay.exit).toBe(0);expect(git(f.tree,'rev-parse','HEAD')).toBe(parentHead);expect(f.vendorEntries).toHaveLength(1)
   }finally{await f.cleanup()}
