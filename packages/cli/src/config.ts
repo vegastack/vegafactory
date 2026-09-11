@@ -8,6 +8,8 @@
 // is `off`, a stage naming a harness this dispatcher cannot launch is dropped rather than guessed,
 // and any unreadable field in factory.json is a named error instead of a default. A dispatcher that
 // silently defaults is a dispatcher that starts a dark build nobody asked for.
+import { readFactoryConfig } from './control-room.ts'
+import { resolvePolicy } from '../../../skills/dev/dev-setup/scripts/effective-policy.mjs'
 import { readFile } from 'node:fs/promises'
 import { isAbsolute, join, resolve } from 'node:path'
 
@@ -30,16 +32,22 @@ export interface FactoryConfig {
   logRoot: string
   lockRoot: string
   dispatcherLock: string
+  executionMode?: 'legacy' | 'shared'
+  settingsPath?: string
 }
 
+export type State = 'needsOperator' | 'needsPlan' | 'ready' | 'working' | 'forOperator'
+export type LabelMap = Record<State, string>
+
 export interface RepoPolicy {
+  labelMap?: LabelMap
   dispatch: 'off' | 'local'
   operators: string[]
   stages: Partial<Record<StageName, StagePolicy>>
+  refusal?: string | null
+  effective?: ReturnType<typeof resolvePolicy>['policy']
 }
 
-const HARNESSES: readonly string[] = ['claude', 'codex']
-const STAGE_NAMES: readonly StageName[] = ['intake', 'plan', 'implement', 'review', 'status', 'chronicle']
 const DEFAULTS = { interval: 120, maxRuns: 1, spawnDepth: 1, concurrent: 3 }
 
 function expandHome(path: string, home: string): string {
@@ -83,6 +91,8 @@ export function parseFactoryConfig(raw: unknown, home: string): FactoryConfig {
   }
 
   const root = join(home, '.vegastack', 'factory')
+  if (document.lockRoot !== undefined && (typeof document.lockRoot !== 'string' || !isAbsolute(document.lockRoot))) throw new Error('factory.json: lockRoot must be one absolute directory shared by this dispatcher account')
+  const lockRoot = typeof document.lockRoot === 'string' ? document.lockRoot : join(root, 'locks')
   return {
     repos: entries,
     interval: positiveInteger(document.interval, 'interval', DEFAULTS.interval),
@@ -95,8 +105,11 @@ export function parseFactoryConfig(raw: unknown, home: string): FactoryConfig {
     home,
     stateFile: join(root, 'state.json'),
     logRoot: join(root, 'logs'),
-    lockRoot: join(root, 'locks'),
-    dispatcherLock: join(root, 'dispatcher.lock'),
+    lockRoot,
+    dispatcherLock: document.lockRoot === undefined ? join(root, 'dispatcher.lock') : join(lockRoot, 'dispatcher.lock'),
+    // Presence of bootstrap opts into shared registration checks, never into authority. The
+    // snapshot/claim owners complete that path; an unavailable registry must not fall back.
+    executionMode: document.machine !== undefined || document.executionMode === 'shared' ? 'shared' : 'legacy',
   }
 }
 
@@ -113,64 +126,42 @@ export async function loadFactoryConfig(path: string, home: string): Promise<Fac
   } catch {
     throw new Error(`factory.json: ${path} is not valid JSON — fix it rather than deleting it, the control-room clone paths live there too`)
   }
-  return parseFactoryConfig(parsed, home)
+  // The pre-sync dispatcher supported unversioned local-only configuration. Preserve that
+  // format for local work; any policy or enrollment state requires a supported schema.
+  const wire = parsed as Record<string, unknown>
+  if (wire.schemaVersion !== undefined || wire.controlRooms !== undefined || wire.machine !== undefined) readFactoryConfig(text)
+  return { ...parseFactoryConfig(parsed, home), settingsPath: resolve(path) }
 }
 
-function stagePolicyFrom(tokens: string[]): StagePolicy | null {
-  if (tokens.length !== 3) return null
-  const [harness, model, effort] = tokens as [string, string, string]
-  if (!HARNESSES.includes(harness)) return null
-  return { harness: harness as Harness, model, effort }
+// Thin adapters preserve the dispatcher shape; all interpretation belongs to the owner helper.
+export interface PolicyContext {
+  org?: string
+  identity?: Record<string, unknown>
+  freshness?: Record<string, unknown>
 }
 
-// Two shapes are read because two shapes exist in the wild: the single `harness-policy:` line a
-// dev.md carries (`<stage> <agent> <model> <effort>` separated by `·`) and the per-stage lines a
-// group.md or an override block uses. A line that is not exactly a stage policy — `review:
-// cross-agent-risky`, say — is left alone rather than half-parsed.
 export function parseRepoPolicy(text: string): RepoPolicy {
-  const body = typeof text === 'string' ? text : ''
-  const dispatchMatch = /^dispatch:\s*([^\s#]+)/m.exec(body)
-  const dispatch = dispatchMatch?.[1] === 'local' ? 'local' : 'off'
-
-  const operatorsMatch = /^operators:\s*([^#\n]+)/m.exec(body)
-  const operators = (operatorsMatch?.[1] ?? '')
-    .split(/[,\s]+/)
-    .map(entry => entry.trim())
-    .filter(entry => entry !== '')
-
-  const stages: Partial<Record<StageName, StagePolicy>> = {}
-  const harnessPolicy = /^harness-policy:\s*([^#\n]+)/m.exec(body)
-  if (harnessPolicy) {
-    for (const segment of harnessPolicy[1]!.split('·')) {
-      const tokens = segment.trim().split(/\s+/)
-      const name = tokens.shift()
-      if (!name || !STAGE_NAMES.includes(name as StageName)) continue
-      const policy = stagePolicyFrom(tokens)
-      if (policy) stages[name as StageName] = policy
-    }
-  }
-  for (const name of STAGE_NAMES) {
-    const line = new RegExp(`^${name}:\\s*([^#\\n]+)`, 'm').exec(body)
-    if (!line) continue
-    const policy = stagePolicyFrom(line[1]!.trim().split(/\s+/))
-    if (policy) stages[name] = policy
-  }
-  return { dispatch, operators, stages }
+  return mergeRepoPolicy(null, text)
 }
 
-// The group default is a floor, not a gate: `dispatch:` is read from the repo alone, because opting
-// a repo into dark builds is that repo operator's word and no org default's.
-export function mergeRepoPolicy(groupMd: string | null, devMd: string): RepoPolicy {
-  const group = parseRepoPolicy(groupMd ?? '')
-  const repo = parseRepoPolicy(devMd)
+export function mergeRepoPolicy(groupMd: string | null, devMd: string, context: PolicyContext = {}): RepoPolicy {
+  const resolved = resolvePolicy({ org: context.org ?? '', group: groupMd ?? '', repo: devMd, identity: context.identity, freshness: context.freshness })
+  return repoPolicyFromEffective(resolved)
+}
+
+export function repoPolicyFromEffective(resolved: ReturnType<typeof resolvePolicy>): RepoPolicy {
   return {
-    dispatch: repo.dispatch,
-    operators: repo.operators.length > 0 ? repo.operators : group.operators,
-    stages: { ...group.stages, ...repo.stages },
+    dispatch: resolved.policy.values.dispatch === 'local' ? 'local' : 'off',
+    operators: resolved.policy.values.operators ?? [],
+    stages: resolved.policy.values.stages ?? {},
+    refusal: resolved.ok ? null : resolved.blocks.join('; '),
+    effective: resolved.policy,
+    labelMap: resolved.policy.values['workflow-labels'],
   }
 }
 
 export function stagePolicy(policy: RepoPolicy, stage: Stage): StagePolicy {
+  if (policy.refusal) throw new Error(policy.refusal)
   const name: StageName = stage === 'corrections' ? 'implement' : stage
   const found = policy.stages[name]
   if (!found) throw new Error(`no harness policy for the ${stage} stage — add a ${name} entry to harness-policy: in dev.md`)

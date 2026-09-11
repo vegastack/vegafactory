@@ -1,7 +1,7 @@
 import { FilterBar } from '@/components/filter-bar'
 import { Shell } from '@/components/shell'
-import { hours, money, StatTable } from '@/components/stat-table'
-import { loadContext } from '@/lib/context'
+import { hours, money, quantity, StatTable } from '@/components/stat-table'
+import { withContext } from '@/lib/context'
 import { readRepoSummary } from '@/lib/stats/summaries'
 import { buildRepoView } from '@/lib/views/repo'
 
@@ -13,11 +13,21 @@ export default async function RepoPage({ params, searchParams }: {
 }) {
   const { owner, name } = await params
   const repo = `${owner}/${name}`
-  const context = await loadContext(await searchParams)
-  const view = buildRepoView({ context, repo, summary: await readRepoSummary(context.env.controlRoom, repo, context.filters.month) })
+  return withContext(await searchParams, async context => {
+    if (!context.allowedRepos?.includes(repo)) {
+      return (
+        <Shell title={`${context.env.org} · repository unavailable`} freshness={context.freshness} pathname={`/repo/${repo}`} filters={context.filters}>
+          <p className="text-muted-foreground text-sm">This repository is outside the current verified reporting scope.</p>
+        </Shell>
+      )
+    }
+    const summary = context.filters.attributedRepos?.includes(repo)
+      ? await readRepoSummary(context.env.controlRoom, repo, context.filters.month)
+      : null
+    const view = buildRepoView({ context, repo, summary })
 
-  return (
-    <Shell title={`${repo} — ${view.month}`} freshness={context.freshness}>
+    return (
+    <Shell title={`${repo} · ${view.month}`} freshness={context.freshness} pathname={`/repo/${repo}`} filters={context.filters}>
       <FilterBar base={`/repo/${repo}`} options={context.options} filters={context.filters} />
 
       {view.missing.length > 0 && (
@@ -30,18 +40,18 @@ export default async function RepoPage({ params, searchParams }: {
         {[
           { label: 'Lead time p50', value: hours(view.leadTimeH.p50) },
           { label: 'Lead time p90', value: hours(view.leadTimeH.p90) },
-          { label: 'Runs', value: String(view.totals.runs) },
-          { label: 'Cost', value: money(view.totals.costUsd) },
+          { label: 'Terminal segments', value: String(view.totals.runs) },
+          { label: 'Reported cost', value: money(view.totals.costUsd) },
         ].map((tile) => (
           <div key={tile.label} className="border-border rounded-lg border p-4">
             <dt className="text-muted-foreground text-sm">{tile.label}</dt>
-            <dd className="mt-1 text-2xl font-semibold tabular-nums">{tile.value}</dd>
+            <dd className="mt-1 text-2xl font-medium tabular-nums">{tile.value}</dd>
           </div>
         ))}
       </dl>
 
       <section className="mb-8">
-        <h2 className="mb-3 text-lg font-semibold">Cycle time by state</h2>
+        <h2 className="mb-3 text-lg font-medium">Cycle time by state</h2>
         <StatTable
           caption="Hours issues sat in each workflow state, from the rollup's label timelines"
           rows={view.cycleTimeH}
@@ -56,37 +66,38 @@ export default async function RepoPage({ params, searchParams }: {
       </section>
 
       <section className="mb-8">
-        <h2 className="mb-3 text-lg font-semibold">Stages</h2>
+        <h2 className="mb-3 text-lg font-medium">Stages</h2>
         <StatTable
-          caption="Runs, cost and human touchpoints per workflow stage, from the cache"
+          caption="Reported execution usage per workflow stage, from the cache"
           rows={view.stages}
           rowKey={(row) => row.stage}
           empty="No stages recorded for this month."
           columns={[
             { key: 'stage', label: 'Stage', render: (row) => row.stage },
-            { key: 'runs', label: 'Runs', align: 'end', render: (row) => row.runs },
-            { key: 'cost', label: 'Cost', align: 'end', render: (row) => money(row.costUsd) },
-            { key: 'human', label: 'Human touchpoints', align: 'end', render: (row) => row.humanTouchpoints },
+            { key: 'runs', label: 'Terminal segments', align: 'end', render: (row) => row.runs },
+            { key: 'cost', label: 'Reported cost', align: 'end', render: (row) => money(row.costUsd) },
+            { key: 'operator', label: 'Operator minutes', align: 'end', render: (row) => quantity(row.operatorMinutes) },
           ]}
         />
       </section>
 
       <section>
-        <h2 className="mb-3 text-lg font-semibold">Issues</h2>
+        <h2 className="mb-3 text-lg font-medium">Task-linked issue subtotals</h2>
         <StatTable
-          caption="Cost and rework per issue"
+          caption="Task-linked reported cost and monthly rework per issue"
           rows={view.issues}
           rowKey={(row) => String(row.issue)}
           empty="No issues recorded for this month."
           columns={[
             { key: 'issue', label: 'Issue', render: (row) => `#${row.issue}` },
-            { key: 'cost', label: 'Cost', align: 'end', render: (row) => money(row.costUsd) },
-            { key: 'review', label: 'Review rounds', align: 'end', render: (row) => row.reviewRounds },
-            { key: 'fix', label: 'Fix rounds', align: 'end', render: (row) => row.fixRounds },
-            { key: 'handbacks', label: 'Handbacks', align: 'end', render: (row) => row.handbacks },
+            { key: 'cost', label: 'Reported cost', align: 'end', render: (row) => money(row.costUsd) },
+            { key: 'review', label: 'Monthly reviews', align: 'end', render: (row) => quantity(row.reviewRounds) },
+            { key: 'fix', label: 'Monthly corrections', align: 'end', render: (row) => quantity(row.fixRounds) },
+            { key: 'handbacks', label: 'Monthly handbacks', align: 'end', render: (row) => quantity(row.handbacks) },
           ]}
         />
       </section>
     </Shell>
-  )
+    )
+  })
 }

@@ -1,5 +1,5 @@
-import { describe, expect, test } from 'bun:test'
-import { chmodSync, mkdtempSync, readFileSync, symlinkSync, writeFileSync } from 'node:fs'
+import { describe, expect, spyOn, test } from 'bun:test'
+import { chmodSync, mkdtempSync, readFileSync, realpathSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { mkdirSync } from 'node:fs'
@@ -10,8 +10,13 @@ import {
   defaultParentCandidates, parentParallelLaunch, parentParallelLaunchPlan,
   type BoardIssue, type DispatchState, type GuardState, type Rocket,
 } from '../src/dispatch.ts'
-import { buildLaunchPlan } from '../src/launch.ts'
+import { runStatusCli } from '../src/status.ts'
+import { buildLaunchPlan, validateManagedLaunch } from '../src/launch.ts'
 import { parseFactoryConfig, parseRepoPolicy } from '../src/config.ts'
+
+const SHIP_POLICY = join(import.meta.dir, '../../../skills/dev/dev-setup/scripts/ship-policy.mjs')
+process.env.VSK_SHIP_POLICY_SCRIPT = SHIP_POLICY
+const GUARD_BYTES = readFileSync(join(import.meta.dir, '../../../skills/dev/dev-setup/assets/hooks/ship-guard.mjs'))
 
 const issue = (number: number, labels: string[], assignees: string[] = []): BoardIssue =>
   ({ number, title: `feat: thing ${number}`, labels, assignees, updatedAt: '2026-09-03T10:00:00Z' })
@@ -19,9 +24,9 @@ const issue = (number: number, labels: string[], assignees: string[] = []): Boar
 describe('searchQueries', () => {
   test('one query per state, scoped to the repo, ready excluding assignees', () => {
     const q = searchQueries('acme/app')
-    expect(q.needsPlan).toBe('repo:acme/app is:issue is:open label:needs-plan')
-    expect(q.ready).toBe('repo:acme/app is:issue is:open label:ready no:assignee')
-    expect(q.corrections).toBe('repo:acme/app is:issue is:open label:for-operator')
+    expect(q.needsPlan).toBe('repo:acme/app is:issue is:open label:"needs-plan"')
+    expect(q.ready).toBe('repo:acme/app is:issue is:open label:"ready" no:assignee')
+    expect(q.corrections).toBe('repo:acme/app is:issue is:open label:"for-operator"')
   })
 
   test('every tick asks for every for-operator issue — a reaction never moves updated_at, so no window could find it', () => {
@@ -45,7 +50,7 @@ describe('planLabelRuns', () => {
   test('an issue carrying two state labels is refused, never guessed', () => {
     const plan = planLabelRuns({ repo: 'acme/app', needsPlan: [issue(10, ['needs-plan', 'working'])], ready: [] })
     expect(plan.runs).toEqual([])
-    expect(plan.refusals[0]!.reason).toContain('two state labels')
+    expect(plan.refusals[0]!.reason).toContain('conflicting state labels')
   })
 
   test('an epic never starts a run, whatever state label it carries', () => {
@@ -167,7 +172,10 @@ describe('shipGuardWired', () => {
   function repoWith(options: { guard: boolean; settings: string | null; harness: 'claude' | 'codex' }): string {
     const root = mkdtempSync(join(tmpdir(), 'vsk-guard-'))
     mkdirSync(join(root, '.vegastack/hooks'), { recursive: true })
-    if (options.guard) writeFileSync(join(root, '.vegastack/hooks/ship-guard.mjs'), '// guard\n')
+    if (options.guard) writeFileSync(join(root, '.vegastack/hooks/ship-guard.mjs'), GUARD_BYTES)
+    writeFileSync(join(root, '.vegastack/dev.md'), 'gates: 3\n')
+    expect(Bun.spawnSync(['git', 'init', '-q', root]).exitCode).toBe(0)
+    expect(Bun.spawnSync(['git', '-C', root, 'remote', 'add', 'origin', 'https://github.com/acme/app.git']).exitCode).toBe(0)
     const dir = options.harness === 'claude' ? '.claude' : '.codex'
     const file = options.harness === 'claude' ? 'settings.json' : 'hooks.json'
     mkdirSync(join(root, dir), { recursive: true })
@@ -176,6 +184,14 @@ describe('shipGuardWired', () => {
   }
 
   const claudeSettings = JSON.stringify({ hooks: { PreToolUse: [{ matcher: 'Bash', hooks: [{ type: 'command', command: 'node .vegastack/hooks/ship-guard.mjs --harness claude' }] }] } })
+
+  test('F4: an unrelated command field cannot wire a real installed guard', async () => {
+    const root = repoWith({ guard: true, settings: JSON.stringify({ unrelated: { command: 'echo ship-guard.mjs' } }), harness: 'claude' })
+    writeFileSync(join(root, '.vegastack/hooks/ship-guard.mjs'), readFileSync(join(import.meta.dir, '../../../skills/dev/dev-setup/assets/hooks/ship-guard.mjs')))
+    const result = await shipGuardWired(root, 'claude')
+    expect(result.wired).toBe(false)
+    expect(result.detail).toContain('PreToolUse')
+  })
 
   test('a guard file wired into the harness config reads as wired', async () => {
     const result = await shipGuardWired(repoWith({ guard: true, settings: claudeSettings, harness: 'claude' }), 'claude')
@@ -187,12 +203,13 @@ describe('shipGuardWired', () => {
     const repoPath = repoWith({ guard: true, settings: claudeSettings, harness: 'claude' })
     const missing = await shipGuardWired(repoPath, 'claude', { home, repo: 'acme/app' })
     expect(missing.wired).toBe(false)
-    expect(missing.detail).toContain('acme__app.json')
+    expect(missing.detail).toContain('policy')
     expect(missing.detail).toContain('vegafactory guard sync')
     mkdirSync(join(home, '.vegastack/guard'), { recursive: true })
     writeFileSync(join(home, '.vegastack/guard/acme__app.json'), JSON.stringify({ schemaVersion: 1, repo: 'acme/other' }))
     expect((await shipGuardWired(repoPath, 'claude', { home, repo: 'acme/app' })).wired).toBe(false)
-    writeFileSync(join(home, '.vegastack/guard/acme__app.json'), JSON.stringify({ schemaVersion: 1, repo: 'acme/app', defaultBranch: 'main', gates: 3, environments: [], shipAsk: [] }))
+    const compiled = Bun.spawnSync(['node', SHIP_POLICY, '--write', '--json'], { cwd: repoPath, env: { ...process.env, HOME: home } })
+    expect(compiled.exitCode, compiled.stdout.toString()).toBe(0)
     expect((await shipGuardWired(repoPath, 'claude', { home, repo: 'acme/app' })).wired).toBe(true)
   })
 
@@ -285,16 +302,16 @@ describe('redact', () => {
 })
 
 describe('failureComment', () => {
-  test('is a handback comment naming the exit code and carrying the redacted last 40 lines', () => {
+  test('is a handback comment with reason and no private path or transcript', () => {
     const log = Array.from({ length: 60 }, (_, i) => `line ${i} ghp_abcdefghijklmnopqrstuvwxyz0123456789`).join('\n')
     const body = failureComment({ issue: 12, stage: 'implement', exitCode: 1, timedOut: false, log, worktree: '/w/12-thing', at: '2026-09-03T10:04:05Z' })
     expect(body.startsWith('<!-- vsk:v1 type=handback -->')).toBe(true)
     expect(body).toContain('## Hand-back')
     expect(body).toContain('exit 1')
-    expect(body).toContain('/w/12-thing')
+    expect(body).not.toContain('/w/12-thing')
     expect(body).not.toContain('ghp_abcdefghijklmnopqrstuvwxyz0123456789')
     expect(tailLines(log, 40).split('\n')).toHaveLength(40)
-    expect(body).toContain('line 59')
+    expect(body).not.toContain('line 59')
     expect(body).not.toContain('line 19')
   })
 
@@ -304,70 +321,71 @@ describe('failureComment', () => {
   })
 })
 
+// Real log discovery and status decoding; only board/worktree dependencies are offline.
+async function statusRuns(home: string) {
+  const configPath = join(home, 'factory.json')
+  writeFileSync(configPath, JSON.stringify({ repos: [{ path: home, repo: 'acme/app', org: 'acme' }] }))
+  const output = spyOn(console, 'log').mockImplementation(() => {})
+  try {
+    expect(await runStatusCli(['--config', configPath, '--json'], home, {
+      gh: async () => '{"items":[]}', worktrees: async () => [],
+    })).toBe(0)
+    return JSON.parse(output.mock.calls.at(-1)![0] as string).repos[0].runs
+  } finally { output.mockRestore() }
+}
+
+
 describe('executeRun', () => {
   function harnessStub(body: string): string {
     const dir = mkdtempSync(join(tmpdir(), 'vsk-run-'))
-    const path = join(dir, 'harness.sh')
-    writeFileSync(path, body)
-    chmodSync(path, 0o755)
-    return path
+    const path = join(dir, 'harness.sh');writeFileSync(path, body);chmodSync(path, 0o755);return path
   }
-
   const runFor = (home: string) => parseFactoryConfig({ repos: [{ path: '/w', repo: 'acme/app', org: 'acme' }] }, home)
   const planned = { repo: 'acme/app', issue: 12, title: 'feat: thing', stage: 'implement' as const, commentId: null, reactionId: null }
-
-  test('a clean run logs its streams and its exit, pushes the branch, and hands nothing back', async () => {
-    const home = mkdtempSync(join(tmpdir(), 'vsk-home-'))
-    const command = harnessStub('#!/bin/sh\necho hello\n')
-    const calls: string[][] = []
-    const outcome = await executeRun(planned, { command, args: [], env: {}, cwd: home, prompt: 'p' }, runFor(home), { operator: 'mk' }, {
-      now: () => new Date('2026-09-03T10:04:05Z'),
-      gh: async args => { calls.push(args); return '' },
-      git: async args => { calls.push(['git', ...args]); return { ok: true, message: '' } },
-    })
-    expect(outcome.exitCode).toBe(0)
-    expect(outcome.handedBack).toBe(false)
-    expect(outcome.pushed).toBe(true)
-    expect(calls.some(call => call.join(' ') === 'git push -u origin HEAD')).toBe(true)
-    expect(calls.some(call => call[0] === 'issue')).toBe(false)
-    const log = readFileSync(outcome.logFile, 'utf8').trim().split('\n').map(line => JSON.parse(line))
-    expect(log[0].event).toBe('start')
-    expect(log.some(row => row.text?.includes('hello'))).toBe(true)
-    expect(log.at(-1).event).toBe('exit')
+  test('successful execution persists lifecycle metadata without implicit source delivery or raw output', async () => {
+    const home=mkdtempSync(join(tmpdir(),'vsk-home-')),command=harnessStub('#!/bin/sh\necho private-transcript-canary\n')
+    let sends=0
+    const result=await executeRun(planned,{command,args:[],env:{},cwd:home,prompt:'private-prompt'},runFor(home),{operator:null},{wrapperPath:join(import.meta.dir,'../src/run-wrapper.ts'),gh:async()=>{sends++;return ''},git:async()=>{sends++;return{ok:true,message:''}}})
+    expect(result.terminationCause).toBe('succeeded');expect(result.exitCode).toBe(0);expect(result.pushed).toBe(false);expect(sends).toBe(0)
+    const log=readFileSync(result.logFile,'utf8');expect(log).toContain('"event":"start"');expect(log).toContain('"event":"exit"');expect(log).not.toContain('private-transcript-canary');expect(log).not.toContain('private-prompt')
+  })
+  test('silent actual spawn persists corrections identity before output or exit', async () => {
+    const home = mkdtempSync(join(tmpdir(), 'vsk-silent-'))
+    const release = join(home, 'release')
+    const command = harnessStub('#!/bin/sh\nwhile [ ! -f "$1" ]; do sleep 0.01; done\n')
+    let acknowledge!: () => void
+    const acknowledged = new Promise<void>(resolve => { acknowledge = resolve })
+    const running = executeRun({ ...planned, stage: 'corrections' },
+      { command, args: [release], env: {}, cwd: home, prompt: 'p' }, runFor(home),
+      { operator: null, onSpawn: acknowledge }, {
+        wrapperPath: join(import.meta.dir,'../src/run-wrapper.ts'),timeoutMs: 3000, gh: async () => '', git: async () => ({ ok: true, message: '' }),
+      })
+    try {
+      await acknowledged
+      // Poll the consumer-visible boundary, with the child held silent until assertions finish.
+      let runs = []
+      for (let i = 0; i < 50; i++) {
+        runs = await statusRuns(home)
+        if (runs[0]?.issue === planned.issue) break
+        await new Promise(resolve => setTimeout(resolve, 10))
+      }
+      expect(runs).toHaveLength(1)
+      expect(runs[0]).toMatchObject({ issue: 12, stage: 'corrections', exitCode: null })
+      expect(runs[0].startedAt).not.toBe('')
+    } finally {
+      writeFileSync(release, '')
+      await running
+    }
+    expect((await statusRuns(home))[0]).toMatchObject({ issue: 12, stage: 'corrections', exitCode: 0 })
   })
 
-  test('a failing run posts the hand-back, moves the label and assigns the operator', async () => {
-    const home = mkdtempSync(join(tmpdir(), 'vsk-home-'))
-    const command = harnessStub('#!/bin/sh\necho "boom ghp_abcdefghijklmnopqrstuvwxyz0123456789" >&2\nexit 3\n')
-    const calls: { args: string[]; input?: string }[] = []
-    const outcome = await executeRun(planned, { command, args: [], env: {}, cwd: home, prompt: 'p' }, runFor(home), { operator: 'mk' }, {
-      now: () => new Date('2026-09-03T10:04:05Z'),
-      gh: async (args, options) => { calls.push({ args, input: options?.input }); return '' },
-      git: async () => ({ ok: true, message: '' }),
-    })
-    expect(outcome.exitCode).toBe(3)
-    expect(outcome.handedBack).toBe(true)
-    const comment = calls.find(call => call.args[0] === 'issue' && call.args[1] === 'comment')!
-    expect(comment.args).toContain('--body-file')
-    expect(comment.input).toContain('exit 3')
-    expect(comment.input).not.toContain('ghp_abcdefghijklmnopqrstuvwxyz0123456789')
-    const edit = calls.find(call => call.args[1] === 'edit')!
-    expect(edit.args).toEqual(['issue', 'edit', '12', '--repo', 'acme/app', '--add-label', 'needs-operator', '--remove-label', 'working', '--add-assignee', 'mk'])
-  })
-
-  test('a hand-back gh cannot post is logged, and never throws out of the tick', async () => {
-    const home = mkdtempSync(join(tmpdir(), 'vsk-home-'))
-    const command = harnessStub('#!/bin/sh\nexit 1\n')
-    const outcome = await executeRun(planned, { command, args: [], env: {}, cwd: home, prompt: 'p' }, runFor(home), { operator: null }, {
-      now: () => new Date('2026-09-03T10:04:05Z'),
-      gh: async () => { throw new Error('gh issue comment failed: HTTP 403') },
-      git: async () => ({ ok: false, message: 'no upstream' }),
-    })
-    expect(outcome.handedBack).toBe(false)
-    expect(outcome.pushed).toBe(false)
-    const log = readFileSync(outcome.logFile, 'utf8')
-    expect(log).toContain('handback-failed')
-    expect(log).toContain('push-failed')
+  test('spawn failure has durable diagnostic identity and no delivery; a subsequent explicit attempt starts',async()=>{
+    const home=mkdtempSync(join(tmpdir(),'vsk-refusal-')),command=join(home,'retry.sh');let starts=0
+    const launch=()=>executeRun(planned,{command,args:[],env:{},cwd:home,prompt:''},runFor(home),{operator:null,onSpawn:()=>{starts++}},{wrapperPath:join(import.meta.dir,'../src/run-wrapper.ts')})
+    const first=await launch();expect(first.started).toBe(false);expect(first.terminationCause).toBe('spawn-failed');expect(starts).toBe(0)
+    expect((await statusRuns(home))[0]).toMatchObject({state:'terminal',terminationCause:'spawn-failed'})
+    writeFileSync(command,'#!/bin/sh\nexit 0\n');chmodSync(command,0o755)
+    const next=await launch();expect(next.started).toBe(true);expect(next.runId).not.toBe(first.runId);expect(starts).toBe(1)
   })
 })
 
@@ -414,10 +432,10 @@ describe('locks', () => {
     expect((await readLock(path)).held).toBe(false)
   })
 
-  test('a lock left by a dead process is stale, not a wedge', async () => {
+  test('a legacy PID-only lock is preserved for explicit recovery', async () => {
     const path = join(mkdtempSync(join(tmpdir(), 'vsk-lock-')), 'app.lock')
     writeFileSync(path, JSON.stringify({ pid: 2147483000, at: '2026-09-03T10:00:00Z' }))
-    expect(await readLock(path)).toEqual({ held: false, pid: 2147483000 })
+    expect((await readLock(path)).held).toBe(true)
   })
 })
 
@@ -477,16 +495,16 @@ describe('parentParallelLaunch', () => {
     expect(parentParallelLaunch([ready[0]!, { ...ready[1]!, assignee: 'kmanojkumar' }], groups, parent)).toBeNull()
     expect(parentParallelLaunch(ready, [groups[0]!], parent)).toBeNull()
   })
-  test('the launch asks for the workflow in plain words and allows the Workflow tool', () => {
+  test('the parent launch names the verified CLI owner without an alternate workflow allowance', () => {
     const plan = parentParallelLaunchPlan(parentParallelLaunch(ready, groups, parent)!, parent, {
       harness: 'claude', model: 'fable-5-1', effort: 'high', operator: 'kmanojkumar', subagents: { spawnDepth: 2, concurrent: 4 },
     })
     expect(plan.args).toContain('--permission-mode')
     expect(plan.args).toContain('bypassPermissions')
-    expect(plan.args.join(' ')).toContain('--allowed-tools Workflow')
-    expect(plan.prompt).toContain('implement-children')
+    expect(plan.args).not.toContain('--allowed-tools')
+    expect(plan.prompt).toContain('vegafactory children run')
   })
-  test('the parent launch reuses the launch table, adding only the Workflow allowance', () => {
+  test('the parent launch reuses the shared launch table', () => {
     const base = buildLaunchPlan({
       harness: 'claude', model: 'fable-5-1', effort: 'high', stage: 'implement', worktree: parent.worktree,
       issue: { number: 104, title: 'parent' }, operator: 'kmanojkumar', outcome: 'x', stopList: [],
@@ -495,13 +513,12 @@ describe('parentParallelLaunch', () => {
     const plan = parentParallelLaunchPlan(parentParallelLaunch(ready, groups, parent)!, parent, {
       harness: 'claude', model: 'fable-5-1', effort: 'high', operator: 'kmanojkumar', subagents: { spawnDepth: 2, concurrent: 4 },
     })
-    expect(plan.args.filter(a => a !== plan.prompt)).toEqual([...base.args.filter(a => a !== base.prompt), '--allowed-tools', 'Workflow'])
+    expect(plan.args.filter(a => a !== plan.prompt)).toEqual(base.args.filter(a => a !== base.prompt))
     expect(plan.env).toEqual(base.env)
   })
-  // F28: the parallel path launches the repo's implement harness. On Codex there is no saved
-  // workflow and no Workflow tool: the parent is asked to drive children.mjs, whose Codex path is
-  // one `codex exec -C <child worktree>` per child.
-  test('a codex implement stage launches codex for the parent, with no Workflow allowance and the children.mjs path in the prompt', () => {
+  // Both parent harnesses direct execution to the verified CLI gateway, which
+  // prepares each child and uses the shared launch/runtime owner.
+  test('a Codex parent uses the same verified child CLI gateway', () => {
     const run = parentParallelLaunch(ready, groups, parent)!
     const plan = parentParallelLaunchPlan(run, parent, {
       harness: 'codex', model: 'gpt-5.6', effort: 'high', operator: 'kmanojkumar', subagents: { spawnDepth: 2, concurrent: 4 },
@@ -514,7 +531,8 @@ describe('parentParallelLaunch', () => {
     expect(plan.command).toBe('codex')
     expect(plan.args.filter(a => a !== plan.prompt)).toEqual(base.args.filter(a => a !== base.prompt))
     expect(plan.args).not.toContain('--allowed-tools')
-    expect(plan.prompt).toContain('--harness codex')
+    expect(plan.prompt).toContain('vegafactory children run')
+    expect(plan.prompt).toContain('CLI owns execution for codex')
     expect(plan.prompt).not.toContain('saved workflow')
   })
   test('a parent-parallel run replaces its children in the tick', () => {
@@ -531,19 +549,12 @@ describe('parentParallelLaunch', () => {
   })
 })
 
-describe('the Codex child launch and the launch table cannot drift', () => {
-  test('one child argv is the table argv with -C pointed at the child worktree', async () => {
+describe('the retired Codex child launcher cannot become an alternate execution owner', () => {
+  test('the compatibility export refuses and names the shared CLI gateway', async () => {
     const { codexChildLaunch } = await import('../../../skills/dev/dev-implement/scripts/children.mjs')
-    const child = { path: '/r/.vegastack/.worktrees/131-x', branch: 'feat/131-x', baseSha: 'abc1234', issue: 131, title: 'x', files: ['a.ts'] }
-    const launch = codexChildLaunch(child, { model: 'gpt-5.6', effort: 'high', parentIssue: 104, parentBranch: 'feat/104-p' })
-    const table = buildLaunchPlan({
-      harness: 'codex', model: 'gpt-5.6', effort: 'high', stage: 'implement', worktree: child.path,
-      issue: { number: 131, title: 'x' }, operator: 'kmanojkumar', outcome: 'x', stopList: [],
-      resume: false, skillPath: null, subagents: { spawnDepth: 2, concurrent: 4 },
-    })
-    expect(launch.command).toBe(table.command)
-    expect(launch.args.map(a => (a === launch.prompt ? '<prompt>' : a)))
-      .toEqual(table.args.map(a => (a === table.prompt ? '<prompt>' : a)))
+    expect(() => codexChildLaunch()).toThrow(
+      'legacy argv launch is unavailable; use vegafactory children run',
+    )
   })
 })
 
@@ -567,7 +578,10 @@ describe('defaultParentCandidates', () => {
   const ghFor = (comments: Array<{ body: string; user?: { login: string } }>) => async (args: string[]): Promise<string> => {
     if (args[0] === 'issue' && args.includes('parent')) return JSON.stringify({ parent: { number: 104 } })
     if (args[0] === 'issue' && args.includes('title')) return JSON.stringify({ title: 'feat: the factory runtime' })
-    if (args[0] === 'api') return JSON.stringify(comments)
+    if (args[0] === 'api') {
+      const body = JSON.stringify(comments.map((comment, index) => ({ id: index + 1, ...comment })))
+      return args.includes('--include') ? 'HTTP/2.0 200 OK\r\nx-test: parent-comments\r\n\r\n' + body : body
+    }
     return '{}'
   }
 
@@ -609,4 +623,61 @@ describe('defaultParentCandidates', () => {
     expect(candidates).toHaveLength(1)
     expect(candidates[0]?.groups[0]?.files).toEqual(['packages/cli/src/dispatch.ts'])
   })
+})
+
+
+describe('managed launches exclude native memory without disabling project instructions', () => {
+  const input = { harness: 'codex' as const, model: 'fixture', effort: 'high', stage: 'implement' as const, worktree: '/prepared', issue: { number: 140, title: 'fixture' }, operator: 'mk', outcome: 'fixture', stopList: [], resume: false, skillPath: null, subagents: { spawnDepth: 1, concurrent: 3 } }
+  test('Codex has explicit retrieval, generation, import and optional context controls', () => {
+    const plan = buildLaunchPlan(input)
+    expect(plan.remoteEffectCoverage).toEqual({ kind: 'unmanaged-possible', reasonCode: 'hook-configuration-only' })
+    expect(plan.args).toContain('memories.use_memories=false')
+    expect(plan.args).toContain('memories.generate_memories=false')
+    expect(plan.args).toContain('features.context_management.experimental_mode=false')
+    const metadata = { version: 'codex-cli 0.153.4', hookApplicable: true, memoryRetrievalDisabled: true, memoryGenerationDisabled: true, features: { hooks: true, memories: false, external_agent_memory_import: false, context_management: false } }
+    expect(validateManagedLaunch(plan, metadata).ok).toBe(true)
+    expect(validateManagedLaunch(plan, { ...metadata, version: 'codex-cli 0.100.0' }).ok).toBe(false)
+    expect(validateManagedLaunch(plan, { ...metadata, features: { ...metadata.features, context_management: true } }).ok).toBe(false)
+    expect(validateManagedLaunch({ ...plan, args: [...plan.args, '-c', 'memories.use_memories=true'] }, metadata).ok).toBe(false)
+  })
+  test('Claude disables auto memory only for the managed session, retaining hooks and project guidance', () => {
+    const plan = buildLaunchPlan({ ...input, harness: 'claude' })
+    expect(plan.env.CLAUDE_CODE_DISABLE_AUTO_MEMORY).toBe('1')
+    expect(plan.args).not.toContain('--bare')
+    expect(plan.env.CLAUDE_CODE_DISABLE_CLAUDE_MDS).not.toBe('1')
+    expect(validateManagedLaunch(plan, { version: '2.1.263 (Claude Code)', hookApplicable: true, memoryRetrievalDisabled: true, memoryGenerationDisabled: true }).ok).toBe(true)
+    expect(validateManagedLaunch({ ...plan, env: { ...plan.env, CLAUDE_CODE_DISABLE_AUTO_MEMORY: '0' } }, { version: '2.1.263 (Claude Code)', hookApplicable: true, memoryRetrievalDisabled: true, memoryGenerationDisabled: true }).ok).toBe(false)
+    expect(validateManagedLaunch(plan, { version: '9.0.0 (Claude Code)' }).ok).toBe(false)
+  })
+})
+
+
+test('the real executor refuses unsupported external harness metadata before spawn or delivery', async () => {
+  const home = realpathSync(mkdtempSync(join(tmpdir(), 'vf-real-executor-')))
+  const bin = join(home, 'bin'), marker = join(home, 'entered')
+  mkdirSync(bin)
+  writeFileSync(join(bin, 'claude'), `#!/usr/bin/env node
+const fs = require('node:fs');
+if (process.argv.includes('--version')) process.stdout.write('0.0.0 (Claude Code)');
+else fs.writeFileSync(${JSON.stringify(marker)}, 'entered');
+`)
+  chmodSync(join(bin, 'claude'), 0o755)
+  const plan = buildLaunchPlan({ harness: 'claude', model: 'fixture', effort: 'high', stage: 'implement', worktree: home,
+    issue: { number: 140, title: 'fixture' }, operator: 'mk', outcome: 'fixture', stopList: [], resume: false, skillPath: null, subagents: { spawnDepth: 1, concurrent: 3 } })
+  plan.env.PATH = `${bin}:${process.env.PATH ?? ''}`
+  let starts = 0, deliveries = 0
+  const outcome = await executeRun({ repo: 'acme/app', issue: 140, title: 'fixture', stage: 'implement', commentId: null, reactionId: null }, plan,
+    parseFactoryConfig({ repos: [{ path: home, repo: 'acme/app', org: 'acme' }] }, home),
+    { operator: 'mk', onSpawn: () => { starts++ } }, {
+      gh: async () => { deliveries++; return '' }, git: async () => { deliveries++; return { ok: true, message: '' } },
+    })
+  expect(outcome.started).toBe(false)
+  expect(outcome.refusal).toContain('managed launch configuration refused')
+  expect(starts).toBe(0)
+  expect(deliveries).toBe(0)
+  expect((await statusRuns(home))[0]).toMatchObject({state:'terminal',terminationCause:'spawn-failed'})
+  expect(outcome.pushed).toBe(false)
+  expect(outcome.handedBack).toBe(false)
+  expect(readFileSync(outcome.logFile, 'utf8')).toContain('launch-refused')
+  expect(() => readFileSync(marker)).toThrow()
 })

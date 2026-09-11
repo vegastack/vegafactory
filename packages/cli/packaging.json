@@ -38,8 +38,11 @@
     "scripts/questions.mjs@dev-setup",
     "references/ask-route.md@dev-setup",
     "scripts/lib/gh.mjs",
+    "scripts/lib/approval.mjs",
     "scripts/preflight.mjs",
     "scripts/evidence-check.mjs",
+    "scripts/recovery.mjs",
+    "scripts/learning.mjs",
     "scripts/reclaim.mjs",
     "scripts/evidence-upload.mjs",
     "scripts/worktree.mjs",
@@ -50,7 +53,8 @@
     "references/worktrees.md",
     "references/changelog-and-chronicle.md",
     "refresh/REFRESH.md",
-    "refresh/sources.json"
+    "refresh/sources.json",
+    "scripts/effective-policy.mjs@dev-setup"
   ],
   "dev-intake": [
     "SKILL.md",
@@ -58,6 +62,7 @@
     "references/conventions.md@dev-setup",
     "scripts/questions.mjs@dev-setup",
     "references/ask-route.md@dev-setup",
+    "scripts/lib/approval.mjs@dev-implement",
     "scripts/brief-lint.mjs",
     "references/brief-template.md",
     "refresh/REFRESH.md",
@@ -69,6 +74,7 @@
     "references/conventions.md@dev-setup",
     "scripts/questions.mjs@dev-setup",
     "references/ask-route.md@dev-setup",
+    "scripts/lib/approval.mjs@dev-implement",
     "scripts/plan-lint.mjs",
     "references/plan-format.md",
     "refresh/REFRESH.md",
@@ -94,6 +100,7 @@
     "references/ask-route.md",
     "references/stack-playbooks.md",
     "scripts/questions.mjs",
+    "scripts/effective-policy.mjs",
     "scripts/ship-policy.mjs",
     "assets/dev-profile.md.template",
     "assets/agents-section.md.template",
@@ -111,6 +118,7 @@
   ],
   "dev-ship": [
     "SKILL.md",
+    "scripts/lib/approval.mjs@dev-implement",
     "scripts/ship-gate.mjs",
     "references/conventions.md@dev-setup",
     "agents/openai.yaml",
@@ -124,7 +132,8 @@
     "references/conventions.md@dev-setup",
     "scripts/status.mjs",
     "refresh/REFRESH.md",
-    "refresh/sources.json"
+    "refresh/sources.json",
+    "scripts/effective-policy.mjs@dev-setup"
   ],
   "skill-maintainer": [
     "SKILL.md",

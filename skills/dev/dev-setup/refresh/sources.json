@@ -508,6 +508,95 @@
       ],
       "checksum": "1f2f97f0ca0efc2ec47a18cf2491fffb04ca8c5b6cddd0f3bbfdddf994f802a5",
       "retrievedAt": "2026-09-03T10:10:17.840Z"
+    },
+    {
+      "id": "GH-ACTIONS-OIDC",
+      "service": "GitHub Actions OIDC identity, audience and fork claim behavior",
+      "kind": "official-docs",
+      "stability": "vendor-docs",
+      "thresholdDays": 14,
+      "critical": false,
+      "urls": {
+        "primary": "https://docs.github.com/en/actions/reference/security/oidc"
+      },
+      "versionDetection": {
+        "type": "manual-review"
+      },
+      "topics": [
+        "github-actions-oidc"
+      ],
+      "affected": [
+        "references/github-app.md"
+      ],
+      "checksum": "1e77d8a2433cd743449ad5113a05d775304746c5dc28e717782675a01255a3aa",
+      "retrievedAt": "2026-09-11T10:26:56.751Z"
+    },
+    {
+      "id": "GH-INSTALLATION-TOKENS",
+      "service": "GitHub App installation-token creation, repository enumeration and revocation",
+      "kind": "official-docs",
+      "stability": "vendor-docs",
+      "thresholdDays": 14,
+      "critical": false,
+      "urls": {
+        "primary": "https://docs.github.com/en/rest/apps/apps?apiVersion=2022-11-28",
+        "secondary": "https://docs.github.com/en/rest/apps/installations?apiVersion=2022-11-28"
+      },
+      "versionDetection": {
+        "type": "manual-review"
+      },
+      "topics": [
+        "github-app-installation-tokens"
+      ],
+      "affected": [
+        "references/github-app.md"
+      ],
+      "checksum": "bf9d394360cef4e84042bb4520b210ab9dd9cbe37b0a2c20c1188ad9312cdba9",
+      "retrievedAt": "2026-09-11T10:26:56.751Z"
+    },
+    {
+      "id": "CF-WORKERS-REQUEST",
+      "service": "Cloudflare Workers Request cache modes and subrequest controls",
+      "kind": "official-docs",
+      "stability": "vendor-docs",
+      "thresholdDays": 14,
+      "critical": false,
+      "urls": {
+        "primary": "https://developers.cloudflare.com/workers/runtime-apis/request/"
+      },
+      "versionDetection": {
+        "type": "manual-review"
+      },
+      "topics": [
+        "cloudflare-worker-request"
+      ],
+      "affected": [
+        "references/github-app.md"
+      ],
+      "checksum": "a60230d9d16eb86933ce43ef5c2a2ef84920f86b5d5f46cd167c7ebc9dd5d2a5",
+      "retrievedAt": "2026-09-11T10:26:56.751Z"
+    },
+    {
+      "id": "CF-RATE-LIMIT",
+      "service": "Cloudflare Workers rate-limit binding locality and consistency",
+      "kind": "official-docs",
+      "stability": "vendor-docs",
+      "thresholdDays": 14,
+      "critical": false,
+      "urls": {
+        "primary": "https://developers.cloudflare.com/workers/runtime-apis/bindings/rate-limit/"
+      },
+      "versionDetection": {
+        "type": "manual-review"
+      },
+      "topics": [
+        "cloudflare-rate-limit"
+      ],
+      "affected": [
+        "references/github-app.md"
+      ],
+      "checksum": "613c451e935526d57362d3c81cb7c1d602f28378bff32e0b79a06d7151d2b76f",
+      "retrievedAt": "2026-09-11T10:26:56.751Z"
     }
   ]
 }

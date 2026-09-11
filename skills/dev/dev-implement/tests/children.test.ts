@@ -41,10 +41,10 @@ describe('planParallelRun', () => {
 })
 
 describe('effectiveConcurrency', () => {
-  test('the smallest of the configured cap, the machine, and the 16-agent ceiling', () => {
-    expect(effectiveConcurrency({ configured: 4, cpus: 10 })).toBe(4)
-    expect(effectiveConcurrency({ configured: null, cpus: 10 })).toBe(8)
-    expect(effectiveConcurrency({ configured: 32, cpus: 64 })).toBe(16)
+  test('the smallest of the configured cap, the machine, and three qualified children', () => {
+    expect(effectiveConcurrency({ configured: 4, cpus: 10 })).toBe(3)
+    expect(effectiveConcurrency({ configured: null, cpus: 10 })).toBe(3)
+    expect(effectiveConcurrency({ configured: 32, cpus: 64 })).toBe(3)
     expect(effectiveConcurrency({ configured: null, cpus: 1 })).toBe(1)
   })
 })
@@ -53,24 +53,9 @@ import { childPrompt, claudeWorkflowCall, codexChildLaunch } from '../scripts/ch
 
 describe('launch shapes', () => {
   const run = planParallelRun({ ...base, groups })
-  test('the Claude path is one Workflow call by name, children in plan order', () => {
-    const call = claudeWorkflowCall(run, { concurrency: 2 })
-    expect(call.name).toBe('implement-children')
-    expect(call.args.parentBranch).toBe('feat/104-factory-runtime')
-    expect(call.args.parentHead).toBe('abc1234')
-    expect(call.args.concurrency).toBe(2)
-    expect(call.args.children.map((c: { issue: number }) => c.issue)).toEqual([131, 132])
-    expect(call.args.children[0].files).toEqual(['packages/cli/src/dispatch.ts'])
-    expect(call.args.children[0].prompt).toContain('create your branch feat/131-dispatch-parent-launches from abc1234')
-  })
-  test('the Codex path is one codex exec per child, pinned to that child worktree', () => {
-    const launch = codexChildLaunch(run.children[0], { codex: 'codex', model: 'gpt-5.6', effort: 'high', parentIssue: 104, parentBranch: 'feat/104-factory-runtime' })
-    expect(launch.command).toBe('codex')
-    expect(launch.args).toEqual([
-      'exec', '-C', '/r/.vegastack/.worktrees/131-dispatch-parent-launches',
-      '--sandbox', 'workspace-write', '-a', 'never', '--dangerously-bypass-hook-trust',
-      '-c', 'model=gpt-5.6', '-c', 'model_reasoning_effort=high', '--json', launch.prompt,
-    ])
+  test('legacy harness launch descriptions refuse and name the CLI owner', () => {
+    expect(() => claudeWorkflowCall()).toThrow('vegafactory children run')
+    expect(() => codexChildLaunch()).toThrow('vegafactory children run')
   })
   test('the prompt names the declared file set and the stop rule', () => {
     const prompt = childPrompt(run.children[1], { parentIssue: 104, parentBranch: 'feat/104-factory-runtime' })
@@ -82,6 +67,20 @@ describe('launch shapes', () => {
 
 import { evaluateJoin, mergeArgs, scopeViolations } from '../scripts/children.mjs'
 
+// Controlled validator inputs; actual execution and persisted checks are exercised
+// through the CLI subprocess in packages/cli/test/children-execution.test.ts.
+function verifiedInputs(children: Array<{issue:number;branch:string;files:string[]}>) {
+  const scoped = children.map(child => ({...child,baseSha:'a'.repeat(40),scopeDigest:'d'.repeat(64)}))
+  const results: Record<number, any> = {}, runs: Record<number, any> = {}, acceptances: Record<number, any> = {}
+  for (const child of scoped) {
+    const headSha = String(child.issue).padStart(40, '0'), runId = 'run-' + child.issue
+    runs[child.issue] = {runId,repo:'o/r',issue:child.issue,branch:child.branch,baseSha:child.baseSha,headSha,taskKey:{scopeDigest:child.scopeDigest},state:'terminal',terminationCause:'succeeded',exitCode:0,finishedAt:'2026-09-08T00:00:00Z',processIdentity:{pid:1},machine:null,sharedClaim:null,checkpoint:null}
+    acceptances[child.issue] = {runId,baseSha:child.baseSha,headSha,scopeDigest:child.scopeDigest,command:'checked',ok:true,exitCode:0}
+    results[child.issue] = {schemaVersion:1,runId,repo:'o/r',issue:child.issue,branch:child.branch,baseSha:child.baseSha,headSha,scopeDigest:child.scopeDigest,terminationCause:'succeeded',acceptance:{ok:true,command:'checked',sha:headSha},noChange:false,machine:null,sharedGeneration:null,checkpoint:null}
+  }
+  return {children:scoped,results,runs,acceptances}
+}
+
 describe('the join', () => {
   const run = planParallelRun({ ...base, groups })
   test('scope is exact paths plus declared directories', () => {
@@ -91,8 +90,8 @@ describe('the join', () => {
   })
   test('clean children merge in plan order; a wanderer blocks and a failure warns', () => {
     const outcome = evaluateJoin({
-      children: run.children,
-      results: { 131: { status: 'done', head: 'aaaaaaa' }, 132: { status: 'failed', message: 'tests red' } },
+      ...verifiedInputs(run.children),
+      results: { ...verifiedInputs(run.children).results, 132: { status: 'failed', message: 'tests red' } },
       changed: { 131: ['packages/cli/src/dispatch.ts'], 132: [] },
     })
     expect(outcome.merge.map((m) => m.issue)).toEqual([131])
@@ -102,8 +101,7 @@ describe('the join', () => {
   })
   test('a child outside its declared set is not merged and blocks the join', () => {
     const outcome = evaluateJoin({
-      children: run.children,
-      results: { 131: { status: 'done', head: 'aaaaaaa' }, 132: { status: 'done', head: 'bbbbbbb' } },
+      ...verifiedInputs(run.children),
       changed: { 131: ['packages/cli/src/dispatch.ts'], 132: ['README.md', 'packages/cli/src/dispatch.ts'] },
     })
     expect(outcome.merge.map((m) => m.issue)).toEqual([131])
@@ -113,8 +111,9 @@ describe('the join', () => {
     // Every child branches from the same parent HEAD, so the first merge advances the
     // parent and the second stops being a descendant. --ff-only for all of them would
     // land child one and refuse the rest.
-    expect(mergeArgs(run.children[0], 0)).toEqual(['merge', '--ff-only', run.children[0].branch])
-    expect(mergeArgs(run.children[1], 1)).toEqual(['merge', '--no-ff', '--no-edit', run.children[1].branch])
+    expect(mergeArgs({headSha:'a'.repeat(40)}, 0)).toEqual(['merge', '--ff-only', 'a'.repeat(40)])
+    expect(mergeArgs({headSha:'b'.repeat(40)}, 1)).toEqual(['merge', '--no-ff', '--no-edit', 'b'.repeat(40)])
+    expect(() => mergeArgs({branch:'moving'})).toThrow('immutable')
   })
 })
 
@@ -160,19 +159,18 @@ describe('one wanderer never strands its siblings', () => {
   test('the clean child is still in the merge list when another child left its set', () => {
     const run = planParallelRun({ ...base, groups })
     const outcome = evaluateJoin({
-      children: run.children,
-      results: { 131: { status: 'done', head: 'aaaaaaa' }, 132: { status: 'done', head: 'bbbbbbb' } },
+      ...verifiedInputs(run.children),
       changed: { 131: ['packages/cli/src/dispatch.ts'], 132: ['packages/cli/src/dispatch.ts'] },
     })
     expect(outcome.merge.map((m) => m.issue)).toEqual([131])
     expect(outcome.stop.map((s) => s.issue)).toEqual([132])
-    expect(outcome.ledger).toContain('- Join: #131 merged aaaaaaa')
+    expect(outcome.ledger.some(line => line.startsWith('- Join: #131 verified '))).toBe(true)
   })
   test('a failed child is a warn and the other still merges', () => {
     const run = planParallelRun({ ...base, groups })
     const outcome = evaluateJoin({
-      children: run.children,
-      results: { 131: { status: 'failed', message: 'tests red' }, 132: { status: 'done', head: 'bbbbbbb' } },
+      ...verifiedInputs(run.children),
+      results: { ...verifiedInputs(run.children).results, 131: { status: 'failed', message: 'tests red' } },
       changed: { 131: [], 132: ['README.md'] },
     })
     expect(outcome.merge.map((m) => m.issue)).toEqual([132])
@@ -206,7 +204,7 @@ describe('the join against real git', () => {
     }
     git('switch', '-q', 'parent')
 
-    const children = [{ branch: 'child-a' }, { branch: 'child-b' }]
+    const children = ['child-a','child-b'].map(branch=>({headSha:git('rev-parse',branch).out.trim()}))
     for (const [index, child] of children.entries()) {
       expect(git(...mergeArgs(child, index)).ok).toBe(true)
     }
@@ -291,87 +289,43 @@ describe('a write verb never acts on a guessed branch name', () => {
   })
 })
 
-describe('the join verb against real git', () => {
-  // Two children cut from the parent HEAD. #131 lands on the branch its harness
-  // chose, not the planned name, and says so in its result; #132 wanders.
-  function twoChildren(root: string) {
-    const baseSha = sh(root, 'rev-parse', 'HEAD')
-    const commit = (branch: string, files: Record<string, string>) => {
-      sh(root, 'switch', '-q', '-c', branch, baseSha)
-      for (const [file, text] of Object.entries(files)) {
-        mkdirSync(join(root, file, '..'), { recursive: true })
-        writeFileSync(join(root, file), text)
-      }
-      sh(root, 'add', '-A')
-      sh(root, 'commit', '-qm', branch)
-      const head = sh(root, 'rev-parse', 'HEAD')
-      sh(root, 'switch', '-q', 'feat/104-factory-runtime')
-      return head
+describe('the standalone join never substitutes branch existence for execution', () => {
+  test('missing results and self-reported done records both refuse, preserving source', () => {
+    const root = parentRepo(), before = sh(root,'rev-parse','HEAD')
+    sh(root,'branch','feat/131-dispatch-parent-launches')
+    const report = join(root,'groups.json'), results = join(root,'results.json')
+    writeFileSync(report,JSON.stringify({guard:'plan-lint',ok:true,groups:joinGroups}))
+    writeFileSync(results,JSON.stringify([{issue:131,status:'done',branch:'feat/131-dispatch-parent-launches',head:before}]))
+    for(const extra of [[],['--results',results]]) {
+      const result=runCli(root,ghStub(titles),'join','--parent','104','--groups',report,'--repo','o/r','--write',...extra)
+      expect(result.status).toBe(2)
+      expect(result.out.blocks.join(' ')).toContain('CLI execution owner')
+      expect(result.out.wrote).toBe(false)
+      expect(sh(root,'rev-parse','HEAD')).toBe(before)
     }
-    const a = commit('agent/131-dispatch', { 'packages/cli/src/dispatch.ts': 'a\n' })
-    const b = commit('docs/132-readme-rows', { 'docs/dispatcher.md': 'b\n', 'packages/cli/src/index.ts': 'wandered\n' })
+  })
+})
+
+
+test('legacy launch refuses without creating children while the checked gateway is unavailable', () => {
+  for (const harness of ['claude', 'codex']) {
+    const root = parentRepo()
+    const before = sh(root, 'rev-parse', 'HEAD')
     const report = join(root, 'groups.json')
     writeFileSync(report, JSON.stringify({ guard: 'plan-lint', ok: true, groups: joinGroups }))
-    return { report, a, b }
+    const result = runCli(root, ghStub(titles), 'launch', '--parent', '104', '--groups', report, '--repo', 'o/r', '--harness', harness, '--write')
+    expect(result.status).toBe(2)
+    expect(result.out.wrote).toBe(false)
+    expect(result.out.blocks.join(' ')).toContain('checked CLI gateway')
+    expect(existsSync(join(root, '.vegastack/.worktrees'))).toBe(false)
+    expect(sh(root, 'branch', '--list', 'feat/131-*')).toBe('')
+    expect(sh(root, 'rev-parse', 'HEAD')).toBe(before)
   }
-  const results = (root: string, entries: object[]) => {
-    const file = join(root, 'results.json')
-    writeFileSync(file, JSON.stringify(entries))
-    return file
-  }
+})
 
-  test('the branch each child reports is the one diffed and merged; a wanderer blocks without stranding its sibling', () => {
-    const root = parentRepo()
-    const { report, a, b } = twoChildren(root)
-    const file = results(root, [
-      { issue: 131, status: 'done', branch: 'agent/131-dispatch', head: a, files: ['packages/cli/src/dispatch.ts'], message: 'built' },
-      { issue: 132, status: 'done', branch: 'docs/132-readme-rows', head: b, files: ['docs/dispatcher.md', 'packages/cli/src/index.ts'], message: 'built' },
-    ])
-    const r = runCli(root, ghStub(titles), 'join', '--parent', '104', '--groups', report, '--repo', 'o/r', '--results', file, '--write')
-    expect(r.status).toBe(2)
-    expect(r.out.blocks.join(' ')).toContain('#132')
-    expect(r.out.blocks.join(' ')).toContain('outside its declared set')
-    expect(r.out.join.merge).toEqual([{ issue: 131, branch: 'agent/131-dispatch' }])
-    expect(existsSync(join(root, 'packages/cli/src/dispatch.ts'))).toBe(true)
-    expect(existsSync(join(root, 'docs/dispatcher.md'))).toBe(false)
-    expect(sh(root, 'rev-parse', '--abbrev-ref', 'HEAD')).toBe('feat/104-factory-runtime')
-    // A merge landed, so the run says it wrote — even though a sibling blocked.
-    expect(r.out.wrote).toBe(true)
-    expect(r.out.join.ledger).toContain('- Join: #131 merged ' + a.slice(0, 7))
-  })
-  test('a child whose diff cannot be read is not merged, is not written up as merged, and holds every merge', () => {
-    const root = parentRepo()
-    const { report, b } = twoChildren(root)
-    const file = results(root, [
-      { issue: 131, status: 'done', branch: 'agent/131-vanished', head: 'f00ba12', files: [], message: 'built' },
-      { issue: 132, status: 'done', branch: 'docs/132-readme-rows', head: b, files: ['docs/dispatcher.md'], message: 'built' },
-    ])
-    const r = runCli(root, ghStub(titles), 'join', '--parent', '104', '--groups', report, '--repo', 'o/r', '--results', file, '--write')
-    expect(r.status).toBe(2)
-    expect(r.out.blocks.join(' ')).toContain('scope cannot be proved')
-    expect(r.out.join.merge.map((m: { issue: number }) => m.issue)).not.toContain(131)
-    expect(r.out.join.ledger.some((line: string) => line.startsWith('- Join: #131 merged'))).toBe(false)
-    expect(r.out.wrote).toBe(false)
-    expect(existsSync(join(root, 'docs/dispatcher.md'))).toBe(false)
-  })
-  test('a reported branch that is not a branch name is refused before any git call', () => {
-    const root = parentRepo()
-    const { report, b } = twoChildren(root)
-    const file = results(root, [
-      { issue: 131, status: 'done', branch: '--squash', head: 'f00ba12', files: [], message: 'built' },
-      { issue: 132, status: 'done', branch: 'docs/132-readme-rows', head: b, files: ['docs/dispatcher.md'], message: 'built' },
-    ])
-    const r = runCli(root, ghStub(titles), 'join', '--parent', '104', '--groups', report, '--repo', 'o/r', '--results', file, '--write')
-    expect(r.status).toBe(2)
-    expect(r.out.blocks.join(' ')).toContain('not a branch name')
-    expect(r.out.wrote).toBe(false)
-  })
-  test('join --write with GitHub unreachable blocks and merges nothing', () => {
-    const root = parentRepo()
-    const { report } = twoChildren(root)
-    const r = runCli(root, '/nonexistent-vsk-gh', 'join', '--parent', '104', '--groups', report, '--repo', 'o/r', '--write')
-    expect(r.status).toBe(2)
-    expect(r.out.wrote).toBe(false)
-    expect(existsSync(join(root, 'packages/cli/src/dispatch.ts'))).toBe(false)
-  })
+test('139: a branch or status flag without authoritative execution cannot join', () => {
+  const child = { issue: 8, branch: 'feat/8-child', files: ['requested.txt'], baseSha: 'a'.repeat(40) }
+  const result = evaluateJoin({ children: [child], results: { 8: { status: 'done', head: 'a'.repeat(40) } }, changed: { 8: [] } })
+  expect(result.merge).toEqual([])
+  expect(result.stop.map(row => row.issue)).toEqual([8])
 })

@@ -3,9 +3,15 @@ import { execFileSync } from 'node:child_process'
 import { chmodSync, mkdirSync, mkdtempSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { chronicleEntryAdded, evaluateShipGate, gatherFacts, parseMarker, resolveWorktree, reviewAdjudicated } from '../scripts/ship-gate.mjs'
+import { createHash } from 'node:crypto'
+import { evaluateParentDelivery, typedSection, validReview, chronicleEntryAdded, evaluateShipGate, gatherFacts, parseMarker, resolveWorktree, reviewAdjudicated, selectCurrentTrustedReview } from '../scripts/ship-gate.mjs'
 
-const evidenceBody = (sha = 'abc1234') => `<!-- vsk:v1 type=evidence rev=1 branch=feat/12-x sha=${sha} -->
+const SHA = 'a'.repeat(40)
+const BASE = 'b'.repeat(40)
+const SCOPE = 'c'.repeat(64)
+const binding = () => ({ sha: SHA, baseSha: BASE, scopeDigest: SCOPE, verdict: 'clean', findings: [] as {id: string, status: string}[] })
+const reviewBody = (review = binding(), marker = { sha: review.sha, verdict: review.verdict }) => `<!-- vsk:v1 type=review round=1 sha=${marker.sha} agent=codex verdict=${marker.verdict} -->\n\`\`\`json\n${JSON.stringify({ reviewBinding: review })}\n\`\`\``
+const evidenceBody = (sha = SHA) => `<!-- vsk:v1 type=evidence rev=1 branch=feat/12-x sha=${sha} -->
 ## Result (v1)
 **Done:** thing
 **Tests:** bun test → green
@@ -19,7 +25,7 @@ const cleanFacts = () => ({
   evidence: { body: evidenceBody(), updatedAt: '2026-08-29T10:00:00Z' },
   reviewVerdict: 'clean',
   adjudicated: false,
-  headSha: 'abc1234',
+  headSha: SHA, baseSha: BASE, scopeDigest: SCOPE, review: binding(), cleanBefore: true, cleanAfter: true,
   headCommittedAt: '2026-08-29T09:00:00Z',
   diffText: 'diff --git a/.changeset/x.md b/.changeset/x.md\n+content',
   changelogTouched: true,
@@ -37,17 +43,17 @@ describe('ship-gate', () => {
     expect(r.blocks[0]).toContain('no evidence comment')
   })
   test('moved head blocks until the evidence sha itself is updated — a mere comment edit is not reconciliation', () => {
-    const moved = { ...cleanFacts(), headSha: 'fff9999', headCommittedAt: '2026-08-29T12:00:00Z' }
+    const moved = { ...cleanFacts(), headSha: 'f'.repeat(40), headCommittedAt: '2026-08-29T12:00:00Z' }
     expect(evaluateShipGate(moved).blocks.some((b) => b.includes('moved past evidence sha'))).toBe(true)
     const editedButStale = { ...moved, evidence: { body: evidenceBody(), updatedAt: '2026-08-29T13:00:00Z' } }
     expect(evaluateShipGate(editedButStale).blocks.some((b) => b.includes('moved past evidence sha'))).toBe(true)
-    const reconciled = { ...moved, evidence: { body: evidenceBody('fff9999'), updatedAt: '2026-08-29T13:00:00Z' } }
-    expect(evaluateShipGate(reconciled).blocks).toEqual([])
+    const reconciled = { ...moved, evidence: { body: evidenceBody('f'.repeat(40)), updatedAt: '2026-08-29T13:00:00Z' } }
+    expect(evaluateShipGate({ ...reconciled, review: { ...binding(), sha: 'f'.repeat(40) } }).blocks).toEqual([])
   })
   test('missing or invalid evidence sha blocks (never falls open on startsWith(""))', () => {
-    const noSha = { ...cleanFacts(), evidence: { body: evidenceBody().replace(' sha=abc1234', ''), updatedAt: '2026-08-29T10:00:00Z' } }
+    const noSha = { ...cleanFacts(), evidence: { body: evidenceBody().replace(' sha=' + SHA, ''), updatedAt: '2026-08-29T10:00:00Z' } }
     expect(evaluateShipGate(noSha).blocks.some((b) => b.includes('no valid sha='))).toBe(true)
-    const shortSha = { ...cleanFacts(), evidence: { body: evidenceBody().replace('sha=abc1234', 'sha=f'), updatedAt: '2026-08-29T10:00:00Z' } }
+    const shortSha = { ...cleanFacts(), evidence: { body: evidenceBody().replace('sha=' + SHA, 'sha=f'), updatedAt: '2026-08-29T10:00:00Z' } }
     expect(evaluateShipGate(shortSha).blocks.some((b) => b.includes('no valid sha='))).toBe(true)
   })
   test('a checkout that is not the branch under review blocks the fresh-check claim', () => {
@@ -80,27 +86,22 @@ describe('ship-gate', () => {
     const excused = evaluateShipGate({ ...cleanFacts(), changelogTouched: false, allowNoChangelog: 'docs-only' })
     expect(excused.blocks).toEqual([])
   })
-  test('a Review line containing only routine rulings does NOT satisfy adjudication', () => {
-    const evidence = { body: evidenceBody().replace('**Review:** subagent — clean', '**Review:** subagent — needs-fixes; rulings surfaced: Ruling: kept the Map — cost if wrong: low') }
-    const r = evaluateShipGate({ ...cleanFacts(), evidence, reviewVerdict: 'needs-fixes', adjudicated: reviewAdjudicated(evidence.body) })
-    expect(r.blocks.some((b) => b.includes('review verdict'))).toBe(true)
-    const adj = { body: evidenceBody().replace('**Review:** subagent — clean', '**Review:** subagent — needs-fixes; Finding [2] parked with ruling') }
-    expect(evaluateShipGate({ ...cleanFacts(), evidence: adj, reviewVerdict: 'needs-fixes', adjudicated: reviewAdjudicated(adj.body) }).blocks).toEqual([])
+  test('negative prose does not accept a finding', () => {
+    expect(reviewAdjudicated('**Review:** no adjudication has occurred')).toBe(false)
+    expect(reviewAdjudicated('**Review:** Finding [2] parked with ruling')).toBe(false)
   })
-  test('a configured project without a commands check line warns instead of passing silently', () => {
+  test('missing configured check blocks exact candidate acceptance', () => {
     const r = evaluateShipGate({ ...cleanFacts(), checkExit: null, checkMissing: true })
-    expect(r.blocks).toEqual([])
-    expect(r.warns.some((w) => w.includes('no check command'))).toBe(true)
+    expect(r.blocks.some((b) => b.includes('no check command'))).toBe(true)
   })
-  test('needs-fixes verdict blocks without adjudication, passes with it', () => {
-    const r = evaluateShipGate({ ...cleanFacts(), reviewVerdict: 'needs-fixes' })
-    expect(r.blocks.some((b) => b.includes('review verdict'))).toBe(true)
-    const adjudicated = evaluateShipGate({ ...cleanFacts(), reviewVerdict: 'needs-fixes', adjudicated: true })
-    expect(adjudicated.blocks).toEqual([])
+  test('needs-fixes verdict blocks without explicit adjudication', () => {
+    const facts = { ...cleanFacts(), reviewVerdict: 'needs-fixes', review: { ...binding(), verdict: 'needs-fixes', findings: [{id: 'F1', status: 'open'}] } }
+    expect(evaluateShipGate(facts).blocks.some((b) => b.includes('review verdict'))).toBe(true)
+    expect(evaluateShipGate({ ...facts, adjudicated: true }).blocks).toEqual([])
   })
-  test('failing fresh check blocks; absent check command does not', () => {
+  test('failing or absent fresh check blocks', () => {
     expect(evaluateShipGate({ ...cleanFacts(), checkExit: 1 }).blocks.some((b) => b.includes('check command'))).toBe(true)
-    expect(evaluateShipGate({ ...cleanFacts(), checkExit: null }).blocks).toEqual([])
+    expect(evaluateShipGate({ ...cleanFacts(), checkExit: null }).blocks.some((b) => b.includes('check command'))).toBe(true)
   })
   test('leftover [DEBUG- tags block only on ADDED lines — removals and docs context pass', () => {
     const added = evaluateShipGate({ ...cleanFacts(), diffText: '+console.log("[DEBUG-a4f2] x")' })
@@ -123,13 +124,51 @@ describe('ship-gate', () => {
       expect(() => gatherFacts({ issue: '1', branch: 'main' })).toThrow()
     } finally { delete process.env.VSK_GH }
   })
-  test('adjudication: finding-tied parked counts, incidental parked does not', () => {
-    expect(reviewAdjudicated('**Review:** needs-fixes — Finding [2] parked — Ruling: stands\n**Changelog:** x')).toBe(true)
-    expect(reviewAdjudicated('**Review:** needs-fixes; rulings surfaced; Task 3: parked — Ruling: kept\n**Changelog:** x')).toBe(false)
-    expect(reviewAdjudicated('**Review:** clean, nothing parked\n**Changelog:** x')).toBe(false)
-  })
   test('parseMarker exported for the skill wiring', () => {
     expect(parseMarker(evidenceBody())?.keys.type).toBe('evidence')
+  })
+})
+
+describe('trusted current review selection', () => {
+  const trusted = (id = 41, review = binding()) => ({ id, body: reviewBody(review), user: { login: 'operator' } })
+  const select = (comments: unknown[], extra = {}) => selectCurrentTrustedReview(comments, {
+    complete: true, operators: ['operator'], sha: SHA, baseSha: BASE, scopeDigest: SCOPE, ...extra,
+  })
+
+  test('one operator-published exact clean review passes and returns its fresh source binding', () => {
+    const comment = trusted()
+    const selected = select([comment])
+    expect(selected.binding).toEqual(binding())
+    expect(selected.source).toEqual({
+      commentId: comment.id,
+      bodySha256: createHash('sha256').update(comment.body, 'utf8').digest('hex'),
+      publisher: 'operator',
+    })
+  })
+
+  test('an outsider clean comment cannot replace a trusted needs-fixes review or its findings', () => {
+    const needsFixes = { ...binding(), verdict: 'needs-fixes', findings: [{ id: 'X1', status: 'open' }] }
+    const outsider = { id: 42, body: reviewBody(), user: { login: 'outsider' } }
+    const selected = select([trusted(41, needsFixes), outsider])
+    expect(selected.binding).toEqual(needsFixes)
+    expect(selected.source.commentId).toBe(41)
+  })
+
+  test('two trusted exact reviews refuse instead of restoring newest-wins', () => {
+    expect(() => select([trusted(41), trusted(42)])).toThrow(/multiple|ambiguous/i)
+  })
+
+  test('missing publisher, malformed body, wrong marker identity, and incomplete pagination refuse', () => {
+    expect(() => select([{ id: 41, body: reviewBody() }])).toThrow()
+    expect(() => select([{ ...trusted(), body: reviewBody() + '\n' + reviewBody() }])).toThrow()
+    expect(() => select([{ ...trusted(), body: reviewBody(binding(), { sha: BASE, verdict: 'clean' }) }])).toThrow()
+    expect(() => selectCurrentTrustedReview([trusted()], { complete: false, operators: ['operator'], sha: SHA, baseSha: BASE, scopeDigest: SCOPE })).toThrow(/complete/i)
+  })
+
+  test('an edited body no longer matches its previously computed source binding', () => {
+    const comment = trusted()
+    const selected = select([comment])
+    expect(() => select([{ ...comment, body: comment.body + '\nEdited after qualification.' }], { source: selected.source })).toThrow(/changed|source/i)
   })
 })
 
@@ -158,18 +197,18 @@ describe('gatherFacts runs in the branch worktree', () => {
     git(root, 'config', 'user.email', 'a@b.c')
     git(root, 'config', 'user.name', 'a')
     mkdirSync(join(root, '.vegastack'))
-    writeFileSync(join(root, '.vegastack', 'dev.md'), 'commands: check `test -f marker`\nchangelog: changesets\n')
+    writeFileSync(join(root, '.vegastack', 'dev.md'), 'operators: fixture\ncommands: check `test -f marker`\nchangelog: changesets\n')
     git(root, 'add', '.')
     git(root, 'commit', '-qm', 'init')
     const wt = join(root, '.vegastack', '.worktrees', '106-x')
     git(root, 'worktree', 'add', '-q', '-b', 'feat/106-x', wt, 'main')
     writeFileSync(join(wt, 'marker'), '')
-    writeFileSync(join(wt, '.vegastack', 'dev.md'), 'commands: check `test -f marker`\nchangelog: none\n')
+    writeFileSync(join(wt, '.vegastack', 'dev.md'), 'operators: fixture\ncommands: check `test -f marker`\nchangelog: none\n')
     git(wt, 'add', '.')
     git(wt, 'commit', '-qm', 'feat: marker')
     git(root, 'branch', '-q', 'feat/107-y', 'feat/106-x')
     const gh = join(root, 'gh')
-    writeFileSync(gh, '#!/bin/sh\necho "[]"\n')
+    writeFileSync(gh, '#!/usr/bin/env node\nprocess.stdout.write(JSON.stringify([[{id:2,node_id:"PLAN",user:{login:"fixture"},body:"<!-- vsk:v1 type=plan rev=1 -->\\n## Plan"}]]))\n')
     chmodSync(gh, 0o755)
     return { root, wt, gh }
   }
@@ -187,7 +226,7 @@ describe('gatherFacts runs in the branch worktree', () => {
       expect(facts.checkoutMismatch).toBeNull()
       expect(facts.checkExit).toBe(0)
       expect(facts.changelogTouched).toBe(true)
-      expect(facts.headSha).toBe(git(root, 'rev-parse', '--short=7', 'feat/106-x').trim())
+      expect(facts.headSha).toBe(git(root, 'rev-parse', 'feat/106-x').trim())
     })
   })
   test('an epic-sized diff does not read as "cannot verify" — the git buffer is not the fact', () => {
@@ -220,4 +259,93 @@ describe('gatherFacts runs in the branch worktree', () => {
       expect(evaluateShipGate({ ...cleanFacts(), checkoutMismatch: facts.checkoutMismatch }).blocks.some((b) => b.includes('no worktree holds it'))).toBe(true)
     })
   })
+})
+
+function exceptionFixture() {
+  const review = { ...binding(), verdict: 'needs-fixes', findings: [{id: 'F1', status: 'open'}, {id: 'F2', status: 'resolved'}] }
+  const decision = { sha: SHA, reviewCommentId: 9, operator: 'operator', source: {kind: 'session', ref: 'session:fixture', quote: 'Accept F1 for this candidate'}, findings: [{id: 'F1', disposition: 'accept-risk', reason: 'documented constraint'}] }
+  const context = { review, reviewCommentId: 9, operators: ['operator'], publisher: 'operator' }
+  return { review, decision, context, body: () => '```json\n' + JSON.stringify({adjudication: decision}) + '\n```' }
+}
+test('explicit same-review operator exception and resolved findings pass', () => {
+  const f = exceptionFixture(); expect(reviewAdjudicated(f.body(), f.context)).toBe(true)
+})
+for (const mutate of [
+  (f: any) => { f.decision.sha = BASE },
+  (f: any) => { f.decision.reviewCommentId = 10 },
+  (f: any) => { f.decision.operator = 'intruder' },
+  (f: any) => { f.context.publisher = 'intruder' },
+  (f: any) => { f.decision.findings[0].id = 'UNKNOWN' },
+  (f: any) => { f.decision.findings.push(f.decision.findings[0]) },
+  (f: any) => { f.decision.findings = [] },
+  (f: any) => { f.decision.findings[0].reason = '' },
+  (f: any) => { f.review.findings.push({id: 'F3', status: 'open'}) },
+  (f: any) => { f.review.findings.push({id: 'F1', status: 'open'}) },
+  (f: any) => { f.context.review = null },
+]) test('invalid or incomplete scoped exception refuses: ' + String(mutate), () => {
+  const f = exceptionFixture(); mutate(f); expect(reviewAdjudicated(f.body(), f.context)).toBe(false)
+})
+test('GitHub source must match independently read operator comment', () => {
+  const f = exceptionFixture(); f.decision.source = {kind: 'github-comment', ref: 'https://github.com/o/r/issues/1#issuecomment-77', quote: 'accept F1'}
+  const sourceComment = {id: 77, html_url: f.decision.source.ref, user: {login: 'operator'}, body: 'I accept F1\n' + f.body()}
+  expect(reviewAdjudicated(f.body(), {...f.context, publisher: 'recorder', sourceComment})).toBe(true)
+  expect(reviewAdjudicated(f.body(), {...f.context, sourceComment: {...sourceComment, user: {login: 'intruder'}}})).toBe(false)
+  expect(reviewAdjudicated(f.body(), f.context)).toBe(false)
+})
+test('duplicate keys/sections, quoted examples and contradictory clean verdict refuse', () => {
+  const f = exceptionFixture()
+  expect(reviewAdjudicated(f.body() + '\n' + f.body(), f.context)).toBe(false)
+  expect(() => typedSection('```json\n{"reviewBinding":{},"reviewBinding":{}}\n```', 'reviewBinding')).toThrow()
+  expect(typedSection('````markdown\n```json\n{"reviewBinding":{}}\n```\n````', 'reviewBinding')).toBeNull()
+  expect(validReview({...f.review, verdict: 'clean'})).toBe(false)
+})
+
+function parentFixture() {
+  const merged = 'd'.repeat(40)
+  const expected = {repo:'o/r', parentIssue:133, pr:200, prNodeId:'PR200', acceptedParentHead:SHA, baseRepo:'o/r', baseRef:'main', baseSha:BASE}
+  const {baseSha: _baseSha, ...identity} = expected
+  const parentDelivery = {...identity, mergedAt:'2026-09-08T00:00:00Z', mergedCommit:merged, transformation:null as any}
+  const pr = {number:200, node_id:'PR200', head:{repo:{full_name:'o/r'},sha:SHA}, base:{repo:{full_name:'o/r'},ref:'main',sha:BASE}, merged:true, merged_at:parentDelivery.mergedAt, merge_commit_sha:merged}
+  const requiredDeliveries = [
+    {taskRef:{repo:'o/r',issue:135,taskId:'135-T1'},scopeDigest:'1'.repeat(64),childHead:'1'.repeat(40),parentRepo:'o/r',parentIssue:133,parentHead:SHA,acceptance:'implemented'},
+    {taskRef:{repo:'o/r',issue:144,taskId:null},scopeDigest:'2'.repeat(64),childHead:'2'.repeat(40),parentRepo:'o/r',parentIssue:133,parentHead:SHA,acceptance:'implemented'},
+  ]
+  const requiredScopeMatrix = [
+    {repo:'o/r',issue:135,mode:'code',taskIds:['135-T1'],disposition:'accepted-code',evidenceRefs:['https://github.com/o/r/issues/135#issuecomment-1']},
+    {repo:'o/r',issue:144,mode:'code',taskIds:['144-T1'],disposition:'accepted-code',evidenceRefs:['https://github.com/o/r/issues/144#issuecomment-4']},
+    {repo:'o/r',issue:138,mode:'code',taskIds:['138-T1'],disposition:'partial-code',evidenceRefs:['https://github.com/o/r/issues/138#issuecomment-2']},
+    {repo:'o/r',issue:155,mode:'preparation',taskIds:['155-T1'],disposition:'prepared',evidenceRefs:['https://github.com/o/r/issues/155#issuecomment-3']},
+    {repo:'o/r',issue:158,mode:'research',taskIds:[],disposition:'unperformed-live',evidenceRefs:[]},
+  ]
+  return {parentDelivery,pr,expected,requiredDeliveries,acceptedDeliveries:structuredClone(requiredDeliveries),requiredScopeMatrix,scopeMatrix:structuredClone(requiredScopeMatrix),verification:{reviewedHead:SHA,mergedHead:merged,baseSha:BASE,acceptedTree:SHA,mergedTree:SHA,check:{sha:merged,exit:0},ancestorShas:[merged,SHA],rangeHead:merged,evidenceRef:'https://github.com/o/r/issues/133#issuecomment-10'}}
+}
+test('one normal merge delivers several pinned child scopes including preparation', () => {
+  expect(evaluateParentDelivery(parentFixture()).blocks).toEqual([])
+})
+test('verified rebase maps exact reviewed and merged candidate', () => {
+  const f=parentFixture(); f.parentDelivery.transformation={kind:'rebase',reviewedHead:SHA,mergedHead:f.parentDelivery.mergedCommit,evidenceRef:f.verification.evidenceRef};f.verification.ancestorShas=[]
+  expect(evaluateParentDelivery(f).blocks).toEqual([])
+  f.verification.rangeHead=BASE; expect(evaluateParentDelivery(f).blocks.length).toBeGreaterThan(0)
+})
+for (const mutation of [
+  (f:any)=>{f.acceptedDeliveries.pop()},
+  (f:any)=>{f.acceptedDeliveries[0].taskRef.taskId='135-T9'},
+  (f:any)=>{f.requiredDeliveries.push({...f.requiredDeliveries[1],taskRef:{...f.requiredDeliveries[1].taskRef,taskId:'144-T1'}});f.acceptedDeliveries=structuredClone(f.requiredDeliveries)},
+  (f:any)=>{f.requiredDeliveries[0].parentRepo='attacker/other';f.acceptedDeliveries=structuredClone(f.requiredDeliveries)},
+  (f:any)=>{f.requiredDeliveries[0].parentIssue=999;f.acceptedDeliveries=structuredClone(f.requiredDeliveries)},
+  (f:any)=>{f.requiredDeliveries[0].parentHead=BASE;f.acceptedDeliveries=structuredClone(f.requiredDeliveries)},
+  (f:any)=>{f.scopeMatrix=f.scopeMatrix.filter((row:any)=>row.disposition!=='partial-code')},
+  (f:any)=>{f.scopeMatrix=f.scopeMatrix.filter((row:any)=>row.disposition!=='prepared')},
+  (f:any)=>{f.requiredDeliveries[0].acceptance='prepared';f.acceptedDeliveries=structuredClone(f.requiredDeliveries)},
+  (f:any)=>{f.scopeMatrix[0].taskIds=[];f.requiredScopeMatrix=structuredClone(f.scopeMatrix)},
+  (f:any)=>{f.pr.base.ref='other'},
+  (f:any)=>{f.pr.base.sha=SHA},
+  (f:any)=>{f.pr.base.repo.full_name='other/repo'},
+  (f:any)=>{f.pr.head.sha=BASE},
+  (f:any)=>{f.pr.merged=false},
+  (f:any)=>{f.verification.check.sha=SHA},
+  (f:any)=>{f.verification.check.exit=1},
+  (f:any)=>{f.verification.mergedTree=BASE},
+]) test('parent delivery refuses incomplete or mismatched actual proof: '+String(mutation),()=>{
+  const f=parentFixture();mutation(f);expect(evaluateParentDelivery(f).blocks.length).toBeGreaterThan(0)
 })

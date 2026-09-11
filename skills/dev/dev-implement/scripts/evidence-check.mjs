@@ -4,6 +4,7 @@
 //
 // Exit codes: 0 pass · 2 blocked (this guard has no warn class).
 // Usage: node evidence-check.mjs --file <evidence.md> --json
+import { compareTaskIds } from './recovery.mjs';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -53,20 +54,18 @@ export function checkTaskConsistency(comments) {
   // No plan comment, or a plan with no checkboxes (e.g. a research issue), is
   // nothing to reconcile — not a violation. No ledger yet is the same.
   if (!plan || !ledger) return { blocks, warns };
-  const planDone = (plan.match(/^-\s*\[x\]/gim) ?? []).length;
-  const planTotal = planDone + (plan.match(/^-\s*\[ \]/gm) ?? []).length;
-  if (planTotal === 0) return { blocks, warns };
-
-  const completeTasks = new Set();
-  for (const m of ledger.matchAll(/^-\s*Task\s+(\d+):\s*complete\b/gim)) completeTasks.add(m[1]);
-  const ledgerComplete = completeTasks.size;
-
-  if (ledgerComplete > planDone) {
-    // Interpolated paths and messages are concatenated, not template literals: a backtick at a
-    // shell-word start whose first inner token carries the interpolation trips SkillSpector's
-    // bounded parser for the whole skill (skill-maintainer's standards.md, known behaviours).
-    blocks.push(ledgerComplete + ' task(s) are marked complete in the ledger but only ' + planDone + ' of ' + planTotal + ' are checked off in the plan comment — tick the matching [x] boxes before hand-back');
+  const rows = [...plan.matchAll(/^-\s*\[([ x])\].*$/gim)];
+  if (!rows.length) return { blocks, warns };
+  const ids = rows.map(row => /<!--\s*task-id:([1-9]\d*-T[1-9]\d*)\s*-->/.exec(row[0])?.[1]);
+  if (ids.some(id => !id) || new Set(ids).size !== ids.length) {
+    blocks.push('plan task identities missing or duplicate; regenerate only from newly approved scope');
+    return { blocks, warns };
   }
+  const planDone = rows.flatMap((row, i) => row[1].toLowerCase() === 'x' ? [ids[i]] : []);
+  const completed = [...ledger.matchAll(/^-\s*(?:Task\s+)?([1-9]\d*-T[1-9]\d*):\s*complete\b/gim)].map(row => row[1]);
+  if (/^-\s*Task\s+\d+:\s*complete\b/im.test(ledger)) blocks.push('legacy numeric ledger completion lacks approved task identity');
+  const difference = compareTaskIds(planDone, completed);
+  if (difference.missing.length || difference.unknown.length) blocks.push('task identity mismatch: plan-only [' + difference.missing.join(', ') + ']; ledger-only [' + difference.unknown.join(', ') + ']');
   return { blocks, warns };
 }
 

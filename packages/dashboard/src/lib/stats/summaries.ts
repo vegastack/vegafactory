@@ -14,6 +14,15 @@ export interface Pct {
 
 export interface Summary {
   scope: string
+  metricVersion?: 1 | 2
+  definitionLabel?: string
+  mergedIssues?: number | null
+  mergedTasks?: number | null
+  implementedTasks?: number | null
+  releasedTasks?: number | null
+  operatorMinutes?: number | null
+  coverage?: Record<string, unknown>
+  discovery?: {complete:boolean;observedAt:string|null;reason:string|null}
   month: string
   runs: number | null
   /** Repo-wide, hours from issue creation to close; null when no issue closed this month. */
@@ -60,7 +69,7 @@ const EMPTY_PCT: Pct = { p50: null, p90: null }
 // way round, so the banner names only what the writer is supposed to have put there.
 export function parseSummary(kind: SummaryKind, scope: string, month: string, text: string): Summary {
   const empty: Summary = {
-    scope, month, runs: null, leadTimeH: EMPTY_PCT, cycleTimeH: {},
+    scope, month, metricVersion:1,definitionLabel:'legacy definitions',runs: null, leadTimeH: EMPTY_PCT, cycleTimeH: {},
     rework: { reviewRounds: null, fixRounds: null, handbacks: null },
     throughput: { issuesTouched: null, issuesClosed: null },
     costUsd: null, missing: ['document'],
@@ -73,6 +82,10 @@ export function parseSummary(kind: SummaryKind, scope: string, month: string, te
   }
   if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return empty
   const document = parsed as Record<string, unknown>
+  if(document.schemaVersion===2&&document.metricVersion===2){
+    const execution=asObject(document.execution),values=asObject(execution.values),activity=asObject(document.taskActivity),discovery=asObject(document.discovery)
+    return {...empty,metricVersion:2,definitionLabel:'metric v2',runs:asNumber(execution.executionEvents),costUsd:asNumber(asObject(values.costUsd).value),operatorMinutes:asNumber(asObject(execution.operatorMinutes).value),coverage:values,rework:{reviewRounds:asNumber(activity.reviewRounds),fixRounds:asNumber(activity.fixRounds),handbacks:asNumber(activity.handbacks)},mergedIssues:asNumber(activity.mergedIssues),mergedTasks:asNumber(activity.mergedTasks),implementedTasks:asNumber(activity.implementedTasks),releasedTasks:asNumber(activity.releasedTasks),discovery:{complete:discovery.complete===true,observedAt:typeof discovery.observedAt==='string'?discovery.observedAt:null,reason:typeof discovery.reason==='string'?discovery.reason:null},missing:discovery.complete===true?[]:['task source coverage']}
+  }
   const missing: string[] = []
   const runs = field(document, 'runs', 'runs', missing)
 
@@ -87,6 +100,7 @@ export function parseSummary(kind: SummaryKind, scope: string, month: string, te
   return {
     scope,
     month,
+    metricVersion:1,definitionLabel:'legacy definitions',
     runs,
     // Lead time p50/p90 are null in the writer's own output for a month with no closed issue, so
     // a null here is a reading, not a gap; only a missing `lead_time_h` block would be one.

@@ -4,7 +4,7 @@ import type { Live } from '../live/github'
 import type { StatusReport } from '../live/status'
 
 export interface DispatcherView {
-  running: boolean
+  running: boolean | null
   pid: number | null
   lastTick: string | null
   interval: number | null
@@ -13,9 +13,8 @@ export interface DispatcherView {
   reasons: string[]
 }
 
-// A dispatcher whose status could not be read is reported as not running, with the reason beside
-// it. Reporting it as running would be the one wrong answer: it is the claim an operator would
-// act on by not starting it.
+// A failed status read does not prove either idle or running. Keep it unknown so the operator is
+// directed to restore observation rather than act on an invented state.
 export function buildDispatcherView({ context, status, now }: {
   context: PageContext
   status: Live<StatusReport>
@@ -23,7 +22,7 @@ export function buildDispatcherView({ context, status, now }: {
 }): DispatcherView {
   if (!status.ok) {
     return {
-      running: false, pid: null, lastTick: null, interval: null, repos: [],
+      running: null, pid: null, lastTick: null, interval: null, repos: [],
       freshness: freshnessAt({ syncedAt: context.freshness.syncedAt, now, liveOk: false }),
       reasons: [status.reason],
     }
@@ -35,6 +34,9 @@ export function buildDispatcherView({ context, status, now }: {
     interval: status.data.dispatcher.interval,
     repos: status.data.repos,
     freshness: freshnessAt({ syncedAt: context.freshness.syncedAt, now, liveOk: true }),
-    reasons: [],
+    reasons: status.data.repos.flatMap(repo=>[
+      ...repo.runs.filter(run=>(run.pendingDelivery??0)>0||run.terminationCause==='termination-unconfirmed').map(run=>`${repo.repo} #${run.issue}: ${run.terminationCause??run.state??'unknown'}${run.pendingDelivery?` · ${run.pendingDelivery} deliveries pending`:''}`),
+      ...(repo.recovery??[]).map(row=>`${repo.repo}${row.issue===null?'':` #${row.issue}`}: recovery ${row.action} · ${row.reason}`),
+    ]),
   }
 }

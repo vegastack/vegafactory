@@ -3,13 +3,13 @@
   "evals": [
     {
       "id": 1,
-      "prompt": "Review branch feat/27-json-flag against issue 27 in vegastack/docs-tools; the diff is attached. Brief: add a `--json` flag to `scripts/check-links.mjs` printing `{ broken: [...] }`, keep the exit codes, document the flag in the header. Out of scope: renaming or restructuring existing functions. Plan: Task 1 failing test then flag; Task 2 header and changeset. Head sha is 9b7d0e4. Write the review comment.",
+      "prompt": "Review branch feat/27-json-flag against issue 27 in vegastack/docs-tools; the diff is attached. Brief: add a `--json` flag to `scripts/check-links.mjs` printing `{ broken: [...] }`, keep the exit codes, document the flag in the header. Out of scope: renaming or restructuring existing functions. Plan: Task 1 failing test then flag; Task 2 header and changeset. Full head sha is 9b7d0e4f6a1c2d3e4f5061728394a5b6c7d8e9f0. Write the review comment.",
       "expected_output": "One review comment in the workflow format: the marker line, findings each with severity, confidence and `path:line`, the `brokenLinks` → `findBroken` rename reported as scope creep quoting the brief's out-of-scope line, the missing changeset noted against the plan, and a verdict. (prose half only — the live label, branch and PR flow is the sandbox drill's proof)",
       "files": [
         "evals/files/27.diff"
       ],
       "assertions": [
-        "The comment opens with `<!-- vsk:v1 type=review round=1 sha=9b7d0e4 agent=... verdict=... -->`",
+        "The comment opens with `<!-- vsk:v1 type=review round=1 sha=9b7d0e4f6a1c2d3e4f5061728394a5b6c7d8e9f0 agent=... verdict=... -->`",
         "Every finding carries a severity tag, a confidence, and a `path:line` location",
         "The rename of `brokenLinks` to `findBroken` is reported as scope creep, quoting the brief's out-of-scope line",
         "The absent changeset is reported against the plan's Task 2",

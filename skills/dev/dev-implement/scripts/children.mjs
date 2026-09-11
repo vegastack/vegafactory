@@ -1,15 +1,8 @@
 #!/usr/bin/env node
-// The parallel-children planner, launcher and join. A parent session whose plan
-// declares independent groups runs one child per group at the same time, each in
-// its own checkout branched from the parent's HEAD commit, then merges the
-// children back in plan order and verifies once.
-//
-// Every deterministic decision lives here — parallel or sequential, the
-// concurrency cap, child branch and worktree names, the per-harness launch
-// shape, the post-run scope check, and the join order — while the two harness
-// mechanisms stay native: a saved Claude workflow, or one `codex exec -C` per
-// child. The group grammar is NOT re-parsed here: `plan-lint --groups` is the
-// one parser, and this script consumes its validated JSON.
+// The standalone independent-child planner and validator. The packaged CLI is
+// the execution/integration owner: it resolves authoritative runs and acceptance
+// before applying an immutable commit. A helper invocation never launches agents.
+// Group syntax comes only from plan-lint --groups.
 //
 // Exit codes: 0 pass · 1 pass with warnings · 2 blocked (reasons printed).
 // Every verb is dry-run until --write and refuses to write through a symlink.
@@ -55,8 +48,9 @@ export function readGroupsReport(report) {
 // The smallest of the configured cap, what the machine can carry, and the
 // workflow ceiling — never below one, because one child still has to run.
 export function effectiveConcurrency({ configured, cpus: cpuCount }) {
-  const cap = configured === null || configured === undefined ? WORKFLOW_AGENT_CEILING : Number(configured);
-  return Math.max(1, Math.min(WORKFLOW_AGENT_CEILING, Number(cpuCount) - 2, cap));
+  const cap = configured === null || configured === undefined ? 3 : Number(configured);
+  if (!Number.isSafeInteger(cap) || cap < 1 || !Number.isFinite(cpuCount)) throw new Error('invalid child concurrency');
+  return Math.max(1, Math.min(3, WORKFLOW_AGENT_CEILING, Number(cpuCount) - 2, cap));
 }
 
 // --- the run plan ---------------------------------------------------------
@@ -71,7 +65,7 @@ const issueNumber = (member) => {
 // is the collision the disjoint sets exist to rule out — so it does not plan.
 // Parallel needs two groups that carry members; anything less runs in plan
 // order, and the reason goes in the parent's ledger rather than nowhere.
-export function planParallelRun({ groups, issues, parentBranch, parentHead, repoRoot, parentIssue = null }) {
+export function planParallelRun({ groups, issues, parentBranch, parentHead, repoRoot, parentIssue = /** @type {number|null} */ (null) }) {
   const children = [];
   for (const group of groups) {
     if (group.members.length > 1) {
@@ -85,6 +79,7 @@ export function planParallelRun({ groups, issues, parentBranch, parentHead, repo
       if (!issue) {
         throw new Error('group ' + quoted(group.id) + ' names ' + String(member) + ', which is not a child of this parent');
       }
+      if (number === parentIssue) throw new Error('a parent cannot be its own child');
       const type = issue.type || 'feat';
       const plan = childWorktreePlan({ repoRoot, issue: issue.number, title: issue.title, type, baseSha: parentHead });
       children.push({
@@ -139,49 +134,14 @@ export function childPrompt(child, { parentIssue, parentBranch, checkout = child
   return lines.join('\n\n');
 }
 
-// The Claude path: one saved-workflow call by name. The workflow itself has no
-// filesystem access, so everything it needs travels in these args. Its agents
-// run in worktrees the harness creates (isolation: worktree), so the prompt
-// names that checkout rather than a path nothing created.
+// Compatibility exports refuse instead of supplying an alternate executor.
 export const HARNESS_CHECKOUT = 'the worktree the harness gave you';
-export function claudeWorkflowCall(run, { concurrency, parentIssue = null } = {}) {
-  const parent = parentIssue === null || parentIssue === undefined ? run.parentIssue : parentIssue;
-  return {
-    name: 'implement-children',
-    args: {
-      repoRoot: run.repoRoot,
-      parentIssue: parent,
-      parentBranch: run.parentBranch,
-      parentHead: run.parentHead,
-      concurrency,
-      children: run.children.map((child) => ({
-        issue: child.issue,
-        title: child.title,
-        branch: child.branch,
-        baseSha: child.baseSha,
-        files: child.files,
-        prompt: childPrompt(child, { parentIssue: parent, parentBranch: run.parentBranch, checkout: HARNESS_CHECKOUT }),
-      })),
-    },
-  };
+export function claudeWorkflowCall() {
+  throw new Error('legacy workflow launch is unavailable; use vegafactory children run');
 }
 
-// The Codex path: one cwd-pinned `codex exec` per child. `spawn_agent` takes no
-// cwd (codex-cli 0.149.1, verified 03-09-2026), so an in-session agent would
-// share the parent's writable root and could not write to a sibling worktree.
-// The flag sequence is #114's launch table's, verbatim — dispatch.test.ts pins
-// the two together so they cannot drift.
-export function codexChildLaunch(child, { codex = 'codex', model, effort, parentIssue, parentBranch }) {
-  const prompt = childPrompt(child, { parentIssue, parentBranch });
-  return {
-    command: codex,
-    args: [
-      'exec', '-C', child.path, '--sandbox', 'workspace-write', '-a', 'never',
-      '--dangerously-bypass-hook-trust', '-c', 'model=' + model,
-      '-c', 'model_reasoning_effort=' + effort, '--json', prompt,
-    ],
-    prompt,
-  };
+export function codexChildLaunch() {
+  throw new Error('legacy argv launch is unavailable; use vegafactory children run');
 }
 
 // --- the join -------------------------------------------------------------
@@ -208,9 +168,10 @@ export function scopeViolations(changed, declared) {
 // three-way merge — safe here because the declared file sets are disjoint and
 // scopeViolations has already refused any child that strayed outside its own.
 export function mergeArgs(child, index = 0) {
+  if (!/^[a-f0-9]{40}$/.test(child.headSha)) throw new Error('immutable accepted child commit required');
   return index === 0
-    ? ['merge', '--ff-only', child.branch]
-    : ['merge', '--no-ff', '--no-edit', child.branch];
+    ? ['merge', '--ff-only', child.headSha]
+    : ['merge', '--no-ff', '--no-edit', child.headSha];
 }
 
 // A branch a child reports is data from the child, so it is checked as a ref
@@ -225,8 +186,36 @@ export function isBranchName(value) {
 export function joinedChildren(children, results) {
   return children.map((child) => {
     const reported = (results ?? {})[child.issue]?.branch;
-    return reported ? { ...child, branch: reported } : child;
+    if (reported && reported !== child.branch) throw new Error('child result branch differs from its prepared branch');
+    return child;
   });
+}
+
+// The caller resolves these records from the private runtime store. JSON returned
+// by a child is never its own proof that either execution or acceptance happened.
+export function validateChildResult(value, expected) {
+  const run = expected.run;
+  const check = expected.acceptance;
+  const fail = (reason) => ({ ok: false, reason });
+  if (!value || value.schemaVersion !== 1 || !run) return fail('verified child run/result unavailable');
+  const keys = ['schemaVersion', 'runId', 'repo', 'issue', 'baseSha', 'headSha', 'branch', 'scopeDigest', 'terminationCause', 'acceptance', 'noChange', 'machine', 'sharedGeneration', 'checkpoint'];
+  if (Object.keys(value).length !== keys.length || keys.some((key) => !Object.hasOwn(value, key))) return fail('invalid child result fields');
+  if (value.issue !== expected.issue || value.scopeDigest !== expected.scopeDigest || value.runId !== run.runId
+    || value.issue !== run.issue || value.repo !== run.repo || value.branch !== run.branch
+    || value.baseSha !== run.baseSha || value.headSha !== run.headSha || value.scopeDigest !== run.taskKey?.scopeDigest)
+    return fail('child result differs from its authoritative run');
+  if (!/^[a-f0-9]{40}$/.test(value.baseSha) || !/^[a-f0-9]{40}$/.test(value.headSha)
+    || run.state !== 'terminal' || run.terminationCause !== 'succeeded' || value.terminationCause !== 'succeeded'
+    || run.exitCode !== 0 || !run.finishedAt || !run.processIdentity) return fail('child execution did not finish successfully');
+  if (typeof value.noChange !== 'boolean' || value.noChange !== (value.baseSha === value.headSha)) return fail('child no-change identity differs');
+  if (JSON.stringify(value.machine) !== JSON.stringify(run.machine)
+    || value.sharedGeneration !== (run.sharedClaim?.generation ?? null)
+    || JSON.stringify(value.checkpoint) !== JSON.stringify(run.checkpoint)) return fail('child owner/checkpoint identity differs');
+  if (!check || check.runId !== run.runId || check.baseSha !== run.baseSha || check.headSha !== run.headSha
+    || check.scopeDigest !== value.scopeDigest || check.ok !== true || check.exitCode !== 0
+    || check.command !== value.acceptance?.command || value.acceptance?.sha !== run.headSha || value.acceptance?.ok !== true
+    || Object.keys(value.acceptance).sort().join(',') !== 'command,ok,sha') return fail('source-bound executed acceptance unavailable');
+  return { ok: true, reason: '' };
 }
 
 // What the parent does with each child's result, in plan order. A failed child
@@ -235,7 +224,7 @@ export function joinedChildren(children, results) {
 // the only reason the parallel run was allowed at all. A done child whose diff
 // is unknown (`changed[issue]` is null) is likewise not merged: its scope is
 // unproved, and an unverifiable state fails closed.
-export function evaluateJoin({ children, results, changed }) {
+export function evaluateJoin({ children, results, changed, runs = {}, acceptances = {} }) {
   const merge = [];
   const stop = [];
   const blocks = [];
@@ -245,8 +234,9 @@ export function evaluateJoin({ children, results, changed }) {
   for (const child of children) {
     const result = (results ?? {})[child.issue] ?? {};
     const label = '#' + child.issue;
-    if (result.status !== 'done') {
-      const why = result.message ? result.status + ' — ' + result.message : String(result.status ?? 'no result');
+    const checked = validateChildResult(result, { issue: child.issue, scopeDigest: child.scopeDigest, run: runs[child.issue], acceptance: acceptances[child.issue] });
+    if (!checked.ok || result.branch !== child.branch || result.baseSha !== child.baseSha) {
+      const why = checked.reason || 'prepared child identity differs';
       warns.push('child ' + label + ' failed and was not merged — its branch ' + child.branch
         + ' and worktree are left in place (' + why + ')');
       stop.push({ issue: child.issue, reason: why });
@@ -254,7 +244,7 @@ export function evaluateJoin({ children, results, changed }) {
       continue;
     }
     const diff = (changed ?? {})[child.issue];
-    if (diff === null) {
+    if (!Array.isArray(diff)) {
       const reason = 'its diff could not be read, so its scope cannot be proved';
       blocks.push('child ' + label + ': ' + reason);
       stop.push({ issue: child.issue, reason });
@@ -269,8 +259,8 @@ export function evaluateJoin({ children, results, changed }) {
       ledger.push('- Join: ' + label + ' not merged (' + reason + ')');
       continue;
     }
-    merge.push({ issue: child.issue, branch: child.branch });
-    ledger.push('- Join: ' + label + ' merged ' + String(result.head ?? '').slice(0, 7));
+    merge.push({ issue: child.issue, branch: child.branch, headSha: result.headSha, runId: result.runId });
+    ledger.push('- Join: ' + label + ' verified ' + result.headSha.slice(0, 7));
   }
   return { merge, stop, blocks, warns, ledger };
 }
@@ -420,104 +410,12 @@ function runVerb(verb, flags) {
   if (verb === 'plan') return { blocks, warns, plan, wrote: false };
 
   if (verb === 'launch') {
-    if (run.mode !== 'parallel') {
-      warns.push('not launching in parallel — ' + run.reason + '; run the children in plan order instead');
-      return { blocks, warns, plan, wrote: false };
-    }
-    const launch = harness === 'claude'
-      ? { harness, workflow: claudeWorkflowCall(run, { concurrency, parentIssue }) }
-      : {
-          harness,
-          runs: run.children.map((child) => codexChildLaunch(child, {
-            model: flags.model || 'gpt-5.6',
-            effort: flags.effort || 'high',
-            parentIssue,
-            parentBranch: run.parentBranch,
-          })),
-        };
-    const actions = [];
-    // The Claude path gets its worktrees from the harness (isolation: worktree);
-    // the Codex path has no such mechanism, so the parent creates them.
-    if (harness === 'codex') {
-      for (const child of run.children) {
-        actions.push(at(child.path, 'git worktree add -b ' + child.branch + ' from ' + child.baseSha));
-        if (write) {
-          const added = gitRun(repoRoot, ['worktree', 'add', '-b', child.branch, child.path, child.baseSha]);
-          if (!added.ok) blocks.push(at(child.path, 'git worktree add failed: ' + added.out));
-        }
-      }
-    }
-    return { blocks, warns, plan, launch, actions, wrote: write && blocks.length === 0 };
+    blocks.push('legacy child launch is unavailable; use the checked CLI gateway vegafactory children run, or plan for a non-executing preview');
+    return { blocks, warns, plan, wrote: false };
   }
 
   if (verb === 'join') {
-    let results = {};
-    if (flags.results) {
-      // The results are what the children returned (the workflow's CHILD_RESULT
-      // per child): the branch each reports is the branch the join diffs and
-      // merges, so a harness-chosen name is found rather than re-derived.
-      try {
-        const text = flags.results === '-' ? readFileSync(0, 'utf8') : readFileSync(flags.results, 'utf8');
-        for (const entry of JSON.parse(text)) results[entry.issue] = entry;
-      } catch (error) {
-        return { blocks: [at('--results', 'cannot read the child results: ' + error.message)], warns, plan };
-      }
-      for (const entry of Object.values(results)) {
-        if (entry.branch !== undefined && entry.branch !== '' && !isBranchName(entry.branch)) {
-          return { blocks: [at('#' + entry.issue, 'reported ' + quoted(String(entry.branch)) + ', which is not a branch name')], warns, plan };
-        }
-      }
-    } else {
-      // No results file: a child that produced its planned branch is treated as
-      // done, and one that produced nothing as failed. The scope check still decides.
-      for (const child of run.children) {
-        const head = gitRun(repoRoot, ['rev-parse', '--verify', '--quiet', 'refs/heads/' + child.branch]);
-        results[child.issue] = head.ok
-          ? { issue: child.issue, status: 'done', head: head.out.slice(0, 7) }
-          : { issue: child.issue, status: 'failed', message: 'no branch ' + child.branch };
-      }
-    }
-    const children = joinedChildren(run.children, results);
-    const changed = {};
-    for (const child of children) {
-      const diff = gitRun(repoRoot, ['diff', '--name-only', child.baseSha + '..' + child.branch]);
-      // null, not []: an unreadable diff is an unknown scope, and evaluateJoin
-      // refuses to merge on an unknown.
-      changed[child.issue] = diff.ok ? diff.out.split('\n').filter(Boolean) : null;
-      if (!diff.ok && results[child.issue]?.status === 'done') {
-        warns.push(at(child.branch, 'git diff failed: ' + diff.out.split('\n')[0]));
-      }
-    }
-    const outcome = evaluateJoin({ children, results, changed });
-    // A done child whose scope could not be proved holds every merge, not just its
-    // own: the repo state the join was about to write into is not what it was told.
-    const diffBlocked = children.some((child) => changed[child.issue] === null && results[child.issue]?.status === 'done');
-    blocks.push(...outcome.blocks);
-    warns.push(...outcome.warns);
-    const actions = [];
-    let landed = 0;
-    // evaluateJoin has already decided per child. A child that failed or wandered is simply not in
-    // `merge`; its siblings still land, because the brief's rule is that the parent continues with
-    // the others and hands back — not that one wanderer strands the whole run.
-    for (const [index, merged] of outcome.merge.entries()) {
-      const child = children.find((c) => c.issue === merged.issue);
-      const args = mergeArgs(child, index);
-      actions.push(at(run.parentBranch, 'git ' + args.join(' ')));
-      if (write && !diffBlocked) {
-        const done = gitRun(repoRoot, args);
-        if (!done.ok) {
-          // Leave no conflicted tree behind, and stop: the children after this one
-          // were ordered behind it for a reason, and merging past a conflict guesses.
-          gitRun(repoRoot, ['merge', '--abort']);
-          blocks.push(at(merged.branch, 'merge failed and was aborted: ' + done.out));
-          break;
-        }
-        landed += 1;
-      }
-    }
-    // `wrote` reports what happened to the parent branch, not whether the run was
-    // clean: a join that landed one child and then blocked on another has written.
-    return { blocks, warns, plan, join: outcome, actions, wrote: landed > 0 };
+    return { blocks: ['join requires the CLI execution owner to resolve durable runs, current integration authority and source-bound acceptance; use vegafactory children join'], warns, plan, wrote: false };
   }
 
   // remove: the child checkouts only, never a branch, and never a dirty or
@@ -563,4 +461,19 @@ if (invokedDirectly) {
     for (const action of outcome.actions ?? []) console.log('  action: ' + action);
   }
   process.exit(exitCode);
+}
+
+// Public projection is data only. The CLI emits it after review, accepted join
+// and immutable scope readback/linking; this parser grants no execution.
+export function validateAcceptedDeliveries(rows, expected) {
+  const keys=(value,names)=>value&&typeof value==='object'&&!Array.isArray(value)&&Object.keys(value).length===names.length&&names.every(key=>Object.hasOwn(value,key));
+  if(!Array.isArray(rows)||!rows.length)return {ok:false,reason:'implemented task delivery rows unavailable'};
+  const seen=new Set();
+  for(const row of rows){
+    if(!keys(row,['taskRef','scopeDigest','childHead','parentRepo','parentIssue','parentHead','acceptance'])||!keys(row.taskRef,['repo','issue','taskId'])||row.acceptance!=='implemented'||!/^[a-f0-9]{64}$/.test(row.scopeDigest)||!['childHead','parentHead'].every(key=>/^[a-f0-9]{40}$/.test(row[key])))return {ok:false,reason:'invalid accepted delivery projection'};
+    const ref=row.taskRef;
+    if(ref.repo!==expected.repo||ref.issue!==expected.issue||!expected.approvedTaskIds.includes(ref.taskId)||seen.has(ref.taskId)||row.scopeDigest!==expected.scopeDigest||row.childHead!==expected.childHead||row.parentRepo!==expected.parentRepo||row.parentIssue!==expected.parentIssue||row.parentHead!==expected.parentHead)return {ok:false,reason:'accepted delivery source or task differs'};
+    seen.add(ref.taskId);
+  }
+  return {ok:true,reason:'exact accepted task projection'};
 }

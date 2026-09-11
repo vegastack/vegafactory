@@ -1,0 +1,12 @@
+{
+  "metricVersion": 2,
+  "destination": { "host": "github.com", "org": "o", "repo": "o/project.docs", "controlRoom": "o/room" },
+  "period": "2026-09",
+  "execution": [
+    { "schemaVersion": 2, "recordKind": "execution", "utcDay": "2026-09-01", "stage": "implement", "outcome": "interrupted", "harness": "claude", "model": "fixture", "durationSeconds": 10, "tokensIn": 0, "tokensOut": null, "cacheReadTokens": null, "cacheWriteTokens": null, "costUsd": null, "taskRef": { "repo": "o/project.docs", "issue": 1, "taskId": "148-T1" }, "taskOwner": null, "agentAccountOwner": "account", "operatorMinutes": null, "skills": [{ "name": "dev-plan", "trigger": "model", "harness": "claude" }, { "name": "dev-review", "trigger": "model", "harness": "claude" }] },
+    { "schemaVersion": 2, "recordKind": "execution", "utcDay": "2026-09-02", "stage": "implement", "outcome": "succeeded", "harness": "claude", "model": "fixture", "durationSeconds": null, "tokensIn": 3, "tokensOut": 0, "cacheReadTokens": null, "cacheWriteTokens": null, "costUsd": 0, "taskRef": { "repo": "o/project.docs", "issue": 1, "taskId": "148-T1" }, "taskOwner": "person", "agentAccountOwner": "account", "operatorMinutes": 5, "skills": [] },
+    { "schemaVersion": 2, "recordKind": "execution", "utcDay": "2026-09-03", "stage": "review", "outcome": "succeeded", "harness": "codex", "model": "fixture", "durationSeconds": 20, "tokensIn": null, "tokensOut": 5, "cacheReadTokens": 0, "cacheWriteTokens": null, "costUsd": 3, "taskRef": null, "taskOwner": null, "agentAccountOwner": null, "operatorMinutes": 0, "skills": [{ "name": "dev-plan", "trigger": "model", "harness": "codex" }, { "name": "dev-review", "trigger": "model", "harness": "codex" }] }
+  ],
+  "subscriptionFee": { "amount": 20, "currency": "USD", "period": "2026-09", "source": "operator-supplied" },
+  "expected": { "executionEvents": 3, "logicalExecutions": 2, "costUsd": { "value": 3, "known": 2, "unknown": 1 }, "tokensIn": { "value": 3, "known": 2, "unknown": 1 }, "durationSeconds": { "value": 30, "known": 2, "unknown": 1 }, "operatorMinutes": { "value": 5, "known": 2, "unknown": 1 } }
+}

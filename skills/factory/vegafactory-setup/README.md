@@ -36,13 +36,12 @@ Three procedures, one file layout.
 
 - **Bootstrap** asks the `org.md` questionnaire — org name, goals, and what applies to everyone, including the three statistics lines — renders every template in `assets/control-room/` into a directory the operator can read, and then stops: creating the repository, granting access, and recording anyone's role are the operator's own account actions, named as exact commands and never attempted.
 - **`register <repo>`** confirms the repo's group, runs `dev-setup` there (which reads the control room first, so an inherited knob is stated rather than asked), appends the `repos.md` row, and links the board when one exists.
-- **`onboard <login>`** walks `onboarding/new-teammate.md` and adds the `people.csv` row. A person's `role` is recorded only on the operator's word, because `lead` gates the people-level statistics views.
+- **`onboard <login>`** walks `onboarding/new-teammate.md` and adds the `people.csv` row. A person's `role` is descriptive and recorded only on the operator's word; people-level reads come from the resolved administration capability and repository scope, never from `lead`.
 
 Guardrails: nothing secret goes in any control-room file — names of secrets only; department knobs never go in `org.md`; a declined step is written into `org.md`'s `## Unconfirmed` section so the next run asks again; and a control room that does not exist yet degrades to `dev-setup` asking the questions itself.
 
-Precedence, in one line: hand edits in a repo's `.vegastack/dev.md` beat `groups/<g>/*`, which beat `org.md`, which beat the skill defaults — except the decision registers, which concatenate.
+Precedence, in one line: ordinary delegated defaults use repo → group → org → skill, while an organization lock stays effective unless the organization grants the exact key/group/repository/value delegation; decision registers concatenate.
 
 ## Known gaps
 
-- The behavioral eval in `evals/` has not been executed. The four cases are written and reviewed by hand, but `claude plugin eval` answers `plugin eval is currently in early access` on this account, and this harness offers no subagent to run the with-skill/baseline procedure instead. The cases stand as the skill's quality bar the moment a runner is available; nothing here has been scored.
-
+- The current eight-case behavioral eval is pending the campaign's source-bound paired run. Until that result is recorded, deterministic tests do not substitute for skillify item 6.

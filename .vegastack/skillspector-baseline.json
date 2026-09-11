@@ -82,13 +82,49 @@
       "reason": "EA5 (External Model or Provider Selection) on the Codex skill-discovery drill: one documented command, codex exec -C \"$PROBE\" --skip-git-repo-check -s read-only '...', that starts a real Codex session against a throwaway probe skill to learn whether headless Codex discovers project skills on its own. The quota cost is real and is the reason the section says, in bold, that the operator runs it by hand — no skill, hook or dispatcher may run it unasked, and dev-setup only ever prints it for the operator to copy. The run is sandboxed read-only inside a mktemp directory so the repo's un-ignored .agents/ is never written to. Adjudicated 03-09-2026 (#104). Still flag if: the command appears in this file outside the operator-run drill, loses the read-only sandbox flag or the scratch directory, or any script or hook in this repo executes this probe without an explicit operator instruction."
     }
   ],
-  "scanner_version": "2.11.0",
+  "scanner_version": "2.11.2",
   "fingerprints": [
     {
-      "hash": "sha256:e3e1ca8788fb051e8de12a331679f13ff920b376a1b28d28b13e11cba982ed0e",
+      "hash": "sha256:e78c61ef434d65afdf199da75f9adeaa345d936e7463f81f66b05af0c5b90f6e",
       "rule_id": "RA1",
       "file": "refresh/REFRESH.md",
-      "reason": "skillify only. RA1 (Rogue Agent / self-modification) is CORRECT about the pattern and is accepted with its limits stated, not explained away: this refresh contract instructs an agent to rewrite skillify's own marked sections when upstream sources drift. What actually bounds it, verified: refresh work runs on refresh/** branches, and .github/workflows/refresh-guard.yml fails any such PR whose diff touches anything outside a skill's refresh/ directory - so the automated path cannot reach skillify's SKILL.md or references at all. Checksums, versions and timestamps in refresh/sources.json are runner-only by repo rule, and the workflow maintains one standing PR rather than pushing. What bounds it as of 01-09-2026: the default branch IS branch-protected - a PR is required, force-pushes and deletion are blocked, and admins are not exempt - so 'a human reviews before merge' is now an enforced control rather than a convention. This sentence previously recorded the opposite, and the protection was enabled because this suppression depended on a control that did not exist. Still narrower than it sounds: refresh-guard only constrains refresh/** branches, so an agent following this contract from any other branch is bounded by the PR requirement alone. The residual risk is therefore real but not unique to this contract: it is the same risk carried by any agent with write access to the repository, and the finding is accepted on that basis rather than on a control that does not exist. Still flag if: this contract's wording changes at all (content-hashed, so it re-triggers automatically), or refresh-guard.yml stops restricting refresh/** diffs to refresh/ directories - that guard is the one real bound named here. Re-adjudicated 03-09-2026 (#101) after REFRESH.md dropped the authoring.md mirrored-table bullet (that table is now a citation of skill-maintainer's Hard limits): the hashed instruction - update skillify's marked section on a normal branch when skill-maintainer's sources drift - is the same sentence with 'two marked sections' read 'marked section', refresh-guard.yml is unchanged, and only the digest moves."
+      "reason": "skillify only. RA1 (Rogue Agent / self-modification) is CORRECT about the pattern and is accepted with its limits stated, not explained away: this refresh contract instructs an agent to rewrite skillify's own marked sections when upstream sources drift. What actually bounds it, verified: refresh work runs on refresh/** branches, and .github/workflows/refresh-guard.yml fails any such PR whose diff touches anything outside a skill's refresh/ directory - so the automated path cannot reach skillify's SKILL.md or references at all. Checksums, versions and timestamps in refresh/sources.json are runner-only by repo rule, and the workflow maintains one standing PR rather than pushing. What bounds it as of 01-09-2026: the default branch IS branch-protected - a PR is required, force-pushes and deletion are blocked, and admins are not exempt - so 'a human reviews before merge' is now an enforced control rather than a convention. This sentence previously recorded the opposite, and the protection was enabled because this suppression depended on a control that did not exist. Still narrower than it sounds: refresh-guard only constrains refresh/** branches, so an agent following this contract from any other branch is bounded by the PR requirement alone. The residual risk is therefore real but not unique to this contract: it is the same risk carried by any agent with write access to the repository, and the finding is accepted on that basis rather than on a control that does not exist. Still flag if: this contract's wording changes at all (content-hashed, so it re-triggers automatically), or refresh-guard.yml stops restricting refresh/** diffs to refresh/ directories - that guard is the one real bound named here. Re-adjudicated 03-09-2026 (#101) after REFRESH.md dropped the authoring.md mirrored-table bullet (that table is now a citation of skill-maintainer's Hard limits): the hashed instruction - update skillify's marked section on a normal branch when skill-maintainer's sources drift - is the same sentence with 'two marked sections' read 'marked section', refresh-guard.yml is unchanged, and only the digest moves. Re-adjudicated 11-09-2026 after the operator-approved SkillSpector 2.11.2 upgrade changed the scanner fingerprint while the accepted source bytes and controls remained unchanged."
+    },
+    {
+      "hash": "sha256:4157aed2b08e4f44fa4858eadaf71e095f0773d7a5d00553e320acc253cbdbd4",
+      "rule_id": "P2",
+      "file": "scripts/lib/approval.mjs",
+      "reason": "The approval owner documents and parses vsk approval/progress metadata. The matched bytes are a schema example or literal delimiter comparison, not an agent-directed instruction; only declared JSON fields grant scope after canonical identity/source/history validation. This identical owner file is copied into dev-implement, dev-intake, dev-plan and dev-ship. Exact content fingerprint regenerated after the operator-approved SkillSpector 2.11.2 upgrade; no path-wide or rule-wide exception. Still flag if: the matched content changes, a comment gains an instruction rather than metadata, or a new finding appears outside this exact fingerprint."
+    },
+    {
+      "hash": "sha256:96872fa1047dc764a24d7aa6d6c1b4832df6af80dbc1825989fa9d55bc6bd84c",
+      "rule_id": "P2",
+      "file": "scripts/lib/approval.mjs",
+      "reason": "The approval owner documents and parses vsk approval/progress metadata. The matched bytes are a schema example or literal delimiter comparison, not an agent-directed instruction; only declared JSON fields grant scope after canonical identity/source/history validation. This identical owner file is copied into dev-implement, dev-intake, dev-plan and dev-ship. Exact content fingerprint regenerated after the operator-approved SkillSpector 2.11.2 upgrade; no path-wide or rule-wide exception. Still flag if: the matched content changes, a comment gains an instruction rather than metadata, or a new finding appears outside this exact fingerprint."
+    },
+    {
+      "hash": "sha256:772bc478e8c325fe76ef2d23c47daff461a7c8d54390316e506c0fcf86169992",
+      "rule_id": "P2",
+      "file": "scripts/lib/approval.mjs",
+      "reason": "The approval owner documents and parses vsk approval/progress metadata. The matched bytes are a schema example or literal delimiter comparison, not an agent-directed instruction; only declared JSON fields grant scope after canonical identity/source/history validation. This identical owner file is copied into dev-implement, dev-intake, dev-plan and dev-ship. Exact content fingerprint regenerated after the operator-approved SkillSpector 2.11.2 upgrade; no path-wide or rule-wide exception. Still flag if: the matched content changes, a comment gains an instruction rather than metadata, or a new finding appears outside this exact fingerprint."
+    },
+    {
+      "hash": "sha256:6fc53185b2a016f31c7059696797c718a4106af3855a5f2730af457f532d279d",
+      "rule_id": "P2",
+      "file": "references/plan-format.md",
+      "reason": "The plan template uses vsk plan and stable task-id metadata inside fenced Markdown examples. These delimiters bind immutable task identity; they contain no hidden operational directive. Exact content fingerprint regenerated after the operator-approved SkillSpector 2.11.2 upgrade; no path-wide or rule-wide exception. Still flag if: the matched content changes, a comment gains an instruction rather than metadata, or a new finding appears outside this exact fingerprint."
+    },
+    {
+      "hash": "sha256:63683a14c1dc0f09cab888eb0ad2a5aa8f5316b228b22ffea4e0431804d021b5",
+      "rule_id": "P2",
+      "file": "scripts/recovery.mjs",
+      "reason": "The recovery owner matches vsk correction, ruling, handback, plan and approval metadata so that a later operator instruction blocks automatic resumption unless its exact comment ID and body digest were reconciled. The matched HTML syntax is defensive parser input, never an instruction consumed as authority. Exact SkillSpector 2.11.2 fingerprint; no path-wide or rule-wide exception. Still flag if: the matcher stops blocking unreconciled instructions, the matched bytes change, or a finding appears outside this exact parser occurrence."
+    },
+    {
+      "hash": "sha256:ea14472572ac2d20b9b94a351491b92f7aa3cfd228f62d9a631ef7d06647b2ca",
+      "rule_id": "P2",
+      "file": "scripts/plan-lint.mjs",
+      "reason": "The plan linter parses the stable task-id HTML marker only on structural lines outside fenced examples, rejects duplicates, and uses the result to bind exact task files. The matched syntax is a defensive identity parser, not hidden agent direction. Exact SkillSpector 2.11.2 fingerprint; no path-wide or rule-wide exception. Still flag if: fenced or malformed markers begin granting task identity, duplicate rejection weakens, the matched bytes change, or a finding appears outside this exact parser occurrence."
     }
   ],
   "coverage": [

@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test'
 import { join } from 'node:path'
-import { bannedPlaceholders, lintPlan, parseIndependentGroups } from '../scripts/plan-lint.mjs'
+import { bannedPlaceholders, lintPlan, parseFleetParallelDeclaration, parseIndependentGroups } from '../scripts/plan-lint.mjs'
 
 const goodPlan = `<!-- vsk:v1 type=plan rev=1 -->
 ## Plan (v1)
@@ -117,6 +117,81 @@ describe('independent groups', () => {
   test('a malformed group line is reported, never silently skipped', () => {
     const r = lintPlan(groupPlan.replace('- `docs` — #132 · Files: `docs/dispatcher.md`', '- docs: whatever'))
     expect(r.blocks.some((b) => b.includes('independent group line'))).toBe(true)
+  })
+})
+
+describe('fleet parallel declaration', () => {
+  const fleetPlan = goodPlan
+    .replace('**Constraints:**', '**Constraints:**\n**Fleet parallel:** {"schemaVersion":1,"eligible":true,"taskIds":["1-T1"],"resources":["fixture:one"]}')
+    .replace('**Task 1: build it**', '**Task 1: build it** <!-- task-id:1-T1 -->')
+  const withDeclaration = (declaration: string) => fleetPlan.replace(/^\*\*Fleet parallel:\*\* .*$/m, '**Fleet parallel:** ' + declaration)
+
+  test('projects exact selected tasks, canonical task files and bounded resources', () => {
+    expect(parseFleetParallelDeclaration(fleetPlan, ['1-T1'])).toEqual({
+      eligible: true,
+      independent: true,
+      taskIds: ['1-T1'],
+      paths: ['skills/x/scripts/x.mjs', 'skills/x/tests/x.test.ts'],
+      resources: ['fixture:one'],
+      reason: null,
+    })
+  })
+
+  test('missing or malformed declarations stay repository-exclusive', () => {
+    expect(parseFleetParallelDeclaration(goodPlan, ['1-T1']).independent).toBe(false)
+    expect(parseFleetParallelDeclaration(fleetPlan.replace('"eligible":true', '"eligible":false'), ['1-T1']).independent).toBe(false)
+    expect(parseFleetParallelDeclaration(fleetPlan, ['1-T2']).independent).toBe(false)
+  })
+
+  test('only one declaration at the defined structural location is eligible; fenced examples grant nothing', () => {
+    const line = fleetPlan.split('\n').find((value) => value.startsWith('**Fleet parallel:**'))!
+    expect(parseFleetParallelDeclaration(fleetPlan + '\n' + line, ['1-T1']).independent).toBe(false)
+    expect(parseFleetParallelDeclaration(fleetPlan.replace(line, '').replace('### Tasks', '### Tasks\n' + line), ['1-T1']).independent).toBe(false)
+    const fencedOnly = goodPlan.replace('### Tasks', '```md\n' + line + '\n```\n### Tasks')
+    expect(parseFleetParallelDeclaration(fencedOnly, ['1-T1']).independent).toBe(false)
+    expect(lintPlan(fencedOnly).blocks).toEqual([])
+  })
+
+  test('closed JSON rejects unknown, duplicate, wrong-version and path-bearing fields', () => {
+    for (const declaration of [
+      '{"schemaVersion":1,"eligible":true,"taskIds":["1-T1"],"resources":[],"paths":["skills/x/scripts/x.mjs"]}',
+      '{"schemaVersion":2,"eligible":true,"taskIds":["1-T1"],"resources":[]}',
+      '{"schemaVersion":1,"eligible":true,"eligible":true,"taskIds":["1-T1"],"resources":[]}',
+      '{"schemaVersion":1,"eligible":1,"taskIds":["1-T1"],"resources":[]}',
+    ]) {
+      const changed = withDeclaration(declaration)
+      expect(parseFleetParallelDeclaration(changed, ['1-T1']).independent).toBe(false)
+      expect(lintPlan(changed).blocks.some((block) => block.includes('fleet declaration'))).toBe(true)
+    }
+  })
+
+  test('task and resource members are canonical, unique and capped at 64', () => {
+    const replace = (taskIds: string[], resources: string[]) => withDeclaration(JSON.stringify({ schemaVersion: 1, eligible: true, taskIds, resources }))
+    for (const changed of [
+      replace(['1-T1', '1-T1'], []),
+      replace(['task-one'], []),
+      replace(Array.from({ length: 65 }, (_, i) => `1-T${i + 1}`), []),
+      replace(['1-T1'], ['fixture:one', 'fixture:one']),
+      replace(['1-T1'], ['Fixture']),
+      replace(['1-T1'], ['x'.repeat(129)]),
+      replace(['1-T1'], Array.from({ length: 65 }, (_, i) => `resource:${i}`)),
+    ]) expect(parseFleetParallelDeclaration(changed, ['1-T1']).independent).toBe(false)
+  })
+
+  test('derived task paths must be nonempty, literal, normalized and non-shared', () => {
+    for (const path of ['', '../escape.ts', './relative.ts', '/absolute.ts', 'C:\\source\\a.ts', 'src/*.ts', 'src//a.ts', 'README.md']) {
+      const changed = fleetPlan.replace('skills/x/scripts/x.mjs', path).replace('skills/x/tests/x.test.ts', path)
+      expect(parseFleetParallelDeclaration(changed, ['1-T1']).independent).toBe(false)
+    }
+    const twice = fleetPlan.replace('  - Interfaces —', '  - Files — Modify: `skills/x/second.ts`\n  - Interfaces —')
+    expect(parseFleetParallelDeclaration(twice, ['1-T1']).independent).toBe(false)
+  })
+
+  test('a declaration above 8 KiB refuses instead of truncating', () => {
+    const resources = Array.from({ length: 64 }, (_, i) => `r${i}:${'x'.repeat(123)}`)
+    const changed = withDeclaration(JSON.stringify({ schemaVersion: 1, eligible: true, taskIds: ['1-T1'], resources }))
+    expect(Buffer.byteLength(changed.split('**Fleet parallel:** ')[1]!.split('\n')[0]!, 'utf8')).toBeGreaterThan(8192)
+    expect(parseFleetParallelDeclaration(changed, ['1-T1']).independent).toBe(false)
   })
 })
 

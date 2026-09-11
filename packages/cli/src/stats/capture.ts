@@ -24,6 +24,7 @@ export interface CaptureContext {
   human?: string | null
   worktree?: string | null
   parent?: number | null
+  terminationCause?: import('../runs.ts').TerminalCause | null
   outcome?: StatsOutcome | null
   review_rounds?: number | null
   fix_rounds?: number | null
@@ -94,7 +95,7 @@ export function fromClaudeHeadless(stdout: unknown, context: CaptureContext): St
       cache_read: numberOrNull(usage.cache_read_input_tokens),
       cache_write: numberOrNull(usage.cache_creation_input_tokens),
     },
-    outcome: context.outcome ?? (result.is_error === true ? 'failed' : 'complete'),
+    outcome: (context.terminationCause && context.terminationCause !== 'succeeded' ? 'failed' : context.outcome) ?? (result.is_error === true ? 'failed' : 'complete'),
   })
 }
 
@@ -117,7 +118,7 @@ export function fromCodexExec(events: unknown[], context: CaptureContext): Stats
       cache_read: numberOrNull(usage.cached_input_tokens),
       cache_write: null,
     },
-    outcome: context.outcome ?? null,
+    outcome: (context.terminationCause && context.terminationCause !== 'succeeded' ? 'failed' : context.outcome) ?? null,
   })
 }
 
@@ -127,8 +128,8 @@ export function fromCodexExec(events: unknown[], context: CaptureContext): Stats
 export function fromClaudeSessionEnd(hook: unknown, transcriptLines: string[], context: CaptureContext): StatsRecord {
   const payload = asObject(hook)
   let turns = 0
-  let toolCalls = 0
-  const totals = { in: 0, out: 0, cache_read: 0, cache_write: 0 }
+  let toolCalls: number | null = 0
+  const totals: StatsRecord['tokens'] = { in: 0, out: 0, cache_read: 0, cache_write: 0 }
   let sawAssistant = false
   for (const line of Array.isArray(transcriptLines) ? transcriptLines : []) {
     let entry: Record<string, unknown>
@@ -142,12 +143,14 @@ export function fromClaudeSessionEnd(hook: unknown, transcriptLines: string[], c
     const usage = asObject(message.usage)
     turns += 1
     sawAssistant = true
-    totals.in += numberOrNull(usage.input_tokens) ?? 0
-    totals.out += numberOrNull(usage.output_tokens) ?? 0
-    totals.cache_read += numberOrNull(usage.cache_read_input_tokens) ?? 0
-    totals.cache_write += numberOrNull(usage.cache_creation_input_tokens) ?? 0
+    // A session total is known only when every included turn reported that field.
+    for (const [key, vendor] of [['in', 'input_tokens'], ['out', 'output_tokens'], ['cache_read', 'cache_read_input_tokens'], ['cache_write', 'cache_creation_input_tokens']] as const) {
+      const value = numberOrNull(usage[vendor])
+      totals[key] = totals[key] === null || value === null ? null : totals[key] + value
+    }
+    if(!Array.isArray(message.content))toolCalls=null
     for (const block of Array.isArray(message.content) ? message.content : []) {
-      if (asObject(block).type === 'tool_use') toolCalls += 1
+      if (asObject(block).type === 'tool_use' && toolCalls !== null) toolCalls += 1
     }
   }
   return normalizeRecord({
@@ -160,7 +163,7 @@ export function fromClaudeSessionEnd(hook: unknown, transcriptLines: string[], c
     tokens: sawAssistant
       ? totals
       : { in: null, out: null, cache_read: null, cache_write: null },
-    outcome: context.outcome ?? null,
+    outcome: (context.terminationCause && context.terminationCause !== 'succeeded' ? 'failed' : context.outcome) ?? null,
   })
 }
 
@@ -174,7 +177,7 @@ export function fromCodexSessionEnd(hook: unknown, context: CaptureContext): Sta
     harness: 'codex',
     mode: 'interactive',
     session_id: stringOrNull(payload.session_id),
-    outcome: context.outcome ?? null,
+    outcome: (context.terminationCause && context.terminationCause !== 'succeeded' ? 'failed' : context.outcome) ?? null,
   })
 }
 
@@ -236,4 +239,11 @@ export function fromSkillHook(hook: unknown, source: SkillHookSource): { session
     }
   }
   return { sessionId, invocations }
+}
+
+export function claudeHeadlessResult(stdout:string):unknown {
+  try{return JSON.parse(stdout)}catch{}
+  let result:unknown={}
+  for(const line of stdout.split('\n'))try{const row=JSON.parse(line);if(row?.type==='result')result=row}catch{}
+  return result
 }

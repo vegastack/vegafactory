@@ -90,3 +90,58 @@ describe('control-room knob and machine state', () => {
     expect(Object.keys(written)).not.toContain('settings')
   })
 })
+
+import { mkdtemp, realpath, readFile, writeFile, mkdir, rm } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { updateSettings, snapshotFreshness } from '../src/control-room.ts'
+
+test('settings transactions preserve two process updates and inert extension collisions', async () => {
+  const root = await realpath(await mkdtemp(join(tmpdir(), 'settings-147-')))
+  try {
+    await writeFile(join(root, 'factory.json'), JSON.stringify({ schemaVersion: 1, orgs: { inert: true }, custom: 9, controlRooms: {} }))
+    const module = new URL('../src/control-room.ts', import.meta.url).pathname
+    const children = ['alpha', 'beta'].map(org => Bun.spawn([process.execPath, '-e', `import {updateSettings} from ${JSON.stringify(module)}; await updateSettings(${JSON.stringify(root)}, s => ({...s,orgs:{...s.orgs,${org}:{repo:'${org}/room'}}}));`], { stdout: 'pipe', stderr: 'pipe' }))
+    expect(await Promise.all(children.map(child => child.exited))).toEqual([0, 0])
+    const wire = JSON.parse(await readFile(join(root, 'factory.json'), 'utf8'))
+    expect(wire).toMatchObject({ schemaVersion: 2, revision: 2, orgs: { inert: true }, custom: 9 })
+    expect(Object.keys(wire.controlRooms).sort()).toEqual(['alpha', 'beta'])
+    expect(JSON.parse(await readFile(join(root, 'factory.json.schema1.bak'), 'utf8')).schemaVersion).toBe(1)
+    await writeFile(join(root, 'factory.json'), '{"schemaVersion":99,"controlRooms":{}}')
+    await expect(updateSettings(root, s => s)).rejects.toThrow(/schema/)
+    expect(await readFile(join(root, 'factory.json'), 'utf8')).toBe('{"schemaVersion":99,"controlRooms":{}}')
+  } finally { await rm(root, { recursive: true, force: true }) }
+})
+
+test('incomplete transaction ownership refuses without changing settings', async () => {
+  const root = await realpath(await mkdtemp(join(tmpdir(), 'settings-147-')))
+  try {
+    await mkdir(join(root, 'factory.json.guard'))
+    await expect(updateSettings(root, s => s)).rejects.toThrow(/guard/)
+    expect(await readFile(join(root, 'factory.json'), 'utf8').catch(e => e.code)).toBe('ENOENT')
+  } finally { await rm(root, { recursive: true, force: true }) }
+})
+
+test('freshness expires exactly at the selected bound and rejects future clocks', () => {
+  const now = Date.parse('2026-09-06T12:00:00Z')
+  for (const [age, state] of [[7199, 'fresh'], [7200, 'stale'], [7201, 'stale'], [-1, 'unavailable']] as const) {
+    expect(snapshotFreshness(new Date(now - age * 1000).toISOString(), now, 7200)).toBe(state)
+  }
+  expect(snapshotFreshness('bad', now, 7200)).toBe('unavailable')
+})
+
+test('unreadable settings and symlink aliases refuse without migration or backup loss', async () => {
+  const { chmod, symlink } = await import('node:fs/promises')
+  const root = await realpath(await mkdtemp(join(tmpdir(), 'settings-permissions-147-')))
+  const path = join(root, 'factory.json'), original = '{"schemaVersion":1,"controlRooms":{},"operator":"kept"}'
+  try {
+    await writeFile(path, original)
+    await chmod(path, 0)
+    await expect(updateSettings(root, s => s)).rejects.toThrow(/EACCES/)
+    await chmod(path, 0o600)
+    expect(await readFile(path, 'utf8')).toBe(original)
+    await symlink(root, join(root, 'alias'))
+    await expect(updateSettings(join(root, 'alias'), s => s)).rejects.toThrow(/symlink/)
+    expect(await readFile(path + '.schema1.bak', 'utf8').catch(error => error.code)).toBe('ENOENT')
+  } finally { await chmod(path, 0o600); await rm(root, { recursive: true, force: true }) }
+})

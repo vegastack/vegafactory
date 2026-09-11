@@ -18,12 +18,17 @@ test('the fixed headers parse, any other is refused, and a group row overrides a
   ].join('\n'))).toEqual({ 'vegastack/vegafactory': 'dev', 'vegastack/site': 'design' })
 })
 
-test('the gate refuses a non-lead viewer, and a lead only while stats-people is on', () => {
+test('the legacy adapter allows own rows, but descriptive leads do not grant administration', () => {
   expect(canViewPerson({ viewer: 'dev1', subject: 'dev1', people, statsPeople: 'on' }).allowed).toBe(true)
   expect(canViewPerson({ viewer: 'dev1', subject: 'kmanojkumar', people, statsPeople: 'on' })).toEqual({
-    allowed: false, reason: 'people-level stats are visible to the person themselves and to a lead',
+    allowed: false, reason: 'people-level stats require verified own-data identity or explicitly scoped organization administration',
   })
   expect(canViewPerson({ viewer: null, subject: 'dev1', people, statsPeople: 'on' }).allowed).toBe(false)
-  expect(canViewPerson({ viewer: 'kmanojkumar', subject: 'dev1', people, statsPeople: 'on' }).allowed).toBe(true)
+  expect(canViewPerson({ viewer: 'kmanojkumar', subject: 'dev1', people, statsPeople: 'on' }).allowed).toBe(false)
   expect(canViewPerson({ viewer: 'kmanojkumar', subject: 'dev1', people, statsPeople: 'off' }).allowed).toBe(false)
+})
+
+test('a descriptive legacy lead cannot supply administration or cross-group read authority', () => {
+  const group = parsePeopleCsv('login,name,role,slack,timezone,groups\ndev1,Dev One,lead,U2,Asia/Kolkata,design')
+  expect(canViewPerson({ viewer: 'dev1', subject: 'kmanojkumar', people: mergePeople(people, group), statsPeople: 'on' }).allowed).toBe(false)
 })

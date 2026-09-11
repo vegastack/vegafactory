@@ -14,8 +14,8 @@ const envBlock = (host: string, storeId: string, namespaceId: string) => ({
 const base = {
   name: 'vegafactory-token-broker', main: 'src/index.ts', compatibility_date: '2026-09-01',
   env: {
-    preview: envBlock('factory-token.vegastack.dev', 'c'.repeat(32), '1001'),
-    production: envBlock('factory-token.vegastack.com', 'd'.repeat(32), '1002'),
+    preview: envBlock('vegafactory-token.vegastack.dev', 'c'.repeat(32), '1001'),
+    production: envBlock('vegafactory-token.vegastack.com', 'd'.repeat(32), '1002'),
   },
 }
 
@@ -82,5 +82,30 @@ describe('checkBrokerConfig', () => {
     const result = checkBrokerConfig(readFileSync(path, 'utf8'))
     expect(result.blocks).toEqual([])
     expect(result.warns).toEqual([])
+  })
+})
+
+describe('same-App domain migration', () => {
+  test('rejects the old domains, a different App and an uncoordinated audience rename', () => {
+    for (const environment of ['preview', 'production'] as const) {
+      const host = structuredClone(base)
+      host.env[environment].routes[0]!.pattern = `factory-token.vegastack.${environment === 'preview' ? 'dev' : 'com'}`
+      expect(checkBrokerConfig(JSON.stringify(host)).blocks.join(' ')).toContain('routes[0].pattern')
+      const app = structuredClone(base)
+      app.env[environment].vars.VEGAFACTORY_APP_ID = '1234567'
+      expect(checkBrokerConfig(JSON.stringify(app)).blocks.join(' ')).toContain('VEGAFACTORY_APP_ID must be 4812956')
+      const audience = structuredClone(base)
+      audience.env[environment].vars.OIDC_AUDIENCE = 'vegafactory'
+      expect(checkBrokerConfig(JSON.stringify(audience)).blocks.join(' ')).toContain('OIDC_AUDIENCE must be vegastack-factory')
+    }
+  })
+
+  test('rejects whitespace-only store IDs and a different secret name', () => {
+    const blank = structuredClone(base)
+    blank.env.preview.secrets_store_secrets[0]!.store_id = '   '
+    expect(checkBrokerConfig(JSON.stringify(blank)).blocks.join(' ')).toContain('store_id is empty')
+    const name = structuredClone(base)
+    name.env.production.secrets_store_secrets[0]!.secret_name = 'some-other-app'
+    expect(checkBrokerConfig(JSON.stringify(name)).blocks.join(' ')).toContain('secret_name must be vegafactory-app-private-key')
   })
 })

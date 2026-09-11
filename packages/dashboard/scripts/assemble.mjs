@@ -1,9 +1,11 @@
 // Turns `next build`'s standalone output into the exact tree the published tarball ships:
 // dist-standalone/packages/dashboard/server.js, with the static assets and public files
 // sitting where that server looks for them. `next build` leaves them apart on purpose.
-import { cp, mkdir, rm, stat } from 'node:fs/promises'
+import { mkdir, rm, stat } from 'node:fs/promises'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
+
+import { materializeTree } from '../../../scripts/release-artifacts.mjs'
 
 const packageRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const next = join(packageRoot, '.next')
@@ -26,10 +28,10 @@ if (!(await exists(join(next, 'standalone')))) {
 
 await rm(out, { recursive: true, force: true })
 await mkdir(out, { recursive: true })
-await cp(join(next, 'standalone'), out, { recursive: true })
-await cp(join(next, 'static'), join(app, '.next', 'static'), { recursive: true })
+await materializeTree(join(next, 'standalone'), out)
+await materializeTree(join(next, 'static'), join(app, '.next', 'static'))
 if (await exists(join(packageRoot, 'public'))) {
-  await cp(join(packageRoot, 'public'), join(app, 'public'), { recursive: true })
+  await materializeTree(join(packageRoot, 'public'), join(app, 'public'))
 }
 
 const entry = join(app, 'server.js')

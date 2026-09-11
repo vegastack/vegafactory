@@ -1,5 +1,5 @@
-name: VegaStack Factory token
-description: Exchange this job's GitHub Actions OIDC token for a one-repository VegaStack Factory token (issues + projects, 1 hour).
+name: VegaFactory token
+description: Exchange this job's GitHub OIDC token for repository issues and organization-wide project access (1 hour).
 author: VegaStack
 
 # The calling job MUST request an OIDC token, or `core.getIDToken` has nothing to fetch:
@@ -19,7 +19,7 @@ inputs:
   endpoint:
     description: The broker endpoint to exchange the OIDC token at.
     required: false
-    default: https://factory-token.vegastack.com/token
+    default: https://vegafactory-token.vegastack.com/token
   audience:
     description: The OIDC audience the broker verifies.
     required: false
@@ -27,8 +27,11 @@ inputs:
 
 outputs:
   token:
-    description: A one-repository installation token, valid for one hour, capped to issues + projects.
+    description: An installation token for one repository's issues and organization-wide projects.
     value: ${{ steps.mint.outputs.token }}
+  expires_at:
+    description: The installation token's expiry reported by the broker.
+    value: ${{ steps.mint.outputs.expires_at }}
 
 runs:
   using: composite
@@ -42,19 +45,30 @@ runs:
         script: |
           const endpoint = process.env.BROKER_ENDPOINT
           const audience = process.env.BROKER_AUDIENCE
-          const idToken = await core.getIDToken(audience)
-          const response = await fetch(endpoint, {
-            method: 'POST',
-            headers: { authorization: `Bearer ${idToken}`, accept: 'application/json' },
-          })
-          const body = await response.json().catch(() => ({}))
-          if (!response.ok) {
-            core.setFailed(`the token broker refused this request: HTTP ${response.status} (${body.reason ?? body.error ?? 'no reason given'})`)
-            return
+          try {
+            const idToken = await core.getIDToken(audience)
+            core.setSecret(idToken)
+            const response = await fetch(endpoint, {
+              method: 'POST',
+              redirect: 'error',
+              signal: AbortSignal.timeout(20000),
+              headers: { authorization: `Bearer ${idToken}`, accept: 'application/json' },
+            })
+            if (!response.ok) {
+              core.setFailed(`the token broker refused this request: HTTP ${response.status}`)
+              return
+            }
+            const body = await response.json().catch(() => ({}))
+            if (typeof body.token !== 'string' || !body.token || typeof body.expires_at !== 'string' ||
+                !Number.isFinite(Date.parse(body.expires_at)) || Date.parse(body.expires_at) <= Date.now()) {
+              core.setFailed('the token broker returned an unusable token response')
+              return
+            }
+            // core.setSecret emits ::add-mask:: before either documented output is exposed.
+            core.setSecret(body.token)
+            core.setOutput('token', body.token)
+            core.setOutput('expires_at', body.expires_at)
+            core.info('minted a capped factory token')
+          } catch {
+            core.setFailed('the token broker exchange could not be completed')
           }
-          // core.setSecret emits the `::add-mask::` workflow command, so the token is redacted in
-          // every log line of this job before it is ever set as an output.
-          core.setSecret(body.token)
-          core.setOutput('token', body.token)
-          core.setOutput('expires_at', body.expires_at)
-          core.info(`minted a token for ${body.repository}, expiring ${body.expires_at}`)

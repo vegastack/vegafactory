@@ -1,3 +1,4 @@
+import { parsePolicy, resolvePolicy } from '../../../../skills/dev/dev-setup/scripts/effective-policy.mjs'
 // The stats record — what one agent run or one interactive session is, as data.
 //
 // Counts and identifiers only. No prompt text, no assistant text, no tool arguments and no file
@@ -130,18 +131,14 @@ export interface StatsKnobs {
   statsOverride?: 'allowed' | 'locked'
 }
 
-// Exactly three lines are read, and everything else in the document is ignored: these knobs live
-// alongside prose in `org.md`, `group.md` and `dev.md`, and a parser that guessed at neighbouring
-// lines would turn a sentence about statistics into a policy change.
+// Legacy public shape, parsed by the same owner as runtime and guard policy.
 export function parseStatsKnobs(text: string): StatsKnobs {
-  const body = typeof text === 'string' ? text : ''
+  const layer = parsePolicy(text, 'repo')
+  const values = layer.values as Record<string, unknown>
   const knobs: StatsKnobs = {}
-  const stats = /^stats:\s*(on|off)\s*(?:#.*)?$/m.exec(body)
-  if (stats) knobs.stats = stats[1] as 'on' | 'off'
-  const people = /^stats-people:\s*(on|off)\s*(?:#.*)?$/m.exec(body)
-  if (people) knobs.statsPeople = people[1] as 'on' | 'off'
-  const override = /^stats-override:\s*(allowed|locked)\s*(?:#.*)?$/m.exec(body)
-  if (override) knobs.statsOverride = override[1] as 'allowed' | 'locked'
+  if (values.stats === 'on' || values.stats === 'off') knobs.stats = values.stats
+  if (values['stats-people'] === 'on' || values['stats-people'] === 'off') knobs.statsPeople = values['stats-people']
+  if (values['stats-override'] === 'allowed' || values['stats-override'] === 'locked') knobs.statsOverride = values['stats-override']
   return knobs
 }
 
@@ -152,37 +149,150 @@ export interface StatsPolicy {
   refusal: string | null
 }
 
-// Layered org → group → repo, nearest wins — except that a repo may only opt itself out while the
-// org says `stats-override: allowed`. Under `locked` the repo line is ignored and the reason is
-// carried back in `refusal`, so the person who wrote it learns why it did nothing instead of
-// believing the repo is silent.
-export function resolveStatsPolicy(layers: { org?: string; group?: string; repo?: string }): StatsPolicy {
-  const org = parseStatsKnobs(layers.org ?? '')
-  const group = parseStatsKnobs(layers.group ?? '')
-  const repo = parseStatsKnobs(layers.repo ?? '')
-  const override = group.statsOverride ?? org.statsOverride ?? 'allowed'
+// enabled is the diagnostic effective value. A non-null refusal always blocks capture/export.
+export function resolveStatsPolicy(layers: { org?: string; group?: string; repo?: string; identity?: Record<string, unknown>; freshness?: Record<string, unknown> }): StatsPolicy {
+  const resolved = resolvePolicy(layers)
+  return statsPolicyFromEffective(resolved)
+}
 
-  let refusal: string | null = null
-  let enabled: boolean
-  let source: StatsPolicy['source']
-  if (repo.stats !== undefined && override === 'allowed') {
-    enabled = repo.stats === 'on'
-    source = 'repo'
-  } else {
-    if (repo.stats !== undefined) {
-      refusal = `this repo carries "stats: ${repo.stats}" but the org sets "stats-override: locked" — the repo line is ignored`
-    }
-    if (group.stats !== undefined) {
-      enabled = group.stats === 'on'
-      source = 'group'
-    } else if (org.stats !== undefined) {
-      enabled = org.stats === 'on'
-      source = 'org'
-    } else {
-      enabled = true
-      source = 'default'
-    }
+export function statsPolicyFromEffective(resolved: ReturnType<typeof resolvePolicy>): StatsPolicy {
+  const values = resolved.policy.values
+  const enabled = values.stats !== 'off'
+  return {
+    enabled,
+    people: enabled && values['stats-people'] === 'on',
+    source: resolved.policy.sources.stats?.scope ?? 'default',
+    refusal: resolved.ok ? null : resolved.blocks.join('; '),
   }
-  const people = group.statsPeople ?? org.statsPeople ?? 'off'
-  return { enabled, people: enabled && people === 'on', source, refusal }
+}
+
+// The local durable run record is the only terminal capture authority. Vendor stdout
+// has already been reduced by #138; hook inputs never supply measurement payloads.
+export type BeforeManagedFlush=()=>Promise<void>
+export async function captureTerminalRun(home: string, runId: string, destination: import('./types.ts').Destination, policy: StatsPolicy, exactCaptureKey?:string, beforeFlush?:BeforeManagedFlush): Promise<string | null> {
+  if (!policy.enabled || policy.refusal) return null
+  const { readRun, runsRoot, acknowledgeTerminalCapture, terminalCaptureDescriptor, terminalCaptureAttempts, readRunAttemptSnapshot, runReportingHold } = await import('../runs.ts')
+  const { hashBytes, validateDestination, parseTerminalCaptureKey } = await import('./types.ts')
+  const { enqueueEvent, spoolRoot, readCaptureProof } = await import('./outbox.ts')
+  const current = await readRun(runsRoot(home), runId)
+  const reportingHold=runReportingHold(current)
+  if(reportingHold)throw Error(reportingHold) // Never invent receiving-home ordinal or reporting identity.
+  if(current.repo!==validateDestination(destination).repo)return null
+  const currentKey=terminalCaptureDescriptor(current).captureKey,captureKey=exactCaptureKey??currentKey
+  const parsed=parseTerminalCaptureKey(captureKey)
+  if(!parsed||parsed.runId!==runId)throw Error('terminal-capture-key-unavailable')
+  const deliveries=current.pendingDelivery.filter(p=>p.kind==='telemetry-capture'&&'captureKey'in p.target&&p.target.captureKey===captureKey)
+  if(deliveries.length>1)throw Error('terminal-capture-key-unavailable')
+  const delivery=deliveries[0]
+  let run=current
+  if(captureKey!==currentKey){
+    if(!delivery)throw Error('terminal-capture-key-unavailable')
+    const attempts=(current.attempts??[]).filter(a=>a.terminalSequence===parsed.sequence&&a.snapshotDigest)
+    if(attempts.length!==1)throw Error('terminal-capture-history-unavailable')
+    const attempt=attempts[0]!
+    try{run=await readRunAttemptSnapshot(runsRoot(home),runId,attempt)}catch{throw Error('terminal-capture-history-unavailable')}
+    const original=run.pendingDelivery.find(p=>p.kind==='telemetry-capture'&&'captureKey'in p.target&&p.target.captureKey===captureKey)
+    if(terminalCaptureDescriptor(run).captureKey!==captureKey||run.generation>=current.generation||run.repo!==current.repo||run.issue!==current.issue||run.startedAt!==attempt.startedAt||run.finishedAt!==attempt.finishedAt||run.terminationCause!==attempt.terminationCause||!original||original.id!==delivery.id||original.payload!==delivery.payload||original.payloadDigest!==delivery.payloadDigest)throw Error('terminal-capture-history-differs')
+    if(!delivery.payload||!delivery.payloadDigest)throw Error('terminal-capture-payload-unavailable')
+  }
+  if (run.state !== 'terminal' || run.waitReason || !run.execution || run.terminationCause === 'termination-unconfirmed') return null
+  if (!delivery?.payload || !delivery.payloadDigest || hashBytes(delivery.payload) !== delivery.payloadDigest) return null
+  const record = parseLocalRecord(JSON.parse(delivery.payload))
+  if (recordProblems(record).length || record.repo !== run.repo || record.issue !== run.issue || record.session_id !== (run.vendorSessionId ?? null)) throw Error('terminal-measurement-identity-mismatch')
+  const input:Pick<import('./types.ts').SpoolEnvelope,'destination'|'captureKey'|'payload'>={destination,captureKey,
+    payload: { schemaVersion: 2, recordKind: 'execution', utcDay: new Date(record.ts).toISOString().slice(0, 10), stage: run.stage, outcome: run.terminationCause ?? 'interrupted', values: JSON.parse(delivery.payload), localRunId:run.runId, taskRef:{repo:run.repo,issue:run.issue,taskId:run.taskKey.taskId === 'unknown' ? null : run.taskKey.taskId}, taskOwner:run.taskOwner, agentAccountOwner:run.agentAccountOwner, attempt:(run.attempts?.length??0)+1, startedAt:run.terminalSegment?(terminalCaptureAttempts(run)[0]?.startedAt??run.startedAt):run.startedAt, endedAt:run.finishedAt },
+  }
+  if(delivery.status==='acknowledged'){
+    const captured=await readCaptureProof(spoolRoot(home),input)
+    if(!captured)throw Error('acknowledged-capture-proof-unavailable')
+    return captured // The flag alone never authorizes replay or repairs missing evidence.
+  }
+  // A trusted supervisor grants the one local flush phase only after these reads.
+  // Await it before UUID allocation and every directory, claim, map, event or ACK write.
+  await beforeFlush?.()
+  const event = await enqueueEvent(spoolRoot(home), {schemaVersion:2,eventId:crypto.randomUUID(),...input})
+  await acknowledgeTerminalCapture(runsRoot(home), runId, captureKey, delivery.payloadDigest)
+  return event.eventId
+}
+
+export interface ManagedHookInput { harness: 'claude' | 'codex'; event: 'SessionStart' | 'Stop' | 'SessionEnd'; sessionId: string; turnId?: string; cwd: string; stopHookActive: boolean }
+export function parseManagedHook(raw: string): ManagedHookInput | null {
+  if (Buffer.byteLength(raw) > 64 * 1024) return null
+  try {
+    const value = JSON.parse(raw) as ManagedHookInput
+    if (!value || typeof value !== 'object' || Array.isArray(value) || Object.keys(value).some(k => !['harness','event','sessionId','turnId','cwd','stopHookActive'].includes(k)) || !['claude','codex'].includes(value.harness) || !['SessionStart','Stop','SessionEnd'].includes(value.event) || typeof value.stopHookActive !== 'boolean') return null
+    const id = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/
+    if (typeof value.sessionId !== 'string' || !id.test(value.sessionId) || (value.turnId !== undefined && (typeof value.turnId !== 'string' || !id.test(value.turnId))) || typeof value.cwd !== 'string' || !value.cwd.startsWith('/') || value.cwd.length > 4096 || /[\0\r\n]/.test(value.cwd) || value.event === 'Stop' && value.stopHookActive) return null
+    return value
+  } catch { return null }
+}
+
+export interface RegisteredCaptureContext {
+  destination:import('./types.ts').Destination;policy:StatsPolicy;learningEnabled:boolean
+  effectivePolicy:ReturnType<typeof import('../../../../skills/dev/dev-setup/scripts/effective-policy.mjs').loadConfiguredPolicy>
+}
+export interface ValidatedManagedHookContext {input:ManagedHookInput;run:import('../runs.ts').RunRecord;context:RegisteredCaptureContext;reportingHold:ReturnType<typeof import('../runs.ts').runReportingHold>}
+export async function registeredCaptureContext(home: string, repo: string, checkout: string): Promise<RegisteredCaptureContext | null> {
+  const { readFile } = await import('node:fs/promises'), { join, resolve } = await import('node:path')
+  const { readPrivateRunFile } = await import('../runs.ts')
+  const { parseControlRoomKnob, readFactoryConfig } = await import('../control-room.ts')
+  const { validateDestination } = await import('./types.ts')
+  const raw = await readPrivateRunFile(join(home,'.vegastack','factory.json'))
+  const wire = JSON.parse(raw) as {repos?:Array<{repo:string;path:string;org:string}>}
+  const entries = (wire.repos ?? []).filter(entry => entry.repo === repo && typeof entry.path === 'string' && (checkout === resolve(entry.path) || checkout.startsWith(join(resolve(entry.path),'.vegastack','.worktrees') + '/')))
+  if (entries.length !== 1) return null
+  const devMd = await readFile(join(checkout,'.vegastack','dev.md'),'utf8')
+  const knob = parseControlRoomKnob(devMd), factory = readFactoryConfig(raw)
+  if (!knob || knob.org !== entries[0]!.org || factory.controlRooms[knob.org]?.repo !== knob.repo) return null
+  const { loadConfiguredPolicy } = await import('../../../../skills/dev/dev-setup/scripts/effective-policy.mjs')
+  const effective = loadConfiguredPolicy({home,repo,devMd})
+  const policy = statsPolicyFromEffective(effective)
+  if (!effective.ok || !policy.enabled || policy.refusal) return null
+  return { destination:validateDestination({host:'github.com',org:knob.org,repo,controlRoom:knob.repo}), policy, learningEnabled:effective.policy.values.learning!=='off', effectivePolicy:effective }
+}
+
+export async function consumeManagedHook(home: string, raw: string, afterValidated?:(value:ValidatedManagedHookContext)=>Promise<void>, beforeFlush?:BeforeManagedFlush): Promise<{ok:true} | null> {
+  const input = parseManagedHook(raw)
+  if (!input) return null
+  try {
+    // Check the private registry before reading any caller-named directory or run payload.
+    const { join, resolve } = await import('node:path')
+    const { readPrivateRunFile, findOwnedRunSession, runsRoot, runReportingHold } = await import('../runs.ts')
+    const registry = JSON.parse(await readPrivateRunFile(join(home,'.vegastack','factory.json'))) as {repos?:Array<{path:string}>}
+    if (!(registry.repos ?? []).some(entry => typeof entry.path === 'string' && (input.cwd === resolve(entry.path) || input.cwd.startsWith(join(resolve(entry.path),'.vegastack','.worktrees') + '/')))) return null
+    const run = await findOwnedRunSession(runsRoot(home),input)
+    if (!run || run.harness !== input.harness) return null
+    const context = await registeredCaptureContext(home,run.repo,run.checkout)
+    if (!context || !context.learningEnabled) return null
+    const reportingHold=runReportingHold(run)
+    // No wire verdict or cached authority enters here.144 starts one500ms flush only
+    // after this request's real private validation, inside its unchanged1s overall cap.
+    // A rejected/timed-out grant stops before capture AND the learning callback.
+    await beforeFlush?.()
+    const captured=!reportingHold&&input.event!=='SessionStart'&&run.state==='terminal'
+      ? await captureTerminalRun(home,run.runId,context.destination,context.policy) : null
+    // Trusted same-phase144 composition can reuse this actual fresh validation, never
+    // a caller-supplied verdict. It re-reads the current generation after our durable ACK.
+    // A callback cannot manufacture capture success or a public context pointer here.
+    await afterValidated?.({input,run,context,reportingHold})
+    return captured ? {ok:true} : null
+  } catch { return null }
+}
+
+export function parseLocalRecord(value: unknown): StatsRecord {
+  const record=value as StatsRecord
+  if(!record||typeof record!=='object'||Array.isArray(record)||Object.keys(record).some(k=>!RECORD_FIELDS.includes(k as keyof StatsRecord)))throw Error('unknown-local-record-field')
+  if(recordProblems(record).length||!record.tokens||Object.keys(record.tokens).some(k=>!['in','out','cache_read','cache_write'].includes(k))||Object.values(record.tokens).some(v=>v!==null&&(typeof v!=='number'||!Number.isFinite(v)||v<0)))throw Error('invalid-local-record')
+  for(const key of ['issue','parent','duration_s','turns','tool_calls','subagents','cost_usd','review_rounds','fix_rounds','handbacks'] as const){const v=record[key];if(v!==null&&v!==undefined&&(typeof v!=='number'||!Number.isFinite(v)||v<0))throw Error('invalid-local-number')}
+  for(const key of ['stage','harness','model','effort','mode','human','session_id','worktree','outcome'] as const){const v=record[key];if(v!==null&&v!==undefined&&(typeof v!=='string'||v.length>4096||/[\r\n\0]/.test(v)))throw Error('invalid-local-identifier')}
+  if(!Array.isArray(record.skills)||record.skills.some(s=>!s||Object.keys(s).sort().join(',')!=='harness,name,trigger'||!['model','typed','mention'].includes(s.trigger)||typeof s.name!=='string'||typeof s.harness!=='string'||s.name.length>128||s.harness.length>128))throw Error('invalid-local-skills')
+  return normalizeRecord(record)
+}
+
+/** Display-only execution adapter. Activity and cumulative snapshots never become
+ * runs; callers retain the validated event for coverage and semantic identities. */
+export function measurementRecord(event: import('./types.ts').ExportedEvent): StatsRecord | null {
+  const p=event.payload
+  if(p.recordKind!=='execution')return null
+  return normalizeRecord({repo:event.destination.repo,ts:p.endedAt??p.utcDay+'T00:00:00.000Z',issue:typeof p.taskRef==='object'?p.taskRef?.issue??null:null,stage:p.stage,harness:p.harness??null,model:p.model??null,mode:p.mode??null,human:p.taskOwner??null,duration_s:p.durationSeconds??null,turns:p.turns??null,tool_calls:p.toolCalls??null,subagents:p.subagents??null,tokens:{in:p.tokensIn??null,out:p.tokensOut??null,cache_read:p.cacheReadTokens??null,cache_write:p.cacheWriteTokens??null},cost_usd:p.costUsd??null,outcome:p.outcome==='succeeded'||p.outcome==='complete'?'complete':p.outcome==='handback'?'handback':'failed',skills:p.skills??[]})
 }

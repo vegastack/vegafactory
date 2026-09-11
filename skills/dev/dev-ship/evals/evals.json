@@ -3,7 +3,7 @@
   "evals": [
     {
       "id": 1,
-      "prompt": "Make the PR for issue 27 in vegastack/docs-tools (title `feat: --json flag for check-links`). Branch feat/27-json-flag is at 9b7d0e4, the evidence comment says `Branch: feat/27-json-flag @ 9b7d0e4`, review round 1 verdict clean, changeset present. dev.md says `gates: 3`, `merge: rebase`, `chronicle: on`.",
+      "prompt": "Make the PR for issue 27 in vegastack/docs-tools (title `feat: --json flag for check-links`). Branch feat/27-json-flag is at full SHA 9b7d0e4f6a1c2d3e4f5061728394a5b6c7d8e9f0, the evidence comment binds the same full SHA, review round 1 verdict clean, changeset present. dev.md says `gates: 3`, `merge: rebase`, `chronicle: on`.",
       "expected_output": "ship-gate is named and run first; the PR is opened with the issue's title and a body pointing at the evidence; nothing is merged and the run stops for the operator's next word. (prose half only — the live label, branch and PR flow is the sandbox drill's proof)",
       "files": [],
       "assertions": [
@@ -15,11 +15,11 @@
     },
     {
       "id": 2,
-      "prompt": "ship it — issue 27, branch feat/27-json-flag is at c0ffee1 now, evidence comment still says `@ 9b7d0e4`",
+      "prompt": "ship it — issue 27, branch feat/27-json-flag is at full SHA c0ffee1a2b3c4d5e6f708192a3b4c5d6e7f8091a now, evidence comment still binds full SHA 9b7d0e4f6a1c2d3e4f5061728394a5b6c7d8e9f0",
       "expected_output": "A refusal: the evidence sha does not equal the branch head, so ship-gate blocks; the reason is stated and the corrections loop is named as the only way to reconcile; nothing merges. (prose half only — the live label, branch and PR flow is the sandbox drill's proof)",
       "files": [],
       "assertions": [
-        "The refusal names the stale evidence sha (`9b7d0e4` versus head `c0ffee1`) as the reason",
+        "The refusal names the stale full evidence SHA (`9b7d0e4f6a1c2d3e4f5061728394a5b6c7d8e9f0` versus head `c0ffee1a2b3c4d5e6f708192a3b4c5d6e7f8091a`) as the reason",
         "Nothing is merged or pushed",
         "The corrections loop (update the evidence comment to the new head) is named as the path forward"
       ]

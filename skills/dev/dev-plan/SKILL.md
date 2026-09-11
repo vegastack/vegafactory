@@ -13,7 +13,7 @@ Nearest neighbors: `dev-intake` owns the brief and its approval mechanics — th
 
 ## Every run
 
-1. Read `.vegastack/dev.md` and the issue: brief (description), recorded brief approval (`type=approval` marker), scope label. Full-plan issues arrive labeled `needs-plan`; anything else at this door is either intake's inline request (below) or a misroute — say so.
+1. Read `.vegastack/dev.md` and the issue: brief (description), current schema-v2 brief approval (bundled `scripts/lib/approval.mjs`’s `evaluateApprovals`, complete history and current operator policy), scope label. Full-plan issues arrive labeled `needs-plan`; anything else at this door is either intake's inline request (below) or a misroute — say so.
 2. **Re-ground before planning** — open the brief's touch points in the current code and verify the flow, names and shapes the plan builds on, because code drifts between approval and build. A claim that no longer matches reality goes back to the operator (`handback` comment, `needs-operator`).
 3. Stack-bearing choices (schema, hosting, services, jobs, auth) check `dev-architect` — its verify protocol governs platform claims, and no plan re-proposes a recorded rejection.
 
@@ -30,7 +30,7 @@ Rounds go out by the ask route (`references/ask-route.md`); an issue-routed roun
 
 ## The plan
 
-Post one comment per [plan-format](references/plan-format.md): Goal · Approach (alternatives named) · Constraints · ordered `- [ ]` tasks, each with exact Files, an Interfaces block (consumes/produces with exact signatures), and Steps that put the failing test before the code. Before posting:
+Give every task its stable `<issue>-T<n>` identity before approval. Post one comment per [plan-format](references/plan-format.md): Goal · Approach (alternatives named) · Constraints · ordered `- [ ]` tasks, each with exact Files, an Interfaces block (consumes/produces with exact signatures), and Steps that put the failing test before the code. Before posting:
 
 - Walk the brief section by section per plan-format's self-review — every requirement points at a task, names match across tasks, no banned placeholder.
 - Work that can run at the same time gets plan-format's independent-group block, because a declared file set is what lets dev-implement run children in parallel and prove afterwards that none of them wandered.
@@ -40,7 +40,9 @@ Checkboxes belong to the implement session and post empty, because dev-status re
 
 ## Labels and approval
 
-Post the plan → flip to `needs-operator`, assigned to the issue's operator (conventions' Labels table). On the operator's "plan approved": record the approval marker comment per conventions with `scope=plan`, quoting their words in its operator-identity format, flip to `ready` and unassign — an unassigned `ready` issue is what tells the next agent it is free — stop; building is dev-implement's.
+Post a new plan → `needs-operator`, assigned to the issue's operator (conventions' Labels table). Resolve fresh complete approval history against current canonical artifacts first: reuse valid intent covering the requested scope, including a combined brief+plan grant, preserving canonical `approvalBindings`. When new approval is needed, record the operator's actual scope per conventions: `scope=plan` for standalone full-plan approval, `scope=brief+plan` for quick-build inline approval, with exact source quotation and current canonical `ArtifactRef`s. A policy-operator publisher attests session words; another recorder may only relay a verified identical scoped grant.
+
+A requested approval draft must match that disposition: the exact existing event body for reuse, or the applicable new event/verified relay, never a hypothetical substitute. Validate the complete body per conventions. Only after fresh evaluation confirms both current brief and plan approval, flip to `ready` and unassign; stop — building is dev-implement's.
 
 ## The ratchet — one home, this file
 

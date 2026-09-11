@@ -107,7 +107,7 @@ npx @vegastack/vegafactory skills remove --group dev --global
 
 ### The dispatcher
 
-`vegafactory dispatch` polls the repos this machine watches and starts headless runs in their feature worktrees: `needs-plan` → dev-plan, unassigned `ready` → dev-implement, and a 🚀 reaction from a listed operator on any comment of a `for-operator` issue → the corrections run. It runs as **you** — your `gh` token, your harness authentication, your machine — which is why installing it is the operator's own step and never an agent's.
+`vegafactory dispatch` polls the repos this machine watches and starts headless runs in their feature worktrees: `needs-plan` → dev-plan, unassigned `ready` → dev-implement, and a 🚀 reaction from a listed operator on any comment of a `for-operator` issue → the corrections run. It runs as **you** — your `gh` token, your harness authentication, your machine — which is why installing it is the operator's own step and never an agent's. Board, launch-comment and native-dependency reads must be complete before claiming or starting work. Reads stop at 100 pages or 10,000 records, with a 10-second request bound, 60-second repository budget and at most two retries; incomplete or rate-limited reads remain a named refusal and do not mean an empty queue. Retry a tick after connectivity recovers or the reported rate reset; no unchanged failure produces repeated notifications. The status CLI and its dashboard bridge still require #141’s completeness integration before their final acceptance.
 
 Which repos, how often, and how many at a time is machine-local, in `~/.vegastack/factory.json` (the same file the control-room clone state lives in; keys it does not recognise are left untouched):
 
@@ -129,7 +129,7 @@ dispatch: local             # off | local
 Three refusals stand between a board and a dark build, and each one names itself in the output:
 
 - `dispatch: off`, no `dispatch:` line, or any other value — opting in is explicit, and the default is off.
-- The ship guard is not wired for the harness that would run: the guard script at `.vegastack/hooks/ship-guard.mjs`, the harness's hook config (`.claude/settings.json` or `.codex/hooks.json`) **and** the compiled policy at `~/.vegastack/guard/<owner>__<repo>.json` (written by `vegafactory guard sync`) must all be there — for each harness the tick would launch (a `plan` stage on Codex is checked against `.codex/hooks.json` even when `implement` runs on Claude), and again in the worktree the run starts in, because a harness reads its hooks from the directory it is started in and a fresh checkout carries tracked files only. A gitignored `.claude/settings.json` reaches the worktree through dev.md's `worktree-include:` knob. Dark builds run under bypassed permissions; the guard is what asks before a merge, tag, publish, deploy or force push. It is not a sandbox: it runs as you, so branch protection and a read-only token remain the walls, and it closes the path where a run edits its own worktree's dev.md into permission — the policy lives outside every worktree and touching it is itself an ask.
+- The selected harness must have a supported synchronous PreToolUse registration for every shell tool: direct `node <checkout guard> --harness <selected>`, with verified installed asset bytes, no symlinks and an executable interpreter. JSON and supported inline config layers are checked together. Wrong event/matcher/argv, missing worktree copies and custom wrappers refuse with a migration reason. The owner compiler checks current schema2 policy/digest in the actual prepared ordinary or parent worktree, and the check repeats immediately before spawn. Stale policy requires explicit `vegafactory guard sync`; launch never recompiles it into permission. Configuration, local invocation and live-qualified coverage are separate. These same-user hooks are cooperative; remote branch protection and permissions remain necessary.
 - Another run holds the repo's lock, the issue is assigned, or `maxRuns` is already committed.
 
 Read the plan before anything ever runs — this is the default, and both `--once` and `--watch` are opt-ins:
@@ -141,7 +141,25 @@ vegafactory dispatch --watch                    # the loop the service runs
 vegafactory status --json                       # what happened
 ```
 
-Every run's stdout and stderr land in `~/.vegastack/factory/logs/<org>/<repo>/<issue>-<timestamp>.jsonl`. A run that fails or times out posts a hand-back comment carrying the last 40 log lines with token shapes redacted, moves the issue to `needs-operator` assigned to its operator, and leaves the worktree exactly as the run left it.
+Every run first records private lifecycle state under `~/.vegastack/runs/<run-id>/`; default diagnostics contain bounded events and reason codes, never raw stdout, stderr, argv, credentials, or local paths. A failed or timed-out run may publish only a separately authorized hand-back intent with an opaque delivery marker and reason. Process completion grants no label, assignment, push, or acceptance mutation: each remote effect needs its own durable exact intent and verified readback, while the worktree and pending local evidence remain preserved.
+
+### Owned claims and recovery
+
+Use one non-root dispatcher account and one lock directory per host. The default is `~/.vegastack/factory/locks`; an optional absolute `lockRoot` in the exact service config selects another directory. Changing the directory requires stopped-service migration and inspection of the old directory first. Two homes are not a substitute for a shared host lock root.
+
+Repository and watch claims use random owner tokens plus the process UID, boot identity and start identity. Every acquisition, renewal, release and stale-owner replacement takes the same short exclusive mutation guard. A PID alone never proves ownership. The guard waits at most two seconds for contention; this is not a task timeout. Repository path keys hash the canonical GitHub identity. Existing PID-only files are preserved and refuse migration until reconciled. Status reports unverifiable ownership explicitly.
+
+For a corrupt claim, legacy claim or abandoned mutation guard: stop every dispatcher using that account/root; preserve the owner file and guard directory; verify the recorded process is absent or its boot/start identity differs; verify no retained run is executing; then take an exclusive offline recovery guard and reconcile only the inspected pathname and exact token. Re-read the token while holding that guard before clearing a verified stale record. If a mutation guard has no valid owner record, recovery is an offline operator action: automatic recursive guard stealing is forbidden. Never delete a worktree, checkpoint or run record to unlock a task. An unknown process identity remains a visible refusal.
+
+Registered machines additionally use the configured existing private control-room state branch. Shared claims reserve repository/issue identity, host capacity, parent child slots and incompatible resources with one GitHub `createCommitOnBranch` transaction using `expectedHeadOid`. Different machines and scope revisions do not create different task keys. Only verified independent scopes may overlap; ambiguous paths serialize. A missing, rewritten, malformed, default or inaccessible state branch refuses dispatch; runtime never creates or resets it. [GitHub's conditional commit input](https://docs.github.com/en/graphql/reference/commits#createcommitonbranchinput) defines the expected-head field.
+
+Top-level work is repository-exclusive unless the fresh approved plan carries #135's closed `FleetParallelDeclaration`. The declaration must name the exact selected task set; its paths are re-derived from those tasks' canonical `Files —` clauses after current authority and dependency validation, and both peers must independently provide disjoint paths and resources. Missing, malformed, stale, mismatched, globbed or shared scope never reuses an older projection or gains independence from capacity, labels, configuration, observed diffs or model output.
+
+A verified stopped top-level parent and every direct retained child can move only through one atomic group-succession commit. The commit preserves checkpoints, accepted work, original parent bindings, joins, effects, history and reservations while replacing the complete owner tuple and generation. It leaves the parent `claimed` and children `recovery-queued`; transfer starts no process. Queued children retain file/resource reservations but consume a process slot only when their immutable predecessor receipt no longer proves stopped-and-never-started. Starting one requires the transferred parent to be running, fresh authority/source/qualification checks and both parent and machine child capacity. Group records use task schema v2 and a distinct receipt schema; every participating reader must support them before live activation, while v1 records remain readable and older closed readers refuse v2 instead of falling back.
+
+Recovery receipts are closed typed data pinned to an actual commit and blob digest. Publishing a receipt and linking it into the task are separate acknowledged transitions. Unlinked intent cannot authorize an effect, and an ambiguous send must be reconciled before retry. Completed scope evidence remains historical even after active reservations are removed. A stale heartbeat or disconnected host never proves termination. Transfer requires verified stopped execution, an available checkpoint, original execution identity, current authority and resolution of every possible remote effect. Configured hooks alone leave `remoteEffectCoverage` as `unmanaged-possible`.
+
+The source coordination API is available to the durable runtime owner: `acquireSharedTask`, `transitionSharedTask`, `recoverStoppedGroup`, `inspectGroupSuccession`, `publishRecoveryReceipt`, `resolveEvidence`, `beginManagedEffect` and `readSharedStatus`. Dispatch requires verified-candidate, durable-preparation, shared-executor and stopped-result adapters; absence refuses instead of launching through the legacy executor. Live provider behavior, full macOS/Linux reboot coverage, managed-effect qualification and assembled acceptance remain separate required gates.
 
 ### Running it as a service
 
@@ -185,7 +203,7 @@ vegafactory sync --org acme # bootstrap: a repo whose profile has no control-roo
 - The project's `.vegastack/dev.md` names the control room: `control-room: <org>/<repo>#<group>@<sha7>`, where the trailing sha is the clone commit the profile was drafted from. `control-room: none`, or no line at all, means the skill defaults apply and `sync` exits 0 doing nothing — unless `--org <org>` is passed, the bootstrap path dev-setup uses before the profile exists: the room is then `<org>/vegafactory-control-room` by convention, and an `--org` that disagrees with an existing knob is refused (exit 2).
 - The clone lives at `~/.vegastack/control-room/<org>/` — one per org.
 - The machine-local state document `~/.vegastack/factory.json` records, per org, the clone `path`, its `remote` and `branch`, and the timestamp of the **last successful fetch**. Freshness is measured from that timestamp, never from the directory's mtime. Editing `path`, `remote` or `branch` there points a repo at a different control room; nothing in the repository has to change — every refresh re-points the clone's `origin` at the configured `remote` and resets to what it fetched from the configured `branch`, so an edit takes effect on the next refresh (or `--force`) rather than only on a fresh clone.
-- `sync-max-age: 30m` in `.vegastack/dev.md` (`<n>m` or `<n>h`) is how stale the clone may be before a session refreshes it. The SessionStart hook runs `sync` in the background past that age.
+- `sync-max-age: 30m` in `.vegastack/dev.md` (`<n>m` or `<n>h`) is how stale the clone may be before a session refreshes it. Refresh runs through the explicit sync/runtime owner; the bounded advisory SessionStart hook performs no background network work.
 - Authentication is your existing `gh` credential over HTTPS, injected per invocation — no token reaches argv, the remote URL, or the clone's config, and no second credential is set up.
 - `sync` never commits and never pushes: the clone is read-only to this verb.
 
@@ -198,9 +216,21 @@ Two refusals are deliberate and fail closed:
 
 An unreadable `~/.vegastack/factory.json` is also a refusal, never a silent reset: resetting it would drop every other org's clone record.
 
+### Effective policy and migration
+
+Runtime, stats and the standalone dev-setup compiler share `effective-policy.mjs`. Ordinary explicit values resolve org → group → repo, including individual harness stages. A repo alone opts into `dispatch: local`. Org locks and exact group/repo/value delegations live in one `vsk-policy` schema2 block in org.md; a group's legacy `stats-override: allowed` cannot unlock the organization. A refused override retains its effective value for diagnostics but stops capture/export and new launches.
+
+`policy-schema: 2` opts into the documented typed contract. Legacy version1 ordinary knobs remain readable and are never silently rewritten. Use `vegafactory guard sync --dry-run --json` to inspect the proposed compiled values, source revisions and digest, then `--check` to compare the installed copy. Show original/effective/proposed policy differences and preserve originals before an explicit migration; obtain approval for an actual authority change. Unknown schemas, duplicate known keys and invalid values refuse without overwriting the existing copy. Unknown extension fields remain inert.
+
+Configured rooms require `factory.json`'s `controlRooms[org].snapshots[canonicalCodeRepo]` binding. Each snapshot carries schemaVersion2, org, group, repository (the room), origin, full sourceCommit, policyDigest, validatedAt and contentPath. The digest is recomputed for that exact code repo's current profile and selected group, using canonical relative source paths; one org digest cannot stand for multiple code repos. The reader checks origin, commit, clean managed content and regular Git blobs. Missing bindings, changed local profile, wrong group/origin or expired validation refuse. Snapshot creation and atomic refresh are the sync transaction's responsibility; a legacy lastSyncedAt is not validation. Freshness never creates a cumulative task deadline.
+
+Organization admins and explicitly delegated group admins are configured separately from descriptive people.csv roles and the task operators list. Only org admins appoint/remove admins. CLI people queries verify the requester through GitHub and filter exact allowed repository records before totals; chat/URL/display-role claims do not grant authority. The dashboard's canonical adapters fail closed until a caller supplies validated scope. Control-room Git readers can still read committed reports; application permissions do not make shared Git files group-confidential.
+
+Registered-machine policy includes stable machine/installation identity, host binding, execution login, exact repositories and disabled initial enrollment. Org defaults → group defaults → machine overrides govern polling, capacity, checkpoint and verified-transfer recovery modes. Group edits require previous org delegation; bootstrap paths cannot enable or enlarge registration. No-fleet installations retain explicit legacy operation; shared machines require validated registration and shared ownership rather than local-lock fallback. Runtime activation, private house-policy migration and state-branch creation remain separate setup steps.
+
 ### Statistics
 
-One JSONL record per headless run and per interactive session, spooled to a machine-local outbox and pushed into the org's control room at `stats/<owner>__<name>/<MON-YYYY>/<hostname>.jsonl`. One file per repo, per month, per machine, so two machines never conflict — a concurrent push is a non-fast-forward, which `pull --rebase` and a retry settles without a human.
+Metric v2 uses immutable execution, activity and rework-snapshot events in the private outbox and control room. Execution segments retain independent event IDs and one logical execution identity across continuation. Historical JSONL files remain unchanged and use explicitly labelled legacy definitions. See the [metric dictionary and coverage rules](https://github.com/vegastack/vegafactory/blob/main/packages/cli/docs/metrics.md).
 
 ```sh
 vegafactory stats                       # this repo, this month
@@ -208,18 +238,19 @@ vegafactory stats --org --since SEP-2026
 vegafactory stats --me                  # your own rows
 vegafactory stats skills                # invocations per skill, by trigger and harness
 vegafactory stats push                  # dry run: prints the plan and the commit it would make
-vegafactory stats push --commit         # copies the outbox in, commits, pushes, rebases on rejection
-vegafactory stats rollup --since SEP-2026   # regenerate the summaries; reads each touched issue's timeline through gh
+vegafactory stats push --commit         # delivers verified immutable event batches
+vegafactory stats rollup --since SEP-2026   # discover accepted delivery independently of run months
+vegafactory stats activity --org acme --repo acme/project.docs --month 2026-09 --json
 vegafactory stats record --source <kind>    # called by the capture hooks, reads the payload on stdin
 ```
 
-**A record is counts and identifiers only.** When the run happened, which repo, issue and stage, which harness, model and effort, how long it took, turns, tool calls, the four token counters, cost, how it ended, rework rounds — read after a headless run from the issue's own review, ledger and hand-back comments, by marker — and which skills it used. Never prompt text, assistant text, tool arguments, or file contents — the harness transcripts are read for usage totals and tool-call counts and nothing else. A field the capture could not fill is `null`, never a guess and never a zero.
+**Records contain counts and permitted identifiers only.** Execution records carry observed runtime, usage and terminal outcome. Activities carry event identity and occurrence time; cumulative rework snapshots carry their as-of date and history coverage. Missing measurements stay `null`, and reported zero stays zero. Mutable legacy review/ledger/handback counters do not become monthly events. Prompt text, assistant text, tool arguments and file contents do not enter shared reports.
 
-**Whether anything is recorded at all is the org's call, not the machine's.** `stats: on|off` and `stats-people: on|off` live in the control room's `org.md` (or a department's `group.md`); a repo may opt itself out with `stats: off` in its `.vegastack/dev.md` only while `org.md` says `stats-override: allowed`. Under `stats-override: locked` the repo's line is read, reported back, and ignored. There is deliberately no machine-level knob. Per-person views are for the person they describe or a `lead` in `people.csv`; org and repo totals are for everyone, and the committed summary files carry no per-person block, because the control-room clone is readable by everyone the org onboards.
+**Whether anything is recorded is org/group/repo policy, never a machine bypass.** Ordinary `stats` and `stats-people` values inherit; explicit org locks require exact delegation. `stats-export: attributed` requires org authorization. Refusals stop capture and export. Per-person reads use verified own-data identity or explicit scoped administration; a descriptive `lead` role does not supply that grant. Derived summaries retain their authorized repository scope. The private shared Git audience remains explicit; UI filtering does not erase Git history or copies.
 
 `push` is a dry run until `--commit`, because it writes to a repository other people read.
 
-`rollup` is the one statistics verb that reads the GitHub API: lead and cycle time come from each touched issue's label timeline, fetched through `gh` and written beside the summary as `<MON-YYYY>.timeline.json`. When `gh` cannot answer, the summaries are still regenerated from the timeline file the clone already holds, the reason is printed, and the exit code is 1.
+The CLI verifies its requester through the GitHub API. `rollup` also reads issue history: lead and cycle time come from each touched issue's label timeline, fetched through `gh` and written beside the summary as `<MON-YYYY>.timeline.json`. When `gh` cannot answer, the summaries are still regenerated from the timeline file the clone already holds, the reason is printed, and the exit code is 1.
 
 ## Dashboard
 
@@ -227,34 +258,59 @@ vegafactory stats record --source <kind>    # called by the capture hooks, reads
 
 ```bash
 vegafactory dashboard              # fetch on first use, then serve on 127.0.0.1:7777
+vegafactory dashboard --org acme   # required only when more than one org is configured
 vegafactory dashboard --open       # …and open it in the browser
 vegafactory dashboard --dry-run    # print what a real run would do, change nothing
 ```
 
 | Flag | Means |
 |---|---|
+| `--org ORG` | Select one configured canonical organization; inferred when exactly one is configured |
 | `--port N` | First port to try; the next nine are tried in turn |
 | `--open` | Open the URL in the browser once the server answers |
 | `--dir PATH` | Launch an already-built package tree instead of the fetched one |
 | `--dry-run` | Print the plan and change nothing |
-| `--json` | Machine-readable result: `{command, ok, url, dir, entry, fetched, pid}` |
+| `--json` | Machine-readable result, including the exact `org`, `version`, `instanceId` and cache schema of the owned child |
 
 Exit **0** the server answered, or the dry-run plan printed · **1** the server exited or never
-answered on its health route · **2** a usage error or a refusal (a symlink on the install path, no
-control room recorded for this machine, `gh` unavailable).
+answered with the expected identity · **2** a usage error or refusal such as ambiguous org selection,
+an invalid repository registration, an unsafe path, or an unverified existing install. Missing `gh`
+credentials do not block an identity-safe empty/unavailable shell.
 
 The app is a second published package, `@vegastack/vegafactory-dashboard`, fetched at this CLI's own
 version on first use into `~/.vegastack/dashboard/<version>/` — the core install stays small. The
-derived index lives at `~/.vegastack/cache/stats.db`; it holds nothing the control room does not, so
-**deleting it is always safe** and the next start rebuilds it.
+CLI verifies the exact descriptor-declared tarball bytes and regular-file tree, stages them with
+scripts disabled, and atomically selects the version. An ordinary caught failure removes only that
+attempt's owned staging directory; crash-interrupted or unrelated staging and an unowned or
+mismatched existing install remain preserved and unexecuted. `--dir` is explicitly
+`unverified-development`; release qualification never treats it as artifact proof.
 
-The server binds `127.0.0.1` only, and your `gh` token is passed to that process and never leaves
-it: the browser receives projected view models, not credentials.
+Each canonical org has an isolated immutable-generation cache at
+`~/.vegastack/dashboard/<sha256(org)>/cache-v2/`. Requests hold process-identity reader pins until
+their async render callback finishes; obsolete generations are reclaimed only when every exact pin
+owner is absent or proven stopped. A failed refresh serves the last eligible generation with its
+original source timestamp/digest and a stale/partial reason. The legacy
+`~/.vegastack/cache/stats.db` is never migrated, relabelled or deleted automatically: after a new
+selected-org generation has served the expected views, inspect/move it as a manual dry-run cleanup
+candidate before deleting it.
 
-Six views — org, repo, people, skills, board, dispatcher — read the control-room clone; the board and
-dispatcher views also read live GitHub and `vegafactory status --json`. When the live half is
-unreachable the page still renders from the clone, behind a banner naming what failed and how stale
-the clone is.
+The server binds `127.0.0.1` only. The CLI generates a fresh per-child instance ID and accepts
+readiness only when org, version, instance, schema and data-state match while that owned child is
+still alive. Your `gh` token is passed only to that server process and never appears in readiness or
+client data: the browser receives projected view models, not credentials.
+
+Nine destinations cover Attention, Performance, Activity, People, person detail, Skills, repository
+detail, Board and Dispatcher. Attention orders decisions, blocked or failed tasks, running work and
+recent merges. Performance keeps reported usage, coverage, subscription fee evidence and
+API-equivalent estimates separate. Activity keeps task owner, agent-account owner, shared machine,
+checkpoint uncertainty and compact handoff history on one repository/issue row. Every live/status
+read is projected to the current verified repository scope before totals, rows or links. When a live
+source is unavailable, safely retained data stays visible with explicit unavailable, stale and
+partial state; unavailable dispatcher observation is not reported as idle.
+
+This source revision still uses the dashboard's native semantic table and existing root setup.
+Signature-verified provider/Table copy-in and descriptor-backed packed browser evidence remain
+pending; no registry credential, hash-only component or completed accessibility claim is implied.
 
 ## Flags
 
@@ -302,7 +358,7 @@ The tool makes three kinds of network call, all to somewhere you already own:
 
 - `doctor`'s single version check against registry.npmjs.org;
 - `sync`'s shallow git fetch of the control room named by the project's `control-room:` knob;
-- `stats push`'s git push of your statistics records into that same control room, and `stats rollup`'s reads of the touched issues' timelines from the GitHub API;
+- `stats push`'s git push of your statistics records into that same control room, and bounded `stats rollup`/`stats activity` reads of all-state issues, immutable acceptance receipts, delivery PRs and linked releases/tags;
 - `dashboard`'s first-use fetch of `@vegastack/vegafactory-dashboard` from registry.npmjs.org, and that server's own reads of the GitHub API for the live board.
 
 All of them but the two registry calls use your existing `gh` credential, and the control-room calls reach only your organization's own repository. `add`, `verify`, and `remove` are fully offline. Statistics are recorded only while the org's `stats:` policy says so, and a record carries counts and identifiers only — never transcript text (see [Statistics](#statistics)).
@@ -317,3 +373,45 @@ All of them but the two registry calls use your existing `gh` credential, and th
 Skill content, freshness model, and policies: [github.com/vegastack/vegafactory](https://github.com/vegastack/vegafactory)
 
 MIT license.
+
+
+### Managed hooks and memory
+
+Managed Claude/Codex launches disable native memory retrieval/generation while retaining authored project instructions and hooks. Supported controls are pinned to Claude Code2.1.263 and Codex0.153.4; missing/unsupported version or effective controls refuse. Codex also disables optional task-note/search context management and native-memory import; neither `memories=false` nor CLI help alone proves runtime exclusion. Session overrides do not alter personal settings or existing vendor stores. Actual qualification remains separately evidenced.
+
+SessionStart/Stop/SessionEnd use a bounded local adapter with explicit harness, a 64 KiB input limit, one 500 ms capture/learning phase and one-second overall hook limit. The known Node child signals module readiness, validates registry/session/current policy without optional Git index locks, then obtains one trusted flush grant before any write. The supervisor enforces both fixed deadlines through owned-process-group termination. Finish plus exit 0 is required for context output. Stop and SessionEnd emit no instructions and start no network/model process. The shared session-start.mjs file must accompany either consumer. Only normalized identity fields reach `stats record --source managed-hook`; the CLI index preserves its existing durable private capture/deduplication consumer before flushing prepared learning. SessionStart uses `learning inspect --source managed-hook --json` for actual bounded verified lesson context. No fallback reads transcripts or native memory, and no capture/lesson-reuse success is inferred from silent exit. The precise wire and configuration examples are in the authored dev-setup harness-facts reference.
+
+
+Codex0.153.4 applicability uses bounded read-only stdio hooks/config/requirements metadata APIs, with no thread, turn or hook execution. Only relevant sanitized fields survive; individual disabling and managed-only restrictions can refuse a locally present guard. Claude applicability currently remains unsupported and refuses: CLI version/help is not effective managed-settings evidence. The checked child gateway is integrated, while actual pinned-harness execution qualification and qualified shared-parent admission remain outstanding. Neither refusal changes personal settings or permits native-memory fallback. Pre-spawn refusal preserves a pending corrections reaction, and configuration evidence retains explicit unmanaged-possible effect coverage.
+
+
+### Recoverable execution and source checkpoints
+
+Each execution attempt has a private record under `~/.vegastack/runs/<run-id>/`.
+The wrapper records its process identity before admitting the vendor command. Ordinary
+work has no elapsed-time cutoff. Cancellation allows five seconds for termination,
+then up to two seconds to verify forced cleanup. Unknown termination retains ownership
+and requires reconciliation; process completion does not imply accepted issue completion.
+Default event logs contain lifecycle events and reason codes, without raw streams or argv.
+
+`vegafactory status --json` reports durable state, terminal cause and pending delivery
+counts. Legacy logs remain unverified diagnostics. The same task resumes only after its
+original authority, ownership, saved source and execution setup are verified.
+
+`vegafactory checkpoint --run-id ID --json` inspects saved progress. `--write` requires
+an existing recorded exact checkpoint intent and freshly verified canonical approval.
+Checkpoint preparation checks all newly exported commits, merge ancestry, paths and blobs,
+including files removed by later commits. Delivery uses the approved task ref without force,
+implicit tags or submodule pushes, and remote readback precedes acknowledgment. A failed
+upload preserves local source. The dispatcher never stages an actively changing worktree.
+
+This source checkpoint does not qualify unattended operation. Shared execution refuses
+without the pinned execution-evidence verifier. Provider quota detection/availability,
+shared checkpoint/status effect controllers and complete recovery/acceptance qualification
+remain integration work; local fixtures do not establish those capabilities.
+
+### Verified lessons and recovery
+
+`vegafactory learning checkpoint --run-id ID --json` flushes prepared observations from the owned recovery packet; `inspect` selects source-bound lessons and `revert --id ID --run-id ID --dry-run|--apply --json` checks an exact local inverse patch. Lessons need actual relevant ordinary-work checks and reversible approved files; mandatory reviews and protected rules retain their gates. No background model jobs or native-memory fallback are added.
+
+Recovery compares exact approved task IDs and fresh source tuples, keeps prior attempts and pending delivery identities, and preserves unavailable checkpoints, unknown termination and ambiguous effects as explicit blockers. Within a live owned run, `dispatch --checkpoint-task ISSUE-TN --run-id RUN_ID --once --json` runs only its approved-base configured check and retains task-only completion proof; omission of `--once` previews. Same-home continuation and receiving-home construction use verified ownership transitions and new terminal segments. Receiving history and reporting remain explicitly unavailable when the old private context is absent. Accepted child delivery rows require verified review, exact local join and immutable receipt readback/linking. Source backups, silent hooks and successful process exit alone are insufficient.

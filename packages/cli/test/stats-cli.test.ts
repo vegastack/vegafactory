@@ -6,6 +6,8 @@ import { normalizeRecord } from '../src/stats/record.ts'
 import { appendRecord, listOutbox } from '../src/stats/outbox.ts'
 import { parseStatsArgs, runStats, type StatsDeps } from '../src/stats/cli.ts'
 
+import { resolvePolicy } from '../../../skills/dev/dev-setup/scripts/effective-policy.mjs'
+const effectiveFor=(repo:string)=>resolvePolicy({org:'stats: on\nstats-people: on\nstats-export: attributed\npolicy-schema: 2\n```vsk-policy\n'+JSON.stringify({schemaVersion:2,administration:{orgAdmins:['kmanojkumar'],groupAdmins:{},groupAdminCapabilities:{}}})+'\n```',identity:{repo,org:'vegastack',group:'dev',peopleByScope:{org:[{login:'kmanojkumar',groups:['dev']},{login:'someone-else',groups:['dev']}]},repoGroups:{'vegastack/vegafactory':'dev'}}}).policy
 const policy = { enabled: true, people: true, source: 'org' as const, refusal: null }
 const deps = async (): Promise<{ lines: string[]; deps: StatsDeps }> => {
   const lines: string[] = []
@@ -13,6 +15,7 @@ const deps = async (): Promise<{ lines: string[]; deps: StatsDeps }> => {
     lines,
     deps: {
       home: await mkdtemp(join(tmpdir(), 'vsk-cli-')), cloneRoot: await mkdtemp(join(tmpdir(), 'vsk-cli-clone-')),
+      viewerVerified:true,effectivePolicy:effectiveFor('vegastack/vegafactory'),readGh:async()=>{throw Error('offline fixture')},
       hostname: 'mini', ghUser: 'kmanojkumar', login: 'kmanojkumar', isLead: false, policy,
       repo: 'vegastack/vegafactory',
       git: async () => ({ code: 0, stdout: '', stderr: '' }), gh: async () => ({}), readStdin: async () => '{}',
@@ -73,9 +76,9 @@ test('a skill hook accumulates into the session sidecar, not the outbox', async 
 
 test('a non-lead asking for another person is refused with the reason and exit 2', async () => {
   const { lines, deps: base } = await deps()
-  const code = await runStats({ ...parseStatsArgs(['--me']), scope: 'me' }, { ...base, login: 'someone-else', isLead: false })
+  const code = await runStats({ ...parseStatsArgs(['--me']), scope: 'me' }, { ...base, login: 'unconfirmed', isLead: false })
   expect(code).toBe(2)
-  expect(lines.join('\n')).toContain('people-level statistics')
+  expect(lines.join('\n')).toContain('privacy-read-scope-refused')
 })
 
 test('unparseable hook input is a refusal, never a partial record', async () => {
@@ -129,19 +132,19 @@ test('--since totals every month in the window rather than printing one of them'
   expect(summary.month).toBe('SEP-2026…OCT-2026')
 })
 
-test('the dry-run push names the records it would copy and the commit it would make', async () => {
+test('legacy dry-run push refuses export and names explicit migration', async () => {
   const { lines, deps: base } = await deps()
-  await appendRecord(base.home, row({}), 'mini')
-  expect(await runStats(parseStatsArgs(['push']), base)).toBe(0)
-  const output = lines.join('\n')
-  expect(output).toContain('dry run')
-  expect(output).toContain('(+1)')
-  expect(output).toContain('stats: vegastack/vegafactory +1 runs SEP-2026 · kmanojkumar@mini · claude/fable-5.1')
+  const originalPath = await appendRecord(base.home, row({}), 'mini')
+  const originalBytes = await readFile(originalPath)
+  expect(await runStats(parseStatsArgs(['push']), base)).toBe(2)
+  expect(lines.join('\n')).toContain('legacy-spool-requires-explicit-migration')
+  expect(await readFile(originalPath)).toEqual(originalBytes)
+  expect(await listOutbox(base.home)).toHaveLength(1)
 })
 
 // --- the people gate on every scope --------------------------------------------------------
 
-test('--org and --repo carry a per-person block only for a lead, whatever stats-people says', async () => {
+test('--org and --repo do not elevate a legacy lead into scoped administration', async () => {
   const { lines, deps: base } = await deps()
   await seed(base.cloneRoot, 'SEP-2026', [row({}), row({ human: 'someone-else', issue: 999, cost_usd: 50 })])
   expect(await runStats(parseStatsArgs(['--org', '--json']), { ...base, isLead: false })).toBe(0)
@@ -151,18 +154,19 @@ test('--org and --repo carry a per-person block only for a lead, whatever stats-
   expect(JSON.parse(lines.join('')).people).toBeNull()
   lines.length = 0
   expect(await runStats(parseStatsArgs(['--org', '--json']), { ...base, isLead: true })).toBe(0)
-  expect(Object.keys(JSON.parse(lines.join('')).people)).toEqual(['kmanojkumar', 'someone-else'])
+  expect(JSON.parse(lines.join('')).people).toBeNull()
 })
 
-test('the committed summaries never carry a per-person block: the clone is readable by everyone', async () => {
+test('regenerated metric v2 summaries separate historical legacy runs and unavailable task evidence', async () => {
   const { deps: base } = await deps()
   await seed(base.cloneRoot, 'SEP-2026', [row({}), row({ human: 'someone-else', issue: 999 })])
-  expect(await runStats(parseStatsArgs(['rollup', '--since', 'SEP-2026']), { ...base, isLead: true })).toBe(0)
+  expect(await runStats(parseStatsArgs(['rollup', '--since', 'SEP-2026']), base)).toBe(1)
   const repo = JSON.parse(await readFile(join(base.cloneRoot, 'stats/vegastack__vegafactory/SEP-2026.summary.json'), 'utf8'))
-  const org = JSON.parse(await readFile(join(base.cloneRoot, 'stats/org/SEP-2026.summary.json'), 'utf8'))
-  expect(repo.people).toBeNull()
-  expect(org.people).toBeNull()
-  expect(repo.runs).toBe(2)
+  expect(repo.metricVersion).toBe(2)
+  expect(repo.legacy.people).toBeNull()
+  expect(repo.legacy.runs).toBe(2)
+  expect(repo.runs).toBe(0)
+  expect(repo.taskActivity.mergedIssues).toBeNull()
 })
 
 // --- lead and cycle time at rollup ----------------------------------------------------------
@@ -173,27 +177,16 @@ const apiTimeline = [
   { event: 'closed', created_at: '2026-09-03T00:00:00.000Z' },
 ]
 
-test('rollup fetches the issue timelines through gh, writes them beside the summary, and reports lead time from them', async () => {
+test('legacy close timelines remain historical audit data and never become v2 merged completion', async () => {
   const { lines, deps: base } = await deps()
-  await seed(base.cloneRoot, 'SEP-2026', [row({}), row({ issue: 121, stage: 'review' })])
-  const calls: string[][] = []
-  const gh = async (args: string[]): Promise<unknown> => {
-    calls.push(args)
-    return args[1]!.endsWith('/timeline') ? apiTimeline : { created_at: '2026-09-01T00:00:00.000Z' }
-  }
-  expect(await runStats(parseStatsArgs(['rollup', '--since', 'SEP-2026', '--json']), { ...base, gh })).toBe(0)
-  expect(calls).toHaveLength(2)
-  const timeline = JSON.parse(await readFile(join(base.cloneRoot, 'stats/vegastack__vegafactory/SEP-2026.timeline.json'), 'utf8'))
-  expect(timeline).toHaveLength(4)
-  const summary = JSON.parse(await readFile(join(base.cloneRoot, 'stats/vegastack__vegafactory/SEP-2026.summary.json'), 'utf8'))
-  expect(summary.lead_time_h.p50).toBe(48)
-  expect(summary.cycle_time_h.ready.p50).toBe(12)
-  expect(summary.throughput.issues_closed).toBe(1)
-  expect(JSON.parse(lines.join(''))).toMatchObject({ guard: 'stats-rollup', timelines: ['vegastack/vegafactory'] })
-  // `show` reads what rollup wrote: the same clone, no further gh call.
-  lines.length = 0
-  expect(await runStats(parseStatsArgs(['--repo', '--since', 'SEP-2026', '--json']), { ...base, gh: async () => { throw new Error('offline') } })).toBe(0)
-  expect(JSON.parse(lines.join('')).lead_time_h.p50).toBe(48)
+  await seed(base.cloneRoot, 'SEP-2026', [row({})])
+  const path=join(base.cloneRoot,'stats/vegastack__vegafactory/SEP-2026.timeline.json')
+  const bytes=JSON.stringify(apiTimeline)
+  await writeFile(path,bytes)
+  expect(await runStats(parseStatsArgs(['rollup','--json']),base)).toBe(1)
+  expect(await readFile(path,'utf8')).toBe(bytes)
+  const result=JSON.parse(lines.at(-1)!)
+  expect(result.report.repos[0].taskActivity.mergedIssues).toBeNull()
 })
 
 test('a rollup that cannot reach gh still writes the summaries, keeps an older timeline, and exits 1 naming the gap', async () => {
@@ -204,6 +197,44 @@ test('a rollup that cannot reach gh still writes the summaries, keeps an older t
   expect(await runStats(parseStatsArgs(['rollup', '--since', 'SEP-2026']), { ...base, gh: async () => { throw new Error('HTTP 403: forbidden') } })).toBe(1)
   expect(await readFile(stale, 'utf8')).toContain('"closed"')
   const summary = JSON.parse(await readFile(join(base.cloneRoot, 'stats/vegastack__vegafactory/SEP-2026.summary.json'), 'utf8'))
-  expect(summary.lead_time_h.p50).toBe(24)
-  expect(lines.join('\n')).toContain('HTTP 403')
+  expect(summary.taskActivity.mergedIssues).toBeNull()
+  expect(lines.join('\n')).toContain('unavailable')
+})
+
+test('a policy refusal prevents reading hook input and any capture or export', async () => {
+  const { deps: base } = await deps()
+  let effects = 0
+  const denied = { ...base, policy: { ...policy, refusal: 'org delegation required' }, readStdin: async () => { effects++; return '{}' }, git: async () => { effects++; return { code: 0, stdout: '', stderr: '' } } }
+  expect(await runStats(parseStatsArgs(['record', '--source', 'codex-session-end']), denied)).toBe(2)
+  expect(await runStats(parseStatsArgs(['push', '--commit']), denied)).toBe(2)
+  expect(effects).toBe(0)
+  expect(await listOutbox(base.home)).toEqual([])
+})
+
+test('explicit group read scope filters individual records before organization totals', async () => {
+  const { resolvePolicy } = await import('../../../skills/dev/dev-setup/scripts/effective-policy.mjs')
+  const { deps: base, lines } = await deps()
+  const effective = resolvePolicy({ org: 'stats-people: on\nstats-export: attributed\npolicy-schema: 2\n```vsk-policy\n' + JSON.stringify({ schemaVersion: 2, administration: { orgAdmins: ['owner'], groupAdmins: { dev: ['reader'] }, groupAdminCapabilities: { dev: ['group.people.read'] } } }) + '\n```', identity: { org: 'vegastack', repo: base.repo, group: 'dev', peopleByScope: { org: [{ login: 'owner', groups: ['dev'] }, { login: 'reader', groups: ['dev'] }, { login: 'person', groups: ['dev', 'design'] }] }, repoGroups: { 'vegastack/vegafactory': 'dev', 'vegastack/design': 'design' } } }).policy
+  await seed(base.cloneRoot, 'SEP-2026', [row({ human: 'person', duration_s: 10 }), row({ human: 'person', repo: 'vegastack/design', duration_s: 900 })])
+  expect(await runStats(parseStatsArgs(['--org', '--json']), { ...base, login: 'reader', ghUser: 'reader', viewerVerified: true, effectivePolicy: effective })).toBe(0)
+  const summary = JSON.parse(lines.join(''))
+  expect(summary.runs).toBe(1)
+  expect(summary.by_stage.implement.duration_s).toBe(10)
+  expect(summary.people).toBeNull()
+})
+
+test('CLI requester comes from verified GitHub context, not operators prose or claimed login', async () => {
+  const { buildStatsDeps, isLeadIn } = await import('../src/stats/cli.ts')
+  const home = await mkdtemp(join(tmpdir(), 'policy-identity-'))
+  const cwd = join(home, 'app')
+  await mkdir(join(cwd, '.vegastack'), { recursive: true })
+  await writeFile(join(cwd, '.vegastack', 'dev.md'), 'repo: acme/app\noperators: owner\nstats: on')
+  const verified = await buildStatsDeps(home, cwd, () => {}, async () => ({ login: 'member', id: 123 }))
+  expect(verified.login).toBe('member')
+  expect(verified.viewerVerified).toBe(true)
+  expect(verified.isLead).toBe(false)
+  const unavailable = await buildStatsDeps(home, cwd, () => {}, async () => ({ login: 'owner' }))
+  expect(unavailable.login).toBe('')
+  expect(unavailable.viewerVerified).toBe(false)
+  expect(isLeadIn('login,role\nmember,not-a-lead', 'member')).toBe(false)
 })

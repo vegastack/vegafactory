@@ -73,10 +73,13 @@ describe('vegafactory-setup contract', () => {
 
   test('the group harness policy is the line shape the dispatcher parses, and it merges into a repo that names none', () => {
     const group = readFileSync(join(assets, 'group.md.template'), 'utf8')
-    expect(Object.keys(parseRepoPolicy(group).stages).sort()).toEqual(['chronicle', 'implement', 'intake', 'plan', 'review', 'status'])
-    const merged = mergeRepoPolicy(group, '## Knobs\n\ndispatch: local\noperators: mk\n')
-    expect(stagePolicy(merged, 'implement')).toEqual({ harness: 'claude', model: 'fable', effort: 'high' })
-    expect(stagePolicy(merged, 'corrections').harness).toBe('claude')
+    expect(parseRepoPolicy(group).refusal).toMatch(/harness/)
+    const confirmed = group.replace(/\{\{([a-z]+)-(harness|model|effort)\}\}/g, (_match, _stage, field) => field === 'harness' ? 'codex' : field === 'model' ? 'fixture-model' : 'high')
+      .replace('{{operators}}', 'mk')
+    expect(Object.keys(parseRepoPolicy(confirmed).stages).sort()).toEqual(['chronicle', 'implement', 'intake', 'plan', 'review', 'status'])
+    const merged = mergeRepoPolicy(confirmed, 'dispatch: local\noperators: mk')
+    expect(stagePolicy(merged, 'implement')).toEqual({ harness: 'codex', model: 'fixture-model', effort: 'high' })
+    expect(stagePolicy(merged, 'corrections').harness).toBe('codex')
   })
 
   test('org.md template holds the global policy only, never a department knob', () => {
@@ -90,7 +93,9 @@ describe('vegafactory-setup contract', () => {
   test('no template carries a secret value, only secret names', () => {
     for (const file of ['org.md.template', 'group.md.template']) {
       const body = readFileSync(join(assets, file), 'utf8')
-      expect(body).not.toMatch(/(ghp_|sk-|AKIA)[A-Za-z0-9]/)
+      const credential = /(?:\bghp_|\bsk-|\bAKIA)[A-Za-z0-9]/
+      expect(body).not.toMatch(credential)
+      for (const example of ['ghp_example', 'sk-example', 'AKIAEXAMPLE']) expect(credential.test(example)).toBe(true)
     }
   })
 
@@ -125,6 +130,7 @@ describe('vegafactory-setup contract', () => {
       '## Accounts',
       '## Toolchain',
       '## Power and login',
+      '## Dispatcher ownership and offline recovery',
       '## Grant the group',
       '## Register the runner',
       '## Verify',

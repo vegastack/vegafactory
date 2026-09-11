@@ -1,13 +1,13 @@
 import type { PageContext } from '../context'
-import { perIssue, perStage, type Totals } from '../cache/queries'
+import { orgTotals, perIssue, perStage, type Totals } from '../cache/queries'
 import type { Pct, Summary } from '../stats/summaries'
 
 export interface RepoIssueRow {
   issue: number
-  costUsd: number
-  reviewRounds: number
-  fixRounds: number
-  handbacks: number
+  costUsd: number | null
+  reviewRounds: number | null
+  fixRounds: number | null
+  handbacks: number | null
 }
 
 export interface RepoView {
@@ -41,22 +41,10 @@ export function buildRepoView({ context, repo, summary }: {
   const stages = perStage(context.db, filters)
 
   const rows = perIssue(context.db, filters)
-  const totals = rows.reduce<Totals>((sum, row) => ({
-    runs: sum.runs + row.runs,
-    costUsd: sum.costUsd + row.costUsd,
-    durationS: sum.durationS + row.durationS,
-    tokensIn: sum.tokensIn + row.tokensIn,
-    tokensOut: sum.tokensOut + row.tokensOut,
-    cacheRead: sum.cacheRead + row.cacheRead,
-    cacheWrite: sum.cacheWrite + row.cacheWrite,
-    handbacks: sum.handbacks + row.handbacks,
-    reviewRounds: sum.reviewRounds + row.reviewRounds,
-    fixRounds: sum.fixRounds + row.fixRounds,
-    humanTouchpoints: sum.humanTouchpoints + row.humanTouchpoints,
-  }), {
-    runs: 0, costUsd: 0, durationS: 0, tokensIn: 0, tokensOut: 0, cacheRead: 0, cacheWrite: 0,
-    handbacks: 0, reviewRounds: 0, fixRounds: 0, humanTouchpoints: 0,
-  })
+  const totals = orgTotals(context.db,filters)
+  totals.subscriptionFee=null // Report-level account fee is never allocated to a repository row.
+  if(!(filters.allowedRepos===null||filters.allowedRepos?.includes(repo))||!filters.attributedRepos?.includes(repo)||summary?.scope!==repo)summary=null
+
 
   return {
     repo,

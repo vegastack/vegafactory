@@ -7,7 +7,7 @@
 // `gh` and harness authentication, and that is the whole identity model of #114. Nothing here needs
 // or asks for root.
 import { lstat, mkdir, writeFile } from 'node:fs/promises'
-import { dirname, join } from 'node:path'
+import { dirname, join, isAbsolute } from 'node:path'
 
 export interface ServiceInput {
   platform: 'darwin' | 'linux'
@@ -38,6 +38,7 @@ function xml(value: string): string {
 }
 
 export function serviceArgs(input: ServiceInput): string[] {
+  if (!isAbsolute(input.configPath)) throw new Error('dispatcher service requires the exact absolute config path')
   return ['dispatch', '--watch', '--config', input.configPath]
 }
 
@@ -67,17 +68,21 @@ ${args}
 }
 
 export function renderSystemdUnit(input: ServiceInput): string {
+  const word = (value: string): string => {
+    if (!value || /[\x00-\x1f\x7f]/.test(value)) throw new Error('systemd service value contains a control character')
+    return `"${value.replace(/\\/g, '\\\\').replace(/"/g, '\\"').replace(/\$/g, '$$$$').replace(/%/g, '%%')}"`
+  }
   return `[Unit]
 Description=VegaFactory dispatcher — headless runs in feature worktrees
 After=network-online.target
 
 [Service]
 Type=simple
-ExecStart=${input.binPath} ${serviceArgs(input).join(' ')}
+ExecStart=${[input.binPath, ...serviceArgs(input)].map(word).join(' ')}
 Restart=always
 RestartSec=${input.interval}
-StandardOutput=append:${join(input.logRoot, 'dispatcher.out.log')}
-StandardError=append:${join(input.logRoot, 'dispatcher.err.log')}
+StandardOutput=${word('append:' + join(input.logRoot, 'dispatcher.out.log'))}
+StandardError=${word('append:' + join(input.logRoot, 'dispatcher.err.log'))}
 
 [Install]
 WantedBy=default.target
@@ -136,6 +141,8 @@ export function serviceUsage(): string {
 Dry run until --write: install prints the unit file it would write and every command it
 would run, and does neither. The dispatcher runs as you, with your own gh and harness
 authentication — which is why installing it is your call and not an agent's.
+Use one non-root dispatcher account and one lockRoot per host. Copied configuration
+does not enroll another machine; corrupt or abandoned claims require offline recovery.
 `
 }
 

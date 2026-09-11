@@ -33,12 +33,22 @@ jobs:
           sparse-checkout: ".vegastack/dev.md"
           sparse-checkout-cone-mode: false
 
+      - name: Read the pinned policy compiler
+        uses: actions/checkout@v7
+        with:
+          repository: vegastack/vegafactory
+          ref: "280f379cf5e955dd758b77566bf309c7b6ff5b6b"
+          path: .vegafactory-policy
+          sparse-checkout: "skills/dev/dev-setup/scripts/effective-policy.mjs"
+          sparse-checkout-cone-mode: false
+          persist-credentials: false
+
       - name: Resolve the board and the state label
         id: resolve
         env:
           PROFILE: "profile/.vegastack/dev.md"
-          STATE_LABELS: "needs-operator,needs-plan,ready,working,for-operator"
-          LABELS: "${{ join(github.event.issue.labels.*.name, ',') }}"
+          POLICY_MODULE: ".vegafactory-policy/skills/dev/dev-setup/scripts/effective-policy.mjs"
+          LABELS: '${{ toJSON(github.event.issue.labels.*.name) }}'
           APP_ID: "${{ vars.VEGAFACTORY_APP_ID }}"
         run: |
           set -eu
@@ -69,31 +79,25 @@ jobs:
             exit 1
           fi
 
-          found=''
-          count=0
-          IFS=','
-          for label in $LABELS; do
-            for state in $STATE_LABELS; do
-              [ "$label" = "$state" ] || continue
-              found=$label
-              count=$((count + 1))
-            done
-          done
-          unset IFS
-
-          if [ "$count" -eq 0 ]; then
-            echo "board mirror: skipped - no state label on this issue"
-            echo 'decision=skip' >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-          if [ "$count" -gt 1 ]; then
-            echo "board mirror: ambiguous, skipped - $count state labels present ($LABELS)"
-            echo 'decision=skip' >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-
-          echo "board mirror: $found -> Status on project $board"
-          { echo 'decision=sync'; echo "board=$board"; echo "status=$found"; } >> "$GITHUB_OUTPUT"
+          node --input-type=module <<'JS'
+          import { readFileSync, appendFileSync } from 'node:fs';
+          import { resolve } from 'node:path';
+          import { pathToFileURL } from 'node:url';
+          const { parsePolicy, readWorkflowLabels, resolveState } = await import(pathToFileURL(resolve(process.env.POLICY_MODULE)).href);
+          try {
+            const policy = parsePolicy(readFileSync(process.env.PROFILE, 'utf8'));
+            if (policy.blocks.length) throw new Error(policy.blocks.join('; '));
+            const map = readWorkflowLabels(readFileSync(process.env.PROFILE, 'utf8'));
+            const state = resolveState(JSON.parse(process.env.LABELS), map);
+            if (state.blocks.length) throw new Error(state.blocks.join('; '));
+            const board = policy.extensions.board?.split(/\s/)[0];
+            if (!/^[1-9][0-9]*$/.test(board ?? '')) throw new Error('invalid board number');
+            appendFileSync(process.env.GITHUB_OUTPUT, 'decision=sync\nboard=' + board + '\nstatus=' + map[state.state] + '\n');
+          } catch (error) {
+            console.log('board mirror: skipped - ' + error.message);
+            appendFileSync(process.env.GITHUB_OUTPUT, 'decision=skip\n');
+          }
+          JS
 
       - name: Mint the App token
         id: token
@@ -118,6 +122,17 @@ jobs:
           ISSUE_URL: "${{ github.event.issue.html_url }}"
         run: |
           set -eu
+          options=$(mktemp)
+          gh project field-list "$BOARD" --owner "$OWNER" --format json > "$options"
+          OPTIONS_FILE="$options" node --input-type=module <<'JS'
+          import { readFileSync } from 'node:fs';
+          const fields = JSON.parse(readFileSync(process.env.OPTIONS_FILE, 'utf8')).fields;
+          const status = Array.isArray(fields) ? fields.filter(field => field.name === 'Status') : [];
+          if (status.length !== 1 || !Array.isArray(status[0].options) || !status[0].options.some(option => option.name === process.env.STATUS)) {
+            console.error('board mirror: configured Status option unavailable; no board mutation');
+            process.exit(1);
+          }
+          JS
           err=$(mktemp)
           if gh project item-edit "$BOARD" --owner "$OWNER" --url "$ISSUE_URL" --field Status --value "$STATUS" 2>"$err"; then
             echo "board mirror: Status=$STATUS on project $BOARD"

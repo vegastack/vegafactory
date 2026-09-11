@@ -299,11 +299,11 @@ export function mainCheckout(cwd) {
 }
 
 const hasRemote = (repoRoot, remote) => git(repoRoot, ['remote', 'get-url', remote]).ok;
-const branchExistsIn = (repoRoot, branch) => git(repoRoot, ['rev-parse', '--verify', '--quiet', 'refs/heads/' + branch]).ok;
+const branchExistsIn = (repoRoot, branch, gitRunner = git) => gitRunner(repoRoot, ['rev-parse', '--verify', '--quiet', 'refs/heads/' + branch]).ok;
 
 // The path of the worktree currently holding a branch, straight off porcelain.
-export function worktreeHoldingBranch(repoRoot, branch) {
-  const listed = git(repoRoot, ['worktree', 'list', '--porcelain']);
+export function worktreeHoldingBranch(repoRoot, branch, gitRunner = git) {
+  const listed = gitRunner(repoRoot, ['worktree', 'list', '--porcelain']);
   if (!listed.ok) return null;
   const found = parseWorktreeList(listed.out).find((entry) => entry.branch === branch)?.path ?? null;
   return rebaseUnderRoot(repoRoot, found);
@@ -348,15 +348,15 @@ function applyCodexTrust({ home, absPath, write, actions, warns, blocks }) {
 
 // --- create and restore ---------------------------------------------------
 
-function prepareCheckout({ repoRoot, path, devMd, home, write, actions, warns, blocks }) {
+function prepareCheckout({ repoRoot, path, devMd, home, write, actions, warns, blocks, required = false }) {
   for (const file of parseIncludeKnob(devMd)) {
     const source = join(repoRoot, file);
     if (!existsSync(source)) {
-      warns.push(at(file, 'listed in worktree-include: but absent from the main checkout — not copied'));
+      (required ? blocks : warns).push(at(file, 'listed in worktree-include: but absent from the main checkout — not copied'));
       continue;
     }
     if (symlinkBlock(source)) {
-      warns.push(at(file, 'is a symlink in the main checkout — not copied'));
+      (required ? blocks : warns).push(at(file, 'is a symlink in the main checkout — not copied'));
       continue;
     }
     actions.push(at(file, 'copy into the worktree'));
@@ -372,7 +372,7 @@ function prepareCheckout({ repoRoot, path, devMd, home, write, actions, warns, b
       try {
         execFileSync('sh', ['-c', setup], { cwd: path, encoding: 'utf8', stdio: [DISCARD, 'pipe', 'pipe'] });
       } catch (error) {
-        warns.push(at('setup', '`' + setup + '` failed: ' + (error.stderr?.toString().trim() || error.message)));
+        (required ? blocks : warns).push(at('setup', '`' + setup + '` failed: ' + (error.stderr?.toString().trim() || error.message)));
       }
     }
   }
@@ -448,7 +448,7 @@ export function createWorktree({ repoRoot, issue, slug, type, base, parent, devM
 // from the parent's HEAD commit. It shares createWorktree's symlink refusal,
 // existing-branch refusal and post-add preparation, and differs only in the
 // start point, which is a commit rather than a ref.
-export function createChildWorktree({ repoRoot, issue, slug, type, baseSha, devMd, home, write = false }) {
+export function createChildWorktree({ repoRoot, issue, slug, type, baseSha, devMd, home, write = false, gitRunner = git }) {
   const blocks = [];
   const warns = [];
   const actions = [];
@@ -463,19 +463,19 @@ export function createChildWorktree({ repoRoot, issue, slug, type, baseSha, devM
     if (symlink) blocks.push(symlink);
   }
   if (blocks.length > 0) return { blocks, warns, actions, path: plan.path, branch: plan.branch };
-  if (branchExistsIn(repoRoot, plan.branch)) {
+  if (branchExistsIn(repoRoot, plan.branch, gitRunner)) {
     blocks.push(at(plan.branch, 'the branch already exists — use restore to re-add its worktree'));
     return { blocks, warns, actions, path: plan.path, branch: plan.branch };
   }
   actions.push(at(plan.path, 'git worktree add -b ' + plan.branch + ' from ' + plan.baseSha));
   if (write) {
-    const added = git(repoRoot, plan.args);
+    const added = gitRunner(repoRoot, plan.args);
     if (!added.ok) {
       blocks.push(at(plan.path, 'git worktree add failed: ' + added.out));
       return { blocks, warns, actions, path: plan.path, branch: plan.branch };
     }
   }
-  prepareCheckout({ repoRoot, path: plan.path, devMd, home, write, actions, warns, blocks });
+  prepareCheckout({ repoRoot, path: plan.path, devMd, home, write, actions, warns, blocks, required: true });
   return { blocks, warns, actions, path: plan.path, branch: plan.branch };
 }
 
@@ -483,7 +483,7 @@ export function createChildWorktree({ repoRoot, issue, slug, type, baseSha, devM
 // gone — the corrections and reclaim path. It never creates a branch: a
 // missing branch means the work is somewhere else, and guessing would be worse
 // than stopping.
-export function restoreWorktree({ repoRoot, issue, slug, type, devMd, home, write = false }) {
+export function restoreWorktree({ repoRoot, issue, slug, type, devMd, home, write = false, gitRunner = git }) {
   const blocks = [];
   const warns = [];
   const actions = [];
@@ -497,11 +497,11 @@ export function restoreWorktree({ repoRoot, issue, slug, type, devMd, home, writ
   }
   if (blocks.length > 0) return { blocks, warns, actions, path, branch };
 
-  if (!branchExistsIn(repoRoot, branch)) {
+  if (!branchExistsIn(repoRoot, branch, gitRunner)) {
     blocks.push(at(branch, 'no branch of that name — nothing to restore; create it instead'));
     return { blocks, warns, actions, path, branch };
   }
-  const held = worktreeHoldingBranch(repoRoot, branch);
+  const held = worktreeHoldingBranch(repoRoot, branch, gitRunner);
   if (held) {
     warns.push(at(held, 'already holds ' + branch + ' — nothing to restore'));
     return { blocks, warns, actions, path: held, branch };
@@ -509,7 +509,7 @@ export function restoreWorktree({ repoRoot, issue, slug, type, devMd, home, writ
 
   actions.push(at(path, 'git worktree add ' + branch));
   if (write) {
-    const added = git(repoRoot, ['worktree', 'add', path, branch]);
+    const added = gitRunner(repoRoot, ['worktree', 'add', path, branch]);
     if (!added.ok) {
       blocks.push(at(path, 'git worktree add failed: ' + added.out));
       return { blocks, warns, actions, path, branch };
@@ -605,6 +605,10 @@ export function removeWorktree({ repoRoot, name, base, force = false, push = fal
   if (!entry) return { blocks: [at(name, 'no worktree at ' + path + ' — nothing to remove')], warns, actions };
 
   const branch = entry.branch;
+  const branchIssue = branch && /^[^/]+\/([1-9]\d*)(?:-|$)/.exec(branch);
+  if (branchIssue && issueOfWorktree(name) !== Number(branchIssue[1])) {
+    return { blocks: ['serial child cannot remove its parent worktree; return to the parent branch and retain it until the parent PR merges'], warns, actions, path, branch };
+  }
   refreshBase({ repoRoot, base, remote, actions, warns });
   let facts = gatherRemovalFacts({ repoRoot, path, branch, base, remote, locked: entry.locked });
   if (push && branch && (facts.remoteMissing || facts.unpushed)) {

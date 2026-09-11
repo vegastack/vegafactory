@@ -30,7 +30,8 @@ describe('dev-setup contract', () => {
     const skill = readFileSync(join(skillRoot, 'SKILL.md'), 'utf8')
     const roundC = skill.split('**Round C')[1].split('\n## ')[0]
     expect(roundC).toContain('assets/factory-board.yml.template')
-    expect(roundC).toContain('{{state-labels}}')
+    expect(roundC).toContain('{{product-revision}}')
+    expect(roundC).toContain('packaged compiler resolves JSON event labels')
     expect(roundC).toContain('cosmetic until the next label change')
   })
 
@@ -65,7 +66,7 @@ describe('dev-setup contract', () => {
   })
 
   const HARNESS_IDS = ['CC-MEMORY', 'CC-SKILLS', 'CC-TOOLS', 'CC-HOOKS', 'CC-SDK-PRESET', 'CC-CLI', 'CC-SUBAGENT-ENV', 'CODEX-AGENTS', 'CODEX-SKILLS', 'CODEX-EXEC', 'CODEX-HOOKS', 'CODEX-AGENTS-MULTI', 'CODEX-CONFIG', 'CC-TELEMETRY', 'CODEX-OTEL', 'HERMES-HOOKS', 'HERMES-TOOLS', 'HERMES-CURATOR', 'GH-CLI']
-  const APP_IDS = ['GH-APP-PERMS', 'GH-APP-TOKEN', 'GH-APP-INSTALLS']
+  const APP_IDS = ['GH-APP-PERMS', 'GH-APP-TOKEN', 'GH-APP-INSTALLS', 'GH-ACTIONS-OIDC', 'GH-INSTALLATION-TOKENS', 'CF-WORKERS-REQUEST', 'CF-RATE-LIMIT']
   const REGISTRY_IDS = [...HARNESS_IDS, ...APP_IDS]
   const harnessFacts = readFileSync(join(skillRoot, 'references/harness-facts.md'), 'utf8')
 
@@ -165,8 +166,10 @@ describe('dev-setup contract', () => {
     const entries = policy!.replace(/^harness-policy:\s*/, '').split('#')[0].trim().split(' · ')
     expect(entries.map((entry) => entry.split(' ')[0])).toEqual(['intake', 'plan', 'implement', 'review', 'status', 'chronicle'])
     for (const entry of entries) expect(entry.split(' ')).toHaveLength(4)
-    expect(policy).toContain('review codex gpt-5.6 xhigh')
-    expect(policy).toContain('xhigh')
+    for (const entry of entries) {
+      const stage = entry.split(' ')[0]
+      expect(entry).toBe(stage + ' {{' + stage + '-harness}} {{' + stage + '-model}} {{' + stage + '-effort}}')
+    }
   })
 
   test('SKILL.md ties the review recommendation and the Environments gap note to detected harnesses', () => {
@@ -202,8 +205,10 @@ describe('dev-setup contract', () => {
     const skill = readFileSync(join(skillRoot, 'SKILL.md'), 'utf8')
     const roundC = skill.split('**Round C')[1].split('## Step 3')[0]
     expect(roundC).toContain('Hooks package')
-    for (const phrase of ['ship guard', 'SessionStart context', 'Stop heartbeat', 'decision nudge']) expect(roundC).toContain(phrase)
-    expect(roundC).toContain('merging into existing hook config')
+    for (const phrase of ['ship guard', 'SessionStart context', 'Stop heartbeat', 'legacy decision hook']) expect(roundC).toContain(phrase)
+    expect(roundC).toContain('the same nonblocking flush')
+    expect(roundC).toContain('Directional choices stay session proposals')
+    expect(roundC).toContain('Deduplicate both config layers while preserving user hooks')
     const step3 = skill.split('## Step 3 — Write')[1].split('## Step 4')[0]
     expect(step3).toContain('.vegastack/hooks/')
     expect(step3).toContain('<repo>/.codex/hooks.json')
@@ -246,7 +251,7 @@ describe('dev-setup contract', () => {
   test('conventions carries the precedence rule and did not grow doing it', () => {
     const conventions = readFileSync(join(skillRoot, 'references/conventions.md'), 'utf8')
     expect(conventions).toContain(
-      "Knob precedence, nearest wins: hand edits in `.vegastack/dev.md`, then the org control room's `groups/<g>/*`, then its `org.md`, then skill defaults; decision registers concatenate instead of overriding.",
+      'locks require explicit org delegation',
     )
     expect(conventions).not.toContain('A checkpoint retains what a compaction summary must retain')
     expect(conventions.split(/\s+/).filter(Boolean).length).toBeLessThanOrEqual(1090)

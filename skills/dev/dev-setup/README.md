@@ -30,18 +30,19 @@ npx @vegastack/vegafactory skills add --group dev --global
 | [references/ask-route.md](references/ask-route.md) | The ask route — tool or issue, the questions comment format, the reply grammar, re-asks |
 | [references/stack-playbooks.md](references/stack-playbooks.md) | Per-stack detection → draft mapping (npm/changesets, Node app, Flutter, Python, Go, generic), the guard library, and the greenfield playbook |
 | [scripts/questions.mjs](scripts/questions.mjs) | The ask round renderer, answer parser and route decision — authored here, duplicated into intake, plan and implement |
+| [scripts/effective-policy.mjs](scripts/effective-policy.mjs) | Canonical Markdown policy, org delegation, administration/read scope and registered-machine resolution with source/freshness diagnostics |
 | [scripts/ship-policy.mjs](scripts/ship-policy.mjs) | Compiles dev.md's Environments lines, gates knob and backticked Ship ask: commands into `~/.vegastack/guard/<owner>__<repo>.json`, the one file the ship guard reads; `--check` exits 2 when it is stale |
 | [assets/dev-profile.md.template](assets/dev-profile.md.template) | The `.vegastack/dev.md` starting point |
 | [assets/agents-section.md.template](assets/agents-section.md.template) | The marked AGENTS.md block this skill owns |
 | [assets/factory-board.yml.template](assets/factory-board.yml.template) | The board-mirror workflow dev-setup writes when the project has a project board |
 | [assets/hooks/ship-guard.mjs](assets/hooks/ship-guard.mjs) | PreToolUse ship guard: reads only the compiled policy outside the worktree, parses the command as a shell would, and asks on a merge, tag, publish, deploy, force push or anything in the shipping family it cannot classify |
-| [assets/hooks/session-start.mjs](assets/hooks/session-start.mjs) | SessionStart context: the operator's queue and the worktree claim this checkout holds |
-| [assets/hooks/stop-heartbeat.mjs](assets/hooks/stop-heartbeat.mjs) | Stop heartbeat: one nudge to checkpoint the ledger when a working claim's ledger is older than the session |
-| [assets/hooks/decision-nudge.mjs](assets/hooks/decision-nudge.mjs) | Stop decision nudge: asks whether this session settled a directional choice |
-| [assets/hooks/session-end.mjs](assets/hooks/session-end.mjs) | SessionEnd statistics capture: one record per interactive session, plus a throttled control-room push |
+| [assets/hooks/session-start.mjs](assets/hooks/session-start.mjs) | Shared bounded advisory adapter: verified package/bin and normalized identity requests; SessionStart supplies at most three source-verified lessons/2 KiB from the owned learning CLI |
+| [assets/hooks/stop-heartbeat.mjs](assets/hooks/stop-heartbeat.mjs) | Stop local-flush adapter: shared session-start.mjs sibling required; no continuation, network work or blocking output |
+| [assets/hooks/decision-nudge.mjs](assets/hooks/decision-nudge.mjs) | Compatibility Stop adapter for the same bounded local flush; never forces continuation or creates a session-named temporary file |
+| [assets/hooks/session-end.mjs](assets/hooks/session-end.mjs) | SessionEnd local-flush adapter: explicit harness, sanitized input and 500 ms limit; no transcript forwarding or detached push |
 | [assets/hooks/skill-activated.mjs](assets/hooks/skill-activated.mjs) | Records which skills a Claude session used, and whether the model or a person chose them |
 | [assets/hooks/prompt-skill-mention.mjs](assets/hooks/prompt-skill-mention.mjs) | Records `$name` skill mentions in a Codex prompt as a proxy, marked as one |
-| assets/workflows/implement-children.js (installed copy) | The saved Claude Code workflow (authored in dev-implement) copied to `.claude/workflows/` on the operator's yes, so a parent can run its independent children at the same time |
+| assets/workflows/implement-children.js (installed copy) | Legacy compatibility entry refuses before spawning; supported managed execution uses `vegafactory children run` / `join` from the active registered parent session and checkout; see the [CLI README](../../../packages/cli/README.md). Setup preserves existing `.claude/workflows/implement-children.js` copies and user configuration; older copies may retain their own executor and are not automatically migrated, overwritten or deleted |
 | [refresh/REFRESH.md](refresh/REFRESH.md) | Freshness contract tracking the official harness-doc sources |
 | [refresh/sources.json](refresh/sources.json) | Source registry: the official Claude Code, Codex, Hermes and GitHub CLI pages harness-facts.md is pinned to |
 | `tests/` | Bun tests and the trigger-query fixture (never packaged) |

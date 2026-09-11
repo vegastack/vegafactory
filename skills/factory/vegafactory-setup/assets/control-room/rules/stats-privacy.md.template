@@ -1,30 +1,44 @@
-# Statistics — what is recorded, and who may read it
+# Statistics — what stays local and what is shared
 
-This rule applies to every repo in {{org}}. It is written here rather than in a tool's help text because it is a promise to the people whose work is being counted, and a promise nobody can find is not one.
+This rule applies to repositories registered in {{org}}. Confirm the organization's reporting policy before enabling exports. VegaStack's selected profile is mandatory private attributed reporting; other organizations choose their own confirmed profile. Repository exceptions require the exact organization delegation accepted by the policy validator. A machine preference or a descriptive `lead` role grants no exception or administration authority.
 
-## What a record holds
+## Reporting modes and recipients
 
-Counts and identifiers, and nothing else:
+`stats-export: attributed` permits the closed task/person reporting schema below. `non-attributed` removes execution attribution and suppresses activity and rework snapshots. `off` suppresses every variant, including queued execution reports. `stats: off` also suppresses export. Unknown, stale or unconfirmed policy refuses export. Local recovery remains independent of these reporting modes.
 
-- when the run happened, which repo, which issue, which stage
-- which harness, model and effort ran it, headless or interactive, and who it was for
-- how long it took, how many turns and tool calls, how many tokens in each of the four counters, what it cost
-- how it ended, how many review rounds, fix rounds and hand-backs it carried
-- which skills it used, and whether the model chose each one or a person typed it
+The recipients are readers of the confirmed private control-room Git repository, including existing clones. Dashboard and CLI person views apply current organization/group/person scope before aggregation, but those filters do not restrict direct Git access. Repository/day/model combinations may permit inference; non-attributed is not a promise of anonymity. Git commit metadata uses a neutral transport identity. GitHub actors, access logs, existing Git history and historical copies remain separately visible to their platform/repository readers.
 
-## What a record never holds
+## The exact shared schema
 
-Prompt text. Assistant text. Tool arguments. File contents. Transcripts of any kind. The harness transcripts are read for usage totals and tool-call counts and for nothing else, and a capture path that would need text is a stop condition rather than a design choice. A field the capture could not fill is `null` — never a guess and never a zero.
+All reports have `schemaVersion: 2`, `metricVersion: 2`, `recordKind`, a random opaque `eventId`, a validated `destination` and `utcDay`. Destination contains exactly `host`, `org`, `repo` and `controlRoom` and binds one registered code repository to its confirmed recipient. Unknown fields or variants refuse; nested objects are closed too.
 
-## Who may read what
+- **Execution:** `stage`, `harness`, `model`, `mode`, `outcome`, `durationSeconds`, `turns`, `toolCalls`, `subagents`, `tokensIn`, `tokensOut`, `cacheReadTokens`, `cacheWriteTokens`, `costUsd`, `coverage`, `skills`. Only executions count as runs or enter execution usage/cost denominators. The six configured stages are intake, plan, implement, review, status and chronicle; corrections use implement. Outcomes are succeeded, failed, spawn-failed, timed-out, cancelled, interrupted and termination-unconfirmed.
+- **Attributed execution extension:** exactly `taskRef`, `taskOwner`, `agentAccountOwner`, `executionRef`, `attempt`, `startedAt`, `endedAt`, `operatorMinutes`, `apiEquivalentUsd`, `estimateBasis`. Unlinked execution has null taskRef; unknown owners stay null. A private persisted random executionRef is reused across retries, never derived from a local run/session/account identifier. Task owner and account owner are different dimensions.
+- **Activity, attributed only:** exactly `taskRef`, `taskOwner`, `agentAccountOwner`, `activity`, in addition to the common fields. Activity contains `taskRef`, `activityId`, `kind`, `occurredAt`, `deliveryRef`, `sourceRef`. Kinds are implemented, merged, released, review, fix and handback. Repeated `(taskRef, activityId)` observations count once across transport UUIDs. Activities do not add a run or duplicate usage.
+- **Rework snapshot, attributed only:** exactly `taskRef`, `taskOwner`, `reworkSnapshot`, in addition to common fields. The snapshot contains `taskRef`, `asOf`, `sourceRef`, `counterEpoch`, `reviewRounds`, `fixRounds`, `handbacks`, `historyComplete`, `historyStart`. Counters are authoritative as-of values, never additive activity. Counter epoch is the approved-scope SHA-256 plus `:v2`. A difference needs complete boundary history, the same epoch and monotonic counters. Lifetime is the latest authoritative total and its date; expiry makes it unavailable until actual authorized source evidence is reread. Do not redate snapshots to retain identity indefinitely.
 
-- **Org and repo totals: everyone.** How much the org spends, where the time goes, which skills earn their place — these are shared numbers, and hiding them would make the whole exercise a surveillance tool instead of a shared instrument.
-- **Per-person rows: the person they describe, or a `lead` in `people.csv`.** Nobody else, and only while `stats-people: on`. With `stats-people: off` the per-person block is not written at all, so there is nothing to leak.
+TaskRef contains exactly `repo`, positive `issue`, and nullable `taskId`. DeliveryRef contains exactly `repo`, `pr`, `prNodeId`, `acceptedParentHead`, nullable `mergedCommit`. Reporting sourceRef contains exactly `repo`, nullable `issue`, `commentId`, `nodeId`, `bodySha256`; at least one evidence identity is required. Inner and outer task references must agree, and all repository references must match the destination. These are typed GitHub IDs/hashes, not raw evidence text, arbitrary URLs or private recovery pointers.
 
-## Who writes it
+Measurements are finite nonnegative numbers or explicit null; counters are safe nonnegative integers or null. Unknown is different from zero. Coverage contains exactly the nine execution measurement keys, each with nonnegative integer `known` and `unknown` observation counts. Skills contain at most128 exact `{name,trigger,harness}` entries; triggers are model, typed or mention. Price estimate basis contains exactly `sourceUrl`, `checkedAt`, `priceDigest`, `currency`, `model` and accompanies the API-equivalent estimate. `costUsd` means reported charge. Organization subscription fees are separate verified policy/account facts, never an invented per-task charge.
 
-Automation writes only under `stats/`, and only through `vegafactory stats push`, under the operator's own `gh` credentials. Nothing is sent to VegaStack or to any third party: the records go to this repository and stop there.
+## Excluded from reports and basic diagnostics
 
-## Turning it off
+Hostnames, local run/session/capture IDs, filesystem/worktree paths, credentials, prompts, conversations, file contents, raw tool input/output, argv, stdout/stderr and freeform diagnostic text never enter reports. The producer may reduce structured execution output to counters transiently; it does not persist raw output as diagnostics. Legacy hook capture does not read a caller-supplied transcript path by default.
 
-`stats: off` in `org.md` records nothing for anyone. `stats: off` in a `groups/<g>/group.md` turns one department off. A repo may opt itself out with `stats: off` in its `.vegastack/dev.md` **only** while `org.md` says `stats-override: allowed`; under `stats-override: locked` the repo's line is read, reported back, and ignored. There is deliberately no machine-level knob — a box that could opt itself out would make every org total quietly wrong.
+Built-in Claude Code and Codex memory is excluded: no reads, imports, writes, generation, migration or fallback. Vendor hooks are integration points; VegaFactory owns its separately verified lesson records and selection. Existing vendor memory stores are not cleanup candidates.
+
+Private recovery uses the existing closed recovery/acceptance/effect schemas. Original execution/account references, canonical approval source references and nullable recordBinding stay inside those typed private envelopes. They never become reporting fields through object copying. Hashes do not authorize exporting raw source, approval quotes, credentials or logs. Source checkpoints have their code repository's visibility, including public branches; a private recovery pointer does not make public source confidential.
+
+## Delivery, local diagnostics and retention
+
+`stats privacy --json` reports current mode, allowed fields, recipients, pending counts/bytes/age, diagnostic bytes and real disk pressure. `stats export --output <file>` creates a new private scoped file and refuses an existing destination. It applies current policy and read scope; it does not acknowledge remote delivery or upgrade historical non-attributed reports.
+
+Basic local diagnostic directories use0700 and files0600. Their closed records contain event/time, stable reason codes and observed exits; raw log or transcript capture is outside this profile. Durable terminal state and pending capture remain visible after storage failure.
+
+`stats cleanup --dry-run` previews the same local selector used by `--apply` and automatic maintenance. Inactive basic logs expire after14days; acknowledged active report payloads expire after12calendar months from original report observation, with month-end/leap-year clamping. Every candidate is enumerated again under the existing owned guard before removal. Active, undelivered, ambiguous, quarantined, recovery-dependent or unknown references are held. Capture mappings, delivery receipts, attempted hashes, minimal dedup identity, active authority evidence, source checkpoints, branches, worktrees, code, credentials and native memory are not expired by this selector.
+
+Shared active-file removal uses the existing dedicated Git writer, a fresh validated destination/policy, the original acknowledged bytes and a private durable removal intent. Only actual remote absent-path readback permits local payload retirement. Its private removal receipt is separate from the original delivery receipt; deletion never becomes a new reporting acknowledgment. Missing authority, active references, changed remote bytes and unconfirmed pushes remain held/pending. Cleanup does not erase Git history, clones or platform metadata.
+
+Delivery reconciliation checks historical attempted bytes before applying stricter current policy. Proven previous delivery keeps its real receipt and original policy digest; only truly undelivered bytes can be serialized again. A suppressed event receives a private policy-suppressed disposition, never a fabricated remote acknowledgment. Legacy migration previews exact original bytes, requires explicit apply and destination mapping, and preserves original files privately. It never retroactively attributes a historical non-attributed report.
+
+Real filesystem free space below1GiB pauses new launches; capacity resumes at2GiB. A failed probe is unavailable and refuses launch. Pending spool at1GiB warns but does not independently stop work while capacity is safe. Running owned processes use the existing bounded stop protocol on pressure. This reserves shutdown/capture headroom; it cannot prevent another process from exhausting the disk. No automatic code/worktree/credential deletion is authorized to create space.

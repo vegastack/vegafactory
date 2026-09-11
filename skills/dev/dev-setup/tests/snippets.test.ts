@@ -36,12 +36,12 @@ describe("decision-nudge hook asset (assets/hooks/decision-nudge.mjs)", () => {
     });
   const sid = `t${Date.now()}`;
 
-  test("nudges once on a directional last message", () => {
+  test("delegates directional Stop handling silently", () => {
     const r = run(
       `{"session_id":"${sid}","stop_hook_active":false,"last_assistant_message":"We decided to use Postgres instead of SQLite."}`,
     );
     expect(r.exitCode).toBe(0);
-    expect(r.stdout.toString()).toContain('"decision":"block"');
+    expect(r.stdout.toString()).toBe("");
   });
 
   test("stays silent the second time in the same session", () => {

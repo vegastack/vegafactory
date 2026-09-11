@@ -23,6 +23,7 @@ npx @vegastack/vegafactory skills add --group dev --global
 | Path | Purpose |
 |---|---|
 | [SKILL.md](SKILL.md) | Agent entry point: the gates, PR and merge mechanics, decision recording, failure handling |
+| scripts/lib/approval.mjs (installed copy) | Canonical dev-implement strict JSON and ArtifactRef/scope parser; no second approval interpretation |
 | [scripts/ship-gate.mjs](scripts/ship-gate.mjs) | The Gate 1 deterministic guard (fresh check re-run, sha equality, changelog/chronicle, verdicts, tag grep) |
 | references/conventions.md (installed copy) | The workflow artifact spec, duplicated into every dev-family install |
 | [agents/openai.yaml](agents/openai.yaml) | Codex interface metadata |
@@ -35,3 +36,13 @@ npx @vegastack/vegafactory skills add --group dev --global
 ## Behavior contract
 
 Green checks and PR permissions authorize nothing by themselves — only the user's instruction does, and each instruction covers exactly its own gate. Missing preconditions (no `for-operator`, no evidence, moved head, failing checks) produce a plain statement of what's missing, never a workaround.
+
+## Exact candidate and exception metadata
+
+The gate reads complete issue comment pages and derives `scopeDigest` from the unique current plan using dev-implement's canonical `artifactRef`. Review and evidence markers name full commit IDs; the review contains one fenced JSON object with `reviewBinding:{sha,baseSha,scopeDigest,verdict,findings:[{id,status}]}`. `status` is `open` or `resolved`; a clean verdict cannot carry open findings. Keep historical rounds as prose without active typed sections. Missing/legacy review metadata requires a fresh review; an ancestor or same-tree different commit is not the reviewed candidate.
+
+An exception is one fenced JSON object in evidence with `adjudication:{sha,reviewCommentId,operator,source:{kind,ref,quote},findings:[{id,disposition,reason}]}`. Its full SHA and numeric review comment ID identify the current review; each open ID appears exactly once with `disposition:"accept-risk"` and a nonempty reason. Unknown, duplicate, resolved or uncovered IDs refuse. `operator` must be in the accepted base commit's `operators:` roster; candidate edits cannot change eligibility. JSON output binds that roster as `operatorPolicy:{sha,path,bodySha256}`, and a roster change becomes eligible only when its commit later serves as the accepted base. For `source.kind:"session"`, the provider-envelope evidence publisher must be that operator. For `github-comment`, `ref` is an issue-comment URL freshly read by the gate, with matching ID/URL/operator and the actual quote. A different publisher may only relay the same SHA/review/operator/finding decisions from that operator's typed source comment. An unrelated quotation or negative prose never creates acceptance.
+
+The checkout must be clean before and after the configured check: HEAD, branch/base refs, index, tracked files and nonignored untracked inputs cannot change. Ignored build output is allowed. Missing check commands refuse; dirty files are retained. JSON output includes full candidate identities, plan binding, clean-state results, command, exit and runtime/platform/architecture/Git identity for the evidence comment. Keep evidence in comments; committing it changes the candidate and requires renewed checks/review. `--allow-no-changelog` retains its existing explained docs/test-only scope and grants no review/check exception.
+
+The [runbook](references/runbook.md) defines final parent acceptance and `parentDelivery`. `evaluateParentDelivery` evaluates independently gathered PR/Git/check facts against pinned parent identity and the exact `acceptedDeliveries` projection; it neither gathers merge authority nor performs a merge.

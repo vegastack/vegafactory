@@ -11,7 +11,10 @@ afterAll(async () => { await rm(temporary, { recursive: true, force: true }) })
 
 describe('publishable package', () => {
   test('packs locally, installs the tarball, and runs its bundled installer', async () => {
-    const pack = Bun.spawnSync(['npm', 'pack', '--silent', '--pack-destination', temporary], { cwd: packageRoot })
+    const build = Bun.spawnSync(['bun', 'run', 'build'], { cwd: packageRoot })
+    expect(build.exitCode).toBe(0)
+    // Installer-only smoke; descriptor-backed release pair is covered by release-artifacts.
+    const pack = Bun.spawnSync(['npm', 'pack', '--ignore-scripts', '--silent', '--pack-destination', temporary], { cwd: packageRoot })
     expect(pack.exitCode).toBe(0)
     const filename = pack.stdout.toString().trim().split('\n').at(-1)!
     const tarball = join(temporary, filename)

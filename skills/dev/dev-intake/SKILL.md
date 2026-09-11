@@ -69,7 +69,7 @@ Before posting any brief, run `node <path-to-this-skill>/scripts/brief-lint.mjs 
 
   GitHub drops a type or a field value written without push access and returns success, so the two readbacks decide the claim and a mismatch is reported rather than assumed away. Both knobs at `none` — a personal repo, or an org defining neither — means the issue carries its labels and nothing else; say that in one plain sentence instead of reporting a failure.
 - Approval is the operator's explicit words tied to the issue, because labels, silence and time say nothing about consent.
-- Record it as one approval marker comment per conventions — `scope=brief`, or `scope=brief+plan` when the inline plan was posted with it — quoting the operator's words in the (username) format; preflight verifies that comment.
+- Record one schema-v2 approval event per conventions: `scope=brief`, or `scope=brief+plan` for brief plus plan comment. Use bundled `scripts/lib/approval.mjs`’s `artifactRef` on refreshed canonical artifacts; include actual operator words and artifact bindings. Session attestations require a policy-operator publisher; other recorders may only relay an independently verified identical scoped grant per conventions. Evaluate fresh complete history/current policy, preserving canonical `approvalBindings`. Preserve legacy records for scoped reconfirmation; a marker alone grants nothing.
 - Then flip the state, carrying the assignee the Labels table names: `research` and `quick-build` → `ready` (unassigned); `full-plan` → `needs-plan` (the operator).
 - An issue leaves `needs-operator` only once every Assumptions entry is resolved (confirmed, corrected, or moved to a spike) and the section deleted.
 - A directional decision this work settles (dev.md's Decisions test) is proposed as one register line on the operator's yes; `dev-ship` records at merge.
@@ -77,4 +77,4 @@ Before posting any brief, run `node <path-to-this-skill>/scripts/brief-lint.mjs 
 
 ## After approval
 
-An approved issue that later needs a material change flips back to `needs-operator` with one comment naming what changed; the new approval is recorded the same way and the brief's revision marker bumps. Wording fixes that change no behavior reopen nothing.
+An approved issue that later needs a material change flips back to `needs-operator` with one comment naming what changed; the new approval is recorded the same way and the brief's revision marker bumps. Only the canonicalizer’s specified progress fields preserve approval; every other scope-byte edit requires refreshed intent.

@@ -19,7 +19,7 @@ const SECRET_BINDING = 'APP_PRIVATE_KEY'
 const SECRET_NAME = 'vegafactory-app-private-key'
 const LIMITER_NAME = 'TOKEN_LIMITER'
 const ALLOWED_PERIODS = [10, 60]
-const HOSTS = { preview: 'factory-token.vegastack.dev', production: 'factory-token.vegastack.com' }
+const HOSTS = { preview: 'vegafactory-token.vegastack.dev', production: 'vegafactory-token.vegastack.com' }
 const SECRET_SHAPED = ['PRIVATE_KEY', 'SECRET', 'TOKEN']
 const STORE_ADVICE = 'the account allows one store — read its id with: wrangler secrets-store store list --remote'
 
@@ -79,11 +79,11 @@ export function checkBrokerConfig(text) {
     }
 
     const vars = typeof block.vars === 'object' && block.vars !== null ? block.vars : {}
-    if (typeof vars.VEGAFACTORY_APP_ID !== 'string' || vars.VEGAFACTORY_APP_ID.length === 0) {
-      blocks.push(`${at}.vars.VEGAFACTORY_APP_ID is empty — the App id is public and belongs here`)
+    if (vars.VEGAFACTORY_APP_ID !== '4812956') {
+      blocks.push(`${at}.vars.VEGAFACTORY_APP_ID must be 4812956 — both environments retain the same approved App`)
     }
-    if (typeof vars.OIDC_AUDIENCE !== 'string' || vars.OIDC_AUDIENCE.length === 0) {
-      blocks.push(`${at}.vars.OIDC_AUDIENCE is empty`)
+    if (vars.OIDC_AUDIENCE !== 'vegastack-factory') {
+      blocks.push(`${at}.vars.OIDC_AUDIENCE must be vegastack-factory — keep the reviewed action/Worker audience pair`)
     }
     for (const key of Object.keys(vars)) {
       if (SECRET_SHAPED.some((shape) => key.toUpperCase().includes(shape))) {
@@ -97,10 +97,10 @@ export function checkBrokerConfig(text) {
       blocks.push(`${at}.secrets_store_secrets carries no ${SECRET_BINDING} binding — the App private key lives nowhere else`)
     } else {
       const index = secrets.indexOf(secret)
-      if (typeof secret.secret_name !== 'string' || secret.secret_name.length === 0) {
-        blocks.push(`${at}.secrets_store_secrets[${index}].secret_name is empty — it must be ${SECRET_NAME}`)
+      if (secret.secret_name !== SECRET_NAME) {
+        blocks.push(`${at}.secrets_store_secrets[${index}].secret_name must be ${SECRET_NAME}`)
       }
-      if (typeof secret.store_id !== 'string' || secret.store_id.length === 0) {
+      if (typeof secret.store_id !== 'string' || secret.store_id.trim().length === 0) {
         blocks.push(`${at}.secrets_store_secrets[${index}].store_id is empty — ${STORE_ADVICE}`)
       }
     }

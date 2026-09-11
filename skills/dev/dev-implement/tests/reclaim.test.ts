@@ -45,3 +45,37 @@ describe('evaluateReclaim: read-verify before releasing a claim', () => {
     expect(r.stdout + r.stderr).toContain('cannot verify')
   })
 })
+
+test('141 reclaim uses configured labels and never releases a mixed state, even forced', () => {
+  const map = { needsOperator: 'Decision', needsPlan: 'Plan', ready: 'Go', working: 'Build', forOperator: 'Review' }
+  const profile = 'workflow-labels: ' + JSON.stringify(map)
+  const current = { ...working(), labels: [{ name: 'Build' }, { name: 'full-plan' }] }
+  const result = evaluateReclaim({ issue: current, comments: [], devMd: profile, now: NOW })
+  expect(result.blocks).toEqual([])
+  expect(result.plan.labelMap).toEqual(map)
+  current.labels.push({ name: 'Go' })
+  expect(evaluateReclaim({ issue: current, comments: [], devMd: profile, force: true, now: NOW }).blocks.join()).toContain('conflicting')
+})
+
+test('141 installed standalone reclaim emits exact custom label mutation argv', async () => {
+  const { copyFileSync, cpSync, mkdtempSync, mkdirSync, writeFileSync, readFileSync, realpathSync } = await import('node:fs')
+  const { tmpdir } = await import('node:os')
+  const root = realpathSync(mkdtempSync(join(tmpdir(), 'vsk-reclaim-installed-')))
+  const scripts = join(root, 'scripts')
+  mkdirSync(scripts)
+  cpSync(join(skillRoot, 'scripts/lib'), join(scripts, 'lib'), { recursive: true })
+  copyFileSync(join(skillRoot, 'scripts/reclaim.mjs'), join(scripts, 'reclaim.mjs'))
+  copyFileSync(join(skillRoot, '../dev-setup/scripts/effective-policy.mjs'), join(scripts, 'effective-policy.mjs'))
+  const profile = join(root, 'dev.md'), log = join(root, 'argv.jsonl'), gh = join(root, 'gh')
+  writeFileSync(profile, 'workflow-labels: ' + JSON.stringify({ needsOperator: 'Decision', needsPlan: 'Plan', ready: 'Go', working: 'Build', forOperator: 'Review' }))
+  writeFileSync(gh, '#!/usr/bin/env node\nimport {appendFileSync} from "node:fs"; const a=process.argv.slice(2); appendFileSync(' + JSON.stringify(log) + ',JSON.stringify(a)+"\\n"); console.log(JSON.stringify(a[0]==="api" && !a[1].endsWith("comments") ? {state:"open",labels:[{name:"Build"}],assignees:[]} : []));\n', { mode: 0o755 })
+  const result = spawnSync('node', [join(scripts, 'reclaim.mjs'), '--issue', '5', '--repo', 'acme/app', '--dev-md', profile, '--json'], { cwd: root, env: { ...process.env, VSK_GH: gh, HOME: root }, encoding: 'utf8' })
+  expect(result.status, result.stdout + result.stderr).toBe(1)
+  expect(JSON.parse(result.stdout).ok).toBe(true)
+  const calls = readFileSync(log, 'utf8').trim().split('\n').map(line => JSON.parse(line))
+  expect(calls).toContainEqual(['issue', 'edit', '5', '-R', 'acme/app', '--remove-label', 'Build', '--add-label', 'Go'])
+  copyFileSync(join(skillRoot, '../dev-status/scripts/status.mjs'), join(scripts, 'status.mjs'))
+  const status = spawnSync('node', ['--input-type=module', '-e', 'import {readKnobs} from ' + JSON.stringify('file://' + join(scripts, 'status.mjs')) + '; import {readFileSync} from "node:fs"; console.log(JSON.stringify(readKnobs(readFileSync(' + JSON.stringify(profile) + ',"utf8"))));'], { cwd: root, encoding: 'utf8' })
+  expect(status.status, status.stderr).toBe(0)
+  expect(JSON.parse(status.stdout).states).toEqual(['Decision', 'Plan', 'Go', 'Build', 'Review'])
+})

@@ -57,7 +57,7 @@ describe('status helpers', () => {
   test('readKnobs parses the operators csv; an absent line is an empty list', () => {
     expect(readKnobs('operators: kmanojkumar, ada\n').operators).toEqual(['kmanojkumar', 'ada'])
     expect(readKnobs('operators: kmanojkumar   # just me\n').operators).toEqual(['kmanojkumar'])
-    expect(readKnobs('labels: a b c\n').operators).toEqual([])
+    expect(readKnobs('').operators).toEqual([])
   })
   test('resolveOperator: approval author wins, then the issue author, then the first listed', () => {
     const operators = ['kmanojkumar', 'ada']
@@ -167,12 +167,14 @@ describe('gatherStatus over the gh stub', () => {
       expect(all.needsYou.map((i: any) => i.number)).toEqual([11, 12, 13, 14])
     } finally { delete process.env.VSK_GH; delete process.env.GH_STUB_DIR }
   })
-  test('readKnobs: renamed labels and custom register parse; short lists fall back', () => {
-    const knobs = readKnobs('labels: waiting planning go doing done hot q s l parent\ndecisions: docs/register.md\n')
+  test('readKnobs: explicit workflow labels and custom register parse; ambiguous legacy labels refuse', () => {
+    const labels = { needsOperator: 'waiting', needsPlan: 'planning', ready: 'go', working: 'doing', forOperator: 'done' }
+    const knobs = readKnobs('workflow-labels: ' + JSON.stringify(labels) + '\ndecisions: docs/register.md\n')
     expect(knobs.states).toEqual(['waiting', 'planning', 'go', 'doing', 'done'])
-    expect(knobs.risky).toBe('hot')
+    expect(knobs.risky).toBe('risky')
     expect(knobs.register).toBe('docs/register.md')
-    expect(readKnobs('labels: a b c\n').states[0]).toBe('needs-operator')
+    expect(() => readKnobs('labels: waiting planning go doing done hot q s l parent\n')).toThrow()
+    expect(() => readKnobs('labels: a b c\n')).toThrow()
     expect(readKnobs('').register).toBe('.vegastack/decisions.md')
   })
 })

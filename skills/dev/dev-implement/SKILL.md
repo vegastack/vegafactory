@@ -5,11 +5,11 @@ description: Implement an approved GitHub issue end to end without further user 
 
 # dev-implement
 
-Act: build the approved issue end to end, dark, and hand the evidence back in the issue.
+Act: implement approved work and return evidence in its issue.
 
-One issue, one session: preflight → claim → build dark → verify → review → evidence → stop. The operator reads the result in the issue; PRs and merges are `dev-ship`'s, on the operator's word. The ledger discipline lives in [ledger-and-resume](references/ledger-and-resume.md).
+One issue/session: preflight → claim → build → verify → review → evidence. The operator reads the result in the issue; PRs and merges are `dev-ship`'s, on the operator's word. The ledger discipline lives in [ledger-and-resume](references/ledger-and-resume.md).
 
-Nearest neighbors: `dev-plan` writes the plan this skill executes task by task; `dev-review` judges the result; an issue that turns out to need a decision goes back through `needs-operator` and is asked there, because a guessed decision is one the operator did not make. dev.md's knobs govern this skill; its `## Architecture` section governs stack-touching choices.
+Nearest neighbors: `dev-plan` supplies the tasks; `dev-review` judges execution. Route unresolved decisions through `needs-operator`; never guess. dev.md's knobs govern this skill; its `## Architecture` section governs stack-touching choices.
 
 ## Direct requests — trivial only, tightly bounded
 
@@ -18,8 +18,9 @@ When the operator asks in chat for a change, their words are the approval — bu
 ## Preflight — all must hold, or stop and say which failed
 
 - Run the guard first: `node <path-to-this-skill>/scripts/preflight.mjs --issue <n> --me $(gh api user -q .login) --json` (add `--repo <o/r> --dev-md <path>` outside the project root). Exit 2 stops you with its reasons; exit 1 passes with warnings, which go into the ledger. Resume and corrections runs pass `--expect working` / `--expect for-operator`.
+- Scoped intent follows conventions: policy-operator session publisher or verified identical grant relay. Preserve canonical `approvalBindings`; relay `recordBinding` is audit-only. Reconfirm legacy records; preserve preparation/research provenance; reread recovery authority.
 - Then the judgment checks: read the complete brief plus parent issue and milestone; read the brief's touch points in the current code, because they drift between approval and execution — the version-impact line, volatile dependency claims per `dev-architect`'s verify protocol, and a full-plan issue's plan included. A material decision left open — even outside a formal Assumptions section — or reality contradicting brief or plan is a stop: one `handback` comment with the smallest question, `needs-operator`.
-- Resuming a dead session's issue takes the operator's explicit handover, then the resume protocol in [ledger-and-resume](references/ledger-and-resume.md): brief → plan → ledger → `git log`, nothing else — in the branch's worktree, restored with `worktree.mjs restore --issue <n> --slug <slug> --write` when its directory is gone. A claim being abandoned instead is released by the operator with `node <path-to-this-skill>/scripts/reclaim.mjs --issue <n>` (`working` → `ready`, unassign; refuses a still-fresh ledger unless `--force`) — a claim is released on their word only.
+- Resume verified unfinished work only within its original authority, using [ledger-and-resume](references/ledger-and-resume.md): brief → plan → ledger → `git log` → fresh source reconciliation. Restore a missing worktree with `worktree.mjs restore --issue <n> --slug <slug> --write`. Only the operator may abandon a claim, via `node <path-to-this-skill>/scripts/reclaim.mjs --issue <n>` (`working` → `ready`, unassign; a fresh ledger requires `--force`).
 
 ## Claim
 
@@ -31,12 +32,14 @@ No questions. Every ledger checkpoint line is also the chat update — one text,
 
 - **Red before green**, because a test written after the code proves only that the code runs. Write the failing test first — at the seams the brief names, and only there, because a seam the brief did not name is one review cannot judge — watch it fail for the stated reason, implement the minimal code, watch it pass. One slice at a time. The tests-are-real rubric (implementation-coupled, tautological, horizontal-sliced — defined in `dev-review`'s dispatch prompts) applies to your own tests before a reviewer sees them.
 - **Checkpoint the ledger** after every task and tick the matching `[x]` in the plan comment in the same pass — the reference says why both writes matter.
-- **Independent children run at the same time.** A parent whose plan declares independent groups with disjoint file sets runs one child per group, each in its own checkout branched from the parent HEAD sha, then joins them in plan order and verifies once; anything else runs in plan order with the ledger saying why. The verbs, the two harness paths and the scope check are in [parallel-children](references/parallel-children.md).
+- **Independent children use the CLI owner.** A registered parent runs declared disjoint groups through `vegafactory children run`, then `children join` under current integration authority. Branches and printed commands never prove execution. The CLI bounds owned processes, verifies acceptance at exact commits and preserves partial joins. Ordinary work stays serial; [worktrees](references/worktrees.md) gives the execution and recovery contract.
 - The scope ratchet is a stop condition: work revealed bigger than the issue's scope class (or plainly exceeding one session) → one `handback` comment proposing the upgrade or split (dev-plan's ratchet rules), `needs-operator`, stop.
 
 The approved brief and plan are the scope. Extras you notice go in the evidence comment's Not done / limits line as a follow-up note, not in the diff; an assumption you had to make is stated in the summary. Tests are sized like their neighbours — one focused test per behaviour the brief states, at the seams it names. When the code can just change, change it: no feature flag, compat shim or parallel path for a caller that does not exist, because each is a moving part nobody asked for. Decide routine things yourself and ledger the rulings; a structural choice — a new dependency, table or service — checks `dev-architect`'s trigger discipline first, and a moving part with no named trigger is a stop condition. Hitting any stop condition — the brief's out-of-scope section, dev.md's stop-list, the scope ratchet — ends dark mode with one `handback` comment stating the smallest decision needed, your recommendation attached — and where that decision has options, the handback comment carries the round rendered by `scripts/questions.mjs`, so the operator's reply parses like any other (`references/ask-route.md`).
 
 **Honesty over green**: a failing test gets fixed at the root or reported as failing, because weakening a test, an assertion, or acceptance to pass is a cover-up, and cover-ups surface at review with interest.
+
+Verified lessons live in the recovery packet, never vendor memory. [Ledger and resume](references/ledger-and-resume.md) defines their owned commands, validation, bounded next-session context, undo and protected-rule limits.
 
 ## Changelog and chronicle — before hand-back
 

@@ -1,3 +1,4 @@
+import { parsePeopleRegistry, resolvePeopleReadScope } from '../../../../../skills/dev/dev-setup/scripts/effective-policy.mjs'
 import { join } from 'node:path'
 
 import { readOrEmpty } from '../read'
@@ -11,30 +12,9 @@ export interface Person {
   groups: string[]
 }
 
-const HEADER = 'login,name,role,slack,timezone,groups'
-
-// One header, exactly. A people.csv with any other shape returns no people rather than guessing
-// which column is the login — and a people view with no rows is a visibly empty page, while a
-// mis-parsed one would quietly attribute a person's runs to the wrong name.
+// Fixed CSV parser is shared with policy validation; descriptive fields retain their shape.
 export function parsePeopleCsv(text: string): Person[] {
-  const lines = (text ?? '').split('\n').map((line) => line.replace(/\r$/, '')).filter((line) => line.trim() !== '')
-  const header = lines.shift()
-  if (!header || header.trim() !== HEADER) return []
-  const people: Person[] = []
-  for (const line of lines) {
-    const cells = line.split(',').map((cell) => cell.trim())
-    const login = cells[0]
-    if (!login) continue
-    people.push({
-      login,
-      name: cells[1] ?? '',
-      role: cells[2] ?? '',
-      slack: cells[3] ?? '',
-      timezone: cells[4] ?? '',
-      groups: (cells[5] ?? '').split(/[;|]/).map((g) => g.trim()).filter(Boolean),
-    })
-  }
-  return people
+  return parsePeopleRegistry(text).people as Person[]
 }
 
 // Layered the way CLAUDE.md and AGENTS.md layer: the nearer file wins. A group row replaces the
@@ -57,21 +37,33 @@ export interface Gate {
   reason: string | null
 }
 
-const REFUSAL = 'people-level stats are visible to the person themselves and to a lead'
+const REFUSAL = 'people-level stats require verified own-data identity or explicitly scoped organization administration'
 
-// The privacy rule #112 recorded, in one function. Own row always; anyone else's needs both the
-// org's `stats-people: on` and a viewer whose people.csv role is `lead`. An unknown viewer — no
-// VEGAFACTORY_VIEWER, so no `gh` login — is nobody, and sees nobody.
+// Descriptive legacy roles are not admin grants. New callers provide current canonical policy
+// plus the exact repository query; older callers can show only the verified local viewer's row.
 export function canViewPerson(input: {
   viewer: string | null
   subject: string
   people: Person[]
   statsPeople: 'on' | 'off'
+  policy?: Record<string, any>
+  administration?: Record<string, any> | null
+  repoGroups?: Record<string, string>
+  requestedRepos?: string[]
+  verifiedViewer?: boolean
 }): Gate {
-  if (!input.viewer) return { allowed: false, reason: REFUSAL }
-  if (input.viewer === input.subject) return { allowed: true, reason: null }
-  if (input.statsPeople !== 'on') return { allowed: false, reason: REFUSAL }
-  const role = input.people.find((person) => person.login === input.viewer)?.role
-  if (role !== 'lead') return { allowed: false, reason: REFUSAL }
-  return { allowed: true, reason: null }
+  if (!input.viewer || !input.people.some(person => person.login === input.viewer)) return { allowed: false, reason: REFUSAL }
+  if (input.policy) {
+    const result = resolvePeopleReadScope({ viewer: { login: input.viewer, verified: input.verifiedViewer === true }, subject: input.subject,
+      requestedRepos: input.requestedRepos, administration: input.administration ?? input.policy.administration,
+      policy: input.policy, repoGroups: input.repoGroups ?? input.policy.registry.repoGroups })
+    // A boolean gate cannot partially filter an already aggregated query. Only authorize it
+    // when every explicitly requested repository is permitted; row adapters use the scope API.
+    const complete = Array.isArray(input.requestedRepos) && input.requestedRepos.length > 0
+      && input.requestedRepos.every(repo => result.allowedRepos.includes(repo))
+    return { allowed: result.refusal === null && complete, reason: result.refusal ?? (complete ? null : 'people query needs an exact fully permitted repository scope') }
+  }
+  return input.viewer === input.subject ? { allowed: true, reason: null } : { allowed: false, reason: REFUSAL }
 }
+
+export { resolvePeopleReadScope }

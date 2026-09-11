@@ -2,6 +2,206 @@
 
 The project's story, newest first: what got built, why, and how it went — for the operator's future recall. Format home: the dev-chronicle skill.
 
+## 09-09-2026 — The dashboard opens on what needs attention ([#151](https://github.com/vegastack/vegafactory/issues/151))
+
+- **What:** Registry-independent source now opens on decisions, blocked or failed work, running tasks and recent merges, with separate scoped Performance and Activity destinations. Every old page uses the request-lifetime context callback, and task and agent-account ownership remain separate.
+- **Why:** An operator needed current priorities before aggregate reports, while missing usage, liveness, ownership or checkpoint evidence could not safely look like zero, idle or complete.
+- **How it went:** A failing caller test identified the removed context API, then all seven pages and the two new routes passed focused adapter, renderer and strict-launch fixtures. A personal-report regression caught account-owner execution rows being denied until the adapter supplied the exact person dimension. Signed provider/Table input and packed browser evidence remain blocked and unperformed.
+- **Changed:** Attention-first route · scoped Performance and Activity views · one-row task handoffs · nullable metric copy · semantic filter-preserving navigation · honest loading and failure states.
+- **Decisions:** none.
+
+— approved by (kmanojkumar) · built by Codex · branch codex/productionization-133
+
+## 09-09-2026 — Each dashboard opens one verified organization ([#150](https://github.com/vegastack/vegafactory/issues/150))
+
+- **What:** Dashboard source now selects one configured organization, keeps its repositories and cache generations isolated, and accepts readiness only from the exact owned child. Descriptor-bound package bytes are staged and verified before an installed version becomes selectable.
+- **Why:** A first configured org, shared cache file, or unrelated HTTP 200 could silently mix data or launch the wrong process.
+- **How it went:** Resuming the preserved source exposed missing private modes on claim directories; real generation use refused until that was corrected. Focused tests now cover live cross-process readers, crashed and unknown owners, retained failed-refresh provenance, descriptor attacks and child cleanup. Page migrations, packed-pair proof and broad qualification remain with their named later owners.
+- **Changed:** Explicit `--org` selection · canonical per-org cache namespaces · request-lifetime reader pins · honest empty/unavailable readiness · descriptor-verified atomic installation · recovery guidance.
+- **Decisions:** none.
+
+— approved by (kmanojkumar) · built by Codex · branch codex/productionization-133
+
+## 08-09-2026 — Reports distinguish missing measurements from completed work ([#148](https://github.com/vegastack/vegafactory/issues/148))
+
+- **What:** CLI and dashboard source now share measured coverage, separate execution segments from task activity, and discover accepted merges and first releases independently of run months. Task and account owners remain distinct, including explicit unknown-owner buckets.
+- **Why:** Missing usage had become zero, repeated counters had become new work, and run-month discovery missed later delivery.
+- **How it went:** The focused source suite passed 85 tests and strict CLI/dashboard types. A failed-refresh privacy case exposed stale identity filtering and now has a regression test. One older unscoped skills assertion belongs to the queued UI fixture migration; broad checks, independent review and live qualification remain open.
+- **Changed:** Nullable usage and operator minutes · verified delivery periods · dated monthly/lifetime rework · current repository/person scopes · transactional derived cache · explicit metric definitions.
+- **Decisions:** none.
+
+— approved by (kmanojkumar) · built by codex · branch codex/productionization-133
+
+## 08-09-2026 — Interrupted work keeps its verified progress ([#144](https://github.com/vegastack/vegafactory/issues/144))
+
+- **What:** Recovery now retains verified completed tasks and reconstructs a receiving run from its exact shared handoff. Unavailable earlier history stays unknown, while accepted child deliveries give reporting a verifiable source. Local lessons carry evidence for adoption and undo.
+- **Why:** Resuming interrupted work must preserve what was actually completed without inventing ownership, history or acceptance.
+- **How it went:** Capture and duplicate replay initially missed the existing hook deadlines. Later recovery work first stopped when child-owner replay coverage was incomplete, then review found that the stopped-group helpers were not reachable from the real tick and had replaced live checks with equality. Further passes found shared verifier state, same-home child startup, status-role gaps and crash windows around child join and parent settlement. The corrected production fixture proves one persisted intent and CAS, independent drift refusals, a lost response, mixed remote/same-home attempts, fresh machine revocation, immutable accepted-review source binding, restarts after a partial start, completed child phase, accepted-child completion and parent stop-proof persistence, exact children-before-parent execution, current-generation settlement, read-only current-parent status and no process/check/merge replay. The assembled 1,803-test gate and independent spec, standards and security review passed; native provider admission and vendor/platform qualification remain pending under their operational/research owners.
+- **Changed:** Task evidence reconciliation · verified continuation and receiving-group runs · operation-scoped one-CAS stopped-group recovery · twice-fresh authority and machine checks · restart-safe parent-first ownership with children-before-parent execution · current-generation accepted-child settlement · phase-typed finish receipts and finish-only replay · exact read-only recovery status · separate child checkpoint authority · accepted child-delivery evidence · bounded lessons · safe hook replay.
+- **Decisions:** none.
+
+— approved by (kmanojkumar) · built by Codex · branch codex/productionization-133
+
+## 08-09-2026 — Broker deployment requires a reviewed artifact ([#155](https://github.com/vegastack/vegafactory/issues/155))
+
+- **What:** Prepared the two canonical broker domains and an explicit deployment workflow that checks the merged source, Worker digest and protected environment before deploying the retained bundle. The existing App and OIDC audience stay paired across preview and production.
+- **Why:** Preview has the same App authority as production, so a merge alone must not deploy it.
+- **How it went:** All 61 broker tests passed. Preview, production and deployment without rebundling produced identical Worker bytes. The last dry-run exposed a missing explicit Wrangler config path, which is now covered. Both empty live store IDs still refuse deployment; reviewer availability and live exchange evidence remain unverified.
+- **Changed:** Broker/action domain references · explicit reviewed-artifact dispatch · binding/protection guards · rollback and caller migration preparation.
+- **Decisions:** none. Handbook replacements remain proposals. Final assembled checks, skill evaluation, independent review and all live operations are still pending.
+
+— approved by (kmanojkumar) · built by codex · branch codex/productionization-133
+
+## 08-09-2026 — Reports have an enforced privacy boundary ([#149](https://github.com/vegastack/vegafactory/issues/149))
+
+- **What:** Reports now cross an explicit schema before delivery. Task and account owners stay distinct, local execution identities stay private, and people totals use current repository permissions. Retention uses the same guarded Git writer as delivery and preserves the original delivery evidence.
+- **Why:** Hiding a dashboard row could not prevent raw identifiers from reaching shared files, and deleting a local copy could not prove a shared report was removed.
+- **How it went:** Focused Git tests cover real three-variant export, stricter-policy reconciliation, lost removal responses and changed remote bytes. Broad validation, independent privacy review, live provider qualification and the remaining metric/detail-page consumers remain open under source-first sequencing.
+- **Changed:** Closed report schema · scoped people views and private export · basic diagnostics ·14-day/12-calendar-month retention · real disk-pressure controls.
+- **Decisions:** none.
+
+— approved by (kmanojkumar) · built by codex · branch codex/productionization-133
+
+## 08-09-2026 — A child branch must prove its work ([#139](https://github.com/vegastack/vegafactory/issues/139))
+
+- **What:** The CLI now derives a child’s execution and checkpoint permissions separately from one current consolidated parent record, runs only the exact selected code scope, and preserves original launch provenance when a stopped group changes coordinator. An untouched or merely checkpointed branch still cannot pass as completed work.
+- **Why:** The earlier gateway still expected native child approval and could not safely carry queued children across a parent-owner succession; a parent branch or checkpoint must never become child authority by substitution.
+- **How it went:** The first red exposed the missing consolidated child-request seam. Synthetic closed-action cases then covered branch, ref, base, task, path, mode, action and source drift, while real Git/process fixtures retained cancellation, partial joins and trusted review behavior. The focused child/dispatch and upstream approval/checkpoint/shared-owner suites passed; final immutable review and actual platform qualification remain open.
+- **Changed:** Separate execution/checkpoint requests · exact child ref delivery · closed version 2 launch provenance · verified stopped-group succession · recovery-queued atomic starts · accepted join replay prevention.
+- **Decisions:** none.
+
+— approved by (kmanojkumar) · built by codex · branch codex/productionization-133
+
+## 08-09-2026 — Captured work survives a lost delivery ([#143](https://github.com/vegastack/vegafactory/issues/143))
+
+- **What:** Captured events keep one private identity through concurrent writes, interrupted delivery and explicit legacy migration. Organization destinations remain separate, and duplicate source files no longer create duplicate event counts.
+- **Why:** Mutable machine logs could lose a concurrent append or reach the wrong organization, and a lost push acknowledgment could count the same work again.
+- **How it went:** Real bare Git fixtures and a killed pusher proved recovery from retained attempt bytes. An installed Node hook fixture reached owned terminal capture without trusting foreign sessions. Privacy serialization, composed metrics, final evaluation, independent review and platform qualification remain open under source-first sequencing.
+- **Changed:** Immutable spool and receipts · bounded managed-hook consumer · explicit migration and inspection · CLI and SQLite event identity · protected retention.
+- **Decisions:** none.
+
+— approved by (kmanojkumar) · built by codex · branch codex/productionization-133
+
+## 08-09-2026 — Execution survives its process ([#138](https://github.com/vegastack/vegafactory/issues/138))
+
+- **What:** Source work adds private run records, an owned cancellation wrapper, durable delivery markers, checkpoint history validation and visible pending status.
+- **Why:** Logs alone lost crash boundaries, timeout exit zero could look successful, and a generic push lacked exact action authority.
+- **How it went:** Harmless actual processes exercised timeout and forced cancellation; temporary bare repositories rejected removed secret and out-of-scope history before export. Source integration is partial: live qualification, quota-provider wiring, shared effect controllers and final acceptance remain open.
+- **Changed:** CLI lifecycle/checkpoint/status source · dashboard status data · focused filesystem/process/Git fixtures.
+- **Decisions:** none.
+
+— approved by (kmanojkumar) · built by codex · branch codex/productionization-133
+
+## 08-09-2026 — Dispatch claims have an owner ([#137](https://github.com/vegastack/vegafactory/issues/137))
+
+- **What:** Local repository/watch claims now serialize mutation and retain exact owner tokens. Shared task state uses conditional commits, reservations and immutable recovery evidence. Partial accepted scopes can be linked without completing the task, and pinned historical reads preserve original parent/child identities without granting current ownership. A complete verified stopped parent/direct-child group can now change owners in one versioned commit, with unfinished children queued behind the same parent and capacity. Top-level parallel candidates come only from the fresh canonical fleet declaration and selected-task file projection. Shared status continues to preserve unknown provenance and incomplete archive coverage when evidence runs out.
+- **Why:** Two processes previously passed the same unlocked read and both executed. Pathname-only release could remove a replacement owner's claim.
+- **How it went:** The actual two-process race reproduced double entry, then passed with one execute entry. Controlled separate-home shared fixtures now prove default-adapter fleet overlap only for exact disjoint declarations, one-winner conflict behavior, atomic two-receiver group succession, lost-response readback, v1 compatibility/v2 old-reader refusal and old-owner fencing. Current-source review then caught an ownerless-guard disposition, Linux path quoting, lost rate-limit timing, duplicated recovery parsers and missing completed/no-task group classifications; each became a focused regression. Follow-up review required the completed receipts to be resolved, the classifications to reach the executable child record, and HTTP-200 GraphQL exhaustion to retain reset timing. Provider qualification, full reboot acceptance, final evaluation and assembled review remain open.
+- **Changed:** Claims and machine identity APIs · shared state/recovery/group-succession wires · canonical fleet admission · dispatch/status adapters · offline recovery instructions.
+- **Decisions:** none.
+
+— approved by (kmanojkumar) · built by codex · branch codex/productionization-133
+
+## 08-09-2026 — Workflow labels have one meaning ([#141](https://github.com/vegastack/vegafactory/issues/141))
+
+- **What:** An explicit semantic label map now drives dispatch, preflight, reclaim, status and board mirroring. The dashboard joins CLI snapshots to live issue identities and labels; conflicts and stale reads remain visible.
+- **Why:** Positional legacy parsing and separate default-label filters disagreed, allowing mixed correction states and hiding custom queues.
+- **How it went:** Focused resolver and consumer fixtures exercise complete legacy profiles, custom mappings, conflicts and snapshot freshness. Evaluation, assembled checks, packed-bundle acceptance, independent review and live board qualification remain open under source-first sequencing.
+- **Changed:** Semantic policy compiler · standalone helper copies · CLI snapshot bridge · configured board options · explicit migration preview.
+- **Decisions:** none.
+
+— approved by (kmanojkumar) · built by codex · branch codex/productionization-133
+
+## 08-09-2026 — Policy refresh preserves the last valid state ([#147](https://github.com/vegastack/vegafactory/issues/147))
+
+- **What:** Sync validates immutable per-repository snapshots before one guarded settings publication. Status and dashboard read their source identity and validation age; failed refreshes keep the last valid state and operator edits. Restore selects inactive backup content until a successful fresh sync.
+- **Why:** Resetting a shared checkout and rewriting settings after sync could discard edits or another writer's configuration, and fetch timestamps could suggest authority that had never been validated.
+- **How it went:** Focused process/Git fixtures cover concurrent writers, semantic refusal, unchanged-commit refresh, enrollment mismatch, exact expiry, source recovery and retention. Broad validation, packed recovery integration, behavioral evaluations, independent review and live qualification remain open.
+- **Changed:** Version2 settings transactions · immutable snapshot publisher · separate telemetry checkout · canonical CLI/dashboard freshness · source inspection and recovery APIs.
+- **Decisions:** none.
+
+— approved by (kmanojkumar) · built by codex · branch codex/productionization-133
+
+## 08-09-2026 — Ship only the reviewed and checked commit ([#136](https://github.com/vegastack/vegafactory/issues/136))
+
+- **What:** The ship gate now binds an accepted-base-operator-authenticated review to the full candidate/base identities and canonical plan scope, checks an unchanged committed checkout, and records implemented child deliveries separately from partial, prepared and unperformed parent work.
+- **Why:** An ancestor review plus uncommitted passing bytes could previously qualify a failing commit, while free-form adjudication prose and reconstructed delivery rows could erase unresolved findings or unfinished scope.
+- **How it went:** Seven real-Git false passes became regressions before the first correction. Exact-source review then found incomplete review markers, candidate-selected reviewers, outsider marker denial and an invented parent-delivery test shape; the follow-up uses the accepted base policy, canonical review metadata, eligible publishers, actual #144 delivery rows and a closed scope matrix. Final whole-parent review, merge readback and release remain later gates.
+- **Changed:** Full review/evidence SHA binding · trusted reviewer source identity · clean before/after check snapshots · typed finding adjudication · actual accepted-delivery projection · explicit pending-operations matrix · merge/rebase readback proof.
+- **Decisions:** none.
+
+— approved by (kmanojkumar) · built by codex · branch codex/productionization-133
+
+## 07-09-2026 — A recorder cannot invent operator approval ([#135](https://github.com/vegastack/vegafactory/issues/135))
+
+- **What:** Session approval now requires a publisher in current operator policy. Another recorder can relay only an independently verified identical scoped grant, inheriting its authority and revocation history. Launch, preparation and research results retain the original source comment and body identity.
+- **Why:** An untrusted recorder could previously claim a configured operator’s words or reuse a quotation for changed scope. Missing source evidence must not become permission through a correction.
+- **How it went:** Eleven new regressions failed before the correction. Approval/preflight/CLI tests and focused provenance/cancellation checks now pass; actual managed-launch integration, broad checks, scan, evaluation and independent review remain pending at the shared checkpoint.
+- **Changed:** Trusted session attestations · exact grant relays · canonical source provenance · unavailable-source refusal · four approved scanner fingerprints.
+- **Decisions:** none.
+
+— approved by (kmanojkumar) · built by codex · branch codex/productionization-133
+
+## 07-09-2026 — Broker access is checked before the token leaves ([#154](https://github.com/vegastack/vegafactory/issues/154))
+
+- **What:** The broker binds signed repository and owner IDs to the App installation, then checks the minted token's actual repository reach, permissions and expiry. Every installed-repository workflow remains eligible; project write authority is explicitly organization-wide.
+- **Why:** A permission echo could not prove repository scope, and unbounded upstream reads or stale signing keys could leave exchanges hanging or refusing rotated keys.
+- **How it went:** Signed JWT, streaming, action execution and timed failure fixtures exercise the boundaries. Focused broker tests pass; empty Secrets Store IDs remain a configuration refusal. Shared review, broad checks, behavioral evaluation and live rollout evidence remain pending.
+- **Changed:** Bound exchanges and key refresh · verified token scope · disposable-token cleanup · masked action outputs · honest trust and readiness documentation.
+- **Decisions:** none.
+
+— approved by (kmanojkumar) · built by codex · branch codex/productionization-133
+
+## 07-09-2026 — A partial board no longer looks empty ([#142](https://github.com/vegastack/vegafactory/issues/142))
+
+- **What:** The dispatcher reads repository issue pages and refuses to start work when the board, comments or dependency history is incomplete. The dashboard keeps available rows and identifies incomplete repositories with their observation time and failure reason.
+- **Why:** First-page reads silently missed issues and pull requests. A failed later page could look like an empty queue, and a stalled GitHub process had no deadline.
+- **How it went:** Real child-process and page-adapter reproductions failed first. Pagination and rendered-page fixtures now exercise the corrected paths; inherited managed-launch compatibility and later status integration remain explicit limits.
+- **Changed:** Complete or partial board results · bounded cancellable reads · stable row deduplication · visible repository failures · fewer repeated discovery calls.
+- **Decisions:** none.
+
+— approved by (kmanojkumar) · built by codex · branch codex/productionization-133
+
+## 07-09-2026 — Hooks must be real before a run starts ([#140](https://github.com/vegastack/vegafactory/issues/140))
+
+- **What:** Launch validation checks the selected tool event, direct guard command, installed bytes and current compiler policy in the prepared checkout. Managed sessions exclude native memory; advisory hooks send only bounded local identity requests.
+- **Why:** An unrelated echo of the guard filename counted as wiring, while a stored policy header could conceal stale intent. Session hooks also forwarded raw payloads or started network work during exit.
+- **How it went:** The original false positive failed a regression test first. Real Git worktrees and hook subprocess fixtures exercise the corrected seams. Child-launch/copy compatibility, private capture integration, pooled evaluation and final review remain explicit gates.
+- **Changed:** Exact registration validation · fresh compiler comparison · managed memory controls · local advisory adapter · qualification vocabulary.
+- **Decisions:** none.
+
+— approved by (kmanojkumar) · built by codex · branch codex/productionization-133
+
+## 07-09-2026 — Policy has one authority model ([#145](https://github.com/vegastack/vegafactory/issues/145))
+
+- **What:** Organization locks, group defaults and repository choices now resolve through one helper, alongside explicit admin/read scopes and registered-machine settings. Consumers keep the source and reason when a requested override is refused.
+- **Why:** Separate parsers let a group unlock mandatory org reporting and omitted org stage defaults. Descriptive lead rows could also grant broad people views without an explicit admin assignment.
+- **How it went:** Focused failures exposed those contradictions before their adapters changed. Real Git fixtures cover separate repo/group snapshots, changed local policy, wrong origins and expired validation. Shared evaluation and final candidate review remain separate acceptance gates.
+- **Changed:** Effective policy resolver · administration/fleet contracts · runtime/stats/guard adapters · scoped people reads · migration and source diagnostics.
+- **Decisions:** none.
+
+— approved by (kmanojkumar) · built by codex · branch codex/productionization-133
+
+## 07-09-2026 — Approval follows the work that was actually approved ([#135](https://github.com/vegastack/vegafactory/issues/135))
+
+- **What:** Scoped approval records now bind the operator’s quoted intent to current brief and plan identities. Task progress keeps its approval; changed requirements require fresh intent. Parent selections distinguish code, preparation and research permissions, while child checkpoint authority binds one exact prepared child. Fleet overlap is eligible only through a closed plan declaration whose paths come from the selected tasks.
+- **Why:** The old preflight accepted a bare approval marker even after the brief changed. That could start work whose actual scope had never been approved.
+- **How it went:** Subprocess tests reproduced both failures. The shared parser and launch gate reject them; preparation and research adapters retain their separate evidence requirements. Later fail-closed cases separated child execution from checkpoint requests and made invalid fleet declarations serialize. Final acceptance still needs the recorded scope, evaluation and review gates.
+- **Changed:** Current-scope preflight · dispatcher admission · inspectable legacy reconfirmation · frozen-manifest retrieval · counted research reservations · exact child checkpoint actions · canonical fleet declarations.
+- **Decisions:** none.
+
+— approved by (kmanojkumar) · built by codex · branch codex/productionization-133
+
+## 07-09-2026 — Releases keep one immutable pair ([#153](https://github.com/vegastack/vegafactory/issues/153))
+
+- **What:** Release preparation now packs the dashboard first, embeds its exact identity in the CLI, verifies the retained pair in isolation and resumes partial publication through registry readback instead of rebuilding or guessing that an outage means a version is absent. Installed-runtime evidence binds every packaged CLI file and mode to the pair and its trusted source/tree.
+- **Why:** Publishing the CLI before its dashboard or rebuilding during recovery can strand first use and erase the byte identity that review approved; registry uncertainty must never become permission to republish or move `latest` backward.
+- **How it went:** Real process fixtures exercise preparation, retained-state recovery, a loopback registry, installed CLI/server smoke and per-package promotion readback. Review then caught a stale release-only scanner pin and lossy comparison of very large numeric prerelease identifiers; both now have focused regressions. The finalized pair is retained before publication and every required SBOM is bound, while exact current-pair generation, complete behavioral evaluation, platform qualification and actual publication remain separate gates.
+- **Changed:** Dashboard-first immutable packing · noncircular installed descriptor · full installed-file/mode verification · bounded registry readback and partial-publication recovery · serialized promotion · scanner/baseline pin binding · exact prerelease ordering.
+- **Decisions:** none.
+
+— approved by (kmanojkumar) · built by codex · branch codex/productionization-133
+
 ## 03-09-2026 — vegastack-skills became VegaFactory: a runtime around the skills, and a dashboard to watch it ([#104](https://github.com/vegastack/vegastack-skills/issues/104))
 
 - **What:** epic B, eighteen children stacked on one branch, turned a skills installer into a factory. The package is `@vegastack/vegafactory` and the bin is `vegafactory`; the authored groups are `dev`, `factory`, `skills-tooling` and `repo-tooling`. Around the skills there is now a runtime: one feature = one worktree with `worktree` verbs and a retention policy, an `operators:` roster so assignment follows the state label, a hooks package whose ship guard reads dev.md per environment, the issue itself as the interview surface when no question tool exists, an org control room cloned locally and refreshed by `vegafactory sync`, a dispatcher that turns labels and 🚀 reactions into headless runs, parallel children where a plan declares disjoint file sets, a public GitHub App with a board mirror, and statistics recorded per run into the control room. The last child is the one that makes all of it legible: `vegafactory dashboard` starts a local, read-only Next.js view — org, repo, people, skills, board, dispatcher — over those statistics and the live board. Alongside it, a hosted token broker ([#117](https://github.com/vegastack/vegastack-skills/issues/117)) — a Cloudflare Worker at `packages/broker` that trades a GitHub Actions OIDC token for a one-repository, issues-and-projects token — lets any org that installs the public App drive the factory without ever holding a private key of its own.
