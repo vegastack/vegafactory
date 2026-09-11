@@ -112,6 +112,15 @@ test('actual workflow recovery command permits a failed preparation retry and re
  const reuse=run({...fixture,artifacts:[{name:'release-pair-a-attempt-1',id:42,expired:false}]});expect(reuse.status).toBe(0);expect(JSON.parse(reuse.stdout)).toMatchObject({prepare:'false','artifact-id':42})
 })
 
+test('release workflow immutable scanner source matches the audited baseline version',async()=>{
+ const baseline=JSON.parse(await readFile('.vegastack/skillspector-baseline.json','utf8'))
+ const workflow=await readFile('.github/workflows/release.yml','utf8')
+ const pin=/# SkillSpector v(\d+\.\d+\.\d+) immutable commit ([a-f0-9]{40}), matched to the audited baseline\.[\s\S]*?skillspector\.git@([a-f0-9]{40})'/.exec(workflow)
+ expect(pin).not.toBeNull()
+ expect(pin?.[1]).toBe(baseline.scanner_version)
+ expect(pin?.[2]).toBe(pin?.[3])
+})
+
 
 import { CLI, DASHBOARD, extractPackage, packPair, verifyInstalledRuntime } from './release-artifacts.mjs'
 import { verifyInstalledRuntimeBinding, type InstalledRuntimeBinding } from '../packages/cli/src/runs.ts'

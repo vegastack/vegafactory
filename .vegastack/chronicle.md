@@ -182,6 +182,16 @@ The project's story, newest first: what got built, why, and how it went — for 
 
 — approved by (kmanojkumar) · built by codex · branch codex/productionization-133
 
+## 07-09-2026 — Releases keep one immutable pair ([#153](https://github.com/vegastack/vegafactory/issues/153))
+
+- **What:** Release preparation now packs the dashboard first, embeds its exact identity in the CLI, verifies the retained pair in isolation and resumes partial publication through registry readback instead of rebuilding or guessing that an outage means a version is absent. Installed-runtime evidence binds every packaged CLI file and mode to the pair and its trusted source/tree.
+- **Why:** Publishing the CLI before its dashboard or rebuilding during recovery can strand first use and erase the byte identity that review approved; registry uncertainty must never become permission to republish or move `latest` backward.
+- **How it went:** Real process fixtures exercise preparation, retained-state recovery, a loopback registry, installed CLI/server smoke and per-package promotion readback. Review then caught a stale release-only scanner pin and lossy comparison of very large numeric prerelease identifiers; both now have focused regressions. The finalized pair is retained before publication and every required SBOM is bound, while exact current-pair generation, complete behavioral evaluation, platform qualification and actual publication remain separate gates.
+- **Changed:** Dashboard-first immutable packing · noncircular installed descriptor · full installed-file/mode verification · bounded registry readback and partial-publication recovery · serialized promotion · scanner/baseline pin binding · exact prerelease ordering.
+- **Decisions:** none.
+
+— approved by (kmanojkumar) · built by codex · branch codex/productionization-133
+
 ## 03-09-2026 — vegastack-skills became VegaFactory: a runtime around the skills, and a dashboard to watch it ([#104](https://github.com/vegastack/vegastack-skills/issues/104))
 
 - **What:** epic B, eighteen children stacked on one branch, turned a skills installer into a factory. The package is `@vegastack/vegafactory` and the bin is `vegafactory`; the authored groups are `dev`, `factory`, `skills-tooling` and `repo-tooling`. Around the skills there is now a runtime: one feature = one worktree with `worktree` verbs and a retention policy, an `operators:` roster so assignment follows the state label, a hooks package whose ship guard reads dev.md per environment, the issue itself as the interview surface when no question tool exists, an org control room cloned locally and refreshed by `vegafactory sync`, a dispatcher that turns labels and 🚀 reactions into headless runs, parallel children where a plan declares disjoint file sets, a public GitHub App with a board mirror, and statistics recorded per run into the control room. The last child is the one that makes all of it legible: `vegafactory dashboard` starts a local, read-only Next.js view — org, repo, people, skills, board, dispatcher — over those statistics and the live board. Alongside it, a hosted token broker ([#117](https://github.com/vegastack/vegastack-skills/issues/117)) — a Cloudflare Worker at `packages/broker` that trades a GitHub Actions OIDC token for a one-repository, issues-and-projects token — lets any org that installs the public App drive the factory without ever holding a private key of its own.
@@ -483,15 +493,6 @@ The project's story, newest first: what got built, why, and how it went — for 
 - **Decisions:** none new (executes the recorded v3 plan).
 
 — approved by operator (kmanojkumar) · built by claude · branch feat/10-workflow-conventions
-
-## 7 September 2026 — Immutable paired release preparation (#153)
-
-Release preparation now packs the dashboard first and embeds its exact identity in the CLI before packing the installer. The retained pair is checked in isolation, and publication resumes through registry readback rather than rebuilding or guessing that a network error means a version is absent. Candidate staging and first-use smoke precede promotion. Actual publication, provenance and final platform qualification remain separate evidence gates.
-
-8 September: installed CLI runtime evidence now compares every packaged file and mode with the retained pair and trusted source/tree before qualification. Producer-consumer tests include a real offline npm fixture; final candidate qualification remains pending.
-
-Review corrections retain the finalized pair before publication, bind every required SBOM, serialize live publishers through the Release workflow, and preserve each promotion readback. Synthetic process fixtures exercise the actual preparation/publication commands, loopback registry, installed CLI and server; current-source full preparation remains blocked by the separate expired scanner baseline disposition.
-
 
 ## 08-09-2026 — Ship the reviewed commit (#136)
 

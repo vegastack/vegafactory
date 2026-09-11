@@ -140,9 +140,9 @@ jobs:
 
       - name: Install pinned release scanner
         if: steps.recovery.outputs.prepare == 'true'
-        # SkillSpector v2.11.0 immutable commit, matched to the audited baseline.
+        # SkillSpector v2.11.2 immutable commit 69dcdfb74487d361ba4c811d088cfdea2ff3a9dc, matched to the audited baseline.
         run: |
-          uv tool install --python 3.12 'git+https://github.com/NVIDIA/skillspector.git@b7241089d7ec15d8b30df980dacbb428214732b9'
+          uv tool install --python 3.12 'git+https://github.com/NVIDIA/skillspector.git@69dcdfb74487d361ba4c811d088cfdea2ff3a9dc'
           echo "$(uv tool dir --bin)" >> "$GITHUB_PATH"
           echo "$(dirname "$(uv python find 3.12)")" >> "$GITHUB_PATH"
 

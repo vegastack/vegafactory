@@ -66,7 +66,7 @@ export function compareVersions(a,b) {
   const x=parse(a),y=parse(b)
   for(let i=0;i<3;i++)if(x.n[i]!==y.n[i])return x.n[i]>y.n[i]?1:-1
   if(!x.pre||!y.pre)return x.pre?-1:y.pre?1:0
-  for(let i=0;i<Math.max(x.pre.length,y.pre.length);i++) {const p=x.pre[i],q=y.pre[i];if(p===q)continue;if(p===undefined)return -1;if(q===undefined)return 1;const pn=/^\d+$/.test(p),qn=/^\d+$/.test(q);if(pn&&qn)return Number(p)>Number(q)?1:-1;if(pn!==qn)return pn?-1:1;return p>q?1:-1}
+  for(let i=0;i<Math.max(x.pre.length,y.pre.length);i++) {const p=x.pre[i],q=y.pre[i];if(p===q)continue;if(p===undefined)return -1;if(q===undefined)return 1;const pn=/^\d+$/.test(p),qn=/^\d+$/.test(q);if(pn&&qn)return p.length!==q.length?p.length>q.length?1:-1:p>q?1:-1;if(pn!==qn)return pn?-1:1;return p>q?1:-1}
   return 0
 }
 export function registryClient({directory,base='https://registry.npmjs.org',candidateTag='candidate',fetcher=fetch,run=command,smoke=smokePair,publisher}={}) {

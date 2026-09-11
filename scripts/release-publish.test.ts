@@ -1,5 +1,5 @@
 import { expect, test } from 'bun:test'
-import { classifyRegistry, publishPair } from './release-publish.mjs'
+import { classifyRegistry, compareVersions, publishPair } from './release-publish.mjs'
 import { createHash } from 'node:crypto'
 const artifact=(name:string)=>{const bytes=Buffer.from(name);return {name,file:name.replaceAll('/','-').replace('@','')+'.tgz',sha256:createHash('sha256').update(bytes).digest('hex'),integrity:'sha512-'+createHash('sha512').update(bytes).digest('base64'),bytes:bytes.length}}
 const manifest={version:'1.0.0',artifacts:[artifact('@vegastack/vegafactory-dashboard'),artifact('@vegastack/vegafactory')]}
@@ -21,6 +21,12 @@ test('promotion refuses backward latest before npm mutation',async()=>{
  const {registryClient}=await import('./release-publish.mjs');let mutations=0
  const r=registryClient({fetcher:async()=>Response.json({name:manifest.artifacts[0]!.name,version:'2.0.0'}),run:()=>{mutations++;return ''}})
  await expect(r.promote(manifest.artifacts[0],'1.0.0')).rejects.toThrow('backward');expect(mutations).toBe(0)
+})
+test('large numeric prerelease identifiers compare exactly and cannot move latest backward',async()=>{
+ expect(compareVersions('1.0.0-9007199254740993','1.0.0-9007199254740992')).toBe(1)
+ const {registryClient}=await import('./release-publish.mjs');let mutations=0
+ const r=registryClient({fetcher:async()=>Response.json({name:manifest.artifacts[0]!.name,version:'1.0.0-9007199254740993'}),run:()=>{mutations++;return ''}})
+ await expect(r.promote(manifest.artifacts[0],'1.0.0-9007199254740992')).rejects.toThrow('backward');expect(mutations).toBe(0)
 })
 
 test('known integrity conflicts do not download payloads',async()=>{
