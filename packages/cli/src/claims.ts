@@ -194,6 +194,8 @@ async function guarded<T>(path: string, identity: ProcessIdentity, mutate: () =>
             });
             if (held && await stopped(held.identity))
                 throw new ClaimRefusal(`abandoned mutation guard: ${guard}; offline operator recovery required`);
+            if (Date.now() >= deadline && !held)
+                throw new ClaimRefusal(`ownerless mutation guard: ${guard}; stop service and perform offline operator recovery`);
             if (Date.now() >= deadline)
                 throw new ClaimBusy(`mutation guard busy: ${guard}`);
             await sleep(50);

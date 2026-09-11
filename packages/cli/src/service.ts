@@ -68,17 +68,21 @@ ${args}
 }
 
 export function renderSystemdUnit(input: ServiceInput): string {
+  const word = (value: string): string => {
+    if (!value || /[\x00-\x1f\x7f]/.test(value)) throw new Error('systemd service value contains a control character')
+    return `"${value.replace(/\\/g, '\\\\').replace(/"/g, '\\"').replace(/\$/g, '$$$$').replace(/%/g, '%%')}"`
+  }
   return `[Unit]
 Description=VegaFactory dispatcher — headless runs in feature worktrees
 After=network-online.target
 
 [Service]
 Type=simple
-ExecStart=${input.binPath} ${serviceArgs(input).join(' ')}
+ExecStart=${[input.binPath, ...serviceArgs(input)].map(word).join(' ')}
 Restart=always
 RestartSec=${input.interval}
-StandardOutput=append:${join(input.logRoot, 'dispatcher.out.log')}
-StandardError=append:${join(input.logRoot, 'dispatcher.err.log')}
+StandardOutput=${word('append:' + join(input.logRoot, 'dispatcher.out.log'))}
+StandardError=${word('append:' + join(input.logRoot, 'dispatcher.err.log'))}
 
 [Install]
 WantedBy=default.target

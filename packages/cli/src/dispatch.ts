@@ -1947,7 +1947,7 @@ const stoppedGroupSetupOverride=Symbol.for('vegafactory.test.stopped-group-recei
 type StoppedGroupTarget=import('./shared-claims.ts').CoordinationTarget&{[stoppedGroupSetupOverride]?:typeof receivingExecutionSetup}
 interface ActiveStoppedGroupContext {
   request:import('./shared-claims.ts').GroupSuccessionRequest
-  materials:RemoteRecoveryMaterial[];config:FactoryConfig;gh:TickDeps['gh'];localClaim:Claim
+  materials:RemoteRecoveryMaterial[];classifications:StoppedGroupClassification[];config:FactoryConfig;gh:TickDeps['gh'];localClaim:Claim
   checkouts:Map<string,string>;setupDigests:Map<string,string>;setup:typeof receivingExecutionSetup;source?:RemoteRecoveryTransport['source'];machine:EffectiveMachine;session:MachineSession
 }
 const stoppedGroupSerialTails=new Map<string,Promise<void>>()
@@ -2464,6 +2464,11 @@ export interface RemoteRecoveryMaterial {
 }
 
 type StoppedGroupDecision={action:string;reason:string;request:import('./shared-claims.ts').GroupSuccessionRequest|null}
+type StoppedStateRef=Extract<import('./shared-claims.ts').EvidenceRef,{kind:'state-receipt'}>
+type StoppedGroupClassification={groupId:string;issue:number;issueNodeId:string;taskKey:string;classification:
+ | {kind:'retained';expected:import('./shared-claims.ts').ParentClaimBinding}
+ | {kind:'completed';acceptedScope:StoppedStateRef;joinEvidence:StoppedStateRef}
+ | {kind:'no-shared-task'}}
 type StoppedGroupRecoveryDeps={
  evaluate:(input:unknown)=>StoppedGroupDecision
  recover:(input:{machine:EffectiveMachine;session:MachineSession;request:import('./shared-claims.ts').GroupSuccessionRequest})=>Promise<import('./shared-claims.ts').GroupSuccessionResult>
@@ -2473,6 +2478,38 @@ type StoppedGroupRecoveryDeps={
 const groupBinding=(task:Pick<import('./shared-claims.ts').TaskRecord,'taskKey'|'runId'|'generation'|'ownerToken'|'machineId'|'installationId'|'sessionId'>):import('./shared-claims.ts').ParentClaimBinding=>({taskKey:task.taskKey,runId:task.runId,generation:task.generation,ownerToken:task.ownerToken,machineId:task.machineId,installationId:task.installationId,sessionId:task.sessionId})
 const groupCandidate=(task:import('./shared-claims.ts').TaskRecord):VerifiedCandidate=>({host:task.host,repo:task.repo,issue:task.issue,repositoryNodeId:task.repositoryNodeId,issueNodeId:task.issueNodeId,scopeDigest:task.scopeDigest,approvalDigest:task.approvalDigest,approvalBindings:task.approvalBindings,runId:task.runId,stage:task.stage,paths:task.paths,resources:task.resources,independent:task.independent,parentTaskKey:task.parentTaskKey,parentBinding:task.parentBinding??null,approvedTaskIds:task.approvedTaskIds})
 const stoppedMaterialFacts=(row:RemoteRecoveryMaterial)=>({stateCommit:row.stateCommit,task:row.task,artifacts:row.artifacts,briefBody:row.briefBody,planBody:row.planBody,title:row.title,authorityRequest:row.authorityRequest,checkpointRequest:row.checkpointRequest,packet:row.packet,evidence:row.evidence,children:row.children.map(child=>({candidate:groupCandidate(child.task),authorityRequest:child.authorityRequest,checkpointRequest:child.checkpointRequest})).sort((a,b)=>a.candidate.runId.localeCompare(b.candidate.runId)),planSourceId:row.planSourceId,sourceRefs:row.sourceRefs,unavailableContext:row.unavailableContext,blocks:row.blocks})
+async function stoppedGroupClassifications(input:{materials:RemoteRecoveryMaterial[];parentTaskKey:string;approvedGroups:Array<{id:string|null;members:string[];files:string[]}>;target:import('./shared-claims.ts').CoordinationTarget;gh:TickDeps['gh']}):Promise<StoppedGroupClassification[]>{
+ const owner=await import('./shared-claims.ts'),parent=input.materials.find(row=>row.task.taskKey===input.parentTaskKey)
+ if(!parent||!parent.task.recovery||input.materials.some(row=>row.stateCommit!==parent.stateCommit))throw Error('stopped group classification parent unavailable')
+ const parsed=input.approvedGroups.map(group=>({group,issue:Number(/^#([1-9]\d*)$/.exec(group.members.length===1?group.members[0]!:'')?.[1])}))
+ if(parsed.some(row=>!row.group.id||!Number.isSafeInteger(row.issue)||row.issue<=0||!row.group.files.length)||new Set(parsed.map(row=>row.group.id)).size!==parsed.length||new Set(parsed.map(row=>row.issue)).size!==parsed.length)throw Error('stopped group declaration cannot be classified')
+ const active=input.materials.filter(row=>row!==parent)
+ if(active.some(row=>row.task.parentTaskKey!==parent.task.taskKey)||new Set(active.map(row=>row.task.issue)).size!==active.length)throw Error('retained stopped group members differ')
+ const known=parent.children.filter(row=>!active.some(current=>current.task.taskKey===row.task.taskKey)),result:StoppedGroupClassification[]=[]
+ for(const {group,issue} of parsed){
+  const retained=active.filter(row=>row.task.issue===issue)
+  if(retained.length===1){
+   const task=retained[0]!.task
+   if(task.paths.join('\n')!==group.files.join('\n'))throw Error('retained stopped group files differ')
+   result.push({groupId:group.id!,issue,issueNodeId:task.issueNodeId,taskKey:task.taskKey,classification:{kind:'retained',expected:groupBinding(task)}});continue
+  }
+  if(retained.length>1)throw Error('repeated retained stopped group member')
+  const completed=known.filter(row=>row.task.issue===issue)
+  if(completed.length===1){
+   const child=completed[0]!,task=child.task,accepted=parent.task.recovery.children.filter(row=>row.childTaskKey===task.taskKey&&row.childRunId===task.runId&&row.scopeDigest===task.scopeDigest),joins=parent.task.recovery.joins.filter(row=>row.childRunId===task.runId&&row.state==='accepted'),scopes=task.acceptedScopes.filter(row=>row.scopeDigest===task.scopeDigest)
+   if(child.stateCommit!==parent.stateCommit||task.state!=='completed'||task.paths.join('\n')!==group.files.join('\n')||accepted.length!==1||joins.length!==1||scopes.length!==1||accepted[0]!.acceptance.evidence.kind!=='state-receipt'||joins[0]!.evidence.kind!=='state-receipt'||joins[0]!.acceptance?.evidence.kind!=='state-receipt'||scopes[0]!.receipt.kind!=='state-receipt')throw Error('completed stopped group evidence differs')
+   result.push({groupId:group.id!,issue,issueNodeId:task.issueNodeId,taskKey:task.taskKey,classification:{kind:'completed',acceptedScope:structuredClone(scopes[0]!.receipt),joinEvidence:structuredClone(joins[0]!.evidence)}});continue
+  }
+  if(completed.length>1)throw Error('repeated completed stopped group member')
+  const subject=await boundedGhJson<{number:number;node_id:string}>(input.gh,['api',`repos/${parent.task.repo}/issues/${issue}`],readBudget())
+  if(subject.number!==issue||typeof subject.node_id!=='string'||!subject.node_id)throw Error('no-task stopped group issue identity unavailable')
+  const key=owner.taskKey(parent.task.host,parent.task.repositoryNodeId,subject.node_id),raw=await input.target.provider.read(input.target,parent.stateCommit,`coordination/tasks/${key}.json`)
+  if(raw!==null)throw Error('declared stopped group has unclassified retained history')
+  result.push({groupId:group.id!,issue,issueNodeId:subject.node_id,taskKey:key,classification:{kind:'no-shared-task'}})
+ }
+ if(active.some(row=>!result.some(item=>item.classification.kind==='retained'&&item.taskKey===row.task.taskKey))||known.some(row=>!result.some(item=>item.classification.kind==='completed'&&item.taskKey===row.task.taskKey)))throw Error('stopped group contains undeclared task history')
+ return result
+}
 
 // Every callback made by #137 re-runs the complete source/authority/private
 // reconstruction proof. Equality is only the final comparison with the frozen
@@ -2503,6 +2540,10 @@ async function verifyFreshStoppedGroup(context:ActiveStoppedGroupContext,actual:
    if(setup.receiver.machine.id!==context.machine.id||setup.receiver.machine.installationId!==context.machine.installationId||setup.receiver.machine.sessionId!==context.session.sessionId||context.setupDigests.get(frozen.task.taskKey)!==digest)throw Error('stopped group receiver setup changed')
    freshRows.push(fresh)
   }
+  const parent=freshRows.find(row=>row.task.taskKey===context.request.parentTaskKey),source=fileURLToPath(import.meta.url).endsWith('.ts'),planner=await import(new URL(source?'../../../skills/dev/dev-plan/scripts/plan-lint.mjs':'../skill/dev-plan/scripts/plan-lint.mjs',import.meta.url).href) as typeof import('../../../skills/dev/dev-plan/scripts/plan-lint.mjs')
+  if(!parent)throw Error('stopped group fresh parent unavailable')
+  const approvedGroups=planner.parseIndependentGroups(parent.planBody).map(group=>({id:group.id,members:group.members,files:group.files})),classifications=await stoppedGroupClassifications({materials:freshRows,parentTaskKey:context.request.parentTaskKey,approvedGroups,target:context.session.target,gh:context.gh})
+  if(canonicalWire(classifications)!==canonicalWire(context.classifications))throw Error('stopped group classification changed')
   if(actual.ref){
    if(actual.ref.kind==='github-comment'){const sources=freshRows.flatMap(row=>row.task.approvalBindings.map(binding=>binding.source)).filter(ref=>canonicalWire(ref)===canonicalWire(actual.ref));if(!sources.length||actual.payload!==null)throw Error('stopped group approval evidence changed')}
    else{const proof=freshRows.flatMap(row=>row.evidence).filter(row=>canonicalWire(row.ref)===canonicalWire(actual.ref));if(!proof.length||proof.some(row=>canonicalWire(row.payload)!==canonicalWire(actual.payload)))throw Error('stopped group evidence changed: '+actual.ref.operationId+':'+proof.length)}
@@ -2549,7 +2590,7 @@ export function assertRemoteRecoveryMaterial(material:RemoteRecoveryMaterial):vo
 // Discover the exact parent/direct-child set from separately verified remote
 // materials. Each member's full reader must have succeeded; a parent summary is
 // not allowed to vouch for a child's stop, authority, effects, or checkpoint.
-export async function recoverStoppedGroupMaterials(input:{operationId:string;parentTaskKey:string;materials:RemoteRecoveryMaterial[];machine:EffectiveMachine;session:MachineSession;runtime?:{config:FactoryConfig;gh:TickDeps['gh'];localClaim:Claim;checkouts:Map<string,string>;setupDigests:Map<string,string>;setup:typeof receivingExecutionSetup;source?:RemoteRecoveryTransport['source']}},overrides:Partial<StoppedGroupRecoveryDeps>={}):ReturnType<typeof recoverVerifiedStoppedGroup>{
+export async function recoverStoppedGroupMaterials(input:{operationId:string;parentTaskKey:string;materials:RemoteRecoveryMaterial[];classifications?:StoppedGroupClassification[];machine:EffectiveMachine;session:MachineSession;runtime?:{config:FactoryConfig;gh:TickDeps['gh'];localClaim:Claim;checkouts:Map<string,string>;setupDigests:Map<string,string>;setup:typeof receivingExecutionSetup;source?:RemoteRecoveryTransport['source']}},overrides:Partial<StoppedGroupRecoveryDeps>={}):ReturnType<typeof recoverVerifiedStoppedGroup>{
  for(const material of input.materials)assertRemoteRecoveryMaterial(material)
  const parentRows=input.materials.filter(row=>row.task.taskKey===input.parentTaskKey&&row.task.parentTaskKey===null)
  if(parentRows.length!==1)throw Error('unique verified stopped group parent unavailable')
@@ -2557,11 +2598,12 @@ export async function recoverStoppedGroupMaterials(input:{operationId:string;par
  const approvedGroups=planner.parseIndependentGroups(parent.planBody).map(group=>({id:group.id,members:group.members,files:group.files})),groupPlan=parent.artifacts.find(ref=>ref.kind==='plan')
  if(!approvedGroups.length||!groupPlan)throw Error('approved stopped group declaration unavailable')
  const children=input.materials.filter(row=>row!==parent)
- if(children.some(row=>row.task.parentTaskKey!==parent.task.taskKey)||children.length!==approvedGroups.length)throw Error('complete verified stopped group material required')
+ if(children.some(row=>row.task.parentTaskKey!==parent.task.taskKey)||children.length<1)throw Error('complete verified stopped group material required')
  const heads=[...new Set(input.materials.map(row=>row.stateCommit))]
  if(heads.length!==1)throw Error('stopped group materials do not share one state head')
- const owner=await import('./shared-claims.ts'),groupsDigest=owner.sha256(owner.canonical(approvedGroups))
- const evaluation={operationId:input.operationId,expectedHead:heads[0],parentTaskKey:input.parentTaskKey,groupPlan,groupsDigest,approvedGroups,members:input.materials.map(material=>({stateCommit:material.stateCommit,task:material.task,expected:groupBinding(material.task),candidate:groupCandidate(material.task)}))}
+ const owner=await import('./shared-claims.ts'),groupsDigest=owner.sha256(owner.canonical(approvedGroups)),classifications=await stoppedGroupClassifications({materials:input.materials,parentTaskKey:input.parentTaskKey,approvedGroups,target:input.session.target,gh:input.runtime?.gh??ghText})
+ if(input.classifications&&canonicalWire(input.classifications)!==canonicalWire(classifications))throw Error('stopped group frozen classification changed')
+ const evaluation={operationId:input.operationId,expectedHead:heads[0],parentTaskKey:input.parentTaskKey,groupPlan,groupsDigest,approvedGroups,classifications,members:input.materials.map(material=>({stateCommit:material.stateCommit,task:material.task,expected:groupBinding(material.task),candidate:groupCandidate(material.task)}))}
  const core=await recoveryScript(),decision=(overrides.evaluate??(value=>core.evaluateStoppedGroupRecovery(value) as StoppedGroupDecision))(structuredClone(evaluation))
  let session=input.session,context:ActiveStoppedGroupContext|null=null
  if(input.runtime&&decision.action==='recover-stopped-group'&&decision.request){
@@ -2577,7 +2619,7 @@ export async function recoverStoppedGroupMaterials(input:{operationId:string;par
   }
   session={...input.session,target,localRoot:target.localRoot}
   sharedMachineContexts.set(target,input.machine)
-  context={request:decision.request,materials:input.materials,config:input.runtime.config,gh:input.runtime.gh,localClaim:input.runtime.localClaim,checkouts:input.runtime.checkouts,setupDigests:input.runtime.setupDigests,setup:input.runtime.setup,source:input.runtime.source,machine:input.machine,session}
+  context={request:decision.request,materials:input.materials,classifications,config:input.runtime.config,gh:input.runtime.gh,localClaim:input.runtime.localClaim,checkouts:input.runtime.checkouts,setupDigests:input.runtime.setupDigests,setup:input.runtime.setup,source:input.runtime.source,machine:input.machine,session}
  }
  const recovered=await recoverVerifiedStoppedGroup({evaluation,machine:input.machine,session,evidence:input.materials.flatMap(row=>row.evidence)},{...overrides,evaluate:()=>decision})
  if(recovered.kind==='owned'&&context)await stoppedGroupSerial(input.session.target,'verify',()=>verifyFreshStoppedGroup(context!,{}))
@@ -2725,7 +2767,7 @@ async function inspectRemoteRecoveryRecord(input:{repo:string;taskKey:string;con
    if(stopProof&&canonicalWire(entry.ref)===canonicalWire(stopProof.evidenceRef)){
     const raw=await target.provider.read(target,entry.ref.commitSha,owner.operationPath(entry.ref.operationId))
     if(!raw||owner.sha256(raw)!==entry.ref.blobSha256)throw Error('stop receipt readback changed')
-    const receipt=JSON.parse(raw) as import('./shared-claims.ts').OperationReceipt,proof=stopProof
+    const receipt=owner.parseOperationReceiptBytes(raw),proof=stopProof
     if(receipt.taskKey!==task.taskKey||receipt.generation!==stoppedOwner.generation||receipt.resultOwner.runId!==task.runId||receipt.resultOwner.ownerToken!==stoppedOwner.ownerToken||receipt.resultOwner.machineId!==proof.machineId||receipt.resultOwner.installationId!==proof.installationId||receipt.resultOwner.sessionId!==proof.sessionId||proof.generation!==stoppedOwner.generation||!proof.runIds.includes(task.runId))throw Error('stop receipt original owner differs')
    }
    evidence.push({ref:entry.ref,payload})
@@ -2742,8 +2784,8 @@ async function inspectRemoteRecoveryRecord(input:{repo:string;taskKey:string;con
   const accepted=[] as Array<Extract<import('./shared-claims.ts').RecoveryEvidencePayload,{kind:'acceptance'}>>
   for(const link of currentTask.acceptedScopes.filter(row=>row.scopeDigest===currentTask.scopeDigest))try{
    const raw=await target.provider.read(target,link.receipt.commitSha,owner.operationPath(link.receipt.operationId));if(!raw||owner.sha256(raw)!==link.receipt.blobSha256)continue
-   const receipt=JSON.parse(raw) as import('./shared-claims.ts').OperationReceipt,payload=owner.parseRecoveryPayload(receipt.recoveryPayload)
-   if(raw!==owner.canonical(receipt)||receipt.operationId!==link.receipt.operationId||receipt.taskKey!==currentTask.taskKey||receipt.generation!==currentTask.generation||canonicalWire(receipt.resultOwner)!==canonicalWire({ownerToken:currentTask.ownerToken,machineId:currentTask.machineId,installationId:currentTask.installationId,sessionId:currentTask.sessionId,runId:currentTask.runId})||payload?.kind!=='acceptance'||payload.result!=='passed'||payload.runId!==currentTask.runId||payload.sourceSha!==currentTask.checkpoint.headSha||payload.scopeDigest!==currentTask.scopeDigest||!payload.acceptedScope)continue
+   const receipt=owner.parseOperationReceiptBytes(raw),payload=owner.parseRecoveryPayload(receipt.recoveryPayload)
+   if(receipt.operationId!==link.receipt.operationId||receipt.taskKey!==currentTask.taskKey||receipt.generation!==currentTask.generation||canonicalWire(receipt.resultOwner)!==canonicalWire({ownerToken:currentTask.ownerToken,machineId:currentTask.machineId,installationId:currentTask.installationId,sessionId:currentTask.sessionId,runId:currentTask.runId})||payload?.kind!=='acceptance'||payload.result!=='passed'||payload.runId!==currentTask.runId||payload.sourceSha!==currentTask.checkpoint.headSha||payload.scopeDigest!==currentTask.scopeDigest||!payload.acceptedScope)continue
    const scope=owner.parseAcceptedScope(payload.acceptedScope)
    if(scope.repo!==currentTask.repo||scope.issue!==currentTask.issue||canonicalWire(scope.artifacts)!==canonicalWire(authority.artifacts)||canonicalWire(scope.approvalBindings)!==canonicalWire(currentTask.approvalBindings)||canonicalWire([...scope.approvedTaskIds].sort())!==canonicalWire([...currentTask.approvedTaskIds].sort())||canonicalWire([...scope.completedTaskIds].sort())!==canonicalWire([...scope.approvedTaskIds].sort()))continue
    accepted.push(payload)
@@ -2803,7 +2845,7 @@ async function inspectRemoteRecoveryRecord(input:{repo:string;taskKey:string;con
    if(!historical||accepted.acceptance.evidence.kind!=='state-receipt')throw Error('historical accepted child context requires pinned task reader')
    const ref=accepted.acceptance.evidence,raw=await target.provider.read(target,ref.commitSha,owner.operationPath(ref.operationId))
    if(!raw||owner.sha256(raw)!==ref.blobSha256)throw Error('historical child receipt changed')
-   const receipt=JSON.parse(raw) as import('./shared-claims.ts').OperationReceipt
+   const receipt=owner.parseOperationReceiptBytes(raw)
    if(receipt.taskKey!==task.taskKey||receipt.recoveryPayload?.kind!=='acceptance'||receipt.recoveryPayload.runId!==accepted.childRunId)throw Error('original parent publication binding unavailable')
    const parent={taskKey:receipt.taskKey,generation:receipt.generation,...receipt.resultOwner}
    const child={taskKey:accepted.childTaskKey,runId:accepted.childRunId,generation:accepted.generation,machineId:accepted.machineId,installationId:accepted.installationId,sessionId:accepted.sessionId}
@@ -2917,9 +2959,10 @@ interface ReceivingIntent {
  checkout:string;handoff:Extract<import('./shared-claims.ts').EvidenceRef,{kind:'state-receipt'}>|null
 }
 interface StoppedGroupRecoveryIntent {
- schemaVersion:2;operationId:string;parentTaskKey:string;expectedHead:string
- groupPlan:import('./shared-claims.ts').ArtifactRef;groupsDigest:string
- members:Array<{taskKey:string;runId:string;expectedBinding:import('./shared-claims.ts').ParentClaimBinding;candidateDigest:string;materialDigest:string;stableMaterialDigest:string;planSourceId:string;sourceRefs:Array<{id:string;updatedAt:string;bodySha256:string}>}>
+  schemaVersion:2;operationId:string;parentTaskKey:string;expectedHead:string
+  groupPlan:import('./shared-claims.ts').ArtifactRef;groupsDigest:string
+  classifications:StoppedGroupClassification[]
+  members:Array<{taskKey:string;runId:string;expectedBinding:import('./shared-claims.ts').ParentClaimBinding;candidateDigest:string;materialDigest:string;stableMaterialDigest:string;planSourceId:string;sourceRefs:Array<{id:string;updatedAt:string;bodySha256:string}>}>
 }
 type PreparedStoppedGroup={run:RunRecord;claim:SharedClaim;plan:LaunchPlan;started:true;group:{guard:'plan-lint';ok:true;groups:Array<{id:string;members:string[];files:string[]}>;starts:{parent:{task:import('./shared-claims.ts').TaskRecord;claim:SharedClaim;startOperationId:string};children:Array<{task:import('./shared-claims.ts').TaskRecord;claim:SharedClaim;startOperationId:string}>}}}
 const stoppedUuid=/^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/i,stoppedDigest=/^[a-f0-9]{64}$/i,stoppedSha=/^[a-f0-9]{40}$/i
@@ -2935,16 +2978,17 @@ function groupCheckpointIntent(material:RemoteRecoveryMaterial,checkout:string):
  if(remote.status!==0||!remote.stdout.trim())throw Error('stopped group source remote unavailable')
  return{id:request.requested.actionId,repo:material.task.repo,repositoryId:material.task.repositoryNodeId,remote:'origin',remoteUrl:remote.stdout.trim(),branch:checkpoint.branch,baseRef:request.requested.ref??`refs/heads/${checkpoint.branch}`,baseSha:checkpoint.baseSha,scopeDigest:material.task.scopeDigest,paths:[...material.task.paths],approvalBindings:structuredClone(material.task.approvalBindings),approvalRequest:structuredClone(request)}
 }
-async function stoppedGroupDescriptor(materials:RemoteRecoveryMaterial[],parentTaskKey:string,operationId:string):Promise<StoppedGroupRecoveryIntent>{
+async function stoppedGroupDescriptor(materials:RemoteRecoveryMaterial[],parentTaskKey:string,operationId:string,target:import('./shared-claims.ts').CoordinationTarget,gh:TickDeps['gh']):Promise<StoppedGroupRecoveryIntent>{
  const owner=await import('./shared-claims.ts'),parent=materials.find(row=>row.task.taskKey===parentTaskKey)
  if(!parent||materials.some(row=>row.stateCommit!==parent.stateCommit))throw Error('complete same-head stopped group unavailable')
  const groupPlan=parent.artifacts.find(row=>row.kind==='plan'&&row.issue===parent.task.issue)
  if(!groupPlan)throw Error('stopped group plan artifact unavailable')
  const source=fileURLToPath(import.meta.url).endsWith('.ts'),planner=await import(new URL(source?'../../../skills/dev/dev-plan/scripts/plan-lint.mjs':'../skill/dev-plan/scripts/plan-lint.mjs',import.meta.url).href) as typeof import('../../../skills/dev/dev-plan/scripts/plan-lint.mjs')
  const approvedGroups=planner.parseIndependentGroups(parent.planBody).map(group=>({id:group.id,members:group.members,files:group.files}))
- if(!approvedGroups.length||approvedGroups.length!==materials.length-1)throw Error('stopped group approved member set differs')
+ if(!approvedGroups.length)throw Error('stopped group approved member set differs')
+ const classifications=await stoppedGroupClassifications({materials,parentTaskKey,approvedGroups,target,gh})
  const members=materials.map(material=>{const facts=stoppedMaterialFacts(material),{sourceRefs:_,packet,...stable}=facts,{commentCursor:__,...stablePacket}=packet;stable.planBody=stable.planBody.replace(/^(-\s*)\[[ xX]\]/gm,'$1[ ]');return{taskKey:material.task.taskKey,runId:material.task.runId,expectedBinding:groupBinding(material.task),candidateDigest:owner.sha256(owner.canonical(groupCandidate(material.task))),materialDigest:owner.sha256(owner.canonical(facts)),stableMaterialDigest:owner.sha256(owner.canonical({...stable,packet:stablePacket})),planSourceId:material.planSourceId,sourceRefs:structuredClone(material.sourceRefs)}}).sort((a,b)=>a.taskKey.localeCompare(b.taskKey))
- return{schemaVersion:2,operationId,parentTaskKey,expectedHead:parent.stateCommit,groupPlan,groupsDigest:owner.sha256(owner.canonical(approvedGroups)),members}
+ return{schemaVersion:2,operationId,parentTaskKey,expectedHead:parent.stateCommit,groupPlan,groupsDigest:owner.sha256(owner.canonical(approvedGroups)),classifications,members}
 }
 async function stoppedBarrierProgressMatches(frozen:StoppedGroupRecoveryIntent,current:StoppedGroupRecoveryIntent,root:string):Promise<boolean>{
  const core=(value:StoppedGroupRecoveryIntent)=>({...value,members:value.members.map(({materialDigest:_,sourceRefs:__,...member})=>member)})
@@ -2965,7 +3009,12 @@ async function stoppedBarrierProgressMatches(frozen:StoppedGroupRecoveryIntent,c
 function assertStoppedGroupIntent(value:unknown):asserts value is StoppedGroupRecoveryIntent{
  if(!value||typeof value!=='object'||Array.isArray(value))throw Error('stopped group intent unavailable')
  const row=value as StoppedGroupRecoveryIntent,keys=Object.keys(row).sort().join(',')
- if(keys!=='expectedHead,groupPlan,groupsDigest,members,operationId,parentTaskKey,schemaVersion'||row.schemaVersion!==2||!stoppedUuid.test(row.operationId)||!stoppedDigest.test(row.parentTaskKey)||!stoppedSha.test(row.expectedHead)||!stoppedDigest.test(row.groupsDigest)||!Array.isArray(row.members)||row.members.length<2||row.members.length>17)throw Error('stopped group intent schema differs')
+ if(keys!=='classifications,expectedHead,groupPlan,groupsDigest,members,operationId,parentTaskKey,schemaVersion'||row.schemaVersion!==2||!stoppedUuid.test(row.operationId)||!stoppedDigest.test(row.parentTaskKey)||!stoppedSha.test(row.expectedHead)||!stoppedDigest.test(row.groupsDigest)||!Array.isArray(row.classifications)||!row.classifications.length||row.classifications.length>16||!Array.isArray(row.members)||row.members.length<2||row.members.length>17)throw Error('stopped group intent schema differs')
+ if(new Set(row.classifications.map(item=>item.groupId)).size!==row.classifications.length||new Set(row.classifications.map(item=>item.issue)).size!==row.classifications.length||new Set(row.classifications.map(item=>item.issueNodeId)).size!==row.classifications.length||new Set(row.classifications.map(item=>item.taskKey)).size!==row.classifications.length)throw Error('stopped group intent classifications differ')
+ const validBinding=(binding:import('./shared-claims.ts').ParentClaimBinding)=>!!binding&&Object.keys(binding).sort().join(',')==='generation,installationId,machineId,ownerToken,runId,sessionId,taskKey'&&stoppedDigest.test(binding.taskKey)&&stoppedUuid.test(binding.runId)&&Number.isSafeInteger(binding.generation)&&binding.generation>0&&!!binding.machineId&&stoppedUuid.test(binding.ownerToken)&&stoppedUuid.test(binding.installationId)&&stoppedUuid.test(binding.sessionId)
+ for(const item of row.classifications){const classification=item.classification,base=Object.keys(item).sort().join(',')==='classification,groupId,issue,issueNodeId,taskKey'&&!!item.groupId&&Number.isSafeInteger(item.issue)&&item.issue>0&&!!item.issueNodeId&&stoppedDigest.test(item.taskKey)
+  if(!base||!classification||classification.kind==='retained'&&(Object.keys(classification).sort().join(',')!=='expected,kind'||classification.expected.taskKey!==item.taskKey||!validBinding(classification.expected))||classification.kind==='completed'&&(Object.keys(classification).sort().join(',')!=='acceptedScope,joinEvidence,kind'||![classification.acceptedScope,classification.joinEvidence].every(ref=>ref.kind==='state-receipt'&&stoppedUuid.test(ref.operationId)&&stoppedSha.test(ref.commitSha)&&stoppedDigest.test(ref.blobSha256)))||classification.kind==='no-shared-task'&&Object.keys(classification).sort().join(',')!=='kind'||!['retained','completed','no-shared-task'].includes(classification.kind))throw Error('stopped group intent classification differs')
+ }
  if(row.members.map(member=>member.taskKey).join('\n')!==[...row.members].map(member=>member.taskKey).sort().join('\n')||new Set(row.members.map(member=>member.taskKey)).size!==row.members.length||new Set(row.members.map(member=>member.runId)).size!==row.members.length)throw Error('stopped group intent member set differs')
  for(const member of row.members){const binding=member.expectedBinding
   if(Object.keys(member).sort().join(',')!=='candidateDigest,expectedBinding,materialDigest,planSourceId,runId,sourceRefs,stableMaterialDigest,taskKey'||!stoppedDigest.test(member.taskKey)||!stoppedUuid.test(member.runId)||!stoppedDigest.test(member.candidateDigest)||!stoppedDigest.test(member.materialDigest)||!stoppedDigest.test(member.stableMaterialDigest)||!member.planSourceId||!Array.isArray(member.sourceRefs)||member.sourceRefs.some(ref=>Object.keys(ref).sort().join(',')!=='bodySha256,id,updatedAt'||!ref.id||!Number.isFinite(Date.parse(ref.updatedAt))||!stoppedDigest.test(ref.bodySha256))||!binding||Object.keys(binding).sort().join(',')!=='generation,installationId,machineId,ownerToken,runId,sessionId,taskKey'||binding.taskKey!==member.taskKey||binding.runId!==member.runId||!Number.isSafeInteger(binding.generation)||binding.generation<1||!binding.machineId||!stoppedUuid.test(binding.installationId)||!stoppedUuid.test(binding.sessionId)||!stoppedUuid.test(binding.ownerToken))throw Error('stopped group intent member differs')
@@ -3001,8 +3050,6 @@ async function stoppedGroupMaterialsAt(input:{repo:string;parentTaskKey:string;h
   const material=await inspectRemoteRecoveryRecord({repo:input.repo,taskKey:task.taskKey,config:input.config},{head:input.head,task},{target:input.target,gh:input.gh,source:input.source},task.stopProof??undefined)
   assertRemoteRecoveryMaterial(material);materials.push(material)
  }
- const parentMaterial=materials.find(row=>row.task.taskKey===parent.taskKey)!,declared=[...new Set(parentMaterial.children.map(row=>row.task.taskKey))].sort(),actual=members.filter(task=>task.taskKey!==parent.taskKey).map(task=>task.taskKey).sort()
- if(canonicalWire(declared)!==canonicalWire(actual))throw Error('separately authenticated stopped group member set differs: '+declared.join(',')+' != '+actual.join(','))
  return materials
 }
 async function stoppedGroupMaterialsFromReceipt(input:{repo:string;intent:StoppedGroupRecoveryIntent;currentParent:import('./shared-claims.ts').TaskRecord;config:FactoryConfig;target:import('./shared-claims.ts').CoordinationTarget;gh:TickDeps['gh'];source?:RemoteRecoveryTransport['source']}):Promise<{materials:RemoteRecoveryMaterial[];inspection:Extract<import('./shared-claims.ts').GroupSuccessionInspection,{kind:'verified'}>}>
@@ -3013,8 +3060,8 @@ async function stoppedGroupMaterialsFromReceipt(input:{repo:string;intent:Stoppe
  for(const member of input.intent.members){
   const receiptMember=inspection.receipt.members.find(row=>row.before.taskKey===member.taskKey),raw=await input.target.provider.read(input.target,input.intent.expectedHead,`coordination/tasks/${member.taskKey}.json`)
   if(!receiptMember||!raw||Buffer.byteLength(raw)>256*1024)throw Error('stopped group predecessor unavailable')
-  let task:import('./shared-claims.ts').TaskRecord;try{task=JSON.parse(raw)}catch{throw Error('stopped group predecessor is unreadable')}
-  if(raw!==owner.canonical(task)||owner.sha256(raw)!==receiptMember.beforeTaskSha256||canonicalWire(groupBinding(task))!==canonicalWire(member.expectedBinding)||owner.sha256(owner.canonical(groupCandidate(task)))!==member.candidateDigest)throw Error('stopped group predecessor identity changed')
+  let task:import('./shared-claims.ts').TaskRecord;try{task=owner.parseTaskRecordBytes(raw)}catch{throw Error('stopped group predecessor is unreadable')}
+  if(owner.sha256(raw)!==receiptMember.beforeTaskSha256||canonicalWire(groupBinding(task))!==canonicalWire(member.expectedBinding)||owner.sha256(owner.canonical(groupCandidate(task)))!==member.candidateDigest)throw Error('stopped group predecessor identity changed')
   const material=await inspectRemoteRecoveryRecord({repo:input.repo,taskKey:member.taskKey,config:input.config},{head:input.intent.expectedHead,task},{target:input.target,gh:input.gh,source:input.source},task.stopProof??undefined)
   assertRemoteRecoveryMaterial(material);materials.push(material)
  }
@@ -3027,7 +3074,7 @@ async function stoppedGroupDecision(input:{repo:string;intent:StoppedGroupRecove
  const owner=await import('./shared-claims.ts'),current=await owner.inspectCoordinationTask(input.target,input.intent.parentTaskKey)
  if(current.kind!=='active'||current.task.schemaVersion!==2||!(progressed?['claimed','running'].includes(current.task.state):current.task.state==='claimed')||current.task.successionOperationId!==input.intent.operationId)throw Error('stopped group current parent unavailable')
  const refreshed=await stoppedGroupMaterialsFromReceipt({repo:input.repo,intent:input.intent,currentParent:current.task,config:input.config,target:input.target,gh:input.gh,source:input.source})
- const descriptor=await stoppedGroupDescriptor(refreshed.materials,input.intent.parentTaskKey,input.intent.operationId)
+ const descriptor=await stoppedGroupDescriptor(refreshed.materials,input.intent.parentTaskKey,input.intent.operationId,input.target,input.gh)
  if(canonicalWire(descriptor)!==canonicalWire(input.intent)){
   const parent=input.intent.members.find(row=>row.taskKey===input.intent.parentTaskKey);let barrier:{schemaVersion:number;runId:string;attemptId:string;state:string}|null=null
   if(progressed&&parent)try{barrier=JSON.parse(await(await import('./runs.ts')).readPrivateRunFile(join(runsRoot(input.config.home),parent.runId,'controller-barrier.json')))}catch(error){if((error as NodeJS.ErrnoException).code!=='ENOENT')throw error}
@@ -3091,9 +3138,9 @@ export async function prepareVerifiedStoppedGroup(input:{repo:string;parentTaskK
  let intent=await readStoppedGroupIntent(intentPath),materials:RemoteRecoveryMaterial[]
  if(intent&&currentParent.schemaVersion===2&&currentParent.successionOperationId===intent.operationId){materials=(await stoppedGroupMaterialsFromReceipt({repo:input.repo,intent,currentParent,config:input.config,target,gh,source:input.source})).materials}
  else materials=await stoppedGroupMaterialsAt({repo:input.repo,parentTaskKey:input.parentTaskKey,head:snapshot.head,tasks:Object.values(snapshot.tasks),config:input.config,target,gh,source:input.source})
- if(!intent){intent=await stoppedGroupDescriptor(materials,input.parentTaskKey,randomUUID());await helpers.atomicRunFile(intentPath,intent);const readback=await readStoppedGroupIntent(intentPath);if(!readback||canonicalWire(readback)!==canonicalWire(intent))throw Error('stopped group durable intent readback differs')}
+ if(!intent){intent=await stoppedGroupDescriptor(materials,input.parentTaskKey,randomUUID(),target,gh);await helpers.atomicRunFile(intentPath,intent);const readback=await readStoppedGroupIntent(intentPath);if(!readback||canonicalWire(readback)!==canonicalWire(intent))throw Error('stopped group durable intent readback differs')}
  else{
-  const current=await stoppedGroupDescriptor(materials,input.parentTaskKey,intent.operationId)
+  const current=await stoppedGroupDescriptor(materials,input.parentTaskKey,intent.operationId,target,gh)
   if(canonicalWire(current)!==canonicalWire(intent)){
    let barrier:{schemaVersion:number;runId:string;attemptId:string;state:string}|null=null
    try{barrier=JSON.parse(await helpers.readPrivateRunFile(join(root,currentParent.runId,'controller-barrier.json')))}catch(error){if((error as NodeJS.ErrnoException).code!=='ENOENT')throw error}
@@ -3112,7 +3159,7 @@ export async function prepareVerifiedStoppedGroup(input:{repo:string;parentTaskK
  const setupOwner=(target as StoppedGroupTarget)[stoppedGroupSetupOverride]??receivingExecutionSetup,setupDigests=new Map<string,string>()
  for(const material of materials){const setup=await setupOwner(material,checkouts.get(material.task.taskKey)!,input.config,target,input.localClaim,session.sessionId);setupDigests.set(material.task.taskKey,createHash('sha256').update(canonicalWire(setup)).digest('hex'))}
  let recovered:Awaited<ReturnType<typeof recoverStoppedGroupMaterials>>
- try{recovered=await recoverStoppedGroupMaterials({operationId:intent.operationId,parentTaskKey:intent.parentTaskKey,materials,machine,session,runtime:{config:input.config,gh,localClaim:input.localClaim,checkouts,setupDigests,setup:setupOwner,source:input.source}})}catch(error){throw Error('stopped group succession verification: '+(error as Error).message)}
+ try{recovered=await recoverStoppedGroupMaterials({operationId:intent.operationId,parentTaskKey:intent.parentTaskKey,materials,classifications:intent.classifications,machine,session,runtime:{config:input.config,gh,localClaim:input.localClaim,checkouts,setupDigests,setup:setupOwner,source:input.source}})}catch(error){throw Error('stopped group succession verification: '+(error as Error).message)}
  if(recovered.kind!=='owned')throw Error('stopped group ownership unavailable: '+recovered.reason)
  const currentByKey=new Map(recovered.inspection.currentMembers.map(row=>[row.current.taskKey,row.current])),runs:RunRecord[]=[],progressed=[...currentByKey.values()].some(task=>task.taskKey===intent!.parentTaskKey?task.state!=='claimed':task.state!=='recovery-queued')
  for(const material of materials){
@@ -3369,8 +3416,8 @@ async function recoveredGroupFinishClaim(run:RunRecord,config:FactoryConfig,gh:T
   sharedTaskContexts.set(target,current.task);await helpers.verifySharedStopProof(run.stopProof,current.task,target,run);await owner.resolveEvidence(target,run.acceptedScopeRef)
   const transition:TaskTransition={kind:'complete',stopProof:run.stopProof,acceptedScope:run.acceptedScopeRef},operationId=durableFinishOperationId(run,transition),raw=await target.provider.read(target,current.head,owner.operationPath(operationId))
   if(!raw)throw Error('recovered group completed parent operation receipt is missing')
-  const receipt=JSON.parse(raw) as import('./shared-claims.ts').OperationReceipt
-  if(raw!==owner.canonical(receipt)||receipt.operationId!==operationId||receipt.type!=='complete'||receipt.taskKey!==current.task.taskKey||receipt.generation!==current.task.generation||receipt.requestDigest!==owner.sha256(owner.canonical(transition))||canonicalWire(receipt.resultOwner)!==canonicalWire({ownerToken:current.task.ownerToken,machineId:current.task.machineId,installationId:current.task.installationId,sessionId:current.task.sessionId,runId:current.task.runId}))throw Error('recovered group completed parent operation receipt differs')
+  const receipt=owner.parseOperationReceiptBytes(raw)
+  if(receipt.operationId!==operationId||receipt.type!=='complete'||receipt.taskKey!==current.task.taskKey||receipt.generation!==current.task.generation||receipt.requestDigest!==owner.sha256(owner.canonical(transition))||canonicalWire(receipt.resultOwner)!==canonicalWire({ownerToken:current.task.ownerToken,machineId:current.task.machineId,installationId:current.task.installationId,sessionId:current.task.sessionId,runId:current.task.runId}))throw Error('recovered group completed parent operation receipt differs')
   return{kind:'completed'}
  }
  if(current.kind!=='active'||current.task.schemaVersion!==2||current.task.parentTaskKey!==null||!['running','stopped','blocked'].includes(current.task.state)||!current.task.recovery)throw Error('recovered group parent finish owner differs')

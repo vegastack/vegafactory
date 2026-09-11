@@ -119,11 +119,11 @@ test('memoized self identity never accepts a changed claimant tuple', async () =
     await releaseClaim(held.claim);
 });
 
-test('unpublished guard stays busy and verified dead guard refuses without removal', async () => {
+test('ownerless or verified-dead guard refuses for offline recovery without removal', async () => {
     const path = await fixture(), identity = await processIdentity();
     await mkdir(path + '.guard', { mode: 0o700 });
     const guard = await lstat(path + '.guard');
-    expect(await acquireClaim(path, identity)).toMatchObject({ kind: 'busy' });
+    expect(await acquireClaim(path, identity)).toMatchObject({ kind: 'refused', reason: expect.stringContaining('offline operator recovery') });
     expect((await lstat(path + '.guard')).ino).toBe(guard.ino);
     expect(await readFile(path + '.guard/owner.json').catch(e => e.code)).toBe('ENOENT');
     const record = JSON.stringify({ schemaVersion: 1, token: crypto.randomUUID(), identity: { ...identity, startId: 'prior-process-start' } });

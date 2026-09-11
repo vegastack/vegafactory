@@ -3,7 +3,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { mkdir, open, readFile, rename, lstat } from 'node:fs/promises';
 import { join, dirname } from 'node:path';
-import { ghText, type GhOptions } from './gh.ts';
+import { GhUnavailable, ghText, type GhOptions } from './gh.ts';
 import { acquireClaim, releaseClaim, processIdentity, type ProcessIdentity } from './claims.ts';
 export type CheckpointRef = {
     schemaVersion: 1;
@@ -686,6 +686,24 @@ const groupMemberSchema = closed({ before: parentBindingSchema, after: parentBin
 const receiverSchema = closed({ machineId: id, installationId: uuid, sessionId: uuid, hostBindingDigest: digest, bootIdDigest: digest });
 const groupReceiptSchema = closed({ schemaVersion: literal(2), type: literal('group-succession'), operationId: uuid, parentTaskKey: digest, previousHead: sha, requestDigest: digest, groupPlan: artifact, groupsDigest: digest, transferredAt: date, receiver: receiverSchema, members: unique(groupMemberSchema) });
 const groupRequestSchema = closed({ schemaVersion: literal(1), kind: literal('recover-stopped-group'), operationId: uuid, expectedHead: sha, parentTaskKey: digest, groupPlan: artifact, groupsDigest: digest, members: unique(closed({ expected: parentBindingSchema, candidate: candidateSchema })) });
+function parseCanonicalBytes<T>(raw: string, check: Check, name: string, max: number): T {
+    if (typeof raw !== 'string' || Buffer.byteLength(raw) > max) throw Error(`${name}: unsupported, oversized or invalid closed schema`);
+    let value: unknown;
+    try { value = JSON.parse(raw); } catch { throw Error(`${name}: corrupt JSON`); }
+    const parsed = parse<T>(value, check, name, max);
+    if (raw !== canonical(parsed)) throw Error(`${name}: noncanonical bytes`);
+    return parsed;
+}
+export function parseTaskRecordBytes(raw: string): TaskRecord {
+    const task = parseCanonicalBytes<TaskRecord>(raw, recordSchema, 'task record', 256 * 1024);
+    if (task.recovery) parseRecoveryEnvelope(task.recovery);
+    return task;
+}
+export function parseOperationReceiptBytes(raw: string): OperationReceipt {
+    const receipt = parseCanonicalBytes<OperationReceipt>(raw, receiptSchema, 'operation receipt', 32 * 1024);
+    if (receipt.recoveryPayload) parseRecoveryPayload(receipt.recoveryPayload);
+    return receipt;
+}
 export function taskKey(host: string, repositoryNodeId: string, issueNodeId: string): string {
     if (!/^[a-z0-9.-]+$/.test(host) || !node(repositoryNodeId) || !node(issueNodeId))
         throw new Error('invalid canonical task identity');
@@ -2057,14 +2075,31 @@ export async function readSharedStatus(target: CoordinationTarget, allowedRepos:
 }
 // No state-branch creation or ref fallback exists. gh retains the configured local credentials.
 export function githubCoordinationProvider(gh: (args: string[], options?: GhOptions) => Promise<string> = ghText): CoordinationProvider {
+    const includedBody = (raw: string): string => {
+        if (!raw.startsWith('HTTP/')) return raw; // Preserve injected reader compatibility.
+        const match = /^HTTP\/\S+ \d{3}[^\r\n]*\r?\n(?:[^\r\n]*\r?\n)*\r?\n([\s\S]*)$/.exec(raw);
+        if (!match) throw Error('GitHub response headers are unreadable');
+        return match[1]!;
+    };
+    const rateLimitDelay = (error: unknown): number | null => {
+        if (!(error instanceof GhUnavailable)) return null;
+        const limited = error.httpStatus === 429 || error.httpStatus === 403
+            && (error.headers.has('retry-after') || error.headers.get('x-ratelimit-remaining') === '0');
+        if (!limited) return null;
+        const after = error.headers.get('retry-after'), reset = error.headers.get('x-ratelimit-reset');
+        const delay = after !== null
+            ? (/^\d+(?:\.\d+)?$/.test(after) ? Number(after) * 1000 : Date.parse(after) - Date.now())
+            : reset !== null && /^\d+$/.test(reset) ? Number(reset) * 1000 - Date.now() : 0;
+        return Number.isFinite(delay) ? Math.max(0, Math.ceil(delay)) : 0;
+    };
     async function graphql(target: CoordinationTarget, query: string, variables: Record<string, unknown>, maxBytes?: number) {
-        const raw = await gh(['api', '--hostname', target.host, 'graphql', '--input', '-'], { input: JSON.stringify({ query, variables }), timeoutMs: requestTimeout() });
+        const raw = await gh(['api', '--hostname', target.host, 'graphql', '--input', '-', '--include'], { input: JSON.stringify({ query, variables }), timeoutMs: requestTimeout() });
         if (maxBytes !== undefined) {
             const bytes = Buffer.byteLength(raw), budget = transactionClock.getStore();
             if (budget) budget.decodedBytes += bytes;
             if (bytes > maxBytes || budget && budget.decodedBytes > 8 * 1024 * 1024) throw new StatusBoundExceeded();
         }
-        const body = JSON.parse(raw);
+        const body = JSON.parse(includedBody(raw));
         if (body.errors?.length)
             throw Error(`GraphQL refused: ${body.errors.map((x: {
                 type?: string;
@@ -2108,9 +2143,12 @@ export function githubCoordinationProvider(gh: (args: string[], options?: GhOpti
             }
             catch (error) {
                 const message = (error as Error).message;
+                const retryAfterMs = rateLimitDelay(error);
+                if (retryAfterMs !== null)
+                    return { kind: 'conflict', reason: 'provider rate limited', retryAfterMs };
                 if (/STALE_DATA|expectedHeadOid|head.*changed/i.test(message))
                     return { kind: 'conflict', reason: 'expected head changed' };
-                if (/FORBIDDEN|UNPROCESSABLE|NOT_FOUND/.test(message))
+                if (/FORBIDDEN|UNPROCESSABLE|NOT_FOUND/.test(message) || error instanceof GhUnavailable && [401, 403, 404, 422].includes(error.httpStatus ?? 0))
                     return { kind: 'refused', reason: 'provider refused conditional mutation' };
                 return { kind: 'ambiguous', reason: 'conditional mutation response unavailable' };
             }

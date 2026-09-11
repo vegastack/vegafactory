@@ -5,7 +5,8 @@ import { join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { randomUUID } from 'node:crypto';
 import { processIdentity } from '../src/claims.ts';
-import { acquireSharedTask, transitionSharedTask, recoverStoppedGroup, inspectGroupSuccession, linkAcceptedScope, inspectHandoffCoordinationTask, inspectHistoricalCoordinationTask, inspectCoordinationTask, readCoordination, readSharedStatus, taskKey, parseRecoveryEnvelope, parseRecoveryPayload, publishRecoveryReceipt, resolveEvidence, beginManagedEffect, verifyManagedEffect, canonical, sha256, githubCoordinationProvider, type CoordinationTarget, type CoordinationProvider, type VerifiedCandidate, type EffectiveMachine, type MachineSession, type GroupSuccessionRequest, type RecoveryEvidencePayload, type RecoveryEnvelope } from '../src/shared-claims.ts';
+import { GhUnavailable } from '../src/gh.ts';
+import { acquireSharedTask, transitionSharedTask, recoverStoppedGroup, inspectGroupSuccession, linkAcceptedScope, inspectHandoffCoordinationTask, inspectHistoricalCoordinationTask, inspectCoordinationTask, readCoordination, readSharedStatus, taskKey, parseRecoveryEnvelope, parseRecoveryPayload, parseTaskRecordBytes, parseOperationReceiptBytes, publishRecoveryReceipt, resolveEvidence, beginManagedEffect, verifyManagedEffect, canonical, sha256, githubCoordinationProvider, type CoordinationTarget, type CoordinationProvider, type VerifiedCandidate, type EffectiveMachine, type MachineSession, type GroupSuccessionRequest, type RecoveryEvidencePayload, type RecoveryEnvelope } from '../src/shared-claims.ts';
 const d = 'd'.repeat(64), root = '1'.repeat(40), installation = '11111111-1111-4111-8111-111111111111';
 async function fixture() {
     let head = root, version = 1, ambiguous = false, conflicts = 0, mutations = 0;
@@ -79,6 +80,16 @@ test('closed wire rejects recursion, unknown keys, provenance omission and false
     const invalid = { schemaVersion: 2, kind: 'effect-intent', effectId: randomUUID(), runId: randomUUID(), generation: 1, approvalBindings: [], effectKind: 'handback', target: { kind: 'issue-comment', repositoryId: 'R_app', issueNodeId: 'I_137', commentId: null, markerId: 'handback' }, payloadDigest: d, result: 'acknowledged', observedRemoteId: null, observedDigest: null, reasonCode: null };
     expect(() => parseRecoveryPayload(invalid)).toThrow('prepared');
 });
+test('closed task and receipt byte owners reject unknown and malformed recovered provider data', async () => {
+    const f = await fixture(), operationId = randomUUID(), acquired = await acquireSharedTask({ ...f, operationId });
+    if (acquired.kind !== 'owned') throw Error(acquired.reason);
+    const task = (await readCoordination(f.target)).tasks[acquired.claim.taskKey]!, files = f.versions.get(f.head)!, receiptRaw = files[`coordination/operations/${operationId}.json`]!, receipt = parseOperationReceiptBytes(receiptRaw);
+    expect(parseTaskRecordBytes(canonical(task))).toEqual(task); expect(receipt.operationId).toBe(operationId);
+    expect(() => parseTaskRecordBytes(canonical({ ...task, extra: true }))).toThrow('closed schema');
+    expect(() => parseOperationReceiptBytes(canonical({ ...receipt, extra: true }))).toThrow('closed schema');
+    expect(() => parseOperationReceiptBytes(canonical({ ...receipt, recoveryPayload: { schemaVersion: 2, kind: 'acceptance', extra: true } }))).toThrow('closed schema');
+    expect(() => parseOperationReceiptBytes(JSON.stringify(receipt, null, 2))).toThrow('noncanonical');
+});
 test('immutable receipt publication returns actual commit before any envelope link; edit/unavailable refuses', async () => {
     const f = await fixture(), acquired = await acquireSharedTask({ ...f, operationId: randomUUID() });
     if (acquired.kind !== 'owned')
@@ -99,11 +110,23 @@ test('copied machine identity and second session cannot enter', async () => {
     expect((await acquireSharedTask({ ...f, session: { ...f.session, sessionId: randomUUID() }, candidate: { ...f.candidate, issue: 138, issueNodeId: 'I_138', paths: ['src/b'] }, operationId: randomUUID() })).kind).toBe('busy');
 });
 test('GitHub provider sends expected head in GraphQL and inspects HTTP200 errors', async () => {
-    let request: Record<string, unknown> | null = null;
-    const f = await fixture(), p = githubCoordinationProvider(async (_args, options) => { request = JSON.parse(options!.input!); return JSON.stringify({ errors: [{ type: 'STALE_DATA' }] }); });
+    let request: Record<string, unknown> | null = null, args: string[] = [];
+    const f = await fixture(), p = githubCoordinationProvider(async (actual, options) => { args = actual; request = JSON.parse(options!.input!); return 'HTTP/2.0 200 OK\r\ncontent-type: application/json\r\n\r\n' + JSON.stringify({ errors: [{ type: 'STALE_DATA' }] }); });
     const result = await p.commit(f.target, { branchId: 'REF_state', expectedHeadOid: root, files: { 'coordination/index.json': '{}' }, operationId: randomUUID() });
     expect(result.kind).toBe('conflict');
+    expect(args).toContain('--include');
     expect((request as any).variables.input.expectedHeadOid).toBe(root);
+});
+test('GitHub provider retains server rate-limit timing for bounded transaction retry', async () => {
+    const f = await fixture(), input = { branchId: 'REF_state', expectedHeadOid: root, files: { 'coordination/index.json': '{}' }, operationId: randomUUID() };
+    const after = githubCoordinationProvider(async () => { throw new GhUnavailable('rate limited', 429, new Headers({ 'retry-after': '300' })); });
+    expect(await after.commit(f.target, input)).toEqual({ kind: 'conflict', reason: 'provider rate limited', retryAfterMs: 300_000 });
+    const now = Date.now(), reset = githubCoordinationProvider(async () => { throw new GhUnavailable('rate limited', 403, new Headers({ 'x-ratelimit-remaining': '0', 'x-ratelimit-reset': String(Math.ceil((now + 60_000) / 1000)) })); });
+    const result = await reset.commit(f.target, input);
+    expect(result).toMatchObject({ kind: 'conflict', reason: 'provider rate limited' });
+    if (result.kind === 'conflict') expect(result.retryAfterMs).toBeGreaterThanOrEqual(59_000);
+    const forbidden = githubCoordinationProvider(async () => { throw new GhUnavailable('forbidden', 403); });
+    expect(await forbidden.commit(f.target, input)).toEqual({ kind: 'refused', reason: 'provider refused conditional mutation' });
 });
 test('receipt retry rejects changed payload under the same immutable operation ID', async () => {
     const f = await fixture(), result = await acquireSharedTask({ ...f, operationId: randomUUID() });

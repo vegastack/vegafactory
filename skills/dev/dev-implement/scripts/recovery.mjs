@@ -7,6 +7,7 @@ import { createHash } from 'node:crypto';
 import { evaluateApprovals, readApprovalSources, readPages, scopeDigest, gatherConsolidatedApproval } from './lib/approval.mjs';
 const sha = /^[a-f0-9]{40}$/;
 const digest = /^[a-f0-9]{64}$/;
+const uuid = /^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/i;
 const taskId = /^[1-9]\d*-T[1-9]\d*$/;
 export const canonicalRecovery = value => JSON.stringify(value, (_key, item) => item && typeof item === 'object' && !Array.isArray(item) ? Object.fromEntries(Object.entries(item).sort(([a],[b]) => a.localeCompare(b))) : item);
 const same = (a,b) => canonicalRecovery(a) === canonicalRecovery(b);
@@ -91,17 +92,32 @@ const stoppedGroupCandidate = task => ({host:task.host,repo:task.repo,issue:task
 export function evaluateStoppedGroupRecovery(input) {
   const refuse=reason=>({action:'refuse',reason,request:null}),wait=reason=>({action:'wait',reason,request:null});
   if(!input||typeof input!=='object'||Array.isArray(input))return refuse('stopped group recovery input unavailable');
-  const {operationId,expectedHead,parentTaskKey,groupPlan,groupsDigest,approvedGroups,members}=input;
+  const {operationId,expectedHead,parentTaskKey,groupPlan,groupsDigest,approvedGroups,classifications,members}=input;
   if(!/^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/i.test(operationId)||!sha.test(expectedHead)||!digest.test(parentTaskKey)||!digest.test(groupsDigest)||groupPlan?.kind!=='plan'||!digest.test(groupPlan.digest))return refuse('stopped group recovery identity unavailable');
-  if(!Array.isArray(approvedGroups)||!approvedGroups.length||!Array.isArray(members)||members.length!==approvedGroups.length+1)return refuse('complete approved stopped group required');
+  if(!Array.isArray(approvedGroups)||!approvedGroups.length||!Array.isArray(classifications)||classifications.length!==approvedGroups.length||!Array.isArray(members))return refuse('complete approved stopped group required');
   if(hash(canonicalRecovery(approvedGroups))!==groupsDigest)return refuse('stopped group digest differs from approved groups');
   const expectedChildren=approvedGroups.map(group=>({issue:Number(/^#([1-9]\d*)$/.exec(group?.members?.length===1?group.members[0]:'')?.[1]),files:group?.files}));
   if(expectedChildren.some(row=>!Number.isSafeInteger(row.issue)||row.issue<=0||!Array.isArray(row.files)||!row.files.length||!unique(row.files)))return refuse('approved stopped group declaration unavailable');
+  const stateRef=ref=>ref&&Object.keys(ref).sort().join(',')==='blobSha256,commitSha,kind,operationId'&&ref.kind==='state-receipt'&&uuid.test(ref.operationId)&&sha.test(ref.commitSha)&&digest.test(ref.blobSha256);
+  const retained=[];
+  for(let index=0;index<classifications.length;index++){
+    const row=classifications[index],group=approvedGroups[index],expected=expectedChildren[index],kind=row?.classification?.kind;
+    if(!row||Object.keys(row).sort().join(',')!=='classification,groupId,issue,issueNodeId,taskKey'||row.groupId!==group?.id||row.issue!==expected.issue||typeof row.issueNodeId!=='string'||!/^[A-Za-z0-9_-]+$/.test(row.issueNodeId)||!digest.test(row.taskKey))return refuse('stopped group classification identity differs');
+    if(kind==='retained'){
+      if(Object.keys(row.classification).sort().join(',')!=='expected,kind'||row.classification.expected?.taskKey!==row.taskKey) return refuse('retained stopped group classification differs');
+      retained.push(row);
+    }else if(kind==='completed'){
+      if(Object.keys(row.classification).sort().join(',')!=='acceptedScope,joinEvidence,kind'||!stateRef(row.classification.acceptedScope)||!stateRef(row.classification.joinEvidence))return refuse('completed stopped group evidence differs');
+    }else if(kind==='no-shared-task'){
+      if(Object.keys(row.classification).sort().join(',')!=='kind')return refuse('no-task stopped group classification differs');
+    }else return refuse('unknown stopped group classification');
+  }
+  if(!retained.length||!unique(classifications.map(row=>row.groupId))||!unique(classifications.map(row=>row.issue))||!unique(classifications.map(row=>row.issueNodeId))||!unique(classifications.map(row=>row.taskKey))||members.length!==retained.length+1)return refuse('stopped group classifications are incomplete or repeated');
   if(!unique(members.map(row=>row?.task?.taskKey))||!unique(members.map(row=>row?.task?.runId))||!unique(members.map(row=>row?.task?.issue)))return refuse('stopped group members must be unique');
   const parent=members.find(row=>row?.task?.taskKey===parentTaskKey);
   if(!parent||parent.task.parentTaskKey!==null||parent.task.parentBinding!=null)return refuse('one top-level stopped group parent required');
-  const childIssues=members.filter(row=>row!==parent).map(row=>row.task.issue).sort((a,b)=>a-b),approvedIssues=expectedChildren.map(row=>row.issue).sort((a,b)=>a-b);
-  if(!same(childIssues,approvedIssues))return refuse('stopped group omitted or added an approved child');
+  const childIssues=members.filter(row=>row!==parent).map(row=>row.task.issue).sort((a,b)=>a-b),retainedIssues=retained.map(row=>row.issue).sort((a,b)=>a-b);
+  if(!same(childIssues,retainedIssues))return refuse('stopped group retained-member projection differs');
   for(const row of members){
     const task=row?.task,recovery=task?.recovery;
     if(!row||Object.keys(row).sort().join(',')!=='candidate,expected,stateCommit,task')return refuse('unknown or missing stopped group member field');
@@ -116,8 +132,8 @@ export function evaluateStoppedGroupRecovery(input) {
     if(stop.machineId!==task.machineId||stop.installationId!==task.installationId||stop.sessionId!==task.sessionId||stop.generation!==task.generation||!stop.runIds?.includes(task.runId))return refuse('stopped group stop owner or generation differs');
     if(task.parentTaskKey!==null){
       if(task.parentTaskKey!==parentTaskKey||!same(task.parentBinding,stoppedGroupBinding(parent.task)))return refuse('stopped group child original parent differs');
-      const approved=expectedChildren.find(group=>group.issue===task.issue);
-      if(!approved||!same(task.paths,approved.files))return refuse('stopped group child scope differs from approved group');
+      const approved=expectedChildren.find(group=>group.issue===task.issue),classification=retained.find(group=>group.issue===task.issue);
+      if(!approved||!classification||!same(task.paths,approved.files)||!same(row.expected,classification.classification.expected)||task.issueNodeId!==classification.issueNodeId||task.taskKey!==classification.taskKey)return refuse('stopped group child scope differs from approved group');
     }
     if(recovery.remoteEffectCoverage?.kind==='unmanaged-possible'||[...(recovery.effects??[])].some(effect=>effect.kind!=='telemetry-push'&&!['acknowledged','cancelled-before-send'].includes(effect.state)))return wait('stopped group blocking effects unresolved');
     if((recovery.joins??[]).some(join=>!['accepted','prepared'].includes(join.state)))return refuse('stopped group join history is not recoverable');

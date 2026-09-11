@@ -36,9 +36,19 @@ describe('renderSystemdUnit', () => {
   test('is a user unit that restarts and starts at login', () => {
     const unit = renderSystemdUnit({ ...input, platform: 'linux' })
     expect(unit).toContain('[Service]')
-    expect(unit).toContain('ExecStart=/usr/local/bin/vegafactory dispatch --watch --config /home/mk/.vegastack/factory.json')
+    expect(unit).toContain('ExecStart="/usr/local/bin/vegafactory" "dispatch" "--watch" "--config" "/home/mk/.vegastack/factory.json"')
     expect(unit).toContain('Restart=always')
     expect(unit).toContain('WantedBy=default.target')
+  })
+
+  test('quotes exact executable, config and log paths containing systemd metacharacters', () => {
+    const unit = renderSystemdUnit({ ...input, platform: 'linux',
+      binPath: '/opt/Vega $Factory/bin/vega%factory',
+      configPath: '/home/operator/Vega "Factory"/factory.json',
+      logRoot: '/home/operator/Vega Factory/logs' })
+    expect(unit).toContain('ExecStart="/opt/Vega $$Factory/bin/vega%%factory" "dispatch" "--watch" "--config" "/home/operator/Vega \\"Factory\\"/factory.json"')
+    expect(unit).toContain('StandardOutput="append:/home/operator/Vega Factory/logs/dispatcher.out.log"')
+    expect(unit).toContain('StandardError="append:/home/operator/Vega Factory/logs/dispatcher.err.log"')
   })
 })
 
@@ -100,7 +110,7 @@ describe('runServiceCli', () => {
     })
     expect(code).toBe(0)
     expect(ran[0]).toEqual(['loginctl', 'enable-linger'])
-    expect(readFileSync(join(home, '.config/systemd/user/vegafactory.service'), 'utf8')).toContain('dispatch --watch')
+    expect(readFileSync(join(home, '.config/systemd/user/vegafactory.service'), 'utf8')).toContain('"dispatch" "--watch"')
   })
 
   test('a service manager that refuses is exit 1 with its message, not a claimed success', async () => {

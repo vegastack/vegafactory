@@ -79,8 +79,8 @@ test('shared recovery preserves nonblocking telemetry but rejects identity, effe
  expect(evaluateSharedRecovery({...input,pendingEffects:[{kind:'handback',state:'ambiguous'}]}).action).toBe('wait')
 })
 
-test('complete verified stopped group yields one exact recovery request without mutating evidence',()=>{
- const f=sourceFixture(),operationId='11111111-1111-4111-8111-111111111111',head=f.head,approvedGroups=[{id:'child',members:['#145'],files:['child.ts']}]
+test('complete verified stopped group classifies retained, completed and unstarted groups without mutating evidence',()=>{
+ const f=sourceFixture(),operationId='11111111-1111-4111-8111-111111111111',head=f.head,approvedGroups=[{id:'child',members:['#145'],files:['child.ts']},{id:'done',members:['#146'],files:['done.ts']},{id:'new',members:['#147'],files:['new.ts']}]
  const groupsDigest=createHash('sha256').update(JSON.stringify(approvedGroups,(_key,item)=>item&&typeof item==='object'&&!Array.isArray(item)?Object.fromEntries(Object.entries(item).sort(([a],[b])=>a.localeCompare(b))):item)).digest('hex')
  const groupPlan={repo:'o/r',issue:144,kind:'plan',artifactId:'plan144',rev:13,digest:'8'.repeat(64)}
  const binding=(key:string,runId:string,generation=1)=>({taskKey:key,runId,generation,ownerToken:'22222222-2222-4222-8222-'+key.slice(0,12),machineId:'old',installationId:'33333333-3333-4333-8333-333333333333',sessionId:'44444444-4444-4444-8444-444444444444'})
@@ -89,7 +89,13 @@ test('complete verified stopped group yields one exact recovery request without 
   stateCommit:head,expected,candidate:{host:'github.com',repo:'o/r',issue:parentTaskKey?145:144,repositoryNodeId:'R_repo',issueNodeId:parentTaskKey?'I_145':'I_144',scopeDigest:'c'.repeat(64),approvalDigest:'d'.repeat(64),approvalBindings:f.packet.approvalBindings,runId:expected.runId,stage:'implement',paths:[parentTaskKey?'child.ts':'parent.ts'],resources:[],independent:true,parentTaskKey,parentBinding:parentTaskKey?parent:null,approvedTaskIds:[parentTaskKey?'145-T1':'144-T1']},
   task:{schemaVersion:1,state:'stopped',...expected,host:'github.com',repo:'o/r',issue:parentTaskKey?145:144,repositoryNodeId:'R_repo',issueNodeId:parentTaskKey?'I_145':'I_144',scopeDigest:'c'.repeat(64),approvalDigest:'d'.repeat(64),approvalBindings:f.packet.approvalBindings,stage:'implement',paths:[parentTaskKey?'child.ts':'parent.ts'],resources:[],independent:true,parentTaskKey,parentBinding:parentTaskKey?parent:null,approvedTaskIds:[parentTaskKey?'145-T1':'144-T1'],checkpoint,stopProof:{machineId:expected.machineId,installationId:expected.installationId,sessionId:expected.sessionId,generation:expected.generation,runIds:[expected.runId]},unresolvedEffects:[],recovery:{schemaVersion:2,taskKey:expected.taskKey,runId:expected.runId,generation:expected.generation,scopeDigest:'c'.repeat(64),approvalDigest:'d'.repeat(64),approvalBindings:f.packet.approvalBindings,checkpoint,execution:{id:'qualified'},remoteEffectCoverage:{kind:'qualified-managed-only'},effects:[],completed:[],joins:[]},acceptedScopes:[]},
  })}
- const input={operationId,expectedHead:head,parentTaskKey:parent.taskKey,groupPlan,groupsDigest,approvedGroups,members:[member(parent,null),member(child,parent.taskKey)]}
+ const stateRef=(id:string)=>({kind:'state-receipt',operationId:id,commitSha:'7'.repeat(40),blobSha256:'8'.repeat(64)})
+ const classifications=[
+  {groupId:'child',issue:145,issueNodeId:'I_145',taskKey:child.taskKey,classification:{kind:'retained',expected:child}},
+  {groupId:'done',issue:146,issueNodeId:'I_146',taskKey:'c'.repeat(64),classification:{kind:'completed',acceptedScope:stateRef('77777777-7777-4777-8777-777777777777'),joinEvidence:stateRef('88888888-8888-4888-8888-888888888888')}},
+  {groupId:'new',issue:147,issueNodeId:'I_147',taskKey:'d'.repeat(64),classification:{kind:'no-shared-task'}},
+ ]
+ const input={operationId,expectedHead:head,parentTaskKey:parent.taskKey,groupPlan,groupsDigest,approvedGroups,classifications,members:[member(parent,null),member(child,parent.taskKey)]}
  const before=JSON.stringify(input),decision=evaluateStoppedGroupRecovery(input)
  expect(decision).toEqual({action:'recover-stopped-group',reason:'verified-complete-stopped-group',request:{schemaVersion:1,kind:'recover-stopped-group',operationId,expectedHead:head,parentTaskKey:parent.taskKey,groupPlan,groupsDigest,members:input.members.map(({expected,candidate})=>({expected,candidate}))}})
  expect(JSON.stringify(input)).toBe(before)
@@ -99,6 +105,11 @@ test('complete verified stopped group yields one exact recovery request without 
   ['duplicate member',value=>{value.members.push(structuredClone(value.members[1]))},'refuse'],
   ['wrong shared head',value=>{value.members[1].stateCommit='f'.repeat(40)},'refuse'],
   ['wrong group digest',value=>{value.groupsDigest='0'.repeat(64)},'refuse'],
+  ['missing classification',value=>{value.classifications.pop()},'refuse'],
+  ['duplicate classification',value=>{value.classifications[2].taskKey=value.classifications[1].taskKey},'refuse'],
+  ['unknown classification',value=>{value.classifications[2].classification.kind='invented'},'refuse'],
+  ['completed evidence mismatch',value=>{value.classifications[1].classification.acceptedScope.commitSha='short'},'refuse'],
+  ['retained binding mismatch',value=>{value.classifications[0].classification.expected.ownerToken='99999999-9999-4999-8999-999999999999'},'refuse'],
   ['caller-created verification flags',value=>{value.members[1].verification={launch:true}},'refuse'],
   ['changed child candidate',value=>{value.members[1].candidate.paths=['other.ts']},'refuse'],
   ['changed canonical authority',value=>{value.members[1].task.recovery.approvalBindings=[]},'refuse'],
