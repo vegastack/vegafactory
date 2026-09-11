@@ -1061,13 +1061,14 @@ export interface AcceptedDelivery {
   taskRef:{repo:string;issue:number;taskId:string|null};scopeDigest:string;childHead:string
   parentRepo:string;parentIssue:number;parentHead:string;acceptance:'implemented'
 }
+interface TrustedReviewSource {commentId:number;bodySha256:string;publisher:string}
 interface AcceptedScopeProgress {
-  schemaVersion:1;joinOperationId:string;receiptId:string;linkId:string
+  schemaVersion:2;joinOperationId:string;receiptId:string;linkId:string;review:TrustedReviewSource
   payload:Extract<RecoveryEvidencePayload,{kind:'acceptance'}>
   reference:Extract<import('./shared-claims.ts').EvidenceRef,{kind:'state-receipt'}>|null
   state:'prepared'|'published'|'linked'
 }
-export async function exactReviewedChild(run:RunRecord,config:FactoryConfig,gh:typeof ghText=ghText):Promise<void> {
+async function trustedReviewedChildSource(run:RunRecord,config:FactoryConfig,gh:typeof ghText=ghText):Promise<TrustedReviewSource> {
   const comments=await fetchGhPages<{id:number;body:string;user:{login:string}}>(gh,`repos/${run.repo}/issues/${run.issue}/comments`,readBudget())
   const shipUrl=new URL(sourceModule?'../../../skills/dev/dev-ship/scripts/ship-gate.mjs':'../skill/dev-ship/scripts/ship-gate.mjs',import.meta.url)
   const {selectCurrentTrustedReview}=await import(shipUrl.href) as typeof import('../../../skills/dev/dev-ship/scripts/ship-gate.mjs')
@@ -1082,7 +1083,9 @@ export async function exactReviewedChild(run:RunRecord,config:FactoryConfig,gh:t
     throw Error('child review requires fixes'+(open.length?': '+open.join(', '):''))
   }
   await verifyDispatchRunAuthority(run,config,'effect',{gh})
+  return selected.source
 }
+export async function exactReviewedChild(run:RunRecord,config:FactoryConfig,gh:typeof ghText=ghText):Promise<void> {await trustedReviewedChildSource(run,config,gh)}
 export function acceptedDeliveryProjection(snapshot:import('./shared-claims.ts').AcceptedScopeSnapshot,childHead:string,scopeDigest:string):AcceptedDelivery[] {
   parseAcceptedScope(snapshot)
   if(!/^[a-f0-9]{64}$/.test(scopeDigest)||snapshot.schemaVersion!==2||!sha.test(childHead)||!snapshot.completedTaskIds.length||snapshot.completedTaskIds.some(id=>!snapshot.approvedTaskIds.includes(id))||new Set(snapshot.completedTaskIds).size!==snapshot.completedTaskIds.length)throw Error('accepted task projection differs')
@@ -1094,7 +1097,7 @@ export async function publishAcceptedChildScope(parent:RunRecord,child:RunRecord
   if(joined.state!=='accepted'||!joined.acceptedRef||!joined.accepted||joined.runId!==child.runId||joined.fromSha!==child.headSha||!joined.parentAfter)throw Error('accepted parent join unavailable')
   const record=await readExecutableChildrenRecord(parent,config)
   await verifyIntegrationAuthority(parent,record,config,gh)
-  await exactReviewedChild(child,config,gh)
+  const review=await trustedReviewedChildSource(child,config,gh)
   const plan=await canonicalPlan(child,gh)
   const completed=[...plan.matchAll(/^-\s*\[x\].*<!--\s*task-id:([1-9]\d*-T[1-9]\d*)\s*-->/gim)].map(row=>row[1]!)
   if(!child.approvedTaskIds?.length||!same([...completed].sort(),[...child.approvedTaskIds].sort()))throw Error('unchecked or partial child scope cannot be reported implemented')
@@ -1110,10 +1113,10 @@ export async function publishAcceptedChildScope(parent:RunRecord,child:RunRecord
   let progress=await readOptional<AcceptedScopeProgress>(path)
   if(!progress){
     const acceptedScope:import('./shared-claims.ts').AcceptedScopeSnapshot={schemaVersion:2,repo:child.repo,issue:child.issue,artifacts:child.approvalRefs,approvalBindings:child.approvalBindings,approvedTaskIds:child.approvedTaskIds,completedTaskIds:completed,parentRepo:parent.repo,parentIssue:parent.issue,parentBefore:joined.parentBefore,parentAfter:joined.parentAfter,acceptedAt:new Date().toISOString()}
-    progress={schemaVersion:1,joinOperationId:joined.operationId,receiptId:randomUUID(),linkId:randomUUID(),reference:null,state:'prepared',payload:{schemaVersion:2,kind:'acceptance',taskId:completed[0]!,runId:child.runId,sourceSha:child.headSha!,scopeDigest:child.taskKey.scopeDigest,validationId:check.validationId,commandDigest:hash(check.command),result:'passed',acceptedScope}}
+    progress={schemaVersion:2,joinOperationId:joined.operationId,receiptId:randomUUID(),linkId:randomUUID(),review,reference:null,state:'prepared',payload:{schemaVersion:2,kind:'acceptance',taskId:completed[0]!,runId:child.runId,sourceSha:child.headSha!,scopeDigest:child.taskKey.scopeDigest,validationId:check.validationId,commandDigest:hash(check.command),result:'passed',acceptedScope}}
     await atomicRunFile(path,progress)
   }
-  if(!closed(progress,['schemaVersion','joinOperationId','receiptId','linkId','payload','reference','state'])||progress.schemaVersion!==1||progress.joinOperationId!==joined.operationId||!uuid.test(progress.receiptId)||!uuid.test(progress.linkId)||progress.payload.sourceSha!==child.headSha||progress.payload.acceptedScope?.parentAfter!==joined.parentAfter||!same(progress.payload.acceptedScope?.approvalBindings,child.approvalBindings))throw Error('accepted scope persistence identity changed')
+  if(!closed(progress,['schemaVersion','joinOperationId','receiptId','linkId','payload','reference','review','state'])||progress.schemaVersion!==2||progress.joinOperationId!==joined.operationId||!uuid.test(progress.receiptId)||!uuid.test(progress.linkId)||!same(progress.review,review)||progress.payload.sourceSha!==child.headSha||progress.payload.acceptedScope?.parentAfter!==joined.parentAfter||!same(progress.payload.acceptedScope?.approvalBindings,child.approvalBindings))throw Error('accepted scope persistence identity changed')
   const owner=await import('./shared-claims.ts');owner.parseRecoveryPayload(progress.payload)
   let claim=await sharedClaimForRun(child,config,gh)
   if(!progress.reference){const published=await publishRecoveryReceipt({claim,operationId:progress.receiptId,payload:progress.payload});claim=published.claim;progress.reference=published.reference;progress.state='published';await atomicRunFile(path,progress)}

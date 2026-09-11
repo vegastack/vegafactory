@@ -2453,7 +2453,7 @@ export interface RemoteRecoveryMaterial {
   packet:Record<string,unknown>;evidence:Array<{ref:import('./shared-claims.ts').EvidenceRef;payload:import('./shared-claims.ts').RecoveryEvidencePayload|null}>
   children:Array<{task:import('./shared-claims.ts').TaskRecord;stateCommit:string;authorityRequest:import('./runs.ts').RunAuthorityRequest;checkpointRequest:NonNullable<import('./checkpoints.ts').CheckpointIntent['approvalRequest']>|null}>
   historicalParents:Array<{task:import('./shared-claims.ts').TaskRecord;stateCommit:string}>
-  sourceRefs:Array<{id:string;updatedAt:string;bodySha256:string}>;unavailableContext:Array<'original-private-notes'|'original-learning-context'>;blocks:string[]
+  planSourceId:string;sourceRefs:Array<{id:string;updatedAt:string;bodySha256:string}>;unavailableContext:Array<'original-private-notes'|'original-learning-context'>;blocks:string[]
 }
 
 type StoppedGroupDecision={action:string;reason:string;request:import('./shared-claims.ts').GroupSuccessionRequest|null}
@@ -2465,7 +2465,7 @@ type StoppedGroupRecoveryDeps={
 }
 const groupBinding=(task:Pick<import('./shared-claims.ts').TaskRecord,'taskKey'|'runId'|'generation'|'ownerToken'|'machineId'|'installationId'|'sessionId'>):import('./shared-claims.ts').ParentClaimBinding=>({taskKey:task.taskKey,runId:task.runId,generation:task.generation,ownerToken:task.ownerToken,machineId:task.machineId,installationId:task.installationId,sessionId:task.sessionId})
 const groupCandidate=(task:import('./shared-claims.ts').TaskRecord):VerifiedCandidate=>({host:task.host,repo:task.repo,issue:task.issue,repositoryNodeId:task.repositoryNodeId,issueNodeId:task.issueNodeId,scopeDigest:task.scopeDigest,approvalDigest:task.approvalDigest,approvalBindings:task.approvalBindings,runId:task.runId,stage:task.stage,paths:task.paths,resources:task.resources,independent:task.independent,parentTaskKey:task.parentTaskKey,parentBinding:task.parentBinding??null,approvedTaskIds:task.approvedTaskIds})
-const stoppedMaterialFacts=(row:RemoteRecoveryMaterial)=>({stateCommit:row.stateCommit,task:row.task,artifacts:row.artifacts,briefBody:row.briefBody,planBody:row.planBody,title:row.title,authorityRequest:row.authorityRequest,checkpointRequest:row.checkpointRequest,packet:row.packet,evidence:row.evidence,children:row.children.map(child=>({candidate:groupCandidate(child.task),authorityRequest:child.authorityRequest,checkpointRequest:child.checkpointRequest})).sort((a,b)=>a.candidate.runId.localeCompare(b.candidate.runId)),sourceRefs:row.sourceRefs,unavailableContext:row.unavailableContext,blocks:row.blocks})
+const stoppedMaterialFacts=(row:RemoteRecoveryMaterial)=>({stateCommit:row.stateCommit,task:row.task,artifacts:row.artifacts,briefBody:row.briefBody,planBody:row.planBody,title:row.title,authorityRequest:row.authorityRequest,checkpointRequest:row.checkpointRequest,packet:row.packet,evidence:row.evidence,children:row.children.map(child=>({candidate:groupCandidate(child.task),authorityRequest:child.authorityRequest,checkpointRequest:child.checkpointRequest})).sort((a,b)=>a.candidate.runId.localeCompare(b.candidate.runId)),planSourceId:row.planSourceId,sourceRefs:row.sourceRefs,unavailableContext:row.unavailableContext,blocks:row.blocks})
 
 // Every callback made by #137 re-runs the complete source/authority/private
 // reconstruction proof. Equality is only the final comparison with the frozen
@@ -2742,8 +2742,12 @@ async function inspectRemoteRecoveryRecord(input:{repo:string;taskKey:string;con
    accepted.push(payload)
   }catch{/* An unverified scope cannot reconcile a later review comment. */}
   if(accepted.length===1)try{
+   const parent=currentTask.parentTaskKey?current.tasks[currentTask.parentTaskKey]:null
+   if(!parent)throw Error('accepted review parent is unavailable')
+   const progress=JSON.parse(await(await import('./runs.ts')).readPrivateRunFile(join(runsRoot(input.config.home),parent.runId,'accepted-scope-'+currentTask.runId+'.json'))) as {schemaVersion:number;joinOperationId:string;receiptId:string;linkId:string;review:{commentId:number;bodySha256:string;publisher:string};payload:unknown;reference:unknown;state:string}
+   if(progress.schemaVersion!==2||progress.state!=='linked'||Object.keys(progress.review??{}).sort().join(',')!=='bodySha256,commentId,publisher'||!Number.isSafeInteger(progress.review.commentId)||progress.review.commentId<=0||!stoppedDigest.test(progress.review.bodySha256)||!progress.review.publisher||canonicalWire(progress.payload)!==canonicalWire(accepted[0])||!currentTask.acceptedScopes.some(row=>canonicalWire(row.receipt)===canonicalWire(progress.reference)))throw Error('accepted review source binding unavailable')
    const source=fileURLToPath(import.meta.url).endsWith('.ts'),ship=await import(new URL(source?'../../../skills/dev/dev-ship/scripts/ship-gate.mjs':'../skill/dev-ship/scripts/ship-gate.mjs',import.meta.url).href) as typeof import('../../../skills/dev/dev-ship/scripts/ship-gate.mjs')
-   const selected=ship.selectCurrentTrustedReview(comments,{complete:true,operators:authority.policy.operators,sha:accepted[0]!.sourceSha,baseSha:currentTask.checkpoint.baseSha,scopeDigest:authority.planRef.digest})
+   const selected=ship.selectCurrentTrustedReview(comments,{complete:true,operators:authority.policy.operators,sha:accepted[0]!.sourceSha,baseSha:currentTask.checkpoint.baseSha,scopeDigest:authority.planRef.digest,source:progress.review})
    if(selected?.binding.verdict==='clean')coveredReviewCommentId=selected.source.commentId
   }catch{/* A missing, changed or ambiguous current review remains an instruction barrier. */}
  }
@@ -2824,7 +2828,9 @@ async function inspectRemoteRecoveryRecord(input:{repo:string;taskKey:string;con
    for(const joined of envelope.joins){if(joined.state==='accepted'&&joined.parentAfter){const checked=spawnSync('git',['merge-base','--is-ancestor',joined.parentAfter,task.checkpoint.headSha],{cwd:checkout,timeout:3000});if(checked.status!==0)throw Error('accepted parent join is missing from recovered checkpoint')}}
   }catch(error){blocks.push((error as Error).message)}
  }
- const material={stateCommit:inspected.head,task,artifacts:authority.artifacts,briefBody:authority.briefBody,planBody:authority.planBody,title:authority.title,authorityRequest:authority.authorityRequest,checkpointRequest:authority.checkpointRequest,packet,evidence,children,historicalParents,unavailableContext:['original-private-notes','original-learning-context'] as RemoteRecoveryMaterial['unavailableContext'],sourceRefs:comments.map(row=>({id:String(row.id),updatedAt:row.updated_at,bodySha256:createHash('sha256').update(row.body).digest('hex')})),blocks:[...new Set(blocks)]}
+ const planSources=(comments as Array<{id:number;node_id?:string}>).filter(row=>row.node_id===authority.planRef.artifactId)
+ if(planSources.length!==1)blocks.push('canonical plan source identity unavailable')
+ const material={stateCommit:inspected.head,task,artifacts:authority.artifacts,briefBody:authority.briefBody,planBody:authority.planBody,title:authority.title,authorityRequest:authority.authorityRequest,checkpointRequest:authority.checkpointRequest,packet,evidence,children,historicalParents,planSourceId:String(planSources[0]?.id??''),unavailableContext:['original-private-notes','original-learning-context'] as RemoteRecoveryMaterial['unavailableContext'],sourceRefs:comments.map(row=>({id:String(row.id),updatedAt:row.updated_at,bodySha256:createHash('sha256').update(row.body).digest('hex')})),blocks:[...new Set(blocks)]}
  if(!material.blocks.length)verifiedRecoveryMaterials.set(material,createHash('sha256').update(canonicalWire(material)).digest('hex'))
  return material
 }
@@ -2904,11 +2910,10 @@ interface ReceivingIntent {
  checkout:string;handoff:Extract<import('./shared-claims.ts').EvidenceRef,{kind:'state-receipt'}>|null
 }
 interface StoppedGroupRecoveryIntent {
- schemaVersion:1;operationId:string;parentTaskKey:string;expectedHead:string
+ schemaVersion:2;operationId:string;parentTaskKey:string;expectedHead:string
  groupPlan:import('./shared-claims.ts').ArtifactRef;groupsDigest:string
- members:Array<{taskKey:string;runId:string;expectedBinding:import('./shared-claims.ts').ParentClaimBinding;candidateDigest:string;materialDigest:string}>
+ members:Array<{taskKey:string;runId:string;expectedBinding:import('./shared-claims.ts').ParentClaimBinding;candidateDigest:string;materialDigest:string;stableMaterialDigest:string;planSourceId:string;sourceRefs:Array<{id:string;updatedAt:string;bodySha256:string}>}>
 }
-const stableStoppedGroupIntent=(value:StoppedGroupRecoveryIntent)=>({...value,members:value.members.map(({materialDigest:_,...member})=>member)})
 type PreparedStoppedGroup={run:RunRecord;claim:SharedClaim;plan:LaunchPlan;started:true;group:{guard:'plan-lint';ok:true;groups:Array<{id:string;members:string[];files:string[]}>;starts:{parent:{task:import('./shared-claims.ts').TaskRecord;claim:SharedClaim;startOperationId:string};children:Array<{task:import('./shared-claims.ts').TaskRecord;claim:SharedClaim;startOperationId:string}>}}}
 const stoppedUuid=/^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/i,stoppedDigest=/^[a-f0-9]{64}$/i,stoppedSha=/^[a-f0-9]{40}$/i
 export const stableGroupRequestId=(operationId:string,taskKey:string):string=>{
@@ -2931,16 +2936,32 @@ async function stoppedGroupDescriptor(materials:RemoteRecoveryMaterial[],parentT
  const source=fileURLToPath(import.meta.url).endsWith('.ts'),planner=await import(new URL(source?'../../../skills/dev/dev-plan/scripts/plan-lint.mjs':'../skill/dev-plan/scripts/plan-lint.mjs',import.meta.url).href) as typeof import('../../../skills/dev/dev-plan/scripts/plan-lint.mjs')
  const approvedGroups=planner.parseIndependentGroups(parent.planBody).map(group=>({id:group.id,members:group.members,files:group.files}))
  if(!approvedGroups.length||approvedGroups.length!==materials.length-1)throw Error('stopped group approved member set differs')
- const members=materials.map(material=>({taskKey:material.task.taskKey,runId:material.task.runId,expectedBinding:groupBinding(material.task),candidateDigest:owner.sha256(owner.canonical(groupCandidate(material.task))),materialDigest:owner.sha256(owner.canonical(stoppedMaterialFacts(material)))})).sort((a,b)=>a.taskKey.localeCompare(b.taskKey))
- return{schemaVersion:1,operationId,parentTaskKey,expectedHead:parent.stateCommit,groupPlan,groupsDigest:owner.sha256(owner.canonical(approvedGroups)),members}
+ const members=materials.map(material=>{const facts=stoppedMaterialFacts(material),{sourceRefs:_,packet,...stable}=facts,{commentCursor:__,...stablePacket}=packet;stable.planBody=stable.planBody.replace(/^(-\s*)\[[ xX]\]/gm,'$1[ ]');return{taskKey:material.task.taskKey,runId:material.task.runId,expectedBinding:groupBinding(material.task),candidateDigest:owner.sha256(owner.canonical(groupCandidate(material.task))),materialDigest:owner.sha256(owner.canonical(facts)),stableMaterialDigest:owner.sha256(owner.canonical({...stable,packet:stablePacket})),planSourceId:material.planSourceId,sourceRefs:structuredClone(material.sourceRefs)}}).sort((a,b)=>a.taskKey.localeCompare(b.taskKey))
+ return{schemaVersion:2,operationId,parentTaskKey,expectedHead:parent.stateCommit,groupPlan,groupsDigest:owner.sha256(owner.canonical(approvedGroups)),members}
+}
+async function stoppedBarrierProgressMatches(frozen:StoppedGroupRecoveryIntent,current:StoppedGroupRecoveryIntent,root:string):Promise<boolean>{
+ const core=(value:StoppedGroupRecoveryIntent)=>({...value,members:value.members.map(({materialDigest:_,sourceRefs:__,...member})=>member)})
+ if(canonicalWire(core(frozen))!==canonicalWire(core(current)))return false
+ const parent=frozen.members.find(row=>row.taskKey===frozen.parentTaskKey);if(!parent)return false
+ for(const before of frozen.members){
+  const after=current.members.find(row=>row.taskKey===before.taskKey);if(!after)return false
+  const afterById=new Map(after.sourceRefs.map(row=>[row.id,row])),changed=before.sourceRefs.filter(row=>{const next=afterById.get(row.id);return !next||canonicalWire(next)!==canonicalWire(row)}),knownIds=new Set(before.sourceRefs.map(row=>row.id)),extras=after.sourceRefs.filter(row=>!knownIds.has(row.id))
+  if(before.materialDigest===after.materialDigest){if(changed.length||extras.length)return false;continue}
+  if(before.taskKey===frozen.parentTaskKey||changed.some(row=>row.id!==before.planSourceId)||extras.length!==1)return false
+  try{
+   const progress=JSON.parse(await(await import('./runs.ts')).readPrivateRunFile(join(root,parent.runId,'accepted-scope-'+before.runId+'.json'))) as {schemaVersion:number;review:{commentId:number;bodySha256:string;publisher:string};state:string}
+   if(progress.schemaVersion!==2||progress.state!=='linked'||String(progress.review.commentId)!==extras[0]!.id||progress.review.bodySha256!==extras[0]!.bodySha256||!progress.review.publisher)return false
+  }catch{return false}
+ }
+ return true
 }
 function assertStoppedGroupIntent(value:unknown):asserts value is StoppedGroupRecoveryIntent{
  if(!value||typeof value!=='object'||Array.isArray(value))throw Error('stopped group intent unavailable')
  const row=value as StoppedGroupRecoveryIntent,keys=Object.keys(row).sort().join(',')
- if(keys!=='expectedHead,groupPlan,groupsDigest,members,operationId,parentTaskKey,schemaVersion'||row.schemaVersion!==1||!stoppedUuid.test(row.operationId)||!stoppedDigest.test(row.parentTaskKey)||!stoppedSha.test(row.expectedHead)||!stoppedDigest.test(row.groupsDigest)||!Array.isArray(row.members)||row.members.length<2||row.members.length>17)throw Error('stopped group intent schema differs')
+ if(keys!=='expectedHead,groupPlan,groupsDigest,members,operationId,parentTaskKey,schemaVersion'||row.schemaVersion!==2||!stoppedUuid.test(row.operationId)||!stoppedDigest.test(row.parentTaskKey)||!stoppedSha.test(row.expectedHead)||!stoppedDigest.test(row.groupsDigest)||!Array.isArray(row.members)||row.members.length<2||row.members.length>17)throw Error('stopped group intent schema differs')
  if(row.members.map(member=>member.taskKey).join('\n')!==[...row.members].map(member=>member.taskKey).sort().join('\n')||new Set(row.members.map(member=>member.taskKey)).size!==row.members.length||new Set(row.members.map(member=>member.runId)).size!==row.members.length)throw Error('stopped group intent member set differs')
  for(const member of row.members){const binding=member.expectedBinding
-  if(Object.keys(member).sort().join(',')!=='candidateDigest,expectedBinding,materialDigest,runId,taskKey'||!stoppedDigest.test(member.taskKey)||!stoppedUuid.test(member.runId)||!stoppedDigest.test(member.candidateDigest)||!stoppedDigest.test(member.materialDigest)||!binding||Object.keys(binding).sort().join(',')!=='generation,installationId,machineId,ownerToken,runId,sessionId,taskKey'||binding.taskKey!==member.taskKey||binding.runId!==member.runId||!Number.isSafeInteger(binding.generation)||binding.generation<1||!binding.machineId||!stoppedUuid.test(binding.installationId)||!stoppedUuid.test(binding.sessionId)||!stoppedUuid.test(binding.ownerToken))throw Error('stopped group intent member differs')
+  if(Object.keys(member).sort().join(',')!=='candidateDigest,expectedBinding,materialDigest,planSourceId,runId,sourceRefs,stableMaterialDigest,taskKey'||!stoppedDigest.test(member.taskKey)||!stoppedUuid.test(member.runId)||!stoppedDigest.test(member.candidateDigest)||!stoppedDigest.test(member.materialDigest)||!stoppedDigest.test(member.stableMaterialDigest)||!member.planSourceId||!Array.isArray(member.sourceRefs)||member.sourceRefs.some(ref=>Object.keys(ref).sort().join(',')!=='bodySha256,id,updatedAt'||!ref.id||!Number.isFinite(Date.parse(ref.updatedAt))||!stoppedDigest.test(ref.bodySha256))||!binding||Object.keys(binding).sort().join(',')!=='generation,installationId,machineId,ownerToken,runId,sessionId,taskKey'||binding.taskKey!==member.taskKey||binding.runId!==member.runId||!Number.isSafeInteger(binding.generation)||binding.generation<1||!binding.machineId||!stoppedUuid.test(binding.installationId)||!stoppedUuid.test(binding.sessionId)||!stoppedUuid.test(binding.ownerToken))throw Error('stopped group intent member differs')
  }
 }
 async function receivingCheckout(material:RemoteRecoveryMaterial,config:FactoryConfig):Promise<string> {
@@ -3003,7 +3024,7 @@ async function stoppedGroupDecision(input:{repo:string;intent:StoppedGroupRecove
  if(canonicalWire(descriptor)!==canonicalWire(input.intent)){
   const parent=input.intent.members.find(row=>row.taskKey===input.intent.parentTaskKey);let barrier:{schemaVersion:number;runId:string;attemptId:string;state:string}|null=null
   if(progressed&&parent)try{barrier=JSON.parse(await(await import('./runs.ts')).readPrivateRunFile(join(runsRoot(input.config.home),parent.runId,'controller-barrier.json')))}catch(error){if((error as NodeJS.ErrnoException).code!=='ENOENT')throw error}
-  if(!barrier||barrier.schemaVersion!==1||barrier.runId!==parent?.runId||!['active','complete'].includes(barrier.state)||canonicalWire(stableStoppedGroupIntent(descriptor))!==canonicalWire(stableStoppedGroupIntent(input.intent)))throw Error('stopped group intent changed')
+  if(!barrier||barrier.schemaVersion!==1||barrier.runId!==parent?.runId||!['active','complete'].includes(barrier.state)||!await stoppedBarrierProgressMatches(input.intent,descriptor,runsRoot(input.config.home)))throw Error('stopped group intent changed')
  }
  if(canonicalWire(refreshed.inspection.reference)!==canonicalWire(input.request.succession))throw Error('stopped group receipt changed')
  const currentByKey=new Map(refreshed.inspection.currentMembers.map(row=>[row.current.taskKey,row.current]))
@@ -3069,7 +3090,7 @@ export async function prepareVerifiedStoppedGroup(input:{repo:string;parentTaskK
   if(canonicalWire(current)!==canonicalWire(intent)){
    let barrier:{schemaVersion:number;runId:string;attemptId:string;state:string}|null=null
    try{barrier=JSON.parse(await helpers.readPrivateRunFile(join(root,currentParent.runId,'controller-barrier.json')))}catch(error){if((error as NodeJS.ErrnoException).code!=='ENOENT')throw error}
-   if(!barrier||barrier.schemaVersion!==1||barrier.runId!==currentParent.runId||!['active','complete'].includes(barrier.state)||canonicalWire(stableStoppedGroupIntent(current))!==canonicalWire(stableStoppedGroupIntent(intent)))throw Error('stopped group durable intent differs')
+   if(!barrier||barrier.schemaVersion!==1||barrier.runId!==currentParent.runId||!['active','complete'].includes(barrier.state)||!await stoppedBarrierProgressMatches(intent,current,root))throw Error('stopped group durable intent differs')
   }
  }
  const saved=await helpers.readRuns(root),checkouts=new Map<string,string>()
@@ -3321,11 +3342,21 @@ export function durableRecoverySummary(run:RunRecord):{action:'wait'|'retry-deli
  if(run.state==='terminal'&&pending)return{action:'retry-delivery',reason:'implementation is not replayed for pending delivery',...source}
  return null
 }
+async function recoveredGroupFinishClaim(run:RunRecord,config:FactoryConfig,gh:TickDeps['gh']):Promise<SharedClaim|null>{
+ if(run.parent!==null||run.state!=='terminal'||run.terminationCause!=='succeeded'||run.waitReason||run.cancelRequestedAt||!run.sharedClaim||!run.machine||!run.execution||run.remoteRecovery?.kind==='receiving-group'&&run.remoteRecovery.role!=='parent'||!run.remoteRecovery&&!run.continuations?.length)return null
+ const helpers=await import('./runs.ts'),barrierPath=join(runsRoot(config.home),run.runId,'controller-barrier.json')
+ let barrier:{schemaVersion:number;runId:string;attemptId:string;state:string};try{barrier=JSON.parse(await helpers.readPrivateRunFile(barrierPath))}catch{return null}
+ if(barrier.schemaVersion!==1||barrier.runId!==run.runId||barrier.attemptId!==(run.attemptId??run.runId)||barrier.state!=='complete'||!await helpers.verifyLocalRunStopped(run))return null
+ const claim=await sharedClaimForRun(run,config,gh),owner=await import('./shared-claims.ts'),current=await owner.inspectCoordinationTask(claim.target,claim.taskKey,{runId:claim.runId,generation:claim.generation,ownerToken:claim.ownerToken,machineId:claim.machineId,installationId:claim.installationId,sessionId:claim.sessionId})
+ if(current.kind!=='active'||current.task.schemaVersion!==2||current.task.parentTaskKey!==null||!['running','stopped','blocked'].includes(current.task.state)||!current.task.recovery)throw Error('recovered group parent finish owner differs')
+ if(run.remoteRecovery?.kind==='receiving-group'&&current.task.successionOperationId!==run.remoteRecovery.succession.operationId)throw Error('recovered group parent finish succession differs')
+ return claim
+}
 async function inspectSavedRecoveryWork(config:FactoryConfig,options:{signal?:AbortSignal},tracker:RunTracker,reports:RunReport[],refusals:Refusal[],gh:TickDeps['gh']=ghText,recoveryTransport?:TickDeps['recoveryTransport'],processDeps?:Pick<ExecuteDeps,'wrapperPath'>,recoveredChildPrepare?:TickDeps['recoveredChildPrepare']):Promise<void> {
  const helpers=await import('./runs.ts'),saved=await helpers.readRuns(runsRoot(config.home))
  const recoveryFor=async(repo:string):Promise<{target:import('./shared-claims.ts').CoordinationTarget;source?:RemoteRecoveryTransport['source']}>=>recoveryTransport?recoveryTransport(repo,config):{target:await verifiedSharedTarget(repo,config,undefined,gh)}
  type Seed=Pick<RunRecord,'repo'|'issue'|'stage'|'harness'|'checkout'>
- type Prepared={run:RunRecord;claim:SharedClaim;plan:LaunchPlan;started?:true;group?:PreparedStoppedGroup['group']}
+ type Prepared={run:RunRecord;claim:SharedClaim;plan?:LaunchPlan;started?:true;group?:PreparedStoppedGroup['group'];finishOnly?:true}
  const schedule=async(seed:Seed,prepare:(claim:Claim)=>Promise<Prepared|null>)=>{
   const key=`${seed.repo}#${seed.issue}`
   if(tracker.has(key)||inFlightIssues(tracker,seed.repo).length>=config.maxRuns)return
@@ -3338,6 +3369,13 @@ async function inspectSavedRecoveryWork(config:FactoryConfig,options:{signal?:Ab
    let outcome:RunOutcome|null=null
    try{
     const prepared=await prepare(local);if(!prepared)return
+    if(prepared.finishOnly){
+     await verifyDispatchRunAuthority(prepared.run,config,'effect',{gh});const claim=await sharedClaimForRun(prepared.run,config,gh),finish=await finishDurableSharedRun(claim,null,config,gh),finishedRun=await helpers.readRun(runsRoot(config.home),prepared.run.runId)
+     const stable=finish.kind==='stop'||finish.kind==='block'&&!!finish.stopProof?finishedRun.stopReceiptIds?.transition:null;if((finish.kind==='stop'||finish.kind==='block'&&!!finish.stopProof)&&!stable)throw Error('recovered group parent finish operation identity unavailable')
+     const finished=await transitionSharedTask({claim,operationId:stable??randomUUID(),transition:finish});if(finished.kind!=='owned')throw Error('recovery final state pending: '+finished.reason)
+     report.exitCode=prepared.run.exitCode;if(finish.kind==='block')throw Error('recovered group retained: '+(finishBlockReasons.get(finish)??'accepted child settlement or effect evidence is incomplete'));return
+    }
+    if(!prepared.plan)throw Error('recovery launch plan unavailable')
     await verifyDispatchRunAuthority(prepared.run,config,'launch',{gh})
     const start=prepared.started?{kind:'owned' as const,claim:prepared.claim}:await transitionSharedTask({claim:prepared.claim,operationId:prepared.run.attemptOperationIds!.start,transition:{kind:'start'}})
     if(start.kind!=='owned')throw Error('recovery start not acknowledged: '+start.reason)
@@ -3358,7 +3396,9 @@ async function inspectSavedRecoveryWork(config:FactoryConfig,options:{signal?:Ab
     const groupError=outcome.refusal?Error(outcome.refusal):null
     report.exitCode=outcome.exitCode;report.logFile=outcome.logFile
     const latest=await helpers.readRun(runsRoot(config.home),current.runId),claim=await sharedClaimForRun(latest,config,gh),finish=await finishDurableSharedRun(claim,outcome,config,gh)
-    const finished=await transitionSharedTask({claim,operationId:finish.kind==='stop'?latest.stopReceiptIds?.transition??randomUUID():randomUUID(),transition:finish})
+    const finishedRun=await helpers.readRun(runsRoot(config.home),latest.runId),stable=finish.kind==='stop'||finish.kind==='block'&&!!finish.stopProof?finishedRun.stopReceiptIds?.transition:null
+    if((finish.kind==='stop'||finish.kind==='block'&&!!finish.stopProof)&&!stable)throw Error('recovered group parent finish operation identity unavailable')
+    const finished=await transitionSharedTask({claim,operationId:stable??randomUUID(),transition:finish})
     if(finished.kind!=='owned')throw Error('recovery final state pending: '+finished.reason)
     if(groupError)throw groupError
     if(finish.kind==='block')throw Error('recovered group retained: '+(finishBlockReasons.get(finish)??'accepted child settlement or effect evidence is incomplete'))
@@ -3375,8 +3415,11 @@ async function inspectSavedRecoveryWork(config:FactoryConfig,options:{signal?:Ab
   const resumableGroupParent=run.parent===null&&(run.remoteRecovery?.kind==='receiving-group'||!!run.continuations?.length)
   if(retainedGroupRuns.has(run.runId)&&!resumableGroupParent)continue
   const allocated=run.state==='prepared'&&!run.processIdentity&&(run.remoteRecovery||run.continuations?.length)
-  if(!allocated&&!durableRecoverySummary(run))continue
+  let finishOnly:SharedClaim|null=null
+  if(!allocated)try{finishOnly=await recoveredGroupFinishClaim(run,config,gh)}catch(error){refusals.push({repo:run.repo,issue:run.issue,reason:(error as Error).message});continue}
+  if(!allocated&&!durableRecoverySummary(run)&&!finishOnly)continue
   await schedule(run,async local=>{
+   if(finishOnly)return{run,claim:finishOnly,finishOnly:true}
    if(allocated){
     if(run.remoteRecovery?.kind==='receiving-group'){const transport=await recoveryFor(run.repo);return prepareVerifiedStoppedGroup({repo:run.repo,parentTaskKey:run.remoteRecovery.parentTaskKey,config,localClaim:local,gh,...transport})}
     if(run.remoteRecovery)return prepareVerifiedReceivingRun({repo:run.repo,taskKey:run.sharedClaim!.taskKey,runId:run.runId},config,local)
