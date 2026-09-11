@@ -1176,6 +1176,9 @@ test('144 same-home controller verifies fresh task evidence after real ownership
  expect(continued.state).toBe('prepared');expect(continued.runId).toBe(original.runId);expect(continued.attemptId).not.toBe(original.attemptId??original.runId)
  expect(continued.attempts?.[0]?.terminationCause).toBe('interrupted');expect(continued.approvedTaskIds).toEqual(['144-T1','144-T2'])
  expect(JSON.parse(await (await import('node:fs/promises')).readFile(join(runtime.runsRoot(f.home),original.runId,'recovery.json'),'utf8')).completed.map((row:{taskId:string})=>row.taskId)).toEqual(['144-T1'])
+ const terminal=await runtime.transitionRun(continued.runId,continued.generation,{state:'terminal',terminationCause:'succeeded',exitCode:0,finishedAt:new Date().toISOString()},runtime.runsRoot(f.home)),tracker=new Map()
+ const tick=await dispatch.runTick(f.config,{dryRun:false},{gh:f.gh,tracker,recoveryTransport:async()=>f.transport} as any);await dispatch.settleRuns(tracker)
+ expect(terminal.continuations).toHaveLength(1);expect(tick.refusals.some(row=>row.reason.includes('group parent finish barrier'))).toBe(false)
 },60000)
 
 test('144 receiving inspection binds real handoff history and a fresh claimed owner without local run history',async()=>{

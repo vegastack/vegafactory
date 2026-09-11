@@ -3350,9 +3350,14 @@ export function durableRecoverySummary(run:RunRecord):{action:'wait'|'retry-deli
  return null
 }
 async function recoveredGroupFinishClaim(run:RunRecord,config:FactoryConfig,gh:TickDeps['gh']):Promise<{kind:'pending';claim:SharedClaim}|{kind:'completed'}|null>{
- const groupParent=run.remoteRecovery?.kind==='receiving-group'?run.remoteRecovery.role==='parent':!run.remoteRecovery&&!!run.continuations?.length
- if(!groupParent||run.parent!==null||run.state!=='terminal'||run.terminationCause!=='succeeded'||run.waitReason||run.cancelRequestedAt||!run.sharedClaim||!run.machine||!run.execution)return null
- const helpers=await import('./runs.ts'),barrierPath=join(runsRoot(config.home),run.runId,'controller-barrier.json')
+ const possibleGroupParent=run.remoteRecovery?.kind==='receiving-group'?run.remoteRecovery.role==='parent':!run.remoteRecovery&&!!run.continuations?.length
+ if(!possibleGroupParent||run.parent!==null||run.state!=='terminal'||run.terminationCause!=='succeeded'||run.waitReason||run.cancelRequestedAt||!run.sharedClaim||!run.machine||!run.execution)return null
+ const helpers=await import('./runs.ts'),root=runsRoot(config.home),intentPath=join(root,'receiving-group-'+run.sharedClaim.taskKey+'-'+run.runId+'.json'),intent=await readStoppedGroupIntent(intentPath)
+ if(!intent){if(run.remoteRecovery?.kind==='receiving-group')throw Error('recovered group parent finish intent is missing');return null}
+ if(intent.parentTaskKey!==run.sharedClaim.taskKey||!intent.members.some(row=>row.taskKey===run.sharedClaim!.taskKey&&row.runId===run.runId))throw Error('recovered group parent finish intent differs')
+ if(run.remoteRecovery?.kind==='receiving-group'){if(run.remoteRecovery.succession.operationId!==intent.operationId)throw Error('recovered group parent finish intent succession differs')}
+ else if(!run.continuations?.some(row=>row.requestId===stableGroupRequestId(intent.operationId,run.sharedClaim!.taskKey)))return null
+ const barrierPath=join(root,run.runId,'controller-barrier.json')
  let barrier:{schemaVersion:number;runId:string;attemptId:string;state:string};try{barrier=JSON.parse(await helpers.readPrivateRunFile(barrierPath))}catch(error){if((error as NodeJS.ErrnoException).code==='ENOENT')throw Error('recovered group parent finish barrier is missing');throw Error('recovered group parent finish barrier is unreadable')}
  if(barrier.schemaVersion!==1||barrier.runId!==run.runId||barrier.attemptId!==(run.attemptId??run.runId)||barrier.state!=='complete')throw Error('recovered group parent finish barrier identity/state differs')
  if(!await helpers.verifyLocalRunStopped(run))throw Error('recovered group parent process stop is unverified')
@@ -3361,7 +3366,7 @@ async function recoveredGroupFinishClaim(run:RunRecord,config:FactoryConfig,gh:T
  const expected={runId:run.runId,generation:run.sharedClaim.generation,ownerToken:run.sharedClaim.ownerToken,machineId:run.machine.id,installationId:run.machine.installationId,sessionId:run.machine.sessionId},current=await owner.inspectCoordinationTask(target,run.sharedClaim.taskKey,expected)
  if(current.kind==='completed'){
   if(!run.stopProof||!run.acceptedScopeRef||canonicalWire(current.task.stopProof)!==canonicalWire(run.stopProof)||!current.task.acceptedScopes.some(row=>canonicalWire(row.receipt)===canonicalWire(run.acceptedScopeRef)))throw Error('recovered group completed parent proof differs')
-  await helpers.verifySharedStopProof(run.stopProof,current.task,target,run);await owner.resolveEvidence(target,run.acceptedScopeRef)
+  sharedTaskContexts.set(target,current.task);await helpers.verifySharedStopProof(run.stopProof,current.task,target,run);await owner.resolveEvidence(target,run.acceptedScopeRef)
   const transition:TaskTransition={kind:'complete',stopProof:run.stopProof,acceptedScope:run.acceptedScopeRef},operationId=durableFinishOperationId(run,transition),raw=await target.provider.read(target,current.head,owner.operationPath(operationId))
   if(!raw)throw Error('recovered group completed parent operation receipt is missing')
   const receipt=JSON.parse(raw) as import('./shared-claims.ts').OperationReceipt
@@ -3429,6 +3434,7 @@ async function inspectSavedRecoveryWork(config:FactoryConfig,options:{signal?:Ab
  for(const run of saved){
   if(!config.repos.some(row=>row.repo===run.repo)||run.waitReason||!run.execution)continue
   if(run.remoteRecovery?.kind==='receiving-group'&&run.remoteRecovery.role==='child')continue
+  if(run.parent!==null&&run.continuations?.length)continue
   const resumableGroupParent=run.parent===null&&(run.remoteRecovery?.kind==='receiving-group'||!!run.continuations?.length)
   if(retainedGroupRuns.has(run.runId)&&!resumableGroupParent)continue
   const allocated=run.state==='prepared'&&!run.processIdentity&&(run.remoteRecovery||run.continuations?.length)
