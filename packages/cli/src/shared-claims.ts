@@ -2147,8 +2147,8 @@ export function githubCoordinationProvider(gh: (args: string[], options?: GhOpti
             return null; if (!b || b.isBinary || typeof b.text !== 'string' || b.byteSize !== Buffer.byteLength(b.text) || b.byteSize > 1024 * 1024)
             throw Error('unreadable coordination blob'); return b.text; },
         async compare(t, base, head) { if (!sha(base) || !sha(head))
-            throw Error('invalid ancestry identity'); const raw = JSON.parse(await gh(['api', '--hostname', t.host, `repos/${t.repository}/compare/${base}...${head}`], { timeoutMs: requestTimeout() })); if (!['ahead', 'identical', 'behind', 'diverged'].includes(raw.status))
-            throw Error('ancestry unavailable'); return raw.status; },
+            throw Error('invalid ancestry identity'); try { const response = includedResponse(await gh(['api', '--hostname', t.host, `repos/${t.repository}/compare/${base}...${head}`, '--include'], { timeoutMs: requestTimeout() })), raw = JSON.parse(response.body); if (!['ahead', 'identical', 'behind', 'diverged'].includes(raw.status))
+                throw Error('ancestry unavailable'); return raw.status; } catch (error) { const retryAfterMs = rateLimitDelay(error); if (retryAfterMs !== null) throw new CoordinationRateLimit(retryAfterMs); throw error; } },
         async commit(t, input) {
             try {
                 const variables = { input: { branch: { id: input.branchId }, expectedHeadOid: input.expectedHeadOid, fileChanges: { additions: Object.entries(input.files).map(([path, text]) => ({ path, contents: Buffer.from(text).toString('base64') })) }, message: { headline: 'factory coordination ' + input.operationId }, clientMutationId: input.operationId } };
