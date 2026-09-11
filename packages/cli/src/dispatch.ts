@@ -2303,6 +2303,13 @@ function recoveredSettlementOperationId(kind:'receipt'|'complete',successionOper
   const value=createHash('sha256').update(`VegaFactory/recovered-accepted-settlement/v1\n${kind}\n${successionOperationId}\n${taskKey}`).digest('hex')
   return `${value.slice(0,8)}-${value.slice(8,12)}-4${value.slice(13,16)}-${((Number.parseInt(value[16]!,16)&3)|8).toString(16)}${value.slice(17,20)}-${value.slice(20,32)}`
 }
+function durableFinishOperationId(run:RunRecord,transition:TaskTransition):string{
+ const base=run.stopReceiptIds?.transition
+ if((transition.kind==='stop'||transition.kind==='complete'||transition.kind==='block'&&!!transition.stopProof)&&!base)throw Error('durable finish operation identity unavailable')
+ if(transition.kind==='stop')return base!
+ if(transition.kind==='complete'||transition.kind==='block'&&!!transition.stopProof){const value=createHash('sha256').update(`VegaFactory/durable-finish-transition/v1\n${transition.kind}\n${base}\n${run.sharedClaim?.taskKey??run.taskKey.scopeDigest}`).digest('hex');return `${value.slice(0,8)}-${value.slice(8,12)}-4${value.slice(13,16)}-${((Number.parseInt(value[16]!,16)&3)|8).toString(16)}${value.slice(17,20)}-${value.slice(20,32)}`}
+ return randomUUID()
+}
 async function settleRecoveredAcceptedChild(task:import('./shared-claims.ts').TaskRecordV2,scope:Extract<import('./shared-claims.ts').TaskRecordV2['acceptedScopes'][number],unknown>,config:FactoryConfig,gh:TickDeps['gh']):Promise<void>{
   const helpers=await import('./runs.ts'),owner=await import('./shared-claims.ts'),root=runsRoot(config.home)
   let run=await helpers.readRun(root,task.runId)
@@ -3342,15 +3349,28 @@ export function durableRecoverySummary(run:RunRecord):{action:'wait'|'retry-deli
  if(run.state==='terminal'&&pending)return{action:'retry-delivery',reason:'implementation is not replayed for pending delivery',...source}
  return null
 }
-async function recoveredGroupFinishClaim(run:RunRecord,config:FactoryConfig,gh:TickDeps['gh']):Promise<SharedClaim|null>{
- if(run.parent!==null||run.state!=='terminal'||run.terminationCause!=='succeeded'||run.waitReason||run.cancelRequestedAt||!run.sharedClaim||!run.machine||!run.execution||run.remoteRecovery?.kind==='receiving-group'&&run.remoteRecovery.role!=='parent'||!run.remoteRecovery&&!run.continuations?.length)return null
+async function recoveredGroupFinishClaim(run:RunRecord,config:FactoryConfig,gh:TickDeps['gh']):Promise<{kind:'pending';claim:SharedClaim}|{kind:'completed'}|null>{
+ const groupParent=run.remoteRecovery?.kind==='receiving-group'?run.remoteRecovery.role==='parent':!run.remoteRecovery&&!!run.continuations?.length
+ if(!groupParent||run.parent!==null||run.state!=='terminal'||run.terminationCause!=='succeeded'||run.waitReason||run.cancelRequestedAt||!run.sharedClaim||!run.machine||!run.execution)return null
  const helpers=await import('./runs.ts'),barrierPath=join(runsRoot(config.home),run.runId,'controller-barrier.json')
- let barrier:{schemaVersion:number;runId:string;attemptId:string;state:string};try{barrier=JSON.parse(await helpers.readPrivateRunFile(barrierPath))}catch{return null}
- if(barrier.schemaVersion!==1||barrier.runId!==run.runId||barrier.attemptId!==(run.attemptId??run.runId)||barrier.state!=='complete'||!await helpers.verifyLocalRunStopped(run))return null
- const claim=await sharedClaimForRun(run,config,gh),owner=await import('./shared-claims.ts'),current=await owner.inspectCoordinationTask(claim.target,claim.taskKey,{runId:claim.runId,generation:claim.generation,ownerToken:claim.ownerToken,machineId:claim.machineId,installationId:claim.installationId,sessionId:claim.sessionId})
+ let barrier:{schemaVersion:number;runId:string;attemptId:string;state:string};try{barrier=JSON.parse(await helpers.readPrivateRunFile(barrierPath))}catch(error){if((error as NodeJS.ErrnoException).code==='ENOENT')throw Error('recovered group parent finish barrier is missing');throw Error('recovered group parent finish barrier is unreadable')}
+ if(barrier.schemaVersion!==1||barrier.runId!==run.runId||barrier.attemptId!==(run.attemptId??run.runId)||barrier.state!=='complete')throw Error('recovered group parent finish barrier identity/state differs')
+ if(!await helpers.verifyLocalRunStopped(run))throw Error('recovered group parent process stop is unverified')
+ const target=await verifiedSharedTarget(run.repo,config,run.runId,gh),machine=sharedMachineContexts.get(target),owner=await import('./shared-claims.ts')
+ if(!machine||machine.id!==run.machine.id||machine.installationId!==run.machine.installationId||machine.hostBindingDigest!==run.machine.hostBindingDigest)throw Error('recovered group parent finish machine authorization differs')
+ const expected={runId:run.runId,generation:run.sharedClaim.generation,ownerToken:run.sharedClaim.ownerToken,machineId:run.machine.id,installationId:run.machine.installationId,sessionId:run.machine.sessionId},current=await owner.inspectCoordinationTask(target,run.sharedClaim.taskKey,expected)
+ if(current.kind==='completed'){
+  if(!run.stopProof||!run.acceptedScopeRef||canonicalWire(current.task.stopProof)!==canonicalWire(run.stopProof)||!current.task.acceptedScopes.some(row=>canonicalWire(row.receipt)===canonicalWire(run.acceptedScopeRef)))throw Error('recovered group completed parent proof differs')
+  await helpers.verifySharedStopProof(run.stopProof,current.task,target,run);await owner.resolveEvidence(target,run.acceptedScopeRef)
+  const transition:TaskTransition={kind:'complete',stopProof:run.stopProof,acceptedScope:run.acceptedScopeRef},operationId=durableFinishOperationId(run,transition),raw=await target.provider.read(target,current.head,owner.operationPath(operationId))
+  if(!raw)throw Error('recovered group completed parent operation receipt is missing')
+  const receipt=JSON.parse(raw) as import('./shared-claims.ts').OperationReceipt
+  if(raw!==owner.canonical(receipt)||receipt.operationId!==operationId||receipt.type!=='complete'||receipt.taskKey!==current.task.taskKey||receipt.generation!==current.task.generation||receipt.requestDigest!==owner.sha256(owner.canonical(transition))||canonicalWire(receipt.resultOwner)!==canonicalWire({ownerToken:current.task.ownerToken,machineId:current.task.machineId,installationId:current.task.installationId,sessionId:current.task.sessionId,runId:current.task.runId}))throw Error('recovered group completed parent operation receipt differs')
+  return{kind:'completed'}
+ }
  if(current.kind!=='active'||current.task.schemaVersion!==2||current.task.parentTaskKey!==null||!['running','stopped','blocked'].includes(current.task.state)||!current.task.recovery)throw Error('recovered group parent finish owner differs')
  if(run.remoteRecovery?.kind==='receiving-group'&&current.task.successionOperationId!==run.remoteRecovery.succession.operationId)throw Error('recovered group parent finish succession differs')
- return claim
+ return{kind:'pending',claim:{taskKey:current.task.taskKey,generation:current.task.generation,ownerToken:current.task.ownerToken,machineId:current.task.machineId,installationId:current.task.installationId,sessionId:current.task.sessionId,runId:current.task.runId,stateCommit:current.head,target}}
 }
 async function inspectSavedRecoveryWork(config:FactoryConfig,options:{signal?:AbortSignal},tracker:RunTracker,reports:RunReport[],refusals:Refusal[],gh:TickDeps['gh']=ghText,recoveryTransport?:TickDeps['recoveryTransport'],processDeps?:Pick<ExecuteDeps,'wrapperPath'>,recoveredChildPrepare?:TickDeps['recoveredChildPrepare']):Promise<void> {
  const helpers=await import('./runs.ts'),saved=await helpers.readRuns(runsRoot(config.home))
@@ -3371,8 +3391,7 @@ async function inspectSavedRecoveryWork(config:FactoryConfig,options:{signal?:Ab
     const prepared=await prepare(local);if(!prepared)return
     if(prepared.finishOnly){
      await verifyDispatchRunAuthority(prepared.run,config,'effect',{gh});const claim=await sharedClaimForRun(prepared.run,config,gh),finish=await finishDurableSharedRun(claim,null,config,gh),finishedRun=await helpers.readRun(runsRoot(config.home),prepared.run.runId)
-     const stable=finish.kind==='stop'||finish.kind==='block'&&!!finish.stopProof?finishedRun.stopReceiptIds?.transition:null;if((finish.kind==='stop'||finish.kind==='block'&&!!finish.stopProof)&&!stable)throw Error('recovered group parent finish operation identity unavailable')
-     const finished=await transitionSharedTask({claim,operationId:stable??randomUUID(),transition:finish});if(finished.kind!=='owned')throw Error('recovery final state pending: '+finished.reason)
+     const finished=await transitionSharedTask({claim,operationId:durableFinishOperationId(finishedRun,finish),transition:finish});if(finished.kind!=='owned')throw Error('recovery final state pending: '+finished.reason)
      report.exitCode=prepared.run.exitCode;if(finish.kind==='block')throw Error('recovered group retained: '+(finishBlockReasons.get(finish)??'accepted child settlement or effect evidence is incomplete'));return
     }
     if(!prepared.plan)throw Error('recovery launch plan unavailable')
@@ -3396,9 +3415,7 @@ async function inspectSavedRecoveryWork(config:FactoryConfig,options:{signal?:Ab
     const groupError=outcome.refusal?Error(outcome.refusal):null
     report.exitCode=outcome.exitCode;report.logFile=outcome.logFile
     const latest=await helpers.readRun(runsRoot(config.home),current.runId),claim=await sharedClaimForRun(latest,config,gh),finish=await finishDurableSharedRun(claim,outcome,config,gh)
-    const finishedRun=await helpers.readRun(runsRoot(config.home),latest.runId),stable=finish.kind==='stop'||finish.kind==='block'&&!!finish.stopProof?finishedRun.stopReceiptIds?.transition:null
-    if((finish.kind==='stop'||finish.kind==='block'&&!!finish.stopProof)&&!stable)throw Error('recovered group parent finish operation identity unavailable')
-    const finished=await transitionSharedTask({claim,operationId:stable??randomUUID(),transition:finish})
+    const finishedRun=await helpers.readRun(runsRoot(config.home),latest.runId),finished=await transitionSharedTask({claim,operationId:durableFinishOperationId(finishedRun,finish),transition:finish})
     if(finished.kind!=='owned')throw Error('recovery final state pending: '+finished.reason)
     if(groupError)throw groupError
     if(finish.kind==='block')throw Error('recovered group retained: '+(finishBlockReasons.get(finish)??'accepted child settlement or effect evidence is incomplete'))
@@ -3416,7 +3433,7 @@ async function inspectSavedRecoveryWork(config:FactoryConfig,options:{signal?:Ab
   if(retainedGroupRuns.has(run.runId)&&!resumableGroupParent)continue
   const allocated=run.state==='prepared'&&!run.processIdentity&&(run.remoteRecovery||run.continuations?.length)
   let finishOnly:SharedClaim|null=null
-  if(!allocated)try{finishOnly=await recoveredGroupFinishClaim(run,config,gh)}catch(error){refusals.push({repo:run.repo,issue:run.issue,reason:(error as Error).message});continue}
+  if(!allocated)try{const finish=await recoveredGroupFinishClaim(run,config,gh);if(finish?.kind==='completed')continue;if(finish?.kind==='pending')finishOnly=finish.claim}catch(error){refusals.push({repo:run.repo,issue:run.issue,reason:(error as Error).message});continue}
   if(!allocated&&!durableRecoverySummary(run)&&!finishOnly)continue
   await schedule(run,async local=>{
    if(finishOnly)return{run,claim:finishOnly,finishOnly:true}
