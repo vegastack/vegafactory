@@ -58,7 +58,7 @@ const pageFixture = String.raw`
     groupAdminCapabilities: { dev: ['group.people.read'], secret: [] },
   } }
   const fence = String.fromCharCode(96).repeat(3)
-  await writeFile(join(room, 'org.md'), 'stats: on\nstats-people: on\nstats-export: attributed\n' + fence + 'vsk-policy\n' + JSON.stringify(authority) + '\n' + fence + '\n')
+  await writeFile(join(room, 'org.md'), 'stats: on\nstats-people: on\nstats-export: attributed\npolicy-schema: 2\n' + fence + 'vsk-policy\n' + JSON.stringify(authority) + '\n' + fence + '\n')
   await writeFile(join(room, 'groups', 'dev', 'group.md'), 'review: subagent\n')
   await writeFile(join(room, 'groups', 'secret', 'group.md'), 'review: subagent\n')
   await writeFile(join(room, 'repos.md'), '| repo | group | owner | repository-id |\n|---|---|---|---|\n| a/ok | dev | dev1 | R_ok |\n| a/private | secret | secret1 | R_private |\n')

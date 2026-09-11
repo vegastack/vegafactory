@@ -189,7 +189,7 @@ test('actual CLI rollup/activity/show discover September delivery independently 
   const {runStats,parseStatsArgs}=await import('../src/stats/cli.ts'),{resolvePolicy}=await import('../../../skills/dev/dev-setup/scripts/effective-policy.mjs')
   const fs=await import('node:fs/promises'),{join}=await import('node:path'),f=await acceptedFixture(),lines:string[]=[]
   try{
-    const org='stats: on\nstats-people: on\nstats-export: attributed\n```vsk-policy\n'+JSON.stringify({schemaVersion:2,administration:{orgAdmins:['reader'],groupAdmins:{},groupAdminCapabilities:{}}})+'\n```'
+    const org='stats: on\nstats-people: on\nstats-export: attributed\npolicy-schema: 2\n```vsk-policy\n'+JSON.stringify({schemaVersion:2,administration:{orgAdmins:['reader'],groupAdmins:{},groupAdminCapabilities:{}}})+'\n```'
     const effective=resolvePolicy({org,identity:{org:'o',repo:f.repo,group:'dev',peopleByScope:{org:[{login:'reader',groups:['dev']}]},repoGroups:{[f.repo]:'dev'}}})
     expect(effective.ok).toBe(true)
     const base:import('../src/stats/cli.ts').StatsDeps={home:f.root,cloneRoot:join(f.root,'clone'),hostname:'fixture',ghUser:'reader',login:'reader',viewerVerified:true,isLead:false,org:'o',repo:f.repo,policy:{enabled:true,people:true,source:'org',refusal:null},effectivePolicy:effective.policy,git:async()=>{throw Error('read only')},gh:async()=>{throw Error('legacy discovery forbidden')},readGh:f.gh,activityTarget:async()=>f.target,readStdin:async()=>'',readTranscript:async()=>[],now:()=>new Date('2026-09-15T00:00:00Z'),log:line=>lines.push(line)}

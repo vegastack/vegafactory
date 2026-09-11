@@ -40,7 +40,7 @@ test.each([
 
 function policies(context:Awaited<ReturnType<typeof contextFixture>>,offRepo:string|null=null):PeoplePolicies{
  const authority={schemaVersion:2,locked:{},delegations:[],administration:{orgAdmins:['kmanojkumar'],groupAdmins:{dev:['dev1']},groupAdminCapabilities:{dev:['group.people.read']}}}
- const org='stats: on\nstats-people: on\nstats-export: attributed\n```vsk-policy\n'+JSON.stringify(authority)+'\n```'
+ const org='stats: on\nstats-people: on\nstats-export: attributed\npolicy-schema: 2\n```vsk-policy\n'+JSON.stringify(authority)+'\n```'
  return new Map(Object.keys(context.repoGroups).map(repo=>{
   const result=resolvePolicy({org,repo:repo===offRepo?'stats-export: off':'',identity:{repo,org:'vegastack',group:context.repoGroups[repo],peopleByScope:{org:context.people},repoGroups:context.repoGroups}})
   expect(result.ok).toBe(true)

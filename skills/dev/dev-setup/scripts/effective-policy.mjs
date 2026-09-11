@@ -204,6 +204,10 @@ export function parsePolicy(text = '', scope = 'repo') {
     else if (!(key === 'stats' && parsed === 'inherit')) layer.values[key] = parsed
   }
   if (fence && policyLines) layer.blocks.push('unclosed vsk-policy block')
+  if (layer.authority && layer.schemaVersion !== 2) {
+    layer.blocks.push('vsk-policy authority requires policy-schema: 2; explicit migration required')
+    layer.authority = null
+  }
   return layer
 }
 
@@ -548,9 +552,14 @@ export function parsePeopleRegistry(text = '') {
 export function parseRepositoryRegistry(text = '') {
   const repoGroups = {}, repositoryIds = {}, blocks = [], seen = new Set()
   let idColumn = -1
-  let fence = false
+  let fence = null
   for (const line of String(text).split(/\r?\n/)) {
-    if (/^\s{0,3}(?:`{3,}|~{3,})/.test(line)) { fence = !fence; continue }
+    const boundary = /^\s{0,3}(`{3,}|~{3,})(.*)$/.exec(line)
+    if (boundary) {
+      if (!fence) fence = boundary[1]
+      else if (boundary[1][0] === fence[0] && boundary[1].length >= fence.length && !boundary[2].trim()) fence = null
+      continue
+    }
     if (fence || !line.startsWith('|')) continue
     const cells = line.split('|').slice(1, -1).map(cell => cell.trim())
     const [repo, group] = cells

@@ -1,5 +1,5 @@
 import { expect, test } from 'bun:test'
-import { gitReadBlobs, parsePolicy, resolvePolicy } from '../scripts/effective-policy.mjs'
+import { gitReadBlobs, parsePolicy, parseRepositoryRegistry, resolvePolicy } from '../scripts/effective-policy.mjs'
 
 const identity = { org: 'acme', repo: 'acme/app', group: 'dev', roomSha: 'a'.repeat(40) }
 const freshness = { configured: true, validatedAt: '2026-09-06T00:00:00Z', now: '2026-09-06T00:01:00Z', maxAgeSeconds: 7200 }
@@ -42,6 +42,22 @@ test('chronicle on/off remains an ordinary knob alongside its harness stage', ()
 
 test.each(['stats: maybe', 'stats: on\nstats: off', 'policy-schema: 9', 'harness-policy: plan unknown model high', 'review: none', '```vsk-policy\n{bad}\n```'])('known malformed input refuses: %s', text => {
   expect(resolvePolicy({ repo: text, identity }).ok).toBe(false)
+})
+
+test('schema2 authority requires an explicit policy-schema2 marker regardless of document order', () => {
+  const block = '```vsk-policy\n' + JSON.stringify({ schemaVersion: 2, locked: { tests: 'required' } }) + '\n```'
+  for (const text of [block, 'policy-schema: 1\n' + block, block + '\npolicy-schema: 1']) {
+    const layer = parsePolicy(text, 'org')
+    expect(layer.authority).toBeNull()
+    expect(layer.blocks.join(' ')).toContain('policy-schema: 2')
+  }
+  expect(parsePolicy('policy-schema: 2\n' + block, 'org').authority?.locked.tests).toBe('required')
+})
+
+test('repository registry keeps shorter nested fences and their rows inert', () => {
+  const hidden = '````md\n```\n| acme/hidden | dev | | owner | R_hidden |\n```\n````\n'
+  const visible = '| repo | group | board | owner | repository-id |\n|---|---|---|---|---|\n| acme/app | dev | | owner | R_app |\n'
+  expect(parseRepositoryRegistry(hidden + visible)).toEqual({ repoGroups: { 'acme/app': 'dev' }, repositoryIds: { 'acme/app': 'R_app' }, blocks: [] })
 })
 
 test('examples and nested lines cannot become policy; unknown extensions remain inert', () => {

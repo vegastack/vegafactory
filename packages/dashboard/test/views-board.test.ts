@@ -98,7 +98,7 @@ test('142 actual page renders successful and partial repositories without false 
     const authority = {schemaVersion:2,locked:{},delegations:[],administration:{orgAdmins:['robot'],groupAdmins:{dev:[]},groupAdminCapabilities:{dev:[]}}};
     await writeFile(code['a/ok'] + '/.vegastack/dev.md', profile);
     await writeFile(code['a/fail'] + '/.vegastack/dev.md', profile.replace('a/ok','a/fail'));
-    await writeFile(root + '/org.md', 'stats: on\\nstats-people: on\\nstats-export: attributed\\n\`\`\`vsk-policy\\n' + JSON.stringify(authority) + '\\n\`\`\`\\n');
+    await writeFile(root + '/org.md', 'stats: on\\nstats-people: on\\nstats-export: attributed\\npolicy-schema: 2\\n\`\`\`vsk-policy\\n' + JSON.stringify(authority) + '\\n\`\`\`\\n');
     await writeFile(root + '/groups/dev/group.md', 'review: subagent\\n');
     await writeFile(root + '/repos.md', '| repo | group | owner | repository-id |\\n|---|---|---|---|\\n| a/ok | dev | robot | R_ok |\\n| a/fail | dev | robot | R_fail |\\n');
     await writeFile(root + '/people.csv', 'login,name,role,slack,timezone,groups\\nrobot,Robot,member,,UTC,dev\\n');

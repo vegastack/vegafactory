@@ -7,7 +7,7 @@ import { appendRecord, listOutbox } from '../src/stats/outbox.ts'
 import { parseStatsArgs, runStats, type StatsDeps } from '../src/stats/cli.ts'
 
 import { resolvePolicy } from '../../../skills/dev/dev-setup/scripts/effective-policy.mjs'
-const effectiveFor=(repo:string)=>resolvePolicy({org:'stats: on\nstats-people: on\nstats-export: attributed\n```vsk-policy\n'+JSON.stringify({schemaVersion:2,administration:{orgAdmins:['kmanojkumar'],groupAdmins:{},groupAdminCapabilities:{}}})+'\n```',identity:{repo,org:'vegastack',group:'dev',peopleByScope:{org:[{login:'kmanojkumar',groups:['dev']},{login:'someone-else',groups:['dev']}]},repoGroups:{'vegastack/vegafactory':'dev'}}}).policy
+const effectiveFor=(repo:string)=>resolvePolicy({org:'stats: on\nstats-people: on\nstats-export: attributed\npolicy-schema: 2\n```vsk-policy\n'+JSON.stringify({schemaVersion:2,administration:{orgAdmins:['kmanojkumar'],groupAdmins:{},groupAdminCapabilities:{}}})+'\n```',identity:{repo,org:'vegastack',group:'dev',peopleByScope:{org:[{login:'kmanojkumar',groups:['dev']},{login:'someone-else',groups:['dev']}]},repoGroups:{'vegastack/vegafactory':'dev'}}}).policy
 const policy = { enabled: true, people: true, source: 'org' as const, refusal: null }
 const deps = async (): Promise<{ lines: string[]; deps: StatsDeps }> => {
   const lines: string[] = []
@@ -214,7 +214,7 @@ test('a policy refusal prevents reading hook input and any capture or export', a
 test('explicit group read scope filters individual records before organization totals', async () => {
   const { resolvePolicy } = await import('../../../skills/dev/dev-setup/scripts/effective-policy.mjs')
   const { deps: base, lines } = await deps()
-  const effective = resolvePolicy({ org: 'stats-people: on\nstats-export: attributed\n```vsk-policy\n' + JSON.stringify({ schemaVersion: 2, administration: { orgAdmins: ['owner'], groupAdmins: { dev: ['reader'] }, groupAdminCapabilities: { dev: ['group.people.read'] } } }) + '\n```', identity: { org: 'vegastack', repo: base.repo, group: 'dev', peopleByScope: { org: [{ login: 'owner', groups: ['dev'] }, { login: 'reader', groups: ['dev'] }, { login: 'person', groups: ['dev', 'design'] }] }, repoGroups: { 'vegastack/vegafactory': 'dev', 'vegastack/design': 'design' } } }).policy
+  const effective = resolvePolicy({ org: 'stats-people: on\nstats-export: attributed\npolicy-schema: 2\n```vsk-policy\n' + JSON.stringify({ schemaVersion: 2, administration: { orgAdmins: ['owner'], groupAdmins: { dev: ['reader'] }, groupAdminCapabilities: { dev: ['group.people.read'] } } }) + '\n```', identity: { org: 'vegastack', repo: base.repo, group: 'dev', peopleByScope: { org: [{ login: 'owner', groups: ['dev'] }, { login: 'reader', groups: ['dev'] }, { login: 'person', groups: ['dev', 'design'] }] }, repoGroups: { 'vegastack/vegafactory': 'dev', 'vegastack/design': 'design' } } }).policy
   await seed(base.cloneRoot, 'SEP-2026', [row({ human: 'person', duration_s: 10 }), row({ human: 'person', repo: 'vegastack/design', duration_s: 900 })])
   expect(await runStats(parseStatsArgs(['--org', '--json']), { ...base, login: 'reader', ghUser: 'reader', viewerVerified: true, effectivePolicy: effective })).toBe(0)
   const summary = JSON.parse(lines.join(''))
