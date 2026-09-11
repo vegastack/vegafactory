@@ -31,7 +31,8 @@
       "files": [],
       "assertions": [
         "A `people.csv` row is proposed with the header's columns `login,name,role,slack,timezone,groups`",
-        "`role` is not invented or inferred from org membership; it is asked for, and the reason given is that `lead` gates the people-level statistics views",
+        "`role` is not invented or inferred from org membership; it is asked for as descriptive membership and is explicitly not used as people-level read authority",
+        "Cross-person reads are routed to the resolved administration capability and repository scope in `references/control-room.md`",
         "The checklist steps (gh auth, harness install, `vegafactory skills add --group dev --global`, control-room access, Slack) are the person's own actions, and no credential is requested or read"
       ]
     },
@@ -85,12 +86,13 @@
     {
       "id": 8,
       "prompt": "Our org.md says stats: on and stats-override: locked. One of my repos put `stats: off` in its .vegastack/dev.md because that team does not want to be measured. Is that repo being recorded?",
-      "expected_output": "Yes, it is. Under `stats-override: locked` a repo's `stats: off` line is read, reported back, and ignored \u2014 the org's answer stands. The reply says so plainly, names the two ways to actually turn that repo off (change `org.md` to `stats-override: allowed`, or set `stats: off` on that repo's group in `groups/<g>/group.md`), and points at `rules/stats-privacy.md` for what a record does and does not hold \u2014 counts and identifiers only, never transcript text \u2014 because the team's real objection is usually about content, not counts.",
+      "expected_output": "Yes, it is. Under the organization lock, the repo's `stats: off` is diagnosed but cannot override the effective value. The reply says so plainly and names the two authorized remedies: the organization changes or removes the lock, or an organization admin grants an exact `stats` delegation for that group/repository and the delegated layer selects `off`. It points at `rules/stats-privacy.md` for the record boundary rather than inventing reassurance.",
       "files": [],
       "assertions": [
         "States that the repo IS still being recorded",
-        "Names `stats-override: locked` as the reason the repo's line has no effect",
-        "Offers the group-level `stats: off` and the org-level `stats-override: allowed` as the two real remedies",
+        "Names the organization lock as the reason the repo's line has no effect",
+        "Offers only changing or removing the organization lock, or granting an exact organization delegation before a group/repo `stats: off` can apply",
+        "Does not claim an undelegated group value overrides an organization lock",
         "Does not suggest a machine-level or per-user opt-out, because none exists",
         "Points at the privacy rule for what a record contains rather than reassuring in its own words"
       ]

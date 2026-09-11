@@ -40,7 +40,7 @@ A board mirrors the state labels; it never drives them. This round records the b
 
 ## Seeding `groups/<g>/group.md`
 
-A group file carries one default for every knob a group can decide for a repo's `.vegastack/dev.md` — per-repo facts such as `repo:`, `skill-scan:`, `board:` and `control-room:` stay in the repo — so a repo that answers nothing else still gets a complete profile. Seed it from an existing repo's dev.md — the knob lines transfer verbatim, the `harness-policy:` line included, because a group file is read by the same parser as dev.md — plus the harness policy: intake, plan, and implement on Claude Fable 5.1 at high effort; review on Codex gpt-5.6 at xhigh under `cross-agent` or `cross-agent-risky` and Claude Fable 5.1 high otherwise; status and the chronicle digest on Claude Sonnet 5 at medium; xhigh for planning a `risky` `full-plan` issue.
+A group file carries one default for every knob a group can decide for a repo's `.vegastack/dev.md` — per-repo facts such as `repo:`, `skill-scan:`, `board:` and `control-room:` stay in the repo — so a repo that answers nothing else still gets a complete profile. Seed it from an existing repo's dev.md: confirmed knob lines transfer verbatim, including `harness-policy:`, because a group file uses the same parser. When no confirmed policy exists, use dev-setup's refresh-tracked harness selection and flag mapping in `references/harness-facts.md`; this skill does not freeze vendor model/version defaults. <!-- mirrored -->
 
 A knob whose value differs between two repos in the group is a question, not an average: ask which one is the group's default, and let the other repo keep its hand edit — the precedence rule already protects it.
 
@@ -60,7 +60,7 @@ The org's third onboarding path is a machine rather than a repo or a person: `on
 
 Walk `onboarding/new-teammate.md` with the person: `gh auth login` at or above the group's `gh-floor:`, the harnesses the group's `harness-policy:` line names, `vegafactory skills add --group dev --global`, control-room read access, and the Slack subscription through the official GitHub Slack app. Then add their `people.csv` row — `login,name,role,slack,timezone,groups`.
 
-**A person's `role` is recorded only on the operator's word**, never inferred from org membership, because `lead` gates the people-level statistics views. A group-level row overrides an org row with the same `login`; a login absent at org level is added by the group row.
+**A person's `role` is descriptive and recorded only on the operator's word**, never inferred from org membership. It grants no people-level read authority. Cross-person visibility comes only from the resolved organization/group administration capability and repository read scope in [control-room](references/control-room.md). A group-level row overrides descriptive membership for the same `login`; it cannot override an organization lock or create administration authority without the exact organization delegation.
 
 ## The declined step
 

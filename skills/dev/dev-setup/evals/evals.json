@@ -90,7 +90,7 @@
       "files": [],
       "assertions": [
         "board: 12 is written into .vegastack/dev.md's Knobs section",
-        ".github/workflows/factory-board.yml is written only after an explicit yes, with {{runs-on}}, {{profile}} and {{state-labels}} bound and the authoring notes above the # --- marker dropped",
+        ".github/workflows/factory-board.yml is written only after an explicit yes, with {{runs-on}}, {{profile}} and {{product-revision}} bound and the authoring notes above the # --- marker dropped",
         "The reply states the mirror is one way: no reverse sync from the board back to labels",
         "The reply names the factory App and the gh 2.97.0 runner floor as the workflow's requirements"
       ]
