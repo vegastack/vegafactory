@@ -95,7 +95,7 @@ const hashBytes=(bytes:string)=>createHash('sha256').update(bytes).digest('hex')
 const uuid = /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i
 const causes = new Set(['succeeded','failed','spawn-failed','timed-out','cancelled','interrupted','termination-unconfirmed'])
 const roots = new Map<string,string>()
-const trustedGitConfigArgs=['-c','core.fsmonitor=false','-c','core.hooksPath=/dev/null','-c','core.sshCommand=ssh -oBatchMode=yes','-c','credential.helper=','-c','credential.helper=!gh auth git-credential','-c','protocol.ext.allow=never','-c','submodule.recurse=false'] as const
+const trustedGitConfigArgs=(hooksPath='/dev/null')=>['-c','core.fsmonitor=false','-c',`core.hooksPath=${hooksPath}`,'-c','core.sshCommand=ssh -oBatchMode=yes','-c','credential.helper=','-c','credential.helper=!gh auth git-credential','-c','protocol.ext.allow=never','-c','submodule.recurse=false']
 const executableGitConfig=/^(?:core\.(?:fsmonitor|sshcommand|hookspath|pager|editor)|sequence\.editor|credential(?:\..+)?\.helper|filter\..+\.(?:clean|smudge|process)|diff\..+\.(?:command|textconv)|difftool\..+\.cmd|merge\..+\.driver|mergetool\..+\.cmd|remote\..+\.(?:uploadpack|receivepack)|submodule\..+\.update|tar\..+\.command|gpg(?:\..+)?\.program|url\..+\.(?:insteadof|pushinsteadof)|protocol\..+\.allow)$/i
 export function trustedGitEnvironment():NodeJS.ProcessEnv {
   const env={...process.env}
@@ -109,21 +109,48 @@ function assertTrustedGitConfiguration(bytes:Buffer|string):void {
     if(executableGitConfig.test(row.slice(0,split)))throw Error('git-executable-config-refused')
   }
 }
-export function trustedGitSync(checkout:string,args:string[],options:{encoding?:BufferEncoding;timeout?:number;maxBuffer?:number}={}):SpawnSyncReturns<string>{
+export function trustedGitSync(checkout:string,args:string[],options:{encoding?:BufferEncoding;timeout?:number;maxBuffer?:number;hooksPath?:string}={}):SpawnSyncReturns<string>{
   const env=trustedGitEnvironment()
   const config=spawnSync('git',['config','--null','--list'],{cwd:checkout,encoding:'buffer',timeout:options.timeout??5000,maxBuffer:1024*1024,env})
   if(config.status!==0||config.error)throw Error('git-configuration-unavailable')
   assertTrustedGitConfiguration(config.stdout)
-  return spawnSync('git',[...trustedGitConfigArgs,...args],{cwd:checkout,encoding:options.encoding??'utf8',timeout:options.timeout??5000,maxBuffer:options.maxBuffer??32*1024*1024,env}) as SpawnSyncReturns<string>
+  return spawnSync('git',[...trustedGitConfigArgs(options.hooksPath),...args],{cwd:checkout,encoding:options.encoding??'utf8',timeout:options.timeout??5000,maxBuffer:options.maxBuffer??32*1024*1024,env}) as SpawnSyncReturns<string>
 }
-export async function trustedGitBytes(checkout:string,args:string[],timeout=5000):Promise<Buffer>{
+export async function trustedGitBytes(checkout:string,args:string[],timeout=5000,hooksPath?:string):Promise<Buffer>{
   const {execFile}=await import('node:child_process'),{promisify}=await import('node:util'),execute=promisify(execFile),env=trustedGitEnvironment()
   const config=(await execute('git',['config','--null','--list'],{cwd:checkout,encoding:'buffer',timeout,maxBuffer:1024*1024,env})).stdout
   assertTrustedGitConfiguration(config)
-  return(await execute('git',[...trustedGitConfigArgs,...args],{cwd:checkout,encoding:'buffer',timeout,maxBuffer:32*1024*1024,env})).stdout
+  return(await execute('git',[...trustedGitConfigArgs(hooksPath),...args],{cwd:checkout,encoding:'buffer',timeout,maxBuffer:32*1024*1024,env})).stdout
 }
-export async function trustedGitText(checkout:string,args:string[],timeout=5000):Promise<string>{
-  return new TextDecoder('utf-8',{fatal:true}).decode(await trustedGitBytes(checkout,args,timeout)).trim()
+export async function trustedGitText(checkout:string,args:string[],timeout=5000,hooksPath?:string):Promise<string>{
+  return new TextDecoder('utf-8',{fatal:true}).decode(await trustedGitBytes(checkout,args,timeout,hooksPath)).trim()
+}
+interface TrustedGitHooksManifest {schemaVersion:1;prePush:{sha256:string;bytes:number}|null}
+export async function snapshotTrustedGitHooks(root:string,run:RunRecord):Promise<void>{
+  const directory=join(root,run.runId,'git-hooks'),manifestPath=join(directory,'manifest.json'),destination=join(directory,'pre-push')
+  await mkdir(directory,{mode:0o700}).catch(error=>{if((error as NodeJS.ErrnoException).code!=='EEXIST')throw error});await privatePath(directory,true)
+  try{await trustedGitHooksPath(root,run);return}catch(error){if((error as NodeJS.ErrnoException).code!=='ENOENT'&&(error as Error).message!=='trusted Git hook manifest unavailable')throw error}
+  const common=await realpath(await trustedGitText(run.checkout,['rev-parse','--path-format=absolute','--git-common-dir'])),source=join(common,'hooks','pre-push')
+  let bytes:Buffer|null=null
+  try{const stat=await lstat(source);if(stat.isSymbolicLink()||!stat.isFile()||stat.uid!==process.getuid?.()||stat.size>256*1024)throw Error('trusted pre-push hook source refused');if((stat.mode&0o111)!==0){const file=await open(source,constants.O_RDONLY|constants.O_NOFOLLOW);try{bytes=await file.readFile()}finally{await file.close()}}}
+  catch(error){if((error as NodeJS.ErrnoException).code!=='ENOENT')throw error}
+  let prePush:TrustedGitHooksManifest['prePush']=null
+  if(bytes){
+    const sha256=createHash('sha256').update(bytes).digest('hex');prePush={sha256,bytes:bytes.length}
+    try{const existing=await open(destination,constants.O_RDONLY|constants.O_NOFOLLOW);try{const stat=await existing.stat(),saved=await existing.readFile();if(!stat.isFile()||stat.uid!==process.getuid?.()||(stat.mode&0o077)!==0||(stat.mode&0o100)===0||saved.length!==bytes.length||createHash('sha256').update(saved).digest('hex')!==sha256)throw Error('trusted pre-push hook snapshot differs')}finally{await existing.close()}}
+    catch(error){if((error as NodeJS.ErrnoException).code!=='ENOENT')throw error;const file=await open(destination,constants.O_WRONLY|constants.O_CREAT|constants.O_EXCL|constants.O_NOFOLLOW,0o700);try{await file.writeFile(bytes);await file.sync()}finally{await file.close()}}
+  }
+  await atomicRunFile(manifestPath,{schemaVersion:1,prePush})
+}
+export async function trustedGitHooksPath(root:string,run:RunRecord):Promise<string>{
+  const directory=join(root,run.runId,'git-hooks'),manifestPath=join(directory,'manifest.json')
+  let manifest:TrustedGitHooksManifest;try{manifest=parseStrictJson(await readPrivateRunFile(manifestPath,16384)) as TrustedGitHooksManifest}catch(error){if((error as NodeJS.ErrnoException).code==='ENOENT')throw Error('trusted Git hook manifest unavailable');throw error}
+  if(!closed(manifest,['schemaVersion','prePush'])||manifest.schemaVersion!==1||manifest.prePush!==null&&(!closed(manifest.prePush,['sha256','bytes'])||!digest(manifest.prePush.sha256)||!number(manifest.prePush.bytes)||manifest.prePush.bytes>256*1024))throw Error('trusted Git hook manifest differs')
+  if(manifest.prePush===null)return'/dev/null'
+  await privatePath(directory,true);const file=await open(join(directory,'pre-push'),constants.O_RDONLY|constants.O_NOFOLLOW)
+  try{const stat=await file.stat(),bytes=await file.readFile();if(!stat.isFile()||stat.uid!==process.getuid?.()||(stat.mode&0o077)!==0||(stat.mode&0o100)===0||bytes.length!==manifest.prePush.bytes||createHash('sha256').update(bytes).digest('hex')!==manifest.prePush.sha256)throw Error('trusted pre-push hook snapshot differs')}
+  finally{await file.close()}
+  return directory
 }
 export const runsRoot = (home=homedir()) => join(home,'.vegastack','runs')
 function requireId(id:string) { if (!uuid.test(id)) throw Error('invalid run identity') }
@@ -538,6 +565,7 @@ export async function createVerifiedReceivingRun(request:ReceivingRunRequest,con
       if(Object.entries(identity).some(([key,value])=>!sameJson(saved[key as keyof RunRecord],value))||saved.remoteRecovery.originalStateCommit!==fresh.original.stateCommit||saved.remoteRecovery.originalTask.bytes!==bytes||!sameJson(saved.remoteRecovery.stopProof,next.stopProof))throw Error('receiving saved identity differs')
       if(saved.state!=='prepared'||saved.pid!==null||saved.attemptId!==saved.terminalSegment?.firstAttemptId||saved.attempts?.length||saved.sharedClaim?.generation!==verified.next.generation||saved.sharedClaim.ownerToken!==verified.next.ownerToken)throw Error('receiving allocation already advanced')
       try{await lstat(runAttemptDirectory(request.root,saved));throw Error('receiving wrapper already prepared')}catch(error){if((error as NodeJS.ErrnoException).code!=='ENOENT')throw error}
+      await snapshotTrustedGitHooks(request.root,saved)
       return saved // Fresh verification still does not authorize a vendor spawn.
     }
     const attemptId=randomUUID()
@@ -562,7 +590,7 @@ export async function createVerifiedReceivingRun(request:ReceivingRunRequest,con
       await rename(staging,join(request.root,run.runId))
       for(const directory of [join(request.root,run.runId),request.root]){const handle=await open(directory,constants.O_RDONLY|constants.O_NOFOLLOW);try{await handle.sync()}finally{await handle.close()}}
     }finally{await rm(staging,{recursive:true,force:true})}
-    roots.set(run.runId,request.root)
+    roots.set(run.runId,request.root);await snapshotTrustedGitHooks(request.root,run)
     return run
   }finally{await releaseClaim(lock.claim)}
 }
@@ -718,7 +746,7 @@ export async function createVerifiedGroupReceivingRun(request:GroupReceivingRunR
     const checkpointIntent=selected.checkpointIntent??undefined,parentIssue=request.role==='parent'?null:parent.original.task.issue
     const identity={
       runId:request.runId,repo:old.repo,issue:old.issue,parent:parentIssue,checkout:request.checkout,
-      branch:checkpointIntent?.branch??checkpoint.branch,baseSha:checkpointIntent?.baseSha??checkpoint.baseSha,headSha:checkpoint.headSha,stage:old.stage,
+      branch:checkpointIntent?.branch??checkpoint.branch,baseSha:selected.authorityRequest.kind==='consolidated'?selected.authorityRequest.requested.baseSha:checkpoint.baseSha,headSha:checkpoint.headSha,stage:old.stage,
       harness:envelope.execution.harness,model:envelope.execution.model,effort:envelope.execution.effort,execution:envelope.execution,
       approvalBindings:old.approvalBindings,recordBinding:envelope.recordBinding,approvalRefs:selected.artifacts,authorityRequest:selected.authorityRequest,
       policyDigest:receiver.policyDigest,claimToken:receiver.claimToken,taskKey:{repo:old.repo,issue:old.issue,taskId:old.approvedTaskIds.length===1?old.approvedTaskIds[0]:'whole-issue',scopeDigest:old.scopeDigest},
@@ -738,7 +766,7 @@ export async function createVerifiedGroupReceivingRun(request:GroupReceivingRunR
       const fresh=groupReceivingFacts(request,structuredClone(await controller.verifyRecovery(structuredClone(request))))
       if(fresh.requestDigest!==first.requestDigest)throw Error('group receiving authority/setup changed during verification')
       await verifyGroupReceivingCheckout(request,fresh)
-      return saved
+      await snapshotTrustedGitHooks(request.root,saved);return saved
     }
     const attemptId=randomUUID(),run=parseRun({
       ...identity,schemaVersion:2,generation:1,state:'prepared',terminationCause:null,exitCode:null,pid:null,processStartId:null,processGroupId:null,processIdentity:null,
@@ -761,7 +789,7 @@ export async function createVerifiedGroupReceivingRun(request:GroupReceivingRunR
       const published=await readRun(request.root,run.runId)
       if(!sameJson(published,run))throw Error('group receiving publication readback differs')
     }finally{await rm(staging,{recursive:true,force:true})}
-    roots.set(run.runId,request.root)
+    roots.set(run.runId,request.root);await snapshotTrustedGitHooks(request.root,run)
     return run
   }finally{await releaseClaim(lock)}
 }
@@ -772,10 +800,10 @@ export async function reconcileRuns(root:string):Promise<RunRecord[]>{
   for(let run of await readRuns(root)){
     if(!['prepared','running','interrupted'].includes(run.state)&&run.terminationCause!=='termination-unconfirmed'){result.push(run);continue}
     const directory=runAttemptDirectory(root,run)
-    let handshake:import('./run-wrapper.ts').WrapperHandshake|null=null,terminal:import('./run-wrapper.ts').WrapperResult|null=null,invalid=false,attemptExists=false
+    let handshake:(import('./run-wrapper.ts').WrapperHandshake|{schemaVersion:1;runId:string;attemptId:string;identity:ProcessIdentity;pgid:number})|null=null,terminal:import('./run-wrapper.ts').WrapperResult|null=null,invalid=false,attemptExists=false
     try{await privatePath(directory,true);attemptExists=true}catch(error){if((error as NodeJS.ErrnoException).code!=='ENOENT')invalid=true}
     if(attemptExists){
-      try{const h=parseStrictJson(await readPrivateRunFile(join(directory,'handshake.json'),16384));if(!closed(h,['schemaVersion','runId','attemptId','identity','pgid'])||h.schemaVersion!==1||h.runId!==run.runId||h.attemptId!==(run.attemptId??run.runId)||!validRunProcess(h.identity)||h.pgid!==h.identity.pid)throw Error('invalid handshake');handshake=h}catch(error){if((error as NodeJS.ErrnoException).code!=='ENOENT')invalid=true}
+      try{const h=parseStrictJson(await readPrivateRunFile(join(directory,'handshake.json'),16384));const legacy=h.schemaVersion===1&&closed(h,['schemaVersion','runId','attemptId','identity','pgid']),current=h.schemaVersion===2&&closed(h,['schemaVersion','runId','attemptId','identity','anchorIdentity','pgid']);if((!legacy&&!current)||h.runId!==run.runId||h.attemptId!==(run.attemptId??run.runId)||!validRunProcess(h.identity)||h.pgid!==h.identity.pid||current&&(!validRunProcess(h.anchorIdentity)||h.anchorIdentity.pid===h.identity.pid||h.anchorIdentity.uid!==h.identity.uid||h.anchorIdentity.bootId!==h.identity.bootId))throw Error('invalid handshake');handshake=h}catch(error){if((error as NodeJS.ErrnoException).code!=='ENOENT')invalid=true}
       try{const t=parseStrictJson(await readPrivateRunFile(join(directory,'result.json'),16384));if(!closed(t,['schemaVersion','runId','attemptId','exitCode','cause','finishedAt'])||t.schemaVersion!==1||t.runId!==run.runId||t.attemptId!==(run.attemptId??run.runId)||!['succeeded','failed','spawn-failed','interrupted'].includes(t.cause)||!nullable(t.exitCode,v=>Number.isSafeInteger(v))||!date(t.finishedAt))throw Error('invalid terminal handshake');terminal=t}catch(error){if((error as NodeJS.ErrnoException).code!=='ENOENT')invalid=true}
     }
     if(handshake&&run.processIdentity&&!sameJson(handshake.identity,run.processIdentity))invalid=true

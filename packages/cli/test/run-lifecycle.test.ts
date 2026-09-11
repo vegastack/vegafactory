@@ -1,5 +1,5 @@
 import {test,expect} from 'bun:test'
-import {mkdtemp,rm} from 'node:fs/promises'
+import {mkdtemp,readFile,rm} from 'node:fs/promises'
 import {tmpdir} from 'node:os'
 import {join,resolve} from 'node:path'
 import {executeRun} from '../src/dispatch.ts'
@@ -12,15 +12,19 @@ test('owned process ignoring TERM is killed within cancellation bound',async()=>
 test('cancellation removes the owned nondetached descendant too',async()=>{const {result}=await fixture("const {spawn}=require('node:child_process');const c=spawn(process.execPath,['-e',\"process.on('SIGTERM',()=>{});setInterval(()=>{},100)\"],{stdio:'ignore'});console.log(c.pid);process.on('SIGTERM',()=>{});setInterval(()=>{},100)",200);expect(result.terminationCause).toBe('timed-out');const pid=Number(result.stdout?.trim());expect(pid).toBeGreaterThan(0);expect(()=>process.kill(pid,0)).toThrow()},12000)
 
 test('wrapper leader loss still terminates its authenticated nondetached process tree',async()=>{
-  const code="const {spawn}=require('node:child_process');const c=spawn(process.execPath,['-e',\"process.on('SIGTERM',()=>{});setInterval(()=>{},100)\"],{stdio:'ignore'});console.log(JSON.stringify({vendor:process.pid,child:c.pid}));process.on('SIGTERM',()=>{});setTimeout(()=>process.kill(process.ppid,'SIGKILL'),200);setInterval(()=>{},100)"
-  const {result,runs}=await fixture(code)
-  const line=result.stdout?.split('\n').find(row=>row.startsWith('{'))??'{}',pids=JSON.parse(line) as {vendor?:number;child?:number}
+  const probe=await mkdtemp(join(tmpdir(),'leader-loss-probe-')),pidFile=join(probe,'pids.json')
+  const code=`const {spawn}=require('node:child_process'),{writeFileSync}=require('node:fs');const c=spawn(process.execPath,['-e',"process.on('SIGTERM',()=>{});setInterval(()=>{},100)"],{stdio:'ignore'});writeFileSync(${JSON.stringify(pidFile)},JSON.stringify({vendor:process.pid,child:c.pid}));process.kill(process.ppid,'SIGKILL');process.exit(0)`
+  const {result,runs}=await fixture(code),pids=JSON.parse(await readFile(pidFile,'utf8')) as {vendor?:number;child?:number}
   try{
     expect(pids.vendor).toBeGreaterThan(0);expect(pids.child).toBeGreaterThan(0)
-    expect(()=>process.kill(pids.vendor!,0)).toThrow();expect(()=>process.kill(pids.child!,0)).toThrow()
+    expect(()=>process.kill(pids.vendor!,0)).toThrow()
+    const {spawnSync}=await import('node:child_process'),state=spawnSync('/bin/ps',['-p',String(pids.child),'-o','stat='],{encoding:'utf8'}).stdout.trim()
+    expect(state===''||state.startsWith('Z'),JSON.stringify({state,result,group:runs[0]?.processGroupId})).toBe(true)
+    expect((await import('../src/run-wrapper.ts').then(owner=>owner.inspectOwnedGroup(runs[0]!.processIdentity!))).kind).toBe('absent')
     expect(result.terminationCause).toBe('interrupted')
   }finally{
     if(runs[0]?.processGroupId)try{process.kill(-runs[0].processGroupId,'SIGKILL')}catch{}
+    await rm(probe,{recursive:true,force:true})
   }
 },12000)
 

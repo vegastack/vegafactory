@@ -1,6 +1,6 @@
 import { canonical as canonicalWire } from './shared-claims.ts'
 import { randomUUID, createHash } from 'node:crypto'
-import { type RunRecord, transitionRun, readRun, type PendingDelivery, validateAuthority, validateCheckpointIntentShape, updateRun, withRunDelivery, trustedGitBytes, trustedGitText } from './runs.ts'
+import { type RunRecord, transitionRun, readRun, type PendingDelivery, validateAuthority, validateCheckpointIntentShape, updateRun, withRunDelivery, trustedGitBytes, trustedGitText, trustedGitHooksPath } from './runs.ts'
 import { type ApprovalAuthorityRef, type CheckpointRef } from './shared-claims.ts'
 import { containsCredentialLikeText } from './dispatch.ts'
 const digest=(s:string)=>createHash('sha256').update(s).digest('hex')
@@ -23,11 +23,11 @@ export interface CheckpointController {
   prepareEffect?:(candidate:CheckpointCandidate,delivery:PendingDelivery)=>Promise<void>
   acknowledgeEffect?:(candidate:CheckpointCandidate,delivery:PendingDelivery,checkpoint:CheckpointRef)=>Promise<void>
 }
-async function gitBytes(cwd:string,args:string[]):Promise<Buffer>{
-  try{return await trustedGitBytes(cwd,args,10_000)}catch(error){if((error as Error).message==='git-executable-config-refused')throw Error('checkpoint-executable-git-config-refused');throw Error('checkpoint-git-refused')}
+async function gitBytes(cwd:string,args:string[],hooksPath?:string):Promise<Buffer>{
+  try{return await trustedGitBytes(cwd,args,10_000,hooksPath)}catch(error){if((error as Error).message==='git-executable-config-refused')throw Error('checkpoint-executable-git-config-refused');throw Error('checkpoint-git-refused')}
 }
-async function git(cwd:string,args:string[]):Promise<string>{
-  try{return await trustedGitText(cwd,args,10_000)}catch(error){if((error as Error).message==='git-executable-config-refused')throw Error('checkpoint-executable-git-config-refused');if((error as Error).message==='checkpoint-git-refused')throw error;throw Error('checkpoint-git-refused')}
+async function git(cwd:string,args:string[],hooksPath?:string):Promise<string>{
+  try{return await trustedGitText(cwd,args,10_000,hooksPath)}catch(error){if((error as Error).message==='git-executable-config-refused')throw Error('checkpoint-executable-git-config-refused');if((error as Error).message==='checkpoint-git-refused')throw error;throw Error('checkpoint-git-refused')}
 }
 async function validateGitSource(run:RunRecord,intent:CheckpointIntent):Promise<void>{
   const {readFile,lstat}=await import('node:fs/promises')
@@ -123,7 +123,7 @@ export async function publishCheckpoint(candidate:CheckpointCandidate,controller
       try{
         if(!present){
           await update({status:'ambiguous',attempts:delivery.attempts+1,lastError:null})
-          await git(record.checkout,['-c','push.followTags=false','push','--no-follow-tags','--recurse-submodules=no',i.remoteUrl,`${fresh.headSha}:${checkpointRemoteRef(i)}`])
+          await git(record.checkout,['-c','push.followTags=false','push','--no-follow-tags','--recurse-submodules=no',i.remoteUrl,`${fresh.headSha}:${checkpointRemoteRef(i)}`],await trustedGitHooksPath(controller.root,record))
         }
         const tip=await remoteState(record,i);if(!tip)throw Error('checkpoint-readback-missing')
         await git(record.checkout,['merge-base','--is-ancestor',fresh.headSha,tip])

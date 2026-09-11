@@ -613,6 +613,16 @@ export async function inspectManagedHarness(plan: LaunchPlan): Promise<HarnessMe
     problems: ['effective Claude hook and memory configuration inspection is unavailable'] }
 }
 
+export function verifyChildAuthorityIdentity(run:RunRecord):void {
+  const request=run.authorityRequest,intent=run.checkpointIntent,checkpointRequest=intent?.approvalRequest
+  if(run.parent===null||request?.kind!=='consolidated'||!intent||!checkpointRequest||checkpointRequest.requested.ref!==`refs/heads/${run.branch}`||checkpointRequest.requested.branch!==run.branch
+    ||checkpointRequest.parentRepo!==request.parentRepo||checkpointRequest.parentIssue!==request.parentIssue||canonicalWire(checkpointRequest.approvalBinding)!==canonicalWire(request.approvalBinding)
+    ||request.requested.repo!==run.repo||request.requested.issue!==run.issue||request.requested.operation!=='edit'||request.requested.branch===run.branch||request.requested.baseSha!==run.baseSha
+    ||checkpointRequest.requested.repo!==run.repo||checkpointRequest.requested.issue!==run.issue||checkpointRequest.requested.operation!=='checkpoint'||checkpointRequest.requested.baseSha!==intent.baseSha||intent.baseRef!==checkpointRequest.requested.ref
+    ||canonicalWire(request.requested.taskIds)!==canonicalWire(run.approvedTaskIds)||canonicalWire(checkpointRequest.requested.taskIds)!==canonicalWire(run.approvedTaskIds)
+    ||canonicalWire(checkpointRequest.requested.paths)!==canonicalWire(request.requested.paths)||canonicalWire(intent.paths)!==canonicalWire(request.requested.paths))throw Error('child execution/checkpoint authority identity differs')
+}
+
 export async function verifyDispatchRunAuthority(
   run: RunRecord,
   config: FactoryConfig,
@@ -624,18 +634,9 @@ export async function verifyDispatchRunAuthority(
     await helpers.verifyRunAuthority(run, config, purpose, { gh: transport.gh })
     return
   }
+  verifyChildAuthorityIdentity(run)
   const request = run.authorityRequest, intent = run.checkpointIntent, checkpointRequest = intent?.approvalRequest
-  if (!intent || !checkpointRequest || checkpointRequest.requested.ref !== `refs/heads/${run.branch}` || checkpointRequest.requested.branch !== run.branch
-    || checkpointRequest.parentRepo !== request.parentRepo || checkpointRequest.parentIssue !== request.parentIssue
-    || canonicalWire(checkpointRequest.approvalBinding) !== canonicalWire(request.approvalBinding)
-    || request.requested.repo !== run.repo || request.requested.issue !== run.issue || request.requested.operation !== 'edit'
-    || request.requested.branch === run.branch || request.requested.baseSha !== run.baseSha
-    || checkpointRequest.requested.repo !== run.repo || checkpointRequest.requested.issue !== run.issue || checkpointRequest.requested.operation !== 'checkpoint'
-    || checkpointRequest.requested.baseSha !== intent.baseSha || intent.baseRef !== checkpointRequest.requested.ref
-    || canonicalWire(request.requested.taskIds) !== canonicalWire(run.approvedTaskIds)
-    || canonicalWire(checkpointRequest.requested.taskIds) !== canonicalWire(run.approvedTaskIds)
-    || canonicalWire(checkpointRequest.requested.paths) !== canonicalWire(request.requested.paths)
-    || canonicalWire(intent.paths) !== canonicalWire(request.requested.paths)) throw Error('child execution/checkpoint authority identity differs')
+  if(!intent||!checkpointRequest)throw Error('child execution/checkpoint authority identity differs')
   const branch = trustedGitSync(run.checkout,['symbolic-ref','--short','HEAD'])
   const head = trustedGitSync(run.checkout,['rev-parse','HEAD'])
   const ancestor = trustedGitSync(run.checkout,['merge-base','--is-ancestor',run.baseSha,head.stdout?.trim() ?? ''])
@@ -815,10 +816,11 @@ export async function executeRun(
     })
     child.on('message',(message:unknown)=>{
       messages=messages.then(async()=>{
-        const m=message as {kind:string;schemaVersion:number;runId:string;attemptId:string;identity:Awaited<ReturnType<typeof processIdentity>>;pgid:number;pid?:number;exitCode:number|null;cause:TerminalCause}
+        const m=message as {kind:string;schemaVersion:number;runId:string;attemptId:string;identity:Awaited<ReturnType<typeof processIdentity>>;anchorIdentity?:Awaited<ReturnType<typeof processIdentity>>;pgid:number;pid?:number;exitCode:number|null;cause:TerminalCause}
         if(!m||m.runId!==record.runId||m.attemptId!==attemptId)throw Error('wrapper message identity mismatch')
         if(m.kind==='handshake'){
-          if(m.schemaVersion!==1||m.identity.pid!==child.pid||m.pgid!==child.pid||!identity||canonicalWire(identity)!==canonicalWire(m.identity))throw Error('wrapper handshake mismatch')
+          if(m.schemaVersion!==2||m.identity.pid!==child.pid||m.pgid!==child.pid||!identity||canonicalWire(identity)!==canonicalWire(m.identity)||!m.anchorIdentity||m.anchorIdentity.pid===m.identity.pid||m.anchorIdentity.uid!==m.identity.uid||m.anchorIdentity.bootId!==m.identity.bootId)throw Error('wrapper handshake mismatch')
+          const anchored=await refreshOwnedGroupAnchors(identity,[m.anchorIdentity]);if(!anchored?.some(member=>canonicalWire(member)===canonicalWire(m.anchorIdentity)))throw Error('wrapper containment anchor mismatch');groupAnchors=anchored
           clearTimeout(handshakeTimer)
           if(options.signal?.aborted||stopAt!==null){stop('cancelled');return}
           send({kind:'acknowledge',runId:record.runId,attemptId,command:plan.command,args:plan.args,cwd:plan.cwd,env:ownedLaunchEnvironment(plan,record,attemptId)})
@@ -2166,6 +2168,7 @@ export async function prepareDispatchRun(input:{run:PlannedRun;plan:LaunchPlan;c
       ||canonicalWire(prior.authorityRequest)!==canonicalWire(input.authorityRequest??{kind:'native'}))throw Error('prepared context changed; verified recovery required')
     const freshIntent=await(await import('./checkpoints.ts')).checkpointIntentFromApproval(prior,config)
     if(input.parent&&input.authorityRequest?.kind==='consolidated'&&(!freshIntent||canonicalWire(freshIntent.approvalRequest)!==canonicalWire(input.checkpointRequest)||canonicalWire(freshIntent)!==canonicalWire(prior.checkpointIntent)))throw Error('prepared child checkpoint request changed; local work retained')
+    await helpers.snapshotTrustedGitHooks(root,prior)
     return prior
   }
   const branch=trustedGitSync(plan.cwd,['symbolic-ref','--short','HEAD']),head=trustedGitSync(plan.cwd,['rev-parse','HEAD'])
@@ -2177,7 +2180,7 @@ export async function prepareDispatchRun(input:{run:PlannedRun;plan:LaunchPlan;c
   {const intent=await(await import('./checkpoints.ts')).checkpointIntentFromApproval({...runInput,runId:runInput.runId??randomUUID(),schemaVersion:2,generation:1,state:'prepared',terminationCause:null,exitCode:null,pid:null,processStartId:null,processGroupId:null,processIdentity:null,finishedAt:null,pendingDelivery:[]} as RunRecord,config)
    if(input.parent&&input.authorityRequest?.kind==='consolidated'&&(!intent||canonicalWire(intent.approvalRequest)!==canonicalWire(input.checkpointRequest)))throw Error('exact child checkpoint request unavailable; prepared checkout retained')
    if(intent)runInput.checkpointIntent=intent}
-  return helpers.createRun(runInput)
+  const created=await helpers.createRun(runInput);await helpers.snapshotTrustedGitHooks(root,created);return created
 }
 
 export async function registerQualifiedExecution(input:{config:FactoryConfig;repo:string;plan:LaunchPlan;execution:import('./shared-claims.ts').ExecutionIdentity;runtimeBinding:import('./runs.ts').InstalledRuntimeBinding}):Promise<string>{

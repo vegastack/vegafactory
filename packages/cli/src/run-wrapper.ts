@@ -43,7 +43,7 @@ export async function refreshOwnedGroupAnchors(identity:ProcessIdentity,anchors:
   if(observation.kind==='absent')return []
   if(observation.kind==='foreign'||!observation.members.length)return null
   const members:ProcessIdentity[]=[]
-  try{for(const pid of observation.members){const member=await inspector.identity(pid);if(member.uid!==identity.uid||member.bootId!==identity.bootId)return null;members.push(member)}}catch{return null}
+  for(const pid of observation.members)try{const member=await inspector.identity(pid);if(member.uid===identity.uid&&member.bootId===identity.bootId)members.push(member)}catch{/* A concurrently exiting member does not erase a surviving exact anchor. */}
   // A live exact leader establishes the group initially. After leader loss, at
   // least one exact previously observed member must keep the same PGID alive;
   // a newly reused numeric group cannot inherit kill authority.
@@ -58,12 +58,18 @@ export async function signalOwnedGroup(identity:ProcessIdentity,signal:NodeJS.Si
   catch(error){if((error as NodeJS.ErrnoException).code==='ESRCH')return true;return(await inspectOwnedGroup(identity,inspector)).kind==='absent'}
 }
 
-export interface WrapperHandshake {schemaVersion:1;runId:string;attemptId:string;identity:ProcessIdentity;pgid:number}
+export interface WrapperHandshake {schemaVersion:2;runId:string;attemptId:string;identity:ProcessIdentity;anchorIdentity:ProcessIdentity;pgid:number}
 export interface WrapperResult {schemaVersion:1;runId:string;attemptId:string;exitCode:number|null;cause:'succeeded'|'failed'|'spawn-failed'|'interrupted';finishedAt:string}
 export async function runWrapper(directory:string,runId:string,attemptId:string):Promise<void>{
   if(!process.send||!['darwin','linux'].includes(process.platform))throw Error('owned wrapper requires supported IPC launch')
   const identity=await processIdentity()
-  const handshake:WrapperHandshake={schemaVersion:1,runId,attemptId,identity,pgid:process.pid}
+  // A trusted inert member keeps the process-group identity continuously
+  // observable if the leader and short-lived vendor exit together. It exists
+  // before vendor admission and its exact process identity is persisted.
+  const anchor=spawn(process.execPath,['-e',"process.on('SIGTERM',()=>{});process.on('SIGUSR1',()=>process.exit(0));setInterval(()=>{},1000)"],{stdio:'ignore'})
+  await new Promise<void>((resolve,reject)=>anchor.once('spawn',resolve).once('error',reject))
+  const anchorIdentity=await processIdentity(anchor.pid!)
+  const handshake:WrapperHandshake={schemaVersion:2,runId,attemptId,identity,anchorIdentity,pgid:process.pid}
   await atomicRunFile(join(directory,'handshake.json'),handshake)
   process.send({kind:'handshake',...handshake})
   let admitted=false,stopping=false,completed=false,lastHeartbeat=performance.now()
@@ -82,6 +88,7 @@ export async function runWrapper(directory:string,runId:string,attemptId:string)
   const result=async(exitCode:number|null,cause:WrapperResult['cause'])=>{
     if(completed)return
     completed=true
+    if(anchor.exitCode===null&&anchor.signalCode===null)await new Promise<void>(resolve=>{const timer=setTimeout(resolve,1000);anchor.once('exit',()=>{clearTimeout(timer);resolve()});anchor.kill('SIGUSR1')})
     const record:WrapperResult={schemaVersion:1,runId,attemptId,exitCode,cause,finishedAt:new Date().toISOString()}
     try {await atomicRunFile(join(directory,'result.json'),record)}catch{terminate();return}
     process.send?.({kind:'result',...record})

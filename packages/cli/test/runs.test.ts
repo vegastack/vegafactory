@@ -362,7 +362,7 @@ test('verified group receiving creates exact parent and child attempts without f
       expect(run.parent).toBe(role==='parent'?null:1)
       expect(run.remoteRecovery).toMatchObject({kind:'receiving-group',succession:f.succession,role,parentTaskKey:request.parentTaskKey,priorHistory:'unavailable',reportingContext:'unavailable'})
       expect(run.remoteRecovery!.originalTask).toEqual({bytes:f.wire.canonical(selected.original.task),sha256:f.wire.sha256(f.wire.canonical(selected.original.task))})
-      expect(run.checkpointIntent??null).toEqual(selected.checkpointIntent);expect(run.approvalBindings).toEqual(selected.original.task.approvalBindings);expect(run.recordBinding).toEqual(selected.original.task.recovery!.recordBinding);expect((await stat(join(f.root,run.runId,'run.json'))).mode&0o777).toBe(0o600)
+      expect(run.checkpointIntent??null).toEqual(selected.checkpointIntent);expect(run.approvalBindings).toEqual(selected.original.task.approvalBindings);expect(run.recordBinding).toEqual(selected.original.task.recovery!.recordBinding);expect(run.baseSha).toBe(selected.authorityRequest.kind==='consolidated'?selected.authorityRequest.requested.baseSha:selected.original.task.checkpoint!.baseSha);if(role==='child'){expect(run.baseSha).not.toBe(run.checkpointIntent!.baseSha);(await import('../src/dispatch.ts')).verifyChildAuthorityIdentity(run)}expect((await stat(join(f.root,run.runId,'run.json'))).mode&0o777).toBe(0o600)
     }
   }finally{await rm(f.directory,{recursive:true,force:true})}
 })
