@@ -7,9 +7,19 @@ description: Bootstrap a project for issue-driven agent development — existing
 
 Act: give the project everything the dev workflow needs, asking only for the decisions detection cannot make.
 
-Re-runnable bootstrap: a profile file holding the knobs and runbooks, a thin AGENTS.md section that both Claude Code and Codex read, the GitHub labels, and the decision register. The other dev skills call this automatically when `.vegastack/dev.md` is missing, then continue with their original request. The workflow-wide artifact spec — comment markers, operator identity, revision markers, scope classes, ledger format, `.vegastack/.tmp/` workspace — lives in [conventions](references/conventions.md); dev skills cite it rather than restating it.
+Creates the profile/runbooks, thin AGENTS.md section, labels and decision register. Other dev skills call it when `.vegastack/dev.md` is missing. [Conventions](references/conventions.md) owns shared artifact and workspace rules.
 
 Nearest neighbor: `dev-architect` consumes dev.md's `## Architecture` section and gives architecture advice; dev-setup detects the facts and writes the section. There is no separate architecture profile — dev.md is the one file.
+
+## Routing
+
+| Need | Read |
+|---|---|
+| artifact formats and workspaces | [conventions](references/conventions.md) |
+| headless question fallback | [ask-route](references/ask-route.md) |
+| harness, hooks and model facts | [harness-facts](references/harness-facts.md) |
+| stack and release playbooks | [stack-playbooks](references/stack-playbooks.md) |
+| GitHub App and broker | [github-app](references/github-app.md) |
 
 ## Step 1 — Detect before asking
 
