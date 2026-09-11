@@ -272,10 +272,10 @@ export async function collectTaskActivities(input:{repo:string;period:string;gh:
           for(const comment of comments.get(projection.parentIssue)??[]){
             const delivery=typedSection(comment.body,'parentDelivery'),verification=typedSection(comment.body,'deliveryVerification')
             if(!delivery||!verification)continue
-            const acceptedRows=typedSection(comment.body,'acceptedDeliveries')
+            const acceptedRows=typedSection(comment.body,'acceptedDeliveries'),scopeMatrix=typedSection(comment.body,'scopeMatrix'),requiredScopeMatrix=typedSection(comment.body,'requiredScopeMatrix')
             const expected={repo:input.repo,parentIssue:projection.parentIssue,pr:number,prNodeId:pr.node_id,acceptedParentHead:projection.parentHead,baseRepo:input.repo,baseRef:'main',baseSha:asObject(pr.base).sha}
             const required=accepted.filter(a=>a.projection.parentIssue===projection.parentIssue&&a.projection.parentHead===projection.parentHead).map(a=>a.projection)
-            const check=evaluateParentDelivery({parentDelivery:delivery,pr,expected,acceptedDeliveries:acceptedRows,requiredDeliveries:required,verification})
+            const check=evaluateParentDelivery({parentDelivery:delivery,pr,expected,acceptedDeliveries:acceptedRows,requiredDeliveries:required,scopeMatrix,requiredScopeMatrix,verification})
             if(check.blocks.length)continue
             // Independent API tree/readback establishes the claimed equality;
             // a typed object asserting a successful check is not enough alone.

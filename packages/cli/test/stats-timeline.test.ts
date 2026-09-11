@@ -95,12 +95,12 @@ async function acceptedFixture(options: {truncated?:boolean;tamper?:boolean;chan
   const stateHead=oid(1),receiptHead=oid(2),stateRoot=oid(3),childHead=oid(4),parentHead=oid(5),mergedHead=oid(6),treeId=oid(7)
   const scopeDigest='a'.repeat(64),key=taskKey('github.com',codeRepoId,issueNode)
   const approvals=[{approvalId:'approved',source:{kind:'github-comment' as const,repositoryId:codeRepoId,issueNodeId:issueNode,commentId:'100',bodySha256:'b'.repeat(64)}}]
-  const scope={schemaVersion:2 as const,repo,issue:1,artifacts:[{repo,issue:1,kind:'plan' as const,artifactId:'IC_plan',rev:1,digest:'c'.repeat(64)}],approvalBindings:approvals,approvedTaskIds:['148-T1','148-T2'],completedTaskIds:options.partial?['148-T1']:['148-T1','148-T2'],parentRepo:repo,parentIssue:2,parentBefore:oid(8),parentAfter:parentHead,acceptedAt:'2026-08-20T00:00:00.000Z'}
+  const scope={schemaVersion:2 as const,repo,issue:148,artifacts:[{repo,issue:148,kind:'plan' as const,artifactId:'IC_plan',rev:1,digest:'c'.repeat(64)}],approvalBindings:approvals,approvedTaskIds:['148-T1','148-T2'],completedTaskIds:options.partial?['148-T1']:['148-T1','148-T2'],parentRepo:repo,parentIssue:2,parentBefore:oid(8),parentAfter:parentHead,acceptedAt:'2026-08-20T00:00:00.000Z'}
   const payload={schemaVersion:2,kind:'acceptance',taskId:'148-T1',runId:uuid(1),sourceSha:childHead,scopeDigest,validationId:'fixture/check/'+ '1'.repeat(64),commandDigest:'d'.repeat(64),result:'passed',acceptedScope:scope}
   const owner={ownerToken:uuid(2),machineId:'machine-one',installationId:uuid(3),sessionId:uuid(4),runId:uuid(1)}
   const receipt={schemaVersion:1,operationId:uuid(5),type:'receipt',taskKey:key,generation:1,previousHead:stateRoot,requestDigest:'e'.repeat(64),resultOwner:owner,recoveryPayload:payload}
   const receiptBytes=canonicalJson(receipt),ref={kind:'state-receipt' as const,operationId:uuid(5),commitSha:receiptHead,blobSha256:hashBytes(receiptBytes)}
-  const task={schemaVersion:1,taskKey:key,host:'github.com',repo,issue:1,repositoryNodeId:codeRepoId,issueNodeId:issueNode,scopeDigest,approvalDigest:'f'.repeat(64),approvalBindings:approvals,generation:1,...owner,stage:'implement',state:'completed',paths:[],resources:[],independent:false,parentTaskKey:null,approvedTaskIds:scope.approvedTaskIds,checkpoint:null,stopProof:null,unresolvedEffects:[],recovery:null,acceptedScopes:options.omitReceipt?[]:[{scopeDigest,receipt:ref}]}
+  const task={schemaVersion:1,taskKey:key,host:'github.com',repo,issue:148,repositoryNodeId:codeRepoId,issueNodeId:issueNode,scopeDigest,approvalDigest:'f'.repeat(64),approvalBindings:approvals,generation:1,...owner,stage:'implement',state:'completed',paths:[],resources:[],independent:false,parentTaskKey:null,approvedTaskIds:scope.approvedTaskIds,checkpoint:null,stopProof:null,unresolvedEffects:[],recovery:null,acceptedScopes:options.omitReceipt?[]:[{scopeDigest,receipt:ref}]}
   const index={schemaVersion:1,installationId:uuid(9),revision:1,active:[],machines:[]}
   const deliveryRows=acceptedDeliveryProjection(scope,childHead,scopeDigest)
   const block=(name:string,value:unknown)=>'```json\n'+JSON.stringify({[name]:value})+'\n```'
@@ -108,12 +108,19 @@ async function acceptedFixture(options: {truncated?:boolean;tamper?:boolean;chan
   let body=block('acceptedDeliveries',deliveryRows)
   if(options.transform){
     const evidenceRef=`https://github.com/${repo}/issues/2#issuecomment-200`
+    const scopeMatrix=[
+      {repo,issue:148,mode:'code',taskIds:['148-T1','148-T2'],disposition:'accepted-code',evidenceRefs:[`https://github.com/${repo}/issues/148#issuecomment-100`]},
+      {repo,issue:4,mode:'code',taskIds:['4-T1'],disposition:'partial-code',evidenceRefs:[`https://github.com/${repo}/issues/4#issuecomment-101`]},
+      {repo,issue:5,mode:'preparation',taskIds:['5-T1'],disposition:'prepared',evidenceRefs:[`https://github.com/${repo}/issues/5#issuecomment-102`]},
+      {repo,issue:6,mode:'research',taskIds:[],disposition:'unperformed-live',evidenceRefs:[]},
+    ]
     body+='\n'+block('parentDelivery',{repo,parentIssue:2,pr:3,prNodeId:pr.node_id,acceptedParentHead:parentHead,baseRepo:repo,baseRef:'main',mergedAt:pr.merged_at,mergedCommit:mergedHead,transformation:{kind:'squash',reviewedHead:parentHead,mergedHead,evidenceRef}})
     body+='\n'+block('deliveryVerification',{reviewedHead:parentHead,mergedHead,baseSha:oid(8),acceptedTree:treeId,mergedTree:treeId,check:{sha:mergedHead,exit:0},rangeHead:mergedHead,evidenceRef})
+    body+='\n'+block('scopeMatrix',scopeMatrix)+'\n'+block('requiredScopeMatrix',scopeMatrix)
   }
   const comment={id:200,node_id:'IC_delivery',body,created_at:'2026-08-20T00:00:00.000Z',updated_at:'2026-09-10T01:00:00.000Z'}
   const issue=(number:number,node_id:string)=>({id:number,node_id,number,body:'Current edited brief does not contain old scope',created_at:'2026-08-01T00:00:00.000Z',updated_at:'2026-09-09T00:00:00.000Z'})
-  const issues=[issue(1,issueNode),issue(2,parentNode)]
+  const issues=[issue(148,issueNode),issue(2,parentNode)]
   const calls:string[]=[]
   const http=(value:unknown,link?:string)=>'HTTP/2.0 200 OK\nContent-Type: application/json\n'+(link?'Link: <'+link+'>; rel="next"\n':'')+'\n'+JSON.stringify(value)
   const gh:import('../src/gh.ts').GhReader=async args=>{
@@ -124,11 +131,11 @@ async function acceptedFixture(options: {truncated?:boolean;tamper?:boolean;chan
     if(path.startsWith(`repos/${repo}/git/ref/tags/`)){const name=path.split('/tags/')[1]!;return JSON.stringify({ref:'refs/tags/'+name,object:{type:'commit',sha:options.tagDrift&&calls.filter(call=>call===path).length>1?oid(99):mergedHead}})}
     if(path===`repos/${repo}`)return JSON.stringify({node_id:codeRepoId,full_name:repo,default_branch:'main'})
     if(url.pathname===`/repos/${repo}/issues`)return http([...issues,{id:3,node_id:'PR_delivery',number:3,pull_request:{}}])
-    if(url.pathname===`/repos/${repo}/issues/1/comments`)return http([])
+    if(url.pathname===`/repos/${repo}/issues/148/comments`)return http([])
     if(url.pathname===`/repos/${repo}/issues/2/comments`)return http([comment])
-    if(url.pathname===`/repos/${repo}/issues/1/timeline`)return http([{id:1,node_id:'EV_closed',event:'closed',created_at:'2026-10-01T00:00:00Z'}])
+    if(url.pathname===`/repos/${repo}/issues/148/timeline`)return http([{id:1,node_id:'EV_closed',event:'closed',created_at:'2026-10-01T00:00:00Z'}])
     if(url.pathname===`/repos/${repo}/issues/2/timeline`)return http([{id:2,node_id:'EV_cross',event:'cross-referenced',source:{issue:{number:3,pull_request:{url:`https://api.github.com/repos/${repo}/pulls/3`}}}}])
-    if(path===`repos/${repo}/issues/1`)return JSON.stringify(issues[0])
+    if(path===`repos/${repo}/issues/148`)return JSON.stringify(issues[0])
     if(path===`repos/${repo}/issues/2`)return JSON.stringify(issues[1])
     if(path===`repos/${repo}/issues/comments/200`)return JSON.stringify({...comment,...(options.changed?{body:body+'edited'}:{})})
     if(path===`repos/${repo}/pulls/3`)return JSON.stringify(pr)
