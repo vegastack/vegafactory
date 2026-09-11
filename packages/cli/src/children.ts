@@ -242,13 +242,16 @@ export async function startRecoveredGroupMembers(input:{parent:RecoveredStartMem
  if(new Set(input.children.map(row=>row.task.taskKey)).size!==input.children.length||new Set(input.children.map(row=>row.task.runId)).size!==input.children.length)throw Error('recovered children are not unique')
  const acceptedRunIds=[...new Set((parent.task.recovery?.joins??[]).filter(join=>join.state==='accepted').map(join=>join.childRunId))]
  if(acceptedRunIds.some(runId=>!input.children.some(row=>row.task.runId===runId)))throw Error('accepted recovered join names a missing child')
- for(const row of input.children)if(row.task.schemaVersion!==2||!['recovery-queued','running','completed'].includes(row.task.state)||row.task.parentTaskKey!==parent.task.taskKey||row.task.successionOperationId!==operation||!row.task.parentBinding||!same(binding(row.task),claimBinding(row.claim)))throw Error('recovered child is not an exact recovery-queued successor')
+ for(const row of input.children)if(row.task.schemaVersion!==2||!['recovery-queued','running','stopped','completed'].includes(row.task.state)||row.task.parentTaskKey!==parent.task.taskKey||row.task.successionOperationId!==operation||!row.task.parentBinding||!same(binding(row.task),claimBinding(row.claim)))throw Error('recovered child is not an exact recovery-queued successor')
  const outstanding=input.children.filter(row=>!acceptedRunIds.includes(row.task.runId))
  const parentStarted=await transition({claim:parent.claim,operationId:parent.startOperationId,transition:{kind:'start'}})
  if(parentStarted.kind!=='owned')throw Error('recovered parent start not acknowledged: '+parentStarted.reason)
  const children:SharedClaim[]=[]
  if(input.deferChildren)return{parent:parentStarted.claim,children,acceptedRunIds}
- for(const row of outstanding){const started=await transition({claim:row.claim,operationId:row.startOperationId,transition:{kind:'start'}});if(started.kind!=='owned')throw Error('recovery-queued child start not acknowledged: '+started.reason);children.push(started.claim)}
+ for(const row of outstanding){
+  if(['stopped','completed'].includes(row.task.state))continue
+  const started=await transition({claim:row.claim,operationId:row.startOperationId,transition:{kind:'start'}});if(started.kind!=='owned')throw Error('recovery-queued child start not acknowledged: '+started.reason);children.push(started.claim)
+ }
  return{parent:parentStarted.claim,children,acceptedRunIds}
 }
 async function verifyParent(record: ChildrenRecord, config: FactoryConfig, unchangedSource = false, gh:typeof ghText=ghText): Promise<void> {
