@@ -197,18 +197,18 @@ describe('gatherFacts runs in the branch worktree', () => {
     git(root, 'config', 'user.email', 'a@b.c')
     git(root, 'config', 'user.name', 'a')
     mkdirSync(join(root, '.vegastack'))
-    writeFileSync(join(root, '.vegastack', 'dev.md'), 'commands: check `test -f marker`\nchangelog: changesets\n')
+    writeFileSync(join(root, '.vegastack', 'dev.md'), 'operators: fixture\ncommands: check `test -f marker`\nchangelog: changesets\n')
     git(root, 'add', '.')
     git(root, 'commit', '-qm', 'init')
     const wt = join(root, '.vegastack', '.worktrees', '106-x')
     git(root, 'worktree', 'add', '-q', '-b', 'feat/106-x', wt, 'main')
     writeFileSync(join(wt, 'marker'), '')
-    writeFileSync(join(wt, '.vegastack', 'dev.md'), 'commands: check `test -f marker`\nchangelog: none\n')
+    writeFileSync(join(wt, '.vegastack', 'dev.md'), 'operators: fixture\ncommands: check `test -f marker`\nchangelog: none\n')
     git(wt, 'add', '.')
     git(wt, 'commit', '-qm', 'feat: marker')
     git(root, 'branch', '-q', 'feat/107-y', 'feat/106-x')
     const gh = join(root, 'gh')
-    writeFileSync(gh, '#!/usr/bin/env node\nprocess.stdout.write(JSON.stringify([[{id:2,node_id:"PLAN",body:"<!-- vsk:v1 type=plan rev=1 -->\\n## Plan"}]]))\n')
+    writeFileSync(gh, '#!/usr/bin/env node\nprocess.stdout.write(JSON.stringify([[{id:2,node_id:"PLAN",user:{login:"fixture"},body:"<!-- vsk:v1 type=plan rev=1 -->\\n## Plan"}]]))\n')
     chmodSync(gh, 0o755)
     return { root, wt, gh }
   }
@@ -306,8 +306,18 @@ function parentFixture() {
   const {baseSha: _baseSha, ...identity} = expected
   const parentDelivery = {...identity, mergedAt:'2026-09-08T00:00:00Z', mergedCommit:merged, transformation:null as any}
   const pr = {number:200, node_id:'PR200', head:{repo:{full_name:'o/r'},sha:SHA}, base:{repo:{full_name:'o/r'},ref:'main',sha:BASE}, merged:true, merged_at:parentDelivery.mergedAt, merge_commit_sha:merged}
-  const requiredDeliveries = [{issue:135, taskIds:['135-T1'], mode:'code'}, {issue:155, taskIds:['155-T1'], mode:'preparation'}]
-  return {parentDelivery,pr,expected,requiredDeliveries,acceptedDeliveries:structuredClone(requiredDeliveries),verification:{reviewedHead:SHA,mergedHead:merged,baseSha:BASE,acceptedTree:SHA,mergedTree:SHA,check:{sha:merged,exit:0},ancestorShas:[merged,SHA],rangeHead:merged,evidenceRef:'https://github.com/o/r/issues/133#issuecomment-10'}}
+  const requiredDeliveries = [
+    {taskRef:{repo:'o/r',issue:135,taskId:'135-T1'},scopeDigest:'1'.repeat(64),childHead:'1'.repeat(40),parentRepo:'o/r',parentIssue:133,parentHead:SHA,acceptance:'implemented'},
+    {taskRef:{repo:'o/r',issue:144,taskId:'144-T1'},scopeDigest:'2'.repeat(64),childHead:'2'.repeat(40),parentRepo:'o/r',parentIssue:133,parentHead:SHA,acceptance:'implemented'},
+  ]
+  const requiredScopeMatrix = [
+    {repo:'o/r',issue:135,mode:'code',taskIds:['135-T1'],disposition:'accepted-code',evidenceRefs:['https://github.com/o/r/issues/135#issuecomment-1']},
+    {repo:'o/r',issue:144,mode:'code',taskIds:['144-T1'],disposition:'accepted-code',evidenceRefs:['https://github.com/o/r/issues/144#issuecomment-4']},
+    {repo:'o/r',issue:138,mode:'code',taskIds:['138-T1'],disposition:'partial-code',evidenceRefs:['https://github.com/o/r/issues/138#issuecomment-2']},
+    {repo:'o/r',issue:155,mode:'preparation',taskIds:['155-T1'],disposition:'prepared',evidenceRefs:['https://github.com/o/r/issues/155#issuecomment-3']},
+    {repo:'o/r',issue:158,mode:'research',taskIds:[],disposition:'unperformed-live',evidenceRefs:[]},
+  ]
+  return {parentDelivery,pr,expected,requiredDeliveries,acceptedDeliveries:structuredClone(requiredDeliveries),requiredScopeMatrix,scopeMatrix:structuredClone(requiredScopeMatrix),verification:{reviewedHead:SHA,mergedHead:merged,baseSha:BASE,acceptedTree:SHA,mergedTree:SHA,check:{sha:merged,exit:0},ancestorShas:[merged,SHA],rangeHead:merged,evidenceRef:'https://github.com/o/r/issues/133#issuecomment-10'}}
 }
 test('one normal merge delivers several pinned child scopes including preparation', () => {
   expect(evaluateParentDelivery(parentFixture()).blocks).toEqual([])
@@ -319,7 +329,11 @@ test('verified rebase maps exact reviewed and merged candidate', () => {
 })
 for (const mutation of [
   (f:any)=>{f.acceptedDeliveries.pop()},
-  (f:any)=>{f.acceptedDeliveries[0].taskIds=[]},
+  (f:any)=>{f.acceptedDeliveries[0].taskRef.taskId='135-T9'},
+  (f:any)=>{f.scopeMatrix=f.scopeMatrix.filter((row:any)=>row.disposition!=='partial-code')},
+  (f:any)=>{f.scopeMatrix=f.scopeMatrix.filter((row:any)=>row.disposition!=='prepared')},
+  (f:any)=>{f.requiredDeliveries[0].acceptance='prepared';f.acceptedDeliveries=structuredClone(f.requiredDeliveries)},
+  (f:any)=>{f.scopeMatrix[0].taskIds=[];f.requiredScopeMatrix=structuredClone(f.scopeMatrix)},
   (f:any)=>{f.pr.base.ref='other'},
   (f:any)=>{f.pr.base.sha=SHA},
   (f:any)=>{f.pr.base.repo.full_name='other/repo'},

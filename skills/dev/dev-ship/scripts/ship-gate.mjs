@@ -26,7 +26,7 @@ import { fileURLToPath } from 'node:url';
 
 // Packaging copies the canonical owner; source development imports that owner.
 const approvalUrl = new URL('./lib/approval.mjs', import.meta.url);
-const { artifactRef, parseStrictJson } = await import(existsSync(approvalUrl)
+const { artifactRef, parseJsonSections } = await import(existsSync(approvalUrl)
   ? approvalUrl.href : new URL('../../dev-implement/scripts/lib/approval.mjs', import.meta.url).href);
 const fullSha = (value) => typeof value === 'string' && /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(value);
 const digest = (value) => typeof value === 'string' && /^[0-9a-f]{64}$/.test(value);
@@ -37,17 +37,11 @@ const exactKeys = (value, names) => value && typeof value === 'object' && !Array
 // One authoritative typed section, outside quoted/fenced examples. Other JSON
 // examples may exist, but duplicate binding sections and duplicate keys refuse.
 export function typedSection(body, key) {
-  let fence = null; let content = ''; const matches = [];
-  for (const line of String(body ?? '').replaceAll('\r\n', '\n').split('\n')) {
-    const boundary = /^ {0,3}(`{3,}|~{3,})(.*)$/.exec(line);
-    if (!fence && boundary) { fence = { char: boundary[1][0], size: boundary[1].length, json: boundary[2].trim() === 'json' }; content = ''; }
-    else if (fence && boundary && boundary[1][0] === fence.char && boundary[1].length >= fence.size && boundary[2].trim() === '') {
-      if (fence.json) { const value = parseStrictJson(content); if (Object.hasOwn(value ?? {}, key)) { if (!exactKeys(value, [key])) throw new Error('unknown typed section fields'); matches.push(value[key]); } }
-      fence = null;
-    } else if (fence) content += line + '\n';
-  }
-  if (fence || matches.length > 1) throw new Error('unclosed or duplicate typed section');
-  return matches[0] ?? null;
+  if (typeof body !== 'string') return null;
+  const matches = parseJsonSections(body).map((section) => section.value).filter((value) => Object.hasOwn(value ?? {}, key));
+  if (matches.some((value) => !exactKeys(value, [key]))) throw new Error('unknown typed section fields');
+  if (matches.length > 1) throw new Error('duplicate typed section');
+  return matches[0]?.[key] ?? null;
 }
 
 export function validReview(binding) {
@@ -80,7 +74,10 @@ export function selectCurrentTrustedReview(comments, { complete, operators, sha,
   const matches = [];
   for (const comment of comments.filter((entry) => operators.includes(entry.user.login))) {
     const marker = parseMarker(comment.body);
-    if (marker?.keys.type !== 'review' || marker.keys.sha !== sha) continue;
+    const markerKeys = marker?.keys ?? {};
+    if (markerKeys.type !== 'review' || markerKeys.sha !== sha) continue;
+    if (Object.keys(markerKeys).sort().join(',') !== 'agent,round,sha,type,verdict'
+      || !/^[1-9]\d*$/.test(markerKeys.round) || !['claude', 'codex'].includes(markerKeys.agent)) continue;
     const binding = typedSection(comment.body, 'reviewBinding');
     if (!validReview(binding) || binding.sha !== sha || binding.baseSha !== baseSha
       || binding.scopeDigest !== scopeDigest || marker.keys.verdict !== binding.verdict) continue;
@@ -177,7 +174,7 @@ export function parseMarker(body) {
 
 // Readback facts come from the authorized postmerge operation. This evaluates
 // identity, scope completeness and its actual Git/check proof; it never merges.
-export function evaluateParentDelivery({ parentDelivery: delivery, pr, expected, acceptedDeliveries, requiredDeliveries, verification }) {
+export function evaluateParentDelivery({ parentDelivery: delivery, pr, expected, acceptedDeliveries, requiredDeliveries, scopeMatrix, requiredScopeMatrix, verification }) {
   const blocks = [];
   const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
   if (!exactKeys(delivery, ['repo', 'parentIssue', 'pr', 'prNodeId', 'acceptedParentHead', 'baseRepo', 'baseRef', 'mergedAt', 'mergedCommit', 'transformation'])
@@ -198,8 +195,34 @@ export function evaluateParentDelivery({ parentDelivery: delivery, pr, expected,
     || verification.baseSha !== expected.baseSha || !fullSha(verification.acceptedTree)
     || verification.acceptedTree !== verification.mergedTree || verification.check?.sha !== delivery.mergedCommit
     || verification.check?.exit !== 0) blocks.push('exact merged commit range/tree/check proof missing or mismatched');
-  if (!Array.isArray(requiredDeliveries) || requiredDeliveries.length === 0 || !Array.isArray(acceptedDeliveries)
-    || !same(acceptedDeliveries, requiredDeliveries)) blocks.push('accepted child scope projection is incomplete or changed, including partial/preparation tasks');
+  const validDelivery = (row) => exactKeys(row, ['taskRef', 'scopeDigest', 'childHead', 'parentRepo', 'parentIssue', 'parentHead', 'acceptance'])
+    && exactKeys(row.taskRef, ['repo', 'issue', 'taskId']) && /^[^/\s]+\/[^/\s]+$/.test(row.taskRef.repo)
+    && Number.isSafeInteger(row.taskRef.issue) && row.taskRef.issue > 0 && /^[1-9]\d*-T[1-9]\d*$/.test(row.taskRef.taskId)
+    && digest(row.scopeDigest) && fullSha(row.childHead) && /^[^/\s]+\/[^/\s]+$/.test(row.parentRepo)
+    && Number.isSafeInteger(row.parentIssue) && row.parentIssue > 0 && fullSha(row.parentHead) && row.acceptance === 'implemented';
+  if (!Array.isArray(requiredDeliveries) || requiredDeliveries.length === 0 || !requiredDeliveries.every(validDelivery)
+    || new Set(requiredDeliveries.map((row) => `${row.taskRef.repo}#${row.taskRef.issue}#${row.taskRef.taskId}`)).size !== requiredDeliveries.length
+    || !Array.isArray(acceptedDeliveries) || !acceptedDeliveries.every(validDelivery)
+    || !same(acceptedDeliveries, requiredDeliveries)) blocks.push('accepted child scope projection is incomplete, invalid or changed');
+  const dispositions = ['accepted-code', 'partial-code', 'prepared', 'unperformed-live'];
+  const validMatrixRow = (row) => exactKeys(row, ['repo', 'issue', 'mode', 'taskIds', 'disposition', 'evidenceRefs'])
+    && /^[^/\s]+\/[^/\s]+$/.test(row.repo) && Number.isSafeInteger(row.issue) && row.issue > 0
+    && ['code', 'preparation', 'research'].includes(row.mode) && dispositions.includes(row.disposition)
+    && Array.isArray(row.taskIds) && row.taskIds.every((id) => /^[1-9]\d*-T[1-9]\d*$/.test(id) && id.startsWith(row.issue + '-T'))
+    && new Set(row.taskIds).size === row.taskIds.length && (row.disposition === 'unperformed-live' || row.taskIds.length > 0)
+    && (row.disposition === 'accepted-code' || row.disposition === 'partial-code' ? row.mode === 'code' : row.disposition === 'prepared' ? row.mode === 'preparation' : true)
+    && Array.isArray(row.evidenceRefs) && row.evidenceRefs.every((ref) => /^https:\/\//.test(ref))
+    && new Set(row.evidenceRefs).size === row.evidenceRefs.length && (row.disposition === 'unperformed-live' || row.evidenceRefs.length > 0);
+  if (!Array.isArray(requiredScopeMatrix) || !requiredScopeMatrix.every(validMatrixRow)
+    || new Set(requiredScopeMatrix.map((row) => `${row.repo}#${row.issue}#${row.mode}`)).size !== requiredScopeMatrix.length
+    || dispositions.some((disposition) => !requiredScopeMatrix.some((row) => row.disposition === disposition))
+    || !Array.isArray(scopeMatrix) || !scopeMatrix.every(validMatrixRow) || !same(scopeMatrix, requiredScopeMatrix)) {
+    blocks.push('child acceptance and pending-operations matrix is incomplete, invalid or changed');
+  } else if (Array.isArray(requiredDeliveries) && requiredDeliveries.every(validDelivery)) {
+    const delivered = [...requiredDeliveries].map((row) => `${row.taskRef.repo}#${row.taskRef.issue}#${row.taskRef.taskId}`).sort();
+    const accepted = requiredScopeMatrix.filter((row) => row.disposition === 'accepted-code').flatMap((row) => row.taskIds.map((taskId) => `${row.repo}#${row.issue}#${taskId}`)).sort();
+    if (!same(delivered, accepted)) blocks.push('implemented delivery projection differs from accepted-code matrix rows');
+  }
   const transform = delivery.transformation;
   if (transform === null) {
     if (!Array.isArray(verification.ancestorShas) || !verification.ancestorShas.includes(delivery.acceptedParentHead)) blocks.push('normal merge lacks reviewed candidate ancestry');
@@ -311,17 +334,6 @@ export function gatherFacts(flags) {
     listed = '';
   }
   const cwd = flags.worktree || resolveWorktree(branch, listed) || undefined;
-  const pages = JSON.parse(sh('gh', ['api', 'repos/' + repo + '/issues/' + flags.issue + '/comments', '--paginate', '--slurp']));
-  if (!Array.isArray(pages) || !pages.every(Array.isArray)) throw new Error('unreadable complete comment history');
-  const comments = pages.flat();
-  const ofType = (type) => comments.filter((comment) => parseMarker(comment.body)?.keys.type === type);
-  const evidenceComments = ofType('evidence');
-  if (evidenceComments.length > 1) throw new Error('duplicate evidence comments');
-  const evidence = evidenceComments[0] ?? null;
-  const plans = ofType('plan');
-  if (plans.length !== 1) throw new Error('missing or duplicate canonical plan');
-  const planBinding = artifactRef({ repo, issue: Number(flags.issue), kind: 'plan', artifact: plans[0] });
-  const scopeDigest = planBinding.digest;
   const commit = (ref) => {
     const result = sh('git', ['rev-parse', '--verify', '--end-of-options', ref + '^{commit}'], cwd);
     if (!fullSha(result)) throw new Error('invalid full commit identity');
@@ -335,10 +347,25 @@ export function gatherFacts(flags) {
   if (isAbsolute(profilePath) || profilePath === '..' || profilePath.startsWith('../')) throw new Error('check profile must belong to the exact committed checkout');
   sh('git', ['ls-files', '--error-unmatch', '--', profilePath], cwd);
   const devMd = readFileSync(profile, 'utf8');
-  const operators = (/^operators:\s*([^\n#]+)/m.exec(devMd)?.[1] ?? '').split(',').map((name) => name.trim()).filter(Boolean);
+  const baseDevMd = sh('git', ['show', baseSha + ':' + profilePath], cwd);
+  const operators = (/^operators:\s*([^\n#]+)/m.exec(baseDevMd)?.[1] ?? '').split(',').map((name) => name.trim()).filter(Boolean);
+  if (!operators.length || new Set(operators).size !== operators.length || operators.some((name) => !/^[A-Za-z0-9-]+$/.test(name))) throw new Error('accepted base operator policy is missing or malformed');
+  const operatorPolicy = { sha: baseSha, path: profilePath, bodySha256: createHash('sha256').update(baseDevMd, 'utf8').digest('hex') };
+  const pages = JSON.parse(sh('gh', ['api', 'repos/' + repo + '/issues/' + flags.issue + '/comments', '--paginate', '--slurp']));
+  if (!Array.isArray(pages) || !pages.every(Array.isArray)) throw new Error('unreadable complete comment history');
+  const comments = pages.flat();
+  const eligibleComments = comments.filter((comment) => operators.includes(comment?.user?.login));
+  const ofType = (type) => eligibleComments.filter((comment) => parseMarker(comment.body)?.keys.type === type);
+  const evidenceComments = ofType('evidence');
+  if (evidenceComments.length > 1) throw new Error('duplicate evidence comments');
+  const evidence = evidenceComments[0] ?? null;
+  const plans = ofType('plan');
+  if (plans.length !== 1) throw new Error('missing or duplicate canonical plan');
+  const planBinding = artifactRef({ repo, issue: Number(flags.issue), kind: 'plan', artifact: plans[0] });
+  const scopeDigest = planBinding.digest;
   let selectedReview = null; let reviewSelectionError = null;
   try {
-    selectedReview = selectCurrentTrustedReview(comments, { complete: true, operators, sha: headSha, baseSha, scopeDigest });
+    selectedReview = selectCurrentTrustedReview(eligibleComments, { complete: true, operators, sha: headSha, baseSha, scopeDigest });
   } catch (error) {
     reviewSelectionError = error.message;
   }
@@ -396,7 +423,7 @@ export function gatherFacts(flags) {
   const adjudicated = reviewAdjudicated(evidence?.body, { review, reviewCommentId: reviewComment?.id,
     operators, publisher: evidence?.user?.login, sourceComment });
   return {
-    evidence, review, reviewSource, reviewSelectionError, reviewVerdict, adjudicated, headSha, baseSha, reviewSha, evidenceSha, scopeDigest, planBinding, cleanBefore, cleanAfter, diffText,
+    evidence, review, reviewSource, reviewSelectionError, reviewVerdict, adjudicated, headSha, baseSha, operatorPolicy, reviewSha, evidenceSha, scopeDigest, planBinding, cleanBefore, cleanAfter, diffText,
     checkCommand: checkCmd ?? null, environment: { runtime: process.version, platform: process.platform, arch: process.arch, git: sh('git', ['--version'], cwd) },
     changelogTouched, chronicleOn, chronicleTouched,
     allowNoChangelog: flags['allow-no-changelog'], checkExit, checkMissing, checkoutMismatch,
@@ -418,7 +445,7 @@ if (invokedDirectly) {
   } else {
     try {
       const facts = gatherFacts(flags);
-      outcome = { ...evaluateShipGate(facts), candidate: { headSha: facts.headSha, baseSha: facts.baseSha, reviewSha: facts.reviewSha, review: facts.review, reviewSource: facts.reviewSource, evidenceSha: facts.evidenceSha, scopeDigest: facts.scopeDigest, planBinding: facts.planBinding, cleanBefore: facts.cleanBefore, cleanAfter: facts.cleanAfter, checkExit: facts.checkExit, checkCommand: facts.checkCommand, environment: facts.environment } };
+      outcome = { ...evaluateShipGate(facts), candidate: { headSha: facts.headSha, baseSha: facts.baseSha, operatorPolicy: facts.operatorPolicy, reviewSha: facts.reviewSha, review: facts.review, reviewSource: facts.reviewSource, evidenceSha: facts.evidenceSha, scopeDigest: facts.scopeDigest, planBinding: facts.planBinding, cleanBefore: facts.cleanBefore, cleanAfter: facts.cleanAfter, checkExit: facts.checkExit, checkCommand: facts.checkCommand, environment: facts.environment } };
     } catch (error) {
       outcome = { blocks: [`cannot verify: ${error.message}`], warns: [] };
     }

@@ -2,4 +2,9 @@
 "@vegastack/vegafactory": major
 ---
 
-Require full reviewed commit/base/scope bindings and explicit operator finding exceptions before shipping. Check only clean committed candidates and refuse check-induced changes. Define assembled parent acceptance and verified merge delivery evidence; legacy review records require renewal.
+Require exact reviewed commit, base and scope bindings before shipping.
+
+- Accept only operator-authenticated current review markers and explicit same-review finding exceptions.
+- Check clean committed candidates and refuse check-induced changes.
+- Preserve implemented deliveries separately from partial, prepared and unperformed parent scope.
+- Require legacy review records to be renewed.

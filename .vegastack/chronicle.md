@@ -122,6 +122,16 @@ The project's story, newest first: what got built, why, and how it went — for 
 
 — approved by (kmanojkumar) · built by codex · branch codex/productionization-133
 
+## 08-09-2026 — Ship only the reviewed and checked commit ([#136](https://github.com/vegastack/vegafactory/issues/136))
+
+- **What:** The ship gate now binds a current operator-authenticated review to the full candidate/base identities and canonical plan scope, checks an unchanged committed checkout, and records implemented child deliveries separately from partial, prepared and unperformed parent work.
+- **Why:** An ancestor review plus uncommitted passing bytes could previously qualify a failing commit, while free-form adjudication prose and reconstructed delivery rows could erase unresolved findings or unfinished scope.
+- **How it went:** Seven real-Git false passes became regressions before the first correction. Exact-source review then found incomplete review markers, candidate-selected reviewers, outsider marker denial and an invented parent-delivery test shape; the follow-up uses the accepted base policy, canonical review metadata, eligible publishers, actual #144 delivery rows and a closed scope matrix. Final whole-parent review, merge readback and release remain later gates.
+- **Changed:** Full review/evidence SHA binding · trusted reviewer source identity · clean before/after check snapshots · typed finding adjudication · actual accepted-delivery projection · explicit pending-operations matrix · merge/rebase readback proof.
+- **Decisions:** none.
+
+— approved by (kmanojkumar) · built by codex · branch codex/productionization-133
+
 ## 07-09-2026 — A recorder cannot invent operator approval ([#135](https://github.com/vegastack/vegafactory/issues/135))
 
 - **What:** Session approval now requires a publisher in current operator policy. Another recorder can relay only an independently verified identical scoped grant, inheriting its authority and revocation history. Launch, preparation and research results retain the original source comment and body identity.
@@ -493,7 +503,3 @@ The project's story, newest first: what got built, why, and how it went — for 
 - **Decisions:** none new (executes the recorded v3 plan).
 
 — approved by operator (kmanojkumar) · built by claude · branch feat/10-workflow-conventions
-
-## 08-09-2026 — Ship the reviewed commit (#136)
-
-The ship gate used to accept an ancestor review and run checks over uncommitted files, so a passing checkout could hide a failing committed artifact. It now binds the current review to full commit/base identities and canonical plan scope, refuses dirty or check-mutated candidates, and requires explicit operator decisions for every open finding. Parent delivery records distinguish accepted local work from verified merge and release. Focused real-Git regression coverage accompanies the change; final assembled qualification, independent review and release remain separate gates.

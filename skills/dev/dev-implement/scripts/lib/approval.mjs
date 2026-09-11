@@ -101,7 +101,7 @@ export function parseStrictJson(raw) {
 function linesOf(body) {
   check(typeof body === 'string' && body.isWellFormed() && Buffer.byteLength(body, 'utf8') <= 1024 * 1024, 'invalid artifact body');
   let fence = null;
-  return body.replaceAll('\r\n', '\n').match(/[^\n]*\n|[^\n]+$/g)?.map((line) => {
+  return body.replaceAll('\r\n', '\n').match(/[^\n]*\n|[^\n]+$/g)?.map((line, index) => {
     const opening = /^ {0,3}(`{3,}|~{3,})(.*?)(?:\n)?$/.exec(line);
     const structural = fence === null && opening === null && !/^(?: {4}|\t)/.test(line);
     const fenceOpen = fence === null && opening ? opening[2].trim() : null;
@@ -110,8 +110,27 @@ function linesOf(body) {
       if (fence === null) fence = opening[1];
       else if (opening[1][0] === fence[0] && opening[1].length >= fence.length && opening[2].trim() === '') fence = null;
     }
-    return { line, structural, fenceOpen, fenceClose: Boolean(fenceClose) };
+    return { line, index, structural, fenceOpen, fenceClose: Boolean(fenceClose) };
   }) ?? [];
+}
+
+export function parseJsonSections(body) {
+  const sections = [];
+  let payload = null;
+  let startIndex = null;
+  for (const row of linesOf(body)) {
+    if (row.fenceOpen === 'json') {
+      check(payload === null, 'nested JSON payload');
+      payload = '';
+      startIndex = row.index;
+    } else if (row.fenceClose && payload !== null) {
+      sections.push({ value: parseStrictJson(payload), startIndex });
+      payload = null;
+      startIndex = null;
+    } else if (payload !== null) payload += row.line;
+  }
+  check(payload === null, 'unclosed JSON payload');
+  return sections;
 }
 
 function structuralMarker(line) {
@@ -275,27 +294,13 @@ function validateItem(value) {
 export function parseApproval(comment) {
   try {
     const lines = linesOf(comment?.body);
-    const markers = lines.filter((line) => line.structural).map(({ line }) => structuralMarker(line)).filter((marker) => marker?.type === 'approval');
+    const markers = lines.filter((line) => line.structural).map((row) => ({ marker: structuralMarker(row.line), index: row.index })).filter((row) => row.marker?.type === 'approval');
     check(markers.length === 1, 'missing or duplicate type=approval marker');
-    const blocks = [];
-    let collecting = false;
-    let payload = '';
-    let seenMarker = false;
-    for (const row of lines) {
-      if (row.structural && structuralMarker(row.line)?.type === 'approval') seenMarker = true;
-      if (row.fenceOpen === 'json') {
-        check(seenMarker, 'approval payload precedes its marker');
-        collecting = true;
-        payload = '';
-      } else if (row.fenceClose && collecting) {
-        blocks.push(payload);
-        collecting = false;
-      } else if (collecting) payload += row.line;
-    }
-    check(!collecting, 'unclosed approval payload');
-    check(blocks.length === 1, 'approval requires one JSON payload');
-    const value = parseStrictJson(blocks[0]);
-    check(value.schemaVersion === 2 && value.scope === markers[0].scope && text(value.operator), 'invalid approval version, scope or operator');
+    const sections = parseJsonSections(comment?.body);
+    check(sections.length === 1, 'approval requires one JSON payload');
+    check(sections[0].startIndex > markers[0].index, 'approval payload precedes its marker');
+    const value = sections[0].value;
+    check(value.schemaVersion === 2 && value.scope === markers[0].marker.scope && text(value.operator), 'invalid approval version, scope or operator');
     validateSource(value.source);
     list(value.supersedes, text, 'superseded IDs');
     list(value.revokes, text, 'revoked IDs');
@@ -683,14 +688,7 @@ function boundEvidence(context, reference, kind) {
   check(evidence.kind === kind && isObject(evidence.payload), 'wrong admission evidence kind');
   // The projection must be literally present in the fetched ledger, not a
   // separate mutable object next to it. Keep all other ledger prose intact.
-  const payloads = [];
-  let collecting = false;
-  let raw = '';
-  for (const row of linesOf(evidence.comment.body)) {
-    if (row.fenceOpen === 'json') { collecting = true; raw = ''; }
-    else if (row.fenceClose && collecting) { payloads.push(parseStrictJson(raw)); collecting = false; }
-    else if (collecting) raw += row.line;
-  }
+  const payloads = parseJsonSections(evidence.comment.body).map((section) => section.value);
   check(payloads.some((payload) => sortedJson(payload) === sortedJson(evidence.payload)), 'evidence projection differs from source');
   return evidence.payload;
 }

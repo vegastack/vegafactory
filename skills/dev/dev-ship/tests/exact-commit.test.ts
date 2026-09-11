@@ -23,7 +23,7 @@ function fixture(check = 'test "$(cat check.txt)" = PASS', content = 'PASS') {
   const brief = { number: 1, node_id: 'ISSUE', body: '<!-- vsk:v1 type=brief rev=1 scope=full-plan -->\n## Outcome\nship\n' }
   const scope = execFileSync(process.execPath, ['--input-type=module', '-e', `import {scopeDigest} from ${JSON.stringify(resolve(import.meta.dir, '../../dev-implement/scripts/lib/approval.mjs'))}; process.stdout.write(scopeDigest(${JSON.stringify(plan.body)}, 'plan'))`], { encoding: 'utf8' })
   const binding = { sha, baseSha: base, scopeDigest: scope, verdict: 'clean', findings: [] }
-  const comments: any[] = [plan, { id: 3, user: { login: 'fixture' }, body: `<!-- vsk:v1 type=evidence rev=1 sha=${sha} -->` }, { id: 4, user: { login: 'fixture' }, body: `<!-- vsk:v1 type=review round=1 sha=${sha} verdict=clean -->\n\`\`\`json\n${JSON.stringify({ reviewBinding: binding })}\n\`\`\`` }]
+  const comments: any[] = [plan, { id: 3, user: { login: 'fixture' }, body: `<!-- vsk:v1 type=evidence rev=1 sha=${sha} -->` }, { id: 4, user: { login: 'fixture' }, body: `<!-- vsk:v1 type=review round=1 sha=${sha} agent=codex verdict=clean -->\n\`\`\`json\n${JSON.stringify({ reviewBinding: binding })}\n\`\`\`` }]
   const gh = join(root, 'gh'); const data = join(root, 'comments.json')
   writeFileSync(gh, `#!/usr/bin/env node\nconst fs=require('node:fs'),pages=JSON.parse(fs.readFileSync(${JSON.stringify(data)},'utf8'));process.stdout.write(process.argv.includes('--paginate')?JSON.stringify(process.argv.includes('--slurp')?pages:pages.flat()):${JSON.stringify(JSON.stringify(brief))});\n`, { mode: 0o700 })
   return { dir, git, sha, base, comments, run: (pages: any = [comments]) => { writeFileSync(data, JSON.stringify(pages)); return spawnSync(process.execPath, [cli, '--issue', '1', '--repo', 'o/r', '--branch', 'codex/fixture', '--base', 'main', '--worktree', dir, '--json'], { cwd: dir, env: { ...process.env, VSK_GH: gh }, encoding: 'utf8' }) }, cleanup: () => rmSync(root, { recursive: true, force: true }) }
@@ -99,4 +99,40 @@ test('actual CLI refuses two trusted exact matches, missing publisher metadata, 
   }
   const f = fixture()
   try { expect(f.run(f.comments).status).toBe(2) } finally { f.cleanup() }
+})
+
+test('actual CLI refuses review markers missing or carrying invalid round and agent', () => {
+  for (const mutate of [
+    (body: string) => body.replace(' round=1', ''),
+    (body: string) => body.replace('round=1', 'round=0'),
+    (body: string) => body.replace(' agent=codex', ''),
+    (body: string) => body.replace('agent=codex', 'agent=hermes'),
+  ]) {
+    const f = fixture()
+    try { f.comments[2].body = mutate(f.comments[2].body); expect(f.run().status).toBe(2) } finally { f.cleanup() }
+  }
+})
+
+test('candidate policy cannot appoint the publisher of its own clean review', () => {
+  const f = fixture()
+  try {
+    writeFileSync(join(f.dir, '.vegastack/dev.md'), 'repo: o/r\noperators: fixture,outsider\nchangelog: none\ncommands: check `test "$(cat check.txt)" = PASS`\n')
+    f.git('add', '.vegastack/dev.md'); f.git('commit', '-qm', 'candidate appoints outsider')
+    const next = f.git('rev-parse', 'HEAD')
+    f.comments[1].body = f.comments[1].body.replaceAll(f.sha, next)
+    f.comments[2].body = f.comments[2].body.replaceAll(f.sha, next)
+    f.comments[2].user = { login: 'outsider' }
+    expect(f.run().status).toBe(2)
+  } finally { f.cleanup() }
+})
+
+test('outsider protocol-looking comments cannot block canonical artifacts', () => {
+  for (const comment of [
+    { id: 10, user: { login: 'outsider' }, body: '<!-- vsk:v1 type=plan rev=1 -->\n## Fake plan' },
+    { id: 11, user: { login: 'outsider' }, body: '<!-- vsk:v1 type=evidence rev=1 sha=' + 'a'.repeat(40) + ' -->' },
+    { id: 12, user: { login: 'outsider' }, body: '<!-- vsk:v1 type=plan type=evidence -->' },
+  ]) {
+    const f = fixture()
+    try { f.comments.push(comment); expect(f.run().status).toBe(0) } finally { f.cleanup() }
+  }
 })
