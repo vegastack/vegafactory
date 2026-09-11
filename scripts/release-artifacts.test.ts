@@ -98,27 +98,31 @@ const fs=require('node:fs'),a=process.argv.slice(2);fs.mkdirSync('work',{recursi
 test('actual workflow recovery command permits a failed preparation retry and refuses uncertain publication; pair upload gates mutation',async()=>{
  const text=await readFile('.github/workflows/release.yml','utf8')
  const workflow=Bun.YAML.parse(text) as any
- const steps=workflow.jobs.publish.steps
- const recovery=steps.find((s:any)=>s.id==='recovery')
- const retained=steps.findIndex((s:any)=>s.name==='Retain finalized immutable pair')
- const publish=steps.findIndex((s:any)=>s.name==='Publish retained pair and promote after registry first-use smoke')
- expect(retained).toBeGreaterThan(steps.findIndex((s:any)=>s.name==='Verify finalized immutable pair and evidence'))
- expect(publish).toBeGreaterThan(retained);expect(steps[publish].if).toBeUndefined();expect(steps[retained].with['if-no-files-found']).toBe('error')
- const fixture={artifacts:[],jobs:[{name:'publish',status:'completed',steps:[{name:steps[publish].name,conclusion:'skipped'}]}]}
+ const prepareSteps=workflow.jobs.prepare.steps,publishSteps=workflow.jobs.publish.steps
+ const recovery=prepareSteps.find((s:any)=>s.id==='recovery')
+ const retained=prepareSteps.findIndex((s:any)=>s.name==='Retain finalized immutable pair')
+ const publish=publishSteps.findIndex((s:any)=>s.name==='Publish retained pair and promote after registry first-use smoke')
+ expect(retained).toBeGreaterThan(prepareSteps.findIndex((s:any)=>s.name==='Verify finalized immutable pair and evidence'))
+ expect(publish).toBeGreaterThan(publishSteps.findIndex((s:any)=>s.name==='Verify retained pair before publication authority is used'));expect(publishSteps[publish].if).toBeUndefined();expect(prepareSteps[retained].with['if-no-files-found']).toBe('error')
+ expect(workflow.jobs.prepare.permissions).toEqual({contents:'read',actions:'read'});expect(workflow.jobs.publish.permissions).toEqual({contents:'read',actions:'read','id-token':'write'});expect(workflow.jobs.release.permissions).toEqual({contents:'write',actions:'read'})
+ const fixture={artifacts:[],jobs:[{name:'prepare',status:'completed',conclusion:'failure',steps:[{name:prepareSteps[retained].name,conclusion:'skipped'}]},{name:'publish',status:'completed',conclusion:'skipped',steps:[]}]}
  const script=`const fixture=JSON.parse(process.env.FIXTURE_HISTORY);const output={};const core={setOutput:(k,v)=>output[k]=v};const context={repo:{owner:'fixture',repo:'fixture'},runId:1,sha:'a'};const github={rest:{actions:{listWorkflowRunArtifacts:'artifacts'}},paginate:async(route)=>route==='artifacts'?fixture.artifacts:fixture.jobs};await (async()=>{${recovery.with.script}})();console.log(JSON.stringify(output))`
  const run=(history:any)=>spawnSync('node',['--input-type=module','-e',script],{env:{...process.env,GITHUB_WORKSPACE:process.cwd(),GITHUB_RUN_ATTEMPT:'2',FIXTURE_HISTORY:JSON.stringify(history)},encoding:'utf8'})
  const retry=run(fixture);expect(retry.status).toBe(0);expect(JSON.parse(retry.stdout).prepare).toBe('true')
- fixture.jobs[0]!.steps[0]!.conclusion='failure';const uncertain=run(fixture);expect(uncertain.status).not.toBe(0);expect(uncertain.stderr).toContain('uncertain')
+ fixture.jobs[0]!.conclusion='success';fixture.jobs[0]!.steps[0]!.conclusion='success';fixture.jobs[1]!.conclusion='failure';fixture.jobs[1]!.steps=[{name:publishSteps[publish].name,conclusion:'failure'}];const uncertain=run(fixture);expect(uncertain.status).not.toBe(0);expect(uncertain.stderr).toContain('uncertain')
  const reuse=run({...fixture,artifacts:[{name:'release-pair-a-attempt-1',id:42,expired:false}]});expect(reuse.status).toBe(0);expect(JSON.parse(reuse.stdout)).toMatchObject({prepare:'false','artifact-id':42})
 })
 
 test('release workflow immutable scanner source matches the audited baseline version',async()=>{
  const baseline=JSON.parse(await readFile('.vegastack/skillspector-baseline.json','utf8'))
  const workflow=await readFile('.github/workflows/release.yml','utf8')
- const pin=/# SkillSpector v(\d+\.\d+\.\d+) immutable commit ([a-f0-9]{40}), matched to the audited baseline\.[\s\S]*?skillspector\.git@([a-f0-9]{40})'/.exec(workflow)
+ const pin=/# SkillSpector v(\d+\.\d+\.\d+) immutable commit ([a-f0-9]{40}), with one hash-locked runtime\/build graph\.[\s\S]*?skillspector\.git@([a-f0-9]{40})'/.exec(workflow)
  expect(pin).not.toBeNull()
  expect(pin?.[1]).toBe(baseline.scanner_version)
  expect(pin?.[2]).toBe(pin?.[3])
+ const constraints=await readFile('.github/skillspector-release-constraints.txt','utf8')
+ expect(constraints).toContain(`skillspector @ git+https://github.com/NVIDIA/skillspector.git@${pin?.[2]}`);expect(constraints).toMatch(/^hatchling==\d/m);expect(workflow).toContain('uv pip sync --python work/release-scanner/venv/bin/python --require-hashes')
+ for(const use of workflow.matchAll(/^\s*uses:\s*[^@\s]+@([^\s#]+)/gm))expect(use[1]).toMatch(/^[a-f0-9]{40}$/)
 })
 
 

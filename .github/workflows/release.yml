@@ -9,12 +9,7 @@ on:
     tags:
       - "v*"
 
-permissions:
-  # OIDC token for npm trusted publishing.
-  id-token: write
-  # Create the GitHub release and attach the SBOM.
-  contents: write
-  actions: read
+permissions: {}
 
 # All versions and retries share this boundary; local live publishing refuses.
 concurrency:
@@ -22,7 +17,14 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  publish:
+  prepare:
+    permissions:
+      contents: read
+      actions: read
+    outputs:
+      pair-name: ${{ steps.recovery.outputs.prepare == 'true' && format('release-pair-{0}-attempt-{1}', github.sha, github.run_attempt) || steps.recovery.outputs.artifact }}
+      pair-id: ${{ steps.recovery.outputs.prepare == 'true' && steps.retained.outputs.artifact-id || steps.recovery.outputs.artifact-id }}
+      prior-outcome-name: ${{ steps.recovery.outputs.outcome }}
     # TEMPORARY (0.16.1, as for 0.14.0 and 0.16.0): GitHub-hosted runners are suspended by an
     # account-level billing lock — hosted jobs complete with zero steps executed, never having
     # started ("The job was not started because your account is locked due to a billing issue",
@@ -45,17 +47,18 @@ jobs:
     # Revert to `ubuntu-latest` — and drop --no-provenance below — once the lock clears (#57).
     runs-on: [self-hosted, vsk-runners-mac]
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
 
-      - uses: oven-sh/setup-bun@v2
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
         with:
           bun-version: "1.3.14"
 
       # Node 24 ships npm >= 11.5.1, required for trusted publishing.
-      - uses: actions/setup-node@v7
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
         with:
           node-version: "24.x"
-          registry-url: "https://registry.npmjs.org"
 
       # A v0.2.0 tag on a tree whose package.json still says 0.1.0 must fail here,
       # not publish the wrong version.
@@ -98,7 +101,7 @@ jobs:
 
       - name: Decide retained-pair recovery
         id: recovery
-        uses: actions/github-script@v8
+        uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8
         with:
           script: |
             const { recoveryDecision } = await import(`${process.env.GITHUB_WORKSPACE}/scripts/release-artifacts.mjs`)
@@ -117,34 +120,28 @@ jobs:
 
       - name: Restore finalized immutable pair
         if: steps.recovery.outputs.prepare == 'false'
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           name: ${{ steps.recovery.outputs.artifact }}
           path: work/release/
 
-      - name: Restore last available attempt observations
-        if: steps.recovery.outputs.prepare == 'false' && steps.recovery.outputs.outcome != ''
-        uses: actions/download-artifact@v4
-        with:
-          name: ${{ steps.recovery.outputs.outcome }}
-          path: work/previous-release/
-
-      - name: Preserve previous publication observations
-        if: steps.recovery.outputs.prepare == 'false' && steps.recovery.outputs.outcome != ''
-        run: |
-          node --input-type=module <<'NODE'
-          import { readFile, writeFile } from 'node:fs/promises'
-          try { await writeFile('work/release/release-state.json', await readFile('work/previous-release/release-state.json')) }
-          catch (error) { if (error.code !== 'ENOENT') throw error }
-          NODE
-
       - name: Install pinned release scanner
         if: steps.recovery.outputs.prepare == 'true'
-        # SkillSpector v2.11.2 immutable commit 69dcdfb74487d361ba4c811d088cfdea2ff3a9dc, matched to the audited baseline.
+        # SkillSpector v2.11.2 immutable commit 69dcdfb74487d361ba4c811d088cfdea2ff3a9dc, with one hash-locked runtime/build graph.
         run: |
-          uv tool install --python 3.12 'git+https://github.com/NVIDIA/skillspector.git@69dcdfb74487d361ba4c811d088cfdea2ff3a9dc'
-          echo "$(uv tool dir --bin)" >> "$GITHUB_PATH"
-          echo "$(dirname "$(uv python find 3.12)")" >> "$GITHUB_PATH"
+          set -euo pipefail
+          uv venv --python 3.12 work/release-scanner/venv
+          grep -v '^skillspector @' .github/skillspector-release-constraints.txt > work/release-scanner/dependencies.txt
+          uv pip sync --python work/release-scanner/venv/bin/python --require-hashes work/release-scanner/dependencies.txt
+          uv pip install --python work/release-scanner/venv/bin/python --no-deps --no-build-isolation 'git+https://github.com/NVIDIA/skillspector.git@69dcdfb74487d361ba4c811d088cfdea2ff3a9dc'
+          work/release-scanner/venv/bin/python - <<'PY'
+          import importlib.metadata, json
+          distribution = importlib.metadata.distribution("skillspector")
+          direct = json.loads(distribution.read_text("direct_url.json"))
+          assert distribution.version == "2.11.2"
+          assert direct["vcs_info"]["commit_id"] == "69dcdfb74487d361ba4c811d088cfdea2ff3a9dc"
+          PY
+          echo "$GITHUB_WORKSPACE/work/release-scanner/venv/bin" >> "$GITHUB_PATH"
 
       - name: Prepare and smoke immutable artifact pair
         if: steps.recovery.outputs.prepare == 'true'
@@ -157,33 +154,90 @@ jobs:
       - name: Retain finalized immutable pair
         if: steps.recovery.outputs.prepare == 'true'
         id: retained
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: release-pair-${{ github.sha }}-attempt-${{ github.run_attempt }}
           path: work/release/
           if-no-files-found: error
           retention-days: 90
 
+  publish:
+    needs: prepare
+    permissions:
+      contents: read
+      actions: read
+      id-token: write
+    runs-on: [self-hosted, vsk-runners-mac]
+    outputs:
+      outcome-name: release-outcome-${{ github.sha }}-attempt-${{ github.run_attempt }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: "24.x"
+          registry-url: "https://registry.npmjs.org"
+
+      - name: Restore prepared immutable pair
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: ${{ needs.prepare.outputs.pair-name }}
+          path: work/release/
+
+      - name: Restore last available publication observations
+        if: needs.prepare.outputs.prior-outcome-name != ''
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: ${{ needs.prepare.outputs.prior-outcome-name }}
+          path: work/previous-release/
+
+      - name: Preserve previous publication observations
+        if: needs.prepare.outputs.prior-outcome-name != ''
+        run: |
+          node --input-type=module <<'NODE'
+          import { readFile, writeFile } from 'node:fs/promises'
+          try { await writeFile('work/release/release-state.json', await readFile('work/previous-release/release-state.json')) }
+          catch (error) { if (error.code !== 'ENOENT') throw error }
+          NODE
+
+      - name: Verify retained pair before publication authority is used
+        run: node scripts/release-artifacts.mjs verify-release work/release/release-manifest.json
+
       # Publication and promotion are covered only by the operator-authorized release tag.
       # Authentication/provenance decisions remain #156; runner routing is unchanged.
       - name: Publish retained pair and promote after registry first-use smoke
         env:
-          VEGAFACTORY_RETAINED_PAIR_ID: ${{ steps.retained.outputs.artifact-id || steps.recovery.outputs.artifact-id }}
+          VEGAFACTORY_RETAINED_PAIR_ID: ${{ needs.prepare.outputs.pair-id }}
         run: node scripts/release-publish.mjs work/release/release-manifest.json --publish --promote
+
+      - name: Verify release assets before exposing success
+        run: node scripts/release-artifacts.mjs verify-release work/release/release-manifest.json
 
       - name: Retain attempt outcome and failure recovery evidence
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: release-outcome-${{ github.sha }}-attempt-${{ github.run_attempt }}
           path: work/release/
           retention-days: 90
 
-      - name: Verify release assets before exposing success
-        run: node scripts/release-artifacts.mjs verify-release work/release/release-manifest.json
+  release:
+    needs: publish
+    permissions:
+      contents: write
+      actions: read
+    runs-on: [self-hosted, vsk-runners-mac]
+    steps:
+      - name: Restore verified publication outcome
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: ${{ needs.publish.outputs.outcome-name }}
+          path: work/release/
 
       - name: Create GitHub release after pair promotion
-        uses: softprops/action-gh-release@v3
+        uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3
         with:
           files: work/release/*
           body_path: work/release/release-notes.md

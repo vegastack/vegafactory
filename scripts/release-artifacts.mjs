@@ -259,9 +259,12 @@ export function recoveryDecision({artifacts,attempts,sourceSha,runAttempt}) {
   if (pairs.length===1) return {prepare:false,artifact:pairs[0].name}
   for(let n=1;n<runAttempt;n++) {
     const jobs=attempts[n]
-    const job=jobs?.find(j=>j.name==='publish')
-    const step=job?.steps?.find(s=>s.name==='Publish retained pair and promote after registry first-use smoke')
-    if(job?.status!=='completed' || step?.conclusion!=='skipped') throw new Error('prior publication uncertain; refuse rebuilding')
+    const prepare=jobs?.find(j=>j.name==='prepare'),publish=jobs?.find(j=>j.name==='publish')
+    const retained=prepare?.steps?.find(s=>s.name==='Retain finalized immutable pair')
+    const step=publish?.steps?.find(s=>s.name==='Publish retained pair and promote after registry first-use smoke')
+    const preparationFailedBeforeRetention=prepare?.status==='completed'&&prepare?.conclusion==='failure'&&retained?.conclusion!=='success'&&(!publish||publish.status==='completed'&&publish.conclusion==='skipped')
+    const legacyOrCompletedPublishSkipped=publish?.status==='completed'&&step?.conclusion==='skipped'
+    if(!preparationFailedBeforeRetention&&!legacyOrCompletedPublishSkipped)throw new Error('prior publication uncertain; refuse rebuilding')
   }
   return {prepare:true,artifact:''}
 }
