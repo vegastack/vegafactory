@@ -1077,7 +1077,9 @@ export interface RunAuthorityDependencies {
 }
 export async function approvalTools(deps:RunAuthorityDependencies={}){
   const {fileURLToPath,pathToFileURL}=await import('node:url')
-  const preflight=deps.preflightScript??process.env.VSK_PREFLIGHT_SCRIPT??join(dirname(dirname(fileURLToPath(import.meta.url))),'skill','dev-implement','scripts','preflight.mjs')
+  const sourceModule=fileURLToPath(import.meta.url).endsWith('.ts')
+  const defaultPreflight=fileURLToPath(new URL(sourceModule?'../../../skills/dev/dev-implement/scripts/preflight.mjs':'../skill/dev-implement/scripts/preflight.mjs',import.meta.url))
+  const preflight=deps.preflightScript??process.env.VSK_PREFLIGHT_SCRIPT??defaultPreflight
   const approval=deps.approvalScript??join(dirname(preflight),'lib','approval.mjs')
   return{approval:await import(pathToFileURL(approval).href),preflight:await import(pathToFileURL(preflight).href)}
 }

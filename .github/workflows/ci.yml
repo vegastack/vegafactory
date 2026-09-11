@@ -35,6 +35,10 @@ jobs:
     runs-on: [self-hosted, vsk-runners-mac]
     steps:
       - uses: actions/checkout@v7
+        with:
+          # Compatibility tests load exact pre-amendment readers from Git history.
+          # A depth-1 checkout makes those immutable fixtures disappear.
+          fetch-depth: 0
 
       - uses: oven-sh/setup-bun@v2
         with:
