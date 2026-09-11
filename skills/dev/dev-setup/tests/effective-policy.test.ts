@@ -324,3 +324,15 @@ test('policy batch reader validates exact byte framing and separate file/aggrega
   output = Buffer.concat(ids.map(id => frame(id, large)))
   expect(() => read('/fixture', ids)).toThrow(/byte limit/)
 })
+
+test('policy batch reader retries one transient truncated frame', () => {
+  const oid = 'a'.repeat(40), text = 'policy\n'
+  const complete = Buffer.concat([Buffer.from(`${oid} blob ${Buffer.byteLength(text)}\n`), Buffer.from(text), Buffer.from('\n')])
+  let calls = 0
+  const blobs = gitReadBlobs('/fixture', [oid], () => ++calls === 1 ? complete.subarray(0, -2) : complete)
+  expect(blobs.get(oid)).toBe(text)
+  expect(calls).toBe(2)
+  calls = 0
+  expect(() => gitReadBlobs('/fixture', [oid], () => { calls++; return complete.subarray(0, -2) })).toThrow(/framing/)
+  expect(calls).toBe(2)
+})

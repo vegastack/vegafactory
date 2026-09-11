@@ -589,13 +589,7 @@ function gitRead(cwd, args) {
 
 // Git batch output is byte framed, not line-oriented policy text. Keep the existing
 // 4 MiB per-file ceiling, with a separate bounded allowance for the whole snapshot.
-export function gitReadBlobs(cwd, oids, run = execFileSync) {
-  const blobLimit = 4 * 1024 * 1024, aggregateLimit = 64 * 1024 * 1024
-  const output = run('git', ['cat-file', '--batch'], {
-    cwd, input: oids.join('\n') + '\n', stdio: 'pipe', timeout: 5000,
-    maxBuffer: Math.min(oids.length * (blobLimit + 64), aggregateLimit + oids.length * 64),
-    env: { ...process.env },
-  })
+function parseGitBlobBatch(output, oids, blobLimit, aggregateLimit) {
   const blobs = new Map()
   let offset = 0, total = 0
   for (const oid of oids) {
@@ -614,6 +608,24 @@ export function gitReadBlobs(cwd, oids, run = execFileSync) {
   }
   if (offset !== output.length) throw new Error('unexpected trailing policy blob batch output')
   return blobs
+}
+
+export function gitReadBlobs(cwd, oids, run = execFileSync) {
+  const blobLimit = 4 * 1024 * 1024, aggregateLimit = 64 * 1024 * 1024
+  const options = {
+    cwd, input: oids.join('\n') + '\n', stdio: 'pipe', timeout: 5000,
+    maxBuffer: Math.min(oids.length * (blobLimit + 64), aggregateLimit + oids.length * 64),
+    env: { ...process.env },
+  }
+  const read = () => run('git', ['cat-file', '--batch'], options)
+  try { return parseGitBlobBatch(read(), oids, blobLimit, aggregateLimit) }
+  catch (error) {
+    // A busy runner can very rarely yield a short synchronous child-process pipe.
+    // Retry only the exact incomplete-frame case;
+    // identity, type, size and trailing-output violations remain hard failures.
+    if (error?.message !== 'truncated or invalid policy blob batch framing') throw error
+    return parseGitBlobBatch(read(), oids, blobLimit, aggregateLimit)
+  }
 }
 
 // A per-code-repository pointer is supplied by the snapshot owner. Read authoritative blobs
