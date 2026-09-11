@@ -23,7 +23,7 @@ describe('app credentials', () => {
 
 describe('findInstallation', () => {
   const respond = (status: number, body: unknown) => (async () => new Response(JSON.stringify(body), { status })) as unknown as typeof fetch
-  const identity = { repository: 'acme/widgets', repositoryId: 12, owner: 'acme', ownerId: 4, audience: 'vegastack-factory', expiresAt: 1_800_000_300 }
+  const identity = { repository: 'acme/widgets', repositoryName: 'widgets', repositoryId: 12, owner: 'acme', ownerId: 4, audience: 'vegastack-factory', expiresAt: 1_800_000_300 }
   const lookup = (doFetch: typeof fetch) => findInstallation({ identity, appId: '123456', jwt: 'jwt', doFetch })
   const installed = { id: 42, app_id: 123456, account: { id: 4 } }
 
@@ -42,7 +42,7 @@ describe('findInstallation', () => {
   test('percent-encodes the path segments it is given', async () => {
     let seen = ''
     const spy = (async (url: string) => { seen = url; return new Response(JSON.stringify(installed), { status: 200 }) }) as unknown as typeof fetch
-    await findInstallation({ identity: { ...identity, repository: 'acme/wid gets' }, appId: '123456', jwt: 'jwt', doFetch: spy })
+    await findInstallation({ identity: { ...identity, repository: 'acme/wid gets', repositoryName: 'wid gets' }, appId: '123456', jwt: 'jwt', doFetch: spy })
     expect(seen).toBe('https://api.github.com/repos/acme/wid%20gets/installation')
   })
 })

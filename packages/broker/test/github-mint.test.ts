@@ -3,7 +3,7 @@ import { CAPPED_PERMISSIONS, PermissionCapViolation, UpstreamFailure, mintRepoTo
 
 const cap = { issues: 'write', metadata: 'read', organization_projects: 'write' }
 const now = 1_800_000_000
-const identity = { repository: 'acme/widgets', repositoryId: 12, owner: 'acme', ownerId: 4, audience: 'vegastack-factory', expiresAt: now + 300 }
+const identity = { repository: 'acme/widgets', repositoryName: 'widgets', repositoryId: 12, owner: 'acme', ownerId: 4, audience: 'vegastack-factory', expiresAt: now + 300 }
 const installation = { id: 42, appId: 123456, accountId: 4 }
 const scope = { total_count: 1, repositories: [{ id: 12, full_name: 'acme/widgets', owner: { id: 4 } }] }
 const expiry = new Date((now + 3600) * 1000).toISOString()

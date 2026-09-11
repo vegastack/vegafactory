@@ -98,7 +98,7 @@ export async function handleTokenRequest(request: Request, env: Env, deps: Deps)
     audit.owner = claims.owner
 
     try {
-      const allowed = await withDeadline(async () => checkRate(env.TOKEN_LIMITER, rateKey(claims.owner, claims.repository.slice(claims.owner.length + 1))), signal)
+      const allowed = await withDeadline(async () => checkRate(env.TOKEN_LIMITER, rateKey(claims.owner, claims.repositoryName)), signal)
       if (!allowed) {
         return outcome(429, 'rate_limited', { error: 'too_many_requests', reason: 'rate_limited' }, { 'Retry-After': '60' })
       }

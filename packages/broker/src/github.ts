@@ -90,7 +90,7 @@ export async function findInstallation(args: {
   identity: VerifiedIdentity; appId: string; jwt: string; doFetch: typeof fetch; signal?: AbortSignal
 }): Promise<Installation> {
   const owner = args.identity.owner
-  const repo = args.identity.repository.slice(owner.length + 1)
+  const repo = args.identity.repositoryName
   const url = `https://api.github.com/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/installation`
   const response = await fetchJson(url, { method: 'GET', headers: { ...API_HEADERS, Authorization: `Bearer ${args.jwt}` }, signal: args.signal }, args.doFetch, 64 * 1024)
   if (response.status === 404) throw new NotInstalled('the VegaStack Factory App is not installed on this repository')

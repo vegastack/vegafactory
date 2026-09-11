@@ -40,6 +40,7 @@ export class TokenRejected extends Error {
 
 export interface VerifiedIdentity {
   repository: string
+  repositoryName: string
   repositoryId: number
   owner: string
   ownerId: number
@@ -159,7 +160,7 @@ export async function verifyOidcToken(
     throw new TokenRejected('claims', 'the repository name is not a single segment')
   }
 
-  return { repository, ...parseSignedRepositoryIds(payload), owner: repositoryOwner, audience: options.audience, expiresAt: exp }
+  return { repository, repositoryName, ...parseSignedRepositoryIds(payload), owner: repositoryOwner, audience: options.audience, expiresAt: exp }
 }
 
 export function parseSignedRepositoryIds(claims: Record<string, unknown>): { repositoryId: number; ownerId: number } {

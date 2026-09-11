@@ -18,7 +18,7 @@ const good = { iss: 'https://token.actions.githubusercontent.com', aud: 'vegasta
 describe('verifyOidcToken', () => {
   test('accepts a well-formed token and splits the repository claim', async () => {
     const claims = await verifyOidcToken(await sign(good), { jwks, audience: 'vegastack-factory', nowSeconds: now })
-    expect(claims).toEqual({ repository: 'acme/widgets', repositoryId: 12, owner: 'acme', ownerId: 4, audience: 'vegastack-factory', expiresAt: now + 300 })
+    expect(claims).toEqual({ repository: 'acme/widgets', repositoryName: 'widgets', repositoryId: 12, owner: 'acme', ownerId: 4, audience: 'vegastack-factory', expiresAt: now + 300 })
   })
 
   test('rejects each broken claim with its own reason', async () => {

@@ -148,6 +148,28 @@ test('unavailable JWKS refuses through the real handler', async () => {
   expect(await response.text()).not.toContain('ghs_secret')
 })
 
+test('stalled JWKS hits the fetch deadline before any downstream broker effect', async () => {
+  let downstreamFetch = false
+  let limiterRead = false
+  let secretRead = false
+  const transport = (async (url: string) => {
+    if (url.endsWith('/.well-known/jwks')) return new Promise<Response>(() => {})
+    downstreamFetch = true
+    return new Response(null, { status: 500 })
+  }) as typeof fetch
+  const records: Record<string, unknown>[] = []
+  const started = performance.now()
+  const response = await handleTokenRequest(await post(await oidcToken()), envWith({
+    TOKEN_LIMITER: { async limit() { limiterRead = true; return { success: true } } },
+    APP_PRIVATE_KEY: { async get() { secretRead = true; return appPem } },
+  }), deps(transport, records))
+  expect(response.status).toBe(502)
+  expect(await response.json()).toEqual({ error: 'bad_gateway', reason: 'jwks_unavailable' })
+  expect(performance.now() - started).toBeLessThan(4000)
+  expect({ downstreamFetch, limiterRead, secretRead }).toEqual({ downstreamFetch: false, limiterRead: false, secretRead: false })
+  expect(JSON.stringify(records)).not.toContain('ghs_')
+}, 5000)
+
 test('otherwise-valid mint stream grants below64KiB and refuses above64KiB', async () => {
   const base = github(installed, minted)
   for (const padding of [63 * 1024, 64 * 1024]) {
