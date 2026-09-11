@@ -158,7 +158,7 @@ test('real process interruption after first write reconciles exact bytes on rest
   const first=launchPair(p,r);r.control.onPublish=()=>first.child.kill('SIGKILL');await first.result
   expect(JSON.parse(await readFile(join(p.dir,'release-state.json'),'utf8')).pending.operation).toBe('publish')
   r.control.onPublish=null;r.control.lostPublish=true
-  expect((await launchPair(p,r).result).code).toBe(0);expect(r.writes.filter(x=>x==='publish '+DASHBOARD)).toHaveLength(1)
+  const resumed=await launchPair(p,r).result;expect(resumed.code,resumed.output).toBe(0);expect(r.writes.filter(x=>x==='publish '+DASHBOARD)).toHaveLength(1)
  }finally{await r.close()}
 },30000)
 test('real CLI refuses missing or altered SBOM before registry writes and refuses local live mutation',async()=>{
