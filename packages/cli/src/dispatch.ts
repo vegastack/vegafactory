@@ -2465,7 +2465,7 @@ export interface RemoteRecoveryMaterial {
 
 type StoppedGroupDecision={action:string;reason:string;request:import('./shared-claims.ts').GroupSuccessionRequest|null}
 type StoppedStateRef=Extract<import('./shared-claims.ts').EvidenceRef,{kind:'state-receipt'}>
-type StoppedGroupClassification={groupId:string;issue:number;issueNodeId:string;taskKey:string;classification:
+export type StoppedGroupClassification={groupId:string;issue:number;issueNodeId:string;taskKey:string;classification:
  | {kind:'retained';expected:import('./shared-claims.ts').ParentClaimBinding}
  | {kind:'completed';acceptedScope:StoppedStateRef;joinEvidence:StoppedStateRef}
  | {kind:'no-shared-task'}}
@@ -2498,6 +2498,10 @@ async function stoppedGroupClassifications(input:{materials:RemoteRecoveryMateri
   if(completed.length===1){
    const child=completed[0]!,task=child.task,accepted=parent.task.recovery.children.filter(row=>row.childTaskKey===task.taskKey&&row.childRunId===task.runId&&row.scopeDigest===task.scopeDigest),joins=parent.task.recovery.joins.filter(row=>row.childRunId===task.runId&&row.state==='accepted'),scopes=task.acceptedScopes.filter(row=>row.scopeDigest===task.scopeDigest)
    if(child.stateCommit!==parent.stateCommit||task.state!=='completed'||task.paths.join('\n')!==group.files.join('\n')||accepted.length!==1||joins.length!==1||scopes.length!==1||accepted[0]!.acceptance.evidence.kind!=='state-receipt'||joins[0]!.evidence.kind!=='state-receipt'||joins[0]!.acceptance?.evidence.kind!=='state-receipt'||scopes[0]!.receipt.kind!=='state-receipt')throw Error('completed stopped group evidence differs')
+   const resolve=async(ref:StoppedStateRef)=>{let payload:import('./shared-claims.ts').RecoveryEvidencePayload|null|undefined;await owner.resolveEvidence({...input.target,verifyEvidence:async(_actual,value)=>{payload=value}},ref);return payload}
+   const scopePayload=await resolve(scopes[0]!.receipt),joinPayload=await resolve(joins[0]!.evidence),scope=scopePayload?.kind==='acceptance'&&scopePayload.acceptedScope?owner.parseAcceptedScope(scopePayload.acceptedScope):null,acceptedRow=accepted[0]!,join=joins[0]!
+   if(scopePayload?.kind!=='acceptance'||scopePayload.result!=='passed'||scopePayload.runId!==task.runId||scopePayload.sourceSha!==acceptedRow.headSha||scopePayload.scopeDigest!==task.scopeDigest||scopePayload.validationId!==acceptedRow.acceptance.validationId||scopePayload.commandDigest!==acceptedRow.acceptance.commandDigest||!scope||scope.repo!==task.repo||scope.issue!==task.issue||canonicalWire(scope.approvalBindings)!==canonicalWire(task.approvalBindings)||canonicalWire([...scope.approvedTaskIds].sort())!==canonicalWire([...task.approvedTaskIds].sort())||canonicalWire([...scope.completedTaskIds].sort())!==canonicalWire([...task.approvedTaskIds].sort()))throw Error('completed stopped group accepted scope differs')
+   if(joinPayload?.kind!=='join'||joinPayload.childRunId!==task.runId||joinPayload.generation!==join.generation||joinPayload.fromSha!==join.fromSha||joinPayload.parentBefore!==join.parentBefore||joinPayload.parentAfter!==join.parentAfter||joinPayload.state!==join.state||joinPayload.validationId!==join.acceptance!.validationId||joinPayload.commandDigest!==join.acceptance!.commandDigest||joinPayload.result!=='passed')throw Error('completed stopped group join evidence differs')
    result.push({groupId:group.id!,issue,issueNodeId:task.issueNodeId,taskKey:task.taskKey,classification:{kind:'completed',acceptedScope:structuredClone(scopes[0]!.receipt),joinEvidence:structuredClone(joins[0]!.evidence)}});continue
   }
   if(completed.length>1)throw Error('repeated completed stopped group member')
@@ -3194,7 +3198,7 @@ export async function prepareVerifiedStoppedGroup(input:{repo:string;parentTaskK
    if(barrier.schemaVersion!==1||barrier.runId!==parent.runId||barrier.attemptId!==(parent.attemptId??parent.runId)||!['active','complete'].includes(barrier.state))throw Error('stopped group controller barrier identity differs')
    const record=await(await import('./children.ts')).readExecutableChildrenRecord(parent,input.config)
    installed={record,existing:[],newPreparations:[],currentTitles:record.children.map(row=>({issue:row.issue,title:row.title}))}
-  }else installed=await(await import('./children.ts')).installRecoveredChildrenContext({parent,material:parentMaterial,config:input.config},{target,gh})
+  }else installed=await(await import('./children.ts')).installRecoveredChildrenContext({parent,material:parentMaterial,classifications:intent.classifications,config:input.config},{target,gh})
  }catch(error){throw Error('stopped group child context verification: '+(error as Error).message)}
  const freshTarget=await verifiedSharedTarget(input.repo,input.config,parent.runId,gh),freshMachine=sharedMachineContexts.get(freshTarget)
  if(!freshMachine||freshMachine.id!==machine.id||freshMachine.installationId!==machine.installationId||freshMachine.hostBindingDigest!==machine.hostBindingDigest)throw Error('stopped group receiver authorization changed before start')

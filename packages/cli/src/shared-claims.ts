@@ -2075,22 +2075,28 @@ export async function readSharedStatus(target: CoordinationTarget, allowedRepos:
 }
 // No state-branch creation or ref fallback exists. gh retains the configured local credentials.
 export function githubCoordinationProvider(gh: (args: string[], options?: GhOptions) => Promise<string> = ghText): CoordinationProvider {
-    const includedBody = (raw: string): string => {
-        if (!raw.startsWith('HTTP/')) return raw; // Preserve injected reader compatibility.
-        const match = /^HTTP\/\S+ \d{3}[^\r\n]*\r?\n(?:[^\r\n]*\r?\n)*\r?\n([\s\S]*)$/.exec(raw);
+    const includedResponse = (raw: string): { body: string; headers: Headers } => {
+        if (!raw.startsWith('HTTP/')) return { body: raw, headers: new Headers() }; // Preserve injected reader compatibility.
+        const match = /^HTTP\/\S+ \d{3}[^\r\n]*\r?\n([\s\S]*?)\r?\n\r?\n([\s\S]*)$/.exec(raw);
         if (!match) throw Error('GitHub response headers are unreadable');
-        return match[1]!;
+        const headers = new Headers();
+        for (const line of match[1]!.split(/\r?\n/)) { const split = line.indexOf(':'); if (split <= 0) throw Error('GitHub response headers are unreadable'); headers.append(line.slice(0, split), line.slice(split + 1).trim()); }
+        return { body: match[2]!, headers };
     };
-    const rateLimitDelay = (error: unknown): number | null => {
-        if (!(error instanceof GhUnavailable)) return null;
-        const limited = error.httpStatus === 429 || error.httpStatus === 403
-            && (error.headers.has('retry-after') || error.headers.get('x-ratelimit-remaining') === '0');
-        if (!limited) return null;
-        const after = error.headers.get('retry-after'), reset = error.headers.get('x-ratelimit-reset');
+    const delayFrom = (headers: Headers): number => {
+        const after = headers.get('retry-after'), reset = headers.get('x-ratelimit-reset');
         const delay = after !== null
             ? (/^\d+(?:\.\d+)?$/.test(after) ? Number(after) * 1000 : Date.parse(after) - Date.now())
             : reset !== null && /^\d+$/.test(reset) ? Number(reset) * 1000 - Date.now() : 0;
         return Number.isFinite(delay) ? Math.max(0, Math.ceil(delay)) : 0;
+    };
+    class RateLimited extends Error { constructor(readonly retryAfterMs: number) { super('provider rate limited'); } }
+    const rateLimitDelay = (error: unknown): number | null => {
+        if (error instanceof RateLimited) return error.retryAfterMs;
+        if (!(error instanceof GhUnavailable)) return null;
+        const limited = error.httpStatus === 429 || error.httpStatus === 403
+            && (error.headers.has('retry-after') || error.headers.get('x-ratelimit-remaining') === '0');
+        return limited ? delayFrom(error.headers) : null;
     };
     async function graphql(target: CoordinationTarget, query: string, variables: Record<string, unknown>, maxBytes?: number) {
         const raw = await gh(['api', '--hostname', target.host, 'graphql', '--input', '-', '--include'], { input: JSON.stringify({ query, variables }), timeoutMs: requestTimeout() });
@@ -2099,11 +2105,14 @@ export function githubCoordinationProvider(gh: (args: string[], options?: GhOpti
             if (budget) budget.decodedBytes += bytes;
             if (bytes > maxBytes || budget && budget.decodedBytes > 8 * 1024 * 1024) throw new StatusBoundExceeded();
         }
-        const body = JSON.parse(includedBody(raw));
-        if (body.errors?.length)
-            throw Error(`GraphQL refused: ${body.errors.map((x: {
+        const response = includedResponse(raw), body = JSON.parse(response.body);
+        if (body.errors?.length) {
+            const types = body.errors.map((x: {
                 type?: string;
-            }) => x.type ?? 'error').join(',')}`);
+            }) => x.type ?? 'error');
+            if (types.includes('RATE_LIMITED') || response.headers.get('x-ratelimit-remaining') === '0') throw new RateLimited(delayFrom(response.headers));
+            throw Error(`GraphQL refused: ${types.join(',')}`);
+        }
         if (!body.data)
             throw Error('missing GraphQL result');
         return body.data;
