@@ -147,6 +147,11 @@ async function currentParentContext(parent:RunRecord,record:ChildrenRecord,confi
   }
   return{claim,task,binding,succession}
 }
+async function activeParentLifecycle(parent:RunRecord,config:FactoryConfig):Promise<boolean>{
+  if(parent.state==='running')return true
+  const barrier=await readOptional<{schemaVersion:number;runId:string;attemptId:string;state:string}>(join(runsRoot(config.home),parent.runId,'controller-barrier.json'))
+  return parent.state==='prepared'&&!parent.processIdentity&&parent.parent===null&&(parent.remoteRecovery?.kind==='receiving-group'&&parent.remoteRecovery.role==='parent'||!!parent.continuations?.length)&&barrier?.schemaVersion===1&&barrier.runId===parent.runId&&barrier.attemptId===(parent.attemptId??parent.runId)&&barrier.state==='active'&&!existsSync(join(runsRoot(config.home),parent.runId,'attempts',parent.attemptId??parent.runId))
+}
 export async function readExecutableChildrenRecord(parent:RunRecord,config:FactoryConfig):Promise<ChildrenRecord>{
   const root=runsRoot(config.home),path=recordPath(root,parent.runId),raw=await readPrivateRunFile(path),parsed=parseChildrenRecord(JSON.parse(raw))
   if(parsed.schemaVersion===2)return parsed
@@ -192,7 +197,7 @@ export async function verifyChildRelationship(input: { parent: TaskRecord; child
   if (!same(actual, expected) || input.child.parentTaskKey !== expected.taskKey
     || parent.sharedClaim?.taskKey !== expected.taskKey || parent.sharedClaim.ownerToken !== expected.ownerToken || parent.sharedClaim.generation !== expected.generation
     || parent.machine?.id !== expected.machineId || parent.machine.installationId !== expected.installationId || parent.machine.sessionId !== expected.sessionId
-    || parent.state !== 'running' || parent.cancelRequestedAt || parent.terminationRequest || parent.parent !== null) throw Error('original parent coordination authority differs')
+    || !await activeParentLifecycle(parent,config) || parent.cancelRequestedAt || parent.terminationRequest || parent.parent !== null) throw Error('original parent coordination authority differs')
   clean(parent.checkout)
   if (git(parent.checkout, ['rev-parse', 'HEAD']) !== launch.baseSha) throw Error('parent source edits cannot overlap child reservations')
   const groups = await authoritativeGroups(parent, config,gh)
@@ -249,7 +254,7 @@ export async function startRecoveredGroupMembers(input:{parent:RecoveredStartMem
 async function verifyParent(record: ChildrenRecord, config: FactoryConfig, unchangedSource = false, gh:typeof ghText=ghText): Promise<void> {
   const parent = await readRun(runsRoot(config.home), record.parentRunId)
   validateRecordedSource(parent, record)
-  if (parent.state !== 'running' || parent.cancelRequestedAt || parent.terminationRequest) throw Error('parent stopped or cancelled')
+  if (!await activeParentLifecycle(parent,config) || parent.cancelRequestedAt || parent.terminationRequest) throw Error('parent stopped, cancelled or lacks its active recovery-controller barrier')
   const current=await currentParentContext(parent,record,config,gh),{claim}=current
   const snapshot = await readCoordination(claim.target),task=snapshot.tasks[claim.taskKey]
   if (!task || task.state !== 'running' || task.stopProof || !snapshot.index.active.some(row => row.taskKey === task.taskKey)) throw Error('parent no longer owns active coordination')
@@ -665,6 +670,11 @@ export async function verifyChildrenEvidence(input: { run: RunRecord; task?: Tas
         .find(row => same(row.evidence, input.ref))
       if (accepted && payload.acceptedScope === null && payload.result === 'passed' && accepted.sourceSha === payload.sourceSha
         && accepted.validationId === payload.validationId && accepted.commandDigest === payload.commandDigest && payload.scopeDigest === subject.taskKey.scopeDigest) return
+    }
+    if(!input.publishing&&input.ref&&input.task?.acceptedScopes.some(row=>same(row.receipt,input.ref)&&row.scopeDigest===payload.scopeDigest)&&payload.acceptedScope){
+      const retained=parseAcceptedScope(payload.acceptedScope)
+      if(payload.result!=='passed'||payload.runId!==subject.runId||payload.sourceSha!==subject.headSha||payload.scopeDigest!==subject.taskKey.scopeDigest||retained.repo!==subject.repo||retained.issue!==subject.issue||!same(retained.artifacts,subject.approvalRefs)||!same(retained.approvalBindings,subject.approvalBindings)||!same([...retained.approvedTaskIds].sort(),[...(subject.approvedTaskIds??[])].sort())||!same([...retained.completedTaskIds].sort(),[...retained.approvedTaskIds].sort()))throw Error('retained accepted scope identity differs')
+      return
     }
     let label = 'child'
     if (subject.parent === null) {

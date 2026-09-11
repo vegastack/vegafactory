@@ -289,7 +289,7 @@ export async function runStatusCli(argv: string[], home: string, deps?: Partial<
   try {
     config = await loadFactoryConfig(configPath ?? `${home}/.vegastack/factory.json`, home)
   } catch (error) {
-    console.error(privacyReason(error))
+    console.error(`factory.json unavailable: ${privacyReason(error)}`)
     return 2
   }
 
