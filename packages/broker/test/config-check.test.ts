@@ -69,12 +69,19 @@ describe('checkBrokerConfig', () => {
     expect(checkBrokerConfig(JSON.stringify(shared)).blocks.join(' ')).toContain('namespace_id')
   })
 
-  test('the committed config is clean apart from the one store id only the operator can create', () => {
-    const path = resolve(import.meta.dir, '../wrangler.jsonc')
-    expect(checkBrokerConfig(readFileSync(path, 'utf8')).blocks).toEqual([
-      'env.preview.secrets_store_secrets[0].store_id is empty — create it with: wrangler secrets-store store create vegafactory --remote',
-      'env.production.secrets_store_secrets[0].store_id is empty — create it with: wrangler secrets-store store create vegafactory --remote',
+  test('blocks an empty store id and says how to find the account store', () => {
+    const empty = structuredClone(base); empty.env.preview.secrets_store_secrets[0]!.store_id = ''
+    const blocks = checkBrokerConfig(JSON.stringify(empty)).blocks
+    expect(blocks).toEqual([
+      'env.preview.secrets_store_secrets[0].store_id is empty — the account allows one store — read its id with: wrangler secrets-store store list --remote',
     ])
+  })
+
+  test('the committed config is clean: both environments bind the account store', () => {
+    const path = resolve(import.meta.dir, '../wrangler.jsonc')
+    const result = checkBrokerConfig(readFileSync(path, 'utf8'))
+    expect(result.blocks).toEqual([])
+    expect(result.warns).toEqual([])
   })
 })
 

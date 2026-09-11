@@ -21,7 +21,7 @@ const LIMITER_NAME = 'TOKEN_LIMITER'
 const ALLOWED_PERIODS = [10, 60]
 const HOSTS = { preview: 'vegafactory-token.vegastack.dev', production: 'vegafactory-token.vegastack.com' }
 const SECRET_SHAPED = ['PRIVATE_KEY', 'SECRET', 'TOKEN']
-const STORE_ADVICE = 'create it with: wrangler secrets-store store create vegafactory --remote'
+const STORE_ADVICE = 'the account allows one store — read its id with: wrangler secrets-store store list --remote'
 
 export function checkBrokerConfig(text) {
   const blocks = []

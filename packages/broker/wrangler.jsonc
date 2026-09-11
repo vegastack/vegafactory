@@ -13,7 +13,7 @@
       "secrets_store_secrets": [
         {
           "binding": "APP_PRIVATE_KEY",
-          "store_id": "",
+          "store_id": "5cebcea1774c4596aba4ffcee25d57f1",
           "secret_name": "vegafactory-app-private-key"
         }
       ],
@@ -36,7 +36,7 @@
       "secrets_store_secrets": [
         {
           "binding": "APP_PRIVATE_KEY",
-          "store_id": "",
+          "store_id": "5cebcea1774c4596aba4ffcee25d57f1",
           "secret_name": "vegafactory-app-private-key"
         }
       ],

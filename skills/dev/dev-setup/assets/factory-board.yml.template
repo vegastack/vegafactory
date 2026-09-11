@@ -36,6 +36,10 @@ jobs:
       - name: Read the profile
         uses: actions/checkout@v7
         with:
+          # Its own directory, never the runner's shared checkout: a sparse checkout
+          # leaves git in sparse mode, and on a self-hosted runner the next job that
+          # reuses the same path would start from an almost-empty tree.
+          path: profile
           sparse-checkout: "{{profile}}"
           sparse-checkout-cone-mode: false
 
@@ -52,7 +56,7 @@ jobs:
       - name: Resolve the board and the state label
         id: resolve
         env:
-          PROFILE: "{{profile}}"
+          PROFILE: "profile/{{profile}}"
           POLICY_MODULE: ".vegafactory-policy/skills/dev/dev-setup/scripts/effective-policy.mjs"
           LABELS: '${{ toJSON(github.event.issue.labels.*.name) }}'
           APP_ID: "${{ vars.VEGAFACTORY_APP_ID }}"
