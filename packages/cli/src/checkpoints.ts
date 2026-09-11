@@ -1,10 +1,8 @@
 import { canonical as canonicalWire } from './shared-claims.ts'
-import { execFile } from 'node:child_process'
-import { promisify } from 'node:util'
 import { randomUUID, createHash } from 'node:crypto'
-import { type RunRecord, transitionRun, readRun, type PendingDelivery, validateAuthority, validateCheckpointIntentShape, updateRun, withRunDelivery } from './runs.ts'
+import { type RunRecord, transitionRun, readRun, type PendingDelivery, validateAuthority, validateCheckpointIntentShape, updateRun, withRunDelivery, trustedGitBytes, trustedGitText } from './runs.ts'
 import { type ApprovalAuthorityRef, type CheckpointRef } from './shared-claims.ts'
-const exec=promisify(execFile)
+import { containsCredentialLikeText } from './dispatch.ts'
 const digest=(s:string)=>createHash('sha256').update(s).digest('hex')
 export interface CheckpointIntent {
   approvalRequest?:{parentRepo:string;parentIssue:number;approvalBinding:{commentId:number;bodySha256:string};requested:{repo:string;issue:number;taskIds:string[];actionId:string;branch:string;ref?:string;baseSha:string;paths:string[];operation:"checkpoint"}}
@@ -25,16 +23,11 @@ export interface CheckpointController {
   prepareEffect?:(candidate:CheckpointCandidate,delivery:PendingDelivery)=>Promise<void>
   acknowledgeEffect?:(candidate:CheckpointCandidate,delivery:PendingDelivery,checkpoint:CheckpointRef)=>Promise<void>
 }
-function gitEnvironment():NodeJS.ProcessEnv {
-  const env={...process.env,GIT_TERMINAL_PROMPT:'0',GIT_NO_REPLACE_OBJECTS:'1'}
-  for(const key of ['GIT_DIR','GIT_WORK_TREE','GIT_COMMON_DIR','GIT_NAMESPACE','GIT_INDEX_FILE','GIT_OBJECT_DIRECTORY','GIT_ALTERNATE_OBJECT_DIRECTORIES','GIT_REPLACE_REF_BASE','GIT_CONFIG_PARAMETERS','GIT_CONFIG_COUNT'])delete env[key as keyof typeof env]
-  return env
-}
 async function gitBytes(cwd:string,args:string[]):Promise<Buffer>{
-  try{return(await exec('git',args,{cwd,encoding:'buffer',timeout:10_000,maxBuffer:32*1024*1024,env:gitEnvironment()})).stdout}catch{throw Error('checkpoint-git-refused')}
+  try{return await trustedGitBytes(cwd,args,10_000)}catch(error){if((error as Error).message==='git-executable-config-refused')throw Error('checkpoint-executable-git-config-refused');throw Error('checkpoint-git-refused')}
 }
 async function git(cwd:string,args:string[]):Promise<string>{
-  try{return new TextDecoder('utf-8',{fatal:true}).decode(await gitBytes(cwd,args))}catch(error){if((error as Error).message==='checkpoint-git-refused')throw error;throw Error('checkpoint-text-encoding-refused')}
+  try{return await trustedGitText(cwd,args,10_000)}catch(error){if((error as Error).message==='git-executable-config-refused')throw Error('checkpoint-executable-git-config-refused');if((error as Error).message==='checkpoint-git-refused')throw error;throw Error('checkpoint-git-refused')}
 }
 async function validateGitSource(run:RunRecord,intent:CheckpointIntent):Promise<void>{
   const {readFile,lstat}=await import('node:fs/promises')
@@ -51,7 +44,6 @@ async function validateGitSource(run:RunRecord,intent:CheckpointIntent):Promise<
 }
 
 const sha=/^[a-f0-9]{40}$/
-const sensitive=/(?:-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----|(?:gh[pousr]_[A-Za-z0-9_]{20,}|github_pat_[A-Za-z0-9_]{20,}|AKIA[A-Z0-9]{16})|(?:credential|secret|token)[-_ ]?canary|(?:api[_-]?key|access[_-]?token|password|secret)\s*[:=]\s*["']?[A-Za-z0-9_\-/+]{16,})/i
 function permitted(path:string,paths:string[]){return paths.some(p=>path===p || p.endsWith('/')&&path.startsWith(p))}
 function checkpointRemoteRef(intent:CheckpointIntent){return intent.approvalRequest?.requested.ref??`refs/heads/${intent.branch}`}
 function localAuthority(binding:ApprovalAuthorityRef|null){if(!binding)return null;const commentId=Number(binding.source.commentId);if(!Number.isSafeInteger(commentId)||commentId<1)throw Error('checkpoint authority locator refused');return{approvalId:binding.approvalId,commentId,bodySha256:binding.source.bodySha256}}
@@ -84,7 +76,7 @@ export async function prepareCheckpoint(input:{run:RunRecord;approvedIntent:Chec
   const commits=(await git(run.checkout,['rev-list',headSha,`^${i.baseSha}`,...(tip?[`^${tip}`]:[])])).trim().split('\n').filter(Boolean)
   const closure:string[]=[]
   for(const commit of commits){
-    const raw=await git(run.checkout,['cat-file','commit',commit]);if(sensitive.test(raw))throw Error('checkpoint-sensitive-commit')
+    const raw=await git(run.checkout,['cat-file','commit',commit]);if(containsCredentialLikeText(raw))throw Error('checkpoint-sensitive-commit')
     const paths=(await git(run.checkout,['diff-tree','--root','-m','--no-commit-id','--name-only','-r','-z',commit])).split('\0').filter(Boolean)
     if(paths.some(p=>!permitted(p,i.paths)||/(?:^|\/)(?:\.env(?:\..*)?|id_rsa|id_ed25519|credentials|\.vegastack\/(?:runs|state))(?:\/|$)/i.test(p)))throw Error('checkpoint-out-of-scope-history')
     const changed=(await git(run.checkout,['diff-tree','--root','-m','--no-commit-id','--raw','-r','-z',commit])).split('\0')
@@ -99,7 +91,7 @@ export async function prepareCheckpoint(input:{run:RunRecord;approvedIntent:Chec
     if(!['blob','tree','commit'].includes(kind)||!Number.isSafeInteger(size)||size>8*1024*1024)throw Error('checkpoint-object-bound')
     const content=await gitBytes(run.checkout,['cat-file',kind,oid])
     if(content.length!==size||createHash('sha1').update(`${kind} ${size}\0`).update(content).digest('hex')!==oid)throw Error('checkpoint-object-integrity-refused')
-    if((kind==='blob'||kind==='commit')&&sensitive.test(content.toString('latin1')))throw Error('checkpoint-sensitive-history')
+    if((kind==='blob'||kind==='commit')&&containsCredentialLikeText(content.toString('latin1')))throw Error('checkpoint-sensitive-history')
     closure.push(oid+':'+createHash('sha256').update(content).digest('hex'))
   }
 
@@ -167,7 +159,8 @@ export async function configuredCheckpointController(run:RunRecord,config:import
     }
     const childRef=request.requested.ref,execution=run.authorityRequest
     if(intent.nativeApproval||request.requested.repo!==run.repo||request.requested.issue!==run.issue||request.requested.operation!=='checkpoint'||request.requested.branch!==run.branch||request.requested.baseSha!==intent.baseSha||canonicalWire(request.requested.paths)!==canonicalWire(intent.paths)||childRef!==undefined&&intent.baseRef!==childRef||childRef===undefined&&(run.parent!==null||intent.baseSha!==run.baseSha))throw Error('checkpoint canonical approval request unavailable')
-    if(childRef!==undefined&&(run.parent===null||execution?.kind!=='consolidated'||request.parentRepo!==execution.parentRepo||request.parentIssue!==execution.parentIssue||request.parentIssue!==run.parent||canonicalWire(request.approvalBinding)!==canonicalWire(execution.approvalBinding)||canonicalWire(request.requested.taskIds)!==canonicalWire(execution.requested.taskIds)||canonicalWire(request.requested.taskIds)!==canonicalWire(run.approvedTaskIds)||canonicalWire(request.requested.paths)!==canonicalWire(execution.requested.paths)))throw Error('checkpoint child execution authority differs')
+    const groupChild=run.remoteRecovery?.kind==='receiving-group'&&run.remoteRecovery.role==='child'
+    if(childRef!==undefined&&(run.parent===null||execution?.kind!=='consolidated'||request.parentRepo!==execution.parentRepo||request.parentIssue!==execution.parentIssue||!groupChild&&request.parentIssue!==run.parent||canonicalWire(request.approvalBinding)!==canonicalWire(execution.approvalBinding)||canonicalWire(request.requested.taskIds)!==canonicalWire(execution.requested.taskIds)||canonicalWire(request.requested.taskIds)!==canonicalWire(run.approvedTaskIds)||canonicalWire(request.requested.paths)!==canonicalWire(execution.requested.paths)))throw Error('checkpoint child execution authority differs')
     const devMd=await readFile(join(entry.path,'.vegastack/dev.md'),'utf8')
     const policy=loadConfiguredPolicy({home:config.home,repo:run.repo,devMd,settingsPath:config.settingsPath});if(!policy.ok)throw Error('checkpoint current policy unavailable')
     const script=join(dirname(dirname(fileURLToPath(import.meta.url))),'skill','dev-implement','scripts','lib','approval.mjs')

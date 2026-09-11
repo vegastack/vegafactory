@@ -38,12 +38,23 @@ export async function inspectOwnedGroup(identity:ProcessIdentity,inspector:Group
     return{kind:leader?'owned':'unknown',members}
   }catch{return{kind:'unknown',members:[]}}
 }
-export async function signalOwnedGroup(identity:ProcessIdentity,signal:NodeJS.Signals,inspector:GroupInspector=nativeGroupInspector):Promise<boolean>{
+export async function refreshOwnedGroupAnchors(identity:ProcessIdentity,anchors:ProcessIdentity[]=[],inspector:GroupInspector=nativeGroupInspector):Promise<ProcessIdentity[]|null>{
   const observation=await inspectOwnedGroup(identity,inspector)
-  if(observation.kind==='absent')return true
-  if(observation.kind!=='owned')return false
-  // Recheck the group leader immediately before signaling; an old numeric PID grants nothing.
-  try {if(!sameProcess(await inspector.identity(identity.pid),identity))return false;inspector.signal(identity.pid,signal);return true}
+  if(observation.kind==='absent')return []
+  if(observation.kind==='foreign'||!observation.members.length)return null
+  const members:ProcessIdentity[]=[]
+  try{for(const pid of observation.members){const member=await inspector.identity(pid);if(member.uid!==identity.uid||member.bootId!==identity.bootId)return null;members.push(member)}}catch{return null}
+  // A live exact leader establishes the group initially. After leader loss, at
+  // least one exact previously observed member must keep the same PGID alive;
+  // a newly reused numeric group cannot inherit kill authority.
+  if(observation.kind!=='owned'&&!anchors.some(anchor=>members.some(member=>sameProcess(anchor,member))))return null
+  return members
+}
+export async function signalOwnedGroup(identity:ProcessIdentity,signal:NodeJS.Signals,inspector:GroupInspector=nativeGroupInspector,anchors:ProcessIdentity[]=[]):Promise<boolean>{
+  const members=await refreshOwnedGroupAnchors(identity,anchors,inspector)
+  if(members?.length===0)return true
+  if(!members)return false
+  try {inspector.signal(identity.pid,signal);return true}
   catch(error){if((error as NodeJS.ErrnoException).code==='ESRCH')return true;return(await inspectOwnedGroup(identity,inspector)).kind==='absent'}
 }
 
@@ -86,7 +97,7 @@ export async function runWrapper(directory:string,runId:string,attemptId:string)
     if(typeof m.command!=='string'||!Array.isArray(m.args)||m.args.some(a=>typeof a!=='string')||typeof m.cwd!=='string'||!m.env||typeof m.env!=='object'){terminate();return}
     admitted=true;clearTimeout(acknowledgment)
     const child=spawn(m.command,m.args,{cwd:m.cwd,env:m.env,stdio:['ignore','pipe','pipe']})
-    child.once('spawn',()=>process.send?.({kind:'spawn',runId,attemptId}))
+    child.once('spawn',()=>process.send?.({kind:'spawn',runId,attemptId,pid:child.pid}))
     child.stdout.on('data',(data:Buffer)=>process.stdout.write(data))
     child.stderr.on('data',(data:Buffer)=>process.stderr.write(data))
     child.once('error',()=>void result(null,'spawn-failed'))

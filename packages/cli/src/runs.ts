@@ -2,6 +2,7 @@ import { canonical as canonicalWire } from './shared-claims.ts'
 import { parseStrictJson } from '../../../skills/dev/dev-implement/scripts/lib/approval.mjs'
 // Private local execution truth. Remote ownership and delivery acknowledgments stay separate.
 import { randomUUID, createHash } from 'node:crypto'
+import { spawnSync, type SpawnSyncReturns } from 'node:child_process'
 import { constants } from 'node:fs'
 import { lstat, mkdir, open, readFile, readdir, rename, rm, realpath } from 'node:fs/promises'
 import { join, dirname, isAbsolute, resolve } from 'node:path'
@@ -94,6 +95,36 @@ const hashBytes=(bytes:string)=>createHash('sha256').update(bytes).digest('hex')
 const uuid = /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i
 const causes = new Set(['succeeded','failed','spawn-failed','timed-out','cancelled','interrupted','termination-unconfirmed'])
 const roots = new Map<string,string>()
+const trustedGitConfigArgs=['-c','core.fsmonitor=false','-c','core.hooksPath=/dev/null','-c','core.sshCommand=ssh -oBatchMode=yes','-c','credential.helper=','-c','credential.helper=!gh auth git-credential','-c','protocol.ext.allow=never','-c','submodule.recurse=false'] as const
+const executableGitConfig=/^(?:core\.(?:fsmonitor|sshcommand|hookspath|pager|editor)|sequence\.editor|credential(?:\..+)?\.helper|filter\..+\.(?:clean|smudge|process)|diff\..+\.(?:command|textconv)|difftool\..+\.cmd|merge\..+\.driver|mergetool\..+\.cmd|remote\..+\.(?:uploadpack|receivepack)|submodule\..+\.update|tar\..+\.command|gpg(?:\..+)?\.program|url\..+\.(?:insteadof|pushinsteadof)|protocol\..+\.allow)$/i
+export function trustedGitEnvironment():NodeJS.ProcessEnv {
+  const env={...process.env}
+  for(const key of Object.keys(env))if(key.startsWith('GIT_')||key==='SSH_ASKPASS')delete env[key]
+  return{...env,GIT_TERMINAL_PROMPT:'0',GIT_NO_REPLACE_OBJECTS:'1',GIT_CONFIG_NOSYSTEM:'1',GIT_CONFIG_GLOBAL:'/dev/null',GIT_PAGER:'cat'}
+}
+function assertTrustedGitConfiguration(bytes:Buffer|string):void {
+  const text=typeof bytes==='string'?bytes:new TextDecoder('utf-8',{fatal:true}).decode(bytes)
+  for(const row of text.split('\0')){
+    const split=row.indexOf('\n');if(split<1)continue
+    if(executableGitConfig.test(row.slice(0,split)))throw Error('git-executable-config-refused')
+  }
+}
+export function trustedGitSync(checkout:string,args:string[],options:{encoding?:BufferEncoding;timeout?:number;maxBuffer?:number}={}):SpawnSyncReturns<string>{
+  const env=trustedGitEnvironment()
+  const config=spawnSync('git',['config','--null','--list'],{cwd:checkout,encoding:'buffer',timeout:options.timeout??5000,maxBuffer:1024*1024,env})
+  if(config.status!==0||config.error)throw Error('git-configuration-unavailable')
+  assertTrustedGitConfiguration(config.stdout)
+  return spawnSync('git',[...trustedGitConfigArgs,...args],{cwd:checkout,encoding:options.encoding??'utf8',timeout:options.timeout??5000,maxBuffer:options.maxBuffer??32*1024*1024,env}) as SpawnSyncReturns<string>
+}
+export async function trustedGitBytes(checkout:string,args:string[],timeout=5000):Promise<Buffer>{
+  const {execFile}=await import('node:child_process'),{promisify}=await import('node:util'),execute=promisify(execFile),env=trustedGitEnvironment()
+  const config=(await execute('git',['config','--null','--list'],{cwd:checkout,encoding:'buffer',timeout,maxBuffer:1024*1024,env})).stdout
+  assertTrustedGitConfiguration(config)
+  return(await execute('git',[...trustedGitConfigArgs,...args],{cwd:checkout,encoding:'buffer',timeout,maxBuffer:32*1024*1024,env})).stdout
+}
+export async function trustedGitText(checkout:string,args:string[],timeout=5000):Promise<string>{
+  return new TextDecoder('utf-8',{fatal:true}).decode(await trustedGitBytes(checkout,args,timeout)).trim()
+}
 export const runsRoot = (home=homedir()) => join(home,'.vegastack','runs')
 function requireId(id:string) { if (!uuid.test(id)) throw Error('invalid run identity') }
 async function privatePath(path:string,directory:boolean) {
@@ -299,7 +330,8 @@ export async function transitionRun(runId:string,expectedGeneration:number,patch
   if(Object.keys(patch).some(k=>!patchKeys.has(k)))throw Error('immutable run identity')
   return mutateRun(runId,expectedGeneration,root,old=>{
     if(patch.activeElapsedMs!==undefined&&old.activeElapsedMs!==null&&patch.activeElapsedMs!==null&&patch.activeElapsedMs<old.activeElapsedMs)throw Error('active elapsed checkpoint decreased')
-    if(old.state==='terminal')for(const field of ['state','terminationCause','exitCode','finishedAt'] as const)if(patch[field]!==undefined&&!sameJson(patch[field],old[field]))throw Error('terminal attempt is immutable')
+    const quotaCancellation=old.state==='terminal'&&old.waitReason==='subscription-quota'&&old.terminationCause==='failed'&&patch.state==='terminal'&&patch.terminationCause==='cancelled'&&!!patch.cancelRequestedAt&&patch.waitReason===null&&patch.quotaWait===null
+    if(old.state==='terminal')for(const field of ['state','terminationCause','exitCode','finishedAt'] as const)if(patch[field]!==undefined&&!sameJson(patch[field],old[field])&&!quotaCancellation)throw Error('terminal attempt is immutable')
     if(old.terminationRequest&&['timed-out','cancelled'].includes(old.terminationRequest.cause)&&patch.terminationRequest!==undefined&&!sameJson(patch.terminationRequest,old.terminationRequest))throw Error('terminal request cause is immutable')
     if(old.cancelRequestedAt&&patch.cancelRequestedAt!==undefined&&patch.cancelRequestedAt!==old.cancelRequestedAt)throw Error('recorded cancellation is immutable')
     if(old.vendorSessionId&&patch.vendorSessionId!==undefined&&patch.vendorSessionId!==old.vendorSessionId)throw Error('vendor session identity changed')
@@ -390,8 +422,7 @@ export async function beginVerifiedRunContinuation(request:RunContinuationReques
     if(request.currentOwner.machine.hostBindingDigest!==(await readHostBinding()).digest)throw Error('continuation target host differs')
     const decision=await controller.verifyRecovery({run:structuredClone(old),request:structuredClone(request)})
     if(!decision||decision.action!=='resume-task'||!text(decision.reason)||decision.runId!==runId||decision.expectedGeneration!==expectedGeneration||decision.previousAttemptId!==previousAttemptId||!sameJson(decision.approvedTaskIds,old.approvedTaskIds)||!sameJson(decision.approvalBindings,old.approvalBindings)||!sameJson(decision.recordBinding,old.recordBinding)||!sameJson(decision.artifacts,old.approvalRefs)||!sameJson(decision.execution,old.execution)||!sameJson(decision.checkpoint,request.checkpoint)||decision.worktreeDigest!==request.worktreeDigest||!sameJson(decision.currentOwner,request.currentOwner)||!Array.isArray(decision.taskIds)||!decision.taskIds.length||new Set(decision.taskIds).size!==decision.taskIds.length||decision.taskIds.some(id=>!old.approvedTaskIds!.includes(id))||!Array.isArray(decision.sourceRefs)||!decision.sourceRefs.length||decision.sourceRefs.some(ref=>!closed(ref,['id','updatedAt','bodySha256'])||!text(ref.id)||!date(ref.updatedAt)||!digest(ref.bodySha256)))throw Error('verified recovery decision differs')
-    const {execFile}=await import('node:child_process'),{promisify}=await import('node:util'),execute=promisify(execFile)
-    const git=async(args:string[])=>(await execute('git',args,{cwd:old.checkout,encoding:'utf8',timeout:5000,env:{...process.env,GIT_NO_REPLACE_OBJECTS:'1',GIT_TERMINAL_PROMPT:'0'}})).stdout.trim()
+    const git=(args:string[])=>trustedGitText(old.checkout,args)
     const [head,tree,branch,fingerprint]=await Promise.all([git(['rev-parse','HEAD']),git(['rev-parse','HEAD^{tree}']),git(['symbolic-ref','--short','HEAD']),worktreeFingerprint(old.checkout)])
     if(head!==request.checkpoint.headSha||tree!==request.checkpoint.treeSha||branch!==old.branch||fingerprint!==request.worktreeDigest)throw Error('continuation checkout changed')
     // Read stop again after controller I/O before preserving and resetting the attempt.
@@ -466,8 +497,7 @@ function receivingFacts(request:ReceivingRunRequest,decision:VerifiedReceivingRu
 async function verifyReceivingCheckout(request:ReceivingRunRequest,decision:VerifiedReceivingRunDecision):Promise<void>{
   const {readHostBinding}=await import('./machine-identity.ts')
   if(decision.receiver.machine.hostBindingDigest!==(await readHostBinding()).digest)throw Error('receiving target host differs')
-  const {execFile}=await import('node:child_process'),{promisify}=await import('node:util'),execute=promisify(execFile)
-  const git=async(args:string[])=>(await execute('git',args,{cwd:request.checkout,encoding:'utf8',timeout:5000,env:{...process.env,GIT_NO_REPLACE_OBJECTS:'1',GIT_TERMINAL_PROMPT:'0'}})).stdout.trim()
+  const git=(args:string[])=>trustedGitText(request.checkout,args)
   const checkpoint=decision.current.task.checkpoint!
   const [head,tree,branch,fingerprint]=await Promise.all([git(['rev-parse','HEAD']),git(['rev-parse','HEAD^{tree}']),git(['symbolic-ref','--short','HEAD']),worktreeFingerprint(request.checkout)])
   if(head!==checkpoint.headSha||tree!==checkpoint.treeSha||branch!==checkpoint.branch||fingerprint!==decision.receiver.worktreeDigest)throw Error('receiving checkout changed')
@@ -615,10 +645,11 @@ function groupReceivingFacts(request:GroupReceivingRunRequest,decision:VerifiedG
     const expectedCurrent:TaskRecordV2={...structuredClone(old),schemaVersion:2,parentBinding:old.parentBinding??null,successionOperationId:receipt.operationId,machineId:receiver.machine.id,installationId:receiver.machine.installationId,sessionId:receiver.machine.sessionId,ownerToken:row.after.ownerToken,generation:old.generation+1,state:old.taskKey===request.parentTaskKey?'claimed':'recovery-queued',recovery:old.recovery?{...structuredClone(old.recovery),generation:old.generation+1}:null}
     if(!sameJson(current,expectedCurrent)||old.state==='completed'||(old.taskKey===request.parentTaskKey?(old.parentTaskKey!==null||old.parentBinding!=null):(old.parentTaskKey!==request.parentTaskKey||!sameJson(old.parentBinding,taskBinding(parent.original.task)))))throw Error('group receiving member lineage differs')
     const stop=parseStopProof(old.stopProof)
-    if(stop.machineId!==old.machineId||stop.installationId!==old.installationId||stop.sessionId!==old.sessionId||stop.generation!==old.generation||!stop.runIds.includes(old.runId)||old.unresolvedEffects.length)throw Error('group receiving predecessor stop/effects differ')
+    if(stop.machineId!==old.machineId||stop.installationId!==old.installationId||stop.sessionId!==old.sessionId||stop.generation!==old.generation||!stop.runIds.includes(old.runId))throw Error('group receiving predecessor stop/effects differ')
     const envelope=parseRecoveryEnvelope(old.recovery),currentEnvelope=parseRecoveryEnvelope(current.recovery),checkpoint=parseCheckpointRef(old.checkpoint)
     if(envelope.taskKey!==old.taskKey||envelope.runId!==old.runId||envelope.generation!==old.generation||envelope.scopeDigest!==old.scopeDigest||envelope.approvalDigest!==old.approvalDigest||!sameJson(envelope.approvalBindings,old.approvalBindings)||!sameJson(currentEnvelope,{...envelope,generation:current.generation})||!sameJson(checkpoint,envelope.checkpoint)||!sameJson(checkpoint,current.checkpoint)||checkpoint.runId!==old.runId||checkpoint.repo!==old.repo||checkpoint.repositoryId!==old.repositoryNodeId||checkpoint.scopeDigest!==old.scopeDigest)throw Error('group receiving checkpoint/effects differ')
-    if(envelope.remoteEffectCoverage.kind==='unmanaged-possible'||envelope.effects.some(effect=>(effect.kind!=='telemetry-push'||effect.target.kind!=='telemetry')&&['prepared','ambiguous'].includes(effect.state)))throw Error('group receiving unresolved code/control effects')
+    const telemetryRefs=envelope.effects.filter(effect=>effect.kind==='telemetry-push'&&effect.target.kind==='telemetry').flatMap(effect=>[effect.intent,effect.outcome].filter((ref):ref is EvidenceRef=>ref!==null)).map(canonicalWire)
+    if(old.unresolvedEffects.some(ref=>!telemetryRefs.includes(canonicalWire(ref)))||envelope.remoteEffectCoverage.kind==='unmanaged-possible'||envelope.effects.some(effect=>(effect.kind!=='telemetry-push'||effect.target.kind!=='telemetry')&&['prepared','ambiguous'].includes(effect.state)))throw Error('group receiving unresolved code/control effects')
     if(!Array.isArray(member.artifacts)||!member.artifacts.length||new Set(member.artifacts.map(canonicalWire)).size!==member.artifacts.length||member.artifacts.some(artifact=>{validateGroupArtifact(artifact);return artifact.repo!==old.repo||artifact.issue!==old.issue})||hashBytes(canonicalWire({artifacts:member.artifacts,taskIds:old.approvedTaskIds}))!==old.scopeDigest)throw Error('group receiving approved artifact scope differs')
     const completed=new Set(envelope.completed.map(done=>done.taskId)),outstanding=old.approvedTaskIds.filter(id=>!completed.has(id))
     if(envelope.completed.some(done=>!old.approvedTaskIds.includes(done.taskId))||!outstanding.length||!Array.isArray(member.taskIds)||new Set(member.taskIds).size!==member.taskIds.length||!sameJson(member.taskIds,outstanding))throw Error('group receiving outstanding task selection differs')
@@ -643,8 +674,7 @@ function groupReceivingFacts(request:GroupReceivingRunRequest,decision:VerifiedG
 async function verifyGroupReceivingCheckout(request:GroupReceivingRunRequest,facts:ReturnType<typeof groupReceivingFacts>):Promise<void>{
   const {readHostBinding}=await import('./machine-identity.ts')
   if(facts.receiver.machine.hostBindingDigest!==(await readHostBinding()).digest)throw Error('group receiving target host differs')
-  const {execFile}=await import('node:child_process'),{promisify}=await import('node:util'),execute=promisify(execFile)
-  const git=async(args:string[])=>(await execute('git',args,{cwd:request.checkout,encoding:'utf8',timeout:5000,env:{...process.env,GIT_NO_REPLACE_OBJECTS:'1',GIT_TERMINAL_PROMPT:'0'}})).stdout.trim()
+  const git=(args:string[])=>trustedGitText(request.checkout,args)
   const [head,tree,branch,fingerprint]=await Promise.all([git(['rev-parse','HEAD']),git(['rev-parse','HEAD^{tree}']),git(['symbolic-ref','--short','HEAD']),worktreeFingerprint(request.checkout)])
   if(head!==facts.checkpoint.headSha||tree!==facts.checkpoint.treeSha||branch!==facts.checkpoint.branch||fingerprint!==facts.receiver.worktreeDigest)throw Error('group receiving checkout changed')
 }
@@ -1282,9 +1312,8 @@ export async function approvedTaskSelection(bindings:ArtifactRef[],reads:unknown
 }
 
 export async function worktreeFingerprint(checkout:string):Promise<string>{
-  const {execFile}=await import('node:child_process'),{promisify}=await import('node:util'),{createHash}=await import('node:crypto'),{readlink}=await import('node:fs/promises')
-  const execute=promisify(execFile),hash=createHash('sha256')
-  const git=async(args:string[])=> (await execute('git',args,{cwd:checkout,encoding:'buffer',timeout:5000,maxBuffer:32*1024*1024,env:{...process.env,GIT_NO_REPLACE_OBJECTS:'1',GIT_TERMINAL_PROMPT:'0'}})).stdout
+  const {createHash}=await import('node:crypto'),{readlink}=await import('node:fs/promises')
+  const hash=createHash('sha256'),git=(args:string[])=>trustedGitBytes(checkout,args)
   hash.update(await git(['rev-parse','HEAD']));hash.update(await git(['symbolic-ref','HEAD']));hash.update(await git(['diff','HEAD','--binary','--no-ext-diff','--no-textconv']))
   const untracked=new TextDecoder('utf-8',{fatal:true}).decode(await git(['ls-files','--others','--exclude-standard','-z'])).split('\0').filter(Boolean).sort()
   for(const path of untracked){

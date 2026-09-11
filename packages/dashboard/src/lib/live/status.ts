@@ -60,12 +60,14 @@ function workflowSnapshot(value: unknown, repo: string): WorkflowStateSnapshot |
 
 export interface DurableRecoverySummary {action:'wait'|'retry-delivery'|'inspect';reason:string;checkpointHead:string|null;unbackedTail:boolean;terminalCapturePreserved:boolean}
 export type SharedHistoryCoverage='complete'|'partial'|'unsupported'|'unavailable'|'bounded'
-export type SharedTransitionKind='acquire'|'start'|'checkpoint'|'stop'|'handoff'|'complete'|'block'|'recovery'|'receipt'|'effect-send'|'accept-scope'
+export type SharedTransitionKind='acquire'|'start'|'checkpoint'|'stop'|'handoff'|'complete'|'block'|'recovery'|'receipt'|'effect-send'|'accept-scope'|'group-succession'
 export interface SharedTaskStatus {taskKey:string;repo:string;issue:number;state:string;machineId:string;generation:number;sourceCommit?:string;originMachineId?:string|null;lastTransitionObservedAt?:string|null;checkpoint?:{headSha:string;publishedAt:string;sourceCommit:string;availability:'unknown'}|null;history?:{coverage:SharedHistoryCoverage;events:Array<{kind:SharedTransitionKind;generation:number;machineId:string;previousMachineId:string|null;sourceCommit:string;observedAt:string|null}>}}
 export interface SharedStatus {head:string|null;tasks:SharedTaskStatus[];refusal:string|null;history?:{coverage:SharedHistoryCoverage;archiveCoverage:'active-only'|'partial';sourceCommit:string}}
+export interface SharedRecoveryProjection {taskKey:string|null;issue:number|null;state:string;action:'recover'|'wait'|'refuse';reason:string}
 export interface PolicySnapshotStatus {state:string;sourceCommit:string|null;policyDigest:string|null;validatedAt:string|null;ageSeconds:number|null;reason:string|null;machine?:{id:string|null;state:string;reason:string|null;executionIdentityVerified:boolean;sourceCommit:string|null}|null}
 export interface StatusRepo {
   shared?: SharedStatus | null
+  recovery?: SharedRecoveryProjection[]
   snapshot?: PolicySnapshotStatus | null
   workflow?: WorkflowStateSnapshot | null
   repo: string
@@ -111,6 +113,7 @@ export function parseStatusReport(parsed: unknown): StatusReport | null {
         workflow: workflowSnapshot(row.workflow, text(row.repo)),
         dispatch: text(row.dispatch),
         shared: sharedStatus(row.shared,text(row.repo)),
+        recovery: recoveryRows(row.recovery),
         snapshot: policySnapshot(row.snapshot),
         board: {
           needsPlan: count(board.needsPlan), ready: count(board.ready),
@@ -175,7 +178,7 @@ function sharedStatus(value:unknown,repo:string):SharedStatus|null {
   if(r.head!==null&&!shaValue(r.head)||!Array.isArray(r.tasks)||r.refusal!==null&&safeReason(r.refusal)===null)return null
   const tasks:SharedStatus['tasks']=[],seen=new Set<string>()
   for(const item of r.tasks){const t=object(item);if(t.repo!==repo)continue
-    if(typeof t.taskKey!=='string'||!/^[a-f0-9]{64}$/.test(t.taskKey)||seen.has(t.taskKey)||!Number.isSafeInteger(t.issue)||Number(t.issue)<1||!['claimed','running','stopped','blocked','completed'].includes(String(t.state))||typeof t.machineId!=='string'||!/^[A-Za-z0-9_-]{1,128}$/.test(t.machineId)||!Number.isSafeInteger(t.generation)||Number(t.generation)<1)return null
+    if(typeof t.taskKey!=='string'||!/^[a-f0-9]{64}$/.test(t.taskKey)||seen.has(t.taskKey)||!Number.isSafeInteger(t.issue)||Number(t.issue)<1||!['claimed','running','stopped','blocked','completed','recovery-queued'].includes(String(t.state))||typeof t.machineId!=='string'||!/^[A-Za-z0-9_-]{1,128}$/.test(t.machineId)||!Number.isSafeInteger(t.generation)||Number(t.generation)<1)return null
     const row:SharedTaskStatus={taskKey:t.taskKey,repo,issue:Number(t.issue),state:String(t.state),machineId:t.machineId,generation:Number(t.generation)}
     if(Object.hasOwn(t,'history')){const extra=sharedTaskProjection(t,r.head);if(extra)Object.assign(row,extra)}
     seen.add(t.taskKey);tasks.push(row)
@@ -183,6 +186,16 @@ function sharedStatus(value:unknown,repo:string):SharedStatus|null {
   const metadata=object(r.history)
   const history=historyCoverage(metadata.coverage)&&['active-only','partial'].includes(String(metadata.archiveCoverage))&&metadata.sourceCommit===r.head&&shaValue(metadata.sourceCommit)?{coverage:metadata.coverage as SharedHistoryCoverage,archiveCoverage:metadata.archiveCoverage as 'active-only'|'partial',sourceCommit:metadata.sourceCommit as string}:undefined
   return {head:shaValue(r.head),tasks,refusal:safeReason(r.refusal),...(history?{history}:{})}
+}
+function recoveryRows(value:unknown):SharedRecoveryProjection[]{
+  if(value===undefined)return[]
+  if(!Array.isArray(value)||value.length>100)return[]
+  const rows:SharedRecoveryProjection[]=[],seen=new Set<string>()
+  for(const item of value){const row=object(item),reason=safeReason(row.reason),key=row.taskKey===null?'none':String(row.taskKey)
+    if(row.taskKey!==null&&(typeof row.taskKey!=='string'||!/^[a-f0-9]{64}$/.test(row.taskKey))||seen.has(key)||row.issue!==null&&(!Number.isSafeInteger(row.issue)||Number(row.issue)<1)||typeof row.state!=='string'||!['claimed','recovery-queued','stopped','blocked','unavailable'].includes(row.state)||!['recover','wait','refuse'].includes(String(row.action))||reason===null)return[]
+    seen.add(key);rows.push({taskKey:row.taskKey as string|null,issue:row.issue as number|null,state:row.state,action:row.action as SharedRecoveryProjection['action'],reason})
+  }
+  return rows
 }
 function policySnapshot(value:unknown):PolicySnapshotStatus|null {
   if(value===null||value===undefined)return null
@@ -266,7 +279,7 @@ function sharedTaskProjection(row:Record<string,unknown>,head:unknown):Pick<Shar
   if(!shaValue(row.sourceCommit)||row.sourceCommit!==head||!historyCoverage(history.coverage)||!Array.isArray(history.events)||history.events.length>100||row.originMachineId!==null&&!machineId(row.originMachineId)||history.coverage!=='complete'&&row.originMachineId!==null||row.lastTransitionObservedAt!==null&&!wireDate(row.lastTransitionObservedAt))return null
   const events:NonNullable<SharedTaskStatus['history']>['events']=[]
   for(const value of history.events){const event=object(value)
-    if(!['acquire','start','checkpoint','stop','handoff','complete','block','recovery','receipt','effect-send','accept-scope'].includes(String(event.kind))||!Number.isSafeInteger(event.generation)||Number(event.generation)<1||!machineId(event.machineId)||event.previousMachineId!==null&&!machineId(event.previousMachineId)||!shaValue(event.sourceCommit)||event.observedAt!==null&&!wireDate(event.observedAt))return null
+    if(!['acquire','start','checkpoint','stop','handoff','complete','block','recovery','receipt','effect-send','accept-scope','group-succession'].includes(String(event.kind))||!Number.isSafeInteger(event.generation)||Number(event.generation)<1||!machineId(event.machineId)||event.previousMachineId!==null&&!machineId(event.previousMachineId)||!shaValue(event.sourceCommit)||event.observedAt!==null&&!wireDate(event.observedAt))return null
     events.push({kind:event.kind as SharedTransitionKind,generation:Number(event.generation),machineId:event.machineId,previousMachineId:event.previousMachineId as string|null,sourceCommit:event.sourceCommit as string,observedAt:event.observedAt as string|null})
   }
   let checkpoint:SharedTaskStatus['checkpoint']=null

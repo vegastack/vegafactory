@@ -150,3 +150,12 @@ test('141 status refuses missing and truncated search completeness instead of cl
     }
   } finally { console.log = log }
 })
+
+test('138 CLI group-recovery status survives the dashboard bridge and reaches operator attention',async()=>{
+  const statusBridge=await import(new URL('../../dashboard/src/lib/live/status.ts',import.meta.url).href),dispatcherView=await import(new URL('../../dashboard/src/lib/views/dispatcher.ts',import.meta.url).href)
+  const head='a'.repeat(40),taskKey='b'.repeat(64)
+  const source={dispatcher:{running:false,pid:null,lastTick:null,interval:120},repos:[{repo:'acme/app',dispatch:'local',board:{needsPlan:0,ready:0,working:1,forOperator:0},worktrees:[],runs:[],shared:{head,refusal:null,history:{coverage:'complete',archiveCoverage:'partial',sourceCommit:head},tasks:[{taskKey,repo:'acme/app',issue:144,state:'recovery-queued',machineId:'receiver',generation:2,sourceCommit:head,originMachineId:'original',lastTransitionObservedAt:'2026-09-11T00:00:00Z',checkpoint:null,history:{coverage:'complete',events:[{kind:'group-succession',generation:2,machineId:'receiver',previousMachineId:'original',sourceCommit:head,observedAt:'2026-09-11T00:00:00Z'}]}}]},recovery:[{taskKey,issue:144,state:'recovery-queued',action:'wait',reason:'parent must start before this recovered child'}]}]}
+  const bridged=statusBridge.parseStatusReport(source)!;expect(bridged.repos[0]?.shared?.tasks[0]?.state).toBe('recovery-queued');expect(bridged.repos[0]?.shared?.tasks[0]?.history?.events[0]?.kind).toBe('group-succession');expect(bridged.repos[0]?.recovery).toEqual(source.repos[0]!.recovery)
+  const view=dispatcherView.buildDispatcherView({context:{freshness:{syncedAt:'2026-09-11T00:00:00Z'}} as never,status:{ok:true,data:bridged},now:Date.parse('2026-09-11T00:01:00Z')})
+  expect(view.reasons).toEqual(['acme/app #144: recovery wait · parent must start before this recovered child'])
+})

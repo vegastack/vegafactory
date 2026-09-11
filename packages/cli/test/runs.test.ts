@@ -301,7 +301,7 @@ test('receiving startup reconciliation keeps historical usage unknown after rece
 
 // A real two-checkout group fixture. The controller is still a controlled
 // authority boundary; #144 owns the live conditional-provider orchestration.
-async function groupReceivingFixture(options:{parentTaskIds?:string[];parentCompleted?:string[]}={}){
+async function groupReceivingFixture(options:{parentTaskIds?:string[];parentCompleted?:string[];telemetryBacklog?:boolean}={}){
   const runtime=await import('../src/runs.ts'),wire=await import('../src/shared-claims.ts')
   const {execFileSync}=await import('node:child_process'),{mkdir}=await import('node:fs/promises'),{readHostBinding}=await import('../src/machine-identity.ts')
   const directory=await mkdtemp(join(tmpdir(),'group-receiving-')),root=join(directory,'runs'),source=join(directory,'source'),remote=join(directory,'remote.git')
@@ -311,7 +311,7 @@ async function groupReceivingFixture(options:{parentTaskIds?:string[];parentComp
   git(directory,['clone','-q','--bare',source,remote])
   const parentCheckout=join(directory,'parent-checkout'),childCheckout=join(directory,'child-checkout')
   git(directory,['clone','-q','-b','feat/parent',remote,parentCheckout]);git(directory,['clone','-q','-b','feat/child',remote,childCheckout])
-  const host=(await readHostBinding()).digest,authority={approvalId:'fixture',source:{kind:'github-comment' as const,repositoryId:'R_repo',issueNodeId:'I_parent',commentId:'12',bodySha256:'a'.repeat(64)}}
+  const host=(await readHostBinding()).digest,authority={approvalId:'fixture',source:{kind:'github-comment' as const,repositoryId:'R_repo',issueNodeId:'I_parent',commentId:'12',bodySha256:'a'.repeat(64)}},relayAuthority={approvalId:'relay',source:{kind:'github-comment' as const,repositoryId:'R_repo',issueNodeId:'I_record',commentId:'13',bodySha256:'b'.repeat(64)}}
   const evidence=()=>({kind:'state-receipt' as const,operationId:crypto.randomUUID(),commitSha:'e'.repeat(40),blobSha256:'f'.repeat(64)})
   const receiver={machine:{id:'receiver',installationId:crypto.randomUUID(),sessionId:crypto.randomUUID(),hostBindingDigest:host},claimToken:crypto.randomUUID(),policyDigest:'b'.repeat(64),runtimeBinding:{schemaVersion:1 as const,sourceSha:'5'.repeat(40),treeSha:'6'.repeat(40),packageName:'@vegastack/vegafactory' as const,version:'0.1.0',tarballSha256:'7'.repeat(64),inventoryDigest:'8'.repeat(64)},configurationDigest:'9'.repeat(64),worktreeDigest:''}
   const operationId=crypto.randomUUID(),previousHead='3'.repeat(40),currentHead='4'.repeat(40),parentTaskKey='1'.repeat(64)
@@ -322,8 +322,9 @@ async function groupReceivingFixture(options:{parentTaskIds?:string[];parentComp
     const execution:import('../src/shared-claims.ts').ExecutionIdentity={providerMode:'subscription',harness:'codex',harnessVersion:'fixture',model:'fixture',effort:'high',accountRef:'original-account',qualification:evidence()}
     const stopProof:import('../src/shared-claims.ts').StopProof={kind:'verified-reboot',machineId:'old-machine',installationId:'11111111-1111-4111-8111-111111111111',sessionId:'22222222-2222-4222-8222-222222222222',hostBindingDigest:'1'.repeat(64),bootIdDigest:'2'.repeat(64),runIds:[runId],generation:3,observedAt:'2026-09-09T01:00:00.000Z',evidenceRef:evidence()}
     const completed=(input.completed??[]).map(taskId=>({taskId,headSha,acceptance:{sourceSha:headSha,validationId:`fixture/check/${'a'.repeat(64)}`,commandDigest:'b'.repeat(64),evidence:evidence()}}))
-    const recovery:import('../src/shared-claims.ts').RecoveryEnvelope={schemaVersion:2,taskKey:input.taskKey,runId,generation:3,approvalBindings:[authority],recordBinding:authority,scopeDigest,approvalDigest:'c'.repeat(64),execution,checkpoint,completed,children:[],joins:[],effects:[],remoteEffectCoverage:{kind:'reconciled',evidence:evidence()}}
-    const task:import('../src/shared-claims.ts').TaskRecord={schemaVersion:1,taskKey:input.taskKey,host:'github.com',repo:'o/r',issue:input.issue,repositoryNodeId:'R_repo',issueNodeId:`I_${input.issue}`,scopeDigest,approvalDigest:'c'.repeat(64),approvalBindings:[authority],generation:3,machineId:stopProof.machineId,installationId:stopProof.installationId,sessionId:stopProof.sessionId,ownerToken:crypto.randomUUID(),runId,stage:'implement',state:'stopped',paths:[input.issue===1?'parent.txt':'child.txt'],resources:[],independent:true,parentTaskKey:input.parentBinding?.taskKey??null,parentBinding:input.parentBinding,approvedTaskIds:taskIds,checkpoint,stopProof,unresolvedEffects:[],recovery,acceptedScopes:[]}
+    const telemetry:import('../src/shared-claims.ts').EffectRef|undefined=options.telemetryBacklog?{operationId:crypto.randomUUID(),runId,generation:3,kind:'telemetry-push',target:{kind:'telemetry',destinationRepositoryId:'R_room',destinationPath:`data/${input.issue}.jsonl`,eventId:crypto.randomUUID(),batchId:crypto.randomUUID()},payloadDigest:'d'.repeat(64),state:'ambiguous',intent:evidence(),outcome:null}:undefined
+    const recovery:import('../src/shared-claims.ts').RecoveryEnvelope={schemaVersion:2,taskKey:input.taskKey,runId,generation:3,approvalBindings:[authority],recordBinding:relayAuthority,scopeDigest,approvalDigest:'c'.repeat(64),execution,checkpoint,completed,children:[],joins:[],effects:telemetry?[telemetry]:[],remoteEffectCoverage:{kind:'reconciled',evidence:evidence()}}
+    const task:import('../src/shared-claims.ts').TaskRecord={schemaVersion:1,taskKey:input.taskKey,host:'github.com',repo:'o/r',issue:input.issue,repositoryNodeId:'R_repo',issueNodeId:`I_${input.issue}`,scopeDigest,approvalDigest:'c'.repeat(64),approvalBindings:[authority],generation:3,machineId:stopProof.machineId,installationId:stopProof.installationId,sessionId:stopProof.sessionId,ownerToken:crypto.randomUUID(),runId,stage:'implement',state:'stopped',paths:[input.issue===1?'parent.txt':'child.txt'],resources:[],independent:true,parentTaskKey:input.parentBinding?.taskKey??null,parentBinding:input.parentBinding,approvedTaskIds:taskIds,checkpoint,stopProof,unresolvedEffects:telemetry?[telemetry.intent]:[],recovery,acceptedScopes:[]}
     return{task,artifacts,taskIds,checkout:input.checkout}
   }
   const parent=makeOriginal({issue:1,taskKey:parentTaskKey,branch:'feat/parent',checkout:parentCheckout,parentBinding:null,taskIds:options.parentTaskIds,completed:options.parentCompleted})
@@ -337,7 +338,7 @@ async function groupReceivingFixture(options:{parentTaskIds?:string[];parentComp
   const succession={kind:'state-receipt' as const,operationId,commitSha:currentHead,blobSha256:wire.sha256(wire.canonical(receipt))}
   const approvalBinding={commentId:12,bodySha256:'a'.repeat(64)}
   const members:import('../src/runs.ts').VerifiedGroupReceivingRunDecision['members']=originals.map((member,index)=>{
-    const isChild=index===1,authorityRequest:import('../src/runs.ts').RunAuthorityRequest={kind:'consolidated',parentRepo:'o/r',parentIssue:133,approvalBinding,requested:{repo:'o/r',issue:member.task.issue,taskIds:member.task.approvedTaskIds,actionId:'local-code',branch:member.task.checkpoint!.branch,baseSha:member.task.checkpoint!.baseSha,paths:member.task.paths,operation:'edit'}}
+    const isChild=index===1,executionSource=isChild?parent.task.checkpoint!:member.task.checkpoint!,authorityRequest:import('../src/runs.ts').RunAuthorityRequest={kind:'consolidated',parentRepo:'o/r',parentIssue:133,approvalBinding,requested:{repo:'o/r',issue:member.task.issue,taskIds:member.task.approvedTaskIds,actionId:'local-code',branch:executionSource.branch,baseSha:executionSource.baseSha,paths:member.task.paths,operation:'edit'}}
     const checkpointIntent:import('../src/checkpoints.ts').CheckpointIntent|null=isChild?{id:'child-checkpoint',repo:'o/r',repositoryId:'R_repo',remote:'origin',remoteUrl:remote,branch:member.task.checkpoint!.branch,baseRef:`refs/heads/${member.task.checkpoint!.branch}`,baseSha:member.task.checkpoint!.baseSha,scopeDigest:member.task.scopeDigest,paths:member.task.paths,approvalBindings:[authority],approvalRequest:{parentRepo:'o/r',parentIssue:133,approvalBinding,requested:{repo:'o/r',issue:member.task.issue,taskIds:member.task.approvedTaskIds,actionId:'child-checkpoint',branch:member.task.checkpoint!.branch,ref:`refs/heads/${member.task.checkpoint!.branch}`,baseSha:member.task.checkpoint!.baseSha,paths:member.task.paths,operation:'checkpoint'}}}:null
     const completed=new Set(member.task.recovery!.completed.map(row=>row.taskId))
     return{original:{stateCommit:previousHead,task:member.task},current:{stateCommit:currentHead,task:currents[index]!},artifacts:member.artifacts,authorityRequest,checkpointIntent,taskIds:member.task.approvedTaskIds.filter(id=>!completed.has(id)),sourceRefs:[{id:`source-${member.task.issue}`,updatedAt:'2026-09-09T02:00:00.000Z',bodySha256:'a'.repeat(64)}]}
@@ -361,8 +362,17 @@ test('verified group receiving creates exact parent and child attempts without f
       expect(run.parent).toBe(role==='parent'?null:1)
       expect(run.remoteRecovery).toMatchObject({kind:'receiving-group',succession:f.succession,role,parentTaskKey:request.parentTaskKey,priorHistory:'unavailable',reportingContext:'unavailable'})
       expect(run.remoteRecovery!.originalTask).toEqual({bytes:f.wire.canonical(selected.original.task),sha256:f.wire.sha256(f.wire.canonical(selected.original.task))})
-      expect(run.checkpointIntent??null).toEqual(selected.checkpointIntent);expect((await stat(join(f.root,run.runId,'run.json'))).mode&0o777).toBe(0o600)
+      expect(run.checkpointIntent??null).toEqual(selected.checkpointIntent);expect(run.approvalBindings).toEqual(selected.original.task.approvalBindings);expect(run.recordBinding).toEqual(selected.original.task.recovery!.recordBinding);expect((await stat(join(f.root,run.runId,'run.json'))).mode&0o777).toBe(0o600)
     }
+  }finally{await rm(f.directory,{recursive:true,force:true})}
+})
+
+test('verified group receiving retains telemetry-only backlog without blocking recovery',async()=>{
+  const f=await groupReceivingFixture({telemetryBacklog:true})
+  try{
+    const request=f.request('child'),run=await f.runtime.createVerifiedGroupReceivingRun(request,f.controller)
+    const original=JSON.parse(run.remoteRecovery!.originalTask.bytes) as import('../src/shared-claims.ts').TaskRecord
+    expect(original.unresolvedEffects).toHaveLength(1);expect(original.recovery!.effects[0]?.kind).toBe('telemetry-push');expect(run.state).toBe('prepared')
   }finally{await rm(f.directory,{recursive:true,force:true})}
 })
 

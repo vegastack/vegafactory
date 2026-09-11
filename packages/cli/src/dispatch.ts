@@ -2,7 +2,7 @@ import { realpath } from 'node:fs/promises'
 import { inspectSpool, spoolRoot } from './stats/outbox.ts'
 import { basicDiagnostic, probePressure, privacyReason } from './stats/privacy.ts'
 import { canonical as canonicalWire } from './shared-claims.ts'
-import { createRun, readRun, transitionRun, updateRun, runsRoot, type RunRecord, type TerminalCause, type RunInput, prepareRunAttemptDirectory } from './runs.ts'
+import { createRun, readRun, transitionRun, updateRun, runsRoot, trustedGitSync, type RunRecord, type TerminalCause, type RunInput, prepareRunAttemptDirectory } from './runs.ts'
 import { resolveLabels, resolveState } from '../../../skills/dev/dev-setup/scripts/effective-policy.mjs'
 import type { LabelMap } from './config.ts'
 // The dispatcher: what a tick would do, and then doing it. Everything that decides is a pure
@@ -505,17 +505,25 @@ export function logPath(config: FactoryConfig, repo: string, issue: number, at: 
 // Pattern-based, and deliberately broad: this text goes into a public issue comment, so a shape
 // that merely looks like a credential is redacted rather than reasoned about.
 const SECRET_PATTERNS: RegExp[] = [
-  /\bghp_[A-Za-z0-9]{16,}/g,
+  /\bgh[pousr]_[A-Za-z0-9_]{16,}/g,
   /\bgithub_pat_[A-Za-z0-9_]{20,}/g,
-  /\bgho_[A-Za-z0-9]{16,}/g,
   /\bsk-[A-Za-z0-9_-]{16,}/g,
   /\bnpm_[A-Za-z0-9]{16,}/g,
+  /\bAKIA[A-Z0-9]{16}\b/g,
+  /-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----/g,
+  /(?:credential|secret|token)[-_ ]?canary/gi,
+  /(?:api[_-]?key|access[_-]?token|password|secret)\s*[:=]\s*["']?[A-Za-z0-9_\-/+]{16,}/gi,
   // The header label and an optional scheme are kept; whatever one token follows them, on the same
   // line, is the credential. Quotes end the token, so a JSON-shaped or curl-quoted header loses only
   // its value, and the pattern never reaches across a line break to the next header.
   /(Authorization["']?:[ \t]*["']?(?:(?:Bearer|Basic|Token|Digest)[ \t]+)?)[^\s"']+/gi,
   /((?:AWS_SECRET_ACCESS_KEY|AWS_SESSION_TOKEN|GITHUB_TOKEN|GH_TOKEN|ANTHROPIC_API_KEY|OPENAI_API_KEY)\s*[=:]\s*)\S+/g,
 ]
+
+export function containsCredentialLikeText(text:string):boolean {
+  for(const pattern of SECRET_PATTERNS){pattern.lastIndex=0;const found=pattern.test(text);pattern.lastIndex=0;if(found)return true}
+  return false
+}
 
 export function redact(text: string): string {
   let out = text
@@ -579,27 +587,11 @@ export interface ExecuteDeps {
   checkpoint: 'auto'|'deferred'
 }
 
-function defaultGit(args: string[], cwd: string): Promise<{ ok: boolean; message: string }> {
-  return new Promise(resolve => {
-    const child = spawn('git', args, { cwd, stdio: ['ignore', 'pipe', 'pipe'] })
-    let message = ''
-    child.stdout.setEncoding('utf8')
-    child.stderr.setEncoding('utf8')
-    child.stdout.on('data', (chunk: string) => { message += chunk })
-    child.stderr.on('data', (chunk: string) => { message += chunk })
-    child.on('error', error => resolve({ ok: false, message: (error as Error).message }))
-    child.on('close', code => resolve({ ok: code === 0, message: message.trim() }))
-  })
-}
-
-// The effectful half, and the only place in this file that spawns a harness. Both pipes are
-// streamed to the log as they arrive rather than buffered, so a dispatcher that dies still leaves a
-// readable record of how far the run got, and a run that prints megabytes cannot exhaust memory.
-//
-// A run that fails is not retried and is never left looking finished: the branch is pushed anyway
-// (an evidence sha only resolves once the commit is on the remote), a hand-back comment carrying
-// the redacted tail is posted, the issue goes back to `needs-operator` assigned to its operator,
-// and the worktree is left exactly as the run left it.
+// The effectful half, and the only place in this file that spawns a harness.
+// Raw streams stay in bounded private capture for the current process only; durable diagnostics
+// contain lifecycle events and reason codes. Source, hand-back, evidence and telemetry delivery
+// each require their own persisted exact intent and verified readback. A terminal process state
+// grants no implicit push, label, assignment or acceptance mutation.
 // Metadata only: version and allowlisted config/hook RPCs start no task or turn.
 export async function inspectManagedHarness(plan: LaunchPlan): Promise<HarnessMetadata> {
   try { if (realpathSync(plan.cwd) !== plan.cwd) return { version: '', problems: ['prepared checkout must be canonical before managed launch'] } }
@@ -634,7 +626,7 @@ export async function verifyDispatchRunAuthority(
   }
   const request = run.authorityRequest, intent = run.checkpointIntent, checkpointRequest = intent?.approvalRequest
   if (!intent || !checkpointRequest || checkpointRequest.requested.ref !== `refs/heads/${run.branch}` || checkpointRequest.requested.branch !== run.branch
-    || request.parentIssue !== run.parent || checkpointRequest.parentRepo !== request.parentRepo || checkpointRequest.parentIssue !== request.parentIssue
+    || checkpointRequest.parentRepo !== request.parentRepo || checkpointRequest.parentIssue !== request.parentIssue
     || canonicalWire(checkpointRequest.approvalBinding) !== canonicalWire(request.approvalBinding)
     || request.requested.repo !== run.repo || request.requested.issue !== run.issue || request.requested.operation !== 'edit'
     || request.requested.branch === run.branch || request.requested.baseSha !== run.baseSha
@@ -644,11 +636,11 @@ export async function verifyDispatchRunAuthority(
     || canonicalWire(checkpointRequest.requested.taskIds) !== canonicalWire(run.approvedTaskIds)
     || canonicalWire(checkpointRequest.requested.paths) !== canonicalWire(request.requested.paths)
     || canonicalWire(intent.paths) !== canonicalWire(request.requested.paths)) throw Error('child execution/checkpoint authority identity differs')
-  const branch = spawnSync('git', ['symbolic-ref','--short','HEAD'], { cwd: run.checkout, encoding: 'utf8', timeout: 5000 })
-  const head = spawnSync('git', ['rev-parse','HEAD'], { cwd: run.checkout, encoding: 'utf8', timeout: 5000 })
-  const ancestor = spawnSync('git', ['merge-base','--is-ancestor',run.baseSha,head.stdout?.trim() ?? ''], { cwd: run.checkout, timeout: 5000 })
+  const branch = trustedGitSync(run.checkout,['symbolic-ref','--short','HEAD'])
+  const head = trustedGitSync(run.checkout,['rev-parse','HEAD'])
+  const ancestor = trustedGitSync(run.checkout,['merge-base','--is-ancestor',run.baseSha,head.stdout?.trim() ?? ''])
   if (branch.status !== 0 || head.status !== 0 || branch.stdout.trim() !== run.branch || !/^[a-f0-9]{40}$/.test(head.stdout.trim()) || ancestor.status !== 0
-    || purpose === 'launch' && (head.stdout.trim() !== run.headSha || spawnSync('git',['status','--porcelain','--untracked-files=all'],{cwd:run.checkout,encoding:'utf8',timeout:5000}).stdout.trim())) throw Error('actual child Git identity differs')
+    || purpose === 'launch' && (head.stdout.trim() !== run.headSha || trustedGitSync(run.checkout,['status','--porcelain','--untracked-files=all']).stdout.trim())) throw Error('actual child Git identity differs')
   const entry = config.repos.find(row => row.repo.toLowerCase() === run.repo.toLowerCase())
   if (!entry || !run.approvalBindings.length || !run.approvedTaskIds?.length) throw Error('child authority context unavailable')
   const devMd = await readFile(join(entry.path,'.vegastack','dev.md'),'utf8'), resolved = loadConfiguredPolicy({home:config.home,repo:run.repo,devMd,settingsPath:config.settingsPath})
@@ -685,8 +677,8 @@ export async function executeRun(
   const timeoutMs = deps?.timeoutMs
   if(timeoutMs != null && (!Number.isFinite(timeoutMs)||timeoutMs<=0))throw Error('invalid explicit execution timeout')
   const root=runsRoot(config.home),startedAt=now().toISOString()
-  const gitHead=spawnSync('git',['rev-parse','HEAD'],{cwd:plan.cwd,encoding:'utf8'}).stdout?.trim()??''
-  const branch=spawnSync('git',['symbolic-ref','--short','HEAD'],{cwd:plan.cwd,encoding:'utf8'}).stdout?.trim()??''
+  const gitHead=trustedGitSync(plan.cwd,['rev-parse','HEAD']).stdout?.trim()??''
+  const branch=trustedGitSync(plan.cwd,['symbolic-ref','--short','HEAD']).stdout?.trim()??''
   const hostBindingDigest=(await (await import('./machine-identity.ts')).readHostBinding()).digest
   let record:RunRecord=deps?.preparedRun??await createRun(deps?.runInput??{root,hostBindingDigest,repo:run.repo,issue:run.issue,parent:null,checkout:plan.cwd,branch,baseSha:gitHead,headSha:gitHead||null,stage:run.stage,harness:plan.command,model:'unknown',effort:'unknown',execution:null,approvalBindings:[],recordBinding:null,approvalRefs:[],policyDigest:plan.guardPolicyDigest??'',claimToken:randomUUID(),startedAt,taskKey:{repo:run.repo,issue:run.issue,taskId:'unknown',scopeDigest:''},activeElapsedMs:null,taskOwner:null,agentAccountOwner:null,accountRef:null,waitReason:null,machine:null,sharedClaim:null,checkpoint:null,remoteEffectCoverage:plan.remoteEffectCoverage??{kind:'unmanaged-possible',reasonCode:'unqualified-local-attempt'}})
   const recordRoot=deps?.runInput?.root??root
@@ -700,12 +692,12 @@ export async function executeRun(
     record=await updateRun(recordRoot,record.runId,()=>patch)
   });return mutations}
   await event('prepared')
-  const refuse=async(reason:string):Promise<RunOutcome>=>{await transition({state:'terminal',terminationCause:'spawn-failed',finishedAt:now().toISOString()});await event('launch-refused',{reasonCode:'launch-refused'});return{runId:record.runId,started:false,refusal:reason,terminationCause:'spawn-failed',exitCode:null,timedOut:false,logFile:file,pushed:false,handedBack:false}}
+  const refuse=async(reason:string,terminationCause:TerminalCause='spawn-failed'):Promise<RunOutcome>=>{const at=now().toISOString();await transition({state:'terminal',terminationCause,finishedAt:at,...(terminationCause==='cancelled'?{cancelRequestedAt:record.cancelRequestedAt??at,terminationRequest:{cause:'cancelled',at}}:{})});await event('launch-refused',{reasonCode:'launch-refused'});return{runId:record.runId,started:false,refusal:reason,terminationCause,exitCode:null,timedOut:false,logFile:file,pushed:false,handedBack:false}}
   let pendingBytes=0
   try{pendingBytes=(await inspectSpool(spoolRoot(config.home))).pendingBytes}catch{return refuse('privacy-spool-unavailable')}
   const pressure=await probePressure(config.home,pendingBytes)
   if(pressure.paused)return refuse(pressure.reason)
-  if(options.signal?.aborted)return refuse('cancelled before launch')
+  if(options.signal?.aborted)return refuse('cancelled before launch','cancelled')
   if(run.parallel?.length){
     try{if(!options.sharedClaim)throw Error('shared parent ownership required');await(await import('./children.ts')).validateParallelCoordinator(run,record,config)}
     catch(error){return refuse((error as Error).message)}
@@ -746,7 +738,7 @@ export async function executeRun(
   const wrapperPath=deps?.wrapperPath??join(dirname(fileURLToPath(import.meta.url)),'run-wrapper.js')
   if(!existsSync(wrapperPath))return refuse('packaged run wrapper unavailable')
   if(record.cancelRequestedAt)throw Error('run was explicitly cancelled; fresh resume authority required')
-  const {inspectOwnedGroup,signalOwnedGroup}=await import('./run-wrapper.ts')
+  const {inspectOwnedGroup,signalOwnedGroup,refreshOwnedGroupAnchors}=await import('./run-wrapper.ts')
   const directory=await prepareRunAttemptDirectory(recordRoot,record),attemptId=record.attemptId??record.runId
   const monotonic=deps?.monotonic??(()=>performance.now())
   let started=false,stdout='',cause:TerminalCause|null=null,exitCode:number|null=null,identity:Awaited<ReturnType<typeof processIdentity>>|null=null
@@ -754,7 +746,7 @@ export async function executeRun(
   let activeStart=monotonic(),elapsed=0,quota:{retryAt:number|null}|null=null,vendorFailed=false
   await new Promise<void>((resolveOutcome,rejectOutcome)=>{
     const child=spawn(process.execPath,[wrapperPath,directory,record.runId,attemptId],{cwd:plan.cwd,env:{...process.env},detached:true,stdio:['ignore','pipe','pipe','ipc']})
-    let settled=false,exited=false,resultReceived=false,cleanupStarted=false,stopAt:number|null=null
+    let settled=false,exited=false,resultReceived=false,cleanupStarted=false,stopAt:number|null=null,groupAnchors:Awaited<ReturnType<typeof processIdentity>>[]=[]
     let timeout:ReturnType<typeof setTimeout>|undefined,escalation:ReturnType<typeof setTimeout>|undefined
     let messages=Promise.resolve()
     const send=(message:unknown)=>{if(child.connected)child.send(message as Parameters<typeof child.send>[0],()=>{})}
@@ -765,8 +757,11 @@ export async function executeRun(
       if(stopAt!==null)return
       stopAt=monotonic()
       send({kind:'cancel'})
-      if(identity)void signalOwnedGroup(identity,'SIGTERM').then(ok=>{if(!ok)cause='termination-unconfirmed'})
-      escalation=setTimeout(()=>{if(identity)void signalOwnedGroup(identity,'SIGKILL').then(ok=>{if(!ok)cause='termination-unconfirmed'})},5000)
+      // Signal races are resolved by the bounded absence verification in
+      // cleanup. A leader or vendor may exit between inspection and signal;
+      // only a group still present at the deadline is unconfirmed.
+      if(identity)void signalOwnedGroup(identity,'SIGTERM',undefined,groupAnchors)
+      escalation=setTimeout(()=>{if(identity)void signalOwnedGroup(identity,'SIGKILL',undefined,groupAnchors)},5000)
     }
     const aborted=()=>{void transition({cancelRequestedAt:now().toISOString()}).catch(()=>{});stop('cancelled')}
     options.signal?.addEventListener('abort',aborted,{once:true})
@@ -779,6 +774,7 @@ export async function executeRun(
         void probePressure(config.home,0).then(current=>{if(!settled&&!exited&&current.paused){void event('storage-pressure',{reasonCode:current.reason}).catch(()=>{});stop('failed')}}).finally(()=>{probingPressure=false})
       }
       if(started&&!exited){elapsed=Math.max(elapsed,monotonic()-activeStart);void transition({attemptElapsedMs:elapsed,activeElapsedMs:historicalElapsed===null?null:historicalElapsed+elapsed}).catch(()=>stop('termination-unconfirmed'))}
+      if(identity&&!exited)void refreshOwnedGroupAnchors(identity,groupAnchors).then(next=>{if(next)groupAnchors=next})
     },5000)
     const settle=async()=>{
       if(settled)return
@@ -795,7 +791,7 @@ export async function executeRun(
       if(identity){
         let observed=await inspectOwnedGroup(identity)
         if(!exited&&resultReceived&&observed.kind==='owned'&&observed.members.every(pid=>pid===identity!.pid))send({kind:'release'})
-        else if(observed.kind==='owned'&&!exited)stop(cause??'interrupted')
+        else if((observed.kind==='owned'&&!exited)||(observed.kind==='unknown'&&groupAnchors.length))stop(cause??'interrupted')
         else if(observed.kind!=='absent')cause='termination-unconfirmed'
         // TERM + KILL verification share one deadline, including a root that exits early.
         const deadline=(stopAt??monotonic())+(stopAt===null?2000:7000)
@@ -819,7 +815,7 @@ export async function executeRun(
     })
     child.on('message',(message:unknown)=>{
       messages=messages.then(async()=>{
-        const m=message as {kind:string;schemaVersion:number;runId:string;attemptId:string;identity:Awaited<ReturnType<typeof processIdentity>>;pgid:number;exitCode:number|null;cause:TerminalCause}
+        const m=message as {kind:string;schemaVersion:number;runId:string;attemptId:string;identity:Awaited<ReturnType<typeof processIdentity>>;pgid:number;pid?:number;exitCode:number|null;cause:TerminalCause}
         if(!m||m.runId!==record.runId||m.attemptId!==attemptId)throw Error('wrapper message identity mismatch')
         if(m.kind==='handshake'){
           if(m.schemaVersion!==1||m.identity.pid!==child.pid||m.pgid!==child.pid||!identity||canonicalWire(identity)!==canonicalWire(m.identity))throw Error('wrapper handshake mismatch')
@@ -827,7 +823,11 @@ export async function executeRun(
           if(options.signal?.aborted||stopAt!==null){stop('cancelled');return}
           send({kind:'acknowledge',runId:record.runId,attemptId,command:plan.command,args:plan.args,cwd:plan.cwd,env:ownedLaunchEnvironment(plan,record,attemptId)})
         }else if(m.kind==='spawn'){
-          if(started)throw Error('duplicate vendor spawn')
+          if(started||!Number.isSafeInteger(m.pid)||m.pid!<1)throw Error('duplicate or invalid vendor spawn')
+          // A harmless short-lived check may exit before its PID can be read.
+          // The exact wrapper leader still anchors that completed group; a live
+          // vendor identity is retained only for leader-loss containment.
+          try{const vendorIdentity=await processIdentity(m.pid!);if(!identity||vendorIdentity.uid!==identity.uid||vendorIdentity.bootId!==identity.bootId)throw Error('vendor process identity differs');groupAnchors=(await refreshOwnedGroupAnchors(identity,groupAnchors))??[vendorIdentity]}catch{}
           started=true;activeStart=monotonic()
           await transition({state:'running'});await event('start');options.onSpawn?.()
           if(timeoutMs!=null)timeout=setTimeout(()=>stop('timed-out'),timeoutMs)
@@ -872,7 +872,7 @@ export async function executeRun(
     const {nextQuotaCheck}=await import('./runs.ts')
     await transition({waitReason:'subscription-quota',quotaWait:{checks:record.quotaChecks??0,nextCheckAt:new Date(nextQuotaCheck(record.quotaChecks??0,now().getTime(),quota.retryAt??undefined)).toISOString()}})
   }
-  try{const helpers=await import('./runs.ts');await transition({headSha:spawnSync('git',['rev-parse','HEAD'],{cwd:record.checkout,encoding:'utf8'}).stdout?.trim()||record.headSha,worktreeDigest:await helpers.worktreeFingerprint(record.checkout)})}catch{/* Unverifiable saved work cannot be automatically resumed. */}
+  try{const helpers=await import('./runs.ts');await transition({headSha:trustedGitSync(record.checkout,['rev-parse','HEAD']).stdout?.trim()||record.headSha,worktreeDigest:await helpers.worktreeFingerprint(record.checkout)})}catch{/* Unverifiable saved work cannot be automatically resumed. */}
   try{await persistAttemptCapture(record,stdout,recordRoot,terminalCause)}catch{
     // The process outcome stays terminal and pending persistence stays visible; no ACK.
     const captureOwner=await import('./runs.ts')
@@ -1194,14 +1194,14 @@ export async function releaseLock(path: string, expected?: Claim): Promise<void>
 // The worktree the run will happen in. Creating it is the packaged script's job — the CLI is a
 // caller here, exactly as `vegafactory worktree` is, so one removal and creation rule exists.
 export function defaultEnsureWorktree(repoPath: string, issue: number, title: string): Promise<WorktreeTarget> {
-  const inventory = spawnSync('git', ['worktree', 'list', '--porcelain'], { cwd: repoPath, encoding: 'utf8' })
+  const inventory = trustedGitSync(repoPath,['worktree','list','--porcelain'])
   if (inventory.status !== 0) throw Error('worktree inventory unavailable')
   const matches = inventory.stdout.split('\n\n').map(block => ({ path: /^worktree (.+)$/m.exec(block)?.[1], branch: /^branch refs\/heads\/(.+)$/m.exec(block)?.[1] }))
     .filter(row => row.path && row.branch && new RegExp(`(?:^|/)${issue}-`).test(row.branch))
   if (matches.length > 1) throw Error('multiple worktrees match repository and issue; takeover requires reconciliation')
   if (matches.length === 1) {
     const row=matches[0]!, inferred=worktreeFor(repoPath,issue,title)
-    const dirty=spawnSync('git',['status','--porcelain'],{cwd:row.path!,encoding:'utf8'})
+    const dirty=trustedGitSync(row.path!,['status','--porcelain'])
     if(dirty.status!==0||dirty.stdout.trim())throw Error('existing checkout has user edits; verified takeover handover required')
     return Promise.resolve({...inferred,path:row.path!,branch:row.branch!,slug:row.branch!.replace(new RegExp(`^.*?${issue}-`),'')})
   }
@@ -1283,7 +1283,7 @@ export async function defaultParentCandidates(
     // the children run one at a time, instead of a run whose cwd does not exist being re-planned
     // and failed on every tick.
     if (!existsSync(target.path)) continue
-    const head = spawnSync('git', ['rev-parse', 'HEAD'], { cwd: target.path, encoding: 'utf8' })
+    const head = trustedGitSync(target.path,['rev-parse','HEAD'])
     candidates.push({
       parent: { issue: parent, branch: target.branch, head: (head.stdout ?? '').trim(), worktree: target.path },
       groups,
@@ -1495,8 +1495,8 @@ export async function runTick(
         continue
       }
       if(!options.dryRun){
-        const {reconcileRuns}=await import('./runs.ts')
-        const existing=(await reconcileRuns(runsRoot(config.home))).filter(r=>r.repo===run.repo&&r.issue===run.issue&&(r.state==='running'||r.state==='interrupted'||r.state==='prepared'&&(r.pid!==null||existsSync(join(runsRoot(config.home),r.runId,'events.jsonl'))||existsSync(join(runsRoot(config.home),r.runId,'handshake.json')))))
+        const runStore=await import('./runs.ts')
+        const existing=(await runStore.reconcileRuns(runsRoot(config.home))).filter(r=>r.repo===run.repo&&r.issue===run.issue&&(r.state==='running'||r.state==='interrupted'||r.state==='prepared'&&(r.pid!==null||existsSync(runStore.runAttemptDirectory(runsRoot(config.home),r)))))
         if(existing.length){refusals.push({repo:run.repo,issue:run.issue,reason:'saved unfinished execution requires verified recovery; duplicate launch refused'});continue}
       }
       if(!options.dryRun&&!suppliedExecutor){
@@ -2168,7 +2168,7 @@ export async function prepareDispatchRun(input:{run:PlannedRun;plan:LaunchPlan;c
     if(input.parent&&input.authorityRequest?.kind==='consolidated'&&(!freshIntent||canonicalWire(freshIntent.approvalRequest)!==canonicalWire(input.checkpointRequest)||canonicalWire(freshIntent)!==canonicalWire(prior.checkpointIntent)))throw Error('prepared child checkpoint request changed; local work retained')
     return prior
   }
-  const branch=spawnSync('git',['symbolic-ref','--short','HEAD'],{cwd:plan.cwd,encoding:'utf8'}),head=spawnSync('git',['rev-parse','HEAD'],{cwd:plan.cwd,encoding:'utf8'})
+  const branch=trustedGitSync(plan.cwd,['symbolic-ref','--short','HEAD']),head=trustedGitSync(plan.cwd,['rev-parse','HEAD'])
   if(branch.status!==0||head.status!==0||!head.stdout.trim())throw Error('run source identity unavailable')
   const host=(await (await import('./machine-identity.ts')).readHostBinding()).digest
   const target=await verifiedSharedTarget(run.repo,config,undefined,gh),machine=sharedMachineContexts.get(target)!
@@ -2259,7 +2259,7 @@ export async function executeApprovedRun(run:PlannedRun,initialPlan:LaunchPlan,c
     options.onWait?.()
     record=await helpers.readRun(root,outcome.runId)
     for(;;){
-      if(options.signal?.aborted||record.cancelRequestedAt){record=await helpers.updateRun(root,record.runId,()=>({cancelRequestedAt:record!.cancelRequestedAt??new Date().toISOString(),waitReason:null,quotaWait:null}));return{...outcome,waitReason:null,refusal:'run cancelled while waiting for subscription availability'}}
+      if(options.signal?.aborted||record.cancelRequestedAt){const at=record.cancelRequestedAt??new Date().toISOString();record=await helpers.updateRun(root,record.runId,()=>({state:'terminal',terminationCause:'cancelled',finishedAt:at,cancelRequestedAt:at,terminationRequest:{cause:'cancelled',at},waitReason:null,quotaWait:null}));return{...outcome,waitReason:null,terminationCause:'cancelled',timedOut:false,refusal:'run cancelled while waiting for subscription availability'}}
       if(!record.execution)throw Error('saved subscription execution identity unavailable')
       const at=record.quotaWait?Date.parse(record.quotaWait.nextCheckAt):helpers.nextQuotaCheck(record.quotaChecks??0,Date.now())
       try{await waitForQuotaCheck(Math.max(0,at-Date.now()),options.signal)}catch{continue}
@@ -2440,7 +2440,7 @@ export async function registerExecutionRequest(request:unknown,config:FactoryCon
   if(!request||typeof request!=='object'||Array.isArray(request)||Object.keys(request).sort().join(',')!=='checkout,execution,repo,runtimeBinding,schemaVersion,stage')throw Error('execution registration schema refused')
   const r=request as ExecutionRegistrationRequest,entry=config.repos.find(e=>e.repo===r.repo)
   if(r.schemaVersion!==1||!entry||typeof r.checkout!=='string'||!['plan','implement','corrections'].includes(r.stage)||!r.execution)throw Error('execution registration identity refused')
-  const checkout=realpathSync(r.checkout),inventory=spawnSync('git',['worktree','list','--porcelain'],{cwd:entry.path,encoding:'utf8'})
+  const checkout=realpathSync(r.checkout),inventory=trustedGitSync(entry.path,['worktree','list','--porcelain'])
   if(checkout!==r.checkout||inventory.status!==0||!inventory.stdout.split('\n').includes('worktree '+checkout))throw Error('registration checkout is not a configured repository worktree')
   const devMd=await readFile(join(checkout,'.vegastack','dev.md'),'utf8'),resolved=loadConfiguredPolicy({home:config.home,repo:r.repo,devMd,settingsPath:config.settingsPath})
   if(!resolved.ok)throw Error('registration policy unavailable')
@@ -2707,9 +2707,8 @@ async function recoveryAuthority(task:import('./shared-claims.ts').TaskRecord,co
   await approval.readPages(readJson,['api',`repos/${task.repo}/issues/${issue}/comments`])
   const audit=await helpers.bindVerifiedApprovalSources([tuple],reads,readJson,gh)
   if(canonicalWire(audit[0])!==canonicalWire(wire))throw Error('requested record locator changed')
-  // Preserve requested relay pin for subsequent normal-owner verification;
-  // canonical authority was separately read/evaluated above.
-  if(authorityRequest.kind==='consolidated')authorityRequest={...authorityRequest,parentIssue:Number(issue),approvalBinding:{commentId:tuple.commentId,bodySha256:tuple.bodySha256}}
+  // The record/relay pin is audit provenance only. The canonical execution
+  // request remains byte-identical to the authority selected above.
  }
  const planRef=checked.bindings.find((ref:any)=>ref.kind==='plan'),briefRef=checked.bindings.find((ref:any)=>ref.kind==='brief')
  const plan=comments.find((row:any)=>row.node_id===planRef?.artifactId)
@@ -2876,9 +2875,9 @@ async function inspectRemoteRecoveryRecord(input:{repo:string;taskKey:string;con
    const checkout=input.config.repos.find(row=>row.repo===task.repo)!.path,fetch=(await import('./children.ts')).fetchChildCheckpoint
    const sourceRun={repo:task.repo,runId:task.runId,branch:task.checkpoint.branch,baseSha:task.checkpoint.baseSha,headSha:task.checkpoint.headSha,taskKey:{repo:task.repo,issue:task.issue,taskId:task.approvedTaskIds[0]!,scopeDigest:task.scopeDigest},checkpoint:task.checkpoint}
    await fetch({checkout,run:sourceRun,config:input.config},transport.source)
-   for(const completed of envelope.completed){const checked=spawnSync('git',['merge-base','--is-ancestor',completed.headSha,task.checkpoint.headSha],{cwd:checkout,timeout:3000});if(checked.status!==0)throw Error('completed source is not in recovered checkpoint')}
+   for(const completed of envelope.completed){const checked=trustedGitSync(checkout,['merge-base','--is-ancestor',completed.headSha,task.checkpoint.headSha],{timeout:3000});if(checked.status!==0)throw Error('completed source is not in recovered checkpoint')}
    for(const child of envelope.children)await fetch({checkout,run:{repo:task.repo,runId:child.childRunId,branch:child.checkpoint.branch,baseSha:child.baseSha,headSha:child.headSha,taskKey:{repo:task.repo,issue:task.issue,taskId:task.approvedTaskIds[0]!,scopeDigest:child.scopeDigest},checkpoint:child.checkpoint},config:input.config},transport.source)
-   for(const joined of envelope.joins){if(joined.state==='accepted'&&joined.parentAfter){const checked=spawnSync('git',['merge-base','--is-ancestor',joined.parentAfter,task.checkpoint.headSha],{cwd:checkout,timeout:3000});if(checked.status!==0)throw Error('accepted parent join is missing from recovered checkpoint')}}
+   for(const joined of envelope.joins){if(joined.state==='accepted'&&joined.parentAfter){const checked=trustedGitSync(checkout,['merge-base','--is-ancestor',joined.parentAfter,task.checkpoint.headSha],{timeout:3000});if(checked.status!==0)throw Error('accepted parent join is missing from recovered checkpoint')}}
   }catch(error){blocks.push((error as Error).message)}
  }
  const planSources=(comments as Array<{id:number;node_id?:string}>).filter(row=>row.node_id===authority.planRef.artifactId)
@@ -2945,7 +2944,7 @@ async function receivingExecutionSetup(material:RemoteRecoveryMaterial,checkout:
 export async function verifyReceivingRunRecovery(request:import('./runs.ts').ReceivingRunRequest,originalOwner:import('./shared-claims.ts').ParentClaimBinding,config:FactoryConfig,localClaim:Claim):Promise<import('./runs.ts').VerifiedReceivingRunDecision> {
  const entry=config.repos.find(row=>row.repo===originalOwnerRepository.get(originalOwner));
  // The request's local checkout must belong to one configured source repository.
- const candidates=entry?[entry]:config.repos.filter(row=>{const r=spawnSync('git',['rev-parse','--path-format=absolute','--git-common-dir'],{cwd:row.path,encoding:'utf8',timeout:3000});const c=spawnSync('git',['rev-parse','--path-format=absolute','--git-common-dir'],{cwd:request.checkout,encoding:'utf8',timeout:3000});return r.status===0&&c.status===0&&r.stdout.trim()===c.stdout.trim()})
+ const candidates=entry?[entry]:config.repos.filter(row=>{const r=trustedGitSync(row.path,['rev-parse','--path-format=absolute','--git-common-dir'],{timeout:3000});const c=trustedGitSync(request.checkout,['rev-parse','--path-format=absolute','--git-common-dir'],{timeout:3000});return r.status===0&&c.status===0&&r.stdout.trim()===c.stdout.trim()})
  if(candidates.length!==1)throw Error('receiving configured source repository unavailable')
  const target=await verifiedSharedTarget(candidates[0]!.repo,config),material=await inspectReceivingRecovery(request,originalOwner,config,{target})
  const setup=await receivingExecutionSetup(material.original,request.checkout,config,target,localClaim,material.current.task.sessionId)
@@ -2978,7 +2977,7 @@ function groupCheckpointIntent(material:RemoteRecoveryMaterial,checkout:string):
  const request=material.checkpointRequest,checkpoint=material.task.checkpoint
  if(!request)return null
  if(!checkpoint)throw Error('stopped group checkpoint unavailable')
- const remote=spawnSync('git',['remote','get-url','origin'],{cwd:checkout,encoding:'utf8',timeout:3000})
+ const remote=trustedGitSync(checkout,['remote','get-url','origin'],{timeout:3000})
  if(remote.status!==0||!remote.stdout.trim())throw Error('stopped group source remote unavailable')
  return{id:request.requested.actionId,repo:material.task.repo,repositoryId:material.task.repositoryNodeId,remote:'origin',remoteUrl:remote.stdout.trim(),branch:checkpoint.branch,baseRef:request.requested.ref??`refs/heads/${checkpoint.branch}`,baseSha:checkpoint.baseSha,scopeDigest:material.task.scopeDigest,paths:[...material.task.paths],approvalBindings:structuredClone(material.task.approvalBindings),approvalRequest:structuredClone(request)}
 }
@@ -3026,7 +3025,7 @@ function assertStoppedGroupIntent(value:unknown):asserts value is StoppedGroupRe
 }
 async function receivingCheckout(material:RemoteRecoveryMaterial,config:FactoryConfig):Promise<string> {
  const entry=config.repos.find(row=>row.repo===material.task.repo)!,checkpoint=material.task.checkpoint!
- const git=(args:string[])=>{const r=spawnSync('git',args,{cwd:entry.path,encoding:'utf8',timeout:5000,maxBuffer:4*1024*1024});if(r.status!==0)throw Error('receiving checkout source unavailable');return r.stdout.trim()}
+ const git=(args:string[])=>{const r=trustedGitSync(entry.path,args,{timeout:5000,maxBuffer:4*1024*1024});if(r.status!==0)throw Error('receiving checkout source unavailable');return r.stdout.trim()}
  const inventory=git(['worktree','list','--porcelain']).split('\n\n')
  for(const row of inventory){
   if(!row.split('\n').includes('branch refs/heads/'+checkpoint.branch))continue
@@ -3037,7 +3036,7 @@ async function receivingCheckout(material:RemoteRecoveryMaterial,config:FactoryC
  const named=/^([^/]+)\/([1-9]\d*)-(.+)$/.exec(checkpoint.branch)
  if(!named||Number(named[2])!==material.task.issue||!BRANCH_TYPES.includes(named[1]!))throw Error('original recovery branch cannot be restored by the worktree owner')
  const helper=await import(new URL(fileURLToPath(import.meta.url).endsWith('.ts')?'../../../skills/dev/dev-implement/scripts/worktree.mjs':'../skill/dev-implement/scripts/worktree.mjs',import.meta.url).href) as typeof import('../../../skills/dev/dev-implement/scripts/worktree.mjs')
- const existing=spawnSync('git',['rev-parse','--verify','refs/heads/'+checkpoint.branch],{cwd:entry.path,encoding:'utf8',timeout:3000})
+ const existing=trustedGitSync(entry.path,['rev-parse','--verify','refs/heads/'+checkpoint.branch],{timeout:3000})
  if(existing.status===0&&existing.stdout.trim()!==checkpoint.headSha)throw Error('existing original recovery branch differs; source preserved')
  const args={repoRoot:entry.path,issue:material.task.issue,slug:named[3]!,type:named[1]!,home:config.home,devMd:await readFile(join(entry.path,'.vegastack/dev.md'),'utf8'),write:true}
  const restored=existing.status===0?helper.restoreWorktree(args):helper.createChildWorktree({...args,baseSha:checkpoint.headSha})
@@ -3154,7 +3153,7 @@ export async function prepareVerifiedStoppedGroup(input:{repo:string;parentTaskK
  const saved=await helpers.readRuns(root),checkouts=new Map<string,string>()
  for(const material of materials){const local=saved.find(run=>run.runId===material.task.runId),checkout=local?await realpath(local.checkout):await receivingCheckout(material,input.config),checkpoint=material.task.checkpoint
   if(!checkpoint)throw Error('stopped group member checkpoint unavailable')
-  const branch=spawnSync('git',['symbolic-ref','--short','HEAD'],{cwd:checkout,encoding:'utf8',timeout:3000}),head=spawnSync('git',['rev-parse','HEAD'],{cwd:checkout,encoding:'utf8',timeout:3000})
+  const branch=trustedGitSync(checkout,['symbolic-ref','--short','HEAD'],{timeout:3000}),head=trustedGitSync(checkout,['rev-parse','HEAD'],{timeout:3000})
   if(branch.status!==0||head.status!==0||branch.stdout.trim()!==checkpoint.branch||head.stdout.trim()!==checkpoint.headSha)throw Error('stopped group member checkout differs')
   checkouts.set(material.task.taskKey,checkout)
  }
@@ -3287,7 +3286,7 @@ export async function checkpointRecoveryContext(run:RunRecord,config:FactoryConf
  const brief=await readJson(['api',`repos/${run.repo}/issues/${run.issue}`]),comments=await approval.readPages(readJson,['api',`repos/${run.repo}/issues/${run.issue}/comments`]) as Array<{id:number;node_id:string;body:string;updated_at:string}>
  const briefRef=run.approvalRefs.find(ref=>ref.kind==='brief'),planRef=run.approvalRefs.find(ref=>ref.kind==='plan'),plan=comments.find(row=>row.node_id===planRef?.artifactId)
  if(!briefRef||!planRef||!plan||approval.scopeDigest(plan.body,'plan')!==planRef.digest||approval.scopeDigest(brief.body,'brief')!==briefRef.digest||!run.approvedTaskIds?.length)throw Error('current recovery source unavailable')
- const result=spawnSync('git',['rev-parse','--verify',run.headSha+'^{commit}'],{cwd:run.checkout,encoding:'utf8',timeout:3000,maxBuffer:4096})
+ const result=trustedGitSync(run.checkout,['rev-parse','--verify',run.headSha+'^{commit}'],{timeout:3000,maxBuffer:4096})
  if(result.status!==0||result.stdout.trim()!==run.headSha)throw Error('recovery source commit unavailable')
  let previous:any=null
  try{previous=core.validateRecoveryPacket(JSON.parse(await helpers.readPrivateRunFile(join(root,run.runId,'recovery.json'))))}catch(error){if((error as NodeJS.ErrnoException).code!=='ENOENT')throw error}
@@ -3311,7 +3310,7 @@ export async function checkpointRecoveryContext(run:RunRecord,config:FactoryConf
  const reviews=comments.filter(row=>/^<!-- vsk:v1 type=review\b/m.test(row.body)).sort((a,b)=>Date.parse(a.updated_at)-Date.parse(b.updated_at)).slice(-16).flatMap(row=>{
   const binding=gate.typedSection(row.body,'reviewBinding')
   if(!gate.validReview(binding)||binding.baseSha!==run.baseSha||binding.scopeDigest!==planRef.digest)return[]
-  const ancestry=spawnSync('git',['merge-base','--is-ancestor',binding.sha,run.headSha!],{cwd:run.checkout,timeout:3000})
+  const ancestry=trustedGitSync(run.checkout,['merge-base','--is-ancestor',binding.sha,run.headSha!],{timeout:3000})
   return ancestry.status===0?[{commentId:row.id,bodySha256:createHash('sha256').update(row.body).digest('hex'),agent:/\bagent=(claude|codex)\b/.exec(row.body)?.[1]??'',binding}]:[]
  })
  const findingState=new Map<string,{id:string;status:string;sourceRef:string;sha:string}>()
@@ -3395,6 +3394,7 @@ export function durableRecoverySummary(run:RunRecord):{action:'wait'|'retry-deli
  const pending=run.pendingDelivery.some(row=>row.status!=='acknowledged'),capture=run.pendingDelivery.some(row=>row.kind==='telemetry-capture'&&(row.status==='acknowledged'||!!row.payloadDigest))
  const source={checkpointHead:run.checkpoint?.headSha??null,unbackedTail:!!run.headSha&&run.headSha!==run.checkpoint?.headSha,terminalCapturePreserved:capture}
  if(run.terminationCause==='termination-unconfirmed')return{action:'wait',reason:'original execution termination unconfirmed',...source}
+ if(run.terminationCause==='cancelled')return{action:'wait',reason:'run cancelled; fresh operator action required',...source}
  if(run.waitReason==='subscription-quota')return{action:'wait',reason:'subscription availability; original setup retained',...source}
  if(run.state==='interrupted'||run.state==='terminal'&&run.terminationCause!=='succeeded')return{action:'inspect',reason:capture?'prior terminal capture preserved; verified continuation required':'fresh task, source, stop and effect reconciliation required',...source}
  if(run.state==='terminal'&&pending)return{action:'retry-delivery',reason:'implementation is not replayed for pending delivery',...source}
@@ -3670,7 +3670,7 @@ async function taskCheckSource(run:RunRecord,taskId:string,config:FactoryConfig,
  const {approval}=await helpers.approvalTools(),comments=await approval.readPages((args:string[])=>boundedGhJson<any>(gh,args,readBudget()),['api',`repos/${run.repo}/issues/${run.issue}/comments`])
  const planRef=run.approvalRefs.find(ref=>ref.kind==='plan'),plans=comments.filter((row:any)=>row.node_id===planRef?.artifactId)
  if(plans.length!==1||approval.scopeDigest(plans[0].body,'plan')!==planRef?.digest)throw Error('checkpoint canonical plan differs')
- const git=(args:string[])=>{const result=spawnSync('git',args,{cwd:run.checkout,encoding:'utf8',timeout:5000,maxBuffer:4*1024*1024});if(result.status!==0||result.error)throw Error('checkpoint source unavailable');return result.stdout.trim()}
+ const git=(args:string[])=>{const result=trustedGitSync(run.checkout,args,{timeout:5000,maxBuffer:4*1024*1024});if(result.status!==0||result.error)throw Error('checkpoint source unavailable');return result.stdout.trim()}
  const headSha=git(['rev-parse','HEAD']),branch=git(['symbolic-ref','--short','HEAD'])
  if(branch!==run.branch||!sha40(headSha))throw Error('checkpoint branch or source differs')
  git(['merge-base','--is-ancestor',run.baseSha,headSha])
@@ -3693,7 +3693,7 @@ async function verifyTaskCheckpointEvidence(run:RunRecord,payload:Extract<import
  const check=JSON.parse(await helpers.readPrivateRunFile(join(root,run.runId,label+'-acceptance.json'))) as import('./children.ts').ChildCheck
  const intent=JSON.parse(await helpers.readPrivateRunFile(join(root,run.runId,label+'-check-intent.json'))) as {runId:string;checkRunId:string;headSha:string;command:string;validationId:string}
  const executed=await readRun(root,check.checkRunId)
- const base=spawnSync('git',['show',run.baseSha+':.vegastack/dev.md'],{cwd:run.checkout,encoding:'utf8',timeout:5000,maxBuffer:1024*1024}),command=/^commands:.*?\bcheck\s+`([^`]+)`/m.exec(base.stdout??'')?.[1]
+ const base=trustedGitSync(run.checkout,['show',run.baseSha+':.vegastack/dev.md'],{timeout:5000,maxBuffer:1024*1024}),command=/^commands:.*?\bcheck\s+`([^`]+)`/m.exec(base.stdout??'')?.[1]
  if(base.status!==0||!command||check.schemaVersion!==1||check.runId!==run.runId||check.baseSha!==run.baseSha||check.headSha!==payload.sourceSha||check.scopeDigest!==run.taskKey.scopeDigest||check.command!==command||!check.ok||check.exitCode!==0||check.validationId!==payload.validationId||createHash('sha256').update(command).digest('hex')!==payload.commandDigest||intent.runId!==run.runId||intent.checkRunId!==check.checkRunId||intent.headSha!==check.headSha||intent.command!==command||intent.validationId!==check.validationId||executed.repo!==run.repo||executed.issue!==run.issue||executed.parent!==run.issue||executed.stage!=='acceptance'||executed.state!=='terminal'||executed.terminationCause!=='succeeded'||executed.exitCode!==0||!executed.processIdentity||executed.headSha!==check.headSha||executed.baseSha!==check.headSha)throw Error('task checkpoint lacks actual configured-check success')
  return true
 }
@@ -3710,7 +3710,7 @@ export async function verifyRetainedTaskCompletion(run:RunRecord,payload:Extract
  if(!completed)return false
  if(payload.result!=='passed'||payload.runId!==original.runId||payload.runId!==run.runId||payload.taskId!==completed.taskId||!run.approvedTaskIds?.includes(payload.taskId)||payload.scopeDigest!==original.scopeDigest||payload.scopeDigest!==run.taskKey.scopeDigest||payload.sourceSha!==completed.headSha||payload.validationId!==completed.acceptance.validationId||payload.commandDigest!==completed.acceptance.commandDigest)throw Error('retained completed-task evidence differs')
  await verifyDispatchRunAuthority(run,config,'effect',{gh})
- const inherited=spawnSync('git',['merge-base','--is-ancestor',completed.headSha,run.headSha??''],{cwd:run.checkout,timeout:3000})
+ const inherited=trustedGitSync(run.checkout,['merge-base','--is-ancestor',completed.headSha,run.headSha??''],{timeout:3000})
  if(inherited.status!==0)throw Error('retained completed source is missing from receiving checkout')
  return true
 }
@@ -3725,7 +3725,7 @@ export async function checkpointTaskForRecovery(input:{run:RunRecord;taskId:stri
  if(previous){
   const proof=await owner.resolveEvidence(claim.target,previous.acceptance.evidence)
   if(proof?.kind!=='acceptance'||proof.taskId!==taskId||proof.runId!==run.runId||proof.sourceSha!==previous.headSha||proof.scopeDigest!==run.taskKey.scopeDigest||proof.result!=='passed'||proof.validationId!==previous.acceptance.validationId||proof.commandDigest!==previous.acceptance.commandDigest)throw Error('existing task completion proof unavailable')
-  const inherited=spawnSync('git',['merge-base','--is-ancestor',previous.headSha,source.headSha],{cwd:run.checkout,timeout:3000})
+  const inherited=trustedGitSync(run.checkout,['merge-base','--is-ancestor',previous.headSha,source.headSha],{timeout:3000})
   if(inherited.status!==0)throw Error('completed task source is missing from current checkout')
   return {taskId,headSha:previous.headSha,reference:previous.acceptance.evidence,wrote:false,replayed:true,reason:'verified completion retained; configured check not replayed'}
  }

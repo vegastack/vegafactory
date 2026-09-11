@@ -141,7 +141,7 @@ vegafactory dispatch --watch                    # the loop the service runs
 vegafactory status --json                       # what happened
 ```
 
-Every run's stdout and stderr land in `~/.vegastack/factory/logs/<org>/<repo>/<issue>-<timestamp>.jsonl`. A run that fails or times out posts a hand-back comment carrying the last 40 log lines with token shapes redacted, moves the issue to `needs-operator` assigned to its operator, and leaves the worktree exactly as the run left it.
+Every run first records private lifecycle state under `~/.vegastack/runs/<run-id>/`; default diagnostics contain bounded events and reason codes, never raw stdout, stderr, argv, credentials, or local paths. A failed or timed-out run may publish only a separately authorized hand-back intent with an opaque delivery marker and reason. Process completion grants no label, assignment, push, or acceptance mutation: each remote effect needs its own durable exact intent and verified readback, while the worktree and pending local evidence remain preserved.
 
 ### Owned claims and recovery
 

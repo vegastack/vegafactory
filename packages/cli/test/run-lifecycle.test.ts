@@ -4,12 +4,46 @@ import {tmpdir} from 'node:os'
 import {join,resolve} from 'node:path'
 import {executeRun} from '../src/dispatch.ts'
 import {parseFactoryConfig} from '../src/config.ts'
-import {readRuns,runsRoot} from '../src/runs.ts'
+import {createRun,readRun,readRuns,runsRoot,transitionRun} from '../src/runs.ts'
 async function fixture(code:string,timeoutMs?:number|null){const home=await mkdtemp(join(tmpdir(),'owned-run-'));try{const result=await executeRun({repo:'o/r',issue:1,title:'fixture',stage:'implement',commentId:null,reactionId:null},{command:process.execPath,args:['-e',code],cwd:home,env:{},prompt:''},parseFactoryConfig({repos:[{repo:'o/r',org:'o',path:home}]},home),{operator:null},{timeoutMs,wrapperPath:resolve('packages/cli/src/run-wrapper.ts')});return{result,runs:await readRuns(runsRoot(home))}}finally{await rm(home,{recursive:true,force:true})}}
 test('actual wrapper records successful execution without implicit delivery',async()=>{const {result,runs}=await fixture('process.exit(0)');expect(result.terminationCause).toBe('succeeded');expect(result.pushed).toBe(false);expect(runs[0]?.state).toBe('terminal');expect(runs[0]?.processIdentity?.pid).toBeGreaterThan(0)},10000)
 test('timeout remains failure when vendor TERM handler exits zero',async()=>{const {result}=await fixture("process.on('SIGTERM',()=>process.exit(0));setInterval(()=>{},100)",200);expect(result.timedOut).toBe(true);expect(result.terminationCause).toBe('timed-out');expect(result.exitCode).toBe(0)},15000)
 test('owned process ignoring TERM is killed within cancellation bound',async()=>{const start=performance.now();const {result}=await fixture("process.on('SIGTERM',()=>{});setInterval(()=>{},100)",200);expect(result.terminationCause).toBe('timed-out');expect(performance.now()-start).toBeLessThan(9000)},12000)
 test('cancellation removes the owned nondetached descendant too',async()=>{const {result}=await fixture("const {spawn}=require('node:child_process');const c=spawn(process.execPath,['-e',\"process.on('SIGTERM',()=>{});setInterval(()=>{},100)\"],{stdio:'ignore'});console.log(c.pid);process.on('SIGTERM',()=>{});setInterval(()=>{},100)",200);expect(result.terminationCause).toBe('timed-out');const pid=Number(result.stdout?.trim());expect(pid).toBeGreaterThan(0);expect(()=>process.kill(pid,0)).toThrow()},12000)
+
+test('wrapper leader loss still terminates its authenticated nondetached process tree',async()=>{
+  const code="const {spawn}=require('node:child_process');const c=spawn(process.execPath,['-e',\"process.on('SIGTERM',()=>{});setInterval(()=>{},100)\"],{stdio:'ignore'});console.log(JSON.stringify({vendor:process.pid,child:c.pid}));process.on('SIGTERM',()=>{});setTimeout(()=>process.kill(process.ppid,'SIGKILL'),200);setInterval(()=>{},100)"
+  const {result,runs}=await fixture(code)
+  const line=result.stdout?.split('\n').find(row=>row.startsWith('{'))??'{}',pids=JSON.parse(line) as {vendor?:number;child?:number}
+  try{
+    expect(pids.vendor).toBeGreaterThan(0);expect(pids.child).toBeGreaterThan(0)
+    expect(()=>process.kill(pids.vendor!,0)).toThrow();expect(()=>process.kill(pids.child!,0)).toThrow()
+    expect(result.terminationCause).toBe('interrupted')
+  }finally{
+    if(runs[0]?.processGroupId)try{process.kill(-runs[0].processGroupId,'SIGKILL')}catch{}
+  }
+},12000)
+
+test('an already-aborted launch is durably cancelled rather than classified as spawn failure',async()=>{
+  const home=await mkdtemp(join(tmpdir(),'cancel-before-launch-')),controller=new AbortController();controller.abort()
+  try{
+    const result=await executeRun({repo:'o/r',issue:1,title:'fixture',stage:'implement',commentId:null,reactionId:null},{command:process.execPath,args:['-e','process.exit(0)'],cwd:home,env:{},prompt:''},parseFactoryConfig({repos:[{repo:'o/r',org:'o',path:home}]},home),{operator:null,signal:controller.signal},{wrapperPath:resolve('packages/cli/src/run-wrapper.ts')})
+    const [saved]=await readRuns(runsRoot(home));expect(result.terminationCause).toBe('cancelled');expect(saved?.terminationCause).toBe('cancelled');expect(saved?.cancelRequestedAt).toBeString();expect(saved?.terminationRequest?.cause).toBe('cancelled')
+  }finally{await rm(home,{recursive:true,force:true})}
+})
+
+test('cancelling subscription wait replaces failed state with a durable cancelled terminal',async()=>{
+  const {execFileSync}=await import('node:child_process'),crypto=await import('node:crypto'),dispatch=await import('../src/dispatch.ts')
+  const home=await mkdtemp(join(tmpdir(),'cancel-quota-wait-')),root=runsRoot(home);execFileSync('git',['init','-q','-b','feat/1-work'],{cwd:home})
+  try{
+    const source={kind:'github-comment' as const,repositoryId:'R_repo',issueNodeId:'I_issue',commentId:'12',bodySha256:'a'.repeat(64)};execFileSync('git',['-c','user.name=Fixture','-c','user.email=fixture@example.test','commit','--allow-empty','-qm','base'],{cwd:home})
+    const head=execFileSync('git',['rev-parse','HEAD'],{cwd:home,encoding:'utf8'}).trim(),run=await createRun({root,repo:'o/r',issue:1,parent:null,checkout:home,branch:'feat/1-work',baseSha:head,headSha:head,stage:'implement',harness:'codex',model:'fixture',effort:'high',execution:{providerMode:'subscription',harness:'codex',harnessVersion:'fixture',model:'fixture',effort:'high',accountRef:'fixture',qualification:source},approvalBindings:[{approvalId:'approved',source}],recordBinding:null,approvalRefs:[],policyDigest:'b'.repeat(64),claimToken:crypto.randomUUID(),startedAt:new Date().toISOString(),taskKey:{repo:'o/r',issue:1,taskId:'1-T1',scopeDigest:'c'.repeat(64)},approvedTaskIds:['1-T1'],activeElapsedMs:0,taskOwner:null,agentAccountOwner:null,accountRef:'fixture',waitReason:null,machine:null,sharedClaim:null,checkpoint:null,remoteEffectCoverage:{kind:'unmanaged-possible',reasonCode:'fixture'}})
+    const waiting=await transitionRun(run.runId,run.generation,{state:'terminal',terminationCause:'failed',finishedAt:new Date().toISOString(),waitReason:'subscription-quota',quotaWait:{checks:0,nextCheckAt:new Date(Date.now()+60_000).toISOString()}},root)
+    const controller=new AbortController();controller.abort()
+    const outcome=await dispatch.executeApprovedRun({repo:'o/r',issue:1,title:'fixture',stage:'implement',commentId:null,reactionId:null},{command:'codex',args:[],cwd:home,env:{},prompt:''},parseFactoryConfig({repos:[{repo:'o/r',org:'o',path:home}]},home),{operator:null,signal:controller.signal},{preparedRun:waiting,runInput:{...waiting,root}})
+    const saved=await readRun(root,run.runId);expect(outcome.terminationCause).toBe('cancelled');expect(saved.terminationCause).toBe('cancelled');expect(saved.waitReason).toBeNull();expect(saved.cancelRequestedAt).toBeString();expect(dispatch.durableRecoverySummary(saved)?.reason).toContain('cancelled')
+  }finally{await rm(home,{recursive:true,force:true})}
+})
 
 test('default qualified admission runs, waits for quota, resumes the same session and preserves terminal delivery',async()=>{
   const {spyOn}=await import('bun:test'),fs=await import('node:fs/promises'),{execFileSync,spawn}=await import('node:child_process'),crypto=await import('node:crypto')
@@ -40,7 +74,7 @@ test('default qualified admission runs, waits for quota, resumes the same sessio
     const config=parseFactoryConfig(raw,home)
     const issueBody='<!-- vsk:v1 type=brief rev=1 scope=quick-build -->\n## Outcome\nFinish the controlled fixture.\n'
     const planBody='<!-- vsk:v1 type=plan rev=1 -->\n- [ ] **Task 1: fixture** <!-- task-id:1-T1 -->\n  - Files — `allowed.txt`\n  - Interfaces — existing CLI\n  - Steps: finish fixture\n'
-    const artifacts=[{repo:'acme/app',issue:1,kind:'brief',artifactId:'I_1',rev:1,digest:approvalOwner.scopeDigest(issueBody,'brief')},{repo:'acme/app',issue:1,kind:'plan',artifactId:'PLAN_1',rev:1,digest:approvalOwner.scopeDigest(planBody,'plan')}]
+    const artifacts:import('../src/shared-claims.ts').ArtifactRef[]=[{repo:'acme/app',issue:1,kind:'brief',artifactId:'I_1',rev:1,digest:approvalOwner.scopeDigest(issueBody,'brief')},{repo:'acme/app',issue:1,kind:'plan',artifactId:'PLAN_1',rev:1,digest:approvalOwner.scopeDigest(planBody,'plan')}]
     const event={schemaVersion:2,id:'approved-fixture',operator:'robot',scope:'brief+plan',source:{kind:'session',ref:'session:fixture',quote:'I approve this exact fixture.'},artifacts,supersedes:[],revokes:[]}
     const baseComment={issue_url:'https://api.github.com/repos/acme/app/issues/1',user:{login:'robot'},updated_at:'2026-09-08T12:14:45Z'}
     const comments=[{...baseComment,id:11,node_id:'PLAN_1',body:planBody,html_url:'https://github.com/acme/app/issues/1#issuecomment-11'},{...baseComment,id:12,node_id:'APPROVAL_1',body:'<!-- vsk:v1 type=approval scope=brief+plan -->\n```json\n'+JSON.stringify(event)+'\n```\n',html_url:'https://github.com/acme/app/issues/1#issuecomment-12'}]
@@ -130,11 +164,21 @@ if(args.includes('app-server')){
     await dispatch.registerExecutionRequest(JSON.parse(await fs.readFile(registrationFile,'utf8')),config)
     expect(await(await import('../src/checkpoints.ts')).runCheckpointCli(['--register-execution',registrationFile,'--json'],home)).toBe(0)
     expect((await runtime.readQualifiedExecutions(runtime.runsRoot(home))).length).toBe(1)
+    // Reproduce a crash after durable preparation/event publication but before
+    // an attempt directory or wrapper exists, then rename the issue. The next
+    // real runOnce must reuse this exact record and checkout.
+    const approvalBody=String(comments[1]!.body),authorities=[{approvalId:event.id,source:{kind:'github-comment' as const,repositoryId:'R_app',issueNodeId:'I_1',commentId:'12',bodySha256:crypto.createHash('sha256').update(approvalBody).digest('hex')}}]
+    const taskIds=['1-T1'],scopeDigest=wire.sha256(wire.canonical({artifacts,taskIds})),runRoot=runtime.runsRoot(home)
+    let prepared=await runtime.createRun({root:runRoot,repo:'acme/app',issue:1,parent:null,checkout:tree,branch:'feat/1-fixture',baseSha:sourceSha,headSha:sourceSha,stage:'implement',harness:'codex',model:'fixture-model',effort:'high',execution,approvalBindings:authorities,recordBinding:null,approvalRefs:artifacts,policyDigest:snapshot.policyDigest,claimToken:crypto.randomUUID(),startedAt:new Date().toISOString(),taskKey:{repo:'acme/app',issue:1,taskId:'1-T1',scopeDigest},approvedTaskIds:taskIds,activeElapsedMs:null,taskOwner:null,agentAccountOwner:null,accountRef:execution.accountRef,waitReason:null,hostBindingDigest:host,machine:{id:'box',installationId:installation,sessionId:crypto.randomUUID(),hostBindingDigest:host},sharedClaim:null,checkpoint:null,remoteEffectCoverage:{kind:'qualified-managed-only',qualification:execution.qualification},runtimeBinding:binding,configurationDigest,authorityRequest:{kind:'native'},handbackIntent:{id:'run-handback',approvalBindings:authorities},dispatchRequest:{commentId:null,reactionId:null}})
+    const checkpointOwner=await import('../src/checkpoints.ts'),checkpointIntent=await checkpointOwner.checkpointIntentFromApproval(prepared,config)
+    prepared=runtime.parseRun({...prepared,checkpointIntent:checkpointIntent!});await runtime.atomicRunFile(join(runRoot,prepared.runId,'run.json'),prepared)
+    await fs.writeFile(join(runRoot,prepared.runId,'events.jsonl'),JSON.stringify({at:new Date().toISOString(),event:'prepared'})+'\n',{mode:0o600})
+    issue.title='feat: renamed fixture'
     // Source execution uses the real wrapper implementation without broad package build work.
     try{
       const result=await dispatch.runOnce(config,{dryRun:false},{processDeps:{wrapperPath:resolve('packages/cli/src/run-wrapper.ts')}})
       expect(result.refusals,result.refusals.map(r=>r.reason).join('\n')).toEqual([])
-      const records=await runtime.readRuns(runtime.runsRoot(home));expect(records).toHaveLength(1)
+      const records=await runtime.readRuns(runtime.runsRoot(home));expect(records).toHaveLength(1);expect(records[0]?.runId).toBe(prepared.runId);expect(records[0]?.checkout).toBe(tree)
       const saved=records[0]!
       expect(JSON.parse(await fs.readFile(phasePath,'utf8')).starts).toBe(2)
       expect(saved.terminationCause).toBe('succeeded');expect(saved.attempts).toHaveLength(1);expect(saved.vendorSessionId).toBe('fixture-session');expect(saved.waitReason).toBe(null)
@@ -142,7 +186,7 @@ if(args.includes('app-server')){
       expect(saved.approvedTaskIds).toEqual(['1-T1']);expect(saved.approvalBindings[0]?.source.issueNodeId).toBe('I_1');expect(saved.stopProof?.kind).toBe('process-exit')
       expect(saved.checkpointIntent?.nativeApproval?.action).toBe('task-branch');expect(saved.checkpointIntent?.paths).toEqual(['allowed.txt'])
       expect(saved.checkpoint?.headSha).toBe(g(tree,'rev-parse','HEAD'));expect(g(repo,'ls-remote',sourceRemote,'refs/heads/feat/1-fixture').split(/\s/)[0]).toBe(saved.checkpoint?.headSha)
-      const checkpointOwner=await import('../src/checkpoints.ts'),intent=saved.checkpointIntent!
+      const intent=saved.checkpointIntent!
       const {nativeApproval:_,...absentAction}=intent
       await expect((await checkpointOwner.configuredCheckpointController({...saved,checkpointIntent:absentAction},config)).verifyAuthority(absentAction)).rejects.toThrow('native authority')
       expect(()=>runtime.validateCheckpointIntentShape({...intent,nativeApproval:{...intent.nativeApproval!,action:'feature-push'}})).toThrow('native checkpoint authority')
@@ -153,6 +197,9 @@ if(args.includes('app-server')){
       await expect((await checkpointOwner.configuredCheckpointController({...saved,checkpointIntent:changedRef},config)).verifyAuthority(changedRef)).rejects.toThrow('repository identity')
       const changedFiles={...intent,paths:['other.txt']}
       await expect((await checkpointOwner.configuredCheckpointController({...saved,checkpointIntent:changedFiles},config)).verifyAuthority(changedFiles)).rejects.toThrow('native scope')
+      await fs.writeFile(join(tree,'dirty-after-rename.txt'),'user edit')
+      expect(()=>dispatch.defaultEnsureWorktree(repo,1,'feat: renamed again')).toThrow('verified takeover handover required')
+      await fs.unlink(join(tree,'dirty-after-rename.txt'))
       expect(publicWrites).toBe(0)
       await dispatch.runOnce(config,{dryRun:false},{processDeps:{wrapperPath:resolve('packages/cli/src/run-wrapper.ts')}})
       expect(JSON.parse(await fs.readFile(phasePath,'utf8')).starts).toBe(2)
