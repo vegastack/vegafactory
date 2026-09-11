@@ -614,6 +614,9 @@ export interface CoordinationProvider {
         retryAfterMs?: number;
     }>;
 }
+class CoordinationRateLimit extends Error {
+    constructor(readonly retryAfterMs: number) { super('provider rate limited'); }
+}
 // These functions are controller dependencies. Nothing decoded from shared state can provide them.
 export interface CoordinationTarget {
     host: string;
@@ -1351,6 +1354,12 @@ async function transactWithinWindow(target: CoordinationTarget, operationId: str
             await new Promise(resolve => setTimeout(resolve, delay));
         }
         catch (error) {
+            if (error instanceof CoordinationRateLimit) {
+                if (Date.now() + error.retryAfterMs >= deadline)
+                    return { kind: 'busy', reason: 'coordination rate-limit delay exceeds this transaction window' };
+                await new Promise(resolve => setTimeout(resolve, error.retryAfterMs));
+                continue;
+            }
             return { kind: /busy|maxRuns|capacity|another session/.test((error as Error).message) ? 'busy' : 'refused', reason: (error as Error).message };
         }
     }
@@ -2090,9 +2099,8 @@ export function githubCoordinationProvider(gh: (args: string[], options?: GhOpti
             : reset !== null && /^\d+$/.test(reset) ? Number(reset) * 1000 - Date.now() : 0;
         return Number.isFinite(delay) ? Math.max(0, Math.ceil(delay)) : 0;
     };
-    class RateLimited extends Error { constructor(readonly retryAfterMs: number) { super('provider rate limited'); } }
     const rateLimitDelay = (error: unknown): number | null => {
-        if (error instanceof RateLimited) return error.retryAfterMs;
+        if (error instanceof CoordinationRateLimit) return error.retryAfterMs;
         if (!(error instanceof GhUnavailable)) return null;
         const limited = error.httpStatus === 429 || error.httpStatus === 403
             && (error.headers.has('retry-after') || error.headers.get('x-ratelimit-remaining') === '0');
@@ -2110,7 +2118,7 @@ export function githubCoordinationProvider(gh: (args: string[], options?: GhOpti
             const types = body.errors.map((x: {
                 type?: string;
             }) => x.type ?? 'error');
-            if (types.includes('RATE_LIMITED') || response.headers.get('x-ratelimit-remaining') === '0') throw new RateLimited(delayFrom(response.headers));
+            if (types.includes('RATE_LIMITED') || response.headers.get('x-ratelimit-remaining') === '0') throw new CoordinationRateLimit(delayFrom(response.headers));
             throw Error(`GraphQL refused: ${types.join(',')}`);
         }
         if (!body.data)

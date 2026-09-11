@@ -514,6 +514,8 @@ test('changed coordinator is accepted only through the exact current group succe
   try{
     const preview=await executeChildren({parent,groups,config},{groups:async()=>groups.groups})
     expect(preview.plan.parentBinding).toEqual(original);expect(succession).toHaveBeenCalled()
+    succession.mockResolvedValue({kind:'verified',reference:{kind:'state-receipt',operationId,commitSha:'2'.repeat(40),blobSha256:'d'.repeat(64)},receipt:{members:[{before:{...original,ownerToken:randomUUID()},after:current}]},currentMembers:[{initial:{...task,successionOperationId:operationId},current:task}]} as any)
+    await expect(executeChildren({parent,groups,config},{groups:async()=>groups.groups})).rejects.toThrow('succession member')
     succession.mockResolvedValue({kind:'invalid-or-unavailable',reason:'group succession could not be verified'})
     await expect(executeChildren({parent,groups,config},{groups:async()=>groups.groups})).rejects.toThrow('group succession')
   }finally{shared.mockRestore();coordination.mockRestore();succession.mockRestore();await rm(home,{recursive:true,force:true})}

@@ -129,6 +129,7 @@ test('GitHub provider retains server rate-limit timing for bounded transaction r
     expect(await forbidden.commit(f.target, input)).toEqual({ kind: 'refused', reason: 'provider refused conditional mutation' });
     const resetAt = Math.ceil((Date.now() + 60_000) / 1000), graphql = githubCoordinationProvider(async () => `HTTP/2.0 200 OK\r\nx-ratelimit-remaining: 0\r\nx-ratelimit-reset: ${resetAt}\r\ncontent-type: application/json\r\n\r\n${JSON.stringify({ errors: [{ type: 'RATE_LIMITED' }] })}`);
     const limited = await graphql.commit(f.target, input); expect(limited).toMatchObject({ kind: 'conflict', reason: 'provider rate limited' }); if (limited.kind === 'conflict') expect(limited.retryAfterMs).toBeGreaterThanOrEqual(59_000);
+    const preflight = await fixture(); preflight.target.provider = graphql; expect(await acquireSharedTask({ ...preflight, operationId: randomUUID() })).toEqual({ kind: 'busy', reason: 'coordination rate-limit delay exceeds this transaction window' }); expect(preflight.mutations).toBe(0);
 });
 test('receipt retry rejects changed payload under the same immutable operation ID', async () => {
     const f = await fixture(), result = await acquireSharedTask({ ...f, operationId: randomUUID() });

@@ -145,7 +145,8 @@ async function currentParentContext(parent:RunRecord,record:ChildrenRecord,confi
     if(inspected.kind!=='verified')throw Error(inspected.reason)
     succession=inspected
     const current=inspected.currentMembers.find(row=>row.current.taskKey===task.taskKey)
-    if(!current||!same(current.current,task)||current.initial.successionOperationId!==task.successionOperationId)throw Error('current parent succession member differs')
+    const receipt=inspected.receipt.members.find(row=>row.after.taskKey===task.taskKey)
+    if(!current||!receipt||!same(receipt.before,record.parentBinding)||!same(current.current,task)||current.initial.successionOperationId!==task.successionOperationId)throw Error('current parent succession member differs')
   }
   return{claim,task,binding,succession}
 }
@@ -394,7 +395,7 @@ async function acquireChild(child: ChildLaunch, record: ChildrenRecord, prepared
       if((!receiving&&!sameHome)||!operationId)throw Error('running recovered child lacks exact group provenance')
       const raw=await claim.target.provider.read(claim.target,snapshot.head,owner.operationPath(operationId))
       if(!raw)throw Error('running recovered child start receipt unavailable')
-      const receipt=JSON.parse(raw) as import('./shared-claims.ts').OperationReceipt
+      const receipt=owner.parseOperationReceiptBytes(raw)
       if(receipt.operationId!==operationId||receipt.type!=='start'||receipt.taskKey!==task.taskKey||receipt.generation!==task.generation||receipt.requestDigest!==owner.sha256(owner.canonical({kind:'start'}))||!same(receipt.resultOwner,{ownerToken:task.ownerToken,machineId:task.machineId,installationId:task.installationId,sessionId:task.sessionId,runId:task.runId}))throw Error('running recovered child start receipt differs')
       return claim
     }
