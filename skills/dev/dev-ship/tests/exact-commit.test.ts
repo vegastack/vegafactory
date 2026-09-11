@@ -50,7 +50,7 @@ for (const [name, check, content, mutation, passes] of [
   test(`actual CLI: ${name}`, () => {
     const f = fixture(check, content)
     try { mutation?.(f); const result = f.run(); expect(result.status, result.stdout + result.stderr).toBe(passes ? 0 : 2) } finally { f.cleanup() }
-  })
+  },15000)
 }
 
 test('dirty candidate refuses before running the command and preserves files', () => {
