@@ -68,10 +68,13 @@ test('actual CLI revokes without regranting and accepts explicit supersession', 
 
 test('actual CLI exact legacy correction retains originals and needs separate current intent', () => {
   const data: any = fixture()
-  const legacy = { id: 9, node_id: 'legacy', body: '<!-- vsk:v1 type=approval -->' }
+  const legacy = { id: 9, node_id: 'legacy', user: { login: 'ada' }, body: '<!-- vsk:v1 type=approval -->' }
   const correction = { schemaVersion: 2, kind: 'correction', scope: 'none', operator: 'ada', source: { kind: 'session', ref: 'session:correction', quote: 'Neutralize this exact old malformed record and retain it.' }, targets: [{ commentId: 9, bodySha256: Bun.SHA256.hash(legacy.body, 'hex') }], supersedes: [], revokes: [] }
   data.pages = [[legacy, eventComment(correction, 10)], data.comments]
   expect(run(data).status).toBe(0)
+  const unknownPublisher = structuredClone(data)
+  delete unknownPublisher.pages[0][0].user
+  expect(run(unknownPublisher).status).toBe(2)
   data.pages[1] = [data.comments[0]]
   expect(run(data).status).toBe(2)
 })

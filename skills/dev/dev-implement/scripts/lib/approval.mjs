@@ -384,9 +384,9 @@ function validateHistorySources(parsed, comments, operators, sourceComments) {
   // Unknown reads never become invalid evidence merely because another fault
   // or an exact correction is also present in the same history.
   for (const entry of parsed) {
-    if (entry.event.ok === false) continue;
     known(integer(entry.comment.id) && text(entry.comment.user?.login), 'publisher/comment identity metadata missing');
     publishers.set(entry, entry.comment.user.login);
+    if (entry.event.ok === false) continue;
     if (entry.event.source.kind === 'github-comment') sources.set(entry, resolveSource(entry.event));
   }
   const refuseKnownInvalid = (entry, error) => {

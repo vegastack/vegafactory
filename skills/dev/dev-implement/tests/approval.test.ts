@@ -104,6 +104,16 @@ test('malformed historical approvals require an exact authorized correction', ()
   expect(evaluate([{ ...broken, body: broken.body + ' edited' }, correctionComment, grant()]).ok).toBe(false)
 })
 
+test('malformed history with missing publisher metadata remains unavailable despite correction and fresh intent', () => {
+  const broken = { id: 8, body: '<!-- vsk:v1 type=approval scope=brief -->\nOld ambiguous statement' }
+  const correction = {
+    schemaVersion: 2, kind: 'correction', scope: 'none', operator: 'ada', source: record().source,
+    targets: [{ commentId: 8, bodySha256: Bun.SHA256.hash(broken.body, 'hex') }], supersedes: [], revokes: [],
+  }
+  const correctionComment = { id: 9, user: { login: 'ada' }, body: '<!-- vsk:v1 type=approval scope=none -->\n```json\n' + JSON.stringify(correction) + '\n```\n' }
+  expect(evaluate([broken, correctionComment, grant('fresh')]).blocks.join(' ')).toContain('unavailable')
+})
+
 test('duplicate canonical plans refuse, while checkbox-only progress remains approved', () => {
   expect(evaluate([grant(), { ...livePlan, id: 20, node_id: 'other-plan' }]).ok).toBe(false)
   const progress = { ...livePlan, body: livePlan.body.replace('[ ]', '[x]') }
