@@ -151,7 +151,7 @@ test('ordinary review finding resolution verifies an improvement and a changed r
  const f=await fixture(),sourcePath=join(runsRoot(f.home),f.run.runId,'recovery-source.json'),source=JSON.parse(await readFile(sourcePath,'utf8'))
  const before={sha:f.base,baseSha:f.base,scopeDigest:f.packet.planRef!.digest,verdict:'needs-fixes',findings:[{id:'clarify-recovery-step',status:'open'}]}
  const after={...before,sha:f.head,verdict:'clean',findings:[{id:'clarify-recovery-step',status:'resolved'}]}
- const bodies=[before,after].map(binding=>'<!-- vsk:v1 type=review agent=claude -->\n```json\n'+JSON.stringify({reviewBinding:binding})+'\n```')
+ const bodies=[before,after].map((binding,index)=>`<!-- vsk:v1 type=review round=${index+1} sha=${binding.sha} agent=claude verdict=${binding.verdict} -->\n\`\`\`json\n${JSON.stringify({reviewBinding:binding})}\n\`\`\``)
  const reviews=[before,after].map((binding,index)=>({commentId:20+index,bodySha256:createHash('sha256').update(bodies[index]!).digest('hex'),agent:'claude',binding}))
  await atomicRunFile(sourcePath,{...source,reviews})
  f.lesson.evidenceRefs=reviews.map((review,index)=>({kind:'review' as const,ref:'review:'+review.commentId+':'+review.bodySha256,sha:index?f.head:f.base,passed:!!index}))
