@@ -2,6 +2,16 @@
 
 The project's story, newest first: what got built, why, and how it went — for the operator's future recall. Format home: the dev-chronicle skill.
 
+## 13-09-2026 — Release authority uses npm-supported hosted identity
+
+- **What:** Immutable artifact preparation remains on the Mac runner, while npm publication and GitHub Release creation run on GitHub-hosted Linux.
+- **Why:** The first `v1.0.5` publication reached npm with a verified retained pair but npm rejected trusted publishing from the self-hosted runner.
+- **How it went:** The registry failure reduced to npm's documented hosted-runner requirement; the workflow routing and its semantic regression changed together without rebuilding or weakening the artifact gates.
+- **Changed:** Hosted OIDC publication · hosted GitHub Release authority · unchanged self-hosted preparation and retained-pair verification.
+- **Decisions:** none.
+
+— approved by (kmanojkumar) · built by Codex · branch fix/release-publish-hosted-runner
+
 ## 13-09-2026 — Release dependency inventory handles Bun executable links ([#177](https://github.com/vegastack/vegafactory/issues/177))
 
 - **What:** Release preparation now inventories package metadata through dependency directories without trying to open executable links that resolve to ordinary files.

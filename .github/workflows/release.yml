@@ -168,7 +168,8 @@ jobs:
       contents: read
       actions: read
       id-token: write
-    runs-on: [self-hosted, vsk-runners-mac]
+    # npm trusted publishing accepts OIDC only from supported hosted runners.
+    runs-on: ubuntu-latest
     outputs:
       outcome-name: release-outcome-${{ github.sha }}-attempt-${{ github.run_attempt }}
     steps:
@@ -207,7 +208,7 @@ jobs:
         run: node scripts/release-artifacts.mjs verify-release work/release/release-manifest.json
 
       # Publication and promotion are covered only by the operator-authorized release tag.
-      # Authentication/provenance decisions remain #156; runner routing is unchanged.
+      # Authentication/provenance decisions remain #156; publication uses npm-supported hosted OIDC.
       - name: Publish retained pair and promote after registry first-use smoke
         env:
           VEGAFACTORY_RETAINED_PAIR_ID: ${{ needs.prepare.outputs.pair-id }}
@@ -229,7 +230,7 @@ jobs:
     permissions:
       contents: write
       actions: read
-    runs-on: [self-hosted, vsk-runners-mac]
+    runs-on: ubuntu-latest
     steps:
       - name: Restore verified publication outcome
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
