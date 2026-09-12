@@ -1,7 +1,7 @@
 {
   "name": "@vegastack/vegafactory-dashboard",
-  "version": "0.18.0",
-  "description": "Local read-only dashboard for VegaFactory \u2014 org, repo, people, skills, board, and dispatcher views over the control room",
+  "version": "1.0.0",
+  "description": "Local read-only dashboard for VegaFactory — org, repo, people, skills, board, and dispatcher views over the control room",
   "license": "MIT",
   "type": "module",
   "repository": {
