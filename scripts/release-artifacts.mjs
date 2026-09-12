@@ -295,7 +295,7 @@ async function startStaleDashboard(expected) {
   const sockets=new Set()
   // Keep the probe socket open deliberately: cleanup must not depend on the
   // launcher's HTTP client releasing an idle connection before the CLI stops.
-  const server=createServer(socket=>{sockets.add(socket);socket.once('close',()=>sockets.delete(socket));socket.write(`HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: ${Buffer.byteLength(body)}\r\nConnection: keep-alive\r\n\r\n${body}`)})
+  const server=createServer(socket=>{sockets.add(socket);socket.once('error',()=>sockets.delete(socket));socket.once('close',()=>sockets.delete(socket));socket.write(`HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: ${Buffer.byteLength(body)}\r\nConnection: keep-alive\r\n\r\n${body}`)})
   await new Promise((ok,fail)=>{server.once('error',fail);server.listen(0,'127.0.0.1',ok)})
   return {server,sockets,port:server.address().port}
 }
