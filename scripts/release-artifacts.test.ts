@@ -1,6 +1,6 @@
 import { expect, test } from 'bun:test'
 import { createHash } from 'node:crypto'
-import { verifyArtifactBytes, assertPairVersions, assertScanEvidence, readPackageArchive, dashboardDescriptor, verifyDashboardDescriptor, materializeTree, smokePair, command } from './release-artifacts.mjs'
+import { verifyArtifactBytes, assertPairVersions, assertScanEvidence, readPackageArchive, dashboardDescriptor, verifyDashboardDescriptor, materializeTree, smokePair, command, buildSbom } from './release-artifacts.mjs'
 import { mkdtemp, mkdir, writeFile, symlink, readFile, chmod, rm, link } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -47,6 +47,14 @@ test('only same-skill baseline-accepted coverage admits a degraded scan',()=>{
  for(const warns of [[],['b: reduced coverage accepted by the baseline for scripts/a.mjs — the scan of those files is incomplete by acknowledged cause'],[42]]){
   expect(()=>assertScanEvidence({...scanWith(accepted),warns},['a'])).toThrow('partial scanner coverage: a')
  }
+})
+test('build SBOM ignores dependency executable links that resolve to files',async()=>{
+ const root=await mkdtemp(join(tmpdir(),'build-sbom-file-link-')),modules=join(root,'node_modules')
+ await mkdir(join(modules,'fixture/bin'),{recursive:true});await mkdir(join(modules,'.bin'))
+ await writeFile(join(modules,'fixture/package.json'),JSON.stringify({name:'fixture',version:'1.0.0'}));await writeFile(join(modules,'fixture/bin.js'),'#!/usr/bin/env node\n')
+ await symlink('../fixture/bin.js',join(modules,'.bin/fixture'))
+ const sbom=await buildSbom(root)
+ expect(sbom.components.map((component:any)=>component.name)).toEqual(['fixture'])
 })
 test('descriptor binds bytes, identity and every file',()=>{const b=packed();const d=dashboardDescriptor(b,'1.0.0');expect(verifyDashboardDescriptor(d,b,'1.0.0')).toBe(true);for(const bad of [undefined,{...d,version:'0.9.0'},{...d,files:[]},{...d,files:d.files.map((f:any)=>({...f,sha256:'0'.repeat(64)}))}])expect(()=>verifyDashboardDescriptor(bad,b,'1.0.0')).toThrow();expect(()=>verifyDashboardDescriptor(d,Buffer.concat([b,Buffer.from('changed')]),'1.0.0')).toThrow()})
 test('tar rejects traversal, absolute, duplicate, links and devices before extraction',()=>{for(const e of [[{path:'/package/a'}],[{path:'package/../a'}],[{path:'package/a'},{path:'package/a'}],[{path:'package/a',type:'2'}],[{path:'package/a',type:'1'}],[{path:'package/a',type:'3'}],[{path:'package/a//b'}]])expect(()=>readPackageArchive(archive(e))).toThrow()})
