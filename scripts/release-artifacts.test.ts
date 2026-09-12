@@ -78,10 +78,12 @@ test('workflow recovery rebuilds only after affirmative skipped publication and 
  expect(recoveryDecision({artifacts:[{name:'release-pair-a-attempt-2',expired:false}],attempts:{},sourceSha:'a',runAttempt:3})).toEqual({prepare:false,artifact:'release-pair-a-attempt-2'})
  expect(()=>recoveryDecision({artifacts:[{name:'release-pair-a-attempt-2',expired:true}],attempts:{},sourceSha:'a',runAttempt:3})).toThrow('expired')
 })
-test('CI checks out full history before running compatibility readers',async()=>{
- const workflow=await readFile('.github/workflows/ci.yml','utf8')
- const checkout=workflow.slice(workflow.indexOf('- uses: actions/checkout@v7'),workflow.indexOf('- uses: oven-sh/setup-bun@v2'))
- expect(checkout).toContain('fetch-depth: 0')
+test('CI and release preparation check out full history before running compatibility readers',async()=>{
+ for(const [file,job] of [['.github/workflows/ci.yml','check'],['.github/workflows/release.yml','prepare']] as const){
+  const workflow=Bun.YAML.parse(await readFile(file,'utf8')) as any
+  const checkout=workflow.jobs[job].steps.find((step:any)=>String(step.uses??'').startsWith('actions/checkout@'))
+  expect(checkout?.with?.['fetch-depth']).toBe(0)
+ }
 })
 test('actual preparation CLI stops at dashboard build and scanner failures, leaving no finalized pair for guarded retry',async()=>{
  const root=await realpath(await mkdtemp(join(tmpdir(),'prepare-command-'))),bin=join(root,'fixture-bin'),out=join(root,'work/release')
