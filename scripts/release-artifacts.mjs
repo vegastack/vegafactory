@@ -407,10 +407,11 @@ async function runtimeSbom(files, name, version) {
   }
   return {bomFormat:'CycloneDX',specVersion:'1.5',version:1,metadata:{component:{type:'application',name,version}},components}
 }
-async function buildSbom(root) {
+export async function buildSbom(root) {
   const components=[];const seen=new Set()
   async function walk(path) {
     let actual;try{actual=await realpath(path)}catch{return}
+    if(!(await lstat(actual)).isDirectory())return
     if(seen.has(actual))return;seen.add(actual)
     for(const e of await readdir(actual,{withFileTypes:true})) {
       const p=join(actual,e.name)

@@ -2,6 +2,16 @@
 
 The project's story, newest first: what got built, why, and how it went — for the operator's future recall. Format home: the dev-chronicle skill.
 
+## 13-09-2026 — Release dependency inventory handles Bun executable links ([#177](https://github.com/vegastack/vegafactory/issues/177))
+
+- **What:** Release preparation now inventories package metadata through dependency directories without trying to open executable links that resolve to ordinary files.
+- **Why:** The first `v1.0.4` preparation reached its build SBOM and failed when Bun's Changesets executable link resolved to `bin.js`.
+- **How it went:** The workflow error reduced to one deterministic file-link fixture, which failed with the same `ENOTDIR` and passed after a single directory-type guard.
+- **Changed:** File-valued dependency links are skipped · directory links remain traversed · package metadata collection is unchanged.
+- **Decisions:** none.
+
+— approved by (kmanojkumar) · built by Codex · branch fix/release-sbom-file-symlink
+
 ## 12-09-2026 — Releases honor scanner coverage already adjudicated ([#175](https://github.com/vegastack/vegafactory/issues/175))
 
 - **What:** Release preparation now distinguishes an unaccepted incomplete scan from reduced coverage that the built-skill guard already accepted for the same skill through an exact file-hash-bound baseline entry.
