@@ -64,7 +64,7 @@ async function pairFixture(version='1.0.0',badSmoke=false) {
  const dashboard=tar({'package.json':JSON.stringify({name:DASHBOARD,version}),'dist-standalone/packages/dashboard/server.js':'// retained exact dashboard fixture'})
  const descriptor=dashboardDescriptor(dashboard,version)
  const child=`import {createServer} from 'node:http';
-const [port,instanceId,org,version,badSmoke]=process.argv.slice(2);
+const [instanceId,org,version,badSmoke]=process.argv.slice(2);
 const pages={
  '/':'Needs your decision Blocked or failed Running Recently merged',
  '/performance':'Performance report is unavailable. Unlinked terminal segments Unavailable',
@@ -77,18 +77,18 @@ const pages={
  '/dispatcher':'Running Unavailable Last tick Unavailable',
 };
 const server=createServer((request,response)=>{const path=new URL(request.url,'http://fixture').pathname;if(path==='/api/health'){if(badSmoke==='true'){response.statusCode=500;response.end('fixture readiness unavailable');return}response.setHeader('content-type','application/json');response.end(JSON.stringify({ok:true,org,version,instanceId,cacheSchema:2,dataState:'unavailable',sourceAgeSeconds:null}));return}response.setHeader('content-type','text/html');response.statusCode=Object.hasOwn(pages,path)?200:404;response.end(pages[path]??'not found')});
-server.listen(Number(port),'127.0.0.1',()=>console.log('ready'));const stop=()=>server.close(()=>process.exit(0));process.on('SIGTERM',stop);process.on('SIGINT',stop);`
+server.listen(0,'127.0.0.1',()=>console.log(server.address().port));const stop=()=>server.close(()=>process.exit(0));process.on('SIGTERM',stop);process.on('SIGINT',stop);`
  const cliEntry=`#!/usr/bin/env node
 import {copyFileSync,existsSync,mkdirSync,readFileSync} from 'node:fs';import {isAbsolute,join} from 'node:path';import {spawn} from 'node:child_process';import {randomUUID} from 'node:crypto';import {fileURLToPath} from 'node:url';
 const [verb,...rest]=process.argv.slice(2);const home=process.env.HOME;const packageVersion=${JSON.stringify(version)};
 if(verb==='--version'){console.log('vegafactory '+packageVersion);process.exit(0)}
 if(verb==='skills'){if(rest[0]==='list'){console.log('dev-implement');process.exit(0)}const root=rest[rest.indexOf('--dir')+1],destination=join(root,'.agents/skills/dev-implement/scripts/preflight.mjs');if(rest[0]==='add'){mkdirSync(join(root,'.agents/skills/dev-implement/scripts'),{recursive:true});copyFileSync(fileURLToPath(new URL('../skill/dev-implement/scripts/preflight.mjs',import.meta.url)),destination);process.exit(0)}if(rest[0]==='verify'){if(!existsSync(destination))process.exit(74);process.exit(0)}}
 if(verb!=='dashboard'||rest.includes('--dir')||!rest.includes('--json'))process.exit(75);
-const config=JSON.parse(readFileSync(join(home,'.vegastack/factory.json'),'utf8')),org=rest[rest.indexOf('--org')+1],start=Number(rest[rest.indexOf('--port')+1]),room=config.controlRooms?.[org],repos=config.repos;
+const config=JSON.parse(readFileSync(join(home,'.vegastack/factory.json'),'utf8')),org=rest[rest.indexOf('--org')+1],room=config.controlRooms?.[org],repos=config.repos;
 if(config.schemaVersion!==2||config.revision!==0||!room||!isAbsolute(room.path)||!Array.isArray(repos)||repos.length!==1||repos[0].org!==org||repos[0].repo!=='fixture/project'||!isAbsolute(repos[0].path))process.exit(77);
 const retained=join(home,'.vegastack/dashboard',packageVersion,'node_modules/@vegastack/vegafactory-dashboard/dist-standalone/packages/dashboard/server.js');if(!existsSync(retained))process.exit(78);
-const instanceId=randomUUID(),port=start+1,child=spawn(process.execPath,[fileURLToPath(new URL('./fixture-dashboard-child.mjs',import.meta.url)),String(port),instanceId,org,packageVersion,${JSON.stringify(String(badSmoke))}],{detached:true,stdio:['ignore','pipe','inherit']});
-child.stdout.once('data',()=>console.log(JSON.stringify({command:'dashboard',ok:true,org,version:packageVersion,instanceId,cacheSchema:2,url:'http://127.0.0.1:'+port,dir:join(home,'.vegastack/dashboard',packageVersion),entry:retained,fetched:false,pid:child.pid})));const stop=()=>{child.once('close',()=>process.exit(0));child.kill('SIGTERM')};process.on('SIGTERM',stop);process.on('SIGINT',stop);await new Promise(()=>{});`
+const instanceId=randomUUID(),child=spawn(process.execPath,[fileURLToPath(new URL('./fixture-dashboard-child.mjs',import.meta.url)),instanceId,org,packageVersion,${JSON.stringify(String(badSmoke))}],{detached:true,stdio:['ignore','pipe','inherit']});
+child.stdout.once('data',data=>{const port=Number(String(data).trim());if(!Number.isSafeInteger(port)||port<1)process.exit(79);console.log(JSON.stringify({command:'dashboard',ok:true,org,version:packageVersion,instanceId,cacheSchema:2,url:'http://127.0.0.1:'+port,dir:join(home,'.vegastack/dashboard',packageVersion),entry:retained,fetched:false,pid:child.pid}))});const stop=()=>{child.once('close',()=>process.exit(0));child.kill('SIGTERM')};process.on('SIGTERM',stop);process.on('SIGINT',stop);await new Promise(()=>{});`
  const cli=tar({
   'package.json':JSON.stringify({name:CLI,version,type:'module',bin:{vegafactory:'dist/index.js'}}),
   'dist/index.js':{data:cliEntry,mode:0o755},'dist/run-wrapper.js':'// retained runtime wrapper',
