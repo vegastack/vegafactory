@@ -2,6 +2,16 @@
 
 The project's story, newest first: what got built, why, and how it went — for the operator's future recall. Format home: the dev-chronicle skill.
 
+## 12-09-2026 — Releases honor scanner coverage already adjudicated ([#175](https://github.com/vegastack/vegafactory/issues/175))
+
+- **What:** Release preparation now distinguishes an unaccepted incomplete scan from reduced coverage that the built-skill guard already accepted for the same skill through an exact file-hash-bound baseline entry.
+- **Why:** The first `v1.0.3` preparation correctly completed its scan, but the release validator independently rejected `skill-scan`'s known and already-adjudicated parser limitation before retaining the artifact pair.
+- **How it went:** The live report showed the same one-file, one-analyzer `static_parse_limit` acceptance while the guard verdict stayed clean. Assertion and real preparation-process regressions went red because release validation ignored that signal, then green with an exact same-skill warning match; arbitrary and mismatched partial evidence still refuses.
+- **Changed:** Existing accepted-coverage evidence reaches release preparation · unchanged scanner and baseline policy · unchanged retained-pair and publication gates.
+- **Decisions:** none.
+
+— approved by (kmanojkumar) · built by Codex · branch fix/175-honor-accepted-scanner-coverage-in-relea
+
 ## 12-09-2026 — Release scans keep all their evidence ([#172](https://github.com/vegastack/vegafactory/issues/172))
 
 - **What:** Machine-readable skill scans now finish writing their complete JSON document before exiting, even when findings and accepted suppressions exceed the operating system's pipe buffer.

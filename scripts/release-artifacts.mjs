@@ -23,6 +23,10 @@ export function assertScanEvidence(scan, expectedSkills) {
   if (JSON.stringify(actual) !== JSON.stringify([...expectedSkills].sort())) throw new Error('scanner skill coverage mismatch')
   for (const s of scan.skills) {
     const c = s.completeness
+    const acceptancePrefix = `${s.name}: reduced coverage accepted by the baseline for `
+    const acceptanceSuffix = ' — the scan of those files is incomplete by acknowledged cause'
+    const acceptedCoverage = Array.isArray(scan.warns) && scan.warns.some(warning =>
+      typeof warning === 'string' && warning.startsWith(acceptancePrefix) && warning.endsWith(acceptanceSuffix) && warning.length > acceptancePrefix.length + acceptanceSuffix.length)
     const entirelyFields = ['entirelyUninspected','entirely_uninspected_files']
     const partiallyFields = ['partiallyInspected','partially_inspected_files','partially_inspected']
     const coverageFields = ['coveragePercent','coverage_percent']
@@ -32,7 +36,7 @@ export function assertScanEvidence(scan, expectedSkills) {
     const healthyPartial = c?.status === 'partial' && Array.isArray(c.limitations) && c.limitations.length === 0 &&
       [entirelyFields,partiallyFields].every(fields => present(fields).length > 0 && present(fields).every(field => c[field] === 0)) &&
       present(coverageFields).length > 0 && present(coverageFields).every(field => c[field] === 100)
-    if (!c || !['complete','partial'].includes(c.status) || c.limitations?.length || hasGap || belowFullCoverage || (c.status === 'partial' && !healthyPartial)) throw new Error(`partial scanner coverage: ${s.name}`)
+    if (!c || !['complete','partial'].includes(c.status) || (!acceptedCoverage && (c.limitations?.length || hasGap || belowFullCoverage || (c.status === 'partial' && !healthyPartial)))) throw new Error(`partial scanner coverage: ${s.name}`)
   }
 }
 export function packagePath(path) {
