@@ -1,5 +1,15 @@
 # @vegastack/skills
 
+## 1.0.5
+
+### Patch Changes
+
+- 1b85e65: Release preparation now skips executable links that resolve to files while inventorying build dependencies.
+
+  - Preserve directory-link traversal and package metadata collection.
+  - Prevent Bun-managed `.bin` file links from being opened as directories.
+  - Contain the expected stale-socket reset during the release smoke teardown.
+
 ## 1.0.4
 
 ### Patch Changes
