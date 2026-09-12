@@ -6,8 +6,8 @@ The project's story, newest first: what got built, why, and how it went — for 
 
 - **What:** Release preparation now inventories package metadata through dependency directories without trying to open executable links that resolve to ordinary files.
 - **Why:** The first `v1.0.4` preparation reached its build SBOM and failed when Bun's Changesets executable link resolved to `bin.js`.
-- **How it went:** The workflow error reduced to one deterministic file-link fixture, which failed with the same `ENOTDIR` and passed after a single directory-type guard; CI then exposed and contained an expected stale-socket reset during smoke teardown.
-- **Changed:** File-valued dependency links are skipped · directory links remain traversed · package metadata collection is unchanged · stale smoke sockets cannot escape teardown as unhandled errors.
+- **How it went:** The workflow error reduced to one deterministic file-link fixture, which failed with the same `ENOTDIR` and passed after a single directory-type guard; CI then exposed and contained an expected stale-socket reset and a fixture-only `port + 1` allocation race.
+- **Changed:** File-valued dependency links are skipped · directory links remain traversed · package metadata collection is unchanged · stale smoke sockets cannot escape teardown as unhandled errors · publisher fixtures use an OS-selected ephemeral port.
 - **Decisions:** none.
 
 — approved by (kmanojkumar) · built by Codex · branch fix/release-sbom-file-symlink
