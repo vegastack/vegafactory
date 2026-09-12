@@ -1,5 +1,14 @@
 # @vegastack/skills
 
+## 1.0.4
+
+### Patch Changes
+
+- ea259ac: Release preparation now honors exact scanner coverage acceptances already validated by the built-skill guard.
+
+  - Match the existing baseline-accepted warning to the same skill before admitting degraded completeness.
+  - Keep missing, malformed, mismatched, blocked, skipped, and unaccepted partial scanner evidence as hard failures.
+
 ## 1.0.3
 
 ### Patch Changes

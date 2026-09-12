@@ -1,6 +1,6 @@
 {
   "name": "@vegastack/vegafactory",
-  "version": "1.0.3",
+  "version": "1.0.4",
   "description": "Installer and verifier for VegaStack Agent Skills (Claude Code, Codex, and Hermes)",
   "license": "MIT",
   "type": "module",
