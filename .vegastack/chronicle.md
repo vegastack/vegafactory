@@ -2,6 +2,16 @@
 
 The project's story, newest first: what got built, why, and how it went — for the operator's future recall. Format home: the dev-chronicle skill.
 
+## 12-09-2026 — Release checks can read the history they verify ([#169](https://github.com/vegastack/vegafactory/issues/169))
+
+- **What:** Release preparation now fetches complete Git history before running the same compatibility suite as required CI, while checkout credentials remain disabled.
+- **Why:** The first `v1.0.1` preparation reached the full check but its shallow tag checkout could not load the exact pre-amendment reader used by a backward-compatibility test.
+- **How it went:** The real failed run isolated `git show` exit `128` before pair retention or publication. A workflow regression reproduced the missing depth input, then passed once the prepare checkout matched CI's full-history contract.
+- **Changed:** Prepare-job checkout depth · semantic workflow regression · unchanged compatibility fixture and release gates.
+- **Decisions:** none.
+
+— approved by (kmanojkumar) · built by Codex · branch fix/169-fetch-history-for-release-compatibility
+
 ## 12-09-2026 — Warning-only release scans reach their evidence check ([#166](https://github.com/vegastack/vegafactory/issues/166))
 
 - **What:** Release preparation now accepts SkillSpector's warning exit only at the scanner call, then independently requires the same `ok:true`, zero-block, complete-coverage JSON evidence before retaining a pair.
