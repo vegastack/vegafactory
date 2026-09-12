@@ -4,7 +4,7 @@ import { AsyncLocalStorage } from 'node:async_hooks';
 import { mkdir, open, readFile, rename, lstat } from 'node:fs/promises';
 import { join, dirname } from 'node:path';
 import { GhUnavailable, ghText, type GhOptions } from './gh.ts';
-import { acquireClaim, releaseClaim, processIdentity, type ProcessIdentity } from './claims.ts';
+import { acquireClaim, releaseClaim, processIdentity, type Claim, type ProcessIdentity } from './claims.ts';
 export type CheckpointRef = {
     schemaVersion: 1;
     id: string;
@@ -757,6 +757,31 @@ async function privateWrite(path: string, value: unknown) {
     }
 }
 function localPath(target: CoordinationTarget, suffix: string) { return join(target.localRoot, sha256(`${target.host}\n${target.repositoryId}\n${target.branch}`), suffix); }
+export async function acquireReadPointerClaim(path: string, maxWaitMs = requestTimeout()): Promise<Claim> {
+    if (!Number.isSafeInteger(maxWaitMs) || maxWaitMs < 0 || maxWaitMs > 10000)
+        throw Error('invalid coordination read-pointer wait window');
+    const identity = await processIdentity(), deadline = Date.now() + maxWaitMs;
+    let busyReason: string | null = null;
+    for (;;) {
+        if (busyReason && Date.now() >= deadline)
+            throw Error(`${busyReason}; coordination read-pointer wait window exhausted`);
+        const result = await acquireClaim(path, identity);
+        if (result.kind === 'owned') {
+            if (Date.now() > deadline) {
+                await releaseClaim(result.claim);
+                throw Error(`${busyReason ?? 'coordination read-pointer acquisition'}; wait window exhausted`);
+            }
+            return result.claim;
+        }
+        if (result.kind === 'refused')
+            throw Error(result.reason);
+        busyReason = result.reason;
+        const remaining = deadline - Date.now();
+        if (remaining <= 0)
+            throw Error(`${busyReason}; coordination read-pointer wait window exhausted`);
+        await new Promise(resolve => setTimeout(resolve, Math.min(50, remaining)));
+    }
+}
 async function remembered(target: CoordinationTarget): Promise<{
     head: string;
     revision: number;
@@ -848,9 +873,7 @@ async function readCoordinationSnapshot(target: CoordinationTarget, rememberHead
     if (!rememberHead)
         return { head: remote.head, branchId: remote.id, index, tasks, machines };
     // Serialize local read pointers: concurrent older reads must not regress remembered state.
-    const lock = await acquireClaim(localPath(target, 'read-pointer.lock'), await processIdentity());
-    if (lock.kind !== 'owned')
-        throw Error(lock.reason);
+    const lock = await acquireReadPointerClaim(localPath(target, 'read-pointer.lock'));
     try {
         const current = await remembered(target);
         if (current && current.head !== remote.head && !['ahead', 'identical'].includes(await bounded(target.provider.compare(target, current.head, remote.head))))
@@ -858,7 +881,7 @@ async function readCoordinationSnapshot(target: CoordinationTarget, rememberHead
         await privateWrite(localPath(target, 'accepted.json'), { head: remote.head, revision: index.revision });
     }
     finally {
-        await releaseClaim(lock.claim);
+        await releaseClaim(lock);
     }
     return { head: remote.head, branchId: remote.id, index, tasks, machines };
 }
