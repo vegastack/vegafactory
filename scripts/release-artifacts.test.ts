@@ -1,6 +1,6 @@
 import { expect, test } from 'bun:test'
 import { createHash } from 'node:crypto'
-import { verifyArtifactBytes, assertPairVersions, assertScanEvidence, readPackageArchive, dashboardDescriptor, verifyDashboardDescriptor, materializeTree, smokePair } from './release-artifacts.mjs'
+import { verifyArtifactBytes, assertPairVersions, assertScanEvidence, readPackageArchive, dashboardDescriptor, verifyDashboardDescriptor, materializeTree, smokePair, command } from './release-artifacts.mjs'
 import { mkdtemp, mkdir, writeFile, symlink, readFile, chmod, rm, link } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -13,6 +13,12 @@ function archive(entries: {path:string, data?:string, type?:string, mode?:number
 const packed=()=>archive([{path:'package/package.json',data:JSON.stringify({name:'@vegastack/vegafactory-dashboard',version:'1.0.0'})},{path:'package/dist-standalone/server.js',data:'server'}])
 test('changing packed bytes invalidates identity',()=>{const b=Buffer.from('reviewed');const sha256=createHash('sha256').update(b).digest('hex');expect(verifyArtifactBytes(b,{sha256})).toBe(true);expect(verifyArtifactBytes(Buffer.from('rebuilt'),{sha256})).toBe(false)})
 test('pair and tag versions must match',()=>{expect(()=>assertPairVersions({cli:'1.0.0',dashboard:'1.0.1',tag:'v1.0.0'})).toThrow();expect(()=>assertPairVersions({cli:'1.0.0',dashboard:'1.0.0',tag:'v1.0.0'})).not.toThrow()})
+test('command statuses stay zero-only unless one call explicitly admits a warning',()=>{
+ const warning=[process.execPath,'-e','console.log("warning output");process.exit(1)']
+ expect(()=>command(warning)).toThrow('failed (1)')
+ expect(command(warning,{allowedStatuses:[0,1]})).toBe('warning output')
+ for(const allowedStatuses of [[],[0,0],[-1],[256],[1.5]])expect(()=>command(warning,{allowedStatuses})).toThrow('invalid allowed command statuses')
+})
 const scanWith=(completeness:any)=>({ok:true,skipped:false,blocks:[],skills:[{name:'a',completeness}]})
 test('scanner unavailable, skipped, blocked or with mismatched skills is refused',()=>{
  const healthy=scanWith({status:'complete',limitations:[]})
@@ -88,15 +94,19 @@ test('actual preparation CLI stops at dashboard build and scanner failures, leav
 const fs=require('node:fs'),a=process.argv.slice(2);fs.mkdirSync('work',{recursive:true});fs.appendFileSync('work/commands.jsonl',JSON.stringify(a)+'\\n');if(a[0]==='--version')console.log('1.3.14');else if(a.join(' ')==='run --cwd packages/dashboard build' && process.env.FIXTURE_FAILURE==='dashboard'){console.error('fixture dashboard build failed');process.exit(2)}else if(a.join(' ')==='run build')fs.mkdirSync('packages/cli/skill/fixture',{recursive:true});else if(a.join(' ')==='run check')console.log('fixture check');else if(!['install','run'].includes(a[0]))process.exit(91)
 `,{mode:0o755})
  for(const [name,version] of [['python3.12','Python 3.12.0'],['skillspector','fixture-scanner']])await writeFile(join(bin,name!),`#!/usr/bin/env node\nif(process.argv[2]!=='--version')process.exit(92);console.log(${JSON.stringify(version)})\n`,{mode:0o755})
- await writeFile(join(root,'skills/skills-tooling/skill-scan/scripts/skill-scan.mjs'),`if(process.env.FIXTURE_FAILURE==='unavailable'){console.error('fixture scanner unavailable');process.exit(2)};console.log(JSON.stringify({ok:process.env.FIXTURE_FAILURE!=='blocked',skipped:false,blocks:[],skills:[{name:'fixture',completeness:{status:'partial',limitations:['fixture coverage gap']}}]}))`)
+ await writeFile(join(bin,'npm'),`#!/usr/bin/env node\nif(process.argv[2]==='--version')console.log('11.6.0');else{console.error('post-scan sentinel');process.exit(2)}\n`,{mode:0o755})
+ await writeFile(join(root,'skills/skills-tooling/skill-scan/scripts/skill-scan.mjs'),`const failure=process.env.FIXTURE_FAILURE;if(failure==='unavailable'){console.error('fixture scanner unavailable');process.exit(2)};const completeness=failure==='partial'?{status:'partial',limitations:['fixture coverage gap']}:{status:'complete',limitations:[],entirelyUninspected:0,partiallyInspected:0,coveragePercent:100};console.log(JSON.stringify({ok:failure!=='blocked',skipped:false,blocks:failure==='blocked'?['fixture block']:[],skills:[{name:'fixture',completeness}]}));if(failure==='warning')process.exit(1)`)
  const git=(a:string[])=>{const r=spawnSync('git',a,{cwd:root,encoding:'utf8'});if(r.status!==0)throw Error(r.stderr)}
  git(['init','-q']);git(['add','.']);git(['-c','user.name=Fixture','-c','user.email=fixture@example.invalid','-c','core.hooksPath=/dev/null','commit','-qm','synthetic preparation source'])
  for(const [failure,reason] of [['dashboard','fixture dashboard build failed'],['unavailable','fixture scanner unavailable'],['blocked','scanner unavailable or incomplete'],['partial','partial scanner coverage']]) {
   const result=spawnSync('node',[join(root,'scripts/release-artifacts.mjs'),'prepare',out,'v1.0.0'],{cwd:root,env:{...process.env,PATH:bin+':'+process.env.PATH,FIXTURE_FAILURE:failure},encoding:'utf8'})
   expect(result.status).toBe(2);expect(result.stderr).toContain(reason!);await expect(readFile(join(out,'release-manifest.json'))).rejects.toThrow()
  }
+ const warning=spawnSync('node',[join(root,'scripts/release-artifacts.mjs'),'prepare',out,'v1.0.0'],{cwd:root,env:{...process.env,PATH:bin+':'+process.env.PATH,FIXTURE_FAILURE:'warning'},encoding:'utf8'})
+ expect(warning.status).toBe(2);expect(warning.stderr).toContain('post-scan sentinel');expect(warning.stderr).not.toContain('skill-scan.mjs --json --no-provision failed (1)')
+ await expect(readFile(join(out,'release-manifest.json'))).rejects.toThrow()
  const calls=(await readFile(join(root,'work/commands.jsonl'),'utf8')).trim().split('\n').map(x=>JSON.parse(x))
- expect(calls.filter(a=>a.join(' ')==='run --cwd packages/dashboard build')).toHaveLength(4)
+ expect(calls.filter(a=>a.join(' ')==='run --cwd packages/dashboard build')).toHaveLength(5)
  expect(spawnSync('git',['status','--porcelain'],{cwd:root,encoding:'utf8'}).stdout).toBe('')
 },15000)
 

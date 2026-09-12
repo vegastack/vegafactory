@@ -136,9 +136,10 @@ export async function materializeTree(source, destination) {
   }
   await copy(boundary,destination,new Set())
 }
-export function command(argv, {cwd,env=process.env,timeout=600000}={}) {
+export function command(argv, {cwd,env=process.env,timeout=600000,allowedStatuses=[0]}={}) {
+  if (!Array.isArray(allowedStatuses) || !allowedStatuses.length || allowedStatuses.some(status => !Number.isSafeInteger(status) || status < 0 || status > 255) || new Set(allowedStatuses).size !== allowedStatuses.length) throw new Error('invalid allowed command statuses')
   const r = spawnSync(argv[0],argv.slice(1),{cwd,env,timeout,encoding:'utf8',maxBuffer:64*1024*1024})
-  if (r.error || r.status !== 0) throw new Error(`${argv.join(' ')} failed (${r.status}): ${r.error?.message ?? ''}\n${r.stdout}\n${r.stderr}`)
+  if (r.error || !allowedStatuses.includes(r.status)) throw new Error(`${argv.join(' ')} failed (${r.status}): ${r.error?.message ?? ''}\n${r.stdout}\n${r.stderr}`)
   return r.stdout.trim()
 }
 export async function extractPackage(bytes, destination) {
@@ -452,7 +453,7 @@ export async function prepareRelease(root,directory,tag) {
   const checkLog=command(['bun','run','check'],{cwd:root,timeout:1800000});await writeFile(join(directory,'check.log'),checkLog)
   command(['bun','run','--cwd','packages/dashboard','build'],{cwd:root});command(['bun','run','--cwd','packages/dashboard','assemble'],{cwd:root})
   command(['bun','run','build'],{cwd:root})
-  const scanText=command(['node','skills/skills-tooling/skill-scan/scripts/skill-scan.mjs','--json','--no-provision'],{cwd:root,timeout:1800000})
+  const scanText=command(['node','skills/skills-tooling/skill-scan/scripts/skill-scan.mjs','--json','--no-provision'],{cwd:root,timeout:1800000,allowedStatuses:[0,1]})
   const scan=JSON.parse(scanText);const expected=(await readdir(join(root,'packages/cli/skill'),{withFileTypes:true})).filter(e=>e.isDirectory()).map(e=>e.name)
   assertScanEvidence(scan,expected);await writeFile(join(directory,'scan.json'),scanText)
   await writeFile(join(directory,'build-sbom.json'),JSON.stringify(await buildSbom(root),null,2)+'\n')
