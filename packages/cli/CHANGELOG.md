@@ -1,5 +1,14 @@
 # @vegastack/skills
 
+## 1.0.2
+
+### Patch Changes
+
+- b8c57c8: Release preparation now fetches the Git history required by exact historical compatibility checks.
+
+  - Match the full-history checkout already used by required CI while retaining disabled checkout credentials and pinned actions.
+  - Keep the pre-amendment reader fixture intact so a release cannot silently lose backward-compatibility coverage.
+
 ## 1.0.1
 
 ### Patch Changes
