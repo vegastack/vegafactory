@@ -40,6 +40,14 @@ test('unknown, missing or genuinely incomplete partial scanner evidence is refus
   {...partial,entirely_uninspected_files:1},{...partial,partially_inspected_files:1},{...partial,coverage_percent:99.9},
  ])expect(()=>assertScanEvidence(scanWith(completeness),['a'])).toThrow()
 })
+test('only same-skill baseline-accepted coverage admits a degraded scan',()=>{
+ const accepted={status:'partial',limitations:['Analyzer static_patterns_tool_misuse status: degraded.'],entirelyUninspected:0,partiallyInspected:1,coveragePercent:83.3}
+ const warning='a: reduced coverage accepted by the baseline for scripts/a.mjs — the scan of those files is incomplete by acknowledged cause'
+ expect(()=>assertScanEvidence({...scanWith(accepted),warns:[warning]},['a'])).not.toThrow()
+ for(const warns of [[],['b: reduced coverage accepted by the baseline for scripts/a.mjs — the scan of those files is incomplete by acknowledged cause'],[42]]){
+  expect(()=>assertScanEvidence({...scanWith(accepted),warns},['a'])).toThrow('partial scanner coverage: a')
+ }
+})
 test('descriptor binds bytes, identity and every file',()=>{const b=packed();const d=dashboardDescriptor(b,'1.0.0');expect(verifyDashboardDescriptor(d,b,'1.0.0')).toBe(true);for(const bad of [undefined,{...d,version:'0.9.0'},{...d,files:[]},{...d,files:d.files.map((f:any)=>({...f,sha256:'0'.repeat(64)}))}])expect(()=>verifyDashboardDescriptor(bad,b,'1.0.0')).toThrow();expect(()=>verifyDashboardDescriptor(d,Buffer.concat([b,Buffer.from('changed')]),'1.0.0')).toThrow()})
 test('tar rejects traversal, absolute, duplicate, links and devices before extraction',()=>{for(const e of [[{path:'/package/a'}],[{path:'package/../a'}],[{path:'package/a'},{path:'package/a'}],[{path:'package/a',type:'2'}],[{path:'package/a',type:'1'}],[{path:'package/a',type:'3'}],[{path:'package/a//b'}]])expect(()=>readPackageArchive(archive(e))).toThrow()})
 test('assembly materializes internal links and rejects escapes',async()=>{const root=await mkdtemp(join(tmpdir(),'release-links-'));const src=join(root,'src');await mkdir(src);await writeFile(join(src,'a'),'actual');await symlink('a',join(src,'b'));await materializeTree(src,join(root,'out'));expect(await readFile(join(root,'out/b'),'utf8')).toBe('actual');await symlink('../outside',join(src,'escape'));await writeFile(join(root,'outside'),'secret');await expect(materializeTree(src,join(root,'bad'))).rejects.toThrow()})
@@ -97,7 +105,7 @@ const fs=require('node:fs'),a=process.argv.slice(2);fs.mkdirSync('work',{recursi
 `,{mode:0o755})
  for(const [name,version] of [['python3.12','Python 3.12.0'],['skillspector','fixture-scanner']])await writeFile(join(bin,name!),`#!/usr/bin/env node\nif(process.argv[2]!=='--version')process.exit(92);console.log(${JSON.stringify(version)})\n`,{mode:0o755})
  await writeFile(join(bin,'npm'),`#!/usr/bin/env node\nif(process.argv[2]==='--version')console.log('11.6.0');else{console.error('post-scan sentinel');process.exit(2)}\n`,{mode:0o755})
- await writeFile(join(root,'skills/skills-tooling/skill-scan/scripts/skill-scan.mjs'),`const failure=process.env.FIXTURE_FAILURE;if(failure==='unavailable'){console.error('fixture scanner unavailable');process.exit(2)};const completeness=failure==='partial'?{status:'partial',limitations:['fixture coverage gap']}:{status:'complete',limitations:[],entirelyUninspected:0,partiallyInspected:0,coveragePercent:100};console.log(JSON.stringify({ok:failure!=='blocked',skipped:false,blocks:failure==='blocked'?['fixture block']:[],skills:[{name:'fixture',completeness}]}));if(failure==='warning')process.exit(1)`)
+ await writeFile(join(root,'skills/skills-tooling/skill-scan/scripts/skill-scan.mjs'),`const failure=process.env.FIXTURE_FAILURE;if(failure==='unavailable'){console.error('fixture scanner unavailable');process.exit(2)};const incomplete=['partial','accepted'].includes(failure);const completeness=incomplete?{status:'partial',limitations:['fixture coverage gap'],entirelyUninspected:0,partiallyInspected:1,coveragePercent:83.3}:{status:'complete',limitations:[],entirelyUninspected:0,partiallyInspected:0,coveragePercent:100};const warns=failure==='accepted'?['fixture: reduced coverage accepted by the baseline for scripts/fixture.mjs — the scan of those files is incomplete by acknowledged cause']:[];console.log(JSON.stringify({ok:failure!=='blocked',skipped:false,blocks:failure==='blocked'?['fixture block']:[],warns,skills:[{name:'fixture',completeness}]}));if(failure==='warning')process.exit(1)`)
  const git=(a:string[])=>{const r=spawnSync('git',a,{cwd:root,encoding:'utf8'});if(r.status!==0)throw Error(r.stderr)}
  git(['init','-q']);git(['add','.']);git(['-c','user.name=Fixture','-c','user.email=fixture@example.invalid','-c','core.hooksPath=/dev/null','commit','-qm','synthetic preparation source'])
  for(const [failure,reason] of [['dashboard','fixture dashboard build failed'],['unavailable','fixture scanner unavailable'],['blocked','scanner unavailable or incomplete'],['partial','partial scanner coverage']]) {
@@ -106,9 +114,11 @@ const fs=require('node:fs'),a=process.argv.slice(2);fs.mkdirSync('work',{recursi
  }
  const warning=spawnSync('node',[join(root,'scripts/release-artifacts.mjs'),'prepare',out,'v1.0.0'],{cwd:root,env:{...process.env,PATH:bin+':'+process.env.PATH,FIXTURE_FAILURE:'warning'},encoding:'utf8'})
  expect(warning.status).toBe(2);expect(warning.stderr).toContain('post-scan sentinel');expect(warning.stderr).not.toContain('skill-scan.mjs --json --no-provision failed (1)')
+ const accepted=spawnSync('node',[join(root,'scripts/release-artifacts.mjs'),'prepare',out,'v1.0.0'],{cwd:root,env:{...process.env,PATH:bin+':'+process.env.PATH,FIXTURE_FAILURE:'accepted'},encoding:'utf8'})
+ expect(accepted.status).toBe(2);expect(accepted.stderr).toContain('post-scan sentinel');expect(accepted.stderr).not.toContain('partial scanner coverage')
  await expect(readFile(join(out,'release-manifest.json'))).rejects.toThrow()
  const calls=(await readFile(join(root,'work/commands.jsonl'),'utf8')).trim().split('\n').map(x=>JSON.parse(x))
- expect(calls.filter(a=>a.join(' ')==='run --cwd packages/dashboard build')).toHaveLength(5)
+ expect(calls.filter(a=>a.join(' ')==='run --cwd packages/dashboard build')).toHaveLength(6)
  expect(spawnSync('git',['status','--porcelain'],{cwd:root,encoding:'utf8'}).stdout).toBe('')
 },15000)
 
