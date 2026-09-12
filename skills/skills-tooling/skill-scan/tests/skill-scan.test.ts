@@ -873,6 +873,35 @@ describe('CLI', () => {
     expect(report.skillspector.channel).toBeNull()
   })
 
+  test('JSON output larger than the pipe buffer is complete before process exit', () => {
+    const reasonLength = 200_000
+    const probe = `
+      const { spawnSync } = require('node:child_process')
+      const report = JSON.stringify({
+        risk_assessment: { score: 0, severity: 'LOW' }, issues: [], suppressed_count: 1,
+        suppressed: [{ rule_id: 'P2', file: 'SKILL.md', reason: 'x'.repeat(${reasonLength}) }],
+        execution_successful: true,
+        analysis_completeness: { status: 'complete', limitations: [], entirely_uninspected_files: 0, partially_inspected_files: 0, fully_inspected_files: 1, coverage_percent: 100 },
+      })
+      const child = spawnSync('node', ${JSON.stringify([script, '--root'])}.concat(process.env.VSK_TEST_SKILL, '--json'), {
+        cwd: ${JSON.stringify(repoRoot)}, env: { ...process.env, VSK_SKILLSPECTOR: ${JSON.stringify(fake)}, VSK_FAKE_REPORT: report },
+        encoding: 'utf8', maxBuffer: 64 * 1024 * 1024,
+      })
+      let parsed = null
+      try { parsed = JSON.parse(child.stdout) } catch {}
+      process.stdout.write(JSON.stringify({ status: child.status, stdoutLength: child.stdout.length, reasonLength: parsed?.skills?.[0]?.suppressed?.[0]?.reason?.length ?? null }))
+    `
+    const result = Bun.spawnSync(['node', '-e', probe], {
+      cwd: repoRoot,
+      env: { ...process.env, VSK_TEST_SKILL: oneSkill() },
+    })
+    expect(result.exitCode).toBe(0)
+    const observed = JSON.parse(result.stdout.toString())
+    expect(observed.status).toBe(1)
+    expect(observed.stdoutLength).toBeGreaterThan(65_536)
+    expect(observed.reasonLength).toBe(reasonLength)
+  })
+
   test('an unreadable dev.md blocks — it is not the same answer as "skill-scan: none"', () => {
     const r = run(['--dev-md', join(tmpdir(), 'vsk-no-such-profile.md'), '--json'])
     expect(r.code).toBe(2)
