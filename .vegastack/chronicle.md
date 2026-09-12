@@ -2,6 +2,16 @@
 
 The project's story, newest first: what got built, why, and how it went — for the operator's future recall. Format home: the dev-chronicle skill.
 
+## 12-09-2026 — Concurrent coordination checks stop tripping each other ([#163](https://github.com/vegastack/vegafactory/issues/163))
+
+- **What:** Two legitimate coordination readers now take turns updating their local remembered pointer. Live contention waits only within the existing bounded coordination window, while malformed or abandoned ownership still refuses immediately.
+- **Why:** Main-branch CI caught a packaged child gateway failing because another health check briefly held the same read-pointer claim.
+- **How it went:** The release paused after the merged tree exposed the timing race. A controlled two-reader regression reproduced the exact `claim held by process` failure, identified immediate busy handling as the cause, and passed with the bounded busy-only acquisition loop; the original packaged gateway then passed repeatedly.
+- **Changed:** Concurrent read serialization · finite busy-only waiting · unchanged monotonic-head and refusal checks.
+- **Decisions:** none.
+
+— approved by (kmanojkumar) · built by Codex · branch fix/163-serialize-concurrent-coordination-read-p
+
 ## 09-09-2026 — The dashboard opens on what needs attention ([#151](https://github.com/vegastack/vegafactory/issues/151))
 
 - **What:** Registry-independent source now opens on decisions, blocked or failed work, running tasks and recent merges, with separate scoped Performance and Activity destinations. Every old page uses the request-lifetime context callback, and task and agent-account ownership remain separate.

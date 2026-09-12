@@ -1,12 +1,12 @@
 import { test, expect } from 'bun:test';
-import { mkdtemp, readFile, writeFile, readdir } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, writeFile, readdir } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { randomUUID } from 'node:crypto';
-import { processIdentity } from '../src/claims.ts';
+import { acquireClaim, releaseClaim, processIdentity } from '../src/claims.ts';
 import { GhUnavailable } from '../src/gh.ts';
-import { acquireSharedTask, transitionSharedTask, recoverStoppedGroup, inspectGroupSuccession, linkAcceptedScope, inspectHandoffCoordinationTask, inspectHistoricalCoordinationTask, inspectCoordinationTask, readCoordination, readSharedStatus, taskKey, parseRecoveryEnvelope, parseRecoveryPayload, parseTaskRecordBytes, parseOperationReceiptBytes, publishRecoveryReceipt, resolveEvidence, beginManagedEffect, verifyManagedEffect, canonical, sha256, githubCoordinationProvider, type CoordinationTarget, type CoordinationProvider, type VerifiedCandidate, type EffectiveMachine, type MachineSession, type GroupSuccessionRequest, type RecoveryEvidencePayload, type RecoveryEnvelope } from '../src/shared-claims.ts';
+import { acquireReadPointerClaim, acquireSharedTask, transitionSharedTask, recoverStoppedGroup, inspectGroupSuccession, linkAcceptedScope, inspectHandoffCoordinationTask, inspectHistoricalCoordinationTask, inspectCoordinationTask, readCoordination, readSharedStatus, taskKey, parseRecoveryEnvelope, parseRecoveryPayload, parseTaskRecordBytes, parseOperationReceiptBytes, publishRecoveryReceipt, resolveEvidence, beginManagedEffect, verifyManagedEffect, canonical, sha256, githubCoordinationProvider, type CoordinationTarget, type CoordinationProvider, type VerifiedCandidate, type EffectiveMachine, type MachineSession, type GroupSuccessionRequest, type RecoveryEvidencePayload, type RecoveryEnvelope } from '../src/shared-claims.ts';
 const d = 'd'.repeat(64), root = '1'.repeat(40), installation = '11111111-1111-4111-8111-111111111111';
 async function fixture() {
     let head = root, version = 1, ambiguous = false, conflicts = 0, mutations = 0;
@@ -69,6 +69,51 @@ test('conditional retry recomputes; changed policy, malformed state and rewritte
     await expect(readCoordination(f.target)).rejects.toThrow('schema');
     f.rewrite();
     await expect(readCoordination(f.target)).rejects.toThrow('ancestry');
+});
+test('concurrent readers serialize remembered pointer updates', async () => {
+    const f = await fixture();
+    const advanced = await f.target.provider.commit(f.target, {
+        branchId: 'REF_state', expectedHeadOid: root,
+        files: { 'coordination/index.json': canonical({ schemaVersion: 1, installationId: installation, revision: 1, active: [], machines: [] }) },
+        operationId: randomUUID(),
+    });
+    expect(advanced.kind).toBe('committed');
+    const pointerDir = join(f.target.localRoot, sha256(`${f.target.host}\n${f.target.repositoryId}\n${f.target.branch}`));
+    await mkdir(pointerDir, { recursive: true, mode: 0o700 });
+    await writeFile(join(pointerDir, 'accepted.json'), canonical({ head: root, revision: 0 }) + '\n', { mode: 0o600 });
+    const compare = f.target.provider.compare.bind(f.target.provider);
+    let forwardCompares = 0, entered!: () => void, release!: () => void;
+    const compareEntered = new Promise<void>(resolve => { entered = resolve; });
+    const compareReleased = new Promise<void>(resolve => { release = resolve; });
+    f.target.provider.compare = async (...args) => {
+        const result = await compare(...args);
+        if (args[1] === root && args[2] === f.head && ++forwardCompares === 2) {
+            entered();
+            await compareReleased;
+        }
+        return result;
+    };
+    const first = readCoordination(f.target);
+    await compareEntered;
+    const second = readCoordination(f.target);
+    await new Promise(resolve => setTimeout(resolve, 100));
+    release();
+    const snapshots = await Promise.all([first, second]);
+    expect(snapshots.map(row => row.head)).toEqual([f.head, f.head]);
+});
+test('read-pointer waiting is busy-only and finite', async () => {
+    const f = await fixture();
+    const pointerDir = join(f.target.localRoot, sha256(`${f.target.host}\n${f.target.repositoryId}\n${f.target.branch}`));
+    const lockPath = join(pointerDir, 'read-pointer.lock');
+    await mkdir(pointerDir, { recursive: true, mode: 0o700 });
+    const held = await acquireClaim(lockPath, await processIdentity());
+    expect(held.kind).toBe('owned');
+    if (held.kind !== 'owned') throw Error(held.reason);
+    await expect(acquireReadPointerClaim(lockPath, 0)).rejects.toThrow('wait window exhausted');
+    await releaseClaim(held.claim);
+    await writeFile(lockPath, '{}\n', { mode: 0o600 });
+    await expect(acquireReadPointerClaim(lockPath, 1000)).rejects.toThrow('unreadable, corrupt or legacy claim');
+    await rm(lockPath);
 });
 test('closed wire rejects recursion, unknown keys, provenance omission and false qualification', () => {
     for (const value of [{ schemaVersion: 1 }, { schemaVersion: 2, remoteEffectCoverage: { kind: 'unmanaged-possible' } }, { schemaVersion: 2, extra: 'token' }])
