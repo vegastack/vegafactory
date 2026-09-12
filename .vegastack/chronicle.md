@@ -2,6 +2,16 @@
 
 The project's story, newest first: what got built, why, and how it went — for the operator's future recall. Format home: the dev-chronicle skill.
 
+## 12-09-2026 — Release scans keep all their evidence ([#172](https://github.com/vegastack/vegafactory/issues/172))
+
+- **What:** Machine-readable skill scans now finish writing their complete JSON document before exiting, even when findings and accepted suppressions exceed the operating system's pipe buffer.
+- **Why:** The first `v1.0.2` preparation completed its full check and scan, but its caller received only the first 65,536 bytes and could not parse the evidence.
+- **How it went:** A preserved-runner rerun reproduced the exact byte boundary. The same scan wrote 207,772 valid bytes to a regular file, isolating asynchronous pipe draining; an exact Node child-process regression went red at the same boundary and green with synchronous JSON output.
+- **Changed:** Complete piped scanner evidence · unchanged scan schema, findings and verdicts · roll-forward release path.
+- **Decisions:** none.
+
+— approved by (kmanojkumar) · built by Codex · branch fix/172-emit-complete-scanner-json-to-piped-cons
+
 ## 12-09-2026 — Release checks can read the history they verify ([#169](https://github.com/vegastack/vegafactory/issues/169))
 
 - **What:** Release preparation now fetches complete Git history before running the same compatibility suite as required CI, while checkout credentials remain disabled.

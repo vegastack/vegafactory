@@ -11,7 +11,7 @@
 
 import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { existsSync, mkdtempSync, readFileSync, readdirSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { basename, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -950,7 +950,7 @@ if (invokedDirectly) {
   outcome = { ...outcome, warns: [...preWarns, ...outcome.warns] };
   const ok = outcome.blocks.length === 0;
   if (json) {
-    console.log(JSON.stringify({
+    const envelope = JSON.stringify({
       guard: 'skill-scan',
       ok,
       skipped,
@@ -963,7 +963,11 @@ if (invokedDirectly) {
       skills: facts.skills.map(({ name, score, severity, suppressedCount, suppressed, completeness, issues }) => ({
         name, score, severity, suppressedCount, suppressed, completeness, findings: issues.length, issues,
       })),
-    }, null, 2));
+    }, null, 2);
+    // console.log writes asynchronously when stdout is a pipe. A warning-status
+    // process can otherwise exit after the platform pipe buffer (64 KiB on macOS)
+    // accepts only a prefix, leaving machine consumers with truncated JSON.
+    writeFileSync(1, `${envelope}\n`);
   } else if (skipped) {
     console.log(`skill-scan: skipped — ${devMdPath} names no scan root (skill-scan: none or absent)`);
   } else if (facts.skills.length === 0 && outcome.blocks.length > 0) {
