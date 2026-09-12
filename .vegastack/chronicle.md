@@ -2,6 +2,16 @@
 
 The project's story, newest first: what got built, why, and how it went — for the operator's future recall. Format home: the dev-chronicle skill.
 
+## 12-09-2026 — Warning-only release scans reach their evidence check ([#166](https://github.com/vegastack/vegafactory/issues/166))
+
+- **What:** Release preparation now accepts SkillSpector's warning exit only at the scanner call, then independently requires the same `ok:true`, zero-block, complete-coverage JSON evidence before retaining a pair.
+- **Why:** The first `v1.0.0` preparation stopped before publication because the generic command wrapper rejected exit `1` before it could inspect an otherwise valid scan report.
+- **How it went:** The failed workflow proved no pair was retained and publish was skipped. A process-level fixture reproduced the early rejection, then showed warning output reaching the post-scan seam while unavailable, blocked, malformed and incomplete evidence remained closed.
+- **Changed:** Exact scanner warning status handling · unchanged evidence validator · roll-forward release path.
+- **Decisions:** none.
+
+— approved by (kmanojkumar) · built by Codex · branch fix/166-validate-warning-only-release-scanner-re
+
 ## 12-09-2026 — Concurrent coordination checks stop tripping each other ([#163](https://github.com/vegastack/vegafactory/issues/163))
 
 - **What:** Two legitimate coordination readers now take turns updating their local remembered pointer. Live contention waits only within the existing bounded coordination window, while malformed or abandoned ownership still refuses immediately.
