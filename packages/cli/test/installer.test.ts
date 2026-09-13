@@ -459,6 +459,7 @@ describe('selecting a family', () => {
     const help = run(temporary, ['--help']).stdout.toString()
     expect(help).toContain('vegafactory skills <add|verify|remove>')
     for (const verb of ['dispatch', 'service', 'status', 'stats', 'dashboard']) expect(help).toContain(verb)
+    expect(help).not.toContain('Reserved (not yet available)')
   })
 
   test('stats has landed: it prints its verbs and refuses a malformed month', () => {

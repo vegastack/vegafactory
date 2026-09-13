@@ -1,11 +1,13 @@
-# VegaStack Skills
+# VegaFactory
 
 [![npm](https://img.shields.io/npm/v/@vegastack/vegafactory?logo=npm&color=cb3837)](https://www.npmjs.com/package/@vegastack/vegafactory)
 [![CI](https://github.com/vegastack/vegafactory/actions/workflows/ci.yml/badge.svg)](https://github.com/vegastack/vegafactory/actions/workflows/ci.yml)
 [![Node](https://img.shields.io/node/v/@vegastack/vegafactory?logo=node.js&logoColor=white)](https://nodejs.org)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-Agent Skills for [Claude Code](https://code.claude.com), [Codex](https://developers.openai.com/codex), and [Hermes](https://hermes-agent.nousresearch.com) — plus the `@vegastack/vegafactory` installer that ships them. Each skill is self-contained: its own entry point, references, deterministic scripts, freshness contract, and walkthrough.
+VegaFactory ships Agent Skills for [Claude Code](https://code.claude.com), [Codex](https://developers.openai.com/codex), and [Hermes](https://hermes-agent.nousresearch.com). The `@vegastack/vegafactory` package is the command-line installer and local workflow/orchestration tool, and it contains the integrity-checked skill bundle. The version-matched `@vegastack/vegafactory-dashboard` package is the local read-only web app; the CLI downloads it on first use, so an ordinary skills install stays small.
+
+Each skill is self-contained: its own entry point, references, deterministic scripts, freshness contract, and walkthrough.
 
 The headline set is **`dev`**: a ten-stage, issue-driven development workflow where every gate that matters is held by a person, not an agent.
 
@@ -36,7 +38,7 @@ Only Node is needed to install. `dev-setup` tells you if `git` or `gh` is missin
 ### 1. Install the dev workflow
 
 ```sh
-npx @vegastack/vegafactory skills add --group dev --global
+npx @vegastack/vegafactory@latest skills add --group dev --global
 ```
 
 This is the **recommended** install: one command, once per machine, and the workflow is available in every project you open. The installer detects which agents you have (Claude Code, Codex, Hermes) and targets them without asking.
@@ -44,7 +46,7 @@ This is the **recommended** install: one command, once per machine, and the work
 Prefer a project-local install when a repository should carry its own copy — so collaborators get the same skills from a checkout, or so one project can pin a version while the rest of the machine moves on:
 
 ```sh
-npx @vegastack/vegafactory skills add --group dev
+npx @vegastack/vegafactory@latest skills add --group dev
 ```
 
 Pick one or the other per skill rather than installing both: in Claude Code, a personal (global) skill takes precedence over a project one, so a project-local copy would not override a global install of the same skill — it would just sit there unused.
