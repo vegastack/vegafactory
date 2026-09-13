@@ -2,6 +2,16 @@
 
 The project's story, newest first: what got built, why, and how it went — for the operator's future recall. Format home: the dev-chronicle skill.
 
+## 13-09-2026 — Major releases require the operator's exact call ([#182](https://github.com/vegastack/vegafactory/issues/182))
+
+- **What:** The unpublished productionization batch returns to the intended `0.19.0` line, and CI plus immutable release preparation now refuse a higher-major transition without an exact operator approval record.
+- **Why:** Eight Changesets entries incorrectly declared major impact, so the tooling selected `1.0.0` even though the operator had not authorized crossing the stable-version boundary.
+- **How it went:** Every unpublished release changeset was reconstructed from the six failed release commits, the eight declarations were corrected to minor, and Changesets generated one consolidated pre-1.0 release; the unfinished `v1.0.0`–`v1.0.5` tags were removed under explicit approval after registry and GitHub Release readbacks proved nothing had shipped.
+- **Changed:** Paired `0.19.0` metadata · exact major-transition authority guard · required CI and release-preparation enforcement · no product behavior rollback.
+- **Decisions:** none.
+
+— approved by (kmanojkumar) · built by Codex · branch fix/182-restore-pre-1-0-release-authority
+
 ## 13-09-2026 — Release authority uses npm-supported hosted identity
 
 - **What:** Immutable artifact preparation remains on the Mac runner, while npm publication and GitHub Release creation run on GitHub-hosted Linux.

@@ -1,18 +1,16 @@
 # @vegastack/vegafactory-dashboard
 
-## 1.0.5
+## 0.19.0
 
-## 1.0.4
+### Minor Changes
 
-## 1.0.3
+- ddbf9ae: The ship guard no longer reads `.vegastack/dev.md` and no longer matches the raw command text.
 
-## 1.0.2
-
-## 1.0.1
-
-## 1.0.0
-
-### Major Changes
+  - Its only policy is `~/.vegastack/guard/<owner>__<repo>.json`, keyed by the checkout's origin remote and compiled from dev.md by dev-setup on your yes or by the new `vegafactory guard sync [--check]` — outside every worktree, so a run under bypassed permissions cannot edit its own profile into permission. With the file missing, stale-for-another-repo or malformed, every guarded command asks and names the sync command; `--check` exits 2 when the file is stale, and the SessionStart hook says so. Run `vegafactory guard sync` once per repo after upgrading.
+  - Commands are read as a shell reads them — quotes, escapes, `;` `&&` `||` `|` `&`, subshells, `$(…)`, `sh -c` — wrappers, paths and git/gh global options resolved, then matched on the argv: every refspec spelling of a push to the default branch (`HEAD:main`, `refs/heads/main`, `main:main`, `+main`), force, delete and `--no-verify` flags in any position, `--tags`, `gh api` on a merge URL, and text handed to another interpreter. The reviewer's nineteen bypasses are now test cases.
+  - A `## Ship` `ask:` step guards a command only when the step names it in backticks; a prose step is a runbook instruction, not a pattern.
+  - The dispatcher refuses a repo whose compiled policy is missing, and the headless prompt fences the issue's title and outcome as data.
+  - Contract change: the hook's `--check` mode takes `--policy PATH` and `--repo owner/repo` instead of `--dev-md`.
 
 - 86158a3: Resolve organization policy, scoped administration and registered-machine settings consistently across consumers.
 
@@ -21,11 +19,25 @@
   - Compile guard policy schema2 and keep capture/export refusals effective before side effects.
   - Batch exact policy Git blobs with bounded, verified framing while rechecking snapshot identity and freshness on every read.
 
+- 47bde99: Any organisation that installs the VegaFactory App can now get repository-scoped GitHub tokens from a hosted broker instead of holding a private key of its own.
+
+  - A Cloudflare Worker at `packages/broker` exchanges a GitHub Actions OIDC token (audience `vegastack-factory`) for a one-repository installation token capped to `issues: write`, `metadata: read`, `organization_projects: write` — enforced in the request and again against the response's own permission echo.
+  - The repository comes from the verified OIDC `repository` and `repository_owner` claims and from nothing the caller sends, so one organisation can never mint a token for another's repository.
+  - Fails closed: 401 unverifiable token, 403 uninstalled repository, 429 rate limited, 503 rate limiter unavailable, 502 upstream failure, 500 on a widened permission echo with the token discarded. `GET /health` answers unauthenticated and reads no credential.
+  - The App private key lives only in a Cloudflare Secrets Store secret; the broker declares no storage binding at all and persists no customer content — one audit record per request carries repository, owner, installation id, decision and status, never a token.
+  - `github-app.md` gains the customer-facing `Hosted token broker` reference: status codes, tenancy, rotation runbook, uninstall kill switch, rate-limit honesty, and the support boundary. The `vegastack/factory-token` composite action source ships in `packages/broker/action/`.
+
 - 86158a3: Resolve configured workflow states consistently across launch guards, status and boards.
 
   - Custom names require explicit semantic mappings; ambiguous legacy profiles refuse until an accepted migration.
   - Mixed states block launches, and dashboard rows with missing, stale or mismatched state remain visibly unresolved.
   - Board mirroring validates existing Status options and passes event labels as JSON.
+
+- 86158a3: Board reads follow every bounded page and show incomplete repositories explicitly.
+
+  - Dispatch refuses incomplete issue, comment and dependency reads before claiming work.
+  - The dashboard retains available rows, names failed repositories and distinguishes missing data from an empty queue.
+  - GitHub reads have cancellation, output and time limits, bounded retries and a shared repository concurrency limit.
 
 - 86158a3: Keep captured telemetry durable, bound to its organization, and counted once across delivery retries.
 
@@ -39,6 +51,7 @@
   - Deduplicate event identities and semantic activity before CLI and SQLite ingestion; protect undelivered records during retention.
   - Route production export and typed reading through the current privacy serializer and reader; preserve pending reporting independently of task success.
 
+- 86158a3: Publish validated per-repository policy snapshots through atomic versioned machine settings. Preserve previous policy, other organizations and local edits on failed refreshes; expose validation identity and freshness consistently in status and dashboard. Add source recovery APIs that require fresh validation before restored policy can authorize work.
 - 86158a3: Align CLI and dashboard metrics around measured coverage, verified delivery periods and current reporting permissions.
 
   - Keep unknown usage distinct from zero and separate terminal segments, logical executions, activities and cumulative snapshots.
@@ -57,31 +70,6 @@
 
   - Export verified continuation terminal segments with the saved logical execution identity, refusing missing or conflicting private mappings without rewriting earlier reports.
 
-### Minor Changes
-
-- ddbf9ae: The ship guard no longer reads `.vegastack/dev.md` and no longer matches the raw command text.
-
-  - Its only policy is `~/.vegastack/guard/<owner>__<repo>.json`, keyed by the checkout's origin remote and compiled from dev.md by dev-setup on your yes or by the new `vegafactory guard sync [--check]` — outside every worktree, so a run under bypassed permissions cannot edit its own profile into permission. With the file missing, stale-for-another-repo or malformed, every guarded command asks and names the sync command; `--check` exits 2 when the file is stale, and the SessionStart hook says so. Run `vegafactory guard sync` once per repo after upgrading.
-  - Commands are read as a shell reads them — quotes, escapes, `;` `&&` `||` `|` `&`, subshells, `$(…)`, `sh -c` — wrappers, paths and git/gh global options resolved, then matched on the argv: every refspec spelling of a push to the default branch (`HEAD:main`, `refs/heads/main`, `main:main`, `+main`), force, delete and `--no-verify` flags in any position, `--tags`, `gh api` on a merge URL, and text handed to another interpreter. The reviewer's nineteen bypasses are now test cases.
-  - A `## Ship` `ask:` step guards a command only when the step names it in backticks; a prose step is a runbook instruction, not a pattern.
-  - The dispatcher refuses a repo whose compiled policy is missing, and the headless prompt fences the issue's title and outcome as data.
-  - Contract change: the hook's `--check` mode takes `--policy PATH` and `--repo owner/repo` instead of `--dev-md`.
-
-- 47bde99: Any organisation that installs the VegaFactory App can now get repository-scoped GitHub tokens from a hosted broker instead of holding a private key of its own.
-
-  - A Cloudflare Worker at `packages/broker` exchanges a GitHub Actions OIDC token (audience `vegastack-factory`) for a one-repository installation token capped to `issues: write`, `metadata: read`, `organization_projects: write` — enforced in the request and again against the response's own permission echo.
-  - The repository comes from the verified OIDC `repository` and `repository_owner` claims and from nothing the caller sends, so one organisation can never mint a token for another's repository.
-  - Fails closed: 401 unverifiable token, 403 uninstalled repository, 429 rate limited, 503 rate limiter unavailable, 502 upstream failure, 500 on a widened permission echo with the token discarded. `GET /health` answers unauthenticated and reads no credential.
-  - The App private key lives only in a Cloudflare Secrets Store secret; the broker declares no storage binding at all and persists no customer content — one audit record per request carries repository, owner, installation id, decision and status, never a token.
-  - `github-app.md` gains the customer-facing `Hosted token broker` reference: status codes, tenancy, rotation runbook, uninstall kill switch, rate-limit honesty, and the support boundary. The `vegastack/factory-token` composite action source ships in `packages/broker/action/`.
-
-- 86158a3: Board reads follow every bounded page and show incomplete repositories explicitly.
-
-  - Dispatch refuses incomplete issue, comment and dependency reads before claiming work.
-  - The dashboard retains available rows, names failed repositories and distinguishes missing data from an empty queue.
-  - GitHub reads have cancellation, output and time limits, bounded retries and a shared repository concurrency limit.
-
-- 86158a3: Publish validated per-repository policy snapshots through atomic versioned machine settings. Preserve previous policy, other organizations and local edits on failed refreshes; expose validation identity and freshness consistently in status and dashboard. Add source recovery APIs that require fresh validation before restored policy can authorize work.
 - 86158a3: Select and isolate the dashboard organization through verified launch, cache and package identities.
 
   - Infer a sole configured organization, require `--org` for ambiguity, and reject foreign repository registrations.
