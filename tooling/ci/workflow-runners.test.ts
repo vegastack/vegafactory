@@ -12,8 +12,8 @@ const executable = (name: string) =>
     .filter((line) => !/^\s*#/.test(line))
     .join('\n')
 
-describe('CI and release run on a reachable self-hosted runner', () => {
-  for (const name of ['ci.yml', 'release.yml', 'factory-board.yml']) {
+describe('workflow runner routing stays reachable and authority-aware', () => {
+  for (const name of ['ci.yml', 'factory-board.yml']) {
     test(`${name} targets the registered laptop runners, never a hosted one`, () => {
       // The Mac mini's org group (#119) is documented in the comment block but is
       // NOT the target: an ungranted or empty runner group queues a job forever
@@ -27,6 +27,13 @@ describe('CI and release run on a reachable self-hosted runner', () => {
       expect(executable(name)).not.toMatch(/^\s*group: vsk-runners-/m)
     })
   }
+
+  test('release.yml keeps preparation self-hosted and uses npm-supported hosted authority jobs', () => {
+    const workflow = Bun.YAML.parse(read('release.yml')) as any
+    expect(workflow.jobs.prepare['runs-on']).toEqual(['self-hosted', 'vsk-runners-mac'])
+    expect(workflow.jobs.publish['runs-on']).toBe('ubuntu-latest')
+    expect(workflow.jobs.release['runs-on']).toBe('ubuntu-latest')
+  })
 
   for (const name of ['ci.yml', 'release.yml']) {
 
