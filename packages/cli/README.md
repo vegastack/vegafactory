@@ -1,11 +1,11 @@
 # @vegastack/vegafactory
 
-Installer for VegaStack Agent Skills — a family of self-contained skills for Claude Code, Codex, and Hermes, shipped in one integrity-checked package.
+The VegaFactory command-line tool installs and verifies a bundled family of VegaStack Agent Skills for Claude Code, Codex, and Hermes, and it runs the local workflow, dispatcher, statistics, and service commands. The separately published `@vegastack/vegafactory-dashboard` package is the local read-only web app; this CLI downloads that package at its own exact version only when `vegafactory dashboard` is first used.
 
 Install the whole dev workflow, once per machine:
 
 ```sh
-npx @vegastack/vegafactory skills add --group dev --global
+npx @vegastack/vegafactory@latest skills add --group dev --global
 ```
 
 `--global` is the recommended install: the skills land in your home directory and are available in every project you open. Drop it for a project-local install when a repository should carry its own copy.

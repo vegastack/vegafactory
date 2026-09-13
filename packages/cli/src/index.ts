@@ -128,8 +128,6 @@ The dashboard (a local, read-only web view over the control room and the live bo
   Fetches @vegastack/vegafactory-dashboard at this CLI's version on first use and
   serves it on 127.0.0.1. Run "vegafactory dashboard --help" for the whole surface.
 
-Reserved (not yet available): dashboard
-
 Run "vegafactory skills list" to see the bundled skills.
 `
 }
