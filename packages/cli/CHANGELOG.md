@@ -162,7 +162,7 @@
   - Provenance stays off — moving to the mini does not restore it, because npm accepts a provenance bundle only from a GitHub-hosted runner (#57).
   - `onboarding/dispatcher-box.md` creates and grants the runner group before the runner registers into it, and the registration block runs without `gh`: the release is looked up over the public API and the registration token is minted by an org admin and pasted in, so the runner account never holds a credential.
 
-- Require an exact operator approval record before crossing a stable major-version boundary.
+- Require an exact operator approval record before crossing a stable major-version boundary, and recognize a generated package changelog version after a release branch consumes its pending Changesets entries.
 - 0fb6466: dev-intake stamps the org's native issue type and its Priority and Effort issue fields on every issue it creates, and dev-setup detects both and records them as the issue-types: and issue-fields: knobs. A repo with no org types degrades to labels.
 - fc69f93: Every branch now lives in its own worktree under `.vegastack/.worktrees/<n>-<slug>/`, and `vegafactory worktree` manages their whole lifecycle.
 
