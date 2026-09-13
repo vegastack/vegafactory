@@ -293,4 +293,7 @@ if(args.includes('app-server')){
     for(const [key,value]of Object.entries(oldEnv)){if(value===undefined)delete process.env[key];else process.env[key]=value}
     await fs.rm(home,{recursive:true,force:true})
   }
-},180000)
+// This full Git/GitHub/process fixture measured 157.6s in a passing full-suite run and can exceed
+// 180s under runner load. Match the comparable packaged gateway fixture's ceiling without weakening
+// any assertion or changing production timing.
+},360000)
