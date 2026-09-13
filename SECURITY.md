@@ -21,6 +21,6 @@ Only the latest published minor of `@vegastack/vegafactory` receives security fi
 
 ## Scope notes
 
-- The installer makes no network calls at install time; `doctor` performs a single version check against registry.npmjs.org. Anything contradicting that is a vulnerability — report it.
-- The bundled checksum manifest proves package-internal consistency; publisher identity is attested by npm provenance. Weaknesses in either model are in scope.
+- After npm/npx has obtained the CLI package, `skills add`, `skills verify`, and `skills remove` make no network calls; `doctor` performs a version check against registry.npmjs.org. Anything contradicting that is a vulnerability — report it.
+- The bundled checksum manifest proves package-internal consistency, not publisher identity. Versions carrying npm provenance add a verifiable source/workflow link; the direct `0.19.0` bootstrap and the current automated publisher explicitly omit that attestation. Missing or mismatched integrity/provenance claims are in scope.
 - Fake credentials under any skill's `tests/fixtures/` are intentional test fixtures, not leaks (see `.gitleaks.toml`).

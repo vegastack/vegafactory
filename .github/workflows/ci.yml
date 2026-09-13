@@ -14,8 +14,8 @@ jobs:
     # Self-hosted while GitHub-hosted runners are billing-locked (#57): on
     # ubuntu-latest every job died in ~3s having recorded ZERO steps, because the
     # runner never picked it up — a permanently red check that stops gating
-    # anything. Revert to `ubuntu-latest` together with release.yml's runner and
-    # its --no-provenance flag, never one without the other, once #57 clears.
+    # anything. Move this check and release.yml's prepare job to `ubuntu-latest`
+    # once #57 clears; release publication already uses a hosted OIDC job.
     #
     # Target: the two repo-level laptop runners (`vsk-runner-mac-mk-1/2`, label
     # `vsk-runners-mac`). The always-on Mac mini is the intended host and is not

@@ -106,7 +106,8 @@ wrong-org caches remain preserved for explicit recovery. None is silently relabe
 ## Qualification status
 
 Focused source tests cover scoped adapters, all callback callers, nullable formatting, navigation,
-state copy and a real strict-launch board render. A descriptor-backed packed browser run has not yet
-been performed for this source checkpoint. Keyboard history, automated accessibility, light/dark
-and 320/768/1280 viewport evidence remain required together with the verified provider/Table input;
-they are pending, not passed or waived.
+state copy and a real strict-launch board render. The registry-downloaded `0.19.0` pair passed
+descriptor/inventory verification, installed-CLI launch identity and health checks, and scoped HTTP
+response smoke across all nine destinations. That smoke did not drive an interactive browser.
+Keyboard history, automated accessibility, light/dark and 320/768/1280 viewport evidence remain
+required together with the verified provider/Table input; they are pending, not passed or waived.
