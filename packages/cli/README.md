@@ -354,7 +354,7 @@ The package ships a checksum manifest that is verified at install and by `verify
 
 ## Network and telemetry
 
-Zero telemetry, in the sense that matters: **nothing is ever sent to VegaStack or to any third party.**
+VegaFactory sends no product telemetry to VegaStack or to an analytics service.
 
 The tool makes four kinds of network call, all to the npm registry or infrastructure you already own:
 
