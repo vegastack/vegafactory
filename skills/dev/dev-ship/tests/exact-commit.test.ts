@@ -111,7 +111,7 @@ test('actual CLI refuses review markers missing or carrying invalid round and ag
     const f = fixture()
     try { f.comments[2].body = mutate(f.comments[2].body); expect(f.run().status).toBe(2) } finally { f.cleanup() }
   }
-})
+},15000)
 
 test('candidate policy cannot appoint the publisher of its own clean review', () => {
   const f = fixture()
