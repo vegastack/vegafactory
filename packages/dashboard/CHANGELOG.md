@@ -1,5 +1,11 @@
 # @vegastack/vegafactory-dashboard
 
+## 0.19.1
+
+### Patch Changes
+
+- 618c75f: Make the published getting-started, package-role, dashboard-help, qualification, security, and release-topology guidance match the shipped VegaFactory package pair.
+
 ## 0.19.0
 
 ### Minor Changes
