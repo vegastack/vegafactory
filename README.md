@@ -135,7 +135,7 @@ npx @vegastack/vegafactory skills remove --group dev --global
 
 Every flag: [installer README](packages/cli/README.md).
 
-The installer is fully offline with one exception: `doctor` checks npmjs.org for a newer release. No telemetry.
+The `add`, `verify`, and `remove` installer verbs are fully offline; `doctor` checks npmjs.org for a newer release. Control-room and dashboard commands make only the network calls documented in the [installer README](packages/cli/README.md). No telemetry.
 
 ## Working with an agent
 

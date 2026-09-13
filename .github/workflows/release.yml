@@ -1,5 +1,5 @@
 # Immutable paired releases. A release tag is an operator-authorized ship action.
-# Authentication/provenance qualification remains #156; no runner migration here.
+# Preparation is self-hosted; publication and GitHub Release creation are hosted.
 # Preserve work/release after failure and resume the same pair, never rebuild it.
 
 name: Release
@@ -37,14 +37,13 @@ jobs:
     # the control room's `onboarding/dispatcher-box.md`. Until the operator grants that group to
     # this repository and it lists an online runner, it is not reachable from here — a probe on
     # 01-09-2026 left all three org label sets queued indefinitely with `runner: null`, which is
-    # how a missing runner-group grant presents (it queues forever rather than erroring). The
-    # switch is the same two lines as in ci.yml, and it does NOT restore provenance: npm accepts
-    # a provenance bundle only from a GitHub-hosted runner.
+    # how a missing runner-group grant presents (it queues forever rather than erroring). This
+    # job prepares and retains bytes only; the publication jobs below already use hosted runners.
     #
     # macOS means BSD userland, which the steps below were not written for. Audited before use:
     # the changelog-extraction `awk` is pure POSIX, `grep -q '[^[:space:]]'` uses a POSIX class,
     # and there is no `sed -i`, `date -d`, `readlink -f`, `base64 -w` or `sort -V` anywhere.
-    # Revert to `ubuntu-latest` — and drop --no-provenance below — once the lock clears (#57).
+    # Move this preparation job to `ubuntu-latest` once the lock clears (#57).
     runs-on: [self-hosted, vsk-runners-mac]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -208,7 +207,8 @@ jobs:
         run: node scripts/release-artifacts.mjs verify-release work/release/release-manifest.json
 
       # Publication and promotion are covered only by the operator-authorized release tag.
-      # Authentication/provenance decisions remain #156; publication uses npm-supported hosted OIDC.
+      # Hosted OIDC supplies short-lived publication authority. The publisher currently opts out
+      # of npm provenance explicitly; removing that opt-out is a separate verified change.
       - name: Publish retained pair and promote after registry first-use smoke
         env:
           VEGAFACTORY_RETAINED_PAIR_ID: ${{ needs.prepare.outputs.pair-id }}
