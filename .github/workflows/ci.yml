@@ -52,6 +52,9 @@ jobs:
       - name: Install dependencies
         run: bun install --frozen-lockfile
 
+      - name: Verify release version authority
+        run: node scripts/release-artifacts.mjs verify-version-transition
+
       - name: Check (validate:skill + test + lint + typecheck)
         run: bun run check
 

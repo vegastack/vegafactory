@@ -1,6 +1,6 @@
 import { expect, test } from 'bun:test'
 import { createHash } from 'node:crypto'
-import { verifyArtifactBytes, assertPairVersions, assertScanEvidence, readPackageArchive, dashboardDescriptor, verifyDashboardDescriptor, materializeTree, smokePair, command, buildSbom } from './release-artifacts.mjs'
+import { verifyArtifactBytes, assertPairVersions, assertMajorVersionTransition, assertScanEvidence, readPackageArchive, dashboardDescriptor, verifyDashboardDescriptor, materializeTree, smokePair, command, buildSbom } from './release-artifacts.mjs'
 import { mkdtemp, mkdir, writeFile, symlink, readFile, chmod, rm, link } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -13,6 +13,13 @@ function archive(entries: {path:string, data?:string, type?:string, mode?:number
 const packed=()=>archive([{path:'package/package.json',data:JSON.stringify({name:'@vegastack/vegafactory-dashboard',version:'1.0.0'})},{path:'package/dist-standalone/server.js',data:'server'}])
 test('changing packed bytes invalidates identity',()=>{const b=Buffer.from('reviewed');const sha256=createHash('sha256').update(b).digest('hex');expect(verifyArtifactBytes(b,{sha256})).toBe(true);expect(verifyArtifactBytes(Buffer.from('rebuilt'),{sha256})).toBe(false)})
 test('pair and tag versions must match',()=>{expect(()=>assertPairVersions({cli:'1.0.0',dashboard:'1.0.1',tag:'v1.0.0'})).toThrow();expect(()=>assertPairVersions({cli:'1.0.0',dashboard:'1.0.0',tag:'v1.0.0'})).not.toThrow()})
+test('a major boundary requires exact operator authority',()=>{
+ const exact={schemaVersion:1,fromVersion:'0.19.0',toVersion:'1.0.0',approvedBy:'kmanojkumar',approvedOn:'2026-09-13',approval:'https://github.com/vegastack/vegafactory/issues/1#issuecomment-1'}
+ expect(()=>assertMajorVersionTransition({previousVersion:'0.19.0',currentVersion:'1.0.0',operators:['kmanojkumar']})).toThrow('major release requires exact operator approval')
+ for(const approval of [{...exact,fromVersion:'0.18.0'},{...exact,toVersion:'2.0.0'},{...exact,approvedBy:'other'},{...exact,approvedOn:'13-09-2026'},{...exact,approvedOn:'2026-02-31'},{...exact,approval:'session:unverifiable'},{...exact,unknown:true}])expect(()=>assertMajorVersionTransition({previousVersion:'0.19.0',currentVersion:'1.0.0',operators:['kmanojkumar'],approval})).toThrow('major release requires exact operator approval')
+ expect(assertMajorVersionTransition({previousVersion:'0.19.0',currentVersion:'1.0.0',operators:['kmanojkumar'],approval:exact})).toBe(true)
+ for(const [previousVersion,currentVersion] of [['0.18.0','0.19.0'],['1.2.0','1.3.0'],['1.2.0','1.2.1'],['1.0.0','0.19.0']])expect(assertMajorVersionTransition({previousVersion,currentVersion,operators:['kmanojkumar']})).toBe(true)
+})
 test('command statuses stay zero-only unless one call explicitly admits a warning',()=>{
  const warning=[process.execPath,'-e','console.log("warning output");process.exit(1)']
  expect(()=>command(warning)).toThrow('failed (1)')
@@ -97,8 +104,12 @@ test('workflow recovery rebuilds only after affirmative skipped publication and 
 test('CI and release preparation check out full history before running compatibility readers',async()=>{
  for(const [file,job] of [['.github/workflows/ci.yml','check'],['.github/workflows/release.yml','prepare']] as const){
   const workflow=Bun.YAML.parse(await readFile(file,'utf8')) as any
-  const checkout=workflow.jobs[job].steps.find((step:any)=>String(step.uses??'').startsWith('actions/checkout@'))
+  const steps=workflow.jobs[job].steps,checkout=steps.find((step:any)=>String(step.uses??'').startsWith('actions/checkout@'))
   expect(checkout?.with?.['fetch-depth']).toBe(0)
+  if(file==='.github/workflows/ci.yml'){
+   const authority=steps.findIndex((step:any)=>step.run==='node scripts/release-artifacts.mjs verify-version-transition')
+   expect(authority).toBeGreaterThan(steps.indexOf(checkout));expect(authority).toBeLessThan(steps.findIndex((step:any)=>String(step.name).startsWith('Check (')))
+  }
  }
 })
 test('actual preparation CLI stops at dashboard build and scanner failures, leaving no finalized pair for guarded retry',async()=>{
