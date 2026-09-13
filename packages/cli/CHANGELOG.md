@@ -1,121 +1,6 @@
 # @vegastack/skills
 
-## 1.0.5
-
-### Patch Changes
-
-- 1b85e65: Release preparation now skips executable links that resolve to files while inventorying build dependencies.
-
-  - Preserve directory-link traversal and package metadata collection.
-  - Prevent Bun-managed `.bin` file links from being opened as directories.
-  - Contain the expected stale-socket reset during the release smoke teardown.
-
-## 1.0.4
-
-### Patch Changes
-
-- ea259ac: Release preparation now honors exact scanner coverage acceptances already validated by the built-skill guard.
-
-  - Match the existing baseline-accepted warning to the same skill before admitting degraded completeness.
-  - Keep missing, malformed, mismatched, blocked, skipped, and unaccepted partial scanner evidence as hard failures.
-
-## 1.0.3
-
-### Patch Changes
-
-- a6a537c: Machine-readable skill scans now flush their complete JSON evidence before exiting.
-
-  - Preserve full findings and suppression evidence when stdout is a pipe, including warning and blocking exits.
-  - Keep the JSON schema, newline termination, human output and verdict semantics unchanged.
-
-## 1.0.2
-
-### Patch Changes
-
-- b8c57c8: Release preparation now fetches the Git history required by exact historical compatibility checks.
-
-  - Match the full-history checkout already used by required CI while retaining disabled checkout credentials and pinned actions.
-  - Keep the pre-amendment reader fixture intact so a release cannot silently lose backward-compatibility coverage.
-
-## 1.0.1
-
-### Patch Changes
-
-- 020fd9b: Release preparation now validates warning-only scanner output instead of rejecting it before inspection.
-
-  - Accept exit `1` only for the exact skill-scan call, then require the existing zero-block complete-coverage JSON contract.
-  - Keep every other command zero-only and preserve scanner exit `2`, malformed, blocked, or incomplete evidence as hard failures.
-
-## 1.0.0
-
-### Major Changes
-
-- 86158a3: Resolve organization policy, scoped administration and registered-machine settings consistently across consumers.
-
-  - Require exact organization delegation for locked overrides, with source and freshness diagnostics.
-  - Reject stale or mismatched policy snapshots and legacy role-based authority; preserve explicit local operation and readable legacy policy.
-  - Compile guard policy schema2 and keep capture/export refusals effective before side effects.
-  - Batch exact policy Git blobs with bounded, verified framing while rechecking snapshot identity and freshness on every read.
-
-- 86158a3: Require exact reviewed commit, base and scope bindings before shipping.
-
-  - Accept only operator-authenticated current review markers and explicit same-review finding exceptions.
-  - Check clean committed candidates and refuse check-induced changes.
-  - Preserve implemented deliveries separately from partial, prepared and unperformed parent scope.
-  - Require legacy review records to be renewed.
-
-- 86158a3: Resolve configured workflow states consistently across launch guards, status and boards.
-
-  - Custom names require explicit semantic mappings; ambiguous legacy profiles refuse until an accepted migration.
-  - Mixed states block launches, and dashboard rows with missing, stale or mismatched state remain visibly unresolved.
-  - Board mirroring validates existing Status options and passes event labels as JSON.
-
-- 86158a3: Keep captured telemetry durable, bound to its organization, and counted once across delivery retries.
-
-  - Store immutable events and stable capture identities; managed hooks resolve private owned sessions before capture.
-  - Preserve one reporting execution identity across separate immutable terminal segments after recovery; replay older pending segments only from their exact retained snapshots, and keep quota retries in their current segment.
-  - Stop promptly on refused spool claims and preserve abandoned guards for offline recovery; retry only live-owner contention.
-  - Await the managed hook’s internal flush grant after fresh private validation; preserve receiving-home reporting on hold until its original reporting context is available.
-  - Verify acknowledged capture replays from immutable identities and event or tombstone evidence without allocating another event, taking claims, or rewriting acknowledgment.
-  - Reconcile exact remote bytes against retained sanitized attempts, including after a crash or policy change, and preserve unrelated writer work.
-  - Require explicit legacy migration, preserve original records, and expose corrupt or conflicting data for inspection.
-  - Deduplicate event identities and semantic activity before CLI and SQLite ingestion; protect undelivered records during retention.
-  - Route production export and typed reading through the current privacy serializer and reader; preserve pending reporting independently of task success.
-
-- 86158a3: Recover approved work by exact task and canonical source identity, preserving completed work, interrupted attempts and pending delivery.
-
-  - Recover a completely verified stopped parent/child group from the real dispatcher tick with one durable intent, one conditional succession and twice-fresh receipt/current-owner validation, including lost responses.
-  - Construct and read back every same-home or remote-only attempt before starting the parent, re-resolve machine enrollment for every later action, and resume a partially started group without another transfer or start. A durable controller barrier finishes recovered children and joins before the parent vendor starts, while accepted children receive current-generation stop/completion evidence without process, check or merge replay.
-  - Preserve separate parent execution/integration and exact child checkpoint authority through recovery, and refuse substituted branches, stale passes or incomplete evidence.
-  - Keep task-scoped preparation, immutable accepted-child delivery evidence and bounded verified lessons with local reversible undo; session hooks use VegaFactory-owned context without native Claude or Codex memory.
-  - Status derives the current recovery role through read-only task and succession inspection, so ordinary claims stay out of recovery while later claimed children and incomplete or moving history never appear as launch-ready parents.
-  - Provider, platform and installed-harness qualification remains unperformed and is not implied by controlled source fixtures.
-
-- 86158a3: Align CLI and dashboard metrics around measured coverage, verified delivery periods and current reporting permissions.
-
-  - Keep unknown usage distinct from zero and separate terminal segments, logical executions, activities and cumulative snapshots.
-  - Discover accepted work and first releases independently of run months, retaining original observation times when bounded evidence refreshes fail.
-  - Apply current repository and person scopes before totals, preserve distinct task/account owners, and report unknown ownership without synthetic profiles.
-  - Rebuild derived metrics transactionally and show supplied operator minutes, reported cost, estimates and account fees separately.
-
-- 86158a3: Enforce confirmed reporting privacy before export and apply current repository permissions before people totals.
-
-  - Validate closed execution, activity and rework snapshot records; keep task and account owners distinct and local identities private.
-  - Reconcile earlier deliveries before policy changes, preserve historical non-attributed data, and expose scoped private export and reporting status.
-  - Retain basic logs for14days and acknowledged active reports for12calendar months, protecting pending and recovery records. Verify shared removal through the existing Git writer without erasing history.
-  - Use basic private diagnostics and real disk-pressure launch/stop controls; exclude raw transcripts, credentials and built-in vendor memory.
-
-  - Validate retained completed task state and immutable recovery evidence before managed retention; hold active, missing, changed or pending telemetry references without deleting authority or delivery history.
-
-  - Export verified continuation terminal segments with the saved logical execution identity, refusing missing or conflicting private mappings without rewriting earlier reports.
-
-- 86158a3: Require current scoped operator intent before planning or implementation launches.
-
-  - Bind approval to canonical artifacts; task progress preserves intent while scope changes require reconfirmation.
-  - Require a policy-operator publisher for session attestations, or a verified identical grant relay that inherits its source’s authority and lifecycle.
-  - Preserve canonical source provenance through launch, preparation and research records; unavailable source reads refuse, and recovery refreshes authority before another effect.
-  - Separate parent execution from exact per-child checkpoint authority, and treat missing or invalid closed fleet-parallel declarations as repository-exclusive.
-  - Retain legacy records and exact consolidated preparation, research and shipping boundaries.
+## 0.19.0
 
 ### Minor Changes
 
@@ -212,12 +97,26 @@
 
 - dc6e843: Board mirror: dev-setup writes `.github/workflows/factory-board.yml`, the new `board:` knob names the project, and vegafactory-setup creates and links it. Labels drive the state; the board follows, one way.
   - `runs-on` is bound unquoted, so a label-array runner (`[self-hosted, x]`) renders as a YAML sequence rather than one literal label that no runner carries; the mint step is on `actions/create-github-app-token@v3`, the major the App reference documents, and passes `repositories:` so the token is scoped to the one repository the job runs in; the mirror step adds an item only on gh's own "is not an item in project" error and reports every other failure as itself.
+- 86158a3: Resolve organization policy, scoped administration and registered-machine settings consistently across consumers.
+
+  - Require exact organization delegation for locked overrides, with source and freshness diagnostics.
+  - Reject stale or mismatched policy snapshots and legacy role-based authority; preserve explicit local operation and readable legacy policy.
+  - Compile guard policy schema2 and keep capture/export refusals effective before side effects.
+  - Batch exact policy Git blobs with bounded, verified framing while rechecking snapshot identity and freshness on every read.
+
 - 05c00aa: dev-implement uploads UI evidence through a dry-run-by-default script and keeps its changelog mechanics and dev-review's scanner-provisioning detail out of the skill bodies.
 
   - New `scripts/evidence-upload.mjs`: `--repo <o/r> --issue <n> --file <png> [--evidence-repo <o/r>] [--dev-md <path>] [--write] [--json]` — plans the PUT (path `<repo-name>/<issue>/<timestamp>-<name>`, size) and sends only under `--write`; the `{message, content}` body rides gh's stdin so the base64 payload never touches argv or any output line; one retry under a `-r2` name on HTTP 409; symlinks, non-image extensions, empty files, and a missing `evidence-repo:` knob are refused with exit 2.
   - New `references/changelog-and-chronicle.md` carries the per-knob changelog mechanics, the entry's first-line rule, and the chronicle hand-off; dev-implement's body keeps a one-paragraph pointer and its Verify bullet names the script instead of a shell one-liner.
   - dev-review's body keeps one sentence on scanner provisioning; the uv/brew/pipx lookup, the `skillspector-update:` knob, `--no-provision`, and the upgrade-reporting rule live in its README.
   - `ghJson` in `scripts/lib/gh.mjs` accepts an `input` option that feeds the child's stdin, so one gh runner serves reads and stdin-fed writes.
+
+- 86158a3: Require exact reviewed commit, base and scope bindings before shipping.
+
+  - Accept only operator-authenticated current review markers and explicit same-review finding exceptions.
+  - Check clean committed candidates and refuse check-induced changes.
+  - Preserve implemented deliveries separately from partial, prepared and unperformed parent scope.
+  - Require legacy review records to be renewed.
 
 - f496680: Every dev skill body now reads to the current Anthropic guidance: one stance sentence, positive rules with their reason, at most two emphasised non-negotiables per skill, no caps-emphasis, no instructions the model already follows, and a length line for every document a skill writes.
 
@@ -263,6 +162,7 @@
   - Provenance stays off — moving to the mini does not restore it, because npm accepts a provenance bundle only from a GitHub-hosted runner (#57).
   - `onboarding/dispatcher-box.md` creates and grants the runner group before the runner registers into it, and the registration block runs without `gh`: the release is looked up over the public API and the registration token is minted by an org admin and pasted in, so the runner account never holds a credential.
 
+- Require an exact operator approval record before crossing a stable major-version boundary.
 - 0fb6466: dev-intake stamps the org's native issue type and its Priority and Effort issue fields on every issue it creates, and dev-setup detects both and records them as the issue-types: and issue-fields: knobs. A repo with no org types degrades to labels.
 - fc69f93: Every branch now lives in its own worktree under `.vegastack/.worktrees/<n>-<slug>/`, and `vegafactory worktree` manages their whole lifecycle.
 
@@ -294,13 +194,58 @@
   - Admit top-level fleet parallelism only from #135's current closed declaration and canonical selected-task file projection; every missing, invalid, stale or mismatched declaration remains repository-exclusive.
   - Preserve GitHub rate-limit timing and exact systemd executable, configuration and log-path values.
 
+- 86158a3: Resolve configured workflow states consistently across launch guards, status and boards.
+
+  - Custom names require explicit semantic mappings; ambiguous legacy profiles refuse until an accepted migration.
+  - Mixed states block launches, and dashboard rows with missing, stale or mismatched state remain visibly unresolved.
+  - Board mirroring validates existing Status options and passes event labels as JSON.
+
 - 86158a3: Board reads follow every bounded page and show incomplete repositories explicitly.
 
   - Dispatch refuses incomplete issue, comment and dependency reads before claiming work.
   - The dashboard retains available rows, names failed repositories and distinguishes missing data from an empty queue.
   - GitHub reads have cancellation, output and time limits, bounded retries and a shared repository concurrency limit.
 
+- 86158a3: Keep captured telemetry durable, bound to its organization, and counted once across delivery retries.
+
+  - Store immutable events and stable capture identities; managed hooks resolve private owned sessions before capture.
+  - Preserve one reporting execution identity across separate immutable terminal segments after recovery; replay older pending segments only from their exact retained snapshots, and keep quota retries in their current segment.
+  - Stop promptly on refused spool claims and preserve abandoned guards for offline recovery; retry only live-owner contention.
+  - Await the managed hook’s internal flush grant after fresh private validation; preserve receiving-home reporting on hold until its original reporting context is available.
+  - Verify acknowledged capture replays from immutable identities and event or tombstone evidence without allocating another event, taking claims, or rewriting acknowledgment.
+  - Reconcile exact remote bytes against retained sanitized attempts, including after a crash or policy change, and preserve unrelated writer work.
+  - Require explicit legacy migration, preserve original records, and expose corrupt or conflicting data for inspection.
+  - Deduplicate event identities and semantic activity before CLI and SQLite ingestion; protect undelivered records during retention.
+  - Route production export and typed reading through the current privacy serializer and reader; preserve pending reporting independently of task success.
+
+- 86158a3: Recover approved work by exact task and canonical source identity, preserving completed work, interrupted attempts and pending delivery.
+
+  - Recover a completely verified stopped parent/child group from the real dispatcher tick with one durable intent, one conditional succession and twice-fresh receipt/current-owner validation, including lost responses.
+  - Construct and read back every same-home or remote-only attempt before starting the parent, re-resolve machine enrollment for every later action, and resume a partially started group without another transfer or start. A durable controller barrier finishes recovered children and joins before the parent vendor starts, while accepted children receive current-generation stop/completion evidence without process, check or merge replay.
+  - Preserve separate parent execution/integration and exact child checkpoint authority through recovery, and refuse substituted branches, stale passes or incomplete evidence.
+  - Keep task-scoped preparation, immutable accepted-child delivery evidence and bounded verified lessons with local reversible undo; session hooks use VegaFactory-owned context without native Claude or Codex memory.
+  - Status derives the current recovery role through read-only task and succession inspection, so ordinary claims stay out of recovery while later claimed children and incomplete or moving history never appear as launch-ready parents.
+  - Provider, platform and installed-harness qualification remains unperformed and is not implied by controlled source fixtures.
+
 - 86158a3: Publish validated per-repository policy snapshots through atomic versioned machine settings. Preserve previous policy, other organizations and local edits on failed refreshes; expose validation identity and freshness consistently in status and dashboard. Add source recovery APIs that require fresh validation before restored policy can authorize work.
+- 86158a3: Align CLI and dashboard metrics around measured coverage, verified delivery periods and current reporting permissions.
+
+  - Keep unknown usage distinct from zero and separate terminal segments, logical executions, activities and cumulative snapshots.
+  - Discover accepted work and first releases independently of run months, retaining original observation times when bounded evidence refreshes fail.
+  - Apply current repository and person scopes before totals, preserve distinct task/account owners, and report unknown ownership without synthetic profiles.
+  - Rebuild derived metrics transactionally and show supplied operator minutes, reported cost, estimates and account fees separately.
+
+- 86158a3: Enforce confirmed reporting privacy before export and apply current repository permissions before people totals.
+
+  - Validate closed execution, activity and rework snapshot records; keep task and account owners distinct and local identities private.
+  - Reconcile earlier deliveries before policy changes, preserve historical non-attributed data, and expose scoped private export and reporting status.
+  - Retain basic logs for14days and acknowledged active reports for12calendar months, protecting pending and recovery records. Verify shared removal through the existing Git writer without erasing history.
+  - Use basic private diagnostics and real disk-pressure launch/stop controls; exclude raw transcripts, credentials and built-in vendor memory.
+
+  - Validate retained completed task state and immutable recovery evidence before managed retention; hold active, missing, changed or pending telemetry references without deleting authority or delivery history.
+
+  - Export verified continuation terminal segments with the saved logical execution identity, refusing missing or conflicting private mappings without rewriting earlier reports.
+
 - 86158a3: Select and isolate the dashboard organization through verified launch, cache and package identities.
 
   - Infer a sole configured organization, require `--org` for ambiguity, and reject foreign repository registrations.
@@ -355,6 +300,14 @@
   - Preserve verified physical-stop receipts when code delivery or effect coverage remains unresolved, with stable receipt payloads across retries.
   - Continue verified unfinished work with a fresh private attempt, immutable prior interruption records, and separate terminal measurement segments.
   - Recover standalone tasks on a verified receiving machine under the original run identity, preserving unavailable history and holding reporting until its original identity is available.
+
+- 86158a3: Require current scoped operator intent before planning or implementation launches.
+
+  - Bind approval to canonical artifacts; task progress preserves intent while scope changes require reconfirmation.
+  - Require a policy-operator publisher for session attestations, or a verified identical grant relay that inherits its source’s authority and lifecycle.
+  - Preserve canonical source provenance through launch, preparation and research records; unavailable source reads refuse, and recovery refreshes authority before another effect.
+  - Separate parent execution from exact per-child checkpoint authority, and treat missing or invalid closed fleet-parallel declarations as repository-exclusive.
+  - Retain legacy records and exact consolidated preparation, research and shipping boundaries.
 
 - c5bc33a: skill-maintainer and skillify are sharpened against each other: skill-maintainer owns the standards and the repo and release operations, skillify owns the procedure and cites those standards instead of restating them.
 
@@ -424,12 +377,39 @@
   - dev-implement, dev-intake, and dev-architect descriptions read as calm conditionals: intake claims "add support for X" phrasings, implement's chat clause is limited to a trivial one-or-two-file fix, and architect's "Consult it BEFORE" becomes "Use when proposing".
   - README quick start says how to load a skill by name (`/dev-intake` in Claude Code and Hermes, `$dev-intake` in Codex) when routing needs bypassing.
 
+- a6a537c: Machine-readable skill scans now flush their complete JSON evidence before exiting.
+
+  - Preserve full findings and suppression evidence when stdout is a pipe, including warning and blocking exits.
+  - Keep the JSON schema, newline termination, human output and verdict semantics unchanged.
+
 - 202e49f: Concurrent coordination readers now wait for a legitimate read-pointer update instead of failing the child gateway.
 
   - Retry only verified live contention within the existing bounded coordination window.
   - Preserve immediate refusal for malformed or abandoned ownership and retain monotonic-head validation.
 
+- ea259ac: Release preparation now honors exact scanner coverage acceptances already validated by the built-skill guard.
+
+  - Match the existing baseline-accepted warning to the same skill before admitting degraded completeness.
+  - Keep missing, malformed, mismatched, blocked, skipped, and unaccepted partial scanner evidence as hard failures.
+
+- 416c56b: Run npm trusted publication and GitHub Release authority on supported GitHub-hosted runners while retaining heavy artifact preparation on the self-hosted Mac runner.
 - d561827: The three sentences every dev skill repeated — the conventions citation, the dev.md-missing rule, and the closing-summary line — now live in one place each: the AGENTS.md dev block (citation and missing-file rule; consumers pick it up on their next dev-setup re-run) and `references/conventions.md` (closing recap). conventions.md is rewritten to the current guidance without growing: verification audits each claim against a tool result from this session and reports failures and skipped steps as such; narration happens at three moments and leads with the outcome; a ledger checkpoint retains what a compaction summary must retain; delegation is for sizeable, independent, parallel work and never for verifying your own; `<path-to-this-skill>` is defined once.
+- b8c57c8: Release preparation now fetches the Git history required by exact historical compatibility checks.
+
+  - Match the full-history checkout already used by required CI while retaining disabled checkout credentials and pinned actions.
+  - Keep the pre-amendment reader fixture intact so a release cannot silently lose backward-compatibility coverage.
+
+- 1b85e65: Release preparation now skips executable links that resolve to files while inventorying build dependencies.
+
+  - Preserve directory-link traversal and package metadata collection.
+  - Prevent Bun-managed `.bin` file links from being opened as directories.
+  - Contain the expected stale-socket reset during the release smoke teardown.
+
+- 020fd9b: Release preparation now validates warning-only scanner output instead of rejecting it before inspection.
+
+  - Accept exit `1` only for the exact skill-scan call, then require the existing zero-block complete-coverage JSON contract.
+  - Keep every other command zero-only and preserve scanner exit `2`, malformed, blocked, or incomplete evidence as hard failures.
+
 - 86158a3: Correct scanner test fixtures to remove absent environment overrides while preserving explicit values and restoring the original environment.
 
 ## 0.18.0
