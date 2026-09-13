@@ -4,7 +4,7 @@ import { chmodSync, mkdirSync, mkdtempSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { createHash } from 'node:crypto'
-import { evaluateParentDelivery, typedSection, validReview, chronicleEntryAdded, evaluateShipGate, gatherFacts, parseMarker, resolveWorktree, reviewAdjudicated, selectCurrentTrustedReview } from '../scripts/ship-gate.mjs'
+import { evaluateParentDelivery, typedSection, validReview, chronicleEntryAdded, changesetChangelogEntryAdded, evaluateShipGate, gatherFacts, parseMarker, resolveWorktree, reviewAdjudicated, selectCurrentTrustedReview } from '../scripts/ship-gate.mjs'
 
 const SHA = 'a'.repeat(40)
 const BASE = 'b'.repeat(40)
@@ -66,6 +66,13 @@ describe('ship-gate', () => {
     expect(headingRule('-## 28-08-2026 — deleted entry\n')).toBe(false)
     expect(headingRule('-**Why:** old\n+**Why:** typo-fixed old entry\n')).toBe(false)
     expect(headingRule('+++ b/.vegastack/chronicle.md\n@@\n context only')).toBe(false)
+  })
+  test('a generated Changesets release heading counts after pending entries are consumed', () => {
+    const releaseDiff='diff --git a/packages/cli/CHANGELOG.md b/packages/cli/CHANGELOG.md\n--- a/packages/cli/CHANGELOG.md\n+++ b/packages/cli/CHANGELOG.md\n@@\n+## 0.19.0\n'
+    expect(changesetChangelogEntryAdded(releaseDiff)).toBe(true)
+    expect(changesetChangelogEntryAdded(releaseDiff.replace('+## 0.19.0','-## 1.0.0'))).toBe(false)
+    expect(changesetChangelogEntryAdded(releaseDiff.replaceAll('CHANGELOG.md','README.md'))).toBe(false)
+    expect(changesetChangelogEntryAdded(releaseDiff.replace('## 0.19.0','### Minor Changes'))).toBe(false)
   })
   test('an exercised excuse warns with what it excused', () => {
     const r = evaluateShipGate({ ...cleanFacts(), changelogTouched: false, chronicleOn: true, chronicleTouched: false, allowNoChangelog: 'docs-only' })

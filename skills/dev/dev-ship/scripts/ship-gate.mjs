@@ -251,6 +251,18 @@ export function chronicleEntryAdded(fileDiff) {
   return /^\+## /m.test(fileDiff ?? '');
 }
 
+// A release branch has already consumed its pending Changesets files. Count
+// the generated package changelog heading as the entry, but only inside an
+// actual CHANGELOG.md diff and only for a concrete semver version.
+export function changesetChangelogEntryAdded(diffText) {
+  const heading = /^\+(?!\+\+)\s*##\s+(?:v)?(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)(?:-[0-9A-Za-z.-]+)?\s*$/m;
+  return String(diffText ?? '').split(/^diff --git /m).slice(1).some((chunk) => {
+    const firstLine = chunk.slice(0, chunk.indexOf('\n'));
+    const paths = /^a\/(.+) b\/(.+)$/.exec(firstLine);
+    return paths?.[1] === paths?.[2] && /(?:^|\/)CHANGELOG\.md$/.test(paths[2]) && heading.test(chunk);
+  });
+}
+
 // Pure evaluation over gathered facts — unit tests drive this directly.
 export function evaluateShipGate(facts) {
   const blocks = [];
@@ -404,7 +416,7 @@ export function gatherFacts(flags) {
   const changelogTouched = changelogKnob === 'none'
     ? true
     : changelogKnob === 'changesets'
-      ? /^\+\+\+ b\/\.changeset\/(?!config)/m.test(diffText)
+      ? /^\+\+\+ b\/\.changeset\/(?!config)/m.test(diffText) || changesetChangelogEntryAdded(diffText)
       : /^\+(?!\+\+)[^\n]*\S/m.test(sh('git', ['diff', baseSha + '...' + headSha, '--', 'CHANGELOG.md'], cwd) || '');
 
   const chronicleOn = /^chronicle:\s*on\s*(#|$)/m.test(devMd);
