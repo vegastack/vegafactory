@@ -16,6 +16,50 @@ export const verifyArtifactBytes = (bytes, expected) => typeof expected?.sha256 
 export function assertPairVersions({ cli, dashboard, tag }) {
   if (!/^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/.test(cli) || cli !== dashboard || tag !== `v${cli}`) throw new Error('CLI/dashboard/tag version mismatch')
 }
+const releaseVersion = value => {
+  const match = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-[0-9A-Za-z.-]+)?$/.exec(value ?? '')
+  if (!match) throw new Error('invalid release version')
+  return { major: Number(match[1]), minor: Number(match[2]), patch: Number(match[3]) }
+}
+const approvalKeys = ['approval','approvedBy','approvedOn','fromVersion','schemaVersion','toVersion']
+export function assertMajorVersionTransition({ previousVersion, currentVersion, approval, operators = [] }) {
+  const previous = releaseVersion(previousVersion), current = releaseVersion(currentVersion)
+  if (current.major <= previous.major) return true
+  const approvedOn = typeof approval?.approvedOn === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(approval.approvedOn) ? new Date(approval.approvedOn + 'T00:00:00Z') : null
+  const date = approvedOn !== null && !Number.isNaN(approvedOn.valueOf()) && approvedOn.toISOString().slice(0,10) === approval.approvedOn
+  const url = typeof approval?.approval === 'string' && /^https:\/\/github\.com\/vegastack\/vegafactory\/(?:issues|pull)\/[1-9]\d*#issuecomment-[1-9]\d*$/.test(approval.approval)
+  const exact = approval && typeof approval === 'object' && !Array.isArray(approval) && Object.keys(approval).sort().join('\0') === approvalKeys.join('\0')
+    && approval.schemaVersion === 1 && approval.fromVersion === previousVersion && approval.toVersion === currentVersion
+    && typeof approval.approvedBy === 'string' && operators.includes(approval.approvedBy) && date && url
+  if (!exact) throw new Error(`major release requires exact operator approval for ${previousVersion} -> ${currentVersion}`)
+  return true
+}
+export async function verifyVersionTransition(root) {
+  root = resolve(root)
+  const cli = JSON.parse(await readFile(join(root,'packages/cli/package.json'),'utf8'))
+  const dashboard = JSON.parse(await readFile(join(root,'packages/dashboard/package.json'),'utf8'))
+  assertPairVersions({cli:cli.version,dashboard:dashboard.version,tag:`v${cli.version}`})
+  const [,parent] = command(['git','rev-list','--parents','-n','1','HEAD'],{cwd:root}).trim().split(/\s+/)
+  const previousTag = parent && command(['git','tag','--merged',parent,'--sort=-version:refname'],{cwd:root}).split('\n').find(tag => /^v\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/.test(tag))
+  if (!previousTag) return { previousVersion: null, currentVersion: cli.version, approvalRequired: false }
+  const previousVersion = previousTag.slice(1), previous = releaseVersion(previousVersion), current = releaseVersion(cli.version)
+  let approval
+  if (current.major > previous.major) {
+    const path = join(root,'.vegastack','major-release-approval.json')
+    try {
+      const info = await lstat(path)
+      if (!info.isFile() || info.isSymbolicLink() || info.size > 16 * 1024) throw new Error('invalid major approval file')
+      approval = JSON.parse(await readFile(path,'utf8'))
+    } catch (error) {
+      if (error.code !== 'ENOENT') throw error
+    }
+  }
+  const dev = await readFile(join(root,'.vegastack','dev.md'),'utf8')
+  const operatorLine = dev.match(/^operators:\s*([^#\n]+?)(?:\s+#.*)?$/m)?.[1] ?? ''
+  const operators = operatorLine.split(',').map(value => value.trim()).filter(Boolean)
+  assertMajorVersionTransition({previousVersion,currentVersion:cli.version,approval,operators})
+  return { previousVersion, currentVersion: cli.version, approvalRequired: current.major > previous.major }
+}
 export function assertScanEvidence(scan, expectedSkills) {
   if (scan?.ok !== true || scan.skipped !== false || !Array.isArray(scan.blocks) || scan.blocks.length || !Array.isArray(expectedSkills) || !expectedSkills.length || !Array.isArray(scan.skills)) throw new Error('scanner unavailable or incomplete')
   if (expectedSkills.some(name => typeof name !== 'string' || !name) || new Set(expectedSkills).size !== expectedSkills.length || scan.skills.some(s => typeof s?.name !== 'string' || !s.name) || new Set(scan.skills.map(s => s.name)).size !== scan.skills.length) throw new Error('scanner skill coverage mismatch')
@@ -449,6 +493,7 @@ export async function prepareRelease(root,directory,tag) {
   const sourceSha=command(['git','rev-parse','HEAD'],{cwd:root});const treeSha=command(['git','rev-parse','HEAD^{tree}'],{cwd:root})
   const cli=JSON.parse(await readFile(join(root,'packages/cli/package.json'),'utf8'));const dashboard=JSON.parse(await readFile(join(root,'packages/dashboard/package.json'),'utf8'))
   assertPairVersions({cli:cli.version,dashboard:dashboard.version,tag:tag??`v${cli.version}`})
+  await verifyVersionTransition(root)
   const toolchain={node:process.version,bun:command(['bun','--version']),npm:command(['npm','--version']),python:command(['python3.12','--version']),skillspector:command(['skillspector','--version']),platform:process.platform,arch:process.arch}
   if(!process.version.startsWith('v24.')||toolchain.bun!=='1.3.14'||!toolchain.python.startsWith('Python 3.12.'))throw new Error('release requires Node24/Bun1.3.14/Python3.12')
   const baseline=JSON.parse(await readFile(join(root,'.vegastack/skillspector-baseline.json'),'utf8'))
@@ -473,6 +518,7 @@ export async function prepareRelease(root,directory,tag) {
 async function main() {
   const [verb,...args]=process.argv.slice(2)
   if(verb==='prepare')return prepareRelease(resolve(dirname(fileURLToPath(import.meta.url)),'..'),args[0]??'work/release',args[1])
+  if(verb==='verify-version-transition')return verifyVersionTransition(resolve(dirname(fileURLToPath(import.meta.url)),'..'))
   if(verb==='verify-release') {const path=resolve(args[0]);await verifyReleaseEvidence(JSON.parse(await readFile(path,'utf8')),dirname(path));return {ok:true}}
   if(verb==='verify'||verb==='smoke') {const path=resolve(args[0]);const manifest=JSON.parse(await readFile(path,'utf8'));return verb==='verify'? (await verifyPair(manifest,dirname(path)),{ok:true}):smokePair(manifest,dirname(path))}
   if(verb==='validate-cli') {
@@ -480,6 +526,6 @@ async function main() {
     if(!process.env.VEGAFACTORY_DASHBOARD_TARBALL)throw new Error('pack CLI through release prepare, or provide the exact dashboard tarball via VEGAFACTORY_DASHBOARD_TARBALL')
     return {ok:verifyDashboardDescriptor(JSON.parse(await readFile(join(root,'packages/cli/dist/dashboard-artifact.json'),'utf8')),await readFile(process.env.VEGAFACTORY_DASHBOARD_TARBALL),version)}
   }
-  throw new Error('usage: release-artifacts.mjs prepare <evidence-dir> <tag> | verify|smoke <manifest> | validate-cli')
+  throw new Error('usage: release-artifacts.mjs prepare <evidence-dir> <tag> | verify-version-transition | verify|smoke <manifest> | validate-cli')
 }
 if(process.argv[1]&&resolve(process.argv[1])===fileURLToPath(import.meta.url))main().then(result=>console.log(JSON.stringify(result,null,2))).catch(error=>{console.error(error.message);process.exitCode=2})
