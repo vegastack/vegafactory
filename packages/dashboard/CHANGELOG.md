@@ -1,5 +1,11 @@
 # @vegastack/vegafactory-dashboard
 
+## 0.19.2
+
+### Patch Changes
+
+- 7bce9e4: Allow a fresh dashboard launch to use a 60-second readiness budget, keep release smoke outside that bound, and tolerate bounded npm publication propagation without republishing immutable versions.
+
 ## 0.19.1
 
 ### Patch Changes
