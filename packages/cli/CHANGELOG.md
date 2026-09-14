@@ -1,5 +1,13 @@
 # @vegastack/skills
 
+## 0.19.5
+
+### Patch Changes
+
+- Roll forward the release-orchestration correction after `v0.19.4` preparation stopped safely on runner disk exhaustion before artifact retention or publication.
+
+  This release contains the same reviewed first-attempt-only workflow and ten-minute npm visibility bound; no published API or runtime behavior changed after `0.19.4`.
+
 ## 0.19.4
 
 ### Patch Changes
