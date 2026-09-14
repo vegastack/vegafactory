@@ -350,6 +350,7 @@ async function closeServer(stale) {
   for(const socket of sockets)socket.destroy()
   if(!await Promise.race([closed,new Promise(ok=>setTimeout(()=>ok(false),1_000))]))throw new Error('stale dashboard cleanup timeout')
 }
+export const RELEASE_DASHBOARD_READY_TIMEOUT_MS=75_000
 export async function smokePair(manifest,directory) {
   const pair=await verifyPair(manifest,directory)
   const home=await realpath(await mkdtemp(join(tmpdir(),'vegafactory-pair-'))),consumer=join(home,'consumer')
@@ -395,7 +396,10 @@ export async function smokePair(manifest,directory) {
     launcherProcess=spawn(cliBin,['dashboard','--org','fixture','--port',String(stale.port),'--json'],{cwd:home,env,stdio:['ignore','pipe','pipe']})
     launcherProcess.stdout.on('data',bytes=>stdout.push(bytes.toString()));launcherProcess.stderr.on('data',bytes=>stderr.push(bytes.toString()));launcherProcess.once('error',error=>{launchError=error})
     let launcher=null
-    const deadline=Date.now()+25_000
+    // The installed CLI owns a 60-second dashboard readiness budget. This outer watcher must
+    // outlive it so a slow fresh launch reports the CLI's definitive result instead of being
+    // killed by the release harness first.
+    const deadline=Date.now()+RELEASE_DASHBOARD_READY_TIMEOUT_MS
     while(Date.now()<deadline && !launcher) {
       if(launchError)throw new Error(`installed CLI dashboard failed to start: ${launchError.message}`)
       const output=stdout.join('').trim();if(output){try{launcher=JSON.parse(output)}catch{/* JSON is pretty-printed over several chunks. */}}
