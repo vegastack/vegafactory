@@ -156,6 +156,8 @@ test('actual workflow refuses reruns and the current-attempt pair upload gates m
  expect(workflow.jobs.prepare.permissions).toEqual({contents:'read'});expect(workflow.jobs.publish.permissions).toEqual({contents:'read',actions:'read','id-token':'write'});expect(workflow.jobs.release.permissions).toEqual({contents:'write',actions:'read'})
  expect(workflow.jobs.prepare['runs-on']).toEqual(['self-hosted','vsk-runners-mac']);expect(workflow.jobs.publish['runs-on']).toBe('ubuntu-latest');expect(workflow.jobs.release['runs-on']).toBe('ubuntu-latest')
  expect(attempt).toBeDefined()
+ expect(prepareSteps.indexOf(attempt)).toBeLessThan(prepareSteps.findIndex((s:any)=>s.name==='Install pinned release scanner'))
+ expect(prepareSteps.indexOf(attempt)).toBeLessThan(prepareSteps.findIndex((s:any)=>s.name==='Prepare and smoke immutable artifact pair'))
  const script=`await (async()=>{${attempt.with.script}})()`
  const run=(runAttempt:number)=>spawnSync('node',['--input-type=module','-e',script],{env:{...process.env,GITHUB_WORKSPACE:process.cwd(),GITHUB_RUN_ATTEMPT:String(runAttempt)},encoding:'utf8'})
  expect(run(1).status).toBe(0);const retry=run(2);expect(retry.status).not.toBe(0);expect(retry.stderr).toContain('release reruns cannot retain prior-attempt artifacts')
