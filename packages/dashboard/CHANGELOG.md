@@ -1,5 +1,11 @@
 # @vegastack/vegafactory-dashboard
 
+## 0.19.3
+
+### Patch Changes
+
+- 76faee4: Keep installed-runtime verification strict inside the retained CLI while tolerating unrelated ancestor directory churn during release preparation.
+
 ## 0.19.2
 
 ### Patch Changes
