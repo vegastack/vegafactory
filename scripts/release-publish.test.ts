@@ -31,7 +31,7 @@ test('post-publish readback exhaustion and integrity conflict fail closed',async
   expect(r.calls.filter(x=>x.includes('@'))).toHaveLength(1)
  }
 })
-test('restored attempted publication stays read-only under absence and unavailability',async()=>{
+test('supplied attempted publication state stays read-only under absence and unavailability',async()=>{
  for(const recovered of [{status:404,definitive:true},{status:0,error:'timeout'}]) {
   const r=registry();let previous:any,publishes=0,recovering=false
   r.publish=async a=>{r.calls.push(a.name);publishes++}
@@ -44,7 +44,7 @@ test('restored attempted publication stays read-only under absence and unavailab
   expect(previous.pending).toEqual({operation:'publish',name:manifest.artifacts[0].name})
  }
 })
-test('matching rerun only smokes; altered bytes and integrity conflict refuse',async()=>{const r=registry();for(const a of manifest.artifacts)r.existing.set(a.name,a);await publishPair(manifest,r,{publish:true});expect(r.calls).toEqual(['smoke']);r.existing.set(manifest.artifacts[0].name,{integrity:'changed'});await expect(publishPair(manifest,r,{publish:true})).rejects.toThrow()})
+test('a matching preexisting pair only smokes; altered bytes and integrity conflict refuse',async()=>{const r=registry();for(const a of manifest.artifacts)r.existing.set(a.name,a);await publishPair(manifest,r,{publish:true});expect(r.calls).toEqual(['smoke']);r.existing.set(manifest.artifacts[0].name,{integrity:'changed'});await expect(publishPair(manifest,r,{publish:true})).rejects.toThrow()})
 test('smoke failure never promotes; no explicit grant never publishes',async()=>{const r=registry();await expect(publishPair(manifest,r,{})).rejects.toThrow();expect(r.calls).toEqual([]);r.smoke=async()=>{throw new Error('smoke failed')};await expect(publishPair(manifest,r,{publish:true,promote:true})).rejects.toThrow();expect(r.calls.some(c=>c.startsWith('promote'))).toBe(false)})
 
 test('HTTP adapter bounds retries and never classifies missing payload as absent',async()=>{
@@ -208,7 +208,7 @@ test('real publisher CLI persists an uncertain CLI attempt and never submits it 
   expect(r.writes.filter(x=>x==='publish '+DASHBOARD)).toHaveLength(1);expect(r.writes.filter(x=>x==='publish '+CLI)).toHaveLength(1)
  }finally{await r.close()}
 },30000)
-test('real publisher CLI resumes half-promotion without republishing the pair',async()=>{
+test('publisher library reconciles supplied half-promotion state without republishing the pair',async()=>{
  const p=await pairFixture(),r=await processRegistry()
  try {
   r.control.failPromoteCLI=true
@@ -234,7 +234,9 @@ test('real CLI refuses missing or altered SBOM before registry writes and refuse
  try {
   await writeFile(join(p.dir,'build-sbom.json'),'changed');expect((await launchPair(p,r).result).code).toBe(2);expect(r.writes).toEqual([])
   const good=await pairFixture();const {unlink}=await import('node:fs/promises');await unlink(join(good.dir,'cli-runtime-sbom.json'));expect((await launchPair(good,r).result).code).toBe(2);expect(r.writes).toEqual([])
-  const {assertLivePublisher}=await import('./release-publish.mjs');expect(()=>assertLivePublisher({})).toThrow('serialized')
+  const {assertLivePublisher}=await import('./release-publish.mjs')
+  const live={GITHUB_ACTIONS:'true',GITHUB_REPOSITORY:'vegastack/vegafactory',GITHUB_JOB:'publish',GITHUB_WORKFLOW:'Release',GITHUB_WORKFLOW_REF:'vegastack/vegafactory/.github/workflows/release.yml@refs/tags/v1.0.0',GITHUB_RUN_ATTEMPT:'1',VEGAFACTORY_RETAINED_PAIR_ID:'42'}
+  expect(()=>assertLivePublisher(live)).not.toThrow();expect(()=>assertLivePublisher({...live,GITHUB_RUN_ATTEMPT:'2'})).toThrow('first attempt')
  }finally{await r.close()}
 })
 test('real CLI rejects incomplete, duplicate and mismatched SBOM identities before registry writes',async()=>{

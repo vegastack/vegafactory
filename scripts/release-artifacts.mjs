@@ -306,21 +306,11 @@ export async function verifyReleaseEvidence(manifest, directory) {
   if (expected.size) throw new Error('required SBOM evidence missing')
   return true
 }
-// The workflow supplies authoritative prior-attempt job observations. Missing history
-// never permits a second preparation of bytes that might already be public.
-export function recoveryDecision({artifacts,attempts,sourceSha,runAttempt}) {
-  const pairs=artifacts.filter(a=>a.name.startsWith(`release-pair-${sourceSha}-attempt-`))
-  if (pairs.length>1 || pairs.some(a=>a.expired)) throw new Error('ambiguous or expired retained pair; refuse rebuilding')
-  if (pairs.length===1) return {prepare:false,artifact:pairs[0].name}
-  for(let n=1;n<runAttempt;n++) {
-    const jobs=attempts[n]
-    const prepare=jobs?.find(j=>j.name==='prepare'),publish=jobs?.find(j=>j.name==='publish')
-    const retained=prepare?.steps?.find(s=>s.name==='Retain finalized immutable pair')
-    const step=publish?.steps?.find(s=>s.name==='Publish retained pair and promote after registry first-use smoke')
-    const preparationFailedBeforeRetention=prepare?.status==='completed'&&prepare?.conclusion==='failure'&&retained?.conclusion!=='success'&&(!publish||publish.status==='completed'&&publish.conclusion==='skipped')
-    const legacyOrCompletedPublishSkipped=publish?.status==='completed'&&step?.conclusion==='skipped'
-    if(!preparationFailedBeforeRetention&&!legacyOrCompletedPublishSkipped)throw new Error('prior publication uncertain; refuse rebuilding')
-  }
+// GitHub replaces a run's prior-attempt artifacts when that run is rerun. A release
+// therefore has one executable attempt; every failure rolls forward under a fresh tag.
+export function recoveryDecision({runAttempt}) {
+  if (!Number.isSafeInteger(runAttempt) || runAttempt < 1) throw new Error('invalid release attempt')
+  if (runAttempt !== 1) throw new Error('release reruns cannot retain prior-attempt artifacts; roll forward with a new patch and tag')
   return {prepare:true,artifact:''}
 }
 const dashboardUuid=/^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/

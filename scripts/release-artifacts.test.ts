@@ -96,12 +96,10 @@ import { cp, realpath } from 'node:fs/promises'
 import { spawnSync } from 'node:child_process'
 import { resolve } from 'node:path'
 import { recoveryDecision } from './release-artifacts.mjs'
-test('workflow recovery rebuilds only after affirmative skipped publication and reuses retained pair',()=>{
- const skipped={name:'publish',status:'completed',steps:[{name:'Publish retained pair and promote after registry first-use smoke',conclusion:'skipped'}]}
- expect(recoveryDecision({artifacts:[],attempts:{1:[skipped]},sourceSha:'a',runAttempt:2})).toEqual({prepare:true,artifact:''})
- for(const jobs of [undefined,[],[{...skipped,status:'in_progress'}],[{...skipped,steps:[]}],[{...skipped,steps:[{...skipped.steps[0],conclusion:'failure'}]}]])expect(()=>recoveryDecision({artifacts:[],attempts:{1:jobs},sourceSha:'a',runAttempt:2})).toThrow('uncertain')
- expect(recoveryDecision({artifacts:[{name:'release-pair-a-attempt-2',expired:false}],attempts:{},sourceSha:'a',runAttempt:3})).toEqual({prepare:false,artifact:'release-pair-a-attempt-2'})
- expect(()=>recoveryDecision({artifacts:[{name:'release-pair-a-attempt-2',expired:true}],attempts:{},sourceSha:'a',runAttempt:3})).toThrow('expired')
+test('workflow release decision permits one fresh attempt and refuses every rerun',()=>{
+ expect(recoveryDecision({artifacts:[],attempts:{},sourceSha:'a',runAttempt:1})).toEqual({prepare:true,artifact:''})
+ for(const runAttempt of [2,3,99])expect(()=>recoveryDecision({artifacts:[{name:'release-pair-a-attempt-1',expired:false}],attempts:{},sourceSha:'a',runAttempt})).toThrow('release reruns cannot retain prior-attempt artifacts; roll forward with a new patch and tag')
+ for(const runAttempt of [0,-1,1.5,NaN])expect(()=>recoveryDecision({artifacts:[],attempts:{},sourceSha:'a',runAttempt})).toThrow('invalid release attempt')
 })
 test('CI and release preparation check out full history before running compatibility readers',async()=>{
  for(const [file,job] of [['.github/workflows/ci.yml','check'],['.github/workflows/release.yml','prepare']] as const){
@@ -114,7 +112,7 @@ test('CI and release preparation check out full history before running compatibi
   }
  }
 })
-test('actual preparation CLI stops at dashboard build and scanner failures, leaving no finalized pair for guarded retry',async()=>{
+test('actual preparation CLI stops at dashboard build and scanner failures, leaving no finalized pair or publication authority',async()=>{
  const root=await realpath(await mkdtemp(join(tmpdir(),'prepare-command-'))),bin=join(root,'fixture-bin'),out=join(root,'work/release')
  for(const path of ['scripts','packages/cli','packages/dashboard','.vegastack','skills/skills-tooling/skill-scan/scripts','fixture-bin'])await mkdir(join(root,path),{recursive:true})
  await cp(resolve('scripts/release-artifacts.mjs'),join(root,'scripts/release-artifacts.mjs'))
@@ -143,23 +141,25 @@ const fs=require('node:fs'),a=process.argv.slice(2);fs.mkdirSync('work',{recursi
  expect(spawnSync('git',['status','--porcelain'],{cwd:root,encoding:'utf8'}).stdout).toBe('')
 },15000)
 
-test('actual workflow recovery command permits a failed preparation retry and refuses uncertain publication; pair upload gates mutation',async()=>{
+test('actual workflow refuses reruns and the current-attempt pair upload gates mutation',async()=>{
  const text=await readFile('.github/workflows/release.yml','utf8')
  const workflow=Bun.YAML.parse(text) as any
  const prepareSteps=workflow.jobs.prepare.steps,publishSteps=workflow.jobs.publish.steps
- const recovery=prepareSteps.find((s:any)=>s.id==='recovery')
+ const attempt=prepareSteps.find((s:any)=>s.name==='Refuse same-run release reruns')
  const retained=prepareSteps.findIndex((s:any)=>s.name==='Retain finalized immutable pair')
  const publish=publishSteps.findIndex((s:any)=>s.name==='Publish retained pair and promote after registry first-use smoke')
  expect(retained).toBeGreaterThan(prepareSteps.findIndex((s:any)=>s.name==='Verify finalized immutable pair and evidence'))
  expect(publish).toBeGreaterThan(publishSteps.findIndex((s:any)=>s.name==='Verify retained pair before publication authority is used'));expect(publishSteps[publish].if).toBeUndefined();expect(prepareSteps[retained].with['if-no-files-found']).toBe('error')
- expect(workflow.jobs.prepare.permissions).toEqual({contents:'read',actions:'read'});expect(workflow.jobs.publish.permissions).toEqual({contents:'read',actions:'read','id-token':'write'});expect(workflow.jobs.release.permissions).toEqual({contents:'write',actions:'read'})
+ expect(workflow.jobs.prepare.outputs['pair-name']).toBe('release-pair-${{ github.sha }}-attempt-${{ github.run_attempt }}')
+ expect(workflow.jobs.prepare.outputs['pair-id']).toBe('${{ steps.retained.outputs.artifact-id }}')
+ expect(workflow.jobs.prepare.outputs['prior-outcome-name']).toBeUndefined()
+ expect(workflow.jobs.prepare.permissions).toEqual({contents:'read'});expect(workflow.jobs.publish.permissions).toEqual({contents:'read',actions:'read','id-token':'write'});expect(workflow.jobs.release.permissions).toEqual({contents:'write',actions:'read'})
  expect(workflow.jobs.prepare['runs-on']).toEqual(['self-hosted','vsk-runners-mac']);expect(workflow.jobs.publish['runs-on']).toBe('ubuntu-latest');expect(workflow.jobs.release['runs-on']).toBe('ubuntu-latest')
- const fixture={artifacts:[],jobs:[{name:'prepare',status:'completed',conclusion:'failure',steps:[{name:prepareSteps[retained].name,conclusion:'skipped'}]},{name:'publish',status:'completed',conclusion:'skipped',steps:[]}]}
- const script=`const fixture=JSON.parse(process.env.FIXTURE_HISTORY);const output={};const core={setOutput:(k,v)=>output[k]=v};const context={repo:{owner:'fixture',repo:'fixture'},runId:1,sha:'a'};const github={rest:{actions:{listWorkflowRunArtifacts:'artifacts'}},paginate:async(route)=>route==='artifacts'?fixture.artifacts:fixture.jobs};await (async()=>{${recovery.with.script}})();console.log(JSON.stringify(output))`
- const run=(history:any)=>spawnSync('node',['--input-type=module','-e',script],{env:{...process.env,GITHUB_WORKSPACE:process.cwd(),GITHUB_RUN_ATTEMPT:'2',FIXTURE_HISTORY:JSON.stringify(history)},encoding:'utf8'})
- const retry=run(fixture);expect(retry.status).toBe(0);expect(JSON.parse(retry.stdout).prepare).toBe('true')
- fixture.jobs[0]!.conclusion='success';fixture.jobs[0]!.steps[0]!.conclusion='success';fixture.jobs[1]!.conclusion='failure';fixture.jobs[1]!.steps=[{name:publishSteps[publish].name,conclusion:'failure'}];const uncertain=run(fixture);expect(uncertain.status).not.toBe(0);expect(uncertain.stderr).toContain('uncertain')
- const reuse=run({...fixture,artifacts:[{name:'release-pair-a-attempt-1',id:42,expired:false}]});expect(reuse.status).toBe(0);expect(JSON.parse(reuse.stdout)).toMatchObject({prepare:'false','artifact-id':42})
+ expect(attempt).toBeDefined()
+ const script=`await (async()=>{${attempt.with.script}})()`
+ const run=(runAttempt:number)=>spawnSync('node',['--input-type=module','-e',script],{env:{...process.env,GITHUB_WORKSPACE:process.cwd(),GITHUB_RUN_ATTEMPT:String(runAttempt)},encoding:'utf8'})
+ expect(run(1).status).toBe(0);const retry=run(2);expect(retry.status).not.toBe(0);expect(retry.stderr).toContain('release reruns cannot retain prior-attempt artifacts')
+ expect(text).not.toContain('listWorkflowRunArtifacts');expect(text).not.toContain('/attempts/{attempt_number}/jobs');expect(text).not.toContain('Restore finalized immutable pair');expect(text).not.toContain('Restore last available publication observations');expect(text).not.toContain('Preserve previous publication observations')
 })
 
 test('release workflow immutable scanner source matches the audited baseline version',async()=>{
