@@ -43,11 +43,11 @@ export async function publishPair(manifest, registry, {publish=false,promote=fal
       if(status==='matching')return
       if(status==='conflict')throw new Error(`registry conflict: ${a.name}`)
     }
-    throw new Error(`publication not confirmed after bounded readback (${status}); preserve pair and resume after diagnosis: ${failure?.message??a.name}`)
+    throw new Error(`publication not confirmed after bounded readback (${status}); do not republish; roll forward with a new patch and tag after diagnosis: ${failure?.message??a.name}`)
   }
   try {
     // A persisted pending mutation is an attempted immutable publish, even if its subprocess
-    // response was lost. Confirm it read-only on every recovery; never submit those bytes twice.
+    // response was lost. Any caller with preserved state confirms it read-only; never submit those bytes twice.
     // Completed states carry the same lifetime fact for earlier artifacts.
     const attempted=new Set()
     if(previous) {
@@ -90,12 +90,13 @@ export async function publishPair(manifest, registry, {publish=false,promote=fal
   }catch(e){await save({error:e.message});throw e}
 }
 // Live operations have one supported entry point: the repository-wide serialized
-// release job. Local recovery must rerun that job, retaining its immutable pair.
+// release job's first attempt. Failure rolls forward under a fresh patch tag.
 export function assertLivePublisher(env=process.env) {
   if(env.GITHUB_ACTIONS!=='true' || env.GITHUB_REPOSITORY!=='vegastack/vegafactory' ||
      env.GITHUB_JOB!=='publish' || env.GITHUB_WORKFLOW!=='Release' ||
+     env.GITHUB_RUN_ATTEMPT!=='1' ||
      !env.GITHUB_WORKFLOW_REF?.startsWith('vegastack/vegafactory/.github/workflows/release.yml@refs/tags/v') ||
-     !/^\d+$/.test(env.VEGAFACTORY_RETAINED_PAIR_ID??''))throw new Error('live publication requires the serialized Release workflow and retained pair; rerun that job for recovery')
+     !/^\d+$/.test(env.VEGAFACTORY_RETAINED_PAIR_ID??''))throw new Error('live publication requires the serialized Release workflow first attempt and its retained pair; failures roll forward with a new patch and tag')
 }
 export function compareVersions(a,b) {
   const parse=v=>{const m=/^(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z.-]+))?$/.exec(v);if(!m)throw new Error('invalid registry version');return {n:m.slice(1,4).map(Number),pre:m[4]?.split('.')}}
