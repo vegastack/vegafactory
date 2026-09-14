@@ -1,6 +1,6 @@
 import { expect, test } from 'bun:test'
 import { createHash } from 'node:crypto'
-import { verifyArtifactBytes, assertPairVersions, assertMajorVersionTransition, assertScanEvidence, readPackageArchive, dashboardDescriptor, verifyDashboardDescriptor, materializeTree, smokePair, command, buildSbom } from './release-artifacts.mjs'
+import { verifyArtifactBytes, assertPairVersions, assertMajorVersionTransition, assertScanEvidence, readPackageArchive, dashboardDescriptor, verifyDashboardDescriptor, materializeTree, RELEASE_DASHBOARD_READY_TIMEOUT_MS, smokePair, command, buildSbom } from './release-artifacts.mjs'
 import { mkdtemp, mkdir, writeFile, symlink, readFile, chmod, rm, link } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -11,6 +11,7 @@ function archive(entries: {path:string, data?:string, type?:string, mode?:number
  return gzipSync(Buffer.concat([...chunks,Buffer.alloc(1024)]))
 }
 const packed=()=>archive([{path:'package/package.json',data:JSON.stringify({name:'@vegastack/vegafactory-dashboard',version:'1.0.0'})},{path:'package/dist-standalone/server.js',data:'server'}])
+test('release smoke waits beyond the CLI dashboard readiness budget',()=>{expect(RELEASE_DASHBOARD_READY_TIMEOUT_MS).toBe(75_000);expect(RELEASE_DASHBOARD_READY_TIMEOUT_MS).toBeGreaterThan(60_000)})
 test('changing packed bytes invalidates identity',()=>{const b=Buffer.from('reviewed');const sha256=createHash('sha256').update(b).digest('hex');expect(verifyArtifactBytes(b,{sha256})).toBe(true);expect(verifyArtifactBytes(Buffer.from('rebuilt'),{sha256})).toBe(false)})
 test('pair and tag versions must match',()=>{expect(()=>assertPairVersions({cli:'1.0.0',dashboard:'1.0.1',tag:'v1.0.0'})).toThrow();expect(()=>assertPairVersions({cli:'1.0.0',dashboard:'1.0.0',tag:'v1.0.0'})).not.toThrow()})
 test('a major boundary requires exact operator authority',()=>{

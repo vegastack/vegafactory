@@ -21,7 +21,14 @@ export const DASHBOARD_PACKAGE = '@vegastack/vegafactory-dashboard'
 export const SERVER_ENTRY = 'dist-standalone/packages/dashboard/server.js'
 const DEFAULT_PORT = 7777
 const PORT_SPAN = 10
-const HEALTH_TIMEOUT_MS = 20_000
+export const DASHBOARD_HEALTH_TIMEOUT_MS = 60_000
+
+// A fresh hosted runner can need more than two seconds to start the standalone server. The
+// global deadline still bounds the whole port search; a living child gets that remaining budget
+// instead of being killed and relaunched repeatedly while it is still starting.
+export function dashboardAttemptDeadline(now: number, globalDeadline: number): number {
+  return globalDeadline > now ? globalDeadline : now
+}
 
 export function dashboardSpec(version: string): string {
   return `${DASHBOARD_PACKAGE}@${version}`
@@ -312,14 +319,14 @@ export async function runDashboard(options: DashboardOptions): Promise<number> {
   } catch (error) { console.error(`error: ${(error as Error).message}`); return 2 }
 
   const version = paths.source === 'override' ? 'unverified-development' : options.version
-  const deadline = Date.now() + HEALTH_TIMEOUT_MS
+  const deadline = Date.now() + DASHBOARD_HEALTH_TIMEOUT_MS
   for (const port of portCandidates(flags.port, PORT_SPAN).filter(port => port <= 65535)) {
     if (Date.now() >= deadline) break
     const identity: DashboardIdentity = {org: environment.org, version, instanceId: randomUUID(), cacheSchema: 2}
     const env = launchEnv({env: {...environment, cacheFile, port, version, instanceId: identity.instanceId, bin: process.argv[1] ?? 'vegafactory'}})
     const attempt = launchDashboardChild(paths.entry, {...process.env, ...env}, flags.json)
     try {
-      const ready = await waitDashboardChild(attempt, identity, port, Math.min(deadline, Date.now() + 2_000))
+      const ready = await waitDashboardChild(attempt, identity, port, dashboardAttemptDeadline(Date.now(), deadline))
       if (!ready) {
         if (!await stopDashboardChild(attempt)) { console.error('error: dashboard child termination is unverified; retained ownership, no port retry'); return 1 }
         continue
@@ -338,7 +345,7 @@ export async function runDashboard(options: DashboardOptions): Promise<number> {
       return 1
     }
   }
-  console.error('error: no owned dashboard instance became ready within 20 seconds')
+  console.error(`error: no owned dashboard instance became ready within ${DASHBOARD_HEALTH_TIMEOUT_MS / 1000} seconds`)
   return 1
 }
 

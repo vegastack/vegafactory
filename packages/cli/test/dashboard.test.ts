@@ -6,7 +6,7 @@ import { dirname, join } from 'node:path'
 import { gzipSync } from 'node:zlib'
 import {
   dashboardCacheNamespace, dashboardInstallReceipt, dashboardPaths, dashboardRepositories,
-  dashboardSpec, installArgs, installDashboardArtifact, launchDashboardChild, launchEnv,
+  DASHBOARD_HEALTH_TIMEOUT_MS, dashboardAttemptDeadline, dashboardSpec, installArgs, installDashboardArtifact, launchDashboardChild, launchEnv,
   matchesReadiness, planDashboard, portCandidates, selectDashboardOrg, SERVER_ENTRY,
   stopDashboardChild, validateDashboardDescriptor, verifyDashboardArtifact, verifyDashboardTree,
   waitDashboardChild, type DashboardArtifactDescriptor, type DashboardIdentity,
@@ -46,6 +46,14 @@ test('the launch environment is exactly the server contract, on the loopback int
   expect(partial).not.toHaveProperty('VEGAFACTORY_VIEWER')
   expect(partial).not.toHaveProperty('VEGAFACTORY_GH_TOKEN')
   expect(portCandidates(7777, 3)).toEqual([7777, 7778, 7779])
+})
+
+test('a fresh dashboard child may use the remaining 60-second readiness budget', () => {
+  const startedAt = 1_000
+  const globalDeadline = startedAt + DASHBOARD_HEALTH_TIMEOUT_MS
+  expect(DASHBOARD_HEALTH_TIMEOUT_MS).toBe(60_000)
+  expect(dashboardAttemptDeadline(startedAt + 250, globalDeadline)).toBe(globalDeadline)
+  expect(dashboardAttemptDeadline(startedAt + 250, globalDeadline) - (startedAt + 250)).toBeGreaterThan(20_000)
 })
 
 test('organization selection is explicit only when ambiguous and repository registrations stay scoped', () => {
