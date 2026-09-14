@@ -2,6 +2,16 @@
 
 The project's story, newest first: what got built, why, and how it went — for the operator's future recall. Format home: the dev-chronicle skill.
 
+## 14-09-2026 — One release attempt waits; failed releases roll forward ([#193](https://github.com/vegastack/vegafactory/issues/193))
+
+- **What:** npm publication readback now allows ten minutes for exact package bytes to become visible, while a GitHub Actions release rerun refuses before preparation and directs the maintainer to a fresh patch and tag.
+- **Why:** The `v0.19.3` workflow stopped after its two-minute readback even though the dashboard package appeared about five minutes later, then the rerun deleted the retained pair it was designed to restore.
+- **How it went:** Fast injected-clock tests cross the former 13-observation limit with one publish per package, and the workflow contract proves only attempt one can prepare or publish while retained-byte verification and publication ordering stay unchanged.
+- **Changed:** Ten-minute exact-byte npm readback · first-attempt-only Release workflow · truthful immutable roll-forward runbook · unchanged OIDC, package identity, candidate/latest order, provenance, and artifact gates.
+- **Decisions:** none.
+
+— approved by (kmanojkumar) · built by Codex · branch fix/193-wait-for-npm-visibility-and-refuse-relea
+
 ## 14-09-2026 — Release integrity ignores the neighbor, not the runtime ([#190](https://github.com/vegastack/vegafactory/issues/190))
 
 - **What:** Installed-runtime verification still binds every retained CLI file and directory exactly, while directories above that trust boundary are now bound by stable identity, type, permissions, and ownership rather than unrelated entry timestamps and counts.
