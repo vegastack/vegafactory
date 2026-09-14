@@ -6,9 +6,9 @@ import { dirname, join } from 'node:path'
 import { gzipSync } from 'node:zlib'
 import {
   dashboardCacheNamespace, dashboardInstallReceipt, dashboardPaths, dashboardRepositories,
-  DASHBOARD_HEALTH_TIMEOUT_MS, dashboardAttemptDeadline, dashboardSpec, installArgs, installDashboardArtifact, launchDashboardChild, launchEnv,
+  DASHBOARD_HEALTH_TIMEOUT_MS, dashboardSpec, installArgs, installDashboardArtifact, launchDashboardChild, launchEnv,
   matchesReadiness, planDashboard, portCandidates, selectDashboardOrg, SERVER_ENTRY,
-  stopDashboardChild, validateDashboardDescriptor, verifyDashboardArtifact, verifyDashboardTree,
+  runDashboard, stopDashboardChild, validateDashboardDescriptor, verifyDashboardArtifact, verifyDashboardTree,
   waitDashboardChild, type DashboardArtifactDescriptor, type DashboardIdentity,
 } from '../src/dashboard.ts'
 
@@ -46,14 +46,6 @@ test('the launch environment is exactly the server contract, on the loopback int
   expect(partial).not.toHaveProperty('VEGAFACTORY_VIEWER')
   expect(partial).not.toHaveProperty('VEGAFACTORY_GH_TOKEN')
   expect(portCandidates(7777, 3)).toEqual([7777, 7778, 7779])
-})
-
-test('a fresh dashboard child may use the remaining 60-second readiness budget', () => {
-  const startedAt = 1_000
-  const globalDeadline = startedAt + DASHBOARD_HEALTH_TIMEOUT_MS
-  expect(DASHBOARD_HEALTH_TIMEOUT_MS).toBe(60_000)
-  expect(dashboardAttemptDeadline(startedAt + 250, globalDeadline)).toBe(globalDeadline)
-  expect(dashboardAttemptDeadline(startedAt + 250, globalDeadline) - (startedAt + 250)).toBeGreaterThan(20_000)
 })
 
 test('organization selection is explicit only when ambiguous and repository registrations stay scoped', () => {
@@ -217,3 +209,23 @@ test('readiness accepts the exact owned child and bounded cleanup removes its pr
     expect(child.exited).toBe(true)
   } finally { await rm(home, { recursive: true, force: true }) }
 })
+
+test('the real dashboard command keeps one slow fresh child beyond the former two-second cutoff', async () => {
+  const home = await realpath(await mkdtemp(join(tmpdir(), 'vf-dashboard-slow-command-')))
+  const room = join(home, 'room'), repo = join(home, 'repo'), override = join(home, 'dashboard'), entry = join(override, SERVER_ENTRY)
+  const fakeBin = join(home, 'bin'), oldPath = process.env.PATH
+  const reservation = Bun.serve({ hostname: '127.0.0.1', port: 0, fetch: () => new Response('reserved') })
+  const port = reservation.port!
+  reservation.stop(true)
+  try {
+    await mkdir(join(home, '.vegastack'), { recursive: true }); await mkdir(room); await mkdir(repo); await mkdir(dirname(entry), { recursive: true }); await mkdir(fakeBin)
+    await writeFile(join(fakeBin, 'gh'), '#!/bin/sh\nexit 1\n', { mode: 0o755 })
+    await writeFile(join(home, '.vegastack/factory.json'), JSON.stringify({schemaVersion:2,revision:0,repos:[{repo:'vegastack/vegafactory',org:'vegastack',path:repo}],controlRooms:{vegastack:{repo:'vegastack/control-room',path:room,branch:'main',lastSyncedAt:null,sha:null}}}))
+    await writeFile(entry, `await Bun.sleep(2250);const server=Bun.serve({hostname:'127.0.0.1',port:Number(process.env.PORT),fetch:()=>Response.json({ok:true,org:process.env.VEGAFACTORY_ORG,version:process.env.VEGAFACTORY_VERSION,instanceId:process.env.VEGAFACTORY_INSTANCE_ID,cacheSchema:2,dataState:'empty',sourceAgeSeconds:null})});setTimeout(()=>{server.stop(true);process.exit(0)},1000);process.on('SIGTERM',()=>{server.stop(true);process.exit(0)})`)
+    process.env.PATH = `${fakeBin}:${oldPath ?? ''}`
+    const started = Date.now()
+    expect(await runDashboard({rest:['--org','vegastack','--port',String(port),'--dir',override,'--json'],home,version:'1.0.0'})).toBe(0)
+    expect(Date.now()-started).toBeGreaterThan(2_000)
+    expect(DASHBOARD_HEALTH_TIMEOUT_MS).toBe(60_000)
+  } finally { process.env.PATH = oldPath; await rm(home, { recursive: true, force: true }) }
+},10_000)

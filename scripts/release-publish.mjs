@@ -30,31 +30,47 @@ export async function publishPair(manifest, registry, {publish=false,promote=fal
     if(status==='conflict'||status==='unavailable')throw new Error(`registry ${status}: ${a.name}`)
     return status
   }
-  const confirmPublication=async(a,failure)=>{
+  const confirmPublication=async(a,failure,initialStatus)=>{
     const policy=readback??registry.publicationReadback??{attempts:1,delayMs:0,sleep:async()=>{}}
     if(!Number.isSafeInteger(policy.attempts)||policy.attempts<1||!Number.isSafeInteger(policy.delayMs)||policy.delayMs<0||typeof policy.sleep!=='function')throw new Error('invalid publication readback policy')
-    let status='unavailable'
-    for(let attempt=0;attempt<policy.attempts;attempt++) {
+    let status=initialStatus,observations=initialStatus===undefined?0:1
+    if(status==='matching')return
+    if(status==='conflict')throw new Error(`registry conflict: ${a.name}`)
+    while(observations<policy.attempts) {
+      if(observations>0)await policy.sleep(policy.delayMs)
       status=await observe(a)
+      observations++
       if(status==='matching')return
       if(status==='conflict')throw new Error(`registry conflict: ${a.name}`)
-      if(attempt+1<policy.attempts)await policy.sleep(policy.delayMs)
     }
     throw new Error(`publication not confirmed after bounded readback (${status}); preserve pair and resume after diagnosis: ${failure?.message??a.name}`)
   }
   try {
-    // Reconcile both immutable identities before replacing any previous progress.
-    const initial=[];for(const a of artifacts)initial.push(await check(a))
+    // A persisted pending mutation is an attempted immutable publish, even if its subprocess
+    // response was lost. Confirm it read-only on every recovery; never submit those bytes twice.
+    // Completed states carry the same lifetime fact for earlier artifacts.
+    const attempted=new Set()
+    if(previous) {
+      if(['dashboard-present','pair-present','smoked','promoted'].includes(previous.state))attempted.add(DASHBOARD)
+      if(['pair-present','smoked','promoted'].includes(previous.state))attempted.add(CLI)
+      if(previous.pending?.operation==='publish' && artifacts.some(a=>a.name===previous.pending.name))attempted.add(previous.pending.name)
+    }
+    // Reconcile both immutable identities before replacing any previous progress. Only an
+    // artifact with no recorded attempt may use definitive absence to authorize publication.
+    const initial=[]
+    for(const a of artifacts)initial.push(attempted.has(a.name)?await observe(a):await check(a))
     await save({error:null})
     for(let i=0;i<artifacts.length;i++) {
       const a=artifacts[i]
-      if(initial[i]==='absent') {
+      if(attempted.has(a.name))await confirmPublication(a,undefined,initial[i])
+      else if(initial[i]==='absent') {
         if(!publish)throw new Error('publication requires explicit --publish authorization')
+        attempted.add(a.name)
         await save({pending:{operation:'publish',name:a.name}})
         let failure;try{await registry.publish(a,manifest.version)}catch(e){failure=e}
         await confirmPublication(a,failure)
       }
-      await save({state:i===0?'dashboard-present':'pair-present',pending:null,lastCompleted:{operation:'publish-readback',name:a.name}})
+      await save({state:i===0?'dashboard-present':'pair-present',pending:record.pending?.name===a.name?null:record.pending,lastCompleted:{operation:'publish-readback',name:a.name}})
     }
     await registry.smoke(manifest);await save({state:'smoked',lastCompleted:{operation:'smoke'}})
     if(promote) {
@@ -89,7 +105,7 @@ export function compareVersions(a,b) {
   for(let i=0;i<Math.max(x.pre.length,y.pre.length);i++) {const p=x.pre[i],q=y.pre[i];if(p===q)continue;if(p===undefined)return -1;if(q===undefined)return 1;const pn=/^\d+$/.test(p),qn=/^\d+$/.test(q);if(pn&&qn)return p.length!==q.length?p.length>q.length?1:-1:p>q?1:-1;if(pn!==qn)return pn?-1:1;return p>q?1:-1}
   return 0
 }
-export function registryClient({directory,base='https://registry.npmjs.org',candidateTag='candidate',fetcher=fetch,run=command,smoke=smokePair,publisher}={}) {
+export function registryClient({directory,base='https://registry.npmjs.org',candidateTag='candidate',fetcher=fetch,run=command,smoke=smokePair,publisher,sleep=ms=>new Promise(resolve=>setTimeout(resolve,ms))}={}) {
   const origin=new URL(base)
   if(origin.username||origin.password)throw new Error('registry URL must not contain credentials')
   if(origin.protocol!=='https:' && !(origin.protocol==='http:'&&['127.0.0.1','localhost','[::1]'].includes(origin.hostname)))throw new Error('registry requires HTTPS (loopback fixtures excepted)')
@@ -125,7 +141,7 @@ export function registryClient({directory,base='https://registry.npmjs.org',cand
   // the bounded propagation window; unit tests inject a short policy to exercise every branch.
   const publicationReadback=publisher
     ? {attempts:1,delayMs:0,sleep:async()=>{}}
-    : {attempts:PUBLICATION_READBACK_ATTEMPTS,delayMs:PUBLICATION_READBACK_DELAY_MS,sleep:ms=>new Promise(resolve=>setTimeout(resolve,ms))}
+    : {attempts:PUBLICATION_READBACK_ATTEMPTS,delayMs:PUBLICATION_READBACK_DELAY_MS,sleep}
   return {
     publicationReadback,
     async read(a,version) {

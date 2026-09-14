@@ -23,13 +23,6 @@ const DEFAULT_PORT = 7777
 const PORT_SPAN = 10
 export const DASHBOARD_HEALTH_TIMEOUT_MS = 60_000
 
-// A fresh hosted runner can need more than two seconds to start the standalone server. The
-// global deadline still bounds the whole port search; a living child gets that remaining budget
-// instead of being killed and relaunched repeatedly while it is still starting.
-export function dashboardAttemptDeadline(now: number, globalDeadline: number): number {
-  return globalDeadline > now ? globalDeadline : now
-}
-
 export function dashboardSpec(version: string): string {
   return `${DASHBOARD_PACKAGE}@${version}`
 }
@@ -326,7 +319,10 @@ export async function runDashboard(options: DashboardOptions): Promise<number> {
     const env = launchEnv({env: {...environment, cacheFile, port, version, instanceId: identity.instanceId, bin: process.argv[1] ?? 'vegafactory'}})
     const attempt = launchDashboardChild(paths.entry, {...process.env, ...env}, flags.json)
     try {
-      const ready = await waitDashboardChild(attempt, identity, port, dashboardAttemptDeadline(Date.now(), deadline))
+      // A fresh hosted runner can need more than two seconds to start the standalone server. The
+      // global deadline still bounds the whole port search; a living child gets that remaining
+      // budget instead of being killed and relaunched while it is still starting.
+      const ready = await waitDashboardChild(attempt, identity, port, deadline)
       if (!ready) {
         if (!await stopDashboardChild(attempt)) { console.error('error: dashboard child termination is unverified; retained ownership, no port retry'); return 1 }
         continue

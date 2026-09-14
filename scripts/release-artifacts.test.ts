@@ -5,13 +5,14 @@ import { mkdtemp, mkdir, writeFile, symlink, readFile, chmod, rm, link } from 'n
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { gzipSync } from 'node:zlib'
+import { DASHBOARD_HEALTH_TIMEOUT_MS } from '../packages/cli/src/dashboard.ts'
 function archive(entries: {path:string, data?:string, type?:string, mode?:number}[]) {
  const chunks: Buffer[]=[]
  for(const e of entries){const b=Buffer.from(e.data??'');const h=Buffer.alloc(512);h.write((e.mode??0o644).toString(8).padStart(7,'0')+'\0',100);h.write(e.path,0,100);h.write(b.length.toString(8).padStart(11,'0')+'\0',124);h.fill(32,148,156);h.write(e.type??'0',156);h.write([...h].reduce((a,v)=>a+v,0).toString(8).padStart(6,'0')+'\0 ',148);chunks.push(h,b,Buffer.alloc((512-b.length%512)%512))}
  return gzipSync(Buffer.concat([...chunks,Buffer.alloc(1024)]))
 }
 const packed=()=>archive([{path:'package/package.json',data:JSON.stringify({name:'@vegastack/vegafactory-dashboard',version:'1.0.0'})},{path:'package/dist-standalone/server.js',data:'server'}])
-test('release smoke waits beyond the CLI dashboard readiness budget',()=>{expect(RELEASE_DASHBOARD_READY_TIMEOUT_MS).toBe(75_000);expect(RELEASE_DASHBOARD_READY_TIMEOUT_MS).toBeGreaterThan(60_000)})
+test('release smoke waits beyond the CLI dashboard readiness budget',()=>{expect(RELEASE_DASHBOARD_READY_TIMEOUT_MS).toBe(75_000);expect(RELEASE_DASHBOARD_READY_TIMEOUT_MS).toBeGreaterThan(DASHBOARD_HEALTH_TIMEOUT_MS)})
 test('changing packed bytes invalidates identity',()=>{const b=Buffer.from('reviewed');const sha256=createHash('sha256').update(b).digest('hex');expect(verifyArtifactBytes(b,{sha256})).toBe(true);expect(verifyArtifactBytes(Buffer.from('rebuilt'),{sha256})).toBe(false)})
 test('pair and tag versions must match',()=>{expect(()=>assertPairVersions({cli:'1.0.0',dashboard:'1.0.1',tag:'v1.0.0'})).toThrow();expect(()=>assertPairVersions({cli:'1.0.0',dashboard:'1.0.0',tag:'v1.0.0'})).not.toThrow()})
 test('a major boundary requires exact operator authority',()=>{
@@ -262,7 +263,7 @@ test('installed runtime producer verifies a real npm packed and offline installe
  await expect(verifyInstalledRuntime(input)).rejects.toThrow('inventory')
 },30000)
 
-async function launcherSmokeFixture(earlyExit=false) {
+async function launcherSmokeFixture(earlyExit=false,launcherDelayMs=0) {
  const home=await realpath(await mkdtemp(join(tmpdir(),'launcher-smoke-pair-'))),directory=join(home,'pair');await mkdir(directory)
  const dashboard=archive([
   {path:'package/package.json',data:JSON.stringify({name:DASHBOARD,version:'1.0.0'})},
@@ -295,7 +296,7 @@ const config=JSON.parse(readFileSync(join(home,'.vegastack/factory.json'),'utf8'
 if(config.schemaVersion!==2||config.revision!==0||!room||!isAbsolute(room.path)||!Array.isArray(repos)||repos.length!==1||repos[0].org!==org||repos[0].repo!=='fixture/project'||!isAbsolute(repos[0].path))process.exit(77);
 const retained=join(home,'.vegastack/dashboard/1.0.0/node_modules/@vegastack/vegafactory-dashboard/dist-standalone/packages/dashboard/server.js');if(!existsSync(retained))process.exit(78);
 const instanceId=randomUUID();const child=spawn(process.execPath,[fileURLToPath(new URL('./fixture-dashboard-child.mjs',import.meta.url)),String(start+1),instanceId,org,'1.0.0'],{detached:true,stdio:['ignore','pipe','inherit']});
-child.stdout.once('data',()=>console.log(JSON.stringify({command:'dashboard',ok:true,org,version:'1.0.0',instanceId,cacheSchema:2,url:'http://127.0.0.1:'+(start+1),dir:join(home,'.vegastack/dashboard/1.0.0'),entry:retained,fetched:false,pid:child.pid})));const stop=()=>{child.once('close',()=>process.exit(0));child.kill('SIGTERM')};process.on('SIGTERM',stop);process.on('SIGINT',stop);await new Promise(()=>{});`
+child.stdout.once('data',()=>setTimeout(()=>console.log(JSON.stringify({command:'dashboard',ok:true,org,version:'1.0.0',instanceId,cacheSchema:2,url:'http://127.0.0.1:'+(start+1),dir:join(home,'.vegastack/dashboard/1.0.0'),entry:retained,fetched:false,pid:child.pid})),${launcherDelayMs}));const stop=()=>{child.once('close',()=>process.exit(0));child.kill('SIGTERM')};process.on('SIGTERM',stop);process.on('SIGINT',stop);await new Promise(()=>{});`
  const cliBytes=archive([
   {path:'package/package.json',data:JSON.stringify({name:CLI,version:'1.0.0',type:'module',bin:{vegafactory:'dist/index.js'}})},
   {path:'package/dist/index.js',data:cli,mode:0o755},{path:'package/dist/run-wrapper.js',data:'// wrapper'},
@@ -314,6 +315,12 @@ test('pair smoke uses the installed CLI launcher, rejects a stale listener, reac
  expect(result.readiness.instanceId).toMatch(/^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/)
  expect(result.routes.map((row:any)=>row.route)).toEqual(['/','/performance','/activity','/people','/people/fixture-user?dimension=task-owner','/skills','/repo/fixture/project','/board','/dispatcher'])
  expect(result).toMatchObject({installedCli:true,staleListenerRejected:true,ownedChildAlive:true,cleanup:{cliStopped:true,dashboardStopped:true,isolatedHomeRemoved:true}})
+},30000)
+
+test('pair smoke outer watcher accepts delayed launcher output inside its injected bound',async()=>{
+ const fixture=await launcherSmokeFixture(false,500);const result=await smokePair(fixture.manifest,fixture.directory,{launcherTimeoutMs:2_000})
+ expect(result.launcher).toMatchObject({command:'dashboard',ok:true,org:'fixture',version:'1.0.0'})
+ expect(result.cleanup).toEqual({cliStopped:true,dashboardStopped:true,isolatedHomeRemoved:true})
 },30000)
 
 test('pair smoke rejects an installed launcher that exits before owning a ready dashboard',async()=>{
