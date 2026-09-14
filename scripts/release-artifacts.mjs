@@ -228,6 +228,9 @@ export async function verifyPair(manifest, directory) {
   verifyDashboardDescriptor(descriptor && JSON.parse(descriptor.data.toString()),pair[DASHBOARD].bytes,manifest.version)
   return pair
 }
+export function sameInstalledRuntimeAncestor(before,after) {
+  return before.dev===after.dev && before.ino===after.ino && before.mode===after.mode && before.uid===after.uid && before.gid===after.gid
+}
 // External retained evidence only: the caller supplies identities from trusted
 // candidate evidence. This does not authenticate that evidence or qualify execution.
 // #138 independently binds the running entry and recomputes this inventory at use.
@@ -247,7 +250,7 @@ export async function verifyInstalledRuntime({manifest,directory,installedRoot,e
   for (let path=installedRoot;;path=dirname(path)) {
     const stat=await lstat(path)
     if (!stat.isDirectory() || stat.isSymbolicLink()) throw new Error('installed runtime root or ancestor contains a link or unsupported object')
-    observed.push({path,stat})
+    observed.push({path,stat,ancestor:path!==installedRoot})
     if (dirname(path)===path) break
   }
   const actual=[]
@@ -257,7 +260,7 @@ export async function verifyInstalledRuntime({manifest,directory,installedRoot,e
       const file=join(root,name), stat=await lstat(file)
       if (stat.isDirectory()) {
         if (!directories.has(path)) throw new Error('installed runtime inventory contains an extra directory')
-        observed.push({path:file,stat});await walk(file,path)
+        observed.push({path:file,stat,ancestor:false});await walk(file,path)
       } else if (stat.isFile() && stat.nlink===1) {
         const mode=stat.mode&0o777
         const retained=archived.get(path)
@@ -269,14 +272,17 @@ export async function verifyInstalledRuntime({manifest,directory,installedRoot,e
           if (bytes.length!==stat.size || !same(stat,await fd.stat())) throw new Error('installed runtime changed during inspection')
           actual.push({path,mode,sha256:digest(bytes)})
         } finally {await fd.close()}
-        observed.push({path:file,stat})
+        observed.push({path:file,stat,ancestor:false})
       } else throw new Error('installed runtime contains a link or unsupported object')
     }
   }
   await walk(installedRoot)
   actual.sort((a,b)=>a.path<b.path?-1:a.path>b.path?1:0)
   if (JSON.stringify(actual)!==JSON.stringify(expected)) throw new Error('installed runtime inventory differs from retained CLI archive')
-  for (const {path,stat} of observed) if (!same(stat,await lstat(path))) throw new Error('installed runtime changed during inspection')
+  for (const {path,stat,ancestor} of observed) {
+    const current=await lstat(path)
+    if (!(ancestor?sameInstalledRuntimeAncestor(stat,current):same(stat,current))) throw new Error('installed runtime changed during inspection')
+  }
   return {schemaVersion:1,sourceSha:expectedSourceSha,treeSha:expectedTreeSha,packageName:CLI,version:manifest.version,tarballSha256:pair[CLI].artifact.sha256,inventoryDigest:digest(JSON.stringify(actual))}
 }
 // Release evidence is bound separately from archive-only CI rehearsals.

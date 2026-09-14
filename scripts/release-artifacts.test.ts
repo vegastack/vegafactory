@@ -175,7 +175,7 @@ test('release workflow immutable scanner source matches the audited baseline ver
 })
 
 
-import { CLI, DASHBOARD, extractPackage, packPair, verifyInstalledRuntime } from './release-artifacts.mjs'
+import { CLI, DASHBOARD, extractPackage, packPair, sameInstalledRuntimeAncestor, verifyInstalledRuntime } from './release-artifacts.mjs'
 import { verifyInstalledRuntimeBinding, type InstalledRuntimeBinding } from '../packages/cli/src/runs.ts'
 const runtimeSha = (bytes: Buffer | string): string => createHash('sha256').update(bytes).digest('hex')
 const runtimeSource = 'a'.repeat(40), runtimeTree = 'b'.repeat(40)
@@ -205,6 +205,20 @@ test('installed runtime producer binds the full retained pair and matches the in
  expect(binding).toEqual({schemaVersion:1,sourceSha:runtimeSource,treeSha:runtimeTree,packageName:CLI,version:'1.0.0',tarballSha256:runtimeSha(f.cli),inventoryDigest:runtimeSha(JSON.stringify(entries))})
  await verifyInstalledRuntimeBinding(binding,f.installedRoot,join(f.installedRoot,'dist/index.js'))
  await expect(verifyInstalledRuntimeBinding(binding,f.installedRoot,join(f.installedRoot,'dist/run-wrapper.js'))).rejects.toThrow('outside')
+})
+test('installed runtime verification tolerates unrelated entry churn on an ancestor directory',async()=>{
+ const f=await runtimeFixture(),sibling=join(f.home,'unrelated-sibling');let active=true,mutations=0
+ const churn=(async()=>{while(active){await mkdir(sibling).catch(error=>{if(error.code!=='EEXIST')throw error});await rm(sibling,{recursive:true,force:true});mutations++}})()
+ try {
+  const binding=await verifyInstalledRuntime(f) as InstalledRuntimeBinding
+  expect(binding.inventoryDigest).toBe(runtimeSha(JSON.stringify(readPackageArchive(f.cli).map(({path,mode,sha256}:any)=>({path,mode,sha256})))))
+  expect(mutations).toBeGreaterThan(0)
+ }finally{active=false;await churn;await rm(f.home,{recursive:true,force:true})}
+})
+test('installed runtime ancestor binding retains identity, permissions, and ownership',()=>{
+ const before={dev:1,ino:2,mode:0o40700,uid:3,gid:4,nlink:5,size:6,mtimeMs:7,ctimeMs:8}
+ expect(sameInstalledRuntimeAncestor(before,{...before,nlink:9,size:10,mtimeMs:11,ctimeMs:12})).toBe(true)
+ for(const field of ['dev','ino','mode','uid','gid'] as const)expect(sameInstalledRuntimeAncestor(before,{...before,[field]:before[field]+1})).toBe(false)
 })
 test('installed runtime producer refuses missing, changed, extra files and directories, modes and links',async()=>{
  const f=await runtimeFixture()
