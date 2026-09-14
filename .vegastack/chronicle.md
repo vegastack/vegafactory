@@ -2,6 +2,16 @@
 
 The project's story, newest first: what got built, why, and how it went — for the operator's future recall. Format home: the dev-chronicle skill.
 
+## 14-09-2026 — Fresh releases wait for what they already published ([#187](https://github.com/vegastack/vegafactory/issues/187))
+
+- **What:** First-use dashboard launch now has a 60-second readiness budget, the release smoke wrapper waits beyond it, and npm publication readback tolerates two minutes of registry propagation without publishing an immutable version twice.
+- **Why:** The `0.19.1` release published both candidate packages, but immediate npm readback twice reported absence and two later hosted first-use smokes killed still-starting dashboard children at the former two-second per-port cutoff.
+- **How it went:** The immutable `0.19.1` evidence stayed intact and candidate-only; focused delayed-visibility and timeout-bound regressions drove a narrow `0.19.2` roll-forward while all integrity, ownership, ordering, and recovery checks remained fail-closed.
+- **Changed:** Dashboard readiness budget · release-smoke outer wait · at-most-once publication with bounded exact-byte readback · no package, credential, or authority change.
+- **Decisions:** none.
+
+— approved by (kmanojkumar) · built by Codex · branch fix/187-tolerate-hosted-release-propagation-and
+
 ## 13-09-2026 — Major releases require the operator's exact call ([#182](https://github.com/vegastack/vegafactory/issues/182))
 
 - **What:** The unpublished productionization batch returns to the intended `0.19.0` line, and CI plus immutable release preparation now refuse a higher-major transition without an exact operator approval record.
