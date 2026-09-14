@@ -7,6 +7,21 @@ function registry(){const existing=new Map<string,any>();const calls:string[]=[]
 test('errors never mean absent',()=>{for(const status of [401,403,429,500,0])expect(classifyRegistry({integrity:'a'},{status})).toBe('unavailable');expect(classifyRegistry({integrity:'a'},{status:404})).toBe('unavailable');expect(classifyRegistry({integrity:'a'},{status:404,definitive:true})).toBe('absent');expect(classifyRegistry({integrity:'a'},{status:200,integrity:'b'})).toBe('conflict')})
 test('dashboard first; CLI failure resumes matching dashboard without re-publication',async()=>{const r=registry();const publish=r.publish;r.publish=async a=>{if(a.name===manifest.artifacts[1].name)throw new Error('failed');await publish(a)};await expect(publishPair(manifest,r,{publish:true})).rejects.toThrow();expect(r.calls).toEqual([manifest.artifacts[0].name]);r.publish=publish;expect((await publishPair(manifest,r,{publish:true,promote:true})).state).toBe('promoted');expect(r.calls.filter(x=>x===manifest.artifacts[0].name)).toHaveLength(1)})
 test('lost publish response reads back and does not blindly retry',async()=>{const r=registry();const publish=r.publish;r.publish=async a=>{await publish(a);throw new Error('timeout')};expect((await publishPair(manifest,r,{publish:true})).state).toBe('smoked');expect(r.calls.filter(x=>x.includes('@'))).toHaveLength(2)})
+test('post-publish readback tolerates delayed visibility without republishing',async()=>{
+ const r=registry(),reads=new Map<string,number>(),published=r.publish,sleeps:number[]=[]
+ r.publish=async a=>{await published(a);reads.set(a.name,0)}
+ r.read=async a=>{const seen=reads.get(a.name);if(seen===undefined)return {status:404,definitive:true};reads.set(a.name,seen+1);return seen<2?{status:404,definitive:true}:{status:200,integrity:a.integrity,bytes:Buffer.from(a.name)}}
+ expect((await publishPair(manifest,r,{publish:true,readback:{attempts:3,delayMs:10_000,sleep:async ms=>{sleeps.push(ms)}}})).state).toBe('smoked')
+ expect(r.calls.filter(x=>x.includes('@'))).toEqual(manifest.artifacts.map(a=>a.name))
+ expect(sleeps).toEqual([10_000,10_000,10_000,10_000])
+})
+test('post-publish readback exhaustion and integrity conflict fail closed',async()=>{
+ for(const observed of [{status:404,definitive:true},{status:0,error:'timeout'},{status:200,integrity:'changed'}]) {
+  const r=registry();let published=false;r.publish=async a=>{r.calls.push(a.name);published=true};r.read=async()=>published?observed:{status:404,definitive:true}
+  await expect(publishPair(manifest,r,{publish:true,readback:{attempts:3,delayMs:1,sleep:async()=>{}}})).rejects.toThrow(observed.status===200?'conflict':'publication not confirmed')
+  expect(r.calls.filter(x=>x.includes('@'))).toHaveLength(1)
+ }
+})
 test('matching rerun only smokes; altered bytes and integrity conflict refuse',async()=>{const r=registry();for(const a of manifest.artifacts)r.existing.set(a.name,a);await publishPair(manifest,r,{publish:true});expect(r.calls).toEqual(['smoke']);r.existing.set(manifest.artifacts[0].name,{integrity:'changed'});await expect(publishPair(manifest,r,{publish:true})).rejects.toThrow()})
 test('smoke failure never promotes; no explicit grant never publishes',async()=>{const r=registry();await expect(publishPair(manifest,r,{})).rejects.toThrow();expect(r.calls).toEqual([]);r.smoke=async()=>{throw new Error('smoke failed')};await expect(publishPair(manifest,r,{publish:true,promote:true})).rejects.toThrow();expect(r.calls.some(c=>c.startsWith('promote'))).toBe(false)})
 

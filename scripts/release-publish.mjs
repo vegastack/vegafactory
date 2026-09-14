@@ -9,18 +9,38 @@ export function classifyRegistry(expected, observed) {
   if(observed?.status===404 && observed.definitive===true)return 'absent'
   return 'unavailable'
 }
-export async function publishPair(manifest, registry, {publish=false,promote=false,onState=async()=>{},previous}={}) {
+export const PUBLICATION_READBACK_ATTEMPTS=13
+export const PUBLICATION_READBACK_DELAY_MS=10_000
+export async function publishPair(manifest, registry, {publish=false,promote=false,onState=async()=>{},previous,readback}={}) {
   const artifacts=[DASHBOARD,CLI].map(name=>manifest.artifacts.find(a=>a.name===name))
   if(artifacts.some(a=>!a)||manifest.artifacts.length!==2)throw new Error('expected exactly dashboard and CLI')
   if(previous && (previous.version!==manifest.version || JSON.stringify(previous.artifacts)!==JSON.stringify(artifacts)))throw new Error('existing release state belongs to another immutable pair')
   const record={...previous,state:previous?.state??'prepared',version:manifest.version,artifacts,observations:{...previous?.observations},promotions:{...previous?.promotions}}
   const save=async patch=>{Object.assign(record,patch);await onState(structuredClone(record))}
-  const check=async a=>{
-    const observed=await registry.read(a,manifest.version);const status=classifyRegistry(a,observed)
+  const observe=async a=>{
+    let observed
+    try{observed=await registry.read(a,manifest.version)}catch(error){observed={status:0,error:error.message}}
+    const status=classifyRegistry(a,observed)
     if(status==='matching' && (!observed.bytes || !verifyArtifactBytes(observed.bytes,a) || observed.bytes.length!==a.bytes))throw new Error(`registry payload mismatch: ${a.name}`)
     record.observations[a.name]=status
+    return status
+  }
+  const check=async a=>{
+    const status=await observe(a)
     if(status==='conflict'||status==='unavailable')throw new Error(`registry ${status}: ${a.name}`)
     return status
+  }
+  const confirmPublication=async(a,failure)=>{
+    const policy=readback??registry.publicationReadback??{attempts:1,delayMs:0,sleep:async()=>{}}
+    if(!Number.isSafeInteger(policy.attempts)||policy.attempts<1||!Number.isSafeInteger(policy.delayMs)||policy.delayMs<0||typeof policy.sleep!=='function')throw new Error('invalid publication readback policy')
+    let status='unavailable'
+    for(let attempt=0;attempt<policy.attempts;attempt++) {
+      status=await observe(a)
+      if(status==='matching')return
+      if(status==='conflict')throw new Error(`registry conflict: ${a.name}`)
+      if(attempt+1<policy.attempts)await policy.sleep(policy.delayMs)
+    }
+    throw new Error(`publication not confirmed after bounded readback (${status}); preserve pair and resume after diagnosis: ${failure?.message??a.name}`)
   }
   try {
     // Reconcile both immutable identities before replacing any previous progress.
@@ -32,7 +52,7 @@ export async function publishPair(manifest, registry, {publish=false,promote=fal
         if(!publish)throw new Error('publication requires explicit --publish authorization')
         await save({pending:{operation:'publish',name:a.name}})
         let failure;try{await registry.publish(a,manifest.version)}catch(e){failure=e}
-        if(await check(a)!=='matching')throw new Error(`publication not confirmed; preserve pair and resume after diagnosis: ${failure?.message??a.name}`)
+        await confirmPublication(a,failure)
       }
       await save({state:i===0?'dashboard-present':'pair-present',pending:null,lastCompleted:{operation:'publish-readback',name:a.name}})
     }
@@ -101,7 +121,13 @@ export function registryClient({directory,base='https://registry.npmjs.org',cand
     if(r.data.version===version && r.data.dist?.integrity!==a.integrity)throw new Error('latest integrity conflict')
     return {status:200,version:r.data.version,integrity:r.data.dist?.integrity,matching:r.data.version===version}
   }
+  // Loopback rehearsals are synchronously visible by construction. The real npm registry gets
+  // the bounded propagation window; unit tests inject a short policy to exercise every branch.
+  const publicationReadback=publisher
+    ? {attempts:1,delayMs:0,sleep:async()=>{}}
+    : {attempts:PUBLICATION_READBACK_ATTEMPTS,delayMs:PUBLICATION_READBACK_DELAY_MS,sleep:ms=>new Promise(resolve=>setTimeout(resolve,ms))}
   return {
+    publicationReadback,
     async read(a,version) {
       const result=await get(new URL(`${encodeURIComponent(a.name)}/${encodeURIComponent(version)}`,origin.href.endsWith('/')?origin.href:origin.href+'/'))
       if(result.status!==200)return result
