@@ -1,5 +1,14 @@
 # @vegastack/skills
 
+## 0.19.4
+
+### Patch Changes
+
+- 6a743e9: Wait through measured npm publication latency and reject destructive same-run release reruns.
+
+  - Observe each attempted publish for up to ten minutes without resubmitting immutable package bytes.
+  - Fail workflow attempts after the first before preparation and direct failed releases to a fresh patch and tag.
+
 ## 0.19.3
 
 ### Patch Changes
