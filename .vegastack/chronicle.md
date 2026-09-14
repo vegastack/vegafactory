@@ -2,6 +2,16 @@
 
 The project's story, newest first: what got built, why, and how it went — for the operator's future recall. Format home: the dev-chronicle skill.
 
+## 14-09-2026 — Release integrity ignores the neighbor, not the runtime ([#190](https://github.com/vegastack/vegafactory/issues/190))
+
+- **What:** Installed-runtime verification still binds every retained CLI file and directory exactly, while directories above that trust boundary are now bound by stable identity, type, permissions, and ownership rather than unrelated entry timestamps and counts.
+- **Why:** The unpublished `v0.19.2` prepare job stopped before retention when another test changed a sibling in the runner's shared temporary directory, making harmless ancestor metadata look like a runtime mutation.
+- **How it went:** A deterministic concurrent sibling-churn test reproduced the false refusal in milliseconds; the correction kept strict runtime-subtree checks and restored the original release-gate failure test to its intended HTTP 500 path.
+- **Changed:** Stable ancestor identity verification · unchanged exact runtime inventory and byte verification · immutable `v0.19.2` remains unpublished · next patch rolls forward.
+- **Decisions:** none.
+
+— approved by (kmanojkumar) · built by Codex · branch fix/190-isolate-runtime-verification-from-ancestor-churn
+
 ## 14-09-2026 — Fresh releases wait for what they already published ([#187](https://github.com/vegastack/vegafactory/issues/187))
 
 - **What:** First-use dashboard launch now has a 60-second readiness budget, the release smoke wrapper waits beyond it, and npm publication readback tolerates two minutes of registry propagation without publishing an immutable version twice.
