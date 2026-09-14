@@ -9,7 +9,7 @@ export function classifyRegistry(expected, observed) {
   if(observed?.status===404 && observed.definitive===true)return 'absent'
   return 'unavailable'
 }
-export const PUBLICATION_READBACK_ATTEMPTS=13
+export const PUBLICATION_READBACK_ATTEMPTS=61
 export const PUBLICATION_READBACK_DELAY_MS=10_000
 export async function publishPair(manifest, registry, {publish=false,promote=false,onState=async()=>{},previous,readback}={}) {
   const artifacts=[DASHBOARD,CLI].map(name=>manifest.artifacts.find(a=>a.name===name))

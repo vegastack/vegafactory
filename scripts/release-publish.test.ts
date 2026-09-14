@@ -54,25 +54,26 @@ test('HTTP adapter bounds retries and never classifies missing payload as absent
  const missingPayload=registryClient({fetcher:async(url:any)=>String(url).endsWith('/file.tgz')?new Response('',{status:404}):Response.json({name:manifest.artifacts[0].name,version:'1.0.0',dist:{integrity:manifest.artifacts[0].integrity,tarball:'https://registry.npmjs.org/file.tgz'}})})
  expect(classifyRegistry(manifest.artifacts[0],await missingPayload.read(manifest.artifacts[0],'1.0.0'))).toBe('unavailable')
 })
-test('production registry policy performs 13 bounded confirmation observations after a lost response without republishing',async()=>{
+test('production registry policy tolerates measured five-minute visibility without republishing',async()=>{
  const {registryClient,PUBLICATION_READBACK_ATTEMPTS,PUBLICATION_READBACK_DELAY_MS}=await import('./release-publish.mjs')
+ expect(PUBLICATION_READBACK_ATTEMPTS).toBe(61)
  const published=new Set<string>(),observations=new Map<string,number>(),mutations=new Map<string,number>(),sleeps:number[]=[]
  const fetcher=async(url:URL|string)=>{
   const address=String(url),a=manifest.artifacts.find(candidate=>address.includes(encodeURIComponent(candidate.name)))!
   if(address.endsWith('.tgz'))return new Response(Buffer.from(a.name))
   if(!published.has(a.name))return new Response('',{status:404})
   const count=(observations.get(a.name)??0)+1;observations.set(a.name,count)
-  if(count<PUBLICATION_READBACK_ATTEMPTS)return new Response('',{status:404})
+  if(count<30)return new Response('',{status:404})
   return Response.json({name:a.name,version:manifest.version,dist:{integrity:a.integrity,tarball:`https://registry.npmjs.org/${encodeURIComponent(a.name)}/${manifest.version}.tgz`}})
  }
  const run=(argv:string[])=>{const a=manifest.artifacts.find(candidate=>argv[2]?.endsWith(candidate.file))!;published.add(a.name);mutations.set(a.name,(mutations.get(a.name)??0)+1);throw Error('lost publish response')}
  const r=registryClient({directory:'/retained',fetcher,run,smoke:async()=>{},sleep:async(ms:number)=>{sleeps.push(ms)}})
  expect((await publishPair(manifest,r,{publish:true})).state).toBe('smoked')
  expect(manifest.artifacts.map(a=>mutations.get(a.name))).toEqual([1,1])
- // Confirmation consumes exactly the configured 13 observations. The successful path then
+ // Confirmation consumes 30 observations, beyond the old 13-observation bound. The successful path then
  // performs one separate read per artifact before the first-use smoke.
- expect(manifest.artifacts.map(a=>observations.get(a.name))).toEqual([PUBLICATION_READBACK_ATTEMPTS+1,PUBLICATION_READBACK_ATTEMPTS+1])
- expect(sleeps).toHaveLength((PUBLICATION_READBACK_ATTEMPTS-1)*manifest.artifacts.length)
+ expect(manifest.artifacts.map(a=>observations.get(a.name))).toEqual([31,31])
+ expect(sleeps).toHaveLength(29*manifest.artifacts.length)
  expect(new Set(sleeps)).toEqual(new Set([PUBLICATION_READBACK_DELAY_MS]))
 })
 test('promotion refuses backward latest before npm mutation',async()=>{
