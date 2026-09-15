@@ -2,6 +2,16 @@
 
 The project's story, newest first: what got built, why, and how it went — for the operator's future recall. Format home: the dev-chronicle skill.
 
+## 15-09-2026 — Hosted releases can run the dashboard they publish ([#197](https://github.com/vegastack/vegafactory/issues/197))
+
+- **What:** The GitHub-hosted publisher now installs the same pinned Bun runtime as release preparation before checking the retained pair and running registry first-use smoke. The dashboard still runs under its existing Node-and-Bun consumer contract.
+- **Why:** The `v0.19.5` pair reached npm candidate tags, but Ubuntu publication had Node and no Bun, so first-use dashboard launch failed before either package could be promoted.
+- **How it went:** Re-grounding caught an unsafe Node-only launcher proposal: the real dashboard cache intentionally imports `bun:sqlite`. The corrected workflow prerequisite failed a regression before the fix and passed afterward, with the existing runtime and release suites green.
+- **Changed:** Pinned Bun 1.3.14 in hosted publication · no launcher, cache, engine, timeout, permission, registry, or artifact change · immutable `v0.19.5` remains candidate-only.
+- **Decisions:** none.
+
+— approved by (kmanojkumar) · built by Codex · branch fix/197-run-the-dashboard-under-the-declared-nod
+
 ## 14-09-2026 — One release attempt waits; failed releases roll forward ([#193](https://github.com/vegastack/vegafactory/issues/193))
 
 - **What:** npm publication readback now allows ten minutes for exact package bytes to become visible, while a GitHub Actions release rerun refuses before preparation and directs the maintainer to a fresh patch and tag.
