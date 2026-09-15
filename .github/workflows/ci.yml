@@ -11,6 +11,11 @@ permissions:
 jobs:
   check:
     name: check (node 24)
+    # Both laptop runners share one physical volume. Retain every waiting job,
+    # but run only one full check/build/smoke or release preparation at a time.
+    concurrency:
+      group: vegafactory-self-hosted-heavy
+      queue: max
     # Self-hosted while GitHub-hosted runners are billing-locked (#57): on
     # ubuntu-latest every job died in ~3s having recorded ZERO steps, because the
     # runner never picked it up — a permanently red check that stops gating
