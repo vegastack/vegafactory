@@ -1,5 +1,14 @@
 # @vegastack/vegafactory-dashboard
 
+## 0.19.8
+
+### Patch Changes
+
+- d5c55de: Mac-built dashboard bundles now retain the Linux process-identity implementation used at runtime.
+
+  - Runtime platform selection no longer lets bundlers delete the other supported OS branch.
+  - Process ownership validation, cache claims, privacy filtering, and release smoke requirements are unchanged.
+
 ## 0.19.7
 
 ### Patch Changes
