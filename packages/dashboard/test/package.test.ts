@@ -32,7 +32,6 @@ test('dashboard bundling retains both supported process identity probes', async 
     target: 'node',
     define: { 'process.platform': JSON.stringify('darwin') },
     minify: true,
-    write: false,
   })
   expect(result.success).toBe(true)
   const bundle = await result.outputs[0]!.text()
