@@ -2,6 +2,16 @@
 
 The project's story, newest first: what got built, why, and how it went — for the operator's future recall. Format home: the dev-chronicle skill.
 
+## 15-09-2026 — The dashboard carries both supported operating systems ([#206](https://github.com/vegastack/vegafactory/issues/206))
+
+- **What:** A dashboard built on macOS now retains both the Linux `/proc` and macOS `sysctl` process-identity probes, selecting between them only when the published server runs.
+- **Why:** The exact `v0.19.7` Linux server launched successfully but stayed on its loading shell because Next/Turbopack had replaced `process.platform` at build time and deleted the Linux claim path.
+- **How it went:** Retained-artifact replay proved no private canary leaked, then inspection of the published server chunk reduced the failure to one missing branch. A build-time regression now refuses that deletion.
+- **Changed:** Runtime platform lookup · cross-platform bundle retention · unchanged process ownership, privacy, loading UI, route smoke, and immutable-release rules · `v0.19.7` remains candidate-only.
+- **Decisions:** none.
+
+— approved by (kmanojkumar) · built by Codex · branch fix/206-preserve-linux-process-identity-in-the-d
+
 ## 15-09-2026 — Heavy runner jobs wait their turn ([#200](https://github.com/vegastack/vegafactory/issues/200))
 
 - **What:** Full CI and immutable release preparation now share one retained GitHub Actions job queue. Hosted publication stays outside that lock, so only the laptop-volume work is serialized.
