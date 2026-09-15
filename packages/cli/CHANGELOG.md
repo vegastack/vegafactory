@@ -1,5 +1,14 @@
 # @vegastack/skills
 
+## 0.19.6
+
+### Patch Changes
+
+- e8f13e1: Hosted paired releases now install the dashboard's pinned Bun runtime before first-use smoke and promotion.
+
+  - The hosted publisher uses Bun 1.3.14, matching immutable-pair preparation and the dashboard's declared `bun:sqlite` runtime.
+  - Registry publication, retained-byte verification, candidate/latest ordering, OIDC, and dashboard behavior are unchanged.
+
 ## 0.19.5
 
 ### Patch Changes
