@@ -308,7 +308,7 @@ test('installed runtime producer verifies a real npm packed and offline installe
  await expect(verifyInstalledRuntime(input)).rejects.toThrow('inventory')
 },30000)
 
-async function launcherSmokeFixture(earlyExit=false,launcherDelayMs=0) {
+async function launcherSmokeFixture(earlyExit=false,launcherDelayMs=0,occupyAdjacent=false) {
  const home=await realpath(await mkdtemp(join(tmpdir(),'launcher-smoke-pair-'))),directory=join(home,'pair');await mkdir(directory)
  const dashboard=archive([
   {path:'package/package.json',data:JSON.stringify({name:DASHBOARD,version:'1.0.0'})},
@@ -329,9 +329,9 @@ const pages={
  '/dispatcher':'Running Unavailable Last tick Unavailable',
 };
 const server=createServer((request,response)=>{const path=new URL(request.url,'http://fixture').pathname;if(path==='/api/health'){response.setHeader('content-type','application/json');response.end(JSON.stringify({ok:true,org,version,instanceId,cacheSchema:2,dataState:'unavailable',sourceAgeSeconds:null}));return}response.setHeader('content-type','text/html');response.statusCode=Object.hasOwn(pages,path)?200:404;response.end(pages[path]??'not found')});
-server.listen(Number(port),'127.0.0.1',()=>console.log('ready'));const stop=()=>server.close(()=>process.exit(0));process.on('SIGTERM',stop);process.on('SIGINT',stop);`
+server.listen(Number(port),'127.0.0.1',()=>console.log(JSON.stringify({port:server.address().port})));const stop=()=>server.close(()=>process.exit(0));process.on('SIGTERM',stop);process.on('SIGINT',stop);`
  const cli=`#!/usr/bin/env node
-import {readFileSync,existsSync,mkdirSync,writeFileSync} from 'node:fs';import {join,isAbsolute} from 'node:path';import {spawn} from 'node:child_process';import {randomUUID} from 'node:crypto';import {fileURLToPath} from 'node:url';
+import {readFileSync,existsSync,mkdirSync,writeFileSync} from 'node:fs';import {join,isAbsolute} from 'node:path';import {spawn} from 'node:child_process';import {randomUUID} from 'node:crypto';import {fileURLToPath} from 'node:url';import {createServer} from 'node:net';
 const [verb,...rest]=process.argv.slice(2);const home=process.env.HOME;
 if(verb==='--version'){console.log('vegafactory 1.0.0');process.exit(0)}
 if(verb==='skills'){if(rest[0]==='list'){console.log('fixture skill');process.exit(0)}const root=rest[rest.indexOf('--dir')+1];if(rest[0]==='add'){mkdirSync(join(root,'.agents/skills/dev-implement/scripts'),{recursive:true});writeFileSync(join(root,'.agents/skills/dev-implement/scripts/preflight.mjs'),'fixture');process.exit(0)}if(rest[0]==='verify'){if(!existsSync(join(root,'.agents/skills/dev-implement/scripts/preflight.mjs')))process.exit(74);process.exit(0)}}
@@ -340,8 +340,9 @@ ${earlyExit?'process.exit(76);':''}
 const config=JSON.parse(readFileSync(join(home,'.vegastack/factory.json'),'utf8'));const org=rest[rest.indexOf('--org')+1];const start=Number(rest[rest.indexOf('--port')+1]);const room=config.controlRooms?.[org];const repos=config.repos;
 if(config.schemaVersion!==2||config.revision!==0||!room||!isAbsolute(room.path)||!Array.isArray(repos)||repos.length!==1||repos[0].org!==org||repos[0].repo!=='fixture/project'||!isAbsolute(repos[0].path))process.exit(77);
 const retained=join(home,'.vegastack/dashboard/1.0.0/node_modules/@vegastack/vegafactory-dashboard/dist-standalone/packages/dashboard/server.js');if(!existsSync(retained))process.exit(78);
-const instanceId=randomUUID();const child=spawn(process.execPath,[fileURLToPath(new URL('./fixture-dashboard-child.mjs',import.meta.url)),String(start+1),instanceId,org,'1.0.0'],{detached:true,stdio:['ignore','pipe','inherit']});
-child.stdout.once('data',()=>setTimeout(()=>console.log(JSON.stringify({command:'dashboard',ok:true,org,version:'1.0.0',instanceId,cacheSchema:2,url:'http://127.0.0.1:'+(start+1),dir:join(home,'.vegastack/dashboard/1.0.0'),entry:retained,fetched:false,pid:child.pid})),${launcherDelayMs}));const stop=()=>{child.once('close',()=>process.exit(0));child.kill('SIGTERM')};process.on('SIGTERM',stop);process.on('SIGINT',stop);await new Promise(()=>{});`
+const blocker=${occupyAdjacent?"createServer();await new Promise((ok,fail)=>{blocker.once('error',fail);blocker.listen(start+1,'127.0.0.1',ok)})":'null'};
+const instanceId=randomUUID();const child=spawn(process.execPath,[fileURLToPath(new URL('./fixture-dashboard-child.mjs',import.meta.url)),'0',instanceId,org,'1.0.0'],{detached:true,stdio:['ignore','pipe','inherit']});
+child.stdout.once('data',data=>{const actual=JSON.parse(data.toString()),port=actual.port;if(!Number.isSafeInteger(port)||port<1||port>65535)process.exit(79);setTimeout(()=>console.log(JSON.stringify({command:'dashboard',ok:true,org,version:'1.0.0',instanceId,cacheSchema:2,url:'http://127.0.0.1:'+port,dir:join(home,'.vegastack/dashboard/1.0.0'),entry:retained,fetched:false,pid:child.pid})),${launcherDelayMs})});const done=()=>blocker?blocker.close(()=>process.exit(0)):process.exit(0);const stop=()=>{child.once('close',done);child.kill('SIGTERM')};process.on('SIGTERM',stop);process.on('SIGINT',stop);await new Promise(()=>{});`
  const cliBytes=archive([
   {path:'package/package.json',data:JSON.stringify({name:CLI,version:'1.0.0',type:'module',bin:{vegafactory:'dist/index.js'}})},
   {path:'package/dist/index.js',data:cli,mode:0o755},{path:'package/dist/run-wrapper.js',data:'// wrapper'},
@@ -364,6 +365,12 @@ test('pair smoke uses the installed CLI launcher, rejects a stale listener, reac
 
 test('pair smoke outer watcher accepts delayed launcher output inside its injected bound',async()=>{
  const fixture=await launcherSmokeFixture(false,500);const result=await smokePair(fixture.manifest,fixture.directory,{launcherTimeoutMs:2_000})
+ expect(result.launcher).toMatchObject({command:'dashboard',ok:true,org:'fixture',version:'1.0.0'})
+ expect(result.cleanup).toEqual({cliStopped:true,dashboardStopped:true,isolatedHomeRemoved:true})
+},30000)
+
+test('pair smoke fixture does not assume the port after a stale listener is free',async()=>{
+ const fixture=await launcherSmokeFixture(false,0,true);const result=await smokePair(fixture.manifest,fixture.directory)
  expect(result.launcher).toMatchObject({command:'dashboard',ok:true,org:'fixture',version:'1.0.0'})
  expect(result.cleanup).toEqual({cliStopped:true,dashboardStopped:true,isolatedHomeRemoved:true})
 },30000)
