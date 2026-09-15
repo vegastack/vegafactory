@@ -1,5 +1,14 @@
 # @vegastack/skills
 
+## 0.19.7
+
+### Patch Changes
+
+- abee83f: Self-hosted CI and release preparation now queue instead of exhausting their shared runner volume.
+
+  - The heavy CI and prepare jobs share one retained job-level concurrency queue.
+  - Hosted publication, immutable-pair verification, and runtime disk-pressure safeguards are unchanged.
+
 ## 0.19.6
 
 ### Patch Changes
