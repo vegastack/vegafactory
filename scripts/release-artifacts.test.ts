@@ -182,6 +182,17 @@ test('hosted publisher provisions the pinned dashboard Bun runtime before retain
  expect(workflow.jobs.publish.permissions).toEqual({contents:'read',actions:'read','id-token':'write'})
 },5000)
 
+test('self-hosted CI and release preparation share one retained heavy-job queue',async()=>{
+ const ci=Bun.YAML.parse(await readFile('.github/workflows/ci.yml','utf8')) as any
+ const release=Bun.YAML.parse(await readFile('.github/workflows/release.yml','utf8')) as any
+ const queue={group:'vegafactory-self-hosted-heavy',queue:'max'}
+ expect(ci.jobs.check.concurrency).toEqual(queue)
+ expect(release.jobs.prepare.concurrency).toEqual(queue)
+ expect(release.concurrency).toEqual({group:'vegafactory-paired-release','cancel-in-progress':false})
+ expect(release.jobs.publish.concurrency).toBeUndefined()
+ expect(release.jobs.release.concurrency).toBeUndefined()
+},5000)
+
 test('release workflow immutable scanner source matches the audited baseline version',async()=>{
  const baseline=JSON.parse(await readFile('.vegastack/skillspector-baseline.json','utf8'))
  const workflow=await readFile('.github/workflows/release.yml','utf8')

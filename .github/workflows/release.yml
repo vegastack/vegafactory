@@ -18,6 +18,11 @@ concurrency:
 
 jobs:
   prepare:
+    # CI and release preparation are both disk-heavy and the two laptop runners
+    # share one volume. Queue every job instead of racing or replacing one.
+    concurrency:
+      group: vegafactory-self-hosted-heavy
+      queue: max
     permissions:
       contents: read
     outputs:
