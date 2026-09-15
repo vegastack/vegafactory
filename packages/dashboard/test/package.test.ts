@@ -26,6 +26,20 @@ test('standalone runtime declares Node and Bun requirements separately from plat
   expect(manifest.engines.bun).toBe('>=1.3')
 })
 
+test('dashboard bundling retains both supported process identity probes', async () => {
+  const result = await Bun.build({
+    entrypoints: [resolve(import.meta.dirname, '../../cli/src/claims.ts')],
+    target: 'node',
+    define: { 'process.platform': JSON.stringify('darwin') },
+    minify: true,
+    write: false,
+  })
+  expect(result.success).toBe(true)
+  const bundle = await result.outputs[0]!.text()
+  expect(bundle).toContain('/proc/sys/kernel/random/boot_id')
+  expect(bundle).toContain('/usr/sbin/sysctl')
+})
+
 const pageFixture = String.raw`
   import React from 'react'
   import { execFileSync } from 'node:child_process'

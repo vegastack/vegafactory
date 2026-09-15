@@ -65,8 +65,12 @@ export async function processIdentity(pid = process.pid): Promise<ProcessIdentit
 async function probeProcessIdentity(pid: number): Promise<ProcessIdentity> {
     if (!Number.isSafeInteger(pid) || pid <= 0)
         throw new ClaimRefusal('process identity requires a positive PID');
+    // Next/Turbopack replaces direct `process.platform` reads with the build host and
+    // eliminates the other branch. Resolve it opaquely so the macOS-built standalone
+    // dashboard retains the Linux /proc probe it selects at runtime.
+    const platform = Reflect.get(process, 'platform') as NodeJS.Platform;
     try {
-        if (process.platform === 'linux') {
+        if (platform === 'linux') {
             const bootId = (await readFile('/proc/sys/kernel/random/boot_id', 'utf8')).trim();
             const stat = await readFile(`/proc/${pid}/stat`, 'utf8');
             const fields = stat.slice(stat.lastIndexOf(')') + 2).split(/\s+/);
@@ -77,7 +81,7 @@ async function probeProcessIdentity(pid: number): Promise<ProcessIdentity> {
                 throw Error('invalid process data');
             return { pid, uid, bootId, startId };
         }
-        if (process.platform === 'darwin') {
+        if (platform === 'darwin') {
             const options = { timeout: 2000, maxBuffer: 16384, env: { ...process.env, LC_ALL: 'C' } };
             const boot = (await execute('/usr/sbin/sysctl', ['-n', 'kern.boottime'], options)).stdout.trim();
             const row = (await execute('/bin/ps', ['-p', String(pid), '-o', 'uid=', '-o', 'lstart='], options)).stdout.trim();
@@ -89,7 +93,7 @@ async function probeProcessIdentity(pid: number): Promise<ProcessIdentity> {
         throw Error('unsupported platform');
     }
     catch {
-        throw new ClaimRefusal(`cannot verify process ${pid} boot/start identity on ${process.platform}`);
+        throw new ClaimRefusal(`cannot verify process ${pid} boot/start identity on ${platform}`);
     }
 }
 async function stopped(identity: ProcessIdentity): Promise<boolean> {
