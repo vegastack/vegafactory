@@ -164,6 +164,24 @@ test('actual workflow refuses reruns and the current-attempt pair upload gates m
  expect(text).not.toContain('listWorkflowRunArtifacts');expect(text).not.toContain('/attempts/{attempt_number}/jobs');expect(text).not.toContain('Restore finalized immutable pair');expect(text).not.toContain('Restore last available publication observations');expect(text).not.toContain('Preserve previous publication observations')
 })
 
+test('hosted publisher provisions the pinned dashboard Bun runtime before retained-pair smoke',async()=>{
+ const workflow=Bun.YAML.parse(await readFile('.github/workflows/release.yml','utf8')) as any
+ const prepare=workflow.jobs.prepare.steps,publish=workflow.jobs.publish.steps
+ const pin='oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6'
+ const prepared=prepare.find((step:any)=>step.uses===pin)
+ const hosted=publish.find((step:any)=>step.uses===pin)
+ expect(prepared?.with?.['bun-version']).toBe('1.3.14')
+ expect(hosted?.with?.['bun-version']).toBe('1.3.14')
+ const setup=publish.indexOf(hosted)
+ const verify=publish.findIndex((step:any)=>step.name==='Verify retained pair before publication authority is used')
+ const mutation=publish.findIndex((step:any)=>step.name==='Publish retained pair and promote after registry first-use smoke')
+ expect(setup).toBeGreaterThan(publish.findIndex((step:any)=>String(step.uses??'').startsWith('actions/setup-node@')))
+ expect(setup).toBeLessThan(verify)
+ expect(setup).toBeLessThan(mutation)
+ expect(workflow.jobs.publish['runs-on']).toBe('ubuntu-latest')
+ expect(workflow.jobs.publish.permissions).toEqual({contents:'read',actions:'read','id-token':'write'})
+},5000)
+
 test('release workflow immutable scanner source matches the audited baseline version',async()=>{
  const baseline=JSON.parse(await readFile('.vegastack/skillspector-baseline.json','utf8'))
  const workflow=await readFile('.github/workflows/release.yml','utf8')
