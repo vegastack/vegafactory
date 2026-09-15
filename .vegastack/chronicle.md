@@ -2,6 +2,16 @@
 
 The project's story, newest first: what got built, why, and how it went — for the operator's future recall. Format home: the dev-chronicle skill.
 
+## 15-09-2026 — Heavy runner jobs wait their turn ([#200](https://github.com/vegastack/vegafactory/issues/200))
+
+- **What:** Full CI and immutable release preparation now share one retained GitHub Actions job queue. Hosted publication stays outside that lock, so only the laptop-volume work is serialized.
+- **Why:** Automatic main CI and `v0.19.6` preparation ran simultaneously on two runners backed by one disk, consuming the last 5 GiB and triggering the runtime's intentional low-space launch refusal before any release artifact was retained.
+- **How it went:** The same two lifecycle tests failed below the 1 GiB safety threshold and passed after capacity returned. The correction preserves that safety gate and prevents the competing jobs instead of hiding the refusal.
+- **Changed:** Shared retained queue for heavy self-hosted jobs · unchanged release-wide version serialization · unchanged hosted OIDC publication and runtime safety · `v0.19.6` remains unpublished.
+- **Decisions:** none.
+
+— approved by (kmanojkumar) · built by Codex · branch fix/200-serialize-heavy-self-hosted-release-work
+
 ## 15-09-2026 — Hosted releases can run the dashboard they publish ([#197](https://github.com/vegastack/vegafactory/issues/197))
 
 - **What:** The GitHub-hosted publisher now installs the same pinned Bun runtime as release preparation before checking the retained pair and running registry first-use smoke. The dashboard still runs under its existing Node-and-Bun consumer contract.
