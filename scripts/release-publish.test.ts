@@ -47,6 +47,14 @@ test('post-publish readback exhaustion and integrity conflict fail closed',async
   expect(r.calls.filter(x=>x.includes('@'))).toHaveLength(1)
  }
 })
+test('direct latest readback retries temporary lookup unavailability without republishing',async()=>{
+ const r=registry(),published=r.publish,latest=r.latest,sleeps:number[]=[];let unavailable=0
+ r.publish=async(a,version)=>{await published(a,version);unavailable=2}
+ r.latest=async(a,version)=>unavailable-->0?{status:503,matching:false,unavailable:true}:latest(a,version)
+ expect((await publishPair(manifest,r,{publish:true,readback:{attempts:3,delayMs:10_000,sleep:async ms=>{sleeps.push(ms)}}})).state).toBe('promoted')
+ expect(r.calls.filter(x=>x.includes('@'))).toEqual(manifest.artifacts.map(a=>a.name))
+ expect(sleeps).toEqual([10_000,10_000,10_000,10_000])
+})
 test('supplied attempted publication state stays read-only under absence and unavailability',async()=>{
  for(const recovered of [{status:404,definitive:true},{status:0,error:'timeout'}]) {
   const r=registry();let previous:any,publishes=0,recovering=false
