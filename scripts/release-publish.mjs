@@ -53,6 +53,7 @@ export async function publishPair(manifest, registry, {publish=false,onState=asy
       observed=await registry.latest(a,manifest.version)
       record.promotions[a.name]=observed
       if(observed.matching)return
+      if(observed.unavailable)continue
     }
     throw new Error(`direct latest readback failed after bounded propagation: ${a.name}`)
   }
@@ -70,7 +71,7 @@ export async function publishPair(manifest, registry, {publish=false,onState=asy
     // artifact with no recorded attempt may use definitive absence to authorize publication.
     // Refuse a queued older release before any registry mutation. Direct OIDC publication
     // attaches latest atomically to each package, so there is no later dist-tag command.
-    for(const a of artifacts)await registry.latest(a,manifest.version)
+    for(const a of artifacts)if((await registry.latest(a,manifest.version)).unavailable)throw new Error(`latest lookup unavailable: ${a.name}`)
     const initial=[]
     for(const a of artifacts)initial.push(attempted.has(a.name)?await observe(a):await check(a))
     await save({error:null})
@@ -135,7 +136,7 @@ export function registryClient({directory,base='https://registry.npmjs.org',fetc
   const latest=async(a,version)=>{
     const r=await get(new URL(`${encodeURIComponent(a.name)}/latest`,origin.href.endsWith('/')?origin.href:origin.href+'/'))
     if(r.status===404&&r.definitive)return {status:404,matching:false}
-    if(r.status!==200 || r.data?.name!==a.name)throw new Error('latest lookup unavailable')
+    if(r.status!==200 || r.data?.name!==a.name)return {status:r.status,matching:false,unavailable:true}
     if(compareVersions(r.data?.version,version)>0)throw new Error('refusing to move latest backward')
     if(r.data.version===version && r.data.dist?.integrity!==a.integrity)throw new Error('latest integrity conflict')
     return {status:200,version:r.data.version,integrity:r.data.dist?.integrity,matching:r.data.version===version}
