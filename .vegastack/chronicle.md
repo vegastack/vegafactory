@@ -2,6 +2,16 @@
 
 The project's story, newest first: what got built, why, and how it went — for the operator's future recall. Format home: the dev-chronicle skill.
 
+## 16-09-2026 — Trusted publishing carries latest itself ([#209](https://github.com/vegastack/vegafactory/issues/209))
+
+- **What:** The retained dashboard and CLI publish directly as npm latest through tokenless OIDC, with dashboard first and the public CLI entrypoint last.
+- **Why:** Exact `0.19.8` candidates published successfully, but npm correctly rejected the separate dist-tag promotion because Trusted Publishing authenticates publish commands, not dist-tag writes.
+- **How it went:** The failure arrived only after the pair had passed preparation and reached npm unchanged, making the missing authorization boundary exact. The correction removes the unsupported second write while preserving retained-pair qualification and registry verification.
+- **Changed:** Direct dashboard-then-CLI latest publication · exact latest/byte readback · no npm token or dist-tag command · explicit non-atomic ordering and roll-forward boundary · immutable `v0.19.8` remains candidate-only.
+- **Decisions:** none.
+
+— approved by (kmanojkumar) · built by Codex · branch fix/209-publish-npm-packages-directly-as-latest-w
+
 ## 15-09-2026 — The dashboard carries both supported operating systems ([#206](https://github.com/vegastack/vegafactory/issues/206))
 
 - **What:** A dashboard built on macOS now retains both the Linux `/proc` and macOS `sysctl` process-identity probes, selecting between them only when the published server runs.
