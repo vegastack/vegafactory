@@ -11,7 +11,7 @@ export function classifyRegistry(expected, observed) {
 }
 export const PUBLICATION_READBACK_ATTEMPTS=61
 export const PUBLICATION_READBACK_DELAY_MS=10_000
-export async function publishPair(manifest, registry, {publish=false,promote=false,onState=async()=>{},previous,readback}={}) {
+export async function publishPair(manifest, registry, {publish=false,onState=async()=>{},previous,readback}={}) {
   const artifacts=[DASHBOARD,CLI].map(name=>manifest.artifacts.find(a=>a.name===name))
   if(artifacts.some(a=>!a)||manifest.artifacts.length!==2)throw new Error('expected exactly dashboard and CLI')
   if(previous && (previous.version!==manifest.version || JSON.stringify(previous.artifacts)!==JSON.stringify(artifacts)))throw new Error('existing release state belongs to another immutable pair')
@@ -45,6 +45,17 @@ export async function publishPair(manifest, registry, {publish=false,promote=fal
     }
     throw new Error(`publication not confirmed after bounded readback (${status}); do not republish; roll forward with a new patch and tag after diagnosis: ${failure?.message??a.name}`)
   }
+  const confirmLatest=async a=>{
+    const policy=readback??registry.publicationReadback??{attempts:1,delayMs:0,sleep:async()=>{}}
+    let observed
+    for(let attempt=0;attempt<policy.attempts;attempt++) {
+      if(attempt>0)await policy.sleep(policy.delayMs)
+      observed=await registry.latest(a,manifest.version)
+      record.promotions[a.name]=observed
+      if(observed.matching)return
+    }
+    throw new Error(`direct latest readback failed after bounded propagation: ${a.name}`)
+  }
   try {
     // A persisted pending mutation is an attempted immutable publish, even if its subprocess
     // response was lost. Any caller with preserved state confirms it read-only; never submit those bytes twice.
@@ -57,6 +68,9 @@ export async function publishPair(manifest, registry, {publish=false,promote=fal
     }
     // Reconcile both immutable identities before replacing any previous progress. Only an
     // artifact with no recorded attempt may use definitive absence to authorize publication.
+    // Refuse a queued older release before any registry mutation. Direct OIDC publication
+    // attaches latest atomically to each package, so there is no later dist-tag command.
+    for(const a of artifacts)await registry.latest(a,manifest.version)
     const initial=[]
     for(const a of artifacts)initial.push(attempted.has(a.name)?await observe(a):await check(a))
     await save({error:null})
@@ -70,22 +84,11 @@ export async function publishPair(manifest, registry, {publish=false,promote=fal
         let failure;try{await registry.publish(a,manifest.version)}catch(e){failure=e}
         await confirmPublication(a,failure)
       }
+      await confirmLatest(a)
       await save({state:i===0?'dashboard-present':'pair-present',pending:record.pending?.name===a.name?null:record.pending,lastCompleted:{operation:'publish-readback',name:a.name}})
     }
     await registry.smoke(manifest);await save({state:'smoked',lastCompleted:{operation:'smoke'}})
-    if(promote) {
-      for(const a of artifacts) {
-        const observed=await registry.latest(a,manifest.version)
-        record.promotions[a.name]=observed
-        await save({pending:observed.matching?null:{operation:'promote',name:a.name}})
-        if(!observed.matching) await registry.promote(a,manifest.version)
-        const confirmed=await registry.latest(a,manifest.version)
-        record.promotions[a.name]=confirmed
-        if(!confirmed.matching)throw new Error(`promotion readback failed: ${a.name}`)
-        await save({pending:null,lastCompleted:{operation:'promotion-readback',name:a.name}})
-      }
-      await save({state:'promoted'})
-    }
+    await save({state:'promoted',lastCompleted:{operation:'registry-smoke'}})
     return {state:record.state,version:manifest.version}
   }catch(e){await save({error:e.message});throw e}
 }
@@ -106,11 +109,10 @@ export function compareVersions(a,b) {
   for(let i=0;i<Math.max(x.pre.length,y.pre.length);i++) {const p=x.pre[i],q=y.pre[i];if(p===q)continue;if(p===undefined)return -1;if(q===undefined)return 1;const pn=/^\d+$/.test(p),qn=/^\d+$/.test(q);if(pn&&qn)return p.length!==q.length?p.length>q.length?1:-1:p>q?1:-1;if(pn!==qn)return pn?-1:1;return p>q?1:-1}
   return 0
 }
-export function registryClient({directory,base='https://registry.npmjs.org',candidateTag='candidate',fetcher=fetch,run=command,smoke=smokePair,publisher,sleep=ms=>new Promise(resolve=>setTimeout(resolve,ms))}={}) {
+export function registryClient({directory,base='https://registry.npmjs.org',fetcher=fetch,run=command,smoke=smokePair,publisher,sleep=ms=>new Promise(resolve=>setTimeout(resolve,ms))}={}) {
   const origin=new URL(base)
   if(origin.username||origin.password)throw new Error('registry URL must not contain credentials')
   if(origin.protocol!=='https:' && !(origin.protocol==='http:'&&['127.0.0.1','localhost','[::1]'].includes(origin.hostname)))throw new Error('registry requires HTTPS (loopback fixtures excepted)')
-  if(!/^[a-z][a-z0-9-]*$/.test(candidateTag)||candidateTag==='latest')throw new Error('candidate tag must be non-latest')
   if(publisher && (origin.protocol!=='http:' || !['127.0.0.1','localhost','[::1]'].includes(origin.hostname) || !isAbsolute(publisher)))throw new Error('rehearsal publisher requires loopback HTTP and an absolute executable')
   const mutate=argv=>{if(!publisher && run===command)assertLivePublisher();return run([publisher??'npm',...argv],{timeout:120000})}
   async function get(url,limit=1024*1024,binary=false) {
@@ -158,7 +160,7 @@ export function registryClient({directory,base='https://registry.npmjs.org',cand
       const downloaded=await get(url,a.bytes,true)
       return downloaded.status===200?{status:200,integrity:d.integrity,bytes:downloaded.bytes}:{status:0,error:'version exists but payload download failed'}
     },
-    async publish(a) {mutate(['publish',join(directory,a.file),'--ignore-scripts','--access','public','--no-provenance','--tag',candidateTag,'--registry',base])},
+    async publish(a) {mutate(['publish',join(directory,a.file),'--ignore-scripts','--access','public','--no-provenance','--tag','latest','--registry',base])},
     async smoke(manifest) {
       // Isolate actual readback bytes from the retained candidate files.
       const {mkdtemp}=await import('node:fs/promises');const {tmpdir}=await import('node:os');const dir=await mkdtemp(join(tmpdir(),'registry-pair-'))
@@ -166,13 +168,6 @@ export function registryClient({directory,base='https://registry.npmjs.org',cand
       await smoke(manifest,dir)
     },
     latest,
-    async promote(a,version) {
-      if((await latest(a,version)).matching)return
-      let failure
-      try{mutate(['dist-tag','add',`${a.name}@${version}`,'latest','--registry',base])}catch(e){failure=e}
-      // A lost subprocess response may have changed the tag. Always read it back.
-      if(!(await latest(a,version)).matching)throw new Error(`promotion readback failed: ${a.name}: ${failure?.message??'not observed'}`)
-    },
   }
 }
 async function main() {
@@ -183,12 +178,13 @@ async function main() {
   const option=name=>{const i=args.indexOf(name);if(i<0)return undefined;if(!args[i+1]||args[i+1].startsWith('--'))throw new Error(`missing ${name}`);return args[i+1]}
   const base=option('--rehearsal-registry'),publisher=option('--rehearsal-publisher')
   if(Boolean(base)!==Boolean(publisher))throw new Error('rehearsal requires both loopback registry and explicit publisher executable')
-  if(!base && (args.includes('--publish')||args.includes('--promote'))) {
+  if(args.includes('--promote'))throw new Error('dist-tag promotion is unsupported under Trusted Publishing; publish directly as latest')
+  if(!base && args.includes('--publish')) {
     assertLivePublisher()
     if(manifest.sourceSha!==process.env.GITHUB_SHA || `v${manifest.version}`!==process.env.GITHUB_REF_NAME)throw new Error('retained pair differs from authorized workflow source/tag')
   }
   if(previous && (previous.sourceSha!==manifest.sourceSha || previous.treeSha!==manifest.treeSha))throw new Error('previous release observations belong to another source')
-  const registry=registryClient({directory,...(base?{base,publisher}:{}),candidateTag:`candidate-${manifest.version.replaceAll('.','-')}`})
-  return publishPair(manifest,registry,{previous,publish:args.includes('--publish'),promote:args.includes('--promote'),onState:async state=>{const target=join(directory,'release-state.json');await writeFile(target+'.tmp',JSON.stringify({...state,sourceSha:manifest.sourceSha,treeSha:manifest.treeSha},null,2)+'\n');await rename(target+'.tmp',target)}})
+  const registry=registryClient({directory,...(base?{base,publisher}:{})})
+  return publishPair(manifest,registry,{previous,publish:args.includes('--publish'),onState:async state=>{const target=join(directory,'release-state.json');await writeFile(target+'.tmp',JSON.stringify({...state,sourceSha:manifest.sourceSha,treeSha:manifest.treeSha},null,2)+'\n');await rename(target+'.tmp',target)}})
 }
 if(process.argv[1]&&resolve(process.argv[1])===fileURLToPath(import.meta.url))main().then(r=>console.log(JSON.stringify(r,null,2))).catch(e=>{console.error(e.message);process.exitCode=2})
