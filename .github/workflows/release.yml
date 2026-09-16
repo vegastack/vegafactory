@@ -177,13 +177,13 @@ jobs:
       - name: Verify retained pair before publication authority is used
         run: node scripts/release-artifacts.mjs verify-release work/release/release-manifest.json
 
-      # Publication and promotion are covered only by the operator-authorized release tag.
+      # Direct latest publication is covered only by the operator-authorized release tag.
       # Hosted OIDC supplies short-lived publication authority. The publisher currently opts out
       # of npm provenance explicitly; removing that opt-out is a separate verified change.
-      - name: Publish retained pair and promote after registry first-use smoke
+      - name: Publish retained pair directly as latest and verify registry first use
         env:
           VEGAFACTORY_RETAINED_PAIR_ID: ${{ needs.prepare.outputs.pair-id }}
-        run: node scripts/release-publish.mjs work/release/release-manifest.json --publish --promote
+        run: node scripts/release-publish.mjs work/release/release-manifest.json --publish
 
       - name: Verify release assets before exposing success
         run: node scripts/release-artifacts.mjs verify-release work/release/release-manifest.json
@@ -209,7 +209,7 @@ jobs:
           name: ${{ needs.publish.outputs.outcome-name }}
           path: work/release/
 
-      - name: Create GitHub release after pair promotion
+      - name: Create GitHub release after direct latest publication
         uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3
         with:
           files: work/release/*

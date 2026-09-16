@@ -3,11 +3,27 @@ import { classifyRegistry, compareVersions, publishPair } from './release-publis
 import { createHash } from 'node:crypto'
 const artifact=(name:string)=>{const bytes=Buffer.from(name);return {name,file:name.replaceAll('/','-').replace('@','')+'.tgz',sha256:createHash('sha256').update(bytes).digest('hex'),integrity:'sha512-'+createHash('sha512').update(bytes).digest('base64'),bytes:bytes.length}}
 const manifest={version:'1.0.0',artifacts:[artifact('@vegastack/vegafactory-dashboard'),artifact('@vegastack/vegafactory')]}
-function registry(){const existing=new Map<string,any>();const calls:string[]=[];return {existing,calls,read:async(a:any)=>existing.has(a.name)?{status:200,integrity:existing.get(a.name).integrity,bytes:Buffer.from(a.name)}:{status:404,definitive:true},publish:async(a:any)=>{calls.push(a.name);existing.set(a.name,a)},smoke:async()=>{calls.push('smoke')},latest:async(a:any)=>({matching:calls.includes('promote '+a.name)}),promote:async(a:any)=>{calls.push('promote '+a.name)}}}
+function registry(){const existing=new Map<string,any>(),latestVersions=new Map<string,string>();const calls:string[]=[];return {existing,latestVersions,calls,read:async(a:any)=>existing.has(a.name)?{status:200,integrity:existing.get(a.name).integrity,bytes:Buffer.from(a.name)}:{status:404,definitive:true},publish:async(a:any,version:string)=>{calls.push(a.name);existing.set(a.name,a);latestVersions.set(a.name,version)},smoke:async()=>{calls.push('smoke')},latest:async(a:any,version:string)=>({matching:latestVersions.get(a.name)===version})}}
+test('trusted publication writes dashboard then CLI directly as latest and never calls dist-tag',async()=>{
+ const existing=new Map<string,any>(),latest=new Map<string,string>(),calls:string[]=[]
+ const r={
+  read:async(a:any)=>existing.has(a.name)?{status:200,integrity:existing.get(a.name).integrity,bytes:Buffer.from(a.name)}:{status:404,definitive:true},
+  publish:async(a:any,version:string)=>{calls.push(`publish ${a.name} latest`);existing.set(a.name,a);latest.set(a.name,version)},
+  smoke:async()=>{calls.push('smoke')},
+  latest:async(a:any,version:string)=>({matching:latest.get(a.name)===version}),
+  promote:async()=>{calls.push('dist-tag')},
+ }
+ expect((await publishPair(manifest,r,{publish:true})).state).toBe('promoted')
+ expect(calls).toEqual([
+  `publish ${manifest.artifacts[0]!.name} latest`,
+  `publish ${manifest.artifacts[1]!.name} latest`,
+  'smoke',
+ ])
+})
 test('errors never mean absent',()=>{for(const status of [401,403,429,500,0])expect(classifyRegistry({integrity:'a'},{status})).toBe('unavailable');expect(classifyRegistry({integrity:'a'},{status:404})).toBe('unavailable');expect(classifyRegistry({integrity:'a'},{status:404,definitive:true})).toBe('absent');expect(classifyRegistry({integrity:'a'},{status:200,integrity:'b'})).toBe('conflict')})
 test('an uncertain CLI publish response is never retried while the confirmed dashboard stays reusable',async()=>{
  const r=registry();const publish=r.publish;let previous:any
- r.publish=async a=>{if(a.name===manifest.artifacts[1].name)throw new Error('failed');await publish(a)}
+ r.publish=async (a,version)=>{if(a.name===manifest.artifacts[1].name)throw new Error('failed');await publish(a,version)}
  await expect(publishPair(manifest,r,{publish:true,onState:async state=>{previous=state}})).rejects.toThrow('publication not confirmed')
  expect(previous).toMatchObject({state:'dashboard-present',pending:{operation:'publish',name:manifest.artifacts[1].name}})
  r.publish=publish
@@ -15,12 +31,12 @@ test('an uncertain CLI publish response is never retried while the confirmed das
  expect(r.calls).toEqual([manifest.artifacts[0].name])
  expect(previous.pending).toEqual({operation:'publish',name:manifest.artifacts[1].name})
 })
-test('lost publish response reads back and does not blindly retry',async()=>{const r=registry();const publish=r.publish;r.publish=async a=>{await publish(a);throw new Error('timeout')};expect((await publishPair(manifest,r,{publish:true})).state).toBe('smoked');expect(r.calls.filter(x=>x.includes('@'))).toHaveLength(2)})
+test('lost publish response reads back and does not blindly retry',async()=>{const r=registry();const publish=r.publish;r.publish=async(a,version)=>{await publish(a,version);throw new Error('timeout')};expect((await publishPair(manifest,r,{publish:true})).state).toBe('promoted');expect(r.calls.filter(x=>x.includes('@'))).toHaveLength(2)})
 test('post-publish readback tolerates delayed visibility without republishing',async()=>{
  const r=registry(),reads=new Map<string,number>(),published=r.publish,sleeps:number[]=[]
- r.publish=async a=>{await published(a);reads.set(a.name,0)}
+ r.publish=async(a,version)=>{await published(a,version);reads.set(a.name,0)}
  r.read=async a=>{const seen=reads.get(a.name);if(seen===undefined)return {status:404,definitive:true};reads.set(a.name,seen+1);return seen<2?{status:404,definitive:true}:{status:200,integrity:a.integrity,bytes:Buffer.from(a.name)}}
- expect((await publishPair(manifest,r,{publish:true,readback:{attempts:3,delayMs:10_000,sleep:async ms=>{sleeps.push(ms)}}})).state).toBe('smoked')
+ expect((await publishPair(manifest,r,{publish:true,readback:{attempts:3,delayMs:10_000,sleep:async ms=>{sleeps.push(ms)}}})).state).toBe('promoted')
  expect(r.calls.filter(x=>x.includes('@'))).toEqual(manifest.artifacts.map(a=>a.name))
  expect(sleeps).toEqual([10_000,10_000,10_000,10_000])
 })
@@ -44,8 +60,8 @@ test('supplied attempted publication state stays read-only under absence and una
   expect(previous.pending).toEqual({operation:'publish',name:manifest.artifacts[0].name})
  }
 })
-test('a matching preexisting pair only smokes; altered bytes and integrity conflict refuse',async()=>{const r=registry();for(const a of manifest.artifacts)r.existing.set(a.name,a);await publishPair(manifest,r,{publish:true});expect(r.calls).toEqual(['smoke']);r.existing.set(manifest.artifacts[0].name,{integrity:'changed'});await expect(publishPair(manifest,r,{publish:true})).rejects.toThrow()})
-test('smoke failure never promotes; no explicit grant never publishes',async()=>{const r=registry();await expect(publishPair(manifest,r,{})).rejects.toThrow();expect(r.calls).toEqual([]);r.smoke=async()=>{throw new Error('smoke failed')};await expect(publishPair(manifest,r,{publish:true,promote:true})).rejects.toThrow();expect(r.calls.some(c=>c.startsWith('promote'))).toBe(false)})
+test('a matching preexisting latest pair only smokes; altered bytes and integrity conflict refuse',async()=>{const r=registry();for(const a of manifest.artifacts){r.existing.set(a.name,a);r.latestVersions.set(a.name,manifest.version)}await publishPair(manifest,r,{publish:true});expect(r.calls).toEqual(['smoke']);r.existing.set(manifest.artifacts[0].name,{integrity:'changed'});await expect(publishPair(manifest,r,{publish:true})).rejects.toThrow()})
+test('smoke failure stops release after direct latest writes; no explicit grant never publishes',async()=>{const r=registry();await expect(publishPair(manifest,r,{})).rejects.toThrow();expect(r.calls).toEqual([]);r.smoke=async()=>{throw new Error('smoke failed')};await expect(publishPair(manifest,r,{publish:true})).rejects.toThrow('smoke failed');expect(r.latestVersions.size).toBe(2)})
 
 test('HTTP adapter bounds retries and never classifies missing payload as absent',async()=>{
  const {registryClient}=await import('./release-publish.mjs');let calls=0
@@ -68,24 +84,24 @@ test('production registry policy tolerates measured five-minute visibility witho
  }
  const run=(argv:string[])=>{const a=manifest.artifacts.find(candidate=>argv[2]?.endsWith(candidate.file))!;published.add(a.name);mutations.set(a.name,(mutations.get(a.name)??0)+1);throw Error('lost publish response')}
  const r=registryClient({directory:'/retained',fetcher,run,smoke:async()=>{},sleep:async(ms:number)=>{sleeps.push(ms)}})
- expect((await publishPair(manifest,r,{publish:true})).state).toBe('smoked')
+ expect((await publishPair(manifest,r,{publish:true})).state).toBe('promoted')
  expect(manifest.artifacts.map(a=>mutations.get(a.name))).toEqual([1,1])
  // Confirmation consumes 30 observations, beyond the old 13-observation bound. The successful path then
- // performs one separate read per artifact before the first-use smoke.
- expect(manifest.artifacts.map(a=>observations.get(a.name))).toEqual([31,31])
+ // performs separate latest-tag and exact-byte reads per artifact before first-use smoke.
+ expect(manifest.artifacts.map(a=>observations.get(a.name))).toEqual([32,32])
  expect(sleeps).toHaveLength(29*manifest.artifacts.length)
  expect(new Set(sleeps)).toEqual(new Set([PUBLICATION_READBACK_DELAY_MS]))
 })
-test('promotion refuses backward latest before npm mutation',async()=>{
+test('direct publication refuses backward latest before npm mutation',async()=>{
  const {registryClient}=await import('./release-publish.mjs');let mutations=0
  const r=registryClient({fetcher:async()=>Response.json({name:manifest.artifacts[0]!.name,version:'2.0.0'}),run:()=>{mutations++;return ''}})
- await expect(r.promote(manifest.artifacts[0],'1.0.0')).rejects.toThrow('backward');expect(mutations).toBe(0)
+ await expect(publishPair(manifest,r,{publish:true})).rejects.toThrow('backward');expect(mutations).toBe(0)
 })
 test('large numeric prerelease identifiers compare exactly and cannot move latest backward',async()=>{
  expect(compareVersions('1.0.0-9007199254740993','1.0.0-9007199254740992')).toBe(1)
  const {registryClient}=await import('./release-publish.mjs');let mutations=0
  const r=registryClient({fetcher:async()=>Response.json({name:manifest.artifacts[0]!.name,version:'1.0.0-9007199254740993'}),run:()=>{mutations++;return ''}})
- await expect(r.promote(manifest.artifacts[0],'1.0.0-9007199254740992')).rejects.toThrow('backward');expect(mutations).toBe(0)
+ await expect(publishPair({...manifest,version:'1.0.0-9007199254740992'},r,{publish:true})).rejects.toThrow('backward');expect(mutations).toBe(0)
 })
 
 test('known integrity conflicts do not download payloads',async()=>{
@@ -166,10 +182,10 @@ child.stdout.once('data',data=>{const port=Number(String(data).trim());if(!Numbe
 async function processRegistry() {
  const dir=await mkdtemp(join(tmpdir(),'fake-publisher-')),publisher=join(dir,'publisher.mjs')
  await writeFile(publisher,`#!/usr/bin/env node
-const fs=await import('node:fs/promises');const a=process.argv.slice(2);const base=a[a.indexOf('--registry')+1];if(new URL(base).protocol!=='http:'||new URL(base).hostname!=='127.0.0.1')throw Error('fixture refuses nonloopback');let body;if(a[0]==='publish'){if(!a.includes('--ignore-scripts')||a[a.indexOf('--tag')+1]==='latest')throw Error('unsafe fixture publish');body={operation:'publish',bytes:(await fs.readFile(a[1])).toString('base64')}}else if(a[0]==='dist-tag'&&a[1]==='add'&&a[3]==='latest')body={operation:'promote',identity:a[2]};else throw Error('unsupported fixture command');const r=await fetch(base+'/mutation',{method:'POST',body:JSON.stringify(body)});if(!r.ok)throw Error('fixture mutation response '+r.status)
+const fs=await import('node:fs/promises');const a=process.argv.slice(2);const base=a[a.indexOf('--registry')+1];if(new URL(base).protocol!=='http:'||new URL(base).hostname!=='127.0.0.1')throw Error('fixture refuses nonloopback');if(a[0]!=='publish'||!a.includes('--ignore-scripts')||a[a.indexOf('--tag')+1]!=='latest')throw Error('fixture requires direct latest publish');const body={operation:'publish',tag:'latest',bytes:(await fs.readFile(a[1])).toString('base64')};const r=await fetch(base+'/mutation',{method:'POST',body:JSON.stringify(body)});if(!r.ok)throw Error('fixture mutation response '+r.status)
 `,{mode:0o755})
  const versions=new Map<string,any>(),tags=new Map<string,string>(),writes:string[]=[]
- const control:any={failCLI:false,failPromoteCLI:false,lostPublish:false,lostPromote:false,status:0,conflict:false,onPublish:null}
+ const control:any={failCLI:false,lostPublish:false,status:0,conflict:false,onPublish:null}
  let base=''
  const server=createServer(async(req,res)=>{
   if(req.method==='POST'){
@@ -177,9 +193,9 @@ const fs=await import('node:fs/promises');const a=process.argv.slice(2);const ba
    if(op.operation==='publish'){
     const bytes=Buffer.from(op.bytes,'base64');const {readPackageArchive}=await import('./release-artifacts.mjs');const m=JSON.parse(readPackageArchive(bytes).find((f:any)=>f.path==='package.json')!.data.toString());writes.push('publish '+m.name)
     if(control.failCLI&&m.name===CLI){res.writeHead(503).end();return}
-    versions.set(m.name+'@'+m.version,{name:m.name,version:m.version,bytes,integrity:'sha512-'+createHash('sha512').update(bytes).digest('base64')});control.onPublish?.(m)
+    versions.set(m.name+'@'+m.version,{name:m.name,version:m.version,bytes,integrity:'sha512-'+createHash('sha512').update(bytes).digest('base64')});if(op.tag==='latest')tags.set(m.name,m.version);control.onPublish?.(m)
     if(control.lostPublish){res.destroy();return}
-   }else{writes.push('promote '+op.identity);const i=op.identity.lastIndexOf('@'),name=op.identity.slice(0,i),version=op.identity.slice(i+1);if(control.failPromoteCLI&&name===CLI){res.writeHead(503).end();return};tags.set(name,version);if(control.lostPromote){res.destroy();return}}
+   }else{res.writeHead(400).end();return}
    res.end('ok');return
   }
   if(control.status){res.writeHead(control.status).end();return}
@@ -192,7 +208,7 @@ const fs=await import('node:fs/promises');const a=process.argv.slice(2);const ba
  await new Promise<void>(ok=>server.listen(0,'127.0.0.1',ok));base=`http://127.0.0.1:${(server.address() as any).port}`
  return {base,publisher,versions,tags,writes,control,close:()=>new Promise<void>(ok=>server.close(()=>ok()))}
 }
-function launchPair(p:{dir:string},r:{base:string,publisher:string},extra:string[]=['--publish','--promote']) {
+function launchPair(p:{dir:string},r:{base:string,publisher:string},extra:string[]=['--publish']) {
  const child=spawn('node',[resolve('scripts/release-publish.mjs'),join(p.dir,'release-manifest.json'),'--rehearsal-registry',r.base,'--rehearsal-publisher',r.publisher,...extra],{env:process.env,stdio:['ignore','pipe','pipe']});let output='';child.stdout.on('data',b=>output+=b);child.stderr.on('data',b=>output+=b)
  return {child,result:new Promise<{code:number|null,output:string}>(ok=>child.on('close',code=>ok({code,output})))}
 }
@@ -208,16 +224,13 @@ test('real publisher CLI persists an uncertain CLI attempt and never submits it 
   expect(r.writes.filter(x=>x==='publish '+DASHBOARD)).toHaveLength(1);expect(r.writes.filter(x=>x==='publish '+CLI)).toHaveLength(1)
  }finally{await r.close()}
 },30000)
-test('publisher library reconciles supplied half-promotion state without republishing the pair',async()=>{
+test('real publisher uses only direct latest publish and records both latest tags',async()=>{
  const p=await pairFixture(),r=await processRegistry()
  try {
-  r.control.failPromoteCLI=true
-  expect((await launchPair(p,r).result).code).toBe(2)
-  let state=JSON.parse(await readFile(join(p.dir,'release-state.json'),'utf8'));expect(state.state).toBe('smoked');expect(state.promotions[DASHBOARD].matching).toBe(true);expect(state.pending.name).toBe(CLI)
-  r.control.failPromoteCLI=false;r.control.lostPromote=true
   expect((await launchPair(p,r).result).code).toBe(0)
-  state=JSON.parse(await readFile(join(p.dir,'release-state.json'),'utf8'));expect(state.state).toBe('promoted');expect(state.promotions[CLI].matching).toBe(true)
+  const state=JSON.parse(await readFile(join(p.dir,'release-state.json'),'utf8'));expect(state.state).toBe('promoted');expect(state.promotions[DASHBOARD].matching).toBe(true);expect(state.promotions[CLI].matching).toBe(true)
   expect(r.writes.filter(x=>x==='publish '+DASHBOARD)).toHaveLength(1);expect(r.writes.filter(x=>x==='publish '+CLI)).toHaveLength(1)
+  expect(r.writes.some(x=>x.startsWith('promote '))).toBe(false)
  }finally{await r.close()}
 },30000)
 test('real process interruption after first write reconciles exact bytes on restart',async()=>{
@@ -272,9 +285,9 @@ test('real CLI registry auth, outage and integrity conflict never create an abse
   const n=r.writes.length;expect((await launchPair(p,r).result).code).toBe(2);expect(r.writes).toHaveLength(n)
  }finally{await r.close()}
 },30000)
-test('actual fixture server failure stops first-use smoke before promotion',async()=>{
+test('actual fixture server failure stops release after direct latest publication',async()=>{
  const p=await pairFixture('1.0.0',true),r=await processRegistry()
- try{const result=await launchPair(p,r).result;expect(result.code).toBe(2);expect(result.output).toContain('dashboard readiness: HTTP 500');expect(r.tags.size).toBe(0);expect(JSON.parse(await readFile(join(p.dir,'release-state.json'),'utf8')).state).toBe('pair-present')}finally{await r.close()}
+ try{const result=await launchPair(p,r).result;expect(result.code).toBe(2);expect(result.output).toContain('dashboard readiness: HTTP 500');expect(r.tags.get(DASHBOARD)).toBe('1.0.0');expect(r.tags.get(CLI)).toBe('1.0.0');expect(JSON.parse(await readFile(join(p.dir,'release-state.json'),'utf8')).state).toBe('pair-present')}finally{await r.close()}
 },30000)
 
 test('one workflow queue covers interleaved version requests and the queued older CLI cannot roll latest backward',async()=>{
@@ -291,7 +304,7 @@ test('one workflow queue covers interleaved version requests and the queued olde
   expect((await active.result).code).toBe(0)
   const result=await queued;expect(result.code).toBe(2);expect(result.output).toContain('backward')
   expect(r.tags.get(CLI)).toBe('1.2.0');expect(r.tags.get(DASHBOARD)).toBe('1.2.0')
-  expect(r.writes.some(x=>x.startsWith('promote ')&&x.endsWith('@1.1.0'))).toBe(false)
+  expect(r.writes).toEqual(['publish '+DASHBOARD,'publish '+CLI])
  }finally{await r.close()}
 },30000)
 
