@@ -121,4 +121,4 @@ No git repo or no origin remote is a greenfield run, not an error. Detection has
 
 ## Decision-capture hooks
 
-The Stop-hook recipe (both harnesses), its wiring, and the hook API facts live in [harness-facts](harness-facts.md) — volatile vendor surface, dated and sourced there. Offer it in Round C; write hook files only on the user's explicit yes.
+The ship-guard hook, its wiring, and the hook API facts live in [harness-facts](harness-facts.md) — volatile vendor surface, dated and sourced there. Offer only the ship guard in Round C; the session hooks wait for #216. Write hook files only on the user's explicit yes.
