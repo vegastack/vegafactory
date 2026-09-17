@@ -17,7 +17,7 @@ export function compareTaskIds(expected, actual) {
 const REQUIRED_SECTIONS = [
   [/\*\*Done:\*\*/, '**Done:** section'],
   [/\*\*Tests:\*\*/, '**Tests:** section (command → fresh result)'],
-  [/\*\*Review:\*\*/, '**Review:** section (mode + verdict/adjudications)'],
+  [/\*\*Review:\*\*/, '**Review:** section (reviewer + round + verdict)'],
   [/\*\*Changelog:\*\*/, '**Changelog:** section (entry, or none with a holding reason)'],
   [/\*\*Docs:\*\*/, '**Docs:** section (brief/plan revisions in sync, or unchanged)'],
   [/\*\*Not done/, '**Not done / limits:** section (the honest list)'],

@@ -63,7 +63,7 @@ Announce it, then run `vegafactory review <n>` from the worktree: the other tool
 ## Result (v1)
 **Done:** what changed, in behavior terms
 **Tests:** <command> → <fresh result>
-**Review:** <mode> — <verdict; adjudications and rulings surfaced, in order made>
+**Review:** <reviewer tool> round <n> — <verdict>; disagreements and deferred minors, in order made
 **Changelog:** <entry added / none, with reason>
 **Docs:** brief v<n>, plan v<n> — in sync | unchanged since the ack
 **UI evidence:** <links>            (when applicable)
@@ -72,7 +72,7 @@ Announce it, then run `vegafactory review <n>` from the worktree: the other tool
 Branch: <name> @ <sha7>
 ```
 
-The tail's sha stays bare, because GitHub auto-links it once the branch is pushed while a hand-written `/commit/` link 404s until then. The `**Review:**` line is the one home of surfaced rulings: every progress `Ruling:` appears there, in the order made. Run `node <path-to-this-skill>/scripts/evidence-check.mjs --file <draft> --issue <n> --json` before posting — it checks the draft's shape and, with `--issue`, that the plan comment's `[x]` boxes reflect the status comment's completed tasks; exit 2 means fix, don't post. The evidence comment is the operator's whole read: one line per field, the Not done / limits list complete, and the closing recap repeats it in under 150 words. Post it with `vegafactory issue comment` (later edits: `issue edit-comment … --since <cursor>`), run `vegafactory issue label <n> --state ready-to-ship` with the assignee moved to the operator, and stop; the recap repeats the evidence content rather than replacing it.
+The tail's sha stays bare, because GitHub auto-links it once the branch is pushed while a hand-written `/commit/` link 404s until then. The `**Review:**` line is the one home of surfaced judgment calls: every progress `Ruling:` and every finding you did not fix appears there, in the order made. Run `node <path-to-this-skill>/scripts/evidence-check.mjs --file <draft> --issue <n> --json` before posting — it checks the draft's shape and, with `--issue`, that the plan comment's `[x]` boxes reflect the status comment's completed tasks; exit 2 means fix, don't post. The evidence comment is the operator's whole read: one line per field, the Not done / limits list complete, and the closing recap repeats it in under 150 words. Post it with `vegafactory issue comment` (later edits: `issue edit-comment … --since <cursor>`), run `vegafactory issue label <n> --state ready-to-ship` with the assignee moved to the operator, and stop; the recap repeats the evidence content rather than replacing it.
 
 ## Corrections loop — code and docs move together
 

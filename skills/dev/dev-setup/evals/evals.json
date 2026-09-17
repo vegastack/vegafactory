@@ -50,10 +50,10 @@
     {
       "id": 5,
       "prompt": "Set up the dev workflow here. This machine has Claude Code installed and nothing else \u2014 no Codex.",
-      "expected_output": "Detection records the single harness, the drafted `review:` knob is `subagent` with cross-agent off, `harnesses:` records the two absent harnesses, and `## Environments` names what the absence costs.",
+      "expected_output": "Detection records the single harness, says plainly that cross-tool review is off until Codex is installed (reviews fall back to a labelled same-tool self-review), `harnesses:` records the absent harness, and `## Environments` names what the absence costs.",
       "files": [],
       "assertions": [
-        "The recommended `review:` knob value is `review: subagent`, not cross-agent-risky, and cross-agent is said to be off until a second harness exists",
+        "No review knob is drafted; the answer says cross-tool review is off until the other tool is installed and that reviews fall back to a labelled same-tool self-review",
         "The `harnesses:` knob line lists the detected Claude Code version and records `codex absent`",
         "The `harness-policy:` line is still drafted with all six stages (intake, plan, implement, review, status, chronicle)",
         "`## Environments` carries a bullet naming the absent harness and the capability its absence gates"
