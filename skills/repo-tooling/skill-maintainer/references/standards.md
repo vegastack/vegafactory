@@ -75,7 +75,7 @@ Repo enforcement: `packages/cli/scripts/validate-skill.mjs` (run by `bun run che
 
 ## Skill scanning and the suppression baseline
 
-Every skill this repo ships is scanned by [NVIDIA SkillSpector](https://github.com/NVIDIA/skillspector) through the `skill-scan` skill's `scripts/skill-scan.mjs`, at the Verify gate before a push and again as a blocking `guard:` before publish. The guard blocks on any unsuppressed **HIGH or CRITICAL** finding and ignores the aggregate risk score: a skills repo documents the very mechanics the scanner matches on, so the score reflects our subject matter more than our risk.
+Every skill this repo ships is scanned by [NVIDIA SkillSpector](https://github.com/NVIDIA/skillspector) through the `skill-scan` skill's `scripts/skill-scan.mjs`, in the merge queue on the built bundle, before any change reaches main. The guard blocks on any unsuppressed **HIGH or CRITICAL** finding and ignores the aggregate risk score: a skills repo documents the very mechanics the scanner matches on, so the score reflects our subject matter more than our risk.
 
 Suppressions live in `.vegastack/skillspector-baseline.json` — a real SkillSpector baseline, passed with `--baseline`, so nothing here forks the scanner's own matching and upstream changes to it arrive for free. The rules this repo adds on top:
 

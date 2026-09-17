@@ -19,8 +19,10 @@ jobs:
   check:
     # The job name is the required status check; keep it stable.
     name: check (node 24)
-    # Fork PRs never reach the self-hosted Mac mini: outside code runs on a clean hosted runner.
-    runs-on: ${{ (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository) && 'ubuntu-latest' || fromJSON('["self-hosted", "vsk-runners-mac-mini"]') }}
+    # Only pull requests from branches in this repository run on the self-hosted Mac mini.
+    # Fork PRs and merge-queue groups (which may contain fork code) run on clean hosted runners.
+    # Fork workflows also need a maintainer's approval before they run (repo setting).
+    runs-on: ${{ (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository) && fromJSON('["self-hosted", "vsk-runners-mac-mini"]') || 'ubuntu-latest' }}
     steps:
       - uses: actions/checkout@v7
         with:
