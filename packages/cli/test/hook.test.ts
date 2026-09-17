@@ -22,6 +22,7 @@ let tree: string
 let plain: string
 let out: string[]
 let detached: string[][]
+let stats: string[][]
 let prHead: string
 let detachPid: number | undefined
 const OWNER = 'box:7-export'
@@ -34,7 +35,9 @@ const runner: GhRunner = (args, input) => {
 }
 
 const deps = (): HookDeps => ({
-  runner, now: () => gh.clock, out: (text) => out.push(text), detach: (command) => { detached.push(command); return detachPid }, cli: ['vf'], host: 'box',
+  runner, now: () => gh.clock, out: (text) => out.push(text), cli: ['vf'], host: 'box',
+  // Usage collection rides on the same detached runner; every other assertion counts the rest.
+  detach: (command) => { (command[1] === 'stats' ? stats : detached).push(command); return detachPid },
 })
 
 async function hook(event: string, payload: unknown, harness = 'claude') {
@@ -52,6 +55,7 @@ beforeEach(() => {
   gh.addIssue({ number: 7, body: 'Export CSV', labels: ['queued', 'small'] })
   out = []
   detached = []
+  stats = []
   detachPid = undefined
   prHead = 'feat/7-export'
   const base = realpathSync(mkdtempSync(join(tmpdir(), 'hook-')))
@@ -375,5 +379,26 @@ describe('heartbeat and checkpoints', () => {
     expect((await hook('stop', { cwd: tree })).text).toBe('')
     expect(git(tree, 'log', '-1', '--format=%s')).toBe('wip: #7 turn checkpoint')
     expect(detached).toHaveLength(1)
+  })
+})
+
+describe('usage collection', () => {
+  test('turn boundaries collect in the background, and only a session start asks to share', async () => {
+    await hook('session-start', { cwd: tree })
+    expect(stats).toEqual([['vf', 'stats', 'collect'], ['vf', 'stats', 'push']])
+    stats = []
+    await hook('stop', { cwd: tree })
+    await hook('session-end', { cwd: tree })
+    expect(stats).toEqual([['vf', 'stats', 'collect'], ['vf', 'stats', 'collect']])
+    stats = []
+    // Not on every tool call, and not on a prompt.
+    await hook('post-tool', { cwd: tree })
+    await hook('prompt', { cwd: tree })
+    expect(stats).toEqual([])
+  })
+
+  test('a checkout with no issue still collects', async () => {
+    await hook('session-start', { cwd: plain })
+    expect(stats).toHaveLength(2)
   })
 })
