@@ -1,4 +1,4 @@
-# Tri-harness skill standards
+# Skill standards for Claude Code and Codex
 
 The complete standards reference for skills in this repository, covering the two target harnesses — Claude Code and Codex — and the agentskills.io open standard they converge on. Verified 2026-08-08.
 
@@ -61,7 +61,7 @@ These paths are the harnesses' own discovery rules and are unaffected by how ski
 
 ## Portability rules (this repo's policy)
 
-One authored tree, three harnesses. Every skill in `skills/` follows all seven:
+One authored tree, two harnesses. Every skill in `skills/` follows all seven:
 
 1. **Frontmatter:** only `name` + `description` (spec also allows `license`, `compatibility`, `metadata` — off by default here). Never depend on `allowed-tools`. No Claude-only keys: they break claude.ai packaging and are dead weight elsewhere.
 2. **Name:** equals the directory name; grammar intersection across harnesses: starts with a lowercase letter, then `[a-z0-9-]`, no consecutive hyphens, no underscores, ≤ 64 chars.
