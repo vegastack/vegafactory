@@ -81,7 +81,9 @@ each log — from a saved byte offset, so a killed session is counted once, at t
 keeps one record per assistant turn under `~/.vegastack/.tmp/stats/` — one collector at a time, so
 two hooks never count the same turn twice: time, your `gh` login, the
 machine, the repository, the issue, the harness, the exact model id, the skill the turn used, the
-tokens, the duration and how the turn ended. Never a prompt, a file, tool arguments or which
+tokens, the duration, how the turn ended, and the workflow stage the issue was in **at that moment**
+— written down as the CLI moves a state label, so a session collected days later still counts in the
+stage it worked in, and turns nothing is known about carry no stage at all. Never a prompt, a file, tool arguments or which
 subscription paid for the turn — a skill is named only when it resolves to one installed under
 `~/.claude/skills`, `~/.agents/skills` or the bundle, so a tool argument that merely looks like a
 skill name is dropped. The harness hooks run it in the background at each turn boundary.
