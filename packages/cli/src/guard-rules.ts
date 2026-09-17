@@ -522,12 +522,13 @@ function refPlumbing(words: string[]): string | null {
   return null
 }
 
-// gh commands that pass: reads, plus opening a PR or an issue (operator's call, 17-09-2026 —
-// both are the skills' normal steps and publish nothing irreversible). `gh api`, `gh pr merge`
-// and `gh release` have their own rules.
+// gh commands that pass: reads, plus the routine, reversible writes the skills make — opening
+// and editing PRs and issues, creating and editing labels (operator's call, 17-09-2026).
+// `gh api`, `gh pr merge` and `gh release` have their own rules; closing, deleting,
+// commenting and everything else still asks.
 const GH_READ_ONLY: Record<string, string[]> = {
-  auth: ['status'], pr: ['view', 'list', 'checks', 'diff', 'status', 'create'], issue: ['view', 'list', 'status', 'create'],
-  run: ['view', 'list', 'watch'], repo: ['view'], label: ['list'], project: ['item-list', 'view', 'field-list'],
+  auth: ['status'], pr: ['view', 'list', 'checks', 'diff', 'status', 'create', 'edit'], issue: ['view', 'list', 'status', 'create', 'edit'],
+  run: ['view', 'list', 'watch'], repo: ['view'], label: ['list', 'create', 'edit'], project: ['item-list', 'view', 'field-list'],
   release: ['list', 'view', 'download', 'ls'],
 }
 
