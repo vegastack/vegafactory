@@ -1,6 +1,6 @@
 # Stack playbooks
 
-Detection-to-draft mapping for Step 1 and Round C: match the signals, propose the matching draft for `.vegastack/dev.md`, confirm with the user. Every draft is a starting proposal — the user's edits win. Mechanism names here are long-stable; anything version- or vendor-volatile lives in [harness-facts](harness-facts.md) under the refresh contract. Non-GitHub hosting is out of scope for this workflow — the issue/label machinery is GitHub-native.
+Detection-to-draft mapping for Step 1 and Round C: match the signals, propose the matching draft for `.vegastack/dev.md`, confirm with the user. Every draft is a starting proposal — the user's edits win. Mechanism names here are long-stable; anything version- or vendor-volatile lives in [harness-facts](harness-facts.md) with its checked date and source. Non-GitHub hosting is out of scope for this workflow — the issue/label machinery is GitHub-native.
 
 Each playbook fills the same six slots: **detect** (file signals) · **ship draft** (runbook lines) · **changelog** (the `changelog:` knob value and what dev-implement adds per change) · **version identity** (the one place a version lives) · **guards** (from the library below) · **rollback** (one line for `## Ship`).
 
@@ -121,4 +121,4 @@ No git repo or no origin remote is a greenfield run, not an error. Detection has
 
 ## Decision-capture hooks
 
-The Stop-hook recipe (both harnesses), its wiring, and the hook API facts live in [harness-facts](harness-facts.md) — volatile vendor surface under the refresh contract. Offer it in Round C; write hook files only on the user's explicit yes.
+The Stop-hook recipe (both harnesses), its wiring, and the hook API facts live in [harness-facts](harness-facts.md) — volatile vendor surface, dated and sourced there. Offer it in Round C; write hook files only on the user's explicit yes.

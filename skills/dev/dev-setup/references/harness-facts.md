@@ -1,6 +1,6 @@
 # Harness facts
 
-Verified mechanics of the two harnesses this workflow targets — Claude Code and Codex — and the GitHub CLI floor. Everything here is volatile — vendors change these — so each claim carries its source; the refresh contract tracks them. Verified 2026-09-03.
+Verified mechanics of the two harnesses this workflow targets — Claude Code and Codex — and the GitHub CLI floor. Everything here is volatile — vendors change these — so each claim carries its source and is re-checked there when older than 60 days. Verified 2026-09-03.
 
 ## Claude Code
 

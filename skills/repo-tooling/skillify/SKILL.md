@@ -1,6 +1,6 @@
 ---
 name: skillify
-description: Repo-local skill factory and auditor for the vegafactory monorepo. Use when asked to "skillify this", "make this a skill", "turn this workflow into a skill", or scaffold a new skill under skills/; when asked to "audit this skill", "is this skill complete", "check skill completeness", or score a skill against the repo contract; when deciding whether a workflow, script, or prompt should become a skill at all; when a skill description under- or over-triggers and needs tuning; or when a skill in this repo is missing tests, a README, a refresh contract, behavioral eval evidence, or repo wiring. Only for skills inside this repository, not for authoring skills in other projects or installing third-party skills.
+description: Repo-local skill factory and auditor for the vegafactory monorepo. Use when asked to "skillify this", "make this a skill", "turn this workflow into a skill", or scaffold a new skill under skills/; when asked to "audit this skill", "is this skill complete", "check skill completeness", or score a skill against the repo contract; when deciding whether a workflow, script, or prompt should become a skill at all; when a skill description under- or over-triggers and needs tuning; or when a skill in this repo is missing tests, dated sources for volatile facts, behavioral eval evidence, or repo wiring. Only for skills inside this repository, not for authoring skills in other projects or installing third-party skills.
 ---
 
 # Skillify

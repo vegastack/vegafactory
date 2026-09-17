@@ -79,6 +79,10 @@ jobs:
       TARBALL: release/${{ needs.build.outputs.tarball }}
       INTEGRITY: ${{ needs.build.outputs.integrity }}
     steps:
+      # Re-running only this job would skip build's guard, so publish checks the attempt itself.
+      - name: Refuse a re-run
+        run: test "$GITHUB_RUN_ATTEMPT" = 1 || { echo "::error::a release is never re-run; tag a new patch version"; exit 1; }
+
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
@@ -100,12 +104,27 @@ jobs:
       - name: Publish with provenance
         run: npm publish "$TARBALL" --provenance --access public
 
-      - name: Wait for the registry and smoke the published version
-        run: node scripts/release.mjs wait-registry
-
       - name: Create the GitHub release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           gh release create "$GITHUB_REF_NAME" "$TARBALL" \
             --repo "$GITHUB_REPOSITORY" --title "$GITHUB_REF_NAME" --notes-file release/notes.md --verify-tag
+
+  registry:
+    # Installing and running the published package happens outside the job that can publish.
+    needs: publish
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: "24.x"
+
+      - name: Wait for the registry and smoke the published version
+        run: node scripts/release.mjs wait-registry
