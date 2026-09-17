@@ -15,7 +15,7 @@ This skill states what must be true; skillify states how to get there. When a ru
 4. `description`: at most 1024 chars, third person, no angle brackets, no space-hash. It states what the skill does and when to load it as a calm "Use when …" conditional carrying the concrete phrasings users type, plus one "Not for …" clause naming the nearest neighbour, because harnesses quote descriptions verbatim in the skill list and emphatic wording (all-caps "must", "critical", "load this before") over-triggers there. Triggers go in the first sentence because listings truncate. The description never summarises the workflow: agents follow the summary and skip the body.
 5. `SKILL.md` under 500 lines (target 150), roughly 5k tokens; detail in `references/`, executables in `scripts/`, templates in `assets/`; relative links stay one level deep inside the skill.
 6. No Claude-only body syntax (token list in [standards](references/standards.md)); reference scripts as plain relative paths from the skill directory.
-7. A volatile fact (version, mechanism name, limit, dated claim) lives in a references file with its checked date and official source link; the `skills-refresh` skill finds what went stale.
+7. A volatile fact (version, mechanism name, limit, dated claim) lives in a references file with its checked date and official source link, and is re-checked against that source when older than 60 days.
 8. Before finishing any change, from the repo root: `node packages/cli/scripts/validate-skill.mjs <skill-dir>`, `bun test ./<skill-dir>`, and `node packages/cli/scripts/structure.mjs check` must pass. `bun run check:fast` includes the structure check; `bun run test:affected` runs the tests the change reaches.
 
 ## Route progressively

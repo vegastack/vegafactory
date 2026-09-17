@@ -3,7 +3,7 @@
 Dated, source-verified facts that change architecture decisions and that models routinely
 get wrong from stale training data. This file is the verified cache behind SKILL.md's
 verify-before-you-recommend protocol, and the ONLY file in this skill that goes stale by
-itself — the `skills-refresh` skill re-checks it against each fact's source. When a recommendation
+itself — each fact names its source and checked date, and is re-checked there before use. When a recommendation
 leans on a fact older than 60 days, re-verify that one fact against its source first.
 
 Facts carry their own verification dates — sections verified 2026-08-12 unless a
