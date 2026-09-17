@@ -88,9 +88,8 @@ else has exactly one home file.
 
 - Commit, tag, push, merge, publish, deploy or create paid/cloud resources only on the
   operator's explicit go-ahead for that step, because approval for one step is
-  not approval for the next (where the dev workflow is installed, dev.md's `gates:` knob
-  sets how many of those steps one instruction covers — the knob changes the count, not
-  the need for an instruction).
+  not approval for the next (where the dev workflow is installed, an issue's recorded
+  "ship it" covers that issue's PR, merge and cleanup, and nothing else).
 - Authorization lives server-side in the data-access layer, checked per resource on every
   request, because the CVE-2025-29927 bypass class is exactly middleware-as-boundary
   (`middleware.ts` or `proxy.ts`).

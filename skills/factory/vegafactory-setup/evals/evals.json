@@ -8,7 +8,7 @@
       "files": [],
       "assertions": [
         "Every file in the layout is rendered: `org.md`, `people.csv`, `decisions.md`, `groups/dev/group.md`, `groups/dev/people.csv`, `groups/dev/decisions.md`, `repos.md`, `boards.md`, `rules/`, `onboarding/new-repo.md`, `onboarding/new-teammate.md`, `templates/`",
-        "`org.md` carries `stats: on`, `stats-people: off`, `stats-override: allowed` and no department knob (`review:`, `gates:`, `merge:`, `harness:`)",
+        "`org.md` carries `stats: on`, `stats-people: off`, `stats-override: allowed` and no department knob (`review:`, `merge:`, `harness:`)",
         "The org repository is NOT created; the exact `gh repo create vegastack/vegafactory-control-room --private --add-readme` command is handed to the operator",
         "No file carries a secret value \u2014 secret names only"
       ]
@@ -19,7 +19,7 @@
       "expected_output": "dev-setup runs in the repo reading the control room first, so every knob the group file answers is stated as inherited rather than asked; the run asks zero knob questions and appends the repo's row to `repos.md`.",
       "files": [],
       "assertions": [
-        "No question is asked about `review`, `gates`, `merge`, `branch`, `labels`, `tests`, `changelog`, `release`, or the harness policy \u2014 each is stated as inherited from `groups/dev/group.md`",
+        "No question is asked about `review`, `merge`, `branch`, `labels`, `tests`, `changelog`, `release`, or the harness policy \u2014 each is stated as inherited from `groups/dev/group.md`",
         "A row for `vegastack/billing` is appended to `repos.md` with its group and owner",
         "The repo's `.vegastack/dev.md` gains a `control-room:` knob naming the control room and the group"
       ]

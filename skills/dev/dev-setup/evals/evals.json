@@ -7,7 +7,7 @@
       "expected_output": "A detection summary confirmed in one round, then `.vegastack/dev.md` rendered with the knob lines and the Ship/Verify sections drafted from the Bun playbook, the workflow labels created, and the AGENTS.md block inserted between the `vsk-dev` markers with the team's own section untouched.",
       "files": [],
       "assertions": [
-        "`.vegastack/dev.md` carries the knob lines `review`, `gates`, `tests`, `branch`, `labels`, `changelog` with values",
+        "`.vegastack/dev.md` carries the knob lines `review`, `tests`, `branch`, `labels`, `changelog` with values",
         "The AGENTS.md insertion is delimited by `<!-- vsk-dev:start -->` and `<!-- vsk-dev:end -->`",
         "The text outside the markers (the team's `## Conventions` section) is unchanged",
         "The `architect:` knob is set to `kmanojkumar`"
@@ -26,11 +26,11 @@
     },
     {
       "id": 3,
-      "prompt": "Re-run dev-setup here. `.vegastack/dev.md` already exists from March with `review: subagent` and `gates: 2`; since then we added Playwright tests under `e2e/` and a release workflow. Update what changed.",
+      "prompt": "Re-run dev-setup here. `.vegastack/dev.md` already exists from March with `review: subagent` and `tests: logic-only`; since then we added Playwright tests under `e2e/` and a release workflow. Update what changed.",
       "expected_output": "A re-run that detects the new machinery, proposes the affected lines (ui-evidence, the Ship runbook) and leaves the operator's existing knob values in place unless they say otherwise; the report lists exactly what changed.",
       "files": [],
       "assertions": [
-        "No existing knob value (`review: subagent`, `gates: 2`) is overwritten without the operator's yes",
+        "No existing knob value (`review: subagent`, `tests: logic-only`) is overwritten without the operator's yes",
         "The newly detected machinery (Playwright, the release workflow) is named with the dev.md lines it affects",
         "The final report lists what changed and what was left alone"
       ]
@@ -62,11 +62,11 @@
     {
       "id": 6,
       "prompt": "Re-run dev-setup here and wire the hooks. We deploy with wrangler \u2014 preview and staging are fine to run unattended, production is not. I use Claude Code and Codex.",
-      "expected_output": "Round C offers the four hooks one at a time, each with a one-sentence explanation and its own yes; the `## Environments` policy lines are drafted and confirmed before the ship guard is offered; the hook files are copied to `.vegastack/hooks/` and the wiring is merged into `.claude/settings.json` and `<repo>/.codex/hooks.json`; the Codex offer states the trust prerequisite.",
+      "expected_output": "Round C offers the hooks as one set with a short explanation and one yes; the production deploy is drafted as a `## Ship` `ask:` line with its wrangler command in backticks; the `vegafactory hook <event> --harness <h>` wiring is merged into `.claude/settings.json` and `<repo>/.codex/hooks.json`; the Codex offer states the trust prerequisite.",
       "files": [],
       "assertions": [
-        "Each of the four hooks is offered separately, each written only on its own yes",
-        "The drafted `## Environments` lines carry `preview: auto`, `staging: auto` and `production: ask` with their wrangler command patterns",
+        "The hooks are offered as one set and written only on the operator's yes",
+        "The drafted `## Ship` section carries an `ask:` line naming `wrangler deploy --env production` in backticks, and preview and staging deploys are not on an `ask:` line",
         "Existing entries in `.claude/settings.json` and `.codex/hooks.json` are merged into, never replaced",
         "The Codex offer states that project-local hooks need the repo's `.codex/` layer to be trusted"
       ]

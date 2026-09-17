@@ -10,8 +10,8 @@ The main checkout never leaves the default branch and never carries uncommitted 
 | Epic parent | A map only — no branch or worktree of its own. |
 | Sub-issue of an epic | Its own branch and worktree cut from the default branch, like any issue, and its own PR. Siblings whose declared file sets do not overlap may run at the same time. |
 | Resume | Same branch, same worktree, reused. The resume read-order — brief → plan → ledger → `git log` — runs *there*, and the ledger names which "there" that is. |
-| Corrections / reclaim | Reuse the worktree. Directory gone but branch alive → `vegafactory worktree restore <n>`, which finds the branch carrying the number (`--slug` picks one when several do), re-adds the checkout and re-runs include-copy, setup and trust. `restore` never creates a branch: a missing branch means the work is elsewhere. |
-| Ship, PR | `ship-gate.mjs` resolves the branch's worktree itself (`--worktree <path>` overrides) and runs its git calls, its dev.md read and the fresh check command there, so the checkout test passes by construction. |
+| Corrections / take-back | Reuse the worktree. Directory gone but branch alive → `vegafactory worktree restore <n>`, which finds the branch carrying the number (`--slug` picks one when several do), re-adds the checkout and re-runs include-copy, setup and trust. `restore` never creates a branch: a missing branch means the work is elsewhere. |
+| Ship, PR | `vegafactory ship check <n>` runs in the issue's worktree: it reads the branch there and refuses uncommitted changes. |
 | Ship, merge | After the merge: `vegafactory worktree remove <n>`. That removes the **directory only** — deleting the local branch and the remote branch are separate operator words. A parent's worktree goes only when the parent PR merges. |
 | Rebase onto the default branch | Done inside the worktree; re-verify whatever the rebase touched. |
 | Direct chat trivial fix | `<type>/<slug>` in its own worktree too — the main checkout stays clean even for a one-liner. |

@@ -4,13 +4,13 @@
     {
       "id": 1,
       "prompt": "status — here is the output of `status.mjs --orphan-hours 6 --json` for vegastack/billing (attached). Render the board.",
-      "expected_output": "The operator's board: every issue as a linked title with its state and age, sections with zero entries omitted, the working issue whose ledger has been silent 13 hours called out as possibly orphaned with the reclaim path, the open PR with its check state, and the pending decision with the issue it records at.",
+      "expected_output": "The operator's board: every issue as a linked title with its state and age, sections with zero entries omitted, the working issue whose ledger has been silent 13 hours called out as possibly orphaned with the take-back command, the open PR with its check state, and the pending decision with the issue it records at.",
       "files": [
         "evals/files/status.json"
       ],
       "assertions": [
         "Every issue appears as a linked title; no bare issue number appears as an identifier",
-        "Issue 27 is listed as possibly orphaned with the ledger silence in hours and the `reclaim.mjs` path named",
+        "Issue 27 is listed as possibly orphaned with the ledger silence in hours and the `vegafactory issue claim 27 … --take-back-by` command named",
         "Sections with zero entries are omitted from the render",
         "The pending decision on issue 39 is shown with a link to the issue"
       ]
