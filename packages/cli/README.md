@@ -25,7 +25,8 @@ npx @vegastack/vegafactory skills list
 | `skills doctor` | Check the install, the project's `.vegastack/dev.md` and the latest version |
 | `worktree <list\|status\|create\|restore\|remove\|prune>` | One git worktree per issue under `.vegastack/.worktrees/` |
 | `sync` | Refresh this machine's copy of the org control room |
-| `guard sync [--check]` | Compile `.vegastack/dev.md`'s ship rules into `~/.vegastack/guard/<owner>__<repo>.json`, the file the ship guard reads |
+| `ship check <n>` | Exit 0 when issue n may merge: a "ship it" after the latest evidence, the branch pushed and clean, its PR green |
+| `hook <event> --harness claude\|codex` | The harness hooks: ship guard, claim heartbeat, WIP checkpoint each turn |
 
 ### Selecting skills
 

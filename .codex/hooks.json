@@ -1,16 +1,25 @@
 {
   "hooks": {
-    "PreToolUse": [
-      { "hooks": [ { "type": "command", "command": "node .vegastack/hooks/ship-guard.mjs --harness codex" } ] }
-    ],
     "SessionStart": [
-      { "hooks": [ { "type": "command", "command": "node .vegastack/hooks/session-start.mjs --harness codex" } ] }
+      { "hooks": [ { "type": "command", "command": "vegafactory hook session-start --harness codex", "timeout": 30 } ] }
+    ],
+    "UserPromptSubmit": [
+      { "hooks": [ { "type": "command", "command": "vegafactory hook prompt --harness codex", "timeout": 30 } ] }
+    ],
+    "PreToolUse": [
+      { "hooks": [ { "type": "command", "command": "vegafactory hook pre-tool --harness codex", "timeout": 60 } ] }
+    ],
+    "PostToolUse": [
+      { "hooks": [ { "type": "command", "command": "vegafactory hook post-tool --harness codex", "timeout": 10 } ] }
+    ],
+    "SubagentStop": [
+      { "hooks": [ { "type": "command", "command": "vegafactory hook post-tool --harness codex", "timeout": 10 } ] }
     ],
     "Stop": [
-      { "hooks": [
-        { "type": "command", "command": "node .vegastack/hooks/stop-heartbeat.mjs --harness codex" },
-        { "type": "command", "command": "node .vegastack/hooks/decision-nudge.mjs --harness codex" }
-      ] }
+      { "hooks": [ { "type": "command", "command": "vegafactory hook stop --harness codex", "timeout": 30 } ] }
+    ],
+    "SessionEnd": [
+      { "hooks": [ { "type": "command", "command": "vegafactory hook session-end --harness codex", "timeout": 3 } ] }
     ]
   }
 }

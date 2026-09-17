@@ -586,7 +586,7 @@ function normalizeIssue(raw) {
 // the loop is the supported path, not an optimization we passed up.
 export function gatherFacts({ root, baselinePath, llm, binary: binaryOverride }) {
   // VSK_SKILLSPECTOR is a TEST SEAM (stubs the scanner in unit tests), mirroring
-  // ship-gate.mjs's VSK_GH. `binaryOverride` is the absolute path the CLI
+  // dev-implement's VSK_GH. `binaryOverride` is the absolute path the CLI
   // resolved through the tool's own install channel; a bare PATH lookup is the
   // last resort, not the first.
   //
@@ -667,7 +667,7 @@ export function gatherFacts({ root, baselinePath, llm, binary: binaryOverride })
     if (baselineUsable) args.push('--baseline', baselinePath);
 
     try {
-      // `env` is passed explicitly, as ship-gate.mjs does: under Bun a mutated
+      // `env` is passed explicitly: under Bun a mutated
       // process.env is NOT inherited by execFileSync children, so the seam and
       // any scanner configuration (SKILLSPECTOR_PROVIDER, etc.) would be lost.
       execFileSync(binary, args, {
