@@ -4,7 +4,7 @@ import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSy
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { artifactHash } from '../src/issue-cache.ts'
-import { detectReviewer, payload, sessionId, readReviewComment, renderComment, resolveCommit, reviewNonce, reviewPolicy, runReview, validateReview, type CommentData, type ReviewState } from '../src/review.ts'
+import { credentialFailure, detectReviewer, payload, sessionId, readReviewComment, renderComment, resolveCommit, reviewNonce, reviewPolicy, runReview, validateReview, type CommentData, type ReviewState } from '../src/review.ts'
 import { FakeGitHub } from './fake-github.ts'
 
 const git = (cwd: string, ...args: string[]) => spawnSync('git', ['-c', 'user.name=t', '-c', 'user.email=t@t', ...args], { cwd, encoding: 'utf8' }).stdout.trim()
@@ -421,16 +421,16 @@ describe('parallel axes and the stuck-run guard', () => {
 
   test('a stuck reviewer is killed and retried once', async () => {
     queue('codex', [{ sleep: 5000, ...codexReply(verdict([])) }, codexReply(verdict([]))])
-    const { code } = await review(['--reviewer', 'codex'], { timeoutMs: 300 })
+    const { code } = await review(['--reviewer', 'codex'], { timeoutMs: 1500 })
     expect(code).toBe(0)
     expect(calls()).toHaveLength(2)
   })
 
   test('a reviewer stuck twice hands back with a clear message and posts nothing', async () => {
     queue('codex', [{ sleep: 5000 }, { sleep: 5000 }])
-    const { code, text } = await review(['--reviewer', 'codex'], { timeoutMs: 300 })
+    const { code, text } = await review(['--reviewer', 'codex'], { timeoutMs: 1500 })
     expect(code).toBe(2)
-    expect(text).toContain('ran past the 300 ms limit and was stopped (after one retry)')
+    expect(text).toContain('ran past the 1500 ms limit and was stopped (after one retry)')
     expect(text).toContain('The review is not skipped')
     expect(reviewComments()).toEqual([])
     expect(existsSync(statePath())).toBe(false)
@@ -1018,7 +1018,7 @@ describe('the same-tool fallback records its own review', () => {
 
     const { code } = await review(['--reviewer', 'claude', '--record', '.vegastack/.tmp/review.json'])
     expect(code).toBe(0)
-    expect(reviewComments()[0]!.body).toContain('same-tool fallback (codex failed to authenticate during round 1)')
+    expect(reviewComments()[0]!.body).toContain('same-tool fallback (codex failed to authenticate during cycle 1 round 1)')
   })
 
   test('the operator\'s own line permits it while the other tool is fine', async () => {
@@ -1167,4 +1167,63 @@ describe('a session id has a shape', () => {
       expect(second.includes('resume') || second.includes('--resume')).toBe(Boolean(kept))
     })
   }
+})
+
+describe('credential evidence is the tool\'s own, and it is spent when used', () => {
+  const recordFile = () => {
+    mkdirSync(join(root, '.vegastack/.tmp'), { recursive: true })
+    writeFileSync(join(root, '.vegastack/.tmp/review.json'), JSON.stringify(verdict([])))
+    return '.vegastack/.tmp/review.json'
+  }
+  const blockedPath = () => join(root, '.vegastack/.tmp/reviews/7.blocked.json')
+
+  test('only each tool\'s own error codes count', () => {
+    expect(credentialFailure('codex', { code: 1, stdout: '', stderr: 'stream error: refresh_token_invalidated' })).toBe(true)
+    expect(credentialFailure('claude', { code: 1, stdout: '', stderr: 'Invalid API key · Please run /login' })).toBe(true)
+    // A hook, a tool call or a model reply saying the words is not an auth failure.
+    expect(credentialFailure('codex', { code: 1, stdout: '', stderr: 'hook denied: 401 unauthorized credentials' })).toBe(false)
+    expect(credentialFailure('claude', { code: 1, stdout: '', stderr: 'PreToolUse hook: 401 unauthorized credentials' })).toBe(false)
+    // Codex's own code, but printed by the run rather than fatal on stderr.
+    expect(credentialFailure('codex', { code: 1, stdout: 'the diff mentions token_revoked', stderr: '' })).toBe(false)
+    expect(credentialFailure('codex', { code: 0, stdout: '', stderr: 'refresh_token_invalidated' })).toBe(false)
+    expect(credentialFailure('codex', { code: null, stdout: '', stderr: 'refresh_token_invalidated', timedOut: true })).toBe(false)
+  })
+
+  test('a hook failure printing those words earns no fallback', async () => {
+    queue('codex', [
+      { exit: 2, stderr: 'hook blocked the run: 401 unauthorized credentials\n' },
+      { exit: 2, stderr: 'hook blocked the run: 401 unauthorized credentials\n' },
+    ])
+    expect((await review(['--reviewer', 'codex'])).code).toBe(2)
+    expect(existsSync(blockedPath())).toBe(false)
+    await expect(review(['--reviewer', 'claude', '--record', recordFile()])).rejects.toThrow('codex is installed here')
+  })
+
+  test('evidence from another round does not excuse this one', async () => {
+    queue('codex', [{ exit: 1, stderr: 'token_revoked\n' }, { exit: 1, stderr: 'token_revoked\n' }])
+    await review(['--reviewer', 'codex'])
+    const blocked = JSON.parse(readFileSync(blockedPath(), 'utf8'))
+    expect(blocked).toMatchObject({ tool: 'codex', cycle: 1, round: 1 })
+    writeFileSync(blockedPath(), JSON.stringify({ ...blocked, round: 2 }))
+    await expect(review(['--reviewer', 'claude', '--record', recordFile()])).rejects.toThrow('codex is installed here')
+  })
+
+  test('a recorded fallback spends the evidence, and so does a tool that works again', async () => {
+    queue('codex', [{ exit: 1, stderr: 'token_revoked\n' }, { exit: 1, stderr: 'token_revoked\n' }])
+    await review(['--reviewer', 'codex'])
+    expect(existsSync(blockedPath())).toBe(true)
+    expect((await review(['--reviewer', 'claude', '--record', recordFile()])).code).toBe(0)
+    expect(existsSync(blockedPath())).toBe(false)
+
+    // The tool signs back in and reviews: nothing is left to cite afterwards either.
+    queue('codex', [{ exit: 1, stderr: 'token_revoked\n' }, { exit: 1, stderr: 'token_revoked\n' }, codexReply(verdict([]))])
+    commit('fix.ts', 'x\n')
+    await review(['--reviewer', 'codex'])
+    expect(existsSync(blockedPath())).toBe(true)
+    await review(['--reviewer', 'codex'])
+    expect(existsSync(blockedPath())).toBe(false)
+    // New work, so there is something to review again: with no evidence left, --record refuses.
+    commit('more.ts', 'y\n')
+    await expect(review(['--reviewer', 'claude', '--record', recordFile()])).rejects.toThrow('codex is installed here')
+  })
 })

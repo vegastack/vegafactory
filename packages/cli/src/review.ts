@@ -105,12 +105,21 @@ export function probeReviewer(tool: Reviewer, { env = process.env, spawn = spawn
   return { available: true, reason: null }
 }
 
-// A run that died on credentials, not on the code: the one signal that a signed-out or revoked
-// tool gives. `token_revoked` and `refresh_token_invalidated` are what Codex prints in that state.
-export const AUTH_FAILURE = /token_revoked|refresh_token_invalidated|invalid_(?:grant|api_key)|unauthorized|401|not (?:logged|signed) in|please (?:run )?(?:codex |claude )?(?:auth )?login|authentication (?:failed|required)|credentials?/i
+// A run that died on credentials, not on the code. Each tool's own error codes only: a hook, a
+// tool call or a model reply can print "401", "unauthorized" or "credentials" all day, and none of
+// that says anything about whether the reviewer can sign in.
+const CODEX_AUTH = /\b(?:token_revoked|refresh_token_invalidated|invalid_grant|invalid_client)\b|please run ['"`]?codex login/i
+const CLAUDE_AUTH = /invalid api key[^\n]*\/login|please run ['"`]?\/?(?:claude )?(?:auth )?login|oauth token (?:has )?expired|\boauth_token_(?:expired|revoked)\b/i
+
+// The tool's own fatal error arrives on stderr and stops the run before any turn; what a hook or a
+// model says travels with the run's output on stdout, and never earns the fallback.
+export function credentialFailure(tool: Reviewer, run: { code: number | null; stdout: string; stderr: string; timedOut?: boolean }): boolean {
+  if (run.timedOut || run.code === 0) return false
+  return (tool === 'codex' ? CODEX_AUTH : CLAUDE_AUTH).test(run.stderr)
+}
 
 // The failure is scoped to what was being reviewed, so it cannot excuse a later review.
-export interface BlockedReviewer { tool: Reviewer; reason: string; round: number; head: string; brief: string; plan: string | null }
+export interface BlockedReviewer { tool: Reviewer; reason: string; cycle: number; round: number; head: string; brief: string; plan: string | null }
 export const blockedPath = (dir: string, number: number) => join(dir, `${number}.blocked.json`)
 
 export function readBlocked(dir: string, number: number): BlockedReviewer | null {
@@ -336,7 +345,7 @@ const SESSION_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12
 export const sessionId = (value: string | null | undefined): string | null => (value && SESSION_ID.test(value) ? value : null)
 
 interface RunOutcome { ok: true; result: ReviewResult; session: string | null }
-interface RunFailure { ok: false; reason: string }
+interface RunFailure { ok: false; reason: string; auth?: boolean }
 
 // Parses one finished run of either tool.
 export function readRun(reviewer: Reviewer, stdout: string, stderr: string, outPath: string): RunOutcome | RunFailure {
@@ -386,10 +395,12 @@ interface RunSpec { group: Group; args: string[]; prompt: string; outPath: strin
 // One reviewer run, retried once on a stuck, failed or malformed run.
 async function runOnce(reviewer: Reviewer, spec: RunSpec, options: { cwd: string; env: NodeJS.ProcessEnv; timeoutMs: number }): Promise<(RunOutcome | RunFailure) & { group: Group }> {
   let reason = ''
+  let auth = false
   for (let attempt = 1; attempt <= 2; attempt++) {
     rmSync(spec.outPath, { force: true })
     const run = await execTool(reviewer, spec.args, { ...options, input: spec.prompt })
     if (run.error) return { ok: false, reason: `could not start ${reviewer}: ${run.error} — is it installed and on PATH?`, group: spec.group }
+    auth = credentialFailure(reviewer, run)
     if (run.timedOut) reason = `${reviewer} ran past the ${limit(options.timeoutMs)} limit and was stopped`
     else if (run.code !== 0) reason = `${reviewer} exited ${run.code}: ${(run.stderr || run.stdout).trim().split('\n').slice(-3).join(' ').slice(0, 300)}`
     else {
@@ -398,7 +409,7 @@ async function runOnce(reviewer: Reviewer, spec: RunSpec, options: { cwd: string
       reason = read.reason
     }
   }
-  return { ok: false, reason: `${reason} (after one retry)`, group: spec.group }
+  return { ok: false, reason: `${reason} (after one retry)`, auth, group: spec.group }
 }
 
 // A previous round's finding is re-checked by the group that owns it: the one whose prefix the id
@@ -692,22 +703,6 @@ export async function runReview(argv: string[], deps: ReviewDeps = {}): Promise<
   const artifacts = currentHashes(snap)
   const sameArtifacts = Boolean(prior && prior.brief === artifacts.brief && prior.plan === artifacts.plan)
 
-  // `--record` stands in for the cross-tool review, so it is allowed only when that review cannot
-  // run: the other tool is missing, broken or signed out — or the operator says so in their own
-  // line on the issue. The reason goes into the comment, where anyone reading the record sees it.
-  let fallback: string | null = null
-  if (args.record) {
-    const missing: Reviewer = reviewer === 'codex' ? 'claude' : 'codex'
-    const approval = acceptedFallback(snap, trusted, head)
-    const probe = probeReviewer(missing, { env })
-    const blocked = readBlocked(dir, number)
-    const failedHere = blocked && blocked.tool === missing && blocked.head === head && blocked.brief === artifacts.brief && blocked.plan === artifacts.plan ? blocked : null
-    if (probe.available && !approval && !failedHere) {
-      throw new Error(`${missing} is installed here, so the cross-tool review runs: drop --record. If it cannot authenticate, run the review once and it will record that; or the operator allows a same-tool review on the issue in a line of their own: "accept same-tool review @ ${head.slice(0, 7)}"`)
-    }
-    fallback = approval ? `allowed by @${approval.author}` : failedHere?.reason ?? probe.reason!
-  }
-
   // The comment is the record: no trusted comment means no round has landed, whatever a local
   // state file remembers.
   const priorRound = prior?.round ?? 0
@@ -758,6 +753,24 @@ export async function runReview(argv: string[], deps: ReviewDeps = {}): Promise<
     throw new Error(`the base is fixed at ${fixed.slice(0, 7)} for this review — drop --base, or start a fresh cycle to change it`)
   }
   const base = fixed ?? resolveCommit(top, args.base ?? defaultBase(top, repo, runner))
+
+  // `--record` stands in for the cross-tool review, so it is allowed only when that review cannot
+  // run: the other tool is missing, broken or signed out — or the operator says so in their own
+  // line on the issue. The reason goes into the comment, where anyone reading the record sees it.
+  let fallback: string | null = null
+  if (args.record) {
+    const missing: Reviewer = reviewer === 'codex' ? 'claude' : 'codex'
+    const approval = acceptedFallback(snap, trusted, head)
+    const probe = probeReviewer(missing, { env })
+    // The recorded failure counts for the round it happened in, on these inputs, and no other.
+    const blocked = readBlocked(dir, number)
+    const failedHere = blocked && blocked.tool === missing && blocked.cycle === cycle && blocked.round === round
+      && blocked.head === head && blocked.brief === artifacts.brief && blocked.plan === artifacts.plan ? blocked : null
+    if (probe.available && !approval && !failedHere) {
+      throw new Error(`${missing} is installed here, so the cross-tool review runs: drop --record. If it cannot authenticate, run the review once and it will record that; or the operator allows a same-tool review on the issue in a line of their own: "accept same-tool review @ ${head.slice(0, 7)}"`)
+    }
+    fallback = approval ? `allowed by @${approval.author}` : failedHere?.reason ?? probe.reason!
+  }
 
   // The packet describes a commit; anything uncommitted would be read but never reviewed.
   const dirty = git(top, ['status', '--porcelain']).split('\n').filter(Boolean)
@@ -837,11 +850,10 @@ export async function runReview(argv: string[], deps: ReviewDeps = {}): Promise<
     const runs = await Promise.all(specs.map((spec) => runOnce(reviewer, spec, { cwd: top, env: childEnv, timeoutMs })))
     const failed = runs.filter((run): run is RunFailure & { group: Group } => !run.ok)
     if (failed.length) {
-      const why = failed.map((run) => run.reason).join('; ')
       // A credential failure is what "the other tool cannot review" actually looks like; record it
-      // against this head and these artifacts so the fallback can cite it, and nothing else can.
-      if (AUTH_FAILURE.test(why)) {
-        const blocked: BlockedReviewer = { tool: reviewer, reason: `${reviewer} failed to authenticate during round ${round}`, round, head, brief: artifacts.brief, plan: artifacts.plan }
+      // against this cycle, round, head and artifacts so the fallback can cite it, and nothing else.
+      if (failed.some((run) => run.auth)) {
+        const blocked: BlockedReviewer = { tool: reviewer, reason: `${reviewer} failed to authenticate during cycle ${cycle} round ${round}`, cycle, round, head, brief: artifacts.brief, plan: artifacts.plan }
         writeFileSync(blockedPath(dir, number), JSON.stringify(blocked, null, 2) + '\n')
       }
       return handBack(`the ${reviewer} review of #${number} did not finish: ${failed.map((run) => `${run.group.key}: ${run.reason}`).join('; ')}`, { round })
@@ -891,6 +903,9 @@ export async function runReview(argv: string[], deps: ReviewDeps = {}): Promise<
     runIssue(current
       ? ['edit-comment', String(number), String(current.entry.id), '--file', bodyPath, '--since', String(cursor), '--repo', repo]
       : ['comment', String(number), '--file', bodyPath, '--repo', repo], { runner, cwd, out: (line) => quiet.push(line) })
+    // The credential evidence has served its purpose — or was never needed, because this round
+    // landed. Either way it must not be reusable later.
+    rmSync(blockedPath(dir, number), { force: true })
     // runIssue synced after writing, so the comment this state describes can be read back by id.
     try {
       next.comment.id = trustedReview(snapshot(cacheDir(root, repo, number)), trusted, head)?.entry.id ?? 0
