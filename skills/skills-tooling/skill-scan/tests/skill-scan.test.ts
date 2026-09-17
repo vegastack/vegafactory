@@ -554,7 +554,7 @@ describe('gatherFacts', () => {
   test('an explicit binary path is used instead of a PATH lookup', () => {
     const log = argvLogPath()
     withFake({ VSK_SKILLSPECTOR: undefined, VSK_FAKE_ARGV: log }, () => {
-      const out = gatherFacts({ root: oneSkill(), baselinePath: null, llm: false, binary: fake })
+      const out = gatherFacts({ root: oneSkill(), baselinePath: null, binary: fake })
       expect(out.binaryMissing).toBe(false)
       expect(out.skills).toHaveLength(1)
     })
@@ -581,7 +581,7 @@ describe('gatherFacts', () => {
     const log = argvLogPath()
     const baseline = baselineFile()
     withFake({ VSK_FAKE_ARGV: log }, () => {
-      gatherFacts({ root: oneSkill(), baselinePath: baseline, llm: false })
+      gatherFacts({ root: oneSkill(), baselinePath: baseline })
     })
     const argv = argvLines(log)[0]
     expect(argv).toContain('--no-llm')
@@ -598,7 +598,7 @@ describe('gatherFacts', () => {
     const log = argvLogPath()
     let f: ReturnType<typeof gatherFacts>
     withFake({ VSK_FAKE_ARGV: log }, () => {
-      f = gatherFacts({ root: oneSkill(), baselinePath: join(tmpdir(), 'vsk-no-baseline.json'), llm: false })
+      f = gatherFacts({ root: oneSkill(), baselinePath: join(tmpdir(), 'vsk-no-baseline.json') })
     })
     expect(f!.baselineMissing).toBe(true)
     expect(argvLines(log)[0]).not.toContain('--baseline')
@@ -609,7 +609,7 @@ describe('gatherFacts', () => {
     const path = join(mkdtempSync(join(tmpdir(), 'vsk-base-')), 'baseline.json')
     writeFileSync(path, JSON.stringify({ version: 2, rules: [rule({ reason: 'no clause here' })], fingerprints: [] }))
     withFake({ VSK_FAKE_ARGV: log }, () => {
-      const f = gatherFacts({ root: oneSkill(), baselinePath: path, llm: false })
+      const f = gatherFacts({ root: oneSkill(), baselinePath: path })
       expect(f.baselineErrors).toHaveLength(1)
       expect(f.baselineErrors[0]).toContain('Still flag if:')
       expect(f.skills).toEqual([])
@@ -619,38 +619,30 @@ describe('gatherFacts', () => {
     expect(existsSync(log)).toBe(false)
   })
 
-  test('--llm drops --no-llm, and is the only way to reach the semantic pass', () => {
-    const log = argvLogPath()
-    withFake({ VSK_FAKE_ARGV: log }, () => {
-      gatherFacts({ root: oneSkill(), baselinePath: null, llm: true })
-    })
-    expect(argvLines(log)[0]).not.toContain('--no-llm')
-  })
-
   test('invokes the scanner once per discovered skill', () => {
     const log = argvLogPath()
     withFake({ VSK_FAKE_ARGV: log }, () => {
-      gatherFacts({ root: tree({ alpha: true, beta: true, gamma: true }), baselinePath: null, llm: false })
+      gatherFacts({ root: tree({ alpha: true, beta: true, gamma: true }), baselinePath: null })
     })
     expect(argvLines(log)).toHaveLength(3)
   })
 
   test('a missing binary is reported as a fact, not an exception', () => {
     withFake({ VSK_SKILLSPECTOR: '/nonexistent/skillspector' }, () => {
-      expect(gatherFacts({ root: oneSkill(), baselinePath: null, llm: false }).binaryMissing).toBe(true)
+      expect(gatherFacts({ root: oneSkill(), baselinePath: null }).binaryMissing).toBe(true)
     })
   })
 
   test('a missing root is reported as a fact', () => {
     withFake({}, () => {
-      const f = gatherFacts({ root: join(tmpdir(), 'vsk-absent-root'), baselinePath: null, llm: false })
+      const f = gatherFacts({ root: join(tmpdir(), 'vsk-absent-root'), baselinePath: null })
       expect(f.rootMissing).toContain('vsk-absent-root')
     })
   })
 
   test('an unparseable report becomes a scanError for that skill', () => {
     withFake({ VSK_FAKE_REPORT: 'not json' }, () => {
-      expect(gatherFacts({ root: oneSkill(), baselinePath: null, llm: false }).scanErrors).toHaveLength(1)
+      expect(gatherFacts({ root: oneSkill(), baselinePath: null }).scanErrors).toHaveLength(1)
     })
   })
 
@@ -659,7 +651,7 @@ describe('gatherFacts', () => {
   // every medium-scoring skill unscannable.
   test('a non-zero scanner exit with a readable report is data, not an error', () => {
     withFake({ VSK_FAKE_EXIT: '1' }, () => {
-      const f = gatherFacts({ root: oneSkill(), baselinePath: null, llm: false })
+      const f = gatherFacts({ root: oneSkill(), baselinePath: null })
       expect(f.scanErrors).toEqual([])
       expect(f.skills).toHaveLength(1)
     })
@@ -674,7 +666,7 @@ describe('gatherFacts', () => {
       analysis_completeness: { status: 'partial', limitations: [], entirely_uninspected_files: 0 },
     })
     withFake({ VSK_FAKE_REPORT: report }, () => {
-      const entry = gatherFacts({ root: oneSkill(), baselinePath: null, llm: false }).skills[0]
+      const entry = gatherFacts({ root: oneSkill(), baselinePath: null }).skills[0]
       expect(entry).toMatchObject({
         name: 'alpha',
         score: 80,
@@ -711,7 +703,7 @@ describe('gatherFacts', () => {
       },
     })
     withFake({ VSK_FAKE_REPORT: report }, () => {
-      const entry = gatherFacts({ root: oneSkill(), baselinePath: null, llm: false }).skills[0]
+      const entry = gatherFacts({ root: oneSkill(), baselinePath: null }).skills[0]
       expect(entry.completeness).toEqual({
         status: 'partial',
         limitations: ['LLM stage degraded'],
@@ -734,7 +726,7 @@ describe('gatherFacts', () => {
       execution_successful: true,
     })
     withFake({ VSK_FAKE_REPORT: report }, () => {
-      const f = gatherFacts({ root: oneSkill(), baselinePath: null, llm: false })
+      const f = gatherFacts({ root: oneSkill(), baselinePath: null })
       expect(f.skills).toEqual([])
       expect(f.scanErrors).toHaveLength(1)
       expect(f.scanErrors[0].message).toContain('unrecognised shape')
@@ -745,7 +737,7 @@ describe('gatherFacts', () => {
 
   test('a report that is valid JSON but not an object is a scanError', () => {
     withFake({ VSK_FAKE_REPORT: '[1,2,3]' }, () => {
-      expect(gatherFacts({ root: oneSkill(), baselinePath: null, llm: false }).scanErrors).toHaveLength(1)
+      expect(gatherFacts({ root: oneSkill(), baselinePath: null }).scanErrors).toHaveLength(1)
     })
   })
 
@@ -777,7 +769,7 @@ describe('gatherFacts', () => {
       analysis_completeness: { status: 'partial', limitations: [], entirely_uninspected_files: 0, partially_inspected_files: 0 },
     })
     withFake({ VSK_FAKE_REPORT: report }, () => {
-      const entry = gatherFacts({ root: oneSkill(), baselinePath: null, llm: false }).skills[0]
+      const entry = gatherFacts({ root: oneSkill(), baselinePath: null }).skills[0]
       expect(entry.suppressed).toHaveLength(1)
       expect(entry.suppressed[0]).toMatchObject({ rule_id: 'P2', file: 'references/conventions.md' })
     })
@@ -1087,7 +1079,7 @@ describe('adversarial regressions', () => {
     const saved = { ...process.env }
     try {
       process.env.VSK_SKILLSPECTOR = fake
-      const f = gatherFacts({ root, baselinePath: null, llm: false })
+      const f = gatherFacts({ root, baselinePath: null })
       expect(f.skills).toHaveLength(2)
       // Both must be present and distinguishable, not one name twice.
       expect(new Set(f.skills.map((e: { name: string }) => e.name)).size).toBe(2)
