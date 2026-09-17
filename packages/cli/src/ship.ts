@@ -1,12 +1,14 @@
 // `vegafactory ship check <n>` — the facts that must hold before an issue's PR is merged:
-// the issue passes `issue check --for ship`, its branch is clean and pushed, and the branch's
-// PR is open on that commit with every check green.
+// the issue passes `issue check --for ship`, its branch is clean and pushed, the latest evidence
+// names that commit, no [DEBUG-…] log line is added, and the branch's PR is open on it with
+// every check green.
 import { spawnSync } from 'node:child_process'
 import { existsSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { defaultRunner, type GhRunner } from './gh.ts'
+import { defaultBranch } from './guard-rules.ts'
 import { issueFromBranch } from './hook.ts'
-import { checkIssue, detectRepo, permissionLookup, repoRoot, snapshot } from './issue.ts'
+import { checkIssue, detectRepo, latestOfType, markerKeys, permissionLookup, repoRoot, snapshot } from './issue.ts'
 import { syncIssue } from './issue-cache.ts'
 
 export interface ShipCheck { ok: boolean; blocks: string[]; warns: string[]; branch: string | null; pr: number | null }
@@ -14,8 +16,9 @@ export interface ShipCheck { ok: boolean; blocks: string[]; warns: string[]; bra
 export function shipUsage(): string {
   return `Usage: vegafactory ship check <n> [--branch NAME] [--repo OWNER/NAME] [--json]
 
-  check <n>   exit 0 when issue n may merge: a "ship it" after the latest evidence, the branch
-              clean and pushed, its PR open on that commit and every check green. Exit 2 when blocked.
+  check <n>   exit 0 when issue n may merge: a "ship it" after the latest evidence, the evidence
+              on the pushed head, the branch clean, its PR open on that commit and every check green.
+              Exit 2 when blocked.
 `
 }
 
@@ -43,7 +46,8 @@ export function shipCheck(input: { cwd: string; root: string; repo: string; numb
   const { dir } = syncIssue({ root, repo, number, runner })
   const devMd = join(root, '.vegastack', 'dev.md')
   const devMdRepo = existsSync(devMd) ? /^repo:\s*(\S+)/m.exec(readFileSync(devMd, 'utf8'))?.[1] ?? null : null
-  const issue = checkIssue(snapshot(dir), 'ship', permissionLookup(repo, runner), { repo, devMdRepo })
+  const snap = snapshot(dir)
+  const issue = checkIssue(snap, 'ship', permissionLookup(repo, runner), { repo, devMdRepo })
   blocks.push(...issue.blocks)
   warns.push(...issue.warns)
 
@@ -55,6 +59,17 @@ export function shipCheck(input: { cwd: string; root: string; repo: string; numb
   const pushed = git(cwd, ['rev-parse', '--verify', '--quiet', `refs/remotes/origin/${branch}`])
   if (!pushed) blocks.push(`${branch} is not on origin`)
   else if (local && local !== pushed) blocks.push(`${branch} differs from origin/${branch} — push it`)
+  // The evidence must describe the commit that merges.
+  const evidence = latestOfType(snap, 'evidence')
+  const sha = evidence ? markerKeys(snap.body(evidence)).sha ?? '' : null
+  if (sha === '') blocks.push('the evidence comment names no sha=')
+  else if (sha && pushed && !pushed.startsWith(sha)) blocks.push(`the evidence is for ${sha}, but origin/${branch} is at ${pushed.slice(0, 12)} — post fresh evidence`)
+
+  // dev-debug's tagged debug logs must not ship.
+  const base = defaultBranch(cwd)
+  const diff = base && pushed ? git(cwd, ['diff', '--no-color', '--no-ext-diff', `origin/${base}...${pushed}`]) ?? '' : ''
+  const tagged = diff.split('\n').filter((line) => line.startsWith('+') && !line.startsWith('+++') && line.includes('[DEBUG-'))
+  if (tagged.length) blocks.push(`${tagged.length} added line(s) still carry a [DEBUG-…] tag`)
 
   const view = runner(['pr', 'view', branch, '--repo', repo, '--json', 'number,state,headRefOid,url'])
   let pr: Pr | null = null

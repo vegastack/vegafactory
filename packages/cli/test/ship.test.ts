@@ -37,7 +37,12 @@ beforeEach(() => {
   mkdirSync(join(root, '.vegastack'))
   writeFileSync(join(root, '.vegastack/dev.md'), 'repo: o/r\n')
   writeFileSync(join(root, '.gitignore'), '.vegastack/.tmp/\n')
+  git(root, 'add', '-A')
+  git(root, 'commit', '-q', '-m', 'init')
+  git(root, 'push', '-q', 'origin', 'main')
+  git(root, 'remote', 'set-head', 'origin', '--auto')
   git(root, 'switch', '-q', '-c', 'feat/7-export')
+  writeFileSync(join(root, 'feature.ts'), 'export {}\n')
   git(root, 'add', '-A')
   git(root, 'commit', '-q', '-m', 'work')
   git(root, 'push', '-q', '-u', 'origin', 'feat/7-export')
@@ -46,18 +51,29 @@ beforeEach(() => {
 })
 
 test('passes with a ship it after the evidence, a pushed clean branch and a green PR', () => {
-  gh.addComment(7, '<!-- vsk:v1 type=evidence -->\nit works')
+  gh.addComment(7, `<!-- vsk:v1 type=evidence rev=1 branch=feat/7-export sha=${git(root, 'rev-parse', '--short', 'HEAD')} -->\nit works`)
   gh.addComment(7, ackBody({ stage: 'ship', by: 'mk', brief: artifactHash('Export CSV'), plan: null, source: 'session', quote: 'ship it' }))
   expect(run()).toMatchObject({ code: 0, ok: true, blocks: [] })
+
+  // Evidence for another commit does not ship this one.
+  git(root, 'commit', '-q', '--allow-empty', '-m', 'more')
+  git(root, 'push', '-q')
+  pr = { ...pr, headRefOid: git(root, 'rev-parse', 'HEAD') }
+  const stale = expect.stringMatching(/^the evidence is for [0-9a-f]+, but origin\/feat\/7-export is at/)
+  expect(run().blocks).toEqual([stale])
 
   writeFileSync(join(root, 'dirty.txt'), 'x')
   checks = [{ name: 'check', bucket: 'fail' }, { name: 'e2e', bucket: 'pending' }]
   const blocked = run()
   expect(blocked.code).toBe(2)
-  expect(blocked.blocks).toEqual(['feat/7-export has uncommitted changes', 'failing checks: check', 'checks still running: e2e'])
+  expect(blocked.blocks).toEqual(['feat/7-export has uncommitted changes', stale, 'failing checks: check', 'checks still running: e2e'])
 })
 
-test('blocks without a ship it, an unpushed commit or a PR', () => {
+test('blocks without a ship it, an unpushed commit, a PR, or with a debug tag left in', () => {
+  writeFileSync(join(root, 'app.ts'), 'console.log("[DEBUG-a1f3] here")\n')
+  git(root, 'add', 'app.ts')
+  git(root, 'commit', '-q', '-m', 'debug')
+  git(root, 'push', '-q')
   git(root, 'commit', '-q', '--allow-empty', '-m', 'more')
   pr = null
   const result = run()
@@ -66,6 +82,7 @@ test('blocks without a ship it, an unpushed commit or a PR', () => {
     'no evidence comment yet',
     'no "ship it": no ship ack yet',
     'feat/7-export differs from origin/feat/7-export — push it',
+    '1 added line(s) still carry a [DEBUG-…] tag',
     'no PR for feat/7-export',
   ])
 })
