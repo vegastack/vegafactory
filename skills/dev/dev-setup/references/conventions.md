@@ -78,7 +78,7 @@ One status comment per issue (`type=ledger`), edited in place:
 - Deferred minor: <one-liner>
 ```
 
-Resume: brief → plan → ledger → `git log` on the issue branch; keep completed work.
+Resume: the status comment and `git log` on the issue branch recover the position; brief and plan confirm the scope; keep completed work.
 
 ## Workspaces
 
