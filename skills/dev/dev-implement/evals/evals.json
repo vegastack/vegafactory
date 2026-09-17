@@ -17,10 +17,10 @@
     {
       "id": 2,
       "prompt": "the last session on issue 27 died mid-way, pick it up. Issue 27 in vegastack/docs-tools (labeled ready, quick-build, assigned to you). Brief: `scripts/check-links.mjs` prints broken links one per line; add a `--json` flag that prints `{ broken: [{ file, broken: [...] }] }` instead, keep the exit codes, document the flag in the script header. Out of scope: renaming or restructuring existing functions. Plan comment (approved): Task 1 \u2014 failing test in `tests/check-links.test.ts` for `--json`, then the flag; Task 2 \u2014 header comment and changeset. dev.md: `tests: required`, `changelog: changesets`, `review: subagent`, `branch: <type>/<slug>`. The ledger comment on the issue reads: `- Task 1: complete (commits a1b2c3d..e4f5a6b)` and nothing else; `git log` on feat/27-json-flag shows those two commits. Tell me what you do first and what you skip.",
-      "expected_output": "The resume protocol is followed and named \u2014 brief, then plan, then ledger, then git log, nothing else \u2014 Task 1 is treated as done because the ledger says so and the commits exist, and work resumes at Task 2. (prose half only \u2014 the live label, branch and PR flow is the sandbox drill's proof)",
+      "expected_output": "The resume protocol is followed and named \u2014 brief, plan, every current issue comment (any age, since old ones can be edited), ledger, then git log \u2014 Task 1 is treated as done because the ledger says so and the commits exist, no operator correction overrides it, and work resumes at Task 2. (prose half only \u2014 the live label, branch and PR flow is the sandbox drill's proof)",
       "files": [],
       "assertions": [
-        "The output names the resume order brief \u2192 plan \u2192 ledger \u2192 git log and reads nothing else",
+        "The output reads the brief, the plan, every current issue comment regardless of age, the ledger and git log, and checks for an operator correction that overrides the ledger",
         "Task 1 is not re-executed; the output says the ledger's `complete` line and the matching commits settle it",
         "Work resumes at Task 2",
         "The operator's explicit handover is acknowledged as the thing that permits taking over a `working` issue"
