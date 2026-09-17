@@ -1,20 +1,23 @@
 #!/bin/sh
 # Fast checks before every commit (validators, lint, typecheck) — a few seconds.
 # Tests run while building (bun run test:affected) and in the merge queue (full suite).
+# WIP checkpoints (messages starting with "wip:") skip the checks so the Stop hook stays fast;
+# the next real commit checks everything.
 # Quiet when everything passes; prints the full output when something fails.
+if head -n 1 "$1" | grep -q '^wip:'; then exit 0; fi
 if git diff --cached --quiet; then exit 0; fi
 # The checks read the working tree, so a file with both staged and unstaged edits
 # could pass here while the commit records a different version.
 staged=$(git diff --cached --name-only)
 partial=$(git diff --name-only | while IFS= read -r file; do printf '%s\n' "$staged" | grep -Fxq -- "$file" && printf '%s\n' "$file"; done)
 if [ -n "$partial" ]; then
-  echo "pre-commit: these files have both staged and unstaged changes, so the checks cannot see what you are committing:" >&2
+  echo "commit-msg: these files have both staged and unstaged changes, so the checks cannot see what you are committing:" >&2
   echo "$partial" | sed 's/^/  /' >&2
   echo "Stage them fully (git add) or commit the unstaged part separately, then commit again." >&2
   exit 1
 fi
 log=$(mktemp)
-if bun run --silent check:fast >"$log" 2>&1; then rm -f "$log"; exit 0; fi
+if ${VEGAFACTORY_FAST_CHECK:-bun run --silent check:fast} >"$log" 2>&1; then rm -f "$log"; exit 0; fi
 cat "$log"; rm -f "$log"
-echo "pre-commit: fast checks failed — fix the problems above and commit again." >&2
+echo "commit-msg: fast checks failed — fix the problems above and commit again." >&2
 exit 1

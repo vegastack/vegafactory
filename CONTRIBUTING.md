@@ -8,13 +8,13 @@ Requirements: [Bun](https://bun.sh) 1.3.14 (pinned in `packageManager`) and Node
 
 ```sh
 bun install --frozen-lockfile
-bun run check:fast     # validators + lint + typecheck (the pre-commit hook runs this)
+bun run check:fast     # validators + lint + typecheck (the commit-msg hook runs this)
 bun run test:affected  # only the tests your change can reach
 bun run check          # everything; the merge queue runs this
 bun run build      # builds the CLI and syncs the skill copy into packages/cli
 ```
 
-`bun install` enables the pre-commit hook. Pull requests run the fast checks and affected tests; the merge queue runs the full suite, a packed-tarball smoke test and the skill scan once, on main plus your PR.
+`bun install` enables the commit-msg hook. Pull requests run the fast checks and affected tests; the merge queue runs the full suite, a packed-tarball smoke test and the skill scan once, on main plus your PR.
 
 ### Scanning the skills
 
