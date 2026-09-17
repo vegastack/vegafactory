@@ -6,13 +6,13 @@ The main checkout never leaves the default branch and never carries uncommitted 
 
 | Scenario | What happens |
 |---|---|
-| New issue, no parent | `worktree.mjs create --issue <n> --write` — the slug and type come off the issue title (`<type>:` prefix, the rest slugified; `--slug`/`--type` override, and GitHub being unreachable blocks rather than guesses) — fetches `origin/<default>`, `git worktree add` on a new branch, copies dev.md's `worktree-include:` files, runs `commands: setup`, adds the Codex trust entry. The ledger's first line records the path. |
-| Epic parent | Branch `<type>/<parent-n>-<slug>`, one worktree, created when the **first child** is claimed. The parent never gets `queued`. |
-| Sub-issue of an epic | `create --parent <parent-branch>`: `git switch -c` from the parent branch **inside the parent's worktree**. One child at a time; ordinary removal cannot delete that parent directory while it holds a serial child branch. Independent children use the CLI contract below. |
+| New issue | `vegafactory worktree create <n>` — the slug and type come off the issue title (`<type>:` prefix, the rest slugified; `--slug`/`--type` override, and GitHub being unreachable blocks rather than guesses) — fetches `origin/<default>`, `git worktree add` on a new branch, copies dev.md's `worktree-include:` files, runs `commands: setup`, adds the Codex trust entry. The ledger's first line records the path. |
+| Epic parent | A map only — no branch or worktree of its own. |
+| Sub-issue of an epic | Its own branch and worktree cut from the default branch, like any issue, and its own PR. Siblings whose declared file sets do not overlap may run at the same time. |
 | Resume | Same branch, same worktree, reused. The resume read-order — brief → plan → ledger → `git log` — runs *there*, and the ledger names which "there" that is. |
-| Corrections / reclaim | Reuse the worktree. Directory gone but branch alive → `restore --issue <n> --write`, which finds the branch carrying the number (`--slug` picks one when several do), re-adds the checkout and re-runs include-copy, setup and trust. `restore` never creates a branch: a missing branch means the work is elsewhere. |
+| Corrections / reclaim | Reuse the worktree. Directory gone but branch alive → `vegafactory worktree restore <n>`, which finds the branch carrying the number (`--slug` picks one when several do), re-adds the checkout and re-runs include-copy, setup and trust. `restore` never creates a branch: a missing branch means the work is elsewhere. |
 | Ship, PR | `ship-gate.mjs` resolves the branch's worktree itself (`--worktree <path>` overrides) and runs its git calls, its dev.md read and the fresh check command there, so the checkout test passes by construction. |
-| Ship, merge | After the merge: `worktree.mjs remove --issue <n> --write`. That removes the **directory only** — deleting the local branch and the remote branch are separate operator words. A parent's worktree goes only when the parent PR merges. |
+| Ship, merge | After the merge: `vegafactory worktree remove <n>`. That removes the **directory only** — deleting the local branch and the remote branch are separate operator words. A parent's worktree goes only when the parent PR merges. |
 | Rebase onto the default branch | Done inside the worktree; re-verify whatever the rebase touched. |
 | Direct chat trivial fix | `<type>/<slug>` in its own worktree too — the main checkout stays clean even for a one-liner. |
 | Research | `research/<n>-<slug>` worktree only when code is actually written; removed at hand-back, never merged. |

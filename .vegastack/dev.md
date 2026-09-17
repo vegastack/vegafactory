@@ -52,7 +52,7 @@ Line prefixes: `auto:` (agent just does it) · `ask:` (operator's word first) ·
 ## Verify — how to see it working (pre-merge)
 
 - Checks run once each: the pre-commit hook runs `bun run check:fast` (validators + lint + typecheck, ~5 s); while building run `bun run test:affected` (only tests the change can reach); the merge queue runs the full `bun run check` plus build, pack smoke and skill scan. Use `./` paths with `bun test` — a bare word is a path filter
-- `vegafactory worktree status` (or `node skills/dev/dev-implement/scripts/worktree.mjs status --json`) reconciles the worktrees against open issues before a hand-back: orphan directories, worktrees with no open issue, open issues with no checkout
+- `vegafactory worktree status` reconciles the worktrees against open issues before a hand-back: orphan directories, worktrees with no open issue, open issues with no checkout
 - The skill scan runs in the merge queue on the built bundle. To investigate a finding locally (needs Python 3.12 + SkillSpector): `bun run build && node skills/skills-tooling/skill-scan/scripts/skill-scan.mjs --json`; `.vegastack/skillspector-baseline.json` is picked up by convention, and a new suppression needs the operator's word, never a widened rule
 
 ## Environments

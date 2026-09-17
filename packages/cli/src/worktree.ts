@@ -19,7 +19,6 @@ export interface WorktreeArgs {
   issue?: number
   slug?: string
   type?: string
-  parent?: string
   force: boolean
   write: boolean
   olderThan?: string
@@ -36,23 +35,21 @@ export interface WorktreeDeps {
 export function worktreeUsage(): string {
   return `Usage: vegafactory worktree <list|create|restore|remove|prune|status> [options]
 
-  list [--all-repos]                    every worktree with its lifecycle state and disk use
+  list [--all-repos]                    every worktree with its state and disk use
   status                                worktrees reconciled against open issues; orphans named
-  create <issue> [--slug S] [--type T]  cut the branch and its worktree (writes); the slug and
-                                        type come off the issue title unless given
-  restore <issue> [--slug S]            re-add the checkout of the branch that carries the issue
-                                        number; --slug picks one when several do
-  remove <issue> [--force] [--write]    remove the directory only; dry-run unless --write
-  prune [--older-than 14d] [--write]    push, then remove parked worktrees past retention
+  create <issue> [--slug S] [--type T]  cut the branch and its worktree (no dependency install);
+                                        slug and type come off the issue title unless given
+  restore <issue> [--slug S]            re-add the checkout of the branch that carries the issue number
+  remove <issue> [--force]              remove the directory once it is clean, pushed and merged
+  prune [--older-than 14d]              remove worktrees idle past retention; uncommitted work is
+                                        first saved to a pushed rescue/<name>-<machine>-<time> branch
 
-The branch, its remote counterpart, and anything uncommitted are never touched:
---force lifts only the "not merged" block, and never on its own — it takes the
-operator's word.
+Every verb acts; --dry-run shows what it would do. Branches are never deleted, and
+--force lifts only the "not merged" block — use it only on the operator's word.
 `
 }
 
-// create/restore are the two verbs that exist to make something, so they write
-// by default. Everything that can destroy work is dry-run until --write.
+// Every verb acts by default; --dry-run previews. The safety rules live in the script.
 export function parseWorktreeArgs(argv: string[]): WorktreeArgs {
   const head = argv[0]
   if (!head || !verbs.includes(head as WorktreeVerb)) {
@@ -60,7 +57,7 @@ export function parseWorktreeArgs(argv: string[]): WorktreeArgs {
   }
   const verb = head as WorktreeVerb
   const rest = argv.slice(1)
-  const args: WorktreeArgs = { verb, force: false, write: verb === 'create' || verb === 'restore', allRepos: false, json: false }
+  const args: WorktreeArgs = { verb, force: false, write: true, allRepos: false, json: false }
   while (rest.length) {
     const token = rest.shift()!
     if (!token.startsWith('-')) {
@@ -70,14 +67,12 @@ export function parseWorktreeArgs(argv: string[]): WorktreeArgs {
       continue
     }
     if (token === '--force') args.force = true
-    else if (token === '--write') args.write = true
     else if (token === '--dry-run') args.write = false
     else if (token === '--all-repos') args.allRepos = true
     else if (token === '--json') args.json = true
     else if (token === '--older-than') args.olderThan = requireValue(token, rest.shift())
     else if (token === '--slug') args.slug = requireValue(token, rest.shift())
     else if (token === '--type') args.type = requireValue(token, rest.shift())
-    else if (token === '--parent') args.parent = requireValue(token, rest.shift())
     else throw new Error(`Unknown option: ${token}`)
   }
   if ((verb === 'create' || verb === 'restore' || verb === 'remove') && args.issue === undefined) {
@@ -96,7 +91,6 @@ export function scriptArgs(args: WorktreeArgs): string[] {
   if (args.issue !== undefined) out.push('--issue', String(args.issue))
   if (args.slug) out.push('--slug', args.slug)
   if (args.type) out.push('--type', args.type)
-  if (args.parent) out.push('--parent', args.parent)
   if (args.olderThan) out.push('--older-than', args.olderThan)
   if (args.force) out.push('--force')
   if (args.write) out.push('--write')

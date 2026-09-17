@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test'
-import { branchName, childWorktreePlan, classifyWorktree, parseWorktreeList, slugify, worktreeName, worktreePath } from '../scripts/worktree.mjs'
+import { branchName, classifyWorktree, parseWorktreeList, slugify, worktreeName, worktreePath } from '../scripts/worktree.mjs'
 
 const base = { dirExists: true, branchExists: true, locked: false, issueState: 'open' as const, mergedIntoDefault: false }
 
@@ -43,7 +43,7 @@ describe('classifyWorktree', () => {
   })
 })
 
-import { evaluateRemoval, isPastRetention, parseDuration, parseIncludeKnob, parseRetentionKnob, parseSetupCommand } from '../scripts/worktree.mjs'
+import { evaluateRemoval, isPastRetention, parseDuration, parseIncludeKnob, parseRetentionKnob } from '../scripts/worktree.mjs'
 
 const devMd = [
   'commands: test `bun test` · check `bun run check` · build `bun run build` · setup `bun install --frozen-lockfile`',
@@ -59,7 +59,9 @@ describe('evaluateRemoval', () => {
   test('each failure reason blocks on its own and names itself', () => {
     expect(evaluateRemoval({ ...clean, dirty: true }).blocks[0]).toContain('uncommitted changes')
     expect(evaluateRemoval({ ...clean, unpushed: true }).blocks[0]).toContain('commits not on the remote')
-    expect(evaluateRemoval({ ...clean, remoteMissing: true }).blocks[0]).toContain('commits not on the remote')
+    expect(evaluateRemoval({ ...clean, remoteMissing: true, mergedIntoDefault: false }).blocks[0]).toContain('commits not on the remote')
+    // #130: a squash-merged branch whose remote was deleted on merge is safe to remove.
+    expect(evaluateRemoval({ ...clean, remoteMissing: true }).blocks).toEqual([])
     expect(evaluateRemoval({ ...clean, mergedIntoDefault: false }).blocks[0]).toContain('not merged into')
     expect(evaluateRemoval({ ...clean, locked: true }).blocks[0]).toContain('locked')
   })
@@ -82,8 +84,6 @@ describe('knobs and retention', () => {
   test('include list and setup command come off dev.md', () => {
     expect(parseIncludeKnob(devMd)).toEqual(['.env', '.dev.vars'])
     expect(parseIncludeKnob('worktree-include: none   # nothing to copy')).toEqual([])
-    expect(parseSetupCommand(devMd)).toBe('bun install --frozen-lockfile')
-    expect(parseSetupCommand('commands: test `bun test`')).toBeNull()
   })
   test('retention is measured from the later of last commit and last ledger edit', () => {
     const now = Date.parse('2026-09-20T00:00:00Z')
@@ -97,16 +97,3 @@ describe('knobs and retention', () => {
   })
 })
 
-describe('childWorktreePlan', () => {
-  test('a child branches from the parent HEAD sha, in the factory worktree location', () => {
-    const plan = childWorktreePlan({ repoRoot: '/r', issue: 131, title: 'Dispatch parent launches', type: 'feat', baseSha: 'abc1234' })
-    expect(plan.name).toBe('131-dispatch-parent-launches')
-    expect(plan.path).toBe('/r/.vegastack/.worktrees/131-dispatch-parent-launches')
-    expect(plan.branch).toBe('feat/131-dispatch-parent-launches')
-    expect(plan.args).toEqual(['worktree', 'add', '-b', 'feat/131-dispatch-parent-launches', '/r/.vegastack/.worktrees/131-dispatch-parent-launches', 'abc1234'])
-  })
-  test('a moving ref is refused as a base', () => {
-    expect(() => childWorktreePlan({ repoRoot: '/r', issue: 131, title: 'x', type: 'feat', baseSha: 'main' })).toThrow(/base must be a commit sha/)
-    expect(() => childWorktreePlan({ repoRoot: '/r', issue: 131, title: 'x', type: 'feat', baseSha: 'abc' })).toThrow(/base must be a commit sha/)
-  })
-})
