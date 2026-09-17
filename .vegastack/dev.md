@@ -13,7 +13,6 @@ review: cross-agent-risky   # subagent | cross-agent-risky | cross-agent — cod
 harnesses: claude 2.1.247 · codex 0.149.1   # detected 03-09-2026; a dev-setup re-run refreshes it
 harness-policy: intake claude fable high · plan claude fable high · implement claude fable high · review codex gpt-5.6 xhigh · status claude sonnet medium · chronicle claude sonnet medium   # `<stage> <agent> <model> <effort>`; raise planning to xhigh for a risky medium issue. Model ids move — edit this line, never a skill; the flags each value becomes are in dev-setup's references/harness-facts.md
 ui-evidence: none           # no UI in this repo
-gates: 3                    # 3 = approve/PR/merge · 2 = approve + one "ship it" · 1 = direct-to-main, which main's branch protection makes unavailable here
 tests: required             # scripts' deterministic branches; prose quality bar is the behavioral eval
 skillspector-update: auto   # off | notify | auto — the CLI self-installs and self-upgrades through whatever channel holds it (uv here); a failed update falls back to the installed copy
 skill-scan: packages/cli/skill   # the BUILT bundle — authored skills/ carries unpackaged tests/ fixtures that are deliberately adversarial and score higher than anything shipped; suppressions in .vegastack/skillspector-baseline.json
@@ -51,8 +50,8 @@ Line prefixes: `auto:` (agent just does it) · `ask:` (operator's word first) ·
 
 ## Verify — how to see it working (pre-merge)
 
-- Checks run once each: the pre-commit hook runs `bun run check:fast` (validators + lint + typecheck, ~5 s); while building run `bun run test:affected` (only tests the change can reach); the merge queue runs the full `bun run check` plus build, pack smoke and skill scan. Use `./` paths with `bun test` — a bare word is a path filter
-- `vegafactory worktree status` (or `node skills/dev/dev-implement/scripts/worktree.mjs status --json`) reconciles the worktrees against open issues before a hand-back: orphan directories, worktrees with no open issue, open issues with no checkout
+- Checks run once each: the commit-msg hook runs `bun run check:fast` (skipped for `wip:` checkpoints) (validators + lint + typecheck, ~5 s); while building run `bun run test:affected` (only tests the change can reach); the merge queue runs the full `bun run check` plus build, pack smoke and skill scan. Use `./` paths with `bun test` — a bare word is a path filter
+- `vegafactory worktree status` reconciles the worktrees against open issues before a hand-back: orphan directories, worktrees with no open issue, open issues with no checkout
 - The skill scan runs in the merge queue on the built bundle. To investigate a finding locally (needs Python 3.12 + SkillSpector): `bun run build && node skills/skills-tooling/skill-scan/scripts/skill-scan.mjs --json`; `.vegastack/skillspector-baseline.json` is picked up by convention, and a new suppression needs the operator's word, never a widened rule
 
 ## Environments
@@ -62,10 +61,9 @@ Line prefixes: `auto:` (agent just does it) · `ask:` (operator's word first) ·
 - Harnesses on this box (03-09-2026): `claude` 2.1.247 and `codex` 0.149.1. Beware that `codex login status` prints "Logged in" on a revoked refresh token, so it is not an auth guard; only a real run is
 - A brief whose acceptance needs a live `claude -p` or `codex exec` proof checks both CLIs are authenticated first (`claude -p 'say ok'`, `codex exec --sandbox read-only -a never 'say ok'`) — an expired session turns that acceptance into a parked finding, as it did on #94
 - main is protected: PRs only, squash merges only, no force-push or deletion, linear history, conversation resolution, admins included; required check `check (node 24)` (not strict — the merge queue tests main + the PR instead)
-- CI runs on the Mac mini org runners (`vsk-runners-mac-mini`, macOS user `vegastack-runners`, separate from the operator account) for pull requests from this repository's own branches; fork PRs and merge-queue groups run on `ubuntu-latest`, and fork workflows need a maintainer's approval first. If both Mac mini runners are offline, own-branch PRs cannot pass — check `gh api orgs/vegastack/actions/runners` before treating a stuck job as a code problem
+- Pull request and merge-queue CI runs only on GitHub-hosted `ubuntu-latest`; fork workflows need a maintainer's approval. The Mac mini org runners (`vsk-runners-mac-mini`) serve only trusted jobs such as the board mirror
 - Self-hosted runners reuse one work directory: a workflow that sparse-checks-out must check out into its own `path:`
-- production: ask — git push origin v
-- The `- <target>: <auto|ask> — <pattern>` line above is a ship-guard policy line: this repo publishes by pushing the version tag, so that push is the production action. The guard reads it only as compiled by `vegafactory guard sync` into `~/.vegastack/guard/<owner>__<repo>.json` — run it after cloning and after any edit here
+- Pushing a version tag publishes to npm; the ship guard always asks before any tag push
 
 ## Decisions
 

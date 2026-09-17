@@ -31,7 +31,8 @@ npx @vegastack/vegafactory skills list
 | `issue <verb> <n>` | Read and write an issue through the local cache — `sync`, `check`, `comment`, `edit-comment`, `body`, `label`, `ack`, `drop` (`vegafactory issue --help`) |
 | `agent claude\|codex <args…>` | Start a headless run on the subscription; parent-app variables are dropped and API-key billing is refused |
 | `sync` | Refresh this machine's copy of the org control room |
-| `guard sync [--check]` | Compile `.vegastack/dev.md`'s ship rules into `~/.vegastack/guard/<owner>__<repo>.json`, the file the ship guard reads |
+| `ship check <n>` | Exit 0 when issue n may merge: a "ship it" after the latest evidence, the branch pushed and clean, its PR green |
+| `hook <event> --harness claude\|codex` | The harness hooks: ship guard, claim heartbeat, WIP checkpoint each turn |
 
 ### Selecting skills
 

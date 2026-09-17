@@ -17,6 +17,7 @@ export interface FakeIssue {
   subIssues: number[]
   blockedBy: Array<{ number: number; state: string }>
   parent: number | null
+  events: Array<{ event: string; label: { name: string }; created_at: string }>
   created_at: string
   last_edited_at: string | null
 }
@@ -24,9 +25,12 @@ export interface FakeIssue {
 export class FakeGitHub {
   issues = new Map<number, FakeIssue>()
   permissions = new Map<string, string>()
+  defaultBranch: string | null = 'main'
   calls: string[] = []
+  // Runs after each posted comment, to stage a concurrent writer.
+  afterPost?: (body: string) => void
   private nextId = 1000
-  private clock = Date.parse('2026-09-17T10:00:00Z')
+  clock = Date.parse('2026-09-17T10:00:00Z')
 
   tick(): string {
     this.clock += 1000
@@ -36,9 +40,10 @@ export class FakeGitHub {
   addIssue(partial: Partial<FakeIssue> & { number: number }): FakeIssue {
     const issue: FakeIssue = {
       title: `Issue ${partial.number}`, body: 'Brief body', state: 'open', labels: [], assignees: [], login: 'mk',
-      updated_at: this.tick(), comments: [], subIssues: [], blockedBy: [], parent: null, created_at: '', last_edited_at: null, ...partial,
+      updated_at: this.tick(), comments: [], subIssues: [], blockedBy: [], parent: null, events: [], created_at: '', last_edited_at: null, ...partial,
     }
     issue.created_at ||= issue.updated_at
+    for (const name of issue.labels) issue.events.push({ event: 'labeled', label: { name }, created_at: issue.updated_at })
     this.issues.set(issue.number, issue)
     return issue
   }
@@ -126,6 +131,7 @@ export class FakeGitHub {
       const issue = this.issues.get(Number(m[1]))!
       if (method === 'POST') {
         const comment = this.addComment(issue.number, payload.body, 'mk')
+        this.afterPost?.(payload.body)
         return this.respond(201, this.commentJson(comment, issue.number))
       }
       const slice = issue.comments.slice((page - 1) * perPage, page * perPage).map((c) => this.commentJson(c, issue.number))
@@ -151,11 +157,17 @@ export class FakeGitHub {
       const issue = this.issues.get(Number(m[1]))!
       if (method === 'PUT') {
         issue.updated_at = this.tick()
+        for (const name of issue.labels.filter((label) => !payload.labels.includes(label))) issue.events.push({ event: 'unlabeled', label: { name }, created_at: issue.updated_at })
+        for (const name of payload.labels.filter((label: string) => !issue.labels.includes(label))) issue.events.push({ event: 'labeled', label: { name }, created_at: issue.updated_at })
         issue.labels = [...payload.labels]
         return this.respond(200, [])
       }
-      for (const label of payload.labels) if (!issue.labels.includes(label)) issue.labels.push(label)
       issue.updated_at = this.tick()
+      for (const label of payload.labels) {
+        if (issue.labels.includes(label)) continue
+        issue.labels.push(label)
+        issue.events.push({ event: 'labeled', label: { name: label }, created_at: issue.updated_at })
+      }
       return this.respond(200, [])
     }
     if ((m = /^repos\/o\/r\/issues\/(\d+)\/labels\/(.+)$/.exec(route!))) {
@@ -164,7 +176,15 @@ export class FakeGitHub {
       if (!issue.labels.includes(name)) return this.respond(404, { message: 'Label does not exist' })
       issue.labels = issue.labels.filter((label) => label !== name)
       issue.updated_at = this.tick()
+      issue.events.push({ event: 'unlabeled', label: { name }, created_at: issue.updated_at })
       return this.respond(200, [])
+    }
+    if ((m = /^repos\/o\/r\/issues\/(\d+)\/timeline$/.exec(route!))) {
+      const issue = this.issues.get(Number(m[1]))!
+      return this.respond(200, issue.events.slice((page - 1) * perPage, page * perPage))
+    }
+    if (route === 'repos/o/r') {
+      return this.defaultBranch ? this.respond(200, { default_branch: this.defaultBranch }) : this.respond(404, { message: 'Not Found' })
     }
     if (route === 'graphql') {
       const issue = this.issues.get(payload.variables.number)

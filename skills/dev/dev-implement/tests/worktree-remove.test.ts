@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test'
-import { execFileSync } from 'node:child_process'
+import { execFileSync, spawnSync } from 'node:child_process'
 import { existsSync, mkdtempSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -118,6 +118,21 @@ describe('removeWorktree', () => {
     expect(r.state).toBe('merged')
     expect(existsSync(wt.path)).toBe(false)
   })
+  test('#130: a squash-merged branch whose remote branch was deleted is still removable', () => {
+    const remote = bareRemote()
+    const root = repoWithRemote(remote)
+    const wt = pushedFeature(root)
+    const other = cloneOf(remote)
+    git(other, 'merge', '-q', '--squash', 'origin/feat/106-x')
+    git(other, 'commit', '-qm', 'feat: x (#106)')
+    git(other, 'push', '-q', 'origin', 'main')
+    git(other, 'push', '-q', 'origin', '--delete', 'feat/106-x')
+    git(root, 'fetch', '-q', '--prune', 'origin')
+    const r = removeWorktree({ repoRoot: root, name: '106-x', base: 'main', force: false, push: false, write: true })
+    expect(r.blocks).toEqual([])
+    expect(r.state).toBe('merged')
+    expect(existsSync(wt.path)).toBe(false)
+  })
   test('a rebase merge counts as merged — every commit is already on the default branch by patch', () => {
     const remote = bareRemote()
     const root = repoWithRemote(remote)
@@ -210,7 +225,7 @@ describe('pruneWorktrees', () => {
     expect(git(root, 'rev-parse', '--verify', 'refs/remotes/origin/feat/106-x').trim()).toMatch(/^[0-9a-f]{40}$/)
   })
 
-  test('a worktree with uncommitted work is never pruned, however old', () => {
+  test('uncommitted work in an idle worktree is committed as wip on its own branch and pushed before removal', () => {
     const root = repoWithRemote()
     const wt = createWorktree({ repoRoot: root, issue: 107, slug: 'dirty', type: 'feat', base: 'main', devMd, home: root, write: true })
     writeFileSync(join(wt.path, 'scratch.txt'), 'wip\n')
@@ -219,8 +234,63 @@ describe('pruneWorktrees', () => {
       ledgerTimes: { '107-dirty': OLD_LEDGER }, now: FUTURE_NOW, write: true,
     })
     const candidate = r.candidates.find((c: { name: string }) => c.name === '107-dirty')
+    expect(candidate?.rescuedTo).toBe('feat/107-dirty')
+    expect(candidate?.removable).toBe(true)
+    expect(existsSync(wt.path)).toBe(false)
+    const saved = spawnSync('git', ['show', 'origin/feat/107-dirty:scratch.txt'], { cwd: root, encoding: 'utf8' })
+    expect(saved.stdout).toBe('wip\n')
+    expect(git(root, 'log', '-1', '--format=%s', 'origin/feat/107-dirty').trim()).toBe('wip: rescued uncommitted work from 107-dirty')
+    expect(git(root, 'ls-remote', '--heads', 'origin').includes('rescue/')).toBe(false)
+  })
+
+  test('a rescue whose push is rejected keeps the commit local and the worktree', () => {
+    const root = repoWithRemote()
+    const wt = createWorktree({ repoRoot: root, issue: 109, slug: 'moved', type: 'feat', base: 'main', devMd, home: root, write: true })
+    // The remote branch moved on without this worktree.
+    spawnSync('git', ['push', '-q', 'origin', 'main:refs/heads/feat/109-moved'], { cwd: root })
+    spawnSync('git', ['-c', 'user.name=t', '-c', 'user.email=t@t', 'commit', '-q', '--allow-empty', '-m', 'elsewhere'], { cwd: root })
+    spawnSync('git', ['push', '-q', 'origin', 'HEAD:refs/heads/feat/109-moved'], { cwd: root })
+    spawnSync('git', ['-c', 'user.name=t', '-c', 'user.email=t@t', 'commit', '-q', '--allow-empty', '-m', 'mine'], { cwd: wt.path })
+    writeFileSync(join(wt.path, 'scratch.txt'), 'wip\n')
+    const r = pruneWorktrees({
+      repoRoot: root, base: 'main', olderThan: '14d', devMd,
+      ledgerTimes: { '109-moved': OLD_LEDGER }, now: FUTURE_NOW, write: true,
+    })
+    const candidate = r.candidates.find((c: { name: string }) => c.name === '109-moved')
     expect(candidate?.removable).toBe(false)
-    expect(candidate?.reason).toContain('uncommitted changes')
+    expect(candidate?.reason).toContain('push was rejected')
+    expect(existsSync(wt.path)).toBe(true)
+    expect(git(wt.path, 'log', '-1', '--format=%s').trim()).toBe('wip: rescued uncommitted work from 109-moved')
+  })
+
+  test('a rescue never commits a staged secret', () => {
+    const root = repoWithRemote()
+    const wt = createWorktree({ repoRoot: root, issue: 110, slug: 'secret', type: 'feat', base: 'main', devMd, home: root, write: true })
+    writeFileSync(join(wt.path, '.env'), 'TOKEN=1\n')
+    writeFileSync(join(wt.path, 'notes.txt'), `${'AKIA' + 'ABCDEFGHIJKLMNOP'}\n`)
+    const r = pruneWorktrees({
+      repoRoot: root, base: 'main', olderThan: '14d', devMd,
+      ledgerTimes: { '110-secret': OLD_LEDGER }, now: FUTURE_NOW, write: true,
+    })
+    const candidate = r.candidates.find((c: { name: string }) => c.name === '110-secret')
+    expect(candidate?.removable).toBe(false)
+    expect(candidate?.reason).toContain('.env')
+    expect(candidate?.reason).toContain('notes.txt')
+    expect(existsSync(wt.path)).toBe(true)
+    expect(git(wt.path, 'status', '--porcelain')).toContain('.env')
+    expect(git(wt.path, 'diff', '--cached', '--name-only').trim()).toBe('')
+  })
+
+  test('a locked worktree with uncommitted work is left alone', () => {
+    const root = repoWithRemote()
+    const wt = createWorktree({ repoRoot: root, issue: 108, slug: 'held', type: 'feat', base: 'main', devMd, home: root, write: true })
+    writeFileSync(join(wt.path, 'scratch.txt'), 'wip\n')
+    spawnSync('git', ['worktree', 'lock', wt.path], { cwd: root })
+    const r = pruneWorktrees({
+      repoRoot: root, base: 'main', olderThan: '14d', devMd,
+      ledgerTimes: { '108-held': OLD_LEDGER }, now: FUTURE_NOW, write: true,
+    })
+    expect(r.candidates.find((c: { name: string }) => c.name === '108-held')).toBeUndefined()
     expect(existsSync(wt.path)).toBe(true)
   })
 })

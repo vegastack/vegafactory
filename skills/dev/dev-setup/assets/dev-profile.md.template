@@ -15,7 +15,6 @@ harnesses: {{claude <version> · codex <version>}}   # what dev-setup found on t
 harness-policy: intake {{intake-harness}} {{intake-model}} {{intake-effort}} · plan {{plan-harness}} {{plan-model}} {{plan-effort}} · implement {{implement-harness}} {{implement-model}} {{implement-effort}} · review {{review-harness}} {{review-model}} {{review-effort}} · status {{status-harness}} {{status-model}} {{status-effort}} · chronicle {{chronicle-harness}} {{chronicle-model}} {{chronicle-effort}}   # confirm detected supported subscription choices for every stage; placeholders block execution
 ui-evidence: playwright     # playwright | none
 evidence-repo: {{owner}}/dev-review-evidence   # shared across projects; this project's folder = repo name; delete the line when ui-evidence is none
-gates: 3                    # 3 = approve/PR/merge · 2 = approve + one "ship it" · 1 = direct-to-main, ship word merges locally and pushes, no PR
 tests: required             # required | logic-only | best-effort | none; an org lock governs allowed overrides
 skill-scan: none            # one line only — directory holding the agent skills to scan (the BUILT one where a bundle is generated) | none. the skill-scan skill's guard reads this and refuses if a second line gives a different value
 skillspector-update: auto   # off | notify | auto — how the SkillSpector CLI itself is kept current. auto installs it when absent and upgrades it before each scan, falling back to the installed copy on any failure; notify only reports what upstream has published; off never touches the network. one line only, same as above
@@ -64,7 +63,7 @@ Line prefixes: `auto:` (agent just does it) · `ask:` (operator's word first) ·
 
 - {{environments and their targets; which the agent may touch}}
 - {{where secret NAMES are defined — values never appear in this file}}
-- Ship-guard policy lines, one per deployable target: `- <target>: <auto|ask> — <command pattern>` — for example `- preview: auto — wrangler deploy --env preview` and `- production: ask — wrangler deploy --env production`. The pattern runs to the end of the line and is matched as a literal prefix of the resolved command (quotes, wrappers and a path on the first word stripped); the longest match wins; a deploy or publish command matching no line is asked. `.vegastack/hooks/ship-guard.mjs` never reads this file: `vegafactory guard sync` compiles these lines into `~/.vegastack/guard/<owner>__<repo>.json`, and until it runs every guarded command asks.
+- A deploy that needs the operator's word is an `ask:` line in `## Ship` with its command in backticks; the ship guard asks before that command, reading this file from the default branch.
 
 ## Design
 

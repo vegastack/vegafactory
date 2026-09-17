@@ -29,22 +29,14 @@ describe('createWorktree', () => {
     expect(r.branch).toBe('feat/106-x')
     expect(existsSync(r.path)).toBe(false)
   })
-  test('--write adds the worktree, copies the include list, and runs setup', () => {
+  test('--write adds the worktree and copies the include list, without installing dependencies', () => {
     const root = repo()
     const r = createWorktree({ repoRoot: root, issue: 106, slug: 'x', type: 'feat', base: 'main', devMd, home: root, write: true })
     expect(r.blocks).toEqual([])
     expect(git(r.path, 'rev-parse', '--abbrev-ref', 'HEAD').trim()).toBe('feat/106-x')
     expect(readFileSync(join(r.path, '.env'), 'utf8')).toBe('SECRET=1\n')
-    expect(readFileSync(join(r.path, 'setup.log'), 'utf8').trim()).toBe('setup-ran')
+    expect(existsSync(join(r.path, 'setup.log'))).toBe(false)
     expect(git(root, 'rev-parse', '--abbrev-ref', 'HEAD').trim()).toBe('main')
-  })
-  test('a child branches from the parent branch inside the parent worktree', () => {
-    const root = repo()
-    const parent = createWorktree({ repoRoot: root, issue: 104, slug: 'epic', type: 'feat', base: 'main', devMd, home: root, write: true })
-    const child = createWorktree({ repoRoot: root, issue: 106, slug: 'x', type: 'feat', base: 'main', parent: parent.branch, devMd, home: root, write: true })
-    expect(child.path).toBe(parent.path)
-    expect(child.branch).toBe('feat/106-x')
-    expect(git(parent.path, 'rev-parse', '--abbrev-ref', 'HEAD').trim()).toBe('feat/106-x')
   })
   test('two issues in one clone get two independent worktrees and main stays put', () => {
     const root = repo()
@@ -140,24 +132,4 @@ describe('codexTrustToml', () => {
     expect(first.text).toContain('trust_level = "trusted"')
     expect(codexTrustToml(first.text, '/r/.vegastack/.worktrees/106-x').changed).toBe(false)
   })
-})
-
-import { createChildWorktree, removeWorktree } from '../scripts/worktree.mjs'
-test('parallel child preparation refuses failed setup and missing required includes', () => {
-  for (const extra of ['commands: setup `exit 19`\n', 'worktree-include: .absent-required-hook\n']) {
-    const root = repo(), baseSha = git(root,'rev-parse','HEAD').trim()
-    const child = createChildWorktree({repoRoot:root,issue:139,slug:'prepared',type:'feat',baseSha,devMd:extra,home:root,write:true})
-    expect(child.blocks.length).toBeGreaterThan(0)
-    expect(existsSync(child.path)).toBe(true)
-    expect(git(child.path,'rev-parse','HEAD').trim()).toBe(baseSha)
-  }
-})
-test('ordinary removal cannot delete the parent checkout occupied by a serial child', () => {
-  const root=repo()
-  const parent=createWorktree({repoRoot:root,issue:133,slug:'parent',type:'feat',base:'main',devMd:'',home:root,write:true})
-  const child=createWorktree({repoRoot:root,issue:139,slug:'child',type:'feat',base:'main',parent:parent.branch,devMd:'',home:root,write:true})
-  expect(child.path).toBe(parent.path)
-  const result=removeWorktree({repoRoot:root,name:'133-parent',base:'main',force:true,write:true})
-  expect(result.blocks.join(' ')).toContain('serial child cannot remove')
-  expect(existsSync(parent.path)).toBe(true)
 })

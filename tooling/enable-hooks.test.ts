@@ -1,95 +1,97 @@
-import { describe, expect, test } from 'bun:test'
+import { beforeEach, expect, test } from 'bun:test'
 import { spawnSync } from 'node:child_process'
-import { chmodSync, cpSync, mkdirSync, mkdtempSync, realpathSync, writeFileSync } from 'node:fs'
+import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-const enableHooks = join(import.meta.dir, 'enable-hooks.mjs')
-const preCommit = join(import.meta.dir, '..', '.githooks', 'pre-commit')
-const temp = () => realpathSync(mkdtempSync(join(tmpdir(), 'hooks-')))
-const git = (cwd: string, ...args: string[]) => spawnSync('git', args, { cwd, encoding: 'utf8' })
+const repoRoot = join(import.meta.dir, '..')
+let repo: string
+let bin: string
 
-function repo(): string {
-  const dir = temp()
-  git(dir, 'init', '-q')
-  git(dir, 'config', 'user.email', 'test@example.com')
-  git(dir, 'config', 'user.name', 'Test')
-  return dir
+const git = (...args: string[]) => spawnSync('git', ['-c', 'user.name=t', '-c', 'user.email=t@t', ...args], { cwd: repo, encoding: 'utf8' })
+
+// A fake `bun` on PATH records where the check ran and what it saw, and exits with `exit`.
+const commit = (message: string, exit = 0) => {
+  const marker = join(bin, 'seen')
+  rmSync(marker, { force: true })
+  writeFileSync(join(bin, 'bun'), `#!/bin/sh\n{ pwd; echo "$*"; cat a.txt 2>/dev/null; echo; ls -a; } > "${marker}"\nexit ${exit}\n`, { mode: 0o755 })
+  const result = spawnSync('git', ['-c', 'user.name=t', '-c', 'user.email=t@t', 'commit', '-q', '-m', message], {
+    cwd: repo, encoding: 'utf8', env: { ...process.env, PATH: `${bin}:${process.env.PATH}` },
+  })
+  const seen = existsSync(marker) ? readFileSync(marker, 'utf8').split('\n') : null
+  return { code: result.status, ran: seen !== null, seen, stderr: result.stderr }
 }
 
-describe('enable-hooks', () => {
-  test('inside a repository it points git at .githooks', () => {
-    const dir = repo()
-    const result = spawnSync('node', [enableHooks], { cwd: dir, encoding: 'utf8' })
-    expect(result.status).toBe(0)
-    expect(git(dir, 'config', '--get', 'core.hooksPath').stdout.trim()).toBe('.githooks')
-  })
-
-  test('outside a repository it does nothing and succeeds', () => {
-    const result = spawnSync('node', [enableHooks], { cwd: temp(), encoding: 'utf8', env: { ...process.env, GIT_CEILING_DIRECTORIES: tmpdir() } })
-    expect(result.status).toBe(0)
-  })
-
-  test('inside a repository a failed git config fails the install', () => {
-    const dir = repo()
-    chmodSync(join(dir, '.git'), 0o500)
-    try {
-      const result = spawnSync('node', [enableHooks], { cwd: dir, encoding: 'utf8' })
-      expect(result.status).not.toBe(0)
-    } finally {
-      chmodSync(join(dir, '.git'), 0o700)
-    }
-  })
+beforeEach(() => {
+  repo = realpathSync(mkdtempSync(join(tmpdir(), 'githooks-')))
+  bin = mkdtempSync(join(tmpdir(), 'githooks-bin-'))
+  spawnSync('git', ['init', '-q', repo])
+  const run = spawnSync(process.execPath, [join(repoRoot, 'tooling/enable-hooks.mjs')], { cwd: repo })
+  expect(run.status).toBe(0)
+  mkdirSync(join(repo, '.githooks'))
+  copyFileSync(join(repoRoot, '.githooks/commit-msg'), join(repo, '.githooks/commit-msg'))
+  spawnSync('chmod', ['+x', join(repo, '.githooks/commit-msg')])
+  writeFileSync(join(repo, '.git/info/exclude'), '.githooks/\n')
 })
 
-describe('pre-commit', () => {
-  // A stand-in `bun` that passes only when the checked tree's check.txt says "good".
-  function fakeBun(): string {
-    const bin = temp()
-    // Passes when check.txt is good, or when an untracked extra.txt is visible — so a hook
-    // that checked the working tree instead of the staged snapshot would wrongly pass.
-    writeFileSync(join(bin, 'bun'), '#!/bin/sh\ngrep -qx good check.txt || test -f extra.txt\n')
-    chmodSync(join(bin, 'bun'), 0o755)
-    return bin
-  }
+test('enable-hooks points git at .githooks, which holds only the commit-msg check', () => {
+  expect(git('config', 'core.hooksPath').stdout.trim()).toBe('.githooks')
+  expect(spawnSync('ls', [join(repoRoot, '.githooks')], { encoding: 'utf8' }).stdout.trim()).toBe('commit-msg')
+  const hook = readFileSync(join(repoRoot, '.githooks/commit-msg'), 'utf8')
+  expect(hook).toContain('bun run --silent check:fast')
+  expect(hook).not.toContain('VEGAFACTORY_FAST_CHECK')
+})
 
-  function hookRepo(): string {
-    const dir = repo()
-    mkdirSync(join(dir, '.githooks'))
-    cpSync(preCommit, join(dir, '.githooks', 'pre-commit'))
-    writeFileSync(join(dir, 'check.txt'), 'good\n')
-    git(dir, 'add', '.')
-    git(dir, '-c', 'core.hooksPath=/dev/null', 'commit', '-qm', 'base')
-    return dir
-  }
+test('a normal commit runs the fast checks and a failure stops it', () => {
+  writeFileSync(join(repo, 'a.txt'), 'a')
+  git('add', 'a.txt')
+  const failed = commit('feat: a', 1)
+  expect(failed).toMatchObject({ code: 1, ran: true })
+  expect(failed.stderr).toContain('fast checks failed')
+  const passed = commit('feat: a')
+  expect(passed).toMatchObject({ code: 0, ran: true })
+  expect(passed.seen![1]).toBe('run --silent check:fast')
+})
 
-  const runHook = (dir: string) =>
-    spawnSync('sh', ['.githooks/pre-commit'], { cwd: dir, encoding: 'utf8', env: { ...process.env, PATH: `${fakeBun()}:${process.env.PATH}` } })
+test('a wip: commit skips the checks', () => {
+  writeFileSync(join(repo, 'a.txt'), 'a')
+  git('add', 'a.txt')
+  expect(commit('wip: #7 turn checkpoint', 1)).toMatchObject({ code: 0, ran: false })
+})
 
-  test('checks what is staged, not the working tree', () => {
-    const dir = hookRepo()
-    writeFileSync(join(dir, 'check.txt'), 'bad\n')
-    git(dir, 'add', 'check.txt')
-    writeFileSync(join(dir, 'check.txt'), 'good\n')
-    const result = runHook(dir)
-    expect(result.status).toBe(1)
-    expect(result.stderr).toContain('fast checks failed on the staged files')
-  })
+test('a checkout without node_modules borrows the nearest parent folder\'s', () => {
+  const nested = join(repo, 'nest', 'wt')
+  mkdirSync(join(repo, 'node_modules'))
+  spawnSync('git', ['init', '-q', nested])
+  spawnSync(process.execPath, [join(repoRoot, 'tooling/enable-hooks.mjs')], { cwd: nested })
+  mkdirSync(join(nested, '.githooks'))
+  copyFileSync(join(repoRoot, '.githooks/commit-msg'), join(nested, '.githooks/commit-msg'))
+  spawnSync('chmod', ['+x', join(nested, '.githooks/commit-msg')])
+  writeFileSync(join(nested, '.git/info/exclude'), '.githooks/\n')
+  writeFileSync(join(nested, 'a.txt'), 'a')
+  const outer = repo
+  repo = nested
+  try {
+    git('add', 'a.txt')
+    const result = commit('feat: a')
+    expect(result).toMatchObject({ code: 0, ran: true })
+    expect(result.seen).toContain('node_modules')
+  } finally { repo = outer }
+})
 
-  test('an untracked file cannot make a staged change pass', () => {
-    const dir = hookRepo()
-    writeFileSync(join(dir, 'check.txt'), 'bad\n')
-    git(dir, 'add', 'check.txt')
-    writeFileSync(join(dir, 'extra.txt'), 'good\n')
-    expect(runHook(dir).status).toBe(1)
-  })
-
-  test('a good staged change passes quietly', () => {
-    const dir = hookRepo()
-    writeFileSync(join(dir, 'other.txt'), 'x\n')
-    git(dir, 'add', 'other.txt')
-    const result = runHook(dir)
-    expect(result.status).toBe(0)
-    expect(result.stdout).toBe('')
-  })
+test('the checks see exactly the staged files, in a copy, with node_modules linked in', () => {
+  mkdirSync(join(repo, 'node_modules'))
+  writeFileSync(join(repo, 'a.txt'), 'staged')
+  git('add', 'a.txt')
+  writeFileSync(join(repo, 'a.txt'), 'unstaged')
+  writeFileSync(join(repo, 'untracked.txt'), 'x')
+  const result = commit('feat: a')
+  expect(result).toMatchObject({ code: 0, ran: true })
+  const [where, , content, ...listing] = result.seen!
+  expect(where).not.toBe(repo)
+  expect(content).toBe('staged')
+  expect(listing).toContain('node_modules')
+  expect(listing).not.toContain('untracked.txt')
+  expect(existsSync(where!)).toBe(false)
+  expect(git('show', 'HEAD:a.txt').stdout).toBe('staged')
 })

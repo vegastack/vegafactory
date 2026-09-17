@@ -20,7 +20,7 @@
     { "match": "skills/dev/dev-setup/scripts/**", "tests": ["packages/cli/test"] },
     { "match": "skills/dev/dev-setup/assets/**", "tests": ["packages/cli/test"] },
     { "match": ".vegastack/dev.md", "tests": ["skills/dev/dev-setup/tests"] },
-    { "match": ".vegastack/hooks/**", "tests": ["skills/dev/dev-setup/tests"] },
+    { "match": ".githooks/**", "tests": ["tooling/enable-hooks.test.ts"] },
     { "match": ".changeset/config.json", "tests": ["tooling/ci"] },
     { "match": ".github/workflows/factory-board.yml", "tests": ["skills/dev/dev-setup/tests/factory-board.test.ts"] },
     { "match": ".github/workflows/release.yml", "tests": ["scripts"] },

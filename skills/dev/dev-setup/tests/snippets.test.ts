@@ -3,14 +3,11 @@ import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-// The decision-nudge hook and the changelog-entry guard get written verbatim into
-// consumer projects. The nudge is now a packaged asset, so it is run directly; the
-// changelog guard still ships embedded in a reference doc, so its fenced block is
-// extracted from the doc itself and a doc edit that breaks it fails here instead of
-// in a user's repo.
+// The changelog-entry guard gets written verbatim into consumer projects. It ships
+// embedded in a reference doc, so its fenced block is extracted from the doc itself and
+// a doc edit that breaks it fails here instead of in a user's repo.
 
 const skillRoot = join(import.meta.dir, "..");
-const harnessFacts = readFileSync(join(skillRoot, "references", "harness-facts.md"), "utf8");
 const playbooks = readFileSync(join(skillRoot, "references", "stack-playbooks.md"), "utf8");
 
 function fencedBlocks(markdown: string, lang: string): string[] {

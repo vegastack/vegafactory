@@ -5,11 +5,12 @@ import { join } from 'node:path'
 import { parseWorktreeArgs, recordRepoRoot, runWorktree } from '../src/worktree.ts'
 
 describe('parseWorktreeArgs', () => {
-  test('create passes --write, remove and prune stay dry-run', () => {
+  test('every verb acts by default and --dry-run previews', () => {
     expect(parseWorktreeArgs(['create', '106'])).toMatchObject({ verb: 'create', issue: 106, write: true })
-    expect(parseWorktreeArgs(['remove', '106'])).toMatchObject({ verb: 'remove', issue: 106, write: false, force: false })
-    expect(parseWorktreeArgs(['remove', '106', '--force', '--write'])).toMatchObject({ force: true, write: true })
-    expect(parseWorktreeArgs(['prune', '--older-than', '7d'])).toMatchObject({ verb: 'prune', olderThan: '7d', write: false })
+    expect(parseWorktreeArgs(['remove', '106'])).toMatchObject({ verb: 'remove', issue: 106, write: true, force: false })
+    expect(parseWorktreeArgs(['remove', '106', '--force', '--dry-run'])).toMatchObject({ force: true, write: false })
+    expect(parseWorktreeArgs(['prune', '--older-than', '7d'])).toMatchObject({ verb: 'prune', olderThan: '7d', write: true })
+    expect(() => parseWorktreeArgs(['remove', '106', '--write'])).toThrow('Unknown option: --write')
     expect(parseWorktreeArgs(['list', '--all-repos'])).toMatchObject({ verb: 'list', allRepos: true })
   })
   test('an unknown verb is a usage error naming the real ones', () => {
@@ -25,7 +26,7 @@ describe('runWorktree', () => {
       return { status: 2, stdout: JSON.stringify({ guard: 'worktree', ok: false, blocks: ['uncommitted changes in the worktree'], warns: [] }) }
     }
     const registryPath = join(mkdtempSync(join(tmpdir(), 'vf-reg-')), 'worktree-roots.json')
-    expect(await runWorktree(['remove', '106'], { spawn, registryPath })).toBe(2)
+    expect(await runWorktree(['remove', '106', '--dry-run'], { spawn, registryPath })).toBe(2)
     expect(calls[0]).toContain('remove')
     expect(calls[0]).not.toContain('--write')
   })

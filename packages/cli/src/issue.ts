@@ -3,20 +3,21 @@
 // to GitHub first and then refreshes the cache.
 import { spawnSync } from 'node:child_process'
 import { existsSync, readFileSync } from 'node:fs'
-import { dirname, join, resolve } from 'node:path'
+import { basename, dirname, join, resolve } from 'node:path'
 import { ghRequest, type GhRunner, defaultRunner } from './gh.ts'
-import { artifactHash, assertRepo, cacheDir, dropIssue, readBody, readState, syncIssue, withLock, type CacheState, type CommentEntry, type GhComment } from './issue-cache.ts'
+import { claim, heartbeat, holderOf, ownerId, release, trustedAuthors, type ClaimKind } from './claim.ts'
+import { writeStatus } from './status-comment.ts'
+import { artifactHash, assertRepo, cacheDir, commentType, dropIssue, permissionLookup, readBody, readState, syncIssue, withLock, WRITE_ROLES, type CacheState, type CommentEntry, type GhComment, type PermissionLookup } from './issue-cache.ts'
 import { STATES, sizeOf, stateOf, transition, type State } from './labels.ts'
 
 export const ACK_STAGES = ['brief', 'plan', 'ship'] as const
 export type AckStage = typeof ACK_STAGES[number]
-const WRITE_ROLES = new Set(['admin', 'maintain', 'write'])
 
 // ---------------------------------------------------------------------------------------------
 // Where the cache lives and which repository we are in
 
 // The main checkout's root, so every worktree of a repository shares one cache.
-export { artifactHash }
+export { artifactHash, permissionLookup, type PermissionLookup }
 
 export function repoRoot(cwd = process.cwd()): string {
   const result = spawnSync('git', ['rev-parse', '--path-format=absolute', '--git-common-dir'], { cwd, encoding: 'utf8' })
@@ -47,9 +48,9 @@ export function markerKeys(body: string): Record<string, string> {
   return keys
 }
 
-interface Snapshot { state: CacheState; dir: string; body: (entry: CommentEntry) => string }
+export interface Snapshot { state: CacheState; dir: string; body: (entry: CommentEntry) => string }
 
-function snapshot(dir: string): Snapshot {
+export function snapshot(dir: string): Snapshot {
   const state = readState(dir)
   if (!state?.issue) throw new Error(`no cached copy in ${dir} — run vegafactory issue sync first`)
   return { state, dir, body: (entry) => readBody(dir, entry.file) }
@@ -73,23 +74,6 @@ export function ackBody(input: { stage: AckStage; by: string; brief: string; pla
   keys.push(`source=${input.source}`)
   const quote = input.quote.trim().replace(/\s+/g, ' ').slice(0, 500)
   return `<!-- vsk:v1 ${keys.join(' ')} -->\n**Ack (${input.stage})** from @${input.by}: "${quote}"\n`
-}
-
-export type PermissionLookup = (login: string) => string
-
-export function permissionLookup(repo: string, runner: GhRunner): PermissionLookup {
-  const cache = new Map<string, string>()
-  return (login) => {
-    if (!cache.has(login)) {
-      try {
-        const { body } = ghRequest<{ permission: string }>(`repos/${repo}/collaborators/${encodeURIComponent(login)}/permission`, { runner })
-        cache.set(login, body.permission)
-      } catch {
-        cache.set(login, 'none')
-      }
-    }
-    return cache.get(login)!
-  }
 }
 
 const squash = (text: string) => text.replace(/\s+/g, ' ').trim()
@@ -143,6 +127,9 @@ export function findValidAck(snap: Snapshot, stage: AckStage, permission: Permis
 
 export type CheckFor = 'plan' | 'implement' | 'ship'
 
+// A "ship it" must postdate the evidence's last meaningful edit; editing the evidence voids it.
+export const evidenceChangedAt = (evidence: CommentEntry) => evidence.changedAt || evidence.updatedAt
+
 export interface CheckResult { ok: boolean; blocks: string[]; warns: string[]; state: State | null; size: string | null }
 
 export function checkIssue(snap: Snapshot, purpose: CheckFor, permission: PermissionLookup, options: { repo: string; devMdRepo?: string | null; resume?: boolean } ): CheckResult {
@@ -177,8 +164,7 @@ export function checkIssue(snap: Snapshot, purpose: CheckFor, permission: Permis
   } else if (purpose === 'ship') {
     const evidence = latestOfType(snap, 'evidence')
     if (!evidence) blocks.push('no evidence comment yet')
-    // Editing the evidence after "ship it" voids it, so compare with its last edit.
-    const ack = findValidAck(snap, 'ship', permission, evidence?.updatedAt ?? null)
+    const ack = findValidAck(snap, 'ship', permission, evidence ? evidenceChangedAt(evidence) : null)
     if (!ack.ok) blocks.push(`no "ship it": ${ack.reason}`)
   }
   if (/^##\s+Assumptions\b[\s\S]*?^\s*-\s+(?!\[x\])/im.test(readBody(snap.dir, 'issue.md')) && purpose === 'implement') {
@@ -282,10 +268,18 @@ Write (GitHub first, then the local copy):
   body <n> --file PATH --since CURSOR    replace the issue body
   label <n> [--add a,b] [--remove c] [--since CURSOR] [--state ${STATES.join('|')}]
   ack <n> --stage brief|plan|ship --by LOGIN --quote TEXT [--source comment:ID|session]
+  claim <n> --harness claude|codex --model ID [--kind session|dispatch] [--take-back-by LOGIN]
+                                         exit 2 when someone else holds it
+  release <n> [--reason TEXT]            give the issue up
+  heartbeat <n> [--active MINUTES]       mark the claim alive (hooks call this)
+  status <n> [--progress-file PATH] [--branch NAME]
+                                         rewrite the status comment from GitHub's facts
+  holder <n>                             who holds the issue
   drop <n> --yes                         delete the local copy
 
-Options: --repo OWNER/NAME (default: dev.md repo: or the origin remote) · --json
-         --dry-run shows what a write verb would do · --yes confirms drop`
+Options: --repo OWNER/NAME (default: dev.md repo: or the origin remote) · --json · --dry-run shows
+what a write verb would do · --yes confirms drop. claim, release and heartbeat always act as this
+checkout (machine:worktree-folder); only a take-back displaces another holder.`
 }
 
 interface Parsed { verb: string; number: number; positional: string[]; flags: Record<string, string>; json: boolean; dryRun: boolean; yes: boolean }
@@ -315,6 +309,11 @@ export function parseIssueArgs(argv: string[]): Parsed {
   return { verb, number, positional, flags, json, dryRun, yes }
 }
 
+function worktreeName(cwd: string): string {
+  const top = spawnSync('git', ['rev-parse', '--show-toplevel'], { cwd, encoding: 'utf8' }).stdout.trim()
+  return basename(top || cwd)
+}
+
 const list = (value?: string) => (value ? value.split(',').map((item) => item.trim()).filter(Boolean) : [])
 const cursor = (value?: string) => {
   const n = Number(value)
@@ -329,6 +328,9 @@ export function runIssue(argv: string[], { runner = defaultRunner, cwd = process
   const repo = assertRepo(args.flags.repo ?? detectRepo(root))
   const ctx: WriteContext = { root, repo, number: args.number, runner }
   const print = (value: unknown, text: string) => out(args.json ? JSON.stringify(value, null, 2) : text)
+  // A session acts only as itself, so it cannot release or keep alive someone else's claim.
+  if (args.flags.owner !== undefined) throw new Error('--owner is not accepted: claim, release and heartbeat act as this checkout (machine:worktree-folder)')
+  const owner = ownerId(worktreeName(cwd))
   const sync = (since = 0) => syncIssue({ root, repo, number: args.number, since, runner })
   // Each write verb validates everything first; a dry run then stops before any request.
   const preview = (what: string, detail: Record<string, unknown> = {}) => {
@@ -336,9 +338,13 @@ export function runIssue(argv: string[], { runner = defaultRunner, cwd = process
     print({ dryRun: true, verb: args.verb, ...detail }, `dry run: would ${what}`)
     return true
   }
+  // Acks, claims and releases are written only by their own verbs, which check what they record.
   const input = (flag = 'file') => {
     if (!args.flags[flag]) throw new Error(`--${flag} is required`)
-    return readFileSync(resolve(cwd, args.flags[flag]!), 'utf8')
+    const text = readFileSync(resolve(cwd, args.flags[flag]!), 'utf8')
+    const type = commentType(text)
+    if (['ack', 'claim', 'release'].includes(type)) throw new Error(`the text starts with a type=${type} marker — only \`vegafactory issue ${type}\` writes those`)
+    return text
   }
 
   switch (args.verb) {
@@ -417,6 +423,39 @@ export function runIssue(argv: string[], { runner = defaultRunner, cwd = process
         return { comment, result: sync() }
       })
       print({ id: comment.id, url: comment.html_url, cursor: result.cursor }, `recorded ${stage} ack ${comment.html_url}\ncursor ${result.cursor}`)
+      return 0
+    }
+    case 'claim': {
+      const kind = (args.flags.kind ?? 'session') as ClaimKind
+      if (kind !== 'session' && kind !== 'dispatch') throw new Error('--kind must be session or dispatch')
+      if (!args.flags.harness || !args.flags.model) throw new Error('--harness and --model are required')
+      const outcome = claim(ctx, { owner, kind, harness: args.flags.harness, model: args.flags.model, takeBackBy: args.flags['take-back-by']?.replace(/^@/, '') })
+      const wait = outcome.waitMs ? `\nwait up to ${outcome.waitMs / 60_000} min for the previous holder's last push, then pull the branch` : ''
+      print(outcome, `${outcome.ok ? 'ok' : 'blocked'}: ${outcome.message}${wait}`)
+      return outcome.ok ? 0 : 2
+    }
+    case 'release':
+      release(ctx, owner, owner, args.flags.reason ?? 'done')
+      print({ released: owner }, `released ${owner}`)
+      return 0
+    case 'heartbeat': {
+      const active = Number(args.flags.active ?? 0)
+      if (!Number.isFinite(active) || active < 0) throw new Error('--active needs a number of minutes')
+      heartbeat(ctx, owner, Math.round(active))
+      print({ owner }, `heartbeat ${owner}`)
+      return 0
+    }
+    case 'holder': {
+      const dir = sync().dir
+      const snap = snapshot(dir)
+      const { holder, stale } = holderOf(snap.state, snap.body, Date.now(), trustedAuthors(ctx))
+      print({ holder, stale }, holder ? `${holder.owner} (${holder.harness}${holder.model ? ` · ${holder.model}` : ''}) · last active ${holder.heartbeat}` : 'nobody')
+      return 0
+    }
+    case 'status': {
+      const progress = args.flags['progress-file'] ? readFileSync(resolve(cwd, args.flags['progress-file']), 'utf8') : null
+      const result = writeStatus(ctx, { cwd, branch: args.flags.branch, progress })
+      print({ cursor: result.cursor }, `status comment updated\ncursor ${result.cursor}`)
       return 0
     }
     case 'drop':

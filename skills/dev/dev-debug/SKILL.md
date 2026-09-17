@@ -32,7 +32,7 @@ List 3–5 candidate causes ranked most-likely first — a single hypothesis anc
 
 ## Phase 4 — test suspects one variable at a time
 
-Every probe maps to one suspect's prediction. Prefer a debugger/REPL breakpoint over logs; when logging, target the boundaries that separate suspects, because a blanket log buries the signal. **Every debug log carries a `[DEBUG-<4hex>]` tag** (one random tag per session): cleanup becomes a single grep, and ship-gate blocks any tag that survives into the diff. Performance bugs: logs lie — measure a baseline first (timing harness, profiler, query plan), then bisect.
+Every probe maps to one suspect's prediction. Prefer a debugger/REPL breakpoint over logs; when logging, target the boundaries that separate suspects, because a blanket log buries the signal. **Every debug log carries a `[DEBUG-<4hex>]` tag** (one random tag per session): cleanup becomes a single grep, and `vegafactory ship check` blocks any tag that survives into the diff. Performance bugs: logs lie — measure a baseline first (timing harness, profiler, query plan), then bisect.
 
 ## Phase 5 — regression test before the fix
 
@@ -40,4 +40,4 @@ Write the failing test before touching the fix, at a correct seam: one where the
 
 ## Phase 6 — clean up and teach
 
-Before hand-back, all checkable: the original repro re-runs green · `git diff <base>... | grep -F '[DEBUG-'` comes back empty (fixed-string grep; ship-gate backstops the added lines) · throwaway harnesses deleted · the winning suspect and its evidence named in the evidence comment and the commit message — the next debugger learns what it actually was, not just that it went away.
+Before hand-back, all checkable: the original repro re-runs green · `git diff <base>... | grep -F '[DEBUG-'` comes back empty (fixed-string grep; `vegafactory ship check` backstops the added lines) · throwaway harnesses deleted · the winning suspect and its evidence named in the evidence comment and the commit message — the next debugger learns what it actually was, not just that it went away.

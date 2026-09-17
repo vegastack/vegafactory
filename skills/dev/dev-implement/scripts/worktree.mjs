@@ -89,22 +89,6 @@ export function branchPartsForIssue(repoRoot, issue) {
   return { type: matches[0].slice(0, slash), slug: matches[0].slice(slash + 1 + lead.length) };
 }
 
-// A child worktree of a parent branch. Correctness never rests on a harness
-// setting: the child branches from the parent's HEAD *sha*, spelled out, so a
-// parallel run that moves the parent branch cannot move the child's base under
-// it. A ref is refused for exactly that reason.
-export const CHILD_BASE_SHA = /^[0-9a-f]{7,40}$/;
-
-export function childWorktreePlan({ repoRoot, issue, title, type, baseSha }) {
-  const sha = String(baseSha ?? '');
-  if (!CHILD_BASE_SHA.test(sha)) throw new Error('base must be a commit sha, not a ref: ' + sha);
-  const name = worktreeName(issue, slugify(title));
-  const path = worktreePath(repoRoot, name);
-  const branch = branchName(type, issue, slugify(title));
-  return { name, path, branch, baseSha: sha, args: ['worktree', 'add', '-b', branch, path, sha] };
-}
-
-
 // --- porcelain ------------------------------------------------------------
 
 // Parse `git worktree list --porcelain`. Records are blank-line separated;
@@ -186,7 +170,7 @@ export function evaluateRemoval({ state, dirty, unpushed, remoteMissing, mergedI
   const warns = [];
   const branchGone = state === 'orphan-dir';
   if (dirty) blocks.push('uncommitted changes in the worktree — commit or discard them first');
-  if (!branchGone && (unpushed || remoteMissing)) {
+  if (!branchGone && (unpushed || (remoteMissing && !mergedIntoDefault))) {
     blocks.push('commits not on the remote — push the branch first, then re-check');
   }
   if (!branchGone && !mergedIntoDefault && !force) {
@@ -232,12 +216,6 @@ export function parseIncludeKnob(devMd) {
 
 // The `setup \`...\`` field of dev.md's `commands:` line — what a fresh
 // checkout has to run before it can build (bun install, and friends).
-export function parseSetupCommand(devMd) {
-  const line = knobLine(devMd, 'commands');
-  if (!line) return null;
-  const match = /\bsetup\s+`([^`]+)`/.exec(line);
-  return match ? match[1].trim() : null;
-}
 
 // Age is measured from the LATER of the last commit and the last ledger edit:
 // a branch that has not moved may still be an issue someone is actively
@@ -365,44 +343,19 @@ function prepareCheckout({ repoRoot, path, devMd, home, write, actions, warns, b
     mkdirSync(dirname(target), { recursive: true });
     copyFileSync(source, target);
   }
-  const setup = parseSetupCommand(devMd);
-  if (setup) {
-    actions.push(at('setup', 'run `' + setup + '` in the worktree'));
-    if (write) {
-      try {
-        execFileSync('sh', ['-c', setup], { cwd: path, encoding: 'utf8', stdio: [DISCARD, 'pipe', 'pipe'] });
-      } catch (error) {
-        (required ? blocks : warns).push(at('setup', '`' + setup + '` failed: ' + (error.stderr?.toString().trim() || error.message)));
-      }
-    }
-  }
+  // Dependencies are not installed here: a step that needs them runs the setup command itself,
+  // so a docs-only issue costs a few megabytes instead of a full install.
   applyCodexTrust({ home, absPath: path, write, actions, warns, blocks });
 }
 
-// Create the checkout for a branch. With `parent` set this is an epic's child:
-// it does NOT get its own directory — it branches off the parent branch inside
-// the parent's worktree, one child at a time, which is what keeps a stack
-// linear. Without `parent` it is a fresh worktree cut from origin/<base>.
-export function createWorktree({ repoRoot, issue, slug, type, base, parent, devMd, home, write = false }) {
+// Create the checkout for a branch: a fresh worktree cut from origin/<base>. Every issue —
+// sub-issues of an epic included — gets its own branch, worktree and PR.
+export function createWorktree({ repoRoot, issue, slug, type, base, devMd, home, write = false }) {
   const blocks = [];
   const warns = [];
   const actions = [];
   const branch = branchName(type, issue, slug);
   const name = worktreeName(issue, slug);
-
-  if (parent) {
-    const parentPath = worktreeHoldingBranch(repoRoot, parent);
-    if (!parentPath) {
-      blocks.push(at(parent, 'no worktree holds the parent branch — create the parent worktree before its first child'));
-      return { blocks, warns, actions, path: '', branch };
-    }
-    actions.push(at(parentPath, 'git switch -c ' + branch + ' from ' + parent));
-    if (write) {
-      const switched = git(parentPath, ['switch', '-c', branch]);
-      if (!switched.ok) blocks.push(at(branch, 'could not branch from ' + parent + ': ' + switched.out));
-    }
-    return { blocks, warns, actions, path: parentPath, branch };
-  }
 
   const path = worktreePath(repoRoot, name);
   for (const candidate of [join(repoRoot, '.vegastack'), join(repoRoot, WORKTREES_DIR), path]) {
@@ -442,41 +395,6 @@ export function createWorktree({ repoRoot, issue, slug, type, base, parent, devM
     prepareCheckout({ repoRoot, path, devMd, home, write: false, actions, warns, blocks });
   }
   return { blocks, warns, actions, path, branch };
-}
-
-// The `create --base <sha>` path: one child checkout of a parallel run, cut
-// from the parent's HEAD commit. It shares createWorktree's symlink refusal,
-// existing-branch refusal and post-add preparation, and differs only in the
-// start point, which is a commit rather than a ref.
-export function createChildWorktree({ repoRoot, issue, slug, type, baseSha, devMd, home, write = false, gitRunner = git }) {
-  const blocks = [];
-  const warns = [];
-  const actions = [];
-  let plan;
-  try {
-    plan = childWorktreePlan({ repoRoot, issue, title: slug, type, baseSha });
-  } catch (error) {
-    return { blocks: [at('--base', error.message)], warns, actions, path: '', branch: '' };
-  }
-  for (const candidate of [join(repoRoot, '.vegastack'), join(repoRoot, WORKTREES_DIR), plan.path]) {
-    const symlink = symlinkBlock(candidate);
-    if (symlink) blocks.push(symlink);
-  }
-  if (blocks.length > 0) return { blocks, warns, actions, path: plan.path, branch: plan.branch };
-  if (branchExistsIn(repoRoot, plan.branch, gitRunner)) {
-    blocks.push(at(plan.branch, 'the branch already exists — use restore to re-add its worktree'));
-    return { blocks, warns, actions, path: plan.path, branch: plan.branch };
-  }
-  actions.push(at(plan.path, 'git worktree add -b ' + plan.branch + ' from ' + plan.baseSha));
-  if (write) {
-    const added = gitRunner(repoRoot, plan.args);
-    if (!added.ok) {
-      blocks.push(at(plan.path, 'git worktree add failed: ' + added.out));
-      return { blocks, warns, actions, path: plan.path, branch: plan.branch };
-    }
-  }
-  prepareCheckout({ repoRoot, path: plan.path, devMd, home, write, actions, warns, blocks, required: true });
-  return { blocks, warns, actions, path: plan.path, branch: plan.branch };
 }
 
 // Re-add the checkout for a branch that still exists but whose directory is
@@ -543,7 +461,8 @@ function gatherRemovalFacts({ repoRoot, path, branch, base, remote, locked }) {
   // reached through a PR, so "ancestor of the default branch" alone would call a
   // brand-new branch cut from origin/main 'merged' and prune it on day one.
   const isAncestor = git(repoRoot, ['merge-base', '--is-ancestor', branch, baseRef]).ok;
-  const mergedIntoDefault = !remoteMissing && (isAncestor || mergedByContent(repoRoot, branch, baseRef));
+  // A squash merge deletes the remote branch (delete-on-merge), so content decides then.
+  const mergedIntoDefault = (!remoteMissing && isAncestor) || mergedByContent(repoRoot, branch, baseRef);
   return { dirty, unpushed, remoteMissing, mergedIntoDefault, locked };
 }
 
@@ -605,10 +524,6 @@ export function removeWorktree({ repoRoot, name, base, force = false, push = fal
   if (!entry) return { blocks: [at(name, 'no worktree at ' + path + ' — nothing to remove')], warns, actions };
 
   const branch = entry.branch;
-  const branchIssue = branch && /^[^/]+\/([1-9]\d*)(?:-|$)/.exec(branch);
-  if (branchIssue && issueOfWorktree(name) !== Number(branchIssue[1])) {
-    return { blocks: ['serial child cannot remove its parent worktree; return to the parent branch and retain it until the parent PR merges'], warns, actions, path, branch };
-  }
   refreshBase({ repoRoot, base, remote, actions, warns });
   let facts = gatherRemovalFacts({ repoRoot, path, branch, base, remote, locked: entry.locked });
   if (push && branch && (facts.remoteMissing || facts.unpushed)) {
@@ -654,6 +569,54 @@ export function inventory(repoRoot) {
     .map((entry) => ({ ...entry, name: entry.path.slice(prefix.length) }));
 }
 
+// Secrets never leave the machine in an automatic commit (the same list as the CLI's hook).
+const SECRET_NAMES = [/^\.env(\..+)?$/, /\.(pem|key|p12)$/, /^id_rsa/];
+const SECRET_TEXT = [
+  /-----BEGIN (?:[A-Z]+ )*PRIVATE KEY-----/,
+  /\b(?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9]{20,}/,
+  /\bgithub_pat_[A-Za-z0-9_]{20,}/,
+  /\bsk-ant-[A-Za-z0-9_-]{10,}/,
+  /\bsk-[A-Za-z0-9_-]{32,}/,
+  /\bAKIA[0-9A-Z]{16}\b/,
+  /\bxox[baprs]-[A-Za-z0-9-]{10,}/,
+  /_auth(?:Token)?\s*=\s*(?!\$\{)\S/,
+];
+
+export function stagedSecrets(path) {
+  const hits = new Set();
+  const names = git(path, ['diff', '--cached', '--name-only', '--diff-filter=ACMR']).out.split('\n').filter(Boolean);
+  for (const file of names) {
+    const name = file.split('/').pop();
+    if (name !== '.env.example' && SECRET_NAMES.some((pattern) => pattern.test(name))) hits.add(file);
+  }
+  const diff = git(path, ['diff', '--cached', '--no-color', '--no-ext-diff', '-U0', '--diff-filter=ACMR'], { raw: true });
+  if (!diff.ok) return ['(the staged changes could not be read)'];
+  let file = '';
+  for (const line of diff.out.split('\n')) {
+    if (line.startsWith('+++ ')) { file = line.replace(/^\+\+\+ (b\/)?/, ''); continue; }
+    if (line.startsWith('+') && SECRET_TEXT.some((pattern) => pattern.test(line))) hits.add(file);
+  }
+  return [...hits];
+}
+
+// Work nobody committed is saved, never thrown away: a `wip:` commit on the
+// worktree's own branch, pushed normally. A rejected push (the remote moved)
+// keeps the commit local; staged secrets keep the work uncommitted.
+export function rescueWork({ path, branch, name, remote = 'origin' }) {
+  const added = git(path, ['add', '--all']);
+  if (!added.ok) return { ok: false, committed: false, reason: 'git add failed: ' + added.out };
+  const secrets = stagedSecrets(path);
+  if (secrets.length > 0) {
+    git(path, ['reset', '--quiet']);
+    return { ok: false, committed: false, reason: 'possible secrets, so nothing was committed: ' + secrets.join(', ') };
+  }
+  const commit = git(path, ['commit', '--quiet', '-m', 'wip: rescued uncommitted work from ' + name]);
+  if (!commit.ok) return { ok: false, committed: false, reason: 'git commit failed: ' + commit.out };
+  const push = git(path, ['push', '--quiet', '-u', remote, 'HEAD:refs/heads/' + branch]);
+  if (!push.ok) return { ok: false, committed: true, reason: 'the commit stays local because the push was rejected: ' + push.out.split('\n')[0] };
+  return { ok: true, committed: true, reason: null };
+}
+
 // Retention prune: propose (and with --write, perform) the removal of parked
 // worktrees whose branch and ledger have both gone quiet past the window. It
 // pushes an unpushed candidate first so nothing local-only is ever discarded,
@@ -692,17 +655,34 @@ export function pruneWorktrees({ repoRoot, base, olderThan, devMd, ledgerTimes =
     // and may still keep the worktree (unmerged, dirty, locked). A dry run
     // pushes nothing, so such a candidate is correctly not-yet-removable.
     const remoteOnly = verdict.blocks.some((block) => block.includes('commits not on the remote'));
+    const rescuable = facts.dirty && branch !== null && !entry.locked;
     candidates.push({
       name: entry.name,
+      path: entry.path,
+      branch,
       state,
       ageDays,
       removable: verdict.blocks.length === 0,
       pushable: remoteOnly,
+      rescuable,
       reason: verdict.blocks[0] ?? null,
     });
   }
   for (const candidate of candidates) {
-    if (!candidate.removable && !candidate.pushable) continue;
+    if (!candidate.removable && !candidate.pushable && !candidate.rescuable) continue;
+    if (candidate.rescuable) {
+      actions.push(at(candidate.name, 'commit uncommitted work as wip on ' + candidate.branch + ' and push it'));
+      if (write) {
+        const saved = rescueWork({ path: candidate.path, branch: candidate.branch, name: candidate.name, remote });
+        if (!saved.ok) {
+          warns.push(at(candidate.name, 'kept: could not save uncommitted work — ' + saved.reason));
+          candidate.removable = false;
+          candidate.reason = saved.reason;
+          continue;
+        }
+        candidate.rescuedTo = candidate.branch;
+      }
+    }
     actions.push(at(candidate.name, (candidate.pushable ? 'push the branch, then re-check for removal after ' : 'remove after ') + candidate.ageDays + ' quiet days'));
     if (!write) continue;
     const removed = removeWorktree({ repoRoot, name: candidate.name, base, force: true, push: true, write: true, remote });
@@ -961,14 +941,7 @@ function runVerb(verb, flags) {
       named = { type: named.type || parts.type, slug: parts.slug };
     }
     if (!named.slug) return { blocks: ['--slug is required for ' + verb + ' without --issue'], warns: [] };
-    const options = { ...shared, issue, slug: named.slug, type: named.type || 'feat', parent: flags.parent };
-    // A `--base` that is a commit sha means a child of a parallel run: its
-    // checkout is cut from that exact commit, never from a ref that another
-    // child could move. Any other `--base` keeps its long-standing meaning,
-    // the branch the new worktree is cut from.
-    if (verb === 'create' && flags.base && CHILD_BASE_SHA.test(String(flags.base))) {
-      return createChildWorktree({ ...options, baseSha: String(flags.base) });
-    }
+    const options = { ...shared, issue, slug: named.slug, type: named.type || 'feat' };
     return verb === 'create' ? createWorktree(options) : restoreWorktree(options);
   }
   return { blocks: [at(verb, 'unknown verb — expected create|restore|remove|list|prune|status')], warns: [] };

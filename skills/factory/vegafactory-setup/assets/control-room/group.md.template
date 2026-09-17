@@ -7,7 +7,6 @@ policy-schema: 2
 ## Knobs
 
 review: cross-agent-risky   # subagent | cross-agent-risky | cross-agent
-gates: 3                    # 3 = approve/PR/merge · 2 = approve + one "ship it" · 1 = direct-to-main
 merge: rebase               # rebase | squash | merge
 branch: <type>/<slug>       # type: feat | fix | docs | chore | refactor
 labels: waiting-on-operator planning queued in-progress ready-to-ship risky research small medium epic

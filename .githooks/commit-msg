@@ -1,8 +1,11 @@
 #!/bin/sh
 # Fast checks before every commit (validators, lint, typecheck) — a few seconds.
 # Tests run while building (bun run test:affected) and in the merge queue (full suite).
+# WIP checkpoints (messages starting with "wip:") skip the checks so the Stop hook stays fast;
+# the next real commit checks everything.
 # The checks run on a copy of exactly what is staged, so unstaged or untracked files
 # cannot make a commit pass. Quiet when everything passes.
+if head -n 1 "$1" | grep -q '^wip:'; then exit 0; fi
 if git diff --cached --quiet; then exit 0; fi
 root=$(git rev-parse --show-toplevel) || exit 1
 snapshot=$(mktemp -d)
@@ -14,8 +17,14 @@ find "$root" \( -path "$root/.vegastack" -o -path "$root/.git" \) -prune -o -nam
   mkdir -p "$snapshot/$(dirname "$rel")"
   ln -s "$dir" "$snapshot/$rel"
 done
-log="$snapshot/.pre-commit.log"
+# A worktree nested in the main checkout resolves packages from the parent folders instead.
+dir=$(dirname "$root")
+while [ ! -e "$snapshot/node_modules" ] && [ "$dir" != / ]; do
+  if [ -d "$dir/node_modules" ]; then ln -s "$dir/node_modules" "$snapshot/node_modules"; fi
+  dir=$(dirname "$dir")
+done
+log="$snapshot/.commit-msg.log"
 if (cd "$snapshot" && bun run --silent check:fast) >"$log" 2>&1; then exit 0; fi
 cat "$log"
-echo "pre-commit: fast checks failed on the staged files — fix the problems above and commit again." >&2
+echo "commit-msg: fast checks failed on the staged files — fix the problems above and commit again." >&2
 exit 1

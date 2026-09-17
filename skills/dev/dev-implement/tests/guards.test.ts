@@ -6,7 +6,6 @@ import { join, resolve } from 'node:path'
 import { GhUnavailable, findMarkerComment, ghJson, parseFlags, parseMarker, renderResult } from '../scripts/lib/gh.mjs'
 
 const implRoot = resolve(import.meta.dir, '..')
-import { scopeDigest } from '../scripts/lib/approval.mjs'
 import { checkEvidence, checkTaskConsistency } from '../scripts/evidence-check.mjs'
 
 const baseIssue = () => ({
@@ -18,8 +17,8 @@ const baseIssue = () => ({
 const currentPlan = { id: 2, node_id: 'plan-2', body: '<!-- vsk:v1 type=plan rev=1 -->\n- [ ] **Task 1: implement** <!-- task-id:1-T1 -->\n' }
 const approval = (scope = 'brief+plan') => {
   const artifacts = [
-    { repo: 'vegastack/vegafactory', issue: 1, kind: 'brief', artifactId: 'brief-1', rev: 1, digest: scopeDigest(baseIssue().body, 'brief') },
-    { repo: 'vegastack/vegafactory', issue: 1, kind: 'plan', artifactId: 'plan-2', rev: 1, digest: scopeDigest(currentPlan.body, 'plan') },
+    { repo: 'vegastack/vegafactory', issue: 1, kind: 'brief', artifactId: 'brief-1', rev: 1, digest: 'brief-digest' },
+    { repo: 'vegastack/vegafactory', issue: 1, kind: 'plan', artifactId: 'plan-2', rev: 1, digest: 'plan-digest' },
   ].filter(ref => scope === 'brief+plan' || ref.kind === scope)
   return { id: scope === 'plan' ? 4 : 3, user: { login: 'kmanojkumar' }, body: `<!-- vsk:v1 type=approval scope=${scope} -->\n\`\`\`json\n` + JSON.stringify({ schemaVersion: 2, id: 'intent-' + scope, operator: 'kmanojkumar', scope, source: { kind: 'session', ref: 'session:1', quote: 'Approved.' }, artifacts, supersedes: [], revokes: [] }) + '\n```\n' }
 }

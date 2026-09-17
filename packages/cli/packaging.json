@@ -32,9 +32,7 @@
     "scripts/questions.mjs@dev-setup",
     "references/ask-route.md@dev-setup",
     "scripts/lib/gh.mjs",
-    "scripts/lib/approval.mjs",
     "scripts/evidence-check.mjs",
-    "scripts/reclaim.mjs",
     "scripts/evidence-upload.mjs",
     "scripts/worktree.mjs",
     "references/ledger-and-resume.md",
@@ -48,7 +46,6 @@
     "references/conventions.md@dev-setup",
     "scripts/questions.mjs@dev-setup",
     "references/ask-route.md@dev-setup",
-    "scripts/lib/approval.mjs@dev-implement",
     "scripts/brief-lint.mjs",
     "references/brief-template.md"
   ],
@@ -58,7 +55,6 @@
     "references/conventions.md@dev-setup",
     "scripts/questions.mjs@dev-setup",
     "references/ask-route.md@dev-setup",
-    "scripts/lib/approval.mjs@dev-implement",
     "scripts/plan-lint.mjs",
     "references/plan-format.md"
   ],
@@ -81,19 +77,12 @@
     "references/stack-playbooks.md",
     "scripts/questions.mjs",
     "scripts/effective-policy.mjs",
-    "scripts/ship-policy.mjs",
     "assets/dev-profile.md.template",
     "assets/agents-section.md.template",
-    "assets/factory-board.yml.template",
-    "assets/hooks/ship-guard.mjs",
-    "assets/hooks/session-start.mjs",
-    "assets/hooks/stop-heartbeat.mjs",
-    "assets/hooks/session-end.mjs"
+    "assets/factory-board.yml.template"
   ],
   "dev-ship": [
     "SKILL.md",
-    "scripts/lib/approval.mjs@dev-implement",
-    "scripts/ship-gate.mjs",
     "references/conventions.md@dev-setup",
     "agents/openai.yaml",
     "references/runbook.md"

@@ -11,7 +11,7 @@ import type { SkillEntry } from './selection.ts'
 type Agent = 'codex' | 'claude'
 type AgentChoice = Agent | 'both'
 type Mode = 'project' | 'global'
-type Command = 'add' | 'update' | 'verify' | 'doctor' | 'remove' | 'list' | 'version' | 'help' | 'worktree' | 'sync' | 'guard' | 'issue' | 'init' | 'agent'
+type Command = 'add' | 'update' | 'verify' | 'doctor' | 'remove' | 'list' | 'version' | 'help' | 'worktree' | 'sync' | 'hook' | 'ship' | 'issue' | 'init' | 'agent'
 const installerVerbs: readonly string[] = ['add', 'update', 'verify', 'doctor', 'remove', 'list'] as const
 interface Options {
   command: Command
@@ -63,12 +63,15 @@ Issues (agents read .vegastack/.tmp/issues/, then write back through these):
 Worktrees (one issue, one worktree; the main checkout stays on the default branch):
   worktree list|status|create|restore|remove|prune ...                run "vegafactory worktree --help"
 
+Shipping and hooks:
+  ship check <n> [--json]                may issue n merge? (ship it recorded, branch pushed, PR green)
+  hook <event> --harness claude|codex    the harness hooks: guard, heartbeat, WIP checkpoints ("hook --help")
+
 Agents:
   agent claude|codex <args…>             start a headless run on the subscription (API keys refused)
 
-Control room and ship guard:
+Control room:
   sync [--org ORG] [--force]             refresh this machine's copy of the org control room
-  guard sync [--check]                   compile dev.md's ship rules for the ship guard
 
 Options:
   --group NAME · --all                   choose skills (--all skips the repo-only ones)
@@ -104,7 +107,7 @@ function parse(argv: string[]): Options {
       if (!installerVerbs.includes(verb) && verb !== 'help' && verb !== 'version') throw new Error(`Unknown command: skills ${verb}`)
       command = verb as Command
     }
-    else if (head === 'worktree' || head === 'guard' || head === 'issue' || head === 'agent') return { command: head, all: false, dryRun: false, force: false, nonInteractive: false, json: false, rest: argv.splice(0) }
+    else if (head === 'worktree' || head === 'hook' || head === 'ship' || head === 'issue' || head === 'agent') return { command: head, all: false, dryRun: false, force: false, nonInteractive: false, json: false, rest: argv.splice(0) }
     else if (installerVerbs.includes(head)) throw new Error(`Unknown command: ${head} — installer verbs moved under the skills namespace: run "vegafactory skills ${head} …"`)
     else if (head === 'sync' || head === 'help' || head === 'version' || head === 'init') command = head
     else throw new Error(`Unknown command: ${head}`)
@@ -833,6 +836,13 @@ async function main() {
   const { assertSupportedPlatform } = await import('./env.ts')
   assertSupportedPlatform()
   const options = parse(process.argv.slice(2))
+  if (options.command === 'hook') {
+    const { hookUsage, runHook } = await import('./hook.ts')
+    const rest = options.rest ?? []
+    if (rest.length === 0 || ['help', '--help', '-h'].includes(rest[0]!)) return console.log(hookUsage())
+    process.exitCode = await runHook(rest)
+    return
+  }
   if (options.command === 'init') return init(options)
   if (options.command === 'update') { await update(options); return }
   if (options.command === 'worktree') {
@@ -852,11 +862,9 @@ async function main() {
     process.exitCode = runAgent(options.rest ?? [])
     return
   }
-  if (options.command === 'guard') {
-    const {guardUsage, runGuardCli}=await import('./guard.ts')
-    const rest = options.rest ?? []
-    if (rest.length === 0 || rest[0] === 'help' || rest[0] === '--help' || rest[0] === '-h') return console.log(guardUsage())
-    process.exitCode = await runGuardCli(rest)
+  if (options.command === 'ship') {
+    const { runShip } = await import('./ship.ts')
+    process.exitCode = runShip(options.rest ?? [])
     return
   }
   if (options.command === 'sync') return sync(options)

@@ -216,7 +216,7 @@ Architecture review (`dev-architect`) is advisory by design: evidence-backed rep
 
 ```sh
 bun install --frozen-lockfile
-bun run check:fast     # validators + lint + typecheck (also the pre-commit hook)
+bun run check:fast     # validators + lint + typecheck (also the commit-msg hook)
 bun run test:affected  # only the tests your change can reach
 bun run check          # everything (the merge queue runs this)
 bun run build

@@ -31,6 +31,13 @@ describe('status helpers', () => {
     expect(ledgerMovedAt(comments)).toBe('2026-08-27T09:00:00Z')
     expect(ledgerMovedAt([])).toBeNull()
   })
+  test('ledgerMovedAt counts a heartbeat on a claim comment as movement', () => {
+    const comments = [
+      { body: '<!-- vsk:v1 type=claim owner=a:1 -->\n<!-- vsk:claim owner=a:1 heartbeat=x active=3 -->', updated_at: '2026-08-29T09:00:00Z' },
+      { body: '<!-- vsk:v1 type=ledger -->\n## Status', updated_at: '2026-08-27T09:00:00Z' },
+    ]
+    expect(ledgerMovedAt(comments)).toBe('2026-08-29T09:00:00Z')
+  })
   test('pendingDecisions: unrecorded decision comments and evidence Decision lines, recorded ones excluded', () => {
     const register = '- 28-08-2026 (mk) — keep D1 for the search index\n'
     const comments = [

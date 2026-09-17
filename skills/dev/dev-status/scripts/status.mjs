@@ -53,7 +53,7 @@ export function ageDays(iso, now = Date.now()) {
 
 // Ledger liveness is measured in hours, not days: a session that hands back in
 // hours can go dark for a fraction of a day, which whole-day granularity cannot
-// even represent. The ledger's updated_at is the only liveness proxy an agent
+// even represent. The ledger's and the claim comments' updated_at are the only liveness proxy an agent
 // session exposes — a live session (even a multi-day one) checkpoints and keeps
 // this small; a dead one freezes it.
 export function ageHours(iso, now = Date.now()) {
@@ -104,11 +104,13 @@ export function taskProgress(comments) {
   return null;
 }
 
-// Latest ledger comment's updated_at → staleness signal for working issues.
+// The last time the ledger or a claim comment moved → staleness signal for working
+// issues. The hooks' heartbeat edits the holder's own claim comment.
 export function ledgerMovedAt(comments) {
   let at = null;
   for (const c of comments ?? []) {
-    if (parseMarker(c.body)?.keys?.type === 'ledger') at = c.updated_at;
+    const type = parseMarker(c.body)?.keys?.type;
+    if ((type === 'ledger' || type === 'claim') && (at === null || c.updated_at > at)) at = c.updated_at;
   }
   return at;
 }

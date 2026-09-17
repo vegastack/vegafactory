@@ -9,7 +9,7 @@ Act: write the project's story for the operator who returns months later — exa
 
 `.vegastack/chronicle.md` is the project's story, newest first — the answer to "what did I build here and what happened?" months later, when the operator remembers nothing. Entries are **story language for a human**, because the changelog already tells consumers what changed and the chronicle is for the operator who wants to know what happened.
 
-Nearest neighbors: `dev-implement` writes the entries at hand-back (the write rule lives there; the format lives here); `dev-status` answers "what needs me now" — this skill answers "how did we get here". `dev-ship`'s ship-gate checks entry presence when dev.md says `chronicle: on`.
+Nearest neighbors: `dev-implement` writes the entries at hand-back (the write rule lives there; the format lives here); `dev-status` answers "what needs me now" — this skill answers "how did we get here". `dev-ship` checks entry presence before the PR when dev.md says `chronicle: on`.
 
 ## The entry — one per behavior-changing branch
 
@@ -29,7 +29,7 @@ Nearest neighbors: `dev-implement` writes the entries at hand-back (the write ru
 - The fields are list items and the footer sits after a blank line — single newlines soft-wrap into one paragraph in rendered markdown; bullets are what guarantee a line per field.
 - Prepend — newest first. File missing → create it with a two-line header naming this skill as the format home.
 - **How it went** is where honesty lives: what fought back, what was cut, what surprised. "Smooth" is a fine answer; silence is not.
-- Research issues get an entry only when the findings changed direction; docs/test-only merges get none (ship-gate's excuse flag covers both records at once).
+- Research issues get an entry only when the findings changed direction; docs/test-only merges get none (the evidence comment's `**Changelog:**` reason covers both records at once).
 - A notable ship event — rollback, failed release — becomes its own short entry on the next branch. Entries are append-only like the register — a typo is the one edit — because a rewritten chapter is a story nobody can trust.
 - An entry runs 80–200 words; the digest scales with the ask.
 
@@ -49,4 +49,4 @@ Length scales with the ask: "catch me up quickly" is one paragraph; a returning-
 
 ## Setup
 
-The `chronicle:` knob in dev.md (`on` default | `off`) governs whether dev-implement writes entries and ship-gate checks them; `chronicle-style:` and `emoji:` govern how they read; `dev-setup` writes all three. A project that turns it on mid-life starts from now — no retroactive backfill unless the operator asks, and then it's marked as reconstructed.
+The `chronicle:` knob in dev.md (`on` default | `off`) governs whether dev-implement writes entries and dev-ship checks them; `chronicle-style:` and `emoji:` govern how they read; `dev-setup` writes all three. A project that turns it on mid-life starts from now — no retroactive backfill unless the operator asks, and then it's marked as reconstructed.
