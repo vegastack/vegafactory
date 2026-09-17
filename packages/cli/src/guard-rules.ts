@@ -522,9 +522,11 @@ function refPlumbing(words: string[]): string | null {
   return null
 }
 
-// Read-only gh commands that pass; `gh api`, `gh pr merge` and `gh release` have their own rules.
+// gh commands that pass: reads, plus opening a PR or an issue (operator's call, 17-09-2026 —
+// both are the skills' normal steps and publish nothing irreversible). `gh api`, `gh pr merge`
+// and `gh release` have their own rules.
 const GH_READ_ONLY: Record<string, string[]> = {
-  auth: ['status'], pr: ['view', 'list', 'checks', 'diff', 'status'], issue: ['view', 'list', 'status'],
+  auth: ['status'], pr: ['view', 'list', 'checks', 'diff', 'status', 'create'], issue: ['view', 'list', 'status', 'create'],
   run: ['view', 'list', 'watch'], repo: ['view'], label: ['list'], project: ['item-list', 'view', 'field-list'],
   release: ['list', 'view', 'download', 'ls'],
 }
