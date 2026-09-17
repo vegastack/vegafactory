@@ -87,9 +87,12 @@ describe('decisions', () => {
     for (const command of ['noglob ls', 'env FOO=1 ls', 'env -i PATH=/bin ls', 'env -u HOME ls']) expect(decide(command).decision, command).toBe('allow')
   })
 
-  test('opening a PR or an issue passes; other gh writes still ask', () => {
-    for (const command of ['gh pr create --title t --body b', 'gh issue create --title t --body b --label planning']) expect(decide(command).decision, command).toBe('allow')
-    for (const command of ['gh pr edit 5 --add-label x', 'gh issue close 5', 'gh label create x', 'gh pr merge 5']) expect(decide(command).decision, command).toBe('ask')
+  test('routine PR, issue and label writes pass; closing, deleting and merging still ask', () => {
+    for (const command of [
+      'gh pr create --title t --body b', 'gh issue create --title t --body b --label planning', 'gh issue edit 5 --add-label in-progress --remove-label queued',
+      'gh pr edit 5 --add-label x', 'gh label create small --color C2E0C6', 'gh label edit small --description d',
+    ]) expect(decide(command).decision, command).toBe('allow')
+    for (const command of ['gh issue close 5', 'gh issue delete 5', 'gh label delete x', 'gh pr close 5', 'gh pr merge 5', 'gh issue comment 5 -b x']) expect(decide(command).decision, command).toBe('ask')
   })
 
   test('pushing one tag by name asks, however it is spelled', () => {
@@ -294,7 +297,7 @@ describe('decisions', () => {
     expect(classifyCommand('gh pr merge 12 --squash', policy, check).decision).toBe('allow')
     for (const command of [
       'gh alias set ship "pr merge"', 'gh alias import x.yml', 'gh alias delete ship', 'gh ship 12', 'gh extension install o/gh-x', 'gh x-merge 1',
-      'gh pr edit 1 --base main', 'gh repo delete o/r', 'gh workflow run release', 'gh secret set X', 'gh auth token', 'gh run rerun 1', 'gh label create x', 'gh project item-edit 1',
+      'gh repo delete o/r', 'gh workflow run release', 'gh secret set X', 'gh auth token', 'gh run rerun 1', 'gh project item-edit 1',
     ]) {
       expect(decide(command).decision, command).toBe('ask')
     }
