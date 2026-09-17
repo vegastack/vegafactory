@@ -8,6 +8,7 @@ import { claim } from '../src/claim.ts'
 import type { GhRunner } from '../src/gh.ts'
 import { detachBounded, issueFromBranch, issueFromWorktree, readHookInput, runHook, type HookDeps } from '../src/hook.ts'
 import { ackBody, artifactHash } from '../src/issue.ts'
+import { addLesson, readLessons } from '../src/learning.ts'
 import { FakeGitHub } from './fake-github.ts'
 
 const git = (cwd: string, ...args: string[]) => {
@@ -360,9 +361,12 @@ describe('heartbeat and checkpoints', () => {
     const asked = (await hook('stop', { cwd: tree, session_id: 's1' })).json().hookSpecificOutput
     expect(asked.hookEventName).toBe('Stop')
     expect(asked.additionalContext).toContain('which general lessons did it teach')
-    expect(asked.additionalContext).toContain(learnings)
+    expect(asked.additionalContext).toContain('vegafactory learning add')
     expect(asked.additionalContext).toContain('not the ones specific to #7')
     expect(asked.additionalContext).toContain("only on the operator's yes")
+    // Nothing to say means saying nothing: no sentinel a model could write over the queue with.
+    expect(asked.additionalContext).toContain(`leave the queue in ${learnings} exactly as it is`)
+    expect(asked.additionalContext).not.toContain('the single word none')
 
     // Once per session id, however many more turns commit.
     writeFileSync(join(tree, 'more.txt'), 'work')
@@ -377,6 +381,37 @@ describe('heartbeat and checkpoints', () => {
     expect(codex.hookSpecificOutput).toBeUndefined()
   })
 
+  test('two sessions in one worktree keep their own baseline and answered state', async () => {
+    // Both start from the same HEAD; the worktree's HEAD is shared, the marks are not.
+    await hook('session-start', { cwd: tree, session_id: 'a' })
+    await hook('session-start', { cwd: tree, session_id: 'b' })
+    const marks = () => JSON.parse(readFileSync(join(tree, '.vegastack/.tmp/claims/7.sessions.json'), 'utf8'))
+    expect(Object.keys(marks()).sort()).toEqual(['a', 'b'])
+
+    // A works and is asked.
+    writeFileSync(join(tree, 'from-a.txt'), 'work')
+    expect((await hook('stop', { cwd: tree, session_id: 'a' })).json().hookSpecificOutput.additionalContext).toContain('which general lessons')
+    // B then ends a chat-only turn: A's commit is not B's work, so B is not asked.
+    expect((await hook('stop', { cwd: tree, session_id: 'b' })).text).toBe('')
+    expect(marks().b.asked).toBe(false)
+
+    // B's own working turn is asked, and A is not asked a second time.
+    writeFileSync(join(tree, 'from-b.txt'), 'work')
+    expect((await hook('stop', { cwd: tree, session_id: 'b' })).json().hookSpecificOutput.additionalContext).toContain('which general lessons')
+    writeFileSync(join(tree, 'from-a-again.txt'), 'work')
+    expect((await hook('stop', { cwd: tree, session_id: 'a' })).text).toBe('')
+    expect([marks().a.asked, marks().b.asked]).toEqual([true, true])
+  })
+
+  test('a session-start whose refresh fails still records the baseline', async () => {
+    const broken: GhRunner = () => { throw new Error('offline') }
+    const stdin = () => Readable.from([Buffer.from(JSON.stringify({ cwd: tree, session_id: 'c' }))])
+    expect(await runHook(['session-start', '--harness', 'claude'], { ...deps(), runner: broken }, stdin())).toBe(0)
+    expect(JSON.parse(readFileSync(join(tree, '.vegastack/.tmp/claims/7.sessions.json'), 'utf8')).c.asked).toBe(false)
+    writeFileSync(join(tree, 'after-failure.txt'), 'work')
+    expect((await hook('stop', { cwd: tree, session_id: 'c' })).json().hookSpecificOutput.additionalContext).toContain('which general lessons')
+  })
+
   test('a warning and the lessons request travel in one Stop object', async () => {
     await hook('session-start', { cwd: tree, session_id: 's3' })
     git(tree, 'commit', '-q', '--allow-empty', '-m', 'real work')
@@ -386,14 +421,32 @@ describe('heartbeat and checkpoints', () => {
     expect(both.hookSpecificOutput.additionalContext).toContain('which general lessons did it teach')
   })
 
-  test('session-start shows the lessons waiting for a dev.md line', async () => {
-    mkdirSync(join(root, '.vegastack/.tmp'), { recursive: true })
-    writeFileSync(join(root, '.vegastack/.tmp/learnings.md'), '- the skill scan reads the built bundle\n')
+  test('session-start shows the lessons waiting for a dev.md line, and a silent session keeps them', async () => {
+    addLesson(root, 'the skill scan reads the built bundle')
     const context = (await hook('session-start', { cwd: tree, session_id: 's4' })).json().hookSpecificOutput.additionalContext
     expect(context).toContain('the skill scan reads the built bundle')
     expect(context).toContain('ONE .vegastack/dev.md line')
     expect(context).toContain('vegafactory learning accept')
     expect(context).toContain('control-room lines stay manual')
+
+    // The session works, is asked, and records nothing. The older lesson is still waiting.
+    writeFileSync(join(tree, 'work.txt'), 'work')
+    expect((await hook('stop', { cwd: tree, session_id: 's4' })).json().hookSpecificOutput.additionalContext).toContain('which general lessons')
+    expect(readLessons(root).map((lesson) => lesson.text)).toEqual(['the skill scan reads the built bundle'])
+    expect((await hook('session-start', { cwd: tree, session_id: 's5' })).json().hookSpecificOutput.additionalContext).toContain('the skill scan reads the built bundle')
+  })
+
+  test('the lessons queue is git-ignored, so no checkpoint commits or pushes it', async () => {
+    addLesson(root, 'a lesson nobody outside this machine should see')
+    writeFileSync(join(tree, 'feature.txt'), 'work')
+    await hook('stop', { cwd: tree, session_id: 's6' })
+    expect(git(tree, 'log', '-1', '--format=%s')).toBe('wip: #7 turn checkpoint')
+    expect(git(tree, 'ls-files', '--', '.vegastack')).toBe('.vegastack/dev.md')
+    expect(git(root, 'ls-files', '--', '.vegastack')).toBe('.vegastack/dev.md')
+    expect(git(root, 'status', '--porcelain', '--ignored', '--', '.vegastack/.tmp')).toBe('!! .vegastack/.tmp/')
+    const [cmd, ...args] = detached.at(-1)!
+    expect(spawnSync(cmd!, args, { cwd: tree }).status).toBe(0)
+    expect(git(tree, 'ls-tree', '-r', '--name-only', 'origin/feat/7-export')).not.toContain('learnings.md')
   })
 
   test('stop never commits or pushes a staged secret and names the files', async () => {

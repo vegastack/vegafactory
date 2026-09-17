@@ -67,8 +67,8 @@ Shipping and hooks:
   ship check <n> [--json]                may issue n merge? (ship it recorded, branch pushed, PR green)
   hook <event> --harness claude|codex    the harness hooks: guard, heartbeat, WIP checkpoints ("hook --help")
 
-Learning (the Stop hook collects these; a dev.md line lands only on the operator's yes):
-  learning list|accept|decline [id]      the lessons waiting for a dev.md line
+Learning (the Stop hook asks for these; a dev.md line lands only on the operator's yes):
+  learning add|list|accept|decline …     the lessons waiting for a dev.md line
 
 Agents:
   agent claude|codex <args…>             start a headless run on the subscription (API keys refused)

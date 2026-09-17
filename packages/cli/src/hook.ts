@@ -10,7 +10,7 @@ import { basename, dirname, join } from 'node:path'
 import { claimsOf, holderOf, ownerId, trustedAuthors, HEARTBEAT_EVERY_MS, type Holder } from './claim.ts'
 import { defaultRunner, type GhRunner } from './gh.ts'
 import { classifyCommand, extractCommand, isShellTool, loadPolicy, mergeTarget, type Decision, type MergeCheck } from './guard-rules.ts'
-import { cacheDir, readBody, readState, syncIssue } from './issue-cache.ts'
+import { cacheDir, readBody, readState, syncIssue, withLock } from './issue-cache.ts'
 import { askText, pendingNote } from './learning.ts'
 import { detectRepo, evidenceChangedAt, findValidAck, latestOfType, permissionLookup, repoRoot, snapshot } from './issue.ts'
 import { stateOf } from './labels.ts'
@@ -129,17 +129,12 @@ export interface LocalClaim {
   lostTo: string | null
   // The claim comment of the holder this worktree already saved its work for.
   rescuedFor: number | null
-  // The harness session this worktree last saw, the HEAD it started on, and the session the
-  // lessons request already went to — together they make that request once per working session.
-  session: string | null
-  sessionHead: string | null
-  askedLearning: string | null
 }
 
 export const localPath = (where: Where) => join(where.top, '.vegastack', '.tmp', 'claims', `${where.number}.json`)
 
 export function readLocal(where: Where): LocalClaim {
-  const blank: LocalClaim = { owner: where.owner, lastActive: null, activeMs: 0, lastPush: null, checkedAt: null, held: false, holder: null, lostTo: null, rescuedFor: null, session: null, sessionHead: null, askedLearning: null }
+  const blank: LocalClaim = { owner: where.owner, lastActive: null, activeMs: 0, lastPush: null, checkedAt: null, held: false, holder: null, lostTo: null, rescuedFor: null }
   try {
     const saved = JSON.parse(readFileSync(localPath(where), 'utf8')) as LocalClaim
     return saved.owner === where.owner ? { ...blank, ...saved } : blank
@@ -152,6 +147,59 @@ function writeLocal(where: Where, local: LocalClaim) {
   const temp = `${path}.${process.pid}.tmp`
   writeFileSync(temp, JSON.stringify(local, null, 2) + '\n')
   renameSync(temp, path)
+}
+
+// One mark per harness session: the HEAD it started on and whether the lessons request already
+// went out. Two sessions can share a worktree, so this is keyed by session id and kept apart from
+// the claim file, which every tool call rewrites — a shared field there would clobber a neighbour's
+// baseline. Every change takes the lock, re-reads and replaces the file, so the change is the whole
+// read-modify-write and not just the write.
+export interface SessionMark { head: string | null; asked: boolean; at: number }
+
+export const sessionsPath = (where: Where) => join(where.top, '.vegastack', '.tmp', 'claims', `${where.number}.sessions.json`)
+
+// Only the most recent sessions are kept; the file is a working note, not a record.
+const SESSIONS_KEPT = 8
+
+function updateSessions<T>(where: Where, change: (marks: Record<string, SessionMark>) => T): T {
+  const path = sessionsPath(where)
+  return withLock(dirname(path), () => {
+    let marks: Record<string, SessionMark> = {}
+    try { marks = JSON.parse(readFileSync(path, 'utf8')) as Record<string, SessionMark> } catch { /* the first session of this worktree */ }
+    const result = change(marks)
+    const kept = Object.entries(marks).sort(([, a], [, b]) => b.at - a.at).slice(0, SESSIONS_KEPT)
+    const temp = `${path}.${process.pid}.tmp`
+    writeFileSync(temp, JSON.stringify(Object.fromEntries(kept), null, 2) + '\n')
+    renameSync(temp, path)
+    return result
+  }, { what: 'the session marks' })
+}
+
+// A session's baseline is written the first time any event sees it, before anything that can fail,
+// so a refresh that throws still leaves the session able to tell work from talk.
+function markSession(where: Where, session: string | null, now: number) {
+  if (!session) return
+  updateSessions(where, (marks) => {
+    const mark = marks[session]
+    if (mark) mark.at = now
+    else marks[session] = { head: headOf(where.top), asked: false, at: now }
+  })
+}
+
+// True once per session, and only when commits appeared while this session was the one working:
+// a chat-only session has no lessons to give. The decision and the record of it happen inside the
+// same lock, and afterwards every mark moves to this HEAD — a worktree's HEAD is shared, so this is
+// what keeps a neighbouring session from being asked for the commits this one just made.
+function claimAsk(where: Where, session: string | null, now: number): boolean {
+  if (!session) return false
+  return updateSessions(where, (marks) => {
+    const head = headOf(where.top)
+    const mark = marks[session]
+    const ask = !!mark && !mark.asked && !!mark.head && mark.head !== head
+    if (mark) { mark.at = now; if (ask) mark.asked = true }
+    for (const entry of Object.values(marks)) entry.head = head
+    return ask
+  })
 }
 
 const label = (h: Holder) => `${h.owner} (${h.harness}${h.model ? ` · ${h.model}` : ''})`
@@ -452,12 +500,11 @@ function advisory(event: HookEvent, harness: Harness, payload: Record<string, un
   const local = readLocal(where)
   const model = typeof payload.model === 'string' && payload.model ? payload.model : '<model>'
   const session = typeof payload.session_id === 'string' && payload.session_id ? payload.session_id : null
-  // A new session starts from the HEAD it finds; a later commit is what makes it a working session.
-  const startSession = () => { if (session && local.session !== session) { local.session = session; local.sessionHead = headOf(where.top) } }
 
   if (event === 'session-start') {
+    // Before the refresh, which talks to GitHub and can throw.
+    markSession(where, session, deps.now())
     const { holder, state } = refresh(where, local, deps, true)
-    startSession()
     writeLocal(where, local)
     const lines = [
       `This worktree works issue #${where.number} (${where.repo}), state ${state ?? 'unknown'}, held by ${holder ? `${label(holder)}${local.held ? ' — this worktree' : ''}` : 'nobody'}.`,
@@ -491,7 +538,7 @@ function advisory(event: HookEvent, harness: Harness, payload: Record<string, un
   }
   if (event === 'stop') {
     recordActivity(local, deps.now())
-    startSession()
+    markSession(where, session, deps.now())
     writeLocal(where, local)
     if (local.lostTo || !where.branch || issueFromBranch(where.branch) !== where.number) return
     const notes: string[] = []
@@ -506,12 +553,14 @@ function advisory(event: HookEvent, harness: Harness, payload: Record<string, un
       deps.detach(['sh', '-c', 'git push --quiet -u origin "HEAD:refs/heads/$1" 2>"$2.tmp" || { mv "$2.tmp" "$2"; exit 1; }; rm -f "$2.tmp"', 'push', where.branch, failed], where.top)
     }
     // The lessons request, once per session that committed something: a chat-only session has none.
+    // A queue that fails its own checks asks for nothing rather than pointing a session at it.
     let ask: string | null = null
-    if (session && local.askedLearning !== session && local.sessionHead && headOf(where.top) !== local.sessionHead) {
-      ask = askText(where.root, where.number)
-      local.askedLearning = session
-      writeLocal(where, local)
-    }
+    try {
+      // The queue's own checks run before the session is marked asked, so a refusal here leaves
+      // the request to the next turn rather than spending it.
+      const request = askText(where.root, where.number)
+      if (claimAsk(where, session, deps.now())) ask = request
+    } catch { /* no request is better than a bad one */ }
     // Both harnesses show a Stop hook's systemMessage to the user as a warning, and one Stop hook
     // prints one JSON object, so the warning and the request travel together.
     const output = { ...(notes.length ? { systemMessage: notes.join('\n') } : {}), ...(ask ? continuation(harness, ask) : {}) }

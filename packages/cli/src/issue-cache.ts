@@ -239,7 +239,7 @@ export function takeOver(lock: string, deadToken: string | null, staleMs: number
   }
 }
 
-export function withLock<T>(dir: string, fn: () => T, { timeoutMs = 10_000, staleMs = 10 * 60_000 } = {}): T {
+export function withLock<T>(dir: string, fn: () => T, { timeoutMs = 10_000, staleMs = 10 * 60_000, what = 'issue cache' } = {}): T {
   mkdirSync(dir, { recursive: true })
   const lock = join(dir, '.lock')
   if (held.has(lock)) return fn()
@@ -249,7 +249,7 @@ export function withLock<T>(dir: string, fn: () => T, { timeoutMs = 10_000, stal
     if (acquire(lock, token)) break
     const owner = readOwner(lock)
     if (ownerGone(owner, lock, staleMs) && takeOver(lock, owner?.token ?? null, staleMs)) continue
-    if (Date.now() - started > timeoutMs) throw new Error(`issue cache is locked by pid ${owner?.pid ?? '?'} on ${owner?.host ?? '?'}: ${lock}`)
+    if (Date.now() - started > timeoutMs) throw new Error(`${what} is locked by pid ${owner?.pid ?? '?'} on ${owner?.host ?? '?'}: ${lock}`)
     Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 50)
   }
   held.set(lock, token)

@@ -487,7 +487,7 @@ describe('selecting a family', () => {
   test('usage names the installer, worktree, sync, ship and hook verbs, and removed verbs are unknown', () => {
     const help = run(temporary, ['--help']).stdout.toString()
     expect(help).toContain('skills add <skill>')
-    for (const verb of ['init', 'skills update', 'issue sync', 'worktree', 'sync', 'ship check', 'hook <event>', 'learning list']) expect(help).toContain(verb)
+    for (const verb of ['init', 'skills update', 'issue sync', 'worktree', 'sync', 'ship check', 'hook <event>', 'learning add|list']) expect(help).toContain(verb)
     for (const verb of ['dispatch', 'stats', 'dashboard', 'children', 'checkpoint']) {
       const result = run(temporary, [verb])
       expect(result.exitCode).toBe(1)
