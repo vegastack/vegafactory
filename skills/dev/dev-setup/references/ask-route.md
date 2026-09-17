@@ -60,7 +60,7 @@ Parse before asking anything. A later session has no `round.json` on disk, so it
 
 ## What it is not
 
-An answer is not an approval. Any teammate may answer a round; only the operator approves, and approval is still its own `approval` marker comment recording the operator's own words in the `(<username>)` format ([conventions](conventions.md)). A round that is fully answered unblocks the work; it does not move the issue to `queued`.
+An answer is not an ack. Anyone may answer a round; an ack comes from a person with write access and is recorded with `vegafactory issue ack` ([conventions](conventions.md)). A round that is fully answered unblocks the work; it does not move the issue to `queued`.
 
 Assignment is not this route's job either — the label moving to `waiting-on-operator` is what puts the issue on the operator.
 
