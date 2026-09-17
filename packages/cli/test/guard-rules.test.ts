@@ -80,9 +80,11 @@ describe('decisions', () => {
   test('env -S and zsh command modifiers cannot hide a guarded command', () => {
     for (const command of [
       'env -S "git push origin main"', 'env -S"git push origin main"', 'env --split-string="git push origin main"',
-      'env -S "vegafactory issue ack 7 --stage ship --by mk --quote x"', 'noglob git push origin main', 'nocorrect git push origin main', 'coproc git push origin main',
+      'env -S "vegafactory issue ack 7 --stage ship --by mk --quote x"', "env -S 'git\\_push origin main'", 'env -P /usr/bin git push origin main',
+      'env -a x git push origin main', 'noglob git push origin main', 'nocorrect git push origin main', 'coproc git push origin main', 'coproc JOB git push origin main',
+      'coproc ls', 'env -S "ls -la"',
     ]) expect(decide(command).decision, command).toBe('ask')
-    for (const command of ['env -S "ls -la"', 'noglob ls', 'env FOO=1 ls']) expect(decide(command).decision, command).toBe('allow')
+    for (const command of ['noglob ls', 'env FOO=1 ls', 'env -i PATH=/bin ls', 'env -u HOME ls']) expect(decide(command).decision, command).toBe('allow')
   })
 
   test('pushing one tag by name asks, however it is spelled', () => {

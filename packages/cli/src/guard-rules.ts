@@ -292,7 +292,7 @@ const WRAPPERS: Record<string, { withValue: string[]; positionals: number }> = {
 }
 const SHELLS = new Set(['sh', 'bash', 'zsh', 'dash', 'ksh', 'ash', 'fish'])
 // Shell words that only introduce the command after them.
-const KEYWORDS = new Set(['if', 'then', 'else', 'elif', 'do', 'while', 'until', '!', 'noglob', 'nocorrect', 'coproc'])
+const KEYWORDS = new Set(['if', 'then', 'else', 'elif', 'do', 'while', 'until', '!', 'noglob', 'nocorrect'])
 const GIT_GLOBAL_WITH_VALUE = new Set(['-C', '-c', '--git-dir', '--work-tree', '--namespace', '--exec-path', '--super-prefix', '--config-env', '--list-cmds', '--attr-source'])
 const GH_GLOBAL_WITH_VALUE = new Set(['-R', '--repo'])
 // Every git subcommand the guard knows. Anything else is an alias it cannot see through, so it asks.
@@ -311,21 +311,11 @@ const GIT_SUBCOMMANDS = new Set([
   'unpack-objects', 'update-index', 'update-ref', 'update-server-info', 'var', 'verify-commit', 'verify-pack', 'verify-tag', 'filter-repo',
   'version', 'whatchanged', 'worktree', 'write-tree', 'check-ignore'])
 
-const quoted = (word: string) => `'${word.replace(/'/g, `'\\''`)}'`
-
 function stripWrapper(words: string[], spec: { withValue: string[]; positionals: number }): string[] {
   let rest = words.slice(1)
   while (rest.length > 0 && rest[0]!.startsWith('-')) {
     const option = rest[0]!
     if (option === '--') { rest = rest.slice(1); break }
-    // `env -S "cmd args"` splits its value into the command it runs: classify that text as a script.
-    const split = words[0] === 'env' ? /^(?:-S|--split-string)(?:=(.*))?$|^-S(.+)$/s.exec(option) : null
-    if (split) {
-      const inline = split[1] ?? split[2]
-      const value = inline ?? rest[1] ?? ''
-      const after = rest.slice(inline === undefined ? 2 : 1)
-      return ['sh', '-c', [value, ...after.map(quoted)].join(' ')]
-    }
     const name = option.includes('=') ? option.slice(0, option.indexOf('=')) : option
     if (spec.withValue.includes(name) && !option.includes('=')) rest = rest.slice(2)
     else rest = rest.slice(1)
@@ -360,6 +350,20 @@ const RISKY_CONFIG = /^(core\.hookspath|core\.sshcommand|include\.|includeif\.|a
 // Environment that points git at other config, another repository or other programs.
 const RISKY_ENV = /^(GIT_CONFIG\w*|GIT_DIR|GIT_COMMON_DIR|GIT_EXEC_PATH|GIT_TEMPLATE_DIR|GIT_INDEX_FILE|GIT_OBJECT_DIRECTORY)=/
 
+// env with only -i/-u and assignments before its command.
+function plainEnv(args: string[]): boolean {
+  for (let i = 0; i < args.length; i += 1) {
+    const arg = args[i]!
+    if (arg === '--') return true
+    if (arg === '-i' || arg === '--ignore-environment' || arg === '-') continue
+    if (arg === '-u' || arg === '--unset') { i += 1; continue }
+    if (arg.startsWith('--unset=')) continue
+    if (arg.startsWith('-')) return false
+    return true
+  }
+  return true
+}
+
 export function resolveWords(input: string[]): { words: string[]; script: string | null; riskyConfig: boolean } {
   let rest = input.filter((word) => typeof word === 'string')
   let head = ''
@@ -375,6 +379,9 @@ export function resolveWords(input: string[]): { words: string[]; script: string
     head = basename(rest[0]!)
     if (SHELLS.has(head)) return { words: [head, ...rest.slice(1)], script: shellScript(rest), riskyConfig }
     if (head === 'eval') return { words: rest, script: rest.slice(1).join(' '), riskyConfig }
+    // coproc may take a name before its command, and env has platform-specific options that
+    // change what runs (-S, -P, -a): the guard cannot read these reliably, so they ask.
+    if (head === 'coproc' || (head === 'env' && !plainEnv(rest.slice(1)))) return { words: [EXPANDED], script: null, riskyConfig }
     if (!Object.hasOwn(WRAPPERS, head)) break
     if (head === 'xargs') viaXargs = true
     rest = stripWrapper(rest, WRAPPERS[head]!)
