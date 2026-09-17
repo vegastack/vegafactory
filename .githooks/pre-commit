@@ -1,5 +1,10 @@
 #!/bin/sh
 # Fast checks before every commit (validators, lint, typecheck) — a few seconds.
-# Tests run while building (test:affected) and in the merge queue (full suite).
+# Tests run while building (bun run test:affected) and in the merge queue (full suite).
+# Quiet when everything passes; prints the full output when something fails.
 if git diff --cached --quiet; then exit 0; fi
-exec bun run --silent check:fast
+log=$(mktemp)
+if bun run --silent check:fast >"$log" 2>&1; then rm -f "$log"; exit 0; fi
+cat "$log"; rm -f "$log"
+echo "pre-commit: fast checks failed — fix the problems above and commit again." >&2
+exit 1
