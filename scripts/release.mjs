@@ -5,11 +5,13 @@
 //   node scripts/release.mjs check-tag <tag>        tag matches package.json; changelog has the entry
 //   node scripts/release.mjs notes <out-file>       write this version's changelog entry
 //   node scripts/release.mjs pack <dir>             build and npm-pack the CLI into <dir>; prints the tarball path
+//   node scripts/release.mjs verify <tarball> <sha512-integrity>   the tarball is byte-identical to the smoked one
 //   node scripts/release.mjs smoke <tarball|spec>   install into a temp dir and exercise the installer
 //   node scripts/release.mjs wait-registry          poll npm until this version is visible, then smoke it
 //   node scripts/release.mjs validate               prepack guard: the build output exists
 import { spawnSync } from 'node:child_process'
-import { existsSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
+import { createHash } from 'node:crypto'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -46,10 +48,20 @@ function run(cmd, args, options = {}) {
 }
 
 export function pack(outDir) {
+  mkdirSync(resolve(outDir), { recursive: true })
   run('bun', ['run', 'build'], { cwd: cliDir, stdio: ['ignore', 'pipe', 'pipe'] })
   const json = run('npm', ['pack', '--json', '--pack-destination', resolve(outDir)], { cwd: cliDir })
   const [info] = JSON.parse(json)
   return { tarball: join(resolve(outDir), info.filename), integrity: info.integrity, version: info.version }
+}
+
+export function integrityOf(file) {
+  return `sha512-${createHash('sha512').update(readFileSync(file)).digest('base64')}`
+}
+
+export function verify(file, expected) {
+  const got = integrityOf(file)
+  if (!expected || got !== expected) throw new Error(`${file} integrity ${got} does not match ${expected || '(none)'}`)
 }
 
 // Installs the package the way a user does, then runs the installer against a scratch project.
@@ -90,11 +102,12 @@ function defaultView(wanted) {
   return result.status === 0 ? result.stdout.trim() : null
 }
 
-async function main([verb, arg]) {
+async function main([verb, arg, extra]) {
   const current = version()
   if (verb === 'check-tag') return checkTag(arg, current, readFileSync(join(cliDir, 'CHANGELOG.md'), 'utf8'))
   if (verb === 'notes') return writeFileSync(arg, changelogEntry(readFileSync(join(cliDir, 'CHANGELOG.md'), 'utf8'), current) + '\n')
   if (verb === 'pack') return console.log(JSON.stringify(pack(arg ?? join(root, 'work/packed'))))
+  if (verb === 'verify') return verify(arg, extra)
   if (verb === 'smoke') return console.log(JSON.stringify(smoke(resolve(arg), current)))
   if (verb === 'wait-registry') {
     await waitRegistry(current)
@@ -106,7 +119,7 @@ async function main([verb, arg]) {
     }
     return
   }
-  throw new Error('usage: release.mjs check-tag <tag> | notes <file> | pack <dir> | smoke <tarball> | wait-registry | validate')
+  throw new Error('usage: release.mjs check-tag <tag> | notes <file> | pack <dir> | verify <tarball> <integrity> | smoke <tarball> | wait-registry | validate')
 }
 
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {

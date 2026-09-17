@@ -15,26 +15,34 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  release:
-    # npm trusted publishing (OIDC) runs only on GitHub-hosted runners.
+  build:
+    # A re-run could publish a tarball built from a different state; roll forward with a new tag instead.
+    if: github.run_attempt == 1
     runs-on: ubuntu-latest
     permissions:
-      contents: write
-      id-token: write
+      contents: read
+    outputs:
+      tarball: ${{ steps.pack.outputs.tarball }}
+      integrity: ${{ steps.pack.outputs.integrity }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
+          fetch-depth: 0
+
+      - name: Require the tagged commit to be on main
+        run: |
+          set -euo pipefail
+          git fetch --no-tags origin main
+          git merge-base --is-ancestor "$GITHUB_SHA" origin/main || { echo "::error::$GITHUB_REF_NAME is not on main"; exit 1; }
 
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
         with:
           bun-version: "1.3.14"
 
-      # Node 24 ships npm >= 11.5.1, required for trusted publishing.
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
         with:
           node-version: "24.x"
-          registry-url: "https://registry.npmjs.org"
 
       - name: Install dependencies
         run: bun install --frozen-lockfile
@@ -46,15 +54,51 @@ jobs:
         id: pack
         run: |
           set -euo pipefail
-          mkdir -p work/release
-          node scripts/release.mjs pack work/release > work/release/pack.json
-          echo "tarball=$(node -p "require('./work/release/pack.json').tarball")" >> "$GITHUB_OUTPUT"
+          node scripts/release.mjs pack release > pack.json
+          echo "tarball=$(node -p "require('path').basename(require('./pack.json').tarball)")" >> "$GITHUB_OUTPUT"
+          echo "integrity=$(node -p "require('./pack.json').integrity")" >> "$GITHUB_OUTPUT"
+          node scripts/release.mjs notes release/notes.md
 
       - name: Smoke the packed tarball
-        run: node scripts/release.mjs smoke "${{ steps.pack.outputs.tarball }}"
+        run: node scripts/release.mjs smoke "release/${{ steps.pack.outputs.tarball }}"
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: release
+          path: release/
+          if-no-files-found: error
+
+  publish:
+    # npm trusted publishing (OIDC) runs only on GitHub-hosted runners; only this job gets the token.
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      id-token: write
+    env:
+      TARBALL: release/${{ needs.build.outputs.tarball }}
+      INTEGRITY: ${{ needs.build.outputs.integrity }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+
+      # Node 24 ships npm >= 11.5.1, required for trusted publishing.
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: "24.x"
+          registry-url: "https://registry.npmjs.org"
+
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: release
+          path: release
+
+      - name: Verify the tarball is the one that was smoked
+        run: node scripts/release.mjs verify "$TARBALL" "$INTEGRITY"
 
       - name: Publish with provenance
-        run: npm publish "${{ steps.pack.outputs.tarball }}" --provenance --access public
+        run: npm publish "$TARBALL" --provenance --access public
 
       - name: Wait for the registry and smoke the published version
         run: node scripts/release.mjs wait-registry
@@ -63,7 +107,5 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          set -euo pipefail
-          node scripts/release.mjs notes work/release/notes.md
-          gh release create "$GITHUB_REF_NAME" "${{ steps.pack.outputs.tarball }}" \
-            --repo "$GITHUB_REPOSITORY" --title "$GITHUB_REF_NAME" --notes-file work/release/notes.md --verify-tag
+          gh release create "$GITHUB_REF_NAME" "$TARBALL" \
+            --repo "$GITHUB_REPOSITORY" --title "$GITHUB_REF_NAME" --notes-file release/notes.md --verify-tag

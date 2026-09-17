@@ -20,16 +20,6 @@ The main checkout never leaves the default branch and never carries uncommitted 
 | Cross-agent review | Read-only, in the same worktree; a reviewer never switches the branch under it. |
 | Abandoned issue | Branch and worktree are removed only on the operator's word. |
 
-## Verified independent children
-
-Inside a registered, currently owned parent session, pass the canonical `plan-lint --groups --json` report to `vegafactory children run --parent <n> --groups <file> --repo <o/r> --write --json`. Without `--write` it previews. The CLI revalidates original parent and child approval, preserves the selected subscription setup, prepares both harnesses through `createChildWorktree`, and executes through the common owned runtime. Failed setup, required includes, effective hooks or native prerequisites refuse; unsupported effective harness inspection never becomes qualification. The standalone helper plans and validates, and directs execution and integration to the CLI.
-
-At most three qualified child processes run for a parent across machines, also bounded by each host's policy. Literal file/resource overlap refuses parallel admission. Original parent claim identity and child run IDs are saved before reservation; a replaced owner, unknown termination or unfinished original run cannot start a duplicate. Parent cancellation cancels only its owned children. Healthy execution has no cumulative task time limit.
-
-`vegafactory children join` takes the same parent/groups/repo flags. It requires a current explicit integration action, successful durable child execution, clean exact source, the original base and branch, full changed-path scope, and the check command from the recorded parent base actually passing at the produced commit. No-change requires that positive acceptance too. It merges immutable local commits in declared order without rewriting published child branches. Missing/failed children remain reported; independent verified siblings can still join. A merge conflict or failed assembled-parent check retains source and prior successes and stops subsequent integration.
-
-The private run ledger and immutable shared receipts bind child run/generation, source SHA, parent before/after and acceptance. Prepared intent precedes Git changes. Restart reconciles receipts with exact Git facts before another join. Typed remote child acceptance requires its verified checkpoint; an accepted remote join additionally requires the resulting parent checkpoint. Missing backup or unresolved delivery leaves prepared/partial evidence, never remote completion. Cross-host reconstruction belongs to the recovery controller and must supply original approval, run and launch context; current-owner guessing is refused. Whole-parent review and remote merge/release permission remain separate.
-
 ## Lifecycle states
 
 Derived from git plus GitHub on every read, never stored — a second source of truth is what drifts. Precedence is top to bottom:

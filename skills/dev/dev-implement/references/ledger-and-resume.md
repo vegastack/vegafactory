@@ -13,8 +13,6 @@ Create the ledger comment as the session's **first write after claiming** — be
 
 Never batch checkpoints "for later" — the ledger's value is exactly that a crash between checkpoints loses one task, not the map. Under concurrent edits, last-writer-wins on one comment is accepted (single-operator workflow); note a clobber if you ever see one.
 
-Within a live managed run, `vegafactory dispatch --checkpoint-task ISSUE-TN --run-id RUN_ID --once --json` runs the configured check from the approved base and retains an immutable task-only completion receipt. Preview is the default without `--once`. The exact canonical task must be checked, source committed and clean, and current run/owner/approval unchanged. Replaying an existing verified completion retains its original check rather than running it again; a plan checkbox alone never skips work.
-
 A checkpoint retains what a compaction summary must retain: difficulties and their resolutions; options tried or set aside, and why; anything decided, ruled out, or established as a constraint, stated exactly; where things stand; what is open; exact names, numbers, links — the operator's words near-verbatim, the agent's reasoning condensed.
 
 The ledger's edit time is also this claim's **heartbeat** — the only liveness signal an agent session exposes. dev-status reads a ledger silent past the orphan threshold (6h) as a *possibly-orphaned* claim: the session likely died before hand-back. A session that runs for days but keeps checkpointing never trips it; a dead one's ledger freezes. A single long task can legitimately go quiet — so checkpoint at rulings within it too, keeping the pulse alive — and the flag is always the operator's to act on (check, resume, or reclaim), never an automatic reset.

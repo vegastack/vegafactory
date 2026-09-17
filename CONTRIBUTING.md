@@ -79,7 +79,7 @@ and no machine-extracted rule format to follow.
 - Removing a skill, or a breaking change to the per-project profile format, is MAJOR;
   renaming a skill ships MINOR by default — major only when the operator declares it.
 - Keep volatile facts (version pins, vendor mechanism names) in `pinned-facts.md`-style dated
-  entries with a checked date and official source link, so `skills-refresh` can re-check them.
+  entries with a checked date and official source link, so they can be re-checked against that source.
 
 ## Releases
 

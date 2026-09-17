@@ -40,10 +40,7 @@
     "scripts/reclaim.mjs",
     "scripts/evidence-upload.mjs",
     "scripts/worktree.mjs",
-    "scripts/children.mjs",
-    "assets/workflows/implement-children.js",
     "references/ledger-and-resume.md",
-    "references/parallel-children.md",
     "references/worktrees.md",
     "references/changelog-and-chronicle.md",
     "scripts/effective-policy.mjs@dev-setup"
@@ -95,10 +92,7 @@
     "assets/hooks/session-start.mjs",
     "assets/hooks/stop-heartbeat.mjs",
     "assets/hooks/decision-nudge.mjs",
-    "assets/hooks/session-end.mjs",
-    "assets/hooks/skill-activated.mjs",
-    "assets/hooks/prompt-skill-mention.mjs",
-    "assets/workflows/implement-children.js@dev-implement"
+    "assets/hooks/session-end.mjs"
   ],
   "dev-ship": [
     "SKILL.md",

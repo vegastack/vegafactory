@@ -98,7 +98,7 @@ A `--group` or `--all` install is **one transaction**: every skill is staged bef
 | Claude Code | `~/.claude/skills/` | `.claude/skills/` |
 | Codex | `~/.agents/skills/` | `.agents/skills/` |
 
-The installer targets detected agents automatically; `--agent codex|claude|both` overrides. `--all` chooses which skills; `--agent` chooses which agent runtimes. `add --all --agent all --global` means every installable skill, on every runtime, in your home directory.
+The installer targets detected agents automatically; `--agent codex|claude|both` overrides. `--all` chooses which skills; `--agent` chooses which agent runtimes. `add --all --agent both --global` means every installable skill, for both agents, in your home directory.
 
 Skills always install **flat**, as `<surface>/<skill-name>/`. Groups are a way of selecting and organising skills — they never appear in an installed path, so `--group` changes what you get, never where it lands.
 
@@ -206,7 +206,7 @@ Tools that work on agent skills themselves: scanning them for vulnerabilities, v
 
 ## How freshness works
 
-Volatile facts in skill references (versions, limits, vendor mechanisms) carry their checked date and an official source link. The `skills-refresh` skill reads what changed upstream since the last check, finds stale facts and new features worth using, and opens one issue per change for the normal workflow. `doctor` reports installed-vs-latest.
+Volatile facts in skill references (versions, limits, vendor mechanisms) carry their checked date and an official source link. A fact older than 60 days is re-checked against its source before anyone relies on it. `doctor` reports installed-vs-latest.
 
 ## Advisory reviews, user-held gates
 
