@@ -14,7 +14,7 @@
 // turns nor files them twice.
 import { spawnSync } from 'node:child_process'
 import { createHash, randomUUID } from 'node:crypto'
-import { closeSync, constants as fsConstants, existsSync, lstatSync, mkdirSync, openSync, readFileSync, readSync, readdirSync, renameSync, rmSync, statSync, truncateSync, writeFileSync, writeSync } from 'node:fs'
+import { closeSync, constants as fsConstants, existsSync, ftruncateSync, lstatSync, mkdirSync, openSync, readFileSync, readSync, readdirSync, renameSync, rmSync, statSync, truncateSync, writeFileSync, writeSync } from 'node:fs'
 import { homedir, hostname } from 'node:os'
 import { basename, dirname, isAbsolute, join, parse as parsePath, resolve, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -63,7 +63,8 @@ const offsetsPath = (home: string) => join(statsDir(home), 'offsets.json')
 const eventsPath = (home: string) => join(statsDir(home), 'events.jsonl')
 const journalPath = (home: string) => join(statsDir(home), 'pending.json')
 const pushPath = (home: string) => join(statsDir(home), 'push.json')
-const pushJournalPath = (home: string) => join(statsDir(home), 'push-pending.json')
+// One journal per control room: a crash pushing to one room must never be replayed against another.
+const pushJournalPath = (home: string, room: string) => join(statsDir(home), 'push-pending', `${room.replace('/', '__')}.json`)
 const identityPath = (home: string) => join(statsDir(home), 'identity.json')
 
 const hash = (text: string) => createHash('sha256').update(text).digest('hex').slice(0, 16)
@@ -798,8 +799,15 @@ export function renderShow(summary: Summary): string {
 // The clone belongs to sync, so this must hand it back exactly as it found it: the clone is checked
 // before anything is written, only the generated files are staged, and a failure puts them back.
 
-export interface PushState { lastPushAt?: number; offset?: number }
+// One cursor per control room, never one for the machine: a turn that belongs to room A must not
+// be marked sent because room B's push walked past it.
+export interface RoomCursor { lastPushAt?: number; offset?: number }
+export interface PushState { rooms?: Record<string, RoomCursor> }
 export interface PushResult { ok: boolean; action: 'pushed' | 'committed' | 'skipped' | 'none' | 'refused'; events: number; paths: string[]; message: string }
+
+// Which control room a journal or cursor belongs to. A journal is only ever applied to the clone it
+// names, revalidated against what is on disk now.
+export interface RoomIdentity { repo: string; remote: string; branch: string; path: string }
 
 // What a push is about to do, written down before it touches anything: enough to finish the job or
 // undo it after a death in the middle.
@@ -807,7 +815,23 @@ interface PushJournal {
   token: string
   at: number
   offset: number
+  room: RoomIdentity
   files: Array<{ relative: string; had: number | null }>
+}
+
+function validJournal(value: unknown): PushJournal | null {
+  const journal = value as PushJournal | null
+  if (!journal || typeof journal !== 'object') return null
+  const { token, at, offset, room, files } = journal
+  if (typeof token !== 'string' || !token || !Number.isFinite(at)) return null
+  if (!Number.isSafeInteger(offset) || offset < 0) return null
+  if (!room || typeof room !== 'object' || ['repo', 'remote', 'branch', 'path'].some((key) => typeof (room as unknown as Record<string, unknown>)[key] !== 'string')) return null
+  if (!Array.isArray(files) || !files.length) return null
+  for (const file of files) {
+    if (!file || typeof file.relative !== 'string' || !file.relative.startsWith('stats/')) return null
+    if (file.had !== null && (!Number.isSafeInteger(file.had) || file.had < 0)) return null
+  }
+  return journal
 }
 
 export type GitRunner = (args: string[]) => { code: number; out: string }
@@ -866,7 +890,46 @@ export function safeStatsPath(clone: string, relative: string): string | null {
   return null
 }
 
-interface Clone { path: string; branch: string }
+interface Clone { path: string; branch: string; remote: string; repo: string }
+
+const identityOf = (clone: Clone): RoomIdentity => ({ repo: clone.repo, remote: clone.remote, branch: clone.branch, path: clone.path })
+const sameRoom = (a: RoomIdentity, b: RoomIdentity) => a.repo === b.repo && a.remote === b.remote && a.branch === b.branch && a.path === b.path
+
+// Puts generated rows back exactly as they were, through checks a journal cannot talk its way out
+// of: every path is re-validated against the clone, a truncation goes through a no-follow handle,
+// and the sizes and the clone's own cleanliness are read back afterwards. Returns why it could not.
+function restoreFiles(clone: Clone, files: PushJournal['files'], git: GitRunner): string | null {
+  for (const file of files) {
+    const unsafe = safeStatsPath(clone.path, file.relative)
+    if (unsafe) return unsafe
+  }
+  for (const file of files) {
+    const path = join(clone.path, ...file.relative.split('/'))
+    let info
+    try { info = lstatSync(path) } catch { info = null }
+    try {
+      if (file.had === null) {
+        if (info?.isFile()) rmSync(path)
+      } else if (info?.isFile()) {
+        const handle = openSync(path, fsConstants.O_WRONLY | fsConstants.O_NOFOLLOW)
+        try { ftruncateSync(handle, file.had) } finally { closeSync(handle) }
+      }
+    } catch (error) {
+      return `the control-room clone could not be put back (${file.relative}: ${(error as Error).message})`
+    }
+  }
+  const reset = git(['-C', clone.path, 'reset', '--quiet', '--', ...files.map((file) => file.relative)])
+  if (reset.code !== 0) return `the control-room index could not be put back: ${reset.out.split('\n')[0]}`
+  for (const file of files) {
+    const path = join(clone.path, ...file.relative.split('/'))
+    let size: number | null = null
+    try { size = lstatSync(path).isFile() ? statSync(path).size : -1 } catch { size = null }
+    if (file.had === null ? size !== null : size !== file.had) return `the control-room clone was not put back: ${file.relative}`
+  }
+  const dirty = git(['-C', clone.path, 'status', '--porcelain', '--untracked-files=all'])
+  if (dirty.code !== 0 || dirty.out.trim()) return `the control-room clone is still not clean (${dirty.out.split('\n')[0] || 'unreadable'})`
+  return null
+}
 
 function sendCommits(clone: Clone, git: GitRunner): { ok: boolean; message: string; restored: boolean } {
   const target = `HEAD:refs/heads/${clone.branch}`
@@ -919,7 +982,37 @@ function identifyClone(home: string, entry: ControlRoomEntry, repo: string, git:
   const head = git(['-C', path, 'branch', '--show-current']).out.trim()
   if (head !== branch) return { reason: `the control-room clone is on ${head || 'a detached HEAD'}, not ${branch}`, fatal: true }
   if (git(['-C', path, 'rev-parse', '--verify', '--quiet', `refs/remotes/origin/${branch}`]).code !== 0) return { reason: `the clone has no origin/${branch} — run "vegafactory sync" first`, fatal: true }
-  return { clone: { path, branch } }
+  return { clone: { path, branch, remote: url, repo } }
+}
+
+// The repositories whose turns may be filed in this control room: the repository this push runs
+// from (its own dev.md binds it), whatever the room's registry lists, and any other checkout on
+// this machine whose profile names the same room. Everything else stays local.
+const REGISTERED = /^\s*\|\s*([A-Za-z0-9][\w.-]*\/[A-Za-z0-9][\w.-]*)\s*\|/
+const REPO_LINE = /^repo:\s*([\w.-]+\/[\w.-]+)/m
+
+export function authorizedRepos(home: string, clone: Clone, devMd: string): Set<string> {
+  const allowed = new Set<string>()
+  const own = REPO_LINE.exec(devMd)?.[1]
+  if (own) allowed.add(own)
+  try {
+    const registry = join(clone.path, 'repos.md')
+    if (lstatSync(registry).isFile()) {
+      for (const line of readFileSync(registry, 'utf8').split('\n')) {
+        const listed = REGISTERED.exec(line)?.[1]
+        if (listed && listed !== 'repo') allowed.add(listed)
+      }
+    }
+  } catch { /* a room with no registry authorizes only what the profiles bind */ }
+  try {
+    const config = readFactoryConfig(readFileSync(factoryConfigPath(home), 'utf8'))
+    for (const row of (config.settings.repos ?? []) as Array<{ repo?: unknown; path?: unknown }>) {
+      if (typeof row.repo !== 'string' || typeof row.path !== 'string') continue
+      const profile = readFileSync(join(row.path, '.vegastack', 'dev.md'), 'utf8')
+      if (parseControlRoomKnob(profile)?.repo === clone.repo && REPO_LINE.exec(profile)?.[1] === row.repo) allowed.add(row.repo)
+    }
+  } catch { /* unreadable checkouts authorize nothing */ }
+  return allowed
 }
 
 // Everything that must be true of the clone's state before this writes into someone else's checkout.
@@ -938,26 +1031,37 @@ function cloneState(clone: Clone, git: GitRunner): { ahead: string[] } | { reaso
   return { ahead }
 }
 
-// A push that died between its commit and its cursor. If the commit is there, the cursor moves once
-// and the commit is left for the retry below; if it is not, the rows go back and nothing is consumed.
-function recoverPush(home: string, clone: Clone, git: GitRunner) {
-  const journal = readJson<PushJournal | null>(pushJournalPath(home), null)
-  if (!journal?.token || !Array.isArray(journal.files)) {
-    rmSync(pushJournalPath(home), { force: true })
-    return
+// The cursor of one control room.
+function readCursor(home: string, room: string): RoomCursor {
+  return readJson<PushState>(pushPath(home), {}).rooms?.[room] ?? {}
+}
+
+function writeCursor(home: string, room: string, cursor: RoomCursor) {
+  const state = readJson<PushState>(pushPath(home), {})
+  atomicWrite(pushPath(home), JSON.stringify({ ...state, rooms: { ...state.rooms, [room]: cursor } }, null, 2) + '\n')
+}
+
+// A push that died between its commit and its cursor. If the commit is there, that room's cursor
+// moves once and the commit is left for the retry below; if it is not, the rows go back and nothing
+// is consumed. A journal is only ever applied to the clone it names, and anything it cannot prove —
+// its own shape, its room, its paths, the restored sizes, a clean clone — keeps it on disk.
+function recoverPush(home: string, clone: Clone, git: GitRunner): { ok: boolean; message: string } {
+  const path = pushJournalPath(home, clone.repo)
+  if (!existsSync(path)) return { ok: true, message: '' }
+  const journal = validJournal(readJson<unknown>(path, null))
+  if (!journal) return { ok: false, message: `an unreadable push journal is in the way: ${path}` }
+  if (!sameRoom(journal.room, identityOf(clone))) {
+    return { ok: false, message: `the push journal at ${path} was written for ${journal.room.repo} at ${journal.room.path} (${journal.room.branch}), which is not the clone this push found` }
   }
   const committed = git(['-C', clone.path, 'log', '--format=%H', '--grep', journal.token, `refs/remotes/origin/${clone.branch}..HEAD`]).out.trim()
   if (committed) {
-    const state = readJson<PushState>(pushPath(home), {})
-    if ((state.offset ?? 0) < journal.offset) atomicWrite(pushPath(home), JSON.stringify({ lastPushAt: journal.at, offset: journal.offset }, null, 2) + '\n')
+    if ((readCursor(home, clone.repo).offset ?? 0) < journal.offset) writeCursor(home, clone.repo, { lastPushAt: journal.at, offset: journal.offset })
   } else {
-    for (const file of journal.files) {
-      const path = join(clone.path, ...file.relative.split('/'))
-      try { file.had === null ? rmSync(path, { force: true }) : truncateSync(path, file.had) } catch { /* nothing to put back */ }
-    }
-    git(['-C', clone.path, 'reset', '--quiet', '--', ...journal.files.map((file) => file.relative)])
+    const failed = restoreFiles(clone, journal.files, git)
+    if (failed) return { ok: false, message: `${failed} — the push journal is kept at ${path}` }
   }
-  rmSync(pushJournalPath(home), { force: true })
+  rmSync(path, { force: true })
+  return { ok: true, message: '' }
 }
 
 function pushLocked(home: string, options: PushOptions): PushResult {
@@ -972,6 +1076,7 @@ function pushLocked(home: string, options: PushOptions): PushResult {
   try { devMd = readFileSync(join(root, '.vegastack', 'dev.md'), 'utf8') } catch { return none('this repo has no .vegastack/dev.md') }
   const knob = parseControlRoomKnob(devMd)
   if (!knob) return none('this repo names no control room')
+  if (!/^[A-Za-z0-9][\w.-]*\/[A-Za-z0-9][\w.-]*$/.test(knob.repo)) return refuse(`${knob.repo} is not a repository name — fix the control-room line in .vegastack/dev.md`)
   let entry: ControlRoomEntry | undefined
   try { entry = readFactoryConfig(readFileSync(factoryConfigPath(home), 'utf8')).controlRooms[knob.org] } catch { return none('no control room is linked on this machine') }
   if (!entry) return none(`${knob.org}'s control room is not linked on this machine — run "vegafactory sync" first`)
@@ -980,7 +1085,8 @@ function pushLocked(home: string, options: PushOptions): PushResult {
   const identified = identifyClone(home, entry, knob.repo, git)
   if ('reason' in identified) return identified.fatal ? refuse(identified.reason) : none(identified.reason)
   const { clone } = identified
-  recoverPush(home, clone, git)
+  const repaired = recoverPush(home, clone, git)
+  if (!repaired.ok) return refuse(repaired.message)
   const state = cloneState(clone, git)
   if ('reason' in state) return refuse(state.reason)
 
@@ -997,7 +1103,7 @@ function pushLocked(home: string, options: PushOptions): PushResult {
       ? { ...result, ok: true, action: 'pushed', message: `pushed ${recovered} earlier stats commit${recovered === 1 ? '' : 's'}; ${result.message}` }
       : result
 
-  const cursor = readJson<PushState>(pushPath(home), {})
+  const cursor = readCursor(home, clone.repo)
   if (!options.force && cursor.lastPushAt && now - cursor.lastPushAt < PUSH_EVERY_MS && now >= cursor.lastPushAt) {
     return done({ ok: true, action: 'skipped', events: 0, paths: [], message: 'pushed less than an hour ago' })
   }
@@ -1011,22 +1117,32 @@ function pushLocked(home: string, options: PushOptions): PushResult {
   if (end === -1) return done(none('nothing new to push'))
   const lines = pending.subarray(0, end + 1).toString('utf8').split('\n').filter((line) => line.trim())
   if (!lines.length) return done(none('nothing new to push'))
+  // This room's own cursor moves past everything read, whether or not this room may have it: a turn
+  // that belongs somewhere else is never this room's to send, and its own room has its own cursor.
   const offset = from + end + 1
 
   // Each turn is filed under the operator and machine it was recorded on, never under whoever is
   // logged in now: a batch collected before a login or a hostname change belongs to its own file.
+  // Only turns from a repository this room is bound to go anywhere; the rest stay on this machine.
+  const allowed = authorizedRepos(home, clone, devMd)
   const groups = new Map<string, { relative: string; rows: string[] }>()
+  let taken = 0
   for (const line of lines) {
     let event: StatsEvent
     try { event = JSON.parse(line) as StatsEvent } catch { continue }
+    if (!event.repo || !allowed.has(event.repo)) continue
     const day = String(event.at ?? '').slice(0, 10).replace(/-/g, '/')
     if (!/^\d{4}\/\d{2}\/\d{2}$/.test(day)) continue
     const relative = `stats/${day}/${safe(event.operator)}-${safe(event.machine)}.jsonl`
     const group = groups.get(relative) ?? { relative, rows: [] }
     group.rows.push(line)
     groups.set(relative, group)
+    taken += 1
   }
-  if (!groups.size) return done(none('nothing new to push'))
+  if (!groups.size) {
+    writeCursor(home, clone.repo, { lastPushAt: cursor.lastPushAt, offset })
+    return done(none(`nothing new for ${clone.repo}`))
+  }
 
   const relatives = [...groups.keys()].sort()
   for (const relative of relatives) {
@@ -1034,22 +1150,22 @@ function pushLocked(home: string, options: PushOptions): PushResult {
     if (unsafe) return done(refuse(unsafe))
   }
   const journal: PushJournal = {
-    token: randomUUID(), at: now, offset,
+    token: randomUUID(), at: now, offset, room: identityOf(clone),
     files: relatives.map((relative) => {
       let had: number | null = null
       try { had = statSync(join(clone.path, ...relative.split('/'))).size } catch { /* a new day, a new file */ }
       return { relative, had }
     }),
   }
-  const undo = () => {
-    for (const file of journal.files) {
-      const path = join(clone.path, ...file.relative.split('/'))
-      try { file.had === null ? rmSync(path, { force: true }) : truncateSync(path, file.had) } catch { /* nothing to put back */ }
-    }
-    git(['-C', clone.path, 'reset', '--quiet', '--', ...relatives])
-    rmSync(pushJournalPath(home), { force: true })
+  // Puts the clone back and only then drops the journal: a rollback that could not finish leaves
+  // the journal for the next run to refuse on, rather than pretending the clone is sound.
+  const undo = (why: string): PushResult => {
+    const failed = restoreFiles(clone, journal.files, git)
+    if (failed) return done(refuse(`${why}; ${failed} — the push journal is kept at ${pushJournalPath(home, clone.repo)}`))
+    rmSync(pushJournalPath(home, clone.repo), { force: true })
+    return done(refuse(why))
   }
-  atomicWrite(pushJournalPath(home), JSON.stringify(journal, null, 2) + '\n')
+  atomicWrite(pushJournalPath(home, clone.repo), JSON.stringify(journal, null, 2) + '\n')
   try {
     for (const group of groups.values()) {
       const path = join(clone.path, ...group.relative.split('/'))
@@ -1057,31 +1173,28 @@ function pushLocked(home: string, options: PushOptions): PushResult {
       appendLines(path, group.rows.join('\n') + '\n')
     }
   } catch (error) {
-    undo()
-    return done(refuse(`the control-room clone could not be written: ${(error as Error).message}`))
+    return undo(`the control-room clone could not be written: ${(error as Error).message}`)
   }
   const add = git(['-C', clone.path, 'add', '--', ...relatives])
   const staged = git(['-C', clone.path, 'diff', '--cached', '--name-only']).out.split('\n').filter(Boolean).sort()
-  if (add.code !== 0 || staged.join(' ') !== relatives.join(' ')) {
-    undo()
-    return done(refuse(`only the stats files may be committed, but the clone staged ${staged.join(', ') || 'nothing'}`))
+  if (add.code !== 0 || staged.length !== relatives.length || staged.some((file, index) => file !== relatives[index])) {
+    return undo(`only the stats files may be committed, but the clone staged ${staged.join(', ') || 'nothing'}`)
   }
-  const subject = `stats: ${lines.length} turn${lines.length === 1 ? '' : 's'} from ${relatives.length} file${relatives.length === 1 ? '' : 's'}`
+  const subject = `stats: ${taken} turn${taken === 1 ? '' : 's'} from ${relatives.length} file${relatives.length === 1 ? '' : 's'}`
   const made = git(['-C', clone.path, 'commit', '--quiet', '-m', subject, '-m', `vsk-push: ${journal.token}`])
   if (made.code !== 0) {
-    undo()
-    return done(refuse(`the control-room commit failed: ${made.out.split('\n')[0]}`))
+    return undo(`the control-room commit failed: ${made.out.split('\n')[0]}`)
   }
-  // The turns are durable in the clone now, so the cursor moves even if the push is rejected; the
-  // next run finds the unpushed commit above and sends it. A death between the two is what the
-  // journal is for: it names the commit, and recovery moves the cursor exactly once.
-  atomicWrite(pushPath(home), JSON.stringify({ lastPushAt: now, offset }, null, 2) + '\n')
-  rmSync(pushJournalPath(home), { force: true })
+  // The turns are durable in the clone now, so this room's cursor moves even if the push is
+  // rejected; the next run finds the unpushed commit above and sends it. A death between the two is
+  // what the journal is for: it names the commit and the clone, and recovery moves that one cursor.
+  writeCursor(home, clone.repo, { lastPushAt: now, offset })
+  rmSync(pushJournalPath(home, clone.repo), { force: true })
   const sent = sendCommits(clone, git)
   if (!sent.ok) {
-    return { ok: false, action: 'committed', events: lines.length, paths: relatives, message: `committed in the control-room clone but not sent: ${sent.message}` }
+    return { ok: false, action: 'committed', events: taken, paths: relatives, message: `committed in the control-room clone but not sent: ${sent.message}` }
   }
-  return { ok: true, action: 'pushed', events: lines.length, paths: relatives, message: `pushed ${lines.length} turns to ${relatives.join(', ')}` }
+  return { ok: true, action: 'pushed', events: taken, paths: relatives, message: `pushed ${taken} turns to ${relatives.join(', ')}` }
 }
 
 // ---------------------------------------------------------------------------------------------

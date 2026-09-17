@@ -2,7 +2,7 @@ import { beforeEach, describe, expect, test } from 'bun:test'
 import { spawn, spawnSync } from 'node:child_process'
 import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, symlinkSync, truncateSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 import type { GhRunner } from '../src/gh.ts'
 import {
   collectStats, defaultSite, loadEvents, parseClaude, parseCodex, parseSince, pushStats, resolveOperator,
@@ -437,6 +437,7 @@ describe('stats push', () => {
     appendFileSync(join(statsDir(home), 'events.jsonl'), events.map((row) => JSON.stringify(row)).join('\n') + '\n')
   const push = (now: number, extra: { force?: boolean; git?: GitRunner } = {}) => pushStats({ home, cwd: repo, now: () => now, ...extra })
   const stats = (...parts: string[]) => join(clone, 'stats', ...parts)
+  const journalFor = (room: string) => join(statsDir(home), 'push-pending', `${room.replace('/', '__')}.json`)
 
   test('turns land in the control room as one file per operator, machine and day', () => {
     write(event('a', '2026-09-17T10:00:00.000Z'), event('b', '2026-09-18T11:00:00.000Z'))
@@ -513,7 +514,7 @@ describe('stats push', () => {
       expect(readJsonCursor()).toBeUndefined()
     }
     const readJsonCursor = () => {
-      try { return JSON.parse(readFileSync(join(statsDir(home), 'push.json'), 'utf8')).offset } catch { return undefined }
+      try { return JSON.parse(readFileSync(join(statsDir(home), 'push.json'), 'utf8')).rooms['acme/room'].offset } catch { return undefined }
     }
     // A dirty worktree.
     writeFileSync(join(clone, 'notes.md'), 'x')
@@ -586,11 +587,11 @@ describe('stats push', () => {
     // The commit is there, the cursor is not: only the journal knows how far the batch got.
     expect(git(clone, 'log', '-1', '--format=%s')).toContain('stats: 1 turn')
     expect(existsSync(join(statsDir(home), 'push.json'))).toBe(false)
-    expect(existsSync(join(statsDir(home), 'push-pending.json'))).toBe(true)
+    expect(existsSync(journalFor('acme/room'))).toBe(true)
 
     const again = push(Date.parse('2026-09-18T12:10:00Z'))
     expect(again).toMatchObject({ ok: true, action: 'pushed' })
-    expect(existsSync(join(statsDir(home), 'push-pending.json'))).toBe(false)
+    expect(existsSync(journalFor('acme/room'))).toBe(false)
     // Exactly one stats commit, and the turn is in the file exactly once.
     expect(git(clone, 'log', 'origin/main', '--format=%s').split('\n').filter((line) => line.startsWith('stats:'))).toHaveLength(1)
     expect(readFileSync(stats('2026', '09', '18', 'mk-box.jsonl'), 'utf8').trim().split('\n')).toHaveLength(1)
@@ -606,7 +607,7 @@ describe('stats push', () => {
       return defaultGitFor(args)
     }
     expect(() => push(Date.parse('2026-09-18T12:00:00Z'), { git: killed })).toThrow('killed')
-    expect(existsSync(join(statsDir(home), 'push-pending.json'))).toBe(true)
+    expect(existsSync(journalFor('acme/room'))).toBe(true)
     const healthy = push(Date.parse('2026-09-18T12:10:00Z'))
     expect(healthy).toMatchObject({ ok: true, action: 'pushed', events: 1 })
     expect(readFileSync(stats('2026', '09', '18', 'mk-box.jsonl'), 'utf8').trim().split('\n')).toHaveLength(1)
@@ -638,15 +639,77 @@ describe('stats push', () => {
 
   // F15
   test('the cursor is bytes, so a turn with non-ASCII text does not shift the next push', () => {
-    write(event('a', '2026-09-18T10:00:00.000Z', { model: 'claude-opus-5-ünïcode', repo: 'acme/café' }))
-    expect(push(Date.parse('2026-09-18T12:00:00Z'))).toMatchObject({ action: 'pushed', events: 1 })
+    write(event('a', '2026-09-18T10:00:00.000Z', { model: 'claude-opus-5-ünïcode', machine: 'büro-mac' }))
+    const first = push(Date.parse('2026-09-18T12:00:00Z'))
+    expect(first).toMatchObject({ action: 'pushed', events: 1 })
+    expect(first.paths).toEqual(['stats/2026/09/18/mk-b-ro-mac.jsonl'])
     write(event('b', '2026-09-18T12:30:00.000Z'))
     expect(push(Date.parse('2026-09-18T13:05:00Z'))).toMatchObject({ action: 'pushed', events: 1 })
+    // The second push starts where the first stopped, counted in bytes, not characters.
+    expect(JSON.parse(readFileSync(stats('2026', '09', '18', 'mk-b-ro-mac.jsonl'), 'utf8').trim()).model).toBe('claude-opus-5-ünïcode')
     const rows = readFileSync(stats('2026', '09', '18', 'mk-box.jsonl'), 'utf8').trim().split('\n')
-    expect(rows).toHaveLength(2)
-    expect(rows.map((row) => JSON.parse(row).id)).toEqual(['a', 'b'])
-    expect(JSON.parse(rows[0]!).model).toBe('claude-opus-5-ünïcode')
+    expect(rows).toHaveLength(1)
+    expect(JSON.parse(rows[0]!).id).toBe('b')
     expect(push(Date.parse('2026-09-18T14:10:00Z')).action).toBe('none')
+  })
+
+  // F19
+  test('a journal naming a symlinked file is refused and kept', () => {
+    const outside = join(base, 'target.jsonl')
+    writeFileSync(outside, 'keep me\n')
+    const relative = 'stats/2026/09/18/mk-box.jsonl'
+    mkdirSync(stats('2026', '09', '18'), { recursive: true })
+    symlinkSync(outside, join(clone, ...relative.split('/')))
+    const path = journalFor('acme/room')
+    mkdirSync(dirname(path), { recursive: true })
+    writeFileSync(path, JSON.stringify({
+      token: 'abc', at: Date.parse('2026-09-18T11:00:00Z'), offset: 0,
+      room: { repo: 'acme/room', remote: origin, branch: 'main', path: clone },
+      files: [{ relative, had: 4 }],
+    }))
+    write(event('a', '2026-09-18T10:00:00.000Z'))
+    const result = push(Date.parse('2026-09-18T12:00:00Z'))
+    expect(result.action).toBe('refused')
+    expect(result.message).toContain('symlinked')
+    // The journal stays for a person, and the link's target is untouched.
+    expect(existsSync(journalFor('acme/room'))).toBe(true)
+    expect(readFileSync(outside, 'utf8')).toBe('keep me\n')
+  })
+
+  // F19
+  test('a journal that is not for this clone, or is malformed, is refused and kept', () => {
+    const path = journalFor('acme/room')
+    mkdirSync(dirname(path), { recursive: true })
+    const journal = {
+      token: 'abc', at: Date.parse('2026-09-18T11:00:00Z'), offset: 0,
+      room: { repo: 'acme/room', remote: origin, branch: 'main', path: join(base, 'somewhere-else') },
+      files: [{ relative: 'stats/2026/09/18/mk-box.jsonl', had: null }],
+    }
+    writeFileSync(path, JSON.stringify(journal))
+    write(event('a', '2026-09-18T10:00:00.000Z'))
+    expect(push(Date.parse('2026-09-18T12:00:00Z')).message).toContain('which is not the clone this push found')
+    expect(existsSync(path)).toBe(true)
+    writeFileSync(path, JSON.stringify({ ...journal, files: [{ relative: '../../escape.jsonl', had: null }] }))
+    expect(push(Date.parse('2026-09-18T12:00:00Z')).message).toContain('unreadable push journal')
+    expect(existsSync(path)).toBe(true)
+    // Sound again once the journal is gone.
+    rmSync(path)
+    expect(push(Date.parse('2026-09-18T12:00:00Z')).action).toBe('pushed')
+  })
+
+  // F19
+  test('a rollback whose index reset fails keeps the journal and says so', () => {
+    write(event('a', '2026-09-18T10:00:00.000Z'))
+    const broken: GitRunner = (args) => {
+      if (args.includes('add') || args.includes('reset')) return { code: 1, out: 'refusing' }
+      return defaultGitFor(args)
+    }
+    const result = push(Date.parse('2026-09-18T12:00:00Z'), { git: broken })
+    expect(result.action).toBe('refused')
+    expect(result.message).toContain('index could not be put back')
+    expect(existsSync(journalFor('acme/room'))).toBe(true)
+    // The rows themselves were still taken back out.
+    expect(existsSync(stats('2026', '09', '18', 'mk-box.jsonl'))).toBe(false)
   })
 
   // F9
@@ -664,6 +727,113 @@ describe('stats push', () => {
     link()
     expect(push(Date.parse('2026-09-18T12:00:00Z')).message).toContain('symlinked')
     expect(existsSync(join(elsewhere, 'stats'))).toBe(false)
+  })
+})
+
+// F17, F18
+describe('stats push with two control rooms', () => {
+  interface Room { org: string; room: string; code: string; origin: string; clone: string; repo: string }
+  let rooms: Room[]
+
+  const build = (org: string, code: string): Room => {
+    const origin = join(base, `${org}.git`)
+    git(base, 'init', '-q', '--bare', '-b', 'main', origin)
+    const clone = join(home, '.vegastack', 'control-room', org)
+    git(base, 'clone', '-q', origin, clone)
+    git(clone, 'commit', '-q', '--allow-empty', '-m', 'seed')
+    git(clone, 'push', '-q', 'origin', 'main')
+    spawnSync('git', ['-C', clone, 'config', 'user.name', 't'])
+    spawnSync('git', ['-C', clone, 'config', 'user.email', 't@t'])
+    const repo = join(base, `app-${org}`)
+    mkdirSync(join(repo, '.vegastack'), { recursive: true })
+    git(repo, 'init', '-q', '-b', 'main', repo)
+    writeFileSync(join(repo, '.vegastack', 'dev.md'), `repo: ${code}\ncontrol-room: ${org}/room#dev\n`)
+    return { org, room: `${org}/room`, code, origin, clone, repo }
+  }
+
+  beforeEach(() => {
+    rooms = [build('acme', 'acme/app'), build('other', 'other/app')]
+    writeFileSync(join(home, '.vegastack', 'factory.json'), JSON.stringify({
+      schemaVersion: 1,
+      controlRooms: Object.fromEntries(rooms.map((room) => [room.org, { repo: room.room, path: room.clone, branch: 'main', remote: room.origin, lastSyncedAt: null, sha: null }])),
+    }))
+    mkdirSync(statsDir(home), { recursive: true })
+  })
+
+  const event = (id: string, at: string, repo: string): StatsEvent => ({
+    id, rev: 1, at, operator: 'mk', machine: 'box', harness: 'claude', model: 'claude-opus-5', repo, issue: 42,
+    state: 'in-progress', skill: null, tokens: { input: 1, output: 2, cacheRead: 3, cacheWrite: 4 }, durationMs: 1000, outcome: 'end_turn',
+  })
+  const write = (...events: StatsEvent[]) =>
+    appendFileSync(join(statsDir(home), 'events.jsonl'), events.map((row) => JSON.stringify(row)).join('\n') + '\n')
+  const rows = (room: Room) => {
+    const path = join(room.clone, 'stats', '2026', '09', '18', 'mk-box.jsonl')
+    return existsSync(path) ? readFileSync(path, 'utf8').trim().split('\n').map((line) => JSON.parse(line).id) : []
+  }
+  const push = (room: Room, now: number, extra: { git?: GitRunner } = {}) => pushStats({ home, cwd: room.repo, now: () => now, ...extra })
+  const journalFor = (room: string) => join(statsDir(home), 'push-pending', `${room.replace('/', '__')}.json`)
+
+  test('each room gets only its own repositories, and neither cursor swallows the other', () => {
+    write(
+      event('a1', '2026-09-18T10:00:00.000Z', 'acme/app'),
+      event('b1', '2026-09-18T10:05:00.000Z', 'other/app'),
+      event('a2', '2026-09-18T10:10:00.000Z', 'acme/app'),
+      event('b2', '2026-09-18T10:15:00.000Z', 'other/app'),
+      // A repository neither room is bound to stays on this machine.
+      event('x1', '2026-09-18T10:20:00.000Z', 'someone/else'),
+    )
+    expect(push(rooms[0]!, Date.parse('2026-09-18T12:00:00Z'))).toMatchObject({ action: 'pushed', events: 2 })
+    expect(push(rooms[1]!, Date.parse('2026-09-18T12:00:00Z'))).toMatchObject({ action: 'pushed', events: 2 })
+    expect(rows(rooms[0]!)).toEqual(['a1', 'a2'])
+    expect(rows(rooms[1]!)).toEqual(['b1', 'b2'])
+    // The unbound repository went nowhere, and both rooms are clean.
+    for (const room of rooms) {
+      expect(readFileSync(join(room.clone, 'stats', '2026', '09', '18', 'mk-box.jsonl'), 'utf8')).not.toContain('someone/else')
+      expect(git(room.clone, 'status', '--porcelain', '--untracked-files=all')).toBe('')
+    }
+    const cursors = JSON.parse(readFileSync(join(statsDir(home), 'push.json'), 'utf8')).rooms
+    expect(Object.keys(cursors).sort()).toEqual(['acme/room', 'other/room'])
+    // New turns for one room only: the other room's cursor is untouched and has nothing to do.
+    write(event('a3', '2026-09-18T13:00:00.000Z', 'acme/app'))
+    expect(push(rooms[0]!, Date.parse('2026-09-18T13:10:00Z'))).toMatchObject({ action: 'pushed', events: 1 })
+    expect(push(rooms[1]!, Date.parse('2026-09-18T13:10:00Z')).action).toBe('none')
+    expect(rows(rooms[0]!)).toEqual(['a1', 'a2', 'a3'])
+    expect(rows(rooms[1]!)).toEqual(['b1', 'b2'])
+  })
+
+  test('the room registry authorizes the other repositories that belong to it', () => {
+    writeFileSync(join(rooms[0]!.clone, 'repos.md'), '| repo | group |\n|---|---|\n| acme/other-service | dev |\n')
+    git(rooms[0]!.clone, 'add', '-A')
+    git(rooms[0]!.clone, 'commit', '-q', '-m', 'stats: registry')
+    git(rooms[0]!.clone, 'push', '-q', 'origin', 'main')
+    write(event('a1', '2026-09-18T10:00:00.000Z', 'acme/other-service'), event('b1', '2026-09-18T10:05:00.000Z', 'other/app'))
+    expect(push(rooms[0]!, Date.parse('2026-09-18T12:00:00Z'))).toMatchObject({ action: 'pushed', events: 1 })
+    expect(rows(rooms[0]!)).toEqual(['a1'])
+  })
+
+  // F18
+  test('a crash in one room is never replayed against another', () => {
+    write(event('a1', '2026-09-18T10:00:00.000Z', 'acme/app'), event('b1', '2026-09-18T10:05:00.000Z', 'other/app'))
+    const killed: GitRunner = (args) => {
+      const result = defaultGitFor(args)
+      if (args.includes('commit')) throw new Error('killed right after the commit')
+      return result
+    }
+    expect(() => push(rooms[0]!, Date.parse('2026-09-18T12:00:00Z'), { git: killed })).toThrow('killed')
+    expect(existsSync(journalFor('acme/room'))).toBe(true)
+
+    // A hook run from the other repository must not touch room A's journal, paths or sizes.
+    expect(push(rooms[1]!, Date.parse('2026-09-18T12:01:00Z'))).toMatchObject({ action: 'pushed', events: 1 })
+    expect(rows(rooms[1]!)).toEqual(['b1'])
+    expect(rows(rooms[0]!)).toEqual(['a1'])
+    expect(existsSync(journalFor('acme/room'))).toBe(true)
+    expect(existsSync(journalFor('other/room'))).toBe(false)
+
+    // Room A recovers on its own next run, exactly once.
+    expect(push(rooms[0]!, Date.parse('2026-09-18T12:02:00Z'))).toMatchObject({ ok: true, action: 'pushed' })
+    expect(existsSync(journalFor('acme/room'))).toBe(false)
+    expect(rows(rooms[0]!)).toEqual(['a1'])
+    expect(git(rooms[0]!.clone, 'log', 'origin/main', '--format=%s').split('\n').filter((line) => line.startsWith('stats:'))).toHaveLength(1)
   })
 })
 
