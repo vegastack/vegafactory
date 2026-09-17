@@ -1,0 +1,43 @@
+{
+  "skill_name": "skills-refresh",
+  "evals": [
+    {
+      "id": 1,
+      "prompt": "Run the facts sweep on vegastack/vegafactory. `facts-scan.mjs --root . --json` exited 1 with the output attached: four Cloudflare lines and two Codex lines are due. Say exactly what you would do, in order.",
+      "expected_output": "A plan that reads the two topics in two separate subagents against the watchlist's official pages, asks each for Unchanged / Changed / New / Gone, then files one issue per change, one date-bump issue for the unchanged lines, and one digest comment on the pinned log issue — and edits no file under skills/.",
+      "files": [
+        "evals/files/facts-scan-due.json"
+      ],
+      "assertions": [
+        "One subagent per topic is named — Cloudflare and Codex are not read by the same agent",
+        "Each subagent is asked for the four categories Unchanged, Changed, New and Gone",
+        "The plan states that this skill edits no file under skills/ and routes the edits through issues",
+        "The unchanged lines become a single date-bump issue, not one issue per line",
+        "A digest comment on the pinned log issue is part of the plan"
+      ]
+    },
+    {
+      "id": 2,
+      "prompt": "The Cloudflare subagent reports: five lines unchanged; the Workflows step ceiling moved from 25,000 to 50,000 in the 12-09-2026 changelog entry (https://developers.cloudflare.com/changelog/); and the R2 pricing page timed out twice and could not be read. Write the digest comment and say which issues you would file.",
+      "expected_output": "A digest naming the counts, the one changed fact with its link and version, and the unreachable R2 pricing page named as unreachable — plus one issue for the Workflows change and one date-bump issue for the five confirmed lines, with the R2 lines keeping their old checked dates.",
+      "files": [],
+      "assertions": [
+        "The unreachable R2 pricing page is reported as unreachable, never as unchanged",
+        "The R2 lines are not given a new checked date",
+        "The Workflows change is one issue carrying the old value, the new value, the version or date and the link",
+        "The five confirmed lines get their checked dates moved in a single issue"
+      ]
+    },
+    {
+      "id": 3,
+      "prompt": "`facts-scan.mjs --root . --json` exited 2: `harness-facts.md:41: does not parse as a fact line`. Sweep the repo.",
+      "expected_output": "No sweep: exit 2 is a line the scanner cannot read, so the malformed line is fixed first — reported plainly, with the file and line named — because an unparsed line is a fact nobody is checking.",
+      "files": [],
+      "assertions": [
+        "No subagents are dispatched and no sweep is performed",
+        "The file and line number from the exit-2 output are named",
+        "The response says the malformed line is fixed before the sweep, and does not treat exit 2 as 'nothing due'"
+      ]
+    }
+  ]
+}

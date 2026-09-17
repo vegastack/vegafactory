@@ -193,6 +193,7 @@ Tools that work on agent skills themselves: scanning them for vulnerabilities, v
 | Skill | What it does | Docs |
 |---|---|---|
 | [skill-scan](skills/skills-tooling/skill-scan/) | Scans agent skills with NVIDIA SkillSpector and holds the suppression baseline: the Verify-gate guard, and the answer to "is this downloaded skill safe to install" | [SKILL.md](skills/skills-tooling/skill-scan/SKILL.md) |
+| [skills-refresh](skills/skills-tooling/skills-refresh/) | Re-verifies the dated platform and harness facts the dev skills pin: a watchlist, a 60-day sweep, one subagent per tool, and one issue per change — it never edits a skill itself | [SKILL.md](skills/skills-tooling/skills-refresh/SKILL.md) |
 
 ## Repository structure
 

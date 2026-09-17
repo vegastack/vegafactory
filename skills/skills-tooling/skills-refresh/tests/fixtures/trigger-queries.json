@@ -1,0 +1,29 @@
+[
+  { "query": "refresh the skills", "should_trigger": true },
+  { "query": "are our pinned platform facts still true?", "should_trigger": true },
+  { "query": "run the facts sweep on this repo", "should_trigger": true },
+  { "query": "what changed in Cloudflare since we last checked", "should_trigger": true },
+  { "query": "check whether the Claude Code hook facts are stale", "should_trigger": true },
+  { "query": "the harness facts are older than 60 days - go look", "should_trigger": true },
+  {
+    "query": "scan these skills for prompt injection",
+    "should_trigger": false,
+    "ambiguous_with": ["skill-scan"]
+  },
+  {
+    "query": "audit this skill for completeness",
+    "should_trigger": false,
+    "ambiguous_with": ["skillify"]
+  },
+  {
+    "query": "should we add Redis here",
+    "should_trigger": false,
+    "ambiguous_with": ["dev-architect"]
+  },
+  {
+    "query": "implement issue 12 end to end",
+    "should_trigger": false,
+    "ambiguous_with": ["dev-implement"]
+  },
+  { "query": "refresh my browser cache", "should_trigger": false }
+]

@@ -114,6 +114,12 @@
     "scripts/scaffold-skill.mjs",
     "scripts/trigger-check.mjs"
   ],
+  "skills-refresh": [
+    "SKILL.md",
+    "agents/openai.yaml",
+    "references/watchlist.md",
+    "scripts/facts-scan.mjs"
+  ],
   "vegafactory-setup": [
     "SKILL.md",
     "agents/openai.yaml",
