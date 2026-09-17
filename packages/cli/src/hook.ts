@@ -11,6 +11,7 @@ import { claimsOf, holderOf, ownerId, trustedAuthors, HEARTBEAT_EVERY_MS, type H
 import { defaultRunner, type GhRunner } from './gh.ts'
 import { classifyCommand, extractCommand, isShellTool, loadPolicy, mergeTarget, type Decision, type MergeCheck } from './guard-rules.ts'
 import { cacheDir, readBody, readState, syncIssue } from './issue-cache.ts'
+import { askText, pendingNote } from './learning.ts'
 import { detectRepo, evidenceChangedAt, findValidAck, latestOfType, permissionLookup, repoRoot, snapshot } from './issue.ts'
 import { stateOf } from './labels.ts'
 
@@ -30,11 +31,12 @@ export function hookUsage(): string {
   return `Usage: vegafactory hook <event> --harness claude|codex   (reads the hook payload on stdin)
 
 Events and the harness hooks they belong on:
-  session-start   SessionStart         the issue, its holder and where its local copy lives
+  session-start   SessionStart         the issue, its holder, where its local copy lives, and any lessons waiting for dev.md
   prompt          UserPromptSubmit     a warning when someone else holds the issue
   pre-tool        PreToolUse           the ship guard; stops file and shell tools after the claim is lost
   post-tool       PostToolUse, SubagentStop   the heartbeat
-  stop            Stop                 commits and pushes a WIP checkpoint of the turn
+  stop            Stop                 commits and pushes a WIP checkpoint of the turn, and asks a
+                                       working session once for the general lessons it taught
   session-end     SessionEnd           a last heartbeat (the claim is kept, the session may resume)
 `
 }
@@ -95,6 +97,11 @@ export function issueFromBranch(branch: string): number | null {
   return match ? Number(match[1]) : null
 }
 
+function headOf(cwd: string): string | null {
+  const head = git(cwd, ['rev-parse', 'HEAD'])
+  return head.ok ? head.out : null
+}
+
 export interface Where { cwd: string; top: string; root: string; repo: string; number: number; owner: string; branch: string }
 
 export function locate(cwd: string, host = hostname()): Where | null {
@@ -122,12 +129,17 @@ export interface LocalClaim {
   lostTo: string | null
   // The claim comment of the holder this worktree already saved its work for.
   rescuedFor: number | null
+  // The harness session this worktree last saw, the HEAD it started on, and the session the
+  // lessons request already went to — together they make that request once per working session.
+  session: string | null
+  sessionHead: string | null
+  askedLearning: string | null
 }
 
 export const localPath = (where: Where) => join(where.top, '.vegastack', '.tmp', 'claims', `${where.number}.json`)
 
 export function readLocal(where: Where): LocalClaim {
-  const blank: LocalClaim = { owner: where.owner, lastActive: null, activeMs: 0, lastPush: null, checkedAt: null, held: false, holder: null, lostTo: null, rescuedFor: null }
+  const blank: LocalClaim = { owner: where.owner, lastActive: null, activeMs: 0, lastPush: null, checkedAt: null, held: false, holder: null, lostTo: null, rescuedFor: null, session: null, sessionHead: null, askedLearning: null }
   try {
     const saved = JSON.parse(readFileSync(localPath(where), 'utf8')) as LocalClaim
     return saved.owner === where.owner ? { ...blank, ...saved } : blank
@@ -177,6 +189,14 @@ function recordActivity(local: LocalClaim, now: number) {
 // Both harnesses document this shape for SessionStart and UserPromptSubmit.
 function context(event: 'SessionStart' | 'UserPromptSubmit', text: string): string {
   return JSON.stringify({ hookSpecificOutput: { hookEventName: event, additionalContext: text } })
+}
+
+// The Stop continuation each harness documents: Claude Code takes additionalContext as non-error
+// hook feedback, Codex turns a blocking reason into the next prompt. Both keep the turn going.
+function continuation(harness: Harness, text: string): Record<string, unknown> {
+  return harness === 'claude'
+    ? { hookSpecificOutput: { hookEventName: 'Stop', additionalContext: text } }
+    : { decision: 'block', reason: text }
 }
 
 // Codex parses permissionDecision "ask" but does not support it, so an ask is a deny there
@@ -431,9 +451,13 @@ function advisory(event: HookEvent, harness: Harness, payload: Record<string, un
   if (!where) return
   const local = readLocal(where)
   const model = typeof payload.model === 'string' && payload.model ? payload.model : '<model>'
+  const session = typeof payload.session_id === 'string' && payload.session_id ? payload.session_id : null
+  // A new session starts from the HEAD it finds; a later commit is what makes it a working session.
+  const startSession = () => { if (session && local.session !== session) { local.session = session; local.sessionHead = headOf(where.top) } }
 
   if (event === 'session-start') {
     const { holder, state } = refresh(where, local, deps, true)
+    startSession()
     writeLocal(where, local)
     const lines = [
       `This worktree works issue #${where.number} (${where.repo}), state ${state ?? 'unknown'}, held by ${holder ? `${label(holder)}${local.held ? ' — this worktree' : ''}` : 'nobody'}.`,
@@ -441,6 +465,8 @@ function advisory(event: HookEvent, harness: Harness, payload: Record<string, un
     ]
     if (holder && !local.held) lines.push(`Someone else holds it. Do not change files; to take it back: \`${takeBack(where, harness, model)}\`.`)
     else if (!holder) lines.push(`Nobody holds it; claim it before working: \`vegafactory issue claim ${where.number} --harness ${harness} --model ${model}\`.`)
+    const pending = pendingNote(where.root)
+    if (pending) lines.push(pending)
     return deps.out(context('SessionStart', lines.join('\n')))
   }
   if (event === 'prompt') {
@@ -465,6 +491,7 @@ function advisory(event: HookEvent, harness: Harness, payload: Record<string, un
   }
   if (event === 'stop') {
     recordActivity(local, deps.now())
+    startSession()
     writeLocal(where, local)
     if (local.lostTo || !where.branch || issueFromBranch(where.branch) !== where.number) return
     const notes: string[] = []
@@ -478,8 +505,17 @@ function advisory(event: HookEvent, harness: Harness, payload: Record<string, un
       rmSync(failed, { force: true })
       deps.detach(['sh', '-c', 'git push --quiet -u origin "HEAD:refs/heads/$1" 2>"$2.tmp" || { mv "$2.tmp" "$2"; exit 1; }; rm -f "$2.tmp"', 'push', where.branch, failed], where.top)
     }
-    // Both harnesses show a Stop hook's systemMessage to the user as a warning.
-    if (notes.length) deps.out(JSON.stringify({ systemMessage: notes.join('\n') }))
+    // The lessons request, once per session that committed something: a chat-only session has none.
+    let ask: string | null = null
+    if (session && local.askedLearning !== session && local.sessionHead && headOf(where.top) !== local.sessionHead) {
+      ask = askText(where.root, where.number)
+      local.askedLearning = session
+      writeLocal(where, local)
+    }
+    // Both harnesses show a Stop hook's systemMessage to the user as a warning, and one Stop hook
+    // prints one JSON object, so the warning and the request travel together.
+    const output = { ...(notes.length ? { systemMessage: notes.join('\n') } : {}), ...(ask ? continuation(harness, ask) : {}) }
+    if (Object.keys(output).length) deps.out(JSON.stringify(output))
   }
 }
 

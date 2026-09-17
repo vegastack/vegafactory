@@ -350,6 +350,52 @@ describe('heartbeat and checkpoints', () => {
     expect(stop.systemMessage).toContain('the commit stays local')
   })
 
+  test('the lessons request goes out once per working session and never on a chat-only one', async () => {
+    const learnings = join(root, '.vegastack/.tmp/learnings.md')
+    // A session that commits nothing has no lessons to give.
+    await hook('session-start', { cwd: tree, session_id: 's1' })
+    expect((await hook('stop', { cwd: tree, session_id: 's1' })).text).toBe('')
+
+    writeFileSync(join(tree, 'feature.txt'), 'work')
+    const asked = (await hook('stop', { cwd: tree, session_id: 's1' })).json().hookSpecificOutput
+    expect(asked.hookEventName).toBe('Stop')
+    expect(asked.additionalContext).toContain('which general lessons did it teach')
+    expect(asked.additionalContext).toContain(learnings)
+    expect(asked.additionalContext).toContain('not the ones specific to #7')
+    expect(asked.additionalContext).toContain("only on the operator's yes")
+
+    // Once per session id, however many more turns commit.
+    writeFileSync(join(tree, 'more.txt'), 'work')
+    expect((await hook('stop', { cwd: tree, session_id: 's1' })).text).toBe('')
+
+    // The next session asks again, and Codex gets its own documented continuation.
+    await hook('session-start', { cwd: tree, session_id: 's2' }, 'codex')
+    writeFileSync(join(tree, 'again.txt'), 'work')
+    const codex = (await hook('stop', { cwd: tree, session_id: 's2' }, 'codex')).json()
+    expect(codex.decision).toBe('block')
+    expect(codex.reason).toContain('which general lessons did it teach')
+    expect(codex.hookSpecificOutput).toBeUndefined()
+  })
+
+  test('a warning and the lessons request travel in one Stop object', async () => {
+    await hook('session-start', { cwd: tree, session_id: 's3' })
+    git(tree, 'commit', '-q', '--allow-empty', '-m', 'real work')
+    writeFileSync(join(tree, '.env'), 'X=1\n')
+    const both = (await hook('stop', { cwd: tree, session_id: 's3' })).json()
+    expect(both.systemMessage).toContain('.env')
+    expect(both.hookSpecificOutput.additionalContext).toContain('which general lessons did it teach')
+  })
+
+  test('session-start shows the lessons waiting for a dev.md line', async () => {
+    mkdirSync(join(root, '.vegastack/.tmp'), { recursive: true })
+    writeFileSync(join(root, '.vegastack/.tmp/learnings.md'), '- the skill scan reads the built bundle\n')
+    const context = (await hook('session-start', { cwd: tree, session_id: 's4' })).json().hookSpecificOutput.additionalContext
+    expect(context).toContain('the skill scan reads the built bundle')
+    expect(context).toContain('ONE .vegastack/dev.md line')
+    expect(context).toContain('vegafactory learning accept')
+    expect(context).toContain('control-room lines stay manual')
+  })
+
   test('stop never commits or pushes a staged secret and names the files', async () => {
     const token = ['ghp', 'A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8'].join('_')
     const cases: Array<[string, string]> = [
