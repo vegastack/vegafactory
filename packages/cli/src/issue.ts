@@ -59,9 +59,9 @@ export function markerKeys(body: string): Record<string, string> {
   return keys
 }
 
-interface Snapshot { state: CacheState; dir: string; body: (entry: CommentEntry) => string }
+export interface Snapshot { state: CacheState; dir: string; body: (entry: CommentEntry) => string }
 
-function snapshot(dir: string): Snapshot {
+export function snapshot(dir: string): Snapshot {
   const state = readState(dir)
   if (!state?.issue) throw new Error(`no cached copy in ${dir} — run vegafactory issue sync first`)
   return { state, dir, body: (entry) => readBody(dir, entry.file) }

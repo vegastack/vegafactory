@@ -1,0 +1,392 @@
+// `vegafactory hook <event> --harness claude|codex` — one command behind every harness hook.
+//
+// The issue comes from the worktree folder (.vegastack/.worktrees/<n>-…) or the branch
+// (<type>/<n>-…). With no issue only the ship guard runs. Advisory events never block and
+// exit 0 on any error; only pre-tool can deny, and its guard fails closed.
+import { spawn, spawnSync } from 'node:child_process'
+import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
+import { hostname } from 'node:os'
+import { basename, dirname, join } from 'node:path'
+import { claimsOf, holderOf, machineName, ownerId, HEARTBEAT_EVERY_MS, type Holder } from './claim.ts'
+import { defaultRunner, type GhRunner } from './gh.ts'
+import { classifyCommand, extractCommand, loadPolicy, mergeTarget, type Decision, type MergeCheck } from './guard-rules.ts'
+import { cacheDir, readBody, readState, syncIssue } from './issue-cache.ts'
+import { detectRepo, findValidAck, latestOfType, permissionLookup, repoRoot, snapshot } from './issue.ts'
+import { stateOf } from './labels.ts'
+
+export const HOOK_EVENTS = ['session-start', 'prompt', 'pre-tool', 'post-tool', 'stop', 'session-end'] as const
+export type HookEvent = typeof HOOK_EVENTS[number]
+type Harness = 'claude' | 'codex'
+
+export const MAX_INPUT_BYTES = 64 * 1024
+const INPUT_WAIT_MS = 350
+const REFRESH_EVERY_MS = 60_000
+// A gap longer than this between tool calls is idle time, not work.
+const ACTIVE_GAP_MS = 5 * 60_000
+// Tools that change files or run commands; the rest keep working after the claim is lost.
+const WRITE_TOOLS = new Set(['Bash', 'Write', 'Edit', 'MultiEdit', 'NotebookEdit', 'apply_patch', 'shell', 'exec_command', 'local_shell'])
+
+export function hookUsage(): string {
+  return `Usage: vegafactory hook <event> --harness claude|codex   (reads the hook payload on stdin)
+
+Events and the harness hooks they belong on:
+  session-start   SessionStart         the issue, its holder and where its local copy lives
+  prompt          UserPromptSubmit     a warning when someone else holds the issue
+  pre-tool        PreToolUse           the ship guard; stops file and shell tools after the claim is lost
+  post-tool       PostToolUse, SubagentStop   the heartbeat
+  stop            Stop                 commits and pushes a WIP checkpoint of the turn
+  session-end     SessionEnd           a last heartbeat (the claim is kept, the session may resume)
+`
+}
+
+// ---------------------------------------------------------------------------------------------
+// Input
+
+export interface HookInput { payload: Record<string, unknown> | null; head: string }
+
+// Reads stdin up to the byte bound and the wait. An oversized or late payload is null, with the
+// first bytes kept so pre-tool can still tell which tool it was.
+export function readHookInput(stream: NodeJS.ReadableStream = process.stdin, { maxBytes = MAX_INPUT_BYTES, waitMs = INPUT_WAIT_MS } = {}): Promise<HookInput> {
+  return new Promise((resolve) => {
+    const chunks: Buffer[] = []
+    let size = 0
+    let finished = false
+    const head = () => Buffer.concat(chunks).subarray(0, 4096).toString('utf8')
+    const done = (payload: Record<string, unknown> | null) => {
+      if (finished) return
+      finished = true
+      clearTimeout(timer)
+      stream.removeAllListeners('data')
+      stream.pause()
+      resolve({ payload, head: head() })
+    }
+    const timer = setTimeout(() => done(null), waitMs)
+    stream.on('data', (chunk: Buffer | string) => {
+      const bytes = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)
+      size += bytes.length
+      if (size > maxBytes) { chunks.push(bytes); return done(null) }
+      chunks.push(bytes)
+    })
+    stream.once('end', () => {
+      try {
+        const value: unknown = JSON.parse(Buffer.concat(chunks).toString('utf8'))
+        done(value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : null)
+      } catch { done(null) }
+    })
+    stream.once('error', () => done(null))
+  })
+}
+
+// ---------------------------------------------------------------------------------------------
+// Where we are
+
+function git(cwd: string, args: string[]): { ok: boolean; out: string } {
+  const result = spawnSync('git', args, { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout: 10_000 })
+  return { ok: result.status === 0, out: (result.stdout ?? '').trim() || (result.stderr ?? '').trim() }
+}
+
+export function issueFromWorktree(top: string): number | null {
+  const match = /[/\\]\.vegastack[/\\]\.worktrees[/\\](\d+)-[^/\\]*$/.exec(top)
+  return match ? Number(match[1]) : null
+}
+
+export function issueFromBranch(branch: string): number | null {
+  const match = /^[\w.-]+\/(\d+)-/.exec(branch)
+  return match ? Number(match[1]) : null
+}
+
+export interface Where { cwd: string; top: string; root: string; repo: string; number: number; owner: string; branch: string }
+
+export function locate(cwd: string, host = hostname()): Where | null {
+  const top = git(cwd, ['rev-parse', '--show-toplevel'])
+  if (!top.ok) return null
+  const branch = git(cwd, ['branch', '--show-current']).out
+  const number = issueFromWorktree(top.out) ?? issueFromBranch(branch)
+  if (!number) return null
+  const root = repoRoot(cwd)
+  return { cwd, top: top.out, root, repo: detectRepo(root), number, owner: ownerId(basename(top.out), host), branch }
+}
+
+// ---------------------------------------------------------------------------------------------
+// The local claim file: checked on every call, refreshed from GitHub at most once a minute.
+
+export interface LocalClaim {
+  owner: string
+  lastActive: number | null
+  activeMs: number
+  lastPush: number | null
+  checkedAt: number | null
+  held: boolean
+  holder: string | null
+  // Set when another session holds the issue after this worktree had claimed it.
+  lostTo: string | null
+  // The claim comment of the holder this worktree already saved its work for.
+  rescuedFor: number | null
+}
+
+export const localPath = (where: Where) => join(where.top, '.vegastack', '.tmp', 'claims', `${where.number}.json`)
+
+export function readLocal(where: Where): LocalClaim {
+  const blank: LocalClaim = { owner: where.owner, lastActive: null, activeMs: 0, lastPush: null, checkedAt: null, held: false, holder: null, lostTo: null, rescuedFor: null }
+  try {
+    const saved = JSON.parse(readFileSync(localPath(where), 'utf8')) as LocalClaim
+    return saved.owner === where.owner ? { ...blank, ...saved } : blank
+  } catch { return blank }
+}
+
+function writeLocal(where: Where, local: LocalClaim) {
+  const path = localPath(where)
+  mkdirSync(dirname(path), { recursive: true })
+  const temp = `${path}.${process.pid}.tmp`
+  writeFileSync(temp, JSON.stringify(local, null, 2) + '\n')
+  renameSync(temp, path)
+}
+
+const label = (h: Holder) => `${h.owner} (${h.harness}${h.model ? ` · ${h.model}` : ''})`
+
+function refresh(where: Where, local: LocalClaim, deps: HookDeps, force = false): { holder: Holder | null; state: string | null } {
+  const dir = cacheDir(where.root, where.repo, where.number)
+  if (force || !local.checkedAt || deps.now() - local.checkedAt >= REFRESH_EVERY_MS) {
+    syncIssue({ root: where.root, repo: where.repo, number: where.number, runner: deps.runner })
+    local.checkedAt = deps.now()
+  }
+  const cached = readState(dir)
+  if (!cached?.issue) return { holder: null, state: null }
+  const body = (entry: { file: string }) => readBody(dir, entry.file)
+  const { holder } = holderOf(cached, body, deps.now())
+  const everClaimed = claimsOf(cached, body).history.some((c) => c.owner === where.owner)
+  local.held = holder?.owner === where.owner
+  local.holder = holder ? label(holder) : null
+  local.lostTo = holder && !local.held && everClaimed ? local.holder : null
+  if (local.lostTo === null) local.rescuedFor = null
+  return { holder, state: stateOf(cached.issue.labels).state }
+}
+
+function recordActivity(local: LocalClaim, now: number) {
+  if (local.lastActive !== null) {
+    const gap = now - local.lastActive
+    if (gap > 0 && gap < ACTIVE_GAP_MS) local.activeMs += gap
+  }
+  local.lastActive = now
+}
+
+// ---------------------------------------------------------------------------------------------
+// Output
+
+// Both harnesses document this shape for SessionStart and UserPromptSubmit.
+function context(event: 'SessionStart' | 'UserPromptSubmit', text: string): string {
+  return JSON.stringify({ hookSpecificOutput: { hookEventName: event, additionalContext: text } })
+}
+
+// Codex parses permissionDecision "ask" but does not support it, so an ask is a deny there
+// and the operator runs the command by hand.
+export function renderDecision(harness: Harness, decision: 'ask' | 'deny', reason: string): string {
+  const permission = harness === 'claude' ? decision : 'deny'
+  return JSON.stringify({ hookSpecificOutput: { hookEventName: 'PreToolUse', permissionDecision: permission, permissionDecisionReason: reason } })
+}
+
+// ---------------------------------------------------------------------------------------------
+// Side effects
+
+export interface HookDeps {
+  runner: GhRunner
+  now: () => number
+  out: (text: string) => void
+  // Starts a process that outlives the hook.
+  detach: (command: string[], cwd: string) => void
+  // How to run this CLI again: the runtime and the entry file.
+  cli: string[]
+  host: string
+}
+
+function defaultDetach(command: string[], cwd: string) {
+  const child = spawn(command[0]!, command.slice(1), { cwd, detached: true, stdio: 'ignore', env: { ...process.env, GIT_TERMINAL_PROMPT: '0' } })
+  child.on('error', () => {})
+  child.unref()
+}
+
+export const defaultDeps = (): HookDeps => ({
+  runner: defaultRunner, now: Date.now, out: (text) => process.stdout.write(text + '\n'), detach: defaultDetach,
+  cli: [process.execPath, process.argv[1]!], host: hostname(),
+})
+
+export function rescueBranchName(name: string, now: number, host: string): string {
+  const stamp = new Date(now).toISOString().replace(/[-:]/g, '').slice(0, 13)
+  return `rescue/${name}-${machineName(host)}-${stamp}`
+}
+
+// Saves uncommitted work on a pushed rescue branch (same shape as worktree prune's rescue).
+export function rescueWork(cwd: string, branch: string, name: string): { ok: boolean; reason: string | null } {
+  if (!git(cwd, ['status', '--porcelain']).out) return { ok: true, reason: null }
+  for (const args of [['switch', '-c', branch], ['add', '--all'], ['commit', '--quiet', '-m', `wip: rescued uncommitted work from ${name}`], ['push', '--quiet', '-u', 'origin', branch]]) {
+    const result = git(cwd, args)
+    if (!result.ok) return { ok: false, reason: `git ${args[0]} failed: ${result.out}` }
+  }
+  return { ok: true, reason: null }
+}
+
+function pushHeartbeat(where: Where, local: LocalClaim, deps: HookDeps) {
+  deps.detach([...deps.cli, 'issue', 'heartbeat', String(where.number), '--repo', where.repo, '--owner', where.owner, '--active', String(Math.round(local.activeMs / 60_000))], where.cwd)
+  local.lastPush = deps.now()
+}
+
+function midOperation(cwd: string): boolean {
+  return ['MERGE_HEAD', 'rebase-merge', 'rebase-apply', 'CHERRY_PICK_HEAD', 'REVERT_HEAD'].some((name) => {
+    const path = git(cwd, ['rev-parse', '--path-format=absolute', '--git-path', name])
+    return path.ok && existsSync(path.out)
+  })
+}
+
+// ---------------------------------------------------------------------------------------------
+// Events
+
+// Allows `gh pr merge` when the PR's branch names issue n and n has a valid "ship it" after its latest evidence.
+function mergeCheck(cwd: string, root: string, repo: string, deps: HookDeps): MergeCheck {
+  return (words, raw) => {
+    if (raw.some((word) => word === '-R' || word.startsWith('--repo')) || words.includes('--admin')) return false
+    // With no argument gh merges the current branch's PR.
+    const target = mergeTarget(words) ?? git(cwd, ['branch', '--show-current']).out
+    if (!target) return false
+    const view = deps.runner(['pr', 'view', target, '--repo', repo, '--json', 'headRefName'])
+    if (view.code !== 0) return false
+    const number = issueFromBranch((JSON.parse(view.stdout) as { headRefName?: string }).headRefName ?? '')
+    if (!number) return false
+    syncIssue({ root, repo, number, runner: deps.runner })
+    const snap = snapshot(cacheDir(root, repo, number))
+    const evidence = latestOfType(snap, 'evidence')
+    return !!evidence && findValidAck(snap, 'ship', permissionLookup(repo, deps.runner), evidence.createdAt).ok
+  }
+}
+
+function guard(payload: Record<string, unknown>, cwd: string, where: Where | null, deps: HookDeps): Decision {
+  const command = extractCommand(payload)
+  if (command === null) return { decision: 'allow', reason: null, rule: 'not-guarded' }
+  const policy = loadPolicy(cwd)
+  let check: MergeCheck | undefined
+  try {
+    const root = where?.root ?? repoRoot(cwd)
+    const repo = where?.repo ?? detectRepo(root)
+    const inner = mergeCheck(cwd, root, repo, deps)
+    check = (words, raw) => { try { return inner(words, raw) } catch { return false } }
+  } catch { check = undefined }
+  return classifyCommand(command, policy, check)
+}
+
+function preTool(harness: Harness, input: HookInput, deps: HookDeps): void {
+  const payload = input.payload
+  if (!payload) {
+    // Too big or unreadable: a tool we can name as harmless passes, anything else asks.
+    const tool = /"tool_name"\s*:\s*"([^"]+)"/.exec(input.head)?.[1]
+    if (tool && !['Bash', 'shell', 'exec_command', 'local_shell'].includes(tool)) return
+    return deps.out(renderDecision(harness, 'ask', 'the ship guard could not read the hook payload — run the command by hand'))
+  }
+  const cwd = typeof payload.cwd === 'string' ? payload.cwd : process.cwd()
+  let where: Where | null = null
+  try { where = locate(cwd, deps.host) } catch { where = null }
+
+  if (where && WRITE_TOOLS.has(String(payload.tool_name ?? ''))) {
+    try {
+      const local = readLocal(where)
+      refresh(where, local, deps)
+      if (local.lostTo) {
+        const holder = refresh(where, local, deps, true).holder
+        if (local.lostTo && holder) {
+          let saved = ''
+          if (local.rescuedFor !== holder.commentId) {
+            const branch = rescueBranchName(basename(where.top), deps.now(), deps.host)
+            const rescue = rescueWork(where.top, branch, basename(where.top))
+            saved = rescue.ok ? ` Uncommitted work (if any) was saved to ${branch}.` : ` Saving uncommitted work failed: ${rescue.reason}.`
+            local.rescuedFor = holder.commentId
+          }
+          writeLocal(where, local)
+          return deps.out(renderDecision(harness, 'deny', `issue #${where.number} is now held by ${local.lostTo}, so this session must stop changing files.${saved} To take it back: vegafactory issue claim ${where.number} --harness ${harness} --model <model> --take-back-by <login>`))
+        }
+      }
+      writeLocal(where, local)
+    } catch { /* a failed ownership check never blocks */ }
+  }
+
+  let decision: Decision
+  try {
+    decision = guard(payload, cwd, where, deps)
+  } catch (error) {
+    decision = { decision: 'ask', reason: `the ship guard failed (${(error as Error).message}) — run the command by hand`, rule: 'guard-error' }
+  }
+  if (decision.decision === 'ask') deps.out(renderDecision(harness, 'ask', decision.reason!))
+}
+
+function takeBack(where: Where, harness: Harness, model: string) {
+  return `vegafactory issue claim ${where.number} --harness ${harness} --model ${model} --take-back-by <login>`
+}
+
+function advisory(event: HookEvent, harness: Harness, payload: Record<string, unknown>, deps: HookDeps): void {
+  const cwd = typeof payload.cwd === 'string' ? payload.cwd : process.cwd()
+  const where = locate(cwd, deps.host)
+  if (!where) return
+  const local = readLocal(where)
+  const model = typeof payload.model === 'string' && payload.model ? payload.model : '<model>'
+
+  if (event === 'session-start') {
+    const { holder, state } = refresh(where, local, deps, true)
+    writeLocal(where, local)
+    const lines = [
+      `This worktree works issue #${where.number} (${where.repo}), state ${state ?? 'unknown'}, held by ${holder ? `${label(holder)}${local.held ? ' — this worktree' : ''}` : 'nobody'}.`,
+      `Its local copy is ${cacheDir(where.root, where.repo, where.number)}; read it with \`vegafactory issue sync ${where.number}\` first.`,
+    ]
+    if (holder && !local.held) lines.push(`Someone else holds it. Do not change files; to take it back: \`${takeBack(where, harness, model)}\`.`)
+    else if (!holder) lines.push(`Nobody holds it; claim it before working: \`vegafactory issue claim ${where.number} --harness ${harness} --model ${model}\`.`)
+    return deps.out(context('SessionStart', lines.join('\n')))
+  }
+  if (event === 'prompt') {
+    const { holder } = refresh(where, local, deps)
+    writeLocal(where, local)
+    if (holder && !local.held) {
+      deps.out(context('UserPromptSubmit', `Issue #${where.number} is held by ${label(holder)}, not this worktree (${where.owner}). Do not change files; to take it back: \`${takeBack(where, harness, model)}\`.`))
+    }
+    return
+  }
+  if (event === 'post-tool') {
+    recordActivity(local, deps.now())
+    if (local.held && (local.lastPush === null || deps.now() - local.lastPush >= HEARTBEAT_EVERY_MS)) pushHeartbeat(where, local, deps)
+    return writeLocal(where, local)
+  }
+  if (event === 'session-end') {
+    recordActivity(local, deps.now())
+    if (local.held) pushHeartbeat(where, local, deps)
+    return writeLocal(where, local)
+  }
+  if (event === 'stop') {
+    recordActivity(local, deps.now())
+    writeLocal(where, local)
+    if (local.lostTo || !where.branch || issueFromBranch(where.branch) !== where.number || midOperation(where.top)) return
+    if (!git(where.top, ['status', '--porcelain']).out) return
+    if (!git(where.top, ['add', '-A']).ok) return
+    if (!git(where.top, ['commit', '--quiet', '-m', `wip: #${where.number} turn checkpoint`]).ok) return
+    deps.detach(['git', 'push', '--quiet', '-u', 'origin', `HEAD:refs/heads/${where.branch}`], where.top)
+  }
+}
+
+export function parseHookArgs(argv: string[]): { event: HookEvent; harness: Harness | null } {
+  const [event, ...rest] = argv
+  if (!HOOK_EVENTS.includes(event as HookEvent)) throw new Error(`unknown hook event: ${event ?? '(none)'} — run vegafactory hook --help`)
+  const at = rest.indexOf('--harness')
+  const harness = at === -1 ? null : rest[at + 1]
+  return { event: event as HookEvent, harness: harness === 'claude' || harness === 'codex' ? harness : null }
+}
+
+export async function runHook(argv: string[], deps: HookDeps = defaultDeps(), stdin: NodeJS.ReadableStream = process.stdin): Promise<number> {
+  const { event, harness } = parseHookArgs(argv)
+  const input = await readHookInput(stdin)
+  if (event === 'pre-tool') {
+    if (!harness) {
+      // Both harnesses understand the legacy block; a mis-wired guard must not pass silently.
+      deps.out(JSON.stringify({ decision: 'block', reason: 'the ship guard is wired without --harness claude|codex — fix the hook command' }))
+      return 0
+    }
+    preTool(harness, input, deps)
+    return 0
+  }
+  if (!harness || !input.payload) return 0
+  try { advisory(event, harness, input.payload, deps) } catch { /* advisory only */ }
+  return 0
+}
