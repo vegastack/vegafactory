@@ -806,7 +806,8 @@ function report(options: Options, payload: SyncReport, code: number) {
 
 async function init(options: Options) {
   const { NEXT_STEP, checkTools, enableRepoHooks, ensureGlobalCli, probe, renderSteps } = await import('./init.ts')
-  const tools = checkTools(probe)
+  const top = probe('git', ['rev-parse', '--show-toplevel'], process.cwd())
+  const tools = checkTools(probe, process.versions.node, top.code === 0 ? top.stdout : process.cwd())
   console.log(renderSteps(tools))
   if (tools.some(step => step.status === 'fail')) {
     console.log('\nFix the FAIL lines above, then run init again.')

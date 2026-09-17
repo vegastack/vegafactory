@@ -1,6 +1,6 @@
 ---
 name: dev-status
-description: The operator's board — whose move is it, across every issue in the dev workflow. Use when asked "status", "what needs me", "where are we", "what's in flight", "anything stale?", "what should I look at next", or for a board overview of waiting-on-operator / planning / ready / working / ready-to-ship issues. Not for the project's history ("catch me up" is dev-chronicle), implementing or reviewing anything, or repo bootstrap (dev-setup).
+description: The operator's board — whose move is it, across every issue in the dev workflow. Use when asked "status", "what needs me", "where are we", "what's in flight", "anything stale?", "what should I look at next", or for a board overview of waiting-on-operator / planning / queued / in-progress / ready-to-ship issues. Not for the project's history ("catch me up" is dev-chronicle), implementing or reviewing anything, or repo bootstrap (dev-setup).
 ---
 
 # dev-status

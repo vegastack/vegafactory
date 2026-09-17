@@ -1,9 +1,9 @@
 import { beforeEach, describe, expect, test } from 'bun:test'
 import { spawnSync } from 'node:child_process'
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
 import { hostname, tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { cacheDir, commentType, readState, syncIssue, withLock } from '../src/issue-cache.ts'
+import { cacheDir, commentType, readState, syncIssue, takeOver, withLock } from '../src/issue-cache.ts'
 import { ackBody, artifactHash, runIssue } from '../src/issue.ts'
 import { FakeGitHub } from './fake-github.ts'
 
@@ -171,12 +171,54 @@ describe('sync', () => {
 
   test('--dry-run writes nothing and drop needs --yes', () => {
     gh.addIssue({ number: 7 })
-    expect(run('label', '7', '--add', 'risky', '--dry-run').text).toContain('dry run: would label')
+    expect(run('label', '7', '--add', 'risky', '--dry-run').text).toContain('dry run: would set labels')
     expect(gh.calls).toEqual([])
     sync(7)
     expect(() => run('drop', '7')).toThrow('pass --yes')
     expect(run('drop', '7', '--yes').code).toBe(0)
     expect(existsSync(cacheDir(root, 'o/r', 7))).toBe(false)
+  })
+
+  test('a dry run still refuses what the real run would refuse', () => {
+    gh.addIssue({ number: 7 })
+    expect(() => run('comment', '7', '--dry-run')).toThrow('--file is required')
+    expect(() => run('ack', '7', '--dry-run')).toThrow('--stage must be')
+    expect(() => run('label', '7', '--state', 'nope', '--dry-run')).toThrow('--state must be one of')
+    expect(() => run('edit-comment', '7', '5', '--file', 'missing.md', '--since', '0', '--dry-run')).toThrow()
+    expect(gh.calls).toEqual([])
+  })
+
+  test('an issue never ends up with two state labels', () => {
+    gh.addIssue({ number: 7, labels: ['planning', 'medium'] })
+    expect(() => run('label', '7', '--add', 'queued')).toThrow('state labels change only through --state')
+    expect(run('label', '7', '--state', 'queued', '--add', 'risky').code).toBe(0)
+    expect(gh.issues.get(7)!.labels.sort()).toEqual(['medium', 'queued', 'risky'])
+    expect(gh.calls.filter((call) => call.startsWith('PUT'))).toHaveLength(1)
+  })
+
+  test('a label edit against a stale cursor is refused', () => {
+    gh.addIssue({ number: 7, labels: ['planning', 'medium'] })
+    const cursor = sync(7).cursor
+    gh.editBody(7, 'changed by someone else')
+    expect(() => run('label', '7', '--add', 'risky', '--since', String(cursor))).toThrow('conflict')
+    expect(gh.issues.get(7)!.labels).not.toContain('risky')
+  })
+
+  test('two waiters racing a dead lock never remove the lock a live process took', () => {
+    const dir = cacheDir(root, 'o/r', 9)
+    const lock = join(dir, '.lock')
+    const dead = spawnSync('true').pid!
+    mkdirSync(lock, { recursive: true })
+    writeFileSync(join(lock, 'owner.json'), JSON.stringify({ token: 'dead', pid: dead, host: hostname(), at: Date.now() }))
+    // A second waiter already replaced the dead lock and a live process now holds it.
+    rmSync(lock, { recursive: true })
+    mkdirSync(lock)
+    writeFileSync(join(lock, 'owner.json'), JSON.stringify({ token: 'live', pid: process.pid, host: hostname(), at: Date.now() }))
+    // The first waiter resumes with its stale judgement: the takeover must re-read and back off.
+    takeOver(lock, 'dead', 60_000)
+    expect(existsSync(join(lock, 'owner.json'))).toBe(true)
+    expect(existsSync(`${lock}.steal`)).toBe(false)
+    expect(JSON.parse(readFileSync(join(lock, 'owner.json'), 'utf8')).token).toBe('live')
   })
 
   test('a write holds the lock from its conflict check through its refresh', () => {
@@ -249,6 +291,14 @@ describe('acks and checks', () => {
     const reply = gh.addComment(7, 'approved, go', 'mk')
     acked('plan', 'mk', `comment:${reply.id}`, 'vegafactory[bot]', 'Bot', 'approved, go')
     expect(run('check', '7', '--for', 'implement').code).toBe(0)
+  })
+
+  test('ticking a plan box does not age out a relayed ack', () => {
+    const reply = gh.addComment(7, 'approved, go', 'mk')
+    acked('plan', 'mk', `comment:${reply.id}`, 'vegafactory[bot]', 'Bot', 'approved, go')
+    const planComment = gh.issues.get(7)!.comments[0]!
+    gh.editComment(planComment.id, planComment.body.replace('- [ ] Task 1', '- [x] Task 1'))
+    expect(run('check', '7', '--for', 'implement', '--resume', 'true').code).toBe(0)
   })
 
   test('a relayed ack must quote the cited words', () => {

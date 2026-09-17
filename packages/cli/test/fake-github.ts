@@ -154,6 +154,13 @@ export class FakeGitHub {
     }
     if ((m = /^repos\/o\/r\/issues\/(\d+)\/labels$/.exec(route!))) {
       const issue = this.issues.get(Number(m[1]))!
+      if (method === 'PUT') {
+        issue.updated_at = this.tick()
+        for (const name of issue.labels.filter((label) => !payload.labels.includes(label))) issue.events.push({ event: 'unlabeled', label: { name }, created_at: issue.updated_at })
+        for (const name of payload.labels.filter((label: string) => !issue.labels.includes(label))) issue.events.push({ event: 'labeled', label: { name }, created_at: issue.updated_at })
+        issue.labels = [...payload.labels]
+        return this.respond(200, [])
+      }
       issue.updated_at = this.tick()
       for (const label of payload.labels) {
         if (issue.labels.includes(label)) continue

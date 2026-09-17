@@ -1,9 +1,9 @@
 import { describe, expect, test } from 'bun:test'
-import { mkdirSync, mkdtempSync, realpathSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, realpathSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { assertSupportedPlatform, billingVariables, childEnvironment } from '../src/env.ts'
-import { checkTools, enableRepoHooks, ensureGlobalCli, nodeMajor, type Probe } from '../src/init.ts'
+import { checkTools, enableRepoHooks, ensureGlobalCli, nodeMajor, usesBun, type Probe } from '../src/init.ts'
 
 describe('subscription-only child environment', () => {
   test('parent Claude Code variables are dropped, including the desktop proxy URL', () => {
@@ -64,6 +64,22 @@ describe('init', () => {
     expect(byName.agents!.status).toBe('fail')
     expect(byName.bun!.status).toBe('warn')
     expect(nodeMajor('24.0.0')).toBe(24)
+  })
+
+  test('missing Bun fails only in a project that uses Bun', () => {
+    const noBun = fakeProbe({ ...healthy, 'bun --version': { code: 127 } }).probe
+    const bunProject = mkdtempSync(join(tmpdir(), 'init-bun-'))
+    writeFileSync(join(bunProject, 'package.json'), JSON.stringify({ packageManager: 'bun@1.3.14' }))
+    const lockProject = mkdtempSync(join(tmpdir(), 'init-lock-'))
+    writeFileSync(join(lockProject, 'bun.lock'), '')
+    const npmProject = mkdtempSync(join(tmpdir(), 'init-npm-'))
+    writeFileSync(join(npmProject, 'package.json'), JSON.stringify({ packageManager: 'npm@11.0.0' }))
+    const bunStep = (dir: string | null) => checkTools(noBun, '24.3.0', dir).find((step) => step.name === 'bun')!
+    expect(bunStep(bunProject).status).toBe('fail')
+    expect(bunStep(lockProject).status).toBe('fail')
+    expect(bunStep(npmProject).status).toBe('warn')
+    expect(bunStep(null).status).toBe('warn')
+    expect(usesBun(bunProject)).toBe(true)
   })
 
   test('the global CLI is installed only when the right version is missing', () => {
