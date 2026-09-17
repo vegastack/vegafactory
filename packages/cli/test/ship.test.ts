@@ -33,7 +33,7 @@ const hashes = () => {
 }
 const reviewed = (over: Partial<CommentData> = {}, login = 'mk', type = 'User') => gh.addComment(7, renderComment({
   cycle: 1, round: 1, sha: git(root, 'rev-parse', 'HEAD'), base: git(root, 'rev-parse', 'origin/main'),
-  ...hashes(), reviewer: 'codex', mode: 'cross-tool', verdict: 'clean', findings: [], ...over,
+  ...hashes(), reviewer: 'codex', mode: 'cross-tool', fallback: null, verdict: 'clean', findings: [], ...over,
 } as CommentData, []), login, type)
 
 const run = (...extra: string[]) => {
@@ -342,11 +342,14 @@ test('a same-tool fallback review, recorded through the CLI, is trusted and ship
   // The other tool is missing, so this session reviewed the diff itself and hands the JSON over.
   mkdirSync(join(root, '.vegastack/.tmp'), { recursive: true })
   writeFileSync(join(root, '.vegastack/.tmp/fallback.json'), JSON.stringify({ verdict: 'clean', findings: [] }))
+  // Nothing on PATH, so the tool that should have reviewed is genuinely unavailable.
+  const empty = mkdtempSync(join(tmpdir(), 'no-tools-'))
   const code = await runReview(['7', '--reviewer', 'claude', '--record', '.vegastack/.tmp/fallback.json'], {
-    runner, cwd: root, env: { PATH: process.env.PATH, HOME: process.env.HOME }, out: () => {},
+    runner, cwd: root, env: { PATH: empty, HOME: process.env.HOME }, out: () => {},
   })
   expect(code).toBe(0)
   const comment = gh.issues.get(7)!.comments.find((c) => c.body.startsWith('<!-- vsk:v1 type=review'))!
   expect(comment.body).toContain('mode=same-tool')
+  expect(comment.body).toContain('codex is not installed')
   expect(run()).toMatchObject({ code: 0, ok: true, blocks: [] })
 })

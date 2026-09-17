@@ -11,7 +11,7 @@ vegafactory review 42 --reviewer codex                  # pick the reviewer inst
 vegafactory review 42 --resume                          # refuse unless this machine's session can be resumed
 vegafactory review 42 --dry-run                         # print the packet and the exact command, run nothing
 vegafactory review 42 --json                            # the result as JSON, for a dispatcher
-vegafactory review 42 --record <file>                   # post findings this session produced (the fallback)
+vegafactory review 42 --record <file>                   # post findings this session produced (only when the other tool cannot review)
 ```
 
 The reviewer defaults to the tool this command is *not* running inside, read from the harness's own environment markers. Where neither is detectable (a plain shell), the command refuses until `--reviewer` says which tool reviews.

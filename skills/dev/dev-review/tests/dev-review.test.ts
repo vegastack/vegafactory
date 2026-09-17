@@ -10,7 +10,7 @@ import { renderComment, readReviewComment } from '../../../../packages/cli/src/r
 describe('review comment ↔ issue cache contract', () => {
   const data = {
     cycle: 1, round: 2, sha: 'abc1234def5678', base: 'origin/main', brief: 'a'.repeat(12), plan: null,
-    reviewer: 'codex' as const, mode: 'cross-tool' as const, verdict: 'needs-fixes' as const,
+    reviewer: 'codex' as const, mode: 'cross-tool' as const, fallback: null, verdict: 'needs-fixes' as const,
     findings: [{ id: 'F1', axis: 'bugs' as const, severity: 'must-fix' as const, file: 'src/a.ts', line: 7, issue: 'null deref', fix: 'guard it' }],
   }
   const body = renderComment(data, ['- Cycle 1 round 1 @ def5678 — needs-fixes — must-fix: F1'])

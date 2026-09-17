@@ -14,7 +14,8 @@ vegafactory review 42 --dry-run --json      # the packet the reviewer would get
 vegafactory review 42 --reviewer claude --record .vegastack/.tmp/42-review.json
 ```
 
-- `--reviewer` names **your own** tool, the one that did the reviewing: the comment records `agent=<tool> mode=same-tool`, so the record shows plainly that nothing independent reviewed this.
+- The command checks first that the other tool really cannot review: not installed, not runnable, or not signed in (`codex login status` / `claude auth status`). If it answers normally, `--record` refuses — the cross-tool review runs. The operator can still allow one for a given head, in a line of their own on the issue: `accept same-tool review @ <sha7>`.
+- `--reviewer` names **your own** tool, the one that did the reviewing: the comment records `agent=<tool> mode=same-tool` and the reason it was allowed ("codex is not installed", "allowed by @mk"), so the record shows plainly that nothing independent reviewed this, and why.
 - The JSON file is exactly what a cross-tool reviewer returns: `{"verdict": "clean|needs-fixes", "findings": [{id, axis, severity, file, line, issue, fix}]}`. It is validated the same way, the verdict is derived from the findings, and ids you were told to re-check keep their numbers.
 - Write it under `.vegastack/.tmp/`, which is gitignored — the command refuses a dirty worktree, and a stray file would be one.
 - Everything else is unchanged: one comment per issue, three rounds per cycle, the same hand-backs.

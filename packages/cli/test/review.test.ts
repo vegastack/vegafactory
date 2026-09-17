@@ -17,6 +17,12 @@ const path = require('node:path')
 const tool = path.basename(process.argv[1])
 const args = process.argv.slice(2)
 const dir = process.env.FAKE_DIR
+// The availability probe, answered without touching the reply queue.
+if (args[0] === '--version') { process.stdout.write('fake 1.0\\n'); process.exit(0) }
+if ((args[0] === 'login' || args[0] === 'auth') && args[1] === 'status') {
+  if (process.env.FAKE_SIGNED_OUT) { process.stdout.write('Not logged in\\n'); process.exit(1) }
+  process.stdout.write('Logged in\\n'); process.exit(0)
+}
 let stdin = ''
 process.stdin.on('data', (c) => { stdin += c })
 process.stdin.on('end', () => {
@@ -94,7 +100,7 @@ const planHash = () => artifactHash(gh.issues.get(7)!.comments.find((c) => c.bod
 const comment = (over: Partial<CommentData> = {}, history: string[] = []) =>
   renderComment({
     cycle: 1, round: 1, sha: 'a'.repeat(40), base: 'b'.repeat(40), brief: briefHash(), plan: planHash(),
-    reviewer: 'codex', mode: 'cross-tool', verdict: 'clean', findings: [], ...over,
+    reviewer: 'codex', mode: 'cross-tool', fallback: null, verdict: 'clean', findings: [], ...over,
   } as CommentData, history)
 const readState = () => JSON.parse(readFileSync(statePath(), 'utf8')) as ReviewState
 
@@ -547,8 +553,10 @@ describe('parallel axes keep their own findings', () => {
     const security = rounds.find((call) => call.args.includes('session-sec'))!
     expect(bugs.stdin).toContain('Open findings from your last round: B1.')
     expect(security.stdin).toContain('Open findings from your last round: S1.')
-    expect(bugs.stdin).not.toContain('S1')
-    expect(security.stdin).not.toContain('B1')
+    expect(bugs.stdin).not.toContain('last round: S1')
+    expect(security.stdin).not.toContain('last round: B1')
+    expect(bugs.stdin.match(/Open findings from your last round: (.*)\./)![1]).toBe('B1')
+    expect(security.stdin.match(/Open findings from your last round: (.*)\./)![1]).toBe('S1')
   })
 })
 
@@ -848,7 +856,7 @@ describe('a comment cannot claim a verdict its findings contradict', () => {
   test('the findings decide, so an inconsistent marker fails trust', async () => {
     const head = git(root, 'rev-parse', 'HEAD')
     // "clean" in the marker and in the JSON, but a must-fix finding in the same JSON.
-    const lying = renderComment({ cycle: 1, round: 1, sha: head, base: git(root, 'rev-parse', 'origin/main'), brief: briefHash(), plan: planHash(), reviewer: 'codex', mode: 'cross-tool', verdict: 'clean', findings: [] } as CommentData, [])
+    const lying = renderComment({ cycle: 1, round: 1, sha: head, base: git(root, 'rev-parse', 'origin/main'), brief: briefHash(), plan: planHash(), reviewer: 'codex', mode: 'cross-tool', fallback: null, verdict: 'clean', findings: [] } as CommentData, [])
       .replace('"findings": []', `"findings": [${JSON.stringify(finding('F1'))}]`)
     gh.addComment(7, lying, 'mk')
     expect(readReviewComment(lying)!.verdict).toBe('needs-fixes')
@@ -988,36 +996,124 @@ describe('what was reviewed must still be there when the verdict lands', () => {
 })
 
 describe('the same-tool fallback records its own review', () => {
+  test('--record refuses while the other tool answers normally', async () => {
+    mkdirSync(join(root, '.vegastack/.tmp'), { recursive: true })
+    writeFileSync(join(root, '.vegastack/.tmp/review.json'), JSON.stringify(verdict([])))
+    await expect(review(['--reviewer', 'claude', '--record', '.vegastack/.tmp/review.json'])).rejects.toThrow('codex answers normally here')
+    expect(reviewComments()).toEqual([])
+  })
+
+  test('a signed-out other tool, or the operator\'s own line, permits it', async () => {
+    mkdirSync(join(root, '.vegastack/.tmp'), { recursive: true })
+    writeFileSync(join(root, '.vegastack/.tmp/review.json'), JSON.stringify(verdict([])))
+    // Signed out: the review that should have run cannot.
+    const { code } = await review(['--reviewer', 'claude', '--record', '.vegastack/.tmp/review.json'], { env: { FAKE_SIGNED_OUT: '1' } })
+    expect(code).toBe(0)
+    expect(reviewComments()[0]!.body).toContain('same-tool fallback (codex is not signed in)')
+
+    // Signed in again, but the operator says a same-tool review is fine for this head.
+    gh.deleteComment(reviewComments()[0]!.id)
+    spawnSync('rm', ['-f', statePath()])
+    gh.addComment(7, `I am fine with this one.\naccept same-tool review @ ${git(root, 'rev-parse', '--short=7', 'HEAD')}`, 'mk')
+    expect((await review(['--reviewer', 'claude', '--record', '.vegastack/.tmp/review.json'])).code).toBe(0)
+    expect(reviewComments()[0]!.body).toContain('same-tool fallback (allowed by @mk)')
+  })
+
   test('--record posts a trusted comment marked as the fallback', async () => {
+    // The other tool is not installed at all (nothing but the fake bin on PATH).
+    spawnSync('rm', ['-f', join(fake, 'bin', 'codex')])
+    const onlyFake = { PATH: join(fake, 'bin') }
     // The scratch directory is gitignored, so recording a result does not dirty the worktree.
     const result = join(root, '.vegastack/.tmp/review.json')
     mkdirSync(join(root, '.vegastack/.tmp'), { recursive: true })
     writeFileSync(result, JSON.stringify(verdict([finding('F1', 'should-fix')])))
-    const { code, text } = await review(['--reviewer', 'claude', '--record', '.vegastack/.tmp/review.json'])
+    const { code, text } = await review(['--reviewer', 'claude', '--record', '.vegastack/.tmp/review.json'], { env: onlyFake })
     expect(code).toBe(0)
     expect(text).toContain('same-tool fallback')
     expect(calls()).toEqual([])
     const body = reviewComments()[0]!.body
     expect(body).toContain('agent=claude mode=same-tool')
-    expect(body).toContain('same-tool fallback')
+    expect(body).toContain('same-tool fallback (codex is not installed)')
     expect(body).toContain('**Finding [F1]**')
     const state = readState()
-    expect(state).toMatchObject({ mode: 'same-tool', cycle: 1, round: 1, sessions: [] })
+    expect(state).toMatchObject({ mode: 'same-tool', cycle: 1, round: 1 })
+    expect(state.sessions.map((session) => session.id)).toEqual([null])
     expect(state.head).toBe(git(root, 'rev-parse', 'HEAD'))
     expect(state.brief).toBe(briefHash())
 
     // A second round records against the same bindings, and keeps the finding's id.
     commit('fix.ts', 'x\n')
     writeFileSync(result, JSON.stringify(verdict([finding('F1', 'should-fix')])))
-    expect((await review(['--reviewer', 'claude', '--record', '.vegastack/.tmp/review.json'])).code).toBe(0)
+    expect((await review(['--reviewer', 'claude', '--record', '.vegastack/.tmp/review.json'], { env: onlyFake })).code).toBe(0)
     expect(reviewComments()[0]!.body).toContain('cycle=1 round=2')
     expect(readState().findings.map((f) => f.id)).toEqual(['F1'])
   })
 
   test('a recorded file that is not a review result refuses', async () => {
+    spawnSync('rm', ['-f', join(fake, 'bin', 'codex')])
     mkdirSync(join(root, '.vegastack/.tmp'), { recursive: true })
     writeFileSync(join(root, '.vegastack/.tmp/bad.json'), JSON.stringify({ verdict: 'clean' }))
-    await expect(review(['--reviewer', 'claude', '--record', '.vegastack/.tmp/bad.json'])).rejects.toThrow('is not a review result')
+    await expect(review(['--reviewer', 'claude', '--record', '.vegastack/.tmp/bad.json'], { env: { PATH: join(fake, 'bin') } })).rejects.toThrow('is not a review result')
     expect(reviewComments()).toEqual([])
+  })
+})
+
+describe('a recorded fallback is split across the axes like any other review', () => {
+  test('a risky fallback keeps security ids apart and routes them next round', async () => {
+    spawnSync('rm', ['-f', join(fake, 'bin', 'codex')])
+    const onlyFake = { PATH: join(fake, 'bin') }
+    gh.issues.get(7)!.labels.push('risky')
+    gh.issues.get(7)!.updated_at = gh.tick()
+    mkdirSync(join(root, '.vegastack/.tmp'), { recursive: true })
+    const file = '.vegastack/.tmp/review.json'
+    writeFileSync(join(root, file), JSON.stringify(verdict([
+      finding('1', 'should-fix'),
+      finding('1', 'must-fix', { axis: 'security' }),
+    ])))
+    expect((await review(['--reviewer', 'claude', '--record', file], { env: onlyFake })).code).toBe(2)
+    const state = readState()
+    expect(state.findings.map((f) => f.id).sort()).toEqual(['B1', 'S1'])
+    expect(state.sessions.map((session) => [session.group.key, session.open])).toEqual([['spec-bugs', ['B1']], ['security', ['S1']]])
+
+    // Round 2: the security finding comes back under its own id, and stays in the security group.
+    commit('fix.ts', 'x\n')
+    writeFileSync(join(root, file), JSON.stringify(verdict([
+      finding('S1', 'must-fix', { axis: 'security' }),
+      finding('2', 'must-fix', { axis: 'bugs' }),
+    ])))
+    expect((await review(['--reviewer', 'claude', '--record', file], { env: onlyFake })).code).toBe(2)
+    const next = readState()
+    expect(next.findings.map((f) => f.id).sort()).toEqual(['B2', 'S1'])
+    expect(next.sessions.map((session) => [session.group.key, session.open])).toEqual([['spec-bugs', ['B2']], ['security', ['S1']]])
+  })
+})
+
+describe('re-running an unchanged review says what it found', () => {
+  test('a clean round 3 answers clean; a needs-fixes round 3 still hands back', async () => {
+    queue('codex', [codexReply(verdict([finding('F1')])), codexReply(verdict([finding('F1')])), codexReply(verdict([]))])
+    await review(['--reviewer', 'codex'])
+    commit('a.ts', '1\n')
+    await review(['--reviewer', 'codex'])
+    commit('b.ts', '2\n')
+    const third = await review(['--reviewer', 'codex'])
+    expect(third.code).toBe(0)
+    // Nothing changed: the clean verdict of round 3 is the answer, not a hand-back.
+    const again = await review(['--reviewer', 'codex'])
+    expect(again.code).toBe(0)
+    expect(again.text).toContain('already reviewed in cycle 1 round 3: clean')
+    expect(calls()).toHaveLength(3)
+  })
+
+  test('an unchanged needs-fixes at the cap hands back with the way forward', async () => {
+    queue('codex', [1, 2, 3].map(() => codexReply(verdict([finding('F1')]))))
+    await review(['--reviewer', 'codex'])
+    commit('a.ts', '1\n')
+    await review(['--reviewer', 'codex'])
+    commit('b.ts', '2\n')
+    await review(['--reviewer', 'codex'])
+    const again = await review(['--reviewer', 'codex'])
+    expect(again.code).toBe(2)
+    expect(again.text).toContain('cycle 1 is spent')
+    expect(calls()).toHaveLength(3)
   })
 })

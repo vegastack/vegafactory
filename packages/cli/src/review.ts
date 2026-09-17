@@ -93,6 +93,22 @@ export function detectReviewer(env: NodeJS.ProcessEnv): Reviewer | null {
   return inClaude ? 'codex' : 'claude'
 }
 
+export type Probe = { available: true; reason: null } | { available: false; reason: string }
+
+// Whether the tool that should have reviewed can run at all. Cheap and bounded: the version it
+// prints, then its own account status — `codex login status` and `claude auth status` both answer
+// offline and cost nothing. This is what makes the same-tool fallback a fact rather than a choice.
+export function probeReviewer(tool: Reviewer, { env = process.env, spawn = spawnSync, timeoutMs = 30_000 } = {}): Probe {
+  const run = (args: string[]) => spawn(tool, args, { env, encoding: 'utf8', timeout: timeoutMs, stdio: ['ignore', 'pipe', 'pipe'] as const })
+  const version = run(['--version'])
+  if ((version.error as NodeJS.ErrnoException | undefined)?.code === 'ENOENT') return { available: false, reason: `${tool} is not installed` }
+  if (version.error || version.status !== 0) return { available: false, reason: `${tool} does not run here` }
+  const status = run(tool === 'codex' ? ['login', 'status'] : ['auth', 'status'])
+  const text = `${status.stdout ?? ''}${status.stderr ?? ''}`
+  if (status.error || status.status !== 0 || !/logged in|"loggedIn"\s*:\s*true/i.test(text)) return { available: false, reason: `${tool} is not signed in` }
+  return { available: true, reason: null }
+}
+
 // The review entry of dev.md's harness-policy line, used only when it names the reviewer.
 // `model: null` (the line says `default`) means the tool's own default model — no model flag.
 export function reviewPolicy(devMd: string, reviewer: Reviewer): { model: string | null; effort: string } | null {
@@ -418,7 +434,7 @@ const safe = (text: string) => text.replace(/<!--/g, '&lt;!--').replace(/\r/g, '
 export type ReviewMode = 'cross-tool' | 'same-tool'
 // `cycle` counts the times the loop has started over: the three-round cap belongs to one cycle, and
 // inputs that change after the cap open the next one.
-export interface CommentData { cycle: number; round: number; sha: string; base: string; brief: string; plan: string | null; reviewer: Reviewer; mode: ReviewMode; verdict: ReviewResult['verdict']; findings: Finding[] }
+export interface CommentData { cycle: number; round: number; sha: string; base: string; brief: string; plan: string | null; reviewer: Reviewer; mode: ReviewMode; fallback: string | null; verdict: ReviewResult['verdict']; findings: Finding[] }
 
 export function readReviewComment(body: string): (CommentData & { history: string[] }) | null {
   const match = FINDINGS_BLOCK.exec(body)
@@ -458,6 +474,8 @@ export function trustedReviews(snap: Snapshot, trusted: Trusted): PostedReview[]
     if (!parsed || !isCommit(parsed.sha) || !isCommit(parsed.base) || (parsed.reviewer !== 'claude' && parsed.reviewer !== 'codex')) continue
     if (!/^[0-9a-f]{12}$/.test(parsed.brief ?? '') || (parsed.plan !== null && !/^[0-9a-f]{12}$/.test(parsed.plan ?? ''))) continue
     if (!Number.isInteger(parsed.cycle) || parsed.cycle < 1 || (parsed.mode !== 'cross-tool' && parsed.mode !== 'same-tool')) continue
+    // A same-tool review says why it was allowed; a cross-tool one has nothing to explain.
+    if (parsed.mode === 'same-tool' ? !(typeof parsed.fallback === 'string' && parsed.fallback.trim()) : parsed.fallback !== null) continue
     const keys = markerKeys(body)
     if (keys.round !== String(parsed.round) || keys.sha !== parsed.sha.slice(0, 7) || keys.agent !== parsed.reviewer || keys.verdict !== parsed.verdict) continue
     if (keys.cycle !== String(parsed.cycle) || keys.mode !== parsed.mode) continue
@@ -504,6 +522,20 @@ export function trustedReview(snap: Snapshot, trusted: Trusted, head?: string): 
 // accepting are all what they look like: not an acceptance.
 export const ACCEPT_PHRASE = /^[*_\s]*accept(?:ing|ed)?\s+review\s+round\s+(\d+)\s*(?:@|at)\s*([0-9a-f]{7,40})[*_\s.!]*$/i
 
+// The operator may also allow a same-tool review for one head, in their own standalone line.
+export const ACCEPT_FALLBACK = /^[*_\s]*accept\s+same-tool\s+review\s*(?:@|at)\s*([0-9a-f]{7,40})[*_\s.!]*$/i
+
+export function acceptedFallback(snap: Snapshot, trusted: Trusted, head: string): CommentEntry | null {
+  for (const entry of Object.values(snap.state.comments).sort((a, b) => a.createdAt.localeCompare(b.createdAt))) {
+    if (entry.type !== 'human' || !trusted(entry)) continue
+    for (const line of snap.body(entry).split('\n')) {
+      const match = ACCEPT_FALLBACK.exec(line)
+      if (match && head.startsWith(match[1]!.toLowerCase())) return entry
+    }
+  }
+  return null
+}
+
 export function acceptedReview(snap: Snapshot, trusted: Trusted, review: PostedReview): CommentEntry | null {
   // The loop runs its rounds first: accepting open findings is what happens after the cap, never a
   // way around the rounds that are still to come.
@@ -545,14 +577,14 @@ export function renderComment(data: CommentData, history: string[]): string {
   ].join('\n')
   return [
     `<!-- vsk:v1 type=review cycle=${data.cycle} round=${data.round} sha=${data.sha.slice(0, 7)} agent=${data.reviewer} mode=${data.mode} verdict=${data.verdict} -->`,
-    `## Review — cycle ${data.cycle}, round ${data.round} @ ${data.sha.slice(0, 7)}${data.mode === 'same-tool' ? ' · same-tool fallback' : ''}`,
+    `## Review — cycle ${data.cycle}, round ${data.round} @ ${data.sha.slice(0, 7)}${data.mode === 'same-tool' ? ` · same-tool fallback (${safe(data.fallback ?? '')})` : ''}`,
     '',
     `**Verdict: ${data.verdict}** — must-fix ${count('must-fix')} · should-fix ${count('should-fix')} · nit ${count('nit')}`,
     '',
     ...(main.length ? main.map(render).flatMap((text) => [text, '']) : ['No findings.', '']),
     ...(nits.length ? [`<details><summary>Nits (${nits.length})</summary>`, '', ...nits.map(render).flatMap((text) => [text, '']), '</details>', ''] : []),
     ...(history.length ? ['### Earlier rounds and cycles', ...history, ''] : []),
-    `Reviewed: ${data.base.slice(0, 7)}...${data.sha.slice(0, 7)} · reviewer: ${data.reviewer}${data.mode === 'same-tool' ? ' (same-tool fallback — no independent tool on this box)' : ''} (vegafactory review)`,
+    `Reviewed: ${data.base.slice(0, 7)}...${data.sha.slice(0, 7)} · reviewer: ${data.reviewer}${data.mode === 'same-tool' ? ` (same-tool fallback: ${safe(data.fallback ?? '')} — nothing independent reviewed this)` : ''} (vegafactory review)`,
     '',
     '<details><summary>Findings JSON</summary>',
     '',
@@ -633,6 +665,20 @@ export async function runReview(argv: string[], deps: ReviewDeps = {}): Promise<
     return handBack((error as Error).message)
   }
 
+  // `--record` stands in for the cross-tool review, so it is allowed only when that review cannot
+  // run: the other tool is missing, broken or signed out — or the operator says so in their own
+  // line on the issue. The reason goes into the comment, where anyone reading the record sees it.
+  let fallback: string | null = null
+  if (args.record) {
+    const missing: Reviewer = reviewer === 'codex' ? 'claude' : 'codex'
+    const approval = acceptedFallback(snap, trusted, head)
+    const probe = probeReviewer(missing, { env })
+    if (probe.available && !approval) {
+      throw new Error(`${missing} answers normally here, so the cross-tool review runs: drop --record. If it must be a same-tool review, the operator says so on the issue in a line of their own: "accept same-tool review @ ${head.slice(0, 7)}"`)
+    }
+    fallback = approval ? `allowed by @${approval.author}` : probe.reason!
+  }
+
   // Local state is evidence about a comment, never a substitute for it. It counts only while the
   // trusted comment on the issue is exactly the one it wrote — same comment, same round, same head,
   // same content. A deleted, forged, edited or malformed comment leaves nothing to stand on, and
@@ -655,6 +701,14 @@ export async function runReview(argv: string[], deps: ReviewDeps = {}): Promise<
   // still hand back, because reviewing the same thing a fourth time is what the cap is for.
   const movedOn = Boolean(prior && (prior.head !== head || !sameArtifacts))
   const newCycle = priorRound >= MAX_ROUNDS && movedOn
+  const unchanged = Boolean(prior && prior.head === head && sameArtifacts && !args.dryRun)
+  // A clean review of exactly this head and these artifacts is the answer, at any round: the cap
+  // exists to stop a fourth look at findings that are still open, not to void a finished review.
+  if (unchanged && prior!.verdict === 'clean') {
+    print({ issue: number, cycle: prior!.cycle, round: prior!.round, verdict: 'clean', findings: prior!.findings, unchanged: true },
+      `HEAD ${head.slice(0, 7)} was already reviewed in cycle ${prior!.cycle} round ${prior!.round}: clean`)
+    return 0
+  }
   if (priorRound >= MAX_ROUNDS && !newCycle) {
     const open = (prior?.findings ?? []).filter((f) => f.severity === 'must-fix').map((f) => f.id)
     return handBack(`cycle ${prior?.cycle ?? 1} is spent: ${MAX_ROUNDS} rounds are done${open.length ? ` and must-fix findings remain open (${open.join(', ')})` : ''}. Commit the fixes, or change the brief or plan, and run this again to start cycle ${(prior?.cycle ?? 1) + 1}; or the operator accepts the findings as they stand`, { cycle: prior?.cycle ?? 1, round: priorRound, open })
@@ -662,7 +716,7 @@ export async function runReview(argv: string[], deps: ReviewDeps = {}): Promise<
 
   // Nothing new since the last round: report it again instead of spending a run. A brief or plan
   // edited since counts as new, because the reviewer judged the text it was given.
-  if (prior && prior.head === head && sameArtifacts && !args.dryRun) {
+  if (unchanged && prior) {
     print({ issue: number, cycle: prior.cycle, round: priorRound, verdict: prior.verdict, findings: prior.findings, unchanged: true },
       `HEAD ${head.slice(0, 7)} was already reviewed in cycle ${prior.cycle} round ${prior.round}: ${prior.verdict}${prior.findings.length ? ` (${prior.findings.map((f) => f.id).join(', ')})` : ''}`)
     return prior.verdict === 'clean' ? 0 : 2
@@ -752,8 +806,15 @@ export async function runReview(argv: string[], deps: ReviewDeps = {}): Promise<
     const parsed = parseJson(readFileSync(resolve(cwd, args.record), 'utf8'))
     const checked = validateReview(parsed)
     if (typeof checked === 'string') throw new Error(`${args.record} is not a review result: ${checked}`)
-    const group = specs[0]!.group
-    result = mergeFindings([{ group, result: checked, prior: specs[0]!.prior }])
+    // Split them the way parallel reviewers would have: a finding belongs to the group that owned
+    // its id last round, else to the group whose axes cover it, so ids and routing stay stable.
+    const groups = specs.map((spec) => spec.group)
+    const mine = (spec: RunSpec) => checked.findings.filter((finding) => {
+      const id = finding.id.trim().replace(/^\[|\]$/g, '')
+      const owner = specs.find((other) => other.prior.includes(id))?.group.key ?? groupOf(finding, groups)
+      return owner === spec.group.key
+    })
+    result = mergeFindings(specs.map((spec) => ({ group: spec.group, prior: spec.prior, result: { verdict: verdictOf(mine(spec)), findings: mine(spec) } })))
   } else {
     writeFileSync(schemaPath, JSON.stringify(REVIEW_SCHEMA, null, 2) + '\n')
     const childEnv = childEnvironment(env)
@@ -764,7 +825,7 @@ export async function runReview(argv: string[], deps: ReviewDeps = {}): Promise<
     result = mergeFindings(done.map((run) => ({ ...run, prior: specs.find((spec) => spec.group.key === run.group.key)?.prior ?? [] })))
   }
 
-  const data: CommentData = { cycle, round, sha: head, base, brief: artifacts.brief, plan: artifacts.plan, reviewer, mode, verdict: result.verdict, findings: result.findings }
+  const data: CommentData = { cycle, round, sha: head, base, brief: artifacts.brief, plan: artifacts.plan, reviewer, mode, fallback, verdict: result.verdict, findings: result.findings }
   const bodyPath = join(dir, `${number}-comment.md`)
   const quiet: string[] = []
   // One comment per issue, upserted under the issue lock: the body is built against the comment as
@@ -772,7 +833,10 @@ export async function runReview(argv: string[], deps: ReviewDeps = {}): Promise<
   // and a second first round edits the existing comment instead of posting a rival one.
   const next: ReviewState = {
     schema: 1, repo, issue: number, reviewer, machine, mode, cycle, round, base, head, brief: artifacts.brief, plan: artifacts.plan,
-    sessions: done.map((run) => ({ group: run.group, id: run.session, open: result.byGroup[run.group.key] ?? [] })),
+    // A recorded round has no reviewer sessions to resume, but it still records which group owns
+    // which finding, so the next round routes them the same way.
+    sessions: (args.record ? specs.map((spec) => ({ group: spec.group, session: null })) : done)
+      .map((run) => ({ group: run.group, id: run.session, open: result.byGroup[run.group.key] ?? [] })),
     comment: { id: 0, digest: commentDigest(data) },
     open: result.findings.map((f) => f.id), verdict: result.verdict, findings: result.findings,
   }
@@ -813,7 +877,7 @@ export async function runReview(argv: string[], deps: ReviewDeps = {}): Promise<
 
   const mustFix = result.findings.filter((f) => f.severity === 'must-fix')
   const summary = [
-    `cycle ${cycle} round ${round} (${reviewer}${mode === 'same-tool' ? ', same-tool fallback' : ''}, ${args.record ? 'recorded' : resumable ? 'resumed' : 'fresh'}): ${result.verdict} — ${result.findings.length} finding(s)`,
+    `cycle ${cycle} round ${round} (${reviewer}${mode === 'same-tool' ? `, same-tool fallback: ${fallback}` : ''}, ${args.record ? 'recorded' : resumable ? 'resumed' : 'fresh'}): ${result.verdict} — ${result.findings.length} finding(s)`,
     ...result.findings.map((f) => `  [${f.id}] ${f.severity} ${f.file}${f.line ? `:${f.line}` : ''} — ${f.issue.split('\n')[0]}`),
     quiet.find((line) => line.startsWith('posted') || line.startsWith('edited')) ?? '',
   ].filter(Boolean)
