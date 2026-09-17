@@ -140,7 +140,7 @@ If you are an agent reading this repository, or pointing a user at it:
 
 - **Load a skill by name.** Each skill's `SKILL.md` is the entry point; its `description` states when to trigger. Detail lives in `references/` and loads only when the workflow routes to it.
 - **`dev.md` outranks the skills.** A project's `.vegastack/dev.md` is its handbook, and where it disagrees with a skill's default, it wins.
-- **Gates are human-held.** No skill authorises approving a brief or a plan, pushing to the default branch, merging, or releasing. Those need the operator's explicit words, every time.
+- **Gates are human-held.** No skill authorises approving a brief or a plan, pushing to the default branch, merging, or releasing. Per issue the operator gives two words — an ack, then "ship it" — and nothing happens without them.
 - **The install layout is flat.** A skill is always at `<surface>/<name>/`. Never construct a path containing a group.
 
 ## Skills
@@ -166,7 +166,7 @@ The issue-driven development workflow: nine stages from project bootstrap to the
 | [dev-implement](skills/dev/dev-implement/) | Implements an approved issue end to end without user input: issue check, claim, dark build, tests, independent review, evidence comment, hand-back | [SKILL.md](skills/dev/dev-implement/SKILL.md) |
 | [dev-debug](skills/dev/dev-debug/) | Reproduce-first bug work: a red repro command before any theory, ranked falsifiable suspects, and the regression test before the fix | [SKILL.md](skills/dev/dev-debug/SKILL.md) |
 | [dev-review](skills/dev/dev-review/) | Independent multi-axis review of finished work — spec, standards, security — with severity-tiered findings and a bounded fix loop | [SKILL.md](skills/dev/dev-review/SKILL.md) |
-| [dev-ship](skills/dev/dev-ship/) | The shipping gates, each spent only by the operator's words: PR, merge per the `merge:` knob, then the project's `## Ship` runbook | [SKILL.md](skills/dev/dev-ship/SKILL.md) |
+| [dev-ship](skills/dev/dev-ship/) | Lands finished work on one operator word: PR, merge queue, merge, the project's `## Ship` runbook and the worktree cleanup | [SKILL.md](skills/dev/dev-ship/SKILL.md) |
 | [dev-status](skills/dev/dev-status/) | The operator's board — a deterministic gh-backed gather of state, progress, staleness and PRs, rendered needs-you-first with one Next action — and the project's chronicle: one story entry per behavior-changing branch, plus the "catch me up" digest read from it and the register | [SKILL.md](skills/dev/dev-status/SKILL.md) |
 
 ### Factory
