@@ -74,7 +74,7 @@ One command handles every event: `vegafactory hook <event> --harness claude|code
 | `SessionStart` | `session-start` | Adds context: the issue, its state, who holds it and where its local copy lives. |
 | `UserPromptSubmit` | `prompt` | Adds a warning with the take-back command when another session holds the issue. |
 | `PreToolUse` | `pre-tool` | The ship guard; after the claim is taken back, denies file and shell tools and saves uncommitted work once as a `wip:` commit on the issue branch, pushed normally (a rejected push keeps the commit local and says so). |
-| `PostToolUse`, `SubagentStop` | `post-tool` | The heartbeat: a local file on every call (`.vegastack/.tmp/claims/<n>.json`), a background `vegafactory issue heartbeat` at most every 5 minutes. |
+| `PostToolUse`, `SubagentStop` | `post-tool` | The heartbeat: a local file on every call (`.vegastack/.tmp/claims/<n>.json`), a background `vegafactory issue heartbeat` at most every 5 minutes, one at a time, that writes a `vsk:claim` row on the holder's own claim comment. Background work is killed after 60 s and every `gh` call after 30 s. Only claims and releases from people with write access count. |
 | `Stop` | `stop` | Commits a dirty worktree as `wip: #<n> turn checkpoint` and pushes the branch in the background, never forced; a rejected push keeps the commit local and is reported on the next prompt or stop. Staged files that look like secrets stop the commit and are named. |
 | `SessionEnd` | `session-end` | A last heartbeat; the claim is kept because the session may resume. |
 
