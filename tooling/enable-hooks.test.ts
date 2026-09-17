@@ -46,7 +46,9 @@ describe('pre-commit', () => {
   // A stand-in `bun` that passes only when the checked tree's check.txt says "good".
   function fakeBun(): string {
     const bin = temp()
-    writeFileSync(join(bin, 'bun'), '#!/bin/sh\ngrep -qx good check.txt\n')
+    // Passes when check.txt is good, or when an untracked extra.txt is visible — so a hook
+    // that checked the working tree instead of the staged snapshot would wrongly pass.
+    writeFileSync(join(bin, 'bun'), '#!/bin/sh\ngrep -qx good check.txt || test -f extra.txt\n')
     chmodSync(join(bin, 'bun'), 0o755)
     return bin
   }
