@@ -64,11 +64,14 @@ describe('collectors', () => {
     expect(events).toHaveLength(2)
     expect(events[0]).toMatchObject({
       harness: 'codex', model: 'gpt-5.6-sol', repo: 'acme/demo', issue: 43, skill: 'dev-review', outcome: 'tool_use',
+      // Timed from the turn's start, not from the tool call the record is written beside.
+      durationMs: 20_000,
       // Codex counts cached tokens inside input_tokens; the event splits them out.
       tokens: { input: 20_228, output: 262, cacheRead: 2000, cacheWrite: 300 },
     })
     // task_complete names how the turn ended, on the turn's last response.
-    expect(events[1]).toMatchObject({ skill: null, outcome: 'end_turn', tokens: { input: 10_000, cacheRead: 20_000 } })
+    // The second response is timed from the tool output that preceded it.
+    expect(events[1]).toMatchObject({ skill: null, outcome: 'end_turn', durationMs: 38_000, tokens: { input: 10_000, cacheRead: 20_000 } })
     expect(JSON.stringify(events)).not.toContain('redacted')
   })
 

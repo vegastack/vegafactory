@@ -245,8 +245,11 @@ export function parseCodex(text: string, context: ParseContext): ParseResult {
     try { entry = JSON.parse(line) as typeof entry } catch { continue }
     const at = Date.parse(String(entry.timestamp ?? ''))
     if (!Number.isFinite(at)) continue
-    const durationMs = gap(carry, at)
     const payload = entry.payload ?? {}
+    // A response is timed from when the model could start writing it: the turn's start or the
+    // previous tool output. Codex logs its token record next to the tool call it just wrote, so
+    // timing it from the line before would report nothing.
+    if ((entry.type === 'event_msg' && payload.type === 'task_started') || (entry.type === 'response_item' && String(payload.type ?? '').endsWith('_output'))) carry.last = at
     if (entry.type === 'session_meta') {
       carry.session = typeof payload.session_id === 'string' ? payload.session_id : null
       carry.cwd = typeof payload.cwd === 'string' ? payload.cwd : null
@@ -276,6 +279,7 @@ export function parseCodex(text: string, context: ParseContext): ParseResult {
     const usage = payload.usage as Record<string, unknown> | undefined
     if (!usage) continue
     const id = hash(`codex|${carry.session ?? ''}|${String(payload.response_id ?? '')}`)
+    const durationMs = gap(carry, at)
     if (!remember(carry, id)) continue
     const site = context.site(carry.cwd ?? null, carry.branch ?? null, carry.repo ?? null)
     // Codex counts cached tokens inside input_tokens; Claude reports them separately. Subtracting
