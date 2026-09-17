@@ -133,7 +133,7 @@ describe('guard', () => {
 
   test('gh pr merge passes only with a ship it after the latest evidence on the issue its branch names', async () => {
     expect((await hook('pre-tool', bash('gh pr merge 12 --squash'))).json().hookSpecificOutput.permissionDecision).toBe('ask')
-    gh.addComment(7, '<!-- vsk:v1 type=evidence -->\nit works')
+    gh.addComment(7, '<!-- vsk:v1 type=evidence -->\nit works\n- [ ] done')
     gh.addComment(7, ackBody({ stage: 'ship', by: 'mk', brief: artifactHash('Export CSV'), plan: null, source: 'session', quote: 'ship it' }))
     expect((await hook('pre-tool', bash('gh pr merge 12 --squash'))).text).toBe('')
     expect((await hook('pre-tool', bash('gh pr merge --squash'))).text).toBe('')
@@ -142,6 +142,15 @@ describe('guard', () => {
     prHead = 'feat/8-other'
     expect((await hook('pre-tool', bash('gh pr merge 12'))).text).toContain('"ask"')
     prHead = 'feat/7-export'
+    // Editing the evidence after "ship it" voids it, as issue check says; ticking a box does not.
+    const evidence = gh.issues.get(7)!.comments.find((c) => c.body.includes('type=evidence'))!
+    gh.editComment(evidence.id, '<!-- vsk:v1 type=evidence -->\nit works\n- [x] done')
+    expect((await hook('pre-tool', bash('gh pr merge 12'))).text).toBe('')
+    gh.editComment(evidence.id, '<!-- vsk:v1 type=evidence -->\nit works, edited')
+    expect((await hook('pre-tool', bash('gh pr merge 12'))).text).toContain('"ask"')
+    gh.editComment(evidence.id, '<!-- vsk:v1 type=evidence -->\nit works')
+    gh.addComment(7, ackBody({ stage: 'ship', by: 'mk', brief: artifactHash('Export CSV'), plan: null, source: 'session', quote: 'ship it' }))
+    expect((await hook('pre-tool', bash('gh pr merge 12'))).text).toBe('')
     gh.addComment(7, '<!-- vsk:v1 type=evidence -->\nnew evidence')
     expect((await hook('pre-tool', bash('gh pr merge 12'))).text).toContain('"ask"')
   })

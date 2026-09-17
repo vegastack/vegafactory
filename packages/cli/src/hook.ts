@@ -11,7 +11,7 @@ import { claimsOf, holderOf, ownerId, trustedAuthors, HEARTBEAT_EVERY_MS, type H
 import { defaultRunner, type GhRunner } from './gh.ts'
 import { classifyCommand, extractCommand, isShellTool, loadPolicy, mergeTarget, type Decision, type MergeCheck } from './guard-rules.ts'
 import { cacheDir, readBody, readState, syncIssue } from './issue-cache.ts'
-import { detectRepo, findValidAck, latestOfType, permissionLookup, repoRoot, snapshot } from './issue.ts'
+import { detectRepo, evidenceChangedAt, findValidAck, latestOfType, permissionLookup, repoRoot, snapshot } from './issue.ts'
 import { stateOf } from './labels.ts'
 
 export const HOOK_EVENTS = ['session-start', 'prompt', 'pre-tool', 'post-tool', 'stop', 'session-end'] as const
@@ -339,7 +339,7 @@ function mergeCheck(cwd: string, root: string, repo: string, deps: HookDeps): Me
     syncIssue({ root, repo, number, runner: deps.runner })
     const snap = snapshot(cacheDir(root, repo, number))
     const evidence = latestOfType(snap, 'evidence')
-    return !!evidence && findValidAck(snap, 'ship', permissionLookup(repo, deps.runner), evidence.createdAt).ok
+    return !!evidence && findValidAck(snap, 'ship', permissionLookup(repo, deps.runner), evidenceChangedAt(evidence)).ok
   }
 }
 

@@ -127,6 +127,9 @@ export function findValidAck(snap: Snapshot, stage: AckStage, permission: Permis
 
 export type CheckFor = 'plan' | 'implement' | 'ship'
 
+// A "ship it" must postdate the evidence's last meaningful edit; editing the evidence voids it.
+export const evidenceChangedAt = (evidence: CommentEntry) => evidence.changedAt || evidence.updatedAt
+
 export interface CheckResult { ok: boolean; blocks: string[]; warns: string[]; state: State | null; size: string | null }
 
 export function checkIssue(snap: Snapshot, purpose: CheckFor, permission: PermissionLookup, options: { repo: string; devMdRepo?: string | null; resume?: boolean } ): CheckResult {
@@ -161,8 +164,7 @@ export function checkIssue(snap: Snapshot, purpose: CheckFor, permission: Permis
   } else if (purpose === 'ship') {
     const evidence = latestOfType(snap, 'evidence')
     if (!evidence) blocks.push('no evidence comment yet')
-    // Editing the evidence after "ship it" voids it, so compare with its last edit.
-    const ack = findValidAck(snap, 'ship', permission, evidence?.updatedAt ?? null)
+    const ack = findValidAck(snap, 'ship', permission, evidence ? evidenceChangedAt(evidence) : null)
     if (!ack.ok) blocks.push(`no "ship it": ${ack.reason}`)
   }
   if (/^##\s+Assumptions\b[\s\S]*?^\s*-\s+(?!\[x\])/im.test(readBody(snap.dir, 'issue.md')) && purpose === 'implement') {
