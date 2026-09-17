@@ -1,7 +1,7 @@
 import { describe, expect, test } from 'bun:test'
 import {
   ageMinutes, defaultClonePath, factoryConfigPath, isStale,
-  parseControlRoomKnob, parseSyncMaxAge, readFactoryConfig, serializeFactoryConfig, withSyncResult,
+  loadConfiguredPolicy, parseControlRoomKnob, parseSyncMaxAge, readFactoryConfig, serializeFactoryConfig, withSyncResult,
 } from '../src/control-room.ts'
 
 const DEV_MD = [
@@ -21,8 +21,17 @@ describe('control-room knob and machine state', () => {
   })
 
   test('no knob, or a knob set to none, resolves to null — skill defaults apply', () => {
-    expect(parseControlRoomKnob('## Knobs\nreview: subagent\n')).toBeNull()
+    expect(parseControlRoomKnob('## Knobs\ntests: required\n')).toBeNull()
     expect(parseControlRoomKnob('## Knobs\ncontrol-room: none\n')).toBeNull()
+  })
+
+  // The `review:` knob is retired: an old profile keeps resolving, so sync never blocks on it.
+  test('a profile that still carries a review knob resolves with no blocks', () => {
+    const resolved = loadConfiguredPolicy({ home: '/nonexistent', repo: 'vegastack/billing', devMd: 'review: cross-agent-risky\ntests: required\n' })
+    expect(resolved.blocks).toEqual([])
+    expect(resolved.ok).toBe(true)
+    expect(resolved.policy.values.review).toBeUndefined()
+    expect(resolved.policy.values.tests).toBe('required')
   })
 
   test('a knob a profile has never synced parses with a null sha', () => {

@@ -40,8 +40,24 @@ test('chronicle on/off remains an ordinary knob alongside its harness stage', ()
   expect(parsePolicy('chronicle: maybe').blocks).toContain('invalid or duplicate harness stage: chronicle')
 })
 
-test.each(['stats: maybe', 'stats: on\nstats: off', 'policy-schema: 9', 'harness-policy: plan unknown model high', 'review: none', '```vsk-policy\n{bad}\n```'])('known malformed input refuses: %s', text => {
+test.each(['stats: maybe', 'stats: on\nstats: off', 'policy-schema: 9', 'harness-policy: plan unknown model high', '```vsk-policy\n{bad}\n```'])('known malformed input refuses: %s', text => {
   expect(resolvePolicy({ repo: text, identity }).ok).toBe(false)
+})
+
+test('the retired review knob is ignored, and review stays a harness stage', () => {
+  for (const line of ['review: cross-agent-risky', 'review: subagent   # an old profile', 'review: none']) {
+    const result = resolvePolicy({ repo: `${line}\ntests: required`, identity })
+    expect(result.blocks).toEqual([])
+    expect(result.ok).toBe(true)
+    expect(result.policy.values.review).toBeUndefined()
+    expect(result.policy.values.tests).toBe('required')
+  }
+  const stage = parsePolicy('review: codex fixture-model xhigh')
+  expect(stage.blocks).toEqual([])
+  expect(stage.values.stages.review).toEqual({ harness: 'codex', model: 'fixture-model', effort: 'xhigh' })
+  // An organization cannot lock a knob that no longer exists.
+  const org = authority({ locked: { review: 'cross-agent' } })
+  expect(resolvePolicy({ org, repo: 'tests: required', identity, freshness }).ok).toBe(false)
 })
 
 test('schema2 authority requires an explicit policy-schema2 marker regardless of document order', () => {
@@ -154,7 +170,7 @@ test.each([
 
 test('group cannot insert org authority, while learning cannot override a quality lock', () => {
   expect(resolvePolicy({ group: authority({ administration: admin }), identity: registeredIdentity }).ok).toBe(false)
-  const org = authority({ locked: { tests: 'required', review: 'cross-agent-risky', 'provider-mode': 'subscription-only' } })
+  const org = authority({ locked: { tests: 'required', 'provider-mode': 'subscription-only' } })
   const result = resolvePolicy({ org, repo: 'tests: none\nlearning: normal-work\nlearning-adoption: scoped-reversible\nexecution-budget-minutes: 120', identity })
   expect(result.ok).toBe(false)
   expect(result.policy?.values.tests).toBe('required')

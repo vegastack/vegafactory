@@ -13,13 +13,13 @@ const forbidden = new Set(['__proto__', 'prototype', 'constructor'])
 const stages = ['intake', 'plan', 'implement', 'review', 'status', 'chronicle']
 const enums = {
   stats: ['on', 'off', 'inherit'], 'stats-people': ['on', 'off'], 'stats-override': ['allowed', 'locked'],
-  review: ['subagent', 'cross-agent-risky', 'cross-agent'], tests: ['required', 'logic-only', 'best-effort', 'none'],
+  tests: ['required', 'logic-only', 'best-effort', 'none'],
   changelog: ['changesets', 'keep-a-changelog', 'pubspec+changelog', 'none'], chronicle: ['on', 'off'],
   merge: ['rebase', 'squash', 'merge'], dispatch: ['off', 'local'], 'provider-mode': ['subscription-only'],
   learning: ['normal-work', 'off'], 'learning-adoption': ['scoped-reversible', 'propose-only'],
   'stats-export': ['off', 'non-attributed', 'attributed'],
 }
-const lockable = new Set(['stats', 'stats-export', 'gates', 'tests', 'review', 'provider-mode', 'learning', 'learning-adoption'])
+const lockable = new Set(['stats', 'stats-export', 'gates', 'tests', 'provider-mode', 'learning', 'learning-adoption'])
 const ordinary = new Set([...Object.keys(enums), 'operators', 'harness-policy', 'gates', 'branch', 'labels', 'control-room', 'sync-max-age', 'workflow-labels', 'stats-local-retention-days', 'stats-shared-retention-months', 'stats-spool-warning-mib'])
 const loginPattern = /^[a-z\d](?:[a-z\d-]{0,37}[a-z\d])?$/i
 const groupPattern = /^[a-z0-9][a-z0-9-]{0,63}$/
@@ -180,6 +180,9 @@ export function parsePolicy(text = '', scope = 'repo') {
     if (!match) continue
     const key = match[1], value = match[2].replace(/\s+#.*$/, '').trim()
     if (forbidden.has(key)) { layer.blocks.push('prototype key in policy'); continue }
+    // The `review:` knob is retired — reviews always run cross-tool — so an old profile's line is
+    // ignored. `review <harness> <model> <effort>` is still that stage's harness-policy line.
+    if (key === 'review' && !parseStage(value)) continue
     const stageLine = stages.includes(key) && !enums[key]?.includes(value)
     if (key === 'policy-schema' || ordinary.has(key) || stageLine) {
       if (seen.has(key)) layer.blocks.push(`duplicate policy key: ${key}`)

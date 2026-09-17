@@ -17,7 +17,7 @@ beforeAll(async () => {
   source = join(root, 'source'); origin = join(root, 'origin.git')
   await mkdir(join(source, 'groups/dev'), { recursive: true })
   await writeFile(join(source, 'org.md'), 'stats: on\nsync-max-age: 2h\n')
-  await writeFile(join(source, 'groups/dev/group.md'), 'review: subagent\n')
+  await writeFile(join(source, 'groups/dev/group.md'), 'tests: required\n')
   await writeFile(join(source, 'repos.md'), '| repo | group | board | owner |\n|---|---|---|---|\n| acme/app | dev | | owner |\n| acme/other | dev | | owner |\n')
   git(['init', '-b', 'main'], source); git(['add', '.'], source); git(['commit', '-m', 'seed'], source)
   git(['clone', '--bare', source, origin], root)

@@ -495,7 +495,7 @@ describe('resolveScanRoot', () => {
 
   test('none and absent both mean no scan', () => {
     expect(resolveScanRoot('skill-scan: none\n')).toBeNull()
-    expect(resolveScanRoot('review: subagent\n')).toBeNull()
+    expect(resolveScanRoot('tests: required\n')).toBeNull()
   })
 })
 
@@ -1070,7 +1070,7 @@ describe('adversarial regressions', () => {
   test('declarations are collected in order so the caller can see disagreement', () => {
     expect(scanRootDeclarations('- skill-scan: none\n\nskill-scan: skills/\n')).toEqual(['none', 'skills/'])
     expect(scanRootDeclarations('skill-scan: skills/\n')).toEqual(['skills/'])
-    expect(scanRootDeclarations('review: subagent\n')).toEqual([])
+    expect(scanRootDeclarations('tests: required\n')).toEqual([])
   })
 
   // Two-level discovery makes duplicate basenames reachable. A report path keyed

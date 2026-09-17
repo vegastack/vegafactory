@@ -194,34 +194,34 @@ describe('control-room drift', () => {
   const skillRoot = resolve(import.meta.dir, '..')
   const devMd = [
     '## Knobs',
-    'review: cross-agent-risky   # this repo overrode the group default',
+    'tests: logic-only   # this repo overrode the group default',
     'gates: 3',
     'control-room: vegastack/vegafactory-control-room#dev@a1b2c3d   # org control room',
   ].join('\n')
 
   test('knobMap keeps a value containing a hash and drops the trailing comment', () => {
     expect(knobMap(devMd)['control-room']).toBe('vegastack/vegafactory-control-room#dev@a1b2c3d')
-    expect(knobMap(devMd).review).toBe('cross-agent-risky')
+    expect(knobMap(devMd).tests).toBe('logic-only')
   })
 
   test('the knob resolves org, group and the recorded sha; absent is null', () => {
     expect(controlRoomKnob(devMd)).toEqual({ org: 'vegastack', repo: 'vegastack/vegafactory-control-room', group: 'dev', sha: 'a1b2c3d' })
-    expect(controlRoomKnob('## Knobs\nreview: subagent\n')).toBeNull()
+    expect(controlRoomKnob('## Knobs\ntests: required\n')).toBeNull()
   })
 
   test('drift lists only knobs the control room and the repo both name with different values', () => {
     const drift = controlRoomDrift({
       devMdText: devMd,
       orgText: 'stats: on\ngates: 3\n',
-      groupText: 'review: cross-agent\nchronicle-style: story\n',
+      groupText: 'tests: required\nchronicle-style: story\n',
       cloneSha: 'e4f5a6b',
     })
     expect(drift).toMatchObject({ recordedSha: 'a1b2c3d', cloneSha: 'e4f5a6b', behind: true })
-    expect(drift.knobs).toEqual([{ knob: 'review', repo: 'cross-agent-risky', controlRoom: 'cross-agent', source: 'group' }])
+    expect(drift.knobs).toEqual([{ knob: 'tests', repo: 'logic-only', controlRoom: 'required', source: 'group' }])
   })
 
   test('a matching sha with no differing knob is not drift', () => {
-    const drift = controlRoomDrift({ devMdText: devMd, orgText: 'gates: 3\n', groupText: 'review: cross-agent-risky\n', cloneSha: 'a1b2c3d' })
+    const drift = controlRoomDrift({ devMdText: devMd, orgText: 'gates: 3\n', groupText: 'tests: logic-only\n', cloneSha: 'a1b2c3d' })
     expect(drift).toMatchObject({ behind: false, knobs: [] })
   })
 
@@ -244,7 +244,7 @@ describe('control-room drift', () => {
     const clone = join(home, '.vegastack/control-room/vegastack')
     mkdirSync(join(clone, 'groups/dev'), { recursive: true })
     writeFileSync(join(clone, 'org.md'), 'stats: on\n')
-    writeFileSync(join(clone, 'groups/dev/group.md'), 'review: cross-agent\n')
+    writeFileSync(join(clone, 'groups/dev/group.md'), 'tests: required\n')
     mkdirSync(join(home, '.vegastack'), { recursive: true })
     writeFileSync(join(home, '.vegastack/factory.json'), JSON.stringify({ schemaVersion: 1, controlRooms: { vegastack: { repo: 'vegastack/vegafactory-control-room', path: clone, branch: 'main', lastSyncedAt: '2026-09-03T11:00:00Z', sha: 'e4f5a6b' } } }))
     const repo = mkdtempSync(join(tmpdir(), 'vsk-repo-'))
@@ -255,7 +255,7 @@ describe('control-room drift', () => {
     try {
       const data = gatherStatus({ devMdPath: join(repo, '.vegastack/dev.md'), chroniclePath: '/nonexistent.md', home, now: Date.parse('2026-09-03T12:00:00Z') })
       expect(data.controlRoom).toMatchObject({ available: true, path: clone, lastSyncedAt: '2026-09-03T11:00:00Z' })
-      expect(data.controlRoom.knobs).toEqual([{ knob: 'review', repo: 'cross-agent-risky', controlRoom: 'cross-agent', source: 'group' }])
+      expect(data.controlRoom.knobs).toEqual([{ knob: 'tests', repo: 'logic-only', controlRoom: 'required', source: 'group' }])
     } finally { delete process.env.VSK_GH; delete process.env.GH_STUB_DIR }
   })
 })
