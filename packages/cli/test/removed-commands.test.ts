@@ -51,13 +51,14 @@ test('no skill, doc or hook wiring calls a removed CLI command or a deleted scri
 })
 
 // The sweep the lean rebuild owes itself: a retired label, knob or mechanism lives in the
-// chronicle and the changelog, and nowhere an agent reads. The one exception carries its
-// marker, because the migration that deletes the old labels has to name them.
+// chronicle and the changelog, and nowhere an agent reads. The one exemption is a line that
+// says `superseded` — the migration that deletes the old labels, and the eval that exercises
+// it, both have to name them, and saying so on the line is cheaper than a file-level hole.
 test('no shipped file still names a retired label, knob or mechanism', () => {
   const hits = sweptFiles().flatMap((file) => {
     const text = readFileSync(join(root, file), 'utf8')
     return text.split('\n').flatMap((line, index) =>
-      line.includes('superseded-labels:') ? []
+      /superseded/i.test(line) ? []
         : STALE.filter(([, pattern]) => pattern.test(line)).map(([what]) => `${file}:${index + 1}: ${what}`))
   })
   expect(hits).toEqual([])

@@ -104,7 +104,7 @@ export const labelsDigest = labels => policyHash([...new Set(labels)].sort())
 // What dev-setup shows the operator before it touches an existing repo's labels: every label
 // from the pre-lean workflow that is still there, and the set that replaces it. Presentation
 // only — `writes: false` — and the old names live nowhere but the repo it read them from.
-const SUPERSEDED = ['ready', 'working', 'needs-plan', 'needs-operator', 'for-operator', 'quick-build', 'deep-build'] // superseded-labels: the one list of names to delete
+const SUPERSEDED = ['ready', 'working', 'needs-plan', 'needs-operator', 'for-operator', 'quick-build', 'deep-build'] // the one list of superseded names to delete
 export function planLabelMigration(existing = []) {
   const names = (Array.isArray(existing) ? existing : []).filter(name => typeof name === 'string')
   return {
