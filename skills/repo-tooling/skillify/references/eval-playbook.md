@@ -1,6 +1,6 @@
 # Behavioral eval playbook
 
-How to prove a skill improves agent behavior before tests cement it. The tooling is your own subagents (Claude Code's Task tool, Codex's `.codex/agents` spawns, Hermes `delegate_task`) and, once its early-access gate lifts and it reads this case format, `claude plugin eval` (status in Model guidance); write cases, never harnesses, viewers or graders of your own — one format is what lets results compare across skills and releases.
+How to prove a skill improves agent behavior before tests cement it. The tooling is your own subagents (Claude Code's Task tool, Codex's `.codex/agents` spawns) and, once its early-access gate lifts and it reads this case format, `claude plugin eval` (status in Model guidance); write cases, never harnesses, viewers or graders of your own — one format is what lets results compare across skills and releases.
 
 ## Why eval before tests
 
@@ -89,7 +89,7 @@ Hard stop after 3 cycles: endless polishing is worse than an honest gap list. Fi
 
 ## KNOWN_GAPS format
 
-Ships at the bottom of the skill's README.md when the eval did not fully pass:
+Ships as a `## Known gaps` section at the end of SKILL.md when the eval did not fully pass:
 
 ```markdown
 ## KNOWN_GAPS

@@ -20,51 +20,6 @@ function fencedBlocks(markdown: string, lang: string): string[] {
   return blocks;
 }
 
-describe("decision-nudge hook asset (assets/hooks/decision-nudge.mjs)", () => {
-  const script = join(skillRoot, "assets", "hooks", "decision-nudge.mjs");
-
-  test("harness-facts points at the asset rather than carrying a shell copy of it", () => {
-    expect(harnessFacts).toContain("assets/hooks/decision-nudge.mjs");
-    expect(fencedBlocks(harnessFacts, "sh").find((b) => b.includes("stop_hook_active"))).toBeUndefined();
-  });
-
-  const dir = mkdtempSync(join(tmpdir(), "vsk-nudge-test-"));
-  const run = (input: string) =>
-    Bun.spawnSync(["node", script, "--harness", "claude"], {
-      stdin: new TextEncoder().encode(input),
-      env: { ...process.env, TMPDIR: dir },
-    });
-  const sid = `t${Date.now()}`;
-
-  test("delegates directional Stop handling silently", () => {
-    const r = run(
-      `{"session_id":"${sid}","stop_hook_active":false,"last_assistant_message":"We decided to use Postgres instead of SQLite."}`,
-    );
-    expect(r.exitCode).toBe(0);
-    expect(r.stdout.toString()).toBe("");
-  });
-
-  test("stays silent the second time in the same session", () => {
-    const r = run(
-      `{"session_id":"${sid}","stop_hook_active":false,"last_assistant_message":"We decided again."}`,
-    );
-    expect(r.exitCode).toBe(0);
-    expect(r.stdout.toString()).toBe("");
-  });
-
-  for (const [name, input] of [
-    ["stop_hook_active true", `{"session_id":"${sid}2","stop_hook_active":true,"last_assistant_message":"decided things"}`],
-    ["no directional keyword", `{"session_id":"${sid}3","stop_hook_active":false,"last_assistant_message":"Fixed the typo."}`],
-    ["null last message", `{"session_id":"${sid}4","stop_hook_active":false,"last_assistant_message":null}`],
-  ] as const) {
-    test(`stays silent on ${name}`, () => {
-      const r = run(input);
-      expect(r.exitCode).toBe(0);
-      expect(r.stdout.toString()).toBe("");
-    });
-  }
-});
-
 describe("changelog-entry guard snippet (stack-playbooks.md)", () => {
   const block = fencedBlocks(playbooks, "sh").find((b) => b.includes("no changelog entry"));
   test("the snippet exists in the doc", () => {

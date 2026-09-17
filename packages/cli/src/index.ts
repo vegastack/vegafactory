@@ -8,12 +8,10 @@ import { fileURLToPath } from 'node:url'
 import { createInterface } from 'node:readline/promises'
 import type { SkillEntry } from './selection.ts'
 
-type Agent = 'codex' | 'claude' | 'hermes'
-type AgentChoice = Agent | 'both' | 'all'
+type Agent = 'codex' | 'claude'
+type AgentChoice = Agent | 'both'
 type Mode = 'project' | 'global'
-type Command = 'add' | 'verify' | 'doctor' | 'remove' | 'list' | 'version' | 'help' | 'worktree' | 'sync' | 'dispatch' | 'service' | 'status' | 'stats' | 'dashboard' | 'guard' | 'checkpoint' | 'children' | 'learning'
-// Top-level verbs the factory reserves; they are named in usage and refuse until they land.
-const reservedTopLevel: readonly string[] = [] as const
+type Command = 'add' | 'verify' | 'doctor' | 'remove' | 'list' | 'version' | 'help' | 'worktree' | 'sync' | 'guard'
 const installerVerbs: readonly string[] = ['add', 'verify', 'doctor', 'remove', 'list'] as const
 interface Options {
   command: Command
@@ -39,8 +37,7 @@ interface InstallJournal { schemaVersion: 2; status: 'prepared' | 'committed'; o
 
 const packageRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const bundleRoot = join(packageRoot, 'skill')
-// Hermes has no project-level skill discovery (single global dir); see docs.
-const surfaces: Record<Agent, string> = { codex: '.agents/skills', claude: '.claude/skills', hermes: '.hermes/skills' }
+const surfaces: Record<Agent, string> = { codex: '.agents/skills', claude: '.claude/skills' }
 const projectAgents: Agent[] = ['codex', 'claude']
 // Single version source: package.json ships in every npm install alongside dist/.
 const packageVersion = (JSON.parse(await readFile(join(packageRoot, 'package.json'), 'utf8')) as { version: string }).version
@@ -58,7 +55,7 @@ A --group or --all install is one transaction: if any skill fails, none are inst
 Options:
   --group NAME                           install every skill in that group
   --all                                  every bundled skill except the repo-only ones
-  --agent codex|claude|hermes|both|all   (both = codex+claude; hermes is global-only)
+  --agent codex|claude|both              (both is the default when both are installed)
   --project | --global
   --dir PATH
   --dry-run
@@ -66,14 +63,6 @@ Options:
   --json                                 machine-readable output (sync)
   --non-interactive
   --version
-
-Verified lessons:
-  vegafactory learning checkpoint|inspect --run-id ID --json
-  vegafactory learning revert --run-id ID --id ID --dry-run|--apply --json
-
-Source checkpoints:
-  vegafactory checkpoint --run-id ID [--json] [--write]
-  Inspect saved progress; writing requires the recorded exact approved task intent.
 
 Worktrees (one feature, one worktree — the main checkout never leaves the default branch):
   vegafactory worktree <list|create|restore|remove|prune|status> [options]
@@ -93,40 +82,11 @@ Control room (skills read the local clone, never the network):
   convention. Exit 0 synced, already fresh, or no control room · 1 a command error or
   failed fetch (the existing clone stands) · 2 a refusal (dirty clone, symlink, bad state file).
 
-Verified children:
-  vegafactory children run|join --parent N --groups FILE --repo owner/name [--write] [--json]
-
-The dispatcher (headless runs in feature worktrees, on the operator's own machine):
-  vegafactory dispatch [--once] [--watch] [--dry-run] [--json] [--config PATH]
-  Turns labels and rocket reactions on the repos named in ~/.vegastack/factory.json
-  into headless runs. Dry run unless --once or --watch is given, and every repo
-  stays refused until its dev.md says dispatch: local, its ship guard is wired and
-  its compiled guard policy exists.
-
+Ship guard:
   vegafactory guard sync [--check] [--dry-run] [--dev-md PATH] [--json]
   Compiles dev.md's guard policy into ~/.vegastack/guard/<owner>__<repo>.json, the
   one file the ship guard reads — outside every worktree. --check exits 2 when the
   file is stale against dev.md; the SessionStart hook runs it to warn.
-
-  vegafactory service <install|uninstall|status> [--write] [--json]
-  Installs that dispatcher as a launchd LaunchAgent (macOS) or a systemd user unit
-  (Linux), running as you with your own gh and harness auth. Dry run until --write.
-
-  vegafactory status [--json] [--config PATH]
-  The board, the worktrees, the last tick, the runs in flight, and whether the
-  dispatcher is alive at all.
-
-Statistics (where agent time and money went — counts and identifiers only, never transcript text):
-  vegafactory stats [--repo|--me|--org|skills] [--since MON-YYYY] [--json]
-  vegafactory stats push [--commit]
-  Reads and writes the org's own control room over your existing gh credentials.
-  push is a dry run until --commit. Recording is org policy (stats: in org.md),
-  not a machine setting. Run "vegafactory stats help" for the whole surface.
-
-The dashboard (a local, read-only web view over the control room and the live board):
-  vegafactory dashboard [--port N] [--open] [--dir PATH] [--dry-run] [--json]
-  Fetches @vegastack/vegafactory-dashboard at this CLI's version on first use and
-  serves it on 127.0.0.1. Run "vegafactory dashboard --help" for the whole surface.
 
 Run "vegafactory skills list" to see the bundled skills.
 `
@@ -139,8 +99,7 @@ async function bundledSkills(): Promise<string[]> {
 
 function parse(argv: string[]): Options {
   // Installer verbs live under the `skills` namespace; a leading flag (e.g. `vegafactory --version`)
-  // is not a command at all. The reserved verbs are named here so `vegafactory dispatch` says when
-  // it lands rather than "unknown command" — they gain behaviour in later releases.
+  // is not a command at all.
   let command: Command = 'help'
   if (argv[0] && !argv[0].startsWith('-')) {
     const head = argv.shift()!
@@ -149,8 +108,7 @@ function parse(argv: string[]): Options {
       if (!installerVerbs.includes(verb) && verb !== 'help' && verb !== 'version') throw new Error(`Unknown command: skills ${verb}`)
       command = verb as Command
     }
-    else if (head === 'worktree' || head === 'dispatch' || head === 'service' || head === 'status' || head === 'stats' || head === 'dashboard' || head === 'guard' || head === 'checkpoint' || head === 'children' || head === 'learning') return { command: head, all: false, dryRun: false, force: false, nonInteractive: false, json: false, rest: argv.splice(0) }
-    else if (reservedTopLevel.includes(head)) throw new Error(`${head} is not available yet — it lands in a later release of vegafactory`)
+    else if (head === 'worktree' || head === 'guard') return { command: head, all: false, dryRun: false, force: false, nonInteractive: false, json: false, rest: argv.splice(0) }
     else if (installerVerbs.includes(head)) throw new Error(`Unknown command: ${head} — installer verbs moved under the skills namespace: run "vegafactory skills ${head} …"`)
     else if (head === 'sync' || head === 'help' || head === 'version') command = head
     else throw new Error(`Unknown command: ${head}`)
@@ -190,7 +148,7 @@ function parse(argv: string[]): Options {
     else if (flag === '--version' || flag === '-v') options.command = 'version'
     else throw new Error(`Unknown option: ${flag}`)
   }
-  if (options.agent && !['codex', 'claude', 'hermes', 'both', 'all'].includes(options.agent)) throw new Error(`Invalid --agent: ${options.agent}`)
+  if (options.agent && !['codex', 'claude', 'both'].includes(options.agent)) throw new Error(`Invalid --agent: ${options.agent}`)
   if (options.mode === 'global' && options.dir) throw new Error('--dir cannot be combined with --global')
   return options
 }
@@ -218,14 +176,13 @@ async function requireSelection(options: Options, verb = 'install'): Promise<str
 // skills.sh-style flow: detect which agents the user actually has and install to them without
 // asking. Only when nothing is detectable does an interactive numbered picker appear; --agent
 // always overrides, and --non-interactive keeps the old defaults.
-const agentLabels: Record<Agent, string> = { claude: 'Claude Code', codex: 'Codex', hermes: 'Hermes' }
+const agentLabels: Record<Agent, string> = { claude: 'Claude Code', codex: 'Codex' }
 
 async function detectAgents(): Promise<Agent[]> {
   const detected: Agent[] = []
   // Order matches install output; detection = the agent's home config dir exists.
   if (await exists(join(homedir(), '.claude'))) detected.push('claude')
   if (await exists(join(homedir(), '.codex')) || await exists(join(homedir(), '.agents'))) detected.push('codex')
-  if (await exists(join(homedir(), '.hermes'))) detected.push('hermes')
   return detected
 }
 
@@ -234,11 +191,11 @@ async function prompt(options: Options): Promise<{ agent: AgentChoice; mode: Mod
   if (options.agent) return { agent: options.agent, mode }
   if (options.nonInteractive || !process.stdin.isTTY) return { agent: 'both', mode }
 
-  const detected = (await detectAgents()).filter(agent => mode === 'global' || agent !== 'hermes')
+  const detected = await detectAgents()
   if (detected.length) {
     console.log(`Detected: ${detected.map(agent => agentLabels[agent]).join(', ')} (override with --agent)`)
     if (detected.length === 1) return { agent: detected[0]!, mode }
-    return { agent: detected.includes('hermes') ? 'all' : 'both', mode }
+    return { agent: 'both', mode }
   }
 
   // Nothing detected: one numbered question with a sensible default.
@@ -254,15 +211,9 @@ async function prompt(options: Options): Promise<{ agent: AgentChoice; mode: Mod
   return { agent, mode }
 }
 
-// Expand an agent choice to concrete agents, enforcing Hermes's global-only discovery.
-function resolveAgents(choice: AgentChoice, mode: Mode): Agent[] {
-  const wanted: Agent[] = choice === 'both' ? ['codex', 'claude'] : choice === 'all' ? ['codex', 'claude', 'hermes'] : [choice]
-  if (mode === 'project' && wanted.includes('hermes')) {
-    if (choice === 'hermes') throw new Error('Hermes discovers skills only in the global ~/.hermes/skills directory; use --global (without --dir) with --agent hermes, or --agent all')
-    console.log('note: skipping hermes for a project install — Hermes discovers skills globally only; run with --global --agent hermes')
-    return wanted.filter(agent => agent !== 'hermes')
-  }
-  return wanted
+// Expand an agent choice to concrete agents.
+function resolveAgents(choice: AgentChoice, _mode: Mode): Agent[] {
+  return choice === 'both' ? ['codex', 'claude'] : [choice]
 }
 
 async function exists(path: string) {
@@ -317,7 +268,7 @@ async function recoverInstall(base: string) {
   const skills = new Set(await bundledSkills())
   const seen = new Set<string>()
   for (const operation of journal.operations) {
-    if (!['codex', 'claude', 'hermes'].includes(operation.agent) || typeof operation.skill !== 'string' || !skills.has(operation.skill)) throw new Error(`Untrusted installer recovery journal: invalid agent or skill; inspect and remove it manually: ${journalPath}`)
+    if (!['codex', 'claude'].includes(operation.agent) || typeof operation.skill !== 'string' || !skills.has(operation.skill)) throw new Error(`Untrusted installer recovery journal: invalid agent or skill; inspect and remove it manually: ${journalPath}`)
     const key = `${operation.agent}/${operation.skill}`
     if (seen.has(key)) throw new Error('Untrusted installer recovery journal: duplicate operation')
     seen.add(key)
@@ -697,8 +648,8 @@ async function doctor(options: Options) {
   let installations = 0
   for (const skillName of await bundledSkills()) {
     const { files } = await loadSource(skillName)
-    for (const agent of ['codex', 'claude', 'hermes'] as Agent[]) {
-      const destination = join(agent === 'hermes' ? homedir() : base, surfaces[agent], skillName)
+    for (const agent of ['codex', 'claude'] as Agent[]) {
+      const destination = join(base, surfaces[agent], skillName)
       if (!await exists(destination)) continue
       installations += 1
       const result = await compare(destination, files)
@@ -810,44 +761,6 @@ async function main() {
     const rest = options.rest ?? []
     if (rest.length === 0 || rest[0] === 'help' || rest[0] === '--help' || rest[0] === '-h') return console.log(guardUsage())
     process.exitCode = await runGuardCli(rest)
-    return
-  }
-  if (options.command === 'learning') { const {runLearningCli}=await import('./learning.ts'); process.exitCode = await runLearningCli(options.rest ?? [], homedir()); return }
-  if (options.command === 'children') { const {runChildrenCli}=await import('./children.ts'); process.exitCode = await runChildrenCli(options.rest ?? [], homedir()); return }
-  if (options.command === 'dispatch') {
-    const {dispatchUsage, runDispatchCli}=await import('./dispatch.ts')
-    const rest = options.rest ?? []
-    if (rest[0] === 'help' || rest[0] === '--help' || rest[0] === '-h') return console.log(dispatchUsage())
-    process.exitCode = await runDispatchCli(rest, homedir())
-    return
-  }
-  if (options.command === 'service') {
-    const {runServiceCli, serviceUsage}=await import('./service.ts')
-    const rest = options.rest ?? []
-    if (rest.length === 0 || rest[0] === 'help' || rest[0] === '--help' || rest[0] === '-h') return console.log(serviceUsage())
-    process.exitCode = await runServiceCli(rest, homedir())
-    return
-  }
-  if (options.command === 'stats') {
-    const rest = options.rest ?? []
-    process.exitCode = rest.length === 4 && rest.join(' ') === 'record --source managed-hook --json' || rest.length === 3 && rest.join(' ') === 'record --source managed-hook'
-      ? await (await import('./learning.ts')).runLearningCli(['checkpoint', '--source', 'managed-hook', '--json'], homedir())
-      : await (await import('./stats/cli.ts')).runStatsCli(rest, homedir())
-    return
-  }
-  if (options.command === 'dashboard') {
-    const {dashboardUsage, runDashboard}=await import('./dashboard.ts')
-    const rest = options.rest ?? []
-    if (rest[0] === 'help') return console.log(dashboardUsage())
-    process.exitCode = await runDashboard({ rest, home: homedir(), version: packageVersion })
-    return
-  }
-  if (options.command === 'checkpoint') { const {runCheckpointCli}=await import('./checkpoints.ts'); process.exitCode=await runCheckpointCli(options.rest??[],homedir());return }
-  if (options.command === 'status') {
-    const {runStatusCli, statusUsage}=await import('./status.ts')
-    const rest = options.rest ?? []
-    if (rest[0] === 'help') return console.log(statusUsage())
-    process.exitCode = await runStatusCli(rest, homedir())
     return
   }
   if (options.command === 'sync') return sync(options)

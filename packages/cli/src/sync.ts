@@ -2,7 +2,6 @@
 import { execFile } from 'node:child_process'
 import { lstat, mkdir, mkdtemp, readFile } from 'node:fs/promises'
 import { dirname, isAbsolute, join, resolve } from 'node:path'
-import { readHostBinding } from './machine-identity.ts'
 import { promisify } from 'node:util'
 import {
   ageMinutes, defaultClonePath, factoryConfigPath, isStale, parseControlRoomKnob,
@@ -73,7 +72,7 @@ interface MachineBootstrap {
   controlRoom: { repositoryId: string; repo: string; remote: string; branch: string }
 }
 export async function localHostBindingDigest(): Promise<string> {
-  return (await readHostBinding()).digest
+  throw new Error('machine enrollment was removed with the old dispatcher; remove settings.machine from ~/.vegastack/factory.json')
 }
 async function githubIdentity(repo: string): Promise<{ node_id: string; full_name: string; permissions?: { pull?: boolean } }> {
   const result = await run('gh', ['api', `repos/${repo}`], { timeout: 10000, maxBuffer: 1024 * 1024 })

@@ -14,11 +14,6 @@ packages/cli/skill-integrity.json
 work/
 *.tgz
 
-# Machine-generated evidence artifacts (regenerated in one code path by refresh tooling;
-# committing them invites split-brain: a cache and a drift report can disagree at the same timestamp)
-.vegastack/evidence-cache.json
-.vegastack/evidence-drift.json
-
 # Tool caches and session artifacts
 .turbo/
 .claude/

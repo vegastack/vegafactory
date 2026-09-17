@@ -3,10 +3,7 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'nod
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { checkStructure } from '../scripts/structure.mjs'
-import { TODO_PURPOSE } from '../scripts/readme-sync.mjs'
 
-// A skill README whose file table is already in sync with the fixtures' ['SKILL.md'] packaging entries.
-const SKILL_README = (name: string) => `# ${name}\n\n## What's in this skill\n\n| Path | Purpose |\n|---|---|\n| [SKILL.md](SKILL.md) | d |\n| \`tests/\` | Bun tests and fixtures (never packaged) |\n| \`evals/\` | Behavioral evals in the agentskills.io format (never packaged) |\n`
 const UNGROUPED_ROW = '| [solo](skills/solo/) | s | [SKILL.md](skills/solo/SKILL.md) |'
 
 function readme(sections: { ungrouped: string[]; groups?: { title: string; blurb: string; rows: string[] }[] }) {
@@ -25,12 +22,8 @@ function fixture(mutate: (paths: { root: string; skills: string }) => void = () 
   mkdirSync(join(root, 'packages/cli'), { recursive: true })
   const meta = (dir: string, name: string) => {
     mkdirSync(join(dir, 'agents'), { recursive: true })
-    mkdirSync(join(dir, 'refresh'), { recursive: true })
     writeFileSync(join(dir, 'SKILL.md'), `---\nname: ${name}\ndescription: d\n---\n`)
-    writeFileSync(join(dir, 'README.md'), SKILL_README(name))
     writeFileSync(join(dir, 'agents/openai.yaml'), 'name: x\n')
-    writeFileSync(join(dir, 'refresh/REFRESH.md'), '# r\n')
-    writeFileSync(join(dir, 'refresh/sources.json'), '{"sources":[]}\n')
     mkdirSync(join(dir, 'evals'), { recursive: true })
     writeFileSync(join(dir, 'evals/evals.json'), JSON.stringify({
       skill_name: name,
@@ -243,39 +236,9 @@ describe('checkStructure', () => {
     clean(root)
   })
 
-  test('blocks a skill README whose file table lists a path packaging does not', () => {
-    const root = fixture(({ skills }) => writeFileSync(join(skills, 'solo', 'README.md'),
-      SKILL_README('solo').replace('| [SKILL.md](SKILL.md) | d |', '| [SKILL.md](SKILL.md) | d |\n| [scripts/ghost.mjs](scripts/ghost.mjs) | g |')))
-    expect(checkStructure(root).blocks.join()).toMatch(/solo\/README\.md file table disagrees/)
-    clean(root)
-  })
-
-  test('blocks a skill README with no "What\'s in this skill" table', () => {
-    const root = fixture(({ skills }) => writeFileSync(join(skills, 'fam', 'one', 'README.md'), '# one\n'))
-    expect(checkStructure(root).blocks.join()).toMatch(/one\/README\.md has no "## What's in this skill" table/)
-    clean(root)
-  })
-
-  test('blocks a skill README row the generator cannot classify', () => {
-    const root = fixture(({ skills }) => writeFileSync(join(skills, 'solo', 'README.md'),
-      SKILL_README('solo').replace('| `tests/` |', '| `references/{a,b}.md` | glob |\n| `tests/` |')))
-    expect(checkStructure(root).blocks.join()).toMatch(/cannot classify: `references\/\{a,b\}\.md`/)
-    clean(root)
-  })
-
-  test('warns without blocking on a placeholder purpose left in a skill README table', () => {
-    const root = fixture(({ skills }) => writeFileSync(join(skills, 'solo', 'README.md'), SKILL_README('solo').replace('| d |', `| ${TODO_PURPOSE} |`)))
-    const result = checkStructure(root)
-    expect(result.blocks).toEqual([])
-    expect(result.warns.join()).toMatch(/solo\/README\.md row for SKILL\.md still carries the placeholder purpose/)
-    clean(root)
-  })
-
   test('warns without blocking on a skill with no evals/evals.json', () => {
-    // The README row goes with the directory: the readme-sync guard is a separate rule and stays quiet.
     const root = fixture(({ skills }) => {
       rmSync(join(skills, 'solo', 'evals'), { recursive: true, force: true })
-      writeFileSync(join(skills, 'solo', 'README.md'), SKILL_README('solo').replace(/\| `evals\/`[^\n]*\n/, ''))
     })
     const result = checkStructure(root)
     expect(result.blocks).toEqual([])

@@ -6,10 +6,5 @@
   "baseBranch": "main",
   "updateInternalDependencies": "patch",
   "ignore": [],
-  "fixed": [
-    [
-      "@vegastack/vegafactory",
-      "@vegastack/vegafactory-dashboard"
-    ]
-  ]
+  "fixed": []
 }

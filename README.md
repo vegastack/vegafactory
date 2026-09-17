@@ -5,9 +5,9 @@
 [![Node](https://img.shields.io/node/v/@vegastack/vegafactory?logo=node.js&logoColor=white)](https://nodejs.org)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-VegaFactory ships Agent Skills for [Claude Code](https://code.claude.com), [Codex](https://developers.openai.com/codex), and [Hermes](https://hermes-agent.nousresearch.com). The `@vegastack/vegafactory` package is the command-line installer and local workflow/orchestration tool, and it contains the integrity-checked skill bundle. The version-matched `@vegastack/vegafactory-dashboard` package is the local read-only web app; the CLI downloads it on first use, so an ordinary skills install stays small.
+VegaFactory ships Agent Skills for [Claude Code](https://code.claude.com) and [Codex](https://developers.openai.com/codex). The `@vegastack/vegafactory` package is the command-line installer and local workflow tool, and it contains the integrity-checked skill bundle.
 
-Each skill is self-contained: its own entry point, references, deterministic scripts, freshness contract, and walkthrough.
+Each skill is self-contained: its own entry point (`SKILL.md`), references, deterministic scripts, tests and evals. Volatile facts carry a checked date and an official source.
 
 The headline set is **`dev`**: a ten-stage, issue-driven development workflow where every gate that matters is held by a person, not an agent.
 
@@ -41,7 +41,7 @@ Only Node is needed to install. `dev-setup` tells you if `git` or `gh` is missin
 npx @vegastack/vegafactory@latest skills add --group dev --global
 ```
 
-This is the **recommended** install: one command, once per machine, and the workflow is available in every project you open. The installer detects which agents you have (Claude Code, Codex, Hermes) and targets them without asking.
+This is the **recommended** install: one command, once per machine, and the workflow is available in every project you open. The installer detects which agents you have (Claude Code, Codex) and targets them without asking.
 
 Prefer a project-local install when a repository should carry its own copy — so collaborators get the same skills from a checkout, or so one project can pin a version while the rest of the machine moves on:
 
@@ -63,7 +63,7 @@ Work flows through GitHub issues:
 
 **dev-intake** turns an idea into a brief you approve → **dev-plan** turns the brief into a plan you approve → **dev-implement** builds it and posts evidence → **dev-review** reviews it independently → **dev-ship** opens the PR and merges, each step only on your explicit word.
 
-`/dev-intake` (Claude Code, Hermes) and `$dev-intake` (Codex) load a skill by name and bypass routing — the same works for every dev skill when the agent picks the wrong one.
+`/dev-intake` (Claude Code) and `$dev-intake` (Codex) load a skill by name and bypass routing — the same works for every dev skill when the agent picks the wrong one.
 
 ## Installing
 
@@ -97,11 +97,8 @@ A `--group` or `--all` install is **one transaction**: every skill is staged bef
 |---|---|---|
 | Claude Code | `~/.claude/skills/` | `.claude/skills/` |
 | Codex | `~/.agents/skills/` | `.agents/skills/` |
-| Hermes | `~/.hermes/skills/` | — not supported |
 
-Hermes discovers skills globally only, so `--agent hermes` requires `--global`, and a global install is the only one that can cover all three runtimes at once.
-
-The installer targets detected agents automatically; `--agent codex|claude|hermes|both|all` overrides. `--all` and `--agent all` are different axes and easy to confuse: **`--all` chooses which skills, `--agent all` chooses which agent runtimes.** `add --all --agent all --global` means every installable skill, on every runtime, in your home directory.
+The installer targets detected agents automatically; `--agent codex|claude|both` overrides. `--all` chooses which skills; `--agent` chooses which agent runtimes. `add --all --agent both --global` means every installable skill, for both agents, in your home directory.
 
 Skills always install **flat**, as `<surface>/<skill-name>/`. Groups are a way of selecting and organising skills — they never appear in an installed path, so `--group` changes what you get, never where it lands.
 
@@ -135,7 +132,7 @@ npx @vegastack/vegafactory skills remove --group dev --global
 
 Every flag: [installer README](packages/cli/README.md).
 
-The `add`, `verify`, and `remove` installer verbs are fully offline; `doctor` checks npmjs.org for a newer release. Control-room and dashboard commands make only the network calls documented in the [installer README](packages/cli/README.md). No telemetry.
+The `add`, `verify`, and `remove` installer verbs are fully offline; `doctor` checks npmjs.org for a newer release. The control-room sync makes only the network calls documented in the [installer README](packages/cli/README.md). No telemetry.
 
 ## Working with an agent
 
@@ -162,16 +159,16 @@ The issue-driven development workflow: ten stages from project bootstrap to the 
 
 | Skill | What it does | Docs |
 |---|---|---|
-| [dev-setup](skills/dev/dev-setup/) | Bootstraps a project for the issue-driven workflow: `.vegastack/dev.md`, the AGENTS.md section, the workflow labels, and the decision register | [Walkthrough](skills/dev/dev-setup/README.md) · [SKILL.md](skills/dev/dev-setup/SKILL.md) |
-| [dev-intake](skills/dev/dev-intake/) | Turns brainstorms, requests, and SOWs into agent-ready issues, with quoted-approval recording that flips `needs-operator` to `ready` | [Walkthrough](skills/dev/dev-intake/README.md) · [SKILL.md](skills/dev/dev-intake/SKILL.md) |
-| [dev-plan](skills/dev/dev-plan/) | The planning stage between intake and implementation: approaches, a no-placeholder plan with failing-test-first steps, and the scope ratchet | [Walkthrough](skills/dev/dev-plan/README.md) · [SKILL.md](skills/dev/dev-plan/SKILL.md) |
-| [dev-architect](skills/dev/dev-architect/) | VegaStack's architecture advisor: the locked stack, recorded rejections, and dated platform facts behind a verify-before-you-recommend protocol | [Walkthrough](skills/dev/dev-architect/README.md) · [SKILL.md](skills/dev/dev-architect/SKILL.md) |
-| [dev-implement](skills/dev/dev-implement/) | Implements an approved issue end to end without user input: preflight, claim, dark build, tests, independent review, evidence comment, hand-back | [Walkthrough](skills/dev/dev-implement/README.md) · [SKILL.md](skills/dev/dev-implement/SKILL.md) |
-| [dev-debug](skills/dev/dev-debug/) | Reproduce-first bug work: a red repro command before any theory, ranked falsifiable suspects, and the regression test before the fix | [Walkthrough](skills/dev/dev-debug/README.md) · [SKILL.md](skills/dev/dev-debug/SKILL.md) |
-| [dev-review](skills/dev/dev-review/) | Independent multi-axis review of finished work — spec, standards, security — with severity-tiered findings and a bounded fix loop | [Walkthrough](skills/dev/dev-review/README.md) · [SKILL.md](skills/dev/dev-review/SKILL.md) |
-| [dev-ship](skills/dev/dev-ship/) | The shipping gates, each spent only by the operator's words: PR, merge per the `merge:` knob, then the project's `## Ship` runbook | [Walkthrough](skills/dev/dev-ship/README.md) · [SKILL.md](skills/dev/dev-ship/SKILL.md) |
-| [dev-status](skills/dev/dev-status/) | The operator's board: a deterministic gh-backed gather of state, progress, staleness, and PRs, rendered needs-you-first with one Next action | [Walkthrough](skills/dev/dev-status/README.md) · [SKILL.md](skills/dev/dev-status/SKILL.md) |
-| [dev-chronicle](skills/dev/dev-chronicle/) | The project's narrative record — one story entry per behavior-changing branch — plus the "catch me up" digest read from it and the register | [Walkthrough](skills/dev/dev-chronicle/README.md) · [SKILL.md](skills/dev/dev-chronicle/SKILL.md) |
+| [dev-setup](skills/dev/dev-setup/) | Bootstraps a project for the issue-driven workflow: `.vegastack/dev.md`, the AGENTS.md section, the workflow labels, and the decision register | [SKILL.md](skills/dev/dev-setup/SKILL.md) |
+| [dev-intake](skills/dev/dev-intake/) | Turns brainstorms, requests, and SOWs into agent-ready issues, with quoted-approval recording that flips `needs-operator` to `ready` | [SKILL.md](skills/dev/dev-intake/SKILL.md) |
+| [dev-plan](skills/dev/dev-plan/) | The planning stage between intake and implementation: approaches, a no-placeholder plan with failing-test-first steps, and the scope ratchet | [SKILL.md](skills/dev/dev-plan/SKILL.md) |
+| [dev-architect](skills/dev/dev-architect/) | VegaStack's architecture advisor: the locked stack, recorded rejections, and dated platform facts behind a verify-before-you-recommend protocol | [SKILL.md](skills/dev/dev-architect/SKILL.md) |
+| [dev-implement](skills/dev/dev-implement/) | Implements an approved issue end to end without user input: preflight, claim, dark build, tests, independent review, evidence comment, hand-back | [SKILL.md](skills/dev/dev-implement/SKILL.md) |
+| [dev-debug](skills/dev/dev-debug/) | Reproduce-first bug work: a red repro command before any theory, ranked falsifiable suspects, and the regression test before the fix | [SKILL.md](skills/dev/dev-debug/SKILL.md) |
+| [dev-review](skills/dev/dev-review/) | Independent multi-axis review of finished work — spec, standards, security — with severity-tiered findings and a bounded fix loop | [SKILL.md](skills/dev/dev-review/SKILL.md) |
+| [dev-ship](skills/dev/dev-ship/) | The shipping gates, each spent only by the operator's words: PR, merge per the `merge:` knob, then the project's `## Ship` runbook | [SKILL.md](skills/dev/dev-ship/SKILL.md) |
+| [dev-status](skills/dev/dev-status/) | The operator's board: a deterministic gh-backed gather of state, progress, staleness, and PRs, rendered needs-you-first with one Next action | [SKILL.md](skills/dev/dev-status/SKILL.md) |
+| [dev-chronicle](skills/dev/dev-chronicle/) | The project's narrative record — one story entry per behavior-changing branch — plus the "catch me up" digest read from it and the register | [SKILL.md](skills/dev/dev-chronicle/SKILL.md) |
 
 ### Factory
 
@@ -179,7 +176,7 @@ Org-level skills: the control room whose defaults every repo layers on, and the 
 
 | Skill | What it does | Docs |
 |---|---|---|
-| [vegafactory-setup](skills/factory/vegafactory-setup/) | Bootstraps and maintains the org control room — org, group, people, repos, boards, rules, and onboarding — that every repo's dev profile layers on | [Walkthrough](skills/factory/vegafactory-setup/README.md) · [SKILL.md](skills/factory/vegafactory-setup/SKILL.md) |
+| [vegafactory-setup](skills/factory/vegafactory-setup/) | Bootstraps and maintains the org control room — org, group, people, repos, boards, rules, and onboarding — that every repo's dev profile layers on | [SKILL.md](skills/factory/vegafactory-setup/SKILL.md) |
 
 ### Repo tooling
 
@@ -187,8 +184,8 @@ Skills that work on this repository itself: they are not installed by --all, and
 
 | Skill | What it does | Docs |
 |---|---|---|
-| [skill-maintainer](skills/repo-tooling/skill-maintainer/) | The verified Agent Skills standards for Claude Code, Codex, Hermes, and agentskills.io — every update, rename, and release runs through it; skillify creates | [Walkthrough](skills/repo-tooling/skill-maintainer/README.md) · [SKILL.md](skills/repo-tooling/skill-maintainer/SKILL.md) |
-| [skillify](skills/repo-tooling/skillify/) | The repo-local skill factory: gates whether something should be a skill at all, scaffolds the contract with its repo wiring, and audits existing skills | [Walkthrough](skills/repo-tooling/skillify/README.md) · [SKILL.md](skills/repo-tooling/skillify/SKILL.md) |
+| [skill-maintainer](skills/repo-tooling/skill-maintainer/) | The verified Agent Skills standards for Claude Code, Codex and agentskills.io — every update, rename, and release runs through it; skillify creates | [SKILL.md](skills/repo-tooling/skill-maintainer/SKILL.md) |
+| [skillify](skills/repo-tooling/skillify/) | The repo-local skill factory: gates whether something should be a skill at all, scaffolds the contract with its repo wiring, and audits existing skills | [SKILL.md](skills/repo-tooling/skillify/SKILL.md) |
 
 ### Skills tooling
 
@@ -196,21 +193,20 @@ Tools that work on agent skills themselves: scanning them for vulnerabilities, v
 
 | Skill | What it does | Docs |
 |---|---|---|
-| [skill-scan](skills/skills-tooling/skill-scan/) | Scans agent skills with NVIDIA SkillSpector and holds the suppression baseline: the Verify-gate guard, and the answer to "is this downloaded skill safe to install" | [Walkthrough](skills/skills-tooling/skill-scan/README.md) · [SKILL.md](skills/skills-tooling/skill-scan/SKILL.md) |
+| [skill-scan](skills/skills-tooling/skill-scan/) | Scans agent skills with NVIDIA SkillSpector and holds the suppression baseline: the Verify-gate guard, and the answer to "is this downloaded skill safe to install" | [SKILL.md](skills/skills-tooling/skill-scan/SKILL.md) |
 
 ## Repository structure
 
 | Path | Purpose |
 |---|---|
-| `skills/<name>/`<br>`skills/<group>/<name>/` | Authored skill content — the source of truth. A skill sits at the top level or inside a group, one level deep and no deeper; both are fully supported. Every skill carries `SKILL.md` (agent entry), `README.md` (human/agent walkthrough), `tests/`, and `refresh/` (freshness contract), plus `references/`, `scripts/`, and `assets/` where the skill needs them. A group adds a `GROUP.md` (display title plus one blurb line) beside its skills; the packaged bundle is flat, so a group is a way of selecting and organising skills (`add --group <name>`) and never appears in an installed path |
-| `tooling/refresh/` | Repo-shared deterministic refresh runner (checksum/version verification), used by every skill's `refresh/sources.json` and both refresh workflows |
+| `skills/<name>/`<br>`skills/<group>/<name>/` | Authored skill content — the source of truth. A skill sits at the top level or inside a group, one level deep and no deeper; both are fully supported. Every skill carries `SKILL.md` (agent entry), `agents/openai.yaml`, `tests/` and `evals/`, plus `references/`, `scripts/`, and `assets/` where the skill needs them. A group adds a `GROUP.md` (display title plus one blurb line) beside its skills; the packaged bundle is flat, so a group is a way of selecting and organising skills (`add --group <name>`) and never appears in an installed path |
 | `packages/cli/` | The `@vegastack/vegafactory` installer. Its skill copy and checksum manifest are generated at build time and are never committed |
 | `.vegastack/` | This repo's own dev workflow instance (dogfooding the dev skills): [dev.md](.vegastack/dev.md) — the canonical process doc with the release runbook, versioning, and rollback — and [decisions.md](.vegastack/decisions.md) |
-| `.github/workflows/` | CI, tag-driven release (npm trusted publishing + SBOM), and refresh-PR guards |
+| `.github/workflows/` | CI (pull requests and the merge queue), tag-driven release (npm trusted publishing), and the board mirror |
 
 ## How freshness works
 
-Skill content cites external sources (specs, vendor docs, package versions) tracked per skill in each skill's `refresh/sources.json`, with per-skill agent instructions in `refresh/REFRESH.md`. A weekly automated refresh (.github/workflows/refresh.yml) re-verifies every registry deterministically and maintains one standing evidence-linked PR; a human reviews and merges. CI restricts refresh branches to refresh metadata only and re-fetches claimed versions/checksums so hand-edited or hallucinated values cannot merge. Old installs degrade gracefully: `doctor` reports installed-vs-latest, and advice leaning on a stale critical source is marked not verified rather than asserted.
+Volatile facts in skill references (versions, limits, vendor mechanisms) carry their checked date and an official source link. A fact older than 60 days is re-checked against its source before anyone relies on it. `doctor` reports installed-vs-latest.
 
 ## Advisory reviews, user-held gates
 

@@ -49,12 +49,12 @@
     },
     {
       "id": 5,
-      "prompt": "Set up the dev workflow here. This machine has Claude Code installed and nothing else \u2014 no Codex, no Hermes.",
+      "prompt": "Set up the dev workflow here. This machine has Claude Code installed and nothing else \u2014 no Codex.",
       "expected_output": "Detection records the single harness, the drafted `review:` knob is `subagent` with cross-agent off, `harnesses:` records the two absent harnesses, and `## Environments` names what the absence costs.",
       "files": [],
       "assertions": [
         "The recommended `review:` knob value is `review: subagent`, not cross-agent-risky, and cross-agent is said to be off until a second harness exists",
-        "The `harnesses:` knob line lists the detected Claude Code version and records `codex absent` and `hermes absent`",
+        "The `harnesses:` knob line lists the detected Claude Code version and records `codex absent`",
         "The `harness-policy:` line is still drafted with all six stages (intake, plan, implement, review, status, chronicle)",
         "`## Environments` carries a bullet naming the absent harness and the capability its absence gates"
       ]
@@ -62,10 +62,10 @@
     {
       "id": 6,
       "prompt": "Re-run dev-setup here and wire the hooks. We deploy with wrangler \u2014 preview and staging are fine to run unattended, production is not. I use Claude Code and Codex.",
-      "expected_output": "Round C offers the four hooks one at a time, each with a one-sentence explanation and its own yes; the `## Environments` policy lines are drafted and confirmed before the ship guard is offered; the hook files are copied to `.vegastack/hooks/` and the wiring is merged into `.claude/settings.json` and `<repo>/.codex/hooks.json`; the Codex offer states the trust prerequisite.",
+      "expected_output": "Round C offers the ship guard with a one-sentence explanation and its own yes; the `## Environments` policy lines are drafted and confirmed before the guard is offered; the hook file is copied to `.vegastack/hooks/` and the wiring is merged into `.claude/settings.json` and `<repo>/.codex/hooks.json`; the Codex offer states the trust prerequisite; the session hooks are not offered.",
       "files": [],
       "assertions": [
-        "Each of the four hooks is offered separately, each written only on its own yes",
+        "The ship guard is offered on its own yes; no session-start, heartbeat or decision hook is offered",
         "The drafted `## Environments` lines carry `preview: auto`, `staging: auto` and `production: ask` with their wrangler command patterns",
         "Existing entries in `.claude/settings.json` and `.codex/hooks.json` are merged into, never replaced",
         "The Codex offer states that project-local hooks need the repo's `.codex/` layer to be trusted"
@@ -93,19 +93,6 @@
         ".github/workflows/factory-board.yml is written only after an explicit yes, with {{runs-on}}, {{profile}} and {{product-revision}} bound and the authoring notes above the # --- marker dropped",
         "The reply states the mirror is one way: no reverse sync from the board back to labels",
         "The reply names the factory App and the gh 2.97.0 runner floor as the workflow's requirements"
-      ]
-    },
-    {
-      "id": 9,
-      "prompt": "Re-run setup here. The org control room says stats: on, stats-people: off, stats-override: allowed. I want the statistics capture but not the skill tracking on Codex \u2014 and be clear about what actually gets recorded before I say yes.",
-      "expected_output": "Round C offers the three capture hooks separately, each in one plain sentence, and says what a record holds (counts and identifiers, never prompt or assistant text) and where it goes (the org's own control room, over the operator's existing gh credentials). Only the hooks the operator says yes to are written to `.vegastack/hooks/` and wired; the declined Codex prompt-mention hook is neither written nor wired, and the report says so.",
-      "files": [],
-      "assertions": [
-        "The three hooks are offered separately, not as one bundle",
-        "The offer states that records carry counts and identifiers only, never transcript text",
-        "The offer states that whether anything is recorded at all is the org's `stats:` policy, not a machine setting",
-        "`.vegastack/hooks/prompt-skill-mention.mjs` is NOT written, because that hook was declined",
-        "No `stats:` line is added to `.vegastack/dev.md`, because the org's policy is on and the repo is not opting out"
       ]
     }
   ]

@@ -24,9 +24,6 @@ const templatesRoot = resolve(here, '..', 'assets', 'templates')
 // Template file -> output path inside the skill (null = tests/<name>.test.ts).
 export const templateFiles = [
   ['SKILL.md.template', 'SKILL.md'],
-  ['README.md.template', 'README.md'],
-  ['sources.json.template', 'refresh/sources.json'],
-  ['REFRESH.md.template', 'refresh/REFRESH.md'],
   ['openai.yaml.template', 'agents/openai.yaml'],
   // One placeholder case; the structure check warns until real cases replace it (skillify Phase 4).
   ['evals.json.template', 'evals/evals.json'],
@@ -35,8 +32,8 @@ export const templateFiles = [
   ['skill.test.ts.template', null],
 ]
 
-// The scaffolded files that ship to installers (README and tests never package).
-const defaultPackagedFiles = ['SKILL.md', 'agents/openai.yaml', 'refresh/REFRESH.md', 'refresh/sources.json']
+// The scaffolded files that ship to installers (tests and evals never package).
+const defaultPackagedFiles = ['SKILL.md', 'agents/openai.yaml']
 
 // Full grammar shared by the repo validator and every target harness: starts
 // with a lowercase letter, then lowercase letters/digits/hyphens, no
@@ -148,7 +145,7 @@ async function wireReadme(repoRoot, name, group, groupHeading, write) {
   if (!target) return { step: 'root README row', status: 'skipped: Skills table not found' }
   const last = target.index
   if (!write) return { step: 'root README row', status: 'planned' }
-  const row = `| [${name}](skills/${relativePath}/) | TODO: one-line description | [Walkthrough](skills/${relativePath}/README.md) · [SKILL.md](skills/${relativePath}/SKILL.md) |`
+  const row = `| [${name}](skills/${relativePath}/) | TODO: one-line description | [SKILL.md](skills/${relativePath}/SKILL.md) |`
   lines.splice(last + 1, 0, row)
   await writeAtomic(path, lines.join('\n'))
   return { step: 'root README row', status: 'done' }

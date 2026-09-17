@@ -90,12 +90,9 @@ describe('scaffold-skill runs', () => {
       const plan = await scaffoldSkill({ name: 'demo-skill', dir: repo })
       expect(plan.wrote).toBe(false)
       expect(plan.files.sort()).toEqual([
-        'README.md',
         'SKILL.md',
         'agents/openai.yaml',
         'evals/evals.json',
-        'refresh/REFRESH.md',
-        'refresh/sources.json',
         'tests/demo-skill.test.ts',
         'tests/fixtures/trigger-queries.json',
       ])
@@ -120,10 +117,6 @@ describe('scaffold-skill runs', () => {
       }
       expect(readFileSync(join(target, 'SKILL.md'), 'utf8')).toContain('name: demo-skill')
       expect(readFileSync(join(target, 'tests/demo-skill.test.ts'), 'utf8')).toContain("'demo-skill contract'")
-      const registry = JSON.parse(readFileSync(join(target, 'refresh/sources.json'), 'utf8'))
-      expect(registry.schemaVersion).toBe(1)
-      expect(registry.sources).toEqual([])
-      expect(registry.retrievalBaseline).toBe('2026-08-08')
       const validated = validateSkill(target)
       expect(validated.message).toBe('Skill is valid!')
       expect(validated.ok).toBe(true)
@@ -133,7 +126,7 @@ describe('scaffold-skill runs', () => {
       // Wiring performed: packaging entry, README row, changeset.
       expect(result.wiring.map((entry: { status: string }) => entry.status)).toEqual(['done', 'done', 'done'])
       const packaging = JSON.parse(await readFile(join(repo, 'packages/cli/packaging.json'), 'utf8'))
-      expect(packaging['demo-skill']).toEqual(['SKILL.md', 'agents/openai.yaml', 'refresh/REFRESH.md', 'refresh/sources.json'])
+      expect(packaging['demo-skill']).toEqual(['SKILL.md', 'agents/openai.yaml'])
       expect(Object.keys(packaging)).toEqual(['architect', 'demo-skill'])
       const readme = await readFile(join(repo, 'README.md'), 'utf8')
       expect(readme).toContain('| [demo-skill](skills/demo-skill/) |')
@@ -306,36 +299,6 @@ describe('scaffold-skill groups', () => {
       expect(validateSkill(join(repo, 'skills/fam/demo-skill')).ok).toBe(true)
     } finally {
       await rm(repo, { recursive: true, force: true })
-    }
-  })
-
-  test('the scaffolded README carries a working group-install line, or none at all', async () => {
-    const grouped = await makeGroupedRepo()
-    try {
-      await scaffoldSkill({ name: 'demo-skill', dir: grouped, group: 'fam', write: true })
-      const readme = await readFile(join(grouped, 'skills/fam/demo-skill/README.md'), 'utf8')
-      expect(readme).toContain('npx @vegastack/vegafactory skills add demo-skill --global')
-      expect(readme).toContain('npx @vegastack/vegafactory skills add --group fam --global')
-      // The family install is an alternative, so it gets its own fence: sharing one with the
-      // single-skill command would run both on a paste.
-      expect(readme).toContain('```sh\nnpx @vegastack/vegafactory skills add --group fam --global\n```')
-      // A literal placeholder would ship a command that always errors.
-      expect(readme).not.toContain('<group>')
-      expect(readme).not.toContain('{{group')
-    } finally {
-      await rm(grouped, { recursive: true, force: true })
-    }
-
-    const flat = await makeGroupedRepo()
-    try {
-      await scaffoldSkill({ name: 'demo-skill', dir: flat, write: true })
-      const readme = await readFile(join(flat, 'skills/demo-skill/README.md'), 'utf8')
-      // Ungrouped: no group line at all, rather than one naming a group that does not apply.
-      expect(readme).not.toContain('--group')
-      expect(readme).toContain('npx @vegastack/vegafactory skills add demo-skill --global')
-      expect(readme).not.toContain('{{groupInstallBlock}}')
-    } finally {
-      await rm(flat, { recursive: true, force: true })
     }
   })
 

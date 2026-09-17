@@ -11,25 +11,19 @@
     "references/infra.md",
     "references/ai-agents.md",
     "references/security.md",
-    "references/mobile.md",
-    "refresh/REFRESH.md",
-    "refresh/sources.json"
+    "references/mobile.md"
   ],
   "dev-chronicle": [
     "SKILL.md",
     "agents/openai.yaml",
     "references/conventions.md@dev-setup",
-    "references/styles.md",
-    "refresh/REFRESH.md",
-    "refresh/sources.json"
+    "references/styles.md"
   ],
   "dev-debug": [
     "SKILL.md",
     "agents/openai.yaml",
     "references/conventions.md@dev-setup",
-    "references/loop-ladder.md",
-    "refresh/REFRESH.md",
-    "refresh/sources.json"
+    "references/loop-ladder.md"
   ],
   "dev-implement": [
     "SKILL.md",
@@ -46,14 +40,9 @@
     "scripts/reclaim.mjs",
     "scripts/evidence-upload.mjs",
     "scripts/worktree.mjs",
-    "scripts/children.mjs",
-    "assets/workflows/implement-children.js",
     "references/ledger-and-resume.md",
-    "references/parallel-children.md",
     "references/worktrees.md",
     "references/changelog-and-chronicle.md",
-    "refresh/REFRESH.md",
-    "refresh/sources.json",
     "scripts/effective-policy.mjs@dev-setup"
   ],
   "dev-intake": [
@@ -64,9 +53,7 @@
     "references/ask-route.md@dev-setup",
     "scripts/lib/approval.mjs@dev-implement",
     "scripts/brief-lint.mjs",
-    "references/brief-template.md",
-    "refresh/REFRESH.md",
-    "refresh/sources.json"
+    "references/brief-template.md"
   ],
   "dev-plan": [
     "SKILL.md",
@@ -76,9 +63,7 @@
     "references/ask-route.md@dev-setup",
     "scripts/lib/approval.mjs@dev-implement",
     "scripts/plan-lint.mjs",
-    "references/plan-format.md",
-    "refresh/REFRESH.md",
-    "refresh/sources.json"
+    "references/plan-format.md"
   ],
   "dev-review": [
     "SKILL.md",
@@ -87,9 +72,7 @@
     "references/dispatch-prompts.md",
     "references/security-axis.md",
     "references/cross-agent.md",
-    "assets/review-known-patterns.md.template",
-    "refresh/REFRESH.md",
-    "refresh/sources.json"
+    "assets/review-known-patterns.md.template"
   ],
   "dev-setup": [
     "SKILL.md",
@@ -108,13 +91,7 @@
     "assets/hooks/ship-guard.mjs",
     "assets/hooks/session-start.mjs",
     "assets/hooks/stop-heartbeat.mjs",
-    "assets/hooks/decision-nudge.mjs",
-    "assets/hooks/session-end.mjs",
-    "assets/hooks/skill-activated.mjs",
-    "assets/hooks/prompt-skill-mention.mjs",
-    "assets/workflows/implement-children.js@dev-implement",
-    "refresh/REFRESH.md",
-    "refresh/sources.json"
+    "assets/hooks/session-end.mjs"
   ],
   "dev-ship": [
     "SKILL.md",
@@ -122,34 +99,26 @@
     "scripts/ship-gate.mjs",
     "references/conventions.md@dev-setup",
     "agents/openai.yaml",
-    "references/runbook.md",
-    "refresh/REFRESH.md",
-    "refresh/sources.json"
+    "references/runbook.md"
   ],
   "dev-status": [
     "SKILL.md",
     "agents/openai.yaml",
     "references/conventions.md@dev-setup",
     "scripts/status.mjs",
-    "refresh/REFRESH.md",
-    "refresh/sources.json",
     "scripts/effective-policy.mjs@dev-setup"
   ],
   "skill-maintainer": [
     "SKILL.md",
     "agents/openai.yaml",
     "references/standards.md",
-    "references/release-ops.md",
-    "refresh/REFRESH.md",
-    "refresh/sources.json"
+    "references/release-ops.md"
   ],
   "skill-scan": [
     "SKILL.md",
     "agents/openai.yaml",
     "scripts/lib/skillspector.mjs",
-    "scripts/skill-scan.mjs",
-    "refresh/REFRESH.md",
-    "refresh/sources.json"
+    "scripts/skill-scan.mjs"
   ],
   "skillify": [
     "SKILL.md",
@@ -157,17 +126,12 @@
     "references/authoring.md",
     "references/eval-playbook.md",
     "assets/templates/SKILL.md.template",
-    "assets/templates/README.md.template",
-    "assets/templates/sources.json.template",
-    "assets/templates/REFRESH.md.template",
     "assets/templates/openai.yaml.template",
     "assets/templates/trigger-queries.json.template",
     "assets/templates/skill.test.ts.template",
     "assets/templates/evals.json.template",
     "scripts/scaffold-skill.mjs",
-    "scripts/trigger-check.mjs",
-    "refresh/REFRESH.md",
-    "refresh/sources.json"
+    "scripts/trigger-check.mjs"
   ],
   "vegafactory-setup": [
     "SKILL.md",
@@ -182,12 +146,9 @@
     "assets/control-room/boards.md.template",
     "assets/control-room/rules/README.md.template",
     "assets/control-room/rules/CODEOWNERS.template",
-    "assets/control-room/rules/stats-privacy.md.template",
     "assets/control-room/templates/README.md.template",
     "assets/control-room/onboarding/new-repo.md.template",
     "assets/control-room/onboarding/new-teammate.md.template",
-    "assets/control-room/onboarding/dispatcher-box.md.template",
-    "refresh/REFRESH.md",
-    "refresh/sources.json"
+    "assets/control-room/onboarding/dispatcher-box.md.template"
   ]
 }

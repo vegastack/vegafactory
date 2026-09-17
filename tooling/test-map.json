@@ -13,7 +13,7 @@
   "rules": [
     { "match": "skills/*/*/**", "tests": ["{skill}/tests"] },
     { "match": "skills/**/SKILL.md", "tests": ["packages/cli/test/installer.test.ts", "packages/cli/test/package.test.ts", "tooling/ci"] },
-    { "match": "packages/cli/packaging.json", "tests": ["packages/cli/test/installer.test.ts", "packages/cli/test/package.test.ts", "packages/cli/test/packaging-links.test.ts", "packages/cli/test/dispatch-stats.test.ts"] },
+    { "match": "packages/cli/packaging.json", "tests": ["packages/cli/test/installer.test.ts", "packages/cli/test/package.test.ts", "packages/cli/test/packaging-links.test.ts"] },
     { "match": "packages/cli/repo-only.json", "tests": ["packages/cli/test/installer.test.ts"] },
     { "match": "packages/cli/scripts/**", "tests": ["packages/cli/test", "skills/repo-tooling"] },
     { "match": "skills/dev/dev-implement/scripts/**", "tests": ["packages/cli/test"] },
@@ -23,7 +23,6 @@
     { "match": ".vegastack/hooks/**", "tests": ["skills/dev/dev-setup/tests"] },
     { "match": ".changeset/config.json", "tests": ["tooling/ci"] },
     { "match": ".github/workflows/factory-board.yml", "tests": ["skills/dev/dev-setup/tests/factory-board.test.ts"] },
-    { "match": ".github/workflows/broker-deploy.yml", "tests": ["packages/broker/test"] },
     { "match": ".github/workflows/release.yml", "tests": ["scripts"] },
     { "match": ".github/skillspector-*", "tests": ["scripts"] },
     { "match": ".vegastack/skillspector-baseline.json", "tests": ["scripts", "skills/skills-tooling"] },

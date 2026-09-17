@@ -31,7 +31,7 @@ Rules for the prose itself — they exist because agents pay attention (and toke
 
 ## Numeric limits
 
-The numbers — name and description limits, body ceiling, and the Claude Code, Codex, and Hermes listing budgets — live in one place: skill-maintainer's Hard limits table, mirrored from the marked sentences in its references/standards.md and refreshed through its registry. Cite them per skill-maintainer's standards; a second copy here drifted once and would again.
+The numbers — name and description limits, body ceiling, and the Claude Code and Codex listing budgets — live in one place: skill-maintainer's Hard limits table, mirrored from the marked sentences in its references/standards.md and updated by hand, in both places, when the vendor docs change. Cite them per skill-maintainer's standards; a second copy here drifted once and would again.
 
 ## Trigger query sets
 
@@ -63,11 +63,9 @@ Cross-reference other skills by name (`skill-maintainer`) instead of restating t
 - Repo conventions for bundled scripts: dependency-free Node (`.mjs`), runnable from the skill dir with plain relative paths, `--json` for machine-readable output, documented exit codes (0 ok / 1 finding-or-refusal / 2 usage), atomic writes (stage then rename), symlink refusal, and an explicit `--write` gate for anything mutating — dry-run is the default.
 - Do NOT script judgment: descriptions, verdicts, review prose. A script that fakes judgment produces confident garbage.
 
-## Volatile facts and refresh
+## Volatile facts
 
-One rule: **version pins, model names, numeric limits, URLs, and anything with a date live in refresh-tracked files — never inline in SKILL.md.** Everything else is plain prose that refresh automation never touches.
-
-A volatile fact gets a `refresh/sources.json` entry (URL, checksum, threshold) and lives in a section the REFRESH.md names as editable; marking an individual sentence `<!-- source: SOURCE-ID -->` remains available when a durable rule leans on one vendor-named mechanism. A skill with no volatile facts of its own declares an **evergreen waiver** in REFRESH.md — one line stating why nothing decays — and keeps `sources: []`. Facts whose source of truth already lives in another skill's registry are mirrored with a `<!-- mirrored -->` marker, not duplicated as a second registry entry.
+One rule: **version pins, model names, numeric limits, URLs, and anything with a date live in a references file — never inline in SKILL.md.** Each such line carries its checked date and an official source link, for example `(checked 17-09-2026 · https://…)`. A fact older than 60 days is re-checked against its link before a skill relies on it.
 
 ## Worked example: skillifying a "release-notes" workflow
 
@@ -83,7 +81,7 @@ Phase 3: scaffold-skill.mjs release-notes --dir . --write (wiring done by the sc
 Phase 4: eval cycle 1 — baseline subagent invents section headings, with-skill misses breaking-change
   callouts → add callout contract to SKILL.md; cycle 2 — with-skill clearly better, baseline still
   wrong shape → pass
-Phase 5: trigger fixture locked; evergreen waiver written; README row description filled in
+Phase 5: trigger fixture locked; volatile facts dated; root README row description filled in
 Phase 6: bun run check:fast and bun run test:affected green; 8/8 → properly skilled
 ```
 
@@ -94,7 +92,7 @@ Phase 6: bun run check:fast and bun run test:affected green; 8/8 → properly sk
 - Skipping the baseline run because "the output looks fine" — that is not evidence.
 - Eval without a fix cycle — vanity metrics.
 - Obviously-irrelevant negatives in the trigger query set — near-misses or nothing.
-- Version pins or model names in SKILL.md — volatile facts live in refresh-tracked locations.
+- Version pins or model names in SKILL.md — volatile facts live in dated references files.
 - Multi-intent skills spanning unrelated triggers — split them.
 - Two skills answering the same trigger — merge or kill one.
 - Steering by prohibition — a wall of NEVERs drags the forbidden behavior into context and grows forever; state the positive rule once and explain why it matters.

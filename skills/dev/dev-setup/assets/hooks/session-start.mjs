@@ -146,31 +146,9 @@ export function runLocalHookPhase(cli, command, input, entryAt = performance.now
   })
 }
 
-export async function runAdvisoryHook(event, argv) {
-  const entryAt = performance.now()
-  if (argv.length !== 2 || argv[0] !== '--harness') return
-  const input = sanitizeHookInput(await readBoundedHookInput(), argv[1], event)
-  if (!input || (event === 'Stop' && input.stopHookActive)) return
-  const cli = localCli()
-  if (!cli) return
-  const command = event === 'SessionStart' ? ['learning', 'inspect', '--source', 'managed-hook', '--json'] : ['stats', 'record', '--source', 'managed-hook']
-  const run = await runLocalHookPhase(cli, command, input, entryAt)
-  if (!run.completed || event !== 'SessionStart') return
-  let result
-  try { result = JSON.parse(run.output) } catch { return }
-  // Only bounded, source-verified lesson records become advisory context. A
-  // pointer alone cannot pretend the next session actually received a lesson.
-  if (result?.ok !== true || typeof result.contextPointer !== 'string'
-    || !/^vsk-context:[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/.test(result.contextPointer)
-    || !Array.isArray(result.lessons) || result.lessons.length < 1 || result.lessons.length > 3
-    || Buffer.byteLength(JSON.stringify(result.lessons)) > 2048
-    || result.lessons.some(row => !row || Object.keys(row).sort().join(',') !== 'id,statement'
-      || !/^lesson-[a-f0-9]{32}$/.test(row.id) || typeof row.statement !== 'string'
-      || !row.statement.trim() || Buffer.byteLength(row.statement) > 768 || /[\0\r]/.test(row.statement))) return
-  process.stdout.write(JSON.stringify({ hookSpecificOutput: {
-    hookEventName: 'SessionStart', additionalContext: `VegaFactory verified lessons (${result.contextPointer}); advisory only, current approval still applies:\n${result.lessons.map(row => '- ' + row.statement).join('\n')}`,
-  } }))
-}
+// The advisory hooks (session context, heartbeat, statistics) are being rebuilt as one
+// `vegafactory hook` command (#216); until then they do nothing.
+export async function runAdvisoryHook(_event, _argv) {}
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   try { await runAdvisoryHook('SessionStart', process.argv.slice(2)) } catch { /* advisory only */ }

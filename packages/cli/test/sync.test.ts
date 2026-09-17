@@ -128,59 +128,6 @@ test('inspect and restore verify provenance, retain old validation time, and def
   expect(wire.controlRooms.acme.recovery.snapshots['acme/app'].validatedAt).toBe(first.lastSyncedAt)
 })
 
-test('enrollment publication verifies repository ID, host, installation, account and enabled registry from one snapshot', async () => {
-  const { chmod } = await import('node:fs/promises')
-  const { readHostBinding } = await import('../src/machine-identity.ts')
-  const f = await fixture('enrolled')
-  const room = join(f.home, 'room-source'), remote = join(f.home, 'room.git'), bin = join(f.home, 'bin')
-  await mkdir(join(room, 'groups/dev'), { recursive: true }); await mkdir(bin)
-  // Enrollment is produced by the canonical identity owner, independently of sync.
-  const { digest: hostBindingDigest } = await readHostBinding()
-  const installationId = '12345678-1234-4123-8123-123456789013'
-  const fleet = { schemaVersion: 1, coordination: { repositoryId: 'R_room', repository: 'acme/room', branch: 'factory-state', rootCommit: 'b'.repeat(40), installationId: '12345678-1234-4123-8123-123456789012' }, defaults: { pollSeconds: 120, maxRuns: 1, childConcurrent: 3, checkpoints: 'task-branch', recovery: 'verified-transfer' }, groupDefaults: {}, machines: {
-    'dev-box': { installationId, hostBindingDigest, executionLogin: 'owner', group: 'dev', repositories: ['acme/app'], enabled: true, overrides: {} },
-    'other-box': { installationId: '12345678-1234-4123-8123-123456789014', hostBindingDigest: 'd'.repeat(64), executionLogin: 'owner', group: 'dev', repositories: ['acme/app'], enabled: true, overrides: {} },
-  } }
-  const org = () => 'sync-max-age: 2h\npolicy-schema: 2\n```vsk-policy\n' + JSON.stringify({ schemaVersion: 2, fleet }) + '\n```\n'
-  await writeFile(join(room, 'org.md'), org())
-  await writeFile(join(room, 'groups/dev/group.md'), 'review: subagent\n')
-  await writeFile(join(room, 'people.csv'), 'login,name,role,slack,timezone,groups\nowner,Owner,lead,,UTC,dev\n')
-  await writeFile(join(room, 'repos.md'), '| repo | group | board | owner | repository-id |\n|---|---|---|---|---|\n| acme/app | dev | | owner | R_app |\n')
-  git(['init', '-b', 'main'], room); git(['add', '.'], room); git(['commit', '-m', 'enrollment'], room); git(['clone', '--bare', room, remote], root)
-  const actualGit = Bun.which('git')!
-  // A deterministic local provider fixture: Git object reads remain real; only the remote
-  // fetch transport and read-only GitHub identity responses are replaced. No live qualification.
-  await writeFile(join(bin, 'git'), `#!${process.execPath}\nimport {spawnSync} from 'node:child_process'; let a=process.argv.slice(2); const f=a.indexOf('fetch'); if(f>=0) { const o=a.indexOf('origin',f); if(o>=0) a[o]=${JSON.stringify(remote)}; } const r=spawnSync(${JSON.stringify(actualGit)},a,{stdio:'inherit'}); process.exit(r.status??1);\n`)
-  await writeFile(join(bin, 'gh'), `#!${process.execPath}\nconst endpoint=process.argv[3]; console.log(JSON.stringify(endpoint==='user'?{login:'owner'}:{node_id:endpoint==='repos/acme/room'?'R_room':'R_app',full_name:endpoint.slice(6),permissions:{pull:true}}));\n`)
-  await chmod(join(bin, 'git'), 0o755); await chmod(join(bin, 'gh'), 0o755)
-  const machine = { id: 'dev-box', installationId, hostBindingDigest, group: 'dev', controlRoom: { repositoryId: 'R_room', repo: 'acme/room', remote: 'https://github.com/acme/room.git', branch: 'main' } }
-  await updateSettings(f.settings, s => { s.orgs.acme!.remote = machine.controlRoom.remote; s.settings.machine = machine; return s })
-  const config = readFactoryConfig(await readFile(f.target.settingsPath, 'utf8'))
-  const target = resolveTarget({ devMdText: DEV_MD, config, home: f.home })!
-  const oldPath = process.env.PATH
-  process.env.PATH = `${bin}:${oldPath}`
-  try {
-    const first = await syncControlRoom({ target, config, now: NOW })
-    expect(first.ok).toBe(true)
-    const saved = await readFile(target.settingsPath, 'utf8')
-    expect(first.config.controlRooms.acme!.repositoryId).toBe('R_room')
-    await updateSettings(f.settings, s => { s.settings.machine = { ...machine, hostBindingDigest: '0'.repeat(64) }; return s })
-    const copiedSettings = await readFile(target.settingsPath, 'utf8')
-    const copiedConfig = readFactoryConfig(copiedSettings)
-    const copied = await syncControlRoom({ target, config: copiedConfig, now: NOW + 1000 })
-    expect(copied.ok).toBe(false)
-    expect(copied.message).toContain('host binding mismatch')
-    expect(await readFile(target.settingsPath, 'utf8')).toBe(copiedSettings)
-    await writeFile(target.settingsPath, saved)
-    fleet.machines['dev-box'].enabled = false
-    await writeFile(join(room, 'org.md'), org()); git(['add', '.'], room); git(['commit', '-m', 'disable'], room); git(['push', remote, 'main'], room)
-    const disabled = await syncControlRoom({ target, config: first.config, now: NOW + 2000, force: true })
-    expect(disabled.ok).toBe(false)
-    expect(disabled.message).toContain('disabled')
-    expect(await readFile(target.settingsPath, 'utf8')).toBe(saved)
-  } finally { process.env.PATH = oldPath }
-}, 20000)
-
 test('multiple repo bindings publish together, swapped rows deny, and older active content survives backup retention', async () => {
   const f = await fixture('bindings')
   for (const name of ['app', 'other']) {
@@ -209,11 +156,3 @@ test('multiple repo bindings publish together, swapped rows deny, and older acti
   expect(await readFile(join(first.path, 'org.md'), 'utf8')).toContain('stats: on')
   expect(config.controlRooms.acme!.path).not.toBe(Object.values(config.controlRooms.acme!.snapshots!)[0]!.contentPath)
 }, 20000)
-
-test('discovery spreads polling and backs off network failures without changing policy expiry', async () => {
-  const { discoveryDelayMs } = await import('../src/dispatch.ts')
-  expect(discoveryDelayMs(120, 0, 0)).toBe(120000)
-  expect(discoveryDelayMs(120, 0, 1)).toBe(132000)
-  expect(discoveryDelayMs(120, 1, 0)).toBe(240000)
-  expect(discoveryDelayMs(120, 10, 0)).toBe(300000)
-})

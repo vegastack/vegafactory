@@ -1,6 +1,6 @@
 ---
 name: skill-maintainer
-description: Standards and release operations for the vegafactory repository itself. Use when working on this repository - editing an existing skill (SKILL.md, references, refresh registry, tests), renaming, deprecating, or removing a skill, creating or checking a skill group, cutting a release or rolling one back, adjudicating a skill-scan finding, or checking cross-agent portability across Claude Code, Codex, Hermes, and the agentskills.io standard. Not for scaffolding a new skill or scoring one against the contract (skillify), and not for skills that live in other projects.
+description: Standards and release operations for the vegafactory repository itself. Use when working on this repository - editing an existing skill (SKILL.md, references, scripts, tests), renaming, deprecating, or removing a skill, creating or checking a skill group, cutting a release or rolling one back, adjudicating a skill-scan finding, or checking cross-agent portability across Claude Code, Codex and the agentskills.io standard. Not for scaffolding a new skill or scoring one against the contract (skillify), and not for skills that live in other projects.
 ---
 
 # VegaStack Skill Maintainer
@@ -15,19 +15,18 @@ This skill states what must be true; skillify states how to get there. When a ru
 4. `description`: at most 1024 chars, third person, no angle brackets, no space-hash. It states what the skill does and when to load it as a calm "Use when …" conditional carrying the concrete phrasings users type, plus one "Not for …" clause naming the nearest neighbour, because harnesses quote descriptions verbatim in the skill list and emphatic wording (all-caps "must", "critical", "load this before") over-triggers there. Triggers go in the first sentence because listings truncate. The description never summarises the workflow: agents follow the summary and skip the body.
 5. `SKILL.md` under 500 lines (target 150), roughly 5k tokens; detail in `references/`, executables in `scripts/`, templates in `assets/`; relative links stay one level deep inside the skill.
 6. No Claude-only body syntax (token list in [standards](references/standards.md)); reference scripts as plain relative paths from the skill directory.
-7. Checksums, versions, and timestamps in any `refresh/sources.json` come only from a refresh-runner run, because a hand-written value records a verification that never happened.
-8. Before finishing any change, from the repo root: `node packages/cli/scripts/validate-skill.mjs <skill-dir>`, `bun test ./<skill-dir>`, and `node packages/cli/scripts/structure.mjs check` must pass, and `bun run readme:sync --write` follows any packaging change so the skill README's file table matches packaging.json. `bun run check:fast` includes the structure check; `bun run test:affected` runs the tests the change reaches.
+7. A volatile fact (version, mechanism name, limit, dated claim) lives in a references file with its checked date and official source link, and is re-checked against that source when older than 60 days.
+8. Before finishing any change, from the repo root: `node packages/cli/scripts/validate-skill.mjs <skill-dir>`, `bun test ./<skill-dir>`, and `node packages/cli/scripts/structure.mjs check` must pass. `bun run check:fast` includes the structure check; `bun run test:affected` runs the tests the change reaches.
 
 ## Route progressively
 
 | Need | Read |
 |---|---|
-| tri-harness standards: discovery paths, frontmatter, budgets, install surfaces, portability | [standards](references/standards.md) |
+| Claude Code and Codex standards: discovery paths, frontmatter, budgets, install surfaces, portability | [standards](references/standards.md) |
 | skill-scan triage and the suppression baseline | [standards](references/standards.md) |
 | a new skill: the should-it-exist gate, scaffolding, audit, evals | the `skillify` skill |
 | repo shape, groups, the structure check | the group workflow below |
 | release, rename, deprecate, rollback | [release ops](references/release-ops.md) |
-| this skill's freshness contract | [REFRESH](refresh/REFRESH.md) |
 | authoritative repo policy | `CONTRIBUTING.md` and `.vegastack/dev.md` |
 
 ## Workflow: create or maintain a group
@@ -42,12 +41,12 @@ An installed skill is always `<surface>/<bare-name>/`; a group is a selection: `
 
 ## Workflow: scaffold a new skill
 
-Run skillify's `scripts/scaffold-skill.mjs` (`--group <name>` for a grouped skill), fill in the README row and changeset placeholders it leaves, and add later packaged files to the packaging entry by hand because the build fails on unlisted files. Then rules 2–6 and 8; the authoring and eval discipline is skillify's.
+Run skillify's `scripts/scaffold-skill.mjs` (`--group <name>` for a grouped skill), fill in the root README row and changeset placeholders it leaves, and add later packaged files to the packaging entry by hand because the build fails on unlisted files. Then rules 2–6 and 8; the authoring and eval discipline is skillify's.
 
 ## Workflow: update or maintain
 
 - **Content versioning.** Per the content-semver bullet in `.vegastack/dev.md`: new rules, references, recorded decisions, and skill renames are MINOR; weakening a normative rule, removing a skill, or breaking a per-project profile format is MAJOR (recorded pre-1.0 exception aside); factual refreshes are PATCH.
-- **Tag volatile claims.** A sentence carrying a vendor version, mechanism name, or numeric budget gets a source marker naming an ID in that skill's `refresh/sources.json` (its `affected` list names the reference); untagged volatile facts rot silently.
+- **Date volatile claims.** A sentence carrying a vendor version, mechanism name, or numeric budget carries its checked date and official source link; undated volatile facts rot silently.
 - **Description budgets.** Keep triggers in the first sentence: both harness listings truncate, and the limits table below carries the numbers.
 - **Packaged-file changes.** Adding, removing, or renaming a packaged file updates its packaging entry in the same PR.
 
@@ -64,7 +63,7 @@ The `## Ship` runbook in `.vegastack/dev.md` is the release sequence and says wh
 - [ ] Frontmatter keys and limits per rules 2–4; `name` equals the directory name.
 - [ ] `SKILL.md` under 500 lines; relative links resolve inside the skill; no Claude-only body syntax.
 - [ ] `agents/openai.yaml` present for Codex (other harnesses ignore extra files).
-- [ ] Install surfaces: Claude Code `.claude/skills` or `~/.claude/skills`; Codex `.agents/skills`; Hermes `~/.hermes/skills`, global only.
+- [ ] Install surfaces: Claude Code `.claude/skills` or `~/.claude/skills`; Codex `.agents/skills` or `~/.agents/skills`.
 - [ ] Rule 8's checks are clean.
 
 ## Hard limits
@@ -77,6 +76,5 @@ The `## Ship` runbook in `.vegastack/dev.md` is the release sequence and says wh
 | Claude Code listing | name + description truncated at 1,536 chars per skill |
 | Claude Code body | first 5,000 tokens persist across compaction; 25,000-token shared skills budget |
 | Codex skill list | 2% of context window / 8,000 chars — descriptions shortened first |
-| Hermes skills_list | ~3k tokens |
 
 These mirror marked sentences in [standards](references/standards.md); update both in one PR when a source changes.
