@@ -86,3 +86,21 @@ jobs:
           status=0
           node skills/skills-tooling/skill-scan/scripts/skill-scan.mjs --json --no-provision || status=$?
           test "$status" -le 1
+
+      # SkillSpector fingerprints differ between macOS and Linux, so a blocked scan publishes
+      # this runner's fingerprints for the operator-approved baseline refresh.
+      - name: Linux fingerprints for a blocked scan
+        if: failure() && github.event_name == 'merge_group'
+        run: |
+          mkdir -p "$RUNNER_TEMP/fingerprints"
+          for dir in packages/cli/skill/*/; do
+            name=$(basename "$dir")
+            skillspector baseline "$dir" -o "$RUNNER_TEMP/fingerprints/$name.yaml" --no-llm >/dev/null 2>&1 || true
+          done
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: failure() && github.event_name == 'merge_group'
+        with:
+          name: skill-scan-fingerprints
+          path: ${{ runner.temp }}/fingerprints/
+          if-no-files-found: ignore
