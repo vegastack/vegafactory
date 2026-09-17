@@ -782,7 +782,7 @@ export function classifySegment(segment: Segment, policy: Policy, mergeCheck?: M
 // finishing a merge or replaying somebody else's work.
 const GIT_COMMITTING = new Set(['commit', 'commit-tree', 'merge', 'rebase', 'cherry-pick', 'revert', 'am', 'pull', 'citool',
   // These rewrite or import history, so they also leave HEAD on a commit this session made.
-  'fast-import', 'filter-branch', 'filter-repo', 'subtree', 'merge-tree', 'replace', 'quiltimport'])
+  'fast-import', 'filter-branch', 'filter-repo', 'subtree', 'quiltimport'])
 // Commands that plainly cannot commit. Everything not named here is assumed able to, because a
 // wrapper, a script or a task runner can commit without saying so anywhere the parser can read.
 const INERT = new Set([

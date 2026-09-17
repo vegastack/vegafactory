@@ -366,7 +366,7 @@ describe('commit capability', () => {
       'git -C other commit -m x', 'sh -c "git commit -m x"', 'ls && git commit -m x', 'git nonsense', 'git $VERB',
       './scripts/release.sh', 'bun run release', 'make ship', 'vegafactory ship check 7', 'find . -name x -exec git commit -m y ;',
       'git fast-import < stream', 'git filter-branch --tree-filter x HEAD', 'git filter-repo --path src', 'git subtree add --prefix=v repo main',
-      'git subtree pull --prefix=v repo main', 'git merge-tree --write-tree a b', 'git replace a b', 'git quiltimport',
+      'git subtree pull --prefix=v repo main', 'git quiltimport',
     ]) expect(canCommit(command), command).toBe(true)
   })
 
@@ -374,6 +374,8 @@ describe('commit capability', () => {
     for (const command of [
       'sleep 30', 'ls -la', 'cat README.md', 'echo hello', 'grep -r x .', 'git status', 'git log -1', 'git diff --stat',
       'git add -A', 'git push origin main', 'git stash', 'git apply p.diff', 'git fetch', 'sleep 5 && ls', 'jq . x.json',
+      // These write a tree object and a ref under refs/replace; neither moves HEAD.
+      'git merge-tree --write-tree a b', 'git replace a b',
     ]) expect(canCommit(command), command).toBe(false)
   })
 
