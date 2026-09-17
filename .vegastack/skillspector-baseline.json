@@ -62,16 +62,6 @@
       "reason": "AS1 on the Codex section's project-trust fact: 'Project trust is per-path in ~/.codex/config.toml' with the [projects.\"<abs path>\"] / trust_level = \"trusted\" shape and the quoted upstream sentence about untrusted paths skipping project-scoped .codex/ layers, cited to CODEX-CONFIG. It is a verified harness fact this reference exists to hold — dev-implement's worktree trust step is designed against it — and it instructs nothing about reading the file. Adjudicated 03-09-2026 (#104). Still flag if: the sentence gains an instruction to read, copy or transmit config.toml content, names a key other than trust_level, or the path appears in this file outside the project-trust fact."
     },
     {
-      "id": "YR1",
-      "path": "assets/hooks/ship-guard.mjs",
-      "reason": "YR1 (YARA agent_skill_destructive_autonomous_actions) matches the strings 'git push --force' and 'git reset --hard' near the top of ship-guard.mjs. They are the hook's ALWAYS_ASK pattern table — the list of commands the guard refuses to let a session run unattended — read by substring match against a command the harness is about to execute, so that the guard answers ask (Claude) or block (Codex). The file executes nothing: it imports readFileSync, join and pathToFileURL only, reads dev.md and stdin, and writes one JSON decision to stdout; it has no child_process import at all. The signature is correct about the words and wrong about the direction. Adjudicated 03-09-2026 (#104). Still flag if: the file gains child_process, exec, spawn or any command execution, a pattern moves out of ALWAYS_ASK or DEFAULT_BRANCH_OPS into an executed string, or an ALWAYS_ASK entry's outcome becomes allow."
-    },
-    {
-      "id": "TM1",
-      "path": "assets/hooks/ship-guard.mjs",
-      "reason": "TM1 (Tool Parameter Abuse) fires twice on the same ALWAYS_ASK table as YR1: the --force and 'git reset --hard' parameters at lines 20 and 22 are the parameters the guard exists to intercept, held as matcher strings and compared against the command text the harness hands the hook. Nothing in the file builds or runs a command; the table's only consumer is classifySegment, which returns an ask/block decision when a pattern is found. Adjudicated 03-09-2026 (#104). Still flag if: the file gains any command execution, a table entry is used to construct a command rather than to match one, or the always-ask list loses the force-push, hard-reset, branch-delete or --no-verify entries."
-    },
-    {
       "id": "EA5",
       "path": "references/harness-facts.md",
       "reason": "EA5 (External Model or Provider Selection) on the Codex skill-discovery drill: one documented command, codex exec -C \"$PROBE\" --skip-git-repo-check -s read-only '...', that starts a real Codex session against a throwaway probe skill to learn whether headless Codex discovers project skills on its own. The quota cost is real and is the reason the section says, in bold, that the operator runs it by hand — no skill, hook or dispatcher may run it unasked, and dev-setup only ever prints it for the operator to copy. The run is sandboxed read-only inside a mktemp directory so the repo's un-ignored .agents/ is never written to. Adjudicated 03-09-2026 (#104). Still flag if: the command appears in this file outside the operator-run drill, loses the read-only sandbox flag or the scratch directory, or any script or hook in this repo executes this probe without an explicit operator instruction."
@@ -79,24 +69,6 @@
   ],
   "scanner_version": "2.11.2",
   "fingerprints": [
-    {
-      "hash": "sha256:70a64779926c9515ee394c5ba5677a936d0e2016752b5aff54d5c47f96d5fb67",
-      "rule_id": "P2",
-      "file": "scripts/lib/approval.mjs",
-      "reason": "The approval owner documents and parses vsk approval/progress metadata. The matched bytes are a schema example or literal delimiter comparison, not an agent-directed instruction; only declared JSON fields grant scope after canonical identity/source/history validation. This identical owner file is copied into dev-implement, dev-intake, dev-plan and dev-ship. Exact content fingerprint regenerated after the operator-approved SkillSpector 2.11.2 upgrade; no path-wide or rule-wide exception. Still flag if: the matched content changes, a comment gains an instruction rather than metadata, or a new finding appears outside this exact fingerprint."
-    },
-    {
-      "hash": "sha256:d3509ebde6e936e30976e6154a33ced041be59f41ab665e3fe5aacbd87869f77",
-      "rule_id": "P2",
-      "file": "scripts/lib/approval.mjs",
-      "reason": "The approval owner documents and parses vsk approval/progress metadata. The matched bytes are a schema example or literal delimiter comparison, not an agent-directed instruction; only declared JSON fields grant scope after canonical identity/source/history validation. This identical owner file is copied into dev-implement, dev-intake, dev-plan and dev-ship. Exact content fingerprint regenerated after the operator-approved SkillSpector 2.11.2 upgrade; no path-wide or rule-wide exception. Still flag if: the matched content changes, a comment gains an instruction rather than metadata, or a new finding appears outside this exact fingerprint."
-    },
-    {
-      "hash": "sha256:73f4541c4f7373057346af97a5fc35f60877b82003070da13700b5acfa790a55",
-      "rule_id": "P2",
-      "file": "scripts/lib/approval.mjs",
-      "reason": "The approval owner documents and parses vsk approval/progress metadata. The matched bytes are a schema example or literal delimiter comparison, not an agent-directed instruction; only declared JSON fields grant scope after canonical identity/source/history validation. This identical owner file is copied into dev-implement, dev-intake, dev-plan and dev-ship. Exact content fingerprint regenerated after the operator-approved SkillSpector 2.11.2 upgrade; no path-wide or rule-wide exception. Still flag if: the matched content changes, a comment gains an instruction rather than metadata, or a new finding appears outside this exact fingerprint."
-    },
     {
       "hash": "sha256:1618044194efc2c7879d9d094dbe70174af152e6ccfae3330f8b56abd1bd478e",
       "rule_id": "P2",
@@ -120,24 +92,6 @@
       "rule_id": "P2",
       "file": "scripts/plan-lint.mjs",
       "reason": "The plan linter parses the stable task-id HTML marker only on structural lines outside fenced examples, rejects duplicates, and uses the result to bind exact task files. The matched syntax is a defensive identity parser, not hidden agent direction. Exact SkillSpector 2.11.2 fingerprint; no path-wide or rule-wide exception. Still flag if: fenced or malformed markers begin granting task identity, duplicate rejection weakens, the matched bytes change, or a finding appears outside this exact parser occurrence."
-    },
-    {
-      "hash": "sha256:4157aed2b08e4f44fa4858eadaf71e095f0773d7a5d00553e320acc253cbdbd4",
-      "rule_id": "P2",
-      "file": "scripts/lib/approval.mjs",
-      "reason": "The approval owner documents and parses vsk approval/progress metadata. The matched bytes are a schema example or literal delimiter comparison, not an agent-directed instruction; only declared JSON fields grant scope after canonical identity/source/history validation. This identical owner file is copied into dev-implement, dev-intake, dev-plan and dev-ship. Exact content fingerprint regenerated after the operator-approved SkillSpector 2.11.2 upgrade; no path-wide or rule-wide exception. Still flag if: the matched content changes, a comment gains an instruction rather than metadata, or a new finding appears outside this exact fingerprint."
-    },
-    {
-      "hash": "sha256:96872fa1047dc764a24d7aa6d6c1b4832df6af80dbc1825989fa9d55bc6bd84c",
-      "rule_id": "P2",
-      "file": "scripts/lib/approval.mjs",
-      "reason": "The approval owner documents and parses vsk approval/progress metadata. The matched bytes are a schema example or literal delimiter comparison, not an agent-directed instruction; only declared JSON fields grant scope after canonical identity/source/history validation. This identical owner file is copied into dev-implement, dev-intake, dev-plan and dev-ship. Exact content fingerprint regenerated after the operator-approved SkillSpector 2.11.2 upgrade; no path-wide or rule-wide exception. Still flag if: the matched content changes, a comment gains an instruction rather than metadata, or a new finding appears outside this exact fingerprint."
-    },
-    {
-      "hash": "sha256:772bc478e8c325fe76ef2d23c47daff461a7c8d54390316e506c0fcf86169992",
-      "rule_id": "P2",
-      "file": "scripts/lib/approval.mjs",
-      "reason": "The approval owner documents and parses vsk approval/progress metadata. The matched bytes are a schema example or literal delimiter comparison, not an agent-directed instruction; only declared JSON fields grant scope after canonical identity/source/history validation. This identical owner file is copied into dev-implement, dev-intake, dev-plan and dev-ship. Exact content fingerprint regenerated after the operator-approved SkillSpector 2.11.2 upgrade; no path-wide or rule-wide exception. Still flag if: the matched content changes, a comment gains an instruction rather than metadata, or a new finding appears outside this exact fingerprint."
     },
     {
       "hash": "sha256:6fc53185b2a016f31c7059696797c718a4106af3855a5f2730af457f532d279d",

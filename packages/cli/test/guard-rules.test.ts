@@ -32,8 +32,8 @@ describe('policy', () => {
     git(work, 'push', '-q', 'origin', 'main')
     git(work, 'remote', 'set-head', 'origin', '--auto')
     writeFileSync(join(work, '.vegastack/dev.md'), '## Ship\n- auto: `bun run release`\n')
-    expect(loadPolicy(work)).toEqual({ defaultBranch: 'main', shipAsk: ['bun run release'] })
-    expect(loadPolicy(tmp)).toEqual({ defaultBranch: null, shipAsk: [] })
+    expect(loadPolicy(work)).toMatchObject({ defaultBranch: 'main', shipAsk: ['bun run release'] })
+    expect(loadPolicy(tmp)).toMatchObject({ defaultBranch: null, shipAsk: [] })
   })
 })
 
@@ -74,6 +74,14 @@ describe('decisions', () => {
       expect(decide(command).decision, command).toBe('ask')
     }
     expect(decide('wrangler deploy --env production').rule).toBe('ship-ask')
+  })
+
+  test('pushing one tag by name asks, however it is spelled', () => {
+    const withTags: Policy = { ...policy, tags: new Set(['release-candidate']) }
+    for (const command of ['git push origin v0.20.0', 'git push origin 1.2.3', 'git push origin release-candidate', 'git push origin v1.0.0:v1.0.0', 'git push origin refs/tags/x']) {
+      expect(decide(command, withTags).decision, command).toBe('ask')
+    }
+    expect(decide('git push origin feat/216-coordination', withTags).decision).toBe('allow')
   })
 
   test('every spelling of a push to the default branch asks', () => {

@@ -11,8 +11,8 @@ const root = join(import.meta.dir, '../../..')
 
 test('no skill, doc or hook wiring calls a removed CLI command or a deleted script', () => {
   const files = execFileSync('git', ['ls-files', '-z', '--', 'skills', '*.md', '.codex', 'packages/cli/packaging.json'], { cwd: root, encoding: 'utf8' })
-    // History files and changesets keep old names; this repo's dev.md is the operator's to edit (its guard sync line is a known follow-up).
-    .split('\0').filter((file) => file && !/(^|\/)(CHANGELOG|chronicle|decisions)\.md$/.test(file) && file !== '.vegastack/dev.md' && !file.startsWith('.changeset/') && !file.includes('/tests/'))
+    // History files and changesets keep old names.
+    .split('\0').filter((file) => file && !/(^|\/)(CHANGELOG|chronicle|decisions)\.md$/.test(file) && !file.startsWith('.changeset/') && !file.includes('/tests/'))
   const verbs = REMOVED.join('|')
   const prose = new RegExp(`\\bvegafactory (${verbs})\\b`)
   const hits = files.flatMap((file) => {

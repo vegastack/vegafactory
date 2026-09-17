@@ -11,7 +11,7 @@ import { spawnSync } from 'node:child_process'
 import { basename } from 'node:path'
 
 export interface Segment { words: string[]; redirects: string[]; strings: string[] }
-export interface Policy { defaultBranch: string | null; shipAsk: string[] }
+export interface Policy { defaultBranch: string | null; shipAsk: string[]; tags?: Set<string> }
 export interface Decision { decision: 'allow' | 'ask'; reason: string | null; rule: string }
 // Says whether `gh pr merge` with these (resolved) arguments is already covered by a recorded "ship it".
 // `raw` is the argv as written, so the check can refuse a `--repo` the resolver stripped.
@@ -52,8 +52,12 @@ export function defaultBranch(cwd: string): string | null {
 export function loadPolicy(cwd: string): Policy {
   const branch = defaultBranch(cwd)
   const devMd = branch ? git(cwd, ['show', `origin/${branch}:.vegastack/dev.md`]) : null
-  return { defaultBranch: branch, shipAsk: devMd ? shipAskCommands(devMd) : [] }
+  const tags = new Set((git(cwd, ['tag', '--list']) ?? '').split('\n').filter(Boolean))
+  return { defaultBranch: branch, shipAsk: devMd ? shipAskCommands(devMd) : [], tags }
 }
+
+// A push destination is a tag when it is spelled as one, names a local tag, or looks like a version.
+const isTag = (name: string, tags?: Set<string>) => name.startsWith('refs/tags/') || Boolean(tags?.has(name)) || /^v?\d+\.\d+/.test(name)
 
 // ---------------------------------------------------------------------------------------------
 // Shell-word parsing
@@ -467,8 +471,11 @@ function classifyResolved(segment: Segment, words: string[], policy: Policy, mer
       const { flags, positionals } = pushArguments(words)
       if (flags.includes('--all') || flags.includes('--mirror')) return ask(`pushing every branch reaches ${policy.defaultBranch ?? 'the default branch'}, which ${WORD}`, 'default-branch')
       if (flags.includes('--tags')) return ask(`pushing tags publishes a release, which ${WORD}`, 'always-ask')
-      const destinations = positionals.slice(1).map(pushDestination)
-      if (destinations.some((d) => d.kind === 'tag')) return ask(`pushing a tag publishes a release, which ${WORD}`, 'always-ask')
+      const refspecs = positionals.slice(1)
+      const destinations = refspecs.map(pushDestination)
+      // `git push origin v1.2.0` pushes the tag of that name: git resolves a bare source as a tag too.
+      const sources = refspecs.map((spec) => spec.replace(/^\+/, '').split(':')[0]!)
+      if (destinations.some((d) => d.kind === 'tag' || isTag(d.branch, policy.tags)) || sources.some((name) => isTag(name, policy.tags))) return ask(`pushing a tag publishes a release, which ${WORD}`, 'always-ask')
       if (destinations.length === 0 || destinations.some((d) => d.kind === 'unreadable')) return ask(`a push whose branch the guard cannot read ${WORD}`, 'unclassified')
       if (policy.defaultBranch === null) return ask(`a push whose target the guard cannot check (no default branch on origin) ${WORD}`, 'unclassified')
       if (destinations.some((d) => d.branch === policy.defaultBranch)) return ask(`pushing to ${policy.defaultBranch} ${WORD}`, 'default-branch')
