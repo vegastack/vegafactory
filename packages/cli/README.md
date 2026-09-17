@@ -33,7 +33,7 @@ npx @vegastack/vegafactory skills list
 | `sync` | Refresh this machine's copy of the org control room |
 | `ship check <n>` | Exit 0 when issue n may merge: a "ship it" after the latest evidence, the branch pushed and clean, its PR green |
 | `hook <event> --harness claude\|codex` | The harness hooks: ship guard, claim heartbeat, WIP checkpoint each turn, and the one lessons request per working session |
-| `learning <add\|list\|accept\|decline>` | The lessons a session left for `.vegastack/dev.md`; `add` records one, accepting or declining drops one from the git-ignored queue, and the dev.md line is yours to write |
+| `learning <add\|list\|accept\|decline>` | The lessons a session left for `.vegastack/dev.md`; `add` reads them from a file or standard input, one per line, so no lesson text passes through a shell; accepting or declining drops one from the git-ignored queue, and the dev.md line is yours to write |
 
 ### Selecting skills
 

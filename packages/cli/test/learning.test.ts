@@ -1,9 +1,9 @@
 import { beforeEach, describe, expect, test } from 'bun:test'
 import { spawn, spawnSync } from 'node:child_process'
-import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, symlinkSync, writeFileSync } from 'node:fs'
+import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { addLesson, learningsPath, pendingNote, readLessons, runLearning, settle } from '../src/learning.ts'
+import { addLesson, learningsPath, lessonsIn, pendingNote, readLessons, runLearning, settle, writeNew } from '../src/learning.ts'
 
 let root: string
 let out: string[]
@@ -27,12 +27,12 @@ describe('the pending queue', () => {
     expect(pendingNote(root)).toBe(null)
     expect(existsSync(learningsPath(root))).toBe(false)
 
-    expect(run('add', 'the skill scan reads the built bundle,\n  so build first')).toBe(0)
+    expect(run('add', '  the skill scan reads the   built bundle  ')).toBe(0)
     expect(out.join('\n')).toContain('recorded')
     expect(run('add', 'unset ANTHROPIC_BASE_URL before the tests')).toBe(0)
-    // A lesson is one line, whatever shape it arrived in.
-    expect(queue()).toBe('- the skill scan reads the built bundle, so build first\n- unset ANTHROPIC_BASE_URL before the tests\n')
-    expect(readLessons(root).map((lesson) => lesson.text)).toEqual(['the skill scan reads the built bundle, so build first', 'unset ANTHROPIC_BASE_URL before the tests'])
+    // One line in, one lesson out, with the spacing tidied.
+    expect(queue()).toBe('- the skill scan reads the built bundle\n- unset ANTHROPIC_BASE_URL before the tests\n')
+    expect(readLessons(root).map((lesson) => lesson.text)).toEqual(['the skill scan reads the built bundle', 'unset ANTHROPIC_BASE_URL before the tests'])
 
     // The same lesson twice is one lesson, and empty text is refused.
     addLesson(root, 'unset ANTHROPIC_BASE_URL before the tests')
@@ -66,7 +66,7 @@ describe('the pending queue', () => {
     expect(() => run('accept')).toThrow('needs a lesson id')
     expect(() => run('sprinkle')).toThrow('unknown learning verb')
     expect(run('--help')).toBe(0)
-    expect(out.join('\n')).toContain('add "<lesson>"')
+    expect(out.join('\n')).toContain('add --file PATH')
   })
 
   test('the session-start note names the file, the one-line rule and the yes', () => {
@@ -145,12 +145,77 @@ describe('the queue is a plain file under .vegastack/.tmp', () => {
     expect(pendingNote(root)).toContain('could not be read')
   })
 
-  test('a symlinked .tmp directory is refused too', () => {
+  test('a symlinked .tmp directory is refused before anything is created at its target', () => {
     const elsewhere = realpathSync(mkdtempSync(join(tmpdir(), 'learning-away-')))
     const tmp = join(root, '.vegastack', '.tmp')
     spawnSync('rm', ['-rf', tmp])
     symlinkSync(elsewhere, tmp)
     expect(() => learningsPath(root)).toThrow('symbolic link')
-    expect(existsSync(join(elsewhere, 'learnings.md'))).toBe(false)
+    expect(() => readLessons(root)).toThrow('symbolic link')
+    expect(() => addLesson(root, 'a lesson')).toThrow('symbolic link')
+    // The lock is taken only after the checks, so not even the lock directory reaches the target.
+    expect(readdirSync(elsewhere)).toEqual([])
+  })
+
+  test('a symlinked lock directory is refused, and its target stays empty', () => {
+    const elsewhere = realpathSync(mkdtempSync(join(tmpdir(), 'learning-lock-')))
+    symlinkSync(elsewhere, join(root, '.vegastack', '.tmp', 'learning'))
+    expect(() => addLesson(root, 'a lesson')).toThrow('symbolic link')
+    expect(() => readLessons(root)).toThrow('symbolic link')
+    expect(readdirSync(elsewhere)).toEqual([])
+    expect(existsSync(join(root, '.vegastack', '.tmp', 'learnings.md'))).toBe(false)
+  })
+
+  test('the replacement write refuses a planted name rather than following it', () => {
+    // Every queue replacement goes through this: an exclusive create, so a link planted at the
+    // temp name is refused instead of being written through to dev.md.
+    const planted = join(root, '.vegastack', '.tmp', 'learnings.md.planted.tmp')
+    symlinkSync(devMdPath(), planted)
+    expect(() => writeNew(planted, '- a lesson\n')).toThrow(/EEXIST|exists/)
+    expect(devMd()).toBe(DEV_MD)
+    // And the real path leaves nothing behind for a next attempt to find.
+    addLesson(root, 'a lesson')
+    expect(readdirSync(join(root, '.vegastack', '.tmp')).filter((name) => name.endsWith('.tmp'))).toEqual(['learnings.md.planted.tmp'])
+  })
+})
+
+describe('lesson text never passes through a shell', () => {
+  const CLI = join(import.meta.dir, '../src/index.ts')
+  // Everything a shell would take an interest in, plus a line a flag parser would.
+  const NASTY = (marker: string) => [
+    'quotes "double" and \'single\' stay put',
+    'a backtick `date` is text',
+    `a substitution $(touch ${marker}) is text`,
+    'a variable $HOME and ${HOME} are text',
+    '--force is a lesson, not a flag',
+    'a trailing backslash \\',
+  ]
+
+  test('add --file round-trips every lesson exactly and runs none of it', () => {
+    const marker = join(root, 'pwned')
+    const draft = join(root, 'draft.md')
+    writeFileSync(draft, NASTY(marker).map((line) => `- ${line}`).join('\n') + '\n')
+    const result = spawnSync(process.execPath, [CLI, 'learning', 'add', '--file', draft], { cwd: root, encoding: 'utf8' })
+    expect(result.status, result.stderr).toBe(0)
+    expect(readLessons(root).map((lesson) => lesson.text)).toEqual(NASTY(marker))
+    expect(existsSync(marker)).toBe(false)
+    expect(devMd()).toBe(DEV_MD)
+  })
+
+  test('add --stdin does the same, and a bare list is accepted with or without markers', () => {
+    const marker = join(root, 'pwned-stdin')
+    const result = spawnSync(process.execPath, [CLI, 'learning', 'add', '--stdin'], {
+      cwd: root, encoding: 'utf8', input: NASTY(marker).join('\n') + '\n\n',
+    })
+    expect(result.status, result.stderr).toBe(0)
+    expect(readLessons(root).map((lesson) => lesson.text)).toEqual(NASTY(marker))
+    expect(existsSync(marker)).toBe(false)
+  })
+
+  test('one line is one lesson, marker or not, and blank lines are not lessons', () => {
+    expect(lessonsIn('- one\n\ntwo\n  * three  \n')).toEqual(['one', 'two', 'three'])
+    expect(() => runLearning(['add', '--file'], { cwd: root, out: () => {} })).toThrow('--file needs a value')
+    writeFileSync(join(root, 'empty.md'), '\n\n')
+    expect(() => runLearning(['add', '--file', join(root, 'empty.md')], { cwd: root, out: () => {} })).toThrow('needs some text')
   })
 })

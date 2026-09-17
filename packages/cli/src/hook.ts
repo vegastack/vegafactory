@@ -149,12 +149,14 @@ function writeLocal(where: Where, local: LocalClaim) {
   renameSync(temp, path)
 }
 
-// One mark per harness session: the HEAD it started on and whether the lessons request already
-// went out. Two sessions can share a worktree, so this is keyed by session id and kept apart from
-// the claim file, which every tool call rewrites — a shared field there would clobber a neighbour's
-// baseline. Every change takes the lock, re-reads and replaces the file, so the change is the whole
-// read-modify-write and not just the write.
-export interface SessionMark { head: string | null; asked: boolean; at: number }
+// One mark per harness session: the HEAD that session last saw at an event of its own, whether it
+// has been seen to do work, and whether the lessons request already went out. Two sessions can
+// share a worktree, so this is keyed by session id and kept apart from the claim file, which every
+// tool call rewrites — a shared field there would clobber a neighbour's baseline. Every change
+// takes the lock, re-reads and replaces the file, so the change is the whole read-modify-write and
+// not just the write. No event ever writes another session's mark: a worktree's HEAD is shared, so
+// a HEAD that moved is only this session's work when this session's own events bracket the move.
+export interface SessionMark { head: string | null; worked: boolean; asked: boolean; at: number }
 
 export const sessionsPath = (where: Where) => join(where.top, '.vegastack', '.tmp', 'claims', `${where.number}.sessions.json`)
 
@@ -175,30 +177,36 @@ function updateSessions<T>(where: Where, change: (marks: Record<string, SessionM
   }, { what: 'the session marks' })
 }
 
-// A session's baseline is written the first time any event sees it, before anything that can fail,
+// What an event tells us about the session it belongs to:
+//   'idle'   only where its HEAD stands now — a session start, a prompt, the end of a session
+//   'tool'   a tool of its own just ran, so a HEAD that moved since its last event is its work
+//   'commit' its own Stop checkpoint made the commit, which is its work by construction
+type Observed = 'idle' | 'tool' | 'commit'
+
+// Written the first time any of that session's events is seen, and before anything that can fail,
 // so a refresh that throws still leaves the session able to tell work from talk.
-function markSession(where: Where, session: string | null, now: number) {
+function observe(where: Where, session: string | null, now: number, kind: Observed = 'idle') {
   if (!session) return
   updateSessions(where, (marks) => {
+    const head = headOf(where.top)
     const mark = marks[session]
-    if (mark) mark.at = now
-    else marks[session] = { head: headOf(where.top), asked: false, at: now }
+    if (!mark) { marks[session] = { head, worked: kind === 'commit', asked: false, at: now }; return }
+    if (kind === 'commit' || (kind === 'tool' && mark.head !== null && mark.head !== head)) mark.worked = true
+    mark.head = head
+    mark.at = now
   })
 }
 
-// True once per session, and only when commits appeared while this session was the one working:
-// a chat-only session has no lessons to give. The decision and the record of it happen inside the
-// same lock, and afterwards every mark moves to this HEAD — a worktree's HEAD is shared, so this is
-// what keeps a neighbouring session from being asked for the commits this one just made.
+// True once per session, and only for a session seen to do work: a session that only talked has no
+// lessons to give. The decision and the record of it happen inside the same lock.
 function claimAsk(where: Where, session: string | null, now: number): boolean {
   if (!session) return false
   return updateSessions(where, (marks) => {
-    const head = headOf(where.top)
     const mark = marks[session]
-    const ask = !!mark && !mark.asked && !!mark.head && mark.head !== head
-    if (mark) { mark.at = now; if (ask) mark.asked = true }
-    for (const entry of Object.values(marks)) entry.head = head
-    return ask
+    if (!mark || mark.asked || !mark.worked) return false
+    mark.asked = true
+    mark.at = now
+    return true
   })
 }
 
@@ -503,7 +511,7 @@ function advisory(event: HookEvent, harness: Harness, payload: Record<string, un
 
   if (event === 'session-start') {
     // Before the refresh, which talks to GitHub and can throw.
-    markSession(where, session, deps.now())
+    observe(where, session, deps.now())
     const { holder, state } = refresh(where, local, deps, true)
     writeLocal(where, local)
     const lines = [
@@ -517,6 +525,7 @@ function advisory(event: HookEvent, harness: Harness, payload: Record<string, un
     return deps.out(context('SessionStart', lines.join('\n')))
   }
   if (event === 'prompt') {
+    observe(where, session, deps.now())
     const { holder } = refresh(where, local, deps)
     writeLocal(where, local)
     const notes: string[] = []
@@ -528,23 +537,27 @@ function advisory(event: HookEvent, harness: Harness, payload: Record<string, un
   }
   if (event === 'post-tool') {
     recordActivity(local, deps.now())
+    observe(where, session, deps.now(), 'tool')
     if (local.held && (local.lastPush === null || deps.now() - local.lastPush >= HEARTBEAT_EVERY_MS)) pushHeartbeat(where, local, deps)
     return writeLocal(where, local)
   }
   if (event === 'session-end') {
     recordActivity(local, deps.now())
+    observe(where, session, deps.now())
     if (local.held) pushHeartbeat(where, local, deps)
     return writeLocal(where, local)
   }
   if (event === 'stop') {
     recordActivity(local, deps.now())
-    markSession(where, session, deps.now())
+    observe(where, session, deps.now())
     writeLocal(where, local)
     if (local.lostTo || !where.branch || issueFromBranch(where.branch) !== where.number) return
     const notes: string[] = []
     const rejected = pushFailure(where)
     if (rejected) notes.push(rejected)
     const saved = commitWork(where.top, `wip: #${where.number} turn checkpoint`)
+    // This session's own turn produced that commit, so the work is this session's.
+    if (saved.committed) observe(where, session, deps.now(), 'commit')
     if (saved.secrets.length) notes.push(`The WIP checkpoint was skipped: ${saved.reason}. Move them out of the worktree or ignore them.`)
     if (saved.committed) {
       // The push runs in the background; a rejection is written down and reported on the next prompt or stop.

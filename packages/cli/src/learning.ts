@@ -5,9 +5,9 @@
 // edits dev.md itself on the operator's yes — this command only keeps the queue and drops a settled
 // lesson. Every read and every write goes through one lock and one checked path, so two sessions
 // cannot lose each other's lessons and no link can turn a settlement into an edit of dev.md.
-import { createHash } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import { lstatSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync } from 'node:fs'
-import { join } from 'node:path'
+import { join, resolve } from 'node:path'
 import { withLock } from './issue-cache.ts'
 import { repoRoot } from './issue.ts'
 
@@ -29,14 +29,15 @@ function linkFree(path: string) {
   if (entry.isSymbolicLink()) throw new Error(`${path} is a symbolic link — delete it; the lessons queue is a plain file under .vegastack/.tmp and this command never writes through a link`)
 }
 
-// The queue is a real file inside this repository's own .vegastack/.tmp. Checked on every read and
-// every write, because a link left at that name would otherwise make accept rewrite whatever it
-// points at — dev.md, say, which nothing here may ever touch.
-export function learningsPath(root: string): string {
+// The queue and its lock are real paths inside this repository's own .vegastack/.tmp. Every
+// component is checked before anything is opened, taken or created, because a link anywhere on the
+// way would otherwise let this command write outside the repository — over dev.md, say, which
+// nothing here may ever touch.
+function checkedPaths(root: string): { queue: string; lock: string } {
   const vegastack = join(root, '.vegastack')
   const tmp = join(vegastack, '.tmp')
-  const path = join(tmp, 'learnings.md')
-  for (const part of [vegastack, tmp, path]) linkFree(part)
+  const paths = { queue: join(tmp, 'learnings.md'), lock: join(tmp, 'learning') }
+  for (const part of [vegastack, tmp, paths.lock, paths.queue]) linkFree(part)
   try {
     const expected = join(realpathSync(root), '.vegastack', '.tmp')
     if (realpathSync(tmp) !== expected) throw new Error(`${tmp} resolves to ${realpathSync(tmp)}, outside ${expected}`)
@@ -44,12 +45,22 @@ export function learningsPath(root: string): string {
     // The directory not existing yet is fine; anything else is a path we will not write through.
     if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
   }
-  return path
+  return paths
 }
 
+export const learningsPath = (root: string) => checkedPaths(root).queue
+
 // Every read and every write of the queue runs inside this, across processes as well as within one.
-export const lockQueue = <T>(root: string, fn: () => T): T =>
-  withLock(join(root, '.vegastack', '.tmp', 'learning'), fn, { what: 'the lessons queue' })
+// The checks come first, so a bad path is refused before the lock directory is created anywhere.
+export function lockQueue<T>(root: string, fn: () => T): T {
+  return withLock(checkedPaths(root).lock, fn, { what: 'the lessons queue' })
+}
+
+// Creates the file or fails. `wx` is O_CREAT|O_EXCL, which refuses a name that already exists —
+// a symbolic link included, dangling or not — so a planted link can never be written through.
+export function writeNew(path: string, text: string) {
+  writeFileSync(path, text, { flag: 'wx' })
+}
 
 function parse(text: string): Lesson[] {
   const seen = new Set<string>()
@@ -68,12 +79,13 @@ function readQueue(root: string): { path: string; text: string } {
   try { return { path, text: readFileSync(path, 'utf8') } } catch { return { path, text: '' } }
 }
 
-// Replaces the queue without following a link: the temp file is renamed over the name, and rename
-// replaces the name itself. An empty queue is no queue, so the file goes rather than linger.
+// Replaces the queue without following a link: the temp name is unguessable and created
+// exclusively, and rename replaces the queue name itself rather than following it. An empty queue
+// is no queue, so the file goes rather than linger.
 function replace(path: string, lines: string[]) {
   if (!lines.some((line) => lessonOn(line) !== null)) return rmSync(path, { force: true })
-  const temp = `${path}.${process.pid}.tmp`
-  writeFileSync(temp, lines.join('\n').replace(/\n*$/, '\n'))
+  const temp = `${path}.${randomUUID()}.tmp`
+  writeNew(temp, lines.join('\n').replace(/\n*$/, '\n'))
   renameSync(temp, path)
 }
 
@@ -81,19 +93,31 @@ export function readLessons(root: string): Lesson[] {
   return lockQueue(root, () => parse(readQueue(root).text))
 }
 
-// Appends one lesson. Under the same lock as settling, so an append during an accept is never lost.
-export function addLesson(root: string, raw: string): Lesson {
-  const text = oneLine(raw)
-  if (!text) throw new Error('a lesson needs some text — run vegafactory learning --help')
+// One lesson per line of whatever the session wrote, with an optional list marker.
+export function lessonsIn(text: string): string[] {
+  return text.split('\n').map((line) => oneLine(lessonOn(line) ?? line)).filter((line) => line !== '')
+}
+
+// Appends lessons in one lock, so an append during an accept is never lost and a batch is one write.
+export function addLessons(root: string, texts: string[]): Lesson[] {
+  const wanted = texts.map(oneLine).filter((text) => text !== '')
+  if (!wanted.length) throw new Error('a lesson needs some text — run vegafactory learning --help')
   return lockQueue(root, () => {
     const { path, text: current } = readQueue(root)
-    const lesson = { id: idOf(text), text }
-    if (parse(current).some((entry) => entry.id === lesson.id)) return lesson
     const lines = current ? current.replace(/\n*$/, '').split('\n') : []
-    replace(path, [...lines, `- ${text}`])
-    return lesson
+    const added: Lesson[] = []
+    for (const text of wanted) {
+      const lesson = { id: idOf(text), text }
+      added.push(lesson)
+      if (parse(lines.join('\n')).some((entry) => entry.id === lesson.id)) continue
+      lines.push(`- ${text}`)
+    }
+    replace(path, lines)
+    return added
   })
 }
+
+export const addLesson = (root: string, raw: string): Lesson => addLessons(root, [raw])[0]!
 
 // Drops the lesson, accepted or declined alike: dev.md is the model's to edit, never this command's.
 export function settle(root: string, id: string): Lesson | null {
@@ -109,12 +133,16 @@ export function settle(root: string, id: string): Lesson | null {
   })
 }
 
-// The one request a working session gets, delivered as the harness's own Stop continuation.
+// The one request a working session gets, delivered as the harness's own Stop continuation. The
+// lessons travel in a file, never as words in a command: prose on a command line is prose the
+// shell reads, and a backtick or a $(…) in a lesson is text, not an instruction.
 export function askText(root: string, number: number): string {
+  const draft = join(root, '.vegastack', '.tmp', `lessons-${number}.md`)
   return [
     `Before this session ends, one request: which general lessons did it teach — the things that would have saved time on any issue in this repo, not the ones specific to #${number}?`,
-    `Record each one with: vegafactory learning add "<the lesson in one line>"`,
-    `Nothing general to add? Then add nothing and leave the queue in ${learningsPath(root)} exactly as it is.`,
+    `Write them with your file-writing tool, one per line, to ${draft}, then record them by running: vegafactory learning add --file ${draft}`,
+    `Put the words in the file only, never in the command, so every quote and backtick stays literal.`,
+    `Nothing general to add? Then run nothing and leave the queue in ${learningsPath(root)} exactly as it is.`,
     `Recorded lessons are proposed as .vegastack/dev.md lines at the next session start and land only on the operator's yes. Then stop.`,
   ].join(' ')
 }
@@ -139,13 +167,16 @@ export function pendingNote(root: string): string | null {
 }
 
 export function learningUsage(): string {
-  return `Usage: vegafactory learning <verb> [text|id]
+  return `Usage: vegafactory learning <verb> [options]
 
-  add "<lesson>"       record one general lesson, in one line
+  add --file PATH      record the lessons in that file, one per line
+  add --stdin          the same, read from standard input
+  add <words…>         one short lesson, for a caller that controls its own quoting
   list [--json]        the lessons waiting for the operator's yes
   accept <id>          the operator said yes — drop it from the queue (you write the dev.md line, not this command)
   decline <id>         the operator said no — drop it from the queue
 
+Prefer --file: lesson text in a file passes through no shell, so quotes and backticks stay literal.
 The queue is .vegastack/.tmp/learnings.md, which is git-ignored and never leaves the machine.
 Nothing to record means running nothing: the queue is left alone.
 `
@@ -156,10 +187,20 @@ export function runLearning(argv: string[], { cwd = process.cwd(), out = console
   if (!verb || ['help', '--help', '-h'].includes(verb)) { out(learningUsage()); return 0 }
   const root = repoRoot(cwd)
   const json = rest.includes('--json')
-  const plain = rest.filter((arg) => !arg.startsWith('--'))
+  const flag = (name: string): string | null => {
+    const at = rest.indexOf(name)
+    if (at === -1) return null
+    const value = rest[at + 1]
+    if (value === undefined || value.startsWith('--')) throw new Error(`${name} needs a value`)
+    return value
+  }
+  const file = flag('--file')
+  // Everything that is not a flag or a flag's value.
+  const plain = rest.filter((arg, index) => !arg.startsWith('--') && !(index > 0 && rest[index - 1] === '--file'))
   if (verb === 'add') {
-    const lesson = addLesson(root, plain.join(' '))
-    out(json ? JSON.stringify({ verb, ...lesson }, null, 2) : `recorded ${lesson.id}  ${lesson.text}`)
+    const source = file !== null ? readFileSync(resolve(cwd, file), 'utf8') : rest.includes('--stdin') ? readFileSync(0, 'utf8') : plain.join(' ')
+    const lessons = addLessons(root, lessonsIn(source))
+    out(json ? JSON.stringify({ verb, lessons }, null, 2) : lessons.map((lesson) => `recorded ${lesson.id}  ${lesson.text}`).join('\n'))
     return 0
   }
   if (verb === 'list') {

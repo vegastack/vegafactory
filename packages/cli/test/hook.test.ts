@@ -381,11 +381,12 @@ describe('heartbeat and checkpoints', () => {
     expect(codex.hookSpecificOutput).toBeUndefined()
   })
 
+  const marks = () => JSON.parse(readFileSync(join(tree, '.vegastack/.tmp/claims/7.sessions.json'), 'utf8'))
+
   test('two sessions in one worktree keep their own baseline and answered state', async () => {
     // Both start from the same HEAD; the worktree's HEAD is shared, the marks are not.
     await hook('session-start', { cwd: tree, session_id: 'a' })
     await hook('session-start', { cwd: tree, session_id: 'b' })
-    const marks = () => JSON.parse(readFileSync(join(tree, '.vegastack/.tmp/claims/7.sessions.json'), 'utf8'))
     expect(Object.keys(marks()).sort()).toEqual(['a', 'b'])
 
     // A works and is asked.
@@ -403,6 +404,26 @@ describe('heartbeat and checkpoints', () => {
     expect([marks().a.asked, marks().b.asked]).toEqual([true, true])
   })
 
+  test('a commit made by hand belongs to the session that ran it, whoever stops first', async () => {
+    await hook('session-start', { cwd: tree, session_id: 'a' })
+    await hook('session-start', { cwd: tree, session_id: 'b' })
+
+    // A commits through a tool of its own: the tool event brackets the HEAD change.
+    writeFileSync(join(tree, 'by-hand.txt'), 'work')
+    git(tree, 'add', '-A')
+    git(tree, 'commit', '-q', '-m', 'a commits by hand')
+    await hook('post-tool', { cwd: tree, session_id: 'a' })
+
+    // B stops first and has done nothing: the shared HEAD moved, but not by B.
+    expect((await hook('stop', { cwd: tree, session_id: 'b' })).text).toBe('')
+    expect([marks().b.worked, marks().b.asked]).toEqual([false, false])
+
+    // A stops second and is still asked — B's Stop did not spend or move A's mark.
+    expect(marks().a.worked).toBe(true)
+    expect((await hook('stop', { cwd: tree, session_id: 'a' })).json().hookSpecificOutput.additionalContext).toContain('which general lessons')
+    expect(marks().a.asked).toBe(true)
+  })
+
   test('a session-start whose refresh fails still records the baseline', async () => {
     const broken: GhRunner = () => { throw new Error('offline') }
     const stdin = () => Readable.from([Buffer.from(JSON.stringify({ cwd: tree, session_id: 'c' }))])
@@ -415,6 +436,7 @@ describe('heartbeat and checkpoints', () => {
   test('a warning and the lessons request travel in one Stop object', async () => {
     await hook('session-start', { cwd: tree, session_id: 's3' })
     git(tree, 'commit', '-q', '--allow-empty', '-m', 'real work')
+    await hook('post-tool', { cwd: tree, session_id: 's3' })
     writeFileSync(join(tree, '.env'), 'X=1\n')
     const both = (await hook('stop', { cwd: tree, session_id: 's3' })).json()
     expect(both.systemMessage).toContain('.env')
