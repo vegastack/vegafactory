@@ -292,7 +292,7 @@ const WRAPPERS: Record<string, { withValue: string[]; positionals: number }> = {
 }
 const SHELLS = new Set(['sh', 'bash', 'zsh', 'dash', 'ksh', 'ash', 'fish'])
 // Shell words that only introduce the command after them.
-const KEYWORDS = new Set(['if', 'then', 'else', 'elif', 'do', 'while', 'until', '!'])
+const KEYWORDS = new Set(['if', 'then', 'else', 'elif', 'do', 'while', 'until', '!', 'noglob', 'nocorrect', 'coproc'])
 const GIT_GLOBAL_WITH_VALUE = new Set(['-C', '-c', '--git-dir', '--work-tree', '--namespace', '--exec-path', '--super-prefix', '--config-env', '--list-cmds', '--attr-source'])
 const GH_GLOBAL_WITH_VALUE = new Set(['-R', '--repo'])
 // Every git subcommand the guard knows. Anything else is an alias it cannot see through, so it asks.
@@ -311,11 +311,21 @@ const GIT_SUBCOMMANDS = new Set([
   'unpack-objects', 'update-index', 'update-ref', 'update-server-info', 'var', 'verify-commit', 'verify-pack', 'verify-tag', 'filter-repo',
   'version', 'whatchanged', 'worktree', 'write-tree', 'check-ignore'])
 
+const quoted = (word: string) => `'${word.replace(/'/g, `'\\''`)}'`
+
 function stripWrapper(words: string[], spec: { withValue: string[]; positionals: number }): string[] {
   let rest = words.slice(1)
   while (rest.length > 0 && rest[0]!.startsWith('-')) {
     const option = rest[0]!
     if (option === '--') { rest = rest.slice(1); break }
+    // `env -S "cmd args"` splits its value into the command it runs: classify that text as a script.
+    const split = words[0] === 'env' ? /^(?:-S|--split-string)(?:=(.*))?$|^-S(.+)$/s.exec(option) : null
+    if (split) {
+      const inline = split[1] ?? split[2]
+      const value = inline ?? rest[1] ?? ''
+      const after = rest.slice(inline === undefined ? 2 : 1)
+      return ['sh', '-c', [value, ...after.map(quoted)].join(' ')]
+    }
     const name = option.includes('=') ? option.slice(0, option.indexOf('=')) : option
     if (spec.withValue.includes(name) && !option.includes('=')) rest = rest.slice(2)
     else rest = rest.slice(1)

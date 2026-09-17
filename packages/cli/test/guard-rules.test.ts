@@ -77,6 +77,14 @@ describe('decisions', () => {
     expect(decide('wrangler deploy --env production').rule).toBe('ship-ask')
   })
 
+  test('env -S and zsh command modifiers cannot hide a guarded command', () => {
+    for (const command of [
+      'env -S "git push origin main"', 'env -S"git push origin main"', 'env --split-string="git push origin main"',
+      'env -S "vegafactory issue ack 7 --stage ship --by mk --quote x"', 'noglob git push origin main', 'nocorrect git push origin main', 'coproc git push origin main',
+    ]) expect(decide(command).decision, command).toBe('ask')
+    for (const command of ['env -S "ls -la"', 'noglob ls', 'env FOO=1 ls']) expect(decide(command).decision, command).toBe('allow')
+  })
+
   test('pushing one tag by name asks, however it is spelled', () => {
     const withTags: Policy = { ...policy, tags: new Set(['release-candidate']) }
     for (const command of ['git push origin v0.20.0', 'git push origin 1.2.3', 'git push origin release-candidate', 'git push origin v1.0.0:v1.0.0', 'git push origin refs/tags/x']) {
