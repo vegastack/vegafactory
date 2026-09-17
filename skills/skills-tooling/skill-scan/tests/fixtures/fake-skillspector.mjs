@@ -4,9 +4,10 @@
 // so the guard's invocation contract is asserted without installing the scanner.
 //
 //   VSK_FAKE_ARGV    path to append the received argv to (one JSON array per line)
-//   VSK_FAKE_REPORT  raw report body to write (default: a clean single-skill report)
+//   VSK_FAKE_REPORT       raw report body to write (default: a clean single-skill report)
+//   VSK_FAKE_REPORT_FILE  a file holding the report body (Linux caps one environment string at 128 KiB)
 //   VSK_FAKE_EXIT    exit code to return (default: 0)
-import { appendFileSync, writeFileSync } from 'node:fs';
+import { appendFileSync, readFileSync, writeFileSync } from 'node:fs';
 
 const argv = process.argv.slice(2);
 
@@ -17,6 +18,7 @@ if (process.env.VSK_FAKE_ARGV) {
 const outputIndex = argv.indexOf('--output');
 if (outputIndex !== -1 && argv[outputIndex + 1]) {
   const body =
+    (process.env.VSK_FAKE_REPORT_FILE ? readFileSync(process.env.VSK_FAKE_REPORT_FILE, 'utf8') : undefined) ??
     process.env.VSK_FAKE_REPORT ??
     JSON.stringify({
       risk_assessment: { score: 17, severity: 'LOW', recommendation: 'SAFE' },

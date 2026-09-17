@@ -24,7 +24,7 @@ function runBlock(script: string, env: Record<string, string>, ghVersion = 'gh v
   writeFileSync(file, script)
   const out = join(dir, 'outputs')
   writeFileSync(out, '')
-  const proc = Bun.spawnSync(['sh', file], {
+  const proc = Bun.spawnSync(['bash', file], {
     env: { ...process.env, POLICY_MODULE: join(skillRoot, 'scripts/effective-policy.mjs'), PATH: `${bin}:${process.env.PATH}`, GITHUB_OUTPUT: out, VSK_DIR: dir, ...env, ...(env.LABELS ? { LABELS: JSON.stringify(env.LABELS.split(',')) } : {}) },
   })
   return {
