@@ -89,3 +89,33 @@ describe('init', () => {
     expect(enableRepoHooks(outside.probe, repo, false).status).toBe('skipped')
   })
 })
+
+describe('vegafactory agent', () => {
+  test('starts the tool with the child environment and returns its exit code', async () => {
+    const { runAgent } = await import('../src/env.ts')
+    const seen: Array<{ tool: string; args: string[]; env: NodeJS.ProcessEnv }> = []
+    const spawn = ((tool: string, args: string[], options: { env: NodeJS.ProcessEnv }) => {
+      seen.push({ tool, args, env: options.env })
+      return { status: 3 }
+    }) as never
+    const env = { PATH: '/bin', CLAUDECODE: '1', ANTHROPIC_BASE_URL: 'http://proxy' }
+    expect(runAgent(['codex', 'exec', 'review this'], { env, spawn })).toBe(3)
+    expect(seen[0]!.tool).toBe('codex')
+    expect(seen[0]!.args).toEqual(['exec', 'review this'])
+    expect(seen[0]!.env.ANTHROPIC_BASE_URL).toBeUndefined()
+    expect(seen[0]!.env.CLAUDECODE).toBeUndefined()
+  })
+
+  test('refuses an API key before starting anything', async () => {
+    const { runAgent } = await import('../src/env.ts')
+    let started = false
+    const spawn = (() => { started = true; return { status: 0 } }) as never
+    expect(() => runAgent(['claude', '-p', 'x'], { env: { OPENAI_API_KEY: 'k' }, spawn })).toThrow('OPENAI_API_KEY')
+    expect(started).toBe(false)
+  })
+
+  test('only claude and codex can be started', async () => {
+    const { runAgent } = await import('../src/env.ts')
+    expect(() => runAgent(['bash', '-c', 'x'])).toThrow('usage: vegafactory agent claude|codex')
+  })
+})

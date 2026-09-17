@@ -11,7 +11,7 @@ import type { SkillEntry } from './selection.ts'
 type Agent = 'codex' | 'claude'
 type AgentChoice = Agent | 'both'
 type Mode = 'project' | 'global'
-type Command = 'add' | 'update' | 'verify' | 'doctor' | 'remove' | 'list' | 'version' | 'help' | 'worktree' | 'sync' | 'guard' | 'issue' | 'init'
+type Command = 'add' | 'update' | 'verify' | 'doctor' | 'remove' | 'list' | 'version' | 'help' | 'worktree' | 'sync' | 'guard' | 'issue' | 'init' | 'agent'
 const installerVerbs: readonly string[] = ['add', 'update', 'verify', 'doctor', 'remove', 'list'] as const
 interface Options {
   command: Command
@@ -63,6 +63,9 @@ Issues (agents read .vegastack/.tmp/issues/, then write back through these):
 Worktrees (one issue, one worktree; the main checkout stays on the default branch):
   worktree list|status|create|restore|remove|prune ...                run "vegafactory worktree --help"
 
+Agents:
+  agent claude|codex <args…>             start a headless run on the subscription (API keys refused)
+
 Control room and ship guard:
   sync [--org ORG] [--force]             refresh this machine's copy of the org control room
   guard sync [--check]                   compile dev.md's ship rules for the ship guard
@@ -101,7 +104,7 @@ function parse(argv: string[]): Options {
       if (!installerVerbs.includes(verb) && verb !== 'help' && verb !== 'version') throw new Error(`Unknown command: skills ${verb}`)
       command = verb as Command
     }
-    else if (head === 'worktree' || head === 'guard' || head === 'issue') return { command: head, all: false, dryRun: false, force: false, nonInteractive: false, json: false, rest: argv.splice(0) }
+    else if (head === 'worktree' || head === 'guard' || head === 'issue' || head === 'agent') return { command: head, all: false, dryRun: false, force: false, nonInteractive: false, json: false, rest: argv.splice(0) }
     else if (installerVerbs.includes(head)) throw new Error(`Unknown command: ${head} — installer verbs moved under the skills namespace: run "vegafactory skills ${head} …"`)
     else if (head === 'sync' || head === 'help' || head === 'version' || head === 'init') command = head
     else throw new Error(`Unknown command: ${head}`)
@@ -585,7 +588,8 @@ async function latestPublishedVersion(): Promise<string | null> {
 }
 
 async function confirm(question: string, options: Options): Promise<boolean> {
-  if (options.nonInteractive || options.dryRun || !process.stdin.isTTY) return true
+  if (options.nonInteractive || options.dryRun) return true
+  if (!process.stdin.isTTY) throw new Error(`${question.replace(/\?$/, '')} needs confirmation — pass --yes when no one can answer`)
   const rl = createInterface({ input: process.stdin, output: process.stdout })
   const answer = (await rl.question(`${question} [y/N] `)).trim().toLowerCase()
   rl.close()
@@ -806,12 +810,20 @@ async function init(options: Options) {
     process.exitCode = 1
     return
   }
-  console.log(renderSteps([ensureGlobalCli(probe, packageVersion, options.dryRun)]))
+  const failed = (step: { status: string }) => step.status === 'fail'
+  const cli = ensureGlobalCli(probe, packageVersion, options.dryRun)
+  console.log(renderSteps([cli]))
   const everyday = (await skillCatalog()).filter(entry => !entry.repoOnly).map(entry => entry.name)
   const { updated, kept } = await update({ ...options, mode: options.mode ?? 'global' }, true, everyday)
   const verb = options.dryRun ? 'would install or update' : 'installed or updated'
   console.log(`${options.dryRun ? 'skip' : 'done'}    skills  ${updated ? `${verb} ${updated}` : 'already up to date'}${kept.length ? ` · kept ${kept.length} locally edited` : ''}`)
-  console.log(renderSteps([enableRepoHooks(probe, process.cwd(), options.dryRun)]))
+  const hooks = enableRepoHooks(probe, process.cwd(), options.dryRun)
+  console.log(renderSteps([hooks]))
+  if ([cli, hooks].some(failed)) {
+    console.log('\nFix the FAIL lines above, then run init again.')
+    process.exitCode = 1
+    return
+  }
   if (options.org) await sync({ ...options, force: true })
   console.log(`\n${NEXT_STEP}`)
 }
@@ -832,6 +844,11 @@ async function main() {
   if (options.command === 'issue') {
     const { runIssue } = await import('./issue.ts')
     process.exitCode = runIssue(options.rest ?? [])
+    return
+  }
+  if (options.command === 'agent') {
+    const { runAgent } = await import('./env.ts')
+    process.exitCode = runAgent(options.rest ?? [])
     return
   }
   if (options.command === 'guard') {

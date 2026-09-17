@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, test } from 'bun:test'
 import { spawnSync } from 'node:child_process'
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, writeFileSync } from 'node:fs'
-import { tmpdir } from 'node:os'
+import { hostname, tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { cacheDir, commentType, readState, syncIssue, withLock } from '../src/issue-cache.ts'
 import { ackBody, artifactHash, runIssue } from '../src/issue.ts'
@@ -114,7 +114,86 @@ describe('sync', () => {
   test('a held lock times out with a clear message', () => {
     const dir = cacheDir(root, 'o/r', 9)
     mkdirSync(join(dir, '.lock'), { recursive: true })
-    expect(() => withLock(dir, () => 1, { timeoutMs: 100 })).toThrow('locked by another process')
+    expect(() => withLock(dir, () => 1, { timeoutMs: 100 })).toThrow('is locked by')
+  })
+
+  test('a lock held by a live process is never taken over, however old', () => {
+    const dir = cacheDir(root, 'o/r', 9)
+    mkdirSync(join(dir, '.lock'), { recursive: true })
+    writeFileSync(join(dir, '.lock/owner.json'), JSON.stringify({ token: 't', pid: process.pid, host: hostname(), at: 0 }))
+    expect(() => withLock(dir, () => 1, { timeoutMs: 100, staleMs: 1 })).toThrow('is locked by pid')
+  })
+
+  test('a lock left by a dead process is taken over', () => {
+    const dir = cacheDir(root, 'o/r', 9)
+    const dead = spawnSync('true').pid!
+    mkdirSync(join(dir, '.lock'), { recursive: true })
+    writeFileSync(join(dir, '.lock/owner.json'), JSON.stringify({ token: 't', pid: dead, host: hostname(), at: Date.now() }))
+    expect(withLock(dir, () => 42, { timeoutMs: 1000 })).toBe(42)
+    expect(existsSync(join(dir, '.lock'))).toBe(false)
+  })
+
+  test('a holder whose lock was replaced does not remove the new owner\'s lock', () => {
+    const dir = cacheDir(root, 'o/r', 9)
+    withLock(dir, () => {
+      writeFileSync(join(dir, '.lock/owner.json'), JSON.stringify({ token: 'someone-else', pid: process.pid, host: hostname(), at: Date.now() }))
+    })
+    expect(existsSync(join(dir, '.lock/owner.json'))).toBe(true)
+  })
+
+  test('the lock is re-entrant inside one process', () => {
+    const dir = cacheDir(root, 'o/r', 9)
+    expect(withLock(dir, () => withLock(dir, () => 'inner'))).toBe('inner')
+  })
+
+  test('an edit or delete on page 2 is seen even when page 1 and the issue are unchanged', () => {
+    gh.addIssue({ number: 7 })
+    const ids = Array.from({ length: 150 }, (_, i) => gh.addComment(7, `comment ${i}`).id)
+    const first = sync(7)
+    gh.editComment(ids[120]!, 'edited on page two', { touchIssue: false })
+    const edited = sync(7, first.cursor)
+    expect(edited.changes.map((c) => c.id)).toEqual([ids[120]])
+    const unchanged = sync(7, edited.cursor)
+    expect(unchanged.changes).toEqual([])
+    expect(unchanged.requests).toBe(3)
+    gh.deleteComment(ids[140]!)
+    gh.issues.get(7)!.updated_at = gh.tick()
+    const removed = sync(7, edited.cursor)
+    expect(removed.changes.map((c) => [c.kind, c.id])).toEqual([['removed', ids[140]]])
+  })
+
+  test('a malformed --repo is refused before any request', () => {
+    for (const repo of ['o/r?x=1', 'o/r/extra', '../r', 'o/..']) {
+      expect(() => run('comment', '7', '--repo', repo, '--file', 'x.md')).toThrow('invalid repository')
+    }
+    expect(gh.calls).toEqual([])
+  })
+
+  test('--dry-run writes nothing and drop needs --yes', () => {
+    gh.addIssue({ number: 7 })
+    expect(run('label', '7', '--add', 'risky', '--dry-run').text).toContain('dry run: would label')
+    expect(gh.calls).toEqual([])
+    sync(7)
+    expect(() => run('drop', '7')).toThrow('pass --yes')
+    expect(run('drop', '7', '--yes').code).toBe(0)
+    expect(existsSync(cacheDir(root, 'o/r', 7))).toBe(false)
+  })
+
+  test('a write holds the lock from its conflict check through its refresh', () => {
+    gh.addIssue({ number: 7 })
+    const comment = gh.addComment(7, 'v1')
+    const cursor = sync(7).cursor
+    const dir = cacheDir(root, 'o/r', 7)
+    const original = gh.runner
+    let lockedDuringWrite = false
+    gh.runner = (args, input) => {
+      if (args.includes('PATCH')) lockedDuringWrite = existsSync(join(dir, '.lock/owner.json'))
+      return original(args, input)
+    }
+    const file = join(root, 'edit.md')
+    writeFileSync(file, 'v2')
+    expect(run('edit-comment', '7', String(comment.id), '--file', file, '--since', String(cursor)).code).toBe(0)
+    expect(lockedDuringWrite).toBe(true)
   })
 })
 
@@ -122,12 +201,12 @@ describe('acks and checks', () => {
   const brief = '## Goal\nExport CSV'
   const plan = '<!-- vsk:v1 type=plan rev=1 -->\n## Plan\n- [ ] Task 1'
 
-  function acked(stage: 'brief' | 'plan' | 'ship', by = 'mk', source = 'session', login = by, type = 'User') {
+  function acked(stage: 'brief' | 'plan' | 'ship', by = 'mk', source = 'session', login = by, type = 'User', quote = 'ok') {
     const dir = sync(7).dir
     const state = readState(dir)!
     const planEntry = Object.values(state.comments).find((c) => c.type === 'plan')
     const planHash = planEntry ? artifactHash(readFileSync(join(dir, planEntry.file), 'utf8').split('\n---\n').slice(1).join('\n---\n')) : null
-    gh.addComment(7, ackBody({ stage, by, brief: artifactHash(brief), plan: stage === 'brief' ? null : planHash, source, quote: 'ok' }), login, type)
+    gh.addComment(7, ackBody({ stage, by, brief: artifactHash(brief), plan: stage === 'brief' ? null : planHash, source, quote }), login, type)
   }
 
   beforeEach(() => {
@@ -149,7 +228,7 @@ describe('acks and checks', () => {
 
   test('editing the brief after the ack invalidates it', () => {
     acked('plan')
-    gh.issues.get(7)!.body = '## Goal\nExport CSV and PDF'
+    gh.editBody(7, '## Goal\nExport CSV and PDF')
     expect(run('check', '7', '--for', 'implement', '--json').json().blocks).toContain('plan not acked: the brief changed after the plan ack')
   })
 
@@ -168,8 +247,39 @@ describe('acks and checks', () => {
 
   test('an app may relay an ack only by citing the person\'s own comment', () => {
     const reply = gh.addComment(7, 'approved, go', 'mk')
-    acked('plan', 'mk', `comment:${reply.id}`, 'vegafactory[bot]', 'Bot')
+    acked('plan', 'mk', `comment:${reply.id}`, 'vegafactory[bot]', 'Bot', 'approved, go')
     expect(run('check', '7', '--for', 'implement').code).toBe(0)
+  })
+
+  test('a relayed ack must quote the cited words', () => {
+    const reply = gh.addComment(7, 'not yet, change the export format', 'mk')
+    acked('plan', 'mk', `comment:${reply.id}`, 'vegafactory[bot]', 'Bot', 'approved')
+    expect(run('check', '7', '--for', 'implement', '--json').json().blocks).toContain('plan not acked: the cited comment does not contain the quoted words')
+  })
+
+  test('a relayed ack cannot cite words written before the current plan', () => {
+    const early = gh.addComment(7, 'approved', 'mk')
+    const planComment = gh.issues.get(7)!.comments[0]!
+    gh.editComment(planComment.id, planComment.body + '\n- [ ] Task 2')
+    acked('plan', 'mk', `comment:${early.id}`, 'vegafactory[bot]', 'Bot', 'approved')
+    expect(run('check', '7', '--for', 'implement', '--json').json().blocks).toContain('plan not acked: the cited comment predates the current brief or plan')
+  })
+
+  test('a relayed ack is void if the cited comment is edited afterwards', () => {
+    const reply = gh.addComment(7, 'approved', 'mk')
+    acked('plan', 'mk', `comment:${reply.id}`, 'vegafactory[bot]', 'Bot', 'approved')
+    gh.editComment(reply.id, 'approved — actually wait')
+    expect(run('check', '7', '--for', 'implement', '--json').json().blocks).toContain('plan not acked: the cited comment was edited after the ack')
+  })
+
+  test('editing the evidence after "ship it" voids it', () => {
+    const issue = gh.issues.get(7)!
+    issue.labels = ['ready-to-ship', 'medium']
+    const evidence = gh.addComment(7, '<!-- vsk:v1 type=evidence -->\nAll green')
+    acked('ship')
+    expect(run('check', '7', '--for', 'ship').code).toBe(0)
+    gh.editComment(evidence.id, '<!-- vsk:v1 type=evidence -->\nAll green, plus a late change')
+    expect(run('check', '7', '--for', 'ship', '--json').json().blocks).toContain('no "ship it": the ship ack predates the latest evidence')
   })
 
   test('an app cannot claim a session ack on someone\'s behalf', () => {
