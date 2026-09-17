@@ -19,8 +19,8 @@ const enums = {
   learning: ['normal-work', 'off'], 'learning-adoption': ['scoped-reversible', 'propose-only'],
   'stats-export': ['off', 'non-attributed', 'attributed'],
 }
-const lockable = new Set(['stats', 'stats-export', 'gates', 'tests', 'review', 'provider-mode', 'learning', 'learning-adoption'])
-const ordinary = new Set([...Object.keys(enums), 'operators', 'harness-policy', 'gates', 'branch', 'labels', 'control-room', 'sync-max-age', 'workflow-labels', 'stats-local-retention-days', 'stats-shared-retention-months', 'stats-spool-warning-mib'])
+const lockable = new Set(['stats', 'stats-export', 'tests', 'review', 'provider-mode', 'learning', 'learning-adoption'])
+const ordinary = new Set([...Object.keys(enums), 'operators', 'harness-policy', 'branch', 'labels', 'control-room', 'sync-max-age', 'stats-local-retention-days', 'stats-shared-retention-months', 'stats-spool-warning-mib'])
 const loginPattern = /^[a-z\d](?:[a-z\d-]{0,37}[a-z\d])?$/i
 const groupPattern = /^[a-z0-9][a-z0-9-]{0,63}$/
 const repoPattern = /^[a-z\d][a-z\d-]*\/[a-z\d_.-]+$/i
@@ -69,60 +69,50 @@ function policyJson(text) {
   return parsed
 }
 
-/** @typedef {'needsOperator'|'needsPlan'|'ready'|'working'|'forOperator'} State */
-/** @typedef {Record<State,string>} LabelMap */
-/** @type {LabelMap} */
-export const DEFAULT_LABELS = Object.freeze({ needsOperator: 'waiting-on-operator', needsPlan: 'planning', ready: 'queued', working: 'in-progress', forOperator: 'ready-to-ship' })
-export const WORKFLOW_STATES = Object.freeze(Object.keys(DEFAULT_LABELS))
+// The five state labels, in order, and the rest of the set dev-setup creates. These are the
+// names themselves — there is no second semantic vocabulary to keep in step, and no knob that
+// renames them, because every skill, script and board option spells them the same way.
+/** @typedef {'waiting-on-operator'|'planning'|'queued'|'in-progress'|'ready-to-ship'} State */
+export const WORKFLOW_STATES = Object.freeze(['waiting-on-operator', 'planning', 'queued', 'in-progress', 'ready-to-ship'])
+export const WORKFLOW_LABELS = Object.freeze([...WORKFLOW_STATES, 'small', 'medium', 'large', 'risky', 'epic', 'research'])
 
-/** @param {unknown} value @returns {LabelMap} */
-export function resolveLabels(value) {
-  if (value === undefined) return { ...DEFAULT_LABELS }
-  if (typeof value === 'string' || Array.isArray(value)) {
-    const names = typeof value === 'string' ? value.trim().split(/[,\s]+/) : value
-    if (!names.length || names.some(name => typeof name !== 'string' || !name.trim())
-      || new Set(names).size !== names.length || !Object.values(DEFAULT_LABELS).every(name => names.includes(name))) {
-      throw new Error('ambiguous legacy labels: preview an explicit workflow-labels semantic mapping; no labels or board options changed')
-    }
-    return { ...DEFAULT_LABELS }
-  }
-  if (!object(value) || Object.keys(value).length !== WORKFLOW_STATES.length
-    || !WORKFLOW_STATES.every(key => own(value, key) && typeof value[key] === 'string' && value[key].trim() === value[key]
-      && value[key].length > 0 && value[key].length <= 50 && !/[\x00-\x1f\x7f]/.test(value[key]))
-    || new Set(Object.values(value).map(name => name.toLowerCase())).size !== WORKFLOW_STATES.length) {
-    throw new Error('workflow-labels requires exactly five semantic keys with distinct nonempty label names')
-  }
-  return Object.fromEntries(WORKFLOW_STATES.map(key => [key, value[key]]))
-}
-
-/** @param {string[]} labels @param {LabelMap} map @returns {{state:State|null,blocks:string[]}} */
-export function resolveState(labels, map) {
-  if (map === undefined || map === null) return { state: null, blocks: ['workflow label map unavailable'] }
-  try { map = resolveLabels(map) } catch (error) { return { state: null, blocks: [error.message] } }
+/** @param {string[]} labels @returns {{state:State|null,blocks:string[]}} */
+export function resolveState(labels) {
   if (!Array.isArray(labels) || labels.some(label => typeof label !== 'string')) return { state: null, blocks: ['unreadable issue labels'] }
-  const states = WORKFLOW_STATES.filter(key => labels.includes(map[key]))
+  const states = WORKFLOW_STATES.filter(state => labels.includes(state))
   return states.length === 1 ? { state: states[0], blocks: [] }
-    : { state: null, blocks: [states.length ? 'conflicting state labels: ' + states.map(key => map[key]).join(', ') : 'no known workflow state label'] }
+    : { state: null, blocks: [states.length ? 'conflicting state labels: ' + states.join(', ') : 'no known workflow state label'] }
 }
 
 // Resolve just the local label contract for read-only profile tooling. Runtime admission
 // supplies the complete configured policy separately; this helper grants no authority.
-export function readWorkflowLabels(text = '') {
+export function readWorkflowStates(text = '') {
   const layer = parsePolicy(text)
   if (layer.blocks.length) throw new Error(layer.blocks.join('; '))
-  return workflowLabelsFromValues(layer.values)
+  return workflowStatesFromValues(layer.values)
 }
-function workflowLabelsFromValues(values) {
-  const map = resolveLabels(values['workflow-labels'] ?? values.labels)
-  if (values['workflow-labels'] !== undefined && values.labels !== undefined && !same(map, resolveLabels(values.labels))) throw new Error('labels and workflow-labels disagree; explicit migration required')
-  return map
+function workflowStatesFromValues(values) {
+  if (values.labels === undefined) return [...WORKFLOW_STATES]
+  const names = String(values.labels).trim().split(/[,\s]+/).filter(Boolean)
+  if (new Set(names).size !== names.length) throw new Error('labels: repeats a name')
+  if (!WORKFLOW_STATES.every(state => names.includes(state))) throw new Error('labels: is missing a state label; the set is ' + WORKFLOW_STATES.join(' '))
+  return [...WORKFLOW_STATES]
 }
 
 export const labelsDigest = labels => policyHash([...new Set(labels)].sort())
 
-// Presentation-only preview; callers obtain an explicit mapping before writing any profile.
-export function previewLabelMigration(value, proposed) {
-  return { oldNames: typeof value === 'string' ? value.trim().split(/[,\s]+/) : value ?? [], proposed: proposed === undefined ? null : resolveLabels(proposed), writes: false }
+// What dev-setup shows the operator before it touches an existing repo's labels: every label
+// from the pre-lean workflow that is still there, and the set that replaces it. Presentation
+// only — `writes: false` — and the old names live nowhere but the repo it read them from.
+const SUPERSEDED = ['ready', 'working', 'needs-plan', 'needs-operator', 'for-operator', 'quick-build', 'deep-build'] // superseded-labels: the one list of names to delete
+export function planLabelMigration(existing = []) {
+  const names = (Array.isArray(existing) ? existing : []).filter(name => typeof name === 'string')
+  return {
+    remove: SUPERSEDED.filter(name => names.includes(name)),
+    add: WORKFLOW_LABELS.filter(name => !names.includes(name)),
+    keep: names.filter(name => !SUPERSEDED.includes(name)),
+    writes: false,
+  }
 }
 
 function parseStage(value) {
@@ -132,7 +122,6 @@ function parseStage(value) {
 }
 function knobValue(key, text) {
   if (enums[key]) return enums[key].includes(text) ? text : undefined
-  if (key === 'gates') return /^[123]$/.test(text) ? Number(text) : undefined
   if (key === 'operators') return text && strings(text.split(/[,\s]+/), loginPattern) ? unique(text.toLowerCase().split(/[,\s]+/)) : undefined
   if (key === 'sync-max-age') {
     const m = /^(\d+)([smh])$/.exec(text)
@@ -143,9 +132,6 @@ function knobValue(key, text) {
   if (key === 'control-room') return text === 'none' || /^[a-z\d][a-z\d-]*\/[a-z\d_.-]+(?:#[a-z\d-]+)?(?:@[a-f\d]{7,40})?$/i.test(text) ? text : undefined
   if (key === 'branch') return text && /^[a-z\d_/-]+$/i.test(text.replace(/<(?:type|issue|slug)>/g, 'value')) ? text : undefined
   if (key === 'labels') return text && text.split(/[,\s]+/).every(label => /^[\w-]+$/.test(label)) ? text.split(/[,\s]+/) : undefined
-  if (key === 'workflow-labels') {
-    try { return resolveLabels(policyJson(text)) } catch { return undefined }
-  }
   return undefined
 }
 
@@ -261,7 +247,7 @@ export function resolvePolicy({ org = '', group = '', repo = '', identity = {}, 
     }
     if (layer.scope === 'org') for (const [key, value] of Object.entries(locked)) { values[key] = value; sources[key] = source(layer) }
   }
-  try { values['workflow-labels'] = workflowLabelsFromValues(values) } catch (error) { blocks.push(error.message) }
+  try { workflowStatesFromValues(values) } catch (error) { blocks.push(error.message) }
   const configured = freshness.configured === true || Boolean(values['control-room'] && values['control-room'] !== 'none')
   const now = typeof freshness.now === 'number' ? freshness.now : Date.parse(freshness.now ?? '')
   const validated = Date.parse(freshness.validatedAt ?? '')

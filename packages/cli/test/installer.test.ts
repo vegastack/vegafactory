@@ -188,7 +188,7 @@ describe('@vegastack/vegafactory installer', () => {
   test('doctor reports profile and installation state', async () => {
     const project = join(temporary, 'doctor')
     await mkdir(join(project, '.vegastack'), { recursive: true })
-    await writeFile(join(project, '.vegastack/dev.md'), '# Dev profile\n\n## Knobs\n\ngates: 3\n')
+    await writeFile(join(project, '.vegastack/dev.md'), '# Dev profile\n\n## Knobs\n\nmerge: rebase\n')
     expect(run(temporary, ['skills', 'add', skill(), '--agent', 'codex', '--dir', project, '--non-interactive']).exitCode).toBe(0)
     const result = run(temporary, ['skills', 'doctor', '--dir', project, '--non-interactive'])
     expect(result.exitCode).toBe(0)

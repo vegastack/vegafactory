@@ -39,7 +39,7 @@ Gather these silently and present them as findings — "here's what I found — 
 | environments and run commands | CI/deploy configs, env examples (names only), dev/start scripts — these draft `## Environments` and `## Verify` |
 | architecture (app repos) | wrangler files, drizzle config, better-auth usage, S3/R2 bindings, pg-boss, `eve`/`ai` packages, Dockerfiles/compose, pubspec.yaml — these draft `## Architecture` (a `d1_databases` binding with no Postgres driver is the D1-only class) |
 | existing files | AGENTS.md, CLAUDE.md, `.vegastack/dev.md`, a legacy `.vegastack/arch.md`, the decision register — read before writing, because hand edits in them are the truth |
-| existing labels | `gh label list` |
+| existing labels | `gh label list` — the names feed the Round C label migration, which is the only thing that removes a label |
 | project board | `gh project list --owner <org>` and `gh project field-list` — an existing board drafts `board: <number>`, none found drafts `board: none` |
 | native issue types | `gh api orgs/<org>/issue-types` — an `Epic` type routes parents to it, otherwise the `epic` label ([conventions](references/conventions.md)); the enabled names draft the `issue-types:` knob, `none` where the call 404s |
 | org automation identity | `gh api orgs/<org>/installations` — a `vegafactory` installation means workflows mint tokens from the App ([github-app](references/github-app.md)); owners only, so a 403 is an unknown, not a missing App |
@@ -82,8 +82,8 @@ Every knob `groups/<g>/group.md` or `org.md` already answers is stated as inheri
 - CLAUDE.md already has content → add the `@AGENTS.md` import as its first line (default) or move its content into AGENTS.md and leave only the import
 - Gitignored files a fresh checkout needs (`.env`) or a setup command detected → confirm `worktree-include:`, `commands: setup` and `worktree-retention:` (default 14d), replayed into every new worktree; nothing detected → `worktree-include: none`
 - No control room exists and the operator wants one → hand the request to `vegafactory-setup`, which bootstraps it; this skill never creates the org repository itself
-- Labels use `scripts/effective-policy.mjs`: defaults accept the complete space/CSV list with scope labels; custom names require five-key `workflow-labels` JSON. Preview semantic conversion; write only an accepted migration, preserving issues and board options. Both knobs must agree.
-- Different label names or a different decision-register path, when the situation or the user brings it up
+- Existing repo whose labels predate this workflow → show the migration before touching anything: `planLabelMigration` in [effective-policy](scripts/effective-policy.mjs) takes `gh label list`'s names and returns what goes, what arrives and what is left alone. Show all three lists, then on the user's yes delete the superseded ones and create the missing ones; issues keep every other label, and nothing records the old names anywhere — `labels:` carries the new set and the profile has no mapping knob. A no leaves the repo exactly as it was and the report says the workflow will not resolve a state until the set exists
+- A different decision-register path, when the situation or the user brings it up
 
 Everything else — merge style, branch naming, the stop-and-ask list, the `architect:` owner (the detected username), `chronicle-style: plain`, and `emoji: none` — takes its documented default straight into dev.md, because the profile is plain text the user can edit anytime.
 

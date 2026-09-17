@@ -14,10 +14,14 @@ test('templates list exactly the CLI state labels, in order', () => {
   }
   expect(read('skills/factory/vegafactory-setup/assets/control-room/boards.md.template')).toContain(STATES.join(' · '))
   expect(read('skills/factory/vegafactory-setup/references/control-room.md')).toContain(`"${STATES.join(',')},Done"`)
-  for (const path of ['skills/dev/dev-setup/assets/dev-profile.md.template', 'skills/factory/vegafactory-setup/assets/control-room/group.md.template']) {
-    const mapping = JSON.parse(/^workflow-labels:\s*(\{[^}]*\})/m.exec(read(path))![1]!)
-    expect(Object.values(mapping), path).toEqual([...STATES])
-  }
+})
+
+// The skill-side resolver and the CLI are two spellings of one state machine; a drift between
+// them shows up as a board option nobody can reach.
+test('the skill-side policy resolver names the same states as the CLI', async () => {
+  const { WORKFLOW_STATES, WORKFLOW_LABELS } = await import('../../../skills/dev/dev-setup/scripts/effective-policy.mjs')
+  expect(WORKFLOW_STATES).toEqual([...STATES])
+  expect([...WORKFLOW_LABELS].sort()).toEqual(LABEL_SPECS.map((spec) => spec.name).sort())
 })
 
 test('dev-setup creates every workflow label with the CLI colors', () => {

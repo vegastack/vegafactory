@@ -200,7 +200,7 @@ test('real Git snapshot bindings are per code repository and reject drift withou
     await mkdir(join(content, 'groups/design'), { recursive: true })
     const git = (...args: string[]) => execFileSync('git', args, { cwd: content, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim()
     git('init', '-q'); git('config', 'user.name', 'Fixture'); git('config', 'user.email', 'fixture@example.test'); git('remote', 'add', 'origin', origin)
-    const org = 'stats: on\nstats-people: on\ngates: 3\nsync-max-age: 2h\n'
+    const org = 'stats: on\nstats-people: on\nmerge: rebase\nsync-max-age: 2h\n'
     const csv = 'login,name,role,slack,timezone,groups\nowner,Owner,lead,,UTC,dev;design\n'
     await writeFile(join(content, 'org.md'), org)
     await writeFile(join(content, 'people.csv'), csv)
@@ -237,7 +237,7 @@ test('real Git snapshot bindings are per code repository and reject drift withou
     expect(commands).toHaveLength(5)
     expect(commands.filter(line => line.includes('cat-file --batch'))).toHaveLength(1)
     expect(loadConfiguredPolicy({ ...input, repo: 'acme/design', devMd: profiles['acme/design'] }).ok).toBe(true)
-    expect(loadConfiguredPolicy({ ...input, devMd: input.devMd + '\ngates: 2' }).blocks.join(' ')).toMatch(/digest changed/)
+    expect(loadConfiguredPolicy({ ...input, devMd: input.devMd + '\nmerge: squash' }).blocks.join(' ')).toMatch(/digest changed/)
     expect(loadConfiguredPolicy({ ...input, now: '2026-09-06T02:00:00Z' }).ok).toBe(false)
     expect(loadConfiguredPolicy({ ...input, devMd: profiles['acme/design'] }).ok).toBe(false)
     state.controlRooms.acme.remote = join(home, 'foreign.git')

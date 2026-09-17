@@ -1,29 +1,53 @@
 import { expect, test } from 'bun:test'
 import { readFileSync } from 'node:fs'
-import { resolveLabels, resolveState, resolvePolicy } from '../scripts/effective-policy.mjs'
+import { planLabelMigration, readWorkflowStates, resolveState, resolvePolicy, WORKFLOW_LABELS, WORKFLOW_STATES } from '../scripts/effective-policy.mjs'
 
 const actual = /^labels:\s*([^#\n]+)/m.exec(readFileSync(new URL('../../../../.vegastack/dev.md', import.meta.url), 'utf8'))![1]!.trim()
-const custom = { needsOperator: 'Decision', needsPlan: 'Plan', ready: 'Go', working: 'Build', forOperator: 'Review' }
 
-test('actual complete profile, CSV and reordered defaults retain semantic meaning and scope labels', () => {
+test('this repo\'s own labels line carries the fixed set, whatever the order or separator', () => {
   const before = actual.split(/\s+/)
   for (const labels of [actual, before.join(','), [...before].reverse().join(' '), actual + ' extra-scope']) {
-    expect(resolveState(['queued', 'medium'], resolveLabels(labels))).toEqual({ state: 'ready', blocks: [] })
+    expect(readWorkflowStates('labels: ' + labels)).toEqual([...WORKFLOW_STATES])
     expect(resolvePolicy({ repo: 'labels: ' + labels }).ok).toBe(true)
   }
   expect(actual.split(/\s+/)).toEqual(before)
 })
-test('custom states resolve exactly once; no and mixed states refuse', () => {
-  expect(resolveState(['Go'], resolveLabels(custom))).toEqual({ state: 'ready', blocks: [] })
-  for (const labels of [[], ['Go', 'Decision']]) {
-    expect(resolveState(labels, custom).state).toBeNull()
-    expect(resolveState(labels, custom).blocks.length).toBeGreaterThan(0)
+
+test('a labels line missing a state, or repeating one, is a block', () => {
+  for (const labels of ['queued in-progress', actual + ' queued', 'small medium large']) {
+    expect(() => readWorkflowStates('labels: ' + labels)).toThrow()
+    expect(resolvePolicy({ repo: 'labels: ' + labels }).ok).toBe(false)
   }
 })
-test('mapping rejects incomplete, duplicate, malformed and ambiguous legacy values', () => {
-  for (const value of [{ ...custom, working: 'Go' }, { ready: 'Go' }, { ...custom, other: 'Extra' }, '', 'Decision Plan Go Build Review', actual + ' queued']) expect(() => resolveLabels(value)).toThrow()
+
+test('one state label resolves; none and several refuse', () => {
+  expect(resolveState(['queued', 'medium'])).toEqual({ state: 'queued', blocks: [] })
+  for (const labels of [[], ['queued', 'in-progress'], null]) {
+    expect(resolveState(labels as string[]).state).toBeNull()
+    expect(resolveState(labels as string[]).blocks.length).toBeGreaterThan(0)
+  }
 })
-test('explicit and legacy representations must agree', () => {
-  expect(resolvePolicy({ repo: 'labels: ' + actual + '\nworkflow-labels: ' + JSON.stringify(custom) }).ok).toBe(false)
-  expect(resolvePolicy({ repo: 'labels: ' + actual + '\nworkflow-labels: ' + JSON.stringify(resolveLabels(undefined)) }).ok).toBe(true)
+
+// The migration an existing repo gets on a dev-setup re-run: what goes, what arrives, and the
+// promise that reading it changes nothing.
+test('the label migration lists the superseded names and the set that replaces them', () => {
+  const plan = planLabelMigration(['ready', 'working', 'needs-plan', 'needs-operator', 'for-operator', 'quick-build', 'bug'])
+  expect(plan.remove).toEqual(['ready', 'working', 'needs-plan', 'needs-operator', 'for-operator', 'quick-build'])
+  expect(plan.add).toEqual([...WORKFLOW_LABELS])
+  expect(plan.keep).toEqual(['bug'])
+  expect(plan.writes).toBe(false)
+})
+
+test('a repo already on the new labels migrates to nothing', () => {
+  const plan = planLabelMigration([...WORKFLOW_LABELS, 'documentation'])
+  expect(plan.remove).toEqual([])
+  expect(plan.add).toEqual([])
+  expect(planLabelMigration().remove).toEqual([])
+})
+
+test('no old state name survives in the profile the migration writes', () => {
+  const template = readFileSync(new URL('../assets/dev-profile.md.template', import.meta.url), 'utf8')
+  const line = /^labels:\s*([^#\n]+)/m.exec(template)![1]!.trim().split(/\s+/)
+  expect(line.slice(0, WORKFLOW_STATES.length)).toEqual([...WORKFLOW_STATES])
+  expect(template).not.toMatch(/workflow-labels|needs-plan|needs-operator|for-operator/)
 })
