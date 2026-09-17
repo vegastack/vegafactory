@@ -81,4 +81,8 @@ jobs:
 
       - name: Scan the built skills
         if: github.event_name == 'merge_group'
-        run: node skills/skills-tooling/skill-scan/scripts/skill-scan.mjs --json --no-provision
+        # Exit 1 is a pass with warnings (accepted findings); only 2 blocks.
+        run: |
+          status=0
+          node skills/skills-tooling/skill-scan/scripts/skill-scan.mjs --json --no-provision || status=$?
+          test "$status" -le 1
