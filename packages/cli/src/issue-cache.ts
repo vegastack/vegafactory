@@ -185,20 +185,14 @@ function release(dir: string, token: string) {
 // Removing a dead owner's lock happens under a second lock with the same owner rules, and only
 // after re-reading that the issue lock still belongs to the owner judged dead. While `.lock`
 // exists nobody else can create it, so the re-read and the removal see the same owner. A dead
-// stealer's mutex is cleared the same way. Returns false when the takeover could not run now.
+// stealer's mutex is never removed automatically. Returns false when the takeover could not run now.
 export function takeOver(lock: string, deadToken: string | null, staleMs: number): boolean {
   const steal = `${lock}.steal`
   const token = randomUUID()
   if (!acquire(steal, token)) {
-    const stealer = readOwner(steal)
-    if (ownerGone(stealer, steal, staleMs)) {
-      const grave = `${steal}.dead-${token}`
-      try {
-        renameSync(steal, grave)
-        // Only bury what we judged dead; put a live replacement back.
-        if (readOwner(grave)?.token === stealer?.token) rmSync(grave, { recursive: true, force: true })
-        else renameSync(grave, steal)
-      } catch { /* another waiter moved it */ }
+    // Freeing another process's mutex cannot be made atomic here, so a dead stealer is left for a person.
+    if (ownerGone(readOwner(steal), steal, staleMs)) {
+      throw new Error(`a crashed process left the takeover lock ${steal} — check no vegafactory command is running, then remove it: rm -rf '${steal}'`)
     }
     return false
   }

@@ -236,7 +236,7 @@ describe('sync', () => {
     expect(takeOver(lock, 'dead', 60_000)).toBe(false)
   })
 
-  test('a dead stealer is cleared, then the dead lock is taken over', () => {
+  test('a dead stealer is reported with the recovery command, never removed automatically', () => {
     const dir = cacheDir(root, 'o/r', 9)
     const lock = join(dir, '.lock')
     const dead = spawnSync('true').pid!
@@ -244,8 +244,10 @@ describe('sync', () => {
     writeFileSync(join(lock, 'owner.json'), JSON.stringify({ token: 'dead', pid: dead, host: hostname(), at: Date.now() }))
     mkdirSync(`${lock}.steal`)
     writeFileSync(join(`${lock}.steal`, 'owner.json'), JSON.stringify({ token: 'gone', pid: dead, host: hostname(), at: Date.now() }))
+    expect(() => withLock(dir, () => 7, { timeoutMs: 2000 })).toThrow(`remove it: rm -rf '${lock}.steal'`)
+    expect(existsSync(`${lock}.steal`)).toBe(true)
+    rmSync(`${lock}.steal`, { recursive: true })
     expect(withLock(dir, () => 7, { timeoutMs: 2000 })).toBe(7)
-    expect(existsSync(`${lock}.steal`)).toBe(false)
   })
 
   test('a stealer that finds a replacement owner leaves it alone', () => {
