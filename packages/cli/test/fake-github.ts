@@ -17,6 +17,7 @@ export interface FakeIssue {
   subIssues: number[]
   blockedBy: Array<{ number: number; state: string }>
   parent: number | null
+  events: Array<{ event: string; label: { name: string }; created_at: string }>
 }
 
 export class FakeGitHub {
@@ -36,8 +37,9 @@ export class FakeGitHub {
   addIssue(partial: Partial<FakeIssue> & { number: number }): FakeIssue {
     const issue: FakeIssue = {
       title: `Issue ${partial.number}`, body: 'Brief body', state: 'open', labels: [], assignees: [], login: 'mk',
-      updated_at: this.tick(), comments: [], subIssues: [], blockedBy: [], parent: null, ...partial,
+      updated_at: this.tick(), comments: [], subIssues: [], blockedBy: [], parent: null, events: [], ...partial,
     }
+    for (const name of issue.labels) issue.events.push({ event: 'labeled', label: { name }, created_at: issue.updated_at })
     this.issues.set(issue.number, issue)
     return issue
   }
@@ -138,8 +140,12 @@ export class FakeGitHub {
     }
     if ((m = /^repos\/o\/r\/issues\/(\d+)\/labels$/.exec(route!))) {
       const issue = this.issues.get(Number(m[1]))!
-      for (const label of payload.labels) if (!issue.labels.includes(label)) issue.labels.push(label)
       issue.updated_at = this.tick()
+      for (const label of payload.labels) {
+        if (issue.labels.includes(label)) continue
+        issue.labels.push(label)
+        issue.events.push({ event: 'labeled', label: { name: label }, created_at: issue.updated_at })
+      }
       return this.respond(200, [])
     }
     if ((m = /^repos\/o\/r\/issues\/(\d+)\/labels\/(.+)$/.exec(route!))) {
@@ -148,7 +154,12 @@ export class FakeGitHub {
       if (!issue.labels.includes(name)) return this.respond(404, { message: 'Label does not exist' })
       issue.labels = issue.labels.filter((label) => label !== name)
       issue.updated_at = this.tick()
+      issue.events.push({ event: 'unlabeled', label: { name }, created_at: issue.updated_at })
       return this.respond(200, [])
+    }
+    if ((m = /^repos\/o\/r\/issues\/(\d+)\/timeline$/.exec(route!))) {
+      const issue = this.issues.get(Number(m[1]))!
+      return this.respond(200, issue.events.slice((page - 1) * perPage, page * perPage))
     }
     if ((m = /^repos\/o\/r\/collaborators\/([^/]+)\/permission$/.exec(route!))) {
       return this.respond(200, { permission: this.permissions.get(decodeURIComponent(m[1]!)) ?? 'read' })

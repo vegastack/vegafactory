@@ -6,7 +6,8 @@ import { spawnSync } from 'node:child_process'
 import { existsSync, readFileSync } from 'node:fs'
 import { basename, dirname, join, resolve } from 'node:path'
 import { ghRequest, type GhRunner, defaultRunner } from './gh.ts'
-import { claim, heartbeat, holderOf, ownerId, release, type ClaimKind } from './claim.ts'
+import { claim, heartbeat, holderOf, keepClaimRows, ownerId, release, type ClaimKind } from './claim.ts'
+import { writeStatus } from './status-comment.ts'
 import { cacheDir, dropIssue, readBody, readState, syncIssue, type CacheState, type CommentEntry, type GhComment } from './issue-cache.ts'
 import { STATES, sizeOf, stateOf, transition, type State } from './labels.ts'
 
@@ -203,18 +204,6 @@ export function postComment(ctx: WriteContext, body: string): GhComment {
   return comment
 }
 
-const CLAIM_ROW = /^\s*<!--\s*vsk:claim\b[^>]*-->\s*$/
-
-// Heartbeat rows belong to the hooks, so an edit keeps GitHub's current rows, not the editor's copy.
-export function keepClaimRows(current: string, edited: string): string {
-  const rows = current.split('\n').filter((row) => CLAIM_ROW.test(row))
-  const lines = edited.split('\n').filter((row) => !CLAIM_ROW.test(row))
-  if (!rows.length) return lines.join('\n')
-  const marker = lines.findIndex((row) => /<!--\s*vsk:v1\s+type=ledger\b/.test(row))
-  lines.splice(marker + 1, 0, ...rows)
-  return lines.join('\n')
-}
-
 export function editComment(ctx: WriteContext, commentId: number, body: string, since: number) {
   const { dir } = syncIssue({ root: ctx.root, repo: ctx.repo, number: ctx.number, runner: ctx.runner })
   conflictIfChanged(ctx, commentId, since)
@@ -267,6 +256,8 @@ Write (GitHub first, then the local copy):
                                          exit 2 when someone else holds it
   release <n> [--reason TEXT]            give the issue up
   heartbeat <n> [--active MINUTES]       mark the claim alive (hooks call this)
+  status <n> [--progress-file PATH] [--branch NAME]
+                                         rewrite the status comment from GitHub's facts
   holder <n>                             who holds the issue
   drop <n>                               delete the local copy
 
@@ -407,6 +398,12 @@ export function runIssue(argv: string[], { runner = defaultRunner, cwd = process
       const snap = snapshot(dir)
       const { holder, stale } = holderOf(snap.state, snap.body)
       print({ holder, stale }, holder ? `${holder.owner} (${holder.harness}${holder.model ? ` · ${holder.model}` : ''}) · last active ${holder.heartbeat}` : 'nobody')
+      return 0
+    }
+    case 'status': {
+      const progress = args.flags['progress-file'] ? readFileSync(resolve(cwd, args.flags['progress-file']), 'utf8') : null
+      const result = writeStatus(ctx, { cwd, branch: args.flags.branch, progress })
+      print({ cursor: result.cursor }, `status comment updated\ncursor ${result.cursor}`)
       return 0
     }
     case 'drop':

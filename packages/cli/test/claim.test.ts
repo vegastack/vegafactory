@@ -3,9 +3,9 @@ import { spawnSync } from 'node:child_process'
 import { mkdirSync, mkdtempSync, realpathSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { claim, claimBody, heartbeat, heartbeatOf, holderOf, machineName, ownerId, release, type ClaimContext } from '../src/claim.ts'
+import { claim, claimBody, heartbeat, heartbeatOf, holderOf, keepClaimRows, machineName, ownerId, release, type ClaimContext } from '../src/claim.ts'
 import { cacheDir, readBody, readState, syncIssue } from '../src/issue-cache.ts'
-import { keepClaimRows, runIssue } from '../src/issue.ts'
+import { runIssue } from '../src/issue.ts'
 import { FakeGitHub } from './fake-github.ts'
 
 let gh: FakeGitHub

@@ -77,9 +77,11 @@ export function withHeartbeat(ledgerBody: string, owner: string, heartbeat: stri
 
 type Body = (entry: CommentEntry) => string
 
-export function claimsOf(state: CacheState, body: Body): { claims: Claim[]; ledger: CommentEntry | null } {
+// Live claims (after the latest release of each owner), every claim ever made, and the status comment.
+export function claimsOf(state: CacheState, body: Body): { claims: Claim[]; history: Claim[]; ledger: CommentEntry | null } {
   const comments = Object.values(state.comments).sort((a, b) => a.createdAt.localeCompare(b.createdAt) || a.id - b.id)
   let claims: Claim[] = []
+  const history: Claim[] = []
   let ledger: CommentEntry | null = null
   for (const entry of comments) {
     if (entry.type === 'ledger') ledger = entry
@@ -89,14 +91,16 @@ export function claimsOf(state: CacheState, body: Body): { claims: Claim[]; ledg
     }
     if (entry.type === 'claim') {
       const keys = markerKeys(body(entry))
-      if (!keys.owner || claims.some((claim) => claim.owner === keys.owner)) continue
-      claims.push({
+      if (!keys.owner) continue
+      const claim: Claim = {
         owner: keys.owner, kind: keys.kind === 'dispatch' ? 'dispatch' : 'session',
         harness: keys.harness ?? '', model: keys.model ?? '', claimedAt: entry.createdAt, commentId: entry.id,
-      })
+      }
+      history.push(claim)
+      if (!claims.some((live) => live.owner === claim.owner)) claims.push(claim)
     }
   }
-  return { claims, ledger }
+  return { claims, history, ledger }
 }
 
 // The current holder: the earliest live claim. Stale claims are reported but do not hold.
@@ -225,4 +229,16 @@ export function claim(ctx: ClaimContext, request: ClaimRequest, now = Date.now()
   }
   const live = before.holder && !before.holder.stale
   return { ok: true, message: `claimed by ${request.owner}`, holder: after.holder, waitMs: live ? 2 * 60_000 : 0 }
+}
+
+const CLAIM_ROW = /^\s*<!--\s*vsk:claim\b[^>]*-->\s*$/
+
+// Heartbeat rows belong to the hooks, so an edit keeps GitHub's current rows, not the editor's copy.
+export function keepClaimRows(current: string, edited: string): string {
+  const rows = current.split('\n').filter((row) => CLAIM_ROW.test(row))
+  const lines = edited.split('\n').filter((row) => !CLAIM_ROW.test(row))
+  if (!rows.length) return lines.join('\n')
+  const marker = lines.findIndex((row) => /<!--\s*vsk:v1\s+type=ledger\b/.test(row))
+  lines.splice(marker + 1, 0, ...rows)
+  return lines.join('\n')
 }
