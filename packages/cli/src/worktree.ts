@@ -42,7 +42,7 @@ export function worktreeUsage(): string {
   restore <issue> [--slug S]            re-add the checkout of the branch that carries the issue number
   remove <issue> [--force]              remove the directory once it is clean, pushed and merged
   prune [--older-than 14d]              remove worktrees idle past retention; uncommitted work is
-                                        first saved to a pushed rescue/<name>-<machine>-<time> branch
+                                        first committed as wip on the worktree's branch and pushed
 
 Every verb acts; --dry-run shows what it would do. Branches are never deleted, and
 --force lifts only the "not merged" block — use it only on the operator's word.

@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, test } from 'bun:test'
 import { spawnSync } from 'node:child_process'
-import { mkdirSync, mkdtempSync, readFileSync, realpathSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { Readable } from 'node:stream'
@@ -170,19 +170,43 @@ describe('ownership', () => {
     const denied = (await hook('pre-tool', bash('ls'))).json().hookSpecificOutput
     expect(denied.permissionDecision).toBe('deny')
     expect(denied.permissionDecisionReason).toContain('held by other:1-x')
-    expect(denied.permissionDecisionReason).toMatch(/saved to rescue\/7-export-box-\d{8}T\d{4}/)
-    const rescue = git(tree, 'branch', '--show-current')
-    expect(git(tree, 'ls-remote', 'origin', rescue)).toContain(rescue)
+    expect(denied.permissionDecisionReason).toContain('committed and pushed to feat/7-export')
+    // The work stays on the issue branch; no other branch is made.
+    expect(git(tree, 'branch', '--show-current')).toBe('feat/7-export')
+    expect(git(tree, 'log', '-1', '--format=%s')).toBe('wip: #7 rescued uncommitted work from 7-export')
+    expect(git(tree, 'ls-remote', 'origin', 'feat/7-export')).toContain(git(tree, 'rev-parse', 'HEAD'))
+    expect(git(tree, 'ls-remote', '--heads', 'origin')).not.toContain('rescue/')
     expect(git(tree, 'status', '--porcelain')).toBe('')
 
     const again = (await hook('pre-tool', { ...bash('ls'), tool_name: 'Edit' })).json().hookSpecificOutput
     expect(again.permissionDecision).toBe('deny')
-    expect(again.permissionDecisionReason).not.toContain('saved to')
+    expect(again.permissionDecisionReason).not.toContain('pushed')
     expect((await hook('pre-tool', { cwd: tree, tool_name: 'Read', tool_input: { file_path: 'x' } })).text).toBe('')
     // The Stop checkpoint leaves a lost worktree alone.
     writeFileSync(join(tree, 'later.txt'), 'x')
     await hook('stop', { cwd: tree })
     expect(detached).toEqual([])
+  })
+
+  test('a rescue whose push is rejected keeps the commit local and says so, never forcing', async () => {
+    claim(ctx(), { owner: OWNER, kind: 'session', harness: 'claude', model: 'opus' }, gh.clock)
+    // The new holder pushed first, so the remote branch moved.
+    git(plain, 'switch', '-q', '-c', 'feat/7-export')
+    writeFileSync(join(plain, 'theirs.txt'), 'theirs')
+    git(plain, 'add', '-A')
+    git(plain, 'commit', '-q', '-m', 'theirs')
+    git(plain, 'push', '-q', 'origin', 'feat/7-export')
+    const theirs = git(plain, 'rev-parse', 'HEAD')
+    const elsewhere = realpathSync(mkdtempSync(join(tmpdir(), 'hook-other-')))
+    claim({ ...ctx(), root: elsewhere }, { owner: 'other:1-x', kind: 'session', harness: 'codex', model: 'gpt', takeBackBy: 'mk' }, gh.clock)
+    writeFileSync(join(tree, 'draft.txt'), 'unsaved')
+    gh.clock += 61_000
+    const denied = (await hook('pre-tool', bash('ls'))).json().hookSpecificOutput
+    expect(denied.permissionDecision).toBe('deny')
+    expect(denied.permissionDecisionReason).toContain('the push was rejected')
+    expect(denied.permissionDecisionReason).toContain('the commit stays local')
+    expect(git(tree, 'log', '-1', '--format=%s')).toStartWith('wip: #7 rescued')
+    expect(git(tree, 'ls-remote', 'origin', 'feat/7-export')).toContain(theirs)
   })
 
   test('a GitHub failure never blocks a tool', async () => {
@@ -238,9 +262,53 @@ describe('heartbeat and checkpoints', () => {
     await hook('stop', { cwd: tree, stop_hook_active: false })
     expect(git(tree, 'log', '-1', '--format=%s')).toBe('wip: #7 turn checkpoint')
     expect(git(tree, 'status', '--porcelain')).toBe('')
-    expect(detached).toEqual([['git', 'push', '--quiet', '-u', 'origin', 'HEAD:refs/heads/feat/7-export']])
+    expect(detached).toHaveLength(1)
+    expect(detached[0]!.join(' ')).toContain('git push --quiet -u origin')
+    expect(detached[0]!.join(' ')).not.toMatch(/--force|push [^|]*-f\b|\+HEAD/)
     const [cmd, ...args] = detached[0]!
     expect(spawnSync(cmd!, args, { cwd: tree }).status).toBe(0)
     expect(git(tree, 'ls-remote', 'origin', 'feat/7-export')).toContain(git(tree, 'rev-parse', 'HEAD'))
+  })
+
+  test('a rejected checkpoint push keeps the commit local and is reported on the next prompt and stop', async () => {
+    git(plain, 'switch', '-q', '-c', 'feat/7-export')
+    git(plain, 'commit', '-q', '--allow-empty', '-m', 'someone else')
+    git(plain, 'push', '-q', 'origin', 'feat/7-export')
+    writeFileSync(join(tree, 'feature.txt'), 'work')
+    await hook('stop', { cwd: tree })
+    const [cmd, ...args] = detached[0]!
+    expect(spawnSync(cmd!, args, { cwd: tree }).status).not.toBe(0)
+    expect(git(tree, 'log', '-1', '--format=%s')).toBe('wip: #7 turn checkpoint')
+    const prompt = (await hook('prompt', { cwd: tree })).json().hookSpecificOutput.additionalContext
+    expect(prompt).toContain('The last WIP push of feat/7-export was rejected')
+    const stop = (await hook('stop', { cwd: tree })).json()
+    expect(stop.systemMessage).toContain('the commit stays local')
+  })
+
+  test('stop never commits or pushes a staged secret and names the files', async () => {
+    const token = ['ghp', 'A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8'].join('_')
+    const cases: Array<[string, string]> = [
+      ['.env', 'X=1\n'], ['deploy.pem', 'x\n'], ['id_rsa', 'x\n'], ['cfg.ts', `const t = '${token}'\n`],
+      ['aws.txt', `key ${'AKIA' + 'ABCDEFGHIJKLMNOP'}\n`], ['k.txt', `${'-----BEGIN ' + 'RSA PRIVATE KEY-----'}\n`],
+      ['.npmrc', '//registry.npmjs.org/:_authToken=abc123\n'], ['s.txt', `${'sk-' + 'ant-' + 'api03-abcdefghijkl'}\n`],
+      ['slack.txt', `${'xoxb' + '-1234567890-abc'}\n`],
+    ]
+    const head = git(tree, 'rev-parse', 'HEAD')
+    for (const [file, text] of cases) {
+      detached = []
+      writeFileSync(join(tree, file), text)
+      const result = (await hook('stop', { cwd: tree })).json()
+      expect(result.systemMessage, file).toContain(file)
+      expect(detached, file).toEqual([])
+      expect(git(tree, 'rev-parse', 'HEAD'), file).toBe(head)
+      expect(git(tree, 'diff', '--cached', '--name-only'), file).toBe('')
+      rmSync(join(tree, file))
+    }
+    // Harmless look-alikes still checkpoint.
+    writeFileSync(join(tree, '.env.example'), 'TOKEN=\n')
+    writeFileSync(join(tree, '.npmrc'), '//registry.npmjs.org/:_authToken=${NPM_TOKEN}\n')
+    expect((await hook('stop', { cwd: tree })).text).toBe('')
+    expect(git(tree, 'log', '-1', '--format=%s')).toBe('wip: #7 turn checkpoint')
+    expect(detached).toHaveLength(1)
   })
 })

@@ -4,10 +4,10 @@
 // (<type>/<n>-…). With no issue only the ship guard runs. Advisory events never block and
 // exit 0 on any error; only pre-tool can deny, and its guard fails closed.
 import { spawn, spawnSync } from 'node:child_process'
-import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs'
 import { hostname } from 'node:os'
 import { basename, dirname, join } from 'node:path'
-import { claimsOf, holderOf, machineName, ownerId, HEARTBEAT_EVERY_MS, type Holder } from './claim.ts'
+import { claimsOf, holderOf, ownerId, HEARTBEAT_EVERY_MS, type Holder } from './claim.ts'
 import { defaultRunner, type GhRunner } from './gh.ts'
 import { classifyCommand, extractCommand, loadPolicy, mergeTarget, type Decision, type MergeCheck } from './guard-rules.ts'
 import { cacheDir, readBody, readState, syncIssue } from './issue-cache.ts'
@@ -210,19 +210,80 @@ export const defaultDeps = (): HookDeps => ({
   cli: [process.execPath, process.argv[1]!], host: hostname(),
 })
 
-export function rescueBranchName(name: string, now: number, host: string): string {
-  const stamp = new Date(now).toISOString().replace(/[-:]/g, '').slice(0, 13)
-  return `rescue/${name}-${machineName(host)}-${stamp}`
+// Secrets never leave the machine in an automatic commit: file names, then the added lines.
+const SECRET_NAMES: Array<[RegExp, string]> = [
+  [/^\.env(\..+)?$/, 'an env file'], [/\.(pem|key|p12)$/, 'a key file'], [/^id_rsa/, 'an SSH key'],
+]
+const SECRET_TEXT: Array<[RegExp, string]> = [
+  [/-----BEGIN (?:[A-Z]+ )*PRIVATE KEY-----/, 'a private key'],
+  [/\b(?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9]{20,}/, 'a GitHub token'],
+  [/\bgithub_pat_[A-Za-z0-9_]{20,}/, 'a GitHub token'],
+  [/\bsk-ant-[A-Za-z0-9_-]{10,}/, 'an Anthropic key'],
+  [/\bsk-[A-Za-z0-9_-]{32,}/, 'an API key'],
+  [/\bAKIA[0-9A-Z]{16}\b/, 'an AWS key'],
+  [/\bxox[baprs]-[A-Za-z0-9-]{10,}/, 'a Slack token'],
+  [/_auth(?:Token)?\s*=\s*(?!\$\{)\S/, 'a registry token'],
+]
+
+// The staged files that look like they carry a secret, as "path (what)".
+export function stagedSecrets(cwd: string): string[] {
+  const hits = new Map<string, string>()
+  const names = git(cwd, ['diff', '--cached', '--name-only', '--diff-filter=ACMR']).out.split('\n').filter(Boolean)
+  for (const file of names) {
+    const name = basename(file)
+    if (name === '.env.example') continue
+    const match = SECRET_NAMES.find(([pattern]) => pattern.test(name))
+    if (match) hits.set(file, match[1])
+  }
+  const diff = spawnSync('git', ['diff', '--cached', '--no-color', '--no-ext-diff', '-U0', '--diff-filter=ACMR'], { cwd, encoding: 'utf8', maxBuffer: 256 * 1024 * 1024, timeout: 10_000 })
+  if (diff.status !== 0) return ['(the staged changes could not be read)']
+  let file = ''
+  for (const line of diff.stdout.split('\n')) {
+    if (line.startsWith('+++ ')) { file = line.replace(/^\+\+\+ (b\/)?/, ''); continue }
+    if (!line.startsWith('+') || hits.has(file)) continue
+    const match = SECRET_TEXT.find(([pattern]) => pattern.test(line))
+    if (match) hits.set(file, match[1])
+  }
+  return [...hits].map(([path, what]) => `${path} (${what})`)
 }
 
-// Saves uncommitted work on a pushed rescue branch (same shape as worktree prune's rescue).
-export function rescueWork(cwd: string, branch: string, name: string): { ok: boolean; reason: string | null } {
-  if (!git(cwd, ['status', '--porcelain']).out) return { ok: true, reason: null }
-  for (const args of [['switch', '-c', branch], ['add', '--all'], ['commit', '--quiet', '-m', `wip: rescued uncommitted work from ${name}`], ['push', '--quiet', '-u', 'origin', branch]]) {
-    const result = git(cwd, args)
-    if (!result.ok) return { ok: false, reason: `git ${args[0]} failed: ${result.out}` }
+export interface Checkpoint { committed: boolean; secrets: string[]; reason: string | null }
+
+// Commits every change as one `wip:` commit on the current branch. Staged secrets stop it:
+// the work stays uncommitted and the files are named.
+export function commitWork(cwd: string, message: string): Checkpoint {
+  if (!git(cwd, ['status', '--porcelain']).out) return { committed: false, secrets: [], reason: null }
+  if (midOperation(cwd)) return { committed: false, secrets: [], reason: 'a merge or rebase is in progress' }
+  if (!git(cwd, ['add', '--all']).ok) return { committed: false, secrets: [], reason: 'git add failed' }
+  const secrets = stagedSecrets(cwd)
+  if (secrets.length) {
+    git(cwd, ['reset', '--quiet'])
+    return { committed: false, secrets, reason: `possible secrets, so nothing was committed: ${secrets.join(', ')}` }
   }
-  return { ok: true, reason: null }
+  const commit = git(cwd, ['commit', '--quiet', '-m', message])
+  return commit.ok ? { committed: true, secrets: [], reason: null } : { committed: false, secrets: [], reason: `git commit failed: ${commit.out}` }
+}
+
+// After the claim is lost: commit the work on the issue branch and push it, never forced.
+// A rejected push (the remote moved) keeps the commit local.
+export function rescueWork(where: Where): string {
+  if (!where.branch || issueFromBranch(where.branch) !== where.number) return ' Uncommitted work (if any) was not saved: this checkout is not on the issue branch.'
+  const saved = commitWork(where.top, `wip: #${where.number} rescued uncommitted work from ${basename(where.top)}`)
+  if (saved.reason) return ` Uncommitted work was not saved: ${saved.reason}.`
+  if (!saved.committed) return ''
+  const push = git(where.top, ['push', '--quiet', '-u', 'origin', `HEAD:refs/heads/${where.branch}`])
+  if (!push.ok) return ` Uncommitted work was committed on ${where.branch} but the push was rejected (${push.out.split('\n')[0]}), so the commit stays local — pull and push by hand.`
+  return ` Uncommitted work was committed and pushed to ${where.branch}.`
+}
+
+const pushFailurePath = (where: Where) => join(where.top, '.vegastack', '.tmp', 'claims', `${where.number}.push-failed`)
+
+// The last background checkpoint push, when it was rejected.
+function pushFailure(where: Where): string | null {
+  try {
+    const text = readFileSync(pushFailurePath(where), 'utf8').trim()
+    return `The last WIP push of ${where.branch} was rejected (${text.split('\n')[0] || 'no reason given'}); the commit stays local — pull and push by hand, never forced.`
+  } catch { return null }
 }
 
 function pushHeartbeat(where: Where, local: LocalClaim, deps: HookDeps) {
@@ -293,9 +354,7 @@ function preTool(harness: Harness, input: HookInput, deps: HookDeps): void {
         if (local.lostTo && holder) {
           let saved = ''
           if (local.rescuedFor !== holder.commentId) {
-            const branch = rescueBranchName(basename(where.top), deps.now(), deps.host)
-            const rescue = rescueWork(where.top, branch, basename(where.top))
-            saved = rescue.ok ? ` Uncommitted work (if any) was saved to ${branch}.` : ` Saving uncommitted work failed: ${rescue.reason}.`
+            saved = rescueWork(where)
             local.rescuedFor = holder.commentId
           }
           writeLocal(where, local)
@@ -340,9 +399,11 @@ function advisory(event: HookEvent, harness: Harness, payload: Record<string, un
   if (event === 'prompt') {
     const { holder } = refresh(where, local, deps)
     writeLocal(where, local)
-    if (holder && !local.held) {
-      deps.out(context('UserPromptSubmit', `Issue #${where.number} is held by ${label(holder)}, not this worktree (${where.owner}). Do not change files; to take it back: \`${takeBack(where, harness, model)}\`.`))
-    }
+    const notes: string[] = []
+    if (holder && !local.held) notes.push(`Issue #${where.number} is held by ${label(holder)}, not this worktree (${where.owner}). Do not change files; to take it back: \`${takeBack(where, harness, model)}\`.`)
+    const rejected = pushFailure(where)
+    if (rejected) notes.push(rejected)
+    if (notes.length) deps.out(context('UserPromptSubmit', notes.join('\n')))
     return
   }
   if (event === 'post-tool') {
@@ -358,11 +419,20 @@ function advisory(event: HookEvent, harness: Harness, payload: Record<string, un
   if (event === 'stop') {
     recordActivity(local, deps.now())
     writeLocal(where, local)
-    if (local.lostTo || !where.branch || issueFromBranch(where.branch) !== where.number || midOperation(where.top)) return
-    if (!git(where.top, ['status', '--porcelain']).out) return
-    if (!git(where.top, ['add', '-A']).ok) return
-    if (!git(where.top, ['commit', '--quiet', '-m', `wip: #${where.number} turn checkpoint`]).ok) return
-    deps.detach(['git', 'push', '--quiet', '-u', 'origin', `HEAD:refs/heads/${where.branch}`], where.top)
+    if (local.lostTo || !where.branch || issueFromBranch(where.branch) !== where.number) return
+    const notes: string[] = []
+    const rejected = pushFailure(where)
+    if (rejected) notes.push(rejected)
+    const saved = commitWork(where.top, `wip: #${where.number} turn checkpoint`)
+    if (saved.secrets.length) notes.push(`The WIP checkpoint was skipped: ${saved.reason}. Move them out of the worktree or ignore them.`)
+    if (saved.committed) {
+      // The push runs in the background; a rejection is written down and reported on the next prompt or stop.
+      const failed = pushFailurePath(where)
+      rmSync(failed, { force: true })
+      deps.detach(['sh', '-c', 'git push --quiet -u origin "HEAD:refs/heads/$1" 2>"$2.tmp" || { mv "$2.tmp" "$2"; exit 1; }; rm -f "$2.tmp"', 'push', where.branch, failed], where.top)
+    }
+    // Both harnesses show a Stop hook's systemMessage to the user as a warning.
+    if (notes.length) deps.out(JSON.stringify({ systemMessage: notes.join('\n') }))
   }
 }
 

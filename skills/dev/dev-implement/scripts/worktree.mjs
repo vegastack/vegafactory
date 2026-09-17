@@ -16,7 +16,7 @@
 // Usage: node worktree.mjs create|restore|remove|list|prune|status [flags] [--json]
 import { execFileSync } from 'node:child_process';
 import { copyFileSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, realpathSync, statSync, writeFileSync } from 'node:fs';
-import { homedir, hostname } from 'node:os';
+import { homedir } from 'node:os';
 import { delimiter, dirname, join, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { findMarkerComment, ghJson, parseFlags, renderResult } from './lib/gh.mjs';
@@ -569,25 +569,52 @@ export function inventory(repoRoot) {
     .map((entry) => ({ ...entry, name: entry.path.slice(prefix.length) }));
 }
 
-// Work nobody committed is saved, never thrown away: a rescue branch holds it on the remote.
-export function rescueBranchName(name, now = Date.now(), host = hostname()) {
-  const stamp = new Date(now).toISOString().replace(/[-:]/g, '').slice(0, 13);
-  const machine = String(host).toLowerCase().replace(/\.local$/, '').replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') || 'machine';
-  return 'rescue/' + name + '-' + machine + '-' + stamp;
+// Secrets never leave the machine in an automatic commit (the same list as the CLI's hook).
+const SECRET_NAMES = [/^\.env(\..+)?$/, /\.(pem|key|p12)$/, /^id_rsa/];
+const SECRET_TEXT = [
+  /-----BEGIN (?:[A-Z]+ )*PRIVATE KEY-----/,
+  /\b(?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9]{20,}/,
+  /\bgithub_pat_[A-Za-z0-9_]{20,}/,
+  /\bsk-ant-[A-Za-z0-9_-]{10,}/,
+  /\bsk-[A-Za-z0-9_-]{32,}/,
+  /\bAKIA[0-9A-Z]{16}\b/,
+  /\bxox[baprs]-[A-Za-z0-9-]{10,}/,
+  /_auth(?:Token)?\s*=\s*(?!\$\{)\S/,
+];
+
+export function stagedSecrets(path) {
+  const hits = new Set();
+  const names = git(path, ['diff', '--cached', '--name-only', '--diff-filter=ACMR']).out.split('\n').filter(Boolean);
+  for (const file of names) {
+    const name = file.split('/').pop();
+    if (name !== '.env.example' && SECRET_NAMES.some((pattern) => pattern.test(name))) hits.add(file);
+  }
+  const diff = git(path, ['diff', '--cached', '--no-color', '--no-ext-diff', '-U0', '--diff-filter=ACMR'], { raw: true });
+  if (!diff.ok) return ['(the staged changes could not be read)'];
+  let file = '';
+  for (const line of diff.out.split('\n')) {
+    if (line.startsWith('+++ ')) { file = line.replace(/^\+\+\+ (b\/)?/, ''); continue; }
+    if (line.startsWith('+') && SECRET_TEXT.some((pattern) => pattern.test(line))) hits.add(file);
+  }
+  return [...hits];
 }
 
+// Work nobody committed is saved, never thrown away: a `wip:` commit on the
+// worktree's own branch, pushed normally. A rejected push (the remote moved)
+// keeps the commit local; staged secrets keep the work uncommitted.
 export function rescueWork({ path, branch, name, remote = 'origin' }) {
-  const steps = [
-    ['switch', '-c', branch],
-    ['add', '--all'],
-    ['commit', '--quiet', '-m', 'wip: rescued uncommitted work from ' + name],
-    ['push', '--quiet', '-u', remote, branch],
-  ];
-  for (const args of steps) {
-    const result = git(path, args);
-    if (!result.ok) return { ok: false, reason: 'git ' + args[0] + ' failed: ' + result.out };
+  const added = git(path, ['add', '--all']);
+  if (!added.ok) return { ok: false, committed: false, reason: 'git add failed: ' + added.out };
+  const secrets = stagedSecrets(path);
+  if (secrets.length > 0) {
+    git(path, ['reset', '--quiet']);
+    return { ok: false, committed: false, reason: 'possible secrets, so nothing was committed: ' + secrets.join(', ') };
   }
-  return { ok: true, reason: null };
+  const commit = git(path, ['commit', '--quiet', '-m', 'wip: rescued uncommitted work from ' + name]);
+  if (!commit.ok) return { ok: false, committed: false, reason: 'git commit failed: ' + commit.out };
+  const push = git(path, ['push', '--quiet', '-u', remote, 'HEAD:refs/heads/' + branch]);
+  if (!push.ok) return { ok: false, committed: true, reason: 'the commit stays local because the push was rejected: ' + push.out.split('\n')[0] };
+  return { ok: true, committed: true, reason: null };
 }
 
 // Retention prune: propose (and with --write, perform) the removal of parked
@@ -632,6 +659,7 @@ export function pruneWorktrees({ repoRoot, base, olderThan, devMd, ledgerTimes =
     candidates.push({
       name: entry.name,
       path: entry.path,
+      branch,
       state,
       ageDays,
       removable: verdict.blocks.length === 0,
@@ -643,17 +671,16 @@ export function pruneWorktrees({ repoRoot, base, olderThan, devMd, ledgerTimes =
   for (const candidate of candidates) {
     if (!candidate.removable && !candidate.pushable && !candidate.rescuable) continue;
     if (candidate.rescuable) {
-      const rescue = rescueBranchName(candidate.name, now);
-      actions.push(at(candidate.name, 'save uncommitted work to ' + rescue + ' and push it'));
+      actions.push(at(candidate.name, 'commit uncommitted work as wip on ' + candidate.branch + ' and push it'));
       if (write) {
-        const saved = rescueWork({ path: candidate.path, branch: rescue, name: candidate.name, remote });
+        const saved = rescueWork({ path: candidate.path, branch: candidate.branch, name: candidate.name, remote });
         if (!saved.ok) {
           warns.push(at(candidate.name, 'kept: could not save uncommitted work — ' + saved.reason));
           candidate.removable = false;
           candidate.reason = saved.reason;
           continue;
         }
-        candidate.rescuedTo = rescue;
+        candidate.rescuedTo = candidate.branch;
       }
     }
     actions.push(at(candidate.name, (candidate.pushable ? 'push the branch, then re-check for removal after ' : 'remove after ') + candidate.ageDays + ' quiet days'));

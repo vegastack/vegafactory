@@ -73,9 +73,9 @@ One command handles every event: `vegafactory hook <event> --harness claude|code
 |---|---|---|
 | `SessionStart` | `session-start` | Adds context: the issue, its state, who holds it and where its local copy lives. |
 | `UserPromptSubmit` | `prompt` | Adds a warning with the take-back command when another session holds the issue. |
-| `PreToolUse` | `pre-tool` | The ship guard; after the claim is taken back, denies file and shell tools and saves uncommitted work once to a pushed `rescue/…` branch. |
+| `PreToolUse` | `pre-tool` | The ship guard; after the claim is taken back, denies file and shell tools and saves uncommitted work once as a `wip:` commit on the issue branch, pushed normally (a rejected push keeps the commit local and says so). |
 | `PostToolUse`, `SubagentStop` | `post-tool` | The heartbeat: a local file on every call (`.vegastack/.tmp/claims/<n>.json`), a background `vegafactory issue heartbeat` at most every 5 minutes. |
-| `Stop` | `stop` | Commits a dirty worktree as `wip: #<n> turn checkpoint` and pushes the branch in the background, never forced. |
+| `Stop` | `stop` | Commits a dirty worktree as `wip: #<n> turn checkpoint` and pushes the branch in the background, never forced; a rejected push keeps the commit local and is reported on the next prompt or stop. Staged files that look like secrets stop the commit and are named. |
 | `SessionEnd` | `session-end` | A last heartbeat; the claim is kept because the session may resume. |
 
 Only `pre-tool` can deny; every other event exits 0 and prints nothing on any error. Ownership is checked against the local file on each call and refreshed from GitHub (an ETag sync) at most once a minute; a failed refresh never blocks a tool. The wiring shape is doubly nested — matcher groups each holding their own `hooks` array — in Claude Code's `.claude/settings.json` and Codex's `<repo>/.codex/hooks.json` alike (merge into existing hook config, never overwrite; remove entries that still point at the old `.vegastack/hooks/` files): <!-- source: CC-HOOKS --> <!-- source: CODEX-HOOKS -->
