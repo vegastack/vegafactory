@@ -478,27 +478,55 @@ describe('heartbeat and checkpoints', () => {
     expect((await hook('stop', { cwd: tree, session_id: 'b' })).json().hookSpecificOutput.additionalContext).toContain('which general lessons')
   })
 
-  test('two shell windows over one commit credit nobody, and the commit is never re-judged', async () => {
+  test('a long tool that cannot commit is no rival: the session that ran git commit keeps the credit', async () => {
     await hook('session-start', { cwd: tree, session_id: 'a' })
     await hook('session-start', { cwd: tree, session_id: 'b' })
 
-    // A starts a long shell tool that commits nothing; B commits while it runs.
+    // A starts a long shell tool that could not commit anything; B commits while it runs.
     await hook('pre-tool', { ...bash('sleep 30'), session_id: 'a' })
+    expect(marks().a.pending.commits).toBe(false)
     await commitByTool('b', 'b commits during a long tool of a', () => writeFileSync(join(tree, 'from-b.txt'), 'work'))
-    const contested = git(tree, 'rev-parse', 'HEAD')
-    // Either could have made it, so neither is credited — and both marks record the ruling, so
-    // A's window closing later cannot re-open it.
-    expect([marks().a.judged, marks().b.judged]).toEqual([contested, contested])
+    const commit = git(tree, 'rev-parse', 'HEAD')
+
+    // B is the only window that could have made it, so B gets it — no checkpoint needed.
+    expect(marks().b.credited).toBe(commit)
+    expect([marks().a.worked, marks().b.worked]).toEqual([false, true])
     await hook('post-tool', { cwd: tree, session_id: 'a', tool_name: 'Bash' })
-    expect([marks().a.worked, marks().b.worked]).toEqual([false, false])
+    expect(marks().a.worked).toBe(false)
     expect(marks().a.credited).toBeUndefined()
 
-    // A stops with nothing of its own and is not asked.
     expect((await hook('stop', { cwd: tree, session_id: 'a' })).text).toBe('')
-    // B stops with its own work still uncommitted: the checkpoint commit is evidence of its own.
-    writeFileSync(join(tree, 'more-from-b.txt'), 'work')
     expect((await hook('stop', { cwd: tree, session_id: 'b' })).json().hookSpecificOutput.additionalContext).toContain('which general lessons')
-    expect(marks().b.credited).toBe(git(tree, 'rev-parse', 'HEAD'))
+    // B was asked for the commit it made, not for anything its Stop added.
+    expect(marks().b.credited).toBe(commit)
+  })
+
+  test('two sessions committing at once credit nobody, and the commit is never re-judged', async () => {
+    await hook('session-start', { cwd: tree, session_id: 'a' })
+    await hook('session-start', { cwd: tree, session_id: 'b' })
+
+    // Both are inside a `git commit` of their own when one of them lands.
+    await hook('pre-tool', { ...bash('git commit -m "a commits"'), session_id: 'a' })
+    await commitByTool('b', 'b commits first', () => writeFileSync(join(tree, 'from-b.txt'), 'work'))
+    const contested = git(tree, 'rev-parse', 'HEAD')
+    expect([marks().a.judged, marks().b.judged]).toEqual([contested, contested])
+    expect([marks().a.worked, marks().b.worked]).toEqual([false, false])
+
+    // A's window closing later cannot re-open the ruling.
+    await hook('post-tool', { cwd: tree, session_id: 'a', tool_name: 'Bash' })
+    expect([marks().a.worked, marks().a.credited]).toEqual([false, undefined])
+    expect((await hook('stop', { cwd: tree, session_id: 'a' })).text).toBe('')
+  })
+
+  test('a command the parser cannot see through contends rather than hand over the credit', async () => {
+    await hook('session-start', { cwd: tree, session_id: 'a' })
+    await hook('session-start', { cwd: tree, session_id: 'b' })
+    // A release script can commit without saying so anywhere a parser can read.
+    await hook('pre-tool', { ...bash('./scripts/release.sh --write'), session_id: 'a' })
+    expect(marks().a.pending.commits).toBe(true)
+    await commitByTool('b', 'b commits during a release script', () => writeFileSync(join(tree, 'from-b.txt'), 'work'))
+    expect([marks().a.worked, marks().b.worked]).toEqual([false, false])
+    expect(marks().b.judged).toBe(git(tree, 'rev-parse', 'HEAD'))
   })
 
   test("a writing tool that commits nothing is not credited with a neighbour's commit either", async () => {

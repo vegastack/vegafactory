@@ -9,7 +9,7 @@ import { hostname } from 'node:os'
 import { basename, dirname, join } from 'node:path'
 import { claimsOf, holderOf, ownerId, trustedAuthors, HEARTBEAT_EVERY_MS, type Holder } from './claim.ts'
 import { defaultRunner, type GhRunner } from './gh.ts'
-import { classifyCommand, extractCommand, isShellTool, loadPolicy, mergeTarget, type Decision, type MergeCheck } from './guard-rules.ts'
+import { canCommit, classifyCommand, extractCommand, isShellTool, loadPolicy, mergeTarget, type Decision, type MergeCheck } from './guard-rules.ts'
 import { cacheDir, readBody, readState, replaceFile, syncIssue, withLock } from './issue-cache.ts'
 import { askText, learningsPath, pendingNote } from './learning.ts'
 import { detectRepo, evidenceChangedAt, findValidAck, latestOfType, permissionLookup, repoRoot, snapshot } from './issue.ts'
@@ -157,8 +157,9 @@ export interface SessionMark {
   worked: boolean
   asked: boolean
   at: number
-  // Set while one of this session's own shell tools is running: the HEAD it began at and when.
-  pending?: { head: string | null; at: number }
+  // Set while one of this session's own shell tools is running: the HEAD it began at, when, and
+  // whether the command in it could produce a commit at all.
+  pending?: { head: string | null; at: number; commits: boolean }
   // The commit this session was credited with, and the commit this mark has already ruled on.
   // A commit is ruled on once, by whichever window closes over it first, and never again.
   credited?: string
@@ -184,13 +185,15 @@ function updateSessions<T>(where: Where, change: (marks: Record<string, SessionM
 
 // What an event tells us about the session it belongs to:
 //   'idle'        only where its HEAD stands now — a session start, a prompt, the end of a session
-//   'tool-start'  one of its own shell tools is about to run, from the HEAD recorded now
+//   'tool-start'  one of its own shell tools is about to run, from the HEAD recorded now, with
+//                 whether the command in it could commit at all
 //   'tool-end'    that tool finished; a commit made while it ran may be this session's work
 //   'commit'      its own Stop checkpoint made the commit, which is its work by construction
 // A worktree's HEAD is shared, so a HEAD that simply differs proves nothing: a neighbour may have
 // moved it. Only a shell tool can produce a commit, so only a shell tool opens a window — a file
-// tool cannot commit and would be pure guessing surface. Where the evidence is unclear the session
-// goes unasked rather than credited with someone else's commit.
+// tool cannot commit and would be pure guessing surface — and only a window whose command could
+// commit counts for anything. Where the evidence is unclear the session goes unasked rather than
+// credited with someone else's commit.
 type Observed = 'idle' | 'tool-start' | 'tool-end' | 'commit'
 
 // When the commit now at HEAD was made. Git keeps seconds, so callers give the window a second's
@@ -202,15 +205,16 @@ function committedAt(cwd: string): number | null {
   return Number.isFinite(made) ? made : null
 }
 
-// One commit, one ruling. The session whose open window covers the commit is credited only when it
-// is the only such session: two windows over the same commit mean either could have made it, so
-// neither is credited and neither may claim it later. The commit is named in the ruling, so a
-// window that closes afterwards cannot re-open a settled question.
+// One commit, one ruling. A window can own the commit only when it was open across it and the
+// command in it could have made one — a `sleep` is neither a claimant nor a rival. One candidate
+// is credited; two mean either could have made it, so neither is, and neither may claim it later.
+// The commit is named in the ruling, so a window closing afterwards cannot re-open a settled
+// question. A window from an older build says nothing about its command, so it is taken as capable.
 function rule(where: Where, marks: Record<string, SessionMark>, session: string, head: string, now: number) {
   const mark = marks[session]!
   const made = committedAt(where.top)
   if (made === null) return
-  const covers = (window: SessionMark['pending']) => !!window && made >= window.at - 1000 && made <= now + 1000
+  const covers = (window: SessionMark['pending']) => !!window && window.commits !== false && made >= window.at - 1000 && made <= now + 1000
   if (!covers(mark.pending)) return
   if (Object.values(marks).some((other) => other.judged === head)) return
   const rivals = Object.entries(marks).filter(([id, other]) => id !== session && covers(other.pending))
@@ -225,7 +229,7 @@ function rule(where: Where, marks: Record<string, SessionMark>, session: string,
 
 // Written the first time any of that session's events is seen, and before anything that can fail,
 // so a refresh that throws still leaves the session able to tell work from talk.
-function observe(where: Where, session: string | null, now: number, kind: Observed = 'idle') {
+function observe(where: Where, session: string | null, now: number, kind: Observed = 'idle', commits = true) {
   if (!session) return
   updateSessions(where, (marks) => {
     const head = headOf(where.top)
@@ -238,7 +242,7 @@ function observe(where: Where, session: string | null, now: number, kind: Observ
     }
     if (kind === 'tool-end' && head !== null && mark.pending?.head != null && mark.pending.head !== head) rule(where, marks, session, head, now)
     // A window belongs to the one tool that opened it; anything else closes it unused.
-    if (kind === 'tool-start') mark.pending = { head, at: now }
+    if (kind === 'tool-start') mark.pending = { head, at: now, commits }
     else delete mark.pending
     mark.head = head
     mark.at = now
@@ -534,7 +538,7 @@ function preTool(harness: Harness, input: HookInput, deps: HookDeps): void {
     // Only a shell tool can produce a commit, so only a shell tool opens a window this session may
     // later be credited for. A file tool writes files; the Stop checkpoint is what commits them.
     const session = typeof payload.session_id === 'string' && payload.session_id ? payload.session_id : null
-    if (isShellTool(tool)) try { observe(here, session, deps.now(), 'tool-start') } catch { /* attribution is never a gate */ }
+    if (isShellTool(tool)) try { observe(here, session, deps.now(), 'tool-start', canCommit(extractCommand(payload))) } catch { /* attribution is never a gate */ }
     const denied = ownership(harness, here, deps)
     if (denied) return deps.out(denied)
   }

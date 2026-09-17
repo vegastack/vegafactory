@@ -3,7 +3,7 @@ import { spawnSync } from 'node:child_process'
 import { mkdirSync, mkdtempSync, realpathSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { classifyCommand, EXPANDED, extractCommand, isShellTool, loadPolicy, mergeTarget, parseCommand, shipAskCommands, splitSegments, type Policy } from '../src/guard-rules.ts'
+import { canCommit, classifyCommand, EXPANDED, extractCommand, isShellTool, loadPolicy, mergeTarget, parseCommand, shipAskCommands, splitSegments, type Policy } from '../src/guard-rules.ts'
 
 const policy: Policy = { defaultBranch: 'main', shipAsk: ['bun run docs:publish', 'wrangler deploy --env production'] }
 const decide = (command: string, p: Policy = policy) => classifyCommand(command, p)
@@ -353,6 +353,31 @@ describe('payloads', () => {
     }
     for (const name of ['Write', 'Edit', 'apply_patch', 'Read', 'mcp__terminal__read_terminal', 'mcp__docs__search', 'WebFetch']) {
       expect(isShellTool(name), name).toBe(false)
+    }
+  })
+})
+
+// Attribution only: this decides which session's tool window may own a commit, never what may run.
+describe('commit capability', () => {
+  test('a command that could leave a commit at HEAD', () => {
+    for (const command of [
+      'git commit -m x', 'git commit --amend', 'git merge origin/main', 'git rebase -i main', 'git cherry-pick abc',
+      'git revert HEAD', 'git am < patch', 'git pull', 'git stash pop', 'git stash apply', 'git apply --index p.diff',
+      'git -C other commit -m x', 'sh -c "git commit -m x"', 'ls && git commit -m x', 'git nonsense', 'git $VERB',
+      './scripts/release.sh', 'bun run release', 'make ship', 'vegafactory ship check 7', 'find . -name x -exec git commit -m y ;',
+    ]) expect(canCommit(command), command).toBe(true)
+  })
+
+  test('a command that plainly cannot', () => {
+    for (const command of [
+      'sleep 30', 'ls -la', 'cat README.md', 'echo hello', 'grep -r x .', 'git status', 'git log -1', 'git diff --stat',
+      'git add -A', 'git push origin main', 'git stash', 'git apply p.diff', 'git fetch', 'sleep 5 && ls', 'jq . x.json',
+    ]) expect(canCommit(command), command).toBe(false)
+  })
+
+  test('anything unreadable is taken as capable, so it contends rather than concede the credit', () => {
+    for (const command of [null, undefined, 42, '$CMD', 'eval "$STEP"', 'xargs git commit']) {
+      expect(canCommit(command), String(command)).toBe(true)
     }
   })
 })
