@@ -88,7 +88,7 @@ describe('what the scanner refuses', () => {
     const { root, watchlist } = repo({ 'watchlist.md': table('facts.md'), 'facts.md': section(body) })
     const result = scanFacts({ root, watchlist, today })
     expect(result.ok).toBe(false)
-    expect(result.problems.join(' ')).toContain('facts.md:5')
+    expect(result.problems.join(' ')).toContain('facts.md line 5')
   })
 
   test('ordinary prose and ordinary bullets are not fact lines and are not errors', () => {
@@ -108,7 +108,7 @@ describe('what the scanner refuses', () => {
 
   test('a facts file with no matching section is named, not silently empty', () => {
     const { root, watchlist } = repo({ 'watchlist.md': table('facts.md'), 'facts.md': '# Facts\n\n## Gadgets\n\n' + fact('Thing', '01-09-2026') })
-    expect(scanFacts({ root, watchlist, today }).problems.join(' ')).toContain('has no "## Widgets" section')
+    expect(scanFacts({ root, watchlist, today }).problems.join(' ')).toContain('has no matching ## heading')
   })
 
   test('a topic with no official page is a problem — a fact with no source is not a fact', () => {

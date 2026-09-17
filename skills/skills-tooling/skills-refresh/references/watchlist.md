@@ -19,6 +19,9 @@ A topic belongs here when a wrong answer changes a decision — a version floor,
 | Claude Code | `skills/dev/dev-setup/references/harness-facts.md` | https://code.claude.com/docs/en/overview · https://code.claude.com/docs/en/hooks · https://code.claude.com/docs/en/skills |
 | Codex | `skills/dev/dev-setup/references/harness-facts.md` | https://learn.chatgpt.com/docs · https://learn.chatgpt.com/docs/config-file/config-reference |
 | GitHub CLI | `skills/dev/dev-setup/references/harness-facts.md` | https://github.com/cli/cli/releases |
+| Model, effort, and concurrency controls | `skills/dev/dev-setup/references/harness-facts.md` | https://code.claude.com/docs/en/cli-reference · https://learn.chatgpt.com/docs/config-file/config-reference |
+| Headless runs | `skills/dev/dev-setup/references/harness-facts.md` | https://code.claude.com/docs/en/cli-reference · https://learn.chatgpt.com/docs |
+| Native-memory contract | `skills/dev/dev-setup/references/harness-facts.md` | https://code.claude.com/docs/en/memory · https://learn.chatgpt.com/docs/config-file/config-reference |
 
 ## The fact line
 
