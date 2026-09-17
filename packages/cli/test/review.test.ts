@@ -22,10 +22,18 @@ process.stdin.on('data', (c) => { stdin += c })
 process.stdin.on('end', () => {
   fs.appendFileSync(path.join(dir, 'calls.jsonl'), JSON.stringify({ tool, args, stdin, env: Object.keys(process.env), cwd: process.cwd() }) + '\\n')
   const queueFile = path.join(dir, tool + '.json')
-  const queue = JSON.parse(fs.readFileSync(queueFile, 'utf8'))
-  const at = queue.findIndex((r) => !r.match || stdin.includes(r.match))
-  const reply = at === -1 ? {} : queue.splice(at, 1)[0]
-  fs.writeFileSync(queueFile, JSON.stringify(queue))
+  // Two parallel reviewers share this queue, so taking a reply is done under a lock.
+  const lock = queueFile + '.lock'
+  for (;;) {
+    try { fs.mkdirSync(lock); break } catch { Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 5) }
+  }
+  let reply
+  try {
+    const queue = JSON.parse(fs.readFileSync(queueFile, 'utf8'))
+    const at = queue.findIndex((r) => !r.match || stdin.includes(r.match))
+    reply = at === -1 ? {} : queue.splice(at, 1)[0]
+    fs.writeFileSync(queueFile, JSON.stringify(queue))
+  } finally { fs.rmdirSync(lock) }
   const finish = () => {
     const o = args.indexOf('-o')
     if (reply.output !== undefined && o !== -1) fs.writeFileSync(args[o + 1], reply.output)
