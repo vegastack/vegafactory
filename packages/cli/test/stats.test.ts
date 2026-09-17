@@ -729,7 +729,7 @@ describe('stats push', () => {
     writeFileSync(path, JSON.stringify({
       token: 'abc', at: Date.parse('2026-09-18T11:00:00Z'), offset: 0, head: git(clone, 'rev-parse', 'HEAD'),
       room: { repo: 'acme/room', remote: origin, branch: 'main', path: clone },
-      files: [{ relative, had: 4, digest: 'whatever', wrote: 0 }],
+      files: [{ relative, had: 4, digest: 'whatever', wrote: 0, appended: 'x' }],
     }))
     write(event('a', '2026-09-18T10:00:00.000Z'))
     const result = push(Date.parse('2026-09-18T12:00:00Z'))
@@ -747,13 +747,13 @@ describe('stats push', () => {
     const journal = {
       token: 'abc', at: Date.parse('2026-09-18T11:00:00Z'), offset: 0, head: git(clone, 'rev-parse', 'HEAD'),
       room: { repo: 'acme/room', remote: origin, branch: 'main', path: join(base, 'somewhere-else') },
-      files: [{ relative: 'stats/2026/09/18/mk-box.jsonl', had: null, digest: 'x', wrote: 0 }],
+      files: [{ relative: 'stats/2026/09/18/mk-box.jsonl', had: null, digest: 'x', wrote: 0, appended: 'x' }],
     }
     writeFileSync(path, JSON.stringify(journal))
     write(event('a', '2026-09-18T10:00:00.000Z'))
     expect(push(Date.parse('2026-09-18T12:00:00Z')).message).toContain('which is not the clone this push found')
     expect(existsSync(path)).toBe(true)
-    writeFileSync(path, JSON.stringify({ ...journal, files: [{ relative: '../../escape.jsonl', had: null, digest: 'x', wrote: 0 }] }))
+    writeFileSync(path, JSON.stringify({ ...journal, files: [{ relative: '../../escape.jsonl', had: null, digest: 'x', wrote: 0, appended: 'x' }] }))
     expect(push(Date.parse('2026-09-18T12:00:00Z')).message).toContain('unreadable push journal')
     expect(existsSync(path)).toBe(true)
     // Sound again once the journal is gone.
@@ -809,6 +809,27 @@ describe('stats push', () => {
     expect(moved.action).toBe('refused')
     expect(moved.message).toContain('moved to')
     expect(readFileSync(file, 'utf8')).toBe(before)
+    expect(existsSync(journalFor('acme/room'))).toBe(true)
+  })
+
+  // F22
+  test('a rollback refuses when the appended bytes are not the ones it wrote', () => {
+    write(event('a', '2026-09-18T10:00:00.000Z'))
+    const killed: GitRunner = (args) => {
+      if (args.includes('add')) throw new Error('killed while staging')
+      return defaultGitFor(args)
+    }
+    expect(() => push(Date.parse('2026-09-18T12:00:00Z'), { git: killed })).toThrow('killed')
+    // Someone replaced the tail with their own line of exactly the same length.
+    const file = stats('2026', '09', '18', 'mk-box.jsonl')
+    const theirs = Buffer.alloc(readFileSync(file).length, 0x78)
+    theirs[theirs.length - 1] = 0x0a
+    writeFileSync(file, theirs)
+    const result = push(Date.parse('2026-09-18T12:10:00Z'))
+    expect(result.action).toBe('refused')
+    expect(result.message).toContain('changed since this push began')
+    // Their bytes are still there, and the journal waits for a person.
+    expect(readFileSync(file).equals(theirs)).toBe(true)
     expect(existsSync(journalFor('acme/room'))).toBe(true)
   })
 

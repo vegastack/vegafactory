@@ -818,10 +818,10 @@ interface PushJournal {
   offset: number
   room: RoomIdentity
   // The clone's HEAD when the batch started, and per file the bytes that were already there
-  // (length and digest) plus the number this push meant to append. A rollback that cannot find
-  // exactly that again is not looking at its own work any more.
+  // (length and digest) plus the exact bytes this push meant to append (length and digest). A
+  // rollback that cannot find exactly that again is not looking at its own work any more.
   head: string
-  files: Array<{ relative: string; had: number | null; digest: string; wrote: number }>
+  files: Array<{ relative: string; had: number | null; digest: string; wrote: number; appended: string }>
 }
 
 function validJournal(value: unknown): PushJournal | null {
@@ -836,7 +836,8 @@ function validJournal(value: unknown): PushJournal | null {
   for (const file of files) {
     if (!file || typeof file.relative !== 'string' || !file.relative.startsWith('stats/')) return null
     if (file.had !== null && (!Number.isSafeInteger(file.had) || file.had < 0)) return null
-    if (typeof file.digest !== 'string' || !Number.isSafeInteger(file.wrote) || file.wrote < 0) return null
+    if (typeof file.digest !== 'string' || typeof file.appended !== 'string') return null
+    if (!Number.isSafeInteger(file.wrote) || file.wrote < 0) return null
   }
   return journal
 }
@@ -923,8 +924,11 @@ function restoreFiles(clone: Clone, journal: PushJournal, git: GitRunner): strin
       if (file.had === null) continue
       return `${file.relative} is gone, so nothing was undone`
     }
-    if (size !== had && size !== had + file.wrote) return `${file.relative} changed since this push began, so nothing was undone`
-    if (hash(readAt(path, 0, had).toString('latin1')) !== file.digest) return `${file.relative} changed since this push began, so nothing was undone`
+    const changed = `${file.relative} changed since this push began, so nothing was undone`
+    if (size !== had && size !== had + file.wrote) return changed
+    if (hash(readAt(path, 0, had).toString('latin1')) !== file.digest) return changed
+    // Bytes of the same length are not this push's bytes: the tail has to be the one it wrote.
+    if (size === had + file.wrote && file.wrote > 0 && hash(readAt(path, had, file.wrote).toString('latin1')) !== file.appended) return changed
   }
   for (const file of files) {
     const path = join(clone.path, ...file.relative.split('/'))
@@ -1180,10 +1184,12 @@ function pushLocked(home: string, options: PushOptions): PushResult {
       const path = join(clone.path, ...relative.split('/'))
       let had: number | null = null
       try { had = statSync(path).size } catch { /* a new day, a new file */ }
+      const rows = Buffer.from(groups.get(relative)!.rows.join('\n') + '\n')
       return {
         relative, had,
         digest: hash(readAt(path, 0, had ?? 0).toString('latin1')),
-        wrote: Buffer.byteLength(groups.get(relative)!.rows.join('\n') + '\n'),
+        wrote: rows.length,
+        appended: hash(rows.toString('latin1')),
       }
     }),
   }
