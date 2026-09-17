@@ -4,7 +4,7 @@
     {
       "id": 1,
       "prompt": "status — here is the output of `status.mjs --orphan-hours 6 --json` for vegastack/billing (attached). Render the board.",
-      "expected_output": "The operator's board: every issue as a linked title with its state and age, sections with zero entries omitted, the working issue whose ledger has been silent 13 hours called out as possibly orphaned with the take-back command, the open PR with its check state, and the pending decision with the issue it records at.",
+      "expected_output": "The operator's board: every issue as a linked title with its state and age, sections with zero entries omitted, the in-progress issue whose ledger has been silent 13 hours called out as possibly orphaned with the take-back command, the open PR with its check state, and the pending decision with the issue it records at.",
       "files": [
         "evals/files/status.json"
       ],

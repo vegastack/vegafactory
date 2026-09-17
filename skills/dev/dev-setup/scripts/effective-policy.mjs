@@ -329,11 +329,10 @@ export function resolveAdministration({ orgLayer, peopleByScope = {}, repoGroups
   return { ok: blocks.length === 0, administration: blocks.length ? null : administration, blocks }
 }
 
-const fleetDefaults = { pollSeconds: 120, maxRuns: 1, childConcurrent: 3, checkpoints: 'task-branch', recovery: 'verified-transfer' }
+const fleetDefaults = { pollSeconds: 120, maxRuns: 1, checkpoints: 'task-branch', recovery: 'verified-transfer' }
 function validFleetValue(key, value) {
   if (key === 'pollSeconds') return Number.isSafeInteger(value) && value >= 30 && value <= 3600
   if (key === 'maxRuns') return Number.isSafeInteger(value) && value > 0
-  if (key === 'childConcurrent') return Number.isSafeInteger(value) && value >= 1 && value <= 16
   if (key === 'checkpoints') return ['off', 'task-branch'].includes(value)
   if (key === 'recovery') return ['original-host', 'verified-transfer'].includes(value)
   return false
@@ -344,9 +343,9 @@ function validDefaults(value, full = false) {
 }
 function validDelegation(value) {
   if (!object(value) || !Array.isArray(value.fields) || value.fields.some(key => !own(fleetDefaults, key))) return false
-  const fields = new Set(['fields', 'maxRunsMax', 'childConcurrentMax', 'pollSecondsMin', 'pollSecondsMax', 'checkpointValues', 'recoveryValues'])
+  const fields = new Set(['fields', 'maxRunsMax', 'pollSecondsMin', 'pollSecondsMax', 'checkpointValues', 'recoveryValues'])
   if (Object.keys(value).some(key => !fields.has(key))) return false
-  for (const [field, key] of [['maxRunsMax', 'maxRuns'], ['childConcurrentMax', 'childConcurrent'], ['pollSecondsMin', 'pollSeconds'], ['pollSecondsMax', 'pollSeconds']]) {
+  for (const [field, key] of [['maxRunsMax', 'maxRuns'], ['pollSecondsMin', 'pollSeconds'], ['pollSecondsMax', 'pollSeconds']]) {
     if (value[field] !== undefined && !validFleetValue(key, value[field])) return false
   }
   if ((value.pollSecondsMin ?? 30) > (value.pollSecondsMax ?? 3600)) return false
@@ -411,7 +410,6 @@ function delegatedFleetChange(changes, delegation) {
   return Object.entries(changes).every(([key, value]) => {
     if (!delegation.fields.includes(key)) return false
     if (key === 'maxRuns') return value <= (delegation.maxRunsMax ?? Number.MAX_SAFE_INTEGER)
-    if (key === 'childConcurrent') return value <= (delegation.childConcurrentMax ?? 16)
     if (key === 'pollSeconds') return value >= (delegation.pollSecondsMin ?? 30) && value <= (delegation.pollSecondsMax ?? 3600)
     if (key === 'checkpoints') return delegation.checkpointValues === undefined || delegation.checkpointValues.includes(value)
     if (key === 'recovery') return delegation.recoveryValues === undefined || delegation.recoveryValues.includes(value)

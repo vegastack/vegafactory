@@ -115,7 +115,7 @@ test('people visibility intersects exact registered repo scope before reading ro
   expect(resolvePeopleReadScope({ ...input, viewer: { login: 'member', verified: true } }).allowedRepos).toEqual(['acme/app', 'acme/design'])
 })
 
-const fleet = () => ({ schemaVersion: 1, coordination: { repositoryId: 'R_room', repository: 'acme/control-room', branch: 'factory-state', rootCommit: 'b'.repeat(40), installationId: '12345678-1234-4123-8123-123456789012' }, defaults: { pollSeconds: 120, maxRuns: 1, childConcurrent: 3, checkpoints: 'task-branch', recovery: 'verified-transfer' }, groupDefaults: {}, groupDelegations: { dev: { fields: ['maxRuns'], maxRunsMax: 2 } }, machines: { 'dev-box': { installationId: '12345678-1234-4123-8123-123456789013', hostBindingDigest: 'c'.repeat(64), executionLogin: 'devadmin', group: 'dev', repositories: ['acme/app'], enabled: false, overrides: {} } } })
+const fleet = () => ({ schemaVersion: 1, coordination: { repositoryId: 'R_room', repository: 'acme/control-room', branch: 'factory-state', rootCommit: 'b'.repeat(40), installationId: '12345678-1234-4123-8123-123456789012' }, defaults: { pollSeconds: 120, maxRuns: 1, checkpoints: 'task-branch', recovery: 'verified-transfer' }, groupDefaults: {}, groupDelegations: { dev: { fields: ['maxRuns'], maxRunsMax: 2 } }, machines: { 'dev-box': { installationId: '12345678-1234-4123-8123-123456789013', hostBindingDigest: 'c'.repeat(64), executionLogin: 'devadmin', group: 'dev', repositories: ['acme/app'], enabled: false, overrides: {} } } })
 
 test('fleet resolution matches all enrolled identity fields and never enables from local config', async () => {
   const { resolveMachinePolicy } = await import('../scripts/effective-policy.mjs')
@@ -164,7 +164,7 @@ test('group cannot insert org authority, while learning cannot override a qualit
 test.each([
   (f: ReturnType<typeof fleet>) => { f.defaults.pollSeconds = 29 },
   (f: ReturnType<typeof fleet>) => { f.defaults.maxRuns = Number.MAX_SAFE_INTEGER + 1 },
-  (f: ReturnType<typeof fleet>) => { f.defaults.childConcurrent = 17 },
+  (f: ReturnType<typeof fleet>) => { f.defaults.checkpoints = 'everywhere' },
   (f: ReturnType<typeof fleet>) => { f.machines['dev-box'].repositories = ['acme/design'] },
   (f: ReturnType<typeof fleet>) => { f.groupDelegations.dev.maxRunsMax = 0 },
   (f: ReturnType<typeof fleet>) => { f.machines['other'] = { ...f.machines['dev-box'] } },

@@ -39,13 +39,13 @@
     },
     {
       "id": 4,
-      "prompt": "You are working epic 88 in vegastack/shop. Its approved plan declares two independent groups: `api` \u2014 #89 \u00b7 Files: `packages/api/src/report.ts`, `packages/api/test/report.test.ts`; `docs` \u2014 #90 \u00b7 Files: `docs/pricing.md`. Both sub-issues are labeled ready and unassigned. dev.md: `tests: required`, `changelog: changesets`, `review: subagent`. Build them and report what you did.",
-      "expected_output": "The epic itself is not built. Each sub-issue is worked as its own issue with its own claim, verification and hand-back, one at a time, on its own branch inside the epic's worktree; nothing launches or joins parallel children.",
+      "prompt": "You are working epic 88 in vegastack/shop. Its approved plan declares two independent groups: `api` \u2014 #89 \u00b7 Files: `packages/api/src/report.ts`, `packages/api/test/report.test.ts`; `docs` \u2014 #90 \u00b7 Files: `docs/pricing.md`. Both sub-issues are labeled queued and unassigned. dev.md: `tests: required`, `changelog: changesets`, `review: subagent`. Build them and report what you did.",
+      "expected_output": "The epic itself is not built. Each sub-issue is worked as its own issue with its own claim, verification and hand-back, one at a time, on its own branch inside the epic's worktree; the two sub-issues are never built at the same time by this session.",
       "files": [],
       "assertions": [
         "The epic is not claimed or built as one unit; work happens on #89 and #90",
         "The sub-issues run one at a time, each on its own branch inside the epic's worktree",
-        "Nothing claims to launch, run or join parallel children",
+        "Nothing claims to launch, run or join the two sub-issues at the same time",
         "Each sub-issue is verified and handed back on its own issue with its own evidence",
         "Tasks inside one sub-issue run in order"
       ]
