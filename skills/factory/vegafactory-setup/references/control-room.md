@@ -17,14 +17,12 @@ rules/                       org-wide review known-patterns, security rules, COD
 onboarding/new-repo.md       checklist run by vegafactory-setup, then dev-setup
 onboarding/new-teammate.md   gh auth, harness install, skills install, control-room access, Slack
 templates/                   hook wiring snippets, board workflow, dev.md section overrides
-stats/<owner>__<name>/<MON-YYYY>/<hostname>.jsonl   one record per run or session, written by automation
-stats/<owner>__<name>/<MON-YYYY>.summary.json       regenerated per repo per month
-stats/<owner>__<name>/<MON-YYYY>.timeline.json      regenerated: the month's issue label timelines, read through gh at rollup
-stats/org/<MON-YYYY>.summary.json                   regenerated across every repo
-stats/org/<MON-YYYY>.skills.json                    regenerated: invocations per skill
+stats/YYYY/MM/DD/<operator>-<machine>.jsonl   one record per assistant turn, appended by the CLI
 ```
 
-`stats/` is the one tree automation writes, and the shape is the reason it can. One file per repo, per month, per **machine** means two machines never touch the same file, so a concurrent push is a non-fast-forward — solved by `pull --rebase` and a retry — and never a content conflict needing a human. The repo segment is `<owner>__<name>` so a path stays two levels deep and a repo name can never be mistaken for a month directory. The three summaries are **regenerated**, never appended: a summary that accumulated would drift the first time a record arrived late from a machine that was offline. Records are counts and identifiers only — never prompt text, assistant text, tool arguments, or file contents — and `rules/stats-privacy.md` is where that promise is written down for everyone the org onboards.
+`stats/` is the one tree automation writes, and the shape is the reason it can. One file per operator, per **machine**, per day means two machines never touch the same file, so a concurrent push is a non-fast-forward — solved by `pull --rebase` and a retry — and never a content conflict needing a human. Nothing here is summarised in the repository: a summary that accumulated would drift the first time a record arrived late from a machine that was offline, so totals are computed when they are read. Each record is one assistant turn — time, operator, repo, issue, harness, model, skill, tokens, duration and outcome — and nothing else: never prompt text, assistant text, tool arguments, file contents, or which subscription paid for the turn.
+
+Machines write here through the CLI, which appends what it has read from the harnesses' own session logs, commits and pushes with the operator's own GitHub login, at most once an hour. Anyone with the clone can read the tree back offline, with `stats show` or as a local page from `vegafactory dashboard`.
 
 `groups/dev/` is the only department seeded today; another department is a new `groups/<g>/` with the same three files.
 

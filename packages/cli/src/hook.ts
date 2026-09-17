@@ -4,13 +4,14 @@
 // (<type>/<n>-…). With no issue only the ship guard runs. Advisory events never block and
 // exit 0 on any error; only pre-tool can deny, and its guard fails closed.
 import { spawn, spawnSync } from 'node:child_process'
-import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, readFileSync, rmSync } from 'node:fs'
 import { hostname } from 'node:os'
 import { basename, dirname, join } from 'node:path'
 import { claimsOf, holderOf, ownerId, trustedAuthors, HEARTBEAT_EVERY_MS, type Holder } from './claim.ts'
 import { defaultRunner, type GhRunner } from './gh.ts'
-import { classifyCommand, extractCommand, isShellTool, loadPolicy, mergeTarget, type Decision, type MergeCheck } from './guard-rules.ts'
-import { cacheDir, readBody, readState, syncIssue } from './issue-cache.ts'
+import { canCommit, classifyCommand, extractCommand, isShellTool, loadPolicy, mergeTarget, type Decision, type MergeCheck } from './guard-rules.ts'
+import { cacheDir, readBody, readState, replaceFile, syncIssue, withLock } from './issue-cache.ts'
+import { askText, learningsPath, pendingNote } from './learning.ts'
 import { detectRepo, evidenceChangedAt, findValidAck, latestOfType, permissionLookup, repoRoot, snapshot } from './issue.ts'
 import { stateOf } from './labels.ts'
 
@@ -30,12 +31,16 @@ export function hookUsage(): string {
   return `Usage: vegafactory hook <event> --harness claude|codex   (reads the hook payload on stdin)
 
 Events and the harness hooks they belong on:
-  session-start   SessionStart         the issue, its holder and where its local copy lives
+  session-start   SessionStart         the issue, its holder, where its local copy lives, and any lessons waiting for dev.md
   prompt          UserPromptSubmit     a warning when someone else holds the issue
   pre-tool        PreToolUse           the ship guard; stops file and shell tools after the claim is lost
   post-tool       PostToolUse, SubagentStop   the heartbeat
-  stop            Stop                 commits and pushes a WIP checkpoint of the turn
+  stop            Stop                 commits and pushes a WIP checkpoint of the turn, and asks a
+                                       working session once for the general lessons it taught
   session-end     SessionEnd           a last heartbeat (the claim is kept, the session may resume)
+
+Session start, stop and session end also collect usage numbers from the harness session logs in
+the background, and a session start asks to share them (at most once an hour).
 `
 }
 
@@ -95,6 +100,11 @@ export function issueFromBranch(branch: string): number | null {
   return match ? Number(match[1]) : null
 }
 
+function headOf(cwd: string): string | null {
+  const head = git(cwd, ['rev-parse', 'HEAD'])
+  return head.ok ? head.out : null
+}
+
 export interface Where { cwd: string; top: string; root: string; repo: string; number: number; owner: string; branch: string }
 
 export function locate(cwd: string, host = hostname()): Where | null {
@@ -135,11 +145,124 @@ export function readLocal(where: Where): LocalClaim {
 }
 
 function writeLocal(where: Where, local: LocalClaim) {
-  const path = localPath(where)
-  mkdirSync(dirname(path), { recursive: true })
-  const temp = `${path}.${process.pid}.tmp`
-  writeFileSync(temp, JSON.stringify(local, null, 2) + '\n')
-  renameSync(temp, path)
+  replaceFile(localPath(where), JSON.stringify(local, null, 2) + '\n')
+}
+
+// One mark per harness session: the HEAD that session last saw at an event of its own, whether it
+// has been seen to do work, and whether the lessons request already went out. Two sessions can
+// share a worktree, so this is keyed by session id and kept apart from the claim file, which every
+// tool call rewrites — a shared field there would clobber a neighbour's baseline. Every change
+// takes the lock, re-reads and replaces the file, so the change is the whole read-modify-write and
+// not just the write. No event ever writes another session's mark: a worktree's HEAD is shared, so
+// a HEAD that moved is only this session's work when this session's own events bracket the move.
+export interface SessionMark {
+  head: string | null
+  worked: boolean
+  asked: boolean
+  at: number
+  // Set while one of this session's own shell tools is running: the HEAD it began at, when, and
+  // whether the command in it could produce a commit at all.
+  pending?: { head: string | null; at: number; commits: boolean }
+  // The commit this session was credited with, and the commit this mark has already ruled on.
+  // A commit is ruled on once, by whichever window closes over it first, and never again.
+  credited?: string
+  judged?: string
+}
+
+export const sessionsPath = (where: Where) => join(where.top, '.vegastack', '.tmp', 'claims', `${where.number}.sessions.json`)
+
+// Only the most recent sessions are kept; the file is a working note, not a record.
+const SESSIONS_KEPT = 8
+
+function updateSessions<T>(where: Where, change: (marks: Record<string, SessionMark>) => T): T {
+  const path = sessionsPath(where)
+  return withLock(dirname(path), () => {
+    let marks: Record<string, SessionMark> = {}
+    try { marks = JSON.parse(readFileSync(path, 'utf8')) as Record<string, SessionMark> } catch { /* the first session of this worktree */ }
+    const result = change(marks)
+    const kept = Object.entries(marks).sort(([, a], [, b]) => b.at - a.at).slice(0, SESSIONS_KEPT)
+    replaceFile(path, JSON.stringify(Object.fromEntries(kept), null, 2) + '\n')
+    return result
+  }, { what: 'the session marks' })
+}
+
+// What an event tells us about the session it belongs to:
+//   'idle'        only where its HEAD stands now — a session start, a prompt, the end of a session
+//   'tool-start'  one of its own shell tools is about to run, from the HEAD recorded now, with
+//                 whether the command in it could commit at all
+//   'tool-end'    that tool finished; a commit made while it ran may be this session's work
+//   'commit'      its own Stop checkpoint made the commit, which is its work by construction
+// A worktree's HEAD is shared, so a HEAD that simply differs proves nothing: a neighbour may have
+// moved it. Only a shell tool can produce a commit, so only a shell tool opens a window — a file
+// tool cannot commit and would be pure guessing surface — and only a window whose command could
+// commit counts for anything. Where the evidence is unclear the session goes unasked rather than
+// credited with someone else's commit.
+type Observed = 'idle' | 'tool-start' | 'tool-end' | 'commit'
+
+// When the commit now at HEAD was made. Git keeps seconds, so callers give the window a second's
+// room at each end.
+function committedAt(cwd: string): number | null {
+  const at = git(cwd, ['log', '-1', '--format=%ct'])
+  if (!at.ok) return null
+  const made = Number(at.out) * 1000
+  return Number.isFinite(made) ? made : null
+}
+
+// One commit, one ruling. A window can own the commit only when it was open across it and the
+// command in it could have made one — a `sleep` is neither a claimant nor a rival. One candidate
+// is credited; two mean either could have made it, so neither is, and neither may claim it later.
+// The commit is named in the ruling, so a window closing afterwards cannot re-open a settled
+// question. A window from an older build says nothing about its command, so it is taken as capable.
+function rule(where: Where, marks: Record<string, SessionMark>, session: string, head: string, now: number) {
+  const mark = marks[session]!
+  const made = committedAt(where.top)
+  if (made === null) return
+  const covers = (window: SessionMark['pending']) => !!window && window.commits !== false && made >= window.at - 1000 && made <= now + 1000
+  if (!covers(mark.pending)) return
+  if (Object.values(marks).some((other) => other.judged === head)) return
+  const rivals = Object.entries(marks).filter(([id, other]) => id !== session && covers(other.pending))
+  mark.judged = head
+  if (rivals.length) {
+    for (const [, other] of rivals) other.judged = head
+    return
+  }
+  mark.worked = true
+  mark.credited = head
+}
+
+// Written the first time any of that session's events is seen, and before anything that can fail,
+// so a refresh that throws still leaves the session able to tell work from talk.
+function observe(where: Where, session: string | null, now: number, kind: Observed = 'idle', commits = true) {
+  if (!session) return
+  updateSessions(where, (marks) => {
+    const head = headOf(where.top)
+    const mark = marks[session] ?? (marks[session] = { head, worked: false, asked: false, at: now })
+    if (kind === 'commit' && head !== null) {
+      // commitWork knows it made this one, so no window and no rival can put it elsewhere.
+      mark.worked = true
+      mark.credited = head
+      mark.judged = head
+    }
+    if (kind === 'tool-end' && head !== null && mark.pending?.head != null && mark.pending.head !== head) rule(where, marks, session, head, now)
+    // A window belongs to the one tool that opened it; anything else closes it unused.
+    if (kind === 'tool-start') mark.pending = { head, at: now, commits }
+    else delete mark.pending
+    mark.head = head
+    mark.at = now
+  })
+}
+
+// True once per session, and only for a session seen to do work: a session that only talked has no
+// lessons to give. The decision and the record of it happen inside the same lock.
+function claimAsk(where: Where, session: string | null, now: number): boolean {
+  if (!session) return false
+  return updateSessions(where, (marks) => {
+    const mark = marks[session]
+    if (!mark || mark.asked || !mark.worked) return false
+    mark.asked = true
+    mark.at = now
+    return true
+  })
 }
 
 const label = (h: Holder) => `${h.owner} (${h.harness}${h.model ? ` · ${h.model}` : ''})`
@@ -177,6 +300,14 @@ function recordActivity(local: LocalClaim, now: number) {
 // Both harnesses document this shape for SessionStart and UserPromptSubmit.
 function context(event: 'SessionStart' | 'UserPromptSubmit', text: string): string {
   return JSON.stringify({ hookSpecificOutput: { hookEventName: event, additionalContext: text } })
+}
+
+// The Stop continuation each harness documents: Claude Code takes additionalContext as non-error
+// hook feedback, Codex turns a blocking reason into the next prompt. Both keep the turn going.
+function continuation(harness: Harness, text: string): Record<string, unknown> {
+  return harness === 'claude'
+    ? { hookSpecificOutput: { hookEventName: 'Stop', additionalContext: text } }
+    : { decision: 'block', reason: text }
 }
 
 // Codex parses permissionDecision "ask" but does not support it, so an ask is a deny there
@@ -309,8 +440,7 @@ function pushHeartbeat(where: Where, local: LocalClaim, deps: HookDeps) {
   } catch { /* no heartbeat running */ }
   const pid = deps.detach([...deps.cli, 'issue', 'heartbeat', String(where.number), '--repo', where.repo, '--active', String(Math.round(local.activeMs / 60_000))], where.cwd)
   if (typeof pid === 'number') {
-    mkdirSync(dirname(pidFile), { recursive: true })
-    writeFileSync(pidFile, JSON.stringify({ pid, at: deps.now() }))
+    replaceFile(pidFile, JSON.stringify({ pid, at: deps.now() }))
   }
   local.lastPush = deps.now()
 }
@@ -408,6 +538,10 @@ function preTool(harness: Harness, input: HookInput, deps: HookDeps): void {
   const here = whereAt(cwd, deps)
   const tool = String(payload.tool_name ?? '')
   if (here && (FILE_TOOLS.has(tool) || isShellTool(tool))) {
+    // Only a shell tool can produce a commit, so only a shell tool opens a window this session may
+    // later be credited for. A file tool writes files; the Stop checkpoint is what commits them.
+    const session = typeof payload.session_id === 'string' && payload.session_id ? payload.session_id : null
+    if (isShellTool(tool)) try { observe(here, session, deps.now(), 'tool-start', canCommit(extractCommand(payload))) } catch { /* attribution is never a gate */ }
     const denied = ownership(harness, here, deps)
     if (denied) return deps.out(denied)
   }
@@ -425,14 +559,27 @@ function takeBack(where: Where, harness: Harness, model: string) {
   return `vegafactory issue claim ${where.number} --harness ${harness} --model ${model} --take-back-by <login>`
 }
 
+// Usage numbers are read from the harnesses' own session logs, in the background, at turn
+// boundaries — never in the session's way, and a failure is silent. The push is bounded to once
+// an hour by the command itself, so a session start can always ask for it.
+function collectStats(event: HookEvent, cwd: string, deps: HookDeps) {
+  if (event !== 'session-start' && event !== 'stop' && event !== 'session-end') return
+  deps.detach([...deps.cli, 'stats', 'collect'], cwd)
+  if (event === 'session-start') deps.detach([...deps.cli, 'stats', 'push'], cwd)
+}
+
 function advisory(event: HookEvent, harness: Harness, payload: Record<string, unknown>, deps: HookDeps): void {
   const cwd = typeof payload.cwd === 'string' ? payload.cwd : process.cwd()
+  try { collectStats(event, cwd, deps) } catch { /* stats never affect a session */ }
   const where = locate(cwd, deps.host)
   if (!where) return
   const local = readLocal(where)
   const model = typeof payload.model === 'string' && payload.model ? payload.model : '<model>'
+  const session = typeof payload.session_id === 'string' && payload.session_id ? payload.session_id : null
 
   if (event === 'session-start') {
+    // Before the refresh, which talks to GitHub and can throw.
+    observe(where, session, deps.now())
     const { holder, state } = refresh(where, local, deps, true)
     writeLocal(where, local)
     const lines = [
@@ -441,9 +588,12 @@ function advisory(event: HookEvent, harness: Harness, payload: Record<string, un
     ]
     if (holder && !local.held) lines.push(`Someone else holds it. Do not change files; to take it back: \`${takeBack(where, harness, model)}\`.`)
     else if (!holder) lines.push(`Nobody holds it; claim it before working: \`vegafactory issue claim ${where.number} --harness ${harness} --model ${model}\`.`)
+    const pending = pendingNote(where.root)
+    if (pending) lines.push(pending)
     return deps.out(context('SessionStart', lines.join('\n')))
   }
   if (event === 'prompt') {
+    observe(where, session, deps.now())
     const { holder } = refresh(where, local, deps)
     writeLocal(where, local)
     const notes: string[] = []
@@ -455,22 +605,27 @@ function advisory(event: HookEvent, harness: Harness, payload: Record<string, un
   }
   if (event === 'post-tool') {
     recordActivity(local, deps.now())
+    observe(where, session, deps.now(), 'tool-end')
     if (local.held && (local.lastPush === null || deps.now() - local.lastPush >= HEARTBEAT_EVERY_MS)) pushHeartbeat(where, local, deps)
     return writeLocal(where, local)
   }
   if (event === 'session-end') {
     recordActivity(local, deps.now())
+    observe(where, session, deps.now())
     if (local.held) pushHeartbeat(where, local, deps)
     return writeLocal(where, local)
   }
   if (event === 'stop') {
     recordActivity(local, deps.now())
+    observe(where, session, deps.now())
     writeLocal(where, local)
     if (local.lostTo || !where.branch || issueFromBranch(where.branch) !== where.number) return
     const notes: string[] = []
     const rejected = pushFailure(where)
     if (rejected) notes.push(rejected)
     const saved = commitWork(where.top, `wip: #${where.number} turn checkpoint`)
+    // This session's own turn produced that commit, so the work is this session's.
+    if (saved.committed) observe(where, session, deps.now(), 'commit')
     if (saved.secrets.length) notes.push(`The WIP checkpoint was skipped: ${saved.reason}. Move them out of the worktree or ignore them.`)
     if (saved.committed) {
       // The push runs in the background; a rejection is written down and reported on the next prompt or stop.
@@ -478,8 +633,20 @@ function advisory(event: HookEvent, harness: Harness, payload: Record<string, un
       rmSync(failed, { force: true })
       deps.detach(['sh', '-c', 'git push --quiet -u origin "HEAD:refs/heads/$1" 2>"$2.tmp" || { mv "$2.tmp" "$2"; exit 1; }; rm -f "$2.tmp"', 'push', where.branch, failed], where.top)
     }
-    // Both harnesses show a Stop hook's systemMessage to the user as a warning.
-    if (notes.length) deps.out(JSON.stringify({ systemMessage: notes.join('\n') }))
+    // The lessons request, once per session that committed something: a chat-only session has none.
+    // A queue that fails its own checks asks for nothing rather than pointing a session at it.
+    let ask: string | null = null
+    try {
+      // The queue's own checks run before the session is marked asked, so a refusal here leaves
+      // the request to the next turn rather than spending it. The text comes after, because
+      // writing it sets up a draft folder and only a session that is really being asked needs one.
+      learningsPath(where.root)
+      if (claimAsk(where, session, deps.now())) ask = askText(where.root, where.number)
+    } catch { /* no request is better than a bad one */ }
+    // Both harnesses show a Stop hook's systemMessage to the user as a warning, and one Stop hook
+    // prints one JSON object, so the warning and the request travel together.
+    const output = { ...(notes.length ? { systemMessage: notes.join('\n') } : {}), ...(ask ? continuation(harness, ask) : {}) }
+    if (Object.keys(output).length) deps.out(JSON.stringify(output))
   }
 }
 

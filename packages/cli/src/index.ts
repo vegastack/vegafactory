@@ -11,7 +11,7 @@ import type { SkillEntry } from './selection.ts'
 type Agent = 'codex' | 'claude'
 type AgentChoice = Agent | 'both'
 type Mode = 'project' | 'global'
-type Command = 'add' | 'update' | 'verify' | 'doctor' | 'remove' | 'list' | 'version' | 'help' | 'worktree' | 'sync' | 'hook' | 'ship' | 'issue' | 'init' | 'agent' | 'review'
+type Command = 'add' | 'update' | 'verify' | 'doctor' | 'remove' | 'list' | 'version' | 'help' | 'worktree' | 'sync' | 'hook' | 'ship' | 'issue' | 'init' | 'agent' | 'stats' | 'dashboard' | 'learning' | 'review'
 const installerVerbs: readonly string[] = ['add', 'update', 'verify', 'doctor', 'remove', 'list'] as const
 interface Options {
   command: Command
@@ -70,11 +70,18 @@ Shipping and hooks:
   ship check <n> [--json]                may issue n merge? (ship it recorded, branch pushed, PR green)
   hook <event> --harness claude|codex    the harness hooks: guard, heartbeat, WIP checkpoints ("hook --help")
 
+Learning (the Stop hook asks for these; a dev.md line lands only on the operator's yes):
+  learning add|list|accept|decline …     the lessons waiting for a dev.md line
+
 Agents:
   agent claude|codex <args…>             start a headless run on the subscription (API keys refused)
 
 Control room:
   sync [--org ORG] [--force]             refresh this machine's copy of the org control room
+
+Usage numbers (from the harnesses' own session logs — counts only, never prompts or code):
+  stats collect|push|show ...            read new turns, share them, print them ("stats --help")
+  dashboard [--out FILE] [--open]        one offline HTML file of operators, projects and issues
 
 Options:
   --group NAME · --all                   choose skills (--all skips the repo-only ones)
@@ -110,7 +117,7 @@ function parse(argv: string[]): Options {
       if (!installerVerbs.includes(verb) && verb !== 'help' && verb !== 'version') throw new Error(`Unknown command: skills ${verb}`)
       command = verb as Command
     }
-    else if (head === 'worktree' || head === 'hook' || head === 'ship' || head === 'issue' || head === 'agent' || head === 'review') return { command: head, all: false, dryRun: false, force: false, nonInteractive: false, json: false, rest: argv.splice(0) }
+    else if (head === 'worktree' || head === 'hook' || head === 'ship' || head === 'issue' || head === 'agent' || head === 'stats' || head === 'dashboard' || head === 'learning' || head === 'review') return { command: head, all: false, dryRun: false, force: false, nonInteractive: false, json: false, rest: argv.splice(0) }
     else if (installerVerbs.includes(head)) throw new Error(`Unknown command: ${head} — installer verbs moved under the skills namespace: run "vegafactory skills ${head} …"`)
     else if (head === 'sync' || head === 'help' || head === 'version' || head === 'init') command = head
     else throw new Error(`Unknown command: ${head}`)
@@ -868,6 +875,21 @@ async function main() {
   if (options.command === 'agent') {
     const { runAgent } = await import('./env.ts')
     process.exitCode = runAgent(options.rest ?? [])
+    return
+  }
+  if (options.command === 'stats') {
+    const { runStats } = await import('./stats.ts')
+    process.exitCode = runStats(options.rest ?? [])
+    return
+  }
+  if (options.command === 'dashboard') {
+    const { runDashboard } = await import('./dashboard.ts')
+    process.exitCode = runDashboard(options.rest ?? [])
+    return
+  }
+  if (options.command === 'learning') {
+    const { runLearning } = await import('./learning.ts')
+    process.exitCode = runLearning(options.rest ?? [])
     return
   }
   if (options.command === 'ship') {

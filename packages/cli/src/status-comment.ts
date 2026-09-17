@@ -5,6 +5,7 @@ import { claimsOf, holderOf, LEDGER_MARKER, trustedAuthors, type Claim, type Cla
 import { ghList, ghRequest } from './gh.ts'
 import { readBody, readState, syncIssue, type CacheState, type CommentEntry } from './issue-cache.ts'
 import { STATES, stateOf, type State } from './labels.ts'
+import { saveSpans } from './stages.ts'
 
 export interface LabelEvent { event: string; label?: { name: string }; created_at: string }
 export interface Span { stage: State; start: string; end: string | null }
@@ -97,10 +98,13 @@ export function writeStatus(ctx: ClaimContext, options: { cwd: string; branch?: 
   const state = readState(dir)!
   const body = (entry: CommentEntry) => readBody(dir, entry.file)
   const events = ghList<LabelEvent>(`repos/${ctx.repo}/issues/${ctx.number}/timeline`, ctx.runner)
+  const spans = stageSpans(events)
+  // The same spans answer "which stage was this turn in?" later, without asking GitHub again.
+  saveSpans(dir, spans)
   const branch = options.branch ?? gitLine(options.cwd, ['branch', '--show-current'])
   const lastPush = branch ? gitLine(options.cwd, ['log', '-1', '--format=%cI', `origin/${branch}`]) : null
   const trusted = trustedAuthors(ctx)
-  const text = renderLedger({ state, body, trusted, spans: stageSpans(events), branch, lastPush, progress: options.progress ?? null, now: options.now ?? Date.now() })
+  const text = renderLedger({ state, body, trusted, spans, branch, lastPush, progress: options.progress ?? null, now: options.now ?? Date.now() })
   const { ledger } = claimsOf(state, body, trusted)
   if (ledger) {
     if (body(ledger) !== text) ghRequest(`repos/${ctx.repo}/issues/comments/${ledger.id}`, { method: 'PATCH', body: { body: text }, runner: ctx.runner })

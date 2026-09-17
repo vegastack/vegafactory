@@ -33,7 +33,9 @@ npx @vegastack/vegafactory skills list
 | `agent claude\|codex <args…>` | Start a headless run on the subscription; parent-app variables are dropped and API-key billing is refused |
 | `sync` | Refresh this machine's copy of the org control room |
 | `ship check <n>` | Exit 0 when issue n may merge: a "ship it" after the latest evidence, the branch pushed and clean, its PR green |
-| `hook <event> --harness claude\|codex` | The harness hooks: ship guard, claim heartbeat, WIP checkpoint each turn |
+| `hook <event> --harness claude\|codex` | The harness hooks: ship guard, claim heartbeat, WIP checkpoint each turn, and the one lessons request per working session |
+| `learning <add\|list\|accept\|decline>` | The lessons a session left for `.vegastack/dev.md`; `add` reads them from a file or standard input, one per line, so no lesson text passes through a shell; accepting or declining drops one from the git-ignored queue, and the dev.md line is yours to write |
+| `stats <collect\|push\|show>` | Usage numbers from the Claude Code and Codex session logs on this machine: read new turns, share them with the org, print them |
 
 ### Selecting skills
 
@@ -73,6 +75,39 @@ vegafactory sync --org acme # first run in a repo whose dev.md has no control-ro
 - `sync` uses your existing `gh` login, never commits and never pushes.
 - Exit codes: **0** synced or already fresh · **1** the fetch failed and the old copy stands · **2** a refusal (a hand-edited copy, a symlinked path, an unreadable `~/.vegastack/factory.json`).
 
+## Usage numbers
+
+Both harnesses write a session log in your home directory. `stats collect` reads the new lines of
+each log — from a saved byte offset, so a killed session is counted once, at the next run — and
+keeps one record per assistant turn under `~/.vegastack/.tmp/stats/` — one collector at a time, so
+two hooks never count the same turn twice: time, your `gh` login, the
+machine, the repository, the issue, the harness, the exact model id, the skill the turn used, the
+tokens, the duration, how the turn ended, and the workflow stage the issue was in **at that moment**
+— written down as the CLI moves a state label, so a session collected days later still counts in the
+stage it worked in, and turns nothing is known about carry no stage at all. Never a prompt, a file, tool arguments or which
+subscription paid for the turn — a skill is named only when it resolves to one installed under
+`~/.claude/skills`, `~/.agents/skills` or the bundle, so a tool argument that merely looks like a
+skill name is dropped. The harness hooks run it in the background at each turn boundary.
+
+```sh
+vegafactory stats show --since 7d   # turns, tokens and time by operator, project, model and stage
+vegafactory stats push              # append this machine's new turns to the org control room
+vegafactory dashboard --open        # one offline HTML page, built from what you have
+```
+
+`push` appends each turn to `stats/YYYY/MM/DD/<operator>-<machine>.jsonl` — the operator and machine
+the turn was recorded on, not whoever is logged in now — in the control-room clone `sync` already
+keeps, then commits and pushes it with your own `gh` login, at most once an hour and never with
+credentials of its own. A room only ever receives turns from the repositories bound to it: the repo
+you are pushing from, the ones its `repos.md` registry lists, and other checkouts on this machine
+whose profile names the same room. Turns from anywhere else stay on this machine, and each room
+keeps its own cursor, so one org's push never marks another's turns as sent. The clone belongs to
+`sync`, so a push refuses unless it is exactly as `sync` left it: the expected origin and branch, a
+clean index and worktree, no local commits other than earlier stats pushes. Only the generated files
+are staged, a failure puts them back, and a commit whose push was rejected is retried by the next
+run. `show` and `dashboard` read this machine's records plus everything other machines pushed into
+that clone; `--local` leaves the shared ones out.
+
 ## Flags
 
 | Flag | Meaning |
@@ -97,7 +132,7 @@ Install each skill globally or per project, not both: in Claude Code a personal 
 
 ## Integrity and network
 
-The package ships a checksum manifest, checked at install and by `verify`. `add`, `verify` and `remove` work offline. Network calls: `doctor`'s version check and `init`'s `npm install -g` reach the npm registry; `issue` commands call the GitHub API through your `gh` login (conditional requests, so an unchanged issue costs almost nothing); `sync` fetches your own control room with git. VegaFactory sends no telemetry.
+The package ships a checksum manifest, checked at install and by `verify`. `add`, `verify` and `remove` work offline. Network calls: `doctor`'s version check and `init`'s `npm install -g` reach the npm registry; `issue` commands call the GitHub API through your `gh` login (conditional requests, so an unchanged issue costs almost nothing); `sync` fetches your own control room with git, and `stats push` commits usage counts to that same repository with your `gh` login. VegaFactory sends nothing anywhere else.
 
 ## Requirements
 

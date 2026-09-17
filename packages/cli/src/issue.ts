@@ -9,6 +9,7 @@ import { claim, heartbeat, holderOf, ownerId, release, trustedAuthors, type Clai
 import { writeStatus } from './status-comment.ts'
 import { artifactHash, assertRepo, cacheDir, commentType, dropIssue, permissionLookup, readBody, readState, syncIssue, withLock, WRITE_ROLES, type CacheState, type CommentEntry, type GhComment, type PermissionLookup } from './issue-cache.ts'
 import { STATES, sizeOf, stateOf, transition, type State } from './labels.ts'
+import { recordStage } from './stages.ts'
 
 export const ACK_STAGES = ['brief', 'plan', 'ship'] as const
 export type AckStage = typeof ACK_STAGES[number]
@@ -240,9 +241,12 @@ export function nextLabels(current: string[], change: { state?: State; add?: str
   return labels
 }
 
-// Replaces the whole label set in one request, so no reader sees two state labels.
+// Replaces the whole label set in one request, so no reader sees two state labels. The state it
+// lands on is written down with its time, so a turn is later credited to the stage it happened in.
 export function setLabels(ctx: WriteContext, labels: string[]) {
   ghRequest(`repos/${ctx.repo}/issues/${ctx.number}/labels`, { method: 'PUT', body: { labels }, runner: ctx.runner })
+  const state = stateOf(labels).state
+  if (state) recordStage(ctx.root, ctx.repo, ctx.number, state)
 }
 
 export function moveTo(ctx: WriteContext, next: State) {

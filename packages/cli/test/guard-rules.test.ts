@@ -3,7 +3,7 @@ import { spawnSync } from 'node:child_process'
 import { mkdirSync, mkdtempSync, realpathSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { classifyCommand, EXPANDED, extractCommand, isShellTool, loadPolicy, mergeTarget, parseCommand, shipAskCommands, splitSegments, type Policy } from '../src/guard-rules.ts'
+import { canCommit, classifyCommand, EXPANDED, extractCommand, isShellTool, loadPolicy, mergeTarget, parseCommand, shipAskCommands, splitSegments, type Policy } from '../src/guard-rules.ts'
 
 const policy: Policy = { defaultBranch: 'main', shipAsk: ['bun run docs:publish', 'wrangler deploy --env production'] }
 const decide = (command: string, p: Policy = policy) => classifyCommand(command, p)
@@ -87,9 +87,12 @@ describe('decisions', () => {
     for (const command of ['noglob ls', 'env FOO=1 ls', 'env -i PATH=/bin ls', 'env -u HOME ls']) expect(decide(command).decision, command).toBe('allow')
   })
 
-  test('opening a PR or an issue passes; other gh writes still ask', () => {
-    for (const command of ['gh pr create --title t --body b', 'gh issue create --title t --body b --label planning']) expect(decide(command).decision, command).toBe('allow')
-    for (const command of ['gh pr edit 5 --add-label x', 'gh issue close 5', 'gh label create x', 'gh pr merge 5']) expect(decide(command).decision, command).toBe('ask')
+  test('routine PR, issue and label writes pass; closing, deleting and merging still ask', () => {
+    for (const command of [
+      'gh pr create --title t --body b', 'gh issue create --title t --body b --label planning', 'gh issue edit 5 --add-label in-progress --remove-label queued',
+      'gh pr edit 5 --add-label x', 'gh label create small --color C2E0C6', 'gh label edit small --description d',
+    ]) expect(decide(command).decision, command).toBe('allow')
+    for (const command of ['gh issue close 5', 'gh issue delete 5', 'gh label delete x', 'gh pr close 5', 'gh pr merge 5', 'gh issue comment 5 -b x']) expect(decide(command).decision, command).toBe('ask')
   })
 
   test('pushing one tag by name asks, however it is spelled', () => {
@@ -294,7 +297,7 @@ describe('decisions', () => {
     expect(classifyCommand('gh pr merge 12 --squash', policy, check).decision).toBe('allow')
     for (const command of [
       'gh alias set ship "pr merge"', 'gh alias import x.yml', 'gh alias delete ship', 'gh ship 12', 'gh extension install o/gh-x', 'gh x-merge 1',
-      'gh pr edit 1 --base main', 'gh repo delete o/r', 'gh workflow run release', 'gh secret set X', 'gh auth token', 'gh run rerun 1', 'gh label create x', 'gh project item-edit 1',
+      'gh repo delete o/r', 'gh workflow run release', 'gh secret set X', 'gh auth token', 'gh run rerun 1', 'gh project item-edit 1',
     ]) {
       expect(decide(command).decision, command).toBe('ask')
     }
@@ -350,6 +353,35 @@ describe('payloads', () => {
     }
     for (const name of ['Write', 'Edit', 'apply_patch', 'Read', 'mcp__terminal__read_terminal', 'mcp__docs__search', 'WebFetch']) {
       expect(isShellTool(name), name).toBe(false)
+    }
+  })
+})
+
+// Attribution only: this decides which session's tool window may own a commit, never what may run.
+describe('commit capability', () => {
+  test('a command that could leave a commit at HEAD', () => {
+    for (const command of [
+      'git commit -m x', 'git commit --amend', 'git merge origin/main', 'git rebase -i main', 'git cherry-pick abc',
+      'git revert HEAD', 'git am < patch', 'git pull', 'git stash pop', 'git stash apply', 'git apply --index p.diff',
+      'git -C other commit -m x', 'sh -c "git commit -m x"', 'ls && git commit -m x', 'git nonsense', 'git $VERB',
+      './scripts/release.sh', 'bun run release', 'make ship', 'vegafactory ship check 7', 'find . -name x -exec git commit -m y ;',
+      'git fast-import < stream', 'git filter-branch --tree-filter x HEAD', 'git filter-repo --path src', 'git subtree add --prefix=v repo main',
+      'git subtree pull --prefix=v repo main', 'git quiltimport',
+    ]) expect(canCommit(command), command).toBe(true)
+  })
+
+  test('a command that plainly cannot', () => {
+    for (const command of [
+      'sleep 30', 'ls -la', 'cat README.md', 'echo hello', 'grep -r x .', 'git status', 'git log -1', 'git diff --stat',
+      'git add -A', 'git push origin main', 'git stash', 'git apply p.diff', 'git fetch', 'sleep 5 && ls', 'jq . x.json',
+      // These write a tree object and a ref under refs/replace; neither moves HEAD.
+      'git merge-tree --write-tree a b', 'git replace a b',
+    ]) expect(canCommit(command), command).toBe(false)
+  })
+
+  test('anything unreadable is taken as capable, so it contends rather than concede the credit', () => {
+    for (const command of [null, undefined, 42, '$CMD', 'eval "$STEP"', 'xargs git commit']) {
+      expect(canCommit(command), String(command)).toBe(true)
     }
   })
 })
