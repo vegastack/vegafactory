@@ -18,13 +18,13 @@
     {
       "id": 2,
       "prompt": "prod throws 'undefined is not a function' somewhere in checkout, no logs, no stack trace, users just see the spinner. just fix it",
-      "expected_output": "A handback: without a reproduction the skill does not theorise — it lists what was tried to build a red command, names the artifacts needed (a HAR, the browser console, a session recording, environment access), and proposes needs-operator; no fix is proposed.",
+      "expected_output": "A handback: without a reproduction the skill does not theorise — it lists what was tried to build a red command, names the artifacts needed (a HAR, the browser console, a session recording, environment access), and proposes waiting-on-operator; no fix is proposed.",
       "files": [],
       "assertions": [
         "The output is a handback comment that lists the artifacts needed to reproduce",
         "No fix or code change is proposed",
         "The output states what was attempted to build a reproduction before stopping",
-        "`needs-operator` is proposed as the next state"
+        "`waiting-on-operator` is proposed as the next state"
       ]
     },
     {

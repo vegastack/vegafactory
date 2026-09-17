@@ -160,7 +160,7 @@ The issue-driven development workflow: ten stages from project bootstrap to the 
 | Skill | What it does | Docs |
 |---|---|---|
 | [dev-setup](skills/dev/dev-setup/) | Bootstraps a project for the issue-driven workflow: `.vegastack/dev.md`, the AGENTS.md section, the workflow labels, and the decision register | [SKILL.md](skills/dev/dev-setup/SKILL.md) |
-| [dev-intake](skills/dev/dev-intake/) | Turns brainstorms, requests, and SOWs into agent-ready issues, with quoted-approval recording that flips `needs-operator` to `ready` | [SKILL.md](skills/dev/dev-intake/SKILL.md) |
+| [dev-intake](skills/dev/dev-intake/) | Turns brainstorms, requests, and SOWs into agent-ready issues, with quoted-approval recording that flips `waiting-on-operator` to `queued` | [SKILL.md](skills/dev/dev-intake/SKILL.md) |
 | [dev-plan](skills/dev/dev-plan/) | The planning stage between intake and implementation: approaches, a no-placeholder plan with failing-test-first steps, and the scope ratchet | [SKILL.md](skills/dev/dev-plan/SKILL.md) |
 | [dev-architect](skills/dev/dev-architect/) | VegaStack's architecture advisor: the locked stack, recorded rejections, and dated platform facts behind a verify-before-you-recommend protocol | [SKILL.md](skills/dev/dev-architect/SKILL.md) |
 | [dev-implement](skills/dev/dev-implement/) | Implements an approved issue end to end without user input: preflight, claim, dark build, tests, independent review, evidence comment, hand-back | [SKILL.md](skills/dev/dev-implement/SKILL.md) |

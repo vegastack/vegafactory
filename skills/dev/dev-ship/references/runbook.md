@@ -16,7 +16,7 @@ A failing step stops the runbook at that step: report what failed and what remai
 
 ## Direct-to-main (`gates: 1`)
 
-The ship word authorizes: merge the task branch onto the default branch locally per the `merge:` knob, push, done — no PR object. Everything else is unchanged: the issue must be `for-operator` with its evidence comment, guards run, the changelog entry must exist. Closing the issue: with `merge: squash`, put `Closes #<n>` in the squash commit message; with any other merge style there is no new commit to carry it — after pushing, close explicitly with `gh issue close <n> --comment "merged to <default> as <sha>"`. Either way, confirm the issue actually closed. Branch protection that blocks direct pushes breaks this mode — dev-setup checks at setup time; if it bites later, tell the operator rather than working around it.
+The ship word authorizes: merge the task branch onto the default branch locally per the `merge:` knob, push, done — no PR object. Everything else is unchanged: the issue must be `ready-to-ship` with its evidence comment, guards run, the changelog entry must exist. Closing the issue: with `merge: squash`, put `Closes #<n>` in the squash commit message; with any other merge style there is no new commit to carry it — after pushing, close explicitly with `gh issue close <n> --comment "merged to <default> as <sha>"`. Either way, confirm the issue actually closed. Branch protection that blocks direct pushes breaks this mode — dev-setup checks at setup time; if it bites later, tell the operator rather than working around it.
 
 ## Decisions under compressed gates
 

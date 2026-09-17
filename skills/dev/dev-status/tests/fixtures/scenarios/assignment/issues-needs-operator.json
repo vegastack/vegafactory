@@ -1,3 +1,0 @@
-[{"number":11,"title":"feat: assigned to me","url":"https://x/11","updatedAt":"2026-09-03T09:00:00Z","labels":[{"name":"needs-operator"},{"name":"full-plan"}],"assignees":[{"login":"kmanojkumar"}],"author":{"login":"kmanojkumar"}},
- {"number":12,"title":"feat: assigned to ada","url":"https://x/12","updatedAt":"2026-09-02T09:00:00Z","labels":[{"name":"needs-operator"},{"name":"quick-build"}],"assignees":[{"login":"ada"}],"author":{"login":"ada"}},
- {"number":13,"title":"feat: nobody owns this","url":"https://x/13","updatedAt":"2026-09-01T09:00:00Z","labels":[{"name":"needs-operator"},{"name":"quick-build"}],"assignees":[],"author":{"login":"outsider"}}]

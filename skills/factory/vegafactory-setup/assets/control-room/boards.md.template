@@ -4,7 +4,7 @@ Project boards and the repos that mirror onto them. Labels stay the machine stat
 
 **One way only.** `.github/workflows/factory-board.yml` reads a repo's state label and writes the board's Status field. Nothing reads the board: a card dragged on the board is cosmetic until the next label change overwrites it.
 
-Status options, in this order: needs-operator · needs-plan · ready · working · for-operator · Done — the five state labels plus Done, which the built-in automations set.
+Status options, in this order: waiting-on-operator · planning · ready · working · ready-to-ship · Done — the five state labels plus Done, which the built-in automations set.
 
 Built-in automations, switched on once per board in its Workflows UI (no CLI covers them): auto-add `is:issue is:open`, item closed → Done, PR merged → Done, auto-archive after 14 days.
 

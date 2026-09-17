@@ -66,7 +66,7 @@
       "files": [],
       "assertions": [
         "Every gh project command is presented as the operator's to run, because they need the project scope",
-        "The Status options are given as needs-operator,needs-plan,ready,working,for-operator,Done in that order",
+        "The Status options are given as waiting-on-operator,planning,ready,working,ready-to-ship,Done in that order",
         "No project is created, no field edited and no repo linked by the agent",
         "The reply states the mirror is one way and that a dragged card is cosmetic until the next label change"
       ]

@@ -8,7 +8,7 @@
     "should_trigger": true
   },
   {
-    "query": "issue 18 is labeled needs-plan \u2014 pick it up",
+    "query": "issue 18 is labeled planning \u2014 pick it up",
     "should_trigger": true
   },
   {
@@ -34,7 +34,7 @@
     "should_trigger": true
   },
   {
-    "query": "dev-intake needs the inline plan for this quick-build",
+    "query": "dev-intake needs the inline plan for this small",
     "should_trigger": true
   },
   {

@@ -1,113 +1,95 @@
 # Workflow conventions
 
-Artifact authority.
+GitHub issues are the record. Agents read them through `vegafactory issue sync` (a local copy under `.vegastack/.tmp/issues/`) and write them through the `vegafactory issue` verbs. Settings resolve repo `dev.md`, then group, then org; a line the org marks `locked` cannot be overridden.
 
-Defaults resolve repo, group, then org; locks require explicit org delegation. Repository dispatch/commands never inherit; registers concatenate. Policy/migration uses dev-setup's `scripts/effective-policy.mjs` and vegafactory-setup's control-room reference.
+## Reading and writing issues
 
-## Comment metadata markers
+- `vegafactory issue sync <n> [--since CURSOR]` refreshes the local copy (a cheap "changed?" check first) and prints only the files that changed since CURSOR, plus the new cursor. Read those files; keep the cursor.
+- Folder: `.vegastack/.tmp/issues/<owner>__<repo>/<n>/` — `issue.md` (labels, assignees, parent, sub-issues, open blockers, then the body) and `comments/<time>-<type>-<id>.md`.
+- Writes: `issue comment <n> --file F`, `issue edit-comment <n> <id> --file F --since CURSOR`, `issue body <n> --file F --since CURSOR`, `issue label <n> --state S [--add a] [--remove b]`. An edit to something that changed after your cursor is refused: read it again, merge, retry.
+- Never call `gh issue` or `gh api` for issue content directly; the cache would go stale.
 
-Comments open:
+## Comment markers
+
+Machine-read comments open with one marker line:
 
 ```markdown
-<!-- vsk:v1 type=<type> rev=<n> [key=value ...] -->
-## <Human title> (v<n>)
+<!-- vsk:v1 type=<type> [key=value ...] -->
+## <Human title>
 ```
 
-| type | required keys | instances |
+| type | keys | instances |
 |---|---|---|
-| `approval` | `scope=<brief\|brief+plan\|plan\|consolidated\|none>` and schema-v2 JSON | one per approval event |
-| `questions` | `rev` | one per ask round; earlier rounds stay as record (dev-setup's `references/ask-route.md`) |
 | `plan` | `rev` | one, edited in place |
-| `ledger` | `branch` | one, edited in place |
-| `evidence` | `rev branch sha` | one, edited in place |
-| `review` | `round sha agent=<claude\|codex> verdict=<clean\|needs-fixes>` | one per review cycle, rounds appended inside |
+| `questions` | `rev` | one per ask round |
+| `ack` | `stage by brief [plan] source` | one per ack — written by `vegafactory issue ack` |
+| `ledger` | `branch` | one status comment, edited in place |
+| `evidence` | `branch sha` | one, edited in place |
+| `review` | `round sha agent=<claude\|codex> verdict=<clean\|needs-fixes>` | one per review cycle |
+| `handback` | — | one per stop |
 | `decision` | — | one per decision proposal |
-| `handback` | — | one per stop event |
 
-`rev=<n>` and `(v<n>)` start at 1 only on brief, plan, questions and evidence; other types have neither. Locate by marker, never heading/legacy fallback.
+A comment without a marker is a person's comment (`human`). Find artifacts by marker, never by heading.
 
-## Operator identity
+## Acks — the operator's two words
 
-Use parenthesized GitHub usernames:
+An operator gives two words per issue: an **ack** on the brief/plan, and **"ship it"**. Anyone with write access to the repository may give them, in an issue comment or in a Claude Code / Codex session. Anything else they say is input: fold it in, update the brief or plan, and ask again.
 
-- Approval: `Approved by (<username>) on DD-MM-YYYY: "<their words>"`
-- Register line: `- DD-MM-YYYY (<username>) — <decision>`
-
-Approval.mjs’s publisher/relay contract lets current-policy provider-envelope publishers attest listed operators’ session words. Other recorders may only relay independently read identical operator-published scoped grants within complete authority history, without lifecycle mutations. Relays inherit source authority/lifecycle; account attestation cannot authenticate off-platform speech.
-
-## Scoped approval records
-
-Use only dev-implement’s `scripts/lib/approval.mjs` and follow its contract. Refresh current policy and complete GitHub histories. `ArtifactRef={repo,issue,kind,artifactId,rev,digest}` binds brief issue-node or unique plan/protocol comment-node identity, revision and canonical SHA-256.
-
-Post exactly one approval comment: matching scope marker, then one fenced JSON `ApprovalRecord={schemaVersion:2,id,operator,scope,source:{kind,ref,quote},artifacts,supersedes,revokes}`. Exclude outer Markdown fences, future alternatives and unresolved source locators; validate the whole body with approval.mjs's `parseApproval`. Source kind is `session` or `github-comment`, with inspectable words. Reuse valid current grants/relays; avoid counterfactual plan-only or redundant approvals. Scope is `brief`, `plan` or `brief+plan`; planning requires brief, implementation both, research execution also its protocol. Empty-artifact revocations remove exact earlier IDs. Conflicts explicitly supersede; newest never wins.
-
-Preserve legacy comments. Without writes, inventory refusals/current digests and request reconfirmation. For duplicate canonical plans preserve both identities/bodies and request record-preserving reconciliation; never delete to clear ambiguity. Follow approval.mjs’s exact correction schema, operator-publisher and target checks. Only malformed or demonstrably invalid-source targets qualify, never valid authority or unavailable/inconsistent facts. Resolve source facts first; corrections grant no scope. Exact child checkpoint actions bind one selected code child's branch/ref/base/tasks/files; other actions never substitute.
-
-Consolidated parent events bind frozen manifests, canonical artifacts and exact task/action subsets. Use inline UTF-8 or immutable repository/commit/path plus blob hash, never local paths. Canonical `approvalBindings` authorize; requested `recordBinding` only audits. Follow approval.mjs’s preparation/research/recovery provenance, receipts, adapters, counted attempts and fresh admission; retain immutable history and unverified legacy records. Keep checkpoint/private/live/shipping gates separate.
-
-Canonicalization normalizes CRLF; its only exceptions are structural plan checkboxes and one validated JSON `{tasks:[{id,evidenceUrls}]}` block between `<!-- vsk:progress:start -->` / `<!-- vsk:progress:end -->`. IDs must exist; URLs are HTTP(S); unknown fields/duplicates refuse. Stable task IDs/order, interfaces, actions, revisions and all other bytes remain scope. Brief/protocol bodies have no mutable fields; fenced examples stay immutable and grant no authority.
-
-## Revision markers
-
-Scope edits increment marker/heading revisions and append `Revisions: v2 — DD-MM-YYYY: <change>, per (<username>) correction`; preserve earlier lines and obtain fresh approval. Validated progress changes need neither.
-
-## Scope classes
-
-Intake explains scope; operator overrides:
-
-- **`research`** — inquiry; throwaway code allowed, never merged. No branch/PR/changelog; evidence comment contains findings and recommendation.
-- **`quick-build`** — existing flow: draft brief+plan together, approve both, then `ready`.
-- **`full-plan`** — new ground: approve brief, `needs-plan`, separate grounded planning session, `needs-operator`, approve plan, `ready`. Split multiple deliverables into independently classified epic children.
-
-Scope ratchet: `dev-plan`.
+- When a person's reply is an ack, record it: `vegafactory issue ack <n> --stage brief|plan|ship --by <login> --quote "<their words>" --source comment:<id>` (their GitHub comment) or `--source session` (said in this session; run it with that person's own `gh` login).
+- The record binds short hashes of the current brief and plan. Editing either afterwards invalidates the ack; ticking plan checkboxes does not.
+- An app or bot may record an ack only by citing the person's own comment. Its own comments never count.
+- `vegafactory issue check <n> --for plan|implement|ship` verifies the facts before acting: open issue, one state label, one size label, no open blockers, and a valid ack (for `ship`, a "ship it" newer than the latest evidence).
 
 ## Labels
 
-One state; flips set assignees (colors: dev-setup):
+One state label at a time (`issue label <n> --state …` swaps it):
 
 | label | meaning | assignee |
 |---|---|---|
-| `needs-operator` | question, brief or plan approval, proposal | the operator |
-| `needs-plan` | brief approved; awaiting planning (full-plan only) | the operator |
-| `ready` | approved — an agent may start | nobody |
-| `working` | claimed; ledger shows live progress | the runner |
-| `for-operator` | done — evidence posted, awaiting operator review | the operator |
+| `waiting-on-operator` | a person must ack or give input (brief, plan, handback) | the operator |
+| `planning` | brief acked; a plan is being written (medium / large) | the operator |
+| `queued` | approved; waiting to be built | nobody |
+| `in-progress` | held by a session or the dispatcher (see the status comment) | the holder |
+| `ready-to-ship` | built and reviewed; comment changes or say "ship it" | the operator |
 
-Modifiers coexist with state: `risky` · scope `research` / `quick-build` / `full-plan` · `epic` (map parents without a native Epic type). Boards mirror states one-way.
+Size, one per issue: `small` (brief and plan together, one ack) · `medium` (brief ack, separate planning session, plan ack) · `large` (planning splits it into small/medium sub-issues; the parent becomes an `epic`). `research` replaces the size for an inquiry: code is throwaway and never merged, and the evidence comment holds findings and a recommendation. Flags: `risky`, `epic`. Boards mirror states one way.
 
 ## Titles, types, hierarchy
 
-- **Title prefixes:** issues, branches and PRs use dev.md's `branch:` types plus `research:`; PR title = issue title.
-- **Native issue types/fields:** Feature (feat) · Bug (fix) · Task (docs/chore/refactor/research) · Epic for parents (else label); intake sets Priority/Effort. Scope classes stay labels.
-- **Hierarchy:** epic parent = map only (Destination · Decisions so far · Not clear yet · Out of scope), with native child sub-issues. Issues are work units (brief, approvals, branch, PR, evidence); tasks are checkboxes **only in the plan comment**. Blockers use dependencies; phases use milestones. Only non-epic issues get `ready`.
+- Issues, branches and PRs use dev.md's `branch:` types plus `research:`; the PR title is the issue title.
+- Native issue types: Feature (feat) · Bug (fix) · Task (docs/chore/refactor/research).
+- An epic is a map only (Destination · Decisions so far · Not clear yet · Out of scope) with native sub-issues. Tasks are checkboxes in the plan comment only. Blockers use GitHub dependencies.
+- Parallel work happens only across sibling sub-issues whose plans list non-overlapping files; tasks inside one issue run in order.
+
+## Revisions
+
+A scope edit bumps the plan's `rev` and appends `Revisions: v2 — DD-MM-YYYY: <change>, per (<username>)`, then asks for a fresh ack. Register lines read `- DD-MM-YYYY (<username>) — <decision>`.
 
 ## The ledger
 
-One implementation ledger:
+One status comment per issue (`type=ledger`), edited in place:
 
 ```markdown
 <!-- vsk:v1 type=ledger branch=<branch> -->
 ## Ledger — <branch>
 - <issue>-T<N>: complete (commits <base7>..<head7>[, review clean | K parked])
-- <issue>-T<N>: fix round <R>/3 (<X> addressed, <Y> open — <one-liners>; commits <a>..<b>)
+- <issue>-T<N>: fix round <R>/3 (<X> addressed, <Y> open — <one-liners>)
 - Ruling: <what> — <why> — cost if wrong: <cost>
-- <issue>-T<N>: parked — <finding> — Ruling: <why the code stands>
 - Deferred minor: <one-liner>
 ```
 
+Resume: brief → plan → ledger → `git log` on the issue branch; keep completed work.
 
-**Resume protocol:** brief → plan comment → ledger → `git log`; then reconcile task IDs, canonical approval history, edited authority, source/evidence, ownership and delivery effects. Preserve completed work/provenance; stale heartbeat is not stop proof. Preparation never implies issue completion. Dev-implement's ledger reference owns recovery detail.
+## Workspaces
 
-## `.vegastack/` workspaces
+Drafts and reports: `.vegastack/.tmp/<issue>-<slug>/` (pre-issue: `intake-<slug>`). Branch checkouts: `.vegastack/.worktrees/<issue>-<slug>/`; the main checkout stays on the default branch. `.vegastack/.tmp/` and `.vegastack/.worktrees/` are git-ignored. Subagents save full reports and return a short status. `<path-to-this-skill>` means SKILL.md's directory.
 
-Drafts/reports: `.vegastack/.tmp/<issue-number>-<title-slug>/` (pre-issue: `intake-<slug>`), self-ignored by a `.gitignore` containing `*`. Branch checkouts: root-ignored `.vegastack/.worktrees/<issue-number>-<title-slug>/`; main stays on its default branch. Keep both outside `.git/`. Subagents save full reports and return short status. `<path-to-this-skill>` means SKILL.md’s directory.
+## Verification
 
-## Verification gate
-
-Prove claims with fresh command output and exit codes; report failures and skips. Delegate only substantial independent parallel work, never your own verification; keep spawn counts low. Guards block machine-verifiable failures (exit 2); heuristics warn. Guards contain no AI inference; unverifiable state fails closed.
+Prove claims with fresh command output and exit codes; report failures and skips. Never delegate your own verification. Checks block on machine-verifiable facts (exit 2) and fail closed when a fact cannot be read; judgment stays in prose.
 
 ## Review bindings
 
-One fenced JSON each: `{"reviewBinding":{sha,baseSha,scopeDigest,verdict,findings:[{id,status}]}}` in review; `{"adjudication":{sha,reviewCommentId,operator,source:{kind,ref,quote},findings:[{id,disposition,reason}]}}` in evidence. Use full commit IDs and canonical-plan scopeDigest; status=open/resolved; disposition=accept-risk. Every open finding requires same-review operator acceptance. dev-ship’s README defines source checks. No prose exceptions.
+One fenced JSON each: `{"reviewBinding":{sha,baseSha,scopeDigest,verdict,findings:[{id,status}]}}` in review; `{"adjudication":{sha,reviewCommentId,operator,source:{kind,ref,quote},findings:[{id,disposition,reason}]}}` in evidence. Full commit IDs; status `open` or `resolved`; disposition `accept-risk`. Every open finding needs the operator's acceptance.
 
-Communicate starts/findings/direction plainly; self-contained outcomes include paths and remaining checks. Avoid invented labels/arrows; visualize usefully. Challenge ambiguity with options; never guess silently.
+Say what you are doing plainly; name paths and remaining checks. When something is ambiguous, offer options — never guess silently.

@@ -12,7 +12,7 @@
   { "query": "make the PR for #9", "should_trigger": false, "ambiguous_with": ["dev-ship"] },
   { "query": "what's the best architecture for the export pipeline", "should_trigger": false, "ambiguous_with": ["dev-architect"] },
   { "query": "write the implementation plan for approved issue 18", "should_trigger": false, "ambiguous_with": ["dev-plan"] },
-  { "query": "issue 18 is labeled needs-plan, pick it up", "should_trigger": false, "ambiguous_with": ["dev-plan"] },
+  { "query": "issue 18 is labeled planning, pick it up", "should_trigger": false, "ambiguous_with": ["dev-plan"] },
   { "query": "debug why login is broken", "should_trigger": false, "ambiguous_with": ["dev-debug"] },
   { "query": "add support for mermaid and latex", "should_trigger": true, "ambiguous_with": ["dev-implement"] },
   { "query": "fix the typo in README.md line 12, \"recieve\" should be \"receive\"", "should_trigger": false, "ambiguous_with": ["dev-implement"] }

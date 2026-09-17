@@ -1,2 +1,2 @@
-labels: needs-operator needs-plan ready working for-operator risky research quick-build full-plan epic
+labels: waiting-on-operator planning queued in-progress ready-to-ship small medium large research risky epic
 operators: kmanojkumar, ada

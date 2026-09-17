@@ -6,10 +6,10 @@
     "updatedAt": "2026-08-25T10:00:00Z",
     "labels": [
       {
-        "name": "for-operator"
+        "name": "ready-to-ship"
       },
       {
-        "name": "quick-build"
+        "name": "small"
       }
     ],
     "assignees": [],

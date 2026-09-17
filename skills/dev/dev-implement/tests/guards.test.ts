@@ -6,14 +6,13 @@ import { join, resolve } from 'node:path'
 import { GhUnavailable, findMarkerComment, ghJson, parseFlags, parseMarker, renderResult } from '../scripts/lib/gh.mjs'
 
 const implRoot = resolve(import.meta.dir, '..')
-import { evaluatePreflight } from '../scripts/preflight.mjs'
 import { scopeDigest } from '../scripts/lib/approval.mjs'
 import { checkEvidence, checkTaskConsistency } from '../scripts/evidence-check.mjs'
 
 const baseIssue = () => ({
   number: 1, node_id: 'brief-1',
-  body: '<!-- vsk:v1 type=brief rev=1 scope=quick-build -->\n## Outcome\nA thing.\n',
-  state: 'open', labels: [{ name: 'ready' }, { name: 'quick-build' }],
+  body: '<!-- vsk:v1 type=brief rev=1 scope=small -->\n## Outcome\nA thing.\n',
+  state: 'open', labels: [{ name: 'queued' }, { name: 'small' }],
   assignees: [] as Array<{ login: string }>, repo: 'vegastack/vegafactory', blockedBy: [] as Array<{ number: number; state: string }>,
 })
 const currentPlan = { id: 2, node_id: 'plan-2', body: '<!-- vsk:v1 type=plan rev=1 -->\n- [ ] **Task 1: implement** <!-- task-id:1-T1 -->\n' }
@@ -82,109 +81,6 @@ describe('ghJson fail-closed', () => {
   })
 })
 
-describe('preflight', () => {
-  test('clean quick-build issue passes', () => {
-    const r = evaluatePreflight({ issue: baseIssue(), comments: [currentPlan, approval()], devMd, me: 'kmanojkumar' })
-    expect(r.blocks).toEqual([])
-  })
-  test('blocks without an approval marker', () => {
-    const r = evaluatePreflight({ issue: baseIssue(), comments: [{ body: 'Approved!' }], devMd, me: 'kmanojkumar' })
-    expect(r.blocks.some((b: string) => b.includes('approval'))).toBe(true)
-  })
-  test('blocks without exactly one scope label', () => {
-    const issue = baseIssue()
-    issue.labels = [{ name: 'ready' }]
-    const r = evaluatePreflight({ issue, comments: [currentPlan, approval()], devMd, me: 'kmanojkumar' })
-    expect(r.blocks.some((b: string) => b.includes('scope label'))).toBe(true)
-  })
-  test('full-plan blocks without plan approval, passes with scope=plan', () => {
-    const issue = baseIssue()
-    issue.labels = [{ name: 'ready' }, { name: 'full-plan' }]
-    const missing = evaluatePreflight({ issue, comments: [currentPlan, approval('brief')], devMd, me: 'kmanojkumar' })
-    expect(missing.blocks.some((b: string) => b.includes('plan'))).toBe(true)
-    const ok = evaluatePreflight({ issue, comments: [currentPlan, approval('brief'), approval('plan')], devMd, me: 'kmanojkumar' })
-    expect(ok.blocks).toEqual([])
-  })
-  test('planning permits the operator assignee with a separate service-account runner', () => {
-    const issue = baseIssue()
-    issue.labels = [{ name: 'needs-plan' }, { name: 'full-plan' }]
-    issue.assignees = [{ login: 'kmanojkumar' }]
-    const input = { issue, comments: [approval('brief')], devMd, me: 'service-runner', expect: 'needs-plan', stage: 'plan' }
-    expect(evaluatePreflight(input).blocks).toEqual([])
-    issue.assignees = [{ login: 'another-runner' }]
-    expect(evaluatePreflight(input).blocks.join(' ')).toContain('another-runner')
-  })
-  test('blocks on unresolved Assumptions section', () => {
-    const issue = baseIssue()
-    issue.body += '\n## Assumptions — confirm or correct\n- gh supports X\n'
-    const r = evaluatePreflight({ issue, comments: [currentPlan, approval()], devMd, me: 'kmanojkumar' })
-    expect(r.blocks.some((b: string) => b.includes('Assumptions'))).toBe(true)
-  })
-  test('blocks on open blockers and foreign assignee', () => {
-    const issue = baseIssue()
-    issue.blockedBy = [{ number: 7, state: 'open' }]
-    issue.assignees = [{ login: 'someone-else' }]
-    const r = evaluatePreflight({ issue, comments: [currentPlan, approval()], devMd, me: 'kmanojkumar' })
-    expect(r.blocks.some((b: string) => b.includes('#7'))).toBe(true)
-    expect(r.blocks.some((b: string) => b.includes('someone-else'))).toBe(true)
-  })
-  test('a ready issue carrying an assignee warns and names them; the foreign-assignee block still fires', () => {
-    const mine = baseIssue()
-    mine.assignees = [{ login: 'kmanojkumar' }]
-    const r = evaluatePreflight({ issue: mine, comments: [currentPlan, approval()], devMd, me: 'kmanojkumar' })
-    expect(r.blocks).toEqual([])
-    expect(r.warns.some((w: string) => w.includes('kmanojkumar'))).toBe(true)
-
-    const foreign = baseIssue()
-    foreign.assignees = [{ login: 'someone-else' }]
-    const f = evaluatePreflight({ issue: foreign, comments: [currentPlan, approval()], devMd, me: 'kmanojkumar' })
-    expect(f.blocks.some((b: string) => b.includes('someone-else'))).toBe(true)
-    expect(f.warns.some((w: string) => w.includes('someone-else'))).toBe(true)
-
-    const resume = baseIssue()
-    resume.labels = [{ name: 'working' }, { name: 'quick-build' }]
-    resume.assignees = [{ login: 'kmanojkumar' }]
-    expect(evaluatePreflight({ issue: resume, comments: [currentPlan, approval()], devMd, me: 'kmanojkumar', expect: 'working' }).warns).toEqual([])
-  })
-  test('a for-operator issue assigned to its operator is not a foreign claim: the corrections run starts', () => {
-    // The hand-back moves the assignee to the operator, so on a multi-operator project (or a
-    // runner whose gh login is not the operator) every corrections run sees a foreign assignee.
-    const corrections = baseIssue()
-    corrections.labels = [{ name: 'for-operator' }, { name: 'quick-build' }]
-    corrections.assignees = [{ login: 'ada' }]
-    expect(evaluatePreflight({ issue: corrections, comments: [currentPlan, approval()], devMd, me: 'kmanojkumar', expect: 'for-operator' }).blocks).toEqual([])
-    // A working issue still belongs to its claimant, and the block says so.
-    const claimed = baseIssue()
-    claimed.labels = [{ name: 'working' }, { name: 'quick-build' }]
-    claimed.assignees = [{ login: 'ada' }]
-    const w = evaluatePreflight({ issue: claimed, comments: [currentPlan, approval()], devMd, me: 'kmanojkumar', expect: 'working' })
-    expect(w.blocks).toEqual(['already assigned to ada — a working issue belongs to its claimant'])
-    // A ready issue is unassigned by convention, so a foreign assignee is someone else's claim.
-    const taken = baseIssue()
-    taken.assignees = [{ login: 'ada' }]
-    const r = evaluatePreflight({ issue: taken, comments: [currentPlan, approval()], devMd, me: 'kmanojkumar' })
-    expect(r.blocks).toEqual(['already assigned to ada — a ready issue is unassigned by convention, so another assignee is someone else\'s claim'])
-  })
-  test('blocks a closed issue and a wrong state label; expect=working accepts a resume', () => {
-    const closed = baseIssue(); closed.state = 'closed'
-    expect(evaluatePreflight({ issue: closed, comments: [currentPlan, approval()], devMd, me: 'kmanojkumar' }).blocks.some((b: string) => b.includes('only open issues'))).toBe(true)
-    const wrong = baseIssue(); wrong.labels = [{ name: 'needs-operator' }, { name: 'quick-build' }]
-    expect(evaluatePreflight({ issue: wrong, comments: [currentPlan, approval()], devMd, me: 'kmanojkumar' }).blocks.some((b: string) => b.includes('expected ready'))).toBe(true)
-    const resume = baseIssue(); resume.labels = [{ name: 'working' }, { name: 'quick-build' }]
-    expect(evaluatePreflight({ issue: resume, comments: [currentPlan, approval()], devMd, me: 'kmanojkumar', expect: 'working' }).blocks).toEqual([])
-  })
-  test('a dev.md without a repo: line warns instead of silently skipping the match', () => {
-    const r = evaluatePreflight({ issue: baseIssue(), comments: [currentPlan, approval()], devMd: 'stack: something\noperators: kmanojkumar\n', me: 'kmanojkumar' })
-    expect(r.blocks).toEqual([])
-    expect(r.warns.some((w: string) => w.includes('no repo: line'))).toBe(true)
-  })
-  test('blocks on repo mismatch with dev.md', () => {
-    const issue = baseIssue()
-    issue.repo = 'vegastack/other-repo'
-    const r = evaluatePreflight({ issue, comments: [currentPlan, approval()], devMd, me: 'kmanojkumar' })
-    expect(r.blocks.some((b: string) => b.includes('does not match dev.md repo'))).toBe(true)
-  })
-})
 
 describe('evidence-check', () => {
   const good = `<!-- vsk:v1 type=evidence rev=1 branch=feat/12-x sha=abc1234 -->
@@ -259,13 +155,3 @@ test('same-count different task IDs refuse consistency', () => {
   expect(checkTaskConsistency([{body:'<!-- vsk:v1 type=plan rev=1 -->\n- [ ] **Task 1** <!-- task-id:1-T1 -->\n- [x] **Task 2** <!-- task-id:1-T2 -->'}, {body:'<!-- vsk:v1 type=ledger -->\n- 1-T1: complete'}]).blocks.join()).toContain('task identity mismatch')
 })
 
-test('141 preflight shares custom semantic state and refuses mixed or changed correction scope', () => {
-  const map = { needsOperator: 'Decision', needsPlan: 'Plan', ready: 'Go', working: 'Build', forOperator: 'Review' }
-  const profile = devMd + 'workflow-labels: ' + JSON.stringify(map)
-  const check = (labels: string[], body = baseIssue().body, expected = 'ready') => evaluatePreflight({ issue: { ...baseIssue(), body, labels: [...labels, 'quick-build'].map(name => ({ name })) }, comments: [currentPlan, approval()], devMd: profile, me: 'kmanojkumar', expect: expected })
-  expect(check(['Go']).blocks).toEqual([])
-  expect(check(['Go']).state).toBe('ready')
-  expect(check(['Go', 'Decision']).blocks.join()).toContain('conflicting')
-  expect(check([]).blocks.join()).toContain('no known workflow state')
-  expect(check(['Review'], baseIssue().body + 'Changed scope.', 'for-operator').blocks.length).toBeGreaterThan(0)
-})

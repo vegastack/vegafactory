@@ -33,7 +33,6 @@
     "references/ask-route.md@dev-setup",
     "scripts/lib/gh.mjs",
     "scripts/lib/approval.mjs",
-    "scripts/preflight.mjs",
     "scripts/evidence-check.mjs",
     "scripts/recovery.mjs",
     "scripts/learning.mjs",

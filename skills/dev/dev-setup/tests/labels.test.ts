@@ -8,7 +8,7 @@ const custom = { needsOperator: 'Decision', needsPlan: 'Plan', ready: 'Go', work
 test('actual complete profile, CSV and reordered defaults retain semantic meaning and scope labels', () => {
   const before = actual.split(/\s+/)
   for (const labels of [actual, before.join(','), [...before].reverse().join(' '), actual + ' extra-scope']) {
-    expect(resolveState(['ready', 'full-plan'], resolveLabels(labels))).toEqual({ state: 'ready', blocks: [] })
+    expect(resolveState(['queued', 'medium'], resolveLabels(labels))).toEqual({ state: 'ready', blocks: [] })
     expect(resolvePolicy({ repo: 'labels: ' + labels }).ok).toBe(true)
   }
   expect(actual.split(/\s+/)).toEqual(before)
@@ -21,7 +21,7 @@ test('custom states resolve exactly once; no and mixed states refuse', () => {
   }
 })
 test('mapping rejects incomplete, duplicate, malformed and ambiguous legacy values', () => {
-  for (const value of [{ ...custom, working: 'Go' }, { ready: 'Go' }, { ...custom, other: 'Extra' }, '', 'Decision Plan Go Build Review', actual + ' ready']) expect(() => resolveLabels(value)).toThrow()
+  for (const value of [{ ...custom, working: 'Go' }, { ready: 'Go' }, { ...custom, other: 'Extra' }, '', 'Decision Plan Go Build Review', actual + ' queued']) expect(() => resolveLabels(value)).toThrow()
 })
 test('explicit and legacy representations must agree', () => {
   expect(resolvePolicy({ repo: 'labels: ' + actual + '\nworkflow-labels: ' + JSON.stringify(custom) }).ok).toBe(false)

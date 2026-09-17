@@ -1,5 +1,5 @@
-<!-- vsk:v1 type=brief rev=1 scope=quick-build -->
-**Scope:** quick-build — the invoice list already exists; this adds one export path beside it.
+<!-- vsk:v1 type=brief rev=1 scope=small -->
+**Scope:** small — the invoice list already exists; this adds one export path beside it.
 
 ## Outcome
 

@@ -65,7 +65,7 @@ test('JSON duplicate keys, mismatched marker scope and competing payloads refuse
   expect(parseApproval({ body: '<!-- vsk:v1 type=approval scope=plan -->\n````md\n' + valid.body + '\n````\n' })).toHaveProperty('ok', false)
 })
 
-const brief = { body: '<!-- vsk:v1 type=brief rev=1 scope=full-plan -->\nBuild a file.\n', node_id: 'brief-node', number: 1 }
+const brief = { body: '<!-- vsk:v1 type=brief rev=1 scope=medium -->\nBuild a file.\n', node_id: 'brief-node', number: 1 }
 const livePlan = { body: plan, node_id: 'plan-node', id: 2 }
 const grant = (id = 'grant-1') => {
   const value = { ...record(), id, scope: 'brief+plan', artifacts: [
@@ -721,20 +721,6 @@ test('source trust: pooled checkpoint digest and consumption retain canonical so
   expect(requests[0].suiteSha256).toBe(scope.research.checkpoint.digest)
 })
 
-test('source trust: actual CLI preserves canonical identity and cannot correct a failed source read', () => {
-  const { root, relay } = trustOrdinary()
-  const dir = mkdtempSync(join(tmpdir(), 'trust-cli-'))
-  const data = { issue: { ...brief, state: 'open', labels: [{ name: 'ready' }, { name: 'quick-build' }], assignees: [] }, comments: [livePlan, root, relay], source: root, unavailable: false }
-  const file = join(dir, 'input.json'); const stub = join(dir, 'gh')
-  writeFileSync(join(dir, 'dev.md'), 'repo: acme/app\noperators: ada\n')
-  writeFileSync(stub, '#!/usr/bin/env node\n' + `const fs=require('node:fs');const x=JSON.parse(fs.readFileSync(${JSON.stringify(file)},'utf8'));const p=process.argv[3];if(p.includes('/issues/comments/')){if(x.unavailable){process.stderr.write('HTTP 503: source unavailable');process.exit(1)}process.stdout.write(JSON.stringify(x.source))}else process.stdout.write(JSON.stringify(p.endsWith('/comments')?[x.comments]:p.endsWith('/blocked_by')?[[]]:x.issue));`, { mode: 0o755 })
-  const invoke = () => { writeFileSync(file, JSON.stringify(data)); return spawnSync('node', [join(import.meta.dir, '../scripts/preflight.mjs'), '--repo', 'acme/app', '--issue', '1', '--me', 'fixture-bot', '--dev-md', join(dir, 'dev.md'), '--json'], { encoding: 'utf8', env: { ...process.env, VSK_GH: stub } }) }
-  const pass = invoke(); expect(pass.status).toBe(0)
-  expect(JSON.parse(pass.stdout).approvalBindings).toEqual([trustBinding(root)])
-  data.comments.push(trustCorrection(relay))
-  data.unavailable = true
-  const blocked = invoke(); expect(blocked.status).toBe(2); expect(blocked.stdout).toContain('source unavailable')
-})
 
 test('source trust: preparation adapter receives and returns canonical source authority', async () => {
   const { fixture } = preparationFixture()

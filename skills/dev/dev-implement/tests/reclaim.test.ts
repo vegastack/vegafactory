@@ -6,7 +6,7 @@ import { evaluateReclaim } from '../scripts/reclaim.mjs'
 const skillRoot = resolve(import.meta.dir, '..')
 
 const NOW = Date.parse('2026-08-29T12:00:00Z')
-const working = (assignees = ['bot']) => ({ state: 'open', labels: [{ name: 'working' }, { name: 'full-plan' }], assignees: assignees.map((login) => ({ login })) })
+const working = (assignees = ['bot']) => ({ state: 'open', labels: [{ name: 'in-progress' }, { name: 'medium' }], assignees: assignees.map((login) => ({ login })) })
 const ledger = (updated_at: string) => ({ body: '<!-- vsk:v1 type=ledger branch=feat/x -->\n## Ledger', updated_at })
 
 describe('evaluateReclaim: read-verify before releasing a claim', () => {
@@ -30,7 +30,7 @@ describe('evaluateReclaim: read-verify before releasing a claim', () => {
     expect(forced.blocks).toEqual([])
   })
   test('a non-working issue is nothing to reclaim', () => {
-    const ready = { state: 'open', labels: [{ name: 'ready' }], assignees: [] }
+    const ready = { state: 'open', labels: [{ name: 'queued' }], assignees: [] }
     expect(evaluateReclaim({ issue: ready, comments: [], now: NOW }).blocks.some((b: string) => b.includes("not 'working'"))).toBe(true)
   })
   test('a closed issue is blocked', () => {
@@ -49,7 +49,7 @@ describe('evaluateReclaim: read-verify before releasing a claim', () => {
 test('141 reclaim uses configured labels and never releases a mixed state, even forced', () => {
   const map = { needsOperator: 'Decision', needsPlan: 'Plan', ready: 'Go', working: 'Build', forOperator: 'Review' }
   const profile = 'workflow-labels: ' + JSON.stringify(map)
-  const current = { ...working(), labels: [{ name: 'Build' }, { name: 'full-plan' }] }
+  const current = { ...working(), labels: [{ name: 'Build' }, { name: 'medium' }] }
   const result = evaluateReclaim({ issue: current, comments: [], devMd: profile, now: NOW })
   expect(result.blocks).toEqual([])
   expect(result.plan.labelMap).toEqual(map)

@@ -1,0 +1,3 @@
+[{"number":11,"title":"feat: assigned to me","url":"https://x/11","updatedAt":"2026-09-03T09:00:00Z","labels":[{"name":"waiting-on-operator"},{"name":"medium"}],"assignees":[{"login":"kmanojkumar"}],"author":{"login":"kmanojkumar"}},
+ {"number":12,"title":"feat: assigned to ada","url":"https://x/12","updatedAt":"2026-09-02T09:00:00Z","labels":[{"name":"waiting-on-operator"},{"name":"small"}],"assignees":[{"login":"ada"}],"author":{"login":"ada"}},
+ {"number":13,"title":"feat: nobody owns this","url":"https://x/13","updatedAt":"2026-09-01T09:00:00Z","labels":[{"name":"waiting-on-operator"},{"name":"small"}],"assignees":[],"author":{"login":"outsider"}}]

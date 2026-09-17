@@ -72,7 +72,7 @@ function policyJson(text) {
 /** @typedef {'needsOperator'|'needsPlan'|'ready'|'working'|'forOperator'} State */
 /** @typedef {Record<State,string>} LabelMap */
 /** @type {LabelMap} */
-export const DEFAULT_LABELS = Object.freeze({ needsOperator: 'needs-operator', needsPlan: 'needs-plan', ready: 'ready', working: 'working', forOperator: 'for-operator' })
+export const DEFAULT_LABELS = Object.freeze({ needsOperator: 'waiting-on-operator', needsPlan: 'planning', ready: 'queued', working: 'in-progress', forOperator: 'ready-to-ship' })
 export const WORKFLOW_STATES = Object.freeze(Object.keys(DEFAULT_LABELS))
 
 /** @param {unknown} value @returns {LabelMap} */

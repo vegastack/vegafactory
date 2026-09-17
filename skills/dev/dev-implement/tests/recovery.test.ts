@@ -33,7 +33,7 @@ function sourceFixture(){
  const cwd=mkdtempSync(join(tmpdir(),'vsk-recovery-source-'))
  const git=(...args:string[])=>{const result=spawnSync('git',args,{cwd,encoding:'utf8'});if(result.status!==0)throw Error(result.stderr);return result.stdout.trim()}
  git('init','-q');git('config','user.name','fixture');git('config','user.email','fixture@example.test');writeFileSync(join(cwd,'first'),'one');git('add','.');git('commit','-qm','verified first task');const head=git('rev-parse','HEAD')
- const brief={number:144,node_id:'brief144',body:'<!-- vsk:v1 type=brief rev=1 scope=full-plan -->\nAn approved task.',title:'current title'}
+ const brief={number:144,node_id:'brief144',body:'<!-- vsk:v1 type=brief rev=1 scope=medium -->\nAn approved task.',title:'current title'}
  const plan={id:2,node_id:'plan144',body:'<!-- vsk:v1 type=plan rev=1 -->\n- [x] **Task 1** <!-- task-id:144-T1 -->\n- [ ] **Task 2** <!-- task-id:144-T2 -->',updated_at:'2026-09-08T01:00:00Z'}
  const refs=[{repo:'o/r',issue:144,kind:'brief',artifactId:brief.node_id,rev:1,digest:scopeDigest(brief.body,'brief')},{repo:'o/r',issue:144,kind:'plan',artifactId:plan.node_id,rev:1,digest:scopeDigest(plan.body,'plan')}]
  const approval={id:3,user:{login:'operator'},updated_at:'2026-09-08T01:01:00Z',body:'<!-- vsk:v1 type=approval scope=brief+plan -->\n```json\n'+JSON.stringify({schemaVersion:2,id:'approved',operator:'operator',scope:'brief+plan',source:{kind:'session',ref:'session:test',quote:'Approved these tasks.'},artifacts:refs,supersedes:[],revokes:[]})+'\n```'}
