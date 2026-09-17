@@ -43,7 +43,7 @@ Optional. Declare it only when the work below can run at the same time; its abse
 - `docs` — #132 · Files: `README.md`
 ```
 
-- **Members** are `#<issue>` on an epic parent's plan, or `Task <n>` inside one issue's plan. A member belongs to exactly one group.
+- **Members** are sibling `#<issue>` numbers on an epic's plan; tasks inside one issue always run in order. A member belongs to exactly one group.
 - **File sets are the contract, not a hint.** Every group declares one; a path ending in `/` is a directory and covers everything beneath it. Two groups' sets must be disjoint, and a group names one child, because its members would otherwise run at once on one set — plan-lint blocks an overlap, a repeated id, a member in two groups, two issues in one group, a missing set, and a line outside the grammar above.
 - Declare the whole set a group will touch, tests included; review flags a sibling whose diff reaches outside its set.
 - `node <path-to-this-skill>/scripts/plan-lint.mjs --file <plan.md> --groups --json` prints the validated groups as JSON — the one parser for this grammar, and the one place that decides which sibling sub-issues may run at the same time. Blocked plans print no groups.

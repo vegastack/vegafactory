@@ -67,22 +67,17 @@ Attempted 03-09-2026 on codex-cli 0.149.1 and **not answered**: `codex login sta
 
 ## The hooks package (optional, offered in Round C)
 
-Four hooks, one Node file each, written to `.vegastack/hooks/` and wired only on the operator's explicit yes, merged into existing hook config rather than replacing it.
+One hook until the session hooks are rebuilt (#216): the ship guard, written to `.vegastack/hooks/` and wired only on the operator's explicit yes, merged into existing hook config rather than replacing it.
 
 | Event | File | What it does | Harnesses |
 |---|---|---|---|
 | `PreToolUse` | `ship-guard.mjs` | Asks before a command the compiled policy says needs the operator's word — a merge, a tag, a publish, a production deploy, a force push. | Claude Code · Codex |
-| `SessionStart` | `session-start.mjs` | Requests a bounded verified-context pointer from the local VegaFactory resolver. | Claude Code · Codex |
-| `Stop` | `stop-heartbeat.mjs` | Requests a bounded local checkpoint flush; no continuation or blocking output. | Claude Code · Codex |
-| `Stop` | `decision-nudge.mjs` | Asks whether this session settled a directional choice worth a register line. | Claude Code · Codex |
 
-The hook files ship as packaged assets — `assets/hooks/ship-guard.mjs`, `assets/hooks/session-start.mjs`, `assets/hooks/stop-heartbeat.mjs`, `assets/hooks/decision-nudge.mjs` — and are copied verbatim into `.vegastack/hooks/`. The advisory SessionStart adapter is also the shared implementation for `stop-heartbeat.mjs` and `session-end.mjs`: copy `session-start.mjs` beside either consumer even when its SessionStart event is not enabled. Missing CLI/adapter support is silent and does not prove capture. The ship guard and decision nudge remain separate. The wiring shape is doubly nested — matcher groups each holding their own `hooks` array — in Claude Code's `.claude/settings.json` and Codex's `<repo>/.codex/hooks.json` alike (merge into existing hook config, never overwrite): <!-- source: CC-HOOKS --> <!-- source: CODEX-HOOKS -->
+The hook file ships as the packaged asset `assets/hooks/ship-guard.mjs` and is copied verbatim into `.vegastack/hooks/`. The wiring shape is doubly nested — matcher groups each holding their own `hooks` array — in Claude Code's `.claude/settings.json` and Codex's `<repo>/.codex/hooks.json` alike (merge into existing hook config, never overwrite): <!-- source: CC-HOOKS --> <!-- source: CODEX-HOOKS -->
 
 ```json
 { "hooks": {
-  "PreToolUse": [ { "matcher": "Bash", "hooks": [ { "type": "command", "command": "node .vegastack/hooks/ship-guard.mjs --harness claude" } ] } ],
-  "SessionStart": [ { "hooks": [ { "type": "command", "command": "node .vegastack/hooks/session-start.mjs --harness claude", "timeout": 1 } ] } ],
-  "Stop": [ { "hooks": [ { "type": "command", "command": "node .vegastack/hooks/stop-heartbeat.mjs --harness claude", "timeout": 1 }, { "type": "command", "command": "node .vegastack/hooks/decision-nudge.mjs --harness claude" } ] } ]
+  "PreToolUse": [ { "matcher": "Bash", "hooks": [ { "type": "command", "command": "node .vegastack/hooks/ship-guard.mjs --harness claude" } ] } ]
 } }
 ```
 
@@ -90,9 +85,7 @@ The Codex block is the same file, `--harness codex`, written to `<repo>/.codex/h
 
 ```json
 { "hooks": {
-  "PreToolUse": [ { "hooks": [ { "type": "command", "command": "node .vegastack/hooks/ship-guard.mjs --harness codex" } ] } ],
-  "SessionStart": [ { "hooks": [ { "type": "command", "command": "node .vegastack/hooks/session-start.mjs --harness codex", "timeout": 1 } ] } ],
-  "Stop": [ { "hooks": [ { "type": "command", "command": "node .vegastack/hooks/stop-heartbeat.mjs --harness codex", "timeout": 1 }, { "type": "command", "command": "node .vegastack/hooks/decision-nudge.mjs --harness codex" } ] } ]
+  "PreToolUse": [ { "hooks": [ { "type": "command", "command": "node .vegastack/hooks/ship-guard.mjs --harness codex" } ] } ]
 } }
 ```
 
@@ -107,7 +100,7 @@ The ship guard's only source of policy is `~/.vegastack/guard/<owner>__<repo>.js
 
 What the guard is not: it runs as the same user as the agent, so it can neither hide its policy from that user nor stop a run that reads credentials or reaches the network outside the shipping verbs. Branch protection and a read-only App token remain the walls; the guard closes the self-authorisation path, refuses what it cannot read, and makes tampering visible.
 
-The prose instruction in the AGENTS.md dev section is the portable base on both harnesses; these hooks are deterministic nudges on top, not a replacement.
+The prose instruction in the AGENTS.md dev section is the portable base on both harnesses; the guard is a deterministic check on top, not a replacement.
 
 ## Headless runs
 

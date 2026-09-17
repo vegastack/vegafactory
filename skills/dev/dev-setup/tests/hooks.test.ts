@@ -5,7 +5,6 @@ import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { classifyCommand, extractCommand, parseCommand, policyPath, readPolicyFile, renderDecision, repoFromRemote, splitSegments } from '../assets/hooks/ship-guard.mjs'
 import { sanitizeHookInput, runLocalHookPhase } from '../assets/hooks/session-start.mjs'
-import { NUDGE_REASON, isDirectional } from '../assets/hooks/decision-nudge.mjs'
 
 // The compiled policy the guard reads. dev.md is never handed to the guard: the compiler
 // (scripts/ship-policy.mjs) writes this shape to ~/.vegastack/guard/<owner>__<repo>.json.
@@ -353,40 +352,9 @@ describe('bounded advisory hook input', () => {
   })
 })
 
-describe('decision nudge', () => {
-  test('matches the directional vocabulary the shell recipe matched', () => {
-    for (const message of ['We decided to use Postgres instead of SQLite.', 'Chose changesets', 'from now on we standardise on Bun', 'switched to rebase merges', 'this is our convention now']) {
-      expect(isDirectional(message)).toBe(true)
-    }
-  })
-
-  test('stays quiet on an ordinary sign-off', () => {
-    for (const message of ['Fixed the failing test and pushed.', 'All twelve tests pass.', '']) {
-      expect(isDirectional(message)).toBe(false)
-    }
-  })
-
-  test('the reason still names the Decisions test and asks for one dated line', () => {
-    expect(NUDGE_REASON).toContain('the Decisions test in .vegastack/dev.md')
-    expect(NUDGE_REASON).toContain('one dated register line')
-  })
-
-  test('does not block Stop or create an unchecked session marker', () => {
-    const dir = mkdtempSync(join(tmpdir(), 'vsk-nudge-'))
-    const script = join(import.meta.dir, '..', 'assets/hooks/decision-nudge.mjs')
-    const payload = '{"session_id":"s1","stop_hook_active":false,"last_assistant_message":"We decided to use Postgres instead of SQLite."}'
-    const env = { ...process.env, TMPDIR: dir }
-    const first = Bun.spawnSync(['node', script, '--harness', 'claude'], { stdin: new TextEncoder().encode(payload), env })
-    expect(first.stdout.toString()).toBe('')
-    expect(existsSync(join(dir, 'vsk-decision-nudge-s1'))).toBe(false)
-    const second = Bun.spawnSync(['node', script, '--harness', 'claude'], { stdin: new TextEncoder().encode(payload), env })
-    expect(second.stdout.toString().trim()).toBe('')
-  })
-})
-
 describe('this repo runs the hooks package it ships', () => {
   const repoRoot = resolve(import.meta.dir, '../../../..')
-  const hooks = ['ship-guard.mjs', 'session-start.mjs', 'stop-heartbeat.mjs', 'decision-nudge.mjs']
+  const hooks = ['ship-guard.mjs', 'session-start.mjs', 'stop-heartbeat.mjs']
 
   test('every installed hook copy is byte-identical to its asset', () => {
     for (const file of hooks) {
@@ -396,12 +364,11 @@ describe('this repo runs the hooks package it ships', () => {
     }
   })
 
-  test('the committed Codex wiring names all four hooks on their events', () => {
+  test('the committed Codex wiring names the guard and the session hooks on their events', () => {
     const wiring = JSON.parse(readFileSync(join(repoRoot, '.codex/hooks.json'), 'utf8'))
     expect(wiring.hooks.PreToolUse[0].hooks[0].command).toContain('ship-guard.mjs --harness codex')
     expect(wiring.hooks.SessionStart[0].hooks[0].command).toContain('session-start.mjs --harness codex')
     expect(wiring.hooks.Stop[0].hooks.map((h: { command: string }) => h.command).join(' ')).toContain('stop-heartbeat.mjs')
-    expect(wiring.hooks.Stop[0].hooks.map((h: { command: string }) => h.command).join(' ')).toContain('decision-nudge.mjs')
   })
 
   test("the guard enforces this repo's shipping commands from an isolated local-policy fixture", () => {

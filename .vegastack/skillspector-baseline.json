@@ -39,12 +39,7 @@
     {
       "id": "P2",
       "path": "references/standards.md",
-      "reason": "standards.md carries the same '<!-- source: ... -->' citation comments, which are how a reader tells a verified normative sentence from commentary and how the weekly refresh knows which sentences a drifted source invalidates. Removing them would make the freshness contract unauditable. Still flag if: a source comment carries anything but a source identifier, or an uncited HTML comment appears among the normative sentences."
-    },
-    {
-      "id": "P2",
-      "path": "references/authoring.md",
-      "reason": "authoring.md marks the tables it mirrors from skill-maintainer's standards with '<!-- mirrored -->' so the refresh runner knows which copies must move together. It is a synchronisation marker between two files, not an instruction. Still flag if: a mirrored marker gains prose, or the comment appears on content that is not actually mirrored elsewhere."
+      "reason": "standards.md carries the same '<!-- source: ... -->' citation comments, which are how a reader tells a verified normative sentence from commentary and which official source a dated fact is re-checked against. Removing them would make the freshness contract unauditable. Still flag if: a source comment carries anything but a source identifier, or an uncited HTML comment appears among the normative sentences."
     },
     {
       "id": "AS1",

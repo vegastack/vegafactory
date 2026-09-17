@@ -1,4 +1,4 @@
 interface:
   display_name: "VegaStack Skill Maintainer"
   short_description: "Maintain vegafactory skills to Claude Code and Codex standards"
-  default_prompt: "Use $skill-maintainer to make this vegafactory change satisfy the per-skill contract and tri-harness standards."
+  default_prompt: "Use $skill-maintainer to make this vegafactory change satisfy the per-skill contract and the Claude Code and Codex standards."

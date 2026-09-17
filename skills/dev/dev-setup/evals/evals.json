@@ -62,10 +62,10 @@
     {
       "id": 6,
       "prompt": "Re-run dev-setup here and wire the hooks. We deploy with wrangler \u2014 preview and staging are fine to run unattended, production is not. I use Claude Code and Codex.",
-      "expected_output": "Round C offers the four hooks one at a time, each with a one-sentence explanation and its own yes; the `## Environments` policy lines are drafted and confirmed before the ship guard is offered; the hook files are copied to `.vegastack/hooks/` and the wiring is merged into `.claude/settings.json` and `<repo>/.codex/hooks.json`; the Codex offer states the trust prerequisite.",
+      "expected_output": "Round C offers the ship guard with a one-sentence explanation and its own yes; the `## Environments` policy lines are drafted and confirmed before the guard is offered; the hook file is copied to `.vegastack/hooks/` and the wiring is merged into `.claude/settings.json` and `<repo>/.codex/hooks.json`; the Codex offer states the trust prerequisite; the session hooks are not offered.",
       "files": [],
       "assertions": [
-        "Each of the four hooks is offered separately, each written only on its own yes",
+        "The ship guard is offered on its own yes; no session-start, heartbeat or decision hook is offered",
         "The drafted `## Environments` lines carry `preview: auto`, `staging: auto` and `production: ask` with their wrangler command patterns",
         "Existing entries in `.claude/settings.json` and `.codex/hooks.json` are merged into, never replaced",
         "The Codex offer states that project-local hooks need the repo's `.codex/` layer to be trusted"
