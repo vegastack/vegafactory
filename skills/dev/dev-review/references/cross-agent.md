@@ -5,7 +5,7 @@ The independence upgrade: the review runs on the *other* agent — Codex when Cl
 ## Announce, invoke, summarize — the operator is never blind
 
 1. **At trigger time**, tell the operator in plain language: "invoking Codex for the cross-agent review of issue #N" — before the call, not after.
-2. **Invoke** non-interactively with the handoff below passed as ONE argument through an exec arg array — `execFile('codex', ['exec', '-c', 'model=<model>', '-c', 'model_reasoning_effort=<effort>', handoff])` from Claude, `execFile('claude', ['-p', '--model', '<model>', '--effort', '<effort>', handoff])` from Codex — never interpolated into a shell string (the exact pattern this skill's own known-patterns template says to still-flag). `<model>` and `<effort>` come from dev.md's `harness-policy:` `review` entry; with no such line, drop both flag pairs and let the reviewing harness use its own defaults rather than inventing a model id.
+2. **Invoke** non-interactively with the handoff below passed as ONE argument through an exec arg array — `execFile('vegafactory', ['agent', 'codex', 'exec', '-c', 'model=<model>', '-c', 'model_reasoning_effort=<effort>', handoff])` from Claude, `execFile('vegafactory', ['agent', 'claude', '-p', '--model', '<model>', '--effort', '<effort>', handoff])` from Codex — `vegafactory agent` drops the parent app's variables and refuses API-key billing — never interpolated into a shell string (the exact pattern this skill's own known-patterns template says to still-flag). `<model>` and `<effort>` come from dev.md's `harness-policy:` `review` entry; with no such line, drop both flag pairs and let the reviewing harness use its own defaults rather than inventing a model id.
 3. **At the end**, summarize: which agent reviewed, the verdict, where its comment is, and what's worth the operator double-checking.
 
 ## The handoff — exact format
@@ -26,8 +26,11 @@ new round/sha/verdict and append the round section below (never a second marker,
 never a second comment),
 findings as Finding [N] with severities [CRITICAL|MUST-FIX|SHOULD-FIX|NIT] and
 path:line evidence; nitpicks and low-confidence collapsed in <details>.
+writes: first run `vegafactory issue sync <n>` and read the files it names; post the
+comment with `vegafactory issue comment <n> --file <path>`; on a re-review round
+edit it with `vegafactory issue edit-comment <n> <comment-id> --file <path> --since <cursor>`.
 constraints: READ-ONLY — never commit, push, edit files, or change labels; your
-only write is the review comment, via gh.
+only write is that review comment.
 ```
 
 The reviewing agent posts its own comment with its own `agent=` key — independence stays verifiable in the record, never paraphrased by the author.

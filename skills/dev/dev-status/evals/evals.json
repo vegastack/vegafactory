@@ -42,7 +42,7 @@
     {
       "id": 4,
       "prompt": "what needs me? — here is the output of `status.mjs --orphan-hours 6 --json` for vegastack/billing (attached).",
-      "expected_output": "The Needs-you queue built from the script's needsYou array — issue 39, for-operator, with its age and the word needed — then an Unowned section naming issue 44 as a human-state issue nobody is assigned, with the `gh issue edit 44 --add-assignee kmanojkumar` line that fixes it. Nothing outside the attached data; `needs-plan` and `ready` are agent states and never appear in either section.",
+      "expected_output": "The Needs-you queue built from the script's needsYou array — issue 39, ready-to-ship, with its age and the word needed — then an Unowned section naming issue 44 as a human-state issue nobody is assigned, with the `gh issue edit 44 --add-assignee kmanojkumar` line that fixes it. Nothing outside the attached data; `planning` and `queued` are agent states and never appear in either section.",
       "files": [
         "evals/files/status.json"
       ],

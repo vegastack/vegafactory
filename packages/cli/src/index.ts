@@ -11,8 +11,8 @@ import type { SkillEntry } from './selection.ts'
 type Agent = 'codex' | 'claude'
 type AgentChoice = Agent | 'both'
 type Mode = 'project' | 'global'
-type Command = 'add' | 'verify' | 'doctor' | 'remove' | 'list' | 'version' | 'help' | 'worktree' | 'sync' | 'guard'
-const installerVerbs: readonly string[] = ['add', 'verify', 'doctor', 'remove', 'list'] as const
+type Command = 'add' | 'update' | 'verify' | 'doctor' | 'remove' | 'list' | 'version' | 'help' | 'worktree' | 'sync' | 'guard' | 'issue' | 'init' | 'agent'
+const installerVerbs: readonly string[] = ['add', 'update', 'verify', 'doctor', 'remove', 'list'] as const
 interface Options {
   command: Command
   skill?: string
@@ -43,58 +43,54 @@ const projectAgents: Agent[] = ['codex', 'claude']
 const packageVersion = (JSON.parse(await readFile(join(packageRoot, 'package.json'), 'utf8')) as { version: string }).version
 
 function usage() {
-  return `Usage: vegafactory skills <add|verify|remove> <skill> [options]
-       vegafactory skills <add|verify|remove> --group <group> [options]
-       vegafactory skills <add|verify|remove> --all [options]
-       vegafactory skills <list|doctor> [options]
+  return `Usage: vegafactory <command> [options]
 
-Select exactly one of: a skill name, --group <group>, or --all.
---all installs every skill except the repo-only ones; name those explicitly.
-A --group or --all install is one transaction: if any skill fails, none are installed.
+Get started:
+  init [--org ORG]                       check your tools, install the CLI and every skill for Claude Code and Codex,
+                                         enable this repo's git hooks, and link your org's control room
+
+Skills:
+  skills list                            the bundled skills, by group
+  skills add <skill> | --group G | --all install (global by default; --project or --dir for one project)
+  skills update [selection]              bring installed skills up to date; locally edited copies are kept unless --force
+  skills verify [selection]              check installed copies against the bundled checksums
+  skills remove <selection> [--yes]      uninstall; refuses a locally edited copy unless --force
+  skills doctor                          check the install, this project's .vegastack/dev.md and the latest version
+
+Issues (agents read .vegastack/.tmp/issues/, then write back through these):
+  issue sync|check|comment|edit-comment|body|label|ack|drop <n> ...   run "vegafactory issue --help"
+
+Worktrees (one issue, one worktree; the main checkout stays on the default branch):
+  worktree list|status|create|restore|remove|prune ...                run "vegafactory worktree --help"
+
+Agents:
+  agent claude|codex <args…>             start a headless run on the subscription (API keys refused)
+
+Control room and ship guard:
+  sync [--org ORG] [--force]             refresh this machine's copy of the org control room
+  guard sync [--check]                   compile dev.md's ship rules for the ship guard
 
 Options:
-  --group NAME                           install every skill in that group
-  --all                                  every bundled skill except the repo-only ones
-  --agent codex|claude|both              (both is the default when both are installed)
-  --project | --global
-  --dir PATH
-  --dry-run
-  --force
-  --json                                 machine-readable output (sync)
-  --non-interactive
-  --version
+  --group NAME · --all                   choose skills (--all skips the repo-only ones)
+  --agent codex|claude|both              which agents (detected when omitted)
+  --global | --project · --dir PATH      where to install (global by default)
+  --dry-run                              show what would change, change nothing
+  --force                                replace locally edited copies
+  --yes                                  skip confirmations (for agents and scripts)
+  --json · --version · --help
 
-Worktrees (one feature, one worktree — the main checkout never leaves the default branch):
-  vegafactory worktree <list|create|restore|remove|prune|status> [options]
-  list [--all-repos] · status · create <issue> · restore <issue>
-  remove <issue> [--force] [--write] · prune [--older-than 14d] [--write]
-  remove and prune are dry-run until --write, and never touch a branch or anything uncommitted.
-
-Control room (skills read the local clone, never the network):
-  vegafactory sync [--org ORG] [--dry-run] [--force] [--json] [--dir PATH]
-  vegafactory sync inspect
-  vegafactory sync restore [--backup N] [--apply]
-  Recovery previews by default; --apply selects recovery content and requires a fresh
-  successful fetch before authority resumes. --backup selects a non-negative index (default 0).
-  Refreshes this machine's shallow clone of the control room named by the project's
-  control-room: knob. --org ORG is the bootstrap path for a repo whose profile has no
-  knob yet (the first dev-setup run): the room is <org>/vegafactory-control-room by
-  convention. Exit 0 synced, already fresh, or no control room · 1 a command error or
-  failed fetch (the existing clone stands) · 2 a refusal (dirty clone, symlink, bad state file).
-
-Ship guard:
-  vegafactory guard sync [--check] [--dry-run] [--dev-md PATH] [--json]
-  Compiles dev.md's guard policy into ~/.vegastack/guard/<owner>__<repo>.json, the
-  one file the ship guard reads — outside every worktree. --check exits 2 when the
-  file is stale against dev.md; the SessionStart hook runs it to warn.
-
-Run "vegafactory skills list" to see the bundled skills.
+VegaFactory runs on macOS and Linux with Node 24 or newer.
 `
 }
 
 async function bundledSkills(): Promise<string[]> {
   const entries = await readdir(bundleRoot, { withFileTypes: true })
   return entries.filter(entry => entry.isDirectory()).map(entry => entry.name).sort()
+}
+
+function requireValue(flag: string, value: string | undefined): string {
+  if (value === undefined || value === '' || value.startsWith('-')) throw new Error(`${flag} requires a value`)
+  return value
 }
 
 function parse(argv: string[]): Options {
@@ -108,9 +104,9 @@ function parse(argv: string[]): Options {
       if (!installerVerbs.includes(verb) && verb !== 'help' && verb !== 'version') throw new Error(`Unknown command: skills ${verb}`)
       command = verb as Command
     }
-    else if (head === 'worktree' || head === 'guard') return { command: head, all: false, dryRun: false, force: false, nonInteractive: false, json: false, rest: argv.splice(0) }
+    else if (head === 'worktree' || head === 'guard' || head === 'issue' || head === 'agent') return { command: head, all: false, dryRun: false, force: false, nonInteractive: false, json: false, rest: argv.splice(0) }
     else if (installerVerbs.includes(head)) throw new Error(`Unknown command: ${head} — installer verbs moved under the skills namespace: run "vegafactory skills ${head} …"`)
-    else if (head === 'sync' || head === 'help' || head === 'version') command = head
+    else if (head === 'sync' || head === 'help' || head === 'version' || head === 'init') command = head
     else throw new Error(`Unknown command: ${head}`)
   }
   const options: Options = { command, all: false, dryRun: false, force: false, nonInteractive: false, json: false }
@@ -125,10 +121,10 @@ function parse(argv: string[]): Options {
       options.group = value
     }
     else if (flag === '--all') options.all = true
-    else if (flag === '--agent') options.agent = argv.shift() as AgentChoice
+    else if (flag === '--agent') options.agent = requireValue(flag, argv.shift()) as AgentChoice
     else if (flag === '--project') options.mode = 'project'
     else if (flag === '--global') options.mode = 'global'
-    else if (flag === '--dir') options.dir = argv.shift()
+    else if (flag === '--dir') options.dir = requireValue(flag, argv.shift())
     else if (flag === '--org') {
       const value = argv.shift()
       if (value === undefined || value === '' || value.startsWith('-')) throw new Error('--org requires a value')
@@ -148,7 +144,7 @@ function parse(argv: string[]): Options {
     else if (flag === '--version' || flag === '-v') options.command = 'version'
     else throw new Error(`Unknown option: ${flag}`)
   }
-  if (options.agent && !['codex', 'claude', 'both'].includes(options.agent)) throw new Error(`Invalid --agent: ${options.agent}`)
+  if (options.agent && !['codex', 'claude', 'both'].includes(options.agent)) throw new Error(`Invalid --agent: ${options.agent} (use codex, claude or both)`)
   if (options.mode === 'global' && options.dir) throw new Error('--dir cannot be combined with --global')
   return options
 }
@@ -187,7 +183,7 @@ async function detectAgents(): Promise<Agent[]> {
 }
 
 async function prompt(options: Options): Promise<{ agent: AgentChoice; mode: Mode }> {
-  const mode: Mode = options.mode ?? 'project'
+  const mode: Mode = options.mode ?? (options.dir ? 'project' : 'global')
   if (options.agent) return { agent: options.agent, mode }
   if (options.nonInteractive || !process.stdin.isTTY) return { agent: 'both', mode }
 
@@ -527,6 +523,50 @@ async function verify(options: Options) {
   if (failed) process.exitCode = 1
 }
 
+interface Receipt { version?: string; files?: Record<string, string> }
+
+async function readReceipt(destination: string): Promise<Receipt | null> {
+  try { return JSON.parse(await readFile(join(destination, '.vegastack-install.json'), 'utf8')) as Receipt }
+  catch { return null }
+}
+
+// Brings installed skills up to date. A copy that still matches its install receipt was never
+// edited, so replacing it loses nothing; an edited copy is kept unless --force.
+async function update(options: Options, quietWhenCurrent = false, includeMissing: string[] = []): Promise<{ updated: number; kept: string[] }> {
+  const choice = await prompt(options)
+  const base = baseFor(choice.mode, options.dir)
+  const agents = resolveAgents(choice.agent, choice.mode)
+  const wanted = includeMissing.length ? includeMissing : hasSelector(options) ? await requireSelection(options, 'update') : await bundledSkills()
+  const plan = new Map<Agent, string[]>()
+  const kept: string[] = []
+  for (const skillName of wanted) {
+    const { files } = await loadSource(skillName)
+    for (const agent of agents) {
+      const destination = join(base, surfaces[agent], skillName)
+      if (!await exists(destination)) {
+        if (includeMissing.length) plan.set(agent, [...(plan.get(agent) ?? []), skillName])
+        continue
+      }
+      if ((await compare(destination, files)).status === 'verified') continue
+      const receipt = await readReceipt(destination)
+      const untouched = receipt?.files ? (await compare(destination, receipt.files)).status === 'verified' : false
+      if (untouched || options.force) plan.set(agent, [...(plan.get(agent) ?? []), skillName])
+      else kept.push(destination)
+    }
+  }
+  let updated = 0
+  for (const [agent, skills] of plan) {
+    const run = () => installLocked({ ...options, force: true, group: undefined, all: false }, skills, [agent], base, !options.dryRun)
+    if (options.dryRun) await run()
+    else await withInstallLock(base, run)
+    updated += skills.length
+  }
+  for (const destination of kept) console.log(`kept locally edited copy (run with --force to replace it): ${destination}`)
+  if (!updated && !kept.length && !quietWhenCurrent) console.log('installed skills are up to date')
+  if (kept.length) process.exitCode = 1
+  return { updated, kept }
+}
+
 function semverLess(a: string, b: string): boolean {
   const parse = (value: string) => value.split('-')[0]!.split('.').map(part => Number.parseInt(part, 10) || 0)
   const [aMajor = 0, aMinor = 0, aPatch = 0] = parse(a)
@@ -547,11 +587,24 @@ async function latestPublishedVersion(): Promise<string | null> {
   }
 }
 
+async function confirm(question: string, options: Options): Promise<boolean> {
+  if (options.nonInteractive || options.dryRun) return true
+  if (!process.stdin.isTTY) throw new Error(`${question.replace(/\?$/, '')} needs confirmation — pass --yes when no one can answer`)
+  const rl = createInterface({ input: process.stdin, output: process.stdout })
+  const answer = (await rl.question(`${question} [y/N] `)).trim().toLowerCase()
+  rl.close()
+  return answer === 'y' || answer === 'yes'
+}
+
 async function removeSkill(options: Options) {
   const skillNames = await requireSelection(options, 'remove')
   const choice = await prompt(options)
   const base = baseFor(choice.mode, options.dir)
   const agents = resolveAgents(choice.agent, choice.mode)
+  if (!await confirm(`Remove ${skillNames.length} skill(s) for ${agents.join(' and ')} from ${base}?`, options)) {
+    console.log('nothing removed')
+    return
+  }
   if (!options.dryRun) return withInstallLock(base, () => removeLocked(options, skillNames, agents, base))
   return removeLocked(options, skillNames, agents, base, false)
 }
@@ -618,14 +671,15 @@ async function list() {
 }
 
 async function doctor(options: Options) {
-  const base = baseFor(options.mode ?? 'project', options.dir)
+  const base = baseFor(options.mode ?? (options.dir ? 'project' : 'global'), options.dir)
   await access(base, fsConstants.R_OK | fsConstants.W_OK)
   await assertNoSymlink(base, false)
   let failed = false
   // The dev skills' per-project profile is plain markdown; the repo, not this file,
   // is the source of truth, so doctor only checks presence and basic shape.
-  const profilePath = join(base, '.vegastack', 'dev.md')
-  if (options.mode !== 'global') {
+  const project = resolve(options.dir ?? process.cwd())
+  const profilePath = join(project, '.vegastack', 'dev.md')
+  if (options.dir || await exists(join(project, '.git')) || await exists(profilePath)) {
     if (await exists(profilePath)) {
       const content = await readFile(profilePath, 'utf8')
       if (content.includes('## Knobs')) console.log(`ok dev profile: ${profilePath}`)
@@ -634,13 +688,13 @@ async function doctor(options: Options) {
         failed = true
       }
     } else {
-      console.log(`missing dev profile: ${profilePath} (created by dev-setup once the dev skills are used in this project)`)
+      console.log(`missing dev profile: ${profilePath} — open this project in Claude Code or Codex and say "set up the dev workflow"`)
     }
   }
   console.log(`ok runtime: Node ${process.versions.node}`)
-  // The only network call the CLI ever makes: one npm version check so stale installs are visible.
+  // One npm version check so stale installs are visible.
   const latest = await latestPublishedVersion()
-  if (latest && semverLess(packageVersion, latest)) console.log(`update available: installed ${packageVersion}, latest ${latest} — run: npx @vegastack/vegafactory@latest skills add <skill> --force`)
+  if (latest && semverLess(packageVersion, latest)) console.log(`update available: installed ${packageVersion}, latest ${latest} — run: npm install -g @vegastack/vegafactory@latest && vegafactory skills update`)
   else if (latest && semverLess(latest, packageVersion)) console.log(`ok installer version: ${packageVersion} (ahead of registry latest ${latest})`)
   else if (latest) console.log(`ok installer version: ${packageVersion} (latest)`)
   else console.log(`skipped installer version check (npmjs.org unreachable); installed ${packageVersion}`)
@@ -657,7 +711,7 @@ async function doctor(options: Options) {
       if (result.status !== 'verified') failed = true
     }
   }
-  if (!installations) { console.log('no bundled skills installed on any surface'); failed = true }
+  if (!installations) { console.log(`no skills installed under ${base} — run: vegafactory init`); failed = true }
   if (failed) process.exitCode = 1
 }
 
@@ -747,13 +801,55 @@ function report(options: Options, payload: SyncReport, code: number) {
   process.exitCode = code
 }
 
+async function init(options: Options) {
+  const { NEXT_STEP, checkTools, enableRepoHooks, ensureGlobalCli, probe, renderSteps } = await import('./init.ts')
+  const top = probe('git', ['rev-parse', '--show-toplevel'], process.cwd())
+  const tools = checkTools(probe, process.versions.node, top.code === 0 ? top.stdout : process.cwd())
+  console.log(renderSteps(tools))
+  if (tools.some(step => step.status === 'fail')) {
+    console.log('\nFix the FAIL lines above, then run init again.')
+    process.exitCode = 1
+    return
+  }
+  const failed = (step: { status: string }) => step.status === 'fail'
+  const cli = ensureGlobalCli(probe, packageVersion, options.dryRun)
+  console.log(renderSteps([cli]))
+  const everyday = (await skillCatalog()).filter(entry => !entry.repoOnly).map(entry => entry.name)
+  const { updated, kept } = await update({ ...options, mode: options.mode ?? 'global' }, true, everyday)
+  const verb = options.dryRun ? 'would install or update' : 'installed or updated'
+  console.log(`${options.dryRun ? 'skip' : 'done'}    skills  ${updated ? `${verb} ${updated}` : 'already up to date'}${kept.length ? ` · kept ${kept.length} locally edited` : ''}`)
+  const hooks = enableRepoHooks(probe, process.cwd(), options.dryRun)
+  console.log(renderSteps([hooks]))
+  if ([cli, hooks].some(failed)) {
+    console.log('\nFix the FAIL lines above, then run init again.')
+    process.exitCode = 1
+    return
+  }
+  if (options.org) await sync({ ...options, force: true })
+  console.log(`\n${NEXT_STEP}`)
+}
+
 async function main() {
+  const { assertSupportedPlatform } = await import('./env.ts')
+  assertSupportedPlatform()
   const options = parse(process.argv.slice(2))
+  if (options.command === 'init') return init(options)
+  if (options.command === 'update') { await update(options); return }
   if (options.command === 'worktree') {
     const {runWorktree, worktreeUsage}=await import('./worktree.ts')
     const rest = options.rest ?? []
     if (rest.length === 0 || rest[0] === 'help' || rest[0] === '--help' || rest[0] === '-h') return console.log(worktreeUsage())
     process.exitCode = await runWorktree(rest)
+    return
+  }
+  if (options.command === 'issue') {
+    const { runIssue } = await import('./issue.ts')
+    process.exitCode = runIssue(options.rest ?? [])
+    return
+  }
+  if (options.command === 'agent') {
+    const { runAgent } = await import('./env.ts')
+    process.exitCode = runAgent(options.rest ?? [])
     return
   }
   if (options.command === 'guard') {

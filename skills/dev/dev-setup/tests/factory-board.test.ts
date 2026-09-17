@@ -41,7 +41,7 @@ function profile(_dir: string, line: string): string {
   return path
 }
 
-const STATES = 'needs-operator,needs-plan,ready,working,for-operator'
+const STATES = 'waiting-on-operator,planning,queued,in-progress,ready-to-ship'
 const resolve = () => step('resolve').run as string
 
 describe('factory-board template — triggers and permissions', () => {
@@ -100,22 +100,22 @@ describe('factory-board template — resolve step', () => {
   })
 
   test('exactly one state label resolves to a sync', () => {
-    const r = runBlock(resolve(), { PROFILE: profile('', 'board: 7   # the mirror'), APP_ID: '1', LABELS: 'risky,working,full-plan', STATE_LABELS: STATES })
+    const r = runBlock(resolve(), { PROFILE: profile('', 'board: 7   # the mirror'), APP_ID: '1', LABELS: 'risky,in-progress,medium', STATE_LABELS: STATES })
     expect(r.code).toBe(0)
     expect(r.outputs).toContain('decision=sync')
     expect(r.outputs).toContain('board=7')
-    expect(r.outputs).toContain('status=working')
+    expect(r.outputs).toContain('status=in-progress')
   })
 
   test('no state label is a logged skip', () => {
-    const r = runBlock(resolve(), { PROFILE: profile('', 'board: 7'), APP_ID: '1', LABELS: 'risky,full-plan', STATE_LABELS: STATES })
+    const r = runBlock(resolve(), { PROFILE: profile('', 'board: 7'), APP_ID: '1', LABELS: 'risky,medium', STATE_LABELS: STATES })
     expect(r.code).toBe(0)
     expect(r.outputs).toContain('decision=skip')
     expect(r.stdout).toContain('no known workflow state label')
   })
 
   test('two state labels are ambiguous and skipped', () => {
-    const r = runBlock(resolve(), { PROFILE: profile('', 'board: 7'), APP_ID: '1', LABELS: 'ready,working', STATE_LABELS: STATES })
+    const r = runBlock(resolve(), { PROFILE: profile('', 'board: 7'), APP_ID: '1', LABELS: 'queued,in-progress', STATE_LABELS: STATES })
     expect(r.code).toBe(0)
     expect(r.outputs).toContain('decision=skip')
     expect(r.stdout).toContain('conflicting state labels')
@@ -203,7 +203,7 @@ describe("this repo's own factory-board workflow", () => {
 
 test('141 board compiler resolves custom map without CSV positional interpretation', () => {
   const map = { needsOperator: 'Decision', needsPlan: 'Plan', ready: 'Go', working: 'Build', forOperator: 'Review' }
-  const r = runBlock(resolve(), { PROFILE: profile('', 'board: 7\nworkflow-labels: ' + JSON.stringify(map)), APP_ID: '1', LABELS: 'Go,full-plan' })
+  const r = runBlock(resolve(), { PROFILE: profile('', 'board: 7\nworkflow-labels: ' + JSON.stringify(map)), APP_ID: '1', LABELS: 'Go,medium' })
   expect(r.code).toBe(0)
   expect(r.outputs).toContain('status=Go')
   const conflict = runBlock(resolve(), { PROFILE: profile('', 'board: 7\nworkflow-labels: ' + JSON.stringify(map)), APP_ID: '1', LABELS: 'Go,Decision' })
@@ -215,8 +215,8 @@ test('141 board compiler resolves custom map without CSV positional interpretati
 test('141 board preserves complete actual labels, CSV and reordered defaults', () => {
   const actual = /^labels:\s*([^#\n]+)/m.exec(readFileSync(join(skillRoot, '../../../.vegastack/dev.md'), 'utf8'))![1]!.trim()
   for (const labels of [actual, actual.split(/\s+/).join(','), actual.split(/\s+/).reverse().join(' ')]) {
-    const result = runBlock(resolve(), { PROFILE: profile('', 'board: 7\nlabels: ' + labels), APP_ID: '1', LABELS: 'ready,full-plan' })
-    expect(result.outputs).toContain('status=ready')
+    const result = runBlock(resolve(), { PROFILE: profile('', 'board: 7\nlabels: ' + labels), APP_ID: '1', LABELS: 'queued,medium' })
+    expect(result.outputs).toContain('status=queued')
   }
 })
 

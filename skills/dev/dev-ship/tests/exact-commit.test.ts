@@ -20,7 +20,7 @@ function fixture(check = 'test "$(cat check.txt)" = PASS', content = 'PASS') {
   git('checkout', '-qb', 'codex/fixture'); writeFileSync(join(dir, 'feature.txt'), 'feature'); git('add', '.'); git('commit', '-qm', 'feature')
   const sha = git('rev-parse', 'HEAD')
   const plan = { id: 2, node_id: 'PLAN', user: { login: 'fixture' }, body: '<!-- vsk:v1 type=plan rev=1 -->\n## Plan\n' }
-  const brief = { number: 1, node_id: 'ISSUE', body: '<!-- vsk:v1 type=brief rev=1 scope=full-plan -->\n## Outcome\nship\n' }
+  const brief = { number: 1, node_id: 'ISSUE', body: '<!-- vsk:v1 type=brief rev=1 scope=medium -->\n## Outcome\nship\n' }
   const scope = execFileSync(process.execPath, ['--input-type=module', '-e', `import {scopeDigest} from ${JSON.stringify(resolve(import.meta.dir, '../../dev-implement/scripts/lib/approval.mjs'))}; process.stdout.write(scopeDigest(${JSON.stringify(plan.body)}, 'plan'))`], { encoding: 'utf8' })
   const binding = { sha, baseSha: base, scopeDigest: scope, verdict: 'clean', findings: [] }
   const comments: any[] = [plan, { id: 3, user: { login: 'fixture' }, body: `<!-- vsk:v1 type=evidence rev=1 sha=${sha} -->` }, { id: 4, user: { login: 'fixture' }, body: `<!-- vsk:v1 type=review round=1 sha=${sha} agent=codex verdict=clean -->\n\`\`\`json\n${JSON.stringify({ reviewBinding: binding })}\n\`\`\`` }]

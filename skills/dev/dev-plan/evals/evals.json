@@ -3,7 +3,7 @@
   "evals": [
     {
       "id": 1,
-      "prompt": "Plan issue 41 in vegastack/billing; the brief is approved and labeled needs-plan. Brief summary: add a nullable `reminderAt` timestamp column to the invoices table (`db/schema/invoices.ts`, Drizzle migrations under `db/migrations/`), and a nightly job in `server/jobs/` (the existing `server/jobs/runner.ts` schedules jobs from a registry) that emails overdue invoices through `server/email/sendTemplate`. Tests live in `tests/` with Bun. Post the plan comment.",
+      "prompt": "Plan issue 41 in vegastack/billing; the brief is approved and labeled planning. Brief summary: add a nullable `reminderAt` timestamp column to the invoices table (`db/schema/invoices.ts`, Drizzle migrations under `db/migrations/`), and a nightly job in `server/jobs/` (the existing `server/jobs/runner.ts` schedules jobs from a registry) that emails overdue invoices through `server/email/sendTemplate`. Tests live in `tests/` with Bun. Post the plan comment.",
       "expected_output": "A plan comment in the workflow format: marker line, `## Plan (v1)`, Goal, Approach naming the alternatives considered, Constraints, and a task list where every task has Files, Interfaces (consumes/produces) and Steps with the failing test first; the plan passes plan-lint.",
       "files": [],
       "assertions": [
@@ -17,27 +17,27 @@
     {
       "id": 2,
       "prompt": "can u write the plan for the csv export thing, issue 58, brief attached",
-      "expected_output": "A handback, not a plan: the brief's Approach names `lib/export.ts`, which the attached tree does not contain (the helper it describes is `lib/print.ts`), so the planner names the drifted claim, asks the smallest question, and proposes needs-operator.",
+      "expected_output": "A handback, not a plan: the brief's Approach names `lib/export.ts`, which the attached tree does not contain (the helper it describes is `lib/print.ts`), so the planner names the drifted claim, asks the smallest question, and proposes waiting-on-operator.",
       "files": [
         "evals/files/issue-58-brief.md"
       ],
       "assertions": [
         "The output names `lib/export.ts` as a file the brief cites that does not exist in the repository tree",
         "No plan comment is posted; the output is a handback with one question",
-        "The `needs-operator` label is proposed as the next state",
+        "The `waiting-on-operator` label is proposed as the next state",
         "The planner does not guess a replacement file and proceed"
       ]
     },
     {
       "id": 3,
-      "prompt": "Plan issue 63 (approved, full-plan). The brief's Outcome reads: \"Customers get a self-serve portal: (1) a magic-link login flow with its own session table, (2) an invoice history page with PDF download, and (3) a Stripe-hosted card update flow with webhook reconciliation.\" Repo is vegastack/billing, Bun + Hono + Drizzle.",
+      "prompt": "Plan issue 63 (approved, medium). The brief's Outcome reads: \"Customers get a self-serve portal: (1) a magic-link login flow with its own session table, (2) an invoice history page with PDF download, and (3) a Stripe-hosted card update flow with webhook reconciliation.\" Repo is vegastack/billing, Bun + Hono + Drizzle.",
       "expected_output": "The planner declines to write one plan: the brief is three deliverables, so it proposes an epic split with a named sub-issue per deliverable and their order, and hands the ratchet back to the operator instead of posting a plan.",
       "files": [],
       "assertions": [
         "The output proposes an epic split listing three sub-issues, one per numbered deliverable",
         "No plan comment with a task list is posted for issue 63",
         "The reason given is the scope ratchet: one issue is one deliverable",
-        "The proposal is addressed to the operator for approval, with `needs-operator` as the next state"
+        "The proposal is addressed to the operator for approval, with `waiting-on-operator` as the next state"
       ]
     },
     {

@@ -7,11 +7,11 @@
       "expected_output": "A draft issue body in the brief format — scope class with its reason, Outcome, Out of scope, Rules and edge cases, Approach and touch points naming the existing email helper and the missing reminder state, Tests and acceptance, Risks — with every open question carrying a recommended answer, ending with a request for the operator's approval rather than a created issue.",
       "files": [],
       "assertions": [
-        "The draft opens with the line `<!-- vsk:v1 type=brief rev=1 scope=... -->` naming one of research, quick-build, full-plan",
+        "The draft opens with the line `<!-- vsk:v1 type=brief rev=1 scope=... -->` naming one of research, small, medium",
         "The **Scope:** line names the class and gives its reason in the same line",
         "Every open question or assumption in the draft carries a recommended answer",
         "No implementation code (function bodies, SQL, route handlers) appears in the draft",
-        "The draft is presented for approval; no `gh issue create` is run and no `ready` label is proposed before the operator says yes"
+        "The draft is presented for approval; no `gh issue create` is run and no `queued` label is proposed before the operator says yes"
       ]
     },
     {
@@ -33,15 +33,15 @@
       "files": [],
       "assertions": [
         "The output proposes one epic parent whose body has the four map sections: Destination, Decisions so far, Not clear yet, Out of scope",
-        "Each proposed child issue carries its own scope class (research, quick-build, or full-plan) with a reason",
-        "No child is proposed with the `ready` label; every child is presented for the operator's approval",
+        "Each proposed child issue carries its own scope class (research, small, or medium) with a reason",
+        "No child is proposed with the `queued` label; every child is presented for the operator's approval",
         "Unclear deliverables are listed under Not clear yet with a question each, rather than silently assigned a class"
       ]
     },
     {
       "id": 4,
       "prompt": "Add a --since flag to our status script in vegastack/example-service; the flag parsing already lives in scripts/status.mjs. Write it up as an issue.",
-      "expected_output": "A quick-build brief whose numbered interview questions include one for Priority and one for Effort, each carrying a recommended answer drawn from the options the org actually defines, so that replying \"all recommended\" answers both; the draft body carries **Priority:** and **Effort:** lines under **Scope:**.",
+      "expected_output": "A small brief whose numbered interview questions include one for Priority and one for Effort, each carrying a recommended answer drawn from the options the org actually defines, so that replying \"all recommended\" answers both; the draft body carries **Priority:** and **Effort:** lines under **Scope:**.",
       "files": [],
       "assertions": [
         "The numbered questions include one for Priority and one for Effort, each carrying a recommended answer",
@@ -54,15 +54,15 @@
     {
       "id": 5,
       "prompt": "You are running headless in vegastack/example-service with no question tool available in this harness. Turn this request into an issue: \"Send customers a reminder email three days after an invoice falls due.\"",
-      "expected_output": "A stub issue is created first at needs-operator with the operator assigned and the request as its body, because the round needs a comment surface; then the interview round is posted as one issue comment opening <!-- vsk:v1 type=questions rev=1 -->, with the questions wrapped in <questions> tags, numbered **Q1.** style and lettered - a) style, exactly one option per question marked (recommended — <reason>), and a closing reply line naming `all recommended`; the issue is left at needs-operator with no brief written and no ready label proposed.",
+      "expected_output": "A stub issue is created first at waiting-on-operator with the operator assigned and the request as its body, because the round needs a comment surface; then the interview round is posted as one issue comment opening <!-- vsk:v1 type=questions rev=1 -->, with the questions wrapped in <questions> tags, numbered **Q1.** style and lettered - a) style, exactly one option per question marked (recommended — <reason>), and a closing reply line naming `all recommended`; the issue is left at waiting-on-operator with no brief written and no ready label proposed.",
       "files": [],
       "assertions": [
-        "The issue is created before the round is posted, at needs-operator with the operator assigned, and the round is posted as a comment on it",
+        "The issue is created before the round is posted, at waiting-on-operator with the operator assigned, and the round is posted as a comment on it",
         "The round is posted as one issue comment whose first line is <!-- vsk:v1 type=questions rev=1 -->",
         "The questions sit inside <questions> tags, numbered **Q1.** style with - a) lettered options",
         "Exactly one option per question is marked (recommended — <reason>) and the reason is given",
         "The closing reply line names `all recommended`",
-        "The issue is left at needs-operator and no ready label is proposed",
+        "The issue is left at waiting-on-operator and no ready label is proposed",
         "No harness question tool is claimed to have been used"
       ]
     }

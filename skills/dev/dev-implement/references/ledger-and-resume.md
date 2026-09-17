@@ -11,17 +11,21 @@ Create the ledger comment as the session's **first write after claiming** — be
 - **At every dark-mode judgment call.** A ruling is any decision the brief/plan didn't make for you that a reviewer or the operator could reasonably question. Rulings are cheap; unrecorded decisions are debt.
 - **On findings deferred or parked at review**, per dev-review's adjudication lines.
 
-Never batch checkpoints "for later" — the ledger's value is exactly that a crash between checkpoints loses one task, not the map. Under concurrent edits, last-writer-wins on one comment is accepted (single-operator workflow); note a clobber if you ever see one.
+Never batch checkpoints "for later" — the ledger's value is exactly that a crash between checkpoints loses one task, not the map. Edit it with `vegafactory issue edit-comment <n> <id> --file F --since <cursor>`; a refused edit means someone else changed it — read it again and merge.
 
 A checkpoint retains what a compaction summary must retain: difficulties and their resolutions; options tried or set aside, and why; anything decided, ruled out, or established as a constraint, stated exactly; where things stand; what is open; exact names, numbers, links — the operator's words near-verbatim, the agent's reasoning condensed.
 
 The ledger's edit time is also this claim's **heartbeat** — the only liveness signal an agent session exposes. dev-status reads a ledger silent past the orphan threshold (6h) as a *possibly-orphaned* claim: the session likely died before hand-back. A session that runs for days but keeps checkpointing never trips it; a dead one's ledger freezes. A single long task can legitimately go quiet — so checkpoint at rulings within it too, keeping the pulse alive — and the flag is always the operator's to act on (check, resume, or reclaim), never an automatic reset.
 
-## Resuming — dev-implement's additions to the protocol
+## Resuming
 
-- Resume only outstanding work inside the unchanged approved scope, with the ack still valid and the issue still yours.
+A resuming session reads brief → plan → ledger (`vegafactory issue sync <n>`) → `git log` on the issue branch in its worktree (`vegafactory worktree restore <n>` when the folder is gone), then continues from the first task the ledger does not mark complete.
+
+- Resume only unfinished work within the acked brief and plan; `vegafactory issue check <n> --for implement --resume true` confirms the ack still matches.
 - Re-read the brief, the plan, every comment on the issue (old ones can be edited, so age does not matter) and `git log`; any current operator correction wins over the ledger.
+- An edited brief or plan since the ack stops the resume: one `handback` comment, `waiting-on-operator`.
 - Match tasks by their IDs, not by counts; a ticked task with a verified commit never reruns.
+- A stale heartbeat is a reason to look, never proof the other session stopped: only the operator takes a claim back.
 - Anything ambiguous — a moved scope, a missing commit, a claim held elsewhere — is a hand-back, not a guess.
 
 ## Surfacing — rulings never die in the dark

@@ -75,7 +75,7 @@ steps:
       private-key: ${{ secrets.VEGAFACTORY_APP_PRIVATE_KEY }}
       owner: ${{ github.repository_owner }}
       repositories: ${{ github.event.repository.name }}
-  - run: gh issue edit "$NUMBER" --add-label ready
+  - run: gh issue edit "$NUMBER" --add-label queued
     env:
       GH_TOKEN: ${{ steps.app-token.outputs.token }}
       NUMBER: ${{ github.event.issue.number }}

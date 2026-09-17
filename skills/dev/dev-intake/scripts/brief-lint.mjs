@@ -1,19 +1,20 @@
 #!/usr/bin/env node
 // dev-intake guard: deterministic checks on a drafted brief before posting.
 // Missing structure blocks; quality smells only warn (heuristics never block).
-// Inline quick-build plans are linted separately by dev-plan's plan-lint — the
+// Inline small-issue plans are linted separately by dev-plan's plan-lint — the
 // banned-placeholder list lives there, its single home.
 //
 // Exit codes: 0 pass · 1 pass-with-warnings · 2 blocked (reasons printed).
-// Usage: node brief-lint.mjs --file <brief.md> --scope <research|quick-build|full-plan> --json
+// Usage: node brief-lint.mjs --file <brief.md> --scope <small|medium|large|research> --json
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const REQUIRED_HEADINGS = {
   research: [/^##\s+.*question/im, /^##\s+.*answered/im],
-  'quick-build': [/^##\s+Outcome\b/m, /^##\s+Tests and acceptance\b/m, /^##\s+Approach/m],
-  'full-plan': [/^##\s+Outcome\b/m, /^##\s+Out of scope\b/m, /^##\s+Tests and acceptance\b/m, /^##\s+Approach/m],
+  small: [/^##\s+Outcome\b/m, /^##\s+Tests and acceptance\b/m, /^##\s+Approach/m],
+  medium: [/^##\s+Outcome\b/m, /^##\s+Out of scope\b/m, /^##\s+Tests and acceptance\b/m, /^##\s+Approach/m],
+  large: [/^##\s+Outcome\b/m, /^##\s+Out of scope\b/m, /^##\s+Tests and acceptance\b/m, /^##\s+Approach/m],
 };
 
 const VAGUE_SMELLS = [
@@ -28,11 +29,11 @@ export function lintBrief(text, scope, { fix = false } = {}) {
   const warns = [];
 
   if (!REQUIRED_HEADINGS[scope]) {
-    return { blocks: [`unknown scope class "${scope}" (research | quick-build | full-plan)`], warns };
+    return { blocks: [`unknown size "${scope}" (small | medium | large | research)`], warns };
   }
-  if (!/<!--\s*vsk:v1\s+type=brief\b/.test(text)) blocks.push('missing brief marker (<!-- vsk:v1 type=brief rev=n scope=... -->)');
-  if (scope !== 'research' && !/^\*\*Scope:\*\*/m.test(text)) {
-    blocks.push('missing the **Scope:** line — the announced reason must survive the conversation');
+  if (!/<!--\s*vsk:v1\s+type=brief\b/.test(text)) blocks.push('missing brief marker (<!-- vsk:v1 type=brief rev=n size=... -->)');
+  if (scope !== 'research' && !/^\*\*Size:\*\*/m.test(text)) {
+    blocks.push('missing the **Size:** line — the announced reason must survive the conversation');
   }
   if (fix && !/^##\s+Reproduction\b/m.test(text)) {
     blocks.push('fix-type brief without a ## Reproduction section — an unreproducible bug is research first');

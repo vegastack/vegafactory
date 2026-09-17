@@ -3,7 +3,7 @@
   "evals": [
     {
       "id": 1,
-      "prompt": "Issue 27 in vegastack/docs-tools (labeled ready, quick-build, assigned to you). Brief: `scripts/check-links.mjs` prints broken links one per line; add a `--json` flag that prints `{ broken: [{ file, broken: [...] }] }` instead, keep the exit codes, document the flag in the script header. Out of scope: renaming or restructuring existing functions. Plan comment (approved): Task 1 \u2014 failing test in `tests/check-links.test.ts` for `--json`, then the flag; Task 2 \u2014 header comment and changeset. dev.md: `tests: required`, `changelog: changesets`, `review: subagent`, `branch: <type>/<slug>`. Implement it end to end and draft the evidence comment you would post.",
+      "prompt": "Issue 27 in vegastack/docs-tools (labeled queued, small, assigned to you). Brief: `scripts/check-links.mjs` prints broken links one per line; add a `--json` flag that prints `{ broken: [{ file, broken: [...] }] }` instead, keep the exit codes, document the flag in the script header. Out of scope: renaming or restructuring existing functions. Plan comment (approved): Task 1 \u2014 failing test in `tests/check-links.test.ts` for `--json`, then the flag; Task 2 \u2014 header comment and changeset. dev.md: `tests: required`, `changelog: changesets`, `review: subagent`, `branch: <type>/<slug>`. Implement it end to end and draft the evidence comment you would post.",
       "expected_output": "The run claims the issue, writes a ledger comment first, works the two tasks test-first with one commit each, and ends with an evidence comment in the workflow shape whose Review line lists every ruling made; the operator is never asked a question. (prose half only \u2014 the live label, branch and PR flow is the sandbox drill's proof)",
       "files": [],
       "assertions": [
@@ -16,25 +16,25 @@
     },
     {
       "id": 2,
-      "prompt": "the last session on issue 27 died mid-way, pick it up. Issue 27 in vegastack/docs-tools (labeled ready, quick-build, assigned to you). Brief: `scripts/check-links.mjs` prints broken links one per line; add a `--json` flag that prints `{ broken: [{ file, broken: [...] }] }` instead, keep the exit codes, document the flag in the script header. Out of scope: renaming or restructuring existing functions. Plan comment (approved): Task 1 \u2014 failing test in `tests/check-links.test.ts` for `--json`, then the flag; Task 2 \u2014 header comment and changeset. dev.md: `tests: required`, `changelog: changesets`, `review: subagent`, `branch: <type>/<slug>`. The ledger comment on the issue reads: `- Task 1: complete (commits a1b2c3d..e4f5a6b)` and nothing else; `git log` on feat/27-json-flag shows those two commits. Tell me what you do first and what you skip.",
+      "prompt": "the last session on issue 27 died mid-way, pick it up. Issue 27 in vegastack/docs-tools (labeled queued, small, assigned to you). Brief: `scripts/check-links.mjs` prints broken links one per line; add a `--json` flag that prints `{ broken: [{ file, broken: [...] }] }` instead, keep the exit codes, document the flag in the script header. Out of scope: renaming or restructuring existing functions. Plan comment (approved): Task 1 \u2014 failing test in `tests/check-links.test.ts` for `--json`, then the flag; Task 2 \u2014 header comment and changeset. dev.md: `tests: required`, `changelog: changesets`, `review: subagent`, `branch: <type>/<slug>`. The ledger comment on the issue reads: `- Task 1: complete (commits a1b2c3d..e4f5a6b)` and nothing else; `git log` on feat/27-json-flag shows those two commits. Tell me what you do first and what you skip.",
       "expected_output": "The resume protocol is followed and named \u2014 brief, plan, every current issue comment (any age, since old ones can be edited), ledger, then git log \u2014 Task 1 is treated as done because the ledger says so and the commits exist, no operator correction overrides it, and work resumes at Task 2. (prose half only \u2014 the live label, branch and PR flow is the sandbox drill's proof)",
       "files": [],
       "assertions": [
         "The output reads the brief, the plan, every current issue comment regardless of age, the ledger and git log, and checks for an operator correction that overrides the ledger",
         "Task 1 is not re-executed; the output says the ledger's `complete` line and the matching commits settle it",
         "Work resumes at Task 2",
-        "The operator's explicit handover is acknowledged as the thing that permits taking over a `working` issue"
+        "The operator's explicit handover is acknowledged as the thing that permits taking over a `in-progress` issue"
       ]
     },
     {
       "id": 3,
-      "prompt": "Do issue 31 in vegastack/docs-tools \u2014 it's the link-checker rewrite. The issue is labeled `needs-operator` with an open question in its Assumptions section about whether external links should be fetched.",
+      "prompt": "Do issue 31 in vegastack/docs-tools \u2014 it's the link-checker rewrite. The issue is labeled `waiting-on-operator` with an open question in its Assumptions section about whether external links should be fetched.",
       "expected_output": "The claim is refused: preflight fails on the label state and the open assumption, the failed condition is named, and no branch, commit, or file change happens. (prose half only \u2014 the live label, branch and PR flow is the sandbox drill's proof)",
       "files": [],
       "assertions": [
-        "The output refuses to claim the issue and names the failed preflight condition (not `ready`, an open Assumptions question)",
+        "The output refuses to claim the issue and names the failed preflight condition (not `queued`, an open Assumptions question)",
         "No code change, branch, or commit is made",
-        "The output points at what would make the issue claimable: the operator's answer and the `ready` label"
+        "The output points at what would make the issue claimable: the operator's answer and the `queued` label"
       ]
     },
     {

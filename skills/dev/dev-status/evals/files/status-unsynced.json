@@ -7,26 +7,26 @@
     "kmanojkumar"
   ],
   "board": {
-    "needs-operator": [
+    "waiting-on-operator": [
       {
         "number": 44,
         "title": "feat: customer portal magic-link login",
         "url": "https://github.com/vegastack/billing/issues/44",
         "ageDays": 2,
-        "scope": "full-plan",
+        "scope": "medium",
         "risky": true,
         "assignees": [],
         "author": "kmanojkumar",
         "operator": "kmanojkumar"
       }
     ],
-    "needs-plan": [
+    "planning": [
       {
         "number": 41,
         "title": "feat: invoice reminder emails 3 and 7 days after due",
         "url": "https://github.com/vegastack/billing/issues/41",
         "ageDays": 1,
-        "scope": "full-plan",
+        "scope": "medium",
         "risky": false,
         "assignees": [
           "kmanojkumar"
@@ -41,7 +41,7 @@
         "title": "feat: CSV export of the filtered invoice list",
         "url": "https://github.com/vegastack/billing/issues/58",
         "ageDays": 0,
-        "scope": "quick-build",
+        "scope": "small",
         "risky": false,
         "assignees": [],
         "author": "kmanojkumar",
@@ -54,7 +54,7 @@
         "title": "feat: --json flag for check-links",
         "url": "https://github.com/vegastack/billing/issues/27",
         "ageDays": 1,
-        "scope": "quick-build",
+        "scope": "small",
         "risky": false,
         "tasks": {
           "done": 1,
@@ -69,13 +69,13 @@
         "operator": "kmanojkumar"
       }
     ],
-    "for-operator": [
+    "ready-to-ship": [
       {
         "number": 39,
         "title": "fix: login 500 on mobile after the session-cookie change",
         "url": "https://github.com/vegastack/billing/issues/39",
         "ageDays": 3,
-        "scope": "quick-build",
+        "scope": "small",
         "risky": false,
         "tasks": {
           "done": 3,
@@ -97,7 +97,7 @@
       "title": "fix: login 500 on mobile after the session-cookie change",
       "url": "https://github.com/vegastack/billing/issues/39",
       "ageDays": 3,
-      "scope": "quick-build",
+      "scope": "small",
       "risky": false,
       "tasks": {
         "done": 3,
@@ -110,7 +110,7 @@
       ],
       "author": "kmanojkumar",
       "operator": "kmanojkumar",
-      "state": "for-operator"
+      "state": "ready-to-ship"
     }
   ],
   "unowned": [
@@ -119,12 +119,12 @@
       "title": "feat: customer portal magic-link login",
       "url": "https://github.com/vegastack/billing/issues/44",
       "ageDays": 2,
-      "scope": "full-plan",
+      "scope": "medium",
       "risky": true,
       "assignees": [],
       "author": "kmanojkumar",
       "operator": "kmanojkumar",
-      "state": "needs-operator"
+      "state": "waiting-on-operator"
     }
   ],
   "prs": [

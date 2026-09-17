@@ -10,7 +10,7 @@ Three steps, in this order, first match wins:
 2. This harness and this run have no question tool → `issue`.
 3. The asker is not the issue's operator → `issue`. An unresolved asker or operator is also `issue`.
 
-Otherwise the tool. The issue route needs an issue: where none exists yet — dev-intake's interview runs before its issue is created — the skill creates the issue first, at `needs-operator` with the operator assigned and the request as its body, and posts the round to it; the brief is written into that issue once the round is answered. On the tool route the issue is created after approval, as before. Settle it deterministically rather than by judgement:
+Otherwise the tool. The issue route needs an issue: where none exists yet — dev-intake's interview runs before its issue is created — the skill creates the issue first, at `waiting-on-operator` with the operator assigned and the request as its body, and posts the round to it; the brief is written into that issue once the round is answered. On the tool route the issue is created after approval, as before. Settle it deterministically rather than by judgement:
 
 ```sh
 node <path-to-this-skill>/scripts/questions.mjs route --tool <name|none> --asker <login> --operator <login> --json
@@ -41,7 +41,7 @@ Reply with `1: a` per question, or `all recommended`.
 </questions>
 ```
 
-No question, option or reason may carry an HTML comment delimiter or a `questions` block tag: a round can be read back out of a comment anyone may have written, so text that could close the block or forge a marker is refused in both directions. Every question carries at least two options and exactly one recommendation, and every recommendation carries its one-line reason — a round that cannot say which way it leans is a round that has not been thought through, and the renderer refuses it. Options run `a` through `h`. After posting, the label moves to `needs-operator` and the session ends.
+No question, option or reason may carry an HTML comment delimiter or a `questions` block tag: a round can be read back out of a comment anyone may have written, so text that could close the block or forge a marker is refused in both directions. Every question carries at least two options and exactly one recommendation, and every recommendation carries its one-line reason — a round that cannot say which way it leans is a round that has not been thought through, and the renderer refuses it. Options run `a` through `h`. After posting, the label moves to `waiting-on-operator` and the session ends.
 
 ## Replying
 
@@ -60,9 +60,9 @@ Parse before asking anything. A later session has no `round.json` on disk, so it
 
 ## What it is not
 
-An answer is not an approval. Any teammate may answer a round; only the operator approves, and approval is still its own `approval` marker comment recording the operator's own words in the `(<username>)` format ([conventions](conventions.md)). A round that is fully answered unblocks the work; it does not move the issue to `ready`.
+An answer is not an ack. Anyone may answer a round; an ack comes from a person with write access and is recorded with `vegafactory issue ack` ([conventions](conventions.md)). A round that is fully answered unblocks the work; it does not move the issue to `queued`.
 
-Assignment is not this route's job either — the label moving to `needs-operator` is what puts the issue on the operator.
+Assignment is not this route's job either — the label moving to `waiting-on-operator` is what puts the issue on the operator.
 
 ## Commands
 

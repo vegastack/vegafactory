@@ -3,8 +3,8 @@
 The issue body a workable issue must have. Write the sections that apply, delete the rest. The test for every section: would a fresh agent have to guess or ask without it?
 
 ```markdown
-<!-- vsk:v1 type=brief rev=1 scope=research|quick-build|full-plan -->
-**Scope:** research | quick-build | full-plan — the announced reason for the call, one line.
+<!-- vsk:v1 type=brief rev=1 size=small|medium|large|research -->
+**Size:** small | medium | large | research — the announced reason for the call, one line.
 **Priority:** <one of the org's Priority options> — the answer from the interview. Delete this line where dev.md's `issue-fields:` knob is `none`.
 **Effort:** <one of the org's Effort options> — the answer from the interview. Delete this line where the knob is `none`.
 
@@ -63,10 +63,10 @@ through — beyond the standing stop-list in .vegastack/dev.md.
 ## Assumptions — confirm or correct
 
 Anything material the grounding investigation could not verify, one per line, each
-awaiting the operator's confirm/correct. The issue cannot leave needs-operator while
+awaiting the operator's confirm/correct. The issue cannot leave waiting-on-operator while
 one is unconfirmed. Verified facts never appear here — they live in their section
-with their evidence. Delete the whole section once every entry is resolved (its
-presence alone blocks preflight).
+with their evidence. Delete the whole section once every entry is resolved (`vegafactory issue check`
+warns while it is present).
 ```
 
 ## Writing rules
@@ -75,7 +75,7 @@ presence alone blocks preflight).
 - Concrete over abstract: "rejects amounts over 10,000 with error E402" beats "validates input".
 - Evidence over confidence: touch points name real file paths; a dependency capability claim carries the doc check and its date; what couldn't be verified goes to Assumptions, never stated as fact.
 - The brief binds the agent, so ambiguity is a bug in the brief — if two readings exist, the interview wasn't done.
-- Post-approval edits follow the revision-marker rule in dev-setup's `references/conventions.md` (heading `(v2)`, marker `rev=2`, a `Revisions:` line).
+- Edits after the ack follow the revision-marker rule in dev-setup's `references/conventions.md` (heading `(v2)`, marker `rev=2`, a `Revisions:` line).
 - A `Decision:` comment exists only for a choice that passes the Decisions test in `.vegastack/dev.md` — feature requests and implementation details never qualify; they are brief content, not register lines.
 
 ### Summarising an SOW

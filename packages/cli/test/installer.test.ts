@@ -1,6 +1,6 @@
 import { afterAll, beforeAll, describe, expect, test } from 'bun:test'
 import { existsSync } from 'node:fs'
-import { cp, mkdtemp, mkdir, readFile, realpath, rm, symlink, writeFile } from 'node:fs/promises'
+import { chmod, cp, mkdtemp, mkdir, readFile, realpath, rm, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 
@@ -51,6 +51,45 @@ describe('@vegastack/vegafactory installer', () => {
     expect(run(temporary, ['skills', 'add', skill(), '--agent', 'codex', '--dir', project, '--force', '--non-interactive']).exitCode).toBe(0)
     expect(await readFile(target, 'utf8')).toContain('name: dev-architect')
     expect(run(temporary, ['skills', 'verify', skill(), '--agent', 'codex', '--dir', project, '--non-interactive']).exitCode).toBe(0)
+  })
+
+  test('without --project or --dir an install goes to the home directory', async () => {
+    const home = join(temporary, 'default-global')
+    await mkdir(home, { recursive: true })
+    expect(run(home, ['skills', 'add', 'dev-debug', '--agent', 'claude', '--non-interactive']).exitCode).toBe(0)
+    expect(existsSync(join(home, '.claude/skills/dev-debug/SKILL.md'))).toBe(true)
+  })
+
+  test('update replaces an untouched old copy and keeps a locally edited one', async () => {
+    const project = join(temporary, 'update')
+    await mkdir(project, { recursive: true })
+    const add = (name: string) => run(temporary, ['skills', 'add', name, '--agent', 'codex', '--dir', project, '--non-interactive'])
+    expect(add('dev-debug').exitCode).toBe(0)
+    expect(add('dev-plan').exitCode).toBe(0)
+    // An "old release": the file and its receipt agree, but differ from the bundle.
+    const oldCopy = join(project, '.agents/skills/dev-debug')
+    await writeFile(join(oldCopy, 'SKILL.md'), 'old release\n')
+    const receipt = JSON.parse(await readFile(join(oldCopy, '.vegastack-install.json'), 'utf8'))
+    receipt.files['SKILL.md'] = new Bun.CryptoHasher('sha256').update('old release\n').digest('hex')
+    await writeFile(join(oldCopy, '.vegastack-install.json'), JSON.stringify(receipt))
+    // A local edit: the file no longer matches its receipt.
+    await writeFile(join(project, '.agents/skills/dev-plan/SKILL.md'), 'my own notes\n')
+    const result = run(temporary, ['skills', 'update', '--agent', 'codex', '--dir', project, '--non-interactive'])
+    expect(result.exitCode).toBe(1)
+    expect(result.stdout.toString()).toContain('kept locally edited copy')
+    expect(await readFile(join(oldCopy, 'SKILL.md'), 'utf8')).toContain('name: dev-debug')
+    expect(await readFile(join(project, '.agents/skills/dev-plan/SKILL.md'), 'utf8')).toBe('my own notes\n')
+    const forced = run(temporary, ['skills', 'update', '--agent', 'codex', '--dir', project, '--force', '--non-interactive'])
+    expect(forced.exitCode).toBe(0)
+    expect(await readFile(join(project, '.agents/skills/dev-plan/SKILL.md'), 'utf8')).toContain('name: dev-plan')
+  })
+
+  test('a flag that needs a value refuses without one', () => {
+    for (const flag of ['--agent', '--dir']) {
+      const result = run(temporary, ['skills', 'add', 'dev-debug', flag])
+      expect(result.exitCode).toBe(1)
+      expect(result.stderr.toString()).toContain(`${flag} requires a value`)
+    }
   })
 
   test('dry-run writes nothing', async () => {
@@ -177,6 +216,33 @@ describe('@vegastack/vegafactory installer', () => {
     const none = run(temporary, ['skills', 'verify', '--agent', 'codex', '--dir', empty, '--non-interactive'])
     expect(none.exitCode).not.toBe(0)
     expect(none.stdout.toString()).toContain('no bundled skills are installed')
+  })
+
+  test('remove with no one to answer and no --yes refuses', async () => {
+    const project = join(temporary, 'remove-unconfirmed')
+    expect(run(temporary, ['skills', 'add', skill(), '--agent', 'codex', '--dir', project, '--non-interactive']).exitCode).toBe(0)
+    const refused = run(temporary, ['skills', 'remove', skill(), '--agent', 'codex', '--dir', project])
+    expect(refused.exitCode).not.toBe(0)
+    expect(refused.stderr.toString()).toContain('pass --yes')
+    expect(existsSync(join(project, '.agents/skills', skill()))).toBe(true)
+  })
+
+  test('init stops with FAIL and no next step when the global install fails', async () => {
+    const bin = join(temporary, 'init-bin')
+    await mkdir(bin, { recursive: true })
+    const script = async (name: string, body: string) => { await writeFile(join(bin, name), `#!/bin/sh\n${body}\n`); await chmod(join(bin, name), 0o755) }
+    await script('gh', 'exit 0')
+    await script('claude', 'echo 2.1.0')
+    await script('vegafactory', 'exit 1')
+    await script('npm', 'echo "npm error 403 Forbidden" >&2; exit 1')
+    const home = join(temporary, 'init-home')
+    await mkdir(home, { recursive: true })
+    const result = Bun.spawnSync(['node', cli, 'init'], { cwd: home, env: { ...process.env, HOME: home, PATH: `${bin}:${process.env.PATH}` } })
+    const out = result.stdout.toString()
+    expect(result.exitCode).toBe(1)
+    expect(out).toContain('FAIL  cli')
+    expect(out).toContain('Fix the FAIL lines above')
+    expect(out).not.toContain('Next:')
   })
 
   test('remove uninstalls a clean copy and refuses a drifted one without --force', async () => {
@@ -420,8 +486,8 @@ describe('selecting a family', () => {
 
   test('usage names the installer, worktree, sync and guard verbs, and removed verbs are unknown', () => {
     const help = run(temporary, ['--help']).stdout.toString()
-    expect(help).toContain('vegafactory skills <add|verify|remove>')
-    for (const verb of ['worktree', 'sync', 'guard sync']) expect(help).toContain(verb)
+    expect(help).toContain('skills add <skill>')
+    for (const verb of ['init', 'skills update', 'issue sync', 'worktree', 'sync', 'guard sync']) expect(help).toContain(verb)
     for (const verb of ['dispatch', 'stats', 'dashboard', 'learning', 'children', 'checkpoint']) {
       const result = run(temporary, [verb])
       expect(result.exitCode).toBe(1)

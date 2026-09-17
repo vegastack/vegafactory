@@ -71,7 +71,7 @@ A board is created, field-configured and linked by the operator, never by an age
 2. `gh project create --owner <org> --title "<title>"` — note the number it prints; that number is the `board:` knob and the `number` column of `boards.md`.
 3. `gh project field-list <n> --owner <org> --format json -q '.fields[] | select(.name=="Status") | .id'` — the id of the default Status field.
 4. ``gh project field-delete --id FIELD_ID`` — use the field ID from step3; the default Status options are not the workflow's states.
-5. `gh project field-create <n> --owner <org> --name Status --data-type SINGLE_SELECT --single-select-options "needs-operator,needs-plan,ready,working,for-operator,Done"` — the five state labels plus Done, in that order.
+5. `gh project field-create <n> --owner <org> --name Status --data-type SINGLE_SELECT --single-select-options "waiting-on-operator,planning,queued,in-progress,ready-to-ship,Done"` — the five state labels plus Done, in that order.
 6. `gh project link <n> --owner <org> --repo <owner/repo>` — one call per repo that mirrors onto this board.
 
 Then, in the project's Workflows UI, switch on the four built-in automations, which have no CLI: auto-add `is:issue is:open`, item closed → Done, PR merged → Done, and auto-archive after 14 days.

@@ -11,7 +11,7 @@ authority: CONTRIBUTING.md → this file → skill-maintainer's release-ops.md (
 
 review: cross-agent-risky   # subagent | cross-agent-risky | cross-agent — codex-cli 0.149.1 present (verified 29-08-2026)
 harnesses: claude 2.1.247 · codex 0.149.1   # detected 03-09-2026; a dev-setup re-run refreshes it
-harness-policy: intake claude fable high · plan claude fable high · implement claude fable high · review codex gpt-5.6 xhigh · status claude sonnet medium · chronicle claude sonnet medium   # `<stage> <agent> <model> <effort>`; raise planning to xhigh for a risky full-plan issue. Model ids move — edit this line, never a skill; the flags each value becomes are in dev-setup's references/harness-facts.md
+harness-policy: intake claude fable high · plan claude fable high · implement claude fable high · review codex gpt-5.6 xhigh · status claude sonnet medium · chronicle claude sonnet medium   # `<stage> <agent> <model> <effort>`; raise planning to xhigh for a risky medium issue. Model ids move — edit this line, never a skill; the flags each value becomes are in dev-setup's references/harness-facts.md
 ui-evidence: none           # no UI in this repo
 gates: 3                    # 3 = approve/PR/merge · 2 = approve + one "ship it" · 1 = direct-to-main, which main's branch protection makes unavailable here
 tests: required             # scripts' deterministic branches; prose quality bar is the behavioral eval
@@ -21,10 +21,10 @@ merge: rebase               # meaningful commits, linear history
 branch: <type>/<slug>       # type: feat | fix | docs | chore | refactor — the only place this list lives
 worktree-include: .claude/settings.json      # the Claude hook wiring is gitignored, so each worktree needs its own copy; .codex/hooks.json is tracked and needs none
 worktree-retention: 14d     # a parked worktree survives this long with no session, measured from the later of its last commit and its last ledger edit
-labels: needs-operator needs-plan ready working for-operator risky research quick-build full-plan epic   # epic label marks map parents (org has no native Epic issue type)
+labels: waiting-on-operator planning queued in-progress ready-to-ship small medium large research risky epic   # one state label at a time; one size (or research); epic marks map parents
 board: none                 # no project board yet; the operator's project commands are in vegafactory-setup's references/control-room.md
 issue-types: Feature=feat · Bug=fix · Task=docs,chore,refactor,research   # no Epic type in this org — the epic label marks map parents
-issue-fields: Priority=Urgent,High,Medium,Low default Medium · Effort=High,Medium,Low default quick-build→Low, full-plan→Medium   # detected 03-09-2026, options in .priority order
+issue-fields: Priority=Urgent,High,Medium,Low default Medium · Effort=High,Medium,Low default small→Low, medium→Medium   # detected 03-09-2026, options in .priority order
 changelog: changesets
 decisions: .vegastack/decisions.md
 release: on-request         # only when the operator says "release" — covers everything merged since the last one (switched from per-merge for the v3 epic, operator 28-08-2026)

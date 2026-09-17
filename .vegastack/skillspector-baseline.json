@@ -80,24 +80,6 @@
   "scanner_version": "2.11.2",
   "fingerprints": [
     {
-      "hash": "sha256:70a64779926c9515ee394c5ba5677a936d0e2016752b5aff54d5c47f96d5fb67",
-      "rule_id": "P2",
-      "file": "scripts/lib/approval.mjs",
-      "reason": "The approval owner documents and parses vsk approval/progress metadata. The matched bytes are a schema example or literal delimiter comparison, not an agent-directed instruction; only declared JSON fields grant scope after canonical identity/source/history validation. This identical owner file is copied into dev-implement, dev-intake, dev-plan and dev-ship. Exact content fingerprint regenerated after the operator-approved SkillSpector 2.11.2 upgrade; no path-wide or rule-wide exception. Still flag if: the matched content changes, a comment gains an instruction rather than metadata, or a new finding appears outside this exact fingerprint."
-    },
-    {
-      "hash": "sha256:d3509ebde6e936e30976e6154a33ced041be59f41ab665e3fe5aacbd87869f77",
-      "rule_id": "P2",
-      "file": "scripts/lib/approval.mjs",
-      "reason": "The approval owner documents and parses vsk approval/progress metadata. The matched bytes are a schema example or literal delimiter comparison, not an agent-directed instruction; only declared JSON fields grant scope after canonical identity/source/history validation. This identical owner file is copied into dev-implement, dev-intake, dev-plan and dev-ship. Exact content fingerprint regenerated after the operator-approved SkillSpector 2.11.2 upgrade; no path-wide or rule-wide exception. Still flag if: the matched content changes, a comment gains an instruction rather than metadata, or a new finding appears outside this exact fingerprint."
-    },
-    {
-      "hash": "sha256:73f4541c4f7373057346af97a5fc35f60877b82003070da13700b5acfa790a55",
-      "rule_id": "P2",
-      "file": "scripts/lib/approval.mjs",
-      "reason": "The approval owner documents and parses vsk approval/progress metadata. The matched bytes are a schema example or literal delimiter comparison, not an agent-directed instruction; only declared JSON fields grant scope after canonical identity/source/history validation. This identical owner file is copied into dev-implement, dev-intake, dev-plan and dev-ship. Exact content fingerprint regenerated after the operator-approved SkillSpector 2.11.2 upgrade; no path-wide or rule-wide exception. Still flag if: the matched content changes, a comment gains an instruction rather than metadata, or a new finding appears outside this exact fingerprint."
-    },
-    {
       "hash": "sha256:3d09d23e2a76128fad8744f283aa18c457dae29e1c2534329377aa2534a71469",
       "rule_id": "P2",
       "file": "scripts/recovery.mjs",
@@ -110,24 +92,6 @@
       "reason": "The plan linter parses the stable task-id HTML marker only on structural lines outside fenced examples, rejects duplicates, and uses the result to bind exact task files. The matched syntax is a defensive identity parser, not hidden agent direction. Exact SkillSpector 2.11.2 fingerprint; no path-wide or rule-wide exception. Still flag if: fenced or malformed markers begin granting task identity, duplicate rejection weakens, the matched bytes change, or a finding appears outside this exact parser occurrence."
     },
     {
-      "hash": "sha256:4157aed2b08e4f44fa4858eadaf71e095f0773d7a5d00553e320acc253cbdbd4",
-      "rule_id": "P2",
-      "file": "scripts/lib/approval.mjs",
-      "reason": "The approval owner documents and parses vsk approval/progress metadata. The matched bytes are a schema example or literal delimiter comparison, not an agent-directed instruction; only declared JSON fields grant scope after canonical identity/source/history validation. This identical owner file is copied into dev-implement, dev-intake, dev-plan and dev-ship. Exact content fingerprint regenerated after the operator-approved SkillSpector 2.11.2 upgrade; no path-wide or rule-wide exception. Still flag if: the matched content changes, a comment gains an instruction rather than metadata, or a new finding appears outside this exact fingerprint."
-    },
-    {
-      "hash": "sha256:96872fa1047dc764a24d7aa6d6c1b4832df6af80dbc1825989fa9d55bc6bd84c",
-      "rule_id": "P2",
-      "file": "scripts/lib/approval.mjs",
-      "reason": "The approval owner documents and parses vsk approval/progress metadata. The matched bytes are a schema example or literal delimiter comparison, not an agent-directed instruction; only declared JSON fields grant scope after canonical identity/source/history validation. This identical owner file is copied into dev-implement, dev-intake, dev-plan and dev-ship. Exact content fingerprint regenerated after the operator-approved SkillSpector 2.11.2 upgrade; no path-wide or rule-wide exception. Still flag if: the matched content changes, a comment gains an instruction rather than metadata, or a new finding appears outside this exact fingerprint."
-    },
-    {
-      "hash": "sha256:772bc478e8c325fe76ef2d23c47daff461a7c8d54390316e506c0fcf86169992",
-      "rule_id": "P2",
-      "file": "scripts/lib/approval.mjs",
-      "reason": "The approval owner documents and parses vsk approval/progress metadata. The matched bytes are a schema example or literal delimiter comparison, not an agent-directed instruction; only declared JSON fields grant scope after canonical identity/source/history validation. This identical owner file is copied into dev-implement, dev-intake, dev-plan and dev-ship. Exact content fingerprint regenerated after the operator-approved SkillSpector 2.11.2 upgrade; no path-wide or rule-wide exception. Still flag if: the matched content changes, a comment gains an instruction rather than metadata, or a new finding appears outside this exact fingerprint."
-    },
-    {
       "hash": "sha256:63683a14c1dc0f09cab888eb0ad2a5aa8f5316b228b22ffea4e0431804d021b5",
       "rule_id": "P2",
       "file": "scripts/recovery.mjs",
@@ -138,6 +102,24 @@
       "rule_id": "P2",
       "file": "scripts/plan-lint.mjs",
       "reason": "The plan linter parses the stable task-id HTML marker only on structural lines outside fenced examples, rejects duplicates, and uses the result to bind exact task files. The matched syntax is a defensive identity parser, not hidden agent direction. Exact SkillSpector 2.11.2 fingerprint; no path-wide or rule-wide exception. Still flag if: fenced or malformed markers begin granting task identity, duplicate rejection weakens, the matched bytes change, or a finding appears outside this exact parser occurrence."
+    },
+    {
+      "hash": "sha256:1d62e35017da80b8a05f5ab5a6cb14062354e7beb19df1b73db8334ad1aeb5b7",
+      "rule_id": "P2",
+      "file": "scripts/lib/approval.mjs",
+      "reason": "The approval owner documents and parses vsk approval/progress metadata. The matched bytes are a schema example or literal delimiter comparison, not an agent-directed instruction; only declared JSON fields grant scope after canonical identity/source/history validation. This identical owner file is copied into dev-implement, dev-intake, dev-plan and dev-ship. Exact content fingerprint taken from the Linux merge-queue run 17-09-2026 after #215 edited the file (same cause, operator's standing word for #212); no path-wide or rule-wide exception. Still flag if: the matched content changes, a comment gains an instruction rather than metadata, or a new finding appears outside this exact fingerprint."
+    },
+    {
+      "hash": "sha256:9c355f9757c3df6063fd08aa3c02605aca15a44579ad21d41947ed51c80ea63d",
+      "rule_id": "P2",
+      "file": "scripts/lib/approval.mjs",
+      "reason": "The approval owner documents and parses vsk approval/progress metadata. The matched bytes are a schema example or literal delimiter comparison, not an agent-directed instruction; only declared JSON fields grant scope after canonical identity/source/history validation. This identical owner file is copied into dev-implement, dev-intake, dev-plan and dev-ship. Exact content fingerprint taken from the Linux merge-queue run 17-09-2026 after #215 edited the file (same cause, operator's standing word for #212); no path-wide or rule-wide exception. Still flag if: the matched content changes, a comment gains an instruction rather than metadata, or a new finding appears outside this exact fingerprint."
+    },
+    {
+      "hash": "sha256:b2f3351ce1d17d4bb10f7d1df9ad814fe246799d66b5bc410322eb0487a52cd8",
+      "rule_id": "P2",
+      "file": "scripts/lib/approval.mjs",
+      "reason": "The approval owner documents and parses vsk approval/progress metadata. The matched bytes are a schema example or literal delimiter comparison, not an agent-directed instruction; only declared JSON fields grant scope after canonical identity/source/history validation. This identical owner file is copied into dev-implement, dev-intake, dev-plan and dev-ship. Exact content fingerprint taken from the Linux merge-queue run 17-09-2026 after #215 edited the file (same cause, operator's standing word for #212); no path-wide or rule-wide exception. Still flag if: the matched content changes, a comment gains an instruction rather than metadata, or a new finding appears outside this exact fingerprint."
     }
   ],
   "coverage": [

@@ -9,8 +9,20 @@ The comment a plan lives in, verbatim. dev-implement executes it task by task an
 **Goal:** <one sentence: what exists when this plan is done>
 **Approach:** <2–3 sentences — and the alternatives considered with why they lost, one line each>
 **Constraints:** <binding requirements from the brief and Architecture facts, exact values, one per line>
-**Fleet parallel:** (optional exact one-line JSON declaration; see ## Fleet parallel declaration)
 **Independent groups:** (optional — only when the work below can run at the same time; see ## Independent groups)
+
+### Tasks
+
+- [ ] **Task 1: <name>** <!-- task-id:<issue>-T1 -->
+  - Files — Create: `exact/path.ts` · Modify: `exact/path.ts` (<which area>) · Test: `exact/path.test.ts`
+  - Interfaces — Consumes: <exact signatures/names from earlier tasks> · Produces: <exact names, parameter and return types later tasks rely on — an implementer may see only this task; this block is how they learn what neighbors use>
+  - Steps: write the failing test (the actual test code, fenced) → run it, expect FAIL with <reason> → implement the minimal code → run, expect PASS → commit `<type>: <message>`
+- [ ] **Task 2: …** <!-- task-id:<issue>-T2 -->
+
+**Revisions:** (absent until a post-approval edit; then one line per edit)
+````
+
+## Independent groups)
 
 ### Tasks
 
@@ -43,7 +55,7 @@ Optional. Declare it only when the sibling sub-issues below could run at the sam
 - `docs` — #132 · Files: `README.md`
 ```
 
-- **Members** are sibling `#<issue>` numbers on an epic's plan; tasks inside one issue always run in order. A member belongs to exactly one group.
+- **Members** are `#<issue>` sub-issues on an epic parent's plan; tasks inside one issue always run in order. A member belongs to exactly one group.
 - **File sets are the contract, not a hint.** Every group declares one; a path ending in `/` is a directory and covers everything beneath it. Two groups' sets must be disjoint, and a group names one child, because its members would otherwise run at once on one set — plan-lint blocks an overlap, a repeated id, a member in two groups, two issues in one group, a missing set, and a line outside the grammar above.
 - Declare the whole set a group will touch, tests included; review flags a sibling whose diff reaches outside its set.
 - `node <path-to-this-skill>/scripts/plan-lint.mjs --file <plan.md> --groups --json` prints the validated groups as JSON — the one parser for this grammar, and the one place that will decide which sibling sub-issues may run at the same time. Blocked plans print no groups.

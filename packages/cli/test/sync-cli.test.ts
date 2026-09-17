@@ -147,13 +147,3 @@ test('actual CLI refuses a backup with a malformed digest without changing setti
   }
 })
 
-test('actual CLI help explains explicit recovery and fresh-fetch requirements', () => {
-  const result = run(root, root, ['--help'])
-  expect(result.exitCode).toBe(0)
-  const help = result.stdout.toString()
-  expect(help).toContain('vegafactory sync inspect')
-  expect(help).toContain('vegafactory sync restore [--backup N] [--apply]')
-  expect(help).toContain('Recovery previews by default')
-  expect(help).toContain('successful fetch before authority resumes')
-  expect(help).toContain('1 a command error')
-})

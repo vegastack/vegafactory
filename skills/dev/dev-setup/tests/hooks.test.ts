@@ -390,4 +390,3 @@ describe('this repo runs the hooks package it ships', () => {
     }
   })
 })
-

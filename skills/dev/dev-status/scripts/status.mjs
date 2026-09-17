@@ -17,7 +17,7 @@ export function readKnobs(devMdText) {
     labelMap,
     states: Object.values(labelMap),
     risky: 'risky',
-    scopes: ['research', 'quick-build', 'full-plan'],
+    scopes: ['small', 'medium', 'large', 'research'],
     register: /^decisions:\s*(\S+)/m.exec(devMdText ?? '')?.[1] ?? '.vegastack/decisions.md',
     operators: (/^operators:\s*([^\n#]+)/m.exec(devMdText ?? '')?.[1] ?? '')
       .split(',').map((t) => t.trim()).filter(Boolean),
@@ -254,7 +254,7 @@ export function gatherStatus({ repo, orphanHours = 6, devMdPath = '.vegastack/de
     }));
   }
 
-  // Enrich working + for-operator issues with comment-derived signals.
+  // Enrich working + ready-to-ship issues with comment-derived signals.
   const registerText = existsSync(knobs.register) ? readFileSync(knobs.register, 'utf8') : '';
   const decisions = [];
   for (const bucket of [knobs.states[3], knobs.states[4]]) {
@@ -286,8 +286,8 @@ export function gatherStatus({ repo, orphanHours = 6, devMdPath = '.vegastack/de
   }
 
   // "Whose move is it" is the question this script exists to answer, so the
-  // filter is data, not the skill's judgment. Human states only: `ready` and
-  // `working` belong to agents, and an unassigned `ready` issue is correct.
+  // filter is data, not the skill's judgment. Human states only: `queued` and
+  // `in-progress` belong to agents, and an unassigned `queued` issue is correct.
   const humanStates = [knobs.states[0], knobs.states[4]];
   const human = humanStates.flatMap((s) => board[s].map((i) => ({ ...i, state: s })));
   const needsYou = human.filter((i) => view === 'all' || i.assignees.includes(viewer));

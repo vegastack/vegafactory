@@ -4,11 +4,15 @@
 //
 // Exit codes: 0 pass · 2 blocked (this guard has no warn class).
 // Usage: node evidence-check.mjs --file <evidence.md> --json
-import { compareTaskIds } from './recovery.mjs';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { GhUnavailable, findMarkerComment, ghJson, parseFlags, parseMarker, renderResult } from './lib/gh.mjs';
+
+// Task IDs present in one list but not the other.
+export function compareTaskIds(expected, actual) {
+  return { missing: [...new Set(expected)].filter(id => !actual.includes(id)), unknown: [...new Set(actual)].filter(id => !expected.includes(id)) };
+}
 
 const REQUIRED_SECTIONS = [
   [/\*\*Done:\*\*/, '**Done:** section'],

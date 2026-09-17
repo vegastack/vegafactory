@@ -20,7 +20,7 @@ Build **one named command** that demonstrates the bug: it fails right now *becau
 - **Fast** — seconds, not minutes; a tight loop is the whole superpower here.
 - **Agent-runnable** — no human in the loop.
 
-Pick the cheapest rung that reaches the bug from the [loop ladder](references/loop-ladder.md). Can't build one after walking the ladder → stop: one `handback` comment, `needs-operator`. A handback lists what was tried, one line per ladder rung, and asks for the artifacts by name (logs, HAR, recording, environment access). Proceeding to theories without a red command is the exact failure this skill exists to prevent.
+Pick the cheapest rung that reaches the bug from the [loop ladder](references/loop-ladder.md). Can't build one after walking the ladder → stop: one `handback` comment, `waiting-on-operator`. A handback lists what was tried, one line per ladder rung, and asks for the artifacts by name (logs, HAR, recording, environment access). Proceeding to theories without a red command is the exact failure this skill exists to prevent.
 
 ## Phase 2 — shrink until everything left is load-bearing
 

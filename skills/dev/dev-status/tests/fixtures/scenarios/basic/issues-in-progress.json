@@ -6,10 +6,10 @@
     "updatedAt": "2026-08-29T10:00:00Z",
     "labels": [
       {
-        "name": "working"
+        "name": "in-progress"
       },
       {
-        "name": "quick-build"
+        "name": "small"
       },
       {
         "name": "risky"

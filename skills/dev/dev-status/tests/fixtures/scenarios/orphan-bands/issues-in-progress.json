@@ -6,10 +6,10 @@
     "updatedAt": "2026-08-29T09:00:00Z",
     "labels": [
       {
-        "name": "working"
+        "name": "in-progress"
       },
       {
-        "name": "full-plan"
+        "name": "medium"
       }
     ],
     "assignees": [
@@ -28,10 +28,10 @@
     "updatedAt": "2026-08-29T10:00:00Z",
     "labels": [
       {
-        "name": "working"
+        "name": "in-progress"
       },
       {
-        "name": "quick-build"
+        "name": "small"
       }
     ],
     "assignees": [

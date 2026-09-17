@@ -93,11 +93,11 @@ describe('gatherStatus over the gh stub', () => {
     try {
       const data = gatherStatus({ orphanHours: 6, devMdPath: '/nonexistent-dev.md', now: Date.parse('2026-08-29T12:00:00Z') })
       expect(data.repo).toBe('vegastack/fixture-repo')
-      expect(data.board.working[0]).toMatchObject({ number: 7, scope: 'quick-build', risky: true, tasks: [1, 2], possiblyOrphaned: true })
-      expect(data.board['for-operator'][0].number).toBe(8)
+      expect(data.board['in-progress'][0]).toMatchObject({ number: 7, scope: 'small', risky: true, tasks: [1, 2], possiblyOrphaned: true })
+      expect(data.board['ready-to-ship'][0].number).toBe(8)
       expect(data.pendingDecisions).toEqual([{ issue: 8, gist: 'retire the [legacy webhook path](https://example.com/webhooks)', gistPlain: 'retire the legacy webhook path' }])
       expect(data.prs[0].checks).toBe('green')
-      expect(data.board.ready).toEqual([])
+      expect(data.board.queued).toEqual([])
     } finally {
       delete process.env.VSK_GH; delete process.env.GH_STUB_DIR
     }
@@ -107,8 +107,8 @@ describe('gatherStatus over the gh stub', () => {
     process.env.GH_STUB_DIR = join(skillRoot, 'tests/fixtures/scenarios/orphan-bands')
     try {
       const data = gatherStatus({ orphanHours: 6, devMdPath: '/nonexistent-dev.md', chroniclePath: '/nonexistent.md', now: Date.parse('2026-08-29T12:00:00Z') })
-      const fresh = data.board.working.find((i: any) => i.number === 7)
-      const dead = data.board.working.find((i: any) => i.number === 9)
+      const fresh = data.board['in-progress'].find((i: any) => i.number === 7)
+      const dead = data.board['in-progress'].find((i: any) => i.number === 9)
       // #7: ledger moved 3h ago (< 6h) → alive
       expect(fresh).toMatchObject({ ledgerAgeHours: 3, possiblyOrphaned: false })
       // #9: no ledger comment ever written → orphaned, null age
@@ -159,9 +159,9 @@ describe('gatherStatus over the gh stub', () => {
       expect(mine.operators).toEqual(['kmanojkumar', 'ada'])
       expect(mine.needsYou.map((i: any) => i.number)).toEqual([11, 14])
       expect(mine.unowned.map((i: any) => i.number)).toEqual([13])
-      expect(mine.board['needs-operator'][0].assignees).toEqual(['kmanojkumar'])
-      expect(mine.board['for-operator'][0].operator).toBe('ada')
-      expect(mine.board['needs-operator'][1].operator).toBe('ada')
+      expect(mine.board['waiting-on-operator'][0].assignees).toEqual(['kmanojkumar'])
+      expect(mine.board['ready-to-ship'][0].operator).toBe('ada')
+      expect(mine.board['waiting-on-operator'][1].operator).toBe('ada')
       const all = gatherStatus({ view: 'all', devMdPath: join(dir, 'dev.md'), chroniclePath: '/nonexistent.md', now: Date.parse('2026-09-03T12:00:00Z') })
       expect(all.view).toBe('all')
       expect(all.needsYou.map((i: any) => i.number)).toEqual([11, 12, 13, 14])
