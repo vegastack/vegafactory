@@ -307,7 +307,7 @@ function pushHeartbeat(where: Where, local: LocalClaim, deps: HookDeps) {
     const running = JSON.parse(readFileSync(pidFile, 'utf8')) as { pid: number; at: number }
     if (deps.now() - running.at < DETACHED_LIMIT_S * 1000 && alive(running.pid)) return
   } catch { /* no heartbeat running */ }
-  const pid = deps.detach([...deps.cli, 'issue', 'heartbeat', String(where.number), '--repo', where.repo, '--owner', where.owner, '--active', String(Math.round(local.activeMs / 60_000))], where.cwd)
+  const pid = deps.detach([...deps.cli, 'issue', 'heartbeat', String(where.number), '--repo', where.repo, '--active', String(Math.round(local.activeMs / 60_000))], where.cwd)
   if (typeof pid === 'number') {
     mkdirSync(dirname(pidFile), { recursive: true })
     writeFileSync(pidFile, JSON.stringify({ pid, at: deps.now() }))

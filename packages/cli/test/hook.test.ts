@@ -260,7 +260,7 @@ describe('heartbeat and checkpoints', () => {
     claim(ctx(), { owner: OWNER, kind: 'session', harness: 'claude', model: 'opus' }, gh.clock)
     await hook('pre-tool', bash('ls'))
     await hook('post-tool', { cwd: tree })
-    expect(detached).toEqual([['vf', 'issue', 'heartbeat', '7', '--repo', 'o/r', '--owner', OWNER, '--active', '0']])
+    expect(detached).toEqual([['vf', 'issue', 'heartbeat', '7', '--repo', 'o/r', '--active', '0']])
     gh.clock += 2 * 60_000
     await hook('post-tool', { cwd: tree })
     expect(detached).toHaveLength(1)
@@ -268,13 +268,13 @@ describe('heartbeat and checkpoints', () => {
     gh.clock += 10 * 60_000 // idle: not counted
     await hook('post-tool', { cwd: tree })
     expect(local().activeMs).toBe(2 * 60_000)
-    expect(detached.at(-1)).toEqual(['vf', 'issue', 'heartbeat', '7', '--repo', 'o/r', '--owner', OWNER, '--active', '2'])
+    expect(detached.at(-1)).toEqual(['vf', 'issue', 'heartbeat', '7', '--repo', 'o/r', '--active', '2'])
     gh.clock += 60_000
     await hook('session-end', { cwd: tree })
     expect(detached).toHaveLength(3)
     // The detached command the hook starts really moves the heartbeat.
-    const [, , , n, , repo, , owner, , active] = detached.at(-1)!
-    expect([n, repo, owner, active]).toEqual(['7', 'o/r', OWNER, '3'])
+    const [, , , n, , repo, , active] = detached.at(-1)!
+    expect([n, repo, active]).toEqual(['7', 'o/r', '3'])
     expect(gh.issues.get(7)!.comments.some((c) => c.body.includes('type=release'))).toBe(false)
   })
 

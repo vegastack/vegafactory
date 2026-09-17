@@ -275,8 +275,9 @@ Write (GitHub first, then the local copy):
   holder <n>                             who holds the issue
   drop <n> --yes                         delete the local copy
 
-Options: --repo OWNER/NAME (default: dev.md repo: or the origin remote) · --owner ID (default:
-machine:worktree-folder) · --json · --dry-run shows what a write verb would do · --yes confirms drop`
+Options: --repo OWNER/NAME (default: dev.md repo: or the origin remote) · --json · --dry-run shows
+what a write verb would do · --yes confirms drop. claim, release and heartbeat always act as this
+checkout (machine:worktree-folder); only a take-back displaces another holder.`
 }
 
 interface Parsed { verb: string; number: number; positional: string[]; flags: Record<string, string>; json: boolean; dryRun: boolean; yes: boolean }
@@ -325,7 +326,9 @@ export function runIssue(argv: string[], { runner = defaultRunner, cwd = process
   const repo = assertRepo(args.flags.repo ?? detectRepo(root))
   const ctx: WriteContext = { root, repo, number: args.number, runner }
   const print = (value: unknown, text: string) => out(args.json ? JSON.stringify(value, null, 2) : text)
-  const owner = args.flags.owner ?? ownerId(worktreeName(cwd))
+  // A session acts only as itself, so it cannot release or keep alive someone else's claim.
+  if (args.flags.owner !== undefined) throw new Error('--owner is not accepted: claim, release and heartbeat act as this checkout (machine:worktree-folder)')
+  const owner = ownerId(worktreeName(cwd))
   const sync = (since = 0) => syncIssue({ root, repo, number: args.number, since, runner })
   // Each write verb validates everything first; a dry run then stops before any request.
   const preview = (what: string, detail: Record<string, unknown> = {}) => {

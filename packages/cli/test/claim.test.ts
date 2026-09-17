@@ -181,22 +181,44 @@ describe('who may claim', () => {
 describe('the claim verbs', () => {
   // The command line uses the real clock.
   beforeEach(() => { gh.clock = Date.now() })
-  const run = (...argv: string[]) => {
+  const runIn = (cwd: string, ...argv: string[]) => {
     const lines: string[] = []
-    const code = runIssue(argv, { runner: gh.runner, cwd: ctx.root, out: (line) => lines.push(line) })
+    const code = runIssue(argv, { runner: gh.runner, cwd, out: (line) => lines.push(line) })
     return { code, text: lines.join('\n') }
   }
+  const run = (...argv: string[]) => runIn(ctx.root, ...argv)
+  // A second checkout of the same repository, so a second owner.
+  const other = () => {
+    const tree = join(ctx.root, '.vegastack', '.worktrees', '7-other')
+    spawnSync('git', ['-c', 'user.name=t', '-c', 'user.email=t@t', 'commit', '-q', '--allow-empty', '-m', 'init'], { cwd: ctx.root })
+    spawnSync('git', ['worktree', 'add', '-q', '-b', 'feat/7-other', tree], { cwd: ctx.root })
+    return tree
+  }
+  const me = () => ownerId(ctx.root.split('/').at(-1)!)
 
   test('claim, holder and release from the command line', () => {
-    expect(run('claim', '7', '--owner', 'a:1', '--harness', 'codex', '--model', 'gpt-5.5').code).toBe(0)
-    expect(run('holder', '7').text).toContain('a:1 (codex · gpt-5.5)')
-    expect(run('claim', '7', '--owner', 'b:2', '--harness', 'claude', '--model', 'opus').code).toBe(2)
-    expect(run('release', '7', '--owner', 'a:1').code).toBe(0)
+    expect(run('claim', '7', '--harness', 'codex', '--model', 'gpt-5.5').code).toBe(0)
+    expect(run('holder', '7').text).toContain(`${me()} (codex · gpt-5.5)`)
+    const tree = other()
+    expect(runIn(tree, 'claim', '7', '--harness', 'claude', '--model', 'opus').code).toBe(2)
+    // Another checkout's release or heartbeat does not touch this holder.
+    expect(() => runIn(tree, 'heartbeat', '7')).toThrow('holds no claim')
+    runIn(tree, 'release', '7')
+    expect(run('holder', '7').text).toContain(me())
+    expect(run('release', '7').code).toBe(0)
     expect(run('holder', '7').text).toBe('nobody')
   })
 
+  test('--owner is refused, so a session cannot act as another holder', () => {
+    run('claim', '7', '--harness', 'codex', '--model', 'm')
+    for (const verb of [['release', '7'], ['heartbeat', '7'], ['claim', '7', '--harness', 'codex', '--model', 'm']]) {
+      expect(() => runIn(other(), ...verb, '--owner', me()), verb[0]).toThrow('--owner is not accepted')
+    }
+    expect(run('holder', '7').text).toContain(me())
+  })
+
   test('claim needs the harness and model', () => {
-    expect(() => run('claim', '7', '--owner', 'a:1')).toThrow('--harness and --model are required')
+    expect(() => run('claim', '7')).toThrow('--harness and --model are required')
   })
 
   test('the default owner is this machine and the worktree folder', () => {

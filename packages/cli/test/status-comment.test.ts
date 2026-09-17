@@ -3,7 +3,7 @@ import { spawnSync } from 'node:child_process'
 import { mkdirSync, mkdtempSync, realpathSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { claim, heartbeat, type ClaimContext } from '../src/claim.ts'
+import { claim, heartbeat, release, type ClaimContext } from '../src/claim.ts'
 import { artifactHash, runIssue } from '../src/issue.ts'
 import { duration, stageSpans, writeStatus } from '../src/status-comment.ts'
 import { FakeGitHub } from './fake-github.ts'
@@ -110,7 +110,7 @@ describe('timeline credit', () => {
     gh.addIssue({ number: 7, labels: ['queued', 'small'] })
     claim(ctx, { owner: 'mini:7-x', kind: 'session', harness: 'codex', model: 'gpt' }, gh.clock)
     runIssue(['label', '7', '--state', 'ready-to-ship'], { runner: gh.runner, cwd: root, out: () => {} })
-    runIssue(['release', '7', '--owner', 'mini:7-x'], { runner: gh.runner, cwd: root, out: () => {} })
+    release(ctx, 'mini:7-x', 'mini:7-x', 'done')
     writeStatus(ctx, { cwd: root, branch: 'feat/7-x', now: gh.clock })
     const body = gh.issues.get(7)!.comments.find((c) => c.body.includes('type=ledger'))!.body
     expect(body).toMatch(/\| in-progress \| `mini:7-x` \| codex · gpt \|/)
