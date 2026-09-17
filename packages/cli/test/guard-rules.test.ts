@@ -365,6 +365,8 @@ describe('commit capability', () => {
       'git revert HEAD', 'git am < patch', 'git pull', 'git stash pop', 'git stash apply', 'git apply --index p.diff',
       'git -C other commit -m x', 'sh -c "git commit -m x"', 'ls && git commit -m x', 'git nonsense', 'git $VERB',
       './scripts/release.sh', 'bun run release', 'make ship', 'vegafactory ship check 7', 'find . -name x -exec git commit -m y ;',
+      'git fast-import < stream', 'git filter-branch --tree-filter x HEAD', 'git filter-repo --path src', 'git subtree add --prefix=v repo main',
+      'git subtree pull --prefix=v repo main', 'git merge-tree --write-tree a b', 'git replace a b', 'git quiltimport',
     ]) expect(canCommit(command), command).toBe(true)
   })
 
