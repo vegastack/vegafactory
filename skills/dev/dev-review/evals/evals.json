@@ -3,30 +3,35 @@
   "evals": [
     {
       "id": 1,
-      "prompt": "Review branch feat/27-json-flag against issue 27 in vegastack/docs-tools; the diff is attached. Brief: add a `--json` flag to `scripts/check-links.mjs` printing `{ broken: [...] }`, keep the exit codes, document the flag in the header. Out of scope: renaming or restructuring existing functions. Plan: Task 1 failing test then flag; Task 2 header and changeset. Full head sha is 9b7d0e4f6a1c2d3e4f5061728394a5b6c7d8e9f0. Write the review comment.",
-      "expected_output": "One review comment in the workflow format: the marker line, findings each with severity, confidence and `path:line`, the `brokenLinks` → `findBroken` rename reported as scope creep quoting the brief's out-of-scope line, the missing changeset noted against the plan, and a verdict. (prose half only — the live label, branch and PR flow is the sandbox drill's proof)",
-      "files": [
-        "evals/files/27.diff"
-      ],
+      "prompt": "Review the finished work on issue 27 in vegastack/docs-tools (branch feat/27-json-flag, worktree already checked out). Brief: add a `--json` flag to `scripts/check-links.mjs` printing `{ broken: [...] }`, keep the exit codes, document the flag in the header. Out of scope: renaming or restructuring existing functions. Plan: Task 1 failing test then flag; Task 2 header and changeset. You are running in Claude Code; Codex is installed and signed in. What do you do, exactly?",
+      "expected_output": "The cross-tool command, not a hand-written review: announce the Codex review to the operator, run `vegafactory review 27` from the worktree, and let the CLI post the one review comment. No subagent axes, no hand-written comment, no `gh` call by a reviewer.",
       "assertions": [
-        "The comment opens with `<!-- vsk:v1 type=review round=1 sha=9b7d0e4f6a1c2d3e4f5061728394a5b6c7d8e9f0 agent=... verdict=... -->`",
-        "Every finding carries a severity tag, a confidence, and a `path:line` location",
-        "The rename of `brokenLinks` to `findBroken` is reported as scope creep, quoting the brief's out-of-scope line",
-        "The absent changeset is reported against the plan's Task 2",
-        "The comment contains no praise lines"
+        "The answer runs `vegafactory review 27` (flags optional) from the issue's worktree",
+        "The Codex review is announced to the operator before the run",
+        "No fresh-subagent axis dispatch is used while Codex is available",
+        "The review comment is described as written by the CLI, not by the reviewer or the session"
       ]
     },
     {
       "id": 2,
-      "prompt": "second pair of eyes on this pls — same diff as before, issue 27, branch feat/27-json-flag",
-      "expected_output": "The same review discipline at a casual ask: findings with a fix suggestion each and a verdict of clean or needs-fixes. (prose half only — the live label, branch and PR flow is the sandbox drill's proof)",
-      "files": [
-        "evals/files/27.diff"
-      ],
+      "prompt": "Same issue 27. The review came back needs-fixes with F1 (must-fix, scope creep: `brokenLinks` renamed to `findBroken`) and F2 (nit). I've fixed F1 and committed. What now?",
+      "expected_output": "Push, run the same command again for round 2 — it resumes the same reviewer session with only the fix diff and the open finding ids — and note that the nit is either fixed opportunistically or recorded as a deferred minor in the evidence comment. At most 3 rounds; a hand-back goes to the operator.",
       "assertions": [
-        "Each finding carries a concrete fix suggestion",
-        "The verdict is exactly `clean` or `needs-fixes`",
-        "Findings are numbered `Finding [N]`, never `#N`"
+        "The next step is `vegafactory review 27` again, not a new hand-written review",
+        "The answer says the round sends only the fix diff plus the open finding ids",
+        "The nit is not treated as blocking",
+        "The 3-round cap and the hand-back to the operator are stated"
+      ]
+    },
+    {
+      "id": 3,
+      "prompt": "second pair of eyes on issue 27 pls — but codex isn't installed on this box",
+      "expected_output": "The one fallback: say plainly that cross-tool review is off because Codex is missing, run the same axes as fresh subagents in this session, and label the result a same-tool self-review in the evidence comment.",
+      "assertions": [
+        "The fallback is named as a same-tool self-review and labelled as such in the evidence comment",
+        "The operator is told cross-tool review is off until the other tool is installed",
+        "The axes still cover spec, bugs and security, with style only where a documented rule exists",
+        "Findings are numbered `Finding [F1]`, never `#1`"
       ]
     }
   ]

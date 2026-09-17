@@ -88,8 +88,8 @@ Drafts and reports: `.vegastack/.tmp/<issue>-<slug>/` (pre-issue: `intake-<slug>
 
 Prove claims with fresh command output and exit codes; report failures and skips. Never delegate your own verification. Checks block on machine-verifiable facts (exit 2) and fail closed when a fact cannot be read; judgment stays in prose.
 
-## Review bindings
+## The review comment
 
-One fenced JSON each: `{"reviewBinding":{sha,baseSha,scopeDigest,verdict,findings:[{id,status}]}}` in review; `{"adjudication":{sha,reviewCommentId,operator,source:{kind,ref,quote},findings:[{id,disposition,reason}]}}` in evidence. Full commit IDs; status `open` or `resolved`; disposition `accept-risk`. Every open finding needs the operator's acceptance.
+`vegafactory review` writes it: one comment per issue, edited each round, the marker always current. Findings render as `Finding [id]` with severity and `path:line`; a `Findings JSON` block at the bottom carries the machine copy. Every must-fix finding still open at hand-back needs the operator's word.
 
 Say what you are doing plainly; name paths and remaining checks. When something is ambiguous, offer options — never guess silently.
