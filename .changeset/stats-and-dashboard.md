@@ -1,0 +1,5 @@
+---
+"@vegastack/vegafactory": minor
+---
+
+New: usage numbers and a local dashboard. `vegafactory stats collect` reads the new lines of the Claude Code and Codex session logs on this machine and keeps one record per assistant turn — time, your `gh` login, machine, repository, issue, harness, exact model id, skill, tokens, duration and outcome, and never a prompt, a file, tool arguments or which subscription paid. Each log is read from a saved byte offset, so a session that was killed is counted once, at the next run. `stats push` appends those records to the org control room at `stats/YYYY/MM/DD/<operator>-<machine>.jsonl` with your own `gh` login, at most once an hour; `stats show` prints turns, tokens and time by operator, project, model, stage and skill. `vegafactory dashboard` writes one self-contained HTML page — operators, projects, issues with their state and links, model use per operator and project, day bars and time per stage — with no server and no network. The harness hooks collect in the background at each turn boundary and ask to share at session start.

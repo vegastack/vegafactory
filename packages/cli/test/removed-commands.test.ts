@@ -4,7 +4,9 @@ import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 
 // Commands the lean rebuild removed. Skills and docs must not tell an agent to run them.
-const REMOVED = ['children', 'dispatch', 'service', 'runs', 'run-wrapper', 'learning', 'stats', 'status', 'launch', 'claims', 'checkpoint', 'checkpoints', 'dashboard', 'config', 'guard']
+// `stats` and `dashboard` are real commands again (P7), with new subcommands; the old stats
+// subcommands below stay removed.
+const REMOVED = ['children', 'dispatch', 'service', 'runs', 'run-wrapper', 'learning', 'status', 'launch', 'claims', 'checkpoint', 'checkpoints', 'config', 'guard']
 // Subcommands that only the removed commands had, written bare in backticks (`stats export`).
 const BARE = ['learning (checkpoint|inspect|revert|record)', 'stats (record|rollup|activity|privacy|export|cleanup)', 'children (run|join|plan|launch)', 'service (install|uninstall)']
 // Scripts, assets and hook files that no longer exist; `vegafactory hook`, `ship check` and `issue claim` replace the hook-era ones.
