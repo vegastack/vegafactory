@@ -15,11 +15,11 @@ Nearest neighbor: `dev-implement` produces the `ready-to-ship` issue with its ev
 
 On the user's PR instruction:
 
-- Record their words (`vegafactory issue ack <n> --stage ship`), then `vegafactory issue check <n> --for ship`; exit 2 stops.
+- Record their words: `vegafactory issue ack <n> --stage ship --by <login> --quote "<their words>" --source comment:<id>` (or `--source session`, posted under their own `gh` login), then `vegafactory issue check <n> --for ship`; exit 2 stops.
 - Run `node <path-to-this-skill>/scripts/ship-gate.mjs --issue <n> --branch <name> --json` (optional `--repo <o/r> --dev-md <path> --worktree <path>`). It checks the committed checkout, evidence and review against the head, plan scope, changelog, chronicle and debug tags. Exit 2 stops; warnings stay visible. Details: [runbook](references/runbook.md).
-- Verify the issue is at `ready-to-ship` with the evidence comment present — including its `**Docs:**` line (brief/plan revisions in sync) — and the branch is pushed. Not there yet → say what's missing instead of creating a premature PR. Docs out of sync is corrections work through implement's loop, because a brief patched from here has no ledger line behind it.
+- Verify the issue is at `ready-to-ship` with the evidence comment present — including its `**Docs:**` line (brief/plan revisions in sync) — and the branch is pushed. Not there yet → say what's missing; docs out of sync is corrections work through implement's loop.
 - Verify the changelog state matches the evidence comment's `**Changelog:**` line: a behavior-changing branch carries its entry per dev.md's `changelog:` knob (changesets: a `.changeset/*.md` in the diff; keep-a-changelog: the diff adds lines to CHANGELOG.md), while `none` with a reason that holds up (docs-only, test-only) is fine. An unexplained miss → corrections loop, not a PR.
-- `gh pr create` from the task branch: title from the issue, body is `Closes #<n>` plus a link to the evidence comment — the issue holds the report; the PR links it rather than duplicating it.
+- `gh pr create` from the task branch: title from the issue, body is `Closes #<n>` plus a link to the evidence comment.
 - No draft PRs unless the user asks for one.
 - If required checks fail on the PR, that's implement work: hand the failures to the corrections loop, update the evidence comment, and tell the user. Under `gates: 2` the standing ship word holds once checks are green again — subject to Gate 2's staleness bound (behavior change or >7 days → one-sentence re-confirm).
 - A direct chat change (dev-implement's no-issue path) ships on the same words: the chat request stands in for the recorded approval, the PR body carries the evidence instead of linking an issue comment, and the changelog rule applies unchanged.

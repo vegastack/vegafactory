@@ -26,8 +26,11 @@ new round/sha/verdict and append the round section below (never a second marker,
 never a second comment),
 findings as Finding [N] with severities [CRITICAL|MUST-FIX|SHOULD-FIX|NIT] and
 path:line evidence; nitpicks and low-confidence collapsed in <details>.
+writes: first run `vegafactory issue sync <n>` and read the files it names; post the
+comment with `vegafactory issue comment <n> --file <path>`; on a re-review round
+edit it with `vegafactory issue edit-comment <n> <comment-id> --file <path> --since <cursor>`.
 constraints: READ-ONLY — never commit, push, edit files, or change labels; your
-only write is the review comment, via gh.
+only write is that review comment.
 ```
 
 The reviewing agent posts its own comment with its own `agent=` key — independence stays verifiable in the record, never paraphrased by the author.

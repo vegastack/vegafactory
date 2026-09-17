@@ -1,12 +1,11 @@
 // `vegafactory issue …` — the agent's only way to read and write issues.
 // Reads come from the local cache after a cheap freshness check; every write goes
 // to GitHub first and then refreshes the cache.
-import { createHash } from 'node:crypto'
 import { spawnSync } from 'node:child_process'
 import { existsSync, readFileSync } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
 import { ghRequest, type GhRunner, defaultRunner } from './gh.ts'
-import { assertRepo, cacheDir, dropIssue, readBody, readState, syncIssue, withLock, type CacheState, type CommentEntry, type GhComment } from './issue-cache.ts'
+import { artifactHash, assertRepo, cacheDir, dropIssue, readBody, readState, syncIssue, withLock, type CacheState, type CommentEntry, type GhComment } from './issue-cache.ts'
 import { STATES, sizeOf, stateOf, transition, type State } from './labels.ts'
 
 export const ACK_STAGES = ['brief', 'plan', 'ship'] as const
@@ -17,6 +16,8 @@ const WRITE_ROLES = new Set(['admin', 'maintain', 'write'])
 // Where the cache lives and which repository we are in
 
 // The main checkout's root, so every worktree of a repository shares one cache.
+export { artifactHash }
+
 export function repoRoot(cwd = process.cwd()): string {
   const result = spawnSync('git', ['rev-parse', '--path-format=absolute', '--git-common-dir'], { cwd, encoding: 'utf8' })
   if (result.status !== 0) throw new Error('not inside a git repository')
@@ -35,17 +36,6 @@ export function detectRepo(root: string): string {
 
 // ---------------------------------------------------------------------------------------------
 // Artifacts and acks
-
-// The hash an ack binds to. Ticking plan checkboxes and heartbeat edits do not change it.
-export function artifactHash(text: string): string {
-  const normalized = (text ?? '')
-    .replace(/\r\n/g, '\n')
-    .replace(/<!--\s*vsk:claim\b[^>]*-->\n?/g, '')
-    .replace(/<!--\s*vsk:progress:start\s*-->[\s\S]*?<!--\s*vsk:progress:end\s*-->\n?/g, '')
-    .replace(/^(\s*[-*] )\[[xX]\]/gm, '$1[ ]')
-    .trim()
-  return createHash('sha256').update(normalized).digest('hex').slice(0, 12)
-}
 
 export function markerKeys(body: string): Record<string, string> {
   const match = /^\s*<!--\s*vsk:v1\s+([^>]*?)\s*-->/.exec(body ?? '')
@@ -109,7 +99,7 @@ const quoteOf = (ackText: string) => /: "([\s\S]*)"\s*$/.exec(ackText)?.[1] ?? '
 export function artifactsChangedAt(snap: Snapshot): string {
   const plan = latestOfType(snap, 'plan')
   const brief = snap.state.issue!.bodyChangedAt
-  return plan && plan.updatedAt > brief ? plan.updatedAt : brief
+  return plan && plan.changedAt > brief ? plan.changedAt : brief
 }
 
 export interface AckVerdict { ok: boolean; reason: string; ack: CommentEntry | null }
@@ -253,11 +243,27 @@ export function editLabels(ctx: WriteContext, add: string[], remove: string[]) {
   }
 }
 
+// The final label set: at most one state label, whatever the request.
+export function nextLabels(current: string[], change: { state?: State; add?: string[]; remove?: string[] }): string[] {
+  let labels = current.filter((label) => !(change.remove ?? []).includes(label))
+  if (change.state) labels = labels.filter((label) => !(STATES as readonly string[]).includes(label)).concat(change.state)
+  labels = [...new Set([...labels, ...(change.add ?? [])])]
+  if (labels.filter((label) => (STATES as readonly string[]).includes(label)).length > 1) {
+    throw new Error(`issue would carry two state labels (${labels.filter((label) => (STATES as readonly string[]).includes(label)).join(', ')}) — pass --state to pick one`)
+  }
+  return labels
+}
+
+// Replaces the whole label set in one request, so no reader sees two state labels.
+export function setLabels(ctx: WriteContext, labels: string[]) {
+  ghRequest(`repos/${ctx.repo}/issues/${ctx.number}/labels`, { method: 'PUT', body: { labels }, runner: ctx.runner })
+}
+
 export function moveTo(ctx: WriteContext, next: State) {
-  refresh(ctx)
-  const state = readState(cacheDir(ctx.root, ctx.repo, ctx.number))!
-  const edit = transition(state.issue!.labels, next)
-  editLabels(ctx, edit.add, edit.remove)
+  locked(ctx, () => {
+    const { dir } = refresh(ctx)
+    setLabels(ctx, nextLabels(readState(dir)!.issue!.labels, { state: next }))
+  })
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -274,7 +280,7 @@ Write (GitHub first, then the local copy):
   comment <n> --file PATH                post a new comment
   edit-comment <n> <comment-id> --file PATH --since CURSOR
   body <n> --file PATH --since CURSOR    replace the issue body
-  label <n> [--add a,b] [--remove c] [--state ${STATES.join('|')}]
+  label <n> [--add a,b] [--remove c] [--since CURSOR] [--state ${STATES.join('|')}]
   ack <n> --stage brief|plan|ship --by LOGIN --quote TEXT [--source comment:ID|session]
   drop <n> --yes                         delete the local copy
 
@@ -324,11 +330,15 @@ export function runIssue(argv: string[], { runner = defaultRunner, cwd = process
   const ctx: WriteContext = { root, repo, number: args.number, runner }
   const print = (value: unknown, text: string) => out(args.json ? JSON.stringify(value, null, 2) : text)
   const sync = (since = 0) => syncIssue({ root, repo, number: args.number, since, runner })
-  const WRITES = ['comment', 'edit-comment', 'body', 'label', 'ack', 'drop']
-  if (args.dryRun && WRITES.includes(args.verb)) {
-    const what = args.verb === 'drop' ? `delete the local copy of #${args.number}` : `${args.verb} on ${repo}#${args.number} with ${JSON.stringify(args.flags)}`
-    print({ dryRun: true, verb: args.verb, flags: args.flags }, `dry run: would ${what}`)
-    return 0
+  // Each write verb validates everything first; a dry run then stops before any request.
+  const preview = (what: string, detail: Record<string, unknown> = {}) => {
+    if (!args.dryRun) return false
+    print({ dryRun: true, verb: args.verb, ...detail }, `dry run: would ${what}`)
+    return true
+  }
+  const input = (flag = 'file') => {
+    if (!args.flags[flag]) throw new Error(`--${flag} is required`)
+    return readFileSync(resolve(cwd, args.flags[flag]!), 'utf8')
   }
 
   switch (args.verb) {
@@ -349,8 +359,8 @@ export function runIssue(argv: string[], { runner = defaultRunner, cwd = process
       return result.ok ? 0 : 2
     }
     case 'comment': {
-      if (!args.flags.file) throw new Error('--file is required')
-      const text = readFileSync(resolve(cwd, args.flags.file), 'utf8')
+      const text = input()
+      if (preview(`post a ${text.length}-character comment on ${repo}#${args.number}`)) return 0
       const { comment, result } = locked(ctx, () => { sync(); const comment = postComment(ctx, text); return { comment, result: sync() } })
       print({ id: comment.id, url: comment.html_url, cursor: result.cursor }, `posted ${comment.html_url}\ncursor ${result.cursor}`)
       return 0
@@ -358,23 +368,34 @@ export function runIssue(argv: string[], { runner = defaultRunner, cwd = process
     case 'edit-comment': {
       const id = Number(args.positional[0])
       if (!Number.isSafeInteger(id)) throw new Error('edit-comment needs a comment id')
-      if (!args.flags.file) throw new Error('--file is required')
-      const result = editComment(ctx, id, readFileSync(resolve(cwd, args.flags.file), 'utf8'), cursor(args.flags.since))
+      const text = input()
+      const since = cursor(args.flags.since)
+      if (preview(`replace comment ${id} on ${repo}#${args.number}`, { id, since })) return 0
+      const result = editComment(ctx, id, text, since)
       print({ id, cursor: result.cursor }, `edited comment ${id}\ncursor ${result.cursor}`)
       return 0
     }
     case 'body': {
-      if (!args.flags.file) throw new Error('--file is required')
-      const result = editBody(ctx, readFileSync(resolve(cwd, args.flags.file), 'utf8'), cursor(args.flags.since))
+      const text = input()
+      const since = cursor(args.flags.since)
+      if (preview(`replace the body of ${repo}#${args.number}`, { since })) return 0
+      const result = editBody(ctx, text, since)
       print({ cursor: result.cursor }, `edited the issue body\ncursor ${result.cursor}`)
       return 0
     }
     case 'label': {
       const next = args.flags.state as State | undefined
       if (next && !STATES.includes(next)) throw new Error(`--state must be one of ${STATES.join(', ')}`)
+      const add = list(args.flags.add)
+      const remove = list(args.flags.remove)
+      if ([...add, ...remove].some((label) => (STATES as readonly string[]).includes(label))) throw new Error('state labels change only through --state, so an issue never carries two')
+      if (!next && !add.length && !remove.length) throw new Error('label needs --state, --add or --remove')
+      const since = args.flags.since === undefined ? null : cursor(args.flags.since)
+      if (preview(`set labels on ${repo}#${args.number}`, { state: next ?? null, add, remove })) return 0
       const result = locked(ctx, () => {
-        if (next) moveTo(ctx, next)
-        editLabels(ctx, list(args.flags.add), list(args.flags.remove))
+        const { dir } = sync()
+        if (since !== null) conflictIfChanged(ctx, null, since)
+        setLabels(ctx, nextLabels(readState(dir)!.issue!.labels, { state: next, add, remove }))
         return sync()
       })
       const labels = readState(result.dir)!.issue!.labels
@@ -389,6 +410,7 @@ export function runIssue(argv: string[], { runner = defaultRunner, cwd = process
       if (source !== 'session' && !/^comment:\d+$/.test(source)) throw new Error('--source must be session or comment:<id>')
       const by = args.flags.by.replace(/^@/, '')
       const quote = args.flags.quote
+      if (preview(`record a ${stage} ack from @${by} on ${repo}#${args.number}`, { stage, by, source })) return 0
       const { comment, result } = locked(ctx, () => {
         const hashes = currentHashes(snapshot(sync().dir))
         const comment = postComment(ctx, ackBody({ stage, by, brief: hashes.brief, plan: stage === 'brief' ? null : hashes.plan, source, quote }))
@@ -398,6 +420,7 @@ export function runIssue(argv: string[], { runner = defaultRunner, cwd = process
       return 0
     }
     case 'drop':
+      if (preview(`delete the local copy of #${args.number}`)) return 0
       if (!args.yes) throw new Error('drop deletes the local copy of the issue — pass --yes to confirm')
       dropIssue(root, repo, args.number)
       print({ dropped: true }, `dropped the local copy of #${args.number}`)

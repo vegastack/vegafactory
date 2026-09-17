@@ -1,6 +1,6 @@
 // `vegafactory init` — one command from a fresh machine to a working setup.
 import { spawnSync } from 'node:child_process'
-import { existsSync } from 'node:fs'
+import { existsSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
 
 export interface InitStep { name: string; status: 'ok' | 'warn' | 'fail' | 'done' | 'skipped'; detail: string }
@@ -17,7 +17,18 @@ export function nodeMajor(version = process.versions.node): number {
 }
 
 // The tool checks, in the order a person fixes them.
-export function checkTools(run: Probe, nodeVersion = process.versions.node): InitStep[] {
+// A project needs Bun when it pins it as its package manager or carries a Bun lockfile.
+export function usesBun(dir: string): boolean {
+  if (existsSync(join(dir, 'bun.lock')) || existsSync(join(dir, 'bun.lockb'))) return true
+  try {
+    const pkg = JSON.parse(readFileSync(join(dir, 'package.json'), 'utf8')) as { packageManager?: string }
+    return typeof pkg.packageManager === 'string' && pkg.packageManager.startsWith('bun@')
+  } catch {
+    return false
+  }
+}
+
+export function checkTools(run: Probe, nodeVersion = process.versions.node, projectDir: string | null = null): InitStep[] {
   const steps: InitStep[] = []
   steps.push(nodeMajor(nodeVersion) >= 24
     ? { name: 'node', status: 'ok', detail: `Node ${nodeVersion}` }
@@ -37,7 +48,9 @@ export function checkTools(run: Probe, nodeVersion = process.versions.node): Ini
   if (claude.code !== 0 && codex.code !== 0) steps.push({ name: 'agents', status: 'fail', detail: 'neither Claude Code nor Codex is installed — install at least one' })
   else steps.push({ name: 'agents', status: 'ok', detail: [claude.code === 0 && `Claude Code ${claude.stdout}`, codex.code === 0 && codex.stdout].filter(Boolean).join(' · ') })
   const bun = run('bun', ['--version'])
-  steps.push(bun.code === 0 ? { name: 'bun', status: 'ok', detail: `Bun ${bun.stdout}` } : { name: 'bun', status: 'warn', detail: 'Bun is not installed — only needed to work on Bun projects' })
+  if (bun.code === 0) steps.push({ name: 'bun', status: 'ok', detail: `Bun ${bun.stdout}` })
+  else if (projectDir && usesBun(projectDir)) steps.push({ name: 'bun', status: 'fail', detail: 'this project uses Bun and Bun is not installed — install it from https://bun.sh' })
+  else steps.push({ name: 'bun', status: 'warn', detail: 'Bun is not installed — only needed to work on Bun projects' })
   return steps
 }
 

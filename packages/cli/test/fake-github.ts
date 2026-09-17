@@ -149,6 +149,11 @@ export class FakeGitHub {
     }
     if ((m = /^repos\/o\/r\/issues\/(\d+)\/labels$/.exec(route!))) {
       const issue = this.issues.get(Number(m[1]))!
+      if (method === 'PUT') {
+        issue.updated_at = this.tick()
+        issue.labels = [...payload.labels]
+        return this.respond(200, [])
+      }
       for (const label of payload.labels) if (!issue.labels.includes(label)) issue.labels.push(label)
       issue.updated_at = this.tick()
       return this.respond(200, [])

@@ -1,12 +1,14 @@
 # @vegastack/vegafactory
 
-The VegaFactory command-line tool installs and verifies the VegaStack Agent Skills for Claude Code and Codex, and runs the local pieces of the dev workflow: per-issue worktrees, the control-room sync and the ship guard.
+The VegaFactory command-line tool installs and verifies the VegaStack Agent Skills for Claude Code and Codex, and runs the local pieces of the dev workflow: machine setup, the agent-side issue cache, per-issue worktrees, headless agent runs, the control-room sync and the ship guard.
 
-Install the dev workflow, once per machine:
+Set up a machine, once:
 
 ```sh
-npx @vegastack/vegafactory@latest skills add --group dev --global
+npx @vegastack/vegafactory@latest init
 ```
+
+`init` checks Node, git, the GitHub CLI login, Claude Code or Codex, and Bun when the project uses it; installs the CLI and every skill globally; and turns on the repository's commit hook.
 
 See everything bundled:
 
@@ -18,12 +20,16 @@ npx @vegastack/vegafactory skills list
 
 | Command | What it does |
 |---|---|
+| `init [--org ORG]` | Set up this machine and repository; exits 1 when a step fails |
 | `skills list` | Show the bundled skills, by group |
+| `skills update [selection]` | Bring installed skills up to date; keeps locally edited copies unless `--force` |
 | `skills add <selection>` | Install skills into the agent directories |
 | `skills verify [selection]` | Check installed copies against the bundled checksum manifest |
-| `skills remove <selection>` | Uninstall skills; refuses a locally edited copy unless `--force` |
+| `skills remove <selection>` | Uninstall skills; refuses a locally edited copy unless `--force`; asks first, or needs `--yes` |
 | `skills doctor` | Check the install, the project's `.vegastack/dev.md` and the latest version |
 | `worktree <list\|status\|create\|restore\|remove\|prune>` | One git worktree per issue under `.vegastack/.worktrees/` |
+| `issue <verb> <n>` | Read and write an issue through the local cache — `sync`, `check`, `comment`, `edit-comment`, `body`, `label`, `ack`, `drop` (`vegafactory issue --help`) |
+| `agent claude\|codex <args…>` | Start a headless run on the subscription; parent-app variables are dropped and API-key billing is refused |
 | `sync` | Refresh this machine's copy of the org control room |
 | `guard sync [--check]` | Compile `.vegastack/dev.md`'s ship rules into `~/.vegastack/guard/<owner>__<repo>.json`, the file the ship guard reads |
 
@@ -46,6 +52,10 @@ A `--group` or `--all` install is one transaction: if any skill fails, none are 
 ```sh
 npx @vegastack/vegafactory@latest skills add --group dev --global --force
 ```
+
+## Issue cache
+
+Agents read issues from `.vegastack/.tmp/issues/<owner>__<repo>/<n>/` — `issue.md`, one file per comment, and `state.json` — and write back only through `vegafactory issue`, which sends the change to GitHub and then refreshes the copy. `issue sync <n> --since <cursor>` prints only what changed. Write verbs take `--dry-run`; `edit-comment`, `body` and `label` take `--since` and refuse when someone else changed the issue first.
 
 ## Control-room sync
 
@@ -71,7 +81,7 @@ vegafactory sync --org acme # first run in a repo whose dev.md has no control-ro
 | `--dry-run` | Show what would change without writing |
 | `--force` | Overwrite a modified installed copy; for `sync`, refresh now |
 | `--json` | Machine-readable output |
-| `--non-interactive` | Skip prompts (for automation) |
+| `--yes` / `--non-interactive` | Confirm without a prompt (for agents and scripts); without a terminal, destructive commands need it |
 | `--version` / `--help` | Print the version or usage |
 
 ## Where skills are installed
@@ -85,7 +95,7 @@ Install each skill globally or per project, not both: in Claude Code a personal 
 
 ## Integrity and network
 
-The package ships a checksum manifest, checked at install and by `verify`. `add`, `verify` and `remove` work offline. The only network calls are `doctor`'s version check against the npm registry and `sync`'s git fetch of your own control room. VegaFactory sends no telemetry.
+The package ships a checksum manifest, checked at install and by `verify`. `add`, `verify` and `remove` work offline. Network calls: `doctor`'s version check and `init`'s `npm install -g` reach the npm registry; `issue` commands call the GitHub API through your `gh` login (conditional requests, so an unchanged issue costs almost nothing); `sync` fetches your own control room with git. VegaFactory sends no telemetry.
 
 ## Requirements
 

@@ -42,6 +42,9 @@ export interface CommentEntry {
   updatedAt: string
   url: string
   sha: string
+  artifact: string
+  // When `artifact` last changed: ticked boxes, heartbeats and progress edits do not count.
+  changedAt: string
   rev: number
 }
 export interface IssueEntry {
@@ -104,6 +107,17 @@ export function commentType(body: string): string {
 // Heartbeat edits only touch the claim line; they are not a change worth re-reading.
 export const meaningfulSha = (body: string) => sha((body ?? '').replace(CLAIM_LINE, ''))
 
+// The 12-hex hash an ack binds to. Ticking plan checkboxes, heartbeats and the progress block do not change it.
+export function artifactHash(text: string): string {
+  const normalized = (text ?? '')
+    .replace(/\r\n/g, '\n')
+    .replace(/<!--\s*vsk:claim\b[^>]*-->\n?/g, '')
+    .replace(/<!--\s*vsk:progress:start\s*-->[\s\S]*?<!--\s*vsk:progress:end\s*-->\n?/g, '')
+    .replace(/^(\s*[-*] )\[[xX]\]/gm, '$1[ ]')
+    .trim()
+  return sha(normalized).slice(0, 12)
+}
+
 const stamp = (iso: string) => iso.replace(/[-:]/g, '').replace(/\.\d+Z$/, 'Z').replace(/Z$/, '')
 export const commentFile = (comment: GhComment, type: string) => `comments/${stamp(comment.created_at)}-${type}-${comment.id}.md`
 
@@ -151,6 +165,28 @@ function readOwner(lockDir: string): LockOwner | null {
   try { return JSON.parse(readFileSync(join(lockDir, 'owner.json'), 'utf8')) as LockOwner } catch { return null }
 }
 
+// Removing a dead owner's lock happens under a second, short-lived lock, and only after
+// re-reading that the lock still belongs to the owner judged dead — so a waiter that paused
+// can never remove a lock a live process took in the meantime. While `.lock` exists nobody
+// else can create it, so the re-read and the removal see the same owner.
+export function takeOver(lock: string, deadToken: string | null, staleMs: number) {
+  const steal = `${lock}.steal`
+  try {
+    mkdirSync(steal)
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error
+    // A stealer that crashed mid-takeover leaves this behind; the takeover itself takes milliseconds.
+    try { if (Date.now() - statSync(steal).mtimeMs > 30_000) rmSync(steal, { recursive: true, force: true }) } catch { /* gone */ }
+    return
+  }
+  try {
+    const current = readOwner(lock)
+    if ((current?.token ?? null) === deadToken && ownerGone(current, lock, staleMs)) rmSync(lock, { recursive: true, force: true })
+  } finally {
+    rmSync(steal, { recursive: true, force: true })
+  }
+}
+
 export function withLock<T>(dir: string, fn: () => T, { timeoutMs = 10_000, staleMs = 10 * 60_000 } = {}): T {
   mkdirSync(dir, { recursive: true })
   const lock = join(dir, '.lock')
@@ -166,9 +202,7 @@ export function withLock<T>(dir: string, fn: () => T, { timeoutMs = 10_000, stal
       if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error
       const owner = readOwner(lock)
       if (ownerGone(owner, lock, staleMs)) {
-        // Take over by renaming, so two waiters cannot both remove it.
-        const grave = `${lock}.stale-${token}`
-        try { renameSync(lock, grave); rmSync(grave, { recursive: true, force: true }) } catch { /* another waiter won */ }
+        takeOver(lock, owner?.token ?? null, staleMs)
         continue
       }
       if (Date.now() - started > timeoutMs) throw new Error(`issue cache is locked by pid ${owner?.pid ?? '?'} on ${owner?.host ?? '?'}: ${lock}`)
@@ -313,10 +347,13 @@ function syncLocked(options: SyncOptions): SyncResult {
       if (old && old.file !== file) rmSync(join(dir, old.file), { force: true })
       atomicWrite(join(dir, file), content)
       const isChange = !old || old.sha !== nextSha || old.type !== type
+      const artifact = artifactHash(comment.body)
+      const meaningfulChange = !old || old.type !== type || old.artifact !== artifact
       if (isChange) state.rev++
       state.comments[key] = {
         id: comment.id, file, type, author: comment.user?.login ?? '', authorType: comment.user?.type ?? 'User',
-        createdAt: comment.created_at, updatedAt: comment.updated_at, url: comment.html_url, sha: nextSha,
+        createdAt: comment.created_at, updatedAt: comment.updated_at, url: comment.html_url, sha: nextSha, artifact,
+        changedAt: meaningfulChange ? comment.updated_at : old!.changedAt,
         rev: isChange ? state.rev : old!.rev,
       }
     }
