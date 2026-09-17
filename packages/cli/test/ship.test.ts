@@ -21,9 +21,9 @@ const runner: GhRunner = (args, input) => {
   if (args[0] === 'pr' && args[1] === 'checks') return checksOut !== null ? { code: 1, stdout: checksOut, stderr: 'no checks reported' } : { code: 0, stdout: JSON.stringify(checks), stderr: '' }
   return gh.runner(args, input)
 }
-const run = () => {
+const run = (...extra: string[]) => {
   const lines: string[] = []
-  const code = runShip(['check', '7', '--json'], { runner, cwd: root, out: (line) => lines.push(line) })
+  const code = runShip(['check', '7', '--json', ...extra], { runner, cwd: root, out: (line) => lines.push(line) })
   return { code, ...JSON.parse(lines.join('\n')) as { blocks: string[]; ok: boolean } }
 }
 
@@ -112,4 +112,35 @@ test('the PR must target the default branch, and only passed or skipped checks p
   }
   checksOut = ''
   expect(run().blocks).toEqual(['the checks of PR #12 could not be read (no checks reported)'])
+})
+
+test('the branch, the evidence branch and the evidence sha must all name this issue and its pushed head', () => {
+  const head = git(root, 'rev-parse', 'HEAD')
+  gh.addComment(7, ackBody({ stage: 'ship', by: 'mk', brief: artifactHash('Export CSV'), plan: null, source: 'session', quote: 'x' }))
+  expect(run('--branch', 'feat/8-other').blocks.at(-1)).toBe('feat/8-other does not name #7 (<type>/7-…)')
+  expect(run('--branch', 'main').blocks.at(-1)).toBe('main does not name #7 (<type>/7-…)')
+  const evidence = (keys: string) => {
+    gh.addComment(7, `<!-- vsk:v1 type=evidence ${keys} -->\nit works`)
+    gh.addComment(7, ackBody({ stage: 'ship', by: 'mk', brief: artifactHash('Export CSV'), plan: null, source: 'session', quote: 'ship it' }))
+    return run().blocks
+  }
+  expect(evidence(`branch=feat/7-other sha=${head}`)).toEqual(['the evidence is for branch feat/7-other, not feat/7-export'])
+  expect(evidence(`sha=${head.slice(0, 6)}`)).toEqual([`the evidence sha=${head.slice(0, 6)} is not a commit id of at least 7 hex characters`])
+  expect(evidence('sha=zzzzzzzz')).toEqual(['the evidence sha=zzzzzzzz is not a commit id of at least 7 hex characters'])
+  expect(evidence(`sha=${head.slice(0, 7)}`)).toEqual([])
+  expect(evidence(`branch=feat/7-export sha=${head}`)).toEqual([])
+  checks = []
+  expect(run().blocks).toEqual(['PR #12 reports no checks'])
+})
+
+// An ambiguous prefix makes `git rev-parse --verify` fail, which blocks the same way; a real
+// 7-character collision is too slow to build in a test.
+test('a short sha of an older commit does not pass', () => {
+  const head = git(root, 'rev-parse', 'HEAD')
+  gh.addComment(7, `<!-- vsk:v1 type=evidence sha=${head.slice(0, 7)} -->\nit works`)
+  gh.addComment(7, ackBody({ stage: 'ship', by: 'mk', brief: artifactHash('Export CSV'), plan: null, source: 'session', quote: 'ship it' }))
+  git(root, 'commit', '-q', '--allow-empty', '-m', 'next')
+  git(root, 'push', '-q')
+  pr = { ...pr, headRefOid: git(root, 'rev-parse', 'HEAD') }
+  expect(run().blocks[0]).toMatch(/^the evidence is for [0-9a-f]{7}, but origin\/feat\/7-export is at/)
 })

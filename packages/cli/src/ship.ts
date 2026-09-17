@@ -54,6 +54,7 @@ export function shipCheck(input: { cwd: string; root: string; repo: string; numb
 
   const branch = input.branch ?? findBranch(cwd, number)
   if (!branch) return { ok: false, blocks: [...blocks, `no single branch names #${number} — pass --branch`], warns, branch: null, pr: null }
+  if (issueFromBranch(branch) !== number) return { ok: false, blocks: [...blocks, `${branch} does not name #${number} (<type>/${number}-…)`], warns, branch, pr: null }
   if (git(cwd, ['branch', '--show-current']) === branch && git(cwd, ['status', '--porcelain'])) blocks.push(`${branch} has uncommitted changes`)
   git(cwd, ['fetch', '--quiet', 'origin', branch])
   const local = git(cwd, ['rev-parse', '--verify', '--quiet', `refs/heads/${branch}`])
@@ -62,9 +63,16 @@ export function shipCheck(input: { cwd: string; root: string; repo: string; numb
   else if (local && local !== pushed) blocks.push(`${branch} differs from origin/${branch} — push it`)
   // The evidence must describe the commit that merges.
   const evidence = latestOfType(snap, 'evidence')
-  const sha = evidence ? markerKeys(snap.body(evidence)).sha ?? '' : null
+  const keys = evidence ? markerKeys(snap.body(evidence)) : null
+  if (keys?.branch !== undefined && keys.branch !== branch) blocks.push(`the evidence is for branch ${keys.branch}, not ${branch}`)
+  const sha = keys ? keys.sha ?? '' : null
   if (sha === '') blocks.push('the evidence comment names no sha=')
-  else if (sha && pushed && !pushed.startsWith(sha)) blocks.push(`the evidence is for ${sha}, but origin/${branch} is at ${pushed.slice(0, 12)} — post fresh evidence`)
+  else if (sha !== null && !/^[0-9a-f]{7,40}$/i.test(sha)) blocks.push(`the evidence sha=${sha} is not a commit id of at least 7 hex characters`)
+  else if (sha && pushed) {
+    // A short id must name exactly one commit, and that commit must be the pushed head.
+    const resolved = git(cwd, ['rev-parse', '--verify', '--quiet', `${sha}^{commit}`])
+    if (resolved !== pushed) blocks.push(`the evidence is for ${sha}, but origin/${branch} is at ${pushed.slice(0, 12)} — post fresh evidence`)
+  }
 
   // dev-debug's tagged debug logs must not ship.
   const base = defaultBranch(cwd)
@@ -102,7 +110,7 @@ export function shipCheck(input: { cwd: string; root: string; repo: string; numb
     if (failing.length) blocks.push(`failing checks: ${failing.map((check) => check.name).join(', ')}`)
     if (pending.length) blocks.push(`checks still running: ${pending.map((check) => check.name).join(', ')}`)
     if (unknown.length) blocks.push(`checks in an unknown state: ${unknown.map((check) => `${check.name} (${check.bucket})`).join(', ')}`)
-    if (!list.length) warns.push(`PR #${pr.number} reports no checks`)
+    if (!list.length) blocks.push(`PR #${pr.number} reports no checks`)
   }
   return { ok: blocks.length === 0, blocks, warns, branch, pr: pr.number }
 }
