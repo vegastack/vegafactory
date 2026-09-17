@@ -20,7 +20,7 @@ The ledger's edit time is also this claim's **heartbeat** — the only liveness 
 ## Resuming — dev-implement's additions to the protocol
 
 - Resume only outstanding work inside the unchanged approved scope, with the ack still valid and the issue still yours.
-- Re-read the brief, the plan, every comment newer than the ledger (old comments can be edited too) and `git log`; a newer operator correction wins over the ledger.
+- Re-read the brief, the plan, every comment on the issue (old ones can be edited, so age does not matter) and `git log`; any current operator correction wins over the ledger.
 - Match tasks by their IDs, not by counts; a ticked task with a verified commit never reruns.
 - Anything ambiguous — a moved scope, a missing commit, a claim held elsewhere — is a hand-back, not a guess.
 
