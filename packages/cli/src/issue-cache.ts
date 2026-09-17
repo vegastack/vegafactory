@@ -157,12 +157,27 @@ function frontmatter(fields: Record<string, unknown>): string {
   return `---\n${lines.join('\n')}\n---\n`
 }
 
-function atomicWrite(path: string, text: string) {
-  mkdirSync(dirname(path), { recursive: true })
-  const temp = `${path}.${process.pid}.tmp`
-  writeFileSync(temp, text)
-  renameSync(temp, path)
+// Creates the file or fails. `wx` is O_CREAT|O_EXCL, which refuses a name that already exists —
+// a symbolic link included, dangling or not — so a planted link can never be written through.
+export function writeNew(path: string, text: string) {
+  writeFileSync(path, text, { flag: 'wx' })
 }
+
+// Replaces a file without ever following a link: the temporary name is unguessable and created
+// exclusively, and rename replaces the target name itself. A failed write leaves nothing behind.
+export function replaceFile(path: string, text: string) {
+  mkdirSync(dirname(path), { recursive: true })
+  const temp = `${path}.${randomUUID()}.tmp`
+  try {
+    writeNew(temp, text)
+    renameSync(temp, path)
+  } catch (error) {
+    rmSync(temp, { force: true })
+    throw error
+  }
+}
+
+const atomicWrite = replaceFile
 
 export function readState(dir: string): CacheState | null {
   const path = join(dir, 'state.json')
@@ -239,7 +254,7 @@ export function takeOver(lock: string, deadToken: string | null, staleMs: number
   }
 }
 
-export function withLock<T>(dir: string, fn: () => T, { timeoutMs = 10_000, staleMs = 10 * 60_000 } = {}): T {
+export function withLock<T>(dir: string, fn: () => T, { timeoutMs = 10_000, staleMs = 10 * 60_000, what = 'issue cache' } = {}): T {
   mkdirSync(dir, { recursive: true })
   const lock = join(dir, '.lock')
   if (held.has(lock)) return fn()
@@ -249,7 +264,7 @@ export function withLock<T>(dir: string, fn: () => T, { timeoutMs = 10_000, stal
     if (acquire(lock, token)) break
     const owner = readOwner(lock)
     if (ownerGone(owner, lock, staleMs) && takeOver(lock, owner?.token ?? null, staleMs)) continue
-    if (Date.now() - started > timeoutMs) throw new Error(`issue cache is locked by pid ${owner?.pid ?? '?'} on ${owner?.host ?? '?'}: ${lock}`)
+    if (Date.now() - started > timeoutMs) throw new Error(`${what} is locked by pid ${owner?.pid ?? '?'} on ${owner?.host ?? '?'}: ${lock}`)
     Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 50)
   }
   held.set(lock, token)

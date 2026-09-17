@@ -1,13 +1,14 @@
 import { beforeEach, describe, expect, test } from 'bun:test'
 import { spawnSync } from 'node:child_process'
-import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 import { Readable } from 'node:stream'
 import { claim } from '../src/claim.ts'
 import type { GhRunner } from '../src/gh.ts'
 import { detachBounded, issueFromBranch, issueFromWorktree, readHookInput, runHook, type HookDeps } from '../src/hook.ts'
 import { ackBody, artifactHash } from '../src/issue.ts'
+import { addLesson, readLessons } from '../src/learning.ts'
 import { FakeGitHub } from './fake-github.ts'
 
 const git = (cwd: string, ...args: string[]) => {
@@ -45,6 +46,23 @@ async function hook(event: string, payload: unknown, harness = 'claude') {
 }
 
 const bash = (command: string, cwd = tree) => ({ hook_event_name: 'PreToolUse', cwd, tool_name: 'Bash', tool_input: { command } })
+
+// A commit stamped with the time the hook's clock reads, as a real one made by a tool call would be.
+const commitNow = (cwd: string, message: string) => {
+  git(cwd, 'add', '-A')
+  const result = spawnSync('git', ['-c', 'user.name=t', '-c', 'user.email=t@t', 'commit', '-q', '-m', message], {
+    cwd, encoding: 'utf8', env: { ...process.env, GIT_COMMITTER_DATE: new Date(gh.clock).toISOString() },
+  })
+  if (result.status !== 0) throw new Error(`git commit: ${result.stderr}`)
+}
+
+// One session's own tool call, with the commit it makes landing inside it.
+async function commitByTool(session: string, message: string, work: () => void) {
+  await hook('pre-tool', { ...bash(`git commit -m ${JSON.stringify(message)}`), session_id: session })
+  work()
+  commitNow(tree, message)
+  await hook('post-tool', { cwd: tree, session_id: session, tool_name: 'Bash' })
+}
 
 beforeEach(() => {
   gh = new FakeGitHub()
@@ -348,6 +366,256 @@ describe('heartbeat and checkpoints', () => {
     expect(prompt).toContain('The last WIP push of feat/7-export was rejected')
     const stop = (await hook('stop', { cwd: tree })).json()
     expect(stop.systemMessage).toContain('the commit stays local')
+  })
+
+  test('the lessons request goes out once per working session and never on a chat-only one', async () => {
+    const learnings = join(root, '.vegastack/.tmp/learnings.md')
+    // A session that commits nothing has no lessons to give.
+    await hook('session-start', { cwd: tree, session_id: 's1' })
+    expect((await hook('stop', { cwd: tree, session_id: 's1' })).text).toBe('')
+
+    writeFileSync(join(tree, 'feature.txt'), 'work')
+    const asked = (await hook('stop', { cwd: tree, session_id: 's1' })).json().hookSpecificOutput
+    expect(asked.hookEventName).toBe('Stop')
+    expect(asked.additionalContext).toContain('which general lessons did it teach')
+    expect(asked.additionalContext).toContain('vegafactory learning add')
+    expect(asked.additionalContext).toContain('not the ones specific to #7')
+    expect(asked.additionalContext).toContain("only on the operator's yes")
+    // Nothing to say means saying nothing: no sentinel a model could write over the queue with.
+    expect(asked.additionalContext).toContain(`leave the queue in ${learnings} exactly as it is`)
+    expect(asked.additionalContext).not.toContain('the single word none')
+
+    // Once per session id, however many more turns commit.
+    writeFileSync(join(tree, 'more.txt'), 'work')
+    expect((await hook('stop', { cwd: tree, session_id: 's1' })).text).toBe('')
+    // The draft the request names is a folder of its own, made only for a session being asked.
+    const draft = /to (\S+lessons\.md)/.exec(asked.additionalContext)![1]!
+    expect(existsSync(dirname(draft))).toBe(true)
+    expect(readdirSync(join(root, '.vegastack/.tmp/lessons'))).toHaveLength(1)
+
+    // The next session asks again, and Codex gets its own documented continuation.
+    await hook('session-start', { cwd: tree, session_id: 's2' }, 'codex')
+    writeFileSync(join(tree, 'again.txt'), 'work')
+    const codex = (await hook('stop', { cwd: tree, session_id: 's2' }, 'codex')).json()
+    expect(codex.decision).toBe('block')
+    expect(codex.reason).toContain('which general lessons did it teach')
+    expect(codex.hookSpecificOutput).toBeUndefined()
+  })
+
+  const marks = () => JSON.parse(readFileSync(join(tree, '.vegastack/.tmp/claims/7.sessions.json'), 'utf8'))
+
+  test('two sessions in one worktree keep their own baseline and answered state', async () => {
+    // Both start from the same HEAD; the worktree's HEAD is shared, the marks are not.
+    await hook('session-start', { cwd: tree, session_id: 'a' })
+    await hook('session-start', { cwd: tree, session_id: 'b' })
+    expect(Object.keys(marks()).sort()).toEqual(['a', 'b'])
+
+    // A works and is asked.
+    writeFileSync(join(tree, 'from-a.txt'), 'work')
+    expect((await hook('stop', { cwd: tree, session_id: 'a' })).json().hookSpecificOutput.additionalContext).toContain('which general lessons')
+    // B then ends a chat-only turn: A's commit is not B's work, so B is not asked.
+    expect((await hook('stop', { cwd: tree, session_id: 'b' })).text).toBe('')
+    expect(marks().b.asked).toBe(false)
+
+    // B's own working turn is asked, and A is not asked a second time.
+    writeFileSync(join(tree, 'from-b.txt'), 'work')
+    expect((await hook('stop', { cwd: tree, session_id: 'b' })).json().hookSpecificOutput.additionalContext).toContain('which general lessons')
+    writeFileSync(join(tree, 'from-a-again.txt'), 'work')
+    expect((await hook('stop', { cwd: tree, session_id: 'a' })).text).toBe('')
+    expect([marks().a.asked, marks().b.asked]).toEqual([true, true])
+  })
+
+  test('a commit made by hand belongs to the session that ran it, whoever stops first', async () => {
+    await hook('session-start', { cwd: tree, session_id: 'a' })
+    await hook('session-start', { cwd: tree, session_id: 'b' })
+
+    // A commits inside a writing tool of its own: that pair is the evidence.
+    await commitByTool('a', 'a commits by hand', () => writeFileSync(join(tree, 'by-hand.txt'), 'work'))
+
+    // B stops first and has done nothing: the shared HEAD moved, but not by B.
+    expect((await hook('stop', { cwd: tree, session_id: 'b' })).text).toBe('')
+    expect([marks().b.worked, marks().b.asked]).toEqual([false, false])
+
+    // A stops second and is still asked — B's Stop did not spend or move A's mark.
+    expect(marks().a.worked).toBe(true)
+    expect((await hook('stop', { cwd: tree, session_id: 'a' })).json().hookSpecificOutput.additionalContext).toContain('which general lessons')
+    expect(marks().a.asked).toBe(true)
+  })
+
+  test("a session that only read is not credited with a neighbour's commit", async () => {
+    await hook('session-start', { cwd: tree, session_id: 'a' })
+    await hook('session-start', { cwd: tree, session_id: 'b' })
+
+    // B commits between A's events.
+    await commitByTool('b', 'b commits', () => writeFileSync(join(tree, 'from-b.txt'), 'work'))
+
+    // A then runs a tool that cannot commit anything. A read opens no window at all.
+    await hook('pre-tool', { cwd: tree, session_id: 'a', tool_name: 'Read', tool_input: { file_path: 'x' } })
+    await hook('post-tool', { cwd: tree, session_id: 'a', tool_name: 'Read' })
+    expect(marks().a.pending).toBeUndefined()
+    expect(marks().a.worked).toBe(false)
+
+    // So chat-only A is not asked, and B is asked on its own Stop.
+    expect((await hook('stop', { cwd: tree, session_id: 'a' })).text).toBe('')
+    expect((await hook('stop', { cwd: tree, session_id: 'b' })).json().hookSpecificOutput.additionalContext).toContain('which general lessons')
+  })
+
+  test("a file tool opens no window, so a commit during it belongs to the session that ran it", async () => {
+    await hook('session-start', { cwd: tree, session_id: 'a' })
+    await hook('session-start', { cwd: tree, session_id: 'b' })
+
+    // A is editing a file — a file tool cannot commit, so it is given no window at all.
+    await hook('pre-tool', { cwd: tree, session_id: 'a', tool_name: 'Write', tool_input: { file_path: join(tree, 'a.txt'), content: 'x' } })
+    expect(marks().a.pending).toBeUndefined()
+    // B commits inside its own shell tool while A's edit is still in flight.
+    await commitByTool('b', 'b commits during an edit of a', () => writeFileSync(join(tree, 'from-b.txt'), 'work'))
+    await hook('post-tool', { cwd: tree, session_id: 'a', tool_name: 'Write' })
+
+    expect(marks().a.pending).toBeUndefined()
+    expect([marks().a.worked, marks().b.worked]).toEqual([false, true])
+    expect(marks().b.credited).toBe(git(tree, 'rev-parse', 'HEAD'))
+    expect((await hook('stop', { cwd: tree, session_id: 'a' })).text).toBe('')
+    expect((await hook('stop', { cwd: tree, session_id: 'b' })).json().hookSpecificOutput.additionalContext).toContain('which general lessons')
+  })
+
+  test('a long tool that cannot commit is no rival: the session that ran git commit keeps the credit', async () => {
+    await hook('session-start', { cwd: tree, session_id: 'a' })
+    await hook('session-start', { cwd: tree, session_id: 'b' })
+
+    // A starts a long shell tool that could not commit anything; B commits while it runs.
+    await hook('pre-tool', { ...bash('sleep 30'), session_id: 'a' })
+    expect(marks().a.pending.commits).toBe(false)
+    await commitByTool('b', 'b commits during a long tool of a', () => writeFileSync(join(tree, 'from-b.txt'), 'work'))
+    const commit = git(tree, 'rev-parse', 'HEAD')
+
+    // B is the only window that could have made it, so B gets it — no checkpoint needed.
+    expect(marks().b.credited).toBe(commit)
+    expect([marks().a.worked, marks().b.worked]).toEqual([false, true])
+    await hook('post-tool', { cwd: tree, session_id: 'a', tool_name: 'Bash' })
+    expect(marks().a.worked).toBe(false)
+    expect(marks().a.credited).toBeUndefined()
+
+    expect((await hook('stop', { cwd: tree, session_id: 'a' })).text).toBe('')
+    expect((await hook('stop', { cwd: tree, session_id: 'b' })).json().hookSpecificOutput.additionalContext).toContain('which general lessons')
+    // B was asked for the commit it made, not for anything its Stop added.
+    expect(marks().b.credited).toBe(commit)
+  })
+
+  test('two sessions committing at once credit nobody, and the commit is never re-judged', async () => {
+    await hook('session-start', { cwd: tree, session_id: 'a' })
+    await hook('session-start', { cwd: tree, session_id: 'b' })
+
+    // Both are inside a `git commit` of their own when one of them lands.
+    await hook('pre-tool', { ...bash('git commit -m "a commits"'), session_id: 'a' })
+    await commitByTool('b', 'b commits first', () => writeFileSync(join(tree, 'from-b.txt'), 'work'))
+    const contested = git(tree, 'rev-parse', 'HEAD')
+    expect([marks().a.judged, marks().b.judged]).toEqual([contested, contested])
+    expect([marks().a.worked, marks().b.worked]).toEqual([false, false])
+
+    // A's window closing later cannot re-open the ruling.
+    await hook('post-tool', { cwd: tree, session_id: 'a', tool_name: 'Bash' })
+    expect([marks().a.worked, marks().a.credited]).toEqual([false, undefined])
+    expect((await hook('stop', { cwd: tree, session_id: 'a' })).text).toBe('')
+  })
+
+  test('a command the parser cannot see through contends rather than hand over the credit', async () => {
+    await hook('session-start', { cwd: tree, session_id: 'a' })
+    await hook('session-start', { cwd: tree, session_id: 'b' })
+    // A release script can commit without saying so anywhere a parser can read.
+    await hook('pre-tool', { ...bash('./scripts/release.sh --write'), session_id: 'a' })
+    expect(marks().a.pending.commits).toBe(true)
+    await commitByTool('b', 'b commits during a release script', () => writeFileSync(join(tree, 'from-b.txt'), 'work'))
+    expect([marks().a.worked, marks().b.worked]).toEqual([false, false])
+    expect(marks().b.judged).toBe(git(tree, 'rev-parse', 'HEAD'))
+  })
+
+  test("a writing tool that commits nothing is not credited with a neighbour's commit either", async () => {
+    await hook('session-start', { cwd: tree, session_id: 'a' })
+    await hook('session-start', { cwd: tree, session_id: 'b' })
+    // A's window is open, and B's commit lands inside it — but from a HEAD A never saw move by its
+    // own hand. The evidence is a commit made during A's tool call, which this is not: it is B's,
+    // made before A's tool started.
+    await commitByTool('b', 'b commits first', () => writeFileSync(join(tree, 'from-b.txt'), 'work'))
+    gh.clock += 5000
+    await hook('pre-tool', { ...bash('ls'), session_id: 'a' })
+    await hook('post-tool', { cwd: tree, session_id: 'a', tool_name: 'Bash' })
+    expect(marks().a.worked).toBe(false)
+    expect((await hook('stop', { cwd: tree, session_id: 'a' })).text).toBe('')
+  })
+
+  test('a session-start whose refresh fails still records the baseline', async () => {
+    const broken: GhRunner = () => { throw new Error('offline') }
+    const stdin = () => Readable.from([Buffer.from(JSON.stringify({ cwd: tree, session_id: 'c' }))])
+    expect(await runHook(['session-start', '--harness', 'claude'], { ...deps(), runner: broken }, stdin())).toBe(0)
+    expect(JSON.parse(readFileSync(join(tree, '.vegastack/.tmp/claims/7.sessions.json'), 'utf8')).c.asked).toBe(false)
+    writeFileSync(join(tree, 'after-failure.txt'), 'work')
+    expect((await hook('stop', { cwd: tree, session_id: 'c' })).json().hookSpecificOutput.additionalContext).toContain('which general lessons')
+  })
+
+  test('a warning and the lessons request travel in one Stop object', async () => {
+    await hook('session-start', { cwd: tree, session_id: 's3' })
+    await commitByTool('s3', 'real work', () => writeFileSync(join(tree, 'real.txt'), 'work'))
+    writeFileSync(join(tree, '.env'), 'X=1\n')
+    const both = (await hook('stop', { cwd: tree, session_id: 's3' })).json()
+    expect(both.systemMessage).toContain('.env')
+    expect(both.hookSpecificOutput.additionalContext).toContain('which general lessons did it teach')
+  })
+
+  test('session-start shows the lessons waiting for a dev.md line, and a silent session keeps them', async () => {
+    addLesson(root, 'the skill scan reads the built bundle')
+    const context = (await hook('session-start', { cwd: tree, session_id: 's4' })).json().hookSpecificOutput.additionalContext
+    expect(context).toContain('the skill scan reads the built bundle')
+    expect(context).toContain('ONE .vegastack/dev.md line')
+    expect(context).toContain('vegafactory learning accept')
+    expect(context).toContain('control-room lines stay manual')
+
+    // The session works, is asked, and records nothing. The older lesson is still waiting.
+    writeFileSync(join(tree, 'work.txt'), 'work')
+    expect((await hook('stop', { cwd: tree, session_id: 's4' })).json().hookSpecificOutput.additionalContext).toContain('which general lessons')
+    expect(readLessons(root).map((lesson) => lesson.text)).toEqual(['the skill scan reads the built bundle'])
+    expect((await hook('session-start', { cwd: tree, session_id: 's5' })).json().hookSpecificOutput.additionalContext).toContain('the skill scan reads the built bundle')
+  })
+
+  test('a link planted at the old predictable temp name is not written through', async () => {
+    // The claim file and the session marks were both written through `<path>.<pid>.tmp`, which a
+    // link at that name would have turned into a write to whatever it pointed at.
+    const claims = join(tree, '.vegastack/.tmp/claims')
+    mkdirSync(claims, { recursive: true })
+    const devMd = join(root, '.vegastack/dev.md')
+    const before = readFileSync(devMd, 'utf8')
+    // The temp names nothing should ever touch, and a destination file whose name is public.
+    const temps = [join(claims, `7.json.${process.pid}.tmp`), join(claims, `7.sessions.json.${process.pid}.tmp`)]
+    const pidFile = join(claims, '7.heartbeat.pid')
+    for (const path of [...temps, pidFile]) symlinkSync(devMd, path)
+
+    // Claimed, so the heartbeat writes its pid file too.
+    claim(ctx(), { owner: OWNER, kind: 'session', harness: 'claude', model: 'opus' }, gh.clock)
+    detachPid = process.pid
+    await hook('session-start', { cwd: tree, session_id: 'p' })
+    writeFileSync(join(tree, 'work.txt'), 'work')
+    await hook('post-tool', { cwd: tree, session_id: 'p', tool_name: 'Bash' })
+    await hook('stop', { cwd: tree, session_id: 'p' })
+
+    expect(readFileSync(devMd, 'utf8')).toBe(before)
+    // No write went near a temp name, so the links planted there are still links.
+    for (const path of temps) expect(lstatSync(path).isSymbolicLink()).toBe(true)
+    // Every file the hook writes is written as itself: a link at a destination is replaced, not
+    // followed, so it is a plain file afterwards and its old target is untouched.
+    expect(detached.some((command) => command.includes('heartbeat'))).toBe(true)
+    for (const path of [join(claims, '7.json'), join(claims, '7.sessions.json'), pidFile]) expect(lstatSync(path).isFile()).toBe(true)
+  })
+
+  test('the lessons queue is git-ignored, so no checkpoint commits or pushes it', async () => {
+    addLesson(root, 'a lesson nobody outside this machine should see')
+    writeFileSync(join(tree, 'feature.txt'), 'work')
+    await hook('stop', { cwd: tree, session_id: 's6' })
+    expect(git(tree, 'log', '-1', '--format=%s')).toBe('wip: #7 turn checkpoint')
+    expect(git(tree, 'ls-files', '--', '.vegastack')).toBe('.vegastack/dev.md')
+    expect(git(root, 'ls-files', '--', '.vegastack')).toBe('.vegastack/dev.md')
+    expect(git(root, 'status', '--porcelain', '--ignored', '--', '.vegastack/.tmp')).toBe('!! .vegastack/.tmp/')
+    const [cmd, ...args] = detached.at(-1)!
+    expect(spawnSync(cmd!, args, { cwd: tree }).status).toBe(0)
+    expect(git(tree, 'ls-tree', '-r', '--name-only', 'origin/feat/7-export')).not.toContain('learnings.md')
   })
 
   test('stop never commits or pushes a staged secret and names the files', async () => {

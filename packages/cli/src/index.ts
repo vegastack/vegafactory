@@ -11,7 +11,7 @@ import type { SkillEntry } from './selection.ts'
 type Agent = 'codex' | 'claude'
 type AgentChoice = Agent | 'both'
 type Mode = 'project' | 'global'
-type Command = 'add' | 'update' | 'verify' | 'doctor' | 'remove' | 'list' | 'version' | 'help' | 'worktree' | 'sync' | 'hook' | 'ship' | 'issue' | 'init' | 'agent'
+type Command = 'add' | 'update' | 'verify' | 'doctor' | 'remove' | 'list' | 'version' | 'help' | 'worktree' | 'sync' | 'hook' | 'ship' | 'issue' | 'init' | 'agent' | 'learning'
 const installerVerbs: readonly string[] = ['add', 'update', 'verify', 'doctor', 'remove', 'list'] as const
 interface Options {
   command: Command
@@ -67,6 +67,9 @@ Shipping and hooks:
   ship check <n> [--json]                may issue n merge? (ship it recorded, branch pushed, PR green)
   hook <event> --harness claude|codex    the harness hooks: guard, heartbeat, WIP checkpoints ("hook --help")
 
+Learning (the Stop hook asks for these; a dev.md line lands only on the operator's yes):
+  learning add|list|accept|decline …     the lessons waiting for a dev.md line
+
 Agents:
   agent claude|codex <args…>             start a headless run on the subscription (API keys refused)
 
@@ -107,7 +110,7 @@ function parse(argv: string[]): Options {
       if (!installerVerbs.includes(verb) && verb !== 'help' && verb !== 'version') throw new Error(`Unknown command: skills ${verb}`)
       command = verb as Command
     }
-    else if (head === 'worktree' || head === 'hook' || head === 'ship' || head === 'issue' || head === 'agent') return { command: head, all: false, dryRun: false, force: false, nonInteractive: false, json: false, rest: argv.splice(0) }
+    else if (head === 'worktree' || head === 'hook' || head === 'ship' || head === 'issue' || head === 'agent' || head === 'learning') return { command: head, all: false, dryRun: false, force: false, nonInteractive: false, json: false, rest: argv.splice(0) }
     else if (installerVerbs.includes(head)) throw new Error(`Unknown command: ${head} — installer verbs moved under the skills namespace: run "vegafactory skills ${head} …"`)
     else if (head === 'sync' || head === 'help' || head === 'version' || head === 'init') command = head
     else throw new Error(`Unknown command: ${head}`)
@@ -860,6 +863,11 @@ async function main() {
   if (options.command === 'agent') {
     const { runAgent } = await import('./env.ts')
     process.exitCode = runAgent(options.rest ?? [])
+    return
+  }
+  if (options.command === 'learning') {
+    const { runLearning } = await import('./learning.ts')
+    process.exitCode = runLearning(options.rest ?? [])
     return
   }
   if (options.command === 'ship') {
