@@ -82,7 +82,9 @@ keeps one record per assistant turn under `~/.vegastack/.tmp/stats/` — one col
 two hooks never count the same turn twice: time, your `gh` login, the
 machine, the repository, the issue, the harness, the exact model id, the skill the turn used, the
 tokens, the duration and how the turn ended. Never a prompt, a file, tool arguments or which
-subscription paid for the turn. The harness hooks run it in the background at each turn boundary.
+subscription paid for the turn — a skill is named only when it resolves to one installed under
+`~/.claude/skills`, `~/.agents/skills` or the bundle, so a tool argument that merely looks like a
+skill name is dropped. The harness hooks run it in the background at each turn boundary.
 
 ```sh
 vegafactory stats show --since 7d   # turns, tokens and time by operator, project, model and stage
