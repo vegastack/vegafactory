@@ -5,6 +5,11 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { createWorktree, pruneWorktrees, removeWorktree } from '../scripts/worktree.mjs'
 
+// Relative to the real clock: the fixture commits carry today's date, so a fixed
+// 'now' turns these into time bombs once the calendar catches up.
+const FUTURE_NOW = Date.now() + 30 * 86_400_000
+const OLD_LEDGER = new Date(Date.now() - 30 * 86_400_000).toISOString()
+
 const git = (cwd: string, ...args: string[]) => execFileSync('git', args, { cwd, encoding: 'utf8' })
 const devMd = 'commands: check `true`\nworktree-include: none\nworktree-retention: 14d\n'
 
@@ -149,10 +154,10 @@ describe('pruneWorktrees', () => {
   test('names a parked worktree past retention and refuses one with unpushed commits', () => {
     const root = repoWithRemote()
     createWorktree({ repoRoot: root, issue: 106, slug: 'old', type: 'feat', base: 'main', devMd, home: root, write: true })
-    const now = Date.parse('2026-10-01T00:00:00Z')
+    const now = FUTURE_NOW
     const r = pruneWorktrees({
       repoRoot: root, base: 'main', olderThan: '14d', devMd,
-      ledgerTimes: { '106-old': '2026-09-01T00:00:00Z' }, now, write: false,
+      ledgerTimes: { '106-old': OLD_LEDGER }, now, write: false,
     })
     const candidate = r.candidates.find((c: { name: string }) => c.name === '106-old')
     expect(candidate?.state).toBe('parked')
@@ -164,17 +169,17 @@ describe('pruneWorktrees', () => {
   test('--write pushes the unpushed candidate first, then removes it', () => {
     const root = repoWithRemote()
     const wt = createWorktree({ repoRoot: root, issue: 106, slug: 'old', type: 'feat', base: 'main', devMd, home: root, write: true })
-    const now = Date.parse('2026-10-01T00:00:00Z')
+    const now = FUTURE_NOW
     const dry = pruneWorktrees({
       repoRoot: root, base: 'main', olderThan: '14d', devMd,
-      ledgerTimes: { '106-old': '2026-09-01T00:00:00Z' }, now, write: false,
+      ledgerTimes: { '106-old': OLD_LEDGER }, now, write: false,
     })
     expect(dry.candidates.find((c: { name: string }) => c.name === '106-old')?.pushable).toBe(true)
     expect(existsSync(wt.path)).toBe(true)
 
     const wet = pruneWorktrees({
       repoRoot: root, base: 'main', olderThan: '14d', devMd,
-      ledgerTimes: { '106-old': '2026-09-01T00:00:00Z' }, now, write: true,
+      ledgerTimes: { '106-old': OLD_LEDGER }, now, write: true,
     })
     expect(wet.candidates.find((c: { name: string }) => c.name === '106-old')?.removable).toBe(true)
     expect(existsSync(wt.path)).toBe(false)
@@ -186,10 +191,10 @@ describe('pruneWorktrees', () => {
   test('a parked worktree with pushed, unmerged commits is removed past retention and its branch survives', () => {
     const root = repoWithRemote()
     const wt = pushedFeature(root)
-    const now = Date.parse('2026-10-01T00:00:00Z')
+    const now = FUTURE_NOW
     const dry = pruneWorktrees({
       repoRoot: root, base: 'main', olderThan: '14d', devMd,
-      ledgerTimes: { '106-x': '2026-09-01T00:00:00Z' }, now, write: false,
+      ledgerTimes: { '106-x': OLD_LEDGER }, now, write: false,
     })
     const candidate = dry.candidates.find((c: { name: string }) => c.name === '106-x')
     expect(candidate?.state).toBe('parked')
@@ -197,7 +202,7 @@ describe('pruneWorktrees', () => {
     expect(existsSync(wt.path)).toBe(true)
     const wet = pruneWorktrees({
       repoRoot: root, base: 'main', olderThan: '14d', devMd,
-      ledgerTimes: { '106-x': '2026-09-01T00:00:00Z' }, now, write: true,
+      ledgerTimes: { '106-x': OLD_LEDGER }, now, write: true,
     })
     expect(wet.candidates.find((c: { name: string }) => c.name === '106-x')?.removable).toBe(true)
     expect(existsSync(wt.path)).toBe(false)
@@ -211,7 +216,7 @@ describe('pruneWorktrees', () => {
     writeFileSync(join(wt.path, 'scratch.txt'), 'wip\n')
     const r = pruneWorktrees({
       repoRoot: root, base: 'main', olderThan: '14d', devMd,
-      ledgerTimes: { '107-dirty': '2026-09-01T00:00:00Z' }, now: Date.parse('2026-10-01T00:00:00Z'), write: true,
+      ledgerTimes: { '107-dirty': OLD_LEDGER }, now: FUTURE_NOW, write: true,
     })
     const candidate = r.candidates.find((c: { name: string }) => c.name === '107-dirty')
     expect(candidate?.removable).toBe(false)

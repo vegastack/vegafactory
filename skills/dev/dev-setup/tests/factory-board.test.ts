@@ -58,8 +58,8 @@ describe('factory-board template — triggers and permissions', () => {
     // `runs-on: "[self-hosted, x]"` is a string Actions treats as a single label nobody carries,
     // and the job queues forever — before the resolve step's skips can run.
     expect(template).toContain('\n    runs-on: {{runs-on}}\n')
-    const rendered = Bun.YAML.parse(template.replaceAll('{{runs-on}}', '[self-hosted, vsk-runners-mac]')) as any
-    expect(rendered.jobs.mirror['runs-on']).toEqual(['self-hosted', 'vsk-runners-mac'])
+    const rendered = Bun.YAML.parse(template.replaceAll('{{runs-on}}', '[self-hosted, vsk-runners-mac-mini]')) as any
+    expect(rendered.jobs.mirror['runs-on']).toEqual(['self-hosted', 'vsk-runners-mac-mini'])
     expect((Bun.YAML.parse(template.replaceAll('{{runs-on}}', 'ubuntu-latest')) as any).jobs.mirror['runs-on']).toBe('ubuntu-latest')
   })
 })
@@ -188,7 +188,7 @@ describe("this repo's own factory-board workflow", () => {
     const marker = template.indexOf('\n# ---\n')
     const rendered = template
       .slice(marker + '\n# ---\n'.length)
-      .replaceAll('{{runs-on}}', '[self-hosted, vsk-runners-mac]')
+      .replaceAll('{{runs-on}}', '[self-hosted, vsk-runners-mac-mini]')
       .replaceAll('{{profile}}', '.vegastack/dev.md')
       .replaceAll('{{product-revision}}', '280f379cf5e955dd758b77566bf309c7b6ff5b6b')
     expect(live).toBe(rendered)

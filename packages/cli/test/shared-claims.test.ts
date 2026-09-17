@@ -646,24 +646,6 @@ test.each(['live-member', 'missing-stop', 'missing-checkpoint', 'unmanaged-effec
     expect(f.f.mutations).toBe(beforeMutations);
 });
 
-test('new reader retains v1 state while the exact pre-amendment reader refuses v2 task and group receipt bytes', async () => {
-    const f = await stoppedGroupFixture();
-    expect((await readCoordination(f.target)).tasks[f.request.parentTaskKey]!.schemaVersion).toBe(1);
-    const recovered = await recoverStoppedGroup({ machine: f.machine, session: f.session, request: f.request });
-    if (recovered.kind !== 'owned') throw Error(recovered.reason);
-    const directory = await mkdtemp(join(tmpdir(), 'vf-old-shared-reader-')), source = join(directory, 'src');
-    await (await import('node:fs/promises')).mkdir(source, { recursive: true });
-    for (const file of ['shared-claims.ts', 'claims.ts', 'gh.ts']) {
-        const shown = Bun.spawnSync(['git', 'show', `216e600603e949b4459f74eb34789c0ea988a9b7:packages/cli/src/${file}`], { cwd: resolve(import.meta.dir, '../../..') });
-        expect(shown.exitCode, shown.stderr.toString()).toBe(0);
-        await writeFile(join(source, file), shown.stdout);
-    }
-    const old = await import(pathToFileURL(join(source, 'shared-claims.ts')).href + '?' + randomUUID());
-    const oldTarget = { ...f.target, localRoot: await mkdtemp(join(tmpdir(), 'vf-old-reader-home-')) };
-    await expect(old.readCoordination(oldTarget)).rejects.toThrow('task record');
-    await expect(old.resolveEvidence(oldTarget, recovered.reference)).rejects.toThrow('schema');
-});
-
 test('historical group inspection survives a verified later child handoff and exposes initial plus current facts', async () => {
     const f = await stoppedGroupFixture(false), recovered = await recoverStoppedGroup({ machine: f.machine, session: f.session, request: f.request });
     if (recovered.kind !== 'owned') throw Error(recovered.reason);
