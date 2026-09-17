@@ -157,8 +157,12 @@ export interface SessionMark {
   worked: boolean
   asked: boolean
   at: number
-  // Set while one of this session's own writing tools is running: the HEAD it began at and when.
+  // Set while one of this session's own shell tools is running: the HEAD it began at and when.
   pending?: { head: string | null; at: number }
+  // The commit this session was credited with, and the commit this mark has already ruled on.
+  // A commit is ruled on once, by whichever window closes over it first, and never again.
+  credited?: string
+  judged?: string
 }
 
 export const sessionsPath = (where: Where) => join(where.top, '.vegastack', '.tmp', 'claims', `${where.number}.sessions.json`)
@@ -180,21 +184,43 @@ function updateSessions<T>(where: Where, change: (marks: Record<string, SessionM
 
 // What an event tells us about the session it belongs to:
 //   'idle'        only where its HEAD stands now — a session start, a prompt, the end of a session
-//   'tool-start'  one of its own writing tools is about to run, from the HEAD recorded now
-//   'tool-end'    that tool finished; a commit made between the two is this session's work
+//   'tool-start'  one of its own shell tools is about to run, from the HEAD recorded now
+//   'tool-end'    that tool finished; a commit made while it ran may be this session's work
 //   'commit'      its own Stop checkpoint made the commit, which is its work by construction
-// A worktree's HEAD is shared, so a HEAD that simply differs from last time proves nothing: a
-// neighbour may have moved it. Only the two kinds of evidence above count, and where the evidence
-// is unclear the session goes unasked rather than credited with someone else's commit.
+// A worktree's HEAD is shared, so a HEAD that simply differs proves nothing: a neighbour may have
+// moved it. Only a shell tool can produce a commit, so only a shell tool opens a window — a file
+// tool cannot commit and would be pure guessing surface. Where the evidence is unclear the session
+// goes unasked rather than credited with someone else's commit.
 type Observed = 'idle' | 'tool-start' | 'tool-end' | 'commit'
 
-// Was the commit now at HEAD made while that tool was running? Git keeps seconds, so each end of
-// the window is given a second's room.
-function committedDuring(cwd: string, from: number, to: number): boolean {
+// When the commit now at HEAD was made. Git keeps seconds, so callers give the window a second's
+// room at each end.
+function committedAt(cwd: string): number | null {
   const at = git(cwd, ['log', '-1', '--format=%ct'])
-  if (!at.ok) return false
+  if (!at.ok) return null
   const made = Number(at.out) * 1000
-  return Number.isFinite(made) && made >= from - 1000 && made <= to + 1000
+  return Number.isFinite(made) ? made : null
+}
+
+// One commit, one ruling. The session whose open window covers the commit is credited only when it
+// is the only such session: two windows over the same commit mean either could have made it, so
+// neither is credited and neither may claim it later. The commit is named in the ruling, so a
+// window that closes afterwards cannot re-open a settled question.
+function rule(where: Where, marks: Record<string, SessionMark>, session: string, head: string, now: number) {
+  const mark = marks[session]!
+  const made = committedAt(where.top)
+  if (made === null) return
+  const covers = (window: SessionMark['pending']) => !!window && made >= window.at - 1000 && made <= now + 1000
+  if (!covers(mark.pending)) return
+  if (Object.values(marks).some((other) => other.judged === head)) return
+  const rivals = Object.entries(marks).filter(([id, other]) => id !== session && covers(other.pending))
+  mark.judged = head
+  if (rivals.length) {
+    for (const [, other] of rivals) other.judged = head
+    return
+  }
+  mark.worked = true
+  mark.credited = head
 }
 
 // Written the first time any of that session's events is seen, and before anything that can fail,
@@ -204,9 +230,13 @@ function observe(where: Where, session: string | null, now: number, kind: Observ
   updateSessions(where, (marks) => {
     const head = headOf(where.top)
     const mark = marks[session] ?? (marks[session] = { head, worked: false, asked: false, at: now })
-    const pending = mark.pending
-    if (kind === 'commit') mark.worked = true
-    if (kind === 'tool-end' && pending && pending.head !== null && pending.head !== head && committedDuring(where.top, pending.at, now)) mark.worked = true
+    if (kind === 'commit' && head !== null) {
+      // commitWork knows it made this one, so no window and no rival can put it elsewhere.
+      mark.worked = true
+      mark.credited = head
+      mark.judged = head
+    }
+    if (kind === 'tool-end' && head !== null && mark.pending?.head != null && mark.pending.head !== head) rule(where, marks, session, head, now)
     // A window belongs to the one tool that opened it; anything else closes it unused.
     if (kind === 'tool-start') mark.pending = { head, at: now }
     else delete mark.pending
@@ -501,10 +531,10 @@ function preTool(harness: Harness, input: HookInput, deps: HookDeps): void {
   const here = whereAt(cwd, deps)
   const tool = String(payload.tool_name ?? '')
   if (here && (FILE_TOOLS.has(tool) || isShellTool(tool))) {
-    // Only a tool that can change files or run commands can produce a commit, so only one of those
-    // opens a window this session may later be credited for. A read never does.
+    // Only a shell tool can produce a commit, so only a shell tool opens a window this session may
+    // later be credited for. A file tool writes files; the Stop checkpoint is what commits them.
     const session = typeof payload.session_id === 'string' && payload.session_id ? payload.session_id : null
-    try { observe(here, session, deps.now(), 'tool-start') } catch { /* attribution is never a gate */ }
+    if (isShellTool(tool)) try { observe(here, session, deps.now(), 'tool-start') } catch { /* attribution is never a gate */ }
     const denied = ownership(harness, here, deps)
     if (denied) return deps.out(denied)
   }
