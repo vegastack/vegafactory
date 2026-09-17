@@ -8,7 +8,7 @@
       "files": [],
       "assertions": [
         "The plan opens with `<!-- vsk:v1 type=plan rev=1 -->` followed by `## Plan (v1)`",
-        "Every task has a `Files —` line with exact paths, an `Interfaces —` block, and a `Steps` line",
+        "Every task has a `Files \u2014` line with exact paths, an `Interfaces \u2014` block, and a `Steps` line",
         "The Approach names at least two alternatives and says why each lost",
         "Each task's Steps write the failing test before the implementation",
         "Running `plan-lint.mjs` on the posted plan exits 0"
@@ -43,11 +43,11 @@
     {
       "id": 4,
       "prompt": "Plan issue 88 in vegastack/shop, an epic parent whose two children can be built at the same time: #89 adds a `--json` flag to `packages/api/src/report.ts` (tests in `packages/api/test/report.test.ts`), #90 rewrites the pricing rows in `docs/pricing.md`. Nothing else is in scope. Post the plan comment.",
-      "expected_output": "A plan comment in the workflow format that also carries an `**Independent groups:**` block with one line per child, each declaring a disjoint file set, so the parent can run the two children at the same time.",
+      "expected_output": "A plan comment in the workflow format that also carries an `**Independent groups:**` block with one line per sub-issue, each declaring a disjoint file set, recording that the two could run at the same time (they still run one at a time until the dispatcher does so).",
       "files": [],
       "assertions": [
         "The plan carries an `**Independent groups:**` block",
-        "Each group line is `- `<id>` — <members> · Files: `<path>`` with at least one backticked path",
+        "Each group line is `- `<id>` \u2014 <members> \u00b7 Files: `<path>`` with at least one backticked path",
         "#89 and #90 are in different groups, and no path appears in both file sets",
         "Running `plan-lint.mjs --groups --json` on the posted plan exits 0 and prints both group ids"
       ]
