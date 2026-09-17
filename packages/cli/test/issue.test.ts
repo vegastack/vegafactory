@@ -221,6 +221,42 @@ describe('sync', () => {
     expect(JSON.parse(readFileSync(join(lock, 'owner.json'), 'utf8')).token).toBe('live')
   })
 
+  test('a live stealer blocks takeover, and waiting still times out', () => {
+    const dir = cacheDir(root, 'o/r', 9)
+    const lock = join(dir, '.lock')
+    const dead = spawnSync('true').pid!
+    mkdirSync(lock, { recursive: true })
+    writeFileSync(join(lock, 'owner.json'), JSON.stringify({ token: 'dead', pid: dead, host: hostname(), at: Date.now() }))
+    mkdirSync(`${lock}.steal`)
+    writeFileSync(join(`${lock}.steal`, 'owner.json'), JSON.stringify({ token: 'stealer', pid: process.pid, host: hostname(), at: 0 }))
+    const started = Date.now()
+    expect(() => withLock(dir, () => 1, { timeoutMs: 200 })).toThrow('is locked by pid')
+    expect(Date.now() - started).toBeLessThan(2000)
+    expect(existsSync(`${lock}.steal`)).toBe(true)
+    expect(takeOver(lock, 'dead', 60_000)).toBe(false)
+  })
+
+  test('a dead stealer is cleared, then the dead lock is taken over', () => {
+    const dir = cacheDir(root, 'o/r', 9)
+    const lock = join(dir, '.lock')
+    const dead = spawnSync('true').pid!
+    mkdirSync(lock, { recursive: true })
+    writeFileSync(join(lock, 'owner.json'), JSON.stringify({ token: 'dead', pid: dead, host: hostname(), at: Date.now() }))
+    mkdirSync(`${lock}.steal`)
+    writeFileSync(join(`${lock}.steal`, 'owner.json'), JSON.stringify({ token: 'gone', pid: dead, host: hostname(), at: Date.now() }))
+    expect(withLock(dir, () => 7, { timeoutMs: 2000 })).toBe(7)
+    expect(existsSync(`${lock}.steal`)).toBe(false)
+  })
+
+  test('a stealer that finds a replacement owner leaves it alone', () => {
+    const dir = cacheDir(root, 'o/r', 9)
+    const lock = join(dir, '.lock')
+    mkdirSync(lock, { recursive: true })
+    writeFileSync(join(lock, 'owner.json'), JSON.stringify({ token: 'live', pid: process.pid, host: hostname(), at: Date.now() }))
+    expect(takeOver(lock, 'dead', 60_000)).toBe(false)
+    expect(JSON.parse(readFileSync(join(lock, 'owner.json'), 'utf8')).token).toBe('live')
+  })
+
   test('a write holds the lock from its conflict check through its refresh', () => {
     gh.addIssue({ number: 7 })
     const comment = gh.addComment(7, 'v1')

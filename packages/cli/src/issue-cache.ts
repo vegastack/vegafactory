@@ -165,25 +165,52 @@ function readOwner(lockDir: string): LockOwner | null {
   try { return JSON.parse(readFileSync(join(lockDir, 'owner.json'), 'utf8')) as LockOwner } catch { return null }
 }
 
-// Removing a dead owner's lock happens under a second, short-lived lock, and only after
-// re-reading that the lock still belongs to the owner judged dead — so a waiter that paused
-// can never remove a lock a live process took in the meantime. While `.lock` exists nobody
-// else can create it, so the re-read and the removal see the same owner.
-export function takeOver(lock: string, deadToken: string | null, staleMs: number) {
-  const steal = `${lock}.steal`
+// Creates `dir` as a lock owned by `token`; false when someone else holds it.
+function acquire(dir: string, token: string): boolean {
   try {
-    mkdirSync(steal)
+    mkdirSync(dir)
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error
-    // A stealer that crashed mid-takeover leaves this behind; the takeover itself takes milliseconds.
-    try { if (Date.now() - statSync(steal).mtimeMs > 30_000) rmSync(steal, { recursive: true, force: true }) } catch { /* gone */ }
-    return
+    if ((error as NodeJS.ErrnoException).code === 'EEXIST') return false
+    throw error
+  }
+  writeFileSync(join(dir, 'owner.json'), JSON.stringify({ token, pid: process.pid, host: hostname(), at: Date.now() }))
+  return true
+}
+
+// Removes `dir` only while `token` still owns it.
+function release(dir: string, token: string) {
+  if (readOwner(dir)?.token === token) rmSync(dir, { recursive: true, force: true })
+}
+
+// Removing a dead owner's lock happens under a second lock with the same owner rules, and only
+// after re-reading that the issue lock still belongs to the owner judged dead. While `.lock`
+// exists nobody else can create it, so the re-read and the removal see the same owner. A dead
+// stealer's mutex is cleared the same way. Returns false when the takeover could not run now.
+export function takeOver(lock: string, deadToken: string | null, staleMs: number): boolean {
+  const steal = `${lock}.steal`
+  const token = randomUUID()
+  if (!acquire(steal, token)) {
+    const stealer = readOwner(steal)
+    if (ownerGone(stealer, steal, staleMs)) {
+      const grave = `${steal}.dead-${token}`
+      try {
+        renameSync(steal, grave)
+        // Only bury what we judged dead; put a live replacement back.
+        if (readOwner(grave)?.token === stealer?.token) rmSync(grave, { recursive: true, force: true })
+        else renameSync(grave, steal)
+      } catch { /* another waiter moved it */ }
+    }
+    return false
   }
   try {
     const current = readOwner(lock)
-    if ((current?.token ?? null) === deadToken && ownerGone(current, lock, staleMs)) rmSync(lock, { recursive: true, force: true })
+    if ((current?.token ?? null) === deadToken && ownerGone(current, lock, staleMs)) {
+      rmSync(lock, { recursive: true, force: true })
+      return true
+    }
+    return false
   } finally {
-    rmSync(steal, { recursive: true, force: true })
+    release(steal, token)
   }
 }
 
@@ -194,27 +221,18 @@ export function withLock<T>(dir: string, fn: () => T, { timeoutMs = 10_000, stal
   const token = randomUUID()
   const started = Date.now()
   for (;;) {
-    try {
-      mkdirSync(lock)
-      writeFileSync(join(lock, 'owner.json'), JSON.stringify({ token, pid: process.pid, host: hostname(), at: Date.now() }))
-      break
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error
-      const owner = readOwner(lock)
-      if (ownerGone(owner, lock, staleMs)) {
-        takeOver(lock, owner?.token ?? null, staleMs)
-        continue
-      }
-      if (Date.now() - started > timeoutMs) throw new Error(`issue cache is locked by pid ${owner?.pid ?? '?'} on ${owner?.host ?? '?'}: ${lock}`)
-      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 50)
-    }
+    if (acquire(lock, token)) break
+    const owner = readOwner(lock)
+    if (ownerGone(owner, lock, staleMs) && takeOver(lock, owner?.token ?? null, staleMs)) continue
+    if (Date.now() - started > timeoutMs) throw new Error(`issue cache is locked by pid ${owner?.pid ?? '?'} on ${owner?.host ?? '?'}: ${lock}`)
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 50)
   }
   held.set(lock, token)
   try {
     return fn()
   } finally {
     held.delete(lock)
-    if (readOwner(lock)?.token === token) rmSync(lock, { recursive: true, force: true })
+    release(lock, token)
   }
 }
 
