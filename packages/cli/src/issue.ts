@@ -4,8 +4,9 @@
 import { createHash } from 'node:crypto'
 import { spawnSync } from 'node:child_process'
 import { existsSync, readFileSync } from 'node:fs'
-import { dirname, join, resolve } from 'node:path'
+import { basename, dirname, join, resolve } from 'node:path'
 import { ghRequest, type GhRunner, defaultRunner } from './gh.ts'
+import { claim, heartbeat, holderOf, ownerId, release, type ClaimKind } from './claim.ts'
 import { cacheDir, dropIssue, readBody, readState, syncIssue, type CacheState, type CommentEntry, type GhComment } from './issue-cache.ts'
 import { STATES, sizeOf, stateOf, transition, type State } from './labels.ts'
 
@@ -202,10 +203,24 @@ export function postComment(ctx: WriteContext, body: string): GhComment {
   return comment
 }
 
+const CLAIM_ROW = /^\s*<!--\s*vsk:claim\b[^>]*-->\s*$/
+
+// Heartbeat rows belong to the hooks, so an edit keeps GitHub's current rows, not the editor's copy.
+export function keepClaimRows(current: string, edited: string): string {
+  const rows = current.split('\n').filter((row) => CLAIM_ROW.test(row))
+  const lines = edited.split('\n').filter((row) => !CLAIM_ROW.test(row))
+  if (!rows.length) return lines.join('\n')
+  const marker = lines.findIndex((row) => /<!--\s*vsk:v1\s+type=ledger\b/.test(row))
+  lines.splice(marker + 1, 0, ...rows)
+  return lines.join('\n')
+}
+
 export function editComment(ctx: WriteContext, commentId: number, body: string, since: number) {
-  syncIssue({ root: ctx.root, repo: ctx.repo, number: ctx.number, runner: ctx.runner })
+  const { dir } = syncIssue({ root: ctx.root, repo: ctx.repo, number: ctx.number, runner: ctx.runner })
   conflictIfChanged(ctx, commentId, since)
-  ghRequest(`repos/${ctx.repo}/issues/comments/${commentId}`, { method: 'PATCH', body: { body }, runner: ctx.runner })
+  const entry = readState(dir)!.comments[String(commentId)]!
+  const next = entry.type === 'ledger' ? keepClaimRows(readBody(dir, entry.file), body) : body
+  ghRequest(`repos/${ctx.repo}/issues/comments/${commentId}`, { method: 'PATCH', body: { body: next }, runner: ctx.runner })
 }
 
 export function editBody(ctx: WriteContext, body: string, since: number) {
@@ -248,9 +263,15 @@ Write (GitHub first, then the local copy):
   body <n> --file PATH --since CURSOR    replace the issue body
   label <n> [--add a,b] [--remove c] [--state ${STATES.join('|')}]
   ack <n> --stage brief|plan|ship --by LOGIN --quote TEXT [--source comment:ID|session]
+  claim <n> --harness claude|codex --model ID [--kind session|dispatch] [--take-back-by LOGIN]
+                                         exit 2 when someone else holds it
+  release <n> [--reason TEXT]            give the issue up
+  heartbeat <n> [--active MINUTES]       mark the claim alive (hooks call this)
+  holder <n>                             who holds the issue
   drop <n>                               delete the local copy
 
-Options: --repo OWNER/NAME (default: dev.md repo: or the origin remote) · --json`
+Options: --repo OWNER/NAME (default: dev.md repo: or the origin remote) · --owner ID (default:
+machine:worktree-folder) · --json`
 }
 
 interface Parsed { verb: string; number: number; positional: string[]; flags: Record<string, string>; json: boolean }
@@ -276,6 +297,11 @@ export function parseIssueArgs(argv: string[]): Parsed {
   return { verb, number, positional, flags, json }
 }
 
+function worktreeName(cwd: string): string {
+  const top = spawnSync('git', ['rev-parse', '--show-toplevel'], { cwd, encoding: 'utf8' }).stdout.trim()
+  return basename(top || cwd)
+}
+
 const list = (value?: string) => (value ? value.split(',').map((item) => item.trim()).filter(Boolean) : [])
 const cursor = (value?: string) => {
   const n = Number(value)
@@ -290,6 +316,7 @@ export function runIssue(argv: string[], { runner = defaultRunner, cwd = process
   const repo = args.flags.repo ?? detectRepo(root)
   const ctx: WriteContext = { root, repo, number: args.number, runner }
   const print = (value: unknown, text: string) => out(args.json ? JSON.stringify(value, null, 2) : text)
+  const owner = args.flags.owner ?? ownerId(worktreeName(cwd))
   const sync = (since = 0) => syncIssue({ root, repo, number: args.number, since, runner })
 
   switch (args.verb) {
@@ -353,6 +380,33 @@ export function runIssue(argv: string[], { runner = defaultRunner, cwd = process
       const comment = postComment(ctx, ackBody({ stage, by: args.flags.by.replace(/^@/, ''), brief: hashes.brief, plan: stage === 'brief' ? null : hashes.plan, source, quote: args.flags.quote }))
       const result = sync()
       print({ id: comment.id, url: comment.html_url, cursor: result.cursor }, `recorded ${stage} ack ${comment.html_url}\ncursor ${result.cursor}`)
+      return 0
+    }
+    case 'claim': {
+      const kind = (args.flags.kind ?? 'session') as ClaimKind
+      if (kind !== 'session' && kind !== 'dispatch') throw new Error('--kind must be session or dispatch')
+      if (!args.flags.harness || !args.flags.model) throw new Error('--harness and --model are required')
+      const outcome = claim(ctx, { owner, kind, harness: args.flags.harness, model: args.flags.model, takeBackBy: args.flags['take-back-by']?.replace(/^@/, '') })
+      const wait = outcome.waitMs ? `\nwait up to ${outcome.waitMs / 60_000} min for the previous holder's last push, then pull the branch` : ''
+      print(outcome, `${outcome.ok ? 'ok' : 'blocked'}: ${outcome.message}${wait}`)
+      return outcome.ok ? 0 : 2
+    }
+    case 'release':
+      release(ctx, owner, owner, args.flags.reason ?? 'done')
+      print({ released: owner }, `released ${owner}`)
+      return 0
+    case 'heartbeat': {
+      const active = Number(args.flags.active ?? 0)
+      if (!Number.isFinite(active) || active < 0) throw new Error('--active needs a number of minutes')
+      heartbeat(ctx, owner, Math.round(active))
+      print({ owner }, `heartbeat ${owner}`)
+      return 0
+    }
+    case 'holder': {
+      const dir = sync().dir
+      const snap = snapshot(dir)
+      const { holder, stale } = holderOf(snap.state, snap.body)
+      print({ holder, stale }, holder ? `${holder.owner} (${holder.harness}${holder.model ? ` · ${holder.model}` : ''}) · last active ${holder.heartbeat}` : 'nobody')
       return 0
     }
     case 'drop':

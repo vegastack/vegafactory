@@ -23,8 +23,10 @@ export class FakeGitHub {
   issues = new Map<number, FakeIssue>()
   permissions = new Map<string, string>()
   calls: string[] = []
+  // Runs after each posted comment, to stage a concurrent writer.
+  afterPost?: (body: string) => void
   private nextId = 1000
-  private clock = Date.parse('2026-09-17T10:00:00Z')
+  clock = Date.parse('2026-09-17T10:00:00Z')
 
   tick(): string {
     this.clock += 1000
@@ -112,6 +114,7 @@ export class FakeGitHub {
       const issue = this.issues.get(Number(m[1]))!
       if (method === 'POST') {
         const comment = this.addComment(issue.number, payload.body, 'mk')
+        this.afterPost?.(payload.body)
         return this.respond(201, this.commentJson(comment, issue.number))
       }
       const slice = issue.comments.slice((page - 1) * perPage, page * perPage).map((c) => this.commentJson(c, issue.number))

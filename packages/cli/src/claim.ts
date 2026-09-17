@@ -3,7 +3,9 @@
 // heartbeat is fresh. The heartbeat lives on the status (ledger) comment's claim line,
 // which hooks refresh — never the model.
 import { hostname } from 'node:os'
-import type { CacheState, CommentEntry } from './issue-cache.ts'
+import { ghRequest, type GhRunner } from './gh.ts'
+import { readBody, readState, syncIssue, type CacheState, type CommentEntry } from './issue-cache.ts'
+import { stateOf, transition } from './labels.ts'
 
 export type ClaimKind = 'session' | 'dispatch'
 export const TIMEOUT_MS: Record<ClaimKind, number> = { session: 4 * 60 * 60_000, dispatch: 30 * 60_000 }
@@ -110,4 +112,117 @@ export function holderOf(state: CacheState, body: Body, now = Date.now()): { hol
     stale.push(holder)
   }
   return { holder: null, stale }
+}
+
+// ---------------------------------------------------------------------------------------------
+// Claim operations. Each one reads GitHub fresh (through the cache) before and after writing.
+
+export const LEDGER_MARKER = '<!-- vsk:v1 type=ledger -->'
+
+export interface ClaimContext {
+  root: string
+  repo: string
+  number: number
+  runner: GhRunner
+}
+
+interface Fresh { state: CacheState; dir: string; body: Body }
+
+function fresh(ctx: ClaimContext): Fresh {
+  const { dir } = syncIssue({ root: ctx.root, repo: ctx.repo, number: ctx.number, runner: ctx.runner })
+  const state = readState(dir)
+  if (!state?.issue) throw new Error(`issue #${ctx.number} is not cached`)
+  return { state, dir, body: (entry) => readBody(dir, entry.file) }
+}
+
+function post(ctx: ClaimContext, body: string): number {
+  return ghRequest<{ id: number }>(`repos/${ctx.repo}/issues/${ctx.number}/comments`, { method: 'POST', body: { body }, runner: ctx.runner }).body.id
+}
+
+function patch(ctx: ClaimContext, commentId: number, body: string) {
+  ghRequest(`repos/${ctx.repo}/issues/comments/${commentId}`, { method: 'PATCH', body: { body }, runner: ctx.runner })
+}
+
+export function emptyLedger(): string {
+  return `${LEDGER_MARKER}\n## Status\n\n_Not started._\n`
+}
+
+// Writes this owner's heartbeat on the status comment, creating the comment when missing.
+// Heartbeat lines are not content: they never bump the cache cursor or break an edit.
+export function heartbeat(ctx: ClaimContext, owner: string, activeMinutes = 0, now = Date.now()) {
+  const f = fresh(ctx)
+  const { claims, ledger } = claimsOf(f.state, f.body)
+  if (!claims.some((claim) => claim.owner === owner)) throw new Error(`${owner} holds no claim on #${ctx.number}`)
+  const at = new Date(now).toISOString()
+  if (!ledger) post(ctx, withHeartbeat(emptyLedger(), owner, at, activeMinutes))
+  else patch(ctx, ledger.id, withHeartbeat(f.body(ledger), owner, at, activeMinutes))
+  syncIssue({ root: ctx.root, repo: ctx.repo, number: ctx.number, runner: ctx.runner })
+}
+
+const args = (f: Fresh): [CacheState, Body] => [f.state, f.body]
+
+function dropHeartbeat(ctx: ClaimContext, owners: string[]) {
+  const f = fresh(ctx)
+  const { ledger } = claimsOf(f.state, f.body)
+  if (!ledger) return
+  const body = f.body(ledger)
+  const kept = body.split('\n').filter((row) => !/<!--\s*vsk:claim\b/.test(row) || !owners.includes(markerKeys(row, 'vsk:claim').owner ?? ''))
+  if (kept.length !== body.split('\n').length) patch(ctx, ledger.id, kept.join('\n'))
+}
+
+export function release(ctx: ClaimContext, owner: string, by: string, reason: string) {
+  post(ctx, releaseBody({ owner, by, reason }))
+  dropHeartbeat(ctx, [owner])
+  syncIssue({ root: ctx.root, repo: ctx.repo, number: ctx.number, runner: ctx.runner })
+}
+
+export interface ClaimRequest { owner: string; kind: ClaimKind; harness: string; model: string; takeBackBy?: string }
+export interface ClaimOutcome {
+  ok: boolean
+  message: string
+  holder: Holder | null
+  // Set after a take-back from a live holder: wait up to this long for its last push.
+  waitMs: number
+}
+
+export function claim(ctx: ClaimContext, request: ClaimRequest, now = Date.now()): ClaimOutcome {
+  const before = holderOf(...args(fresh(ctx)), now)
+  if (before.holder?.owner === request.owner) {
+    heartbeat(ctx, request.owner, 0, now)
+    return { ok: true, message: `already held by ${request.owner}`, holder: before.holder, waitMs: 0 }
+  }
+  if (before.holder && !request.takeBackBy) {
+    const h = before.holder
+    return { ok: false, message: `held by ${h.owner} (${h.harness}${h.model ? ` · ${h.model}` : ''}), last active ${h.heartbeat} — take it back with --take-back-by <login>`, holder: h, waitMs: 0 }
+  }
+  const previous = [...before.stale, ...(before.holder ? [before.holder] : [])]
+  for (const old of previous) {
+    const reason = old.stale ? `no heartbeat since ${old.heartbeat}` : `taken back by @${request.takeBackBy}`
+    post(ctx, releaseBody({ owner: old.owner, by: request.takeBackBy ?? request.owner, reason }))
+  }
+  if (previous.length) dropHeartbeat(ctx, previous.map((old) => old.owner))
+  post(ctx, claimBody({ ...request, note: request.takeBackBy ? `taken back by @${request.takeBackBy}` : undefined }))
+
+  // Two sessions can claim at once: both re-read, the earliest live claim wins, the other backs off.
+  const after = holderOf(...args(fresh(ctx)), now)
+  if (after.holder?.owner !== request.owner) {
+    release(ctx, request.owner, request.owner, `lost the race to ${after.holder?.owner ?? 'another claim'}`)
+    return { ok: false, message: `lost the race to ${after.holder?.owner}`, holder: after.holder, waitMs: 0 }
+  }
+  heartbeat(ctx, request.owner, 0, now)
+  const f = fresh(ctx)
+  if (stateOf(f.state.issue!.labels).state === 'queued') {
+    const edit = transition(f.state.issue!.labels, 'in-progress')
+    if (edit.add.length) ghRequest(`repos/${ctx.repo}/issues/${ctx.number}/labels`, { method: 'POST', body: { labels: edit.add }, runner: ctx.runner })
+    for (const label of edit.remove) {
+      try {
+        ghRequest(`repos/${ctx.repo}/issues/${ctx.number}/labels/${encodeURIComponent(label)}`, { method: 'DELETE', runner: ctx.runner })
+      } catch (error) {
+        if ((error as { status?: number }).status !== 404) throw error
+      }
+    }
+    syncIssue({ root: ctx.root, repo: ctx.repo, number: ctx.number, runner: ctx.runner })
+  }
+  const live = before.holder && !before.holder.stale
+  return { ok: true, message: `claimed by ${request.owner}`, holder: after.holder, waitMs: live ? 2 * 60_000 : 0 }
 }
