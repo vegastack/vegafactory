@@ -3,6 +3,7 @@ import { spawnSync } from 'node:child_process'
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { artifactHash } from '../src/issue-cache.ts'
 import { detectReviewer, payload, readReviewComment, renderComment, resolveCommit, reviewNonce, reviewPolicy, runReview, validateReview, type CommentData, type ReviewState } from '../src/review.ts'
 import { FakeGitHub } from './fake-github.ts'
 
@@ -77,10 +78,16 @@ function commit(file: string, text: string, message = 'work') {
 }
 const reviewComments = () => gh.issues.get(7)!.comments.filter((c) => c.body.startsWith('<!-- vsk:v1 type=review'))
 const statePath = () => join(root, '.vegastack/.tmp/reviews/7.json')
-const devMd = (harnessPolicy: string) => writeFileSync(join(root, '.vegastack/dev.md'), `repo: o/r\nharness-policy: ${harnessPolicy}\n`)
+// dev.md is tracked, and a review refuses a dirty worktree, so a knob change is committed.
+const devMd = (harnessPolicy: string) => commit('.vegastack/dev.md', `repo: o/r\nharness-policy: ${harnessPolicy}\n`, 'knobs')
 // A review comment as the CLI writes it, for forged and concurrent-writer cases.
+const briefHash = () => artifactHash(gh.issues.get(7)!.body)
+const planHash = () => artifactHash(gh.issues.get(7)!.comments.find((c) => c.body.startsWith('<!-- vsk:v1 type=plan'))!.body)
 const comment = (over: Partial<CommentData> = {}, history: string[] = []) =>
-  renderComment({ round: 1, sha: 'a'.repeat(40), base: 'b'.repeat(40), reviewer: 'codex', verdict: 'clean', findings: [], ...over } as CommentData, history)
+  renderComment({
+    round: 1, sha: 'a'.repeat(40), base: 'b'.repeat(40), brief: briefHash(), plan: planHash(),
+    reviewer: 'codex', verdict: 'clean', findings: [], ...over,
+  } as CommentData, history)
 const readState = () => JSON.parse(readFileSync(statePath(), 'utf8')) as ReviewState
 
 beforeEach(() => {
@@ -656,6 +663,8 @@ describe('the reviewer policy comes from the worktree under review', () => {
     const wt = join(workspace, 'wt')
     git(root, 'worktree', 'add', '-q', '-b', 'feat/7-copy', wt, 'HEAD')
     writeFileSync(join(wt, '.vegastack/dev.md'), 'repo: o/r\nharness-policy: review codex default minimal\n')
+    git(wt, 'add', '-A')
+    git(wt, 'commit', '-q', '-m', 'worktree knobs')
     queue('codex', [codexReply(verdict([]))])
     const { code } = await review(['--reviewer', 'codex'], { cwd: wt })
     expect(code).toBe(0)
@@ -800,7 +809,7 @@ describe('a comment cannot claim a verdict its findings contradict', () => {
   test('the findings decide, so an inconsistent marker fails trust', async () => {
     const head = git(root, 'rev-parse', 'HEAD')
     // "clean" in the marker and in the JSON, but a must-fix finding in the same JSON.
-    const lying = renderComment({ round: 1, sha: head, base: git(root, 'rev-parse', 'origin/main'), reviewer: 'codex', verdict: 'clean', findings: [] } as CommentData, [])
+    const lying = renderComment({ round: 1, sha: head, base: git(root, 'rev-parse', 'origin/main'), brief: briefHash(), plan: planHash(), reviewer: 'codex', verdict: 'clean', findings: [] } as CommentData, [])
       .replace('"findings": []', `"findings": [${JSON.stringify(finding('F1'))}]`)
     gh.addComment(7, lying, 'mk')
     expect(readReviewComment(lying)!.verdict).toBe('needs-fixes')
@@ -831,4 +840,79 @@ describe('several trusted reviews are reconciled, or refused', () => {
     expect(conflict.code).toBe(2)
     expect(conflict.text).toContain('two review comments disagree at round 3')
   })
+})
+
+describe('two reviews at one round must be the same review', () => {
+  const head = () => git(root, 'rev-parse', 'HEAD')
+  const rival = (over: Partial<CommentData>) => {
+    gh.addComment(7, comment({ round: 3, sha: head(), base: git(root, 'rev-parse', 'origin/main'), verdict: 'needs-fixes', findings: [finding('F1') as never] }), 'mk')
+    gh.addComment(7, comment({ round: 3, sha: head(), base: git(root, 'rev-parse', 'origin/main'), verdict: 'needs-fixes', findings: [finding('F1') as never], ...over }), 'mk')
+  }
+  test('the same verdict and head but different findings is still a disagreement', async () => {
+    rival({ findings: [finding('F1') as never, finding('F2') as never] })
+    const { code, text } = await review(['--reviewer', 'codex'])
+    expect(code).toBe(2)
+    expect(text).toContain('two review comments disagree at round 3')
+    expect(text).toContain('finding(s)')
+    expect(calls()).toEqual([])
+  })
+
+  test('the same findings from a different base is a disagreement too', async () => {
+    rival({ base: 'c'.repeat(40) })
+    const { code, text } = await review(['--reviewer', 'codex'])
+    expect(code).toBe(2)
+    expect(text).toContain('two review comments disagree at round 3')
+    expect(text).toContain('base ')
+  })
+})
+
+describe('a review is about the brief and plan it read', () => {
+  const clean = () => queue('codex', [codexReply(verdict([])), codexReply(verdict([]))])
+  test('an edited brief re-runs the review; ticking a plan checkbox does not', async () => {
+    clean()
+    expect((await review(['--reviewer', 'codex'])).code).toBe(0)
+    expect((await review(['--reviewer', 'codex'])).text).toContain('already reviewed')
+
+    // A ticked checkbox is not a changed requirement.
+    const plan = gh.issues.get(7)!.comments.find((c) => c.body.startsWith('<!-- vsk:v1 type=plan'))!
+    gh.editComment(plan.id, plan.body.replace('- [ ] **Task 1', '- [x] **Task 1'))
+    expect((await review(['--reviewer', 'codex'])).text).toContain('already reviewed')
+    expect(calls()).toHaveLength(1)
+
+    // An edited requirement is.
+    gh.editBody(7, gh.issues.get(7)!.body + '\n- [ ] and a JSON export\n')
+    const again = await review(['--reviewer', 'codex'])
+    expect(again.code).toBe(0)
+    expect(again.text).not.toContain('already reviewed')
+    expect(calls()).toHaveLength(2)
+    expect(reviewComments()[0]!.body).toContain('type=review round=2')
+  })
+
+  test('an edited plan re-runs it as well, with a fresh reviewer rather than a resume', async () => {
+    clean()
+    await review(['--reviewer', 'codex'])
+    const plan = gh.issues.get(7)!.comments.find((c) => c.body.startsWith('<!-- vsk:v1 type=plan'))!
+    gh.editComment(plan.id, plan.body + '\n- [ ] **Task 2: JSON export** <!-- task-id:7-T2 -->')
+    const { text } = await review(['--reviewer', 'codex', '--dry-run', '--json'])
+    const dry = JSON.parse(text)
+    expect(dry.resume).toBe(false)
+    expect(dry.round).toBe(2)
+  })
+})
+
+describe('the worktree holds nothing the reviewer would read but not review', () => {
+  const cases: Array<[string, () => void]> = [
+    ['a modified tracked file', () => writeFileSync(join(root, 'app.ts'), 'export const a = 2\n')],
+    ['a staged change', () => { writeFileSync(join(root, 'staged.ts'), 'x\n'); git(root, 'add', 'staged.ts') }],
+    ['an untracked file', () => writeFileSync(join(root, 'stray.ts'), 'x\n')],
+  ]
+  for (const [what, dirty] of cases) {
+    test(`${what} refuses the review and names the path`, async () => {
+      queue('codex', [codexReply(verdict([]))])
+      dirty()
+      await expect(review(['--reviewer', 'codex'])).rejects.toThrow(/uncommitted change\(s\) — commit them, then review: /)
+      expect(calls()).toEqual([])
+      expect(reviewComments()).toEqual([])
+    })
+  }
 })

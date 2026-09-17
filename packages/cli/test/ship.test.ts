@@ -1,10 +1,11 @@
 import { beforeEach, expect, test } from 'bun:test'
 import { spawnSync } from 'node:child_process'
-import { mkdirSync, mkdtempSync, realpathSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, readFileSync, realpathSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import type { GhRunner } from '../src/gh.ts'
 import { ackBody, artifactHash } from '../src/issue.ts'
+import { cacheDir, syncIssue } from '../src/issue-cache.ts'
 import { renderComment, type CommentData, type Finding } from '../src/review.ts'
 import { runShip } from '../src/ship.ts'
 import { FakeGitHub } from './fake-github.ts'
@@ -23,9 +24,15 @@ const runner: GhRunner = (args, input) => {
   return gh.runner(args, input)
 }
 // The review the ship gate requires: clean, on the pushed head, from someone with write access.
+const hashes = () => {
+  const dir = cacheDir(root, 'o/r', 7)
+  syncIssue({ root, repo: 'o/r', number: 7, runner })
+  const plan = gh.issues.get(7)!.comments.find((c) => c.body.startsWith('<!-- vsk:v1 type=plan'))
+  return { brief: artifactHash(readFileSync(join(dir, 'issue.md'), 'utf8').split('\n---\n')[1] ?? ''), plan: plan ? artifactHash(plan.body) : null }
+}
 const reviewed = (over: Partial<CommentData> = {}, login = 'mk', type = 'User') => gh.addComment(7, renderComment({
   round: 1, sha: git(root, 'rev-parse', 'HEAD'), base: git(root, 'rev-parse', 'origin/main'),
-  reviewer: 'codex', verdict: 'clean', findings: [], ...over,
+  ...hashes(), reviewer: 'codex', verdict: 'clean', findings: [], ...over,
 } as CommentData, []), login, type)
 
 const run = (...extra: string[]) => {
@@ -271,4 +278,56 @@ test('two trusted reviews that disagree at the same round stop the ship and name
   expect(blocks[0]).toContain('needs-fixes')
   expect(blocks[0]).toContain('clean')
   expect(blocks).toHaveLength(1)
+})
+
+test('the ship gate needs the default branch it can read, and its remote ref', () => {
+  const head = git(root, 'rev-parse', 'HEAD')
+  gh.addComment(7, `<!-- vsk:v1 type=evidence rev=1 branch=feat/7-export sha=${head.slice(0, 7)} -->\nit works`)
+  gh.addComment(7, ackBody({ stage: 'ship', by: 'mk', brief: artifactHash('Export CSV'), plan: null, source: 'session', quote: 'ship it' }))
+  reviewed()
+
+  // The repository's default branch is trunk, and this checkout has no origin/trunk: the review's
+  // base cannot be proved to be in it, so the gate blocks instead of passing on a local guess.
+  spawnSync('git', ['remote', 'set-head', 'origin', '--delete'], { cwd: root })
+  gh.defaultBranch = 'trunk'
+  const blocks = run().blocks
+  expect(blocks).toContain('origin/trunk is not in this checkout — fetch it, so the review\'s base can be checked against it')
+  expect(run().ok).toBe(false)
+
+  // A review whose base is not an object in this checkout blocks too.
+  gh.defaultBranch = 'main'
+  spawnSync('git', ['remote', 'set-head', 'origin', 'main'], { cwd: root })
+  gh.deleteComment(gh.issues.get(7)!.comments.filter((c) => c.body.startsWith('<!-- vsk:v1 type=review'))[0]!.id)
+  reviewed({ base: 'd'.repeat(40) })
+  expect(run().blocks).toEqual([`the review's base ddddddd is not a commit in this checkout — fetch the branch it was reviewed from`])
+})
+
+test('a review of an older brief or plan does not ship', () => {
+  const head = git(root, 'rev-parse', 'HEAD')
+  gh.addComment(7, `<!-- vsk:v1 type=evidence rev=1 branch=feat/7-export sha=${head.slice(0, 7)} -->\nit works`)
+  gh.addComment(7, ackBody({ stage: 'ship', by: 'mk', brief: artifactHash('Export CSV'), plan: null, source: 'session', quote: 'ship it' }))
+  const stale = reviewed()
+  expect(run()).toMatchObject({ ok: true, blocks: [] })
+
+  // The brief moves on without a new commit: the reviewer never saw this text.
+  gh.editBody(7, 'Export CSV and JSON')
+  // (the ack binds to the brief too, so it is void as well — the review block is the one under test)
+  expect(run().blocks).toContain('the brief changed after review round 1 — re-run the review')
+  gh.deleteComment(stale.id)
+  const fresh = reviewed()
+  // The evidence ack binds to the brief too, so record the operator's word against the new text.
+  gh.addComment(7, ackBody({ stage: 'ship', by: 'mk', brief: artifactHash('Export CSV and JSON'), plan: null, source: 'session', quote: 'ship it' }))
+  expect(run()).toMatchObject({ ok: true, blocks: [] })
+
+  // A plan comment appearing after the review is a plan the reviewer never read.
+  const plan = gh.addComment(7, '<!-- vsk:v1 type=plan rev=1 -->\n## Plan (v1)\n\n### Tasks\n\n- [ ] **Task 1** <!-- task-id:7-T1 -->')
+  expect(run().blocks).toContain('the plan changed after review round 1 — re-run the review')
+  gh.deleteComment(fresh.id)
+  reviewed()
+  gh.addComment(7, ackBody({ stage: 'ship', by: 'mk', brief: artifactHash('Export CSV and JSON'), plan: artifactHash(plan.body), source: 'session', quote: 'ship it' }))
+  expect(run()).toMatchObject({ ok: true, blocks: [] })
+
+  // Ticking a plan checkbox changes neither the plan's hash nor the review's standing.
+  gh.editComment(plan.id, plan.body.replace('- [ ]', '- [x]'))
+  expect(run()).toMatchObject({ ok: true, blocks: [] })
 })

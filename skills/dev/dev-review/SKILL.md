@@ -17,12 +17,12 @@ Nearest neighbors: `dev-implement` runs this after its Verify gate and applies t
 
 ## What the command does
 
-Run it from the issue's worktree, after the work is committed.
+Run it from the issue's worktree with nothing uncommitted — the packet describes a commit, and a file the reviewer can read but the diff does not carry is not reviewed at all.
 
 1. Builds the packet: the brief's acceptance criteria, the plan's task list, `git diff --stat`, the changed files, and the diff with five lines of context against the base (default `origin/<default branch>`, `--base` to override).
 2. Starts the other tool read-only in that worktree with the packet on stdin — no shell string, no read limit: the reviewer may read any file it needs. Model and effort come from dev.md's `harness-policy:` `review` entry when it names that tool; otherwise the tool's own default stands.
 3. Takes back JSON — a verdict plus findings with id, axis, severity, file, line, issue and fix — and validates it. One malformed or stuck run is retried once, then the command hands back.
-4. Posts the single review comment itself. **The reviewer never writes to GitHub**, so what lands is exactly what it returned.
+4. Posts the single review comment itself, binding the verdict to the commit *and* to the brief and plan the reviewer read. **The reviewer never writes to GitHub**, so what lands is exactly what it returned. Edit a requirement and the review is stale: the command runs again and the ship check refuses until it does.
 5. Exits 0 clean · 2 needs-fixes or hand-back · 1 error.
 
 Axes: spec (against the acceptance criteria and plan), bugs, security, and style only where a documented rule exists. Large or `risky` diffs split into two parallel reviewers and the findings merge; everything else is one run. Details and the full flag list: [flow](references/flow.md).

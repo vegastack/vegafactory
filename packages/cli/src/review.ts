@@ -11,7 +11,7 @@ import { defaultRunner, ghRequest, type GhRunner } from './gh.ts'
 import { defaultBranch } from './guard-rules.ts'
 import { assertRepo, cacheDir, readBody, syncIssue, type CommentEntry } from './issue-cache.ts'
 import { parseStage } from '../../../skills/dev/dev-setup/scripts/effective-policy.mjs'
-import { detectRepo, latestOfType, locked, markerKeys, repoRoot, runIssue, snapshot, type Snapshot, type WriteContext } from './issue.ts'
+import { currentHashes, detectRepo, latestOfType, locked, markerKeys, repoRoot, runIssue, snapshot, type Snapshot, type WriteContext } from './issue.ts'
 
 export type Reviewer = 'claude' | 'codex'
 export const AXES = ['spec', 'bugs', 'security', 'style'] as const
@@ -31,6 +31,8 @@ export interface ReviewState {
   // The base is the resolved commit id, fixed at round 1; head is the commit reviewed.
   base: string
   head: string
+  brief: string
+  plan: string | null
   sessions: Session[]
   // The comment this state describes. Another machine editing the same round makes it stale.
   comment: { id: number; digest: string }
@@ -405,7 +407,10 @@ const FINDINGS_BLOCK = /<summary>Findings JSON<\/summary>\s*```json\n([\s\S]*?)\
 const HISTORY_LINE = /^- Round \d+ @ .*$/gm
 const safe = (text: string) => text.replace(/<!--/g, '&lt;!--').replace(/\r/g, '').trim()
 
-export interface CommentData { round: number; sha: string; base: string; reviewer: Reviewer; verdict: ReviewResult['verdict']; findings: Finding[] }
+// `brief` and `plan` are the artifact hashes of the issue body and the plan comment the reviewer
+// read (issue-cache's artifactHash, which ignores ticked checkboxes and heartbeats). A review is
+// only about the text it saw.
+export interface CommentData { round: number; sha: string; base: string; brief: string; plan: string | null; reviewer: Reviewer; verdict: ReviewResult['verdict']; findings: Finding[] }
 
 export function readReviewComment(body: string): (CommentData & { history: string[] }) | null {
   const match = FINDINGS_BLOCK.exec(body)
@@ -424,7 +429,14 @@ export interface PostedReview { entry: CommentEntry; data: CommentData; history:
 
 // What a state file records about the comment it wrote, so a later run can tell "mine, unchanged"
 // from "someone else edited this round on another machine".
-export const commentDigest = (data: CommentData) => createHash('sha256').update(JSON.stringify(data)).digest('hex').slice(0, 16)
+const canonical = (value: unknown): unknown =>
+  Array.isArray(value) ? value.map(canonical)
+    : value && typeof value === 'object'
+      ? Object.fromEntries(Object.keys(value as object).sort().map((key) => [key, canonical((value as Record<string, unknown>)[key])]))
+      : value
+
+export const commentDigest = (data: CommentData) =>
+  createHash('sha256').update(JSON.stringify(canonical({ ...data, findings: [...data.findings].sort((a, b) => a.id.localeCompare(b.id)) }))).digest('hex').slice(0, 16)
 
 // The review comment counts only when a person with write access posted it — anyone can write a
 // marker and a Findings JSON block, and a forged "clean at this head" would skip the review.
@@ -436,6 +448,7 @@ export function trustedReviews(snap: Snapshot, trusted: Trusted): PostedReview[]
     const body = snap.body(entry)
     const parsed = readReviewComment(body)
     if (!parsed || !isCommit(parsed.sha) || !isCommit(parsed.base) || (parsed.reviewer !== 'claude' && parsed.reviewer !== 'codex')) continue
+    if (!/^[0-9a-f]{12}$/.test(parsed.brief ?? '') || (parsed.plan !== null && !/^[0-9a-f]{12}$/.test(parsed.plan ?? ''))) continue
     const keys = markerKeys(body)
     if (keys.round !== String(parsed.round) || keys.sha !== parsed.sha.slice(0, 7) || keys.agent !== parsed.reviewer || keys.verdict !== parsed.verdict) continue
     const { history, ...data } = parsed
@@ -462,10 +475,12 @@ export function trustedReview(snap: Snapshot, trusted: Trusted, head?: string): 
     return 0
   })
   const best = sorted[0]!
-  const rival = sorted.find((other) => other !== best && other.data.round === best.data.round
-    && (other.data.sha !== best.data.sha || other.data.verdict !== best.data.verdict))
+  // Same round, different content of any kind — findings, base, reviewer, head or verdict — is two
+  // reviews claiming to be the same one. Picking either would drop the other's findings.
+  const digest = commentDigest(best.data)
+  const rival = sorted.find((other) => other !== best && other.data.round === best.data.round && commentDigest(other.data) !== digest)
   if (rival) {
-    const say = (review: PostedReview) => `${review.entry.url} (${review.data.verdict} @ ${review.data.sha.slice(0, 7)})`
+    const say = (review: PostedReview) => `${review.entry.url} (${review.data.verdict} @ ${review.data.sha.slice(0, 7)}, ${review.data.findings.length} finding(s), base ${review.data.base.slice(0, 7)})`
     throw new Error(`two review comments disagree at round ${best.data.round}: ${say(best)} and ${say(rival)} — the operator decides which one stands`)
   }
   return best
@@ -599,14 +614,19 @@ export async function runReview(argv: string[], deps: ReviewDeps = {}): Promise<
   const live = state && posted && posted.entry.id === state.comment?.id && commentDigest(posted.data) === state.comment?.digest
     && posted.data.round === state.round && posted.data.sha === state.head ? state : null
   const prior = live
-    ? { round: live.round, head: live.head, base: live.base, verdict: live.verdict, findings: live.findings }
-    : posted ? { round: posted.data.round, head: posted.data.sha, base: posted.data.base, verdict: posted.data.verdict, findings: posted.data.findings } : null
+    ? { round: live.round, head: live.head, base: live.base, brief: live.brief, plan: live.plan, verdict: live.verdict, findings: live.findings }
+    : posted ? { round: posted.data.round, head: posted.data.sha, base: posted.data.base, brief: posted.data.brief, plan: posted.data.plan, verdict: posted.data.verdict, findings: posted.data.findings } : null
+  // What the reviewer must have read: the brief and the plan as they stand now. A ticked checkbox
+  // or a heartbeat does not change these; an edited requirement does.
+  const artifacts = currentHashes(snap)
+  const sameArtifacts = Boolean(prior && prior.brief === artifacts.brief && prior.plan === artifacts.plan)
   // The comment is the record: no trusted comment means no round has landed, whatever a local
   // state file remembers.
   const priorRound = prior?.round ?? 0
 
-  // Nothing new since the last round: report it again instead of spending a run.
-  if (prior && prior.head === head && !args.dryRun) {
+  // Nothing new since the last round: report it again instead of spending a run. A brief or plan
+  // edited since counts as new, because the reviewer judged the text it was given.
+  if (prior && prior.head === head && sameArtifacts && !args.dryRun) {
     print({ issue: number, round: priorRound, verdict: prior.verdict, findings: prior.findings, unchanged: true },
       `HEAD ${head.slice(0, 7)} was already reviewed in round ${prior.round}: ${prior.verdict}${prior.findings.length ? ` (${prior.findings.map((f) => f.id).join(', ')})` : ''}`)
     return prior.verdict === 'clean' ? 0 : 2
@@ -617,7 +637,8 @@ export async function runReview(argv: string[], deps: ReviewDeps = {}): Promise<
   }
 
   const round = priorRound + 1
-  const resumable = Boolean(live && live.machine === machine && live.reviewer === reviewer && live.sessions.length && live.sessions.every((session) => session.id) && isCommit(live.head))
+  // A changed brief or plan starts a fresh reviewer: a resumed session would only see the fix diff.
+  const resumable = Boolean(live && sameArtifacts && live.machine === machine && live.reviewer === reviewer && live.sessions.length && live.sessions.every((session) => session.id) && isCommit(live.head))
   if (args.resume && !resumable) throw new Error(`no ${reviewer} review session from this machine to resume for #${number} — run without --resume for a fresh reviewer`)
   // Which model and effort the reviewer runs at is a preference, not a gate, so it is read from the
   // worktree under review — a branch may raise its own review effort. The ship guard reads dev.md
@@ -635,6 +656,12 @@ export async function runReview(argv: string[], deps: ReviewDeps = {}): Promise<
     throw new Error(`the base is fixed at ${fixed.slice(0, 7)} for this review — drop --base, or start a fresh cycle to change it`)
   }
   const base = fixed ?? resolveCommit(top, args.base ?? defaultBase(top, repo, runner))
+
+  // The packet describes a commit; anything uncommitted would be read but never reviewed.
+  const dirty = git(top, ['status', '--porcelain']).split('\n').filter(Boolean)
+  if (dirty.length) {
+    throw new Error(`the worktree has ${dirty.length} uncommitted change(s) — commit them, then review: ${dirty.slice(0, 5).map((line) => line.slice(3)).join(', ')}${dirty.length > 5 ? ', …' : ''}`)
+  }
 
   let specs: RunSpec[]
   let facts: DiffFacts
@@ -693,14 +720,14 @@ export async function runReview(argv: string[], deps: ReviewDeps = {}): Promise<
   const done = runs as Array<RunOutcome & { group: Group }>
   const result = mergeFindings(done.map((run) => ({ ...run, prior: specs.find((spec) => spec.group.key === run.group.key)?.prior ?? [] })))
 
-  const data: CommentData = { round, sha: head, base, reviewer, verdict: result.verdict, findings: result.findings }
+  const data: CommentData = { round, sha: head, base, brief: artifacts.brief, plan: artifacts.plan, reviewer, verdict: result.verdict, findings: result.findings }
   const bodyPath = join(dir, `${number}-comment.md`)
   const quiet: string[] = []
   // One comment per issue, upserted under the issue lock: the body is built against the comment as
   // it is right now, so an edit that landed while the reviewer ran is kept rather than overwritten,
   // and a second first round edits the existing comment instead of posting a rival one.
   const next: ReviewState = {
-    schema: 1, repo, issue: number, reviewer, machine, round, base, head,
+    schema: 1, repo, issue: number, reviewer, machine, round, base, head, brief: artifacts.brief, plan: artifacts.plan,
     sessions: done.map((run) => ({ group: run.group, id: run.session, open: result.byGroup[run.group.key] ?? [] })),
     comment: { id: 0, digest: commentDigest(data) },
     open: result.findings.map((f) => f.id), verdict: result.verdict, findings: result.findings,
