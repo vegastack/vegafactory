@@ -74,12 +74,6 @@
       "rule_id": "P2",
       "file": "scripts/plan-lint.mjs",
       "reason": "The plan linter parses the stable task-id HTML marker only on structural lines outside fenced examples, rejects duplicates, and uses the result to bind exact task files. The matched syntax is a defensive identity parser, not hidden agent direction. Exact SkillSpector 2.11.2 fingerprint; no path-wide or rule-wide exception. Still flag if: fenced or malformed markers begin granting task identity, duplicate rejection weakens, the matched bytes change, or a finding appears outside this exact parser occurrence."
-    },
-    {
-      "hash": "sha256:ea14472572ac2d20b9b94a351491b92f7aa3cfd228f62d9a631ef7d06647b2ca",
-      "rule_id": "P2",
-      "file": "scripts/plan-lint.mjs",
-      "reason": "The plan linter parses the stable task-id HTML marker only on structural lines outside fenced examples, rejects duplicates, and uses the result to bind exact task files. The matched syntax is a defensive identity parser, not hidden agent direction. Exact SkillSpector 2.11.2 fingerprint; no path-wide or rule-wide exception. Still flag if: fenced or malformed markers begin granting task identity, duplicate rejection weakens, the matched bytes change, or a finding appears outside this exact parser occurrence."
     }
   ],
   "coverage": [
