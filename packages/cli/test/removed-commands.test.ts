@@ -22,3 +22,9 @@ test('no skill, doc or hook wiring calls a removed CLI command or a deleted scri
   })
   expect(hits).toEqual([])
 })
+
+test('the control-room templates README names no hooks/ snippet folder', () => {
+  const text = readFileSync(join(import.meta.dir, '../../../skills/factory/vegafactory-setup/assets/control-room/templates/README.md.template'), 'utf8')
+  expect(text).not.toContain('`hooks/`')
+  expect(text).toContain('vegafactory hook <event> --harness claude|codex')
+})
