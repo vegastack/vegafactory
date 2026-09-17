@@ -4,7 +4,7 @@ import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSy
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { Readable } from 'node:stream'
-import { claim, heartbeatOf } from '../src/claim.ts'
+import { claim } from '../src/claim.ts'
 import type { GhRunner } from '../src/gh.ts'
 import { issueFromBranch, issueFromWorktree, readHookInput, runHook, type HookDeps } from '../src/hook.ts'
 import { ackBody, artifactHash } from '../src/issue.ts'
@@ -281,7 +281,6 @@ describe('heartbeat and checkpoints', () => {
     await hook('post-tool', { cwd: tree })
     await hook('session-end', { cwd: tree })
     expect(detached).toEqual([])
-    expect(heartbeatOf(null, OWNER)).toBe(null)
   })
 
   test('stop commits the turn as WIP and pushes the branch in the background, never forced', async () => {

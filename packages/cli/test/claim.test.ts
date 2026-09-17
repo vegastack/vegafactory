@@ -3,7 +3,7 @@ import { spawnSync } from 'node:child_process'
 import { mkdirSync, mkdtempSync, realpathSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { claim, claimBody, heartbeat, heartbeatOf, holderOf, keepClaimRows, machineName, ownerId, release, type ClaimContext } from '../src/claim.ts'
+import { claim, claimBody, heartbeat, heartbeatOf, holderOf, machineName, ownerId, release, releaseBody, trustedAuthors, type ClaimContext } from '../src/claim.ts'
 import { cacheDir, readBody, readState, syncIssue } from '../src/issue-cache.ts'
 import { runIssue } from '../src/issue.ts'
 import { FakeGitHub } from './fake-github.ts'
@@ -15,12 +15,14 @@ const request = (owner: string, extra = {}) => ({ owner, kind: 'session' as cons
 const holder = () => {
   const { dir } = syncIssue({ ...ctx })
   const state = readState(dir)!
-  return holderOf(state, (entry) => readBody(dir, entry.file), now())
+  return holderOf(state, (entry) => readBody(dir, entry.file), now(), trustedAuthors(ctx))
 }
-const ledger = () => gh.issues.get(7)!.comments.find((c) => c.body.includes('type=ledger'))
+// The owner's own claim comment, which carries its heartbeat row.
+const claimOf = (owner: string) => gh.issues.get(7)!.comments.filter((c) => c.body.includes(`type=claim owner=${owner} `)).at(-1)
 
 beforeEach(() => {
   gh = new FakeGitHub()
+  gh.permissions.set('mk', 'admin')
   const root = realpathSync(mkdtempSync(join(tmpdir(), 'claim-')))
   spawnSync('git', ['init', '-q'], { cwd: root })
   mkdirSync(join(root, '.vegastack'))
@@ -41,7 +43,7 @@ describe('claim', () => {
     const outcome = claim(ctx, request('a:1'), now())
     expect(outcome.ok).toBe(true)
     expect(gh.issues.get(7)!.labels).toEqual(['small', 'in-progress'])
-    expect(heartbeatOf(ledger()!.body, 'a:1')).not.toBeNull()
+    expect(heartbeatOf(claimOf('a:1')!.body, 'a:1')).not.toBeNull()
     expect(holder().holder?.owner).toBe('a:1')
   })
 
@@ -66,7 +68,6 @@ describe('claim', () => {
     const outcome = claim(ctx, request('b:2'), now())
     expect(outcome).toMatchObject({ ok: true, waitMs: 0 })
     expect(gh.issues.get(7)!.comments.some((c) => c.body.includes('type=release owner=a:1') && c.body.includes('no heartbeat since'))).toBe(true)
-    expect(heartbeatOf(ledger()!.body, 'a:1')).toBeNull()
     expect(holder().holder?.owner).toBe('b:2')
   })
 
@@ -83,7 +84,7 @@ describe('claim', () => {
     heartbeat(ctx, 'a:1', 42, now())
     gh.clock += 2 * 60 * 60_000
     expect(holder().holder?.owner).toBe('a:1')
-    expect(heartbeatOf(ledger()!.body, 'a:1')?.active).toBe(42)
+    expect(heartbeatOf(claimOf('a:1')!.body, 'a:1')?.active).toBe(42)
   })
 
   test('take back from a live holder records who took it and asks to wait for the last push', () => {
@@ -110,11 +111,10 @@ describe('claim', () => {
     expect(holder().holder?.owner).toBe('a:1')
   })
 
-  test('release gives the issue up and removes the heartbeat row', () => {
+  test('release gives the issue up', () => {
     claim(ctx, request('a:1'), now())
     release(ctx, 'a:1', 'a:1', 'done')
     expect(holder().holder).toBeNull()
-    expect(heartbeatOf(ledger()!.body, 'a:1')).toBeNull()
     expect(claim(ctx, request('b:2'), now()).ok).toBe(true)
   })
 
@@ -123,11 +123,18 @@ describe('claim', () => {
   })
 })
 
-describe('status comment edits', () => {
-  test('an edit keeps the current heartbeat rows, not the editor’s stale copy', () => {
-    const current = '<!-- vsk:v1 type=ledger -->\n<!-- vsk:claim owner=a:1 heartbeat=NEW active=5 -->\n## Status\nold'
-    const edited = '<!-- vsk:v1 type=ledger -->\n<!-- vsk:claim owner=a:1 heartbeat=OLD active=1 -->\n## Status\nnew'
-    expect(keepClaimRows(current, edited)).toBe('<!-- vsk:v1 type=ledger -->\n<!-- vsk:claim owner=a:1 heartbeat=NEW active=5 -->\n## Status\nnew')
+describe('heartbeats', () => {
+  test('each heartbeat edits only the owner’s own claim comment, never the status comment', () => {
+    claim(ctx, request('a:1'), now())
+    gh.addComment(7, '<!-- vsk:v1 type=ledger -->\n## Status\nwritten by someone else')
+    const status = gh.issues.get(7)!.comments.at(-1)!
+    const patches = () => gh.calls.filter((call) => call.startsWith('PATCH'))
+    const before = patches().length
+    heartbeat(ctx, 'a:1', 7, now())
+    expect(patches().slice(before)).toEqual([`PATCH repos/o/r/issues/comments/${claimOf('a:1')!.id}`])
+    expect(status.body).toBe('<!-- vsk:v1 type=ledger -->\n## Status\nwritten by someone else')
+    expect(claimOf('a:1')!.body.split('\n').filter((row) => row.includes('vsk:claim'))).toHaveLength(1)
+    expect(heartbeatOf(claimOf('a:1')!.body, 'a:1')?.active).toBe(7)
   })
 
   test('heartbeats do not move the cursor an agent edits against', () => {
@@ -135,6 +142,39 @@ describe('status comment edits', () => {
     const cursor = syncIssue({ ...ctx }).cursor
     heartbeat(ctx, 'a:1', 3, now())
     expect(syncIssue({ ...ctx, since: cursor }).changes).toEqual([])
+  })
+})
+
+describe('who may claim', () => {
+  test('claims and releases count only from people with write access, never from a bot', () => {
+    gh.permissions.set('visitor', 'read')
+    gh.permissions.set('helper[bot]', 'write')
+    gh.addComment(7, claimBody(request('v:1')), 'visitor')
+    gh.addComment(7, claimBody(request('bot:1')), 'helper[bot]', 'Bot')
+    expect(holder().holder).toBeNull()
+    claim(ctx, request('a:1'), now())
+    gh.addComment(7, releaseBody({ owner: 'a:1', by: 'visitor', reason: 'x' }), 'visitor')
+    gh.addComment(7, releaseBody({ owner: 'a:1', by: 'bot', reason: 'x' }), 'helper[bot]', 'Bot')
+    expect(holder().holder?.owner).toBe('a:1')
+  })
+
+  test('a take-back must name someone with write access', () => {
+    gh.permissions.set('visitor', 'read')
+    claim(ctx, request('a:1'), now())
+    const outcome = claim(ctx, request('b:2', { takeBackBy: 'visitor' }), now())
+    expect(outcome).toMatchObject({ ok: false })
+    expect(outcome.message).toContain('@visitor has no write access')
+    expect(holder().holder?.owner).toBe('a:1')
+    expect(claim(ctx, request('b:2', { takeBackBy: 'nobody-known' }), now()).ok).toBe(false)
+  })
+
+  test('permissions are asked once and kept on disk for ten minutes', () => {
+    claim(ctx, request('a:1'), now())
+    const asks = () => gh.calls.filter((call) => call.includes('/permission')).length
+    const first = asks()
+    holder()
+    holder()
+    expect(asks()).toBe(first)
   })
 })
 

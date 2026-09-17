@@ -15,7 +15,7 @@ Never batch checkpoints "for later" — the progress list's value is exactly tha
 
 A checkpoint retains what a compaction summary must retain: difficulties and their resolutions; options tried or set aside, and why; anything decided, ruled out, or established as a constraint, stated exactly; where things stand; what is open; exact names, numbers, links — the operator's words near-verbatim, the agent's reasoning condensed.
 
-The claim's **heartbeat** is not yours to write: the hooks update it on the status comment's claim line at most every five minutes while tools run, and `vegafactory issue holder <n>` shows it. A claim with no heartbeat for 4 hours (30 minutes for a dispatched run) is stale, and the next `issue claim` releases it. A live claim is taken back only on the operator's word — the flag is theirs to act on (check, resume, or take back), never an automatic reset.
+The claim's **heartbeat** is not yours to write: the hooks update it on your own claim comment (a `vsk:claim` row) at most every five minutes while tools run, and `vegafactory issue holder <n>` shows it. A claim with no heartbeat for 4 hours (30 minutes for a dispatched run) is stale, and the next `issue claim` releases it. A live claim is taken back only on the operator's word — the flag is theirs to act on (check, resume, or take back), never an automatic reset.
 
 ## Resuming
 

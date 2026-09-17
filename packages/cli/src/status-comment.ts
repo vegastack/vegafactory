@@ -1,7 +1,7 @@
 // The status comment: one per issue, written by the CLI, never by hand. It shows where the
 // issue is now, how long each stage took (from GitHub's label history), and the progress list.
 import { spawnSync } from 'node:child_process'
-import { claimsOf, heartbeatOf, holderOf, keepClaimRows, LEDGER_MARKER, type Claim, type ClaimContext } from './claim.ts'
+import { claimsOf, holderOf, LEDGER_MARKER, trustedAuthors, type Claim, type ClaimContext, type Trusted } from './claim.ts'
 import { ghList, ghRequest } from './gh.ts'
 import { readBody, readState, syncIssue, type CacheState, type CommentEntry } from './issue-cache.ts'
 import { STATES, stateOf, type State } from './labels.ts'
@@ -41,6 +41,7 @@ const PROGRESS = /<!--\s*vsk:progress:start\s*-->[\s\S]*?<!--\s*vsk:progress:end
 export interface LedgerInput {
   state: CacheState
   body: (entry: CommentEntry) => string
+  trusted: Trusted
   spans: Span[]
   branch: string | null
   lastPush: string | null
@@ -60,15 +61,14 @@ function whoWorked(span: Span, claims: Claim[]): { owner: string; tool: string }
 }
 
 export function renderLedger(input: LedgerInput): string {
-  const { state, body, spans, now } = input
-  const { holder } = holderOf(state, body, now)
-  const { history, ledger } = claimsOf(state, body)
+  const { state, body, spans, now, trusted } = input
+  const { holder } = holderOf(state, body, now, trusted)
+  const { history, ledger } = claimsOf(state, body, trusted)
   const previous = ledger ? body(ledger) : ''
   const current = stateOf(state.issue!.labels).state ?? 'no state'
   const lines = [LEDGER_MARKER, '## Status', '']
   if (holder) {
-    const beat = heartbeatOf(previous, holder.owner)
-    const active = beat?.active ? ` · ${duration(beat.active * 60_000)} active` : ''
+    const active = holder.active ? ` · ${duration(holder.active * 60_000)} active` : ''
     lines.push(`**${current}** · held by \`${holder.owner}\` (${holder.harness}${holder.model ? ` · ${holder.model}` : ''}) · last active ${when(holder.heartbeat)}${active}`)
   } else lines.push(`**${current}**${current === 'waiting-on-operator' ? ' · waiting on you' : ''} · nobody holds it`)
   if (input.branch) lines.push(`Branch \`${input.branch}\` · last push ${when(input.lastPush)}`)
@@ -83,7 +83,7 @@ export function renderLedger(input: LedgerInput): string {
   }
   const progress = input.progress ?? PROGRESS.exec(previous)?.[0] ?? null
   if (progress) lines.push('', progress.startsWith('<!--') ? progress : `<!-- vsk:progress:start -->\n## Progress\n\n${progress.trim()}\n<!-- vsk:progress:end -->`)
-  return keepClaimRows(previous, `${lines.join('\n')}\n`)
+  return `${lines.join('\n')}\n`
 }
 
 function gitLine(cwd: string, args: string[]): string | null {
@@ -99,8 +99,9 @@ export function writeStatus(ctx: ClaimContext, options: { cwd: string; branch?: 
   const events = ghList<LabelEvent>(`repos/${ctx.repo}/issues/${ctx.number}/timeline`, ctx.runner)
   const branch = options.branch ?? gitLine(options.cwd, ['branch', '--show-current'])
   const lastPush = branch ? gitLine(options.cwd, ['log', '-1', '--format=%cI', `origin/${branch}`]) : null
-  const text = renderLedger({ state, body, spans: stageSpans(events), branch, lastPush, progress: options.progress ?? null, now: options.now ?? Date.now() })
-  const { ledger } = claimsOf(state, body)
+  const trusted = trustedAuthors(ctx)
+  const text = renderLedger({ state, body, trusted, spans: stageSpans(events), branch, lastPush, progress: options.progress ?? null, now: options.now ?? Date.now() })
+  const { ledger } = claimsOf(state, body, trusted)
   if (ledger) {
     if (body(ledger) !== text) ghRequest(`repos/${ctx.repo}/issues/comments/${ledger.id}`, { method: 'PATCH', body: { body: text }, runner: ctx.runner })
   } else ghRequest(`repos/${ctx.repo}/issues/${ctx.number}/comments`, { method: 'POST', body: { body: text }, runner: ctx.runner })

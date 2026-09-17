@@ -1,10 +1,10 @@
 // Who holds an issue. A claim is a `type=claim` comment; a release is a `type=release`
-// comment. The holder is the earliest claim after the latest release, as long as its
-// heartbeat is fresh. The heartbeat lives on the status (ledger) comment's claim line,
-// which hooks refresh — never the model.
+// comment; only people with write access can post either. The holder is the earliest claim
+// after the latest release, as long as its heartbeat is fresh. The heartbeat is a
+// `vsk:claim` row on the holder's own claim comment, which only that holder's hooks edit.
 import { hostname } from 'node:os'
 import { ghRequest, type GhRunner } from './gh.ts'
-import { readBody, readState, syncIssue, type CacheState, type CommentEntry } from './issue-cache.ts'
+import { permissionLookup, readBody, readState, syncIssue, WRITE_ROLES, type CacheState, type CommentEntry, type PermissionLookup } from './issue-cache.ts'
 import { stateOf, transition } from './labels.ts'
 
 export type ClaimKind = 'session' | 'dispatch'
@@ -19,7 +19,7 @@ export interface Claim {
   claimedAt: string
   commentId: number
 }
-export interface Holder extends Claim { heartbeat: string; stale: boolean }
+export interface Holder extends Claim { heartbeat: string; active: number; stale: boolean }
 
 export function machineName(host = hostname()): string {
   return host.toLowerCase().replace(/\.local$/, '').replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') || 'machine'
@@ -53,38 +53,42 @@ export function claimLine(owner: string, heartbeat: string, activeMinutes = 0): 
   return `<!-- vsk:claim owner=${owner} heartbeat=${heartbeat} active=${activeMinutes} -->`
 }
 
-// The heartbeat on the ledger for this owner, or null.
-export function heartbeatOf(ledgerBody: string | null, owner: string): { heartbeat: string; active: number } | null {
-  if (!ledgerBody) return null
-  for (const match of ledgerBody.matchAll(/<!--\s*vsk:claim\s+([^>]*?)\s*-->/g)) {
+// The heartbeat row for this owner in a claim comment, or null.
+export function heartbeatOf(claimBody: string | null, owner: string): { heartbeat: string; active: number } | null {
+  if (!claimBody) return null
+  for (const match of claimBody.matchAll(/<!--\s*vsk:claim\s+([^>]*?)\s*-->/g)) {
     const keys = markerKeys(match[0], 'vsk:claim')
     if (keys.owner === owner && keys.heartbeat) return { heartbeat: keys.heartbeat, active: Number(keys.active ?? 0) }
   }
   return null
 }
 
-// Replaces this owner's claim line (or adds one under the marker line).
-export function withHeartbeat(ledgerBody: string, owner: string, heartbeat: string, activeMinutes: number): string {
-  const line = claimLine(owner, heartbeat, activeMinutes)
-  const lines = ledgerBody.split('\n').filter((row) => {
-    const keys = /<!--\s*vsk:claim\b/.test(row) ? markerKeys(row, 'vsk:claim') : null
-    return !keys || keys.owner !== owner
-  })
-  const marker = lines.findIndex((row) => /<!--\s*vsk:v1\s+type=ledger\b/.test(row))
-  lines.splice(marker === -1 ? 0 : marker + 1, 0, line)
+// The claim comment with this owner's row replaced (or added under the marker line).
+export function withHeartbeat(claimBody: string, owner: string, heartbeat: string, activeMinutes: number): string {
+  const lines = claimBody.split('\n').filter((row) => !/<!--\s*vsk:claim\b/.test(row))
+  const marker = lines.findIndex((row) => /<!--\s*vsk:v1\b/.test(row))
+  lines.splice(marker + 1, 0, claimLine(owner, heartbeat, activeMinutes))
   return lines.join('\n')
 }
 
 type Body = (entry: CommentEntry) => string
+// Whether a claim or release comment counts: its author must be a person with write access.
+export type Trusted = (entry: CommentEntry) => boolean
+
+// No automation identity is configured, so a bot's claim or release never counts.
+export const trustBy = (permission: PermissionLookup): Trusted => (entry) => entry.authorType !== 'Bot' && !!entry.author && WRITE_ROLES.has(permission(entry.author))
+
+export const trustedAuthors = (ctx: { repo: string; runner: GhRunner; root?: string }): Trusted => trustBy(permissionLookup(ctx.repo, ctx.runner, { root: ctx.root }))
 
 // Live claims (after the latest release of each owner), every claim ever made, and the status comment.
-export function claimsOf(state: CacheState, body: Body): { claims: Claim[]; history: Claim[]; ledger: CommentEntry | null } {
+export function claimsOf(state: CacheState, body: Body, trusted: Trusted): { claims: Claim[]; history: Claim[]; ledger: CommentEntry | null } {
   const comments = Object.values(state.comments).sort((a, b) => a.createdAt.localeCompare(b.createdAt) || a.id - b.id)
   let claims: Claim[] = []
   const history: Claim[] = []
   let ledger: CommentEntry | null = null
   for (const entry of comments) {
     if (entry.type === 'ledger') ledger = entry
+    if ((entry.type === 'release' || entry.type === 'claim') && !trusted(entry)) continue
     if (entry.type === 'release') {
       const keys = markerKeys(body(entry))
       claims = keys.owner ? claims.filter((claim) => claim.owner !== keys.owner) : []
@@ -104,14 +108,15 @@ export function claimsOf(state: CacheState, body: Body): { claims: Claim[]; hist
 }
 
 // The current holder: the earliest live claim. Stale claims are reported but do not hold.
-export function holderOf(state: CacheState, body: Body, now = Date.now()): { holder: Holder | null; stale: Holder[] } {
-  const { claims, ledger } = claimsOf(state, body)
-  const ledgerBody = ledger ? body(ledger) : null
+export function holderOf(state: CacheState, body: Body, now: number, trusted: Trusted): { holder: Holder | null; stale: Holder[] } {
+  const { claims } = claimsOf(state, body, trusted)
   const stale: Holder[] = []
   for (const claim of claims) {
-    const beat = heartbeatOf(ledgerBody, claim.owner)?.heartbeat ?? claim.claimedAt
-    const isStale = now - Date.parse(beat) > TIMEOUT_MS[claim.kind]
-    const holder = { ...claim, heartbeat: beat, stale: isStale }
+    const entry = state.comments[String(claim.commentId)]
+    const beat = heartbeatOf(entry ? body(entry) : null, claim.owner)
+    const heartbeat = beat?.heartbeat ?? claim.claimedAt
+    const isStale = now - Date.parse(heartbeat) > TIMEOUT_MS[claim.kind]
+    const holder = { ...claim, heartbeat, active: beat?.active ?? 0, stale: isStale }
     if (!isStale) return { holder, stale }
     stale.push(holder)
   }
@@ -143,40 +148,20 @@ function post(ctx: ClaimContext, body: string): number {
   return ghRequest<{ id: number }>(`repos/${ctx.repo}/issues/${ctx.number}/comments`, { method: 'POST', body: { body }, runner: ctx.runner }).body.id
 }
 
-function patch(ctx: ClaimContext, commentId: number, body: string) {
-  ghRequest(`repos/${ctx.repo}/issues/comments/${commentId}`, { method: 'PATCH', body: { body }, runner: ctx.runner })
-}
-
-export function emptyLedger(): string {
-  return `${LEDGER_MARKER}\n## Status\n\n_Not started._\n`
-}
-
-// Writes this owner's heartbeat on the status comment, creating the comment when missing.
-// Heartbeat lines are not content: they never bump the cache cursor or break an edit.
-export function heartbeat(ctx: ClaimContext, owner: string, activeMinutes = 0, now = Date.now()) {
+// Writes this owner's heartbeat on its own claim comment. Nobody else edits that comment, and
+// heartbeat rows are not content: they never bump the cache cursor.
+export function heartbeat(ctx: ClaimContext, owner: string, activeMinutes = 0, now = Date.now(), trusted = trustedAuthors(ctx)) {
   const f = fresh(ctx)
-  const { claims, ledger } = claimsOf(f.state, f.body)
-  if (!claims.some((claim) => claim.owner === owner)) throw new Error(`${owner} holds no claim on #${ctx.number}`)
-  const at = new Date(now).toISOString()
-  if (!ledger) post(ctx, withHeartbeat(emptyLedger(), owner, at, activeMinutes))
-  else patch(ctx, ledger.id, withHeartbeat(f.body(ledger), owner, at, activeMinutes))
+  const live = claimsOf(f.state, f.body, trusted).claims.find((claim) => claim.owner === owner)
+  const entry = live ? f.state.comments[String(live.commentId)] : undefined
+  if (!live || !entry) throw new Error(`${owner} holds no claim on #${ctx.number}`)
+  const body = withHeartbeat(f.body(entry), owner, new Date(now).toISOString(), activeMinutes)
+  ghRequest(`repos/${ctx.repo}/issues/comments/${live.commentId}`, { method: 'PATCH', body: { body }, runner: ctx.runner })
   syncIssue({ root: ctx.root, repo: ctx.repo, number: ctx.number, runner: ctx.runner })
-}
-
-const args = (f: Fresh): [CacheState, Body] => [f.state, f.body]
-
-function dropHeartbeat(ctx: ClaimContext, owners: string[]) {
-  const f = fresh(ctx)
-  const { ledger } = claimsOf(f.state, f.body)
-  if (!ledger) return
-  const body = f.body(ledger)
-  const kept = body.split('\n').filter((row) => !/<!--\s*vsk:claim\b/.test(row) || !owners.includes(markerKeys(row, 'vsk:claim').owner ?? ''))
-  if (kept.length !== body.split('\n').length) patch(ctx, ledger.id, kept.join('\n'))
 }
 
 export function release(ctx: ClaimContext, owner: string, by: string, reason: string) {
   post(ctx, releaseBody({ owner, by, reason }))
-  dropHeartbeat(ctx, [owner])
   syncIssue({ root: ctx.root, repo: ctx.repo, number: ctx.number, runner: ctx.runner })
 }
 
@@ -190,30 +175,35 @@ export interface ClaimOutcome {
 }
 
 export function claim(ctx: ClaimContext, request: ClaimRequest, now = Date.now()): ClaimOutcome {
-  const before = holderOf(...args(fresh(ctx)), now)
+  const permission = permissionLookup(ctx.repo, ctx.runner, { root: ctx.root })
+  const trusted = trustBy(permission)
+  const holderNow = () => { const f = fresh(ctx); return holderOf(f.state, f.body, now, trusted) }
+  const before = holderNow()
   if (before.holder?.owner === request.owner) {
-    heartbeat(ctx, request.owner, 0, now)
+    heartbeat(ctx, request.owner, 0, now, trusted)
     return { ok: true, message: `already held by ${request.owner}`, holder: before.holder, waitMs: 0 }
   }
   if (before.holder && !request.takeBackBy) {
     const h = before.holder
     return { ok: false, message: `held by ${h.owner} (${h.harness}${h.model ? ` · ${h.model}` : ''}), last active ${h.heartbeat} — take it back with --take-back-by <login>`, holder: h, waitMs: 0 }
   }
+  if (request.takeBackBy && !WRITE_ROLES.has(permission(request.takeBackBy))) {
+    return { ok: false, message: `@${request.takeBackBy} has no write access, so cannot take the issue back`, holder: before.holder, waitMs: 0 }
+  }
   const previous = [...before.stale, ...(before.holder ? [before.holder] : [])]
   for (const old of previous) {
     const reason = old.stale ? `no heartbeat since ${old.heartbeat}` : `taken back by @${request.takeBackBy}`
     post(ctx, releaseBody({ owner: old.owner, by: request.takeBackBy ?? request.owner, reason }))
   }
-  if (previous.length) dropHeartbeat(ctx, previous.map((old) => old.owner))
   post(ctx, claimBody({ ...request, note: request.takeBackBy ? `taken back by @${request.takeBackBy}` : undefined }))
 
   // Two sessions can claim at once: both re-read, the earliest live claim wins, the other backs off.
-  const after = holderOf(...args(fresh(ctx)), now)
+  const after = holderNow()
   if (after.holder?.owner !== request.owner) {
     release(ctx, request.owner, request.owner, `lost the race to ${after.holder?.owner ?? 'another claim'}`)
     return { ok: false, message: `lost the race to ${after.holder?.owner}`, holder: after.holder, waitMs: 0 }
   }
-  heartbeat(ctx, request.owner, 0, now)
+  heartbeat(ctx, request.owner, 0, now, trusted)
   const f = fresh(ctx)
   if (stateOf(f.state.issue!.labels).state === 'queued') {
     const edit = transition(f.state.issue!.labels, 'in-progress')
@@ -229,16 +219,4 @@ export function claim(ctx: ClaimContext, request: ClaimRequest, now = Date.now()
   }
   const live = before.holder && !before.holder.stale
   return { ok: true, message: `claimed by ${request.owner}`, holder: after.holder, waitMs: live ? 2 * 60_000 : 0 }
-}
-
-const CLAIM_ROW = /^\s*<!--\s*vsk:claim\b[^>]*-->\s*$/
-
-// Heartbeat rows belong to the hooks, so an edit keeps GitHub's current rows, not the editor's copy.
-export function keepClaimRows(current: string, edited: string): string {
-  const rows = current.split('\n').filter((row) => CLAIM_ROW.test(row))
-  const lines = edited.split('\n').filter((row) => !CLAIM_ROW.test(row))
-  if (!rows.length) return lines.join('\n')
-  const marker = lines.findIndex((row) => /<!--\s*vsk:v1\s+type=ledger\b/.test(row))
-  lines.splice(marker + 1, 0, ...rows)
-  return lines.join('\n')
 }

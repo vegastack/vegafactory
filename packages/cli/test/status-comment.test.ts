@@ -3,7 +3,7 @@ import { spawnSync } from 'node:child_process'
 import { mkdirSync, mkdtempSync, realpathSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { claim, heartbeatOf, type ClaimContext } from '../src/claim.ts'
+import { claim, heartbeat, type ClaimContext } from '../src/claim.ts'
 import { artifactHash, runIssue } from '../src/issue.ts'
 import { duration, stageSpans, writeStatus } from '../src/status-comment.ts'
 import { FakeGitHub } from './fake-github.ts'
@@ -43,6 +43,7 @@ describe('the status comment', () => {
 
   beforeEach(() => {
     gh = new FakeGitHub()
+    gh.permissions.set('mk', 'admin')
     const root = realpathSync(mkdtempSync(join(tmpdir(), 'status-')))
     spawnSync('git', ['init', '-q'], { cwd: root })
     mkdirSync(join(root, '.vegastack'))
@@ -59,7 +60,14 @@ describe('the status comment', () => {
     expect(body).toContain('Branch `feat/7-x` · last push —')
     expect(body).toMatch(/\| queued \| — \| — \| 2026-09-17 10:00 UTC \| 2026-09-17 10:00 UTC \| 0m \|/)
     expect(body).toMatch(/\| in-progress \| `mini:7-x` \| claude · opus \| .* \| now \| 10m \|/)
-    expect(heartbeatOf(body, 'mini:7-x')).not.toBeNull()
+    expect(body).not.toContain('vsk:claim')
+  })
+
+  test('reads the active time from the holder’s claim comment', () => {
+    claim(ctx, { owner: 'mini:7-x', kind: 'session', harness: 'claude', model: 'opus' }, gh.clock)
+    heartbeat(ctx, 'mini:7-x', 95, gh.clock)
+    writeStatus(ctx, { cwd: ctx.root, branch: 'feat/7-x', now: gh.clock })
+    expect(ledger()).toContain('· 1h 35m active')
   })
 
   test('a progress list is kept across rewrites and does not change the plan hash', () => {
@@ -93,6 +101,7 @@ describe('the status comment', () => {
 describe('timeline credit', () => {
   test('a finished stage keeps the name of a claim that was later released', () => {
     const gh = new FakeGitHub()
+    gh.permissions.set('mk', 'admin')
     const root = realpathSync(mkdtempSync(join(tmpdir(), 'status-')))
     spawnSync('git', ['init', '-q'], { cwd: root })
     mkdirSync(join(root, '.vegastack'))

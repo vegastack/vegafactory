@@ -97,6 +97,37 @@ export function cacheDir(root: string, repo: string, number: number): string {
   return join(root, '.vegastack', '.tmp', 'issues', repo.replace('/', '__'), String(number))
 }
 
+export const WRITE_ROLES = new Set(['admin', 'maintain', 'write'])
+export type PermissionLookup = (login: string) => string
+const PERMISSION_TTL_MS = 10 * 60_000
+
+// A login's role on the repository. Each process asks GitHub once per login; with `root` the
+// answers are also kept on disk for ten minutes, so a hook on every tool call stays cheap.
+export function permissionLookup(repo: string, runner: GhRunner, { root, now = Date.now }: { root?: string; now?: () => number } = {}): PermissionLookup {
+  const memory = new Map<string, string>()
+  const file = root ? join(root, '.vegastack', '.tmp', 'issues', assertRepo(repo).replace('/', '__'), 'permissions.json') : null
+  const load = (): Record<string, { permission: string; at: number }> => {
+    try { return file ? JSON.parse(readFileSync(file, 'utf8')) : {} } catch { return {} }
+  }
+  return (login) => {
+    if (memory.has(login)) return memory.get(login)!
+    const saved = load()[login]
+    if (saved && now() - saved.at < PERMISSION_TTL_MS && now() >= saved.at) {
+      memory.set(login, saved.permission)
+      return saved.permission
+    }
+    let permission = 'none'
+    try {
+      permission = ghRequest<{ permission: string }>(`repos/${repo}/collaborators/${encodeURIComponent(login)}/permission`, { runner }).body.permission
+      if (file) {
+        try { atomicWrite(file, JSON.stringify({ ...load(), [login]: { permission, at: now() } })) } catch { /* the disk copy is only a cache */ }
+      }
+    } catch { /* unknown logins and failed lookups have no access */ }
+    memory.set(login, permission)
+    return permission
+  }
+}
+
 // The `type` from a comment's `<!-- vsk:v1 type=… -->` top line; `human` when there is none.
 export function commentType(body: string): string {
   const marker = /^\s*<!--\s*vsk:v1\s+([^>]*?)\s*-->/.exec(body ?? '')

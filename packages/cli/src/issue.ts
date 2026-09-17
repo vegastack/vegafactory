@@ -5,20 +5,19 @@ import { spawnSync } from 'node:child_process'
 import { existsSync, readFileSync } from 'node:fs'
 import { basename, dirname, join, resolve } from 'node:path'
 import { ghRequest, type GhRunner, defaultRunner } from './gh.ts'
-import { claim, heartbeat, holderOf, keepClaimRows, ownerId, release, type ClaimKind } from './claim.ts'
+import { claim, heartbeat, holderOf, ownerId, release, trustedAuthors, type ClaimKind } from './claim.ts'
 import { writeStatus } from './status-comment.ts'
-import { artifactHash, assertRepo, cacheDir, commentType, dropIssue, readBody, readState, syncIssue, withLock, type CacheState, type CommentEntry, type GhComment } from './issue-cache.ts'
+import { artifactHash, assertRepo, cacheDir, commentType, dropIssue, permissionLookup, readBody, readState, syncIssue, withLock, WRITE_ROLES, type CacheState, type CommentEntry, type GhComment, type PermissionLookup } from './issue-cache.ts'
 import { STATES, sizeOf, stateOf, transition, type State } from './labels.ts'
 
 export const ACK_STAGES = ['brief', 'plan', 'ship'] as const
 export type AckStage = typeof ACK_STAGES[number]
-const WRITE_ROLES = new Set(['admin', 'maintain', 'write'])
 
 // ---------------------------------------------------------------------------------------------
 // Where the cache lives and which repository we are in
 
 // The main checkout's root, so every worktree of a repository shares one cache.
-export { artifactHash }
+export { artifactHash, permissionLookup, type PermissionLookup }
 
 export function repoRoot(cwd = process.cwd()): string {
   const result = spawnSync('git', ['rev-parse', '--path-format=absolute', '--git-common-dir'], { cwd, encoding: 'utf8' })
@@ -75,23 +74,6 @@ export function ackBody(input: { stage: AckStage; by: string; brief: string; pla
   keys.push(`source=${input.source}`)
   const quote = input.quote.trim().replace(/\s+/g, ' ').slice(0, 500)
   return `<!-- vsk:v1 ${keys.join(' ')} -->\n**Ack (${input.stage})** from @${input.by}: "${quote}"\n`
-}
-
-export type PermissionLookup = (login: string) => string
-
-export function permissionLookup(repo: string, runner: GhRunner): PermissionLookup {
-  const cache = new Map<string, string>()
-  return (login) => {
-    if (!cache.has(login)) {
-      try {
-        const { body } = ghRequest<{ permission: string }>(`repos/${repo}/collaborators/${encodeURIComponent(login)}/permission`, { runner })
-        cache.set(login, body.permission)
-      } catch {
-        cache.set(login, 'none')
-      }
-    }
-    return cache.get(login)!
-  }
 }
 
 const squash = (text: string) => text.replace(/\s+/g, ' ').trim()
@@ -218,11 +200,9 @@ export function postComment(ctx: WriteContext, body: string): GhComment {
 
 export function editComment(ctx: WriteContext, commentId: number, body: string, since: number) {
   return locked(ctx, () => {
-    const { dir } = refresh(ctx)
+    refresh(ctx)
     conflictIfChanged(ctx, commentId, since)
-    const entry = readState(dir)!.comments[String(commentId)]!
-    const next = entry.type === 'ledger' ? keepClaimRows(readBody(dir, entry.file), body) : body
-    ghRequest(`repos/${ctx.repo}/issues/comments/${commentId}`, { method: 'PATCH', body: { body: next }, runner: ctx.runner })
+    ghRequest(`repos/${ctx.repo}/issues/comments/${commentId}`, { method: 'PATCH', body: { body }, runner: ctx.runner })
     return refresh(ctx)
   })
 }
@@ -463,7 +443,7 @@ export function runIssue(argv: string[], { runner = defaultRunner, cwd = process
     case 'holder': {
       const dir = sync().dir
       const snap = snapshot(dir)
-      const { holder, stale } = holderOf(snap.state, snap.body)
+      const { holder, stale } = holderOf(snap.state, snap.body, Date.now(), trustedAuthors(ctx))
       print({ holder, stale }, holder ? `${holder.owner} (${holder.harness}${holder.model ? ` · ${holder.model}` : ''}) · last active ${holder.heartbeat}` : 'nobody')
       return 0
     }
