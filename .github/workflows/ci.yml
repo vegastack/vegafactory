@@ -1,55 +1,37 @@
 name: CI
 
+# Each check runs in exactly one place:
+#   pull_request → fast checks + only the tests the change affects
+#   merge_group  → the full suite, build, pack smoke and skill scan, once, on main + this PR
+# Nothing runs after merge: the merge queue already tested exactly what lands.
 on:
   pull_request:
-  push:
-    branches: [main]
+  merge_group:
 
 permissions:
   contents: read
 
+concurrency:
+  group: ci-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   check:
+    # The job name is the required status check; keep it stable.
     name: check (node 24)
-    # Both laptop runners share one physical volume. Retain every waiting job,
-    # but run only one full check/build/smoke or release preparation at a time.
-    concurrency:
-      group: vegafactory-self-hosted-heavy
-      queue: max
-    # Self-hosted while GitHub-hosted runners are billing-locked (#57): on
-    # ubuntu-latest every job died in ~3s having recorded ZERO steps, because the
-    # runner never picked it up — a permanently red check that stops gating
-    # anything. Move this check and release.yml's prepare job to `ubuntu-latest`
-    # once #57 clears; release publication already uses a hosted OIDC job.
-    #
-    # Target: the two repo-level laptop runners (`vsk-runner-mac-mk-1/2`, label
-    # `vsk-runners-mac`). The always-on Mac mini is the intended host and is not
-    # registered yet (#119) — its org runner group is `vsk-runners-mac-mini`, its
-    # runner account is a different macOS user from the dispatcher account so a CI
-    # job cannot read the dispatcher's tokens, and provisioning is the control
-    # room's `onboarding/dispatcher-box.md`. Switch to it — replacing the runs-on
-    # line below with `runs-on:` / `  group: vsk-runners-mac-mini` — only once the
-    # group is granted to this repository AND lists an online runner: this job is a
-    # required status check, and an ungranted or empty group queues forever with
-    # `runner: null` instead of failing, which would strand every PR.
-    #
-    # macOS means BSD userland. Audited before use: no `sed -i`, `date -d`,
-    # `readlink -f`, `base64 -w`, `sort -V`, `grep -P` or `stat -c` anywhere in
-    # this file, and `set -euo pipefail` is valid in macOS bash 3.2. The one real
-    # hazard is the smoke test's target path — see the comment on TARGET_DIR.
-    runs-on: [self-hosted, vsk-runners-mac]
+    # Hosted runners only: a pull request can change any workflow file, so this public repo's
+    # PR and merge-queue code never runs on the self-hosted Mac mini. Fork workflow runs also
+    # need a maintainer's approval (repository setting).
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
         with:
-          # Compatibility tests load exact pre-amendment readers from Git history.
-          # A depth-1 checkout makes those immutable fixtures disappear.
           fetch-depth: 0
 
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version: "1.3.14"
 
-      # Node 24 (LTS) is the single supported runtime: engines floor, CI, and release all match.
       - uses: actions/setup-node@v7
         with:
           node-version: "24.x"
@@ -57,20 +39,38 @@ jobs:
       - name: Install dependencies
         run: bun install --frozen-lockfile
 
+      # Tests create throwaway git repositories; hosted runners have no commit identity.
+      - name: Git identity for test repositories
+        run: |
+          git config --global user.name "vegafactory-ci"
+          git config --global user.email "ci@vegafactory.invalid"
+          git config --global init.defaultBranch main
+
+      - name: Fast checks
+        run: bun run check:fast
+
+      - name: Affected tests
+        if: github.event_name == 'pull_request'
+        run: node tooling/test-affected.mjs --base "origin/${{ github.base_ref }}"
+
+      - name: Full test suite
+        if: github.event_name == 'merge_group'
+        run: bun run test
+
       - name: Verify release version authority
+        if: github.event_name == 'merge_group'
         run: node scripts/release-artifacts.mjs verify-version-transition
 
-      - name: Check (validate:skill + test + lint + typecheck)
-        run: bun run check
-
       - name: Build paired package inputs
+        if: github.event_name == 'merge_group'
         run: |
           set -euo pipefail
           bun run --cwd packages/dashboard build
           bun run --cwd packages/dashboard assemble
           bun run build
 
-      - name: Pack and smoke descriptor-backed CI pair
+      - name: Pack and smoke the package pair
+        if: github.event_name == 'merge_group'
         run: |
           node --input-type=module <<'NODE'
           import { readFile, writeFile, mkdtemp } from 'node:fs/promises'
@@ -97,3 +97,22 @@ jobs:
           await writeFile(join(directory, 'release-manifest.json'), JSON.stringify(manifest, null, 2) + '\n')
           console.log(JSON.stringify({ directory, artifacts: manifest.artifacts, platformMatrix: manifest.platformMatrix }, null, 2))
           NODE
+
+      - uses: astral-sh/setup-uv@v6
+        if: github.event_name == 'merge_group'
+
+      - name: Install pinned skill scanner
+        if: github.event_name == 'merge_group'
+        # SkillSpector v2.11.2 immutable commit 69dcdfb74487d361ba4c811d088cfdea2ff3a9dc, hash-locked dependencies.
+        run: |
+          set -euo pipefail
+          SCANNER="$RUNNER_TEMP/skill-scanner"
+          uv venv --python 3.12 "$SCANNER/venv"
+          grep -v '^skillspector @' .github/skillspector-release-constraints.txt > "$SCANNER/dependencies.txt"
+          uv pip sync --python "$SCANNER/venv/bin/python" --require-hashes "$SCANNER/dependencies.txt"
+          uv pip install --python "$SCANNER/venv/bin/python" --no-deps --no-build-isolation 'git+https://github.com/NVIDIA/skillspector.git@69dcdfb74487d361ba4c811d088cfdea2ff3a9dc'
+          echo "$SCANNER/venv/bin" >> "$GITHUB_PATH"
+
+      - name: Scan the built skills
+        if: github.event_name == 'merge_group'
+        run: node skills/skills-tooling/skill-scan/scripts/skill-scan.mjs --json --no-provision

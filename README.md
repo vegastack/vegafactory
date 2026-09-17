@@ -220,17 +220,19 @@ Architecture review (`dev-architect`) is advisory by design: evidence-backed rep
 
 ```sh
 bun install --frozen-lockfile
-bun run check    # validate skills + test + lint + typecheck
+bun run check:fast     # validators + lint + typecheck (also the pre-commit hook)
+bun run test:affected  # only the tests your change can reach
+bun run check          # everything (the merge queue runs this)
 bun run build
 ```
 
-The skill scan is a separate step, not part of `bun run check` — `check` runs on Bun and Node alone, while the scanner needs Python 3.12. `bun run check` must pass before every PR; the scan runs alongside it as pre-merge verification. See [Security](#security) for the command and [CONTRIBUTING.md](CONTRIBUTING.md) for the suppression rules.
+Pull requests run the fast checks and affected tests. The merge queue runs the full suite, a packed-tarball smoke test and the skill scan once, on main plus the PR. See [CONTRIBUTING.md](CONTRIBUTING.md) for the scan's suppression rules.
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for repo layout, content-versioning rules, the no-generated-files policy, the skill-scan suppression discipline, and how to add a new skill.
 
 ## Security
 
-**These skills are scanned before they ship.** Every skill in this bundle is checked by [NVIDIA SkillSpector](https://github.com/NVIDIA/skillspector) — 71 vulnerability patterns across prompt injection, data exfiltration, excessive agency, supply chain, and MCP-specific risks — twice: before any push, and again before a release, on the built bundle that npm actually serves. The gate blocks on any unsuppressed HIGH or CRITICAL finding. Suppressions are not a switch: each one is a reviewed entry in [`.vegastack/skillspector-baseline.json`](.vegastack/skillspector-baseline.json) whose written reason must say what would make the pattern a real finding again.
+**These skills are scanned before they ship.** Every skill in this bundle is checked by [NVIDIA SkillSpector](https://github.com/NVIDIA/skillspector) — 71 vulnerability patterns across prompt injection, data exfiltration, excessive agency, supply chain, and MCP-specific risks — in the merge queue, before any change reaches main, on the built bundle that npm actually serves. The gate blocks on any unsuppressed HIGH or CRITICAL finding. Suppressions are not a switch: each one is a reviewed entry in [`.vegastack/skillspector-baseline.json`](.vegastack/skillspector-baseline.json) whose written reason must say what would make the pattern a real finding again.
 
 **You can scan any skill the same way — including one you're about to install from someone else.** Agent skills execute with your agent's authority, so "who wrote this and what does it actually do" is a fair question to ask of any of them, ours included.
 

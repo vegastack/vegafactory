@@ -52,7 +52,7 @@ Optional. Declare it only when the work below can run at the same time; its abse
 
 - **Approval scope:** assign each structural task its immutable `<issue>-T<n>` ID before approval; never reuse removed IDs. Requirements, task identities/order, files, interfaces, actions and revisions are immutable approved scope. Only existing task checkboxes and the validated evidence-only progress block in dev-setup's conventions may change without renewed approval. Use dev-implement's canonicalizer; fenced examples are scope bytes, not task declarations. Missing IDs on an already approved legacy plan require a revised approved scope.
 - **Task size:** the smallest unit that carries its own test cycle and is worth a fresh reviewer's look. Fold setup/scaffolding/docs into the task whose deliverable needs them; split only where a reviewer could reject one task while approving its neighbor. Each task ends independently verifiable.
-- **Prose tasks** (docs, skill text, config) swap the test-first Steps for edit → verify (the concrete command: `bun run check`, a link-resolution run, a rendered read-through) → commit. The verify step is never omitted.
+- **Prose tasks** (docs, skill text, config) swap the test-first Steps for edit → verify (the concrete command: the profile's `check` command, a link-resolution run, a rendered read-through) → commit. The verify step is never omitted.
 - **Revisions:** post-approval edits follow the revision-marker rule in dev-setup's `references/conventions.md` — bump the heading/marker version and append the `Revisions:` line.
 
 ## Banned placeholders

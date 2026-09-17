@@ -16,7 +16,7 @@ This skill states what must be true; skillify states how to get there. When a ru
 5. `SKILL.md` under 500 lines (target 150), roughly 5k tokens; detail in `references/`, executables in `scripts/`, templates in `assets/`; relative links stay one level deep inside the skill.
 6. No Claude-only body syntax (token list in [standards](references/standards.md)); reference scripts as plain relative paths from the skill directory.
 7. Checksums, versions, and timestamps in any `refresh/sources.json` come only from a refresh-runner run, because a hand-written value records a verification that never happened.
-8. Before finishing any change, from the repo root: `node packages/cli/scripts/validate-skill.mjs <skill-dir>`, `bun test <skill-dir>`, and `node packages/cli/scripts/structure.mjs check` must pass, and `bun run readme:sync --write` follows any packaging change so the skill README's file table matches packaging.json. `bun run check` includes the structure check.
+8. Before finishing any change, from the repo root: `node packages/cli/scripts/validate-skill.mjs <skill-dir>`, `bun test ./<skill-dir>`, and `node packages/cli/scripts/structure.mjs check` must pass, and `bun run readme:sync --write` follows any packaging change so the skill README's file table matches packaging.json. `bun run check:fast` includes the structure check; `bun run test:affected` runs the tests the change reaches.
 
 ## Route progressively
 
