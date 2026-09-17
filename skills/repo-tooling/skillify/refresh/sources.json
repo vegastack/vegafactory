@@ -1,6 +1,0 @@
-{
-  "schemaVersion": 1,
-  "retrievalBaseline": "2026-08-08T00:00:00Z",
-  "note": "Deliberately empty. Skillify's only time-decaying claim (the model guidance in references/eval-playbook.md) is mirrored from the standards sources tracked in the skill-maintainer registry and is refreshed through that skill's registry, not duplicated here; numeric limits are cited from skill-maintainer, never copied. See REFRESH.md.",
-  "sources": []
-}

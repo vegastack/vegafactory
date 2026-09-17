@@ -41,12 +41,8 @@ describe('publishable package', () => {
       'references/web.md', 'references/data.md',
       'references/infra.md', 'references/ai-agents.md', 'references/security.md',
       'references/mobile.md',
-      'refresh/REFRESH.md', 'refresh/sources.json', 'agents/openai.yaml',
+      'agents/openai.yaml',
     ]) expect(installedFiles.some(path => path.endsWith(required))).toBe(true)
-    // The shipped refresh registry parses and carries populated baselines.
-    const registry = JSON.parse(await readFile(join(installed, 'refresh/sources.json'), 'utf8'))
-    expect(registry.sources.length).toBeGreaterThan(0)
-    for (const source of registry.sources) expect(typeof source.checksum).toBe('string')
   }, 30_000)
 })
 

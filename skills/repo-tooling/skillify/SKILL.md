@@ -16,9 +16,9 @@ Score every item pass / fail / N/A; N/A without a one-line rationale is a fail, 
 3. **Sharp boundary** — the SKILL.md body names its nearest-neighbor skill and the one-sentence axis of difference (or states it has none). Two skills answering the same trigger get merged, not shipped.
 4. **References routed** — `references/` holds detail only some invocations need, behind a routing table; SKILL.md keeps the workflow, one excellent example, and the routes. N/A for a self-contained skill.
 5. **Scripts deterministic and tested** — bundled scripts follow the conventions in [authoring](references/authoring.md) (dependency-free Node, `--json`, documented exit codes, dry-run default, atomic writes); unit tests cover every deterministic branch. N/A when the skill ships no scripts — its quality bar is item 6.
-6. **Behavioral eval passed** — the cases in `evals/evals.json` run with-skill vs baseline per the [eval playbook](references/eval-playbook.md), at most 3 improve cycles; pass, or ship with a KNOWN_GAPS section in the skill's README.
-7. **Freshness honest** — volatile facts live in refresh-tracked files, never in SKILL.md; a skill with none states the evergreen waiver in `refresh/REFRESH.md`.
-8. **Wired and green** — README, `agents/openai.yaml`, packaging entry, root README row, and changeset in place; `bun run check:fast` and `bun run test:affected` pass.
+6. **Behavioral eval passed** — the cases in `evals/evals.json` run with-skill vs baseline per the [eval playbook](references/eval-playbook.md), at most 3 improve cycles; pass, or ship with a `## Known gaps` section at the end of SKILL.md.
+7. **Freshness honest** — volatile facts (versions, model names, limits, dated claims) live in a references file, each with its checked date and official source link, never in SKILL.md; the `skills-refresh` skill keeps them current.
+8. **Wired and green** — `agents/openai.yaml`, packaging entry, root README row, and changeset in place; `bun run check:fast` and `bun run test:affected` pass.
 
 **Verdict:** all pass → `properly skilled`. At most two misses, neither item 1 nor item 6 → `close — create: <missing items>`. Otherwise → `needs skillify — run skillify on <target>`.
 
@@ -55,7 +55,7 @@ Interview, skipping questions the conversation already answers:
 - **Edge cases:** empty input, missing config, offline, partial state.
 - **Existing behavior:** code or prose to absorb? What did its author correct over time?
 
-Mark every volatile fact the skill will state — version pins, model names, numeric limits, dated claims; those go to refresh-tracked files (item 7), or the skill takes the evergreen waiver.
+Mark every volatile fact the skill will state — version pins, model names, numeric limits, dated claims; those go to a dated references file (item 7).
 
 ## Phase 3 — Scaffold and write
 
@@ -81,8 +81,8 @@ At most 3 cycles: eval → apply the top improvements → re-eval; pass, or ship
 ## Phase 5 — Lock in
 
 1. Unit tests and fixtures for the deterministic branches of any bundled scripts; a prose-only skill keeps just its trigger-query fixture.
-2. `refresh/sources.json` + `refresh/REFRESH.md` for the volatile facts marked in Phase 2, or the evergreen waiver.
-3. Finish `README.md`, `agents/openai.yaml`, and the scaffolder's wiring TODOs (README row, changeset per dev-implement's changelog rule).
+2. Put the volatile facts marked in Phase 2 in a references file, each with its checked date and official source link.
+3. Finish `agents/openai.yaml` and the scaffolder's wiring TODOs (root README row, changeset per dev-implement's changelog rule).
 
 ## Phase 6 — Verify
 
@@ -105,4 +105,3 @@ Re-score the checklist and report `<passed>/8` with the verdict; anything below 
 | eval method, pass criteria, trigger-query doctrine, workflow drills, cycles, KNOWN_GAPS, model guidance | [eval playbook](references/eval-playbook.md) |
 | name, description, body limits; listing budgets; portability; release and rename mechanics | the `skill-maintainer` skill |
 | the scaffolded starting points | `assets/templates/` |
-| skillify's freshness stance | [refresh/REFRESH.md](refresh/REFRESH.md) |

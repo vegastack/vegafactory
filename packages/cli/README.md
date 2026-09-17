@@ -1,419 +1,95 @@
 # @vegastack/vegafactory
 
-The VegaFactory command-line tool installs and verifies a bundled family of VegaStack Agent Skills for Claude Code, Codex, and Hermes, and it runs the local workflow, dispatcher, statistics, and service commands. The separately published `@vegastack/vegafactory-dashboard` package is the local read-only web app; this CLI downloads that package at its own exact version only when `vegafactory dashboard` is first used.
+The VegaFactory command-line tool installs and verifies the VegaStack Agent Skills for Claude Code and Codex, and runs the local pieces of the dev workflow: per-issue worktrees, the control-room sync and the ship guard.
 
-Install the whole dev workflow, once per machine:
+Install the dev workflow, once per machine:
 
 ```sh
 npx @vegastack/vegafactory@latest skills add --group dev --global
 ```
 
-`--global` is the recommended install: the skills land in your home directory and are available in every project you open. Drop it for a project-local install when a repository should carry its own copy.
-
-See what else is bundled:
+See everything bundled:
 
 ```sh
 npx @vegastack/vegafactory skills list
 ```
 
-## Skills in this package
-
-### `dev` — the issue-driven dev workflow
-
-Install the family with `add --group dev --global`.
-
-| Skill | What it does |
-|---|---|
-| `dev-setup` | Bootstraps any project, greenfield included, for the issue-driven dev workflow: stack-playbook-drafted profile, AGENTS.md section, labels, guards, decision register |
-| `dev-intake` | Turns ideas, brainstorms, and SOWs into agent-ready GitHub issues with recorded user approval |
-| `dev-plan` | Plans an approved issue before any code exists: fresh-grounded questionnaire, strict plan format with Interfaces blocks, the scope ratchet, quick-build inline mode |
-| `dev-architect` | Architecture advisor: the locked stack, recorded rejections, and dated platform facts behind a verify-before-you-recommend protocol |
-| `dev-implement` | Implements an approved issue end to end, dark: preflight, claim, build, test, review, evidence in the issue |
-| `dev-debug` | Reproduce-first bug diagnosis: red command, ranked suspects, regression-test-before-fix |
-| `dev-review` | Independent multi-axis review of finished work: spec/standards/security axes, bounded fix loop, cross-agent Codex mode |
-| `dev-ship` | Opens the PR, merges, and runs the project's Ship runbook, each only on the user's explicit word |
-| `dev-status` | The operator's board: whose move is it, from deterministic gh data |
-| `dev-chronicle` | The project's narrative record: story entries per branch and the "catch me up" digest |
-
-### `skills-tooling` — tools that work on skills themselves
-
-Install the group with `add --group skills-tooling --global`.
-
-| Skill | What it does |
-|---|---|
-| `skill-scan` | Scans agent skills with NVIDIA SkillSpector and holds the suppression baseline: the Verify-gate guard, and the answer to "is this downloaded skill safe to install" |
-
-### `repo-tooling` — repo-only
-
-These operate on the vegafactory repository itself and do nothing useful in another project, so **`--all` skips them**. Install one by name if you are contributing to that repo.
-
-| Skill | What it does |
-|---|---|
-| `skill-maintainer` | Encodes the Agent Skills standards (Claude Code, Codex, Hermes, agentskills.io) for creating, updating, and releasing skills in a skills repo |
-| `skillify` | Turns a feature or workflow into a complete skill conforming to the VegaStack skills contract, or audits an existing one |
-
 ## Commands
 
 | Command | What it does |
 |---|---|
-| `list` | Show the bundled skills |
-| `add <selection>` | Install (or upgrade) skills into the selected agent directories |
-| `verify [selection]` | Check installed copies against the bundled checksum manifest (all bundled skills when nothing is selected) |
-| `doctor` | Diagnose an install: integrity across all skills, dev profile (`.vegastack/dev.md`) presence, installed-vs-latest version |
-| `remove <selection>` | Uninstall skills from the selected agent directories |
-| `sync` | Refresh this machine's shallow control-room clone from the repo's `control-room:` knob |
-| `dispatch` | Turn labels and 🚀 reactions on the watched repos into headless runs in feature worktrees |
-| `service <install\|uninstall\|status>` | Install that dispatcher as a launchd LaunchAgent (macOS) or a systemd user unit (Linux) |
-| `status` | The board, the worktrees, the last tick, the runs in flight, and the dispatcher's own health |
-| `stats` | Where agent time and money went — record, push, roll up, and print the org's own numbers |
-| `dashboard` | Start the local read-only dashboard over the control room's statistics and the live board |
-| `guard sync [--check]` | Compile `.vegastack/dev.md`'s guard policy into `~/.vegastack/guard/<owner>__<repo>.json`, the one file the ship guard reads; `--check` exits 2 when it is stale |
+| `skills list` | Show the bundled skills, by group |
+| `skills add <selection>` | Install skills into the agent directories |
+| `skills verify [selection]` | Check installed copies against the bundled checksum manifest |
+| `skills remove <selection>` | Uninstall skills; refuses a locally edited copy unless `--force` |
+| `skills doctor` | Check the install, the project's `.vegastack/dev.md` and the latest version |
+| `worktree <list\|status\|create\|restore\|remove\|prune>` | One git worktree per issue under `.vegastack/.worktrees/` |
+| `sync` | Refresh this machine's copy of the org control room |
+| `guard sync [--check]` | Compile `.vegastack/dev.md`'s ship rules into `~/.vegastack/guard/<owner>__<repo>.json`, the file the ship guard reads |
 
-### Selecting what to act on
+### Selecting skills
 
-`add`, `verify`, and `remove` each take **exactly one** selector. Combining two is an error, not a merge.
+`add`, `verify` and `remove` take **exactly one** selector:
 
 | Selector | Means |
 |---|---|
-| `<skill>` | That one skill. Works for every bundled skill, repo-only ones included |
+| `<skill>` | That one skill, repo-only ones included |
 | `--group <group>` | Every skill in that group |
-| `--all` | Every bundled skill **except** the repo-only ones |
+| `--all` | Every bundled skill except the repo-only ones |
 
-A `--group` or `--all` install is **one transaction**: every skill is checked and staged before any of them is committed, so if one fails, none are installed and the destination is left exactly as it was.
+A `--group` or `--all` install is one transaction: if any skill fails, none are installed.
 
-The ten dev-workflow skills:
+### Upgrading
 
-```sh
-npx @vegastack/vegafactory skills add --group dev --global
-```
-
-Everything worth installing outside this repo:
-
-```sh
-npx @vegastack/vegafactory skills add --all --global
-```
-
-Check the family against the manifest:
-
-```sh
-npx @vegastack/vegafactory skills verify --group dev --global
-```
-
-Uninstall it again:
-
-```sh
-npx @vegastack/vegafactory skills remove --group dev --global
-```
-
-### The dispatcher
-
-`vegafactory dispatch` polls the repos this machine watches and starts headless runs in their feature worktrees: `needs-plan` → dev-plan, unassigned `ready` → dev-implement, and a 🚀 reaction from a listed operator on any comment of a `for-operator` issue → the corrections run. It runs as **you** — your `gh` token, your harness authentication, your machine — which is why installing it is the operator's own step and never an agent's. Board, launch-comment and native-dependency reads must be complete before claiming or starting work. Reads stop at 100 pages or 10,000 records, with a 10-second request bound, 60-second repository budget and at most two retries; incomplete or rate-limited reads remain a named refusal and do not mean an empty queue. Retry a tick after connectivity recovers or the reported rate reset; no unchanged failure produces repeated notifications. The status CLI and its dashboard bridge still require #141’s completeness integration before their final acceptance.
-
-Which repos, how often, and how many at a time is machine-local, in `~/.vegastack/factory.json` (the same file the control-room clone state lives in; keys it does not recognise are left untouched):
-
-```json
-{
-  "repos": [{ "path": "~/code/app", "repo": "acme/app", "org": "acme" }],
-  "interval": 120,
-  "maxRuns": 1,
-  "subagents": { "spawnDepth": 1, "concurrent": 3 }
-}
-```
-
-Whether a repo may be dispatched at all is **not** machine-local — it is the repo's own `.vegastack/dev.md`:
-
-```
-dispatch: local             # off | local
-```
-
-Three refusals stand between a board and a dark build, and each one names itself in the output:
-
-- `dispatch: off`, no `dispatch:` line, or any other value — opting in is explicit, and the default is off.
-- The selected harness must have a supported synchronous PreToolUse registration for every shell tool: direct `node <checkout guard> --harness <selected>`, with verified installed asset bytes, no symlinks and an executable interpreter. JSON and supported inline config layers are checked together. Wrong event/matcher/argv, missing worktree copies and custom wrappers refuse with a migration reason. The owner compiler checks current schema2 policy/digest in the actual prepared ordinary or parent worktree, and the check repeats immediately before spawn. Stale policy requires explicit `vegafactory guard sync`; launch never recompiles it into permission. Configuration, local invocation and live-qualified coverage are separate. These same-user hooks are cooperative; remote branch protection and permissions remain necessary.
-- Another run holds the repo's lock, the issue is assigned, or `maxRuns` is already committed.
-
-Read the plan before anything ever runs — this is the default, and both `--once` and `--watch` are opt-ins:
-
-```sh
-vegafactory dispatch --once --dry-run --json    # exactly what would launch, and launch nothing
-vegafactory dispatch --once                     # one tick, for real
-vegafactory dispatch --watch                    # the loop the service runs
-vegafactory status --json                       # what happened
-```
-
-Every run first records private lifecycle state under `~/.vegastack/runs/<run-id>/`; default diagnostics contain bounded events and reason codes, never raw stdout, stderr, argv, credentials, or local paths. A failed or timed-out run may publish only a separately authorized hand-back intent with an opaque delivery marker and reason. Process completion grants no label, assignment, push, or acceptance mutation: each remote effect needs its own durable exact intent and verified readback, while the worktree and pending local evidence remain preserved.
-
-### Owned claims and recovery
-
-Use one non-root dispatcher account and one lock directory per host. The default is `~/.vegastack/factory/locks`; an optional absolute `lockRoot` in the exact service config selects another directory. Changing the directory requires stopped-service migration and inspection of the old directory first. Two homes are not a substitute for a shared host lock root.
-
-Repository and watch claims use random owner tokens plus the process UID, boot identity and start identity. Every acquisition, renewal, release and stale-owner replacement takes the same short exclusive mutation guard. A PID alone never proves ownership. The guard waits at most two seconds for contention; this is not a task timeout. Repository path keys hash the canonical GitHub identity. Existing PID-only files are preserved and refuse migration until reconciled. Status reports unverifiable ownership explicitly.
-
-For a corrupt claim, legacy claim or abandoned mutation guard: stop every dispatcher using that account/root; preserve the owner file and guard directory; verify the recorded process is absent or its boot/start identity differs; verify no retained run is executing; then take an exclusive offline recovery guard and reconcile only the inspected pathname and exact token. Re-read the token while holding that guard before clearing a verified stale record. If a mutation guard has no valid owner record, recovery is an offline operator action: automatic recursive guard stealing is forbidden. Never delete a worktree, checkpoint or run record to unlock a task. An unknown process identity remains a visible refusal.
-
-Registered machines additionally use the configured existing private control-room state branch. Shared claims reserve repository/issue identity, host capacity, parent child slots and incompatible resources with one GitHub `createCommitOnBranch` transaction using `expectedHeadOid`. Different machines and scope revisions do not create different task keys. Only verified independent scopes may overlap; ambiguous paths serialize. A missing, rewritten, malformed, default or inaccessible state branch refuses dispatch; runtime never creates or resets it. [GitHub's conditional commit input](https://docs.github.com/en/graphql/reference/commits#createcommitonbranchinput) defines the expected-head field.
-
-Top-level work is repository-exclusive unless the fresh approved plan carries #135's closed `FleetParallelDeclaration`. The declaration must name the exact selected task set; its paths are re-derived from those tasks' canonical `Files —` clauses after current authority and dependency validation, and both peers must independently provide disjoint paths and resources. Missing, malformed, stale, mismatched, globbed or shared scope never reuses an older projection or gains independence from capacity, labels, configuration, observed diffs or model output.
-
-A verified stopped top-level parent and every direct retained child can move only through one atomic group-succession commit. The commit preserves checkpoints, accepted work, original parent bindings, joins, effects, history and reservations while replacing the complete owner tuple and generation. It leaves the parent `claimed` and children `recovery-queued`; transfer starts no process. Queued children retain file/resource reservations but consume a process slot only when their immutable predecessor receipt no longer proves stopped-and-never-started. Starting one requires the transferred parent to be running, fresh authority/source/qualification checks and both parent and machine child capacity. Group records use task schema v2 and a distinct receipt schema; every participating reader must support them before live activation, while v1 records remain readable and older closed readers refuse v2 instead of falling back.
-
-Recovery receipts are closed typed data pinned to an actual commit and blob digest. Publishing a receipt and linking it into the task are separate acknowledged transitions. Unlinked intent cannot authorize an effect, and an ambiguous send must be reconciled before retry. Completed scope evidence remains historical even after active reservations are removed. A stale heartbeat or disconnected host never proves termination. Transfer requires verified stopped execution, an available checkpoint, original execution identity, current authority and resolution of every possible remote effect. Configured hooks alone leave `remoteEffectCoverage` as `unmanaged-possible`.
-
-The source coordination API is available to the durable runtime owner: `acquireSharedTask`, `transitionSharedTask`, `recoverStoppedGroup`, `inspectGroupSuccession`, `publishRecoveryReceipt`, `resolveEvidence`, `beginManagedEffect` and `readSharedStatus`. Dispatch requires verified-candidate, durable-preparation, shared-executor and stopped-result adapters; absence refuses instead of launching through the legacy executor. Live provider behavior, full macOS/Linux reboot coverage, managed-effect qualification and assembled acceptance remain separate required gates.
-
-### Running it as a service
-
-```sh
-vegafactory service install                     # dry run: prints the unit file and the commands
-vegafactory service install --write             # writes it and loads it
-vegafactory service status
-vegafactory service uninstall --write
-```
-
-macOS gets `~/Library/LaunchAgents/com.vegastack.factory.plist` with `RunAtLoad` and `KeepAlive`, bootstrapped into your GUI domain; Linux gets `~/.config/systemd/user/vegafactory.service` with `Restart=always`, `loginctl enable-linger` first so it survives logout. Both are user-level: nothing here needs or asks for root.
-
-## Upgrading and health checks
-
-Upgrade to the latest release. `--force` is required because `add` refuses to overwrite an installed copy that differs from the bundle rather than silently discarding local edits:
+`add` refuses to overwrite a copy that differs from the bundle, so an upgrade passes `--force`:
 
 ```sh
 npx @vegastack/vegafactory@latest skills add --group dev --global --force
 ```
 
-Diagnose an install — integrity across all skills, plus installed-vs-latest version:
-
-```sh
-npx @vegastack/vegafactory skills doctor --global
-```
-
-Run `doctor` without `--global` from inside a project to additionally check that project's `.vegastack/dev.md` profile; the global run skips that check, since the profile is per-project by design.
-
 ## Control-room sync
 
-An organisation can keep its shared defaults — org policy, per-group knobs, people, decisions — in a **control room** repository. Every machine reads a shallow clone of it rather than the network, so a GitHub outage degrades to "last synced <time>" instead of failing.
+An organisation keeps its shared defaults in a control-room repository. Each machine keeps a copy at `~/.vegastack/control-room/<org>/`, and skills read that copy instead of the network.
 
 ```sh
-vegafactory sync            # refresh if the last fetch is older than sync-max-age
-vegafactory sync --force    # refresh regardless
-vegafactory sync --json     # the machine-readable report (what hooks and the dispatcher read)
-vegafactory sync --dry-run  # print the plan, write nothing
-vegafactory sync --org acme # bootstrap: a repo whose profile has no control-room: knob yet
+vegafactory sync            # refresh when the copy is older than sync-max-age
+vegafactory sync --force    # refresh now
+vegafactory sync --org acme # first run in a repo whose dev.md has no control-room: line yet
 ```
 
-- The project's `.vegastack/dev.md` names the control room: `control-room: <org>/<repo>#<group>@<sha7>`, where the trailing sha is the clone commit the profile was drafted from. `control-room: none`, or no line at all, means the skill defaults apply and `sync` exits 0 doing nothing — unless `--org <org>` is passed, the bootstrap path dev-setup uses before the profile exists: the room is then `<org>/vegafactory-control-room` by convention, and an `--org` that disagrees with an existing knob is refused (exit 2).
-- The clone lives at `~/.vegastack/control-room/<org>/` — one per org.
-- The machine-local state document `~/.vegastack/factory.json` records, per org, the clone `path`, its `remote` and `branch`, and the timestamp of the **last successful fetch**. Freshness is measured from that timestamp, never from the directory's mtime. Editing `path`, `remote` or `branch` there points a repo at a different control room; nothing in the repository has to change — every refresh re-points the clone's `origin` at the configured `remote` and resets to what it fetched from the configured `branch`, so an edit takes effect on the next refresh (or `--force`) rather than only on a fresh clone.
-- `sync-max-age: 30m` in `.vegastack/dev.md` (`<n>m` or `<n>h`) is how stale the clone may be before a session refreshes it. Refresh runs through the explicit sync/runtime owner; the bounded advisory SessionStart hook performs no background network work.
-- Authentication is your existing `gh` credential over HTTPS, injected per invocation — no token reaches argv, the remote URL, or the clone's config, and no second credential is set up.
-- `sync` never commits and never pushes: the clone is read-only to this verb.
-
-Exit codes: **0** synced, already fresh, or the repo names no control room · **1** the fetch failed and the existing clone stands (the report says when it last synced) · **2** a refusal.
-
-Two refusals are deliberate and fail closed:
-
-- a clone with local modifications is never reset — `sync` refuses and names the path, because nobody should hand-edit the clone;
-- a symlink on the clone path or its parent is refused before any git call.
-
-An unreadable `~/.vegastack/factory.json` is also a refusal, never a silent reset: resetting it would drop every other org's clone record.
-
-### Effective policy and migration
-
-Runtime, stats and the standalone dev-setup compiler share `effective-policy.mjs`. Ordinary explicit values resolve org → group → repo, including individual harness stages. A repo alone opts into `dispatch: local`. Org locks and exact group/repo/value delegations live in one `vsk-policy` schema2 block in org.md; a group's legacy `stats-override: allowed` cannot unlock the organization. A refused override retains its effective value for diagnostics but stops capture/export and new launches.
-
-`policy-schema: 2` opts into the documented typed contract. Legacy version1 ordinary knobs remain readable and are never silently rewritten. Use `vegafactory guard sync --dry-run --json` to inspect the proposed compiled values, source revisions and digest, then `--check` to compare the installed copy. Show original/effective/proposed policy differences and preserve originals before an explicit migration; obtain approval for an actual authority change. Unknown schemas, duplicate known keys and invalid values refuse without overwriting the existing copy. Unknown extension fields remain inert.
-
-Configured rooms require `factory.json`'s `controlRooms[org].snapshots[canonicalCodeRepo]` binding. Each snapshot carries schemaVersion2, org, group, repository (the room), origin, full sourceCommit, policyDigest, validatedAt and contentPath. The digest is recomputed for that exact code repo's current profile and selected group, using canonical relative source paths; one org digest cannot stand for multiple code repos. The reader checks origin, commit, clean managed content and regular Git blobs. Missing bindings, changed local profile, wrong group/origin or expired validation refuse. Snapshot creation and atomic refresh are the sync transaction's responsibility; a legacy lastSyncedAt is not validation. Freshness never creates a cumulative task deadline.
-
-Organization admins and explicitly delegated group admins are configured separately from descriptive people.csv roles and the task operators list. Only org admins appoint/remove admins. CLI people queries verify the requester through GitHub and filter exact allowed repository records before totals; chat/URL/display-role claims do not grant authority. The dashboard's canonical adapters fail closed until a caller supplies validated scope. Control-room Git readers can still read committed reports; application permissions do not make shared Git files group-confidential.
-
-Registered-machine policy includes stable machine/installation identity, host binding, execution login, exact repositories and disabled initial enrollment. Org defaults → group defaults → machine overrides govern polling, capacity, checkpoint and verified-transfer recovery modes. Group edits require previous org delegation; bootstrap paths cannot enable or enlarge registration. No-fleet installations retain explicit legacy operation; shared machines require validated registration and shared ownership rather than local-lock fallback. Runtime activation, private house-policy migration and state-branch creation remain separate setup steps.
-
-### Statistics
-
-Metric v2 uses immutable execution, activity and rework-snapshot events in the private outbox and control room. Execution segments retain independent event IDs and one logical execution identity across continuation. Historical JSONL files remain unchanged and use explicitly labelled legacy definitions. See the [metric dictionary and coverage rules](https://github.com/vegastack/vegafactory/blob/main/packages/cli/docs/metrics.md).
-
-```sh
-vegafactory stats                       # this repo, this month
-vegafactory stats --org --since SEP-2026
-vegafactory stats --me                  # your own rows
-vegafactory stats skills                # invocations per skill, by trigger and harness
-vegafactory stats push                  # dry run: prints the plan and the commit it would make
-vegafactory stats push --commit         # delivers verified immutable event batches
-vegafactory stats rollup --since SEP-2026   # discover accepted delivery independently of run months
-vegafactory stats activity --org acme --repo acme/project.docs --month 2026-09 --json
-vegafactory stats record --source <kind>    # called by the capture hooks, reads the payload on stdin
-```
-
-**Records contain counts and permitted identifiers only.** Execution records carry observed runtime, usage and terminal outcome. Activities carry event identity and occurrence time; cumulative rework snapshots carry their as-of date and history coverage. Missing measurements stay `null`, and reported zero stays zero. Mutable legacy review/ledger/handback counters do not become monthly events. Prompt text, assistant text, tool arguments and file contents do not enter shared reports.
-
-**Whether anything is recorded is org/group/repo policy, never a machine bypass.** Ordinary `stats` and `stats-people` values inherit; explicit org locks require exact delegation. `stats-export: attributed` requires org authorization. Refusals stop capture and export. Per-person reads use verified own-data identity or explicit scoped administration; a descriptive `lead` role does not supply that grant. Derived summaries retain their authorized repository scope. The private shared Git audience remains explicit; UI filtering does not erase Git history or copies.
-
-`push` is a dry run until `--commit`, because it writes to a repository other people read.
-
-The CLI verifies its requester through the GitHub API. `rollup` also reads issue history: lead and cycle time come from each touched issue's label timeline, fetched through `gh` and written beside the summary as `<MON-YYYY>.timeline.json`. When `gh` cannot answer, the summaries are still regenerated from the timeline file the clone already holds, the reason is printed, and the exit code is 1.
-
-## Dashboard
-
-`vegafactory dashboard` starts a local, read-only web view of the factory and prints its URL.
-
-```bash
-vegafactory dashboard              # fetch on first use, then serve on 127.0.0.1:7777
-vegafactory dashboard --org acme   # required only when more than one org is configured
-vegafactory dashboard --open       # …and open it in the browser
-vegafactory dashboard --dry-run    # print what a real run would do, change nothing
-```
-
-| Flag | Means |
-|---|---|
-| `--org ORG` | Select one configured canonical organization; inferred when exactly one is configured |
-| `--port N` | First port to try; the next nine are tried in turn |
-| `--open` | Open the URL in the browser once the server answers |
-| `--dir PATH` | Launch an already-built package tree instead of the fetched one |
-| `--dry-run` | Print the plan and change nothing |
-| `--json` | Machine-readable result, including the exact `org`, `version`, `instanceId` and cache schema of the owned child |
-
-Exit **0** the server answered, or the dry-run plan printed · **1** the server exited or never
-answered with the expected identity · **2** a usage error or refusal such as ambiguous org selection,
-an invalid repository registration, an unsafe path, or an unverified existing install. Missing `gh`
-credentials do not block an identity-safe empty/unavailable shell.
-
-The app is a second published package, `@vegastack/vegafactory-dashboard`, fetched at this CLI's own
-version on first use into `~/.vegastack/dashboard/<version>/` — the core install stays small. The
-CLI verifies the exact descriptor-declared tarball bytes and regular-file tree, stages them with
-scripts disabled, and atomically selects the version. An ordinary caught failure removes only that
-attempt's owned staging directory; crash-interrupted or unrelated staging and an unowned or
-mismatched existing install remain preserved and unexecuted. `--dir` is explicitly
-`unverified-development`; release qualification never treats it as artifact proof.
-
-Each canonical org has an isolated immutable-generation cache at
-`~/.vegastack/dashboard/<sha256(org)>/cache-v2/`. Requests hold process-identity reader pins until
-their async render callback finishes; obsolete generations are reclaimed only when every exact pin
-owner is absent or proven stopped. A failed refresh serves the last eligible generation with its
-original source timestamp/digest and a stale/partial reason. The legacy
-`~/.vegastack/cache/stats.db` is never migrated, relabelled or deleted automatically: after a new
-selected-org generation has served the expected views, inspect/move it as a manual dry-run cleanup
-candidate before deleting it.
-
-The server binds `127.0.0.1` only. The CLI generates a fresh per-child instance ID and accepts
-readiness only when org, version, instance, schema and data-state match while that owned child is
-still alive. Your `gh` token is passed only to that server process and never appears in readiness or
-client data: the browser receives projected view models, not credentials.
-
-Nine destinations cover Attention, Performance, Activity, People, person detail, Skills, repository
-detail, Board and Dispatcher. Attention orders decisions, blocked or failed tasks, running work and
-recent merges. Performance keeps reported usage, coverage, subscription fee evidence and
-API-equivalent estimates separate. Activity keeps task owner, agent-account owner, shared machine,
-checkpoint uncertainty and compact handoff history on one repository/issue row. Every live/status
-read is projected to the current verified repository scope before totals, rows or links. When a live
-source is unavailable, safely retained data stays visible with explicit unavailable, stale and
-partial state; unavailable dispatcher observation is not reported as idle.
-
-The registry-downloaded `0.19.0` pair passed descriptor/inventory verification, installed-CLI
-launch identity and health checks, and scoped HTTP response smoke across all nine destinations.
-That was not an interactive browser run. This source revision still uses the dashboard's native
-semantic table and existing root setup; signature-verified provider/Table copy-in, keyboard,
-automated accessibility, theme and viewport evidence remain pending.
+- `.vegastack/dev.md` names the control room: `control-room: <org>/<repo>#<group>@<sha7>`.
+- `sync` uses your existing `gh` login, never commits and never pushes.
+- Exit codes: **0** synced or already fresh · **1** the fetch failed and the old copy stands · **2** a refusal (a hand-edited copy, a symlinked path, an unreadable `~/.vegastack/factory.json`).
 
 ## Flags
 
 | Flag | Meaning |
 |---|---|
-| `--project` / `--global` | Install into the current project (default) or the user's home directory |
-| `--group NAME` | Select every skill in a group (see `list` for the groups) |
-| `--all` | Select every bundled skill except the repo-only ones |
-| `--agent codex\|claude\|hermes\|both\|all` | Target agent runtime(s); `both` = codex+claude |
-| `--dir PATH` | Operate on a different project directory; not valid with `--global` |
+| `--global` / `--project` | Install into your home directory or the current project |
+| `--agent codex\|claude\|both` | Which agents to install for; detected automatically when omitted |
+| `--dir PATH` | Act on another project directory; not valid with `--global` |
 | `--dry-run` | Show what would change without writing |
-| `--force` | Overwrite a modified installed copy; for `sync`, refresh regardless of `sync-max-age` |
-| `--json` | Machine-readable output (`sync`) |
-| `--non-interactive` | Skip prompts and use defaults: `--agent both`, project-local (for automation) |
-| `--version` / `-v` | Print the installer version |
-| `--help` / `-h` | Print usage |
+| `--force` | Overwrite a modified installed copy; for `sync`, refresh now |
+| `--json` | Machine-readable output |
+| `--non-interactive` | Skip prompts (for automation) |
+| `--version` / `--help` | Print the version or usage |
 
-`--all` and `--agent all` are different axes and are easy to confuse: `--all` chooses **which skills**, `--agent all` chooses **which agent runtimes**. `add --all --agent all --global` is valid and means every installable skill, on every runtime, in your home directory.
+## Where skills are installed
 
-Agent targeting is automatic: the CLI detects which agents you have (`~/.claude`, `~/.codex`/`~/.agents`, `~/.hermes`) and targets them without asking — `--agent` overrides. A numbered picker appears only when nothing is detected.
-
-## Agent surfaces
-
-`--global` is the recommended install and the only one that can cover all three runtimes at once. `--project` is the flag default, so pass `--global` explicitly.
-
-| Agent | Global install (recommended) | Project install |
+| Agent | Global | Project |
 |---|---|---|
 | Claude Code | `~/.claude/skills/` | `.claude/skills/` |
 | Codex | `~/.agents/skills/` | `.agents/skills/` |
-| Hermes | `~/.hermes/skills/` | — (Hermes discovers skills globally only) |
 
-`--agent hermes` therefore requires `--global`; `--agent all` on a project install covers codex+claude and prints a notice about hermes.
+Install each skill globally or per project, not both: in Claude Code a personal (global) skill takes precedence over a project one.
 
-Prefer a project install when a repository should carry its own copy — so collaborators get the same skills from a checkout, or so one project can pin a version while the rest of the machine moves on. Pick one or the other per skill rather than both: in Claude Code a personal (global) skill takes precedence over a project one, so a project-local copy would not override a global install of the same skill.
+## Integrity and network
 
-## Integrity model
-
-The package ships a checksum manifest that is verified at install and by `verify` — it proves the installed bytes match what was packed, not who published it. A version with npm provenance adds a verifiable source/workflow link; inspect the selected version on npm rather than assuming every release carries one. The direct `0.19.0` bootstrap and the current automated publisher explicitly omit provenance. Verify available signatures and attestations with `npm audit signatures` or on the package's npm page.
-
-## Network and telemetry
-
-VegaFactory sends no product telemetry to VegaStack or to an analytics service.
-
-The tool makes four kinds of network call, all to the npm registry or infrastructure you already own:
-
-- `doctor`'s single version check against registry.npmjs.org;
-- `sync`'s shallow git fetch of the control room named by the project's `control-room:` knob;
-- `stats push`'s git push of your statistics records into that same control room, and bounded `stats rollup`/`stats activity` reads of all-state issues, immutable acceptance receipts, delivery PRs and linked releases/tags;
-- `dashboard`'s first-use fetch of `@vegastack/vegafactory-dashboard` from registry.npmjs.org, and that server's own reads of the GitHub API for the live board.
-
-All of them but the two registry calls use your existing `gh` credential, and the control-room calls reach only your organization's own repository. `add`, `verify`, and `remove` are fully offline. Statistics are recorded only while the org's `stats:` policy says so, and a record carries counts and identifiers only — never transcript text (see [Statistics](#statistics)).
+The package ships a checksum manifest, checked at install and by `verify`. `add`, `verify` and `remove` work offline. The only network calls are `doctor`'s version check against the npm registry and `sync`'s git fetch of your own control room. VegaFactory sends no telemetry.
 
 ## Requirements
 
-- Node >= 24
-- macOS or Linux. Windows is not yet supported (path handling; tracked in the repo issues).
+- Node 24 or newer
+- macOS or Linux (Windows is not supported)
 
-## Docs
-
-Skill content, freshness model, and policies: [github.com/vegastack/vegafactory](https://github.com/vegastack/vegafactory)
-
-MIT license.
-
-
-### Managed hooks and memory
-
-Managed Claude/Codex launches disable native memory retrieval/generation while retaining authored project instructions and hooks. Supported controls are pinned to Claude Code2.1.263 and Codex0.153.4; missing/unsupported version or effective controls refuse. Codex also disables optional task-note/search context management and native-memory import; neither `memories=false` nor CLI help alone proves runtime exclusion. Session overrides do not alter personal settings or existing vendor stores. Actual qualification remains separately evidenced.
-
-SessionStart/Stop/SessionEnd use a bounded local adapter with explicit harness, a 64 KiB input limit, one 500 ms capture/learning phase and one-second overall hook limit. The known Node child signals module readiness, validates registry/session/current policy without optional Git index locks, then obtains one trusted flush grant before any write. The supervisor enforces both fixed deadlines through owned-process-group termination. Finish plus exit 0 is required for context output. Stop and SessionEnd emit no instructions and start no network/model process. The shared session-start.mjs file must accompany either consumer. Only normalized identity fields reach `stats record --source managed-hook`; the CLI index preserves its existing durable private capture/deduplication consumer before flushing prepared learning. SessionStart uses `learning inspect --source managed-hook --json` for actual bounded verified lesson context. No fallback reads transcripts or native memory, and no capture/lesson-reuse success is inferred from silent exit. The precise wire and configuration examples are in the authored dev-setup harness-facts reference.
-
-
-Codex0.153.4 applicability uses bounded read-only stdio hooks/config/requirements metadata APIs, with no thread, turn or hook execution. Only relevant sanitized fields survive; individual disabling and managed-only restrictions can refuse a locally present guard. Claude applicability currently remains unsupported and refuses: CLI version/help is not effective managed-settings evidence. The checked child gateway is integrated, while actual pinned-harness execution qualification and qualified shared-parent admission remain outstanding. Neither refusal changes personal settings or permits native-memory fallback. Pre-spawn refusal preserves a pending corrections reaction, and configuration evidence retains explicit unmanaged-possible effect coverage.
-
-
-### Recoverable execution and source checkpoints
-
-Each execution attempt has a private record under `~/.vegastack/runs/<run-id>/`.
-The wrapper records its process identity before admitting the vendor command. Ordinary
-work has no elapsed-time cutoff. Cancellation allows five seconds for termination,
-then up to two seconds to verify forced cleanup. Unknown termination retains ownership
-and requires reconciliation; process completion does not imply accepted issue completion.
-Default event logs contain lifecycle events and reason codes, without raw streams or argv.
-
-`vegafactory status --json` reports durable state, terminal cause and pending delivery
-counts. Legacy logs remain unverified diagnostics. The same task resumes only after its
-original authority, ownership, saved source and execution setup are verified.
-
-`vegafactory checkpoint --run-id ID --json` inspects saved progress. `--write` requires
-an existing recorded exact checkpoint intent and freshly verified canonical approval.
-Checkpoint preparation checks all newly exported commits, merge ancestry, paths and blobs,
-including files removed by later commits. Delivery uses the approved task ref without force,
-implicit tags or submodule pushes, and remote readback precedes acknowledgment. A failed
-upload preserves local source. The dispatcher never stages an actively changing worktree.
-
-This source checkpoint does not qualify unattended operation. Shared execution refuses
-without the pinned execution-evidence verifier. Provider quota detection/availability,
-shared checkpoint/status effect controllers and complete recovery/acceptance qualification
-remain integration work; local fixtures do not establish those capabilities.
-
-### Verified lessons and recovery
-
-`vegafactory learning checkpoint --run-id ID --json` flushes prepared observations from the owned recovery packet; `inspect` selects source-bound lessons and `revert --id ID --run-id ID --dry-run|--apply --json` checks an exact local inverse patch. Lessons need actual relevant ordinary-work checks and reversible approved files; mandatory reviews and protected rules retain their gates. No background model jobs or native-memory fallback are added.
-
-Recovery compares exact approved task IDs and fresh source tuples, keeps prior attempts and pending delivery identities, and preserves unavailable checkpoints, unknown termination and ambiguous effects as explicit blockers. Within a live owned run, `dispatch --checkpoint-task ISSUE-TN --run-id RUN_ID --once --json` runs only its approved-base configured check and retains task-only completion proof; omission of `--once` previews. Same-home continuation and receiving-home construction use verified ownership transitions and new terminal segments. Receiving history and reporting remain explicitly unavailable when the old private context is absent. Accepted child delivery rows require verified review, exact local join and immutable receipt readback/linking. Source backups, silent hooks and successful process exit alone are insufficient.
+Docs, skills and policies: [github.com/vegastack/vegafactory](https://github.com/vegastack/vegafactory) · MIT license.

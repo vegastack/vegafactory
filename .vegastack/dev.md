@@ -10,7 +10,7 @@ authority: CONTRIBUTING.md → this file → skill-maintainer's release-ops.md (
 ## Knobs
 
 review: cross-agent-risky   # subagent | cross-agent-risky | cross-agent — codex-cli 0.149.1 present (verified 29-08-2026)
-harnesses: claude 2.1.247 · codex 0.149.1 · hermes absent   # detected 03-09-2026; a dev-setup re-run refreshes it
+harnesses: claude 2.1.247 · codex 0.149.1   # detected 03-09-2026; a dev-setup re-run refreshes it
 harness-policy: intake claude fable high · plan claude fable high · implement claude fable high · review codex gpt-5.6 xhigh · status claude sonnet medium · chronicle claude sonnet medium   # `<stage> <agent> <model> <effort>`; raise planning to xhigh for a risky full-plan issue. Model ids move — edit this line, never a skill; the flags each value becomes are in dev-setup's references/harness-facts.md
 ui-evidence: none           # no UI in this repo
 gates: 3                    # 3 = approve/PR/merge · 2 = approve + one "ship it" · 1 = direct-to-main, which main's branch protection makes unavailable here
@@ -36,22 +36,17 @@ operators: kmanojkumar      # csv of the humans who own issues here; every state
 chronicle-style: plain      # plain | story | witty — the voice of chronicle entries (dev-chronicle's references/styles.md)
 emoji: none                 # none | sparing
 
-## Ship — what happens after merge, in order
+## Ship — what "ship it" does after merge, in order
 
-Line prefixes: `auto:` (agent just does it) · `ask:` (operator's word first) · `guard:` (deterministic check run locally at this position; its release.yml copy is the backstop).
+Line prefixes: `auto:` (agent just does it) · `ask:` (operator's word first) · `guard:` (deterministic check run locally at this position).
 
-- auto: `bunx changeset version && bun install` → commit `chore: release @vegastack/vegafactory <version>` on a `chore/release-<version>` branch → open its PR — the install is there to carry dependency changes; main is branch-protected with no admin exemption, so the bump lands by merge and never by direct push
-- ask: merge the release PR — the version bump is the last reviewable moment before the tag publishes, so it takes the operator's word of its own, not the release word
-- guard: a higher-major package version is refused by `node scripts/release-artifacts.mjs verify-version-transition` unless `.vegastack/major-release-approval.json` binds the exact previous and target versions, a listed operator, date and GitHub approval comment; record that one-transition file only on the operator's explicit major-version call
-- guard: both packages carry the tag version — `V=$(node -p "require('./packages/cli/package.json').version"); test "$V" = "$(node -p "require('./packages/dashboard/package.json').version")"` — `vegafactory dashboard` fetches `@vegastack/vegafactory-dashboard` at the CLI's own version, so a mismatch ships a verb whose first-use fetch resolves nothing
-- guard: changelog entry exists for the new version — `V=$(node -p "require('./packages/cli/package.json').version"); awk -v ver="$V" '$0=="## "ver{f=1;next} f&&/^## /{exit} f{print}' packages/cli/CHANGELOG.md | grep -q '[^[:space:]]'`
-- guard: the release tag targets the clean reviewed merged bump commit; its workflow owns the one release pair and runs frozen install/check, build/assemble, complete built-bundle scan, dashboard-first packing with the CLI descriptor, and actual first-use smoke. Missing/expired scanner evidence blocks preparation; publication never rebuilds.
-- auto: pull main, then tag and push exactly `v$(node -p "require('./packages/cli/package.json').version")` on the merged bump commit — covered by the operator's release word. The repository-wide serialized Release job prepares and pre-smokes one finalized pair, retains its exact tarballs/manifest/checks/scan/SBOM hashes before any registry mutation, publishes dashboard then CLI directly as latest through OIDC, verifies exact downloaded bytes/tags, and smokes registry first use; watch it to green.
-- guard: a Release workflow run has exactly one executable attempt because GitHub removes prior-attempt artifacts when a run is rerun. Any preparation, publication, readback, or smoke failure is diagnosed from retained evidence and rolled forward through a new patch PR and tag; rerunning the same run fails before preparation, never rebuilds or republishes, and never treats an outage as absence. Latest never moves backward, `npm publish --tag latest` is the only live registry write, and local live publication is refused.
-- auto: inspect/download that workflow's exact retained pair and outcome (including each direct-latest readback), and verify with `node scripts/release-artifacts.mjs verify-release <downloaded-directory>/release-manifest.json`; compare each registry `dist.integrity` with the retained manifest and inspect the release assets instead of preparing another pair. Record npm provenance as present only when the selected version's registry metadata actually carries it.
-- auto: confirm `npm view @vegastack/vegafactory version` matches (registry propagation can lag — retry briefly) and `npx @vegastack/vegafactory@latest skills list` shows the bundled skills; report old → new
-- Publishing is tag-triggered trusted publishing (OIDC, token-free): immutable-pair preparation stays on `[self-hosted, vsk-runners-mac]`, while dashboard-first/CLI-second direct-latest publication and GitHub Release creation run on `ubuntu-latest`; only the publish job has `id-token: write`, and no dist-tag/token path exists. **Provenance is currently OFF** because `release-publish.mjs` explicitly passes `--no-provenance`; npm would generate it automatically for these eligible hosted trusted publishes once that opt-out is deliberately removed and verified. The direct `0.19.0` bootstrap also has no attestation.
-- Rollback is roll-forward: revert the offending commits through a PR (main is protected — there is no direct revert push, and a rollback is exactly when that discipline matters most), release previous-good as a new patch, `npm deprecate` the bad version ("Broken — use <new>"); unpublish only for leaked secrets within 72h, in addition to roll-forward, never instead
+- auto: when merged changes carry changesets and a release is due, run `bunx changeset version && bun install` on `chore/release-<version>`, open its PR and add it to the merge queue — the operator's "ship it" covers this
+- guard: the tag matches the version and the changelog has its entry — `node scripts/release.mjs check-tag v<version>`
+- auto: pull main, then tag and push `v<version>` on the merged release commit — covered by "ship it" (the 0.20.0 clean-break release is the exception: it waits for the operator's own word)
+- auto: watch the Release workflow to green; confirm `npm view @vegastack/vegafactory version` shows the new version and `npx @vegastack/vegafactory@latest skills list` works; report old → new
+- Publishing is tag-triggered trusted publishing on GitHub-hosted runners with npm provenance — no tokens. The workflow packs, smokes the tarball, publishes, waits for the registry and smokes the published version
+- A failed release is never re-run: fix forward with a new patch version
+- Rollback is roll-forward: revert through a PR, release a new patch, and `npm deprecate` the bad version ("Broken — use <new>"); unpublish only for leaked secrets within 72h, in addition to the roll-forward
 - Content semver: new references/sections/recorded decisions/skill renames = minor · factual refreshes, wording, test-only = patch · removing a skill, weakening a normative rule, breaking the per-project profile format = major, and major is otherwise the operator's explicit call (pre-1.0 with zero deployed profile consumers, a profile-format break may ship minor — recorded decision 28-08-2026); installer changes follow ordinary semver on the same version, a release takes the higher bump — detail in skill-maintainer's release-ops.md
 
 ## Verify — how to see it working (pre-merge)
@@ -63,19 +58,14 @@ Line prefixes: `auto:` (agent just does it) · `ask:` (operator's word first) ·
 ## Environments
 
 - npm registry via tag-triggered trusted publishing — routine releases use hosted OIDC and no local credential; the one-time creation of the two renamed packages at `0.19.0` was an operator-authenticated local bootstrap
-- GitHub Actions runs CI, release, and the weekly refresh (refresh/** branches are CI-restricted to refresh metadata)
-- Harnesses on this box (03-09-2026): `claude` 2.1.247 and `codex` 0.149.1; **no `hermes`**, which costs nothing because no `harness-policy:` stage names it — install it only if a stage ever does. Beware that `codex login status` prints "Logged in" on a revoked refresh token, so it is not an auth guard; only a real run is
+- GitHub Actions runs CI (pull requests and the merge queue), the tag-triggered release, and the board mirror
+- Harnesses on this box (03-09-2026): `claude` 2.1.247 and `codex` 0.149.1. Beware that `codex login status` prints "Logged in" on a revoked refresh token, so it is not an auth guard; only a real run is
 - A brief whose acceptance needs a live `claude -p` or `codex exec` proof checks both CLIs are authenticated first (`claude -p 'say ok'`, `codex exec --sandbox read-only -a never 'say ok'`) — an expired session turns that acceptance into a parked finding, as it did on #94
 - main is protected: PRs only, squash merges only, no force-push or deletion, linear history, conversation resolution, admins included; required check `check (node 24)` (not strict — the merge queue tests main + the PR instead)
 - CI runs on the Mac mini org runners (`vsk-runners-mac-mini`, macOS user `vegastack-runners`, separate from the operator account); fork PRs run on `ubuntu-latest`. If both Mac mini runners are offline, own-branch PRs cannot pass — check `gh api orgs/vegastack/actions/runners` before treating a stuck job as a code problem
 - Self-hosted runners reuse one work directory: a workflow that sparse-checks-out must check out into its own `path:`
 - production: ask — git push origin v
-- preview: auto — wrangler deploy --env preview
-- preview: auto — bun run --cwd packages/broker deploy:preview
-- production: ask — wrangler deploy --env production
-- production: ask — bun run --cwd packages/broker deploy:production
-- The `- <target>: <auto|ask> — <pattern>` lines above are ship-guard policy lines: this repo publishes by pushing the version tag, so that push is the production action, and the broker's two Worker environments are the other deployable targets — each named twice, once for `wrangler` directly and once for the package script that wraps it, because the guard matches the resolved command text it is handed. Every other bullet in this section is prose the guard ignores. The guard reads these lines only as compiled by `vegafactory guard sync` into `~/.vegastack/guard/vegastack__vegastack-skills.json` (keyed by the origin remote, not this `repo:` line) — run it once after cloning and after any edit here, or every guarded command asks
-- The token broker (`packages/broker`, #117) deploys through `.github/workflows/broker-deploy.yml`: `factory-token.vegastack.dev` is preview and goes out automatically on a merge to main; `factory-token.vegastack.com` is production and only a `workflow_dispatch` reaches it, gated by the `production` GitHub Environment's required reviewer. Its credentials are the Secrets Store secret `vegafactory-app-private-key` in the account's one Secrets Store, `default_secrets_store` (Cloudflare allows a single store per account; bound as `APP_PRIVATE_KEY`) plus the repository secrets `CLOUDFLARE_API_TOKEN` and `CLOUDFLARE_ACCOUNT_ID` — names only; no value of any kind is ever written in this file
+- The `- <target>: <auto|ask> — <pattern>` line above is a ship-guard policy line: this repo publishes by pushing the version tag, so that push is the production action. The guard reads it only as compiled by `vegafactory guard sync` into `~/.vegastack/guard/<owner>__<repo>.json` — run it after cloning and after any edit here
 
 ## Decisions
 
@@ -89,8 +79,8 @@ Pause for the operator only when the work genuinely requires them: a destructive
 
 ## Project rules
 
-- Every behavior-changing PR carries its changeset, written directly as `.changeset/<slug>.md` (bump per the content-semver bullet in Ship); contributors never bump versions; a changeset names `@vegastack/vegafactory` (and `@vegastack/vegafactory-dashboard` when the dashboard itself changed), and `.changeset/config.json`'s `fixed` group moves both packages to the same version on every release, so the first-use fetch always resolves by construction rather than by every author remembering the second name
-- The single version lives in `packages/cli/package.json` (changesets-managed); the workspace root package.json is pinned at `0.0.0` — a placeholder `npm sbom` requires (purls need a version), never bumped, never a release identity; neither is the version `bun.lock` records for the workspace, which does not follow a version bump and is never hand-edited (mechanics: skill-maintainer's release-ops.md)
+- Every behavior-changing PR carries its changeset, written directly as `.changeset/<slug>.md` (bump per the content-semver bullet in Ship); contributors never bump versions; a changeset names `@vegastack/vegafactory`, the only published package
+- The single version lives in `packages/cli/package.json` (changesets-managed); the workspace root package.json is pinned at `0.0.0`, never bumped, never a release identity; neither is the version `bun.lock` records for the workspace, which does not follow a version bump and is never hand-edited (mechanics: skill-maintainer's release-ops.md)
 - Every skill change goes through skillify's contract (8-item checklist, eval before tests)
 - A repo-wide prose or format sweep must include `assets/*.template`: dev-setup's profile template and dev-review's known-patterns template carry normative format strings that a `--include="*.md"` grep silently misses
 - Never commit generated files: dist/, packages/cli/skill/, skill-integrity.json

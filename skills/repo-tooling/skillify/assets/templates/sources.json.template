@@ -1,6 +1,0 @@
-{
-  "schemaVersion": 1,
-  "retrievalBaseline": "{{date}}",
-  "note": "TODO: add one entry per volatile external fact this skill states (see skillify references/authoring.md, volatile facts), or record the one-line evergreen waiver in REFRESH.md and keep sources empty.",
-  "sources": []
-}

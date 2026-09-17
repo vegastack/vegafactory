@@ -163,35 +163,6 @@ describe('@vegastack/vegafactory installer', () => {
     expect(result.stdout.toString()).toContain('dev-architect')
   })
 
-  test('hermes installs are global-only', async () => {
-    const project = join(temporary, 'hermes-project')
-    await mkdir(project, { recursive: true })
-    const rejected = run(temporary, ['skills', 'add', skill(), '--agent', 'hermes', '--project', '--dir', project, '--non-interactive'])
-    expect(rejected.exitCode).not.toBe(0)
-    expect(rejected.stderr.toString()).toContain('global')
-
-    const home = join(temporary, 'hermes-home')
-    await mkdir(home, { recursive: true })
-    const global = run(home, ['skills', 'add', skill(), '--agent', 'hermes', '--global', '--non-interactive'])
-    expect(global.exitCode).toBe(0)
-    expect(await readFile(join(home, '.hermes/skills/dev-architect/SKILL.md'), 'utf8')).toContain('name: dev-architect')
-
-    const all = run(home, ['skills', 'add', skill(), '--agent', 'all', '--global', '--non-interactive', '--force'])
-    expect(all.exitCode).toBe(0)
-    expect(await Bun.file(join(home, '.agents/skills/dev-architect/SKILL.md')).exists()).toBe(true)
-    expect(await Bun.file(join(home, '.claude/skills/dev-architect/SKILL.md')).exists()).toBe(true)
-  })
-
-  test('project install with --agent all skips hermes with a notice', async () => {
-    const project = join(temporary, 'all-project')
-    await mkdir(project, { recursive: true })
-    const result = run(temporary, ['skills', 'add', skill(), '--agent', 'all', '--dir', project, '--non-interactive'])
-    expect(result.exitCode).toBe(0)
-    expect(result.stdout.toString()).toContain('skipping hermes')
-    expect(await Bun.file(join(project, '.agents/skills/dev-architect/SKILL.md')).exists()).toBe(true)
-    expect(await Bun.file(join(project, '.hermes')).exists()).toBe(false)
-  })
-
   test('verify with no skill name checks all bundled skills and tolerates uninstalled ones', async () => {
     const project = join(temporary, 'verify-all')
     await mkdir(project, { recursive: true })
@@ -223,14 +194,6 @@ describe('@vegastack/vegafactory installer', () => {
     const gone = run(temporary, ['skills', 'remove', skill(), '--agent', 'codex', '--dir', project, '--non-interactive'])
     expect(gone.exitCode).not.toBe(0)
     expect(gone.stdout.toString()).toContain('not installed')
-  })
-
-  test('hermes with defaulted project mode errors with global guidance', async () => {
-    const project = join(temporary, 'hermes-defaulted')
-    await mkdir(project, { recursive: true })
-    const result = run(temporary, ['skills', 'add', skill(), '--agent', 'hermes', '--dir', project, '--non-interactive'])
-    expect(result.exitCode).not.toBe(0)
-    expect(result.stderr.toString()).toContain('--global')
   })
 
   test('dry-run over a differing install reports would-replace instead of erroring', async () => {
@@ -455,40 +418,15 @@ describe('selecting a family', () => {
     expect(bare.stderr.toString()).toContain('vegafactory skills add')
   })
 
-  test('every top-level verb is named in usage, and none is reserved any more', () => {
+  test('usage names the installer, worktree, sync and guard verbs, and removed verbs are unknown', () => {
     const help = run(temporary, ['--help']).stdout.toString()
     expect(help).toContain('vegafactory skills <add|verify|remove>')
-    for (const verb of ['dispatch', 'service', 'status', 'stats', 'dashboard']) expect(help).toContain(verb)
-    expect(help).not.toContain('Reserved (not yet available)')
-  })
-
-  test('stats has landed: it prints its verbs and refuses a malformed month', () => {
-    const help = run(temporary, ['stats', 'help']).stdout.toString()
-    expect(help).toContain('vegafactory stats push [--commit]')
-    const bad = run(temporary, ['stats', '--since', 'Sept-26'])
-    expect(bad.exitCode).toBe(2)
-    expect(bad.stderr.toString()).toContain('MON-YYYY')
-  })
-
-  test('service has landed: it prints its verbs and is dry-run by default', () => {
-    const bare = run(temporary, ['service'])
-    expect(bare.stdout.toString()).toContain('install|uninstall|status')
-    const bad = run(temporary, ['service', 'start'])
-    expect(bad.exitCode).toBe(2)
-  })
-
-  test('status has landed: it refuses a config it cannot read rather than printing an empty board', () => {
-    const result = run(temporary, ['status', '--config', '/nowhere/factory.json'])
-    expect(result.exitCode).toBe(2)
-    expect(result.stderr.toString()).toContain('factory.json')
-  })
-
-  test('dispatch has landed: it parses its own flags and refuses without a config', () => {
-    const bare = run(temporary, ['dispatch', '--once', '--watch'])
-    expect(bare.exitCode).toBe(2)
-    expect(bare.stderr.toString()).toContain('--once')
-    const help = run(temporary, ['dispatch', '--help']).stdout.toString()
-    expect(help).toContain('vegafactory dispatch')
+    for (const verb of ['worktree', 'sync', 'guard sync']) expect(help).toContain(verb)
+    for (const verb of ['dispatch', 'stats', 'dashboard', 'learning', 'children', 'checkpoint']) {
+      const result = run(temporary, [verb])
+      expect(result.exitCode).toBe(1)
+      expect(result.stderr.toString()).toContain(`Unknown command: ${verb}`)
+    }
   })
 
   test('worktree has landed: it is no longer reserved and prints its own verbs', () => {

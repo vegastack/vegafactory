@@ -40,14 +40,13 @@ Suppressions live in `.vegastack/skillspector-baseline.json`. Adding one is a se
 | `skills/` | Authored skill content — the single source of truth. Edit here. A skill sits at `skills/<name>/` or, inside a group, at `skills/<group>/<name>/` — one level, never deeper. |
 | `skills/dev/` | The dev-workflow group (setup, intake, plan, architect, implement, debug, review, ship, status, chronicle): a `GROUP.md` plus ten skills, each with `SKILL.md`, references, deterministic scripts where they earn them, tests. |
 | `skills/skills-tooling/` | The skills-about-skills group — tools that operate on agent skills themselves; currently `skill-scan`, the SkillSpector guard and its suppression baseline. |
-| `<skill>/refresh/` | Freshness contract: source registry and refresh instructions consumed by the weekly refresh automation. |
 | `packages/cli/` | The `@vegastack/vegafactory` installer. `packages/cli/skill/` and `skill-integrity.json` are **generated at build** from `skills/` — never edit or commit them. |
 | `packages/cli/repo-only.json` | The skills `add --all` skips because they only make sense inside this repository. Hand-maintained; validated by the build. |
 | `.vegastack/` | The project's own dev workflow instance: `dev.md` (the canonical process doc — release runbook, versioning, rollback), `decisions.md` (the decision register), and `skillspector-baseline.json` (audited skill-scan suppressions). |
 
 ## Never commit generated files
 
-`dist/`, `packages/cli/skill/`, `packages/cli/skill-integrity.json`, `work/`, and `.vegastack/evidence-*.json` are build or tooling outputs. They are gitignored; paired release preparation builds them, and CLI `prepack` validates the generated descriptor against the exact dashboard tarball instead of rebuilding. PRs that add them will be rejected.
+`dist/`, `packages/cli/skill/`, `packages/cli/skill-integrity.json` and `work/` are build outputs. They are gitignored; the release builds them. PRs that add them will be rejected.
 
 ## Adding a new skill
 
@@ -56,13 +55,11 @@ Every skill lives at `skills/<name>/` or `skills/<group>/<name>/` and is self-co
 | File/dir | Required | Purpose |
 |---|---|---|
 | `SKILL.md` | yes | Agent entry point — valid frontmatter (`name`, `description`), progressive routing to references |
-| `README.md` | yes | Human/agent walkthrough of the whole skill (repo-side only; not packaged) |
 | `references/` | if applicable | Normative content, loaded on demand (a self-contained skill may have none) |
 | `scripts/` | if applicable | Deterministic, dependency-free Node scripts |
 | `assets/` | if applicable | Templates, schemas, examples |
 | `tests/` | yes | Bun tests and the trigger-query fixture (never packaged); unit tests are required for scripts' deterministic branches, not for prose |
 | `evals/` | recommended | agentskills.io eval cases in `evals/evals.json` (never packaged; results gitignored) — the structure check warns when absent |
-| `refresh/sources.json` + `refresh/REFRESH.md` | yes | Freshness contract for the weekly refresh automation, or a one-line evergreen waiver |
 | `agents/openai.yaml` | for Codex | Codex interface metadata |
 
 The skillify scaffolder creates this tree and performs the repo wiring itself: the per-skill packaging allowlist entry in `packages/cli/packaging.json` (the build fails loudly on authored files that are neither allowlisted nor deliberately unpackaged), the root README skills-table row, and the changeset. Files added to a skill after scaffolding must be appended to its `packaging.json` entry by hand.
@@ -82,11 +79,7 @@ and no machine-extracted rule format to follow.
 - Removing a skill, or a breaking change to the per-project profile format, is MAJOR;
   renaming a skill ships MINOR by default — major only when the operator declares it.
 - Keep volatile facts (version pins, vendor mechanism names) in `pinned-facts.md`-style dated
-  entries so the refresh system can track them.
-
-## Refresh PRs
-
-Branches named `refresh/**` are reserved for the automated freshness loop and are CI-restricted to refresh metadata at either legal depth. Human content changes go on normal branches.
+  entries with a checked date and official source link, so `skills-refresh` can re-check them.
 
 ## Releases
 
