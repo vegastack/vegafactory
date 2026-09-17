@@ -3,7 +3,9 @@
 // reports only what changed since the caller's cursor; writes go to GitHub first and
 // the cache is updated from GitHub's reply.
 import { createHash } from 'node:crypto'
-import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import { randomUUID } from 'node:crypto'
+import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import { hostname } from 'node:os'
 import { dirname, join } from 'node:path'
 import { GhError, ghList, ghRequest, type GhRunner, defaultRunner } from './gh.ts'
 
@@ -53,17 +55,22 @@ export interface IssueEntry {
   parent: number | null
   subIssues: number[]
   blockedBy: number[]
+  commentCount: number
   sha: string
   bodySha: string
+  // When the body last changed in a way an ack cares about (GitHub keeps no separate edit time).
+  bodyChangedAt: string
   rev: number
 }
+// One entry per comments page: its ETag and the comment ids it held.
+export interface CommentPage { etag: string | null; ids: number[] }
 export interface CacheState {
   schema: 1
   repo: string
   number: number
   rev: number
   issueEtag: string | null
-  commentsEtag: string | null
+  commentPages: CommentPage[]
   fetchedAt: string
   issue: IssueEntry | null
   comments: Record<string, CommentEntry>
@@ -75,8 +82,14 @@ export interface SyncResult { dir: string; cursor: number; changes: Change[]; re
 const CLAIM_LINE = /<!--\s*vsk:claim\b[^>]*-->\r?\n?/g
 const sha = (text: string) => createHash('sha256').update(text).digest('hex')
 
+// OWNER/NAME, checked before the value reaches any API path.
+export function assertRepo(repo: string): string {
+  if (!/^[A-Za-z0-9-]+\/[A-Za-z0-9._-]+$/.test(repo) || /(^|\/)\.\.?$/.test(repo)) throw new Error(`invalid repository: ${repo} — use OWNER/NAME`)
+  return repo
+}
+
 export function cacheDir(root: string, repo: string, number: number): string {
-  if (!/^[\w.-]+\/[\w.-]+$/.test(repo)) throw new Error(`invalid repository: ${repo}`)
+  assertRepo(repo)
   if (!Number.isSafeInteger(number) || number < 1) throw new Error(`invalid issue number: ${number}`)
   return join(root, '.vegastack', '.tmp', 'issues', repo.replace('/', '__'), String(number))
 }
@@ -110,32 +123,64 @@ export function readState(dir: string): CacheState | null {
   const path = join(dir, 'state.json')
   if (!existsSync(path)) return null
   const state = JSON.parse(readFileSync(path, 'utf8')) as CacheState
-  if (state.schema !== 1) throw new Error(`unsupported cache schema in ${path} — delete the folder and sync again`)
+  if (state.schema !== 1 || !Array.isArray(state.commentPages)) throw new Error(`unsupported cache schema in ${path} — delete the folder and sync again`)
   return state
 }
 
-// One writer per issue at a time. A lock older than `staleMs` belongs to a dead process.
-export function withLock<T>(dir: string, fn: () => T, { timeoutMs = 10_000, staleMs = 60_000 } = {}): T {
+// One writer per issue at a time, across processes. The lock records its owner; another
+// process takes it over only when that owner is provably gone, and only the owner removes it.
+// Re-entrant inside one process, so a write can sync while it holds the lock.
+const held = new Map<string, string>()
+interface LockOwner { token: string; pid: number; host: string; at: number }
+
+function ownerGone(owner: LockOwner | null, lockDir: string, staleMs: number): boolean {
+  if (!owner) {
+    // Created but not yet written, or written by a crashed process: judge by age.
+    try { return Date.now() - statSync(lockDir).mtimeMs > staleMs } catch { return true }
+  }
+  if (owner.host !== hostname()) return Date.now() - owner.at > staleMs
+  try {
+    process.kill(owner.pid, 0)
+    return false
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === 'ESRCH'
+  }
+}
+
+function readOwner(lockDir: string): LockOwner | null {
+  try { return JSON.parse(readFileSync(join(lockDir, 'owner.json'), 'utf8')) as LockOwner } catch { return null }
+}
+
+export function withLock<T>(dir: string, fn: () => T, { timeoutMs = 10_000, staleMs = 10 * 60_000 } = {}): T {
   mkdirSync(dir, { recursive: true })
   const lock = join(dir, '.lock')
+  if (held.has(lock)) return fn()
+  const token = randomUUID()
   const started = Date.now()
   for (;;) {
     try {
       mkdirSync(lock)
+      writeFileSync(join(lock, 'owner.json'), JSON.stringify({ token, pid: process.pid, host: hostname(), at: Date.now() }))
       break
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error
-      try {
-        if (Date.now() - statSync(lock).mtimeMs > staleMs) { rmSync(lock, { recursive: true, force: true }); continue }
-      } catch { continue }
-      if (Date.now() - started > timeoutMs) throw new Error(`issue cache is locked by another process: ${lock}`)
+      const owner = readOwner(lock)
+      if (ownerGone(owner, lock, staleMs)) {
+        // Take over by renaming, so two waiters cannot both remove it.
+        const grave = `${lock}.stale-${token}`
+        try { renameSync(lock, grave); rmSync(grave, { recursive: true, force: true }) } catch { /* another waiter won */ }
+        continue
+      }
+      if (Date.now() - started > timeoutMs) throw new Error(`issue cache is locked by pid ${owner?.pid ?? '?'} on ${owner?.host ?? '?'}: ${lock}`)
       Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 50)
     }
   }
+  held.set(lock, token)
   try {
     return fn()
   } finally {
-    rmSync(lock, { recursive: true, force: true })
+    held.delete(lock)
+    if (readOwner(lock)?.token === token) rmSync(lock, { recursive: true, force: true })
   }
 }
 
@@ -161,6 +206,18 @@ function optionalParent(repo: string, number: number, runner: GhRunner): number 
   }
 }
 
+// GitHub's REST issue has no body-edit time (updated_at moves on every comment); GraphQL does.
+function lastEditedAt(repo: string, number: number, runner: GhRunner): string {
+  const [owner, name] = repo.split('/')
+  const query = 'query($owner:String!,$name:String!,$number:Int!){repository(owner:$owner,name:$name){issue(number:$number){createdAt lastEditedAt}}}'
+  const { body } = ghRequest<{ data?: { repository?: { issue?: { createdAt: string; lastEditedAt: string | null } } } }>('graphql', {
+    method: 'POST', body: { query, variables: { owner, name, number } }, runner,
+  })
+  const issue = body.data?.repository?.issue
+  if (!issue) throw new GhError(`could not read the edit time of issue #${number}`)
+  return issue.lastEditedAt ?? issue.createdAt
+}
+
 export interface SyncOptions {
   root: string
   repo: string
@@ -171,90 +228,111 @@ export interface SyncOptions {
 }
 
 export function syncIssue(options: SyncOptions): SyncResult {
+  return withLock(cacheDir(options.root, options.repo, options.number), () => syncLocked(options))
+}
+
+const PAGE = 100
+
+function syncLocked(options: SyncOptions): SyncResult {
   const { root, repo, number, since = 0, runner = defaultRunner, now = () => new Date() } = options
   const dir = cacheDir(root, repo, number)
-  return withLock(dir, () => {
-    let requests = 0
-    const previous = readState(dir)
-    const state: CacheState = previous ?? {
-      schema: 1, repo, number, rev: 0, issueEtag: null, commentsEtag: null, fetchedAt: '', issue: null, comments: {}, removed: [],
-    }
+  let requests = 0
+  const previous = readState(dir)
+  const state: CacheState = previous ?? {
+    schema: 1, repo, number, rev: 0, issueEtag: null, commentPages: [], fetchedAt: '', issue: null, comments: {}, removed: [],
+  }
 
-    const issueResponse = ghRequest<GhIssue>(`repos/${repo}/issues/${number}`, { etag: state.issue ? state.issueEtag : null, runner })
+  const issueResponse = ghRequest<GhIssue>(`repos/${repo}/issues/${number}`, { etag: state.issue ? state.issueEtag : null, runner })
+  requests++
+  if (issueResponse.status !== 304) {
+    const issue = issueResponse.body
+    const subIssues = optionalList(`repos/${repo}/issues/${number}/sub_issues`, runner).map((item) => item.number).sort((a, b) => a - b)
+    const blockedBy = optionalList(`repos/${repo}/issues/${number}/dependencies/blocked_by`, runner)
+      .filter((item) => item.state !== 'closed').map((item) => item.number).sort((a, b) => a - b)
+    const parent = optionalParent(repo, number, runner)
+    requests += 3
+    const fields = {
+      title: issue.title, state: issue.state, labels: labelNames(issue), assignees: (issue.assignees ?? []).map((user) => user.login).sort(),
+      author: issue.user?.login ?? '', updatedAt: issue.updated_at, url: issue.html_url, parent, subIssues, blockedBy,
+    }
+    const body = issue.body ?? ''
+    const { updatedAt, ...stable } = fields
+    const nextSha = sha(JSON.stringify(stable) + '\n' + body)
+    const bodySha = meaningfulSha(body)
+    let bodyChangedAt = state.issue?.bodyChangedAt ?? ''
+    if (state.issue?.bodySha !== bodySha) {
+      bodyChangedAt = lastEditedAt(repo, number, runner)
+      requests++
+    }
+    if (state.issue?.sha !== nextSha) {
+      state.rev++
+      atomicWrite(join(dir, 'issue.md'), frontmatter({ repo, number, ...fields }) + body)
+      state.issue = { ...fields, commentCount: issue.comments, sha: nextSha, bodySha, bodyChangedAt, rev: state.rev }
+    } else {
+      state.issue = { ...state.issue!, updatedAt, commentCount: issue.comments, bodyChangedAt }
+    }
+    state.issueEtag = issueResponse.headers.etag ?? null
+  }
+
+  // Every page is asked conditionally (a 304 is free); an unchanged page keeps its cached ids.
+  const pages: CommentPage[] = []
+  const fresh: GhComment[] = []
+  let changed = false
+  for (let page = 1; ; page++) {
+    const cached = state.commentPages[page - 1]
+    const response = ghRequest<GhComment[]>(`repos/${repo}/issues/${number}/comments?per_page=${PAGE}&page=${page}`, { etag: cached?.etag ?? null, runner })
     requests++
-    const commentsPath = `repos/${repo}/issues/${number}/comments?per_page=100&page=1`
-    const firstPage = ghRequest<GhComment[]>(commentsPath, { etag: previous ? state.commentsEtag : null, runner })
-    requests++
-
-    if (issueResponse.status !== 304) {
-      const issue = issueResponse.body
-      const subIssues = optionalList(`repos/${repo}/issues/${number}/sub_issues`, runner).map((item) => item.number).sort((a, b) => a - b)
-      const blockedBy = optionalList(`repos/${repo}/issues/${number}/dependencies/blocked_by`, runner)
-        .filter((item) => item.state !== 'closed').map((item) => item.number).sort((a, b) => a - b)
-      const parent = optionalParent(repo, number, runner)
-      requests += 3
-      const fields = {
-        title: issue.title, state: issue.state, labels: labelNames(issue), assignees: (issue.assignees ?? []).map((user) => user.login).sort(),
-        author: issue.user?.login ?? '', updatedAt: issue.updated_at, url: issue.html_url, parent, subIssues, blockedBy,
-      }
-      const body = issue.body ?? ''
-      const { updatedAt, ...stable } = fields
-      const nextSha = sha(JSON.stringify(stable) + '\n' + body)
-      if (state.issue?.sha !== nextSha) {
-        state.rev++
-        atomicWrite(join(dir, 'issue.md'), frontmatter({ repo, number, ...fields }) + body)
-        state.issue = { ...fields, sha: nextSha, bodySha: meaningfulSha(body), rev: state.rev }
-      } else {
-        state.issue = { ...state.issue, updatedAt }
-      }
-      state.issueEtag = issueResponse.headers.etag ?? null
+    if (response.status === 304 && cached) {
+      pages.push(cached)
+    } else {
+      if (!Array.isArray(response.body)) throw new GhError(`expected a list of comments for issue #${number}`)
+      changed = true
+      fresh.push(...response.body)
+      pages.push({ etag: response.headers.etag ?? null, ids: response.body.map((comment) => comment.id) })
     }
+    if (pages.at(-1)!.ids.length < PAGE) break
+  }
+  if (pages.length !== state.commentPages.length) changed = true
 
-    if (firstPage.status !== 304) {
-      const pages = firstPage.body.length < 100
-        ? firstPage.body
-        : [...firstPage.body, ...ghList<GhComment>(`repos/${repo}/issues/${number}/comments`, runner).slice(100)]
-      if (firstPage.body.length >= 100) requests++
-      const expected = issueResponse.status === 304 ? null : issueResponse.body.comments
-      if (expected !== null && expected !== pages.length) {
-        throw new Error(`issue #${number} reports ${expected} comments but ${pages.length} were read — sync again`)
-      }
-      const seen = new Set<string>()
-      for (const comment of pages) {
-        const key = String(comment.id)
-        seen.add(key)
-        const type = commentType(comment.body)
-        const file = commentFile(comment, type)
-        const old = state.comments[key]
-        const nextSha = meaningfulSha(comment.body)
-        const content = frontmatter({
-          id: comment.id, type, author: comment.user?.login ?? '', authorType: comment.user?.type ?? 'User',
-          createdAt: comment.created_at, updatedAt: comment.updated_at, url: comment.html_url,
-        }) + comment.body
-        if (old && old.file !== file) rmSync(join(dir, old.file), { force: true })
-        atomicWrite(join(dir, file), content)
-        const changed = !old || old.sha !== nextSha || old.type !== type
-        if (changed) state.rev++
-        state.comments[key] = {
-          id: comment.id, file, type, author: comment.user?.login ?? '', authorType: comment.user?.type ?? 'User',
-          createdAt: comment.created_at, updatedAt: comment.updated_at, url: comment.html_url, sha: nextSha,
-          rev: changed ? state.rev : old!.rev,
-        }
-      }
-      for (const [key, entry] of Object.entries(state.comments)) {
-        if (seen.has(key)) continue
-        rmSync(join(dir, entry.file), { force: true })
-        delete state.comments[key]
-        state.rev++
-        state.removed.push({ id: entry.id, file: entry.file, rev: state.rev })
-      }
-      state.commentsEtag = firstPage.headers.etag ?? null
+  if (changed) {
+    const seen = new Set(pages.flatMap((page) => page.ids).map(String))
+    const expected = state.issue?.commentCount ?? seen.size
+    if (expected !== seen.size) {
+      throw new Error(`issue #${number} reports ${expected} comments but ${seen.size} were read — sync again`)
     }
+    for (const comment of fresh) {
+      const key = String(comment.id)
+      const type = commentType(comment.body)
+      const file = commentFile(comment, type)
+      const old = state.comments[key]
+      const nextSha = meaningfulSha(comment.body)
+      const content = frontmatter({
+        id: comment.id, type, author: comment.user?.login ?? '', authorType: comment.user?.type ?? 'User',
+        createdAt: comment.created_at, updatedAt: comment.updated_at, url: comment.html_url,
+      }) + comment.body
+      if (old && old.file !== file) rmSync(join(dir, old.file), { force: true })
+      atomicWrite(join(dir, file), content)
+      const isChange = !old || old.sha !== nextSha || old.type !== type
+      if (isChange) state.rev++
+      state.comments[key] = {
+        id: comment.id, file, type, author: comment.user?.login ?? '', authorType: comment.user?.type ?? 'User',
+        createdAt: comment.created_at, updatedAt: comment.updated_at, url: comment.html_url, sha: nextSha,
+        rev: isChange ? state.rev : old!.rev,
+      }
+    }
+    for (const [key, entry] of Object.entries(state.comments)) {
+      if (seen.has(key)) continue
+      rmSync(join(dir, entry.file), { force: true })
+      delete state.comments[key]
+      state.rev++
+      state.removed.push({ id: entry.id, file: entry.file, rev: state.rev })
+    }
+    state.commentPages = pages
+  }
 
-    state.fetchedAt = now().toISOString()
-    atomicWrite(join(dir, 'state.json'), JSON.stringify(state, null, 2) + '\n')
-    return { dir, cursor: state.rev, changes: changesSince(state, since), requests }
-  })
+  state.fetchedAt = now().toISOString()
+  atomicWrite(join(dir, 'state.json'), JSON.stringify(state, null, 2) + '\n')
+  return { dir, cursor: state.rev, changes: changesSince(state, since), requests }
 }
 
 export function changesSince(state: CacheState, since: number): Change[] {
@@ -277,5 +355,9 @@ export function readBody(dir: string, file: string): string {
 
 // Deletes an issue's cache folder (after merge or close).
 export function dropIssue(root: string, repo: string, number: number) {
-  rmSync(cacheDir(root, repo, number), { recursive: true, force: true })
+  const dir = cacheDir(root, repo, number)
+  withLock(dir, () => {
+    for (const entry of existsSync(dir) ? readdirSync(dir) : []) if (entry !== '.lock') rmSync(join(dir, entry), { recursive: true, force: true })
+  })
+  rmSync(dir, { recursive: true, force: true })
 }

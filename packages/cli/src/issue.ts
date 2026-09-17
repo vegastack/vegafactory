@@ -8,7 +8,7 @@ import { basename, dirname, join, resolve } from 'node:path'
 import { ghRequest, type GhRunner, defaultRunner } from './gh.ts'
 import { claim, heartbeat, holderOf, keepClaimRows, ownerId, release, type ClaimKind } from './claim.ts'
 import { writeStatus } from './status-comment.ts'
-import { cacheDir, dropIssue, readBody, readState, syncIssue, type CacheState, type CommentEntry, type GhComment } from './issue-cache.ts'
+import { assertRepo, cacheDir, dropIssue, readBody, readState, syncIssue, withLock, type CacheState, type CommentEntry, type GhComment } from './issue-cache.ts'
 import { STATES, sizeOf, stateOf, transition, type State } from './labels.ts'
 
 export const ACK_STAGES = ['brief', 'plan', 'ship'] as const
@@ -104,6 +104,16 @@ export function permissionLookup(repo: string, runner: GhRunner): PermissionLook
   }
 }
 
+const squash = (text: string) => text.replace(/\s+/g, ' ').trim()
+const quoteOf = (ackText: string) => /: "([\s\S]*)"\s*$/.exec(ackText)?.[1] ?? '\u0000'
+
+// The latest moment the brief or the plan changed.
+export function artifactsChangedAt(snap: Snapshot): string {
+  const plan = latestOfType(snap, 'plan')
+  const brief = snap.state.issue!.bodyChangedAt
+  return plan && plan.updatedAt > brief ? plan.updatedAt : brief
+}
+
 export interface AckVerdict { ok: boolean; reason: string; ack: CommentEntry | null }
 
 // A valid ack: a person with write access acknowledged exactly the current brief (and plan).
@@ -127,6 +137,10 @@ export function findValidAck(snap: Snapshot, stage: AckStage, permission: Permis
     if (keys.source?.startsWith('comment:')) {
       const source = snap.state.comments[keys.source.slice('comment:'.length)]
       if (!source || source.author !== by || source.authorType === 'Bot') { lastReason = 'the ack cites a comment that is missing or not from that person'; continue }
+      // The person's own words must postdate the artifacts they approve, be unedited since, and say what the ack quotes.
+      if (source.createdAt <= artifactsChangedAt(snap)) { lastReason = `the cited comment predates the current brief or plan`; continue }
+      if (source.updatedAt > entry.createdAt) { lastReason = 'the cited comment was edited after the ack'; continue }
+      if (!squash(snap.body(source)).includes(squash(quoteOf(snap.body(entry))))) { lastReason = 'the cited comment does not contain the quoted words'; continue }
     } else if (entry.author !== by || entry.authorType === 'Bot') {
       lastReason = 'a session ack must be posted by the person themselves'
       continue
@@ -175,7 +189,8 @@ export function checkIssue(snap: Snapshot, purpose: CheckFor, permission: Permis
   } else if (purpose === 'ship') {
     const evidence = latestOfType(snap, 'evidence')
     if (!evidence) blocks.push('no evidence comment yet')
-    const ack = findValidAck(snap, 'ship', permission, evidence?.createdAt ?? null)
+    // Editing the evidence after "ship it" voids it, so compare with its last edit.
+    const ack = findValidAck(snap, 'ship', permission, evidence?.updatedAt ?? null)
     if (!ack.ok) blocks.push(`no "ship it": ${ack.reason}`)
   }
   if (/^##\s+Assumptions\b[\s\S]*?^\s*-\s+(?!\[x\])/im.test(readBody(snap.dir, 'issue.md')) && purpose === 'implement') {
@@ -188,6 +203,13 @@ export function checkIssue(snap: Snapshot, purpose: CheckFor, permission: Permis
 // Writes
 
 export interface WriteContext { root: string; repo: string; number: number; runner: GhRunner }
+
+// Holds the issue's lock for a whole read → check → write → refresh step.
+export function locked<T>(ctx: WriteContext, fn: () => T): T {
+  return withLock(cacheDir(ctx.root, ctx.repo, ctx.number), fn)
+}
+
+const refresh = (ctx: WriteContext) => syncIssue({ root: ctx.root, repo: ctx.repo, number: ctx.number, runner: ctx.runner })
 
 function conflictIfChanged(ctx: WriteContext, commentId: number | null, since: number) {
   const snap = snapshot(cacheDir(ctx.root, ctx.repo, ctx.number))
@@ -205,17 +227,23 @@ export function postComment(ctx: WriteContext, body: string): GhComment {
 }
 
 export function editComment(ctx: WriteContext, commentId: number, body: string, since: number) {
-  const { dir } = syncIssue({ root: ctx.root, repo: ctx.repo, number: ctx.number, runner: ctx.runner })
-  conflictIfChanged(ctx, commentId, since)
-  const entry = readState(dir)!.comments[String(commentId)]!
-  const next = entry.type === 'ledger' ? keepClaimRows(readBody(dir, entry.file), body) : body
-  ghRequest(`repos/${ctx.repo}/issues/comments/${commentId}`, { method: 'PATCH', body: { body: next }, runner: ctx.runner })
+  return locked(ctx, () => {
+    const { dir } = refresh(ctx)
+    conflictIfChanged(ctx, commentId, since)
+    const entry = readState(dir)!.comments[String(commentId)]!
+    const next = entry.type === 'ledger' ? keepClaimRows(readBody(dir, entry.file), body) : body
+    ghRequest(`repos/${ctx.repo}/issues/comments/${commentId}`, { method: 'PATCH', body: { body: next }, runner: ctx.runner })
+    return refresh(ctx)
+  })
 }
 
 export function editBody(ctx: WriteContext, body: string, since: number) {
-  syncIssue({ root: ctx.root, repo: ctx.repo, number: ctx.number, runner: ctx.runner })
-  conflictIfChanged(ctx, null, since)
-  ghRequest(`repos/${ctx.repo}/issues/${ctx.number}`, { method: 'PATCH', body: { body }, runner: ctx.runner })
+  return locked(ctx, () => {
+    refresh(ctx)
+    conflictIfChanged(ctx, null, since)
+    ghRequest(`repos/${ctx.repo}/issues/${ctx.number}`, { method: 'PATCH', body: { body }, runner: ctx.runner })
+    return refresh(ctx)
+  })
 }
 
 export function editLabels(ctx: WriteContext, add: string[], remove: string[]) {
@@ -230,7 +258,7 @@ export function editLabels(ctx: WriteContext, add: string[], remove: string[]) {
 }
 
 export function moveTo(ctx: WriteContext, next: State) {
-  syncIssue({ root: ctx.root, repo: ctx.repo, number: ctx.number, runner: ctx.runner })
+  refresh(ctx)
   const state = readState(cacheDir(ctx.root, ctx.repo, ctx.number))!
   const edit = transition(state.issue!.labels, next)
   editLabels(ctx, edit.add, edit.remove)
@@ -259,13 +287,13 @@ Write (GitHub first, then the local copy):
   status <n> [--progress-file PATH] [--branch NAME]
                                          rewrite the status comment from GitHub's facts
   holder <n>                             who holds the issue
-  drop <n>                               delete the local copy
+  drop <n> --yes                         delete the local copy
 
 Options: --repo OWNER/NAME (default: dev.md repo: or the origin remote) · --owner ID (default:
-machine:worktree-folder) · --json`
+machine:worktree-folder) · --json · --dry-run shows what a write verb would do · --yes confirms drop`
 }
 
-interface Parsed { verb: string; number: number; positional: string[]; flags: Record<string, string>; json: boolean }
+interface Parsed { verb: string; number: number; positional: string[]; flags: Record<string, string>; json: boolean; dryRun: boolean; yes: boolean }
 
 export function parseIssueArgs(argv: string[]): Parsed {
   const [verb, rawNumber, ...rest] = argv
@@ -275,9 +303,13 @@ export function parseIssueArgs(argv: string[]): Parsed {
   const flags: Record<string, string> = {}
   const positional: string[] = []
   let json = false
+  let dryRun = false
+  let yes = false
   for (let i = 0; i < rest.length; i++) {
     const arg = rest[i]!
     if (arg === '--json') { json = true; continue }
+    if (arg === '--dry-run') { dryRun = true; continue }
+    if (arg === '--yes') { yes = true; continue }
     if (arg.startsWith('--')) {
       const value = rest[i + 1]
       if (value === undefined || value.startsWith('--')) throw new Error(`${arg} needs a value`)
@@ -285,7 +317,7 @@ export function parseIssueArgs(argv: string[]): Parsed {
       i++
     } else positional.push(arg)
   }
-  return { verb, number, positional, flags, json }
+  return { verb, number, positional, flags, json, dryRun, yes }
 }
 
 function worktreeName(cwd: string): string {
@@ -304,11 +336,17 @@ export function runIssue(argv: string[], { runner = defaultRunner, cwd = process
   if (!argv.length || ['help', '--help', '-h'].includes(argv[0]!)) { out(issueUsage()); return 0 }
   const args = parseIssueArgs(argv)
   const root = repoRoot(cwd)
-  const repo = args.flags.repo ?? detectRepo(root)
+  const repo = assertRepo(args.flags.repo ?? detectRepo(root))
   const ctx: WriteContext = { root, repo, number: args.number, runner }
   const print = (value: unknown, text: string) => out(args.json ? JSON.stringify(value, null, 2) : text)
   const owner = args.flags.owner ?? ownerId(worktreeName(cwd))
   const sync = (since = 0) => syncIssue({ root, repo, number: args.number, since, runner })
+  const WRITES = ['comment', 'edit-comment', 'body', 'label', 'ack', 'drop']
+  if (args.dryRun && WRITES.includes(args.verb)) {
+    const what = args.verb === 'drop' ? `delete the local copy of #${args.number}` : `${args.verb} on ${repo}#${args.number} with ${JSON.stringify(args.flags)}`
+    print({ dryRun: true, verb: args.verb, flags: args.flags }, `dry run: would ${what}`)
+    return 0
+  }
 
   switch (args.verb) {
     case 'sync': {
@@ -329,8 +367,8 @@ export function runIssue(argv: string[], { runner = defaultRunner, cwd = process
     }
     case 'comment': {
       if (!args.flags.file) throw new Error('--file is required')
-      const comment = postComment(ctx, readFileSync(resolve(cwd, args.flags.file), 'utf8'))
-      const result = sync()
+      const text = readFileSync(resolve(cwd, args.flags.file), 'utf8')
+      const { comment, result } = locked(ctx, () => { sync(); const comment = postComment(ctx, text); return { comment, result: sync() } })
       print({ id: comment.id, url: comment.html_url, cursor: result.cursor }, `posted ${comment.html_url}\ncursor ${result.cursor}`)
       return 0
     }
@@ -338,24 +376,24 @@ export function runIssue(argv: string[], { runner = defaultRunner, cwd = process
       const id = Number(args.positional[0])
       if (!Number.isSafeInteger(id)) throw new Error('edit-comment needs a comment id')
       if (!args.flags.file) throw new Error('--file is required')
-      editComment(ctx, id, readFileSync(resolve(cwd, args.flags.file), 'utf8'), cursor(args.flags.since))
-      const result = sync()
+      const result = editComment(ctx, id, readFileSync(resolve(cwd, args.flags.file), 'utf8'), cursor(args.flags.since))
       print({ id, cursor: result.cursor }, `edited comment ${id}\ncursor ${result.cursor}`)
       return 0
     }
     case 'body': {
       if (!args.flags.file) throw new Error('--file is required')
-      editBody(ctx, readFileSync(resolve(cwd, args.flags.file), 'utf8'), cursor(args.flags.since))
-      const result = sync()
+      const result = editBody(ctx, readFileSync(resolve(cwd, args.flags.file), 'utf8'), cursor(args.flags.since))
       print({ cursor: result.cursor }, `edited the issue body\ncursor ${result.cursor}`)
       return 0
     }
     case 'label': {
       const next = args.flags.state as State | undefined
       if (next && !STATES.includes(next)) throw new Error(`--state must be one of ${STATES.join(', ')}`)
-      if (next) moveTo(ctx, next)
-      editLabels(ctx, list(args.flags.add), list(args.flags.remove))
-      const result = sync()
+      const result = locked(ctx, () => {
+        if (next) moveTo(ctx, next)
+        editLabels(ctx, list(args.flags.add), list(args.flags.remove))
+        return sync()
+      })
       const labels = readState(result.dir)!.issue!.labels
       print({ labels, cursor: result.cursor }, `labels ${labels.join(', ')}\ncursor ${result.cursor}`)
       return 0
@@ -366,10 +404,13 @@ export function runIssue(argv: string[], { runner = defaultRunner, cwd = process
       if (!args.flags.by || !args.flags.quote) throw new Error('--by and --quote are required')
       const source = args.flags.source ?? 'session'
       if (source !== 'session' && !/^comment:\d+$/.test(source)) throw new Error('--source must be session or comment:<id>')
-      const dir = sync().dir
-      const hashes = currentHashes(snapshot(dir))
-      const comment = postComment(ctx, ackBody({ stage, by: args.flags.by.replace(/^@/, ''), brief: hashes.brief, plan: stage === 'brief' ? null : hashes.plan, source, quote: args.flags.quote }))
-      const result = sync()
+      const by = args.flags.by.replace(/^@/, '')
+      const quote = args.flags.quote
+      const { comment, result } = locked(ctx, () => {
+        const hashes = currentHashes(snapshot(sync().dir))
+        const comment = postComment(ctx, ackBody({ stage, by, brief: hashes.brief, plan: stage === 'brief' ? null : hashes.plan, source, quote }))
+        return { comment, result: sync() }
+      })
       print({ id: comment.id, url: comment.html_url, cursor: result.cursor }, `recorded ${stage} ack ${comment.html_url}\ncursor ${result.cursor}`)
       return 0
     }
@@ -407,6 +448,7 @@ export function runIssue(argv: string[], { runner = defaultRunner, cwd = process
       return 0
     }
     case 'drop':
+      if (!args.yes) throw new Error('drop deletes the local copy of the issue — pass --yes to confirm')
       dropIssue(root, repo, args.number)
       print({ dropped: true }, `dropped the local copy of #${args.number}`)
       return 0

@@ -30,8 +30,8 @@ Needs you (N):
 Unowned (N): - <linked title> — <state> <age>d, nobody assigned → assign <operator>
 Waiting on plan (N): - <linked title> — planning <age>d
 Ready to build (N): - <linked title> — <scope>
-In flight (N): - <linked title> — working, task <x>/<y>, ledger moved <n>h ago
-Possibly orphaned (N): - <linked title> — working <age>d, ledger silent <n>h → heartbeat stopped; check, resume, or take back (`vegafactory issue claim <n> --harness <h> --model <id> --take-back-by <login>`)
+In flight (N): - <linked title> — in-progress, task <x>/<y>, ledger moved <n>h ago
+Possibly orphaned (N): - <linked title> — in-progress <age>d, ledger silent <n>h → heartbeat stopped; check, resume, or take back (`vegafactory issue claim <n> --harness <h> --model <id> --take-back-by <login>`)
 Open PRs (N): - <linked title> — checks <green|pending-or-red|no-checks>
 Control room: <n> knob(s) moved since this profile was drafted (<sha7> → <sha7>): <knob> <repo value> → <control-room value> — propose the edit, never make it
 Pending decisions (N): "<gist-plain>" (<linked issue>) — records at that issue's merge
@@ -43,7 +43,7 @@ Next: <the single most valuable operator action, and why>
 - **Unowned** is a human-state issue with no assignee — a flip that lost its assignment or an issue filed outside the workflow. Name the `operator` the script resolved and the one-line `gh issue edit <n> --add-assignee <operator>` that fixes it; the assignment is the operator's to make.
 - Sections with zero entries are omitted, not rendered empty. A completely quiet board is one line: "Nothing needs you — <n> issues ready for agents, nothing in flight."
 - `risky` issues get their flag shown inline wherever they appear.
-- **Next** is one line, chosen not computed-looking: the action that unblocks the most (a plan approval blocking several ready issues beats a lone review).
+- **Next** is one line, chosen not computed-looking: the action that unblocks the most (a plan approval blocking several queued issues beats a lone review).
 - **Possibly orphaned** is the ledger heartbeat gone silent past the orphan window (or not yet started) — likely a dead session, not certainly one. Surface it with the take-back command inline; the operator decides (check the session, hand it to a resume, or take the claim back). A long-running task that keeps checkpointing stays out of this section, because its heartbeat is alive.
 - <linked title> means a markdown link this report builds around the issue/PR title and its URL; numbers ride inside the link, because a bare number means nothing in a terminal. That governs the references the board itself makes.
 - **Control room** is a proposal, never an edit: dev.md hand edits outrank the org and group defaults, so a differing knob is shown with both values and the operator decides; no clone yet, or a sync that failed, is reported as "control room not synced — run `vegafactory sync`" rather than as agreement

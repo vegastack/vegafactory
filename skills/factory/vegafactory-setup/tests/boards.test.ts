@@ -17,13 +17,13 @@ describe('vegafactory-setup — boards', () => {
       'gh project field-create',
       'gh project link',
     ]) expect(section).toContain(command)
-    expect(section).toContain('waiting-on-operator,planning,ready,working,ready-to-ship,Done')
+    expect(section).toContain('waiting-on-operator,planning,queued,in-progress,ready-to-ship,Done')
     expect(section).toContain('by the operator, never by an agent: **the operator runs these** commands')
   })
 
   test('boards.md.template states the one-way rule, the option order and the auto-add cap', () => {
     expect(boards).toContain('| board | number | repos | notes |')
-    expect(boards).toContain('waiting-on-operator · planning · ready · working · ready-to-ship · Done')
+    expect(boards).toContain('waiting-on-operator · planning · queued · in-progress · ready-to-ship · Done')
     expect(boards).toContain('cosmetic until the next label change')
     expect(boards).toContain('auto-add')
     expect(boards).toContain('recorded here')

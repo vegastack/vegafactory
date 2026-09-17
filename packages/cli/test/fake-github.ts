@@ -18,6 +18,8 @@ export interface FakeIssue {
   blockedBy: Array<{ number: number; state: string }>
   parent: number | null
   events: Array<{ event: string; label: { name: string }; created_at: string }>
+  created_at: string
+  last_edited_at: string | null
 }
 
 export class FakeGitHub {
@@ -37,8 +39,9 @@ export class FakeGitHub {
   addIssue(partial: Partial<FakeIssue> & { number: number }): FakeIssue {
     const issue: FakeIssue = {
       title: `Issue ${partial.number}`, body: 'Brief body', state: 'open', labels: [], assignees: [], login: 'mk',
-      updated_at: this.tick(), comments: [], subIssues: [], blockedBy: [], parent: null, events: [], ...partial,
+      updated_at: this.tick(), comments: [], subIssues: [], blockedBy: [], parent: null, events: [], created_at: '', last_edited_at: null, ...partial,
     }
+    issue.created_at ||= issue.updated_at
     for (const name of issue.labels) issue.events.push({ event: 'labeled', label: { name }, created_at: issue.updated_at })
     this.issues.set(issue.number, issue)
     return issue
@@ -53,11 +56,22 @@ export class FakeGitHub {
     return comment
   }
 
-  editComment(id: number, body: string) {
+  // `touchIssue: false` keeps the issue's own ETag unchanged, the worst case for a cache.
+  editComment(id: number, body: string, { touchIssue = true } = {}) {
     for (const issue of this.issues.values()) {
       const comment = issue.comments.find((c) => c.id === id)
-      if (comment) { comment.body = body; comment.updated_at = this.tick(); issue.updated_at = comment.updated_at }
+      if (!comment) continue
+      comment.body = body
+      comment.updated_at = this.tick()
+      if (touchIssue) issue.updated_at = comment.updated_at
     }
+  }
+
+  editBody(number: number, body: string) {
+    const issue = this.issues.get(number)!
+    issue.body = body
+    issue.updated_at = this.tick()
+    issue.last_edited_at = issue.updated_at
   }
 
   deleteComment(id: number) {
@@ -109,7 +123,7 @@ export class FakeGitHub {
     if ((m = /^repos\/o\/r\/issues\/(\d+)$/.exec(route!))) {
       const issue = this.issues.get(Number(m[1]))
       if (!issue) return this.respond(404, { message: 'Not Found' })
-      if (method === 'PATCH') { issue.body = payload.body; issue.updated_at = this.tick(); return this.respond(200, this.issueJson(issue)) }
+      if (method === 'PATCH') { this.editBody(issue.number, payload.body); return this.respond(200, this.issueJson(issue)) }
       return this.conditional(this.issueJson(issue), header)
     }
     if ((m = /^repos\/o\/r\/issues\/(\d+)\/comments$/.exec(route!))) {
@@ -160,6 +174,10 @@ export class FakeGitHub {
     if ((m = /^repos\/o\/r\/issues\/(\d+)\/timeline$/.exec(route!))) {
       const issue = this.issues.get(Number(m[1]))!
       return this.respond(200, issue.events.slice((page - 1) * perPage, page * perPage))
+    }
+    if (route === 'graphql') {
+      const issue = this.issues.get(payload.variables.number)
+      return this.respond(200, { data: { repository: { issue: issue ? { createdAt: issue.created_at, lastEditedAt: issue.last_edited_at } : null } } })
     }
     if ((m = /^repos\/o\/r\/collaborators\/([^/]+)\/permission$/.exec(route!))) {
       return this.respond(200, { permission: this.permissions.get(decodeURIComponent(m[1]!)) ?? 'read' })

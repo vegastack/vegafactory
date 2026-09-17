@@ -1,3 +1,4 @@
+import { spawnSync } from 'node:child_process'
 // Runtime rules every headless agent run follows: Claude Code and Codex run on their
 // subscriptions only, and never on an API key or a redirected endpoint.
 
@@ -33,6 +34,16 @@ export function childEnvironment(env: NodeJS.ProcessEnv, { insideClaudeCode = is
     throw new Error(`refusing to start an agent run while ${refused.join(', ')} ${refused.length === 1 ? 'is' : 'are'} set — VegaFactory runs Claude Code and Codex on their subscriptions only; unset ${refused.length === 1 ? 'it' : 'them'} and retry`)
   }
   return child
+}
+
+// `vegafactory agent claude|codex <args…>` — starts a headless run with the child environment,
+// so every agent-to-agent call goes through the subscription check.
+export function runAgent(argv: string[], { env = process.env, spawn = spawnSync } = {}): number {
+  const [tool, ...args] = argv
+  if (tool !== 'claude' && tool !== 'codex') throw new Error('usage: vegafactory agent claude|codex <arguments for that tool>')
+  const result = spawn(tool, args, { env: childEnvironment(env), stdio: 'inherit' })
+  if (result.error) throw new Error(`could not start ${tool}: ${result.error.message} — is it installed and on PATH?`)
+  return result.status ?? 1
 }
 
 export function assertSupportedPlatform(platform = process.platform) {

@@ -1,6 +1,6 @@
 import { afterAll, beforeAll, describe, expect, test } from 'bun:test'
 import { existsSync } from 'node:fs'
-import { cp, mkdtemp, mkdir, readFile, realpath, rm, symlink, writeFile } from 'node:fs/promises'
+import { chmod, cp, mkdtemp, mkdir, readFile, realpath, rm, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 
@@ -216,6 +216,33 @@ describe('@vegastack/vegafactory installer', () => {
     const none = run(temporary, ['skills', 'verify', '--agent', 'codex', '--dir', empty, '--non-interactive'])
     expect(none.exitCode).not.toBe(0)
     expect(none.stdout.toString()).toContain('no bundled skills are installed')
+  })
+
+  test('remove with no one to answer and no --yes refuses', async () => {
+    const project = join(temporary, 'remove-unconfirmed')
+    expect(run(temporary, ['skills', 'add', skill(), '--agent', 'codex', '--dir', project, '--non-interactive']).exitCode).toBe(0)
+    const refused = run(temporary, ['skills', 'remove', skill(), '--agent', 'codex', '--dir', project])
+    expect(refused.exitCode).not.toBe(0)
+    expect(refused.stderr.toString()).toContain('pass --yes')
+    expect(existsSync(join(project, '.agents/skills', skill()))).toBe(true)
+  })
+
+  test('init stops with FAIL and no next step when the global install fails', async () => {
+    const bin = join(temporary, 'init-bin')
+    await mkdir(bin, { recursive: true })
+    const script = async (name: string, body: string) => { await writeFile(join(bin, name), `#!/bin/sh\n${body}\n`); await chmod(join(bin, name), 0o755) }
+    await script('gh', 'exit 0')
+    await script('claude', 'echo 2.1.0')
+    await script('vegafactory', 'exit 1')
+    await script('npm', 'echo "npm error 403 Forbidden" >&2; exit 1')
+    const home = join(temporary, 'init-home')
+    await mkdir(home, { recursive: true })
+    const result = Bun.spawnSync(['node', cli, 'init'], { cwd: home, env: { ...process.env, HOME: home, PATH: `${bin}:${process.env.PATH}` } })
+    const out = result.stdout.toString()
+    expect(result.exitCode).toBe(1)
+    expect(out).toContain('FAIL  cli')
+    expect(out).toContain('Fix the FAIL lines above')
+    expect(out).not.toContain('Next:')
   })
 
   test('remove uninstalls a clean copy and refuses a drifted one without --force', async () => {
