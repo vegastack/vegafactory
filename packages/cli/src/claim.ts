@@ -80,15 +80,17 @@ export const trustBy = (permission: PermissionLookup): Trusted => (entry) => ent
 
 export const trustedAuthors = (ctx: { repo: string; runner: GhRunner; root?: string }): Trusted => trustBy(permissionLookup(ctx.repo, ctx.runner, { root: ctx.root }))
 
-// Live claims (after the latest release of each owner), every claim ever made, and the status comment.
+// Live claims (after the latest release of each owner), every claim ever made, and the one
+// status comment. All three count only from trusted authors.
 export function claimsOf(state: CacheState, body: Body, trusted: Trusted): { claims: Claim[]; history: Claim[]; ledger: CommentEntry | null } {
   const comments = Object.values(state.comments).sort((a, b) => a.createdAt.localeCompare(b.createdAt) || a.id - b.id)
   let claims: Claim[] = []
   const history: Claim[] = []
   let ledger: CommentEntry | null = null
   for (const entry of comments) {
-    if (entry.type === 'ledger') ledger = entry
-    if ((entry.type === 'release' || entry.type === 'claim') && !trusted(entry)) continue
+    if (!['ledger', 'release', 'claim'].includes(entry.type) || !trusted(entry)) continue
+    // The earliest trusted status comment is the one; later copies are ignored.
+    if (entry.type === 'ledger') ledger ??= entry
     if (entry.type === 'release') {
       const keys = markerKeys(body(entry))
       claims = keys.owner ? claims.filter((claim) => claim.owner !== keys.owner) : []

@@ -79,6 +79,23 @@ describe('the status comment', () => {
     expect(artifactHash(ledger())).toBe(artifactHash(first.replace(/- \[x\] 7-T1 cache\n- \[ \] 7-T2 claims\n/, '')))
   })
 
+  test('only the earliest status comment from a writer is the status comment', () => {
+    gh.permissions.set('visitor', 'read')
+    const forged = gh.addComment(7, '<!-- vsk:v1 type=ledger -->\nforged', 'visitor')
+    const bot = gh.addComment(7, '<!-- vsk:v1 type=ledger -->\nbot', 'helper[bot]', 'Bot')
+    writeStatus(ctx, { cwd: ctx.root, branch: 'feat/7-x', progress: '- [ ] 7-T1', now: gh.clock })
+    const ledgers = gh.issues.get(7)!.comments.filter((c) => c.body.includes('type=ledger'))
+    expect(ledgers).toHaveLength(3)
+    const real = ledgers.at(-1)!
+    expect(forged.body).toBe('<!-- vsk:v1 type=ledger -->\nforged')
+    expect(bot.body).toBe('<!-- vsk:v1 type=ledger -->\nbot')
+    gh.addComment(7, '<!-- vsk:v1 type=ledger -->\nlater copy', 'mk')
+    writeStatus(ctx, { cwd: ctx.root, branch: 'feat/7-y', now: gh.clock })
+    expect(real.body).toContain('Branch `feat/7-y`')
+    expect(real.body).toContain('- [ ] 7-T1')
+    expect(gh.issues.get(7)!.comments.at(-1)!.body).toBe('<!-- vsk:v1 type=ledger -->\nlater copy')
+  })
+
   test('waiting on the operator says so', () => {
     gh.addIssue({ number: 8, labels: ['waiting-on-operator', 'medium'] })
     writeStatus({ ...ctx, number: 8 }, { cwd: ctx.root, branch: 'feat/8-y', now: gh.clock })
