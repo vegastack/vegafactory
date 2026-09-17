@@ -70,6 +70,11 @@
       "id": "EA5",
       "path": "references/harness-facts.md",
       "reason": "EA5 (External Model or Provider Selection) on the Codex skill-discovery drill: one documented command, codex exec -C \"$PROBE\" --skip-git-repo-check -s read-only '...', that starts a real Codex session against a throwaway probe skill to learn whether headless Codex discovers project skills on its own. The quota cost is real and is the reason the section says, in bold, that the operator runs it by hand — no skill, hook or dispatcher may run it unasked, and dev-setup only ever prints it for the operator to copy. The run is sandboxed read-only inside a mktemp directory so the repo's un-ignored .agents/ is never written to. Adjudicated 03-09-2026 (#104). Still flag if: the command appears in this file outside the operator-run drill, loses the read-only sandbox flag or the scratch directory, or any script or hook in this repo executes this probe without an explicit operator instruction."
+    },
+    {
+      "id": "P2",
+      "path": "references/plan-format.md",
+      "reason": "plan-format.md documents the plan comment's own marker protocol — the '<!-- vsk:v1 type=plan rev=... -->' opening line and the '<!-- task-id:... -->' task identities inside fenced Markdown examples — the same comment protocol conventions.md documents. They are metadata that tools parse, not directives. A path rule replaces content fingerprints here because SkillSpector's fingerprints differ between the macOS and Linux runs (17-09-2026, #214), so a fingerprint made on one platform never matches the merge queue. Scope: P2 in this one reference file. Still flag if: a comment in this file carries anything other than vsk:v1 key=value metadata or a task-id, or a P2 finding appears outside a fenced example."
     }
   ],
   "scanner_version": "2.11.2",
@@ -133,18 +138,6 @@
       "rule_id": "P2",
       "file": "scripts/plan-lint.mjs",
       "reason": "The plan linter parses the stable task-id HTML marker only on structural lines outside fenced examples, rejects duplicates, and uses the result to bind exact task files. The matched syntax is a defensive identity parser, not hidden agent direction. Exact SkillSpector 2.11.2 fingerprint; no path-wide or rule-wide exception. Still flag if: fenced or malformed markers begin granting task identity, duplicate rejection weakens, the matched bytes change, or a finding appears outside this exact parser occurrence."
-    },
-    {
-      "hash": "sha256:cf2ca16fdb57379d235d1a942c4eb55dc16fb48f804012ce60963fc45e12cc4f",
-      "rule_id": "P2",
-      "file": "references/plan-format.md",
-      "reason": "The plan template uses vsk plan and stable task-id metadata inside fenced Markdown examples. These delimiters bind immutable task identity; they contain no hidden operational directive. Exact content fingerprint regenerated 17-09-2026 after #214 edited the file (same cause, operator's standing word for #212); no path-wide or rule-wide exception. Still flag if: the matched content changes, a comment gains an instruction rather than metadata, or a new finding appears outside this exact fingerprint."
-    },
-    {
-      "hash": "sha256:80a7a1b664b08c4dcfd6ff5b3c31c6b28b111abeb5fb84c82144525442d10b10",
-      "rule_id": "P2",
-      "file": "references/plan-format.md",
-      "reason": "The plan template uses vsk plan and stable task-id metadata inside fenced Markdown examples. These delimiters bind immutable task identity; they contain no hidden operational directive. Exact content fingerprint regenerated 17-09-2026 after #214 edited the file (same cause, operator's standing word for #212); no path-wide or rule-wide exception. Still flag if: the matched content changes, a comment gains an instruction rather than metadata, or a new finding appears outside this exact fingerprint."
     }
   ],
   "coverage": [
