@@ -18,8 +18,6 @@ concurrency:
 
 jobs:
   prepare:
-    # CI and release preparation are both disk-heavy and the two laptop runners
-    # share one volume. Queue every job instead of racing or replacing one.
     concurrency:
       group: vegafactory-self-hosted-heavy
       queue: max
@@ -28,25 +26,7 @@ jobs:
     outputs:
       pair-name: release-pair-${{ github.sha }}-attempt-${{ github.run_attempt }}
       pair-id: ${{ steps.retained.outputs.artifact-id }}
-    # TEMPORARY (0.16.1, as for 0.14.0 and 0.16.0): GitHub-hosted runners are suspended by an
-    # account-level billing lock — hosted jobs complete with zero steps executed, never having
-    # started ("The job was not started because your account is locked due to a billing issue",
-    # re-confirmed on a fresh run 01-09-2026). Self-hosted minutes are unmetered and do dispatch.
-    #
-    # Targets the repo-level macOS runners registered on the operator's machine
-    # (`vsk-runner-mac-mk-1/2`, label `vsk-runners-mac`). The always-on Mac mini is the intended
-    # host and is not registered yet (#119): its org runner group is `vsk-runners-mac-mini`, its
-    # runner account is a different macOS user from the dispatcher account, and provisioning is
-    # the control room's `onboarding/dispatcher-box.md`. Until the operator grants that group to
-    # this repository and it lists an online runner, it is not reachable from here — a probe on
-    # 01-09-2026 left all three org label sets queued indefinitely with `runner: null`, which is
-    # how a missing runner-group grant presents (it queues forever rather than erroring). This
-    # job prepares and retains bytes only; the publication jobs below already use hosted runners.
-    #
-    # macOS means BSD userland, which the steps below were not written for. Audited before use:
-    # the changelog-extraction `awk` is pure POSIX, `grep -q '[^[:space:]]'` uses a POSIX class,
-    # and there is no `sed -i`, `date -d`, `readlink -f`, `base64 -w` or `sort -V` anywhere.
-    # Move this preparation job to `ubuntu-latest` once the lock clears (#57).
+    # Preparation runs on the Mac mini org runners; publication below runs on hosted runners.
     runs-on: [self-hosted, vsk-runners-mac-mini]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7

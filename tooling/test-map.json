@@ -1,5 +1,5 @@
 {
-  "comment": "What `bun test --changed` cannot see: files read as text, scripts started as separate processes, and whole-tree inputs. `full` runs everything; `rules` add test paths when a changed file matches.",
+  "comment": "What `bun test --changed` cannot see: files read as text, scripts started as separate processes, and whole-tree inputs. `full` runs everything; `rules` add test paths when a changed file matches. Every target must exist (checked by tooling/test-affected.test.ts).",
   "full": [
     "package.json",
     "bun.lock",
@@ -13,15 +13,19 @@
   "rules": [
     { "match": "skills/*/*/**", "tests": ["{skill}/tests"] },
     { "match": "skills/**/SKILL.md", "tests": ["packages/cli/test/installer.test.ts", "packages/cli/test/package.test.ts", "tooling/ci"] },
-    { "match": "packages/cli/packaging.json", "tests": ["packages/cli/test/installer.test.ts", "packages/cli/test/package.test.ts"] },
+    { "match": "packages/cli/packaging.json", "tests": ["packages/cli/test/installer.test.ts", "packages/cli/test/package.test.ts", "packages/cli/test/packaging-links.test.ts"] },
     { "match": "packages/cli/repo-only.json", "tests": ["packages/cli/test/installer.test.ts"] },
     { "match": "packages/cli/scripts/**", "tests": ["packages/cli/test", "skills/repo-tooling"] },
     { "match": "skills/dev/dev-implement/scripts/**", "tests": ["packages/cli/test"] },
     { "match": "skills/dev/dev-setup/scripts/**", "tests": ["packages/cli/test"] },
-    { "match": "skills/dev/dev-setup/assets/hooks/**", "tests": ["packages/cli/test"] },
+    { "match": "skills/dev/dev-setup/assets/**", "tests": ["packages/cli/test"] },
+    { "match": ".vegastack/dev.md", "tests": ["skills/dev/dev-setup/tests"] },
     { "match": ".vegastack/hooks/**", "tests": ["skills/dev/dev-setup/tests"] },
     { "match": ".changeset/config.json", "tests": ["tooling/ci"] },
-    { "match": ".github/workflows/**", "tests": ["scripts"] },
+    { "match": ".github/workflows/factory-board.yml", "tests": ["skills/dev/dev-setup/tests/factory-board.test.ts"] },
+    { "match": ".github/workflows/broker-deploy.yml", "tests": ["packages/broker/test"] },
+    { "match": ".github/workflows/release.yml", "tests": ["scripts"] },
+    { "match": ".github/skillspector-*", "tests": ["scripts"] },
     { "match": "scripts/**", "tests": ["scripts"] }
   ]
 }
