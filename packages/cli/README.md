@@ -1,6 +1,6 @@
 # @vegastack/vegafactory
 
-The VegaFactory command-line tool installs and verifies the VegaStack Agent Skills for Claude Code and Codex, and runs the local pieces of the dev workflow: machine setup, the agent-side issue cache, per-issue worktrees, headless agent runs, the control-room sync and the ship guard.
+The VegaFactory command-line tool installs and verifies the VegaStack Agent Skills for Claude Code and Codex, and runs the local pieces of the dev workflow: machine setup, the agent-side issue cache, per-issue worktrees, cross-tool review, headless agent runs, the control-room sync and the ship guard.
 
 Set up a machine, once:
 
@@ -29,6 +29,7 @@ npx @vegastack/vegafactory skills list
 | `skills doctor` | Check the install, the project's `.vegastack/dev.md` and the latest version |
 | `worktree <list\|status\|create\|restore\|remove\|prune>` | One git worktree per issue under `.vegastack/.worktrees/` |
 | `issue <verb> <n>` | Read and write an issue through the local cache — `sync`, `check`, `comment`, `edit-comment`, `body`, `label`, `ack`, `drop` (`vegafactory issue --help`) |
+| `review <n>` | Cross-tool review: the other tool reads the issue's diff read-only and this command posts the one review comment (`vegafactory review --help`) |
 | `agent claude\|codex <args…>` | Start a headless run on the subscription; parent-app variables are dropped and API-key billing is refused |
 | `sync` | Refresh this machine's copy of the org control room |
 | `ship check <n>` | Exit 0 when issue n may merge: a "ship it" after the latest evidence, the branch pushed and clean, its PR green |

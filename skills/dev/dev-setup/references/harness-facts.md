@@ -104,6 +104,16 @@ What the guard is not: same-user hooks are cooperative. The hook runs as the sam
 
 The prose instruction in the AGENTS.md dev section is the portable base on both harnesses; these hooks are deterministic checks on top, not a replacement.
 
+## Cross-tool review invocations
+
+Verified 17-09-2026 against `codex exec --help`, `codex exec resume --help` and `claude --help` on this machine (codex-cli 0.153.4, Claude Code 2.1.263) — the flags `vegafactory review` passes:
+
+- Codex: `codex exec -s read-only --output-schema <file> -o <file> -` — `--output-schema` takes a **file path** holding the JSON Schema, `-o/--output-last-message` writes the final message to a file, and a trailing `-` reads the prompt from stdin. `-c model=<id>` and `-c model_reasoning_effort=<level>` set model and effort. <!-- source: CODEX-EXEC -->
+- Codex resume: `codex exec resume [OPTIONS] <session-id> -` keeps the session's memory; it has **no `--sandbox`/`-s` flag**, so read-only comes from `-c sandbox_mode=read-only`. It accepts `--output-schema` and `-o` like `exec`. <!-- source: CODEX-EXEC -->
+- Codex also ships `codex exec review [--base <branch>|--commit <sha>|--uncommitted]`, its own review mode with `--output-schema`; VegaFactory does not use it, because the packet and the finding schema are ours and `exec` takes both directly. <!-- source: CODEX-EXEC -->
+- Claude Code: `claude -p --tools Read,Grep,Glob --output-format json --json-schema <inline JSON>` — `--json-schema` takes the schema **inline as a string**, not a path; `--tools` is variadic (a flag must follow it), the prompt goes on stdin, and the JSON result carries `session_id` plus `structured_output`. `--resume <session-id>` continues that session, `--model` and `--effort` set model and effort. <!-- source: CC-CLI -->
+- Codex sets `CODEX_THREAD_ID` (and `CODEX_SANDBOX` inside its sandbox) for the commands it runs; Claude Code sets `CLAUDECODE` and `CLAUDE_CODE_ENTRYPOINT`. `vegafactory review` reads those to pick the other tool. Read off the shipped binaries on 17-09-2026, not from the published docs — pass `--reviewer` where a run cannot tell. <!-- source: CODEX-CONFIG --> <!-- source: CC-CLI -->
+
 ## Headless runs
 
 What a dispatcher can rely on when it starts a run with no human at the keyboard.
