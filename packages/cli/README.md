@@ -95,12 +95,15 @@ vegafactory dashboard --open        # one offline HTML page, built from what you
 `push` appends each turn to `stats/YYYY/MM/DD/<operator>-<machine>.jsonl` — the operator and machine
 the turn was recorded on, not whoever is logged in now — in the control-room clone `sync` already
 keeps, then commits and pushes it with your own `gh` login, at most once an hour and never with
-credentials of its own. The clone belongs to `sync`, so a push refuses unless it is exactly as
-`sync` left it: the expected origin and branch, a clean index and worktree, no local commits other
-than earlier stats pushes. Only the generated files are staged, a failure puts them back, and a
-commit whose push was rejected is retried by the next run. `show` and `dashboard` read this
-machine's records plus everything other machines pushed into that clone; `--local` leaves the
-shared ones out.
+credentials of its own. A room only ever receives turns from the repositories bound to it: the repo
+you are pushing from, the ones its `repos.md` registry lists, and other checkouts on this machine
+whose profile names the same room. Turns from anywhere else stay on this machine, and each room
+keeps its own cursor, so one org's push never marks another's turns as sent. The clone belongs to
+`sync`, so a push refuses unless it is exactly as `sync` left it: the expected origin and branch, a
+clean index and worktree, no local commits other than earlier stats pushes. Only the generated files
+are staged, a failure puts them back, and a commit whose push was rejected is retried by the next
+run. `show` and `dashboard` read this machine's records plus everything other machines pushed into
+that clone; `--local` leaves the shared ones out.
 
 ## Flags
 
