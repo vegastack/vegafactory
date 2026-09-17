@@ -5,11 +5,13 @@
 import { spawnSync } from 'node:child_process'
 import { existsSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
+import { trustedAuthors } from './claim.ts'
 import { defaultRunner, ghRequest, type GhRunner } from './gh.ts'
 import { defaultBranch } from './guard-rules.ts'
 import { issueFromBranch } from './hook.ts'
 import { checkIssue, detectRepo, latestOfType, markerKeys, permissionLookup, repoRoot, snapshot } from './issue.ts'
 import { syncIssue } from './issue-cache.ts'
+import { acceptedReview, trustedReview } from './review.ts'
 
 export interface ShipCheck { ok: boolean; blocks: string[]; warns: string[]; branch: string | null; pr: number | null }
 
@@ -72,6 +74,16 @@ export function shipCheck(input: { cwd: string; root: string; repo: string; numb
     // A short id must name exactly one commit, and that commit must be the pushed head.
     const resolved = git(cwd, ['rev-parse', '--verify', '--quiet', `${sha}^{commit}`])
     if (resolved !== pushed) blocks.push(`the evidence is for ${sha}, but origin/${branch} is at ${pushed.slice(0, 12)} — post fresh evidence`)
+  }
+
+  // Review is never skipped: the commit that would merge carries a clean review from a reviewer
+  // with write access, or the operator's own written acceptance of what that review left open.
+  const review = trustedReview(snap, trustedAuthors({ repo, runner, root }))
+  if (!review) blocks.push('no review comment from a reviewer with write access — run vegafactory review')
+  else if (pushed && review.data.sha !== pushed) blocks.push(`the review is for ${review.data.sha.slice(0, 7)}, but origin/${branch} is at ${pushed.slice(0, 12)} — review the head that would merge`)
+  else if (review.data.verdict !== 'clean' && !acceptedReview(snap, trustedAuthors({ repo, runner, root }), review)) {
+    const open = review.data.findings.filter((finding) => finding.severity === 'must-fix').map((finding) => finding.id)
+    blocks.push(`review round ${review.data.round} is needs-fixes (${open.join(', ') || 'see the comment'}) — fix and re-review, or the operator accepts them in their own comment: "accept review round ${review.data.round} @ ${review.data.sha.slice(0, 7)}"`)
   }
 
   // dev-debug's tagged debug logs must not ship.

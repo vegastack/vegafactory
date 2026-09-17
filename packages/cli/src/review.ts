@@ -2,7 +2,7 @@
 // for Codex's) reads the worktree read-only and returns findings as JSON; this command posts the
 // one review comment. Fix rounds resume the same reviewer session with only the fix diff.
 import { spawn, spawnSync } from 'node:child_process'
-import { randomBytes } from 'node:crypto'
+import { createHash, randomBytes } from 'node:crypto'
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { machineName, trustedAuthors, type Trusted } from './claim.ts'
@@ -32,6 +32,8 @@ export interface ReviewState {
   base: string
   head: string
   sessions: Session[]
+  // The comment this state describes. Another machine editing the same round makes it stale.
+  comment: { id: number; digest: string }
   open: string[]
   verdict: ReviewResult['verdict']
   findings: Finding[]
@@ -271,6 +273,10 @@ export function reviewerArgs(reviewer: Reviewer, options: { schemaPath: string; 
 // ---------------------------------------------------------------------------------------------
 // Running the reviewer
 
+// The verdict follows from the findings: a reviewer that reports a must-fix and calls the change
+// clean, or reports nothing blocking and calls it needs-fixes, does not get to decide either way.
+export const verdictOf = (findings: Finding[]): ReviewResult['verdict'] => (findings.some((f) => f.severity === 'must-fix') ? 'needs-fixes' : 'clean')
+
 export function validateReview(value: unknown): ReviewResult | string {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return 'the reply is not a JSON object'
   const { verdict, findings } = value as Record<string, unknown>
@@ -285,7 +291,7 @@ export function validateReview(value: unknown): ReviewResult | string {
     if (!(SEVERITIES as readonly unknown[]).includes(item.severity)) return `finding ${i} has an unknown severity`
     if (!Number.isInteger(item.line) || (item.line as number) < 0) return `finding ${i} needs a whole-number line`
   }
-  return { verdict, findings: findings as Finding[] }
+  return { verdict: verdictOf(findings as Finding[]), findings: findings as Finding[] }
 }
 
 function parseJson(text: string): unknown {
@@ -339,7 +345,7 @@ function execTool(tool: string, args: string[], options: { cwd: string; env: Nod
 
 const limit = (ms: number) => (ms >= 60_000 ? `${Math.round(ms / 60_000)} min` : `${ms} ms`)
 
-interface RunSpec { group: Group; args: string[]; prompt: string; outPath: string; session: string | null }
+interface RunSpec { group: Group; args: string[]; prompt: string; outPath: string; session: string | null; prior: string[] }
 
 // One reviewer run, retried once on a stuck, failed or malformed run.
 async function runOnce(reviewer: Reviewer, spec: RunSpec, options: { cwd: string; env: NodeJS.ProcessEnv; timeoutMs: number }): Promise<(RunOutcome | RunFailure) & { group: Group }> {
@@ -372,23 +378,24 @@ export const findingsFor = (group: Group, previous: Finding[] | null, groups: Gr
 
 // Ids stay unique across parallel runs: each run's ids carry its prefix. `byGroup` records which
 // run owns which id, so the next round tells each session only about its own findings.
-export function mergeFindings(runs: Array<{ group: Group; result: ReviewResult }>): ReviewResult & { byGroup: Record<string, string[]> } {
+export function mergeFindings(runs: Array<{ group: Group; result: ReviewResult; prior?: string[] }>): ReviewResult & { byGroup: Record<string, string[]> } {
   const findings: Finding[] = []
   const byGroup: Record<string, string[]> = {}
   const seen = new Set<string>()
-  for (const { group, result } of runs) {
+  for (const { group, result, prior = [] } of runs) {
     byGroup[group.key] ??= []
     for (const finding of result.findings) {
-      let id = finding.id.trim().replace(/^\[|\]$/g, '')
-      if (!id.startsWith(group.prefix)) id = `${group.prefix}${id}`
+      const raw = finding.id.trim().replace(/^\[|\]$/g, '')
+      // A finding this group was asked to re-check keeps the id the operator already read; the
+      // prefix marks new findings, so ids stay stable when the grouping changes between rounds.
+      let id = prior.includes(raw) || raw.startsWith(group.prefix) ? raw : `${group.prefix}${raw}`
       while (seen.has(id)) id = `${id}'`
       seen.add(id)
       byGroup[group.key]!.push(id)
       findings.push({ ...finding, id })
     }
   }
-  const needsFixes = runs.some(({ result }) => result.verdict === 'needs-fixes') || findings.some((f) => f.severity === 'must-fix')
-  return { verdict: needsFixes ? 'needs-fixes' : 'clean', findings, byGroup }
+  return { verdict: verdictOf(findings), findings, byGroup }
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -412,6 +419,10 @@ export function readReviewComment(body: string): (CommentData & { history: strin
 
 export interface PostedReview { entry: CommentEntry; data: CommentData; history: string[] }
 
+// What a state file records about the comment it wrote, so a later run can tell "mine, unchanged"
+// from "someone else edited this round on another machine".
+export const commentDigest = (data: CommentData) => createHash('sha256').update(JSON.stringify(data)).digest('hex').slice(0, 16)
+
 // The review comment counts only when a person with write access posted it — anyone can write a
 // marker and a Findings JSON block, and a forged "clean at this head" would skip the review.
 // Every marker field must also agree with the JSON it claims to summarise.
@@ -423,11 +434,27 @@ export function trustedReview(snap: Snapshot, trusted: Trusted): PostedReview | 
   for (const entry of entries) {
     if (!trusted(entry)) continue
     const body = snap.body(entry)
-    const data = readReviewComment(body)
-    if (!data || !isCommit(data.sha) || !isCommit(data.base) || (data.reviewer !== 'claude' && data.reviewer !== 'codex')) continue
+    const parsed = readReviewComment(body)
+    if (!parsed || !isCommit(parsed.sha) || !isCommit(parsed.base) || (parsed.reviewer !== 'claude' && parsed.reviewer !== 'codex')) continue
     const keys = markerKeys(body)
-    if (keys.round !== String(data.round) || keys.sha !== data.sha.slice(0, 7) || keys.agent !== data.reviewer || keys.verdict !== data.verdict) continue
-    return { entry, data, history: data.history }
+    if (keys.round !== String(parsed.round) || keys.sha !== parsed.sha.slice(0, 7) || keys.agent !== parsed.reviewer || keys.verdict !== parsed.verdict) continue
+    const { history, ...data } = parsed
+    return { entry, data, history }
+  }
+  return null
+}
+
+// The operator's acceptance of findings a review left open: their own comment on the issue, naming
+// the round and the head it accepts, posted after that review. No agent-written artifact counts —
+// like "ship it", the words have to be the person's own, and a bot's never count.
+export const ACCEPT_PHRASE = /\baccept(?:ing|ed)?\s+review\s+round\s+(\d+)\s*(?:@|at)\s*([0-9a-f]{7,40})\b/i
+
+export function acceptedReview(snap: Snapshot, trusted: Trusted, review: PostedReview): CommentEntry | null {
+  const since = review.entry.changedAt || review.entry.updatedAt
+  for (const entry of Object.values(snap.state.comments).sort((a, b) => a.createdAt.localeCompare(b.createdAt))) {
+    if (entry.type !== 'human' || !trusted(entry) || entry.createdAt <= since) continue
+    const match = ACCEPT_PHRASE.exec(snap.body(entry))
+    if (match && Number(match[1]) === review.data.round && review.data.sha.startsWith(match[2]!.toLowerCase())) return entry
   }
   return null
 }
@@ -528,7 +555,10 @@ export async function runReview(argv: string[], deps: ReviewDeps = {}): Promise<
 
   // The posted comment wins whenever it is newer work than this machine's state: another machine
   // reviewed on, so this state's session and round number are stale and must not be reused.
-  const stale = Boolean(state && posted && (posted.data.round > state.round || (posted.data.round === state.round && posted.data.sha !== state.head)))
+  // The issue lock lives on one filesystem, so another machine can have edited this very round:
+  // the state counts only while the posted comment is byte-for-byte the one it recorded.
+  const stale = Boolean(state && posted && (posted.data.round > state.round || (posted.data.round === state.round && posted.data.sha !== state.head)
+    || posted.entry.id !== state.comment?.id || commentDigest(posted.data) !== state.comment?.digest))
   const live = state && !stale ? state : null
   const prior = live
     ? { round: live.round, head: live.head, base: live.base, verdict: live.verdict, findings: live.findings }
@@ -572,7 +602,7 @@ export async function runReview(argv: string[], deps: ReviewDeps = {}): Promise<
     facts = diffFacts(top, `${live!.head}..${head}`)
     specs = live!.sessions.map(({ group, id, open }) => {
       const prompt = resumePrompt({ round, from: live!.head, head, open, facts, nonce })
-      return { group, prompt, session: id, outPath: outPath(group), args: reviewerArgs(reviewer, { schemaPath, outPath: outPath(group), session: id, policy }) }
+      return { group, prompt, session: id, prior: open, outPath: outPath(group), args: reviewerArgs(reviewer, { schemaPath, outPath: outPath(group), session: id, policy }) }
     })
   } else {
     facts = diffFacts(top, `${base}...${head}`)
@@ -589,11 +619,14 @@ export async function runReview(argv: string[], deps: ReviewDeps = {}): Promise<
       previous: round > 1 ? prior?.findings ?? null : null,
       knownPatterns: known.status === 0 && known.stdout.trim() ? known.stdout : null,
     }
-    specs = groups.map((group) => ({
-      group, session: null, outPath: outPath(group),
-      prompt: freshPrompt({ ...input, previous: findingsFor(group, input.previous, groups) }, group, nonce),
-      args: reviewerArgs(reviewer, { schemaPath, outPath: outPath(group), session: null, policy }),
-    }))
+    specs = groups.map((group) => {
+      const mine = findingsFor(group, input.previous, groups)
+      return {
+        group, session: null, outPath: outPath(group), prior: mine.map((finding) => finding.id),
+        prompt: freshPrompt({ ...input, previous: mine }, group, nonce),
+        args: reviewerArgs(reviewer, { schemaPath, outPath: outPath(group), session: null, policy }),
+      }
+    })
   }
   if (!facts.files.length && !resumable) return handBack(`no changes between ${base.slice(0, 7)} and HEAD — nothing to review`)
 
@@ -618,7 +651,7 @@ export async function runReview(argv: string[], deps: ReviewDeps = {}): Promise<
   const failed = runs.filter((run): run is RunFailure & { group: Group } => !run.ok)
   if (failed.length) return handBack(`the ${reviewer} review of #${number} did not finish: ${failed.map((run) => `${run.group.key}: ${run.reason}`).join('; ')}`, { round })
   const done = runs as Array<RunOutcome & { group: Group }>
-  const result = mergeFindings(done)
+  const result = mergeFindings(done.map((run) => ({ ...run, prior: specs.find((spec) => spec.group.key === run.group.key)?.prior ?? [] })))
 
   const data: CommentData = { round, sha: head, base, reviewer, verdict: result.verdict, findings: result.findings }
   const bodyPath = join(dir, `${number}-comment.md`)
@@ -629,6 +662,7 @@ export async function runReview(argv: string[], deps: ReviewDeps = {}): Promise<
   const next: ReviewState = {
     schema: 1, repo, issue: number, reviewer, machine, round, base, head,
     sessions: done.map((run) => ({ group: run.group, id: run.session, open: result.byGroup[run.group.key] ?? [] })),
+    comment: { id: 0, digest: commentDigest(data) },
     open: result.findings.map((f) => f.id), verdict: result.verdict, findings: result.findings,
   }
   // The comment and the state that describes it are written under the same lock, so a second run of
@@ -644,6 +678,8 @@ export async function runReview(argv: string[], deps: ReviewDeps = {}): Promise<
     runIssue(current
       ? ['edit-comment', String(number), String(current.entry.id), '--file', bodyPath, '--since', String(cursor), '--repo', repo]
       : ['comment', String(number), '--file', bodyPath, '--repo', repo], { runner, cwd, out: (line) => quiet.push(line) })
+    // runIssue synced after writing, so the comment this state describes can be read back by id.
+    next.comment.id = trustedReview(snapshot(cacheDir(root, repo, number)), trusted)?.entry.id ?? 0
     writeFileSync(statePath, JSON.stringify(next, null, 2) + '\n')
     return { conflict: null }
   })

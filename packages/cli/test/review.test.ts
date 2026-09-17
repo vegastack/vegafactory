@@ -698,3 +698,72 @@ describe('the comment and the state are one transaction', () => {
     expect(readState()).toMatchObject({ round: 1, head: landedHead })
   })
 })
+
+describe('ids stay stable when the grouping changes', () => {
+  test('single → parallel: a re-emitted finding keeps its id, a new one takes the group prefix', async () => {
+    queue('codex', [codexReply(verdict([finding('F1'), finding('F2', 'must-fix', { axis: 'security' })]))])
+    await review(['--reviewer', 'codex'])
+    spawnSync('rm', ['-f', statePath()])
+    commit('fix.ts', 'x\n')
+    gh.issues.get(7)!.labels.push('risky')
+    gh.issues.get(7)!.updated_at = gh.tick()
+    queue('codex', [
+      { match: '  - bugs —', ...codexReply(verdict([finding('F1'), finding('1', 'should-fix')])) },
+      { match: '  - security —', ...codexReply(verdict([finding('F2', 'must-fix', { axis: 'security' })])) },
+    ])
+    await review(['--reviewer', 'codex'], { machine: 'laptop' })
+    expect(readState().findings.map((f) => f.id).sort()).toEqual(['B1', 'F1', 'F2'])
+    expect(reviewComments()[0]!.body).toContain('**Finding [F1]**')
+    expect(reviewComments()[0]!.body).not.toContain('BF1')
+  })
+
+  test('parallel → single: both groups\' findings keep their ids under the one reviewer', async () => {
+    gh.issues.get(7)!.labels.push('risky')
+    gh.issues.get(7)!.updated_at = gh.tick()
+    queue('codex', [
+      { match: '  - bugs —', ...codexReply(verdict([finding('B1')])) },
+      { match: '  - security —', ...codexReply(verdict([finding('S1', 'must-fix', { axis: 'security' })])) },
+    ])
+    await review(['--reviewer', 'codex'])
+    spawnSync('rm', ['-f', statePath()])
+    commit('fix.ts', 'x\n')
+    gh.issues.get(7)!.labels = gh.issues.get(7)!.labels.filter((label) => label !== 'risky')
+    gh.issues.get(7)!.updated_at = gh.tick()
+    queue('codex', [codexReply(verdict([finding('B1'), finding('S1', 'must-fix', { axis: 'security' })]))])
+    await review(['--reviewer', 'codex'], { machine: 'laptop' })
+    expect(readState().findings.map((f) => f.id).sort()).toEqual(['B1', 'S1'])
+  })
+})
+
+describe('the verdict follows the findings', () => {
+  test('validation derives it, whatever the reviewer claimed', () => {
+    expect(validateReview({ verdict: 'clean', findings: [finding('F1')] })).toMatchObject({ verdict: 'needs-fixes' })
+    expect(validateReview({ verdict: 'needs-fixes', findings: [finding('F1', 'nit')] })).toMatchObject({ verdict: 'clean' })
+  })
+
+  test('a needs-fixes reply with nothing blocking ends the cycle instead of starting a round', async () => {
+    queue('codex', [{ output: JSON.stringify({ verdict: 'needs-fixes', findings: [finding('F1', 'should-fix'), finding('F2', 'nit')] }) }])
+    const { code } = await review(['--reviewer', 'codex'])
+    expect(code).toBe(0)
+    expect(reviewComments()[0]!.body).toContain('verdict=clean')
+    expect(calls()).toHaveLength(1)
+  })
+})
+
+describe('state is only as good as the comment it wrote', () => {
+  test('another machine editing the same round makes the local session stale', async () => {
+    queue('codex', [codexReply(verdict([finding('F1')])), codexReply(verdict([]))])
+    await review(['--reviewer', 'codex'])
+    const state = readState()
+    // Another machine reviews the same head in the same round and edits the comment.
+    const posted = reviewComments()[0]!
+    gh.editComment(posted.id, comment({ round: 1, sha: state.head, base: state.base, verdict: 'needs-fixes', findings: [finding('F1') as never, finding('F2') as never] }))
+    commit('fix.ts', 'x\n')
+    const { text } = await review(['--reviewer', 'codex', '--dry-run', '--json'])
+    const dry = JSON.parse(text)
+    expect(dry.resume).toBe(false)
+    expect(dry.round).toBe(2)
+    expect(dry.prompts[0]).toContain('"id": "F2"')
+    await expect(review(['--reviewer', 'codex', '--resume'])).rejects.toThrow('no codex review session from this machine')
+  })
+})

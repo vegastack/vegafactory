@@ -13,7 +13,7 @@ Review runs on the **other tool**: Codex reviews what Claude Code built, Claude 
 vegafactory review <issue-number>
 ```
 
-Nearest neighbors: `dev-implement` runs this after its Verify gate and applies the findings; `dev-ship` reads the verdict from the review comment; `dev-plan`'s approval gate reviews plans, this skill reviews built work.
+Nearest neighbors: `dev-implement` runs this after its Verify gate and applies the findings; `dev-ship` cannot pass without it — `vegafactory ship check` requires a clean review on the exact commit that would merge; `dev-plan`'s approval gate reviews plans, this skill reviews built work.
 
 ## What the command does
 
@@ -33,7 +33,8 @@ Fix the must-fix findings, commit, push, then run the same command again. It res
 
 - Only must-fix findings block. Should-fix and nit are fixed opportunistically or recorded as deferred minors in the evidence comment.
 - Disagree with a finding → say so openly in the evidence comment with the reason and the cost if you are wrong; a finding dropped in silence is a decision made in secret. An operator dismissal is appended to `.vegastack/review-known-patterns.md` (seed: [template](assets/review-known-patterns.md.template)) so it stays dismissed.
-- After round 3 with findings still open the command stops and hands back: the operator decides. **A review is never skipped** — a stuck or failing reviewer is a hand-back, not a pass.
+- After round 3 with findings still open the command stops and hands back: the operator decides. **A review is never skipped** — a stuck or failing reviewer is a hand-back, not a pass, and the ship check refuses a commit with no clean review of its own.
+- The operator's one way past open findings is their own comment on the issue naming the round and the head — `accept review round 3 @ abc1234` — posted after that review. Never write it for them, any more than you would write "ship it"; a comment carrying a `vsk:v1` marker or coming from a bot does not count.
 
 ## The review comment
 
