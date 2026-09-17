@@ -9,19 +9,20 @@ import { renderComment, readReviewComment } from '../../../../packages/cli/src/r
 
 describe('review comment ↔ issue cache contract', () => {
   const data = {
-    round: 2, sha: 'abc1234def5678', base: 'origin/main', reviewer: 'codex' as const, verdict: 'needs-fixes' as const,
+    cycle: 1, round: 2, sha: 'abc1234def5678', base: 'origin/main', brief: 'a'.repeat(12), plan: null,
+    reviewer: 'codex' as const, mode: 'cross-tool' as const, verdict: 'needs-fixes' as const,
     findings: [{ id: 'F1', axis: 'bugs' as const, severity: 'must-fix' as const, file: 'src/a.ts', line: 7, issue: 'null deref', fix: 'guard it' }],
   }
-  const body = renderComment(data, ['- Round 1 @ def5678 — needs-fixes — must-fix: F1'])
+  const body = renderComment(data, ['- Cycle 1 round 1 @ def5678 — needs-fixes — must-fix: F1'])
 
-  test('the cache reads the top marker: type, round, sha, agent, verdict', () => {
+  test('the cache reads the top marker: type, cycle, round, sha, agent, mode, verdict', () => {
     expect(commentType(body)).toBe('review')
-    expect(markerKeys(body)).toEqual({ type: 'review', round: '2', sha: 'abc1234', agent: 'codex', verdict: 'needs-fixes' })
+    expect(markerKeys(body)).toEqual({ type: 'review', cycle: '1', round: '2', sha: 'abc1234', agent: 'codex', mode: 'cross-tool', verdict: 'needs-fixes' })
   })
 
   test('the rendered finding carries severity and path:line, and earlier rounds keep one line each', () => {
     expect(body).toContain('**Finding [F1]** — **[MUST-FIX]** `src/a.ts:7` · bugs')
-    expect(body).toContain('- Round 1 @ def5678 — needs-fixes — must-fix: F1')
+    expect(body).toContain('- Cycle 1 round 1 @ def5678 — needs-fixes — must-fix: F1')
   })
 
   test('a fresh reviewer on another machine reads the findings back out of the comment', () => {

@@ -1,12 +1,27 @@
 # Same-tool fallback review
 
-**Only for the one case `vegafactory review` names: the other tool is not installed or not signed in.** Everything else — a stuck reviewer, malformed output, a third round with findings open — is a hand-back, not a reason to review your own work.
+**Only for the one case `vegafactory review` names: the other tool is not installed or not signed in.** Everything else — a stuck reviewer, malformed output, a spent cycle — is a hand-back, not a reason to review your own work.
 
-Say it plainly to the operator before you start: cross-tool review is off because that tool is missing here, this pass is a same-tool self-review, and dev-setup records the gap. Label it the same way in the evidence comment's Review line.
+Say it plainly to the operator before you start: cross-tool review is off because that tool is missing here, this pass is a same-tool self-review, and dev-setup records the gap. The comment says so too, and so does the ship record.
 
-## How to run it
+## The shape of it
 
-Fresh subagents, one per axis, in parallel, each with no memory of writing the code. Give each one the same packet the command would have built — acceptance criteria, plan tasks, diff stat, changed files, `git diff -U5 <base>...HEAD`, the known-patterns file — and the axis brief below. Each subagent returns its findings; you merge them, write one review comment in the format the command uses (marker, verdict line, findings, nits collapsed), and post it with the issue command.
+The CLI still owns the bindings — base, head, brief and plan hashes, cycle and round — and still writes the comment, so a fallback review is a review the ship check can trust. You only supply the findings:
+
+```sh
+vegafactory review 42 --dry-run --json      # the packet the reviewer would get
+# … run the axes yourself, write the reviewer's JSON to the scratch directory …
+vegafactory review 42 --reviewer claude --record .vegastack/.tmp/42-review.json
+```
+
+- `--reviewer` names **your own** tool, the one that did the reviewing: the comment records `agent=<tool> mode=same-tool`, so the record shows plainly that nothing independent reviewed this.
+- The JSON file is exactly what a cross-tool reviewer returns: `{"verdict": "clean|needs-fixes", "findings": [{id, axis, severity, file, line, issue, fix}]}`. It is validated the same way, the verdict is derived from the findings, and ids you were told to re-check keep their numbers.
+- Write it under `.vegastack/.tmp/`, which is gitignored — the command refuses a dirty worktree, and a stray file would be one.
+- Everything else is unchanged: one comment per issue, three rounds per cycle, the same hand-backs.
+
+## Running the axes
+
+Fresh subagents, one per axis, in parallel, each with no memory of writing the code. Give each one the packet `--dry-run` prints — acceptance criteria, plan tasks, diff stat, changed files, the diff, the never-flag list — and the axis brief below. Merge what they return into one JSON file and record it.
 
 ## Shared preamble
 
@@ -54,10 +69,10 @@ file's steps in full, because a pointer it cannot follow is no brief.
 
 ```text
 STYLE — only where a documented project rule exists (AGENTS.md, CONTRIBUTING,
-.vegastack/dev.md, the known-patterns file). No finding from taste alone, and
+.vegastack/dev.md, the never-flag list). No finding from taste alone, and
 nothing that tooling already enforces.
 ```
 
-## Re-review rounds
+## Fix rounds
 
-Same bound as the command: three rounds. Each later round gets the same brief plus only the fix diff (`<last reviewed head>..HEAD`) and the open findings verbatim, and verdicts each one **addressed** or **not addressed** — "attempted" is not addressed. New breakage in the fix diff joins the open list; anything else is a deferred minor. After round 3 with findings open, hand back to the operator.
+Same bound as the cross-tool flow: three rounds per cycle. Each later round reviews only the fix diff (`<last reviewed head>..HEAD`) against the open findings verbatim, and verdicts each one **addressed** or **not addressed** — "attempted" is not addressed. New breakage in the fix diff joins the open list; anything else is a deferred minor. Record each round the same way; the command keeps the rounds, the cycle and the history straight.

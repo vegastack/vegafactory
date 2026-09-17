@@ -11,6 +11,7 @@ vegafactory review 42 --reviewer codex                  # pick the reviewer inst
 vegafactory review 42 --resume                          # refuse unless this machine's session can be resumed
 vegafactory review 42 --dry-run                         # print the packet and the exact command, run nothing
 vegafactory review 42 --json                            # the result as JSON, for a dispatcher
+vegafactory review 42 --record <file>                   # post findings this session produced (the fallback)
 ```
 
 The reviewer defaults to the tool this command is *not* running inside, read from the harness's own environment markers. Where neither is detectable (a plain shell), the command refuses until `--reviewer` says which tool reviews.
@@ -67,7 +68,9 @@ State lives in `.vegastack/.tmp/reviews/<n>.json`: reviewer, session ids, round,
 | The review comment is gone, forged or edited elsewhere | The local state stops counting and the round is reviewed again |
 | The brief or the plan changed | A new round with a fresh reviewer; a ticked checkbox is not a change |
 | The worktree is dirty | The command refuses and names what to commit |
-| Round 3 done with findings open | Hand-back: the operator decides |
+| Round 3 done with findings open | Hand-back: the cycle is spent |
+| Inputs changed after a spent cycle | Cycle n+1 opens at round 1, with the open findings to re-check |
+| An input moved while the reviewer ran | Hand-back: nothing is posted, because the verdict is about something else |
 
 Sessions are local to the machine that created them, and neither tool can resume the other's — that is why a move between machines starts fresh rather than pretending to continue.
 
@@ -81,5 +84,5 @@ Every refusal is a hand-back, never a silent pass. The command prints the reason
 
 - **Stuck run:** the reviewer is killed after 60 minutes and retried once.
 - **Malformed JSON twice:** the reviewer could not follow the contract; the operator decides whether to retry or review by hand.
-- **Round 3 with findings open:** the loop is over; the operator accepts the risk in writing, or the work goes back for another cycle.
+- **Round 3 with findings open:** that cycle is over. Commit the fixes or change the brief or plan and run it again — cycle n+1 starts at round 1 — or the operator accepts the risk in writing for the capped round.
 - **Tool missing or signed out:** the command says which tool it could not start — that is the one case for the same-tool fallback in [fallback](fallback.md).

@@ -7,6 +7,7 @@ import type { GhRunner } from '../src/gh.ts'
 import { ackBody, artifactHash } from '../src/issue.ts'
 import { cacheDir, syncIssue } from '../src/issue-cache.ts'
 import { renderComment, type CommentData, type Finding } from '../src/review.ts'
+import { runReview } from '../src/review.ts'
 import { runShip } from '../src/ship.ts'
 import { FakeGitHub } from './fake-github.ts'
 
@@ -31,8 +32,8 @@ const hashes = () => {
   return { brief: artifactHash(readFileSync(join(dir, 'issue.md'), 'utf8').split('\n---\n')[1] ?? ''), plan: plan ? artifactHash(plan.body) : null }
 }
 const reviewed = (over: Partial<CommentData> = {}, login = 'mk', type = 'User') => gh.addComment(7, renderComment({
-  round: 1, sha: git(root, 'rev-parse', 'HEAD'), base: git(root, 'rev-parse', 'origin/main'),
-  ...hashes(), reviewer: 'codex', verdict: 'clean', findings: [], ...over,
+  cycle: 1, round: 1, sha: git(root, 'rev-parse', 'HEAD'), base: git(root, 'rev-parse', 'origin/main'),
+  ...hashes(), reviewer: 'codex', mode: 'cross-tool', verdict: 'clean', findings: [], ...over,
 } as CommentData, []), login, type)
 
 const run = (...extra: string[]) => {
@@ -274,7 +275,7 @@ test('two trusted reviews that disagree at the same round stop the ship and name
   // Two at the same round that disagree are not reconciled at all.
   reviewed({ round: 1, verdict: 'needs-fixes', findings: open })
   const blocks = run().blocks
-  expect(blocks[0]).toContain('two review comments disagree at round 1')
+  expect(blocks[0]).toContain('two review comments disagree at cycle 1 round 1')
   expect(blocks[0]).toContain('needs-fixes')
   expect(blocks[0]).toContain('clean')
   expect(blocks).toHaveLength(1)
@@ -330,4 +331,22 @@ test('a review of an older brief or plan does not ship', () => {
   // Ticking a plan checkbox changes neither the plan's hash nor the review's standing.
   gh.editComment(plan.id, plan.body.replace('- [ ]', '- [x]'))
   expect(run()).toMatchObject({ ok: true, blocks: [] })
+})
+
+test('a same-tool fallback review, recorded through the CLI, is trusted and ships', async () => {
+  const head = git(root, 'rev-parse', 'HEAD')
+  gh.addComment(7, `<!-- vsk:v1 type=evidence rev=1 branch=feat/7-export sha=${head.slice(0, 7)} -->\nit works`)
+  gh.addComment(7, ackBody({ stage: 'ship', by: 'mk', brief: artifactHash('Export CSV'), plan: null, source: 'session', quote: 'ship it' }))
+  expect(run().blocks).toEqual(['no review comment from a reviewer with write access — run vegafactory review'])
+
+  // The other tool is missing, so this session reviewed the diff itself and hands the JSON over.
+  mkdirSync(join(root, '.vegastack/.tmp'), { recursive: true })
+  writeFileSync(join(root, '.vegastack/.tmp/fallback.json'), JSON.stringify({ verdict: 'clean', findings: [] }))
+  const code = await runReview(['7', '--reviewer', 'claude', '--record', '.vegastack/.tmp/fallback.json'], {
+    runner, cwd: root, env: { PATH: process.env.PATH, HOME: process.env.HOME }, out: () => {},
+  })
+  expect(code).toBe(0)
+  const comment = gh.issues.get(7)!.comments.find((c) => c.body.startsWith('<!-- vsk:v1 type=review'))!
+  expect(comment.body).toContain('mode=same-tool')
+  expect(run()).toMatchObject({ code: 0, ok: true, blocks: [] })
 })

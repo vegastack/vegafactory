@@ -93,8 +93,8 @@ const briefHash = () => artifactHash(gh.issues.get(7)!.body)
 const planHash = () => artifactHash(gh.issues.get(7)!.comments.find((c) => c.body.startsWith('<!-- vsk:v1 type=plan'))!.body)
 const comment = (over: Partial<CommentData> = {}, history: string[] = []) =>
   renderComment({
-    round: 1, sha: 'a'.repeat(40), base: 'b'.repeat(40), brief: briefHash(), plan: planHash(),
-    reviewer: 'codex', verdict: 'clean', findings: [], ...over,
+    cycle: 1, round: 1, sha: 'a'.repeat(40), base: 'b'.repeat(40), brief: briefHash(), plan: planHash(),
+    reviewer: 'codex', mode: 'cross-tool', verdict: 'clean', findings: [], ...over,
   } as CommentData, history)
 const readState = () => JSON.parse(readFileSync(statePath(), 'utf8')) as ReviewState
 
@@ -232,7 +232,7 @@ describe('results and the review comment', () => {
     expect(text).toContain('next: fix, commit, push')
     const [comment] = reviewComments()
     const head7 = git(root, 'rev-parse', '--short=7', 'HEAD')
-    expect(comment!.body.split('\n')[0]).toBe(`<!-- vsk:v1 type=review round=1 sha=${head7} agent=codex verdict=needs-fixes -->`)
+    expect(comment!.body.split('\n')[0]).toBe(`<!-- vsk:v1 type=review cycle=1 round=1 sha=${head7} agent=codex mode=cross-tool verdict=needs-fixes -->`)
     expect(comment!.body).toContain('**Finding [F1]** — **[MUST-FIX]** `src/app.ts:3`')
     expect(comment!.body).toContain('<summary>Nits (1)</summary>')
     expect(readReviewComment(comment!.body)!.findings.map((f) => f.id)).toEqual(['F1', 'F2'])
@@ -289,8 +289,8 @@ describe('fix rounds', () => {
     expect(second.stdin).not.toContain('## Acceptance criteria')
     const comments = reviewComments()
     expect(comments).toHaveLength(1)
-    expect(comments[0]!.body).toContain('type=review round=2')
-    expect(comments[0]!.body).toContain(`- Round 1 @ ${first.slice(0, 7)} — needs-fixes — must-fix: F1`)
+    expect(comments[0]!.body).toContain('type=review cycle=1 round=2')
+    expect(comments[0]!.body).toContain(`- Cycle 1 round 1 @ ${first.slice(0, 7)} — needs-fixes — must-fix: F1`)
     expect(readState().round).toBe(2)
   })
 
@@ -307,7 +307,7 @@ describe('fix rounds', () => {
     await review(['--reviewer', 'codex'])
     const again = await review(['--reviewer', 'codex'])
     expect(again.code).toBe(2)
-    expect(again.text).toContain('already reviewed in round 1')
+    expect(again.text).toContain('already reviewed in cycle 1 round 1')
     expect(calls()).toHaveLength(1)
   })
 
@@ -322,7 +322,7 @@ describe('fix rounds', () => {
     expect(second.stdin).toContain('## Findings from the previous round')
     expect(second.stdin).toContain('"id": "F1"')
     expect(second.stdin).toContain('## Acceptance criteria')
-    expect(reviewComments()[0]!.body).toContain('type=review round=2')
+    expect(reviewComments()[0]!.body).toContain('type=review cycle=1 round=2')
     commit('more.ts', 'y\n')
     await expect(review(['--reviewer', 'codex', '--resume'], { machine: 'mini' })).rejects.toThrow('no codex review session from this machine')
   })
@@ -337,7 +337,7 @@ describe('fix rounds', () => {
     expect(readState().round).toBe(2)
   })
 
-  test('after round 3 with open must-fix findings the command hands back and never runs a round 4', async () => {
+  test('the cap ends a cycle, and only changed inputs open the next one', async () => {
     queue('codex', [1, 2, 3].map(() => codexReply(verdict([finding('F1')]))))
     await review(['--reviewer', 'codex'])
     commit('a.ts', '1\n')
@@ -345,12 +345,43 @@ describe('fix rounds', () => {
     commit('b.ts', '2\n')
     const third = await review(['--reviewer', 'codex'])
     expect(third.code).toBe(2)
-    expect(third.text).toContain('hand-back: round 3 still has open findings (F1)')
-    commit('c.ts', '3\n')
+    expect(third.text).toContain('hand-back: cycle 1 round 3 still has open findings (F1)')
+
+    // Nothing has changed since: a fourth round is exactly what the cap refuses.
     const fourth = await review(['--reviewer', 'codex'])
     expect(fourth.code).toBe(2)
-    expect(fourth.text).toContain('3 review rounds are done')
+    expect(fourth.text).toContain('cycle 1 is spent: 3 rounds are done')
+    expect(fourth.text).toContain('start cycle 2')
     expect(calls()).toHaveLength(3)
+
+    // The fixes land: cycle 2 opens at round 1, with the open findings to re-check.
+    queue('codex', [codexReply(verdict([]))])
+    commit('c.ts', '3\n')
+    const next = await review(['--reviewer', 'codex'])
+    expect(next.code).toBe(0)
+    expect(calls()).toHaveLength(4)
+    expect(calls()[3]!.stdin).toContain('"id": "F1"')
+    const body = reviewComments()[0]!.body
+    expect(body).toContain('type=review cycle=2 round=1')
+    expect(body).toContain('- Cycle 1 closed @')
+    expect(body).not.toContain('- Cycle 1 round 3 @')
+    expect(readState()).toMatchObject({ cycle: 2, round: 1 })
+  })
+
+  test('a brief edited after a clean round 3 opens the next cycle too', async () => {
+    queue('codex', [1, 2, 3].map(() => codexReply(verdict([finding('F1')]))))
+    await review(['--reviewer', 'codex'])
+    commit('a.ts', '1\n')
+    await review(['--reviewer', 'codex'])
+    commit('b.ts', '2\n')
+    await review(['--reviewer', 'codex'])
+
+    queue('codex', [codexReply(verdict([]))])
+    gh.editBody(7, gh.issues.get(7)!.body + '\n- [ ] and a JSON export\n')
+    const next = await review(['--reviewer', 'codex'])
+    expect(next.code).toBe(0)
+    expect(reviewComments()[0]!.body).toContain('type=review cycle=2 round=1')
+    expect(calls()).toHaveLength(4)
   })
 })
 
@@ -480,7 +511,7 @@ describe('rounds across machines', () => {
     const stale = readFileSync(statePath(), 'utf8')
     commit('fix1.ts', 'a\n')
     await review(['--reviewer', 'codex'], { machine: 'laptop' })
-    expect(reviewComments()[0]!.body).toContain('type=review round=2')
+    expect(reviewComments()[0]!.body).toContain('type=review cycle=1 round=2')
 
     // The first machine comes back with its round-1 state: the posted round 2 is newer work.
     writeFileSync(statePath(), stale)
@@ -489,7 +520,7 @@ describe('rounds across machines', () => {
     expect(code).toBe(0)
     expect(calls()[2]!.args.slice(0, 3)).toEqual(['exec', '-s', 'read-only'])
     expect(reviewComments()).toHaveLength(1)
-    expect(reviewComments()[0]!.body).toContain('type=review round=3')
+    expect(reviewComments()[0]!.body).toContain('type=review cycle=1 round=3')
     expect(readState().round).toBe(3)
   })
 })
@@ -547,7 +578,7 @@ describe('the review comment is upserted, never duplicated or clobbered', () => 
     queue('codex', [codexReply(verdict([finding('F1')]))])
     const { code, text } = await review(['--reviewer', 'codex'])
     expect(code).toBe(2)
-    expect(text).toContain('another session posted review round 2')
+    expect(text).toContain('another session posted review cycle 1 round 2')
     expect(reviewComments()).toHaveLength(1)
     expect(reviewComments()[0]!.body).toContain('**Finding [X9]**')
     expect(existsSync(statePath())).toBe(false)
@@ -711,7 +742,7 @@ describe('the comment and the state are one transaction', () => {
     }
     const { code, text } = await review(['--reviewer', 'codex'])
     expect(code).toBe(2)
-    expect(text).toContain('another session posted review round 3')
+    expect(text).toContain('another session posted review cycle 1 round 3')
     expect(readState()).toMatchObject({ round: 1, head: landedHead })
   })
 })
@@ -807,7 +838,7 @@ describe('the comment is the record, not the state file', () => {
       expect(calls()).toHaveLength(2)
       // Whatever was left on the issue, a fresh round 1 was posted and it is readable again.
       const posted = reviewComments().filter((c) => c.login === 'mk').at(-1)!
-      expect(posted.body).toContain('type=review round=1')
+      expect(posted.body).toContain('type=review cycle=1 round=1')
       expect(readReviewComment(posted.body)!.round).toBe(1)
     })
   }
@@ -817,7 +848,7 @@ describe('a comment cannot claim a verdict its findings contradict', () => {
   test('the findings decide, so an inconsistent marker fails trust', async () => {
     const head = git(root, 'rev-parse', 'HEAD')
     // "clean" in the marker and in the JSON, but a must-fix finding in the same JSON.
-    const lying = renderComment({ round: 1, sha: head, base: git(root, 'rev-parse', 'origin/main'), brief: briefHash(), plan: planHash(), reviewer: 'codex', verdict: 'clean', findings: [] } as CommentData, [])
+    const lying = renderComment({ cycle: 1, round: 1, sha: head, base: git(root, 'rev-parse', 'origin/main'), brief: briefHash(), plan: planHash(), reviewer: 'codex', mode: 'cross-tool', verdict: 'clean', findings: [] } as CommentData, [])
       .replace('"findings": []', `"findings": [${JSON.stringify(finding('F1'))}]`)
     gh.addComment(7, lying, 'mk')
     expect(readReviewComment(lying)!.verdict).toBe('needs-fixes')
@@ -835,18 +866,17 @@ describe('several trusted reviews are reconciled, or refused', () => {
     const base = git(root, 'rev-parse', 'origin/main')
     gh.addComment(7, comment({ round: 3, sha: head, base, verdict: 'needs-fixes', findings: [finding('F1') as never] }), 'mk')
     gh.addComment(7, comment({ round: 1, sha: head, base, verdict: 'clean' }), 'mk')
-    commit('fix.ts', 'x\n')
     queue('codex', [codexReply(verdict([]))])
     // Round 3 stands, so the cap applies and no fourth round starts.
     const { code, text } = await review(['--reviewer', 'codex'])
     expect(code).toBe(2)
-    expect(text).toContain('3 review rounds are done')
+    expect(text).toContain('cycle 1 is spent: 3 rounds are done')
     expect(calls()).toEqual([])
 
     gh.addComment(7, comment({ round: 3, sha: head, base, verdict: 'clean' }), 'mk')
     const conflict = await review(['--reviewer', 'codex'])
     expect(conflict.code).toBe(2)
-    expect(conflict.text).toContain('two review comments disagree at round 3')
+    expect(conflict.text).toContain('two review comments disagree at cycle 1 round 3')
   })
 })
 
@@ -860,7 +890,7 @@ describe('two reviews at one round must be the same review', () => {
     rival({ findings: [finding('F1') as never, finding('F2') as never] })
     const { code, text } = await review(['--reviewer', 'codex'])
     expect(code).toBe(2)
-    expect(text).toContain('two review comments disagree at round 3')
+    expect(text).toContain('two review comments disagree at cycle 1 round 3')
     expect(text).toContain('finding(s)')
     expect(calls()).toEqual([])
   })
@@ -869,7 +899,7 @@ describe('two reviews at one round must be the same review', () => {
     rival({ base: 'c'.repeat(40) })
     const { code, text } = await review(['--reviewer', 'codex'])
     expect(code).toBe(2)
-    expect(text).toContain('two review comments disagree at round 3')
+    expect(text).toContain('two review comments disagree at cycle 1 round 3')
     expect(text).toContain('base ')
   })
 })
@@ -893,7 +923,7 @@ describe('a review is about the brief and plan it read', () => {
     expect(again.code).toBe(0)
     expect(again.text).not.toContain('already reviewed')
     expect(calls()).toHaveLength(2)
-    expect(reviewComments()[0]!.body).toContain('type=review round=2')
+    expect(reviewComments()[0]!.body).toContain('type=review cycle=1 round=2')
   })
 
   test('an edited plan re-runs it as well, with a fresh reviewer rather than a resume', async () => {
@@ -923,4 +953,71 @@ describe('the worktree holds nothing the reviewer would read but not review', ()
       expect(reviewComments()).toEqual([])
     })
   }
+})
+
+describe('what was reviewed must still be there when the verdict lands', () => {
+  const midRun = (change: () => void) => {
+    const before = calls().length
+    gh.beforeCall = () => {
+      if (calls().length === before) return
+      gh.beforeCall = undefined
+      change()
+    }
+  }
+  const cases: Array<[string, () => void, string]> = [
+    ['the brief is edited', () => gh.editBody(7, 'Export CSV and JSON'), 'the brief was edited'],
+    ['the plan is edited', () => {
+      const plan = gh.issues.get(7)!.comments.find((c) => c.body.startsWith('<!-- vsk:v1 type=plan'))!
+      gh.editComment(plan.id, plan.body + '\n- [ ] **Task 2** <!-- task-id:7-T2 -->')
+    }, 'the plan was edited'],
+    ['another commit lands', () => commit('later.ts', 'x\n'), 'HEAD moved to'],
+    ['the worktree is dirtied', () => writeFileSync(join(root, 'app.ts'), 'export const a = 99\n'), 'the worktree was changed'],
+  ]
+  for (const [what, change, reason] of cases) {
+    test(`${what} while the reviewer runs: hand-back, no comment, no state`, async () => {
+      queue('codex', [codexReply(verdict([]))])
+      midRun(change)
+      const { code, text } = await review(['--reviewer', 'codex'])
+      expect(code).toBe(2)
+      expect(text).toContain(reason)
+      expect(text).toContain('judged something else')
+      expect(reviewComments()).toEqual([])
+      expect(existsSync(statePath())).toBe(false)
+    })
+  }
+})
+
+describe('the same-tool fallback records its own review', () => {
+  test('--record posts a trusted comment marked as the fallback', async () => {
+    // The scratch directory is gitignored, so recording a result does not dirty the worktree.
+    const result = join(root, '.vegastack/.tmp/review.json')
+    mkdirSync(join(root, '.vegastack/.tmp'), { recursive: true })
+    writeFileSync(result, JSON.stringify(verdict([finding('F1', 'should-fix')])))
+    const { code, text } = await review(['--reviewer', 'claude', '--record', '.vegastack/.tmp/review.json'])
+    expect(code).toBe(0)
+    expect(text).toContain('same-tool fallback')
+    expect(calls()).toEqual([])
+    const body = reviewComments()[0]!.body
+    expect(body).toContain('agent=claude mode=same-tool')
+    expect(body).toContain('same-tool fallback')
+    expect(body).toContain('**Finding [F1]**')
+    const state = readState()
+    expect(state).toMatchObject({ mode: 'same-tool', cycle: 1, round: 1, sessions: [] })
+    expect(state.head).toBe(git(root, 'rev-parse', 'HEAD'))
+    expect(state.brief).toBe(briefHash())
+
+    // A second round records against the same bindings, and keeps the finding's id.
+    commit('fix.ts', 'x\n')
+    writeFileSync(result, JSON.stringify(verdict([finding('F1', 'should-fix')])))
+    expect((await review(['--reviewer', 'claude', '--record', '.vegastack/.tmp/review.json'])).code).toBe(0)
+    expect(reviewComments()[0]!.body).toContain('cycle=1 round=2')
+    expect(readState().findings.map((f) => f.id)).toEqual(['F1'])
+  })
+
+  test('a recorded file that is not a review result refuses', async () => {
+    mkdirSync(join(root, '.vegastack/.tmp'), { recursive: true })
+    writeFileSync(join(root, '.vegastack/.tmp/bad.json'), JSON.stringify({ verdict: 'clean' }))
+    await expect(review(['--reviewer', 'claude', '--record', '.vegastack/.tmp/bad.json'])).rejects.toThrow('is not a review result')
+    expect(reviewComments()).toEqual([])
+  })
 })

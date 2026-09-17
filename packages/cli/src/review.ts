@@ -4,7 +4,7 @@
 import { spawn, spawnSync } from 'node:child_process'
 import { createHash, randomBytes } from 'node:crypto'
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
-import { join } from 'node:path'
+import { join, resolve } from 'node:path'
 import { machineName, trustedAuthors, type Trusted } from './claim.ts'
 import { childEnvironment } from './env.ts'
 import { defaultRunner, ghRequest, type GhRunner } from './gh.ts'
@@ -27,6 +27,8 @@ export interface ReviewState {
   issue: number
   reviewer: Reviewer
   machine: string
+  mode: ReviewMode
+  cycle: number
   round: number
   // The base is the resolved commit id, fixed at round 1; head is the commit reviewed.
   base: string
@@ -64,16 +66,19 @@ export const REVIEW_SCHEMA = {
 }
 
 export function reviewUsage(): string {
-  return `Usage: vegafactory review <n> [--base REF] [--reviewer claude|codex] [--resume] [--json] [--dry-run]
+  return `Usage: vegafactory review <n> [--base REF] [--reviewer claude|codex] [--resume] [--record FILE] [--json] [--dry-run]
 
 Runs the other tool read-only in this worktree on issue n's diff and posts one review comment.
   --base REF           diff base (default: origin/<default branch>; later rounds keep the first base)
   --reviewer TOOL      claude or codex (default: the tool this command is not running inside)
   --resume             require resuming this machine's reviewer session (automatic when one exists)
+  --record FILE        post a review this session already produced (the same-tool fallback, only
+                       when the other tool is missing); FILE holds the reviewer's JSON
   --dry-run            print the packet and the exact command without running anything
   --json               machine-readable result
 
-A fix round sends only the fix diff and the open finding ids. At most ${MAX_ROUNDS} rounds.
+A fix round sends only the fix diff and the open finding ids. At most ${MAX_ROUNDS} rounds per cycle;
+after that, committed fixes or an edited brief or plan open the next cycle at round 1.
 Exit 0 clean · 2 needs fixes or hand-back · 1 error.`
 }
 
@@ -404,13 +409,16 @@ export function mergeFindings(runs: Array<{ group: Group; result: ReviewResult; 
 // The review comment
 
 const FINDINGS_BLOCK = /<summary>Findings JSON<\/summary>\s*```json\n([\s\S]*?)\n```/
-const HISTORY_LINE = /^- Round \d+ @ .*$/gm
+const HISTORY_LINE = /^- Cycle \d+ .*$/gm
 const safe = (text: string) => text.replace(/<!--/g, '&lt;!--').replace(/\r/g, '').trim()
 
 // `brief` and `plan` are the artifact hashes of the issue body and the plan comment the reviewer
 // read (issue-cache's artifactHash, which ignores ticked checkboxes and heartbeats). A review is
 // only about the text it saw.
-export interface CommentData { round: number; sha: string; base: string; brief: string; plan: string | null; reviewer: Reviewer; verdict: ReviewResult['verdict']; findings: Finding[] }
+export type ReviewMode = 'cross-tool' | 'same-tool'
+// `cycle` counts the times the loop has started over: the three-round cap belongs to one cycle, and
+// inputs that change after the cap open the next one.
+export interface CommentData { cycle: number; round: number; sha: string; base: string; brief: string; plan: string | null; reviewer: Reviewer; mode: ReviewMode; verdict: ReviewResult['verdict']; findings: Finding[] }
 
 export function readReviewComment(body: string): (CommentData & { history: string[] }) | null {
   const match = FINDINGS_BLOCK.exec(body)
@@ -449,8 +457,10 @@ export function trustedReviews(snap: Snapshot, trusted: Trusted): PostedReview[]
     const parsed = readReviewComment(body)
     if (!parsed || !isCommit(parsed.sha) || !isCommit(parsed.base) || (parsed.reviewer !== 'claude' && parsed.reviewer !== 'codex')) continue
     if (!/^[0-9a-f]{12}$/.test(parsed.brief ?? '') || (parsed.plan !== null && !/^[0-9a-f]{12}$/.test(parsed.plan ?? ''))) continue
+    if (!Number.isInteger(parsed.cycle) || parsed.cycle < 1 || (parsed.mode !== 'cross-tool' && parsed.mode !== 'same-tool')) continue
     const keys = markerKeys(body)
     if (keys.round !== String(parsed.round) || keys.sha !== parsed.sha.slice(0, 7) || keys.agent !== parsed.reviewer || keys.verdict !== parsed.verdict) continue
+    if (keys.cycle !== String(parsed.cycle) || keys.mode !== parsed.mode) continue
     const { history, ...data } = parsed
     found.push({ entry, data, history })
   }
@@ -465,6 +475,7 @@ export function trustedReview(snap: Snapshot, trusted: Trusted, head?: string): 
   if (!all.length) return null
   const rank = (review: PostedReview): number[] => [
     head && review.data.sha === head ? 1 : 0,
+    review.data.cycle,
     review.data.round,
     Date.parse(review.entry.changedAt || review.entry.updatedAt) || 0,
     review.entry.id,
@@ -478,10 +489,10 @@ export function trustedReview(snap: Snapshot, trusted: Trusted, head?: string): 
   // Same round, different content of any kind — findings, base, reviewer, head or verdict — is two
   // reviews claiming to be the same one. Picking either would drop the other's findings.
   const digest = commentDigest(best.data)
-  const rival = sorted.find((other) => other !== best && other.data.round === best.data.round && commentDigest(other.data) !== digest)
+  const rival = sorted.find((other) => other !== best && other.data.cycle === best.data.cycle && other.data.round === best.data.round && commentDigest(other.data) !== digest)
   if (rival) {
     const say = (review: PostedReview) => `${review.entry.url} (${review.data.verdict} @ ${review.data.sha.slice(0, 7)}, ${review.data.findings.length} finding(s), base ${review.data.base.slice(0, 7)})`
-    throw new Error(`two review comments disagree at round ${best.data.round}: ${say(best)} and ${say(rival)} — the operator decides which one stands`)
+    throw new Error(`two review comments disagree at cycle ${best.data.cycle} round ${best.data.round}: ${say(best)} and ${say(rival)} — the operator decides which one stands`)
   }
   return best
 }
@@ -508,9 +519,19 @@ export function acceptedReview(snap: Snapshot, trusted: Trusted, review: PostedR
   return null
 }
 
-const summaryLine = (data: CommentData) => {
-  const open = data.findings.filter((f) => f.severity === 'must-fix').map((f) => f.id)
-  return `- Round ${data.round} @ ${data.sha.slice(0, 7)} — ${data.verdict}${open.length ? ` — must-fix: ${open.join(', ')}` : ''}`
+const openIds = (data: CommentData) => data.findings.filter((f) => f.severity === 'must-fix').map((f) => f.id)
+const summaryLine = (data: CommentData) =>
+  `- Cycle ${data.cycle} round ${data.round} @ ${data.sha.slice(0, 7)} — ${data.verdict}${openIds(data).length ? ` — must-fix: ${openIds(data).join(', ')}` : ''}`
+const cycleLine = (data: CommentData) =>
+  `- Cycle ${data.cycle} closed @ ${data.sha.slice(0, 7)} — ${data.verdict} after ${data.round} round(s)${openIds(data).length ? ` — must-fix: ${openIds(data).join(', ')}` : ''}`
+
+// A finished cycle leaves one line behind, in place of its rounds'.
+export function nextHistory(current: PostedReview | null, data: CommentData): string[] {
+  if (!current) return []
+  if (current.data.cycle < data.cycle) {
+    return [...current.history.filter((line) => !line.startsWith(`- Cycle ${current.data.cycle} round `)), cycleLine(current.data)]
+  }
+  return current.data.round < data.round ? [...current.history, summaryLine(current.data)] : current.history
 }
 
 export function renderComment(data: CommentData, history: string[]): string {
@@ -523,15 +544,15 @@ export function renderComment(data: CommentData, history: string[]): string {
     `Fix: ${safe(f.fix)}`,
   ].join('\n')
   return [
-    `<!-- vsk:v1 type=review round=${data.round} sha=${data.sha.slice(0, 7)} agent=${data.reviewer} verdict=${data.verdict} -->`,
-    `## Review — round ${data.round} @ ${data.sha.slice(0, 7)}`,
+    `<!-- vsk:v1 type=review cycle=${data.cycle} round=${data.round} sha=${data.sha.slice(0, 7)} agent=${data.reviewer} mode=${data.mode} verdict=${data.verdict} -->`,
+    `## Review — cycle ${data.cycle}, round ${data.round} @ ${data.sha.slice(0, 7)}${data.mode === 'same-tool' ? ' · same-tool fallback' : ''}`,
     '',
     `**Verdict: ${data.verdict}** — must-fix ${count('must-fix')} · should-fix ${count('should-fix')} · nit ${count('nit')}`,
     '',
     ...(main.length ? main.map(render).flatMap((text) => [text, '']) : ['No findings.', '']),
     ...(nits.length ? [`<details><summary>Nits (${nits.length})</summary>`, '', ...nits.map(render).flatMap((text) => [text, '']), '</details>', ''] : []),
-    ...(history.length ? ['### Earlier rounds', ...history, ''] : []),
-    `Reviewed: ${data.base}...${data.sha.slice(0, 7)} · reviewer: ${data.reviewer} (vegafactory review)`,
+    ...(history.length ? ['### Earlier rounds and cycles', ...history, ''] : []),
+    `Reviewed: ${data.base.slice(0, 7)}...${data.sha.slice(0, 7)} · reviewer: ${data.reviewer}${data.mode === 'same-tool' ? ' (same-tool fallback — no independent tool on this box)' : ''} (vegafactory review)`,
     '',
     '<details><summary>Findings JSON</summary>',
     '',
@@ -546,7 +567,7 @@ export function renderComment(data: CommentData, history: string[]): string {
 // ---------------------------------------------------------------------------------------------
 // CLI
 
-interface Args { number: number; base?: string; reviewer?: Reviewer; resume: boolean; json: boolean; dryRun: boolean; repo?: string }
+interface Args { number: number; base?: string; reviewer?: Reviewer; resume: boolean; json: boolean; dryRun: boolean; repo?: string; record?: string }
 
 function parseArgs(argv: string[]): Args {
   const [raw, ...rest] = argv
@@ -559,10 +580,11 @@ function parseArgs(argv: string[]): Args {
     if (flag === '--json') { args.json = true; continue }
     if (flag === '--dry-run') { args.dryRun = true; continue }
     const value = rest[i + 1]
-    if (!['--base', '--reviewer', '--repo'].includes(flag)) throw new Error(`unknown review option: ${flag}`)
+    if (!['--base', '--reviewer', '--repo', '--record'].includes(flag)) throw new Error(`unknown review option: ${flag}`)
     if (value === undefined || value.startsWith('--')) throw new Error(`${flag} needs a value`)
     i++
     if (flag === '--base') args.base = value
+    else if (flag === '--record') args.record = value
     else if (flag === '--repo') args.repo = value
     else if (value === 'claude' || value === 'codex') args.reviewer = value
     else throw new Error('--reviewer must be claude or codex')
@@ -580,8 +602,12 @@ export async function runReview(argv: string[], deps: ReviewDeps = {}): Promise<
   const root = repoRoot(cwd)
   const top = git(cwd, ['rev-parse', '--show-toplevel']).trim()
   const repo = assertRepo(args.repo ?? detectRepo(root))
-  const reviewer = args.reviewer ?? detectReviewer(env)
+  const detected = detectReviewer(env)
+  // Normally the reviewer is the other tool. `--record` carries a review this session made itself,
+  // so it is this tool — named by --reviewer, or the one this command is running inside.
+  const reviewer = args.reviewer ?? (args.record ? (detected === 'codex' ? 'claude' : detected === 'claude' ? 'codex' : null) : detected)
   if (!reviewer) throw new Error('cannot tell which tool built this work — pass --reviewer claude or --reviewer codex (the other tool reviews)')
+  const mode: ReviewMode = args.record ? 'same-tool' : 'cross-tool'
   const number = args.number
   const print = (value: unknown, text: string) => out(args.json ? JSON.stringify(value, null, 2) : text)
   const handBack = (reason: string, extra: Record<string, unknown> = {}) => {
@@ -614,8 +640,8 @@ export async function runReview(argv: string[], deps: ReviewDeps = {}): Promise<
   const live = state && posted && posted.entry.id === state.comment?.id && commentDigest(posted.data) === state.comment?.digest
     && posted.data.round === state.round && posted.data.sha === state.head ? state : null
   const prior = live
-    ? { round: live.round, head: live.head, base: live.base, brief: live.brief, plan: live.plan, verdict: live.verdict, findings: live.findings }
-    : posted ? { round: posted.data.round, head: posted.data.sha, base: posted.data.base, brief: posted.data.brief, plan: posted.data.plan, verdict: posted.data.verdict, findings: posted.data.findings } : null
+    ? { cycle: live.cycle, round: live.round, head: live.head, base: live.base, brief: live.brief, plan: live.plan, verdict: live.verdict, findings: live.findings }
+    : posted ? { cycle: posted.data.cycle, round: posted.data.round, head: posted.data.sha, base: posted.data.base, brief: posted.data.brief, plan: posted.data.plan, verdict: posted.data.verdict, findings: posted.data.findings } : null
   // What the reviewer must have read: the brief and the plan as they stand now. A ticked checkbox
   // or a heartbeat does not change these; an edited requirement does.
   const artifacts = currentHashes(snap)
@@ -624,21 +650,27 @@ export async function runReview(argv: string[], deps: ReviewDeps = {}): Promise<
   // state file remembers.
   const priorRound = prior?.round ?? 0
 
+  // The cap is one cycle's, over one set of inputs. Changed inputs after the cap — a commit that
+  // fixes something, an edited brief or plan — open the next cycle at round 1; unchanged inputs
+  // still hand back, because reviewing the same thing a fourth time is what the cap is for.
+  const movedOn = Boolean(prior && (prior.head !== head || !sameArtifacts))
+  const newCycle = priorRound >= MAX_ROUNDS && movedOn
+  if (priorRound >= MAX_ROUNDS && !newCycle) {
+    const open = (prior?.findings ?? []).filter((f) => f.severity === 'must-fix').map((f) => f.id)
+    return handBack(`cycle ${prior?.cycle ?? 1} is spent: ${MAX_ROUNDS} rounds are done${open.length ? ` and must-fix findings remain open (${open.join(', ')})` : ''}. Commit the fixes, or change the brief or plan, and run this again to start cycle ${(prior?.cycle ?? 1) + 1}; or the operator accepts the findings as they stand`, { cycle: prior?.cycle ?? 1, round: priorRound, open })
+  }
+
   // Nothing new since the last round: report it again instead of spending a run. A brief or plan
   // edited since counts as new, because the reviewer judged the text it was given.
   if (prior && prior.head === head && sameArtifacts && !args.dryRun) {
-    print({ issue: number, round: priorRound, verdict: prior.verdict, findings: prior.findings, unchanged: true },
-      `HEAD ${head.slice(0, 7)} was already reviewed in round ${prior.round}: ${prior.verdict}${prior.findings.length ? ` (${prior.findings.map((f) => f.id).join(', ')})` : ''}`)
+    print({ issue: number, cycle: prior.cycle, round: priorRound, verdict: prior.verdict, findings: prior.findings, unchanged: true },
+      `HEAD ${head.slice(0, 7)} was already reviewed in cycle ${prior.cycle} round ${prior.round}: ${prior.verdict}${prior.findings.length ? ` (${prior.findings.map((f) => f.id).join(', ')})` : ''}`)
     return prior.verdict === 'clean' ? 0 : 2
   }
-  if (priorRound >= MAX_ROUNDS) {
-    const open = (prior?.findings ?? []).filter((f) => f.severity === 'must-fix').map((f) => f.id)
-    return handBack(`${MAX_ROUNDS} review rounds are done${open.length ? ` and must-fix findings remain open (${open.join(', ')})` : ''}; the operator decides what happens next`, { round: priorRound, open })
-  }
-
-  const round = priorRound + 1
+  const cycle = newCycle ? (prior?.cycle ?? 1) + 1 : prior?.cycle ?? 1
+  const round = newCycle ? 1 : priorRound + 1
   // A changed brief or plan starts a fresh reviewer: a resumed session would only see the fix diff.
-  const resumable = Boolean(live && sameArtifacts && live.machine === machine && live.reviewer === reviewer && live.sessions.length && live.sessions.every((session) => session.id) && isCommit(live.head))
+  const resumable = Boolean(!args.record && !newCycle && live && sameArtifacts && live.machine === machine && live.reviewer === reviewer && live.sessions.length && live.sessions.every((session) => session.id) && isCommit(live.head))
   if (args.resume && !resumable) throw new Error(`no ${reviewer} review session from this machine to resume for #${number} — run without --resume for a fresh reviewer`)
   // Which model and effort the reviewer runs at is a preference, not a gate, so it is read from the
   // worktree under review — a branch may raise its own review effort. The ship guard reads dev.md
@@ -683,7 +715,7 @@ export async function runReview(argv: string[], deps: ReviewDeps = {}): Promise<
     const input: PacketInput = {
       number, title: snap.state.issue!.title, repo, branch: git(top, ['branch', '--show-current']).trim() || '(detached)', base, head,
       acceptance: acceptanceCriteria(brief), tasks: taskList(snap, brief), facts,
-      previous: round > 1 ? prior?.findings ?? null : null,
+      previous: round > 1 || newCycle ? prior?.findings ?? null : null,
       knownPatterns: known.status === 0 && known.stdout.trim() ? known.stdout : null,
     }
     specs = groups.map((group) => {
@@ -699,10 +731,10 @@ export async function runReview(argv: string[], deps: ReviewDeps = {}): Promise<
 
   if (args.dryRun) {
     const commands = specs.map((spec) => ({ group: spec.group.key, cwd: top, command: [reviewer, ...spec.args], stdin: `${spec.prompt.length} characters` }))
-    if (args.json) out(JSON.stringify({ dryRun: true, issue: number, round, reviewer, resume: resumable, commands, prompts: specs.map((s) => s.prompt) }, null, 2))
+    if (args.json) out(JSON.stringify({ dryRun: true, issue: number, cycle, round, reviewer, resume: resumable, commands, prompts: specs.map((s) => s.prompt) }, null, 2))
     else {
       for (const spec of specs) {
-        out(`# ${spec.group.key} — round ${round}, ${resumable ? 'resumed session' : 'fresh reviewer'}, cwd ${top}`)
+        out(`# ${spec.group.key} — cycle ${cycle}, round ${round}, ${resumable ? 'resumed session' : 'fresh reviewer'}, cwd ${top}`)
         out(`argv: ${JSON.stringify([reviewer, ...spec.args])}`)
         out('stdin:')
         out(spec.prompt)
@@ -712,22 +744,34 @@ export async function runReview(argv: string[], deps: ReviewDeps = {}): Promise<
   }
 
   mkdirSync(dir, { recursive: true })
-  writeFileSync(schemaPath, JSON.stringify(REVIEW_SCHEMA, null, 2) + '\n')
-  const childEnv = childEnvironment(env)
-  const runs = await Promise.all(specs.map((spec) => runOnce(reviewer, spec, { cwd: top, env: childEnv, timeoutMs })))
-  const failed = runs.filter((run): run is RunFailure & { group: Group } => !run.ok)
-  if (failed.length) return handBack(`the ${reviewer} review of #${number} did not finish: ${failed.map((run) => `${run.group.key}: ${run.reason}`).join('; ')}`, { round })
-  const done = runs as Array<RunOutcome & { group: Group }>
-  const result = mergeFindings(done.map((run) => ({ ...run, prior: specs.find((spec) => spec.group.key === run.group.key)?.prior ?? [] })))
+  let done: Array<RunOutcome & { group: Group }> = []
+  let result: ReturnType<typeof mergeFindings>
+  if (args.record) {
+    // The fallback: this session ran the axes itself and hands the JSON over. The bindings, the
+    // validation and the comment are the same as any other round, and the record says same-tool.
+    const parsed = parseJson(readFileSync(resolve(cwd, args.record), 'utf8'))
+    const checked = validateReview(parsed)
+    if (typeof checked === 'string') throw new Error(`${args.record} is not a review result: ${checked}`)
+    const group = specs[0]!.group
+    result = mergeFindings([{ group, result: checked, prior: specs[0]!.prior }])
+  } else {
+    writeFileSync(schemaPath, JSON.stringify(REVIEW_SCHEMA, null, 2) + '\n')
+    const childEnv = childEnvironment(env)
+    const runs = await Promise.all(specs.map((spec) => runOnce(reviewer, spec, { cwd: top, env: childEnv, timeoutMs })))
+    const failed = runs.filter((run): run is RunFailure & { group: Group } => !run.ok)
+    if (failed.length) return handBack(`the ${reviewer} review of #${number} did not finish: ${failed.map((run) => `${run.group.key}: ${run.reason}`).join('; ')}`, { round })
+    done = runs as Array<RunOutcome & { group: Group }>
+    result = mergeFindings(done.map((run) => ({ ...run, prior: specs.find((spec) => spec.group.key === run.group.key)?.prior ?? [] })))
+  }
 
-  const data: CommentData = { round, sha: head, base, brief: artifacts.brief, plan: artifacts.plan, reviewer, verdict: result.verdict, findings: result.findings }
+  const data: CommentData = { cycle, round, sha: head, base, brief: artifacts.brief, plan: artifacts.plan, reviewer, mode, verdict: result.verdict, findings: result.findings }
   const bodyPath = join(dir, `${number}-comment.md`)
   const quiet: string[] = []
   // One comment per issue, upserted under the issue lock: the body is built against the comment as
   // it is right now, so an edit that landed while the reviewer ran is kept rather than overwritten,
   // and a second first round edits the existing comment instead of posting a rival one.
   const next: ReviewState = {
-    schema: 1, repo, issue: number, reviewer, machine, round, base, head, brief: artifacts.brief, plan: artifacts.plan,
+    schema: 1, repo, issue: number, reviewer, machine, mode, cycle, round, base, head, brief: artifacts.brief, plan: artifacts.plan,
     sessions: done.map((run) => ({ group: run.group, id: run.session, open: result.byGroup[run.group.key] ?? [] })),
     comment: { id: 0, digest: commentDigest(data) },
     open: result.findings.map((f) => f.id), verdict: result.verdict, findings: result.findings,
@@ -736,17 +780,25 @@ export async function runReview(argv: string[], deps: ReviewDeps = {}): Promise<
   // the same round can never leave one session's comment beside another session's state.
   const landed = locked(ctx, () => {
     const cursor = syncIssue({ root, repo, number, runner }).cursor
+    // A run can take an hour. What was reviewed must still be what is there, or the verdict is
+    // about something nobody will merge.
+    const now = currentHashes(snapshot(cacheDir(root, repo, number)))
+    const moved = git(top, ['rev-parse', 'HEAD']).trim() !== head ? `HEAD moved to ${git(top, ['rev-parse', '--short', 'HEAD']).trim()}`
+      : git(top, ['status', '--porcelain']).trim() ? 'the worktree was changed'
+        : now.brief !== artifacts.brief ? 'the brief was edited'
+          : now.plan !== artifacts.plan ? 'the plan was edited' : null
+    if (moved) return { conflict: `${moved} while the review ran, so it judged something else` }
     let current: PostedReview | null
     try {
       current = trustedReview(snapshot(cacheDir(root, repo, number)), trusted, head)
     } catch (error) {
       return { conflict: (error as Error).message }
     }
-    if (current && (current.data.round > round || (current.data.round === round && current.data.sha !== head))) {
-      return { conflict: `another session posted review round ${current.data.round} @ ${current.data.sha.slice(0, 7)} while this review ran` }
+    const newer = current && (current.data.cycle > cycle || (current.data.cycle === cycle && current.data.round > round))
+    if (newer || (current && current.data.cycle === cycle && current.data.round === round && current.data.sha !== head)) {
+      return { conflict: `another session posted review cycle ${current!.data.cycle} round ${current!.data.round} @ ${current!.data.sha.slice(0, 7)} while this review ran` }
     }
-    const history = current ? (current.data.round < round ? [...current.history, summaryLine(current.data)] : current.history) : []
-    writeFileSync(bodyPath, renderComment(data, history))
+    writeFileSync(bodyPath, renderComment(data, nextHistory(current, data)))
     runIssue(current
       ? ['edit-comment', String(number), String(current.entry.id), '--file', bodyPath, '--since', String(cursor), '--repo', repo]
       : ['comment', String(number), '--file', bodyPath, '--repo', repo], { runner, cwd, out: (line) => quiet.push(line) })
@@ -757,19 +809,19 @@ export async function runReview(argv: string[], deps: ReviewDeps = {}): Promise<
     writeFileSync(statePath, JSON.stringify(next, null, 2) + '\n')
     return { conflict: null }
   })
-  if (landed.conflict) return handBack(`${landed.conflict} — this round's findings were not posted; re-run the review on the current head`, { round, verdict: result.verdict, findings: result.findings })
+  if (landed.conflict) return handBack(`${landed.conflict} — this round's findings were not posted; re-run the review on the current head`, { cycle, round, verdict: result.verdict, findings: result.findings })
 
   const mustFix = result.findings.filter((f) => f.severity === 'must-fix')
   const summary = [
-    `round ${round} (${reviewer}, ${resumable ? 'resumed' : 'fresh'}): ${result.verdict} — ${result.findings.length} finding(s)`,
+    `cycle ${cycle} round ${round} (${reviewer}${mode === 'same-tool' ? ', same-tool fallback' : ''}, ${args.record ? 'recorded' : resumable ? 'resumed' : 'fresh'}): ${result.verdict} — ${result.findings.length} finding(s)`,
     ...result.findings.map((f) => `  [${f.id}] ${f.severity} ${f.file}${f.line ? `:${f.line}` : ''} — ${f.issue.split('\n')[0]}`),
     quiet.find((line) => line.startsWith('posted') || line.startsWith('edited')) ?? '',
   ].filter(Boolean)
   if (result.verdict === 'needs-fixes' && round >= MAX_ROUNDS) {
-    return handBack(`round ${MAX_ROUNDS} still has open findings (${(mustFix.length ? mustFix : result.findings).map((f) => f.id).join(', ')}); the operator decides what happens next`, { round, verdict: result.verdict, findings: result.findings })
+    return handBack(`cycle ${cycle} round ${MAX_ROUNDS} still has open findings (${(mustFix.length ? mustFix : result.findings).map((f) => f.id).join(', ')}); the operator decides what happens next`, { round, verdict: result.verdict, findings: result.findings })
   }
   if (result.verdict === 'needs-fixes') summary.push(`next: fix, commit, push, then run vegafactory review ${number} again (round ${round + 1} of ${MAX_ROUNDS})`)
-  print({ issue: number, round, reviewer, resumed: resumable, verdict: result.verdict, findings: result.findings, sessions: next.sessions }, summary.join('\n'))
+  print({ issue: number, cycle, round, reviewer, mode, resumed: resumable, verdict: result.verdict, findings: result.findings, sessions: next.sessions }, summary.join('\n'))
   return result.verdict === 'clean' ? 0 : 2
 }
 
