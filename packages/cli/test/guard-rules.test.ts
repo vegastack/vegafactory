@@ -65,7 +65,7 @@ describe('command parsing', () => {
 
 describe('decisions', () => {
   test('allows a command in no guarded family', () => {
-    for (const command of ['ls', 'bun run check', 'git push origin feat/110-hooks', 'git push -u origin feat/x', 'git push origin HEAD:feat/x', 'git push origin feat/x:feat/x', 'git push --force-with-lease origin feat/x', 'git status', 'git -C /repo push origin feat/x', 'env FOO=1 bun run check', 'git commit -m "deploy notes"', 'gh release list', 'wrangler deploy --env staging', 'git worktree list']) {
+    for (const command of ['ls', 'bun run check', 'git push origin feat/110-hooks', 'git push -u origin feat/x', 'git push origin HEAD:feat/x', 'git push origin feat/x:feat/x', 'git push --dry-run origin feat/x', 'git status', 'git -C /repo push origin feat/x', 'env FOO=1 bun run check', 'git commit -m "deploy notes"', 'gh release list', 'wrangler deploy --env staging', 'git worktree list']) {
       expect(decide(command).decision, command).toBe('allow')
     }
   })
@@ -181,7 +181,7 @@ describe('decisions', () => {
     }
     for (const command of [
       'git commit -m "$(cat msg.txt)"', 'echo $HOME', 'cd "$(git rev-parse --show-toplevel)" && ls', 'git add $FILES',
-      'gh pr create --title x --body "$(cat body.md)"', 'ls | xargs git add', 'bun run $SCRIPT', 'FOO=$(date) bun run check',
+      'gh pr view 3 --json body --jq "$Q"', 'ls | xargs git add', 'bun run $SCRIPT', 'FOO=$(date) bun run check',
       'git log --since "$SINCE"', 'echo "cost: 5$"',
     ]) {
       expect(decide(command).decision, command).toBe('allow')
@@ -221,6 +221,82 @@ describe('decisions', () => {
       'vegafactory issue ack 1 --stage plan --by x --quote y --source comment:5', 'vegafactory issue claim 1 --harness claude --model m',
       'vegafactory issue comment 1 --file c.md', 'gh issue view 1', 'gh pr view 3 --comments',
     ]) {
+      expect(decide(command).decision, command).toBe('allow')
+    }
+  })
+
+  test('push options that force, prune, follow tags or change the remote side ask, in any spelling', () => {
+    for (const command of [
+      'git push --force-with-lease origin feat/x', 'git push --force-with-lease=feat/x:abc origin feat/x', 'git push --force-with-lease origin feat/x --force-if-includes',
+      'git push --force-if-includes origin feat/x', 'git push --follow-tags origin feat/x', 'git push --prune origin feat/x', 'git push --mirror origin',
+      'git push --foll origin feat/x', 'git push --forc origin feat/x', 'git push --pru origin feat/x', 'git push --del origin feat/x', 'git push --mir origin',
+      'git push --receive-pack=/tmp/x origin feat/x', 'git push --receive-pack /tmp/x origin feat/x', 'git push --exec=/tmp/x origin feat/x',
+      "git push origin 'refs/heads/*:refs/heads/*'", "git push origin 'feat/*'", 'git push origin HEAD:feat/x@{1}', 'git push origin feat/x:feat/a..b',
+    ]) {
+      expect(decide(command).decision, command).toBe('ask')
+    }
+    for (const command of ['git push --no-force-with-lease origin feat/x', 'git push -u origin feat/x', 'git push --set-upstream origin feat/x', 'git push --porcelain origin feat/x']) {
+      expect(decide(command).decision, command).toBe('allow')
+    }
+  })
+
+  test('ref-writing plumbing fails closed', () => {
+    for (const command of [
+      'git update-ref refs/heads/main abc', 'git update-ref -d refs/heads/main', 'git send-pack origin main', 'git symbolic-ref HEAD refs/heads/main',
+      'git symbolic-ref -d HEAD', 'git fetch origin feat/x:main', 'git fetch origin +refs/heads/*:refs/remotes/origin/*', 'git fetch origin v1:refs/tags/v1',
+      'git fetch --refmap=x origin', 'git pull origin feat/x:main', 'git replace abc def', 'git replace -d abc', 'git filter-branch --all', 'git filter-repo --path x',
+    ]) {
+      expect(decide(command).decision, command).toBe('ask')
+    }
+    for (const command of ['git symbolic-ref HEAD', 'git symbolic-ref --short HEAD', 'git fetch origin', 'git fetch origin main', 'git fetch --prune origin', 'git replace', 'git replace -l', 'git pull --rebase origin feat/x', 'git fetch origin tag v1']) {
+      expect(decide(command).decision, command).toBe('allow')
+    }
+  })
+
+  test('commit hooks cannot be skipped or redirected', () => {
+    for (const command of [
+      'git commit -n -m x', 'git commit -anm x', 'git commit -m x -n', 'git commit -qn', 'git commit --no-verif -m x', 'git commit --no-veri -m x',
+      'git commit $FLAGS -m x', 'git -c core.hooksPath=/dev/null commit -m x', 'git -c CORE.HOOKSPATH=/tmp commit -m x', 'git --config-env=core.hooksPath=H commit -m x',
+      'git --config-env core.hooksPath=H merge feat/x', 'git -c include.path=/tmp/cfg rebase main', 'GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.hooksPath GIT_CONFIG_VALUE_0=/tmp git commit -m x',
+      'GIT_CONFIG_GLOBAL=/tmp/g git cherry-pick abc', 'env GIT_DIR=/tmp/r git am x.patch', 'git --git-dir=/tmp/r commit -m x', 'GIT_CONFIG_PARAMETERS="x" git revert HEAD',
+      'git -c remote.origin.push=refs/heads/*:refs/heads/main push origin', 'git -c push.followTags=true push origin feat/x', 'export GIT_CONFIG_GLOBAL=/tmp/g', 'export GIT_DIR=/x',
+    ]) {
+      expect(decide(command).decision, command).toBe('ask')
+    }
+    for (const command of [
+      'git commit -m "$(cat msg.txt)"', 'git commit -am "-n"', 'git commit -m -n', 'git commit -F msg.txt', 'git -c user.name=x -c user.email=y commit -m x',
+      'git commit --verbose -m x', 'GIT_AUTHOR_NAME=x git commit -m x', 'git cherry-pick -n abc', 'git merge -n feat/x', 'export PATH=/x:$PATH',
+    ]) {
+      expect(decide(command).decision, command).toBe('allow')
+    }
+  })
+
+  test('gh: --admin and --repo in every spelling ask, aliases, extensions and write commands ask, reads pass', () => {
+    const check = () => true
+    for (const command of ['gh pr merge 12 --admin', 'gh pr merge 12 --admin=true', 'gh pr merge 12 --admin=1', 'gh pr merge 12 -R=o/r', 'gh pr merge 12 --repo=o/r', 'gh -R=o/r pr merge 12', 'gh -Ro/r pr merge 12', 'gh --repo=o/r pr merge 12']) {
+      expect(classifyCommand(command, policy, check).decision, command).toBe('ask')
+    }
+    expect(classifyCommand('gh pr merge 12 --squash', policy, check).decision).toBe('allow')
+    for (const command of [
+      'gh alias set ship "pr merge"', 'gh alias import x.yml', 'gh alias delete ship', 'gh ship 12', 'gh extension install o/gh-x', 'gh x-merge 1', 'gh pr create --title x',
+      'gh pr edit 1 --base main', 'gh repo delete o/r', 'gh workflow run release', 'gh secret set X', 'gh auth token', 'gh run rerun 1', 'gh issue create -t x', 'gh label create x', 'gh project item-edit 1',
+    ]) {
+      expect(decide(command).decision, command).toBe('ask')
+    }
+    for (const command of [
+      'gh auth status', 'gh pr view 1', 'gh pr list', 'gh pr checks 1 --watch', 'gh pr diff 1', 'gh issue view 1', 'gh issue list', 'gh run view 1', 'gh run list',
+      'gh run watch 1', 'gh repo view', 'gh release list', 'gh release view v1', 'gh release download v1', 'gh label list', 'gh project item-list 1', 'gh project view 1',
+      'gh project field-list 1', 'gh --version', 'gh api repos/o/r',
+    ]) {
+      expect(decide(command).decision, command).toBe('allow')
+    }
+  })
+
+  test('vegafactory worktree remove passes, remove --force and prune ask, git worktree remove asks', () => {
+    for (const command of ['vegafactory worktree remove 12 --force', 'vegafactory worktree remove --force=1 12', 'vegafactory worktree prune', 'vegafactory worktree prune --older-than 1d', 'bunx @vegastack/vegafactory worktree prune', 'vegafactory worktree remove $N --force', 'git worktree remove x', 'vegafactory worktree $VERB 12']) {
+      expect(decide(command).decision, command).toBe('ask')
+    }
+    for (const command of ['vegafactory worktree remove 12', 'vegafactory worktree prune --dry-run', 'vegafactory worktree list', 'vegafactory worktree create 12']) {
       expect(decide(command).decision, command).toBe('allow')
     }
   })

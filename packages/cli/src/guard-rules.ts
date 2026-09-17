@@ -308,7 +308,7 @@ const GIT_SUBCOMMANDS = new Set([
   'read-tree', 'rebase', 'reflog', 'remote', 'repack', 'replace', 'request-pull', 'rerere', 'reset', 'restore', 'rev-list',
   'rev-parse', 'revert', 'rm', 'send-email', 'send-pack', 'shortlog', 'show', 'show-branch', 'show-index', 'show-ref',
   'sparse-checkout', 'stash', 'status', 'stripspace', 'submodule', 'subtree', 'switch', 'symbolic-ref', 'tag', 'unpack-file',
-  'unpack-objects', 'update-index', 'update-ref', 'update-server-info', 'var', 'verify-commit', 'verify-pack', 'verify-tag',
+  'unpack-objects', 'update-index', 'update-ref', 'update-server-info', 'var', 'verify-commit', 'verify-pack', 'verify-tag', 'filter-repo',
   'version', 'whatchanged', 'worktree', 'write-tree', 'check-ignore'])
 
 function stripWrapper(words: string[], spec: { withValue: string[]; positionals: number }): string[] {
@@ -345,23 +345,32 @@ function shellScript(words: string[]): string | null {
 // Reduces a segment's argv to the command it really runs: assignments and wrappers stripped,
 // the head reduced to its basename, git and gh global options removed, inline git aliases
 // expanded. `script` is set when the command is a shell running a script string.
-export function resolveWords(input: string[]): { words: string[]; script: string | null } {
+// Inline config that can change which hooks run, what a push sends or what a command means.
+const RISKY_CONFIG = /^(core\.hookspath|core\.sshcommand|include\.|includeif\.|alias\.|remote\.|push\.|branch\.|url\.)/i
+// Environment that points git at other config, another repository or other programs.
+const RISKY_ENV = /^(GIT_CONFIG\w*|GIT_DIR|GIT_COMMON_DIR|GIT_EXEC_PATH|GIT_TEMPLATE_DIR|GIT_INDEX_FILE|GIT_OBJECT_DIRECTORY)=/
+
+export function resolveWords(input: string[]): { words: string[]; script: string | null; riskyConfig: boolean } {
   let rest = input.filter((word) => typeof word === 'string')
   let head = ''
   // xargs appends arguments nobody can see yet.
   let viaXargs = false
+  let riskyConfig = false
   for (let guard = 0; guard < 16 && rest.length > 0; guard += 1) {
-    while (rest.length > 0 && (/^[A-Za-z_][A-Za-z0-9_]*=/.test(rest[0]!) || KEYWORDS.has(rest[0]!))) rest = rest.slice(1)
+    while (rest.length > 0 && (/^[A-Za-z_][A-Za-z0-9_]*=/.test(rest[0]!) || KEYWORDS.has(rest[0]!))) {
+      if (RISKY_ENV.test(rest[0]!)) riskyConfig = true
+      rest = rest.slice(1)
+    }
     if (rest.length === 0) break
     head = basename(rest[0]!)
-    if (SHELLS.has(head)) return { words: [head, ...rest.slice(1)], script: shellScript(rest) }
-    if (head === 'eval') return { words: rest, script: rest.slice(1).join(' ') }
+    if (SHELLS.has(head)) return { words: [head, ...rest.slice(1)], script: shellScript(rest), riskyConfig }
+    if (head === 'eval') return { words: rest, script: rest.slice(1).join(' '), riskyConfig }
     if (!Object.hasOwn(WRAPPERS, head)) break
     if (head === 'xargs') viaXargs = true
     rest = stripWrapper(rest, WRAPPERS[head]!)
     head = ''
   }
-  if (rest.length === 0) return { words: [], script: null }
+  if (rest.length === 0) return { words: [], script: null, riskyConfig }
   rest = [head, ...rest.slice(1)]
   if (viaXargs) rest.push(EXPANDED)
   if (head === 'git') {
@@ -372,7 +381,9 @@ export function resolveWords(input: string[]): { words: string[]; script: string
       const name = option.includes('=') ? option.slice(0, option.indexOf('=')) : option
       const value = option.includes('=') ? option.slice(option.indexOf('=') + 1) : tail[1]
       // A computed global option could be an alias or another repository: the subcommand is unknown.
-      if (expanded(option) || (GIT_GLOBAL_WITH_VALUE.has(name) && !option.includes('=') && expanded(value))) return { words: ['git', EXPANDED], script: null }
+      if (expanded(option) || (GIT_GLOBAL_WITH_VALUE.has(name) && !option.includes('=') && expanded(value))) return { words: ['git', EXPANDED], script: null, riskyConfig }
+      if ((name === '-c' || name === '--config-env') && (typeof value !== 'string' || RISKY_CONFIG.test(value))) riskyConfig = true
+      if (['--git-dir', '--exec-path', '--namespace', '--super-prefix'].includes(name)) riskyConfig = true
       if (name === '-c' && typeof value === 'string') {
         const alias = /^alias\.([^=]+)=(.*)$/.exec(value)
         if (alias) aliases[alias[1]!] = alias[2]!
@@ -390,12 +401,12 @@ export function resolveWords(input: string[]): { words: string[]; script: string
     while (tail.length > 0 && tail[0]!.startsWith('-')) {
       const option = tail[0]!
       const name = option.includes('=') ? option.slice(0, option.indexOf('=')) : option
-      if (expanded(option)) return { words: ['gh', EXPANDED], script: null }
+      if (expanded(option)) return { words: ['gh', EXPANDED], script: null, riskyConfig }
       tail = GH_GLOBAL_WITH_VALUE.has(name) && !option.includes('=') ? tail.slice(2) : tail.slice(1)
     }
     rest = ['gh', ...tail]
   }
-  return { words: rest, script: null }
+  return { words: rest, script: null, riskyConfig }
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -429,6 +440,78 @@ function pushArguments(words: string[]): { flags: string[]; positionals: string[
 
 const shortFlag = (flags: string[], letter: string) => flags.some((flag) => /^-[A-Za-z]+$/.test(flag) && flag.includes(letter))
 
+// git accepts any unambiguous prefix of a long option, so `--foll` is `--follow-tags`.
+const PUSH_ASK = ['--force', '--force-with-lease', '--force-if-includes', '--follow-tags', '--prune', '--mirror', '--all', '--branches', '--tags', '--delete', '--receive-pack', '--exec']
+const pushAsk = (flags: string[]) => flags.find((flag) => flag.startsWith('--') && flag.length > 3 && !flag.startsWith('--no-') && PUSH_ASK.some((name) => name.startsWith(flag))) ?? null
+
+// A long option spelled as any prefix of `--no-verify` that git would accept.
+const skipsHooks = (word: string) => word.startsWith('--no-veri') && '--no-verify'.startsWith(word.split('=')[0]!)
+
+// `git commit` options that take the next word as their value.
+const COMMIT_WITH_VALUE = new Set(['-m', '-F', '-C', '-c', '-t', '--message', '--file', '--reuse-message', '--reedit-message', '--template', '--author', '--date', '--cleanup', '--fixup', '--squash', '--trailer', '--pathspec-from-file'])
+
+// The words of a `git commit` that are not option values (flags and pathspecs).
+function commitOptions(words: string[]): string[] {
+  const options: string[] = []
+  for (let i = 2; i < words.length; i += 1) {
+    const token = words[i]!
+    options.push(token)
+    if (COMMIT_WITH_VALUE.has(token)) { i += 1; continue }
+    // A short cluster ending in a value letter (`-am`) takes the next word too.
+    if (/^-[A-Za-z]+$/.test(token) && 'mFCct'.includes(token.at(-1)!) && !/[mFCctSu]/.test(token.slice(1, -1))) i += 1
+  }
+  return options
+}
+
+// `git commit -n` (alone or inside a cluster like `-anm`) skips the hooks.
+function commitSkipsHooks(words: string[]): boolean {
+  for (const token of commitOptions(words)) {
+    if (token === '--') return false
+    if (!/^-[A-Za-z]/.test(token)) continue
+    for (const letter of token.slice(1)) {
+      if (letter === 'n') return true
+      if ('mFCctSu'.includes(letter)) break
+    }
+  }
+  return false
+}
+
+// A fetch refspec with a destination writes that ref locally.
+function fetchWritesRefs(words: string[]): boolean {
+  let positional = 0
+  for (let i = 2; i < words.length; i += 1) {
+    const token = words[i]!
+    if (token === '--refmap' || token.startsWith('--refmap=')) return true
+    if (['--upload-pack', '--depth', '--deepen', '--shallow-since', '--shallow-exclude', '-j', '--jobs', '--negotiation-tip', '--server-option', '-o', '--filter', '--recurse-submodules-default', '--submodule-prefix'].includes(token)) { i += 1; continue }
+    if (token.startsWith('-')) continue
+    positional += 1
+    if (positional === 1) continue
+    const colon = token.indexOf(':')
+    if (colon !== -1 && token.slice(colon + 1) !== '') return true
+  }
+  return false
+}
+
+// A known git subcommand that writes refs or rewrites history outside the normal verbs.
+function refPlumbing(words: string[]): string | null {
+  const sub = words[1]
+  const args = words.slice(2)
+  if (sub === 'update-ref' || sub === 'send-pack' || sub === 'filter-branch' || sub === 'filter-repo') return `git ${sub}`
+  if (sub === 'symbolic-ref' && (args.some((arg) => arg === '-d' || arg === '--delete') || args.filter((arg) => !arg.startsWith('-')).length > 1)) return 'git symbolic-ref'
+  // With no arguments, or -l, git replace only lists.
+  if (sub === 'replace' && args.length > 0 && !args.some((arg) => arg === '-l' || arg === '--list')) return 'git replace'
+
+  if ((sub === 'fetch' || sub === 'pull') && fetchWritesRefs(words)) return `git ${sub} into a named ref`
+  return null
+}
+
+// Read-only gh commands that pass; `gh api`, `gh pr merge` and `gh release` have their own rules.
+const GH_READ_ONLY: Record<string, string[]> = {
+  auth: ['status'], pr: ['view', 'list', 'checks', 'diff', 'status'], issue: ['view', 'list', 'status'],
+  run: ['view', 'list', 'watch'], repo: ['view'], label: ['list'], project: ['item-list', 'view', 'field-list'],
+  release: ['list', 'view', 'download', 'ls'],
+}
+
 type Destination = { kind: 'delete' | 'tag' | 'unreadable' | 'branch'; branch: string }
 
 // The branch a refspec lands on, or a marker for what the guard cannot read.
@@ -440,7 +523,7 @@ function pushDestination(refspec: string): Destination {
   if (colon !== -1 && source === '') return { kind: 'delete', branch: destination.replace(/^refs\/heads\//, '') }
   if (destination.startsWith('refs/tags/')) return { kind: 'tag', branch: destination }
   const branch = destination.replace(/^refs\/heads\//, '')
-  if (branch === '' || branch === 'HEAD' || branch === '@' || /[~^]/.test(branch) || branch.startsWith('refs/')) return { kind: 'unreadable', branch }
+  if (branch === '' || branch === 'HEAD' || branch === '@' || /[~^*?[\\]|@\{|\.\.|:/.test(branch) || branch.startsWith('refs/') || branch.startsWith('-')) return { kind: 'unreadable', branch }
   return { kind: 'branch', branch }
 }
 
@@ -460,7 +543,7 @@ function familyProbe(text: string, extra: string[]): string | null {
 
 const READ_ONLY_RELEASE = new Set(['list', 'view', 'download', 'ls'])
 // Subcommands whose arguments decide whether something ships or is destroyed.
-const GUARDED_GIT = new Set(['push', 'tag', 'reset', 'branch', 'worktree', 'update-ref', 'send-pack', 'symbolic-ref'])
+const GUARDED_GIT = new Set(['push', 'tag', 'reset', 'branch', 'worktree', 'update-ref', 'send-pack', 'symbolic-ref', 'fetch', 'pull', 'replace'])
 const guardedGh = (words: string[]) => ['api', 'release'].includes(words[1]!) || (['pr', 'issue'].includes(words[1]!) && ['merge', 'comment'].includes(words[2]!))
 const PUBLISHERS = ['npm', 'pnpm', 'yarn', 'bun']
 
@@ -470,6 +553,8 @@ function expansionRisk(words: string[]): Decision | null {
   const risky = ask(`a command built by shell expansion cannot be classified, so it ${WORD}`, 'unclassified')
   if (expanded(words[0])) return risky
   if (words[0] === 'git' && (expanded(words[1]) || (GUARDED_GIT.has(words[1]!) && words.slice(2).some(expanded)))) return risky
+  // A computed commit message is fine; a computed option could be `-n`.
+  if (words[0] === 'git' && words[1] === 'commit' && commitOptions(words).some(expanded)) return risky
   if (words[0] === 'gh' && (expanded(words[1]) || expanded(words[2]) || (guardedGh(words) && words.slice(2).some(expanded)))) return risky
   if (PUBLISHERS.includes(words[0]!) && expanded(words[1])) return risky
   return null
@@ -538,17 +623,35 @@ function issueVerb(words: string[]): Decision | null {
   return null
 }
 
-function classifyResolved(segment: Segment, words: string[], policy: Policy, mergeCheck?: MergeCheck): Decision {
+// `vegafactory worktree`: remove refuses unmerged work itself; --force and prune need the word.
+function worktreeVerb(words: string[]): Decision | null {
+  const at = words.findIndex((word, index) => index > 0 && word === 'worktree')
+  if (words[0] === 'git' || at === -1) return null
+  const verb = words[at + 1]
+  const args = words.slice(at + 2)
+  if (expanded(verb) || ((verb === 'remove' || verb === 'prune') && args.some(expanded))) return ask(`a worktree command built by shell expansion ${WORD}`, 'unclassified')
+  if (verb === 'remove' && args.some((arg) => arg.startsWith('--force') || arg === '-f')) return ask(`removing an unmerged worktree ${WORD}`, 'always-ask')
+  if (verb === 'prune' && !args.includes('--dry-run')) return ask(`pruning worktrees ${WORD} — preview with --dry-run`, 'always-ask')
+  return null
+}
+
+function classifyResolved(segment: Segment, words: string[], policy: Policy, mergeCheck?: MergeCheck, riskyConfig = false): Decision {
   if (words.length === 0) return ALLOW
-  const risk = expansionRisk(words) ?? issueVerb(words)
+  const risk = expansionRisk(words) ?? issueVerb(words) ?? worktreeVerb(words)
   if (risk) return risk
   const text = words.join(' ')
   const asWritten = [segment.words[0] ?? '', ...words.slice(1)].join(' ')
 
   // Always ask, with the flag in any position.
-  if (words.includes('--no-verify')) return ask(`skipping the commit checks ${WORD}`, 'always-ask')
+  if (words.some(skipsHooks)) return ask(`skipping the commit checks ${WORD}`, 'always-ask')
   if (words[0] === 'git') {
     const sub = words[1]
+    if (sub === 'commit' && commitSkipsHooks(words)) return ask(`skipping the commit checks (\`-n\`) ${WORD}`, 'always-ask')
+    if (riskyConfig && ['commit', 'merge', 'rebase', 'cherry-pick', 'am', 'pull', 'revert', 'push', 'fetch'].includes(sub!)) {
+      return ask(`git ${sub} with inline config or environment that can change its hooks or target ${WORD}`, 'always-ask')
+    }
+    const plumbing = refPlumbing(words)
+    if (plumbing) return ask(`${plumbing} writes refs directly, which ${WORD}`, 'always-ask')
     if (sub === 'push') {
       const { flags, positionals } = pushArguments(words)
       const refspecs = positionals.slice(1)
@@ -567,7 +670,9 @@ function classifyResolved(segment: Segment, words: string[], policy: Policy, mer
   }
   if (words[0] === 'gh') {
     if (words[1] === 'pr' && words[2] === 'merge') {
-      if (mergeCheck?.(words, segment.words)) return { decision: 'allow', reason: null, rule: 'ship-it-recorded' }
+      // --admin in any spelling, or another repository, is never covered by a recorded "ship it".
+      const unsafe = words.some((word) => /^--admin(=|$)/.test(word)) || segment.words.some((word) => /^(-R|--repo)(=|$)|^-R./.test(word))
+      if (!unsafe && mergeCheck?.(words, segment.words)) return { decision: 'allow', reason: null, rule: 'ship-it-recorded' }
       return ask(`merging to the default branch ${WORD}`, 'default-branch')
     }
     if (words[1] === 'api') {
@@ -577,6 +682,10 @@ function classifyResolved(segment: Segment, words: string[], policy: Policy, mer
     // A raw comment can carry a workflow marker (an ack, a claim); `vegafactory issue comment` refuses those.
     if ((words[1] === 'issue' || words[1] === 'pr') && words[2] === 'comment') return ask(`a raw GitHub comment ${WORD} — use vegafactory issue comment`, 'always-ask')
     if (words[1] === 'release' && !READ_ONLY_RELEASE.has(words[2] ?? '')) return ask(`changing a release ${WORD}`, 'always-ask')
+    // Aliases and extensions can run anything, and most other commands write to GitHub.
+    const verb = words[1] ?? ''
+    const known = ['version', 'help', '--version', '--help', '-h', ''].includes(verb) || verb === 'api' || GH_READ_ONLY[verb]?.includes(words[2] ?? '')
+    if (!known) return ask(`\`gh ${[verb, words[2]].filter(Boolean).join(' ')}\` is not on the guard's read-only list, so it ${WORD}`, 'unclassified')
   }
   if (PUBLISHERS.includes(words[0]!) && words[1] === 'publish') return ask(`publishing ${WORD}`, 'always-ask')
 
@@ -586,6 +695,8 @@ function classifyResolved(segment: Segment, words: string[], policy: Policy, mer
       const { flags, positionals } = pushArguments(words)
       if (flags.includes('--all') || flags.includes('--mirror')) return ask(`pushing every branch reaches ${policy.defaultBranch ?? 'the default branch'}, which ${WORD}`, 'default-branch')
       if (flags.includes('--tags')) return ask(`pushing tags publishes a release, which ${WORD}`, 'always-ask')
+      const risky = pushAsk(flags)
+      if (risky) return ask(`\`git push ${risky}\` ${WORD}`, 'always-ask')
       const refspecs = positionals.slice(1)
       const destinations = refspecs.map(pushDestination)
       // `git push origin v1.2.0` pushes the tag of that name: git resolves a bare source as a tag too.
@@ -626,13 +737,16 @@ export function classifySegment(segment: Segment, policy: Policy, mergeCheck?: M
   if (segment.words.length === 0) return ALLOW
   const resolved = resolveWords(segment.words)
   if (resolved.script !== null) return classifyCommand(resolved.script, policy, mergeCheck)
+  if (['export', 'declare', 'typeset', 'setenv'].includes(resolved.words[0]!) && resolved.words.slice(1).some((word) => RISKY_ENV.test(word) || /^GIT_CONFIG\w*$/.test(word))) {
+    return ask(`pointing git at other config or another repository ${WORD}`, 'always-ask')
+  }
   if (resolved.words[0] === 'find') {
     for (const words of findCommands(resolved.words)) {
       const inner = classifySegment({ words, redirects: [], strings: [] }, policy)
       if (inner.decision === 'ask') return inner
     }
   }
-  const result = classifyResolved(segment, resolved.words, policy, mergeCheck)
+  const result = classifyResolved(segment, resolved.words, policy, mergeCheck, resolved.riskyConfig)
   if (result.decision === 'ask' || (resolved.words[0] === 'git' && resolved.words[1] === 'commit')) return result
   for (const string of segment.strings) {
     const verb = familyProbe(string, policy.shipAsk)
