@@ -1,12 +1,12 @@
 import { beforeEach, describe, expect, test } from 'bun:test'
-import { spawnSync } from 'node:child_process'
-import { appendFileSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
+import { spawn, spawnSync } from 'node:child_process'
+import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, symlinkSync, truncateSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import type { GhRunner } from '../src/gh.ts'
 import {
   collectStats, defaultSite, loadEvents, parseClaude, parseCodex, parseSince, pushStats, resolveOperator,
-  runStats, statsDir, summarize, type ParseContext, type StatsEvent,
+  runStats, skillName, statsDir, summarize, type GitRunner, type ParseContext, type StatsEvent,
 } from '../src/stats.ts'
 
 const fixture = (name: string) => readFileSync(join(import.meta.dir, 'fixtures/stats', name), 'utf8')
@@ -70,7 +70,6 @@ describe('collectors', () => {
       tokens: { input: 20_228, output: 262, cacheRead: 2000, cacheWrite: 300 },
     })
     // task_complete names how the turn ended, on the turn's last response.
-    // The second response is timed from the tool output that preceded it.
     expect(events[1]).toMatchObject({ skill: null, outcome: 'end_turn', durationMs: 38_000, tokens: { input: 10_000, cacheRead: 20_000 } })
     expect(JSON.stringify(events)).not.toContain('redacted')
   })
@@ -96,6 +95,39 @@ describe('collectors', () => {
     writeFileSync(join(cache, 'state.json'), JSON.stringify({ schema: 1, commentPages: [], issue: { labels: ['in-progress', 'small'] } }))
     expect(site()(tree, 'feat/42-demo')).toEqual({ repo: 'acme/demo', issue: 42, state: 'in-progress' })
   })
+
+  // F6
+  test('a turn is timed from its own start, not from whatever record came last', () => {
+    const at = (time: string, extra: string) => `{"type":${extra},"cwd":"/work/demo","sessionId":"s-9","timestamp":"2026-09-17T${time}.000Z"`
+    const log = [
+      `${at('10:00:00', '"user"')},"message":{"role":"user","content":"x"}}`,
+      // Records the harness writes for itself, between the prompt and the answer.
+      `${at('10:00:50', '"queue-operation"')},"operation":"resume"}`,
+      `${at('10:00:55', '"attachment"')},"attachment":{"type":"diagnostics"}}`,
+      `${at('10:01:00', '"assistant"')},"message":{"id":"m1","model":"claude-opus-5","stop_reason":"tool_use","content":[],"usage":{"input_tokens":1,"output_tokens":2,"cache_read_input_tokens":0,"cache_creation_input_tokens":0}}}`,
+      // A second line of the same turn must not become the next turn's start either.
+      `${at('10:01:05', '"assistant"')},"message":{"id":"m1","model":"claude-opus-5","stop_reason":"end_turn","content":[],"usage":{"input_tokens":1,"output_tokens":2,"cache_read_input_tokens":0,"cache_creation_input_tokens":0}}}`,
+      `${at('10:02:00', '"user"')},"message":{"role":"user","content":"x"}}`,
+      `${at('10:02:30', '"assistant"')},"message":{"id":"m2","model":"claude-opus-5","stop_reason":"end_turn","content":[],"usage":{"input_tokens":1,"output_tokens":2,"cache_read_input_tokens":0,"cache_creation_input_tokens":0}}}`,
+    ].join('\n') + '\n'
+    const { events } = parseClaude(log, context())
+    expect(events.map((event) => event.durationMs)).toEqual([60_000, 30_000])
+    expect(events).toHaveLength(2)
+    expect(events[0]!.outcome).toBe('end_turn')
+  })
+
+  // F5
+  test('only a plain skill name is kept; anything else is dropped', () => {
+    expect(skillName('dev-implement')).toBe('dev-implement')
+    expect(skillName('codex:codex-cli-runtime')).toBe('codex:codex-cli-runtime')
+    for (const value of [
+      '<img src=x onerror=alert(1)>', '../../etc/passwd', '/Users/mk/.ssh/id_rsa', 'ghp_A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8',
+      'read the plan and then delete the branch', 'Dev-Implement', 'a'.repeat(80), '', 'x y', 42, null, { skill: 'x' },
+    ]) expect(skillName(value), String(value)).toBeNull()
+    const line = (skill: string) => `{"type":"assistant","cwd":"/work/demo","sessionId":"s-8","timestamp":"2026-09-17T10:00:00.000Z","message":{"id":"m1","model":"claude-opus-5","stop_reason":"end_turn","content":[{"type":"tool_use","name":"Skill","input":{"skill":${JSON.stringify(skill)}}}],"usage":{"input_tokens":1,"output_tokens":1,"cache_read_input_tokens":0,"cache_creation_input_tokens":0}}}\n`
+    expect(parseClaude(line('<script>alert(1)</script>'), context()).events[0]!.skill).toBeNull()
+    expect(parseClaude(line('dev-review'), context()).events[0]!.skill).toBe('dev-review')
+  })
 })
 
 describe('offsets', () => {
@@ -119,27 +151,104 @@ describe('offsets', () => {
       .toBe(Buffer.byteLength(fixture('claude-session.jsonl') + fixture('claude-session-more.jsonl')))
   })
 
-  test('a turn split across two runs is counted once', () => {
+  // F4
+  test('a turn split across two runs ends up exactly as it would in one', () => {
     const text = fixture('claude-session.jsonl')
     const lines = text.split('\n').filter(Boolean)
-    // Stop between the two lines that share one message id.
+    // Stop between the two lines that share one message id: the first has no Skill call yet.
     const path = plantClaude(lines.slice(0, 2).join('\n') + '\n')
     expect(collect().events).toBe(1)
+    expect(events()[0]!.skill).toBeNull()
     writeFileSync(path, text)
     collect()
-    expect(events()).toHaveLength(2)
+    const whole = parseClaude(text, context()).events
+    expect(events()).toEqual(whole)
+    expect(events()[0]!.skill).toBe('dev-implement')
   })
 
-  test('a file replaced at the same path is read from the start', () => {
-    const path = plantClaude(fixture('claude-session.jsonl'))
+  // F4
+  test('a Codex turn completed in a later run has its outcome corrected', () => {
+    const lines = fixture('codex-rollout.jsonl').split('\n').filter(Boolean)
+    const path = plantCodex(lines.slice(0, -1).join('\n') + '\n')
+    collect()
+    expect(events().map((event) => event.outcome)).toEqual(['tool_use', 'tool_use'])
+    writeFileSync(path, fixture('codex-rollout.jsonl'))
+    collect()
+    expect(events()).toEqual(parseCodex(fixture('codex-rollout.jsonl'), context()).events)
+    expect(events().map((event) => event.outcome)).toEqual(['tool_use', 'end_turn'])
+  })
+
+  // F2
+  test('a file replaced at the same path is read from the start, whatever its size', () => {
+    const original = fixture('claude-session.jsonl')
+    const path = plantClaude(original)
     expect(collect().events).toBe(2)
-    writeFileSync(path, fixture('claude-session-more.jsonl'))
+    // Same length, different session: the bytes already read are not the bytes that are there now.
+    const sameSize = original.replaceAll('"s-1"', '"s-9"')
+    expect(Buffer.byteLength(sameSize)).toBe(Buffer.byteLength(original))
+    writeFileSync(path, sameSize)
+    expect(collect().events).toBe(2)
+    // Longer, and different from the start.
+    writeFileSync(path, original.replaceAll('"s-1"', '"s-7"') + fixture('claude-session-more.jsonl').replaceAll('"s-1"', '"s-7"'))
+    expect(collect().events).toBe(3)
+    // Truncated and regrown to the same size it had.
+    truncateSync(path, 0)
+    writeFileSync(path, original.replaceAll('"s-1"', '"s-5"'))
+    expect(collect().events).toBe(2)
+    // A shorter replacement is still read from the start.
+    writeFileSync(path, fixture('claude-session-more.jsonl').replaceAll('"s-1"', '"s-3"'))
     expect(collect().events).toBe(1)
+    expect(events()).toHaveLength(10)
+    expect(new Set(events().map((event) => event.id)).size).toBe(10)
+  })
+
+  // F3
+  test('a record larger than one slice is stepped over and the turns after it are still collected', () => {
+    const giant = `{"type":"assistant","filler":"${'x'.repeat(9 * 1024 * 1024)}"}\n`
+    plantClaude(giant + fixture('claude-session.jsonl'))
+    // One run: the oversized record is skipped and the file is read on to its end.
+    expect(collect().events).toBe(2)
+    expect(collect().events).toBe(0)
   })
 
   test('no session logs at all is not an error', () => {
     expect(collect()).toEqual({ files: 0, events: 0, bytes: 0 })
   })
+
+  // F1
+  test('an interrupted commit is finished on the next run, exactly once', () => {
+    plantClaude(fixture('claude-session.jsonl'))
+    plantCodex(fixture('codex-rollout.jsonl'))
+    collect()
+    const rows = readFileSync(join(statsDir(home), 'events.jsonl'), 'utf8').split('\n').filter(Boolean)
+    const offsets = JSON.parse(readFileSync(join(statsDir(home), 'offsets.json'), 'utf8'))
+    expect(rows).toHaveLength(4)
+    // Rewind to the middle of that run's append: two rows written, the third half-written, no offsets.
+    writeFileSync(join(statsDir(home), 'events.jsonl'), rows.slice(0, 2).join('\n') + '\n' + rows[2]!.slice(0, 30))
+    rmSync(join(statsDir(home), 'offsets.json'))
+    writeFileSync(join(statsDir(home), 'pending.json'), JSON.stringify({ events: rows.map((row) => JSON.parse(row)), offsets }))
+    expect(collect().events).toBe(0)
+    expect(readFileSync(join(statsDir(home), 'events.jsonl'), 'utf8').split('\n').filter(Boolean)).toEqual(rows)
+    expect(existsSync(join(statsDir(home), 'pending.json'))).toBe(false)
+    expect(events()).toHaveLength(4)
+  })
+
+  // F1
+  test('two collectors running at once count every turn once', async () => {
+    plantClaude(fixture('claude-session.jsonl'))
+    plantCodex(fixture('codex-rollout.jsonl'))
+    mkdirSync(statsDir(home), { recursive: true })
+    writeFileSync(join(statsDir(home), 'identity.json'), JSON.stringify({ login: 'mk', at: Date.now() }))
+    const cli = join(import.meta.dir, '../src/index.ts')
+    const once = () => new Promise<number>((done) => {
+      const child = spawn(process.execPath, [cli, 'stats', 'collect'], { env: { ...process.env, HOME: home }, stdio: 'ignore' })
+      child.on('exit', (code) => done(code ?? 1))
+    })
+    expect(await Promise.all([once(), once()])).toEqual([0, 0])
+    const all = events()
+    expect(all).toHaveLength(4)
+    expect(readFileSync(join(statsDir(home), 'events.jsonl'), 'utf8').split('\n').filter(Boolean)).toHaveLength(4)
+  }, 30_000)
 })
 
 describe('the operator', () => {
@@ -213,9 +322,15 @@ describe('stats show', () => {
 describe('stats push', () => {
   let clone: string
   let repo: string
+  let origin: string
+
+  const link = () => writeFileSync(join(home, '.vegastack', 'factory.json'), JSON.stringify({
+    schemaVersion: 1,
+    controlRooms: { acme: { repo: 'acme/room', path: clone, branch: 'main', remote: origin, lastSyncedAt: null, sha: null } },
+  }))
 
   beforeEach(() => {
-    const origin = join(base, 'room.git')
+    origin = join(base, 'room.git')
     git(base, 'init', '-q', '--bare', '-b', 'main', origin)
     clone = join(home, '.vegastack', 'control-room', 'acme')
     git(base, 'clone', '-q', origin, clone)
@@ -223,10 +338,7 @@ describe('stats push', () => {
     git(clone, 'push', '-q', 'origin', 'main')
     spawnSync('git', ['-C', clone, 'config', 'user.name', 't'])
     spawnSync('git', ['-C', clone, 'config', 'user.email', 't@t'])
-    writeFileSync(join(home, '.vegastack', 'factory.json'), JSON.stringify({
-      schemaVersion: 1,
-      controlRooms: { acme: { repo: 'acme/room', path: clone, branch: 'main', remote: origin, lastSyncedAt: null, sha: null } },
-    }))
+    link()
     repo = join(base, 'app')
     mkdirSync(join(repo, '.vegastack'), { recursive: true })
     git(repo, 'init', '-q', '-b', 'main', repo)
@@ -235,25 +347,41 @@ describe('stats push', () => {
     writeFileSync(join(statsDir(home), 'identity.json'), JSON.stringify({ login: 'mk', at: 1 }))
   })
 
-  const event = (id: string, at: string): StatsEvent => ({
+  const event = (id: string, at: string, extra: Partial<StatsEvent> = {}): StatsEvent => ({
     id, at, operator: 'mk', machine: 'box', harness: 'claude', model: 'claude-opus-5', repo: 'acme/app', issue: 42,
-    state: 'in-progress', skill: null, tokens: { input: 1, output: 2, cacheRead: 3, cacheWrite: 4 }, durationMs: 1000, outcome: 'end_turn',
+    state: 'in-progress', skill: null, tokens: { input: 1, output: 2, cacheRead: 3, cacheWrite: 4 }, durationMs: 1000, outcome: 'end_turn', ...extra,
   })
   const write = (...events: StatsEvent[]) =>
     appendFileSync(join(statsDir(home), 'events.jsonl'), events.map((row) => JSON.stringify(row)).join('\n') + '\n')
-  const push = (now: number, force = false) => pushStats({ home, cwd: repo, machine: 'box', now: () => now, force })
+  const push = (now: number, extra: { force?: boolean; git?: GitRunner } = {}) => pushStats({ home, cwd: repo, now: () => now, ...extra })
+  const stats = (...parts: string[]) => join(clone, 'stats', ...parts)
 
   test('turns land in the control room as one file per operator, machine and day', () => {
     write(event('a', '2026-09-17T10:00:00.000Z'), event('b', '2026-09-18T11:00:00.000Z'))
     const result = push(Date.parse('2026-09-18T12:00:00Z'))
     expect(result).toMatchObject({ ok: true, action: 'pushed', events: 2 })
-    expect(readdirSync(join(clone, 'stats', '2026', '09', '17'))).toEqual(['mk-box.jsonl'])
-    expect(readFileSync(join(clone, 'stats', '2026', '09', '18', 'mk-box.jsonl'), 'utf8').trim().split('\n')).toHaveLength(1)
+    expect(readdirSync(stats('2026', '09', '17'))).toEqual(['mk-box.jsonl'])
+    expect(readFileSync(stats('2026', '09', '18', 'mk-box.jsonl'), 'utf8').trim().split('\n')).toHaveLength(1)
     // The clone must stay clean, or the next `vegafactory sync` refuses to refresh it.
-    expect(git(clone, 'status', '--porcelain')).toBe('')
-    expect(git(clone, 'log', 'origin/main', '-1', '--format=%s')).toContain('stats: mk on box')
+    expect(git(clone, 'status', '--porcelain', '--untracked-files=all')).toBe('')
+    expect(git(clone, 'log', 'origin/main', '-1', '--format=%s')).toContain('stats: 2 turns')
     // The events are also readable back as org data.
     expect(loadEvents(home, { local: false }).map((row) => row.id).sort()).toEqual(['a', 'b'])
+  })
+
+  // F10
+  test('each turn is filed under the operator and machine it was recorded on', () => {
+    write(
+      event('a', '2026-09-18T10:00:00.000Z', { operator: 'unknown', machine: 'box' }),
+      event('b', '2026-09-18T10:05:00.000Z', { operator: 'mk', machine: 'box' }),
+      event('c', '2026-09-18T10:10:00.000Z', { operator: 'sam', machine: 'box' }),
+      event('d', '2026-09-18T10:15:00.000Z', { operator: 'mk', machine: 'laptop' }),
+    )
+    const result = push(Date.parse('2026-09-18T12:00:00Z'))
+    expect(result.action).toBe('pushed')
+    expect(readdirSync(stats('2026', '09', '18')).sort()).toEqual(['mk-box.jsonl', 'mk-laptop.jsonl', 'sam-box.jsonl', 'unknown-box.jsonl'])
+    expect(JSON.parse(readFileSync(stats('2026', '09', '18', 'unknown-box.jsonl'), 'utf8').trim()).id).toBe('a')
+    expect(result.paths).toHaveLength(4)
   })
 
   test('a push runs at most once an hour, and only for what is new', () => {
@@ -263,7 +391,7 @@ describe('stats push', () => {
     expect(push(Date.parse('2026-09-18T12:30:00Z')).action).toBe('skipped')
     const later = push(Date.parse('2026-09-18T13:05:00Z'))
     expect(later).toMatchObject({ action: 'pushed', events: 1 })
-    expect(readFileSync(join(clone, 'stats', '2026', '09', '18', 'mk-box.jsonl'), 'utf8').trim().split('\n')).toHaveLength(2)
+    expect(readFileSync(stats('2026', '09', '18', 'mk-box.jsonl'), 'utf8').trim().split('\n')).toHaveLength(2)
     expect(push(Date.parse('2026-09-18T14:10:00Z')).action).toBe('none')
   })
 
@@ -276,16 +404,93 @@ describe('stats push', () => {
     expect(push(Date.parse('2026-09-18T12:00:00Z')).ok).toBe(true)
   })
 
-  test('a rejected push keeps the commit and does not resend those turns', () => {
+  // F8
+  test('a commit that never reached the remote is pushed by the next run', () => {
     write(event('a', '2026-09-18T10:00:00.000Z'))
-    // Another machine moved the branch, and the clone cannot rebase onto a missing remote.
-    rmSync(join(base, 'room.git'), { recursive: true })
-    const result = push(Date.parse('2026-09-18T12:00:00Z'))
-    expect(result).toMatchObject({ ok: false, action: 'committed' })
-    expect(git(clone, 'log', '-1', '--format=%s')).toContain('stats: mk on box')
-    expect(push(Date.parse('2026-09-18T14:00:00Z')).action).toBe('none')
+    const moved = `${origin}.away`
+    spawnSync('mv', [origin, moved])
+    expect(push(Date.parse('2026-09-18T12:00:00Z'))).toMatchObject({ ok: false, action: 'committed' })
+    expect(git(clone, 'log', '-1', '--format=%s')).toContain('stats: 1 turn')
+    // The cursor moved with the commit, so only the retry can still deliver it — and it does,
+    // even inside the hour and with no new turns to send.
+    spawnSync('mv', [moved, origin])
+    const again = push(Date.parse('2026-09-18T12:10:00Z'))
+    expect(again).toMatchObject({ ok: true, action: 'pushed' })
+    expect(again.message).toContain('earlier stats commit')
+    expect(git(clone, 'log', 'origin/main', '-1', '--format=%s')).toContain('stats: 1 turn')
+  })
+
+  // F7
+  test('a clone that is not exactly as sync left it is refused, and nothing is written', () => {
+    write(event('a', '2026-09-18T10:00:00.000Z'))
+    const at = Date.parse('2026-09-18T12:00:00Z')
+    const refused = (what: string) => {
+      const result = push(at)
+      expect(result.action, what).toBe('refused')
+      expect(existsSync(join(clone, 'stats')), what).toBe(false)
+      expect(readJsonCursor()).toBeUndefined()
+    }
+    const readJsonCursor = () => {
+      try { return JSON.parse(readFileSync(join(statsDir(home), 'push.json'), 'utf8')).offset } catch { return undefined }
+    }
+    // A dirty worktree.
+    writeFileSync(join(clone, 'notes.md'), 'x')
+    refused('untracked file')
+    rmSync(join(clone, 'notes.md'))
+    // A staged file someone else left behind.
+    writeFileSync(join(clone, 'notes.md'), 'x')
+    git(clone, 'add', 'notes.md')
+    refused('staged file')
+    git(clone, 'reset', '-q')
+    rmSync(join(clone, 'notes.md'))
+    // The wrong branch.
+    git(clone, 'checkout', '-q', '-b', 'other')
+    refused('wrong branch')
+    git(clone, 'checkout', '-q', 'main')
+    // A local commit that is not a stats push.
+    writeFileSync(join(clone, 'notes.md'), 'x')
+    git(clone, 'add', 'notes.md')
+    git(clone, 'commit', '-q', '-m', 'someone else')
+    refused('unrelated commit')
+    git(clone, 'reset', '-q', '--hard', 'origin/main')
+    // Sorted out: the same turns go through.
+    expect(push(at).action).toBe('pushed')
+  })
+
+  // F7
+  test('a failed commit puts the clone back exactly as it was', () => {
+    write(event('a', '2026-09-18T10:00:00.000Z'))
+    const failing: GitRunner = (args) => (args.includes('commit') ? { code: 1, out: 'no identity' } : defaultGitFor(args))
+    const result = push(Date.parse('2026-09-18T12:00:00Z'), { git: failing })
+    expect(result.action).toBe('refused')
+    expect(existsSync(stats('2026', '09', '18', 'mk-box.jsonl'))).toBe(false)
+    expect(git(clone, 'status', '--porcelain', '--untracked-files=all')).toBe('')
+    // Nothing was consumed, so a healthy run still sends it.
+    expect(push(Date.parse('2026-09-18T12:00:00Z')).action).toBe('pushed')
+  })
+
+  // F9
+  test('a control-room path outside the store or behind a symlink is refused', () => {
+    write(event('a', '2026-09-18T10:00:00.000Z'))
+    const elsewhere = join(base, 'elsewhere')
+    git(base, 'clone', '-q', origin, elsewhere)
+    clone = elsewhere
+    link()
+    expect(push(Date.parse('2026-09-18T12:00:00Z'))).toMatchObject({ ok: false, action: 'refused' })
+    expect(push(Date.parse('2026-09-18T12:00:00Z')).message).toContain('outside')
+    // A path inside the store whose last component is a link out of it.
+    clone = join(home, '.vegastack', 'control-room', 'linked')
+    symlinkSync(elsewhere, clone)
+    link()
+    expect(push(Date.parse('2026-09-18T12:00:00Z')).message).toContain('symlinked')
+    expect(existsSync(join(elsewhere, 'stats'))).toBe(false)
   })
 })
+
+const defaultGitFor = (args: string[]) => {
+  const result = spawnSync('git', args, { encoding: 'utf8' })
+  return { code: result.status ?? 1, out: `${result.stdout ?? ''}${result.stderr ?? ''}`.trim() }
+}
 
 describe('summaries', () => {
   test('buckets carry turns, tokens, time and who used them', () => {
