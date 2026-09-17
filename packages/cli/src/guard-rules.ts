@@ -775,6 +775,50 @@ export function classifySegment(segment: Segment, policy: Policy, mergeCheck?: M
   return result
 }
 
+// ---------------------------------------------------------------------------------------------
+// Commit capability — for attribution, never for permission
+
+// Git subcommands that can leave a new commit at HEAD, including the ones that reach one by
+// finishing a merge or replaying somebody else's work.
+const GIT_COMMITTING = new Set(['commit', 'commit-tree', 'merge', 'rebase', 'cherry-pick', 'revert', 'am', 'pull', 'citool',
+  // These rewrite or import history, so they also leave HEAD on a commit this session made.
+  'fast-import', 'filter-branch', 'filter-repo', 'subtree', 'quiltimport'])
+// Commands that plainly cannot commit. Everything not named here is assumed able to, because a
+// wrapper, a script or a task runner can commit without saying so anywhere the parser can read.
+const INERT = new Set([
+  'sleep', 'ls', 'cat', 'echo', 'printf', 'pwd', 'true', 'false', 'test', '[', ':', 'head', 'tail', 'wc',
+  'which', 'type', 'date', 'whoami', 'hostname', 'uname', 'basename', 'dirname', 'realpath', 'readlink',
+  'stat', 'file', 'grep', 'rg', 'ag', 'sort', 'uniq', 'cut', 'tr', 'jq', 'yq', 'diff', 'cmp', 'du', 'df', 'tree', 'wait',
+])
+
+// Could this command have created the commit now at HEAD? Attribution only: it decides which
+// session's tool window may own a commit, never whether a command may run. Unknown means yes, so
+// an unreadable command contends for a commit rather than letting a neighbour take credit for it.
+export function canCommit(command: unknown): boolean {
+  if (typeof command !== 'string') return true
+  return parseCommand(command).some(segmentCanCommit)
+}
+
+function segmentCanCommit(segment: Segment): boolean {
+  if (segment.words.length === 0) return false
+  const resolved = resolveWords(segment.words)
+  if (resolved.script !== null) return canCommit(resolved.script)
+  const words = resolved.words
+  const head = words[0]
+  if (head === undefined || head === '') return false
+  if (expanded(head)) return true
+  if (head === 'find') return findCommands(words).some((inner) => segmentCanCommit({ words: inner, redirects: [], strings: [] }))
+  if (head !== 'git') return !INERT.has(head)
+  const sub = words[1]
+  // An alias or a computed subcommand is a subcommand the parser cannot read.
+  if (sub === undefined || expanded(sub) || !GIT_SUBCOMMANDS.has(sub)) return true
+  if (GIT_COMMITTING.has(sub)) return true
+  // Restoring a stash can end in a merge, and a patch applied to the index is a commit away.
+  if (sub === 'stash') return words.slice(2).some((word) => word === 'pop' || word === 'apply' || word === 'branch')
+  if (sub === 'apply') return words.includes('--index') || words.includes('--cached')
+  return false
+}
+
 export function classifyCommand(command: unknown, policy: Policy, mergeCheck?: MergeCheck): Decision {
   if (typeof command !== 'string') return ALLOW
   let allowed = ALLOW
