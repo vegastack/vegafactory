@@ -105,9 +105,10 @@ describe('guard', () => {
     expect((await hook('pre-tool', bash('bun run release'))).json().hookSpecificOutput.permissionDecision).toBe('ask')
   })
 
-  test('an unreadable or oversized payload asks unless it names a non-shell tool', async () => {
+  test('an unreadable or oversized payload asks unless it names a read-only or file tool', async () => {
     expect((await hook('pre-tool', 'not json')).json().hookSpecificOutput.permissionDecision).toBe('ask')
     expect((await hook('pre-tool', JSON.stringify({ tool_name: 'Write', tool_input: { content: 'x'.repeat(70_000) } }))).text).toBe('')
+    expect((await hook('pre-tool', JSON.stringify({ tool_name: 'exec_command', tool_input: { cmd: 'x'.repeat(70_000) } }), 'codex')).json().hookSpecificOutput.permissionDecision).toBe('deny')
     expect((await hook('pre-tool', JSON.stringify({ tool_name: 'Bash', tool_input: { command: 'x'.repeat(70_000) } }))).json().hookSpecificOutput.permissionDecision).toBe('ask')
   })
 
@@ -218,6 +219,23 @@ describe('ownership', () => {
     expect(denied.permissionDecisionReason).toContain('the commit stays local')
     expect(git(tree, 'log', '-1', '--format=%s')).toStartWith('wip: #7 rescued')
     expect(git(tree, 'ls-remote', 'origin', 'feat/7-export')).toContain(theirs)
+  })
+
+  test('an oversized file-tool payload still gets the ownership check; only read-only tools pass unread', async () => {
+    claim(ctx(), { owner: OWNER, kind: 'session', harness: 'claude', model: 'opus' }, gh.clock)
+    const big = (tool: string) => JSON.stringify({ tool_name: tool, tool_input: { content: 'x'.repeat(70_000) } })
+    const home = process.cwd()
+    process.chdir(tree)
+    try {
+      expect((await hook('pre-tool', big('Write'))).text).toBe('')
+      const elsewhere = realpathSync(mkdtempSync(join(tmpdir(), 'hook-other-')))
+      claim({ ...ctx(), root: elsewhere }, { owner: 'other:1-x', kind: 'session', harness: 'codex', model: 'gpt', takeBackBy: 'mk' }, gh.clock)
+      gh.clock += 61_000
+      expect((await hook('pre-tool', big('Write'))).json().hookSpecificOutput.permissionDecision).toBe('deny')
+      expect((await hook('pre-tool', big('apply_patch'), 'codex')).json().hookSpecificOutput.permissionDecision).toBe('deny')
+      expect((await hook('pre-tool', big('Read'))).text).toBe('')
+      expect((await hook('pre-tool', big('mcp__x__upload'))).json().hookSpecificOutput.permissionDecision).toBe('ask')
+    } finally { process.chdir(home) }
   })
 
   test('a GitHub failure never blocks a tool', async () => {

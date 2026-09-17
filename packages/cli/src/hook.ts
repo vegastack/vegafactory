@@ -23,8 +23,8 @@ const INPUT_WAIT_MS = 350
 const REFRESH_EVERY_MS = 60_000
 // A gap longer than this between tool calls is idle time, not work.
 const ACTIVE_GAP_MS = 5 * 60_000
-// Tools that change files or run commands; the rest keep working after the claim is lost.
-const WRITE_TOOLS = new Set(['Bash', 'Write', 'Edit', 'MultiEdit', 'NotebookEdit', 'apply_patch', 'shell', 'exec_command', 'local_shell'])
+// Tools that change files; they and the shell tools stop once the claim is lost.
+const FILE_TOOLS = new Set(['Write', 'Edit', 'MultiEdit', 'NotebookEdit', 'apply_patch'])
 
 export function hookUsage(): string {
   return `Usage: vegafactory hook <event> --harness claude|codex   (reads the hook payload on stdin)
@@ -336,41 +336,61 @@ function guard(payload: Record<string, unknown>, cwd: string, where: Where | nul
   return classifyCommand(command, policy, check)
 }
 
+// After the claim is lost: the denial for a tool that changes files, saving the work once.
+function ownership(harness: Harness, where: Where, deps: HookDeps): string | null {
+  try {
+    const local = readLocal(where)
+    refresh(where, local, deps)
+    if (local.lostTo) {
+      const holder = refresh(where, local, deps, true).holder
+      if (local.lostTo && holder) {
+        let saved = ''
+        if (local.rescuedFor !== holder.commentId) {
+          saved = rescueWork(where)
+          local.rescuedFor = holder.commentId
+        }
+        writeLocal(where, local)
+        return renderDecision(harness, 'deny', `issue #${where.number} is now held by ${local.lostTo}, so this session must stop changing files.${saved} To take it back: vegafactory issue claim ${where.number} --harness ${harness} --model <model> --take-back-by <login>`)
+      }
+    }
+    writeLocal(where, local)
+  } catch { /* a failed ownership check never blocks */ }
+  return null
+}
+
+const whereAt = (cwd: string, deps: HookDeps): Where | null => {
+  try { return locate(cwd, deps.host) } catch { return null }
+}
+
+// Tools that only read; they pass even when the payload cannot be read.
+const READ_ONLY_TOOLS = new Set(['Read', 'Glob', 'Grep', 'LS', 'WebFetch', 'WebSearch', 'TodoWrite', 'view_image'])
+
 function preTool(harness: Harness, input: HookInput, deps: HookDeps): void {
   const payload = input.payload
   if (!payload) {
-    // Too big or unreadable: a tool we can name as harmless passes, anything else asks.
-    const tool = /"tool_name"\s*:\s*"([^"]+)"/.exec(input.head)?.[1]
-    if (tool && !['Bash', 'shell', 'exec_command', 'local_shell'].includes(tool)) return
+    // Too big or unreadable: a read-only tool passes, a file tool still gets the ownership
+    // check (from the hook's own cwd), anything else asks.
+    const tool = /"tool_name"\s*:\s*"([^"]+)"/.exec(input.head)?.[1] ?? ''
+    if (READ_ONLY_TOOLS.has(tool)) return
+    if (FILE_TOOLS.has(tool)) {
+      const here = whereAt(process.cwd(), deps)
+      const denied = here ? ownership(harness, here, deps) : null
+      if (denied) deps.out(denied)
+      return
+    }
     return deps.out(renderDecision(harness, 'ask', 'the ship guard could not read the hook payload — run the command by hand'))
   }
   const cwd = typeof payload.cwd === 'string' ? payload.cwd : process.cwd()
-  let where: Where | null = null
-  try { where = locate(cwd, deps.host) } catch { where = null }
-
-  if (where && WRITE_TOOLS.has(String(payload.tool_name ?? ''))) {
-    try {
-      const local = readLocal(where)
-      refresh(where, local, deps)
-      if (local.lostTo) {
-        const holder = refresh(where, local, deps, true).holder
-        if (local.lostTo && holder) {
-          let saved = ''
-          if (local.rescuedFor !== holder.commentId) {
-            saved = rescueWork(where)
-            local.rescuedFor = holder.commentId
-          }
-          writeLocal(where, local)
-          return deps.out(renderDecision(harness, 'deny', `issue #${where.number} is now held by ${local.lostTo}, so this session must stop changing files.${saved} To take it back: vegafactory issue claim ${where.number} --harness ${harness} --model <model> --take-back-by <login>`))
-        }
-      }
-      writeLocal(where, local)
-    } catch { /* a failed ownership check never blocks */ }
+  const here = whereAt(cwd, deps)
+  const tool = String(payload.tool_name ?? '')
+  if (here && (FILE_TOOLS.has(tool) || isShellTool(tool))) {
+    const denied = ownership(harness, here, deps)
+    if (denied) return deps.out(denied)
   }
 
   let decision: Decision
   try {
-    decision = guard(payload, cwd, where, deps)
+    decision = guard(payload, cwd, here, deps)
   } catch (error) {
     decision = { decision: 'ask', reason: `the ship guard failed (${(error as Error).message}) — run the command by hand`, rule: 'guard-error' }
   }
