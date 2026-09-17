@@ -412,8 +412,11 @@ export function readReviewComment(body: string): (CommentData & { history: strin
   if (!match) return null
   try {
     const data = JSON.parse(match[1]!) as CommentData
-    if (typeof validateReview(data) === 'string' || !Number.isInteger(data.round)) return null
-    return { ...data, history: body.match(HISTORY_LINE) ?? [] }
+    const checked = validateReview(data)
+    if (typeof checked === 'string' || !Number.isInteger(data.round)) return null
+    // The verdict a comment carries is the one its findings imply, so a marker repeating a claim
+    // its own findings contradict ("clean" beside a must-fix) fails the marker check below.
+    return { ...data, verdict: checked.verdict, findings: checked.findings, history: body.match(HISTORY_LINE) ?? [] }
   } catch { return null }
 }
 
@@ -426,35 +429,66 @@ export const commentDigest = (data: CommentData) => createHash('sha256').update(
 // The review comment counts only when a person with write access posted it — anyone can write a
 // marker and a Findings JSON block, and a forged "clean at this head" would skip the review.
 // Every marker field must also agree with the JSON it claims to summarise.
-export function trustedReview(snap: Snapshot, trusted: Trusted): PostedReview | null {
-  const entries = Object.values(snap.state.comments)
-    .filter((entry) => entry.type === 'review')
-    .sort((a, b) => a.createdAt.localeCompare(b.createdAt) || a.id - b.id)
-    .reverse()
-  for (const entry of entries) {
-    if (!trusted(entry)) continue
+export function trustedReviews(snap: Snapshot, trusted: Trusted): PostedReview[] {
+  const found: PostedReview[] = []
+  for (const entry of Object.values(snap.state.comments)) {
+    if (entry.type !== 'review' || !trusted(entry)) continue
     const body = snap.body(entry)
     const parsed = readReviewComment(body)
     if (!parsed || !isCommit(parsed.sha) || !isCommit(parsed.base) || (parsed.reviewer !== 'claude' && parsed.reviewer !== 'codex')) continue
     const keys = markerKeys(body)
     if (keys.round !== String(parsed.round) || keys.sha !== parsed.sha.slice(0, 7) || keys.agent !== parsed.reviewer || keys.verdict !== parsed.verdict) continue
     const { history, ...data } = parsed
-    return { entry, data, history }
+    found.push({ entry, data, history })
   }
-  return null
+  return found
+}
+
+// Which review counts when more than one survives: the one for the head being judged, then the
+// highest round, then the latest meaningful edit. Two that disagree at the same round are not
+// reconciled at all — that is a question for the operator, so it fails closed and names both.
+export function trustedReview(snap: Snapshot, trusted: Trusted, head?: string): PostedReview | null {
+  const all = trustedReviews(snap, trusted)
+  if (!all.length) return null
+  const rank = (review: PostedReview): number[] => [
+    head && review.data.sha === head ? 1 : 0,
+    review.data.round,
+    Date.parse(review.entry.changedAt || review.entry.updatedAt) || 0,
+    review.entry.id,
+  ]
+  const sorted = [...all].sort((a, b) => {
+    const [x, y] = [rank(a), rank(b)]
+    for (let i = 0; i < x.length; i++) if (x[i] !== y[i]) return y[i]! - x[i]!
+    return 0
+  })
+  const best = sorted[0]!
+  const rival = sorted.find((other) => other !== best && other.data.round === best.data.round
+    && (other.data.sha !== best.data.sha || other.data.verdict !== best.data.verdict))
+  if (rival) {
+    const say = (review: PostedReview) => `${review.entry.url} (${review.data.verdict} @ ${review.data.sha.slice(0, 7)})`
+    throw new Error(`two review comments disagree at round ${best.data.round}: ${say(best)} and ${say(rival)} — the operator decides which one stands`)
+  }
+  return best
 }
 
 // The operator's acceptance of findings a review left open: their own comment on the issue, naming
 // the round and the head it accepts, posted after that review. No agent-written artifact counts —
 // like "ship it", the words have to be the person's own, and a bot's never count.
-export const ACCEPT_PHRASE = /\baccept(?:ing|ed)?\s+review\s+round\s+(\d+)\s*(?:@|at)\s*([0-9a-f]{7,40})\b/i
+// A whole line and nothing else, so "do not accept …", a quoted "> accept …" and a question about
+// accepting are all what they look like: not an acceptance.
+export const ACCEPT_PHRASE = /^[*_\s]*accept(?:ing|ed)?\s+review\s+round\s+(\d+)\s*(?:@|at)\s*([0-9a-f]{7,40})[*_\s.!]*$/i
 
 export function acceptedReview(snap: Snapshot, trusted: Trusted, review: PostedReview): CommentEntry | null {
+  // The loop runs its rounds first: accepting open findings is what happens after the cap, never a
+  // way around the rounds that are still to come.
+  if (review.data.round < MAX_ROUNDS) return null
   const since = review.entry.changedAt || review.entry.updatedAt
   for (const entry of Object.values(snap.state.comments).sort((a, b) => a.createdAt.localeCompare(b.createdAt))) {
     if (entry.type !== 'human' || !trusted(entry) || entry.createdAt <= since) continue
-    const match = ACCEPT_PHRASE.exec(snap.body(entry))
-    if (match && Number(match[1]) === review.data.round && review.data.sha.startsWith(match[2]!.toLowerCase())) return entry
+    for (const line of snap.body(entry).split('\n')) {
+      const match = ACCEPT_PHRASE.exec(line)
+      if (match && Number(match[1]) === review.data.round && review.data.sha.startsWith(match[2]!.toLowerCase())) return entry
+    }
   }
   return null
 }
@@ -550,20 +584,26 @@ export async function runReview(argv: string[], deps: ReviewDeps = {}): Promise<
   const { dir: cache } = syncIssue({ root, repo, number, runner })
   const snap = snapshot(cache)
   const brief = readBody(cache, 'issue.md')
-  const posted = trustedReview(snap, trusted)
   const head = git(top, ['rev-parse', 'HEAD']).trim()
+  let posted: PostedReview | null
+  try {
+    posted = trustedReview(snap, trusted, head)
+  } catch (error) {
+    return handBack((error as Error).message)
+  }
 
-  // The posted comment wins whenever it is newer work than this machine's state: another machine
-  // reviewed on, so this state's session and round number are stale and must not be reused.
-  // The issue lock lives on one filesystem, so another machine can have edited this very round:
-  // the state counts only while the posted comment is byte-for-byte the one it recorded.
-  const stale = Boolean(state && posted && (posted.data.round > state.round || (posted.data.round === state.round && posted.data.sha !== state.head)
-    || posted.entry.id !== state.comment?.id || commentDigest(posted.data) !== state.comment?.digest))
-  const live = state && !stale ? state : null
+  // Local state is evidence about a comment, never a substitute for it. It counts only while the
+  // trusted comment on the issue is exactly the one it wrote — same comment, same round, same head,
+  // same content. A deleted, forged, edited or malformed comment leaves nothing to stand on, and
+  // the round is reviewed again rather than replayed from a cache nobody else can see.
+  const live = state && posted && posted.entry.id === state.comment?.id && commentDigest(posted.data) === state.comment?.digest
+    && posted.data.round === state.round && posted.data.sha === state.head ? state : null
   const prior = live
     ? { round: live.round, head: live.head, base: live.base, verdict: live.verdict, findings: live.findings }
     : posted ? { round: posted.data.round, head: posted.data.sha, base: posted.data.base, verdict: posted.data.verdict, findings: posted.data.findings } : null
-  const priorRound = Math.max(state?.round ?? 0, posted?.data.round ?? 0)
+  // The comment is the record: no trusted comment means no round has landed, whatever a local
+  // state file remembers.
+  const priorRound = prior?.round ?? 0
 
   // Nothing new since the last round: report it again instead of spending a run.
   if (prior && prior.head === head && !args.dryRun) {
@@ -669,7 +709,12 @@ export async function runReview(argv: string[], deps: ReviewDeps = {}): Promise<
   // the same round can never leave one session's comment beside another session's state.
   const landed = locked(ctx, () => {
     const cursor = syncIssue({ root, repo, number, runner }).cursor
-    const current = trustedReview(snapshot(cacheDir(root, repo, number)), trusted)
+    let current: PostedReview | null
+    try {
+      current = trustedReview(snapshot(cacheDir(root, repo, number)), trusted, head)
+    } catch (error) {
+      return { conflict: (error as Error).message }
+    }
     if (current && (current.data.round > round || (current.data.round === round && current.data.sha !== head))) {
       return { conflict: `another session posted review round ${current.data.round} @ ${current.data.sha.slice(0, 7)} while this review ran` }
     }
@@ -679,7 +724,9 @@ export async function runReview(argv: string[], deps: ReviewDeps = {}): Promise<
       ? ['edit-comment', String(number), String(current.entry.id), '--file', bodyPath, '--since', String(cursor), '--repo', repo]
       : ['comment', String(number), '--file', bodyPath, '--repo', repo], { runner, cwd, out: (line) => quiet.push(line) })
     // runIssue synced after writing, so the comment this state describes can be read back by id.
-    next.comment.id = trustedReview(snapshot(cacheDir(root, repo, number)), trusted)?.entry.id ?? 0
+    try {
+      next.comment.id = trustedReview(snapshot(cacheDir(root, repo, number)), trusted, head)?.entry.id ?? 0
+    } catch { next.comment.id = 0 }
     writeFileSync(statePath, JSON.stringify(next, null, 2) + '\n')
     return { conflict: null }
   })

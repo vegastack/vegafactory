@@ -11,7 +11,7 @@ import { defaultBranch } from './guard-rules.ts'
 import { issueFromBranch } from './hook.ts'
 import { checkIssue, detectRepo, latestOfType, markerKeys, permissionLookup, repoRoot, snapshot } from './issue.ts'
 import { syncIssue } from './issue-cache.ts'
-import { acceptedReview, trustedReview } from './review.ts'
+import { acceptedReview, MAX_ROUNDS, trustedReview } from './review.ts'
 
 export interface ShipCheck { ok: boolean; blocks: string[]; warns: string[]; branch: string | null; pr: number | null }
 
@@ -23,6 +23,11 @@ export function shipUsage(): string {
               branch, and every check passed or skipped.
               Exit 2 when blocked.
 `
+}
+
+// `merge-base --is-ancestor` answers with its exit code and no output.
+function isAncestor(cwd: string, commit: string, ref: string): boolean {
+  return spawnSync('git', ['merge-base', '--is-ancestor', commit, ref], { cwd, encoding: 'utf8', stdio: ['ignore', 'ignore', 'ignore'], timeout: 30_000 }).status === 0
 }
 
 function git(cwd: string, args: string[]): string | null {
@@ -76,18 +81,39 @@ export function shipCheck(input: { cwd: string; root: string; repo: string; numb
     if (resolved !== pushed) blocks.push(`the evidence is for ${sha}, but origin/${branch} is at ${pushed.slice(0, 12)} — post fresh evidence`)
   }
 
+  const base = defaultBranch(cwd)
+
   // Review is never skipped: the commit that would merge carries a clean review from a reviewer
-  // with write access, or the operator's own written acceptance of what that review left open.
-  const review = trustedReview(snap, trustedAuthors({ repo, runner, root }))
-  if (!review) blocks.push('no review comment from a reviewer with write access — run vegafactory review')
-  else if (pushed && review.data.sha !== pushed) blocks.push(`the review is for ${review.data.sha.slice(0, 7)}, but origin/${branch} is at ${pushed.slice(0, 12)} — review the head that would merge`)
-  else if (review.data.verdict !== 'clean' && !acceptedReview(snap, trustedAuthors({ repo, runner, root }), review)) {
-    const open = review.data.findings.filter((finding) => finding.severity === 'must-fix').map((finding) => finding.id)
-    blocks.push(`review round ${review.data.round} is needs-fixes (${open.join(', ') || 'see the comment'}) — fix and re-review, or the operator accepts them in their own comment: "accept review round ${review.data.round} @ ${review.data.sha.slice(0, 7)}"`)
+  // with write access, covering the whole candidate, or the operator's own written acceptance of
+  // what that review left open.
+  const trusted = trustedAuthors({ repo, runner, root })
+  let review: Awaited<ReturnType<typeof trustedReview>> = null
+  try {
+    review = trustedReview(snap, trusted, pushed ?? undefined)
+  } catch (error) {
+    blocks.push((error as Error).message)
+    review = null
+  }
+  if (!review) {
+    if (!blocks.some((block) => block.startsWith('two review comments disagree'))) blocks.push('no review comment from a reviewer with write access — run vegafactory review')
+  } else if (pushed && review.data.sha !== pushed) {
+    blocks.push(`the review is for ${review.data.sha.slice(0, 7)}, but origin/${branch} is at ${pushed.slice(0, 12)} — review the head that would merge`)
+  } else {
+    // A review of a narrow range judges only part of what merges. Its base must already be in the
+    // default branch, so <review base>...<head> is the whole candidate.
+    if (base && !isAncestor(cwd, review.data.base, `origin/${base}`)) {
+      blocks.push(`the review's base ${review.data.base.slice(0, 7)} is not in origin/${base}, so it covered only part of what would merge — re-run the review against the default branch`)
+    }
+    if (review.data.verdict !== 'clean' && !acceptedReview(snap, trusted, review)) {
+      const open = review.data.findings.filter((finding) => finding.severity === 'must-fix').map((finding) => finding.id)
+      const accept = review.data.round >= MAX_ROUNDS
+        ? ` or, now the loop is spent, the operator accepts them in a line of their own: "accept review round ${review.data.round} @ ${review.data.sha.slice(0, 7)}"`
+        : ''
+      blocks.push(`review round ${review.data.round} is needs-fixes (${open.join(', ') || 'see the comment'}) — fix and re-review${accept}`)
+    }
   }
 
   // dev-debug's tagged debug logs must not ship.
-  const base = defaultBranch(cwd)
   const diff = base && pushed ? git(cwd, ['diff', '--no-color', '--no-ext-diff', `origin/${base}...${pushed}`]) ?? '' : ''
   const tagged = diff.split('\n').filter((line) => line.startsWith('+') && !line.startsWith('+++') && line.includes('[DEBUG-'))
   if (tagged.length) blocks.push(`${tagged.length} added line(s) still carry a [DEBUG-…] tag`)

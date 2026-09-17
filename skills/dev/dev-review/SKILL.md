@@ -34,7 +34,7 @@ Fix the must-fix findings, commit, push, then run the same command again. It res
 - Only must-fix findings block. Should-fix and nit are fixed opportunistically or recorded as deferred minors in the evidence comment.
 - Disagree with a finding → say so openly in the evidence comment with the reason and the cost if you are wrong; a finding dropped in silence is a decision made in secret. An operator dismissal is appended to `.vegastack/review-known-patterns.md` (seed: [template](assets/review-known-patterns.md.template)) so it stays dismissed.
 - After round 3 with findings still open the command stops and hands back: the operator decides. **A review is never skipped** — a stuck or failing reviewer is a hand-back, not a pass, and the ship check refuses a commit with no clean review of its own.
-- The operator's one way past open findings is their own comment on the issue naming the round and the head — `accept review round 3 @ abc1234` — posted after that review. Never write it for them, any more than you would write "ship it"; a comment carrying a `vsk:v1` marker or coming from a bot does not count.
+- The operator's one way past open findings, and only once the third round is spent, is their own comment on the issue with the acceptance on a line of its own — `accept review round 3 @ abc1234` — posted after that review. Never write it for them, any more than you would write "ship it"; a negated or quoted line, an earlier round, a `vsk:v1` marker or a bot author all count for nothing.
 
 ## The review comment
 

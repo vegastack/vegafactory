@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import type { GhRunner } from '../src/gh.ts'
 import { ackBody, artifactHash } from '../src/issue.ts'
-import { renderComment, type CommentData } from '../src/review.ts'
+import { renderComment, type CommentData, type Finding } from '../src/review.ts'
 import { runShip } from '../src/ship.ts'
 import { FakeGitHub } from './fake-github.ts'
 
@@ -179,10 +179,11 @@ test('review is never skipped: the head that merges carries a clean review, or t
 
   // Findings still open block, and name the words that would accept them.
   const open = reviewed({ round: 3, verdict: 'needs-fixes', findings: [{ id: 'F1', axis: 'bugs', severity: 'must-fix', file: 'a.ts', line: 1, issue: 'x', fix: 'y' }] })
-  expect(run().blocks).toEqual([`review round 3 is needs-fixes (F1) — fix and re-review, or the operator accepts them in their own comment: "accept review round 3 @ ${head.slice(0, 7)}"`])
+  expect(run().blocks).toEqual([`review round 3 is needs-fixes (F1) — fix and re-review or, now the loop is spent, the operator accepts them in a line of their own: "accept review round 3 @ ${head.slice(0, 7)}"`])
 
-  // The operator's own words, naming the round and the head, are the one way past it.
-  gh.addComment(7, `I looked at F1 myself — accept review round 3 @ ${head.slice(0, 7)}`, 'mk')
+  // The operator's own words, on their own line, naming the round and the head.
+  gh.addComment(7, `I looked at F1 myself and it is fine for now.
+accept review round 3 @ ${head.slice(0, 7)}`, 'mk')
   expect(run()).toMatchObject({ code: 0, ok: true, blocks: [] })
   gh.deleteComment(open.id)
 
@@ -191,22 +192,83 @@ test('review is never skipped: the head that merges carries a clean review, or t
   expect(run()).toMatchObject({ code: 0, ok: true, blocks: [] })
 })
 
-test('an acceptance counts only from a person with write access, for that round and head', () => {
+test('an acceptance is a line of its own, from a person with write access, at the capped round', () => {
   const head = git(root, 'rev-parse', 'HEAD')
-  gh.addComment(7, `<!-- vsk:v1 type=evidence rev=1 branch=feat/7-export sha=${head.slice(0, 7)} -->\nit works`)
+  const sha7 = head.slice(0, 7)
+  const open: Finding[] = [{ id: 'F1', axis: 'bugs', severity: 'must-fix', file: 'a.ts', line: 1, issue: 'x', fix: 'y' }]
+  gh.addComment(7, `<!-- vsk:v1 type=evidence rev=1 branch=feat/7-export sha=${sha7} -->\nit works`)
   gh.addComment(7, ackBody({ stage: 'ship', by: 'mk', brief: artifactHash('Export CSV'), plan: null, source: 'session', quote: 'ship it' }))
-  reviewed({ round: 2, verdict: 'needs-fixes', findings: [{ id: 'F1', axis: 'bugs', severity: 'must-fix', file: 'a.ts', line: 1, issue: 'x', fix: 'y' }] })
+
+  // Rounds 1 and 2 are still the loop's: no acceptance ends them early.
+  for (const round of [1, 2]) {
+    const early = reviewed({ round, verdict: 'needs-fixes', findings: open })
+    gh.addComment(7, `accept review round ${round} @ ${sha7}`, 'mk')
+    expect(run().blocks).toEqual([`review round ${round} is needs-fixes (F1) — fix and re-review`])
+    gh.deleteComment(early.id)
+  }
+
+  reviewed({ round: 3, verdict: 'needs-fixes', findings: open })
   const blocked = run().blocks
   expect(blocked).toHaveLength(1)
 
-  gh.addComment(7, `accept review round 2 @ ${head.slice(0, 7)}`, 'stranger')          // no write access
-  gh.addComment(7, `accept review round 1 @ ${head.slice(0, 7)}`, 'mk')                // wrong round
-  gh.addComment(7, 'accept review round 2 @ deadbee', 'mk')                            // wrong head
-  gh.addComment(7, `<!-- vsk:v1 type=note -->\naccept review round 2 @ ${head.slice(0, 7)}`, 'mk')      // an agent artifact, not the person's words
+  const decoys = [
+    [`do not accept review round 3 @ ${sha7}`, 'mk', 'User'],                       // negated
+    [`> accept review round 3 @ ${sha7}`, 'mk', 'User'],                            // quoting someone else
+    [`should we accept review round 3 @ ${sha7}?`, 'mk', 'User'],                   // a question
+    [`accept review round 3 @ ${sha7}`, 'stranger', 'User'],                        // no write access
+    [`accept review round 2 @ ${sha7}`, 'mk', 'User'],                              // another round
+    ['accept review round 3 @ deadbee', 'mk', 'User'],                              // another head
+    [`<!-- vsk:v1 type=note -->\naccept review round 3 @ ${sha7}`, 'mk', 'User'],    // an agent artifact
+    [`accept review round 3 @ ${sha7}`, 'robot[bot]', 'Bot'],                       // a bot
+  ] as const
   gh.permissions.set('robot[bot]', 'write')
-  gh.addComment(7, `accept review round 2 @ ${head.slice(0, 7)}`, 'robot[bot]', 'Bot') // a bot never accepts
+  for (const [body, login, type] of decoys) gh.addComment(7, body, login, type)
   expect(run().blocks).toEqual(blocked)
 
-  gh.addComment(7, `accept review round 2 @ ${head.slice(0, 7)}`, 'mk')
+  gh.addComment(7, `I read F1 and accept the risk.\naccept review round 3 @ ${sha7}`, 'mk')
   expect(run()).toMatchObject({ code: 0, ok: true, blocks: [] })
+})
+
+test('a review of a narrow base does not ship the whole candidate', () => {
+  const head = git(root, 'rev-parse', 'HEAD')
+  gh.addComment(7, `<!-- vsk:v1 type=evidence rev=1 branch=feat/7-export sha=${head.slice(0, 7)} -->\nit works`)
+  gh.addComment(7, ackBody({ stage: 'ship', by: 'mk', brief: artifactHash('Export CSV'), plan: null, source: 'session', quote: 'ship it' }))
+  writeFileSync(join(root, 'second.ts'), 'export {}\n')
+  git(root, 'add', '-A')
+  git(root, 'commit', '-q', '-m', 'second')
+  git(root, 'push', '-q')
+  const top = git(root, 'rev-parse', 'HEAD')
+  pr = { ...pr, headRefOid: top }
+  gh.addComment(7, `<!-- vsk:v1 type=evidence rev=2 branch=feat/7-export sha=${top.slice(0, 7)} -->\nit works`)
+  gh.addComment(7, ackBody({ stage: 'ship', by: 'mk', brief: artifactHash('Export CSV'), plan: null, source: 'session', quote: 'ship it' }))
+
+  // A clean review of the last commit only: its base is on the branch, not in origin/main.
+  const narrow = reviewed({ sha: top, base: head })
+  expect(run().blocks).toEqual([`the review's base ${head.slice(0, 7)} is not in origin/main, so it covered only part of what would merge — re-run the review against the default branch`])
+  gh.deleteComment(narrow.id)
+
+  reviewed({ sha: top, base: git(root, 'rev-parse', 'origin/main') })
+  expect(run()).toMatchObject({ code: 0, ok: true, blocks: [] })
+})
+
+test('two trusted reviews that disagree at the same round stop the ship and name both', () => {
+  const head = git(root, 'rev-parse', 'HEAD')
+  gh.addComment(7, `<!-- vsk:v1 type=evidence rev=1 branch=feat/7-export sha=${head.slice(0, 7)} -->\nit works`)
+  gh.addComment(7, ackBody({ stage: 'ship', by: 'mk', brief: artifactHash('Export CSV'), plan: null, source: 'session', quote: 'ship it' }))
+  const open: Finding[] = [{ id: 'F1', axis: 'bugs', severity: 'must-fix', file: 'a.ts', line: 1, issue: 'x', fix: 'y' }]
+
+  // An earlier round 3 with findings open, then a later round 1 calling it clean: the higher
+  // round stands, so the later comment cannot wave the findings through.
+  const late = reviewed({ round: 3, verdict: 'needs-fixes', findings: open })
+  reviewed({ round: 1, verdict: 'clean' })
+  expect(run().blocks[0]).toContain('review round 3 is needs-fixes (F1)')
+  gh.deleteComment(late.id)
+
+  // Two at the same round that disagree are not reconciled at all.
+  reviewed({ round: 1, verdict: 'needs-fixes', findings: open })
+  const blocks = run().blocks
+  expect(blocks[0]).toContain('two review comments disagree at round 1')
+  expect(blocks[0]).toContain('needs-fixes')
+  expect(blocks[0]).toContain('clean')
+  expect(blocks).toHaveLength(1)
 })

@@ -767,3 +767,68 @@ describe('state is only as good as the comment it wrote', () => {
     await expect(review(['--reviewer', 'codex', '--resume'])).rejects.toThrow('no codex review session from this machine')
   })
 })
+
+describe('the comment is the record, not the state file', () => {
+  const brokenCases: Array<[string, () => void]> = [
+    ['deleted', () => gh.deleteComment(reviewComments()[0]!.id)],
+    ['posted by someone without write access', () => {
+      const posted = reviewComments()[0]!
+      gh.deleteComment(posted.id)
+      gh.addComment(7, posted.body, 'stranger')
+    }],
+    ['malformed', () => gh.editComment(reviewComments()[0]!.id, reviewComments()[0]!.body.replace('"round": 1', '"round": "one"'))],
+  ]
+  for (const [what, breakIt] of brokenCases) {
+    test(`a ${what} comment leaves nothing to stand on: the round is reviewed again`, async () => {
+      queue('codex', [codexReply(verdict([])), codexReply(verdict([]))])
+      expect((await review(['--reviewer', 'codex'])).code).toBe(0)
+      breakIt()
+      // HEAD has not moved: the cached verdict must not stand in for the missing comment.
+      const { code, text } = await review(['--reviewer', 'codex'])
+      expect(code).toBe(0)
+      expect(text).not.toContain('already reviewed')
+      expect(calls()).toHaveLength(2)
+      // Whatever was left on the issue, a fresh round 1 was posted and it is readable again.
+      const posted = reviewComments().filter((c) => c.login === 'mk').at(-1)!
+      expect(posted.body).toContain('type=review round=1')
+      expect(readReviewComment(posted.body)!.round).toBe(1)
+    })
+  }
+})
+
+describe('a comment cannot claim a verdict its findings contradict', () => {
+  test('the findings decide, so an inconsistent marker fails trust', async () => {
+    const head = git(root, 'rev-parse', 'HEAD')
+    // "clean" in the marker and in the JSON, but a must-fix finding in the same JSON.
+    const lying = renderComment({ round: 1, sha: head, base: git(root, 'rev-parse', 'origin/main'), reviewer: 'codex', verdict: 'clean', findings: [] } as CommentData, [])
+      .replace('"findings": []', `"findings": [${JSON.stringify(finding('F1'))}]`)
+    gh.addComment(7, lying, 'mk')
+    expect(readReviewComment(lying)!.verdict).toBe('needs-fixes')
+    queue('codex', [codexReply(verdict([]))])
+    // Untrusted, so the review runs rather than reporting the forged clean verdict.
+    const { code } = await review(['--reviewer', 'codex'])
+    expect(code).toBe(0)
+    expect(calls()).toHaveLength(1)
+  })
+})
+
+describe('several trusted reviews are reconciled, or refused', () => {
+  test('the highest round for this head wins; a disagreement at one round stops the run', async () => {
+    const head = git(root, 'rev-parse', 'HEAD')
+    const base = git(root, 'rev-parse', 'origin/main')
+    gh.addComment(7, comment({ round: 3, sha: head, base, verdict: 'needs-fixes', findings: [finding('F1') as never] }), 'mk')
+    gh.addComment(7, comment({ round: 1, sha: head, base, verdict: 'clean' }), 'mk')
+    commit('fix.ts', 'x\n')
+    queue('codex', [codexReply(verdict([]))])
+    // Round 3 stands, so the cap applies and no fourth round starts.
+    const { code, text } = await review(['--reviewer', 'codex'])
+    expect(code).toBe(2)
+    expect(text).toContain('3 review rounds are done')
+    expect(calls()).toEqual([])
+
+    gh.addComment(7, comment({ round: 3, sha: head, base, verdict: 'clean' }), 'mk')
+    const conflict = await review(['--reviewer', 'codex'])
+    expect(conflict.code).toBe(2)
+    expect(conflict.text).toContain('two review comments disagree at round 3')
+  })
+})

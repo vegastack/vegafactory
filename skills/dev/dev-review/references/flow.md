@@ -64,6 +64,7 @@ State lives in `.vegastack/.tmp/reviews/<n>.json`: reviewer, session ids, round,
 | State from this machine, round < 3 | The same session resumes with only the fix diff and the open ids |
 | State from another machine, or another reviewer | A fresh reviewer, with the previous findings JSON from the comment |
 | HEAD already reviewed | The last verdict is printed again; no run is spent |
+| The review comment is gone, forged or edited elsewhere | The local state stops counting and the round is reviewed again |
 | Round 3 done with findings open | Hand-back: the operator decides |
 
 Sessions are local to the machine that created them, and neither tool can resume the other's — that is why a move between machines starts fresh rather than pretending to continue.
