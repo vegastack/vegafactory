@@ -2,8 +2,9 @@ import { beforeEach, describe, expect, test } from 'bun:test'
 import { spawn, spawnSync } from 'node:child_process'
 import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
-import { addLesson, learningsPath, lessonsIn, pendingNote, readLessons, runLearning, settle, writeNew } from '../src/learning.ts'
+import { dirname, join } from 'node:path'
+import { writeNew } from '../src/issue-cache.ts'
+import { addLesson, learningsPath, lessonsIn, pendingNote, readLessons, runLearning, scratchFor, settle } from '../src/learning.ts'
 
 let root: string
 let out: string[]
@@ -176,6 +177,51 @@ describe('the queue is a plain file under .vegastack/.tmp', () => {
     // And the real path leaves nothing behind for a next attempt to find.
     addLesson(root, 'a lesson')
     expect(readdirSync(join(root, '.vegastack', '.tmp')).filter((name) => name.endsWith('.tmp'))).toEqual(['learnings.md.planted.tmp'])
+  })
+})
+
+describe('the scratch draft a continuation hands out', () => {
+  const drafts = () => join(root, '.vegastack', '.tmp', 'lessons')
+
+  test('each session gets its own folder, so two drafts never collide', () => {
+    const one = scratchFor(root)
+    const two = scratchFor(root)
+    expect(one).not.toBe(two)
+    expect(dirname(one)).not.toBe(dirname(two))
+    for (const path of [one, two]) {
+      expect(dirname(dirname(path))).toBe(drafts())
+      // The folder is ours and empty; the file itself is the model's to write.
+      expect(readdirSync(dirname(path))).toEqual([])
+    }
+    // The folder is created exclusively, so a name already taken is refused rather than reused.
+    scratchFor(root, 'taken')
+    expect(() => scratchFor(root, 'taken')).toThrow(/EEXIST|exists/)
+  })
+
+  test('a link planted at the draft path is refused and its target is untouched', () => {
+    mkdirSync(drafts(), { recursive: true })
+    symlinkSync(devMdPath(), join(drafts(), 'planted'))
+    expect(() => scratchFor(root, 'planted')).toThrow(/symbolic link|EEXIST|exists/)
+    expect(devMd()).toBe(DEV_MD)
+    // The whole drafts folder being a link is refused too, before anything is created at its target.
+    const elsewhere = realpathSync(mkdtempSync(join(tmpdir(), 'learning-drafts-')))
+    spawnSync('rm', ['-rf', drafts()])
+    symlinkSync(elsewhere, drafts())
+    expect(() => scratchFor(root)).toThrow('symbolic link')
+    expect(readdirSync(elsewhere)).toEqual([])
+  })
+
+  test('a recorded draft is removed, and a file outside the drafts folder is left alone', () => {
+    const draft = scratchFor(root)
+    writeFileSync(draft, '- a lesson from the draft\n')
+    expect(run('add', '--file', draft)).toBe(0)
+    expect(readLessons(root).map((lesson) => lesson.text)).toEqual(['a lesson from the draft'])
+    expect(existsSync(dirname(draft))).toBe(false)
+
+    const mine = join(root, 'notes.md')
+    writeFileSync(mine, '- a lesson of my own\n')
+    expect(run('add', '--file', mine)).toBe(0)
+    expect(existsSync(mine)).toBe(true)
   })
 })
 

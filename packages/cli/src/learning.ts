@@ -6,9 +6,9 @@
 // lesson. Every read and every write goes through one lock and one checked path, so two sessions
 // cannot lose each other's lessons and no link can turn a settlement into an edit of dev.md.
 import { createHash, randomUUID } from 'node:crypto'
-import { lstatSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync } from 'node:fs'
-import { join, resolve } from 'node:path'
-import { withLock } from './issue-cache.ts'
+import { lstatSync, mkdirSync, readFileSync, readdirSync, realpathSync, rmSync } from 'node:fs'
+import { dirname, join, resolve } from 'node:path'
+import { replaceFile, withLock } from './issue-cache.ts'
 import { repoRoot } from './issue.ts'
 
 export interface Lesson { id: string; text: string }
@@ -33,11 +33,11 @@ function linkFree(path: string) {
 // component is checked before anything is opened, taken or created, because a link anywhere on the
 // way would otherwise let this command write outside the repository — over dev.md, say, which
 // nothing here may ever touch.
-function checkedPaths(root: string): { queue: string; lock: string } {
+function checkedPaths(root: string): { queue: string; lock: string; drafts: string } {
   const vegastack = join(root, '.vegastack')
   const tmp = join(vegastack, '.tmp')
-  const paths = { queue: join(tmp, 'learnings.md'), lock: join(tmp, 'learning') }
-  for (const part of [vegastack, tmp, paths.lock, paths.queue]) linkFree(part)
+  const paths = { queue: join(tmp, 'learnings.md'), lock: join(tmp, 'learning'), drafts: join(tmp, 'lessons') }
+  for (const part of [vegastack, tmp, paths.lock, paths.queue, paths.drafts]) linkFree(part)
   try {
     const expected = join(realpathSync(root), '.vegastack', '.tmp')
     if (realpathSync(tmp) !== expected) throw new Error(`${tmp} resolves to ${realpathSync(tmp)}, outside ${expected}`)
@@ -50,16 +50,43 @@ function checkedPaths(root: string): { queue: string; lock: string } {
 
 export const learningsPath = (root: string) => checkedPaths(root).queue
 
+// A fresh, private folder for one session's draft. The folder is created exclusively, so a name
+// already taken — by another session's draft or by a link planted to catch the model's own
+// file-writing tool — fails here instead of being written into. The draft file itself does not
+// exist yet, which is exactly what the model's tool expects and what leaves nothing to follow.
+export function scratchFor(root: string, name: string = randomUUID()): string {
+  const drafts = checkedPaths(root).drafts
+  mkdirSync(drafts, { recursive: true })
+  sweepDrafts(drafts)
+  const folder = join(drafts, name)
+  linkFree(folder)
+  mkdirSync(folder)
+  return join(folder, 'lessons.md')
+}
+
+// A draft a session never came back for is litter after a week.
+const DRAFT_LIFE_MS = 7 * 24 * 60 * 60_000
+function sweepDrafts(drafts: string, now = Date.now()) {
+  for (const name of readdirSync(drafts)) {
+    const folder = join(drafts, name)
+    try {
+      const entry = lstatSync(folder)
+      if (entry.isDirectory() && now - entry.mtimeMs > DRAFT_LIFE_MS) rmSync(folder, { recursive: true, force: true })
+    } catch { /* gone already, or someone else's to worry about */ }
+  }
+}
+
+// A draft is spent once its lessons are recorded, and it is ours to remove only inside our own tree.
+function dropScratch(root: string, file: string) {
+  const folder = dirname(resolve(file))
+  if (dirname(folder) !== checkedPaths(root).drafts) return
+  rmSync(folder, { recursive: true, force: true })
+}
+
 // Every read and every write of the queue runs inside this, across processes as well as within one.
 // The checks come first, so a bad path is refused before the lock directory is created anywhere.
 export function lockQueue<T>(root: string, fn: () => T): T {
   return withLock(checkedPaths(root).lock, fn, { what: 'the lessons queue' })
-}
-
-// Creates the file or fails. `wx` is O_CREAT|O_EXCL, which refuses a name that already exists —
-// a symbolic link included, dangling or not — so a planted link can never be written through.
-export function writeNew(path: string, text: string) {
-  writeFileSync(path, text, { flag: 'wx' })
 }
 
 function parse(text: string): Lesson[] {
@@ -79,14 +106,11 @@ function readQueue(root: string): { path: string; text: string } {
   try { return { path, text: readFileSync(path, 'utf8') } } catch { return { path, text: '' } }
 }
 
-// Replaces the queue without following a link: the temp name is unguessable and created
-// exclusively, and rename replaces the queue name itself rather than following it. An empty queue
-// is no queue, so the file goes rather than linger.
+// An empty queue is no queue, so the file goes rather than linger. Anything else is replaced
+// through `replaceFile`, which never follows a link.
 function replace(path: string, lines: string[]) {
   if (!lines.some((line) => lessonOn(line) !== null)) return rmSync(path, { force: true })
-  const temp = `${path}.${randomUUID()}.tmp`
-  writeNew(temp, lines.join('\n').replace(/\n*$/, '\n'))
-  renameSync(temp, path)
+  replaceFile(path, lines.join('\n').replace(/\n*$/, '\n'))
 }
 
 export function readLessons(root: string): Lesson[] {
@@ -137,7 +161,7 @@ export function settle(root: string, id: string): Lesson | null {
 // lessons travel in a file, never as words in a command: prose on a command line is prose the
 // shell reads, and a backtick or a $(…) in a lesson is text, not an instruction.
 export function askText(root: string, number: number): string {
-  const draft = join(root, '.vegastack', '.tmp', `lessons-${number}.md`)
+  const draft = scratchFor(root)
   return [
     `Before this session ends, one request: which general lessons did it teach — the things that would have saved time on any issue in this repo, not the ones specific to #${number}?`,
     `Write them with your file-writing tool, one per line, to ${draft}, then record them by running: vegafactory learning add --file ${draft}`,
@@ -169,7 +193,8 @@ export function pendingNote(root: string): string | null {
 export function learningUsage(): string {
   return `Usage: vegafactory learning <verb> [options]
 
-  add --file PATH      record the lessons in that file, one per line
+  add --file PATH      record the lessons in that file, one per line; a draft written in
+                       .vegastack/.tmp/lessons/ is removed once its lessons are recorded
   add --stdin          the same, read from standard input
   add <words…>         one short lesson, for a caller that controls its own quoting
   list [--json]        the lessons waiting for the operator's yes
@@ -200,6 +225,8 @@ export function runLearning(argv: string[], { cwd = process.cwd(), out = console
   if (verb === 'add') {
     const source = file !== null ? readFileSync(resolve(cwd, file), 'utf8') : rest.includes('--stdin') ? readFileSync(0, 'utf8') : plain.join(' ')
     const lessons = addLessons(root, lessonsIn(source))
+    // The draft has done its job; leaving it behind is leaving the same words in two places.
+    if (file !== null) dropScratch(root, resolve(cwd, file))
     out(json ? JSON.stringify({ verb, lessons }, null, 2) : lessons.map((lesson) => `recorded ${lesson.id}  ${lesson.text}`).join('\n'))
     return 0
   }

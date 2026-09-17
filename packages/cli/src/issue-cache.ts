@@ -157,12 +157,27 @@ function frontmatter(fields: Record<string, unknown>): string {
   return `---\n${lines.join('\n')}\n---\n`
 }
 
-function atomicWrite(path: string, text: string) {
-  mkdirSync(dirname(path), { recursive: true })
-  const temp = `${path}.${process.pid}.tmp`
-  writeFileSync(temp, text)
-  renameSync(temp, path)
+// Creates the file or fails. `wx` is O_CREAT|O_EXCL, which refuses a name that already exists —
+// a symbolic link included, dangling or not — so a planted link can never be written through.
+export function writeNew(path: string, text: string) {
+  writeFileSync(path, text, { flag: 'wx' })
 }
+
+// Replaces a file without ever following a link: the temporary name is unguessable and created
+// exclusively, and rename replaces the target name itself. A failed write leaves nothing behind.
+export function replaceFile(path: string, text: string) {
+  mkdirSync(dirname(path), { recursive: true })
+  const temp = `${path}.${randomUUID()}.tmp`
+  try {
+    writeNew(temp, text)
+    renameSync(temp, path)
+  } catch (error) {
+    rmSync(temp, { force: true })
+    throw error
+  }
+}
+
+const atomicWrite = replaceFile
 
 export function readState(dir: string): CacheState | null {
   const path = join(dir, 'state.json')

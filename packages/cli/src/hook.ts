@@ -4,14 +4,14 @@
 // (<type>/<n>-…). With no issue only the ship guard runs. Advisory events never block and
 // exit 0 on any error; only pre-tool can deny, and its guard fails closed.
 import { spawn, spawnSync } from 'node:child_process'
-import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, readFileSync, rmSync } from 'node:fs'
 import { hostname } from 'node:os'
 import { basename, dirname, join } from 'node:path'
 import { claimsOf, holderOf, ownerId, trustedAuthors, HEARTBEAT_EVERY_MS, type Holder } from './claim.ts'
 import { defaultRunner, type GhRunner } from './gh.ts'
 import { classifyCommand, extractCommand, isShellTool, loadPolicy, mergeTarget, type Decision, type MergeCheck } from './guard-rules.ts'
-import { cacheDir, readBody, readState, syncIssue, withLock } from './issue-cache.ts'
-import { askText, pendingNote } from './learning.ts'
+import { cacheDir, readBody, readState, replaceFile, syncIssue, withLock } from './issue-cache.ts'
+import { askText, learningsPath, pendingNote } from './learning.ts'
 import { detectRepo, evidenceChangedAt, findValidAck, latestOfType, permissionLookup, repoRoot, snapshot } from './issue.ts'
 import { stateOf } from './labels.ts'
 
@@ -142,11 +142,7 @@ export function readLocal(where: Where): LocalClaim {
 }
 
 function writeLocal(where: Where, local: LocalClaim) {
-  const path = localPath(where)
-  mkdirSync(dirname(path), { recursive: true })
-  const temp = `${path}.${process.pid}.tmp`
-  writeFileSync(temp, JSON.stringify(local, null, 2) + '\n')
-  renameSync(temp, path)
+  replaceFile(localPath(where), JSON.stringify(local, null, 2) + '\n')
 }
 
 // One mark per harness session: the HEAD that session last saw at an event of its own, whether it
@@ -156,7 +152,14 @@ function writeLocal(where: Where, local: LocalClaim) {
 // takes the lock, re-reads and replaces the file, so the change is the whole read-modify-write and
 // not just the write. No event ever writes another session's mark: a worktree's HEAD is shared, so
 // a HEAD that moved is only this session's work when this session's own events bracket the move.
-export interface SessionMark { head: string | null; worked: boolean; asked: boolean; at: number }
+export interface SessionMark {
+  head: string | null
+  worked: boolean
+  asked: boolean
+  at: number
+  // Set while one of this session's own writing tools is running: the HEAD it began at and when.
+  pending?: { head: string | null; at: number }
+}
 
 export const sessionsPath = (where: Where) => join(where.top, '.vegastack', '.tmp', 'claims', `${where.number}.sessions.json`)
 
@@ -170,18 +173,29 @@ function updateSessions<T>(where: Where, change: (marks: Record<string, SessionM
     try { marks = JSON.parse(readFileSync(path, 'utf8')) as Record<string, SessionMark> } catch { /* the first session of this worktree */ }
     const result = change(marks)
     const kept = Object.entries(marks).sort(([, a], [, b]) => b.at - a.at).slice(0, SESSIONS_KEPT)
-    const temp = `${path}.${process.pid}.tmp`
-    writeFileSync(temp, JSON.stringify(Object.fromEntries(kept), null, 2) + '\n')
-    renameSync(temp, path)
+    replaceFile(path, JSON.stringify(Object.fromEntries(kept), null, 2) + '\n')
     return result
   }, { what: 'the session marks' })
 }
 
 // What an event tells us about the session it belongs to:
-//   'idle'   only where its HEAD stands now — a session start, a prompt, the end of a session
-//   'tool'   a tool of its own just ran, so a HEAD that moved since its last event is its work
-//   'commit' its own Stop checkpoint made the commit, which is its work by construction
-type Observed = 'idle' | 'tool' | 'commit'
+//   'idle'        only where its HEAD stands now — a session start, a prompt, the end of a session
+//   'tool-start'  one of its own writing tools is about to run, from the HEAD recorded now
+//   'tool-end'    that tool finished; a commit made between the two is this session's work
+//   'commit'      its own Stop checkpoint made the commit, which is its work by construction
+// A worktree's HEAD is shared, so a HEAD that simply differs from last time proves nothing: a
+// neighbour may have moved it. Only the two kinds of evidence above count, and where the evidence
+// is unclear the session goes unasked rather than credited with someone else's commit.
+type Observed = 'idle' | 'tool-start' | 'tool-end' | 'commit'
+
+// Was the commit now at HEAD made while that tool was running? Git keeps seconds, so each end of
+// the window is given a second's room.
+function committedDuring(cwd: string, from: number, to: number): boolean {
+  const at = git(cwd, ['log', '-1', '--format=%ct'])
+  if (!at.ok) return false
+  const made = Number(at.out) * 1000
+  return Number.isFinite(made) && made >= from - 1000 && made <= to + 1000
+}
 
 // Written the first time any of that session's events is seen, and before anything that can fail,
 // so a refresh that throws still leaves the session able to tell work from talk.
@@ -189,9 +203,13 @@ function observe(where: Where, session: string | null, now: number, kind: Observ
   if (!session) return
   updateSessions(where, (marks) => {
     const head = headOf(where.top)
-    const mark = marks[session]
-    if (!mark) { marks[session] = { head, worked: kind === 'commit', asked: false, at: now }; return }
-    if (kind === 'commit' || (kind === 'tool' && mark.head !== null && mark.head !== head)) mark.worked = true
+    const mark = marks[session] ?? (marks[session] = { head, worked: false, asked: false, at: now })
+    const pending = mark.pending
+    if (kind === 'commit') mark.worked = true
+    if (kind === 'tool-end' && pending && pending.head !== null && pending.head !== head && committedDuring(where.top, pending.at, now)) mark.worked = true
+    // A window belongs to the one tool that opened it; anything else closes it unused.
+    if (kind === 'tool-start') mark.pending = { head, at: now }
+    else delete mark.pending
     mark.head = head
     mark.at = now
   })
@@ -385,8 +403,7 @@ function pushHeartbeat(where: Where, local: LocalClaim, deps: HookDeps) {
   } catch { /* no heartbeat running */ }
   const pid = deps.detach([...deps.cli, 'issue', 'heartbeat', String(where.number), '--repo', where.repo, '--active', String(Math.round(local.activeMs / 60_000))], where.cwd)
   if (typeof pid === 'number') {
-    mkdirSync(dirname(pidFile), { recursive: true })
-    writeFileSync(pidFile, JSON.stringify({ pid, at: deps.now() }))
+    replaceFile(pidFile, JSON.stringify({ pid, at: deps.now() }))
   }
   local.lastPush = deps.now()
 }
@@ -484,6 +501,10 @@ function preTool(harness: Harness, input: HookInput, deps: HookDeps): void {
   const here = whereAt(cwd, deps)
   const tool = String(payload.tool_name ?? '')
   if (here && (FILE_TOOLS.has(tool) || isShellTool(tool))) {
+    // Only a tool that can change files or run commands can produce a commit, so only one of those
+    // opens a window this session may later be credited for. A read never does.
+    const session = typeof payload.session_id === 'string' && payload.session_id ? payload.session_id : null
+    try { observe(here, session, deps.now(), 'tool-start') } catch { /* attribution is never a gate */ }
     const denied = ownership(harness, here, deps)
     if (denied) return deps.out(denied)
   }
@@ -537,7 +558,7 @@ function advisory(event: HookEvent, harness: Harness, payload: Record<string, un
   }
   if (event === 'post-tool') {
     recordActivity(local, deps.now())
-    observe(where, session, deps.now(), 'tool')
+    observe(where, session, deps.now(), 'tool-end')
     if (local.held && (local.lastPush === null || deps.now() - local.lastPush >= HEARTBEAT_EVERY_MS)) pushHeartbeat(where, local, deps)
     return writeLocal(where, local)
   }
@@ -570,9 +591,10 @@ function advisory(event: HookEvent, harness: Harness, payload: Record<string, un
     let ask: string | null = null
     try {
       // The queue's own checks run before the session is marked asked, so a refusal here leaves
-      // the request to the next turn rather than spending it.
-      const request = askText(where.root, where.number)
-      if (claimAsk(where, session, deps.now())) ask = request
+      // the request to the next turn rather than spending it. The text comes after, because
+      // writing it sets up a draft folder and only a session that is really being asked needs one.
+      learningsPath(where.root)
+      if (claimAsk(where, session, deps.now())) ask = askText(where.root, where.number)
     } catch { /* no request is better than a bad one */ }
     // Both harnesses show a Stop hook's systemMessage to the user as a warning, and one Stop hook
     // prints one JSON object, so the warning and the request travel together.
