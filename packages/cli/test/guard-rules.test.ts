@@ -3,7 +3,7 @@ import { spawnSync } from 'node:child_process'
 import { mkdirSync, mkdtempSync, realpathSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { classifyCommand, extractCommand, loadPolicy, mergeTarget, parseCommand, shipAskCommands, splitSegments, type Policy } from '../src/guard-rules.ts'
+import { classifyCommand, EXPANDED, extractCommand, isShellTool, loadPolicy, mergeTarget, parseCommand, shipAskCommands, splitSegments, type Policy } from '../src/guard-rules.ts'
 
 const policy: Policy = { defaultBranch: 'main', shipAsk: ['bun run docs:publish', 'wrangler deploy --env production'] }
 const decide = (command: string, p: Policy = policy) => classifyCommand(command, p)
@@ -49,8 +49,9 @@ describe('command parsing', () => {
     expect(parseCommand('git push origin "main"')[0]!.words).toEqual(['git', 'push', 'origin', 'main'])
     expect(parseCommand("git push origin 'main'")[0]!.words).toEqual(['git', 'push', 'origin', 'main'])
     expect(parseCommand('git push origin ma\\in')[0]!.words).toEqual(['git', 'push', 'origin', 'main'])
-    expect(parseCommand('echo $(npm publish)').map((s) => s.words)).toEqual([['echo'], ['npm', 'publish']])
-    expect(parseCommand('echo `npm publish`').map((s) => s.words)).toEqual([['echo'], ['npm', 'publish']])
+    expect(parseCommand('echo $(npm publish)').map((s) => s.words)).toEqual([['echo', EXPANDED], ['npm', 'publish']])
+    expect(parseCommand('echo `npm publish`').map((s) => s.words)).toEqual([['echo', EXPANDED], ['npm', 'publish']])
+    expect(parseCommand('git${IFS}push "$HOME/x" \'$literal\' a$')[0]!.words).toEqual([`git${EXPANDED}{IFS}push`, `${EXPANDED}HOME/x`, '$literal', 'a$'])
     expect(parseCommand('(git push origin main)')[0]!.words).toEqual(['git', 'push', 'origin', 'main'])
     expect(parseCommand('{ git push origin main; }')[0]!.words).toEqual(['git', 'push', 'origin', 'main'])
   })
@@ -167,6 +168,63 @@ describe('decisions', () => {
     expect(classifyCommand('gh api -X PUT repos/o/r/pulls/12/merge', policy, check).decision).toBe('ask')
   })
 
+  test('shell expansion cannot build a guarded command', () => {
+    for (const command of [
+      '$(printf git) push origin main', 'git${IFS}push origin main', '`echo git` push origin main', '$GIT push origin main',
+      '"$(which git)" push origin main', 'git $(echo push) origin main', 'git push origin $(git rev-parse --abbrev-ref HEAD)',
+      'git push origin "$BRANCH"', "git -c \"$ALIAS\" ship origin main", 'gh pr $(echo merge) 12', 'gh $CMD 12',
+      'gh -R "$R" pr merge 1', 'npm $VERB', "$'\\x67it' push origin main", 'env $CMD push', 'sudo $(which gh) pr merge 1',
+      'echo main | xargs git push origin', 'find . -name x -exec git push origin {} \\;', 'eval git push origin main',
+      'if true; then git push origin main; fi', 'for b in a; do git push origin main; done', 'git tag "$V"',
+    ]) {
+      expect(decide(command).decision, command).toBe('ask')
+    }
+    for (const command of [
+      'git commit -m "$(cat msg.txt)"', 'echo $HOME', 'cd "$(git rev-parse --show-toplevel)" && ls', 'git add $FILES',
+      'gh pr create --title x --body "$(cat body.md)"', 'ls | xargs git add', 'bun run $SCRIPT', 'FOO=$(date) bun run check',
+      'git log --since "$SINCE"', 'echo "cost: 5$"',
+    ]) {
+      expect(decide(command).decision, command).toBe('allow')
+    }
+  })
+
+  test('gh api asks for every write and every GraphQL mutation, and lets reads through', () => {
+    for (const command of [
+      "gh api graphql -f query='mutation{mergePullRequest(input:{pullRequestId:\"x\"}){clientMutationId}}'",
+      "gh api graphql -f query='mutation { createRelease { id } }'", "gh api graphql --raw-field 'query=mutation{deleteRef(input:{refId:\"r\"}){clientMutationId}}'",
+      "gh api graphql -F query=@mutation.graphql", 'gh api graphql --input body.json', "gh api graphql -f 'query=mutation{updateRef}'",
+      'gh api -X POST repos/o/r/releases', 'gh api --method DELETE repos/o/r/git/refs/heads/main', 'gh api -XPATCH repos/o/r/git/refs/heads/main -f sha=x',
+      'gh api repos/o/r/issues/1/comments -f body=hi', 'gh api repos/o/r/issues/comments/9 -F body=@x', 'gh api repos/o/r/dispatches --input x.json',
+      'gh api --method=PUT repos/o/r/pulls/1/merge', 'gh api repos/o/r/git/refs -H "X-HTTP-Method-Override: DELETE"', 'gh api $URL', 'gh api -X $M repos/o/r',
+    ]) {
+      expect(decide(command).decision, command).toBe('ask')
+    }
+    for (const command of [
+      'gh api repos/o/r/pulls/12', 'gh api --paginate repos/o/r/issues --jq ".[].number"', 'gh api -X GET search/issues -f q=repo:o/r',
+      "gh api graphql -f query='query { viewer { login } }'", "gh api graphql -f query='{ repository(owner:\"o\", name:\"r\") { id } }' -F n=1",
+    ]) {
+      expect(decide(command).decision, command).toBe('allow')
+    }
+  })
+
+  test('a session cannot record its own ship it, write raw comments or take an issue back', () => {
+    for (const command of [
+      'vegafactory issue ack 1 --stage ship --by x --quote y', 'vegafactory issue ack 1 --stage ship --by x --quote y --source comment:5',
+      'vegafactory issue ack 1 --stage plan --by x --quote y', 'vegafactory issue ack 1 --stage plan --by x --quote y --source session',
+      'bunx @vegastack/vegafactory issue ack 1 --stage brief --by x --quote y', 'bun packages/cli/src/index.ts issue ack 1 --stage=ship',
+      'vegafactory issue ack 1 --stage plan --source "$S" --by x --quote y', 'vegafactory issue $VERB 1',
+      'vegafactory issue claim 1 --harness claude --model m --take-back-by mk', 'gh issue comment 1 --body "ok"', 'gh pr comment 3 -F body.md',
+    ]) {
+      expect(decide(command).decision, command).toBe('ask')
+    }
+    for (const command of [
+      'vegafactory issue ack 1 --stage plan --by x --quote y --source comment:5', 'vegafactory issue claim 1 --harness claude --model m',
+      'vegafactory issue comment 1 --file c.md', 'gh issue view 1', 'gh pr view 3 --comments',
+    ]) {
+      expect(decide(command).decision, command).toBe('allow')
+    }
+  })
+
   test('mergeTarget reads the PR argument past the flags', () => {
     expect(mergeTarget(['gh', 'pr', 'merge', '--squash', '12'])).toBe('12')
     expect(mergeTarget(['gh', 'pr', 'merge', '-b', 'body text', 'feat/1-x'])).toBe('feat/1-x')
@@ -180,5 +238,27 @@ describe('payloads', () => {
     expect(extractCommand({ tool_input: { command: ['bash', '-lc', 'npm publish'] } })).toBe("bash -lc 'npm publish'")
     expect(extractCommand({ tool_input: 'git tag v1' })).toBe('git tag v1')
     expect(extractCommand({ tool_name: 'Read', tool_input: { file_path: '/x' } })).toBe(null)
+  })
+
+  test('real Claude and Codex shell payloads', () => {
+    const claude = { session_id: 's', cwd: '/r', hook_event_name: 'PreToolUse', tool_name: 'Bash', tool_input: { command: 'git push origin main', description: 'push', timeout: 120000 }, tool_use_id: 't' }
+    const codexBash = { session_id: 's', cwd: '/r', hook_event_name: 'PreToolUse', model: 'gpt-5.5', permission_mode: 'default', tool_name: 'Bash', tool_input: { command: 'git push origin main' } }
+    const codexExec = { session_id: 's', cwd: '/r', hook_event_name: 'PreToolUse', model: 'gpt-5.5', tool_name: 'exec_command', tool_input: { cmd: 'git push origin main', workdir: '/r', yield_time_ms: 1000 } }
+    const codexShell = { session_id: 's', cwd: '/r', hook_event_name: 'PreToolUse', model: 'gpt-5.5', tool_name: 'shell', tool_input: { command: ['bash', '-lc', 'git push origin main'], workdir: '/r' } }
+    const codexArgv = { tool_name: 'exec_command', tool_input: { cmd: ['git', 'push', 'origin', 'main'] } }
+    for (const payload of [claude, codexBash, codexExec, codexShell, codexArgv]) {
+      expect(classifyCommand(extractCommand(payload), policy).decision, JSON.stringify(payload)).toBe('ask')
+    }
+    // apply_patch carries the patch in `command`; it runs nothing.
+    expect(extractCommand({ tool_name: 'apply_patch', tool_input: { command: '*** Begin Patch\n+git push origin main' } })).toBe(null)
+  })
+
+  test('a shell-like tool is recognised by name, so an unknown payload shape fails closed', () => {
+    for (const name of ['Bash', 'shell', 'exec_command', 'local_shell', 'unified_exec', 'shell_command', 'container.exec', 'mcp__terminal__run_in_terminal']) {
+      expect(isShellTool(name), name).toBe(true)
+    }
+    for (const name of ['Write', 'Edit', 'apply_patch', 'Read', 'mcp__terminal__read_terminal', 'mcp__docs__search', 'WebFetch']) {
+      expect(isShellTool(name), name).toBe(false)
+    }
   })
 })

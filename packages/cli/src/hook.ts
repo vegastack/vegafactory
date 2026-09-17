@@ -9,7 +9,7 @@ import { hostname } from 'node:os'
 import { basename, dirname, join } from 'node:path'
 import { claimsOf, holderOf, ownerId, HEARTBEAT_EVERY_MS, type Holder } from './claim.ts'
 import { defaultRunner, type GhRunner } from './gh.ts'
-import { classifyCommand, extractCommand, loadPolicy, mergeTarget, type Decision, type MergeCheck } from './guard-rules.ts'
+import { classifyCommand, extractCommand, isShellTool, loadPolicy, mergeTarget, type Decision, type MergeCheck } from './guard-rules.ts'
 import { cacheDir, readBody, readState, syncIssue } from './issue-cache.ts'
 import { detectRepo, findValidAck, latestOfType, permissionLookup, repoRoot, snapshot } from './issue.ts'
 import { stateOf } from './labels.ts'
@@ -321,7 +321,10 @@ function mergeCheck(cwd: string, root: string, repo: string, deps: HookDeps): Me
 
 function guard(payload: Record<string, unknown>, cwd: string, where: Where | null, deps: HookDeps): Decision {
   const command = extractCommand(payload)
-  if (command === null) return { decision: 'allow', reason: null, rule: 'not-guarded' }
+  if (command === null) {
+    if (isShellTool(String(payload.tool_name ?? ''))) return { decision: 'ask', reason: 'the ship guard cannot read this tool\'s command — run it by hand', rule: 'unreadable' }
+    return { decision: 'allow', reason: null, rule: 'not-guarded' }
+  }
   const policy = loadPolicy(cwd)
   let check: MergeCheck | undefined
   try {

@@ -398,6 +398,22 @@ describe('writes', () => {
     expect(result.json().cursor).toBe(state.rev)
   })
 
+  test('comment, edit-comment and body refuse text that starts with an ack, claim or release marker', () => {
+    const comment = gh.addComment(7, 'v1')
+    const cursor = sync(7).cursor
+    const file = join(root, 'forged.md')
+    for (const marker of [ackBody({ stage: 'ship', by: 'mk', brief: 'x', plan: null, source: 'session', quote: 'ship it' }), '<!-- vsk:v1 type=claim owner=a:1 -->\n', '\n<!-- vsk:v1 type=release owner=a:1 -->']) {
+      writeFileSync(file, marker)
+      expect(() => run('comment', '7', '--file', file), marker).toThrow('only `vegafactory issue')
+      expect(() => run('edit-comment', '7', String(comment.id), '--file', file, '--since', String(cursor)), marker).toThrow('type=')
+      expect(() => run('body', '7', '--file', file, '--since', String(cursor)), marker).toThrow('type=')
+    }
+    expect(gh.calls.filter((call) => !call.startsWith('GET') && call !== 'POST graphql')).toEqual([])
+    // A marker quoted further down is only text.
+    writeFileSync(file, 'see the ack:\n<!-- vsk:v1 type=ack stage=ship -->')
+    expect(run('comment', '7', '--file', file).code).toBe(0)
+  })
+
   test('usage errors name the fix', () => {
     expect(() => run('sync')).toThrow('needs an issue number')
     expect(() => run('comment', '7')).toThrow('--file is required')

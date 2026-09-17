@@ -111,6 +111,17 @@ describe('guard', () => {
     expect((await hook('pre-tool', JSON.stringify({ tool_name: 'Bash', tool_input: { command: 'x'.repeat(70_000) } }))).json().hookSpecificOutput.permissionDecision).toBe('ask')
   })
 
+  test('Codex exec_command payloads are guarded, and a shell tool with an unknown shape asks', async () => {
+    const exec = (cmd: unknown) => ({ hook_event_name: 'PreToolUse', cwd: plain, model: 'gpt-5.5', tool_name: 'exec_command', tool_input: { cmd } })
+    expect((await hook('pre-tool', exec('git push origin main'), 'codex')).json().hookSpecificOutput.permissionDecision).toBe('deny')
+    expect((await hook('pre-tool', exec(['git', 'push', 'origin', 'main']), 'codex')).json().hookSpecificOutput.permissionDecision).toBe('deny')
+    expect((await hook('pre-tool', exec('ls'), 'codex')).text).toBe('')
+    const odd = { hook_event_name: 'PreToolUse', cwd: plain, tool_name: 'exec_command', tool_input: { script: 'git push origin main' } }
+    expect((await hook('pre-tool', odd, 'codex')).json().hookSpecificOutput.permissionDecision).toBe('deny')
+    expect((await hook('pre-tool', { ...odd, tool_name: 'Bash' })).json().hookSpecificOutput.permissionDecision).toBe('ask')
+    expect((await hook('pre-tool', { cwd: plain, tool_name: 'Grep', tool_input: { pattern: 'x' } })).text).toBe('')
+  })
+
   test('a guard wired without a harness blocks', async () => {
     out = []
     await runHook(['pre-tool'], deps(), Readable.from([Buffer.from(JSON.stringify(bash('ls')))]))

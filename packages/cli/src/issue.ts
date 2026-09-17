@@ -7,7 +7,7 @@ import { basename, dirname, join, resolve } from 'node:path'
 import { ghRequest, type GhRunner, defaultRunner } from './gh.ts'
 import { claim, heartbeat, holderOf, keepClaimRows, ownerId, release, type ClaimKind } from './claim.ts'
 import { writeStatus } from './status-comment.ts'
-import { artifactHash, assertRepo, cacheDir, dropIssue, readBody, readState, syncIssue, withLock, type CacheState, type CommentEntry, type GhComment } from './issue-cache.ts'
+import { artifactHash, assertRepo, cacheDir, commentType, dropIssue, readBody, readState, syncIssue, withLock, type CacheState, type CommentEntry, type GhComment } from './issue-cache.ts'
 import { STATES, sizeOf, stateOf, transition, type State } from './labels.ts'
 
 export const ACK_STAGES = ['brief', 'plan', 'ship'] as const
@@ -353,9 +353,13 @@ export function runIssue(argv: string[], { runner = defaultRunner, cwd = process
     print({ dryRun: true, verb: args.verb, ...detail }, `dry run: would ${what}`)
     return true
   }
+  // Acks, claims and releases are written only by their own verbs, which check what they record.
   const input = (flag = 'file') => {
     if (!args.flags[flag]) throw new Error(`--${flag} is required`)
-    return readFileSync(resolve(cwd, args.flags[flag]!), 'utf8')
+    const text = readFileSync(resolve(cwd, args.flags[flag]!), 'utf8')
+    const type = commentType(text)
+    if (['ack', 'claim', 'release'].includes(type)) throw new Error(`the text starts with a type=${type} marker — only \`vegafactory issue ${type}\` writes those`)
+    return text
   }
 
   switch (args.verb) {

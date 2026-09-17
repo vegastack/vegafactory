@@ -11,6 +11,12 @@ import { spawnSync } from 'node:child_process'
 import { basename } from 'node:path'
 
 export interface Segment { words: string[]; redirects: string[]; strings: string[] }
+// Stands in for text the shell computes at run time ($VAR, $(…), backticks, $'…'), so a word
+// built by expansion is never read as the literal it might become.
+export const EXPANDED = '\u0000'
+const expanded = (word: string | undefined) => word !== undefined && word.includes(EXPANDED)
+// A `$` that starts an expansion rather than standing for itself.
+const EXPANSION_START = /[A-Za-z0-9_{@*#?$!'"-]/
 export interface Policy { defaultBranch: string | null; shipAsk: string[]; tags?: Set<string> }
 export interface Decision { decision: 'allow' | 'ask'; reason: string | null; rule: string }
 // Says whether `gh pr merge` with these (resolved) arguments is already covered by a recorded "ship it".
@@ -136,6 +142,7 @@ function parseInto(text: string, segments: Segment[]) {
     if (ch === '$' && text[i + 1] === '(') {
       const end = matchParen(text, i + 1)
       substitute(text.slice(i + 2, end))
+      append(EXPANDED)
       i = end + 1
       continue
     }
@@ -143,7 +150,13 @@ function parseInto(text: string, segments: Segment[]) {
       const end = text.indexOf('`', i + 1)
       const stop = end === -1 ? text.length : end
       substitute(text.slice(i + 1, stop))
+      append(EXPANDED)
       i = stop + 1
+      continue
+    }
+    if (ch === '$' && EXPANSION_START.test(text[i + 1] ?? '')) {
+      append(EXPANDED)
+      i += 1
       continue
     }
     if (ch === '(' && word === null) {
@@ -177,6 +190,7 @@ function parseInto(text: string, segments: Segment[]) {
         if (text[j] === '$' && text[j + 1] === '(') {
           const end = matchParen(text, j + 1)
           substitute(text.slice(j + 2, end))
+          buffer += EXPANDED
           j = end + 1
           continue
         }
@@ -184,7 +198,13 @@ function parseInto(text: string, segments: Segment[]) {
           const end = text.indexOf('`', j + 1)
           const stop = end === -1 ? text.length : end
           substitute(text.slice(j + 1, stop))
+          buffer += EXPANDED
           j = stop + 1
+          continue
+        }
+        if (text[j] === '$' && /[A-Za-z0-9_{@*#?$!-]/.test(text[j + 1] ?? '')) {
+          buffer += EXPANDED
+          j += 1
           continue
         }
         buffer += text[j]
@@ -271,6 +291,8 @@ const WRAPPERS: Record<string, { withValue: string[]; positionals: number }> = {
   xargs: { withValue: ['-I', '-n', '-L', '-P', '-d', '-s', '-E', '-a', '--max-args', '--max-lines', '--max-procs', '--delimiter', '--replace', '--arg-file'], positionals: 0 },
 }
 const SHELLS = new Set(['sh', 'bash', 'zsh', 'dash', 'ksh', 'ash', 'fish'])
+// Shell words that only introduce the command after them.
+const KEYWORDS = new Set(['if', 'then', 'else', 'elif', 'do', 'while', 'until', '!'])
 const GIT_GLOBAL_WITH_VALUE = new Set(['-C', '-c', '--git-dir', '--work-tree', '--namespace', '--exec-path', '--super-prefix', '--config-env', '--list-cmds', '--attr-source'])
 const GH_GLOBAL_WITH_VALUE = new Set(['-R', '--repo'])
 // Every git subcommand the guard knows. Anything else is an alias it cannot see through, so it asks.
@@ -326,17 +348,22 @@ function shellScript(words: string[]): string | null {
 export function resolveWords(input: string[]): { words: string[]; script: string | null } {
   let rest = input.filter((word) => typeof word === 'string')
   let head = ''
+  // xargs appends arguments nobody can see yet.
+  let viaXargs = false
   for (let guard = 0; guard < 16 && rest.length > 0; guard += 1) {
-    while (rest.length > 0 && /^[A-Za-z_][A-Za-z0-9_]*=/.test(rest[0]!)) rest = rest.slice(1)
+    while (rest.length > 0 && (/^[A-Za-z_][A-Za-z0-9_]*=/.test(rest[0]!) || KEYWORDS.has(rest[0]!))) rest = rest.slice(1)
     if (rest.length === 0) break
     head = basename(rest[0]!)
     if (SHELLS.has(head)) return { words: [head, ...rest.slice(1)], script: shellScript(rest) }
+    if (head === 'eval') return { words: rest, script: rest.slice(1).join(' ') }
     if (!Object.hasOwn(WRAPPERS, head)) break
+    if (head === 'xargs') viaXargs = true
     rest = stripWrapper(rest, WRAPPERS[head]!)
     head = ''
   }
   if (rest.length === 0) return { words: [], script: null }
   rest = [head, ...rest.slice(1)]
+  if (viaXargs) rest.push(EXPANDED)
   if (head === 'git') {
     const aliases: Record<string, string> = {}
     let tail = rest.slice(1)
@@ -344,6 +371,8 @@ export function resolveWords(input: string[]): { words: string[]; script: string
       const option = tail[0]!
       const name = option.includes('=') ? option.slice(0, option.indexOf('=')) : option
       const value = option.includes('=') ? option.slice(option.indexOf('=') + 1) : tail[1]
+      // A computed global option could be an alias or another repository: the subcommand is unknown.
+      if (expanded(option) || (GIT_GLOBAL_WITH_VALUE.has(name) && !option.includes('=') && expanded(value))) return { words: ['git', EXPANDED], script: null }
       if (name === '-c' && typeof value === 'string') {
         const alias = /^alias\.([^=]+)=(.*)$/.exec(value)
         if (alias) aliases[alias[1]!] = alias[2]!
@@ -361,6 +390,7 @@ export function resolveWords(input: string[]): { words: string[]; script: string
     while (tail.length > 0 && tail[0]!.startsWith('-')) {
       const option = tail[0]!
       const name = option.includes('=') ? option.slice(0, option.indexOf('=')) : option
+      if (expanded(option)) return { words: ['gh', EXPANDED], script: null }
       tail = GH_GLOBAL_WITH_VALUE.has(name) && !option.includes('=') ? tail.slice(2) : tail.slice(1)
     }
     rest = ['gh', ...tail]
@@ -429,9 +459,89 @@ function familyProbe(text: string, extra: string[]): string | null {
 }
 
 const READ_ONLY_RELEASE = new Set(['list', 'view', 'download', 'ls'])
+// Subcommands whose arguments decide whether something ships or is destroyed.
+const GUARDED_GIT = new Set(['push', 'tag', 'reset', 'branch', 'worktree', 'update-ref', 'send-pack', 'symbolic-ref'])
+const guardedGh = (words: string[]) => ['api', 'release'].includes(words[1]!) || (['pr', 'issue'].includes(words[1]!) && ['merge', 'comment'].includes(words[2]!))
+const PUBLISHERS = ['npm', 'pnpm', 'yarn', 'bun']
+
+// Shell expansion can spell a guarded command the parser never sees, so a computed command
+// name, or a computed argument to a guarded command, asks.
+function expansionRisk(words: string[]): Decision | null {
+  const risky = ask(`a command built by shell expansion cannot be classified, so it ${WORD}`, 'unclassified')
+  if (expanded(words[0])) return risky
+  if (words[0] === 'git' && (expanded(words[1]) || (GUARDED_GIT.has(words[1]!) && words.slice(2).some(expanded)))) return risky
+  if (words[0] === 'gh' && (expanded(words[1]) || expanded(words[2]) || (guardedGh(words) && words.slice(2).some(expanded)))) return risky
+  if (PUBLISHERS.includes(words[0]!) && expanded(words[1])) return risky
+  return null
+}
+
+const GH_API_WITH_VALUE = new Set(['-q', '--jq', '-t', '--template', '--cache', '--hostname', '-p', '--preview'])
+const GH_API_FIELDS = new Set(['-f', '-F', '--field', '--raw-field'])
+
+// `gh api`: a GET is a read; any other method, a body, or a GraphQL mutation asks.
+function ghApi(words: string[]): Decision | null {
+  const args = words.slice(2)
+  let method: string | null = null
+  let endpoint: string | null = null
+  let body = false
+  let override = false
+  const fields: string[] = []
+  for (let i = 0; i < args.length; i += 1) {
+    const token = args[i]!
+    const name = token.startsWith('--') && token.includes('=') ? token.slice(0, token.indexOf('=')) : token
+    const inline = name !== token ? token.slice(name.length + 1) : null
+    if (name === '-X' || name === '--method') method = inline ?? args[++i] ?? ''
+    else if (/^-X./.test(token)) method = token.slice(2)
+    else if (GH_API_FIELDS.has(name)) fields.push(inline ?? args[++i] ?? '')
+    else if (/^-[fF]./.test(token)) fields.push(token.slice(2))
+    else if (name === '--input') { body = true; if (inline === null) i += 1 }
+    else if (name === '-H' || name === '--header') { if (/method-override/i.test(inline ?? args[++i] ?? '')) override = true }
+    else if (GH_API_WITH_VALUE.has(name)) { if (inline === null) i += 1 }
+    else if (token.startsWith('-')) continue
+    else endpoint ??= token
+  }
+  const unreadable = ask(`a \`gh api\` call the guard cannot read ${WORD}`, 'unclassified')
+  if (endpoint === null || expanded(endpoint) || (method !== null && expanded(method))) return unreadable
+  const verb = (method ?? (fields.length || body ? 'POST' : 'GET')).toUpperCase()
+  if (/(^|\/)graphql$/.test(endpoint)) {
+    if (body || override || (method !== null && verb !== 'POST' && verb !== 'GET')) return unreadable
+    if (fields.some((field) => expanded(field) || /^[^=]*=@/.test(field))) return unreadable
+    if (fields.some((field) => /\bmutation\b/i.test(field))) return ask(`a GraphQL mutation can merge, release or delete, so it ${WORD}`, 'always-ask')
+    return null
+  }
+  if (/pulls\/\d+\/merge(\/|$)/.test(endpoint) && (verb !== 'GET' || override)) return ask(`merging to the default branch ${WORD}`, 'default-branch')
+  if (verb !== 'GET' || override) return ask(`a \`gh api\` ${verb} call changes GitHub, which ${WORD}`, 'always-ask')
+  return null
+}
+
+const flagValue = (args: string[], flag: string): string | null => {
+  let value: string | null = null
+  for (let i = 0; i < args.length; i += 1) if (args[i] === flag) value = args[i + 1] ?? ''
+  return value
+}
+
+// `vegafactory issue …`: the verbs that would let a session authorise itself.
+function issueVerb(words: string[]): Decision | null {
+  const at = words.findIndex((word, index) => index > 0 && word === 'issue')
+  if (words[0] === 'gh' || at === -1) return null
+  const verb = words[at + 1]
+  const args = words.slice(at + 2)
+  if (expanded(verb) || ((verb === 'ack' || verb === 'claim') && args.some(expanded))) return ask(`an issue command built by shell expansion ${WORD}`, 'unclassified')
+  if (verb === 'ack') {
+    if (args.some((arg) => /^--(stage|source)=/.test(arg))) return ask(`an ack the guard cannot read ${WORD}`, 'unclassified')
+    const stage = flagValue(args, '--stage')
+    const source = flagValue(args, '--source') ?? 'session'
+    if (stage !== 'brief' && stage !== 'plan') return ask(`recording "ship it" is the operator's own word, so it ${WORD}`, 'always-ask')
+    if (!/^comment:\d+$/.test(source)) return ask(`an ack from this session is the operator's own word, so it ${WORD}`, 'always-ask')
+  }
+  if (verb === 'claim' && args.some((arg) => arg.startsWith('--take-back-by'))) return ask(`taking an issue back from another session ${WORD}`, 'always-ask')
+  return null
+}
 
 function classifyResolved(segment: Segment, words: string[], policy: Policy, mergeCheck?: MergeCheck): Decision {
   if (words.length === 0) return ALLOW
+  const risk = expansionRisk(words) ?? issueVerb(words)
+  if (risk) return risk
   const text = words.join(' ')
   const asWritten = [segment.words[0] ?? '', ...words.slice(1)].join(' ')
 
@@ -460,10 +570,15 @@ function classifyResolved(segment: Segment, words: string[], policy: Policy, mer
       if (mergeCheck?.(words, segment.words)) return { decision: 'allow', reason: null, rule: 'ship-it-recorded' }
       return ask(`merging to the default branch ${WORD}`, 'default-branch')
     }
-    if (words[1] === 'api' && words.some((word) => /pulls\/\d+\/merge(\/|$)/.test(word))) return ask(`merging to the default branch ${WORD}`, 'default-branch')
+    if (words[1] === 'api') {
+      const api = ghApi(words)
+      if (api) return api
+    }
+    // A raw comment can carry a workflow marker (an ack, a claim); `vegafactory issue comment` refuses those.
+    if ((words[1] === 'issue' || words[1] === 'pr') && words[2] === 'comment') return ask(`a raw GitHub comment ${WORD} — use vegafactory issue comment`, 'always-ask')
     if (words[1] === 'release' && !READ_ONLY_RELEASE.has(words[2] ?? '')) return ask(`changing a release ${WORD}`, 'always-ask')
   }
-  if (['npm', 'pnpm', 'yarn', 'bun'].includes(words[0]!) && words[1] === 'publish') return ask(`publishing ${WORD}`, 'always-ask')
+  if (PUBLISHERS.includes(words[0]!) && words[1] === 'publish') return ask(`publishing ${WORD}`, 'always-ask')
 
   if (words[0] === 'git') {
     const sub = words[1]
@@ -495,10 +610,28 @@ function classifyResolved(segment: Segment, words: string[], policy: Policy, mer
   return ALLOW
 }
 
+// The commands `find -exec` runs, with the found path standing in as an expansion.
+function findCommands(words: string[]): string[][] {
+  const commands: string[][] = []
+  for (let i = 1; i < words.length; i += 1) {
+    if (!['-exec', '-execdir', '-ok', '-okdir'].includes(words[i]!)) continue
+    const end = words.findIndex((word, index) => index > i && (word === ';' || word === '+'))
+    commands.push([...words.slice(i + 1, end === -1 ? words.length : end), EXPANDED])
+    i = end === -1 ? words.length : end
+  }
+  return commands
+}
+
 export function classifySegment(segment: Segment, policy: Policy, mergeCheck?: MergeCheck): Decision {
   if (segment.words.length === 0) return ALLOW
   const resolved = resolveWords(segment.words)
   if (resolved.script !== null) return classifyCommand(resolved.script, policy, mergeCheck)
+  if (resolved.words[0] === 'find') {
+    for (const words of findCommands(resolved.words)) {
+      const inner = classifySegment({ words, redirects: [], strings: [] }, policy)
+      if (inner.decision === 'ask') return inner
+    }
+  }
   const result = classifyResolved(segment, resolved.words, policy, mergeCheck)
   if (result.decision === 'ask' || (resolved.words[0] === 'git' && resolved.words[1] === 'commit')) return result
   for (const string of segment.strings) {
@@ -524,15 +657,30 @@ export function classifyCommand(command: unknown, policy: Policy, mergeCheck?: M
 
 const shellQuote = (part: string) => (/^[A-Za-z0-9_/.:=@%+,-]+$/.test(part) ? part : `'${part.replace(/'/g, "'\\''")}'`)
 
-// Claude puts the shell command at tool_input.command; Codex may send the argv array or the
-// string itself. Any other shape is a tool that runs no shell command.
+// Tools that never run a shell command, whatever their payload holds (apply_patch carries the patch in `command`).
+const NOT_SHELL = new Set(['apply_patch', 'Write', 'Edit', 'MultiEdit', 'NotebookEdit', 'Read', 'Glob', 'Grep', 'LS', 'WebFetch', 'WebSearch', 'TodoWrite'])
+
+// A tool that may run a command; the guard asks when it cannot read one from its payload.
+export function isShellTool(name: string): boolean {
+  if (NOT_SHELL.has(name)) return false
+  const last = name.split('__').at(-1) ?? name
+  if (/^(read|list|get)_/.test(last)) return false
+  return /bash|shell|terminal|(^|[_.])exec($|[_.])|command/i.test(last)
+}
+
+// Claude's Bash and Codex's shell tools put the command at tool_input.command; Codex's
+// exec_command uses tool_input.cmd; either may be a string or an argv array.
 export function extractCommand(payload: unknown): string | null {
-  const input = payload && typeof payload === 'object' ? (payload as { tool_input?: unknown }).tool_input : null
+  const record = payload && typeof payload === 'object' ? payload as { tool_name?: unknown; tool_input?: unknown } : {}
+  if (typeof record.tool_name === 'string' && NOT_SHELL.has(record.tool_name)) return null
+  const input = record.tool_input
   if (typeof input === 'string') return input
   if (!input || typeof input !== 'object') return null
-  const command = (input as { command?: unknown }).command
-  if (typeof command === 'string') return command
-  if (Array.isArray(command) && command.every((part) => typeof part === 'string')) return command.map(shellQuote).join(' ')
+  for (const key of ['command', 'cmd']) {
+    const command = (input as Record<string, unknown>)[key]
+    if (typeof command === 'string') return command
+    if (Array.isArray(command) && command.length && command.every((part) => typeof part === 'string')) return command.map(shellQuote).join(' ')
+  }
   return null
 }
 
