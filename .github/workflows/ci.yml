@@ -39,6 +39,13 @@ jobs:
       - name: Install dependencies
         run: bun install --frozen-lockfile
 
+      # Tests create throwaway git repositories; hosted runners have no commit identity.
+      - name: Git identity for test repositories
+        run: |
+          git config --global user.name "vegafactory-ci"
+          git config --global user.email "ci@vegafactory.invalid"
+          git config --global init.defaultBranch main
+
       - name: Fast checks
         run: bun run check:fast
 
