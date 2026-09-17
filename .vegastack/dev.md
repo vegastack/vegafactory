@@ -82,4 +82,3 @@ Pause for the operator only when the work genuinely requires them: a destructive
 - Every skill change goes through skillify's contract (8-item checklist, eval before tests)
 - A repo-wide prose or format sweep must include `assets/*.template`: dev-setup's profile template and dev-review's known-patterns template carry normative format strings that a `--include="*.md"` grep silently misses
 - Never commit generated files: dist/, packages/cli/skill/, skill-integrity.json
-- Never hand-edit refresh checksums/versions/timestamps — runner only

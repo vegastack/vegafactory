@@ -7,7 +7,7 @@
 
 VegaFactory ships Agent Skills for [Claude Code](https://code.claude.com) and [Codex](https://developers.openai.com/codex). The `@vegastack/vegafactory` package is the command-line installer and local workflow tool, and it contains the integrity-checked skill bundle.
 
-Each skill is self-contained: its own entry point, references, deterministic scripts, freshness contract, and walkthrough.
+Each skill is self-contained: its own entry point (`SKILL.md`), references, deterministic scripts, tests and evals. Volatile facts carry a checked date and an official source.
 
 The headline set is **`dev`**: a ten-stage, issue-driven development workflow where every gate that matters is held by a person, not an agent.
 

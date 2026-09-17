@@ -31,7 +31,7 @@ Rules for the prose itself — they exist because agents pay attention (and toke
 
 ## Numeric limits
 
-The numbers — name and description limits, body ceiling, and the Claude Code and Codex listing budgets — live in one place: skill-maintainer's Hard limits table, mirrored from the marked sentences in its references/standards.md and refreshed through its registry. Cite them per skill-maintainer's standards; a second copy here drifted once and would again.
+The numbers — name and description limits, body ceiling, and the Claude Code and Codex listing budgets — live in one place: skill-maintainer's Hard limits table, mirrored from the marked sentences in its references/standards.md and updated by hand, in both places, when the vendor docs change. Cite them per skill-maintainer's standards; a second copy here drifted once and would again.
 
 ## Trigger query sets
 

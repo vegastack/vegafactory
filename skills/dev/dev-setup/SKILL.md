@@ -19,7 +19,7 @@ Nearest neighbor: `dev-architect` consumes dev.md's `## Architecture` section an
 | headless question fallback | [ask-route](references/ask-route.md) |
 | harness, hooks and model facts | [harness-facts](references/harness-facts.md) |
 | stack and release playbooks | [stack-playbooks](references/stack-playbooks.md) |
-| GitHub App and broker | [github-app](references/github-app.md) |
+| GitHub App | [github-app](references/github-app.md) |
 
 ## Step 1 — Detect before asking
 

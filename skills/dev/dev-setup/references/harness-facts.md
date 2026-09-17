@@ -1,6 +1,6 @@
 # Harness facts
 
-Verified mechanics of the two harnesses this workflow targets — Claude Code and Codex — and the GitHub CLI floor. Everything here is volatile — vendors change these — so each claim carries its source; the refresh contract tracks them. Verified 2026-09-03.
+Verified mechanics of the two harnesses this workflow targets — Claude Code and Codex — and the GitHub CLI floor. Everything here is volatile — vendors change these — so each claim carries its source and is re-checked there when older than 60 days. Verified 2026-09-03.
 
 ## Claude Code
 
@@ -118,7 +118,7 @@ What a dispatcher can rely on when it starts a run with no human at the keyboard
 - AGENTS.md is the shared instruction file; the one-line CLAUDE.md import makes it reach Claude Code. Keep the marked section small — it counts against Codex's 32 KiB budget along with everything else in AGENTS.md.
 - Any skill that wants to ask the user degrades by `references/ask-route.md`: intake, plan and implement put the round in the issue and stop at `waiting-on-operator` (intake creates the issue first when the round comes before one exists); dev-setup, which can run before any issue exists, writes documented defaults marked `# TODO confirm` instead and says so.
 - Observed 02-09-2026: the `claude_code` preset already carries the current model guidance on autonomy, delivering work, readability and parallel tool calls; Codex gets none of it. That is why the AGENTS.md conduct paragraph exists and why skill bodies never restate harness behaviour — a restated instruction competes with the harness's own wording.
-- Parallel work runs only across sibling sub-issues of an epic, one session and one worktree each; tasks inside one issue run in order.
+- Tasks inside one issue run in order, and sibling sub-issues of an epic run one at a time for now; the plan's independent groups record which could run in parallel once the dispatcher (#218) does so.
 - The OpenTelemetry stream is **optional and never required**: capture is deterministic without a collector — the dispatcher parses each harness's own run output, SessionEnd hooks cover interactive sessions, and skill invocations come from hook payloads. `OTEL_LOG_TOOL_DETAILS` stays off; it exports exactly the tool arguments a record must never hold.
 - Every target harness spawns subagents (Claude Code's Task tool, Codex agents), so dev.md's `review:` knob means the same thing on each; only a headless run that cannot spawn falls back to a labeled self-review.
 

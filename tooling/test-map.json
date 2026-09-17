@@ -25,6 +25,9 @@
     { "match": ".github/workflows/factory-board.yml", "tests": ["skills/dev/dev-setup/tests/factory-board.test.ts"] },
     { "match": ".github/workflows/release.yml", "tests": ["scripts"] },
     { "match": ".github/skillspector-*", "tests": ["scripts"] },
+    { "match": ".vegastack/skillspector-baseline.json", "tests": ["scripts", "skills/skills-tooling"] },
+    { "match": "tooling/enable-hooks.mjs", "tests": ["tooling/enable-hooks.test.ts"] },
+    { "match": ".githooks/**", "tests": ["tooling/enable-hooks.test.ts"] },
     { "match": "scripts/**", "tests": ["scripts"] }
   ]
 }

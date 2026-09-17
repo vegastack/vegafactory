@@ -7,7 +7,7 @@ import { discoverSkills } from './lib/skills.mjs';
 import { fileURLToPath } from 'node:url';
 
 // The agentskills.io spec's six fields are the ceiling (claude.ai packaging hard-errors on
-// anything else); the tri-harness portable floor is name + description.
+// anything else); the portable floor for Claude Code and Codex is name + description.
 const MAX_NAME_LENGTH = 64;
 const MAX_DESCRIPTION_LENGTH = 1024;
 const ALLOWED_KEYS = new Set(['name', 'description', 'license', 'compatibility', 'allowed-tools', 'metadata']);

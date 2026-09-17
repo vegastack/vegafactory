@@ -47,18 +47,18 @@ The closed object has exactly `schemaVersion:1`, literal `eligible:true`, `taskI
 
 ## Independent groups
 
-Optional. Declare it only when the work below can run at the same time; its absence means the work runs in plan order, which is the safe default.
+Optional. Declare it only when the sibling sub-issues below could run at the same time; its absence means they run in plan order, which is the safe default. For now sub-issues run one at a time; the dispatcher (#218) will run disjoint groups in parallel.
 
 ```markdown
 **Independent groups:** (only when the work below can run at the same time)
-- `api` — #131 · Files: `packages/cli/src/dispatch.ts`, `packages/cli/test/dispatch.test.ts`
+- `api` — #131 · Files: `packages/cli/src/issue.ts`, `packages/cli/test/issue.test.ts`
 - `docs` — #132 · Files: `README.md`
 ```
 
 - **Members** are `#<issue>` sub-issues on an epic parent's plan; tasks inside one issue always run in order. A member belongs to exactly one group.
 - **File sets are the contract, not a hint.** Every group declares one; a path ending in `/` is a directory and covers everything beneath it. Two groups' sets must be disjoint, and a group names one child, because its members would otherwise run at once on one set — plan-lint blocks an overlap, a repeated id, a member in two groups, two issues in one group, a missing set, and a line outside the grammar above.
-- The declared set is also the **scope check**: a sub-issue whose diff touches a path outside its own set is not merged until the operator says so.
-- `node <path-to-this-skill>/scripts/plan-lint.mjs --file <plan.md> --groups --json` prints the validated groups as JSON — the one parser for this grammar, read by the dispatcher to decide which sibling sub-issues may run at the same time (at most three; generated files, migrations, lockfiles and `package.json` never run in parallel).
+- Declare the whole set a group will touch, tests included; review flags a sibling whose diff reaches outside its set.
+- `node <path-to-this-skill>/scripts/plan-lint.mjs --file <plan.md> --groups --json` prints the validated groups as JSON — the one parser for this grammar, and the one place that will decide which sibling sub-issues may run at the same time. Blocked plans print no groups.
 
 ## Rules
 

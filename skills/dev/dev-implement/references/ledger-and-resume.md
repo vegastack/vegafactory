@@ -22,6 +22,13 @@ The claim's **heartbeat** is not yours to write: the hooks update it on your own
 A resuming session claims the issue again (`vegafactory issue claim <n> …`), reads brief → plan → status comment (`vegafactory issue sync <n>`) → `git log` on the issue branch in its worktree (`vegafactory worktree restore <n>` when the folder is gone; `git pull` first after a take-back, since the last holder's final push may land late), then continues from the first task the progress list does not mark complete.
 
 - Resume only unfinished work within the acked brief and plan; `vegafactory issue check <n> --for implement --resume true` confirms the ack still matches.
+- Re-read the brief, the plan, every comment on the issue (old ones can be edited, so age does not matter) and `git log`; any current operator correction wins over the ledger.
 - An edited brief or plan since the ack stops the resume: one `handback` comment, `waiting-on-operator`.
 - Completed tasks stay as they are; re-run their checks only when the code they touched changed since.
 - A stale heartbeat is a reason to look, never proof the other session stopped: a live claim is taken back only on the operator's word (`vegafactory issue claim <n> --harness <h> --model <id> --take-back-by <their login>`).
+- Match tasks by their IDs, not by counts; a ticked task with a verified commit never reruns.
+- Anything ambiguous — a moved scope, a missing commit, a claim held elsewhere — is a hand-back, not a guess.
+
+## Surfacing — rulings never die in the dark
+
+Every `Ruling:` line lands on the evidence comment's `**Review:**` line at hand-back, in the order made. The operator reads that list and reverses anything wrong — a ruling that only ever lived in the ledger was a decision made in secret.
