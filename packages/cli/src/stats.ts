@@ -6,15 +6,18 @@
 // One event per assistant turn — counts and identifiers only, never a prompt, a file, tool
 // arguments or the subscription owner.
 //
-// Two rules keep the numbers honest under crashes and concurrent hooks. Collection holds one
-// interprocess lock and commits through a journal, so an interrupted run replays instead of
-// double-counting. An event id is stable per turn and a later line for the same turn appends a
-// corrected copy, so readers take the last record per id and a split turn still ends up complete.
+// Three rules keep the numbers honest. Collection holds one interprocess lock and commits through
+// a journal, so an interrupted run replays instead of double-counting. An event id is stable per
+// turn and a later line for the same turn appends a corrected copy with a higher revision, so
+// readers take the newest record per id. The push writes only inside the control-room clone, only
+// along real directories, and journals what it is about to do, so a death mid-push neither loses
+// turns nor files them twice.
 import { spawnSync } from 'node:child_process'
-import { createHash } from 'node:crypto'
-import { appendFileSync, closeSync, existsSync, lstatSync, mkdirSync, openSync, readFileSync, readSync, readdirSync, renameSync, rmSync, statSync, truncateSync, writeFileSync } from 'node:fs'
+import { createHash, randomUUID } from 'node:crypto'
+import { closeSync, constants as fsConstants, existsSync, lstatSync, mkdirSync, openSync, readFileSync, readSync, readdirSync, renameSync, rmSync, statSync, truncateSync, writeFileSync, writeSync } from 'node:fs'
 import { homedir, hostname } from 'node:os'
 import { basename, dirname, isAbsolute, join, parse as parsePath, resolve, sep } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { factoryConfigPath, parseControlRoomKnob, readFactoryConfig, type ControlRoomEntry } from './control-room.ts'
 import { defaultRunner, ghRequest, type GhRunner } from './gh.ts'
 import { issueFromBranch, issueFromWorktree } from './hook.ts'
@@ -28,6 +31,8 @@ export interface Tokens { input: number; output: number; cacheRead: number; cach
 
 export interface StatsEvent {
   id: string
+  // Rises each time a later line completes this turn; readers keep the highest revision per id.
+  rev: number
   at: string
   operator: string
   machine: string
@@ -58,6 +63,7 @@ const offsetsPath = (home: string) => join(statsDir(home), 'offsets.json')
 const eventsPath = (home: string) => join(statsDir(home), 'events.jsonl')
 const journalPath = (home: string) => join(statsDir(home), 'pending.json')
 const pushPath = (home: string) => join(statsDir(home), 'push.json')
+const pushJournalPath = (home: string) => join(statsDir(home), 'push-pending.json')
 const identityPath = (home: string) => join(statsDir(home), 'identity.json')
 
 const hash = (text: string) => createHash('sha256').update(text).digest('hex').slice(0, 16)
@@ -83,6 +89,13 @@ function readAt(path: string, position: number, length: number): Buffer {
     const read = readSync(handle, buffer, 0, length, position)
     return buffer.subarray(0, read)
   } finally { closeSync(handle) }
+}
+
+// Appends without ever following a symlink: a link left where a stats file belongs must fail, not
+// redirect the write.
+function appendLines(path: string, text: string) {
+  const handle = openSync(path, fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_APPEND | fsConstants.O_NOFOLLOW, 0o600)
+  try { writeSync(handle, text) } finally { closeSync(handle) }
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -159,6 +172,42 @@ export function defaultSite(): SiteLookup {
 }
 
 // ---------------------------------------------------------------------------------------------
+// Which skill a turn used. A harness records whatever the model passed it, so the name is kept
+// only when it is a real skill: the right shape *and* an actual SKILL.md under a skill root this
+// machine installs into. Anything else — a tool argument that merely looks like a name, a made-up
+// one, a customer's identifier — is dropped rather than carried into the control room.
+
+export type SkillLookup = (value: unknown) => string | null
+
+const SKILL_PATH = /skills\/([a-z0-9][a-z0-9._-]*)\/SKILL\.md/
+const SKILL_NAME = /^[a-z0-9][a-z0-9._-]*(?::[a-z0-9][a-z0-9._-]*)?$/
+
+// The shape a skill name must have. Necessary, never sufficient.
+export function skillName(value: unknown): string | null {
+  return typeof value === 'string' && value.length <= 64 && SKILL_NAME.test(value) ? value : null
+}
+
+export function skillRoots(home: string): string[] {
+  // The bundle that ships with this CLI, then the two directories `skills add` installs into.
+  const bundle = resolve(dirname(fileURLToPath(import.meta.url)), '..', 'skill')
+  return [bundle, join(home, '.claude', 'skills'), join(home, '.agents', 'skills')]
+}
+
+export function skillResolver(home: string, roots = skillRoots(home)): SkillLookup {
+  const known = new Map<string, string | null>()
+  return (value) => {
+    const name = skillName(value)
+    if (name === null) return null
+    if (known.has(name)) return known.get(name)!
+    const installed = roots.some((root) => {
+      try { return lstatSync(join(root, name, 'SKILL.md')).isFile() } catch { return false }
+    })
+    known.set(name, installed ? name : null)
+    return installed ? name : null
+  }
+}
+
+// ---------------------------------------------------------------------------------------------
 // Parsing. Each parser reads a slice of one log and reports how many bytes of whole lines it
 // consumed; `carry` holds what the next slice of the same file still needs — the Codex model and
 // repository arrive once at the top, the turn boundary the next duration is measured from, and the
@@ -176,7 +225,7 @@ export interface Carry {
   pending?: { key: string; event: StatsEvent } | null
 }
 
-export interface ParseContext { operator: string; machine: string; carry: Carry; site: SiteLookup }
+export interface ParseContext { operator: string; machine: string; carry: Carry; site: SiteLookup; skill: SkillLookup }
 export interface ParseResult { events: StatsEvent[]; consumed: number }
 
 // A turn already written down, and whether this slice has already appended it.
@@ -189,11 +238,12 @@ function opened(carry: Carry): Map<string, Known> {
 }
 
 // Applies a late line to a turn already emitted: an in-slice event is edited in place, a turn from
-// an earlier slice gets a corrected copy appended, which readers keep instead of the first one.
+// an earlier slice gets a corrected copy appended under the next revision, which readers keep.
 function correct(known: Known, events: StatsEvent[], change: (event: StatsEvent) => void) {
   const before = JSON.stringify(known.event)
   change(known.event)
   if (known.fresh || JSON.stringify(known.event) === before) return
+  known.event.rev = (known.event.rev ?? 1) + 1
   events.push(known.event)
   known.fresh = true
 }
@@ -209,15 +259,6 @@ function wholeLines(text: string): { lines: string[]; consumed: number } {
   const end = text.lastIndexOf('\n')
   if (end === -1) return { lines: [], consumed: 0 }
   return { lines: text.slice(0, end).split('\n'), consumed: Buffer.byteLength(text.slice(0, end + 1)) }
-}
-
-const SKILL_PATH = /skills\/([a-z0-9][a-z0-9._-]*)\/SKILL\.md/
-// A skill name, and nothing else: the value a harness records is written to the control room and
-// the dashboard, so anything that is not a plain name (markup, a path, a sentence, a secret) is
-// dropped rather than carried.
-const SKILL_NAME = /^[a-z0-9][a-z0-9._-]*(?::[a-z0-9][a-z0-9._-]*)?$/
-export function skillName(value: unknown): string | null {
-  return typeof value === 'string' && value.length <= 64 && SKILL_NAME.test(value) ? value : null
 }
 
 export function parseClaude(text: string, context: ParseContext): ParseResult {
@@ -242,7 +283,7 @@ export function parseClaude(text: string, context: ParseContext): ParseResult {
     if (!message?.id || !message.usage || !message.model || message.model.startsWith('<')) continue
     const id = hash(`claude|${String(entry.sessionId ?? '')}|${message.id}`)
     const call = (message.content ?? []).find((block) => block.type === 'tool_use' && block.name === 'Skill')
-    const chosen = skillName((call?.input as { skill?: unknown } | undefined)?.skill)
+    const chosen = context.skill((call?.input as { skill?: unknown } | undefined)?.skill)
     const already = known.get(message.id)
     if (already) {
       correct(already, events, (event) => {
@@ -256,7 +297,7 @@ export function parseClaude(text: string, context: ParseContext): ParseResult {
     const branch = typeof entry.gitBranch === 'string' ? entry.gitBranch : null
     const site = context.site(cwd, branch)
     const event: StatsEvent = {
-      id, at: new Date(at).toISOString(), operator: context.operator, machine: context.machine, harness: 'claude',
+      id, rev: 1, at: new Date(at).toISOString(), operator: context.operator, machine: context.machine, harness: 'claude',
       model: message.model, repo: site.repo, issue: site.issue, state: site.state, skill: chosen,
       tokens: {
         input: count(message.usage.input_tokens), output: count(message.usage.output_tokens),
@@ -303,9 +344,10 @@ export function parseCodex(text: string, context: ParseContext): ParseResult {
       continue
     }
     if (entry.type === 'response_item' && (payload.type === 'custom_tool_call' || payload.type === 'function_call')) {
-      // Codex has no Skill tool: a skill is used by reading its SKILL.md. Only the name is kept.
-      const text = `${typeof payload.input === 'string' ? payload.input : ''}${typeof payload.arguments === 'string' ? payload.arguments : ''}`
-      const found = skillName(SKILL_PATH.exec(text)?.[1])
+      // Codex has no Skill tool: a skill is used by reading its SKILL.md. Only a name that resolves
+      // to an installed skill is kept — the rest of the command is never looked at again.
+      const call = `${typeof payload.input === 'string' ? payload.input : ''}${typeof payload.arguments === 'string' ? payload.arguments : ''}`
+      const found = context.skill(SKILL_PATH.exec(call)?.[1])
       if (found) carry.skill = found
       continue
     }
@@ -322,7 +364,7 @@ export function parseCodex(text: string, context: ParseContext): ParseResult {
     // here makes the four numbers mean the same thing in both harnesses.
     const cacheRead = count(usage.cached_input_tokens)
     const event: StatsEvent = {
-      id: hash(`codex|${carry.session ?? ''}|${String(payload.response_id ?? '')}`),
+      id: hash(`codex|${carry.session ?? ''}|${String(payload.response_id ?? '')}`), rev: 1,
       at: new Date(at).toISOString(), operator: context.operator, machine: context.machine, harness: 'codex',
       model: carry.model ?? 'unknown', repo: site.repo, issue: site.issue, state: site.state, skill: carry.skill ?? null,
       tokens: {
@@ -362,8 +404,8 @@ export function sessionLogs(home: string): Array<{ path: string; harness: Harnes
   try {
     for (const entry of readdirSync(projects, { withFileTypes: true })) {
       if (!entry.isDirectory()) continue
-      for (const file of readdirSync(join(projects, entry.name))) {
-        if (file.endsWith('.jsonl')) found.push({ path: join(projects, entry.name, file), harness: 'claude' })
+      for (const file of readdirSync(join(projects, entry.name), { withFileTypes: true })) {
+        if (file.isFile() && file.name.endsWith('.jsonl')) found.push({ path: join(projects, entry.name, file.name), harness: 'claude' })
       }
     }
   } catch { /* Claude Code is not installed here */ }
@@ -372,7 +414,7 @@ export function sessionLogs(home: string): Array<{ path: string; harness: Harnes
     for (const entry of readdirSync(dir, { withFileTypes: true })) {
       const path = join(dir, entry.name)
       if (entry.isDirectory()) walk(path, depth + 1)
-      else if (/^rollout-.*\.jsonl$/.test(entry.name)) found.push({ path, harness: 'codex' })
+      else if (entry.isFile() && /^rollout-.*\.jsonl$/.test(entry.name)) found.push({ path, harness: 'codex' })
     }
   }
   try { walk(join(home, '.codex', 'sessions'), 0) } catch { /* Codex is not installed here */ }
@@ -424,6 +466,7 @@ export interface CollectOptions {
   runner?: GhRunner
   now?: () => number
   site?: SiteLookup
+  skill?: SkillLookup
 }
 
 export interface CollectResult { files: number; events: number; bytes: number }
@@ -473,7 +516,7 @@ function recover(home: string) {
   for (let take = Math.min(rows.length, tail.length); take > 0; take--) {
     if (tail.slice(-take).join('\n') === rows.slice(0, take).join('\n')) { landed = take; break }
   }
-  if (landed < rows.length) appendFileSync(eventsPath(home), rows.slice(landed).join('\n') + '\n')
+  if (landed < rows.length) appendLines(eventsPath(home), rows.slice(landed).join('\n') + '\n')
   atomicWrite(offsetsPath(home), JSON.stringify(pending.offsets, null, 2) + '\n')
   rmSync(journalPath(home), { force: true })
 }
@@ -481,7 +524,7 @@ function recover(home: string) {
 function commit(home: string, events: StatsEvent[], offsets: Offsets) {
   if (events.length) {
     atomicWrite(journalPath(home), JSON.stringify({ events, offsets }))
-    appendFileSync(eventsPath(home), events.map((event) => JSON.stringify(event)).join('\n') + '\n')
+    appendLines(eventsPath(home), events.map((event) => JSON.stringify(event)).join('\n') + '\n')
   }
   atomicWrite(offsetsPath(home), JSON.stringify(offsets, null, 2) + '\n')
   rmSync(journalPath(home), { force: true })
@@ -501,6 +544,7 @@ function collectLocked(home: string, options: CollectOptions): CollectResult {
   const machine = options.machine ?? hostname()
   const operator = options.operator ?? resolveOperator(home, options.runner ?? defaultRunner, now())
   const site = options.site ?? defaultSite()
+  const skill = options.skill ?? skillResolver(home)
   const offsets = readJson<Offsets>(offsetsPath(home), { schema: 1, files: {} })
   if (offsets.schema !== 1 || !offsets.files) throw new Error(`unsupported stats offsets in ${offsetsPath(home)} — delete it`)
   const collected: StatsEvent[] = []
@@ -519,7 +563,7 @@ function collectLocked(home: string, options: CollectOptions): CollectResult {
       try { slice = sliceAt(log.path, state.offset, info.size) } catch { break }
       if (slice.skipped) { state.offset += slice.skipped; continue }
       if (!slice.text) break
-      const context: ParseContext = { operator, machine, carry: state.carry ?? {}, site }
+      const context: ParseContext = { operator, machine, carry: state.carry ?? {}, site, skill }
       const result = log.harness === 'claude' ? parseClaude(slice.text, context) : parseCodex(slice.text, context)
       collected.push(...result.events)
       state.carry = context.carry
@@ -537,9 +581,9 @@ function collectLocked(home: string, options: CollectOptions): CollectResult {
 }
 
 // ---------------------------------------------------------------------------------------------
-// Reading events back: this machine's own file, plus whatever every operator pushed into the
-// control-room clones this machine keeps. The last record for an id wins, so a turn corrected by a
-// later slice is read as its finished self.
+// Reading events back: whatever every operator pushed into the control-room clones this machine
+// keeps, then this machine's own file. The newest revision of an id wins, so a turn corrected here
+// but not pushed yet still reads as its finished self.
 
 function parseEvents(text: string, into: Map<string, StatsEvent>, since: number | null) {
   for (const line of text.split('\n')) {
@@ -548,10 +592,13 @@ function parseEvents(text: string, into: Map<string, StatsEvent>, since: number 
     try { event = JSON.parse(line) as StatsEvent } catch { continue }
     if (!event?.id || !event.at) continue
     if (since !== null && Date.parse(event.at) < since) continue
+    const seen = into.get(event.id)
+    if (seen && (seen.rev ?? 0) > (event.rev ?? 0)) continue
     into.set(event.id, event)
   }
 }
 
+// Every entry is judged by lstat, so a symlink is never walked into or read through.
 function jsonlUnder(dir: string, depth = 0): string[] {
   if (depth > 6) return []
   const found: string[] = []
@@ -559,7 +606,7 @@ function jsonlUnder(dir: string, depth = 0): string[] {
     for (const entry of readdirSync(dir, { withFileTypes: true })) {
       const path = join(dir, entry.name)
       if (entry.isDirectory()) found.push(...jsonlUnder(path, depth + 1))
-      else if (entry.name.endsWith('.jsonl')) found.push(path)
+      else if (entry.isFile() && entry.name.endsWith('.jsonl')) found.push(path)
     }
   } catch { /* no such tree */ }
   return found
@@ -571,21 +618,21 @@ export function controlRoomStatsDirs(home: string): string[] {
     return Object.values(config.controlRooms)
       .filter((entry) => safeClonePath(home, entry.path) === null)
       .map((entry) => join(entry.path, 'stats'))
-      .filter((dir) => existsSync(dir))
+      .filter((dir) => { try { return lstatSync(dir).isDirectory() } catch { return false } })
   } catch { return [] }
 }
 
 export function loadEvents(home: string, { since = null as number | null, local = true, shared = true } = {}): StatsEvent[] {
   const events = new Map<string, StatsEvent>()
-  if (local) {
-    try { parseEvents(readFileSync(eventsPath(home), 'utf8'), events, since) } catch { /* nothing collected yet */ }
-  }
   if (shared) {
     for (const dir of controlRoomStatsDirs(home)) {
       for (const file of jsonlUnder(dir)) {
         try { parseEvents(readFileSync(file, 'utf8'), events, since) } catch { /* unreadable file */ }
       }
     }
+  }
+  if (local) {
+    try { parseEvents(readFileSync(eventsPath(home), 'utf8'), events, since) } catch { /* nothing collected yet */ }
   }
   return [...events.values()].sort((a, b) => a.at.localeCompare(b.at))
 }
@@ -754,6 +801,15 @@ export function renderShow(summary: Summary): string {
 export interface PushState { lastPushAt?: number; offset?: number }
 export interface PushResult { ok: boolean; action: 'pushed' | 'committed' | 'skipped' | 'none' | 'refused'; events: number; paths: string[]; message: string }
 
+// What a push is about to do, written down before it touches anything: enough to finish the job or
+// undo it after a death in the middle.
+interface PushJournal {
+  token: string
+  at: number
+  offset: number
+  files: Array<{ relative: string; had: number | null }>
+}
+
 export type GitRunner = (args: string[]) => { code: number; out: string }
 
 export const defaultGit: GitRunner = (args) => {
@@ -769,6 +825,18 @@ export function repoRootFor(cwd: string): string | null {
   return repoRootOf(worktree?.[1] ?? cwd)
 }
 
+// Every component of a path is judged by lstat, never followed.
+function realPathTo(path: string, from: string): string | null {
+  let cursor = from
+  for (const part of path.slice(from.length).split(sep).filter(Boolean)) {
+    cursor = join(cursor, part)
+    let info
+    try { info = lstatSync(cursor) } catch { return `nothing at ${cursor}` }
+    if (info.isSymbolicLink()) return `refusing a symlinked path: ${cursor}`
+  }
+  return null
+}
+
 // A control-room clone is only ever read or written where sync puts it: a canonical absolute path
 // inside this machine's control-room store, with no symlink anywhere along it. Returns the reason
 // it is not usable, or null when it is.
@@ -776,55 +844,49 @@ export function safeClonePath(home: string, path: unknown): string | null {
   const store = join(home, '.vegastack', 'control-room')
   if (typeof path !== 'string' || !path || !isAbsolute(path) || resolve(path) !== path) return 'the control-room path is not absolute and canonical'
   if (path !== store && !path.startsWith(store + sep)) return `the control-room clone is outside ${store}`
-  let cursor = parsePath(path).root
-  for (const part of path.slice(cursor.length).split(sep).filter(Boolean)) {
+  const walked = realPathTo(path, parsePath(path).root)
+  if (walked) return walked.startsWith('nothing at') ? `no control-room clone at ${path}` : walked
+  return null
+}
+
+// A file this push may append to: every directory below the clone must be a real directory, and an
+// existing file must be a regular file. A tracked symlink under stats/ would otherwise redirect the
+// write out of the clone.
+export function safeStatsPath(clone: string, relative: string): string | null {
+  const parts = relative.split('/')
+  if (!parts.length || parts.some((part) => !part || part === '.' || part === '..' || part.includes(sep) || isAbsolute(part))) return `unusable stats path: ${relative}`
+  let cursor = clone
+  for (const [index, part] of parts.entries()) {
     cursor = join(cursor, part)
     let info
-    try { info = lstatSync(cursor) } catch { return `no control-room clone at ${path}` }
-    if (info.isSymbolicLink()) return `refusing a symlinked control-room path: ${cursor}`
+    try { info = lstatSync(cursor) } catch { continue }
+    if (info.isSymbolicLink()) return `refusing a symlinked stats path: ${cursor}`
+    if (index < parts.length - 1 ? !info.isDirectory() : !info.isFile()) return `stats path is not a ${index < parts.length - 1 ? 'directory' : 'regular file'}: ${cursor}`
   }
   return null
 }
 
 interface Clone { path: string; branch: string }
 
-// Everything that must be true before this writes into someone else's checkout.
-function inspectClone(home: string, entry: ControlRoomEntry, repo: string, git: GitRunner): { clone: Clone; ahead: string[] } | { reason: string; fatal: boolean } {
-  const unsafe = safeClonePath(home, entry.path)
-  if (unsafe) return { reason: unsafe, fatal: !unsafe.startsWith('no control-room clone') }
-  const path = entry.path
-  if (!existsSync(join(path, '.git'))) return { reason: `no local clone of the control room at ${path} — run "vegafactory sync" first`, fatal: false }
-  const origin = git(['-C', path, 'remote', 'get-url', 'origin'])
-  if (origin.code !== 0) return { reason: 'the control-room clone has no origin', fatal: true }
-  const url = origin.out.trim()
-  if (entry.remote ? url !== entry.remote : canonicalRepo(url) !== repo) return { reason: `the clone's origin (${url}) is not the control room this repo names`, fatal: true }
-  const branch = entry.branch || 'main'
-  const head = git(['-C', path, 'branch', '--show-current']).out.trim()
-  if (head !== branch) return { reason: `the control-room clone is on ${head || 'a detached HEAD'}, not ${branch}`, fatal: true }
-  if (git(['-C', path, 'rev-parse', '--verify', '--quiet', `refs/remotes/origin/${branch}`]).code !== 0) return { reason: `the clone has no origin/${branch} — run "vegafactory sync" first`, fatal: true }
-  const status = git(['-C', path, 'status', '--porcelain', '--untracked-files=all'])
-  if (status.code !== 0) return { reason: 'the control-room clone could not be read', fatal: true }
-  if (status.out.trim()) return { reason: `the control-room clone has local changes (${status.out.split('\n')[0]}) — sort them out first`, fatal: true }
-  const ahead = git(['-C', path, 'rev-list', `refs/remotes/origin/${branch}..HEAD`]).out.split('\n').filter(Boolean)
-  for (const sha of ahead) {
-    const subject = git(['-C', path, 'log', '-1', '--format=%s', sha]).out.trim()
-    const touched = git(['-C', path, 'show', '--name-only', '--format=', sha]).out.split('\n').filter(Boolean)
-    if (!subject.startsWith('stats:') || touched.some((file) => !file.startsWith('stats/'))) {
-      return { reason: `the control-room clone has a local commit that is not a stats push (${sha.slice(0, 7)} ${subject.slice(0, 60)})`, fatal: true }
-    }
-  }
-  return { clone: { path, branch }, ahead }
-}
-
-function sendCommits(clone: Clone, git: GitRunner): { ok: boolean; message: string } {
+function sendCommits(clone: Clone, git: GitRunner): { ok: boolean; message: string; restored: boolean } {
   const target = `HEAD:refs/heads/${clone.branch}`
+  const head = git(['-C', clone.path, 'rev-parse', 'HEAD']).out.trim()
   let push = git([...GIT_CREDENTIAL_ARGS, '-C', clone.path, 'push', '--quiet', 'origin', target])
-  if (push.code !== 0) {
-    // Another machine pushed first: rebase this machine's own file on top and try once more.
-    const pull = git([...GIT_CREDENTIAL_ARGS, '-C', clone.path, 'pull', '--quiet', '--rebase', 'origin', clone.branch])
-    if (pull.code === 0) push = git([...GIT_CREDENTIAL_ARGS, '-C', clone.path, 'push', '--quiet', 'origin', target])
+  if (push.code === 0) return { ok: true, message: '', restored: true }
+  // Another machine pushed first: rebase this machine's own file on top and try once more.
+  const pull = git([...GIT_CREDENTIAL_ARGS, '-C', clone.path, 'pull', '--quiet', '--rebase', 'origin', clone.branch])
+  if (pull.code !== 0) {
+    // A conflict leaves a rebase in progress and conflict markers in the tree; the clone belongs to
+    // sync, so it goes back exactly as it was, and the caller is told when it could not.
+    git(['-C', clone.path, 'rebase', '--abort'])
+    const back = git(['-C', clone.path, 'rev-parse', 'HEAD']).out.trim()
+    const dirty = git(['-C', clone.path, 'status', '--porcelain', '--untracked-files=all']).out.trim()
+    const why = pull.out.split('\n')[0] ?? 'rebase failed'
+    if (back !== head || dirty) return { ok: false, restored: false, message: `${why}; the control-room clone needs a hand: it is at ${back.slice(0, 7)}${dirty ? ' with local changes' : ''}` }
+    return { ok: false, restored: true, message: `${why}; the clone was put back and the commit stays local` }
   }
-  return { ok: push.code === 0, message: push.out.split('\n')[0] ?? '' }
+  push = git([...GIT_CREDENTIAL_ARGS, '-C', clone.path, 'push', '--quiet', 'origin', target])
+  return { ok: push.code === 0, message: push.out.split('\n')[0] ?? '', restored: true }
 }
 
 export interface PushOptions {
@@ -840,6 +902,62 @@ export function pushStats(options: PushOptions = {}): PushResult {
   mkdirSync(statsDir(home), { recursive: true })
   // One push at a time: two of them would file the same turns twice.
   return withLock(join(statsDir(home), 'push'), () => pushLocked(home, options))
+}
+
+// The clone's identity: where it points and what it is on. Checked before anything is read or
+// written, and before the state checks, because a crashed push is repaired first.
+function identifyClone(home: string, entry: ControlRoomEntry, repo: string, git: GitRunner): { clone: Clone } | { reason: string; fatal: boolean } {
+  const unsafe = safeClonePath(home, entry.path)
+  if (unsafe) return { reason: unsafe, fatal: !unsafe.startsWith('no control-room clone') }
+  const path = entry.path
+  if (!existsSync(join(path, '.git'))) return { reason: `no local clone of the control room at ${path} — run "vegafactory sync" first`, fatal: false }
+  const origin = git(['-C', path, 'remote', 'get-url', 'origin'])
+  if (origin.code !== 0) return { reason: 'the control-room clone has no origin', fatal: true }
+  const url = origin.out.trim()
+  if (entry.remote ? url !== entry.remote : canonicalRepo(url) !== repo) return { reason: `the clone's origin (${url}) is not the control room this repo names`, fatal: true }
+  const branch = entry.branch || 'main'
+  const head = git(['-C', path, 'branch', '--show-current']).out.trim()
+  if (head !== branch) return { reason: `the control-room clone is on ${head || 'a detached HEAD'}, not ${branch}`, fatal: true }
+  if (git(['-C', path, 'rev-parse', '--verify', '--quiet', `refs/remotes/origin/${branch}`]).code !== 0) return { reason: `the clone has no origin/${branch} — run "vegafactory sync" first`, fatal: true }
+  return { clone: { path, branch } }
+}
+
+// Everything that must be true of the clone's state before this writes into someone else's checkout.
+function cloneState(clone: Clone, git: GitRunner): { ahead: string[] } | { reason: string } {
+  const status = git(['-C', clone.path, 'status', '--porcelain', '--untracked-files=all'])
+  if (status.code !== 0) return { reason: 'the control-room clone could not be read' }
+  if (status.out.trim()) return { reason: `the control-room clone has local changes (${status.out.split('\n')[0]}) — sort them out first` }
+  const ahead = git(['-C', clone.path, 'rev-list', `refs/remotes/origin/${clone.branch}..HEAD`]).out.split('\n').filter(Boolean)
+  for (const sha of ahead) {
+    const subject = git(['-C', clone.path, 'log', '-1', '--format=%s', sha]).out.trim()
+    const touched = git(['-C', clone.path, 'show', '--name-only', '--format=', sha]).out.split('\n').filter(Boolean)
+    if (!subject.startsWith('stats:') || touched.some((file) => !file.startsWith('stats/'))) {
+      return { reason: `the control-room clone has a local commit that is not a stats push (${sha.slice(0, 7)} ${subject.slice(0, 60)})` }
+    }
+  }
+  return { ahead }
+}
+
+// A push that died between its commit and its cursor. If the commit is there, the cursor moves once
+// and the commit is left for the retry below; if it is not, the rows go back and nothing is consumed.
+function recoverPush(home: string, clone: Clone, git: GitRunner) {
+  const journal = readJson<PushJournal | null>(pushJournalPath(home), null)
+  if (!journal?.token || !Array.isArray(journal.files)) {
+    rmSync(pushJournalPath(home), { force: true })
+    return
+  }
+  const committed = git(['-C', clone.path, 'log', '--format=%H', '--grep', journal.token, `refs/remotes/origin/${clone.branch}..HEAD`]).out.trim()
+  if (committed) {
+    const state = readJson<PushState>(pushPath(home), {})
+    if ((state.offset ?? 0) < journal.offset) atomicWrite(pushPath(home), JSON.stringify({ lastPushAt: journal.at, offset: journal.offset }, null, 2) + '\n')
+  } else {
+    for (const file of journal.files) {
+      const path = join(clone.path, ...file.relative.split('/'))
+      try { file.had === null ? rmSync(path, { force: true }) : truncateSync(path, file.had) } catch { /* nothing to put back */ }
+    }
+    git(['-C', clone.path, 'reset', '--quiet', '--', ...journal.files.map((file) => file.relative)])
+  }
+  rmSync(pushJournalPath(home), { force: true })
 }
 
 function pushLocked(home: string, options: PushOptions): PushResult {
@@ -859,34 +977,41 @@ function pushLocked(home: string, options: PushOptions): PushResult {
   if (!entry) return none(`${knob.org}'s control room is not linked on this machine — run "vegafactory sync" first`)
   if (entry.repo && entry.repo !== knob.repo) return refuse(`the linked control room is ${entry.repo}, not ${knob.repo}`)
 
-  const inspected = inspectClone(home, entry, knob.repo, git)
-  if ('reason' in inspected) return inspected.fatal ? refuse(inspected.reason) : none(inspected.reason)
-  const { clone, ahead } = inspected
+  const identified = identifyClone(home, entry, knob.repo, git)
+  if ('reason' in identified) return identified.fatal ? refuse(identified.reason) : none(identified.reason)
+  const { clone } = identified
+  recoverPush(home, clone, git)
+  const state = cloneState(clone, git)
+  if ('reason' in state) return refuse(state.reason)
 
   // A stats commit that never reached the remote is retried before anything else: the cursor moved
   // when it was committed, so nothing else would ever send it.
   let recovered = 0
-  if (ahead.length) {
+  if (state.ahead.length) {
     const sent = sendCommits(clone, git)
     if (!sent.ok) return { ok: false, action: 'committed', events: 0, paths: [], message: `an earlier stats commit is still unpushed: ${sent.message}` }
-    recovered = ahead.length
+    recovered = state.ahead.length
   }
   const done = (result: PushResult): PushResult =>
     recovered && result.action !== 'pushed'
       ? { ...result, ok: true, action: 'pushed', message: `pushed ${recovered} earlier stats commit${recovered === 1 ? '' : 's'}; ${result.message}` }
       : result
 
-  const state = readJson<PushState>(pushPath(home), {})
-  if (!options.force && state.lastPushAt && now - state.lastPushAt < PUSH_EVERY_MS && now >= state.lastPushAt) {
+  const cursor = readJson<PushState>(pushPath(home), {})
+  if (!options.force && cursor.lastPushAt && now - cursor.lastPushAt < PUSH_EVERY_MS && now >= cursor.lastPushAt) {
     return done({ ok: true, action: 'skipped', events: 0, paths: [], message: 'pushed less than an hour ago' })
   }
-  let text = ''
-  try { text = readFileSync(eventsPath(home), 'utf8') } catch { return done(none('nothing collected yet')) }
-  const pending = text.slice(Math.min(state.offset ?? 0, text.length))
-  const end = pending.lastIndexOf('\n')
-  const lines = end === -1 ? [] : pending.slice(0, end).split('\n').filter((line) => line.trim())
+  // The cursor is a byte offset, so the file is sliced as bytes: one non-ASCII character in a model
+  // or repository name would put a character count out of step with it.
+  let buffer: Buffer
+  try { buffer = readFileSync(eventsPath(home)) } catch { return done(none('nothing collected yet')) }
+  const from = Math.min(Math.max(cursor.offset ?? 0, 0), buffer.length)
+  const pending = buffer.subarray(from)
+  const end = pending.lastIndexOf(0x0a)
+  if (end === -1) return done(none('nothing new to push'))
+  const lines = pending.subarray(0, end + 1).toString('utf8').split('\n').filter((line) => line.trim())
   if (!lines.length) return done(none('nothing new to push'))
-  const offset = (state.offset ?? 0) + Buffer.byteLength(pending.slice(0, end + 1))
+  const offset = from + end + 1
 
   // Each turn is filed under the operator and machine it was recorded on, never under whoever is
   // logged in now: a batch collected before a login or a hostname change belongs to its own file.
@@ -903,22 +1028,33 @@ function pushLocked(home: string, options: PushOptions): PushResult {
   }
   if (!groups.size) return done(none('nothing new to push'))
 
-  const written: Array<{ path: string; had: number | null }> = []
   const relatives = [...groups.keys()].sort()
+  for (const relative of relatives) {
+    const unsafe = safeStatsPath(clone.path, relative)
+    if (unsafe) return done(refuse(unsafe))
+  }
+  const journal: PushJournal = {
+    token: randomUUID(), at: now, offset,
+    files: relatives.map((relative) => {
+      let had: number | null = null
+      try { had = statSync(join(clone.path, ...relative.split('/'))).size } catch { /* a new day, a new file */ }
+      return { relative, had }
+    }),
+  }
   const undo = () => {
-    for (const file of written) {
-      try { file.had === null ? rmSync(file.path, { force: true }) : truncateSync(file.path, file.had) } catch { /* nothing to put back */ }
+    for (const file of journal.files) {
+      const path = join(clone.path, ...file.relative.split('/'))
+      try { file.had === null ? rmSync(path, { force: true }) : truncateSync(path, file.had) } catch { /* nothing to put back */ }
     }
     git(['-C', clone.path, 'reset', '--quiet', '--', ...relatives])
+    rmSync(pushJournalPath(home), { force: true })
   }
+  atomicWrite(pushJournalPath(home), JSON.stringify(journal, null, 2) + '\n')
   try {
     for (const group of groups.values()) {
       const path = join(clone.path, ...group.relative.split('/'))
-      let had: number | null = null
-      try { had = statSync(path).size } catch { /* a new day, a new file */ }
       mkdirSync(dirname(path), { recursive: true })
-      written.push({ path, had })
-      appendFileSync(path, group.rows.join('\n') + '\n')
+      appendLines(path, group.rows.join('\n') + '\n')
     }
   } catch (error) {
     undo()
@@ -930,18 +1066,20 @@ function pushLocked(home: string, options: PushOptions): PushResult {
     undo()
     return done(refuse(`only the stats files may be committed, but the clone staged ${staged.join(', ') || 'nothing'}`))
   }
-  const message = `stats: ${lines.length} turn${lines.length === 1 ? '' : 's'} from ${relatives.length} file${relatives.length === 1 ? '' : 's'}`
-  const commit = git(['-C', clone.path, 'commit', '--quiet', '-m', message])
-  if (commit.code !== 0) {
+  const subject = `stats: ${lines.length} turn${lines.length === 1 ? '' : 's'} from ${relatives.length} file${relatives.length === 1 ? '' : 's'}`
+  const made = git(['-C', clone.path, 'commit', '--quiet', '-m', subject, '-m', `vsk-push: ${journal.token}`])
+  if (made.code !== 0) {
     undo()
-    return done(refuse(`the control-room commit failed: ${commit.out.split('\n')[0]}`))
+    return done(refuse(`the control-room commit failed: ${made.out.split('\n')[0]}`))
   }
   // The turns are durable in the clone now, so the cursor moves even if the push is rejected; the
-  // next run finds the unpushed commit above and sends it.
+  // next run finds the unpushed commit above and sends it. A death between the two is what the
+  // journal is for: it names the commit, and recovery moves the cursor exactly once.
   atomicWrite(pushPath(home), JSON.stringify({ lastPushAt: now, offset }, null, 2) + '\n')
+  rmSync(pushJournalPath(home), { force: true })
   const sent = sendCommits(clone, git)
   if (!sent.ok) {
-    return { ok: false, action: 'committed', events: lines.length, paths: relatives, message: `committed in the control-room clone but the push was rejected: ${sent.message}` }
+    return { ok: false, action: 'committed', events: lines.length, paths: relatives, message: `committed in the control-room clone but not sent: ${sent.message}` }
   }
   return { ok: true, action: 'pushed', events: lines.length, paths: relatives, message: `pushed ${lines.length} turns to ${relatives.join(', ')}` }
 }

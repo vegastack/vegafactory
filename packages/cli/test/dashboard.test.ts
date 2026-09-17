@@ -8,7 +8,7 @@ import { statsDir, type StatsEvent } from '../src/stats.ts'
 let home: string
 
 const event = (partial: Partial<StatsEvent> & { id: string }): StatsEvent => ({
-  at: '2026-09-17T10:00:00.000Z', operator: 'mk', machine: 'box', harness: 'claude', model: 'claude-opus-5',
+  rev: 1, at: '2026-09-17T10:00:00.000Z', operator: 'mk', machine: 'box', harness: 'claude', model: 'claude-opus-5',
   repo: 'acme/app', issue: 42, state: 'in-progress', skill: null,
   tokens: { input: 100, output: 20, cacheRead: 5000, cacheWrite: 400 }, durationMs: 90_000, outcome: 'end_turn', ...partial,
 })

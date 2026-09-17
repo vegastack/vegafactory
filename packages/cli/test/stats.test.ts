@@ -6,7 +6,7 @@ import { join } from 'node:path'
 import type { GhRunner } from '../src/gh.ts'
 import {
   collectStats, defaultSite, loadEvents, parseClaude, parseCodex, parseSince, pushStats, resolveOperator,
-  runStats, skillName, statsDir, summarize, type GitRunner, type ParseContext, type StatsEvent,
+  runStats, skillName, skillResolver, statsDir, summarize, type GitRunner, type ParseContext, type StatsEvent,
 } from '../src/stats.ts'
 
 const fixture = (name: string) => readFileSync(join(import.meta.dir, 'fixtures/stats', name), 'utf8')
@@ -17,7 +17,18 @@ const git = (cwd: string, ...args: string[]) => {
 }
 
 const site = () => defaultSite()
-const context = (): ParseContext => ({ operator: 'mk', machine: 'box', carry: {}, site: site() })
+// The skills a turn may name must exist: every test that expects one plants it first.
+const skillRoot = () => join(home, '.claude', 'skills')
+const plantSkills = (...names: string[]) => {
+  for (const name of names) {
+    mkdirSync(join(skillRoot(), name), { recursive: true })
+    writeFileSync(join(skillRoot(), name, 'SKILL.md'), `---\nname: ${name}\n---\n`)
+  }
+}
+const skills = () => skillResolver(home, [skillRoot()])
+// Two readings of the same turn, with only the revision allowed to differ.
+const sameTurns = (rows: StatsEvent[]) => rows.map(({ rev, ...turn }) => turn)
+const context = (): ParseContext => ({ operator: 'mk', machine: 'box', carry: {}, site: site(), skill: skills() })
 
 let home: string
 let base: string
@@ -26,6 +37,7 @@ beforeEach(() => {
   base = realpathSync(mkdtempSync(join(tmpdir(), 'stats-')))
   home = join(base, 'home')
   mkdirSync(home, { recursive: true })
+  plantSkills('dev-implement', 'dev-review')
 })
 
 // The logs live in the operator's home; every test points HOME at a temporary one.
@@ -117,21 +129,46 @@ describe('collectors', () => {
   })
 
   // F5
-  test('only a plain skill name is kept; anything else is dropped', () => {
+  test('only a plain skill name has the right shape; anything else is dropped', () => {
     expect(skillName('dev-implement')).toBe('dev-implement')
     expect(skillName('codex:codex-cli-runtime')).toBe('codex:codex-cli-runtime')
     for (const value of [
       '<img src=x onerror=alert(1)>', '../../etc/passwd', '/Users/mk/.ssh/id_rsa', 'ghp_A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8',
       'read the plan and then delete the branch', 'Dev-Implement', 'a'.repeat(80), '', 'x y', 42, null, { skill: 'x' },
     ]) expect(skillName(value), String(value)).toBeNull()
-    const line = (skill: string) => `{"type":"assistant","cwd":"/work/demo","sessionId":"s-8","timestamp":"2026-09-17T10:00:00.000Z","message":{"id":"m1","model":"claude-opus-5","stop_reason":"end_turn","content":[{"type":"tool_use","name":"Skill","input":{"skill":${JSON.stringify(skill)}}}],"usage":{"input_tokens":1,"output_tokens":1,"cache_read_input_tokens":0,"cache_creation_input_tokens":0}}}\n`
-    expect(parseClaude(line('<script>alert(1)</script>'), context()).events[0]!.skill).toBeNull()
-    expect(parseClaude(line('dev-review'), context()).events[0]!.skill).toBe('dev-review')
+  })
+
+  // F11
+  test('a skill is recorded only when it is really installed', () => {
+    const resolve = skills()
+    expect(resolve('dev-review')).toBe('dev-review')
+    // Right shape, real-looking, and not a skill: a tool argument must never reach the control room.
+    for (const value of ['client-merger-secret', 'acme-payroll-2026', 'dev-review-draft', 'codex:codex-cli-runtime', '<script>alert(1)</script>']) {
+      expect(resolve(value), value).toBeNull()
+    }
+    // The answer is cached, so a skill read once is not stat-ed again for every turn.
+    rmSync(join(skillRoot(), 'dev-review'), { recursive: true })
+    expect(resolve('dev-review')).toBe('dev-review')
+    expect(skills()('dev-review')).toBeNull()
+
+    const claude = (skill: string) => `{"type":"assistant","cwd":"/work/demo","sessionId":"s-8","timestamp":"2026-09-17T10:00:00.000Z","message":{"id":"m1","model":"claude-opus-5","stop_reason":"end_turn","content":[{"type":"tool_use","name":"Skill","input":{"skill":${JSON.stringify(skill)}}}],"usage":{"input_tokens":1,"output_tokens":1,"cache_read_input_tokens":0,"cache_creation_input_tokens":0}}}\n`
+    expect(parseClaude(claude('client-merger-secret'), context()).events[0]!.skill).toBeNull()
+    expect(parseClaude(claude('dev-implement'), context()).events[0]!.skill).toBe('dev-implement')
+
+    // Codex reads a SKILL.md, so the same rule applies to the path in the command it ran.
+    const codex = (name: string) => [
+      '{"timestamp":"2026-09-17T11:00:00.000Z","type":"session_meta","payload":{"session_id":"c-2","cwd":"/work/demo"}}',
+      '{"timestamp":"2026-09-17T11:00:01.000Z","type":"turn_context","payload":{"turn_id":"t","model":"gpt-5.6-sol"}}',
+      `{"timestamp":"2026-09-17T11:00:02.000Z","type":"response_item","payload":{"type":"custom_tool_call","input":"cat /srv/skills/${name}/SKILL.md"}}`,
+      '{"timestamp":"2026-09-17T11:00:03.000Z","type":"token_usage_record","payload":{"turn_id":"t","response_id":"r1","usage":{"input_tokens":5,"output_tokens":1}}}',
+    ].join('\n') + '\n'
+    expect(parseCodex(codex('client-merger-secret'), context()).events[0]!.skill).toBeNull()
+    expect(parseCodex(codex('dev-implement'), context()).events[0]!.skill).toBe('dev-implement')
   })
 })
 
 describe('offsets', () => {
-  const collect = () => collectStats({ home, operator: 'mk', machine: 'box', site: site() })
+  const collect = () => collectStats({ home, operator: 'mk', machine: 'box', site: site(), skill: skills() })
   const events = () => loadEvents(home, { shared: false })
 
   test('a killed session is counted at the next run, exactly once', () => {
@@ -162,7 +199,9 @@ describe('offsets', () => {
     writeFileSync(path, text)
     collect()
     const whole = parseClaude(text, context()).events
-    expect(events()).toEqual(whole)
+    // The same turn, down to the field — only its revision says it was finished a run later.
+    expect(sameTurns(events())).toEqual(sameTurns(whole))
+    expect(events().map((event) => event.rev)).toEqual([2, 1])
     expect(events()[0]!.skill).toBe('dev-implement')
   })
 
@@ -174,7 +213,8 @@ describe('offsets', () => {
     expect(events().map((event) => event.outcome)).toEqual(['tool_use', 'tool_use'])
     writeFileSync(path, fixture('codex-rollout.jsonl'))
     collect()
-    expect(events()).toEqual(parseCodex(fixture('codex-rollout.jsonl'), context()).events)
+    expect(sameTurns(events())).toEqual(sameTurns(parseCodex(fixture('codex-rollout.jsonl'), context()).events))
+    expect(events().map((event) => event.rev)).toEqual([1, 2])
     expect(events().map((event) => event.outcome)).toEqual(['tool_use', 'end_turn'])
   })
 
@@ -249,6 +289,48 @@ describe('offsets', () => {
     expect(all).toHaveLength(4)
     expect(readFileSync(join(statsDir(home), 'events.jsonl'), 'utf8').split('\n').filter(Boolean)).toHaveLength(4)
   }, 30_000)
+})
+
+// F16
+describe('reading events back', () => {
+  const shared = (rows: unknown[]) => {
+    const clone = join(home, '.vegastack', 'control-room', 'acme')
+    const dir = join(clone, 'stats', '2026', '09', '18')
+    mkdirSync(dir, { recursive: true })
+    writeFileSync(join(dir, 'mk-box.jsonl'), rows.map((row) => JSON.stringify(row)).join('\n') + '\n')
+    writeFileSync(join(home, '.vegastack', 'factory.json'), JSON.stringify({
+      schemaVersion: 1, controlRooms: { acme: { repo: 'acme/room', path: clone, branch: 'main', lastSyncedAt: null, sha: null } },
+    }))
+    return dir
+  }
+  const turn = (extra: Partial<StatsEvent>): StatsEvent => ({
+    id: 'x', rev: 1, at: '2026-09-18T10:00:00.000Z', operator: 'mk', machine: 'box', harness: 'claude', model: 'opus',
+    repo: 'acme/app', issue: 42, state: 'in-progress', skill: null, tokens: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0 },
+    durationMs: 1000, outcome: 'tool_use', ...extra,
+  })
+  const local = (rows: StatsEvent[]) => {
+    mkdirSync(statsDir(home), { recursive: true })
+    writeFileSync(join(statsDir(home), 'events.jsonl'), rows.map((row) => JSON.stringify(row)).join('\n') + '\n')
+  }
+
+  test('a correction wins over the copy already in the control room, and the other way round', () => {
+    shared([turn({})])
+    local([turn({ rev: 2, skill: 'dev-implement', outcome: 'end_turn' })])
+    expect(loadEvents(home)).toEqual([turn({ rev: 2, skill: 'dev-implement', outcome: 'end_turn' })])
+    // The newest revision wins wherever it is: another machine's correction beats a local original.
+    shared([turn({ rev: 3, skill: 'dev-review', outcome: 'aborted' })])
+    local([turn({ rev: 1 })])
+    expect(loadEvents(home)).toEqual([turn({ rev: 3, skill: 'dev-review', outcome: 'aborted' })])
+  })
+
+  // F12
+  test('a symlinked .jsonl in the control room is never read through', () => {
+    const outside = join(base, 'secrets.jsonl')
+    writeFileSync(outside, JSON.stringify(turn({ id: 'leaked', repo: 'acme/private' })) + '\n')
+    const dir = shared([turn({ id: 'real' })])
+    symlinkSync(outside, join(dir, 'linked.jsonl'))
+    expect(loadEvents(home, { local: false }).map((event) => event.id)).toEqual(['real'])
+  })
 })
 
 describe('the operator', () => {
@@ -348,7 +430,7 @@ describe('stats push', () => {
   })
 
   const event = (id: string, at: string, extra: Partial<StatsEvent> = {}): StatsEvent => ({
-    id, at, operator: 'mk', machine: 'box', harness: 'claude', model: 'claude-opus-5', repo: 'acme/app', issue: 42,
+    id, rev: 1, at, operator: 'mk', machine: 'box', harness: 'claude', model: 'claude-opus-5', repo: 'acme/app', issue: 42,
     state: 'in-progress', skill: null, tokens: { input: 1, output: 2, cacheRead: 3, cacheWrite: 4 }, durationMs: 1000, outcome: 'end_turn', ...extra,
   })
   const write = (...events: StatsEvent[]) =>
@@ -469,6 +551,104 @@ describe('stats push', () => {
     expect(push(Date.parse('2026-09-18T12:00:00Z')).action).toBe('pushed')
   })
 
+  // F12
+  test('a symlink under stats/ can never redirect the write out of the clone', () => {
+    const outside = join(base, 'outside')
+    mkdirSync(outside)
+    // Someone commits stats/2026 as a link out of the control room, and everyone pulls it.
+    const other = join(base, 'other-clone')
+    git(base, 'clone', '-q', origin, other)
+    mkdirSync(join(other, 'stats'), { recursive: true })
+    symlinkSync(outside, join(other, 'stats', '2026'))
+    git(other, 'add', '-A')
+    git(other, 'commit', '-q', '-m', 'stats: a link')
+    git(other, 'push', '-q', 'origin', 'main')
+    git(clone, 'fetch', '-q', 'origin')
+    git(clone, 'reset', '-q', '--hard', 'origin/main')
+
+    write(event('a', '2026-09-18T10:00:00.000Z'))
+    const result = push(Date.parse('2026-09-18T12:00:00Z'))
+    expect(result.action).toBe('refused')
+    expect(result.message).toContain('symlinked')
+    expect(readdirSync(outside)).toEqual([])
+    expect(git(clone, 'status', '--porcelain', '--untracked-files=all')).toBe('')
+  })
+
+  // F13
+  test('a death between the commit and the cursor neither loses turns nor files them twice', () => {
+    write(event('a', '2026-09-18T10:00:00.000Z'))
+    const killed: GitRunner = (args) => {
+      const result = defaultGitFor(args)
+      if (args.includes('commit')) throw new Error('killed right after the commit')
+      return result
+    }
+    expect(() => push(Date.parse('2026-09-18T12:00:00Z'), { git: killed })).toThrow('killed')
+    // The commit is there, the cursor is not: only the journal knows how far the batch got.
+    expect(git(clone, 'log', '-1', '--format=%s')).toContain('stats: 1 turn')
+    expect(existsSync(join(statsDir(home), 'push.json'))).toBe(false)
+    expect(existsSync(join(statsDir(home), 'push-pending.json'))).toBe(true)
+
+    const again = push(Date.parse('2026-09-18T12:10:00Z'))
+    expect(again).toMatchObject({ ok: true, action: 'pushed' })
+    expect(existsSync(join(statsDir(home), 'push-pending.json'))).toBe(false)
+    // Exactly one stats commit, and the turn is in the file exactly once.
+    expect(git(clone, 'log', 'origin/main', '--format=%s').split('\n').filter((line) => line.startsWith('stats:'))).toHaveLength(1)
+    expect(readFileSync(stats('2026', '09', '18', 'mk-box.jsonl'), 'utf8').trim().split('\n')).toHaveLength(1)
+    // And the cursor really moved: there is nothing left to send.
+    expect(push(Date.parse('2026-09-18T14:00:00Z')).action).toBe('none')
+  })
+
+  // F13
+  test('a death before the commit puts the rows back and keeps the turns for the next run', () => {
+    write(event('a', '2026-09-18T10:00:00.000Z'))
+    const killed: GitRunner = (args) => {
+      if (args.includes('add')) throw new Error('killed while staging')
+      return defaultGitFor(args)
+    }
+    expect(() => push(Date.parse('2026-09-18T12:00:00Z'), { git: killed })).toThrow('killed')
+    expect(existsSync(join(statsDir(home), 'push-pending.json'))).toBe(true)
+    const healthy = push(Date.parse('2026-09-18T12:10:00Z'))
+    expect(healthy).toMatchObject({ ok: true, action: 'pushed', events: 1 })
+    expect(readFileSync(stats('2026', '09', '18', 'mk-box.jsonl'), 'utf8').trim().split('\n')).toHaveLength(1)
+    expect(git(clone, 'status', '--porcelain', '--untracked-files=all')).toBe('')
+  })
+
+  // F14
+  test('a rebase that conflicts is aborted and the clone is handed back as it was', () => {
+    write(event('a', '2026-09-18T10:00:00.000Z'))
+    expect(push(Date.parse('2026-09-18T12:00:00Z')).action).toBe('pushed')
+    // Another machine writes to the very same file and pushes first.
+    const other = join(base, 'other-clone')
+    git(base, 'clone', '-q', origin, other)
+    appendFileSync(join(other, 'stats', '2026', '09', '18', 'mk-box.jsonl'), JSON.stringify(event('z', '2026-09-18T10:30:00.000Z')) + '\n')
+    git(other, 'commit', '-q', '-a', '-m', 'stats: someone else')
+    git(other, 'push', '-q', 'origin', 'main')
+
+    write(event('b', '2026-09-18T10:40:00.000Z'))
+    const result = push(Date.parse('2026-09-18T13:10:00Z'))
+    expect(result).toMatchObject({ ok: false, action: 'committed' })
+    expect(result.message).toContain('put back')
+    // No rebase left in progress, nothing half-merged, and our own commit still stands.
+    expect(existsSync(join(clone, '.git', 'rebase-merge'))).toBe(false)
+    expect(existsSync(join(clone, '.git', 'rebase-apply'))).toBe(false)
+    expect(git(clone, 'status', '--porcelain', '--untracked-files=all')).toBe('')
+    expect(git(clone, 'log', '-1', '--format=%s')).toContain('stats: 1 turn')
+    expect(readFileSync(stats('2026', '09', '18', 'mk-box.jsonl'), 'utf8')).not.toContain('<<<<')
+  })
+
+  // F15
+  test('the cursor is bytes, so a turn with non-ASCII text does not shift the next push', () => {
+    write(event('a', '2026-09-18T10:00:00.000Z', { model: 'claude-opus-5-ünïcode', repo: 'acme/café' }))
+    expect(push(Date.parse('2026-09-18T12:00:00Z'))).toMatchObject({ action: 'pushed', events: 1 })
+    write(event('b', '2026-09-18T12:30:00.000Z'))
+    expect(push(Date.parse('2026-09-18T13:05:00Z'))).toMatchObject({ action: 'pushed', events: 1 })
+    const rows = readFileSync(stats('2026', '09', '18', 'mk-box.jsonl'), 'utf8').trim().split('\n')
+    expect(rows).toHaveLength(2)
+    expect(rows.map((row) => JSON.parse(row).id)).toEqual(['a', 'b'])
+    expect(JSON.parse(rows[0]!).model).toBe('claude-opus-5-ünïcode')
+    expect(push(Date.parse('2026-09-18T14:10:00Z')).action).toBe('none')
+  })
+
   // F9
   test('a control-room path outside the store or behind a symlink is refused', () => {
     write(event('a', '2026-09-18T10:00:00.000Z'))
@@ -495,8 +675,8 @@ const defaultGitFor = (args: string[]) => {
 describe('summaries', () => {
   test('buckets carry turns, tokens, time and who used them', () => {
     const rows: StatsEvent[] = [
-      { id: '1', at: '2026-09-17T10:00:00.000Z', operator: 'mk', machine: 'box', harness: 'claude', model: 'opus', repo: 'acme/app', issue: 1, state: 'in-progress', skill: 'dev-plan', tokens: { input: 10, output: 5, cacheRead: 1, cacheWrite: 2 }, durationMs: 60_000, outcome: 'end_turn' },
-      { id: '2', at: '2026-09-18T10:00:00.000Z', operator: 'sam', machine: 'box', harness: 'codex', model: 'gpt', repo: 'acme/app', issue: 1, state: 'ready-to-ship', skill: null, tokens: { input: 4, output: 1, cacheRead: 0, cacheWrite: 0 }, durationMs: 120_000, outcome: 'tool_use' },
+      { id: '1', rev: 1, at: '2026-09-17T10:00:00.000Z', operator: 'mk', machine: 'box', harness: 'claude', model: 'opus', repo: 'acme/app', issue: 1, state: 'in-progress', skill: 'dev-plan', tokens: { input: 10, output: 5, cacheRead: 1, cacheWrite: 2 }, durationMs: 60_000, outcome: 'end_turn' },
+      { id: '2', rev: 1, at: '2026-09-18T10:00:00.000Z', operator: 'sam', machine: 'box', harness: 'codex', model: 'gpt', repo: 'acme/app', issue: 1, state: 'ready-to-ship', skill: null, tokens: { input: 4, output: 1, cacheRead: 0, cacheWrite: 0 }, durationMs: 120_000, outcome: 'tool_use' },
     ]
     const summary = summarize(rows)
     expect(summary.turns).toBe(2)
