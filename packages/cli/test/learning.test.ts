@@ -2,7 +2,7 @@ import { beforeEach, describe, expect, test } from 'bun:test'
 import { spawn, spawnSync } from 'node:child_process'
 import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { dirname, join } from 'node:path'
+import { dirname, join, relative } from 'node:path'
 import { writeNew } from '../src/issue-cache.ts'
 import { addLesson, learningsPath, lessonsIn, pendingNote, readLessons, runLearning, scratchFor, settle } from '../src/learning.ts'
 
@@ -217,6 +217,13 @@ describe('the scratch draft a continuation hands out', () => {
     expect(run('add', '--file', draft)).toBe(0)
     expect(readLessons(root).map((lesson) => lesson.text)).toEqual(['a lesson from the draft'])
     expect(existsSync(dirname(draft))).toBe(false)
+
+    // The same folder spelled another way is still the same folder.
+    const second = scratchFor(root)
+    writeFileSync(second, '- a lesson named relatively\n')
+    expect(run('add', '--file', relative(root, second))).toBe(0)
+    expect(existsSync(dirname(second))).toBe(false)
+    expect(readdirSync(drafts())).toEqual([])
 
     const mine = join(root, 'notes.md')
     writeFileSync(mine, '- a lesson of my own\n')

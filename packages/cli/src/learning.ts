@@ -76,11 +76,15 @@ function sweepDrafts(drafts: string, now = Date.now()) {
   }
 }
 
-// A draft is spent once its lessons are recorded, and it is ours to remove only inside our own tree.
+// A draft is spent once its lessons are recorded, and it is ours to remove only inside our own
+// tree. The comparison is between real paths, because the same folder has many spellings — a
+// relative one, and on macOS /tmp and /private/tmp for the same place.
 function dropScratch(root: string, file: string) {
-  const folder = dirname(resolve(file))
-  if (dirname(folder) !== checkedPaths(root).drafts) return
-  rmSync(folder, { recursive: true, force: true })
+  try {
+    const folder = dirname(realpathSync(resolve(file)))
+    if (realpathSync(dirname(folder)) !== realpathSync(checkedPaths(root).drafts)) return
+    rmSync(folder, { recursive: true, force: true })
+  } catch { /* no folder of ours to drop */ }
 }
 
 // Every read and every write of the queue runs inside this, across processes as well as within one.
