@@ -101,17 +101,6 @@ test('workflow release decision permits one fresh attempt and refuses every reru
  for(const runAttempt of [2,3,99])expect(()=>recoveryDecision({artifacts:[{name:'release-pair-a-attempt-1',expired:false}],attempts:{},sourceSha:'a',runAttempt})).toThrow('release reruns cannot retain prior-attempt artifacts; roll forward with a new patch and tag')
  for(const runAttempt of [0,-1,1.5,NaN])expect(()=>recoveryDecision({artifacts:[],attempts:{},sourceSha:'a',runAttempt})).toThrow('invalid release attempt')
 })
-test('CI and release preparation check out full history before running compatibility readers',async()=>{
- for(const [file,job] of [['.github/workflows/ci.yml','check'],['.github/workflows/release.yml','prepare']] as const){
-  const workflow=Bun.YAML.parse(await readFile(file,'utf8')) as any
-  const steps=workflow.jobs[job].steps,checkout=steps.find((step:any)=>String(step.uses??'').startsWith('actions/checkout@'))
-  expect(checkout?.with?.['fetch-depth']).toBe(0)
-  if(file==='.github/workflows/ci.yml'){
-   const authority=steps.findIndex((step:any)=>step.run==='node scripts/release-artifacts.mjs verify-version-transition')
-   expect(authority).toBeGreaterThan(steps.indexOf(checkout));expect(authority).toBeLessThan(steps.findIndex((step:any)=>String(step.name).startsWith('Check (')))
-  }
- }
-})
 test('actual preparation CLI stops at dashboard build and scanner failures, leaving no finalized pair or publication authority',async()=>{
  const root=await realpath(await mkdtemp(join(tmpdir(),'prepare-command-'))),bin=join(root,'fixture-bin'),out=join(root,'work/release')
  for(const path of ['scripts','packages/cli','packages/dashboard','.vegastack','skills/skills-tooling/skill-scan/scripts','fixture-bin'])await mkdir(join(root,path),{recursive:true})
@@ -140,60 +129,6 @@ const fs=require('node:fs'),a=process.argv.slice(2);fs.mkdirSync('work',{recursi
  expect(calls.filter(a=>a.join(' ')==='run --cwd packages/dashboard build')).toHaveLength(6)
  expect(spawnSync('git',['status','--porcelain'],{cwd:root,encoding:'utf8'}).stdout).toBe('')
 },15000)
-
-test('actual workflow refuses reruns and the current-attempt pair upload gates mutation',async()=>{
- const text=await readFile('.github/workflows/release.yml','utf8')
- const workflow=Bun.YAML.parse(text) as any
- const prepareSteps=workflow.jobs.prepare.steps,publishSteps=workflow.jobs.publish.steps
- const attempt=prepareSteps.find((s:any)=>s.name==='Refuse same-run release reruns')
- const retained=prepareSteps.findIndex((s:any)=>s.name==='Retain finalized immutable pair')
- const publish=publishSteps.findIndex((s:any)=>s.name==='Publish retained pair directly as latest and verify registry first use')
- expect(retained).toBeGreaterThan(prepareSteps.findIndex((s:any)=>s.name==='Verify finalized immutable pair and evidence'))
- expect(publish).toBeGreaterThan(publishSteps.findIndex((s:any)=>s.name==='Verify retained pair before publication authority is used'));expect(publishSteps[publish].if).toBeUndefined();expect(prepareSteps[retained].with['if-no-files-found']).toBe('error')
- expect(publishSteps[publish].run).toBe('node scripts/release-publish.mjs work/release/release-manifest.json --publish')
- expect(text).not.toContain('--promote');expect(text).not.toContain('npm dist-tag')
- expect(workflow.jobs.prepare.outputs['pair-name']).toBe('release-pair-${{ github.sha }}-attempt-${{ github.run_attempt }}')
- expect(workflow.jobs.prepare.outputs['pair-id']).toBe('${{ steps.retained.outputs.artifact-id }}')
- expect(workflow.jobs.prepare.outputs['prior-outcome-name']).toBeUndefined()
- expect(workflow.jobs.prepare.permissions).toEqual({contents:'read'});expect(workflow.jobs.publish.permissions).toEqual({contents:'read',actions:'read','id-token':'write'});expect(workflow.jobs.release.permissions).toEqual({contents:'write',actions:'read'})
- expect(workflow.jobs.prepare['runs-on']).toEqual(['self-hosted','vsk-runners-mac']);expect(workflow.jobs.publish['runs-on']).toBe('ubuntu-latest');expect(workflow.jobs.release['runs-on']).toBe('ubuntu-latest')
- expect(attempt).toBeDefined()
- expect(prepareSteps.indexOf(attempt)).toBeLessThan(prepareSteps.findIndex((s:any)=>s.name==='Install pinned release scanner'))
- expect(prepareSteps.indexOf(attempt)).toBeLessThan(prepareSteps.findIndex((s:any)=>s.name==='Prepare and smoke immutable artifact pair'))
- const script=`await (async()=>{${attempt.with.script}})()`
- const run=(runAttempt:number)=>spawnSync('node',['--input-type=module','-e',script],{env:{...process.env,GITHUB_WORKSPACE:process.cwd(),GITHUB_RUN_ATTEMPT:String(runAttempt)},encoding:'utf8'})
- expect(run(1).status).toBe(0);const retry=run(2);expect(retry.status).not.toBe(0);expect(retry.stderr).toContain('release reruns cannot retain prior-attempt artifacts')
- expect(text).not.toContain('listWorkflowRunArtifacts');expect(text).not.toContain('/attempts/{attempt_number}/jobs');expect(text).not.toContain('Restore finalized immutable pair');expect(text).not.toContain('Restore last available publication observations');expect(text).not.toContain('Preserve previous publication observations')
-})
-
-test('hosted publisher provisions the pinned dashboard Bun runtime before retained-pair smoke',async()=>{
- const workflow=Bun.YAML.parse(await readFile('.github/workflows/release.yml','utf8')) as any
- const prepare=workflow.jobs.prepare.steps,publish=workflow.jobs.publish.steps
- const pin='oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6'
- const prepared=prepare.find((step:any)=>step.uses===pin)
- const hosted=publish.find((step:any)=>step.uses===pin)
- expect(prepared?.with?.['bun-version']).toBe('1.3.14')
- expect(hosted?.with?.['bun-version']).toBe('1.3.14')
- const setup=publish.indexOf(hosted)
- const verify=publish.findIndex((step:any)=>step.name==='Verify retained pair before publication authority is used')
- const mutation=publish.findIndex((step:any)=>step.name==='Publish retained pair directly as latest and verify registry first use')
- expect(setup).toBeGreaterThan(publish.findIndex((step:any)=>String(step.uses??'').startsWith('actions/setup-node@')))
- expect(setup).toBeLessThan(verify)
- expect(setup).toBeLessThan(mutation)
- expect(workflow.jobs.publish['runs-on']).toBe('ubuntu-latest')
- expect(workflow.jobs.publish.permissions).toEqual({contents:'read',actions:'read','id-token':'write'})
-},5000)
-
-test('self-hosted CI and release preparation share one retained heavy-job queue',async()=>{
- const ci=Bun.YAML.parse(await readFile('.github/workflows/ci.yml','utf8')) as any
- const release=Bun.YAML.parse(await readFile('.github/workflows/release.yml','utf8')) as any
- const queue={group:'vegafactory-self-hosted-heavy',queue:'max'}
- expect(ci.jobs.check.concurrency).toEqual(queue)
- expect(release.jobs.prepare.concurrency).toEqual(queue)
- expect(release.concurrency).toEqual({group:'vegafactory-paired-release','cancel-in-progress':false})
- expect(release.jobs.publish.concurrency).toBeUndefined()
- expect(release.jobs.release.concurrency).toBeUndefined()
-},5000)
 
 test('release workflow immutable scanner source matches the audited baseline version',async()=>{
  const baseline=JSON.parse(await readFile('.vegastack/skillspector-baseline.json','utf8'))

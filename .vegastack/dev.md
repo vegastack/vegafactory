@@ -4,7 +4,7 @@ This file is the project's handbook and its only process document: short directi
 
 repo: vegastack/vegafactory · default branch main
 stack: Bun monorepo — authored skills under skills/<name>/ or skills/<group>/<name>/ (one level, GROUP.md per group; the packaged bundle stays flat), @vegastack/vegafactory installer under packages/cli (Node >= 24)
-commands: test `bun test` · check `bun run check` · build `bun run build` · setup `bun install --frozen-lockfile`
+commands: test `bun run test:affected` · check `bun run check:fast && bun run test:affected` · full `bun run check` · build `bun run build` · setup `bun install --frozen-lockfile`
 authority: CONTRIBUTING.md → this file → skill-maintainer's release-ops.md (expanded release/rename detail) → skill defaults
 
 ## Knobs
@@ -56,9 +56,9 @@ Line prefixes: `auto:` (agent just does it) · `ask:` (operator's word first) ·
 
 ## Verify — how to see it working (pre-merge)
 
-- `bun run check` is the whole local verification (validate + tests + lint + typecheck); CI adds a packed-tarball install smoke test
+- Checks run once each: the pre-commit hook runs `bun run check:fast` (validators + lint + typecheck, ~5 s); while building run `bun run test:affected` (only tests the change can reach); the merge queue runs the full `bun run check` plus build, pack smoke and skill scan. Use `./` paths with `bun test` — a bare word is a path filter
 - `vegafactory worktree status` (or `node skills/dev/dev-implement/scripts/worktree.mjs status --json`) reconciles the worktrees against open issues before a hand-back: orphan directories, worktrees with no open issue, open issues with no checkout
-- Skill scanning is separate from `check` because it needs Python 3.12 + SkillSpector, while `check` must stay Bun+Node only: `bun run build && node skills/skills-tooling/skill-scan/scripts/skill-scan.mjs --json` — build first, the knob names the built bundle and `.vegastack/skillspector-baseline.json` is picked up by convention. Exit 2 blocks the hand-back; a new suppression needs the operator's word, never a widened rule to reach green
+- The skill scan runs in the merge queue on the built bundle. To investigate a finding locally (needs Python 3.12 + SkillSpector): `bun run build && node skills/skills-tooling/skill-scan/scripts/skill-scan.mjs --json`; `.vegastack/skillspector-baseline.json` is picked up by convention, and a new suppression needs the operator's word, never a widened rule
 
 ## Environments
 
@@ -66,7 +66,9 @@ Line prefixes: `auto:` (agent just does it) · `ask:` (operator's word first) ·
 - GitHub Actions runs CI, release, and the weekly refresh (refresh/** branches are CI-restricted to refresh metadata)
 - Harnesses on this box (03-09-2026): `claude` 2.1.247 and `codex` 0.149.1; **no `hermes`**, which costs nothing because no `harness-policy:` stage names it — install it only if a stage ever does. Beware that `codex login status` prints "Logged in" on a revoked refresh token, so it is not an auth guard; only a real run is
 - A brief whose acceptance needs a live `claude -p` or `codex exec` proof checks both CLIs are authenticated first (`claude -p 'say ok'`, `codex exec --sandbox read-only -a never 'say ok'`) — an expired session turns that acceptance into a parked finding, as it did on #94
-- main is branch-protected: a PR is required, force-pushes and deletion are blocked, linear history and conversation resolution are enforced, and admins are NOT exempt — so every path to main, agent or human, goes through a PR. **`check (node 24)` is a required status check** (strict: a branch must be up to date with main before merging), enabled 02-09-2026 once `ci.yml` moved to `[self-hosted, vsk-runners-mac]` and started passing again (#87). CI and immutable release preparation run on the two laptop runners (`vsk-runners-mac`); if both are offline, PRs cannot merge and a release cannot prepare its retained pair — check `gh api repos/vegastack/vegafactory/actions/runners` before assuming a stuck job is a code problem. Publication and GitHub Release creation then run on GitHub-hosted `ubuntu-latest` and do not use the laptop after the pair is retained. The always-on Mac mini is the intended self-hosted replacement and is **not registered yet** (#119): its org runner group is `vsk-runners-mac-mini`, its runner account is a different macOS user from the dispatcher account so a CI job cannot read the dispatcher's tokens, and provisioning is the control room's `onboarding/dispatcher-box.md`. Moving the self-hosted jobs to that group waits on the operator's org-admin steps, because an empty, offline, or ungranted group queues jobs forever with `runner: null` rather than failing — read `gh api orgs/vegastack/actions/runner-groups` for the group id, then `gh api orgs/vegastack/actions/runner-groups/<id>/runners` (the org endpoint is the one that lists a group's runners; `repos/vegastack/vegafactory/actions/runners` lists repository-level runners). The two runners reuse one work directory job after job, so a workflow that sparse-checks-out (the board mirror reads only `dev.md`) must check out into its own `path:` — git stays in sparse mode otherwise and the next job at that path starts from an almost-empty tree (04-09-2026, #131)
+- main is protected: PRs only, squash merges only, no force-push or deletion, linear history, conversation resolution, admins included; required check `check (node 24)` (not strict — the merge queue tests main + the PR instead)
+- CI runs on the Mac mini org runners (`vsk-runners-mac-mini`, macOS user `vegastack-runners`, separate from the operator account); fork PRs run on `ubuntu-latest`. If both Mac mini runners are offline, own-branch PRs cannot pass — check `gh api orgs/vegastack/actions/runners` before treating a stuck job as a code problem
+- Self-hosted runners reuse one work directory: a workflow that sparse-checks-out must check out into its own `path:`
 - production: ask — git push origin v
 - preview: auto — wrangler deploy --env preview
 - preview: auto — bun run --cwd packages/broker deploy:preview

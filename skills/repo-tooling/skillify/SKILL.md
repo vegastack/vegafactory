@@ -18,7 +18,7 @@ Score every item pass / fail / N/A; N/A without a one-line rationale is a fail, 
 5. **Scripts deterministic and tested** — bundled scripts follow the conventions in [authoring](references/authoring.md) (dependency-free Node, `--json`, documented exit codes, dry-run default, atomic writes); unit tests cover every deterministic branch. N/A when the skill ships no scripts — its quality bar is item 6.
 6. **Behavioral eval passed** — the cases in `evals/evals.json` run with-skill vs baseline per the [eval playbook](references/eval-playbook.md), at most 3 improve cycles; pass, or ship with a KNOWN_GAPS section in the skill's README.
 7. **Freshness honest** — volatile facts live in refresh-tracked files, never in SKILL.md; a skill with none states the evergreen waiver in `refresh/REFRESH.md`.
-8. **Wired and green** — README, `agents/openai.yaml`, packaging entry, root README row, and changeset in place; `bun run check` passes.
+8. **Wired and green** — README, `agents/openai.yaml`, packaging entry, root README row, and changeset in place; `bun run check:fast` and `bun run test:affected` pass.
 
 **Verdict:** all pass → `properly skilled`. At most two misses, neither item 1 nor item 6 → `close — create: <missing items>`. Otherwise → `needs skillify — run skillify on <target>`.
 
@@ -88,9 +88,9 @@ At most 3 cycles: eval → apply the top improvements → re-eval; pass, or ship
 
 ```sh
 node packages/cli/scripts/validate-skill.mjs <skill-dir>
-bun test <skill-dir>
-node packages/cli/scripts/structure.mjs check
-bun run check
+bun test ./<skill-dir>
+bun run check:fast
+bun run test:affected
 ```
 
 Re-score the checklist and report `<passed>/8` with the verdict; anything below `properly skilled` ships only with named gaps.

@@ -8,15 +8,17 @@ Requirements: [Bun](https://bun.sh) 1.3.14 (pinned in `packageManager`) and Node
 
 ```sh
 bun install --frozen-lockfile
-bun run check      # validate:skill + test + lint + typecheck
+bun run check:fast     # validators + lint + typecheck (the pre-commit hook runs this)
+bun run test:affected  # only the tests your change can reach
+bun run check          # everything; the merge queue runs this
 bun run build      # builds the CLI and syncs the skill copy into packages/cli
 ```
 
-`bun run check` must pass before every PR. CI runs it on Node 24 plus a packed-tarball install smoke test.
+`bun install` enables the pre-commit hook. Pull requests run the fast checks and affected tests; the merge queue runs the full suite, a packed-tarball smoke test and the skill scan once, on main plus your PR.
 
 ### Scanning the skills
 
-Every skill this repo ships is scanned by [NVIDIA SkillSpector](https://github.com/NVIDIA/skillspector) before a push, and again before a release. It is **not** part of `bun run check` — `check` must keep running on Bun and Node alone, while SkillSpector needs Python 3.12 and ~70 packages — so install it once:
+Every skill this repo ships is scanned by [NVIDIA SkillSpector](https://github.com/NVIDIA/skillspector) in the merge queue, with a pinned install. You don't need it locally; to investigate a finding, install it once (Python 3.12) and run:
 
 ```sh
 uv tool install git+https://github.com/NVIDIA/skillspector.git

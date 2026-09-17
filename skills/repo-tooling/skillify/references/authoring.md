@@ -84,7 +84,7 @@ Phase 4: eval cycle 1 — baseline subagent invents section headings, with-skill
   callouts → add callout contract to SKILL.md; cycle 2 — with-skill clearly better, baseline still
   wrong shape → pass
 Phase 5: trigger fixture locked; evergreen waiver written; README row description filled in
-Phase 6: bun run check green; 8/8 → properly skilled
+Phase 6: bun run check:fast and bun run test:affected green; 8/8 → properly skilled
 ```
 
 ## Anti-patterns

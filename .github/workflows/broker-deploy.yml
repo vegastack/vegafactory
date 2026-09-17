@@ -30,7 +30,7 @@ jobs:
     name: deploy (${{ inputs.environment }})
     if: github.ref == 'refs/heads/main'
     # Keep the current account runners; provisioning/migration is a separate operation.
-    runs-on: [self-hosted, vsk-runners-mac]
+    runs-on: [self-hosted, vsk-runners-mac-mini]
     # BOTH environments must have required reviewers and a main-only branch policy.
     # Naming an environment here does not provision or prove those live settings.
     environment: ${{ inputs.environment }}

@@ -220,11 +220,13 @@ Architecture review (`dev-architect`) is advisory by design: evidence-backed rep
 
 ```sh
 bun install --frozen-lockfile
-bun run check    # validate skills + test + lint + typecheck
+bun run check:fast     # validators + lint + typecheck (also the pre-commit hook)
+bun run test:affected  # only the tests your change can reach
+bun run check          # everything (the merge queue runs this)
 bun run build
 ```
 
-The skill scan is a separate step, not part of `bun run check` — `check` runs on Bun and Node alone, while the scanner needs Python 3.12. `bun run check` must pass before every PR; the scan runs alongside it as pre-merge verification. See [Security](#security) for the command and [CONTRIBUTING.md](CONTRIBUTING.md) for the suppression rules.
+Pull requests run the fast checks and affected tests. The merge queue runs the full suite, a packed-tarball smoke test and the skill scan once, on main plus the PR. See [CONTRIBUTING.md](CONTRIBUTING.md) for the scan's suppression rules.
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for repo layout, content-versioning rules, the no-generated-files policy, the skill-scan suppression discipline, and how to add a new skill.
 

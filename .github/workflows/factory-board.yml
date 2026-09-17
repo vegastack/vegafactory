@@ -21,7 +21,7 @@ concurrency:
 
 jobs:
   mirror:
-    runs-on: [self-hosted, vsk-runners-mac]
+    runs-on: [self-hosted, vsk-runners-mac-mini]
     steps:
       - name: Read the profile
         uses: actions/checkout@v7

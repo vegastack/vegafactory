@@ -47,7 +47,7 @@ jobs:
     # the changelog-extraction `awk` is pure POSIX, `grep -q '[^[:space:]]'` uses a POSIX class,
     # and there is no `sed -i`, `date -d`, `readlink -f`, `base64 -w` or `sort -V` anywhere.
     # Move this preparation job to `ubuntu-latest` once the lock clears (#57).
-    runs-on: [self-hosted, vsk-runners-mac]
+    runs-on: [self-hosted, vsk-runners-mac-mini]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:

@@ -1,0 +1,27 @@
+{
+  "comment": "What `bun test --changed` cannot see: files read as text, scripts started as separate processes, and whole-tree inputs. `full` runs everything; `rules` add test paths when a changed file matches.",
+  "full": [
+    "package.json",
+    "bun.lock",
+    "bunfig.toml",
+    "tsconfig*.json",
+    "packages/*/package.json",
+    "packages/*/tsconfig.json",
+    "tooling/test-map.json",
+    "tooling/test-affected.mjs"
+  ],
+  "rules": [
+    { "match": "skills/*/*/**", "tests": ["{skill}/tests"] },
+    { "match": "skills/**/SKILL.md", "tests": ["packages/cli/test/installer.test.ts", "packages/cli/test/package.test.ts", "tooling/ci"] },
+    { "match": "packages/cli/packaging.json", "tests": ["packages/cli/test/installer.test.ts", "packages/cli/test/package.test.ts"] },
+    { "match": "packages/cli/repo-only.json", "tests": ["packages/cli/test/installer.test.ts"] },
+    { "match": "packages/cli/scripts/**", "tests": ["packages/cli/test", "skills/repo-tooling"] },
+    { "match": "skills/dev/dev-implement/scripts/**", "tests": ["packages/cli/test"] },
+    { "match": "skills/dev/dev-setup/scripts/**", "tests": ["packages/cli/test"] },
+    { "match": "skills/dev/dev-setup/assets/hooks/**", "tests": ["packages/cli/test"] },
+    { "match": ".vegastack/hooks/**", "tests": ["skills/dev/dev-setup/tests"] },
+    { "match": ".changeset/config.json", "tests": ["tooling/ci"] },
+    { "match": ".github/workflows/**", "tests": ["scripts"] },
+    { "match": "scripts/**", "tests": ["scripts"] }
+  ]
+}
