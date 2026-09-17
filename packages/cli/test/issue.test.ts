@@ -244,7 +244,7 @@ describe('sync', () => {
     writeFileSync(join(lock, 'owner.json'), JSON.stringify({ token: 'dead', pid: dead, host: hostname(), at: Date.now() }))
     mkdirSync(`${lock}.steal`)
     writeFileSync(join(`${lock}.steal`, 'owner.json'), JSON.stringify({ token: 'gone', pid: dead, host: hostname(), at: Date.now() }))
-    expect(() => withLock(dir, () => 7, { timeoutMs: 2000 })).toThrow(`remove it: rm -rf '${lock}.steal'`)
+    expect(() => withLock(dir, () => 7, { timeoutMs: 2000 })).toThrow(`delete this directory: ${JSON.stringify(`${lock}.steal`)}`)
     expect(existsSync(`${lock}.steal`)).toBe(true)
     rmSync(`${lock}.steal`, { recursive: true })
     expect(withLock(dir, () => 7, { timeoutMs: 2000 })).toBe(7)

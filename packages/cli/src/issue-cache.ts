@@ -192,7 +192,7 @@ export function takeOver(lock: string, deadToken: string | null, staleMs: number
   if (!acquire(steal, token)) {
     // Freeing another process's mutex cannot be made atomic here, so a dead stealer is left for a person.
     if (ownerGone(readOwner(steal), steal, staleMs)) {
-      throw new Error(`a crashed process left the takeover lock ${steal} — check no vegafactory command is running, then remove it: rm -rf '${steal}'`)
+      throw new Error(`a crashed process left a takeover lock behind — check no vegafactory command is running, then delete this directory: ${JSON.stringify(steal)}`)
     }
     return false
   }
