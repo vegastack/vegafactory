@@ -1,5 +1,0 @@
-# Refresh contract — dev-review
-
-Evergreen: this skill asserts no version pins, vendor mechanisms, numeric limits, or dated claims — its content (SKILL.md, `references/dispatch-prompts.md`, `references/security-axis.md`, `references/cross-agent.md`, the known-patterns template) is versionless review discipline: axes, severities, the bounded fix loop, the reviewer briefs, the smell baseline, and the cross-agent handoff. The `codex exec` / `claude -p` invocation forms stay deliberately untracked as durable CLI surfaces; dev-setup's detection covers their presence per machine.
-
-**The waiver was retired on 01-09-2026 (issue #83) and restored on 03-09-2026 (issue #113):** the six volatile SkillSpector facts that retired it — the install command, the `--version` output shape, the releases API, and the uv/brew/pipx channel parsers — moved to the `skill-scan` skill together with the guard that parses them, and are tracked in that skill's registry now. Revisit if a future edit introduces a volatile fact back into this skill.

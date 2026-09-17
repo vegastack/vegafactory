@@ -415,10 +415,10 @@ describe('this repo runs the hooks package it ships', () => {
     const compiled = Bun.spawnSync(['node', compiler, '--dev-md', devMd, '--repo', 'vegastack/vegafactory', '--policy', policyFile, '--write', '--json'])
     expect(compiled.exitCode, compiled.stdout.toString()).toBe(0)
     const check = (command: string) => Bun.spawnSync(['node', script, '--check', '--command', command, '--policy', policyFile, '--repo', 'vegastack/vegafactory', '--json'])
-    for (const command of ['gh pr merge 110 --rebase', 'git push origin main', 'git tag v0.19.0', 'git push origin v0.19.0', 'git push --force', 'wrangler deploy --env production', 'bun run --cwd packages/broker deploy:production']) {
+    for (const command of ['gh pr merge 110 --squash', 'git push origin main', 'git tag v0.19.0', 'git push origin v0.19.0', 'git push --force']) {
       expect(check(command).exitCode, command).toBe(2)
     }
-    for (const command of ['bun run check', 'bun run build', 'git push origin feat/104-factory-runtime', 'wrangler deploy --env preview', 'bun run --cwd packages/broker deploy:preview']) {
+    for (const command of ['bun run check', 'bun run build', 'git push origin feat/104-factory-runtime']) {
       expect(check(command).exitCode, command).toBe(0)
     }
   })

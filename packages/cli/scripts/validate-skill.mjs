@@ -69,7 +69,7 @@ export function validateSkill(skillDir) {
   if (!/^[a-z0-9-]+$/.test(name)) {
     return { ok: false, message: `Name '${name}' should be hyphen-case (lowercase letters, digits, and hyphens only)` };
   }
-  // Grammar intersection across harnesses: Hermes requires a leading letter; the spec forbids
+  // Grammar intersection across harnesses: a leading letter is required; the spec forbids
   // consecutive hyphens and leading/trailing hyphens.
   if (!/^[a-z]/.test(name)) {
     return { ok: false, message: `Name '${name}' must start with a lowercase letter` };

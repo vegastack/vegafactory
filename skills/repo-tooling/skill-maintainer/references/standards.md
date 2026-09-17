@@ -1,8 +1,8 @@
 # Tri-harness skill standards
 
-The complete standards reference for skills in this repository, covering the three target harnesses — Claude Code, Codex, Hermes — and the agentskills.io open standard they converge on. Verified 2026-08-08.
+The complete standards reference for skills in this repository, covering the two target harnesses — Claude Code and Codex — and the agentskills.io open standard they converge on. Verified 2026-08-08.
 
-Sentences carrying volatile vendor facts end with an HTML `source:` comment naming a registry ID; each ID maps to an entry in [sources.json](../refresh/sources.json). When a source changes, the marked sentences are the edit surface — see [REFRESH.md](../refresh/REFRESH.md). Items flagged **UNVERIFIED** must never be asserted as fact in skill content or reviews.
+Volatile vendor facts here carry their checked date; the `skills-refresh` skill re-checks them against the official docs.
 
 ## agentskills.io open standard
 
@@ -48,15 +48,6 @@ Source: https://developers.openai.com/codex/skills (canonical content at learn.c
   - `dependencies`: `tools: [{type: "mcp", value: "..."}]`
 - Invocation: `$` mention, `/skills` list, implicit matching on description. The skill list is capped at 2% of the context window / 8,000 chars — descriptions are shortened first, so front-load trigger words. <!-- source: CODEX-SKILLS -->
 
-## Hermes (Nous Research)
-
-Source: https://hermes-agent.nousresearch.com/docs/user-guide/features/skills. <!-- source: HERMES-SKILLS -->
-
-- Hermes Agent is Nous Research's open agent harness (github.com/NousResearch/hermes-agent; CLI + desktop + messengers; v0.9.0 Apr 2026), explicitly compatible with the agentskills.io standard. <!-- source: HERMES-SKILLS -->
-- Discovery: a single global directory `~/.hermes/skills/` — **no project-level discovery at all**. Extra directories only via `~/.hermes/config.yaml` under `skills.external_dirs` (e.g. `[~/.agents/skills]`). `hermes skills install <source>` installs from hubs/URLs into the global directory after a security scan. <!-- source: HERMES-SKILLS -->
-- Frontmatter: `name` + `description` required; optional Hermes fields: `version`, `platforms` (macos, linux), `required_environment_variables`, `requires_toolsets`, `fallback_for_toolsets`, `metadata.hermes.{tags, category, config}`. Name pattern `^[a-z][a-z0-9_-]*$` — must start with a letter (underscores allowed by Hermes but not by the spec; use hyphens). <!-- source: HERMES-SKILLS -->
-- Unknown-key handling, and treatment of `allowed-tools`/`license`/`compatibility`: **UNVERIFIED** (presumed ignored; no error reports).
-- Triggering: every skill becomes a slash command (`/name args`, chainable); model-side progressive disclosure via `skills_list()` (~3k tokens) then `skill_view(name)`. `/learn` auto-authors SKILL.md. <!-- source: HERMES-SKILLS -->
 
 ## Install surfaces
 
@@ -64,9 +55,7 @@ Source: https://hermes-agent.nousresearch.com/docs/user-guide/features/skills. <
 |---|---|---|---|
 | Claude Code | `.claude/skills/` | `~/.claude/skills/` | parents scanned to repo root; nested dirs lazy-loaded <!-- source: CLAUDE-CODE-SKILLS --> |
 | Codex | `.agents/skills/` | `~/.agents/skills/` | also `/etc/codex/skills` and bundled <!-- source: CODEX-SKILLS --> |
-| Hermes | — none | `~/.hermes/skills/` | **global only**; extension only via `skills.external_dirs` config <!-- source: HERMES-SKILLS --> |
 
-Installer implication: the `@vegastack/vegafactory` installer must treat Hermes as global-only — a "project install" for Hermes does not exist.
 
 These paths are the harnesses' own discovery rules and are unaffected by how skills are selected. The installer's `--group` and `--all` flags choose *which* skills to act on; an installed skill is always `<surface>/<bare-name>/`, never `<surface>/<group>/<name>/`.
 
@@ -79,8 +68,8 @@ One authored tree, three harnesses. Every skill in `skills/` follows all seven:
 3. **Description:** ≤ 1024 chars, trigger words front-loaded (Codex 2%/8,000-char list budget; Claude Code 1,536-char per-skill listing truncation).
 4. **Body syntax:** no Claude-only tokens (list above); scripts referenced as plain relative paths runnable from the skill directory; relative links one level deep.
 5. **Size:** SKILL.md under 500 lines / under 5k tokens; detail in `references/`, executables in `scripts/`, templates in `assets/`.
-6. **Extra files:** `agents/openai.yaml` is safe to ship — Claude Code and Hermes ignore unknown files.
-7. **Per-harness metadata** that must survive claude.ai packaging goes under `metadata:` with namespaced keys (e.g. `metadata.hermes.*`).
+6. **Extra files:** `agents/openai.yaml` is safe to ship — Claude Code ignores unknown files.
+7. **Per-harness metadata** that must survive claude.ai packaging goes under `metadata:` with namespaced keys.
 
 Repo enforcement: `packages/cli/scripts/validate-skill.mjs` (run by `bun run check`) accepts exactly the spec six (`name`, `description`, `license`, `compatibility`, `allowed-tools`, `metadata`) and rejects everything else, enforces the full name grammar (lowercase-letter start, no consecutive hyphens, ≤64 chars, name equals the skill directory name), and rejects empty or over-length descriptions and angle brackets. Policy (rule 1) is stricter than the validator; the minimal two keys are the default.
 
@@ -122,7 +111,6 @@ Recorded so nobody re-derives them. All traced in issue 62.
 - **`obfuscated_instruction_text` degrades every analyzer without a bounded-parse hook (twelve).** The cause is a removal-cue verb — `ignore`, `strip`, `drop`, `remove`, `omit` … — directly beside its own closing quote, which the reconstruction pass reads as an unsupported "ignore the literal …" directive and fails closed on once any later quoted string in the file activates it. In this repo that is Node's `stdio` mode word for a discarded fd; hoisting the word into a named constant clears it while the same bytes reach the child. Which files trip it depends on their other string literals, so the fix is applied at every site, not only the reporting one.
 - **`AE1` on a `SKILL.md` usually means its references, not its behaviour** — either repo-root paths that cannot resolve relative to a skill directory (correct for a repo-scoped meta-skill), or a file it links to that the parser could not finish. Check which before accepting.
 - **`P2` fires on every HTML comment**, because a hidden instruction is a genuine injection vector. This repo uses HTML comments as machine-readable markers — `vsk:v1`, `vsk-dev:start`, `<!-- source: … -->`, `<!-- mirrored -->` — so the finding is the documentation of a mechanism, not an instance of one. Scope the rule to the file, never to the id alone.
-- **`RA1` on a `refresh/REFRESH.md` is correct about the pattern.** The refresh contract genuinely instructs an agent to rewrite the skill's own files. It is acceptable only because the runner is the only writer, it edits marked sections, checksums are runner-only, and every change lands as a reviewed PR — write those bounds into the reason.
 - **The aggregate risk score is not a gate.** It is inflated by unresolvable-path artifacts in meta-content and deflated by unrelated suppressions.
 
 - **A skill authored elsewhere is scanned the same way, before it reaches an agent** — `--root <path to the skill>`. This repo does not yet redistribute anyone else's skill; when it does, the curation, audit, upstream-drift, release, and retirement rules are this skill's to own, and a curated skill is never hand-edited locally (a local fix is overwritten by the next upstream sync and forks us from its author). Scanning a third-party skill you are evaluating works today and needs none of that.
@@ -134,4 +122,3 @@ Do not assert any of these; if one becomes load-bearing, verify against the live
 - agentskills.io spec version identifier.
 - Codex official unknown-frontmatter-key behavior (community: ignored).
 - Codex legacy `~/.codex/skills` discovery.
-- Hermes unknown-key handling and its treatment of `allowed-tools`/`license`/`compatibility`.

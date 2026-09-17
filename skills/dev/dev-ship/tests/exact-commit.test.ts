@@ -106,7 +106,7 @@ test('actual CLI refuses review markers missing or carrying invalid round and ag
     (body: string) => body.replace(' round=1', ''),
     (body: string) => body.replace('round=1', 'round=0'),
     (body: string) => body.replace(' agent=codex', ''),
-    (body: string) => body.replace('agent=codex', 'agent=hermes'),
+    (body: string) => body.replace('agent=codex', 'agent=other'),
   ]) {
     const f = fixture()
     try { f.comments[2].body = mutate(f.comments[2].body); expect(f.run().status).toBe(2) } finally { f.cleanup() }

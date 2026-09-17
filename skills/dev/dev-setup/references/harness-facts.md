@@ -1,6 +1,6 @@
 # Harness facts
 
-Verified mechanics of the three harnesses this workflow targets — Claude Code, Codex, Hermes — and the GitHub CLI floor. Everything here is volatile — vendors change these — so each claim carries its source; the refresh contract tracks them. Verified 2026-09-03.
+Verified mechanics of the two harnesses this workflow targets — Claude Code and Codex — and the GitHub CLI floor. Everything here is volatile — vendors change these — so each claim carries its source; the refresh contract tracks them. Verified 2026-09-03.
 
 ## Claude Code
 
@@ -28,11 +28,6 @@ Verified mechanics of the three harnesses this workflow targets — Claude Code,
 
 - **Telemetry.** OTel log export is **disabled by default**, opted into with an `[otel]` table in config.toml (`exporter = "none"`, `otlp-http`, `otlp-grpc`; with `"none"` Codex "records events but sends nothing"). The documented stream covers "API requests, SSE/events, prompts, tool approvals/results" and names no skill-activation event — which is why skill capture on Codex is a prompt-mention proxy (the skill's name after a dollar sign), recorded as one. Verified 03-09-2026. <!-- source: CODEX-OTEL -->
 
-## Hermes
-
-- Hermes hooks: a shell `pre_tool_call` hook can block a tool call or fail closed; plugin hooks register `pre_tool_call`, `post_tool_call`, `pre_llm_call` and `post_llm_call` through `ctx.register_hook`, bounded by `plugins.hook_callback_timeout` (default 30s). There is no Stop-style turn hook, so the decision-capture recipe below has no Hermes wiring. <!-- source: HERMES-HOOKS -->
-- The **Curator** is "a background maintenance pass for agent-created skills": it tracks views, uses and patches, moves long-unused skills active → stale → archived, runs on an inactivity check rather than a cron daemon, and never auto-deletes. It maintains skills; it is not a usage-statistics stream. Verified 03-09-2026. <!-- source: HERMES-CURATOR -->
-- Hermes tools: the structured question tool is `clarify`; `delegate_task` spawns subagents; both are ordinary toolset entries (`clarify`, `delegation`), so a headless Hermes run with the toolset off degrades exactly like a Claude Code `-p` run. Skills load from `~/.hermes/skills/` only — no project-level discovery. <!-- source: HERMES-TOOLS -->
 
 ## Model, effort, and concurrency controls
 
@@ -42,9 +37,7 @@ Which model and which reasoning effort a stage runs at is dev.md's `harness-poli
 |---|---|---|---|
 | Claude Code | `--model` takes an alias or a full model name — aliases `fable`, `sonnet`, `opus`, `haiku` (plus `best`, `default`, `opusplan`, `sonnet[1m]`, `opus[1m]`), full names look like `claude-sonnet-5`; overrides the `model` setting and `ANTHROPIC_MODEL` <!-- source: CC-CLI --> | `--effort` sets the level for the session; overrides the `modelSettings` and `effortLevel` settings and does not persist <!-- source: CC-CLI --> | `CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH` (nesting depth below the main conversation, default 3; `1` turns nesting off) and `CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS` (simultaneous subagents, default 20) — both env vars, settable under settings.json's `env` <!-- source: CC-SUBAGENT-ENV --> |
 | Codex | `codex exec -m <model>`, or `-c model=<id>` as a config override <!-- source: CODEX-CONFIG --> | `-c model_reasoning_effort=<level>` — the config key the docs demonstrate as `"high"` and do not enumerate, so read the level names off the model's own documentation before promising one <!-- source: CODEX-CONFIG --> | `agents.max_concurrent_threads_per_session` in config.toml caps concurrently open spawned-agent threads, excluding the primary; unset means Codex picks the default <!-- source: CODEX-AGENTS-MULTI --> <!-- source: CODEX-CONFIG --> |
-| Hermes | none documented | none documented | `plugins.hook_callback_timeout` bounds hooks, not agents <!-- source: HERMES-HOOKS --> |
 
-Hermes has no documented model or effort flag, so a `harness-policy:` entry never names it as the agent — a policy value that cannot be passed as a flag is a promise the dispatcher cannot keep.
 
 Verified 03-09-2026: Claude Code's effort levels are low, medium, high, xhigh and max on Fable 5.1, Fable 5, Opus 5 and Sonnet 5 (high is the default on every model except Opus 4.7, whose default is xhigh), and `ultracode` is a Claude Code setting on top that starts the session at xhigh with dynamic workflows on and needs v2.1.203 or later; `claude --version` here reads 2.1.247 and its `--help` lists the first five. Model ids move, which is why dev.md's `harness-policy:` knob holds them and this file only dates them. <!-- source: CC-CLI -->
 
@@ -78,7 +71,7 @@ Four hooks, one Node file each, written to `.vegastack/hooks/` and wired only on
 
 | Event | File | What it does | Harnesses |
 |---|---|---|---|
-| `PreToolUse` | `ship-guard.mjs` | Asks before a command the compiled policy says needs the operator's word — a merge, a tag, a publish, a production deploy, a force push. | Claude Code · Codex · Hermes |
+| `PreToolUse` | `ship-guard.mjs` | Asks before a command the compiled policy says needs the operator's word — a merge, a tag, a publish, a production deploy, a force push. | Claude Code · Codex |
 | `SessionStart` | `session-start.mjs` | Requests a bounded verified-context pointer from the local VegaFactory resolver. | Claude Code · Codex |
 | `Stop` | `stop-heartbeat.mjs` | Requests a bounded local checkpoint flush; no continuation or blocking output. | Claude Code · Codex |
 | `Stop` | `decision-nudge.mjs` | Asks whether this session settled a directional choice worth a register line. | Claude Code · Codex |
@@ -109,16 +102,6 @@ Codex parses `permissionDecision: "ask"` but does not support it, so the ship gu
 
 Project-local Codex hooks load only once the repo's `.codex/` layer is trusted, and a worktree is a separate path that needs its own trust — dev-setup says so before it offers the wiring. <!-- source: CODEX-CONFIG -->
 
-Hermes takes only the ship guard, as a `pre_tool_call` entry in `~/.hermes/config.yaml`:
-
-```yaml
-hooks:
-  pre_tool_call:
-    - command: node .vegastack/hooks/ship-guard.mjs --harness codex
-      fail_closed: true
-```
-
-Hermes has no Stop-style turn hook and no SessionStart event, so only the ship guard wires there; it reuses the Codex block shape because Hermes reads the same `{"decision":"block"}` contract. <!-- source: HERMES-HOOKS -->
 
 The ship guard's only source of policy is `~/.vegastack/guard/<owner>__<repo>.json`, keyed by the checkout's origin remote and compiled from `.vegastack/dev.md` — the `## Environments` policy lines, the `gates:` knob, the `repo:` line's default branch and the commands the `## Ship` runbook's `ask:` lines name in backticks — by `scripts/ship-policy.mjs` on the operator's yes, or by `vegafactory guard sync` afterwards. dev.md stays the declared intent a human edits; the JSON is the enforcement copy, outside every worktree, so no task edits it and no commit carries it. The guard never reads dev.md: a run under bypassed permissions could otherwise write `- prod: auto — gh pr merge` into its own worktree's profile and authorise the command it was about to run. With the policy file missing, unreadable, malformed or compiled for another repository, every guarded command asks with a reason naming the file and the sync command; a command whose text touches `.vegastack/guard` is itself on the always-ask list; the managed launch gate performs the compiler comparison and refuses stale policy. The guard reads the command as a shell would — quotes, escapes, `;` `&&` `||` `|` `&`, subshells and dollar-paren command substitution — resolves wrappers (`sudo`, `env`, `nice`, `time`, `timeout`, `xargs`, `sh -c`, a path or an escape on the head) and git and gh global options, then matches the resolved argv: a push's destination in every refspec spelling (`HEAD:main`, `refs/heads/main`, `main:main`, `+main`), force and delete flags in any position, `gh api` on a merge URL, and a probe of text handed to another interpreter. A command inside the shipping family that nothing classifies resolves to ask, never allow.
 
@@ -139,10 +122,10 @@ What a dispatcher can rely on when it starts a run with no human at the keyboard
 
 - AGENTS.md is the shared instruction file; the one-line CLAUDE.md import makes it reach Claude Code. Keep the marked section small — it counts against Codex's 32 KiB budget along with everything else in AGENTS.md.
 - Any skill that wants to ask the user degrades by `references/ask-route.md`: intake, plan and implement put the round in the issue and stop at `needs-operator` (intake creates the issue first when the round comes before one exists); dev-setup, which can run before any issue exists, writes documented defaults marked `# TODO confirm` instead and says so.
-- Observed 02-09-2026: the `claude_code` preset already carries the current model guidance on autonomy, delivering work, readability and parallel tool calls; Codex and Hermes get none of it. That is why the AGENTS.md conduct paragraph exists and why skill bodies never restate harness behaviour — a restated instruction competes with the harness's own wording.
+- Observed 02-09-2026: the `claude_code` preset already carries the current model guidance on autonomy, delivering work, readability and parallel tool calls; Codex gets none of it. That is why the AGENTS.md conduct paragraph exists and why skill bodies never restate harness behaviour — a restated instruction competes with the harness's own wording.
 - Parallel children use the owned CLI gateway: a registered, currently owned parent passes the canonical `plan-lint --groups --json` result to `vegafactory children run`, then integrates accepted results with `vegafactory children join`. The gateway owns preparation, bounded concurrency, shared acquisition, execution through the checked runtime, durable results and acceptance; the standalone `children.mjs plan` remains non-executing. Harness processes and worktrees are implementation details behind the gateway, not alternate caller-owned executors. The full contract lives in dev-implement's `references/parallel-children.md` and `references/worktrees.md`.
 - The OpenTelemetry stream is **optional and never required**: capture is deterministic without a collector — the dispatcher parses each harness's own run output, SessionEnd hooks cover interactive sessions, and skill invocations come from hook payloads. `OTEL_LOG_TOOL_DETAILS` stays off; it exports exactly the tool arguments a record must never hold.
-- Every target harness spawns subagents (Claude Code's Task tool, Codex agents, Hermes `delegate_task`), so dev.md's `review:` knob means the same thing on each; only a headless run that cannot spawn falls back to a labeled self-review.
+- Every target harness spawns subagents (Claude Code's Task tool, Codex agents), so dev.md's `review:` knob means the same thing on each; only a headless run that cannot spawn falls back to a labeled self-review.
 
 
 ## Managed hook and native-memory contract — 07-09-2026

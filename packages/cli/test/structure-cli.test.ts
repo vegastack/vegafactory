@@ -17,12 +17,9 @@ function fixture({ members = 2 }: { members?: number } = {}) {
   mkdirSync(join(root, 'packages/cli'), { recursive: true })
   const meta = (dir: string, name: string) => {
     mkdirSync(join(dir, 'agents'), { recursive: true })
-    mkdirSync(join(dir, 'refresh'), { recursive: true })
     writeFileSync(join(dir, 'SKILL.md'), `---\nname: ${name}\ndescription: d\n---\n`)
     writeFileSync(join(dir, 'README.md'), SKILL_README(name))
     writeFileSync(join(dir, 'agents/openai.yaml'), 'name: x\n')
-    writeFileSync(join(dir, 'refresh/REFRESH.md'), '# r\n')
-    writeFileSync(join(dir, 'refresh/sources.json'), '{"sources":[]}\n')
     // A clean skill carries its evals; the shape rules are covered in structure-check.test.ts.
     mkdirSync(join(dir, 'evals'), { recursive: true })
     writeFileSync(join(dir, 'evals/evals.json'), JSON.stringify({ skill_name: name, evals: [{ id: 1, prompt: 'p', expected_output: 'e', files: [], assertions: ['a'] }] }))

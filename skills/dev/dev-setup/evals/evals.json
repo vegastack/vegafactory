@@ -49,12 +49,12 @@
     },
     {
       "id": 5,
-      "prompt": "Set up the dev workflow here. This machine has Claude Code installed and nothing else \u2014 no Codex, no Hermes.",
+      "prompt": "Set up the dev workflow here. This machine has Claude Code installed and nothing else \u2014 no Codex.",
       "expected_output": "Detection records the single harness, the drafted `review:` knob is `subagent` with cross-agent off, `harnesses:` records the two absent harnesses, and `## Environments` names what the absence costs.",
       "files": [],
       "assertions": [
         "The recommended `review:` knob value is `review: subagent`, not cross-agent-risky, and cross-agent is said to be off until a second harness exists",
-        "The `harnesses:` knob line lists the detected Claude Code version and records `codex absent` and `hermes absent`",
+        "The `harnesses:` knob line lists the detected Claude Code version and records `codex absent`",
         "The `harness-policy:` line is still drafted with all six stages (intake, plan, implement, review, status, chronicle)",
         "`## Environments` carries a bullet naming the absent harness and the capability its absence gates"
       ]

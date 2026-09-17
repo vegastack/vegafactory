@@ -16,9 +16,8 @@
     "validate:skill": "node packages/cli/scripts/validate-skill.mjs",
     "validate:structure": "node packages/cli/scripts/structure.mjs check",
     "validate:triggers": "node skills/repo-tooling/skillify/scripts/trigger-check.mjs --json",
-    "readme:sync": "node packages/cli/scripts/readme-sync.mjs",
     "lint": "bun packages/cli/scripts/lint.mjs",
-    "typecheck": "bunx tsc -p packages/cli/tsconfig.json --noEmit && bunx tsc -p packages/dashboard/tsconfig.json --noEmit && bunx tsc -p packages/broker/tsconfig.json --noEmit",
+    "typecheck": "bunx tsc -p packages/cli/tsconfig.json --noEmit",
     "package:cli": "bun run --cwd packages/cli pack:local"
   },
   "devDependencies": {

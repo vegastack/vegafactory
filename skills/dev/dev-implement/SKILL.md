@@ -56,7 +56,7 @@ Before claiming any status, run the proving command fresh and read its exit code
 
 ## Independent review — invoke dev-review
 
-Run `dev-review` per dev.md's `review:` knob — fresh subagent axes by default, cross-agent (Codex↔Claude, announced to the operator) per the knob's mapping; it owns the axes, severities, review comment, bounded fix loop, and adjudication rules. Apply its findings through its loop and re-run the affected checks. Disagree with a finding → adjudicate openly per its rules, because a skipped finding is a decision made in secret. Every target harness spawns the axes (Claude Code subagents, Codex agents, Hermes `delegate_task`); only a headless run that cannot spawn runs the axis briefs itself, labeled as a self-review, because independence is the one thing it lacks.
+Run `dev-review` per dev.md's `review:` knob — fresh subagent axes by default, cross-agent (Codex↔Claude, announced to the operator) per the knob's mapping; it owns the axes, severities, review comment, bounded fix loop, and adjudication rules. Apply its findings through its loop and re-run the affected checks. Disagree with a finding → adjudicate openly per its rules, because a skipped finding is a decision made in secret. Every target harness spawns the axes (Claude Code subagents, Codex agents); only a headless run that cannot spawn runs the axis briefs itself, labeled as a self-review, because independence is the one thing it lacks.
 
 ## The evidence comment — exactly one, edited in place
 

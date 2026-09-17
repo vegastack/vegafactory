@@ -6,7 +6,6 @@
 
 - [ ] Installer/CLI (`packages/cli/`)
 - [ ] Skill content (`skills/`) — see the content-semver bullet in [.vegastack/dev.md](https://github.com/vegastack/vegafactory/blob/main/.vegastack/dev.md)
-- [ ] Refresh metadata (any skill's `refresh/`)
 - [ ] CI / repo hygiene
 - [ ] Docs
 
