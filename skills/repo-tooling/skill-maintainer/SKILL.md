@@ -22,7 +22,7 @@ This skill states what must be true; skillify states how to get there. When a ru
 
 | Need | Read |
 |---|---|
-| tri-harness standards: discovery paths, frontmatter, budgets, install surfaces, portability | [standards](references/standards.md) |
+| Claude Code and Codex standards: discovery paths, frontmatter, budgets, install surfaces, portability | [standards](references/standards.md) |
 | skill-scan triage and the suppression baseline | [standards](references/standards.md) |
 | a new skill: the should-it-exist gate, scaffolding, audit, evals | the `skillify` skill |
 | repo shape, groups, the structure check | the group workflow below |

@@ -22,6 +22,12 @@ The ledger's edit time is also this claim's **heartbeat** — the only liveness 
 A resuming session reads brief → plan → ledger (`vegafactory issue sync <n>`) → `git log` on the issue branch in its worktree (`vegafactory worktree restore <n>` when the folder is gone), then continues from the first task the ledger does not mark complete.
 
 - Resume only unfinished work within the acked brief and plan; `vegafactory issue check <n> --for implement --resume true` confirms the ack still matches.
+- Re-read the brief, the plan, every comment on the issue (old ones can be edited, so age does not matter) and `git log`; any current operator correction wins over the ledger.
 - An edited brief or plan since the ack stops the resume: one `handback` comment, `waiting-on-operator`.
-- Completed tasks stay as they are; re-run their checks only when the code they touched changed since.
-- A stale heartbeat is a reason to look, never proof the other session stopped: only the operator abandons a claim (`reclaim.mjs`).
+- Match tasks by their IDs, not by counts; a ticked task with a verified commit never reruns.
+- A stale heartbeat is a reason to look, never proof the other session stopped: only the operator takes a claim back.
+- Anything ambiguous — a moved scope, a missing commit, a claim held elsewhere — is a hand-back, not a guess.
+
+## Surfacing — rulings never die in the dark
+
+Every `Ruling:` line lands on the evidence comment's `**Review:**` line at hand-back, in the order made. The operator reads that list and reverses anything wrong — a ruling that only ever lived in the ledger was a decision made in secret.

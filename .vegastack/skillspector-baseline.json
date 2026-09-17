@@ -39,12 +39,7 @@
     {
       "id": "P2",
       "path": "references/standards.md",
-      "reason": "standards.md carries the same '<!-- source: ... -->' citation comments, which are how a reader tells a verified normative sentence from commentary and how the weekly refresh knows which sentences a drifted source invalidates. Removing them would make the freshness contract unauditable. Still flag if: a source comment carries anything but a source identifier, or an uncited HTML comment appears among the normative sentences."
-    },
-    {
-      "id": "P2",
-      "path": "references/authoring.md",
-      "reason": "authoring.md marks the tables it mirrors from skill-maintainer's standards with '<!-- mirrored -->' so the refresh runner knows which copies must move together. It is a synchronisation marker between two files, not an instruction. Still flag if: a mirrored marker gains prose, or the comment appears on content that is not actually mirrored elsewhere."
+      "reason": "standards.md carries the same '<!-- source: ... -->' citation comments, which are how a reader tells a verified normative sentence from commentary and which official source a dated fact is re-checked against. Removing them would make the freshness contract unauditable. Still flag if: a source comment carries anything but a source identifier, or an uncited HTML comment appears among the normative sentences."
     },
     {
       "id": "AS1",
@@ -75,6 +70,11 @@
       "id": "EA5",
       "path": "references/harness-facts.md",
       "reason": "EA5 (External Model or Provider Selection) on the Codex skill-discovery drill: one documented command, codex exec -C \"$PROBE\" --skip-git-repo-check -s read-only '...', that starts a real Codex session against a throwaway probe skill to learn whether headless Codex discovers project skills on its own. The quota cost is real and is the reason the section says, in bold, that the operator runs it by hand — no skill, hook or dispatcher may run it unasked, and dev-setup only ever prints it for the operator to copy. The run is sandboxed read-only inside a mktemp directory so the repo's un-ignored .agents/ is never written to. Adjudicated 03-09-2026 (#104). Still flag if: the command appears in this file outside the operator-run drill, loses the read-only sandbox flag or the scratch directory, or any script or hook in this repo executes this probe without an explicit operator instruction."
+    },
+    {
+      "id": "P2",
+      "path": "references/plan-format.md",
+      "reason": "plan-format.md documents the plan comment's own marker protocol — the '<!-- vsk:v1 type=plan rev=... -->' opening line and the '<!-- task-id:... -->' task identities inside fenced Markdown examples — the same comment protocol conventions.md documents. They are metadata that tools parse, not directives. A path rule replaces content fingerprints here because SkillSpector's fingerprints differ between the macOS and Linux runs (17-09-2026, #214), so a fingerprint made on one platform never matches the merge queue. Scope: P2 in this one reference file. Still flag if: a comment in this file carries anything other than vsk:v1 key=value metadata or a task-id, or a P2 finding appears outside a fenced example."
     }
   ],
   "scanner_version": "2.11.2",
@@ -96,18 +96,6 @@
       "rule_id": "P2",
       "file": "scripts/lib/approval.mjs",
       "reason": "The approval owner documents and parses vsk approval/progress metadata. The matched bytes are a schema example or literal delimiter comparison, not an agent-directed instruction; only declared JSON fields grant scope after canonical identity/source/history validation. This identical owner file is copied into dev-implement, dev-intake, dev-plan and dev-ship. Exact content fingerprint regenerated after the operator-approved SkillSpector 2.11.2 upgrade; no path-wide or rule-wide exception. Still flag if: the matched content changes, a comment gains an instruction rather than metadata, or a new finding appears outside this exact fingerprint."
-    },
-    {
-      "hash": "sha256:1618044194efc2c7879d9d094dbe70174af152e6ccfae3330f8b56abd1bd478e",
-      "rule_id": "P2",
-      "file": "references/plan-format.md",
-      "reason": "The plan template uses vsk plan and stable task-id metadata inside fenced Markdown examples. These delimiters bind immutable task identity; they contain no hidden operational directive. Exact content fingerprint regenerated after the operator-approved SkillSpector 2.11.2 upgrade; no path-wide or rule-wide exception. Still flag if: the matched content changes, a comment gains an instruction rather than metadata, or a new finding appears outside this exact fingerprint."
-    },
-    {
-      "hash": "sha256:956764a4de95abd1d6e6d73c434314a7ec1861bbf5fe10a3ce087ea6bd443f83",
-      "rule_id": "P2",
-      "file": "references/plan-format.md",
-      "reason": "The plan template uses vsk plan and stable task-id metadata inside fenced Markdown examples. These delimiters bind immutable task identity; they contain no hidden operational directive. Exact content fingerprint regenerated after the operator-approved SkillSpector 2.11.2 upgrade; no path-wide or rule-wide exception. Still flag if: the matched content changes, a comment gains an instruction rather than metadata, or a new finding appears outside this exact fingerprint."
     },
     {
       "hash": "sha256:3d09d23e2a76128fad8744f283aa18c457dae29e1c2534329377aa2534a71469",
@@ -140,12 +128,6 @@
       "reason": "The approval owner documents and parses vsk approval/progress metadata. The matched bytes are a schema example or literal delimiter comparison, not an agent-directed instruction; only declared JSON fields grant scope after canonical identity/source/history validation. This identical owner file is copied into dev-implement, dev-intake, dev-plan and dev-ship. Exact content fingerprint regenerated after the operator-approved SkillSpector 2.11.2 upgrade; no path-wide or rule-wide exception. Still flag if: the matched content changes, a comment gains an instruction rather than metadata, or a new finding appears outside this exact fingerprint."
     },
     {
-      "hash": "sha256:6fc53185b2a016f31c7059696797c718a4106af3855a5f2730af457f532d279d",
-      "rule_id": "P2",
-      "file": "references/plan-format.md",
-      "reason": "The plan template uses vsk plan and stable task-id metadata inside fenced Markdown examples. These delimiters bind immutable task identity; they contain no hidden operational directive. Exact content fingerprint regenerated after the operator-approved SkillSpector 2.11.2 upgrade; no path-wide or rule-wide exception. Still flag if: the matched content changes, a comment gains an instruction rather than metadata, or a new finding appears outside this exact fingerprint."
-    },
-    {
       "hash": "sha256:63683a14c1dc0f09cab888eb0ad2a5aa8f5316b228b22ffea4e0431804d021b5",
       "rule_id": "P2",
       "file": "scripts/recovery.mjs",
@@ -168,14 +150,14 @@
     {
       "skill": "skillify",
       "file": "scripts/scaffold-skill.mjs",
-      "sha256": "18c8bef92d40d40d046bfa15d3e2c2c6daa82184ad46ee98d4ad81fc361d1401",
-      "reason": "The scanner reports static_parse_limit on this file and degrades exactly one analyzer (static_patterns_tool_misuse) for the whole skill. Cause, bisected 03-09-2026 (#104) against the scanner's own predicate rather than assumed: eleven template literals — lines 88, 104, 142, 161, 176, 194, 211, 251, 259, 264 and 326 — whose opening backtick sits at a shell-word start and whose first inner token carries the interpolation; the bounded shell parser reads each as a command substitution and gives up on the expansion (skill-maintainer's standards.md, known behaviours, records the rule). This replaces the earlier reasoning that blamed template literals 'in assignment position', which was neither necessary nor sufficient. Deliberately not converted: rewriting eleven readable interpolated diagnostics as concatenation costs more legibility than one degraded analyzer on a repo-only scaffolder is worth, and the file's exception clears only when every site is fixed. What bounds the risk: the file runs no command (no child_process import), writes only the scaffolded skill tree and the repo wiring it names, and is listed in packages/cli/repo-only.json so it never ships to a consumer. Still flag if: the reported reason code changes from static_parse_limit, the number of degraded analyzers rises above 1, or the file gains shell execution or an outbound destination — any of which is a cause other than the one accepted here. The sha256 binds this acceptance to the file as adjudicated; any edit expires it and forces re-adjudication."
+      "sha256": "05043bdcc5642e320c3d5c15e36a3ec15af86f6c1343843b1e5de1184d9b223e",
+      "reason": "The scanner reports static_parse_limit on this file and degrades exactly one analyzer (static_patterns_tool_misuse) for the whole skill. Cause, bisected 03-09-2026 (#104) against the scanner's own predicate rather than assumed: eleven template literals — lines 88, 104, 142, 161, 176, 194, 211, 251, 259, 264 and 326 — whose opening backtick sits at a shell-word start and whose first inner token carries the interpolation; the bounded shell parser reads each as a command substitution and gives up on the expansion (skill-maintainer's standards.md, known behaviours, records the rule). This replaces the earlier reasoning that blamed template literals 'in assignment position', which was neither necessary nor sufficient. Deliberately not converted: rewriting eleven readable interpolated diagnostics as concatenation costs more legibility than one degraded analyzer on a repo-only scaffolder is worth, and the file's exception clears only when every site is fixed. What bounds the risk: the file runs no command (no child_process import), writes only the scaffolded skill tree and the repo wiring it names, and is listed in packages/cli/repo-only.json so it never ships to a consumer. Still flag if: the reported reason code changes from static_parse_limit, the number of degraded analyzers rises above 1, or the file gains shell execution or an outbound destination — any of which is a cause other than the one accepted here. The sha256 binds this acceptance to the file as adjudicated; any edit expires it and forces re-adjudication. Re-adjudicated 17-09-2026 (#214): the edit removed the README and refresh scaffolding; the scan still reports exactly one degraded analyzer (static_patterns_tool_misuse) from the same template-literal cause, and the file still runs no command; line numbers above have shifted."
     },
     {
       "skill": "skill-maintainer",
       "file": "SKILL.md",
-      "sha256": "81fc5d089e4edb15f8d6511887c65e1ea01bd134ba27fc7a324ffb1e5cff6961",
-      "reason": "Accepts the AE1 findings on this file. AE1 is a completeness signal reported through the findings channel — the scanner's own text is 'Referenced artifact was not completely inspected' — so it is accepted here rather than as a rule or fingerprint. One traced cause remains: this SKILL.md cites repo-root paths (packages/cli/packaging.json, packages/cli/scripts/validate-skill.mjs, CONTRIBUTING.md, .vegastack/dev.md) that cannot resolve relative to a skill directory and are correct for a skill whose subject is this repository; the scanner marks the file partial on those twelve unresolved references, and the three AE1 findings (lines 16, 65, 76 at this adjudication) are the file's own mentions of `SKILL.md` resolving to that partial artifact. The second cause recorded earlier — the link to references/standards.md, which the parser could not finish — is gone: standards.md scans complete since #104 fixed its parse-limit spans. Not a rule, because {id: AE1, path: SKILL.md} silences this in every skill and demonstrably hid a real regression when tried. Not fingerprints, because the scanner emits location-bound hashes its own generator deduplicates, so a fingerprint set provably cannot cover them. Re-adjudicated 03-09-2026 (#104) after the description's 'this repository: editing' became 'this repository - editing': the unquoted colon-space had made the frontmatter unparseable YAML — manifest_parse_error, skill name 'unknown', two analyzers reporting manifest_absent — and this acceptance, keyed on the file path, had absorbed that new reason code silently; validate-skill.mjs now rejects the shape, so it cannot recur unnoticed. Scope of what this hides: any AE1 on this one file. Still flag if: this file changes at all — the sha256 above drops the acceptance automatically — or a rule id other than AE1 appears here, which this acceptance does not cover and which will still block."
+      "sha256": "2ef11968d3964363bf89a396e989577eee8f4aca76f3a7e942a86e5d16bbf673",
+      "reason": "Accepts the AE1 findings on this file. AE1 is a completeness signal reported through the findings channel — the scanner's own text is 'Referenced artifact was not completely inspected' — so it is accepted here rather than as a rule or fingerprint. One traced cause remains: this SKILL.md cites repo-root paths (packages/cli/packaging.json, packages/cli/scripts/validate-skill.mjs, CONTRIBUTING.md, .vegastack/dev.md) that cannot resolve relative to a skill directory and are correct for a skill whose subject is this repository; the scanner marks the file partial on those twelve unresolved references, and the three AE1 findings (lines 16, 64, 75 at this adjudication) are the file's own mentions of `SKILL.md` resolving to that partial artifact. The second cause recorded earlier — the link to references/standards.md, which the parser could not finish — is gone: standards.md scans complete since #104 fixed its parse-limit spans. Not a rule, because {id: AE1, path: SKILL.md} silences this in every skill and demonstrably hid a real regression when tried. Not fingerprints, because the scanner emits location-bound hashes its own generator deduplicates, so a fingerprint set provably cannot cover them. Re-adjudicated 03-09-2026 (#104) after the description's 'this repository: editing' became 'this repository - editing': the unquoted colon-space had made the frontmatter unparseable YAML — manifest_parse_error, skill name 'unknown', two analyzers reporting manifest_absent — and this acceptance, keyed on the file path, had absorbed that new reason code silently; validate-skill.mjs now rejects the shape, so it cannot recur unnoticed. Scope of what this hides: any AE1 on this one file. Still flag if: this file changes at all — the sha256 above drops the acceptance automatically — or a rule id other than AE1 appears here, which this acceptance does not cover and which will still block. Re-adjudicated 17-09-2026 (#214): the edit only reworded the description, rule 7 and the routing table; the scan shows the same three AE1 findings and no other rule id."
     }
   ]
 }

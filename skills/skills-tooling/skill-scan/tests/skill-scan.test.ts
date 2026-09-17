@@ -883,8 +883,10 @@ describe('CLI', () => {
         execution_successful: true,
         analysis_completeness: { status: 'complete', limitations: [], entirely_uninspected_files: 0, partially_inspected_files: 0, fully_inspected_files: 1, coverage_percent: 100 },
       })
+      const reportFile = require('node:path').join(require('node:os').tmpdir(), 'vsk-fake-report-' + process.pid + '.json')
+      require('node:fs').writeFileSync(reportFile, report)
       const child = spawnSync('node', ${JSON.stringify([script, '--root'])}.concat(process.env.VSK_TEST_SKILL, '--json'), {
-        cwd: ${JSON.stringify(repoRoot)}, env: { ...process.env, VSK_SKILLSPECTOR: ${JSON.stringify(fake)}, VSK_FAKE_REPORT: report },
+        cwd: ${JSON.stringify(repoRoot)}, env: { ...process.env, VSK_SKILLSPECTOR: ${JSON.stringify(fake)}, VSK_FAKE_REPORT_FILE: reportFile },
         encoding: 'utf8', maxBuffer: 64 * 1024 * 1024,
       })
       let parsed = null

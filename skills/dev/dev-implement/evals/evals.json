@@ -3,8 +3,8 @@
   "evals": [
     {
       "id": 1,
-      "prompt": "Issue 27 in vegastack/docs-tools (labeled queued, small, assigned to you). Brief: `scripts/check-links.mjs` prints broken links one per line; add a `--json` flag that prints `{ broken: [{ file, broken: [...] }] }` instead, keep the exit codes, document the flag in the script header. Out of scope: renaming or restructuring existing functions. Plan comment (approved): Task 1 — failing test in `tests/check-links.test.ts` for `--json`, then the flag; Task 2 — header comment and changeset. dev.md: `tests: required`, `changelog: changesets`, `review: subagent`, `branch: <type>/<slug>`. Implement it end to end and draft the evidence comment you would post.",
-      "expected_output": "The run claims the issue, writes a ledger comment first, works the two tasks test-first with one commit each, and ends with an evidence comment in the workflow shape whose Review line lists every ruling made; the operator is never asked a question. (prose half only — the live label, branch and PR flow is the sandbox drill's proof)",
+      "prompt": "Issue 27 in vegastack/docs-tools (labeled queued, small, assigned to you). Brief: `scripts/check-links.mjs` prints broken links one per line; add a `--json` flag that prints `{ broken: [{ file, broken: [...] }] }` instead, keep the exit codes, document the flag in the script header. Out of scope: renaming or restructuring existing functions. Plan comment (approved): Task 1 \u2014 failing test in `tests/check-links.test.ts` for `--json`, then the flag; Task 2 \u2014 header comment and changeset. dev.md: `tests: required`, `changelog: changesets`, `review: subagent`, `branch: <type>/<slug>`. Implement it end to end and draft the evidence comment you would post.",
+      "expected_output": "The run claims the issue, writes a ledger comment first, works the two tasks test-first with one commit each, and ends with an evidence comment in the workflow shape whose Review line lists every ruling made; the operator is never asked a question. (prose half only \u2014 the live label, branch and PR flow is the sandbox drill's proof)",
       "files": [],
       "assertions": [
         "The evidence comment opens with `<!-- vsk:v1 type=evidence rev=1 branch=... sha=... -->` and has the Done, Tests, Review, Changelog, Docs, Not done / limits and Branch lines",
@@ -16,11 +16,11 @@
     },
     {
       "id": 2,
-      "prompt": "the last session on issue 27 died mid-way, pick it up. Issue 27 in vegastack/docs-tools (labeled queued, small, assigned to you). Brief: `scripts/check-links.mjs` prints broken links one per line; add a `--json` flag that prints `{ broken: [{ file, broken: [...] }] }` instead, keep the exit codes, document the flag in the script header. Out of scope: renaming or restructuring existing functions. Plan comment (approved): Task 1 — failing test in `tests/check-links.test.ts` for `--json`, then the flag; Task 2 — header comment and changeset. dev.md: `tests: required`, `changelog: changesets`, `review: subagent`, `branch: <type>/<slug>`. The ledger comment on the issue reads: `- Task 1: complete (commits a1b2c3d..e4f5a6b)` and nothing else; `git log` on feat/27-json-flag shows those two commits. Tell me what you do first and what you skip.",
-      "expected_output": "The resume protocol is followed and named — brief, then plan, then ledger, then git log, nothing else — Task 1 is treated as done because the ledger says so and the commits exist, and work resumes at Task 2. (prose half only — the live label, branch and PR flow is the sandbox drill's proof)",
+      "prompt": "the last session on issue 27 died mid-way, pick it up. Issue 27 in vegastack/docs-tools (labeled queued, small, assigned to you). Brief: `scripts/check-links.mjs` prints broken links one per line; add a `--json` flag that prints `{ broken: [{ file, broken: [...] }] }` instead, keep the exit codes, document the flag in the script header. Out of scope: renaming or restructuring existing functions. Plan comment (approved): Task 1 \u2014 failing test in `tests/check-links.test.ts` for `--json`, then the flag; Task 2 \u2014 header comment and changeset. dev.md: `tests: required`, `changelog: changesets`, `review: subagent`, `branch: <type>/<slug>`. The ledger comment on the issue reads: `- Task 1: complete (commits a1b2c3d..e4f5a6b)` and nothing else; `git log` on feat/27-json-flag shows those two commits. Tell me what you do first and what you skip.",
+      "expected_output": "The resume protocol is followed and named \u2014 brief, plan, every current issue comment (any age, since old ones can be edited), ledger, then git log \u2014 Task 1 is treated as done because the ledger says so and the commits exist, no operator correction overrides it, and work resumes at Task 2. (prose half only \u2014 the live label, branch and PR flow is the sandbox drill's proof)",
       "files": [],
       "assertions": [
-        "The output names the resume order brief → plan → ledger → git log and reads nothing else",
+        "The output reads the brief, the plan, every current issue comment regardless of age, the ledger and git log, and checks for an operator correction that overrides the ledger",
         "Task 1 is not re-executed; the output says the ledger's `complete` line and the matching commits settle it",
         "Work resumes at Task 2",
         "The operator's explicit handover is acknowledged as the thing that permits taking over a `in-progress` issue"
@@ -28,8 +28,8 @@
     },
     {
       "id": 3,
-      "prompt": "Do issue 31 in vegastack/docs-tools — it's the link-checker rewrite. The issue is labeled `waiting-on-operator` with an open question in its Assumptions section about whether external links should be fetched.",
-      "expected_output": "The claim is refused: preflight fails on the label state and the open assumption, the failed condition is named, and no branch, commit, or file change happens. (prose half only — the live label, branch and PR flow is the sandbox drill's proof)",
+      "prompt": "Do issue 31 in vegastack/docs-tools \u2014 it's the link-checker rewrite. The issue is labeled `waiting-on-operator` with an open question in its Assumptions section about whether external links should be fetched.",
+      "expected_output": "The claim is refused: preflight fails on the label state and the open assumption, the failed condition is named, and no branch, commit, or file change happens. (prose half only \u2014 the live label, branch and PR flow is the sandbox drill's proof)",
       "files": [],
       "assertions": [
         "The output refuses to claim the issue and names the failed preflight condition (not `queued`, an open Assumptions question)",
@@ -39,15 +39,15 @@
     },
     {
       "id": 4,
-      "prompt": "You are the parent session for epic 88 in vegastack/shop, working in its worktree on `feat/88-reports`. The approved plan declares two independent groups: `api` — #89 · Files: `packages/api/src/report.ts`, `packages/api/test/report.test.ts`; `docs` — #90 · Files: `docs/pricing.md`. Both children are labeled queued and unassigned. dev.md: `tests: required`, `changelog: changesets`, `review: subagent`. Run the children and report what you did.",
-      "expected_output": "The two children run at the same time, each in its own checkout branched from the parent branch's HEAD sha; the parent then joins the branches in plan order, runs the check command once after the join, and reports any child that failed or wrote outside its declared file set.",
+      "prompt": "You are working epic 88 in vegastack/shop. Its approved plan declares two independent groups: `api` \u2014 #89 \u00b7 Files: `packages/api/src/report.ts`, `packages/api/test/report.test.ts`; `docs` \u2014 #90 \u00b7 Files: `docs/pricing.md`. Both sub-issues are labeled ready and unassigned. dev.md: `tests: required`, `changelog: changesets`, `review: subagent`. Build them and report what you did.",
+      "expected_output": "The epic itself is not built. Each sub-issue is worked as its own issue with its own claim, verification and hand-back, one at a time, on its own branch inside the epic's worktree; nothing launches or joins parallel children.",
       "files": [],
       "assertions": [
-        "The children are launched through the harness's own isolation, one child per group, not sequentially",
-        "Each child branches from the parent HEAD sha, and the parent joins the branches in plan order (#89 then #90)",
-        "Verification runs once after the join, not once per child",
-        "A failed child is reported with its branch and worktree left in place, as a ledger line, and the parent continues with the others",
-        "A child whose diff touches a file outside its declared set is not merged and is named as such"
+        "The epic is not claimed or built as one unit; work happens on #89 and #90",
+        "The sub-issues run one at a time, each on its own branch inside the epic's worktree",
+        "Nothing claims to launch, run or join parallel children",
+        "Each sub-issue is verified and handed back on its own issue with its own evidence",
+        "Tasks inside one sub-issue run in order"
       ]
     }
   ]
