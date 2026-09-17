@@ -9,7 +9,7 @@
 //   node scripts/release.mjs wait-registry          poll npm until this version is visible, then smoke it
 //   node scripts/release.mjs validate               prepack guard: the build output exists
 import { spawnSync } from 'node:child_process'
-import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -54,7 +54,8 @@ export function pack(outDir) {
 
 // Installs the package the way a user does, then runs the installer against a scratch project.
 export function smoke(spec, expectedVersion) {
-  const home = mkdtempSync(join(tmpdir(), 'vegafactory-smoke-'))
+  // The installer refuses symlinked path components, and macOS's temp dir sits behind /var -> /private/var.
+  const home = mkdtempSync(join(realpathSync(tmpdir()), 'vegafactory-smoke-'))
   try {
     const prefix = join(home, 'prefix')
     const project = join(home, 'project')
