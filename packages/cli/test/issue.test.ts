@@ -6,6 +6,7 @@ import { join } from 'node:path'
 import { cacheDir, commentType, readState, syncIssue, takeOver, withLock } from '../src/issue-cache.ts'
 import { defaultRunner } from '../src/gh.ts'
 import { ackBody, artifactHash, runIssue } from '../src/issue.ts'
+import { stageLogPath } from '../src/stages.ts'
 import { FakeGitHub } from './fake-github.ts'
 
 function repo(): string {
@@ -195,6 +196,20 @@ describe('sync', () => {
     expect(run('label', '7', '--state', 'queued', '--add', 'risky').code).toBe(0)
     expect(gh.issues.get(7)!.labels.sort()).toEqual(['medium', 'queued', 'risky'])
     expect(gh.calls.filter((call) => call.startsWith('PUT'))).toHaveLength(1)
+  })
+
+  // A state change is written down as it is made, so usage numbers can say which stage a turn
+  // belonged to long after the issue has moved on.
+  test('moving an issue records the stage and its time', () => {
+    gh.addIssue({ number: 7, labels: ['planning', 'medium'] })
+    const before = Date.now()
+    expect(run('label', '7', '--state', 'queued').code).toBe(0)
+    expect(run('label', '7', '--state', 'in-progress').code).toBe(0)
+    // A label that is not a state writes nothing.
+    expect(run('label', '7', '--add', 'risky').code).toBe(0)
+    const lines = readFileSync(stageLogPath(root, 'o/r'), 'utf8').trim().split('\n').map((line) => JSON.parse(line))
+    expect(lines.map((line) => [line.issue, line.state])).toEqual([[7, 'queued'], [7, 'in-progress'], [7, 'in-progress']])
+    for (const line of lines) expect(Date.parse(line.at)).toBeGreaterThanOrEqual(before)
   })
 
   test('a label edit against a stale cursor is refused', () => {

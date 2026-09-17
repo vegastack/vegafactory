@@ -38,6 +38,9 @@ Events and the harness hooks they belong on:
   stop            Stop                 commits and pushes a WIP checkpoint of the turn, and asks a
                                        working session once for the general lessons it taught
   session-end     SessionEnd           a last heartbeat (the claim is kept, the session may resume)
+
+Session start, stop and session end also collect usage numbers from the harness session logs in
+the background, and a session start asks to share them (at most once an hour).
 `
 }
 
@@ -556,8 +559,18 @@ function takeBack(where: Where, harness: Harness, model: string) {
   return `vegafactory issue claim ${where.number} --harness ${harness} --model ${model} --take-back-by <login>`
 }
 
+// Usage numbers are read from the harnesses' own session logs, in the background, at turn
+// boundaries — never in the session's way, and a failure is silent. The push is bounded to once
+// an hour by the command itself, so a session start can always ask for it.
+function collectStats(event: HookEvent, cwd: string, deps: HookDeps) {
+  if (event !== 'session-start' && event !== 'stop' && event !== 'session-end') return
+  deps.detach([...deps.cli, 'stats', 'collect'], cwd)
+  if (event === 'session-start') deps.detach([...deps.cli, 'stats', 'push'], cwd)
+}
+
 function advisory(event: HookEvent, harness: Harness, payload: Record<string, unknown>, deps: HookDeps): void {
   const cwd = typeof payload.cwd === 'string' ? payload.cwd : process.cwd()
+  try { collectStats(event, cwd, deps) } catch { /* stats never affect a session */ }
   const where = locate(cwd, deps.host)
   if (!where) return
   const local = readLocal(where)
