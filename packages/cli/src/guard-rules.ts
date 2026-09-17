@@ -531,8 +531,8 @@ function issueVerb(words: string[]): Decision | null {
     if (args.some((arg) => /^--(stage|source)=/.test(arg))) return ask(`an ack the guard cannot read ${WORD}`, 'unclassified')
     const stage = flagValue(args, '--stage')
     const source = flagValue(args, '--source') ?? 'session'
-    if (stage !== 'brief' && stage !== 'plan') return ask(`recording "ship it" is the operator's own word, so it ${WORD}`, 'always-ask')
-    if (!/^comment:\d+$/.test(source)) return ask(`an ack from this session is the operator's own word, so it ${WORD}`, 'always-ask')
+    if (stage !== 'brief' && stage !== 'plan') return ask(`recording "ship it" ${WORD}`, 'always-ask')
+    if (!/^comment:\d+$/.test(source)) return ask(`an ack recorded from this session ${WORD}`, 'always-ask')
   }
   if (verb === 'claim' && args.some((arg) => arg.startsWith('--take-back-by'))) return ask(`taking an issue back from another session ${WORD}`, 'always-ask')
   return null
