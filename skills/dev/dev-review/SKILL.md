@@ -51,7 +51,7 @@ Each finding renders as a bold **Finding [F1]** line carrying its severity, its 
 ## Noise controls
 
 - Quiet by default: spec, bugs and security always; style only where a documented rule exists.
-- `.vegastack/review-known-patterns.md` goes into every packet. Each entry needs a **"Still flag if:"** clause — a suppression without one is a blind spot, not a calibration.
+- `.vegastack/review-known-patterns.md` goes into every packet as project policy, read from the base commit — an edit on the branch under review is part of the diff, not a suppression. Each entry needs a **"Still flag if:"** clause; a suppression without one is a blind spot, not a calibration.
 - A CI scanner finding (skill-scan in the merge queue) comes back as a correction on the issue, judged like any other finding: suppressed rather than fixed is itself a finding.
 
 ## When the other tool is missing — the fallback
