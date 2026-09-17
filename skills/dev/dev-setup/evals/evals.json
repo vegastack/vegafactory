@@ -94,19 +94,6 @@
         "The reply states the mirror is one way: no reverse sync from the board back to labels",
         "The reply names the factory App and the gh 2.97.0 runner floor as the workflow's requirements"
       ]
-    },
-    {
-      "id": 9,
-      "prompt": "Re-run setup here. The org control room says stats: on, stats-people: off, stats-override: allowed. I want the statistics capture but not the skill tracking on Codex \u2014 and be clear about what actually gets recorded before I say yes.",
-      "expected_output": "Round C offers the three capture hooks separately, each in one plain sentence, and says what a record holds (counts and identifiers, never prompt or assistant text) and where it goes (the org's own control room, over the operator's existing gh credentials). Only the hooks the operator says yes to are written to `.vegastack/hooks/` and wired; the declined Codex prompt-mention hook is neither written nor wired, and the report says so.",
-      "files": [],
-      "assertions": [
-        "The three hooks are offered separately, not as one bundle",
-        "The offer states that records carry counts and identifiers only, never transcript text",
-        "The offer states that whether anything is recorded at all is the org's `stats:` policy, not a machine setting",
-        "`.vegastack/hooks/prompt-skill-mention.mjs` is NOT written, because that hook was declined",
-        "No `stats:` line is added to `.vegastack/dev.md`, because the org's policy is on and the repo is not opting out"
-      ]
     }
   ]
 }

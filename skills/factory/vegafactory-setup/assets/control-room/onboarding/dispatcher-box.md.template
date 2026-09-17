@@ -1,13 +1,13 @@
 # Provisioning the dispatcher box for {{org}}/{{repo}}
 
-The always-on Mac mini runs two things: the GitHub Actions runner that executes CI and release, and the `vegafactory dispatch --watch` service that turns labels and 🚀 reactions into headless runs. Every step below is a human's own action on the box or on the org's settings; the skill positions the operator, it never reaches for the credential.
+The always-on Mac mini runs the GitHub Actions runner for trusted jobs (pull request CI runs on GitHub-hosted runners). A second account is kept for the dispatcher, which is being rebuilt (#218). Every step below is a human's own action on the box or on the org's settings; the skill positions the operator, it never reaches for the credential.
 
 ## Accounts
 
 Two macOS accounts, neither an admin of the other:
 
 - `{{runner-user}}` — runs the Actions runner and nothing else.
-- `{{dispatcher-user}}` — runs `vegafactory dispatch`, and owns the `gh`, Claude, and Codex credentials.
+- `{{dispatcher-user}}` — owns the `gh`, Claude, and Codex credentials, and will run the dispatcher.
 
 The split is the whole point: a CI job runs as `{{runner-user}}` and so **cannot read** the tokens in `{{dispatcher-user}}`'s home — a workflow edited in a pull request gets a repository token and no more. The GitHub App private key is never on this box; it lives in org settings as the secret `VEGAFACTORY_APP_PRIVATE_KEY`.
 
@@ -19,7 +19,6 @@ Installed system-wide so both accounts see the same versions:
 - bun 1.3.14 — `bun --version` prints exactly `1.3.14`, matching the workspace `packageManager` pin.
 - Node 24 — `node --version` prints a `v24.` line.
 - gh 2.97 or newer — `gh --version`, first line; the board mirror needs that floor.
-- SkillSpector for the dispatcher's review runs — `uv tool install git+https://github.com/NVIDIA/skillspector.git`, then `skillspector --version`.
 
 CI jobs get their own bun and Node from `setup-bun` and `setup-node`, so these copies serve `{{dispatcher-user}}` and stand as the fallback.
 
@@ -28,20 +27,7 @@ CI jobs get their own bun and Node from `setup-bun` and `setup-node`, so these c
 - `sudo systemsetup -setcomputersleep Never`
 - `sudo pmset -a sleep 0 disksleep 0 womp 1`
 
-On macOS a per-user LaunchAgent loads only inside that account's GUI session, so exactly one account may rely on auto-login. Give it to `{{runner-user}}`. `{{dispatcher-user}}`'s service is installed by `vegafactory service install` with `RunAtLoad` and `KeepAlive`; its requirement is the reboot drill in `## Verify`, not any particular mechanism.
-
-## Dispatcher ownership and offline recovery
-
-Keep one non-root dispatcher account, `{{dispatcher-user}}`, and one confirmed absolute config path for the host. All service and manual invocations use that path and its single `lockRoot` (default `~/.vegastack/factory/locks`). Inspect the previous root with services stopped before changing it. Separate homes or copied machine configuration do not establish exclusion or enroll another machine.
-
-Local claims have a random token, UID, boot identity and process start identity. Claim mutations use an exclusive directory guard and private owner records. Permission errors, corrupt JSON, symlinks, PID-only legacy files and unverifiable process inspection preserve evidence and refuse. A normal stale lease is replaced under the guard only after proving its process absent or its boot/start identity different. A guard without a valid owner record is never automatically stolen.
-
-For offline recovery, stop all dispatchers under this account, preserve the exact claim and guard, verify the original process and retained runs have stopped, acquire exclusive offline recovery ownership, then re-read and reconcile only the inspected stale token. If stop or ownership is unknown, retain the claim and report the blocker. Never delete worktrees, run records or checkpoints to clear a lock. The two-second guard wait is a contention bound, not an execution deadline.
-
-Shared ownership lives on the explicitly configured existing private state branch. Provisioning that branch and changing enrollment use the separately authorized administration workflow; dispatcher runtime cannot create, reset or repoint it. Machine host binding is a domain-separated digest of the platform OS identity; it detects accidental copied setup, not a malicious cloned OS. Raw platform identifiers and credentials do not belong in the control room.
-
-Before another machine resumes work, verify stop evidence, remotely available checkpoint and original execution identity, current policy/approval, exact owner generation and reconciled effects. A stale heartbeat, unreachable machine or configured guard is insufficient. Independent work can continue while the affected task retains its reservation. Qualification of real macOS/Linux reboot behavior and the selected GitHub conditional provider remains part of the authorized live drill; local fixtures cannot mark it passed.
-
+On macOS a per-user LaunchAgent loads only inside that account's GUI session, so exactly one account may rely on auto-login. Give it to `{{runner-user}}`. Whatever runs as `{{dispatcher-user}}` must pass the same reboot drill in `## Verify`.
 
 ## Grant the group
 

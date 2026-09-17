@@ -2,7 +2,7 @@
 
 The complete standards reference for skills in this repository, covering the two target harnesses — Claude Code and Codex — and the agentskills.io open standard they converge on. Verified 2026-08-08.
 
-Volatile vendor facts here carry their checked date; the `skills-refresh` skill re-checks them against the official docs.
+Volatile vendor facts here carry their checked date; re-check one against the official docs when it is older than 60 days.
 
 ## agentskills.io open standard
 

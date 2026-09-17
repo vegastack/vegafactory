@@ -17,7 +17,7 @@ Score every item pass / fail / N/A; N/A without a one-line rationale is a fail, 
 4. **References routed** — `references/` holds detail only some invocations need, behind a routing table; SKILL.md keeps the workflow, one excellent example, and the routes. N/A for a self-contained skill.
 5. **Scripts deterministic and tested** — bundled scripts follow the conventions in [authoring](references/authoring.md) (dependency-free Node, `--json`, documented exit codes, dry-run default, atomic writes); unit tests cover every deterministic branch. N/A when the skill ships no scripts — its quality bar is item 6.
 6. **Behavioral eval passed** — the cases in `evals/evals.json` run with-skill vs baseline per the [eval playbook](references/eval-playbook.md), at most 3 improve cycles; pass, or ship with a `## Known gaps` section at the end of SKILL.md.
-7. **Freshness honest** — volatile facts (versions, model names, limits, dated claims) live in a references file, each with its checked date and official source link, never in SKILL.md; the `skills-refresh` skill keeps them current.
+7. **Freshness honest** — volatile facts (versions, model names, limits, dated claims) live in a references file, each with its checked date and official source link, never in SKILL.md.
 8. **Wired and green** — `agents/openai.yaml`, packaging entry, root README row, and changeset in place; `bun run check:fast` and `bun run test:affected` pass.
 
 **Verdict:** all pass → `properly skilled`. At most two misses, neither item 1 nor item 6 → `close — create: <missing items>`. Otherwise → `needs skillify — run skillify on <target>`.

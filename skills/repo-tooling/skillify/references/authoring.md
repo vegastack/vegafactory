@@ -65,7 +65,7 @@ Cross-reference other skills by name (`skill-maintainer`) instead of restating t
 
 ## Volatile facts
 
-One rule: **version pins, model names, numeric limits, URLs, and anything with a date live in a references file — never inline in SKILL.md.** Each such line carries its checked date and an official source link, for example `(checked 17-09-2026 · https://…)`. The `skills-refresh` skill reads those dates and links to find what went stale and what is new; nothing else tracks them.
+One rule: **version pins, model names, numeric limits, URLs, and anything with a date live in a references file — never inline in SKILL.md.** Each such line carries its checked date and an official source link, for example `(checked 17-09-2026 · https://…)`. A fact older than 60 days is re-checked against its link before a skill relies on it.
 
 ## Worked example: skillifying a "release-notes" workflow
 

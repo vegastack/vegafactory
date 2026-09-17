@@ -1,5 +1,8 @@
 import { describe, expect, test } from 'bun:test'
-import { changelogEntry, checkTag, waitRegistry } from './release.mjs'
+import { mkdtempSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { changelogEntry, checkTag, integrityOf, verify, waitRegistry } from './release.mjs'
 
 const changelog = `# @vegastack/vegafactory
 
@@ -50,5 +53,18 @@ describe('waitRegistry', () => {
 
   test('gives up after the attempt budget', async () => {
     await expect(waitRegistry('0.20.0', { attempts: 2, view: () => null, sleep: async () => {} })).rejects.toThrow('not visible')
+  })
+})
+
+describe('verify', () => {
+  test('accepts the smoked bytes and refuses anything else', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'vf-release-'))
+    const file = join(dir, 'pkg.tgz')
+    writeFileSync(file, 'smoked')
+    const integrity = integrityOf(file)
+    expect(() => verify(file, integrity)).not.toThrow()
+    writeFileSync(file, 'swapped')
+    expect(() => verify(file, integrity)).toThrow('does not match')
+    expect(() => verify(file, '')).toThrow('does not match')
   })
 })
