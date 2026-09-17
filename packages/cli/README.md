@@ -78,7 +78,8 @@ vegafactory sync --org acme # first run in a repo whose dev.md has no control-ro
 
 Both harnesses write a session log in your home directory. `stats collect` reads the new lines of
 each log — from a saved byte offset, so a killed session is counted once, at the next run — and
-keeps one record per assistant turn under `~/.vegastack/.tmp/stats/`: time, your `gh` login, the
+keeps one record per assistant turn under `~/.vegastack/.tmp/stats/` — one collector at a time, so
+two hooks never count the same turn twice: time, your `gh` login, the
 machine, the repository, the issue, the harness, the exact model id, the skill the turn used, the
 tokens, the duration and how the turn ended. Never a prompt, a file, tool arguments or which
 subscription paid for the turn. The harness hooks run it in the background at each turn boundary.
@@ -89,10 +90,15 @@ vegafactory stats push              # append this machine's new turns to the org
 vegafactory dashboard --open        # one offline HTML page, built from what you have
 ```
 
-`push` appends to `stats/YYYY/MM/DD/<operator>-<machine>.jsonl` in the control-room clone `sync`
-already keeps, then commits and pushes it with your own `gh` login — at most once an hour, and
-never with credentials of its own. `show` and `dashboard` read this machine's records plus
-everything other machines pushed into that clone; `--local` leaves the shared ones out.
+`push` appends each turn to `stats/YYYY/MM/DD/<operator>-<machine>.jsonl` — the operator and machine
+the turn was recorded on, not whoever is logged in now — in the control-room clone `sync` already
+keeps, then commits and pushes it with your own `gh` login, at most once an hour and never with
+credentials of its own. The clone belongs to `sync`, so a push refuses unless it is exactly as
+`sync` left it: the expected origin and branch, a clean index and worktree, no local commits other
+than earlier stats pushes. Only the generated files are staged, a failure puts them back, and a
+commit whose push was rejected is retried by the next run. `show` and `dashboard` read this
+machine's records plus everything other machines pushed into that clone; `--local` leaves the
+shared ones out.
 
 ## Flags
 
