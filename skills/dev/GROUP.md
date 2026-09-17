@@ -1,3 +1,3 @@
 # Dev workflow
 
-The issue-driven development workflow: ten stages from project bootstrap to the shipped, chronicled change.
+The issue-driven development workflow: nine stages from project bootstrap to the shipped, chronicled change.

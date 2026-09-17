@@ -77,6 +77,35 @@
         "No knob is reported as agreeing or drifting, because the data carries no knobs array",
         "The report does not claim to have changed .vegastack/dev.md"
       ]
+    },
+    {
+      "id": 7,
+      "prompt": "Write the chronicle entry for issue 27 in vegastack/docs-tools (`feat: --json flag for check-links`), branch feat/27-json-flag, built by claude, approved by kmanojkumar; the evidence comment is attached. dev.md says `chronicle-style: plain`, `emoji: none`. Today is 03-09-2026.",
+      "expected_output": "One entry in the chronicle format: a dated heading whose title names the outcome for a human, the issue as a full markdown link, the five list fields What / Why / How it went / Changed / Decisions in plain language, and the footer line — ready to prepend to `.vegastack/chronicle.md`.",
+      "files": [
+        "evals/files/issue-27-evidence.md"
+      ],
+      "assertions": [
+        "The heading is `## 03-09-2026 — <title> ([#27](https://github.com/vegastack/docs-tools/issues/27))` and the title names an outcome, not a mechanism or commit subject",
+        "The five fields What, Why, How it went, Changed, Decisions are present as list items in that order",
+        "The footer reads `— approved by (kmanojkumar) · built by claude · branch feat/27-json-flag` after a blank line",
+        "No bare `#27` appears anywhere in the entry",
+        "How it went records the review's reverted rename honestly rather than saying only `smooth`"
+      ]
+    },
+    {
+      "id": 8,
+      "prompt": "catch me up on this project — I've been away a month. the chronicle is attached",
+      "expected_output": "A three-part digest in plain language: the story so far, the recent chapters one line each, and the open threads — built only from the attached chronicle, in chronological order, naming no event the file does not contain.",
+      "files": [
+        "evals/files/chronicle-sample.md"
+      ],
+      "assertions": [
+        "The digest has the three parts: the story so far, recent chapters, open threads",
+        "Recent chapters are listed one line each, in chronological order, with the date and outcome title",
+        "Every event mentioned appears in the attached chronicle; nothing is invented",
+        "The recorded decision (PDF rendering stays pure Node) is named"
+      ]
     }
   ]
 }

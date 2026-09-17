@@ -13,12 +13,6 @@
     "references/security.md",
     "references/mobile.md"
   ],
-  "dev-chronicle": [
-    "SKILL.md",
-    "agents/openai.yaml",
-    "references/conventions.md@dev-setup",
-    "references/styles.md"
-  ],
   "dev-debug": [
     "SKILL.md",
     "agents/openai.yaml",
@@ -91,8 +85,9 @@
     "SKILL.md",
     "agents/openai.yaml",
     "references/conventions.md@dev-setup",
-    "scripts/status.mjs",
-    "scripts/effective-policy.mjs@dev-setup"
+    "references/styles.md",
+    "scripts/effective-policy.mjs@dev-setup",
+    "scripts/status.mjs"
   ],
   "skill-maintainer": [
     "SKILL.md",

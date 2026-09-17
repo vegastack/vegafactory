@@ -374,16 +374,16 @@ describe('selecting a family', () => {
   test('the summary counts what installed, not what was selected', async () => {
     const project = join(temporary, 'group-summary')
     await mkdir(project, { recursive: true })
-    // One member already present and identical: a selection of ten installs nine.
+    // One member already present and identical: a selection of nine installs eight.
     run(temporary, ['skills', 'add', 'dev-plan', '--agent', 'claude', '--dir', project, '--non-interactive'])
     const mixed = run(temporary, ['skills', 'add', '--group', 'dev', '--agent', 'claude', '--dir', project, '--non-interactive'])
     expect(mixed.exitCode).toBe(0)
-    expect(mixed.stdout.toString()).toContain('installed 9 skills from dev, 1 already up to date')
+    expect(mixed.stdout.toString()).toContain('installed 8 skills from dev, 1 already up to date')
 
     // And when nothing needs doing at all, say so rather than printing no summary.
     const noop = run(temporary, ['skills', 'add', '--group', 'dev', '--agent', 'claude', '--dir', project, '--non-interactive'])
     expect(noop.exitCode).toBe(0)
-    expect(noop.stdout.toString()).toMatch(/10 skills already installed and unchanged/)
+    expect(noop.stdout.toString()).toMatch(/9 skills already installed and unchanged/)
   })
 
   test('--all names the repo-only skills it skipped', async () => {

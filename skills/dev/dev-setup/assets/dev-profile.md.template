@@ -36,7 +36,7 @@ sync-max-age: 30m           # confirmed maximum validated-policy age, not a task
 # stats: off               # a mandatory org lock needs an exact org delegation; refusal prevents capture/export even when the diagnostic effective value is on
 operators: {{github-username}}   # csv of the humans who own issues here — every state flip assigns per conventions' Labels table; dev-setup writes the detected login, and the line is edited to add people
 dispatch: off               # off | local; repo-only opt-in, current scoped approval and validated policy/guard required; invalid values refuse
-chronicle-style: plain      # plain | story | witty — the voice of chronicle entries; the rule and one worked example per style live in dev-chronicle's references/styles.md
+chronicle-style: plain      # plain | story | witty — the voice of chronicle entries; the rule and one worked example per style live in dev-status's references/styles.md
 emoji: none                 # none | sparing — sparing allows at most one emoji per chronicle entry, in the title or footer, never inside a field's facts
 
 # provider-mode: subscription-only       # confirmed organization policy; no usage-billed fallback
