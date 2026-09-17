@@ -25,6 +25,7 @@ export interface FakeIssue {
 export class FakeGitHub {
   issues = new Map<number, FakeIssue>()
   permissions = new Map<string, string>()
+  defaultBranch: string | null = 'main'
   calls: string[] = []
   // Runs after each posted comment, to stage a concurrent writer.
   afterPost?: (body: string) => void
@@ -181,6 +182,9 @@ export class FakeGitHub {
     if ((m = /^repos\/o\/r\/issues\/(\d+)\/timeline$/.exec(route!))) {
       const issue = this.issues.get(Number(m[1]))!
       return this.respond(200, issue.events.slice((page - 1) * perPage, page * perPage))
+    }
+    if (route === 'repos/o/r') {
+      return this.defaultBranch ? this.respond(200, { default_branch: this.defaultBranch }) : this.respond(404, { message: 'Not Found' })
     }
     if (route === 'graphql') {
       const issue = this.issues.get(payload.variables.number)

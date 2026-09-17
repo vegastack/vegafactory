@@ -13,11 +13,12 @@ const git = (cwd: string, ...args: string[]) => spawnSync('git', ['-c', 'user.na
 let gh: FakeGitHub
 let root: string
 let pr: Record<string, unknown> | null
-let checks: Array<{ name: string; bucket: string }>
+let checks: unknown
+let checksOut: string | null
 
 const runner: GhRunner = (args, input) => {
   if (args[0] === 'pr' && args[1] === 'view') return pr ? { code: 0, stdout: JSON.stringify(pr), stderr: '' } : { code: 1, stdout: '', stderr: 'no pull requests found' }
-  if (args[0] === 'pr' && args[1] === 'checks') return { code: checks.every((c) => c.bucket === 'pass') ? 0 : 8, stdout: JSON.stringify(checks), stderr: '' }
+  if (args[0] === 'pr' && args[1] === 'checks') return checksOut !== null ? { code: 1, stdout: checksOut, stderr: 'no checks reported' } : { code: 0, stdout: JSON.stringify(checks), stderr: '' }
   return gh.runner(args, input)
 }
 const run = () => {
@@ -46,8 +47,9 @@ beforeEach(() => {
   git(root, 'add', '-A')
   git(root, 'commit', '-q', '-m', 'work')
   git(root, 'push', '-q', '-u', 'origin', 'feat/7-export')
-  pr = { number: 12, state: 'OPEN', headRefOid: git(root, 'rev-parse', 'HEAD'), url: 'u' }
-  checks = [{ name: 'check', bucket: 'pass' }]
+  pr = { number: 12, state: 'OPEN', headRefOid: git(root, 'rev-parse', 'HEAD'), baseRefName: 'main', url: 'u' }
+  checks = [{ name: 'check', bucket: 'pass' }, { name: 'docs', bucket: 'skipping' }]
+  checksOut = null
 })
 
 test('passes with a ship it after the evidence, a pushed clean branch and a green PR', () => {
@@ -85,4 +87,29 @@ test('blocks without a ship it, an unpushed commit, a PR, or with a debug tag le
     '1 added line(s) still carry a [DEBUG-…] tag',
     'no PR for feat/7-export',
   ])
+})
+
+test('the PR must target the default branch, and only passed or skipped checks pass', () => {
+  gh.addComment(7, `<!-- vsk:v1 type=evidence rev=1 branch=feat/7-export sha=${git(root, 'rev-parse', '--short', 'HEAD')} -->\nit works`)
+  gh.addComment(7, ackBody({ stage: 'ship', by: 'mk', brief: artifactHash('Export CSV'), plan: null, source: 'session', quote: 'ship it' }))
+  expect(run().ok).toBe(true)
+  pr = { ...pr, baseRefName: 'release' }
+  expect(run().blocks).toEqual(['PR #12 targets release, not the default branch main'])
+  pr = { ...pr, baseRefName: 'main' }
+  gh.defaultBranch = null
+  expect(run().blocks).toEqual(['cannot read the default branch of o/r'])
+  gh.defaultBranch = 'main'
+  const cases: Array<[unknown, string]> = [
+    [[{ name: 'lint', bucket: 'pending' }], 'checks still running: lint'],
+    [[{ name: 'lint', bucket: 'cancel' }], 'failing checks: lint'],
+    [[{ name: 'lint', bucket: 'weird' }], 'checks in an unknown state: lint (weird)'],
+    [[{ name: 'lint' }], 'the checks of PR #12 could not be read'],
+    [{ name: 'lint', bucket: 'pass' }, 'the checks of PR #12 could not be read'],
+  ]
+  for (const [value, block] of cases) {
+    checks = value
+    expect(run().blocks, block).toEqual([block])
+  }
+  checksOut = ''
+  expect(run().blocks).toEqual(['the checks of PR #12 could not be read (no checks reported)'])
 })

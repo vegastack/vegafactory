@@ -1,11 +1,11 @@
 // `vegafactory ship check <n>` — the facts that must hold before an issue's PR is merged:
 // the issue passes `issue check --for ship`, its branch is clean and pushed, the latest evidence
 // names that commit, no [DEBUG-…] log line is added, and the branch's PR is open on it with
-// every check green.
+// every check green, and that PR targets the repository's default branch.
 import { spawnSync } from 'node:child_process'
 import { existsSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
-import { defaultRunner, type GhRunner } from './gh.ts'
+import { defaultRunner, ghRequest, type GhRunner } from './gh.ts'
 import { defaultBranch } from './guard-rules.ts'
 import { issueFromBranch } from './hook.ts'
 import { checkIssue, detectRepo, latestOfType, markerKeys, permissionLookup, repoRoot, snapshot } from './issue.ts'
@@ -17,7 +17,8 @@ export function shipUsage(): string {
   return `Usage: vegafactory ship check <n> [--branch NAME] [--repo OWNER/NAME] [--json]
 
   check <n>   exit 0 when issue n may merge: a "ship it" after the latest evidence, the evidence
-              on the pushed head, the branch clean, its PR open on that commit and every check green.
+              on the pushed head, the branch clean, its PR open on that commit against the default
+              branch, and every check passed or skipped.
               Exit 2 when blocked.
 `
 }
@@ -36,7 +37,7 @@ function findBranch(cwd: string, number: number): string | null {
   return remote.length === 1 ? remote[0]! : null
 }
 
-interface Pr { number: number; state: string; headRefOid: string; url: string }
+interface Pr { number: number; state: string; headRefOid: string; baseRefName: string; url: string }
 interface Check { name: string; bucket: string }
 
 export function shipCheck(input: { cwd: string; root: string; repo: string; number: number; branch?: string; runner: GhRunner }): ShipCheck {
@@ -71,26 +72,37 @@ export function shipCheck(input: { cwd: string; root: string; repo: string; numb
   const tagged = diff.split('\n').filter((line) => line.startsWith('+') && !line.startsWith('+++') && line.includes('[DEBUG-'))
   if (tagged.length) blocks.push(`${tagged.length} added line(s) still carry a [DEBUG-…] tag`)
 
-  const view = runner(['pr', 'view', branch, '--repo', repo, '--json', 'number,state,headRefOid,url'])
+  const view = runner(['pr', 'view', branch, '--repo', repo, '--json', 'number,state,headRefOid,baseRefName,url'])
   let pr: Pr | null = null
   try { pr = view.code === 0 ? JSON.parse(view.stdout) as Pr : null } catch { pr = null }
   if (!pr) {
     blocks.push(`no PR for ${branch}`)
     return { ok: false, blocks, warns, branch, pr: null }
   }
-  if (pr.state !== 'OPEN') blocks.push(`PR #${pr.number} is ${pr.state.toLowerCase()}`)
+  if (pr.state !== 'OPEN') blocks.push(`PR #${pr.number} is ${String(pr.state).toLowerCase()}`)
   if (pushed && pr.headRefOid !== pushed) blocks.push(`PR #${pr.number} is not on origin/${branch} yet`)
+  let defaultName: string | null = null
+  try { defaultName = ghRequest<{ default_branch?: string }>(`repos/${repo}`, { runner }).body.default_branch ?? null } catch { defaultName = null }
+  if (!defaultName) blocks.push(`cannot read the default branch of ${repo}`)
+  else if (pr.baseRefName !== defaultName) blocks.push(`PR #${pr.number} targets ${pr.baseRefName || 'an unknown branch'}, not the default branch ${defaultName}`)
 
   // gh exits non-zero while checks fail or wait, so read the JSON whatever the exit code.
+  // Only an explicit pass or skip counts; anything else, or no readable answer, blocks.
   const checks = runner(['pr', 'checks', String(pr.number), '--repo', repo, '--json', 'name,bucket'])
   let list: Check[] | null = null
-  try { list = JSON.parse(checks.stdout) as Check[] } catch { list = null }
-  if (!list) warns.push(`PR #${pr.number} reports no checks`)
+  try {
+    const parsed: unknown = JSON.parse(checks.stdout)
+    list = Array.isArray(parsed) && parsed.every((c) => c && typeof c.name === 'string' && typeof c.bucket === 'string') ? parsed as Check[] : null
+  } catch { list = null }
+  if (!list) blocks.push(`the checks of PR #${pr.number} could not be read${checks.stderr.trim() ? ` (${checks.stderr.trim().split('\n')[0]})` : ''}`)
   else {
     const failing = list.filter((check) => check.bucket === 'fail' || check.bucket === 'cancel')
     const pending = list.filter((check) => check.bucket === 'pending')
+    const unknown = list.filter((check) => !['pass', 'skipping', 'fail', 'cancel', 'pending'].includes(check.bucket))
     if (failing.length) blocks.push(`failing checks: ${failing.map((check) => check.name).join(', ')}`)
     if (pending.length) blocks.push(`checks still running: ${pending.map((check) => check.name).join(', ')}`)
+    if (unknown.length) blocks.push(`checks in an unknown state: ${unknown.map((check) => `${check.name} (${check.bucket})`).join(', ')}`)
+    if (!list.length) warns.push(`PR #${pr.number} reports no checks`)
   }
   return { ok: blocks.length === 0, blocks, warns, branch, pr: pr.number }
 }
