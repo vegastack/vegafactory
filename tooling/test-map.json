@@ -23,7 +23,6 @@
     { "match": ".vegastack/hooks/**", "tests": ["skills/dev/dev-setup/tests"] },
     { "match": ".changeset/config.json", "tests": ["tooling/ci"] },
     { "match": ".github/workflows/factory-board.yml", "tests": ["skills/dev/dev-setup/tests/factory-board.test.ts"] },
-    { "match": ".github/workflows/broker-deploy.yml", "tests": ["packages/broker/test"] },
     { "match": ".github/workflows/release.yml", "tests": ["scripts"] },
     { "match": ".github/skillspector-*", "tests": ["scripts"] },
     { "match": "scripts/**", "tests": ["scripts"] }
