@@ -44,13 +44,15 @@ The reviewer returns only JSON:
 Verified against the tools' own `--help` on 17-09-2026 (codex-cli 0.153.4, Claude Code 2.1.263):
 
 ```sh
-codex exec -s read-only -c model=<id> -c model_reasoning_effort=<level> --output-schema <schema.json> -o <out.json> -
+codex exec -s read-only -c model_reasoning_effort=<level> --output-schema <schema.json> -o <out.json> -
 codex exec resume -c sandbox_mode=read-only --output-schema <schema.json> -o <out.json> <session-id> -
-claude -p --tools Read,Grep,Glob --output-format json --json-schema <inline schema> --model <id> --effort <level>
+claude -p --tools Read,Grep,Glob --output-format json --json-schema <inline schema> --effort <level>
 claude -p --resume <session-id> --tools Read,Grep,Glob --output-format json --json-schema <inline schema>
 ```
 
-`codex exec resume` has no `--sandbox` flag, so the resumed run is held read-only by the config key. The model and effort flags appear only when dev.md's `harness-policy:` names that tool for the review stage. Every run goes through the subscription check: parent-app variables are dropped and an API key or a redirected endpoint refuses the run by name.
+The model flag (`-c model=<id>` for Codex, `--model <id>` for Claude Code) appears only when dev.md's `harness-policy:` pins one; its `default` means the tool's own model, which is what a subscription account wants — a pinned id the account cannot serve fails the run.
+
+`codex exec resume` has no `--sandbox` flag, so the resumed run is held read-only by the config key. Model and effort come from dev.md's `harness-policy:` only when it names that tool for the review stage. Every run goes through the subscription check: parent-app variables are dropped and an API key or a redirected endpoint refuses the run by name.
 
 ## Rounds and sessions
 

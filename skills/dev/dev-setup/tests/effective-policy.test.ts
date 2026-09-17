@@ -44,6 +44,20 @@ test.each(['stats: maybe', 'stats: on\nstats: off', 'policy-schema: 9', 'harness
   expect(resolvePolicy({ repo: text, identity }).ok).toBe(false)
 })
 
+test('a stage may pin no model: `default` means the tool\'s own, and an unknown effort refuses', () => {
+  const layer = parsePolicy('harness-policy: plan claude default xhigh · review codex gpt-5.6-sol high')
+  expect(layer.blocks).toEqual([])
+  expect(layer.values.stages).toEqual({
+    plan: { harness: 'claude', model: null, effort: 'xhigh' },
+    review: { harness: 'codex', model: 'gpt-5.6-sol', effort: 'high' },
+  })
+  // Claude Code takes five levels, Codex seven; a level its harness does not take is a typo.
+  expect(parsePolicy('harness-policy: plan claude default minimal').blocks).toContain('invalid or duplicate harness stage: plan')
+  expect(parsePolicy('harness-policy: plan claude default hgih').blocks).toContain('invalid or duplicate harness stage: plan')
+  expect(parsePolicy('harness-policy: plan claude default').blocks).toContain('invalid or duplicate harness stage: plan')
+  expect(parsePolicy('harness-policy: plan codex default ultra').blocks).toEqual([])
+})
+
 test('the retired review knob is ignored, and review stays a harness stage', () => {
   for (const line of ['review: cross-agent-risky', 'review: subagent   # an old profile', 'review: none']) {
     const result = resolvePolicy({ repo: `${line}\ntests: required`, identity })

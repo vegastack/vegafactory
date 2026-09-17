@@ -125,10 +125,17 @@ export function previewLabelMigration(value, proposed) {
   return { oldNames: typeof value === 'string' ? value.trim().split(/[,\s]+/) : value ?? [], proposed: proposed === undefined ? null : resolveLabels(proposed), writes: false }
 }
 
-function parseStage(value) {
-  const parts = value.trim().split(/\s+/)
-  return parts.length === 3 && ['claude', 'codex'].includes(parts[0]) && parts.every(Boolean)
-    ? { harness: parts[0], model: parts[1], effort: parts[2] } : null
+// Reasoning-effort levels each harness takes, read off `claude --help` and the Codex binary's own
+// enum on 18-09-2026. A level neither accepts is a typo that would fail at run time instead.
+const efforts = { claude: ['low', 'medium', 'high', 'xhigh', 'max'], codex: ['minimal', 'low', 'medium', 'high', 'xhigh', 'max', 'ultra'] }
+
+// `<harness> <model> <effort>`, where the model `default` means the tool's own default — nothing
+// pinned, because a pinned id the account cannot use fails the whole run. A pinned id stays legal.
+export function parseStage(value) {
+  const [harness, model, effort, ...rest] = value.trim().split(/\s+/)
+  if (rest.length || !harness || !model || !effort) return null
+  if (!efforts[harness]?.includes(effort)) return null
+  return { harness, model: model === 'default' ? null : model, effort }
 }
 function knobValue(key, text) {
   if (enums[key]) return enums[key].includes(text) ? text : undefined

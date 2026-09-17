@@ -10,7 +10,7 @@ authority: CONTRIBUTING.md → this file → skill-maintainer's release-ops.md (
 ## Knobs
 
 harnesses: claude 2.1.247 · codex 0.149.1   # detected 03-09-2026; a dev-setup re-run refreshes it
-harness-policy: intake claude fable high · plan claude fable high · implement claude fable high · review codex gpt-5.6 xhigh · status claude sonnet medium · chronicle claude sonnet medium   # `<stage> <agent> <model> <effort>`; raise planning to xhigh for a risky medium issue. Model ids move — edit this line, never a skill; the flags each value becomes are in dev-setup's references/harness-facts.md
+harness-policy: intake claude default high · plan claude default high · implement claude default high · review codex default xhigh · status claude default medium · chronicle claude default medium   # `<stage> <agent> default|<model id> <effort>`; `default` pins no model (the tool's own); a pinned id must be one this account can actually use, or the run fails. Raise planning to xhigh for a risky medium issue. Edit this line, never a skill; the flags each value becomes are in dev-setup's references/harness-facts.md
 ui-evidence: none           # no UI in this repo
 tests: required             # scripts' deterministic branches; prose quality bar is the behavioral eval
 skillspector-update: auto   # off | notify | auto — the CLI self-installs and self-upgrades through whatever channel holds it (uv here); a failed update falls back to the installed copy
