@@ -6,7 +6,7 @@ import { join } from 'node:path'
 import { Readable } from 'node:stream'
 import { claim } from '../src/claim.ts'
 import type { GhRunner } from '../src/gh.ts'
-import { issueFromBranch, issueFromWorktree, readHookInput, runHook, type HookDeps } from '../src/hook.ts'
+import { detachBounded, issueFromBranch, issueFromWorktree, readHookInput, runHook, type HookDeps } from '../src/hook.ts'
 import { ackBody, artifactHash } from '../src/issue.ts'
 import { FakeGitHub } from './fake-github.ts'
 
@@ -23,6 +23,7 @@ let plain: string
 let out: string[]
 let detached: string[][]
 let prHead: string
+let detachPid: number | undefined
 const OWNER = 'box:7-export'
 const ctx = () => ({ root, repo: 'o/r', number: 7, runner: gh.runner })
 
@@ -33,7 +34,7 @@ const runner: GhRunner = (args, input) => {
 }
 
 const deps = (): HookDeps => ({
-  runner, now: () => gh.clock, out: (text) => out.push(text), detach: (command) => detached.push(command), cli: ['vf'], host: 'box',
+  runner, now: () => gh.clock, out: (text) => out.push(text), detach: (command) => { detached.push(command); return detachPid }, cli: ['vf'], host: 'box',
 })
 
 async function hook(event: string, payload: unknown, harness = 'claude') {
@@ -51,6 +52,7 @@ beforeEach(() => {
   gh.addIssue({ number: 7, body: 'Export CSV', labels: ['queued', 'small'] })
   out = []
   detached = []
+  detachPid = undefined
   prHead = 'feat/7-export'
   const base = realpathSync(mkdtempSync(join(tmpdir(), 'hook-')))
   const origin = join(base, 'origin.git')
@@ -274,6 +276,32 @@ describe('heartbeat and checkpoints', () => {
     const [, , , n, , repo, , owner, , active] = detached.at(-1)!
     expect([n, repo, owner, active]).toEqual(['7', 'o/r', OWNER, '3'])
     expect(gh.issues.get(7)!.comments.some((c) => c.body.includes('type=release'))).toBe(false)
+  })
+
+  test('a running background heartbeat suppresses the next one until its lifetime ends', async () => {
+    claim(ctx(), { owner: OWNER, kind: 'session', harness: 'claude', model: 'opus' }, gh.clock)
+    detachPid = process.pid
+    await hook('pre-tool', bash('ls'))
+    await hook('post-tool', { cwd: tree })
+    await hook('session-end', { cwd: tree })
+    expect(detached).toHaveLength(1)
+    gh.clock += 61_000
+    await hook('session-end', { cwd: tree })
+    expect(detached).toHaveLength(2)
+  })
+
+  test('a detached process and its children are killed when the lifetime passes', async () => {
+    const pidFile = join(tree, 'child.pid')
+    const started = detachBounded(['sh', '-c', `echo $$ > '${pidFile}'; sleep 30`], tree, 1)
+    expect(typeof started).toBe('number')
+    const deadline = Date.now() + 5000
+    let child = 0
+    while (!child && Date.now() < deadline) { await Bun.sleep(50); try { child = Number(readFileSync(pidFile, 'utf8')) } catch { /* not yet */ } }
+    expect(child).toBeGreaterThan(0)
+    const alive = (pid: number) => { try { process.kill(pid, 0); return true } catch { return false } }
+    expect(alive(child)).toBe(true)
+    while (alive(child) && Date.now() < deadline) await Bun.sleep(100)
+    expect(alive(child)).toBe(false)
   })
 
   test('no heartbeat is pushed for a worktree that holds nothing', async () => {

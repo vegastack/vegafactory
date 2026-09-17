@@ -4,6 +4,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpath
 import { hostname, tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { cacheDir, commentType, readState, syncIssue, takeOver, withLock } from '../src/issue-cache.ts'
+import { defaultRunner } from '../src/gh.ts'
 import { ackBody, artifactHash, runIssue } from '../src/issue.ts'
 import { FakeGitHub } from './fake-github.ts'
 
@@ -418,5 +419,25 @@ describe('writes', () => {
     expect(() => run('sync')).toThrow('needs an issue number')
     expect(() => run('comment', '7')).toThrow('--file is required')
     expect(() => run('label', '7', '--state', 'ready')).toThrow('--state must be one of')
+  })
+})
+
+describe('gh', () => {
+  test('a hung gh is killed after the timeout', () => {
+    const bin = realpathSync(mkdtempSync(join(tmpdir(), 'gh-slow-')))
+    writeFileSync(join(bin, 'gh'), '#!/bin/sh\nsleep 10\n', { mode: 0o755 })
+    const saved = { gh: process.env.VEGAFACTORY_GH, timeout: process.env.VEGAFACTORY_GH_TIMEOUT_MS }
+    process.env.VEGAFACTORY_GH = join(bin, 'gh')
+    process.env.VEGAFACTORY_GH_TIMEOUT_MS = '200'
+    const started = Date.now()
+    try {
+      expect(() => defaultRunner(['api', 'x'])).toThrow('timed out after 200 ms')
+      expect(Date.now() - started).toBeLessThan(5000)
+    } finally {
+      for (const [key, value] of [['VEGAFACTORY_GH', saved.gh], ['VEGAFACTORY_GH_TIMEOUT_MS', saved.timeout]] as const) {
+        if (value === undefined) delete process.env[key]
+        else process.env[key] = value
+      }
+    }
   })
 })

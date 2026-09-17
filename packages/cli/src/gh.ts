@@ -14,13 +14,20 @@ export class GhError extends Error {
   }
 }
 
+// A hung gh (network, auth prompt) must not hold a hook or a lock forever.
+export const GH_TIMEOUT_MS = 30_000
+
 export const defaultRunner: GhRunner = (args, input) => {
+  const timeout = Number(process.env.VEGAFACTORY_GH_TIMEOUT_MS) || GH_TIMEOUT_MS
   const result = spawnSync(process.env.VEGAFACTORY_GH || 'gh', args, {
     encoding: 'utf8',
     input,
     maxBuffer: 64 * 1024 * 1024,
     stdio: [input === undefined ? 'ignore' : 'pipe', 'pipe', 'pipe'],
+    timeout,
+    killSignal: 'SIGKILL',
   })
+  if ((result.error as NodeJS.ErrnoException | undefined)?.code === 'ETIMEDOUT') throw new GhError(`gh ${args.slice(0, 2).join(' ')} timed out after ${timeout} ms`)
   if (result.error) throw new GhError(`gh could not start: ${result.error.message} — install the GitHub CLI and run gh auth login`)
   return { code: result.status ?? 1, stdout: result.stdout ?? '', stderr: result.stderr ?? '' }
 }

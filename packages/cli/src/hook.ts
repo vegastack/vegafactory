@@ -193,21 +193,28 @@ export interface HookDeps {
   runner: GhRunner
   now: () => number
   out: (text: string) => void
-  // Starts a process that outlives the hook.
-  detach: (command: string[], cwd: string) => void
+  // Starts a process that outlives the hook; returns its pid when known.
+  detach: (command: string[], cwd: string) => number | undefined | void
   // How to run this CLI again: the runtime and the entry file.
   cli: string[]
   host: string
 }
 
-function defaultDetach(command: string[], cwd: string) {
-  const child = spawn(command[0]!, command.slice(1), { cwd, detached: true, stdio: 'ignore', env: { ...process.env, GIT_TERMINAL_PROMPT: '0' } })
+export const DETACHED_LIMIT_S = 60
+// Runs the command in its own process group and kills the whole group when the limit passes.
+const WATCHDOG = '"$@" & job=$!; (sleep "$VF_LIMIT"; kill -KILL 0) & dog=$!; wait "$job"; code=$?; kill "$dog" 2>/dev/null; exit "$code"'
+
+export function detachBounded(command: string[], cwd: string, limitSeconds = DETACHED_LIMIT_S): number | undefined {
+  const child = spawn('sh', ['-c', WATCHDOG, 'vegafactory-detached', ...command], {
+    cwd, detached: true, stdio: 'ignore', env: { ...process.env, GIT_TERMINAL_PROMPT: '0', VF_LIMIT: String(limitSeconds) },
+  })
   child.on('error', () => {})
   child.unref()
+  return child.pid
 }
 
 export const defaultDeps = (): HookDeps => ({
-  runner: defaultRunner, now: Date.now, out: (text) => process.stdout.write(text + '\n'), detach: defaultDetach,
+  runner: defaultRunner, now: Date.now, out: (text) => process.stdout.write(text + '\n'), detach: (command, cwd) => detachBounded(command, cwd),
   cli: [process.execPath, process.argv[1]!], host: hostname(),
 })
 
@@ -287,8 +294,24 @@ function pushFailure(where: Where): string | null {
   } catch { return null }
 }
 
+const heartbeatPidPath = (where: Where) => join(where.top, '.vegastack', '.tmp', 'claims', `${where.number}.heartbeat.pid`)
+
+function alive(pid: number): boolean {
+  try { process.kill(pid, 0); return true } catch (error) { return (error as NodeJS.ErrnoException).code === 'EPERM' }
+}
+
+// One background heartbeat at a time: a running one (younger than its lifetime) suppresses the next.
 function pushHeartbeat(where: Where, local: LocalClaim, deps: HookDeps) {
-  deps.detach([...deps.cli, 'issue', 'heartbeat', String(where.number), '--repo', where.repo, '--owner', where.owner, '--active', String(Math.round(local.activeMs / 60_000))], where.cwd)
+  const pidFile = heartbeatPidPath(where)
+  try {
+    const running = JSON.parse(readFileSync(pidFile, 'utf8')) as { pid: number; at: number }
+    if (deps.now() - running.at < DETACHED_LIMIT_S * 1000 && alive(running.pid)) return
+  } catch { /* no heartbeat running */ }
+  const pid = deps.detach([...deps.cli, 'issue', 'heartbeat', String(where.number), '--repo', where.repo, '--owner', where.owner, '--active', String(Math.round(local.activeMs / 60_000))], where.cwd)
+  if (typeof pid === 'number') {
+    mkdirSync(dirname(pidFile), { recursive: true })
+    writeFileSync(pidFile, JSON.stringify({ pid, at: deps.now() }))
+  }
   local.lastPush = deps.now()
 }
 
