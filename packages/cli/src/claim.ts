@@ -6,6 +6,7 @@ import { hostname } from 'node:os'
 import { ghRequest, type GhRunner } from './gh.ts'
 import { permissionLookup, readBody, readState, syncIssue, WRITE_ROLES, type CacheState, type CommentEntry, type PermissionLookup } from './issue-cache.ts'
 import { stateOf, transition } from './labels.ts'
+import { recordStage } from './stages.ts'
 
 export type ClaimKind = 'session' | 'dispatch'
 export const TIMEOUT_MS: Record<ClaimKind, number> = { session: 4 * 60 * 60_000, dispatch: 30 * 60_000 }
@@ -217,6 +218,7 @@ export function claim(ctx: ClaimContext, request: ClaimRequest, now = Date.now()
         if ((error as { status?: number }).status !== 404) throw error
       }
     }
+    recordStage(ctx.root, ctx.repo, ctx.number, 'in-progress')
     syncIssue({ root: ctx.root, repo: ctx.repo, number: ctx.number, runner: ctx.runner })
   }
   const live = before.holder && !before.holder.stale

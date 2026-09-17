@@ -21,8 +21,8 @@ import { fileURLToPath } from 'node:url'
 import { factoryConfigPath, parseControlRoomKnob, readFactoryConfig, type ControlRoomEntry } from './control-room.ts'
 import { defaultRunner, ghRequest, type GhRunner } from './gh.ts'
 import { issueFromBranch, issueFromWorktree } from './hook.ts'
-import { cacheDir, readState, withLock } from './issue-cache.ts'
-import { stateOf } from './labels.ts'
+import { cacheDir, withLock } from './issue-cache.ts'
+import { stageHistory, stageOn, type StageChange } from './stages.ts'
 import { GIT_CREDENTIAL_ARGS } from './sync.ts'
 
 export type Harness = 'claude' | 'codex'
@@ -104,7 +104,8 @@ function appendLines(path: string, text: string) {
 // and branch. Filesystem only — a collect run never reaches the network for this.
 
 export interface Site { repo: string | null; issue: number | null; state: string | null }
-export type SiteLookup = (cwd: string | null, branch: string | null, repo?: string | null) => Site
+// `at` is the turn's own time: the stage is the one the issue was in then, not the one it is in now.
+export type SiteLookup = (cwd: string | null, branch: string | null, at: number, repo?: string | null) => Site
 
 export function canonicalRepo(remote: string): string | null {
   const match = /^(?:https:\/\/github\.com\/|git@github\.com:)([A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+?)(?:\.git)?$/.exec(remote.trim())
@@ -151,8 +152,8 @@ export function checkoutOf(dir: string): { root: string | null; repo: string | n
 
 export function defaultSite(): SiteLookup {
   const repos = new Map<string, { repo: string | null; root: string | null }>()
-  const states = new Map<string, string | null>()
-  return (cwd, branch, known) => {
+  const histories = new Map<string, StageChange[]>()
+  return (cwd, branch, at, known) => {
     const issue = (cwd ? issueFromWorktree(cwd) : null) ?? (branch ? issueFromBranch(branch) : null)
     if (!cwd) return { repo: known ?? null, issue, state: null }
     let place = repos.get(cwd)
@@ -163,12 +164,12 @@ export function defaultSite(): SiteLookup {
     const repo = known ?? place.repo
     if (!place.root || !issue || !repo) return { repo, issue, state: null }
     const key = `${place.root}|${repo}|${issue}`
-    if (!states.has(key)) {
-      let state: string | null = null
-      try { state = stateOf(readState(cacheDir(place.root, repo, issue))?.issue?.labels ?? []).state } catch { /* no local copy of the issue */ }
-      states.set(key, state)
+    if (!histories.has(key)) {
+      let history: StageChange[] = []
+      try { history = stageHistory(place.root, repo, issue, cacheDir(place.root, repo, issue)) } catch { /* no local copy of the issue */ }
+      histories.set(key, history)
     }
-    return { repo, issue, state: states.get(key) ?? null }
+    return { repo, issue, state: stageOn(histories.get(key)!, at) }
   }
 }
 
@@ -296,7 +297,7 @@ export function parseClaude(text: string, context: ParseContext): ParseResult {
     }
     const cwd = typeof entry.cwd === 'string' ? entry.cwd : null
     const branch = typeof entry.gitBranch === 'string' ? entry.gitBranch : null
-    const site = context.site(cwd, branch)
+    const site = context.site(cwd, branch, at)
     const event: StatsEvent = {
       id, rev: 1, at: new Date(at).toISOString(), operator: context.operator, machine: context.machine, harness: 'claude',
       model: message.model, repo: site.repo, issue: site.issue, state: site.state, skill: chosen,
@@ -360,7 +361,7 @@ export function parseCodex(text: string, context: ParseContext): ParseResult {
     if (entry.type !== 'token_usage_record') continue
     const usage = payload.usage as Record<string, unknown> | undefined
     if (!usage) continue
-    const site = context.site(carry.cwd ?? null, carry.branch ?? null, carry.repo ?? null)
+    const site = context.site(carry.cwd ?? null, carry.branch ?? null, at, carry.repo ?? null)
     // Codex counts cached tokens inside input_tokens; Claude reports them separately. Subtracting
     // here makes the four numbers mean the same thing in both harnesses.
     const cacheRead = count(usage.cached_input_tokens)
@@ -816,7 +817,11 @@ interface PushJournal {
   at: number
   offset: number
   room: RoomIdentity
-  files: Array<{ relative: string; had: number | null }>
+  // The clone's HEAD when the batch started, and per file the bytes that were already there
+  // (length and digest) plus the number this push meant to append. A rollback that cannot find
+  // exactly that again is not looking at its own work any more.
+  head: string
+  files: Array<{ relative: string; had: number | null; digest: string; wrote: number }>
 }
 
 function validJournal(value: unknown): PushJournal | null {
@@ -826,10 +831,12 @@ function validJournal(value: unknown): PushJournal | null {
   if (typeof token !== 'string' || !token || !Number.isFinite(at)) return null
   if (!Number.isSafeInteger(offset) || offset < 0) return null
   if (!room || typeof room !== 'object' || ['repo', 'remote', 'branch', 'path'].some((key) => typeof (room as unknown as Record<string, unknown>)[key] !== 'string')) return null
+  if (typeof journal.head !== 'string' || !/^[0-9a-f]{40}$/.test(journal.head)) return null
   if (!Array.isArray(files) || !files.length) return null
   for (const file of files) {
     if (!file || typeof file.relative !== 'string' || !file.relative.startsWith('stats/')) return null
     if (file.had !== null && (!Number.isSafeInteger(file.had) || file.had < 0)) return null
+    if (typeof file.digest !== 'string' || !Number.isSafeInteger(file.wrote) || file.wrote < 0) return null
   }
   return journal
 }
@@ -898,10 +905,26 @@ const sameRoom = (a: RoomIdentity, b: RoomIdentity) => a.repo === b.repo && a.re
 // Puts generated rows back exactly as they were, through checks a journal cannot talk its way out
 // of: every path is re-validated against the clone, a truncation goes through a no-follow handle,
 // and the sizes and the clone's own cleanliness are read back afterwards. Returns why it could not.
-function restoreFiles(clone: Clone, files: PushJournal['files'], git: GitRunner): string | null {
+function restoreFiles(clone: Clone, journal: PushJournal, git: GitRunner): string | null {
+  const files = journal.files
   for (const file of files) {
     const unsafe = safeStatsPath(clone.path, file.relative)
     if (unsafe) return unsafe
+  }
+  const head = git(['-C', clone.path, 'rev-parse', 'HEAD']).out.trim()
+  if (head !== journal.head) return `the control-room clone moved to ${head.slice(0, 7)} since this push began, so nothing was undone`
+  // Each file must still be the bytes that were there plus, at most, this push's own append.
+  for (const file of files) {
+    const path = join(clone.path, ...file.relative.split('/'))
+    let size: number | null = null
+    try { size = lstatSync(path).isFile() ? statSync(path).size : -1 } catch { size = null }
+    const had = file.had ?? 0
+    if (size === null) {
+      if (file.had === null) continue
+      return `${file.relative} is gone, so nothing was undone`
+    }
+    if (size !== had && size !== had + file.wrote) return `${file.relative} changed since this push began, so nothing was undone`
+    if (hash(readAt(path, 0, had).toString('latin1')) !== file.digest) return `${file.relative} changed since this push began, so nothing was undone`
   }
   for (const file of files) {
     const path = join(clone.path, ...file.relative.split('/'))
@@ -1057,7 +1080,7 @@ function recoverPush(home: string, clone: Clone, git: GitRunner): { ok: boolean;
   if (committed) {
     if ((readCursor(home, clone.repo).offset ?? 0) < journal.offset) writeCursor(home, clone.repo, { lastPushAt: journal.at, offset: journal.offset })
   } else {
-    const failed = restoreFiles(clone, journal.files, git)
+    const failed = restoreFiles(clone, journal, git)
     if (failed) return { ok: false, message: `${failed} — the push journal is kept at ${path}` }
   }
   rmSync(path, { force: true })
@@ -1149,18 +1172,25 @@ function pushLocked(home: string, options: PushOptions): PushResult {
     const unsafe = safeStatsPath(clone.path, relative)
     if (unsafe) return done(refuse(unsafe))
   }
+  const head = git(['-C', clone.path, 'rev-parse', 'HEAD']).out.trim()
+  if (!/^[0-9a-f]{40}$/.test(head)) return done(refuse('the control-room clone has no commit to build on'))
   const journal: PushJournal = {
-    token: randomUUID(), at: now, offset, room: identityOf(clone),
+    token: randomUUID(), at: now, offset, room: identityOf(clone), head,
     files: relatives.map((relative) => {
+      const path = join(clone.path, ...relative.split('/'))
       let had: number | null = null
-      try { had = statSync(join(clone.path, ...relative.split('/'))).size } catch { /* a new day, a new file */ }
-      return { relative, had }
+      try { had = statSync(path).size } catch { /* a new day, a new file */ }
+      return {
+        relative, had,
+        digest: hash(readAt(path, 0, had ?? 0).toString('latin1')),
+        wrote: Buffer.byteLength(groups.get(relative)!.rows.join('\n') + '\n'),
+      }
     }),
   }
   // Puts the clone back and only then drops the journal: a rollback that could not finish leaves
   // the journal for the next run to refuse on, rather than pretending the clone is sound.
   const undo = (why: string): PushResult => {
-    const failed = restoreFiles(clone, journal.files, git)
+    const failed = restoreFiles(clone, journal, git)
     if (failed) return done(refuse(`${why}; ${failed} — the push journal is kept at ${pushJournalPath(home, clone.repo)}`))
     rmSync(pushJournalPath(home, clone.repo), { force: true })
     return done(refuse(why))

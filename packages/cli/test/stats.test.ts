@@ -4,6 +4,7 @@ import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readd
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import type { GhRunner } from '../src/gh.ts'
+import { recordStage, saveSpans, stageHistory, stageOn } from '../src/stages.ts'
 import {
   collectStats, defaultSite, loadEvents, parseClaude, parseCodex, parseSince, pushStats, resolveOperator,
   runStats, skillName, skillResolver, statsDir, summarize, type GitRunner, type ParseContext, type StatsEvent,
@@ -55,6 +56,18 @@ function plantCodex(text: string, name = 'rollout-2026-09-17T11-00-00-c-1.jsonl'
   return join(dir, name)
 }
 
+// A checkout with one worktree, the shape the logs' cwd points at.
+function checkout() {
+  const root = join(base, 'demo')
+  mkdirSync(root, { recursive: true })
+  git(root, 'init', '-q', '-b', 'main', root)
+  git(root, 'remote', 'add', 'origin', 'https://github.com/acme/demo.git')
+  const tree = join(root, '.vegastack', '.worktrees', '42-demo')
+  mkdirSync(tree, { recursive: true })
+  writeFileSync(join(tree, '.git'), `gitdir: ${join(root, '.git', 'worktrees', '42-demo')}\n`)
+  return { root, tree }
+}
+
 describe('collectors', () => {
   test('a Claude session yields one event per assistant turn, and no prompt text', () => {
     const { events, consumed } = parseClaude(fixture('claude-session.jsonl'), context())
@@ -94,18 +107,50 @@ describe('collectors', () => {
     expect(events).toHaveLength(2)
   })
 
-  test('the repository, issue and stage come from the checkout, the worktree path and the local issue copy', () => {
+  test('the repository and issue come from the checkout and the worktree path', () => {
+    const { tree } = checkout()
+    recordStage(join(base, 'demo'), 'acme/demo', 42, 'in-progress', new Date('2026-09-17T09:00:00Z'))
+    expect(site()(tree, 'feat/42-demo', Date.parse('2026-09-17T10:00:00Z'))).toEqual({ repo: 'acme/demo', issue: 42, state: 'in-progress' })
+  })
+
+  // F20
+  test('the stage is the one the issue was in at the turn, not the one it is in now', () => {
+    const { root, tree } = checkout()
+    // The CLI moved the issue twice; the turn below happened between the two.
+    recordStage(root, 'acme/demo', 42, 'in-progress', new Date('2026-09-17T09:00:00Z'))
+    recordStage(root, 'acme/demo', 42, 'ready-to-ship', new Date('2026-09-17T11:00:00Z'))
+    const at = Date.parse('2026-09-17T10:00:00Z')
+    expect(site()(tree, 'feat/42-demo', at).state).toBe('in-progress')
+    // Before anything was recorded nothing is known, so the turn carries no stage rather than a guess.
+    expect(site()(tree, 'feat/42-demo', Date.parse('2026-09-17T08:00:00Z')).state).toBeNull()
+    expect(site()(tree, 'feat/42-demo', Date.parse('2026-09-17T12:00:00Z')).state).toBe('ready-to-ship')
+  })
+
+  // F20
+  test('the label spans the status comment saved answer when this machine moved nothing', () => {
+    const { root, tree } = checkout()
+    saveSpans(join(root, '.vegastack', '.tmp', 'issues', 'acme__demo', '42'), [
+      { stage: 'planning', start: '2026-09-17T07:00:00Z', end: '2026-09-17T09:00:00Z' },
+      { stage: 'in-progress', start: '2026-09-17T09:00:00Z', end: null },
+    ])
+    expect(site()(tree, 'feat/42-demo', Date.parse('2026-09-17T08:00:00Z')).state).toBe('planning')
+    expect(site()(tree, 'feat/42-demo', Date.parse('2026-09-17T10:00:00Z')).state).toBe('in-progress')
+    expect(site()(tree, 'feat/42-demo', Date.parse('2026-09-17T06:00:00Z')).state).toBeNull()
+  })
+
+  // F20
+  test('a stage history reads both sources, newest change at or before the moment winning', () => {
     const root = join(base, 'demo')
-    mkdirSync(root)
-    git(root, 'init', '-q', '-b', 'main', root)
-    git(root, 'remote', 'add', 'origin', 'https://github.com/acme/demo.git')
-    const tree = join(root, '.vegastack', '.worktrees', '42-demo')
-    mkdirSync(tree, { recursive: true })
-    writeFileSync(join(tree, '.git'), `gitdir: ${join(root, '.git', 'worktrees', '42-demo')}\n`)
-    const cache = join(root, '.vegastack', '.tmp', 'issues', 'acme__demo', '42')
-    mkdirSync(cache, { recursive: true })
-    writeFileSync(join(cache, 'state.json'), JSON.stringify({ schema: 1, commentPages: [], issue: { labels: ['in-progress', 'small'] } }))
-    expect(site()(tree, 'feat/42-demo')).toEqual({ repo: 'acme/demo', issue: 42, state: 'in-progress' })
+    const dir = join(root, '.vegastack', '.tmp', 'issues', 'acme__demo', '42')
+    recordStage(root, 'acme/demo', 42, 'ready-to-ship', new Date('2026-09-17T11:00:00Z'))
+    recordStage(root, 'acme/demo', 9, 'queued', new Date('2026-09-17T11:30:00Z'))
+    saveSpans(dir, [{ stage: 'in-progress', start: '2026-09-17T09:00:00Z', end: '2026-09-17T11:00:00Z' }])
+    const history = stageHistory(root, 'acme/demo', 42, dir)
+    // Another issue's line is not this issue's history.
+    expect(history.map((change) => change.state)).toEqual(['in-progress', null, 'ready-to-ship'])
+    expect(stageOn(history, Date.parse('2026-09-17T10:00:00Z'))).toBe('in-progress')
+    expect(stageOn(history, Date.parse('2026-09-17T11:30:00Z'))).toBe('ready-to-ship')
+    expect(stageOn([], Date.parse('2026-09-17T10:00:00Z'))).toBeNull()
   })
 
   // F6
@@ -249,6 +294,25 @@ describe('offsets', () => {
     // One run: the oversized record is skipped and the file is read on to its end.
     expect(collect().events).toBe(2)
     expect(collect().events).toBe(0)
+  })
+
+  // F20
+  test('a killed session collected after the issue moved still counts in the earlier stage', () => {
+    const { root, tree } = checkout()
+    recordStage(root, 'acme/demo', 42, 'in-progress', new Date('2026-09-17T09:00:00Z'))
+    const turn = (id: string, at: string) =>
+      `{"type":"user","cwd":${JSON.stringify(tree)},"gitBranch":"feat/42-demo","sessionId":"s-4","timestamp":"${at}"}\n`
+      + `{"type":"assistant","cwd":${JSON.stringify(tree)},"gitBranch":"feat/42-demo","sessionId":"s-4","timestamp":"${at}","message":{"id":"${id}","model":"claude-opus-5","stop_reason":"end_turn","content":[],"usage":{"input_tokens":1,"output_tokens":1,"cache_read_input_tokens":0,"cache_creation_input_tokens":0}}}\n`
+    const path = plantClaude(turn('m1', '2026-09-17T10:00:00.000Z'))
+    // The session is killed; its last turn is only collected after the issue has moved on.
+    appendFileSync(path, turn('m2', '2026-09-17T10:30:00.000Z'))
+    recordStage(root, 'acme/demo', 42, 'ready-to-ship', new Date('2026-09-17T11:00:00Z'))
+    collect()
+    expect(events().map((event) => event.state)).toEqual(['in-progress', 'in-progress'])
+    // A turn after the move is the later stage, so the two stages really are told apart.
+    appendFileSync(path, turn('m3', '2026-09-17T11:30:00.000Z'))
+    collect()
+    expect(events().map((event) => event.state)).toEqual(['in-progress', 'in-progress', 'ready-to-ship'])
   })
 
   test('no session logs at all is not an error', () => {
@@ -663,9 +727,9 @@ describe('stats push', () => {
     const path = journalFor('acme/room')
     mkdirSync(dirname(path), { recursive: true })
     writeFileSync(path, JSON.stringify({
-      token: 'abc', at: Date.parse('2026-09-18T11:00:00Z'), offset: 0,
+      token: 'abc', at: Date.parse('2026-09-18T11:00:00Z'), offset: 0, head: git(clone, 'rev-parse', 'HEAD'),
       room: { repo: 'acme/room', remote: origin, branch: 'main', path: clone },
-      files: [{ relative, had: 4 }],
+      files: [{ relative, had: 4, digest: 'whatever', wrote: 0 }],
     }))
     write(event('a', '2026-09-18T10:00:00.000Z'))
     const result = push(Date.parse('2026-09-18T12:00:00Z'))
@@ -681,15 +745,15 @@ describe('stats push', () => {
     const path = journalFor('acme/room')
     mkdirSync(dirname(path), { recursive: true })
     const journal = {
-      token: 'abc', at: Date.parse('2026-09-18T11:00:00Z'), offset: 0,
+      token: 'abc', at: Date.parse('2026-09-18T11:00:00Z'), offset: 0, head: git(clone, 'rev-parse', 'HEAD'),
       room: { repo: 'acme/room', remote: origin, branch: 'main', path: join(base, 'somewhere-else') },
-      files: [{ relative: 'stats/2026/09/18/mk-box.jsonl', had: null }],
+      files: [{ relative: 'stats/2026/09/18/mk-box.jsonl', had: null, digest: 'x', wrote: 0 }],
     }
     writeFileSync(path, JSON.stringify(journal))
     write(event('a', '2026-09-18T10:00:00.000Z'))
     expect(push(Date.parse('2026-09-18T12:00:00Z')).message).toContain('which is not the clone this push found')
     expect(existsSync(path)).toBe(true)
-    writeFileSync(path, JSON.stringify({ ...journal, files: [{ relative: '../../escape.jsonl', had: null }] }))
+    writeFileSync(path, JSON.stringify({ ...journal, files: [{ relative: '../../escape.jsonl', had: null, digest: 'x', wrote: 0 }] }))
     expect(push(Date.parse('2026-09-18T12:00:00Z')).message).toContain('unreadable push journal')
     expect(existsSync(path)).toBe(true)
     // Sound again once the journal is gone.
@@ -710,6 +774,42 @@ describe('stats push', () => {
     expect(existsSync(journalFor('acme/room'))).toBe(true)
     // The rows themselves were still taken back out.
     expect(existsSync(stats('2026', '09', '18', 'mk-box.jsonl'))).toBe(false)
+  })
+
+  // F21
+  test('a rollback refuses when the file or the clone changed since the crash', () => {
+    const file = stats('2026', '09', '18', 'mk-box.jsonl')
+    const crash = () => {
+      const killed: GitRunner = (args) => {
+        if (args.includes('add')) throw new Error('killed while staging')
+        return defaultGitFor(args)
+      }
+      expect(() => push(Date.parse('2026-09-18T12:00:00Z'), { git: killed })).toThrow('killed')
+    }
+    write(event('a', '2026-09-18T10:00:00.000Z'))
+    crash()
+    // Someone else wrote to the same file before the next run.
+    appendFileSync(file, 'a line from somewhere else\n')
+    const changed = push(Date.parse('2026-09-18T12:10:00Z'))
+    expect(changed.action).toBe('refused')
+    expect(changed.message).toContain('changed since this push began')
+    // Nothing was truncated, and the journal is kept for a person.
+    expect(readFileSync(file, 'utf8')).toContain('a line from somewhere else')
+    expect(existsSync(journalFor('acme/room'))).toBe(true)
+
+    // Same again, but the clone itself moved on: the rollback still touches nothing.
+    rmSync(journalFor('acme/room'))
+    rmSync(file)
+    write(event('b', '2026-09-18T10:05:00.000Z'))
+    crash()
+    const before = readFileSync(file, 'utf8')
+    git(clone, 'add', '-A')
+    git(clone, 'commit', '-q', '-m', 'stats: someone else committed it')
+    const moved = push(Date.parse('2026-09-18T12:20:00Z'))
+    expect(moved.action).toBe('refused')
+    expect(moved.message).toContain('moved to')
+    expect(readFileSync(file, 'utf8')).toBe(before)
+    expect(existsSync(journalFor('acme/room'))).toBe(true)
   })
 
   // F9
