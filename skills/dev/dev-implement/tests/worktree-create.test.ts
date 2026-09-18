@@ -87,6 +87,9 @@ describe('createWorktree', () => {
 const script = join(import.meta.dir, '..', 'scripts', 'worktree.mjs')
 // --home keeps the Codex trust entry inside the temp repo. Without it a
 // --write run edits the real ~/.codex/config.toml, which a test must never do.
+// These tests assert `blocks` and the branch, never the exit code: 0 and 1
+// both mean the verb ran, and which one comes back depends on warnings that
+// differ between a developer's machine and CI.
 const runScript = (root: string, ...args: string[]) => {
   const argv = [script, ...args, '--repo-root', root, '--home', root, '--json']
   const stub = join(root, 'stub-bin')
@@ -121,7 +124,7 @@ describe('the create and restore verbs resolve type and slug independently', () 
     expect(created.branch).toBe('fix/106-x')
     git(root, 'worktree', 'remove', '--force', created.path)
     const r = runScript(root, 'restore', '--issue', '106', '--slug', 'x', '--write')
-    expect(r.code).toBe(0)
+    expect(JSON.parse(r.out).blocks).toEqual([])
     expect(JSON.parse(r.out).branch).toBe('fix/106-x')
   })
   test('--slug picks among several branches for one issue instead of being ambiguous', () => {
@@ -134,7 +137,7 @@ describe('the create and restore verbs resolve type and slug independently', () 
     expect(JSON.parse(runScript(root, 'restore', '--issue', '106').out).blocks.join(' ')).toContain('several branches match')
     // With it, the one named is the one restored — on its own type.
     const r = runScript(root, 'restore', '--issue', '106', '--slug', 'y', '--write')
-    expect(r.code).toBe(0)
+    expect(JSON.parse(r.out).blocks).toEqual([])
     expect(JSON.parse(r.out).branch).toBe('docs/106-y')
   })
   test('a branch with no issue restores on its own type, not on a guessed one', () => {
@@ -143,7 +146,7 @@ describe('the create and restore verbs resolve type and slug independently', () 
     expect(created.branch).toBe('chore/release-0-19-0')
     git(root, 'worktree', 'remove', '--force', created.path)
     const r = runScript(root, 'restore', '--slug', 'release-0-19-0', '--write')
-    expect(r.code).toBeLessThan(2)
+    expect(JSON.parse(r.out).blocks).toEqual([])
     expect(JSON.parse(r.out).branch).toBe('chore/release-0-19-0')
   })
   test('create with --slug reads the title for the type alone', () => {
@@ -151,7 +154,7 @@ describe('the create and restore verbs resolve type and slug independently', () 
     stubGh(root, 'fix: the guard drops a flag')
     writeDevMd(root)
     const r = runScript(root, 'create', '--issue', '106', '--slug', 'custom')
-    expect(r.code).toBeLessThan(2)
+    expect(JSON.parse(r.out).blocks).toEqual([])
     // The type is the title's; the slug stays the one that was passed.
     expect(JSON.parse(r.out).branch).toBe('fix/106-custom')
   })
