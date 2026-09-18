@@ -1,7 +1,8 @@
-import { basename, dirname, isAbsolute, join, resolve, parse } from 'node:path'
+import { basename, dirname, isAbsolute, join, resolve, parse as parsePath, sep } from 'node:path'
 import { lstat, mkdir, open, readFile, rename, rm } from 'node:fs/promises'
+import { lstatSync, readFileSync } from 'node:fs'
 import { randomUUID } from 'node:crypto'
-import { parseControlRoomReference, parsePolicy } from '../../../skills/dev/dev-setup/scripts/effective-policy.mjs'
+import { parseControlRoomReference, resolvePolicy } from '../../../skills/dev/dev-setup/scripts/effective-policy.mjs'
 
 export interface ControlRoomKnob {
   org: string
@@ -17,8 +18,6 @@ export interface ControlRoomEntry {
   remote?: string
   lastSyncedAt: string | null
   sha: string | null
-  snapshots?: Record<string, PolicySnapshot>
-  history?: Record<string, PolicySnapshot>[]
   [key: string]: unknown
 }
 
@@ -33,19 +32,10 @@ export interface FactoryConfig {
   settings: Record<string, unknown>
 }
 
-const DEFAULT_MAX_AGE_MINUTES = 30
-
 // `control-room: <org>/<repo>#<group>@<sha7>` — group and sha are both optional, and the value
 // stops at the first whitespace so the trailing `# comment` every knob line carries is ignored.
 export function parseControlRoomKnob(devMdText: string): ControlRoomKnob | null {
   return parseControlRoomReference(devMdText)
-}
-
-// Freshness is a duration, not a timestamp: `<n>m` or `<n>h`. Anything unparseable falls back to
-// the default rather than disabling the refresh, because a typo must not silently freeze a clone.
-export function parseSyncMaxAge(devMdText: string): number {
-  const seconds = (parsePolicy(devMdText, 'repo').values as Record<string, unknown>)['sync-max-age']
-  return typeof seconds === 'number' ? seconds / 60 : DEFAULT_MAX_AGE_MINUTES
 }
 
 export function defaultClonePath(org: string, home: string): string {
@@ -97,6 +87,9 @@ export function serializeFactoryConfig(config: FactoryConfig): Record<string, un
   return { ...config.settings, schemaVersion: config.schemaVersion, ...(config.schemaVersion === 2 ? { revision: config.revision } : {}), controlRooms: config.controlRooms }
 }
 
+// How stale the local copy of the control room may be before a session refreshes it.
+export const MAX_AGE_MINUTES = 5
+
 // Age is measured from the last successful fetch, never from the clone directory's mtime: a fetch
 // that finds nothing new leaves mtime untouched, so an unchanged control room would look
 // permanently stale and re-fetch on every session.
@@ -113,18 +106,6 @@ export function isStale(lastSyncedAt: string | null, now: number, maxAgeMinutes:
   return age >= maxAgeMinutes
 }
 
-export interface PolicySnapshot {
-  schemaVersion: 2
-  org: string
-  group: string | null
-  repository: string
-  origin: string
-  sourceCommit: string
-  policyDigest: string
-  validatedAt: string
-  contentPath: string
-}
-
 // orgs is only the callback projection of controlRooms. Unknown wire keys, including an
 // extension named orgs, remain in settings. factory.json is the single durable authority.
 export interface SettingsV2 {
@@ -134,15 +115,9 @@ export interface SettingsV2 {
   settings: Record<string, unknown>
 }
 
-export function snapshotFreshness(validatedAt: string, now: number, maxAgeSeconds: number): 'fresh' | 'stale' | 'unavailable' {
-  const at = Date.parse(validatedAt)
-  if (!Number.isFinite(at) || !Number.isFinite(now) || at > now || !Number.isSafeInteger(maxAgeSeconds) || maxAgeSeconds <= 0) return 'unavailable'
-  return now - at >= maxAgeSeconds * 1000 ? 'stale' : 'fresh'
-}
-
 export async function assertSafeLocalPath(path: string): Promise<void> {
   if (!isAbsolute(path) || resolve(path) !== path) throw new Error('settings/content path must be canonical and absolute')
-  let cursor = parse(path).root
+  let cursor = parsePath(path).root
   for (const part of path.slice(cursor.length).split('/').filter(Boolean)) {
     cursor = join(cursor, part)
     const info = await lstat(cursor).catch(error => { if (error.code === 'ENOENT') return null; throw error })
@@ -215,33 +190,70 @@ export async function updateSettingsAtPath(path: string, mutate: (settings: Sett
   }
 }
 
-export { loadSnapshotPolicy } from '../../../skills/dev/dev-setup/scripts/effective-policy.mjs'
-import { loadSnapshotPolicy, resolvePolicy } from '../../../skills/dev/dev-setup/scripts/effective-policy.mjs'
 
-// The exact configured path is used by services as well as interactive CLI readers.
-export function loadConfiguredPolicy(input: { home: string; repo: string; devMd: string; now?: string | number; settingsPath?: string }) {
-  const room = parseControlRoomKnob(input.devMd)
-  if (!room) return resolvePolicy({ repo: input.devMd, identity: { repo: input.repo }, freshness: { configured: false, now: input.now ?? Date.now() } })
-  let entry: ControlRoomEntry | undefined
-  try { entry = readFactoryConfig(readFileSync(input.settingsPath ?? factoryConfigPath(input.home), 'utf8')).controlRooms[room.org] } catch { /* Unavailable, never defaults. */ }
-  return loadSnapshotPolicy({ snapshot: entry?.snapshots?.[input.repo], repo: input.repo, devMd: input.devMd, expectedOrigin: entry?.remote, now: input.now })
+// Every component of a path is judged by lstat, never followed.
+function realPathTo(path: string, from: string): string | null {
+  let cursor = from
+  for (const part of path.slice(from.length).split(sep).filter(Boolean)) {
+    cursor = join(cursor, part)
+    let info
+    try { info = lstatSync(cursor) } catch { return `nothing at ${cursor}` }
+    if (info.isSymbolicLink()) return `refusing a symlinked path: ${cursor}`
+  }
+  return null
 }
-import { readFileSync } from 'node:fs'
 
-export async function getPolicySnapshot(org: string, repo: string, now: number, context: { settingsPath: string; devMd: string }) {
-  const config = await readSettingsFile(context.settingsPath)
-  const entry = config.controlRooms[org], snapshot = entry?.snapshots?.[repo]
-  const resolved = loadSnapshotPolicy({ snapshot, repo, devMd: context.devMd, expectedOrigin: entry?.remote, now })
-  const bootstrap = config.settings.machine as { id?: string; installationId?: string; hostBindingDigest?: string; group?: string } | undefined
-  const registration = bootstrap ? resolved.policy.fleet?.machines?.[bootstrap.id ?? ''] : null
-  const machineReason = !bootstrap ? null : !registration ? 'machine is not enrolled' : !registration.enabled ? 'machine enrollment is disabled'
-    : registration.installationId !== bootstrap.installationId || registration.hostBindingDigest !== bootstrap.hostBindingDigest || registration.group !== bootstrap.group ? 'machine bootstrap and registration disagree' : null
-  const machine = bootstrap ? { id: bootstrap.id ?? null, state: machineReason ? 'unavailable' : 'configured', reason: machineReason,
-    executionIdentityVerified: false, sourceCommit: snapshot?.sourceCommit ?? null,
-    configuration: registration ? { ...registration, defaults: { ...resolved.policy.fleet.defaults, ...resolved.policy.fleet.groupDefaults?.[registration.group], ...registration.overrides } } : null } : null
+// A control-room clone is only ever read or written where sync puts it: a canonical absolute path
+// inside this machine's control-room store, with no symlink anywhere along it. Returns the reason
+// it is not usable, or null when it is.
+export function safeClonePath(home: string, path: unknown): string | null {
+  const store = join(home, '.vegastack', 'control-room')
+  if (typeof path !== 'string' || !path || !isAbsolute(path) || resolve(path) !== path) return 'the control-room path is not absolute and canonical'
+  if (path !== store && !path.startsWith(store + sep)) return `the control-room clone is outside ${store}`
+  const walked = realPathTo(path, parsePath(path).root)
+  if (walked) return walked.startsWith('nothing at') ? `no control-room clone at ${path}` : walked
+  return null
+}
+
+export interface Profile {
+  ok: boolean
+  values: Record<string, unknown>
+  locked: string[]
+  sources: Record<string, string>
+  blocks: string[]
+  room: ControlRoomKnob | null
+  clonePath: string | null
+  lastSyncedAt: string | null
+  stale: boolean
+}
+
+// The profile a repo actually runs on: the org's `org.md`, its group's `group.md`, then the repo's
+// own dev.md. The room is read from the clone `sync` keeps, never from the network — a clone that
+// is missing, unsafe or stale still resolves, and the caller is told which of the three it was.
+export function loadProfile(input: { home: string; devMd: string; now?: number }): Profile {
+  const room = parseControlRoomKnob(input.devMd)
+  const now = input.now ?? Date.now()
+  const blocks: string[] = []
+  let org = '', group = '', clonePath: string | null = null, lastSyncedAt: string | null = null
+  if (room) {
+    let entry: ControlRoomEntry | undefined
+    try { entry = readFactoryConfig(readFileSync(factoryConfigPath(input.home), 'utf8')).controlRooms[room.org] } catch { /* never synced here */ }
+    lastSyncedAt = entry?.lastSyncedAt ?? null
+    const path = entry?.path ?? defaultClonePath(room.org, input.home)
+    const unsafe = safeClonePath(input.home, path)
+    if (unsafe) blocks.push(`${unsafe} — run: vegafactory sync`)
+    else {
+      clonePath = path
+      const read = (relative: string) => {
+        try { return readFileSync(join(path, ...relative.split('/')), 'utf8') } catch { blocks.push(`the control room has no ${relative}`); return '' }
+      }
+      org = read('org.md')
+      if (room.group) group = read(`groups/${room.group}/group.md`)
+    }
+  }
+  const resolved = resolvePolicy({ org, group, repo: input.devMd })
   return {
-    state: machineReason ? 'unavailable' : resolved.ok ? 'fresh' : resolved.policy.freshness.state === 'stale' && resolved.blocks.every((block: string) => block.startsWith('mandatory policy stale:')) ? 'stale' : 'unavailable',
-    snapshot: snapshot ?? null, ageSeconds: resolved.policy.freshness.ageSeconds,
-    reason: machineReason ?? (resolved.ok ? null : resolved.blocks.join('; ')), policy: resolved, machine,
+    ...resolved, blocks: [...blocks, ...resolved.blocks], ok: resolved.ok && blocks.length === 0,
+    room, clonePath, lastSyncedAt, stale: room !== null && isStale(lastSyncedAt, now, MAX_AGE_MINUTES),
   }
 }

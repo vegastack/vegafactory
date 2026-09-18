@@ -30,8 +30,14 @@ test('no skill, doc or hook wiring calls a removed CLI command or a deleted scri
   expect(hits).toEqual([])
 })
 
-test('the control-room templates README names no hooks/ snippet folder', () => {
-  const text = readFileSync(join(import.meta.dir, '../../../skills/factory/vegafactory-setup/assets/control-room/templates/README.md.template'), 'utf8')
-  expect(text).not.toContain('`hooks/`')
-  expect(text).toContain('vegafactory hook <event> --harness claude|codex')
+// The lean control room is exactly these seven; a file the old model had must not come back.
+test('the control-room templates are the lean room and nothing else', () => {
+  const assets = join(import.meta.dir, '../../../skills/factory/vegafactory-setup/assets/control-room')
+  const files = execFileSync('git', ['ls-files', '--', assets], { cwd: root, encoding: 'utf8' })
+    .split('\n').filter(Boolean).map((path) => path.slice(path.indexOf('assets/control-room/') + 'assets/control-room/'.length))
+  expect(files.sort()).toEqual([
+    'boards.md.template', 'dispatchers.md.template', 'group.md.template',
+    'onboarding/dispatcher-box.md.template', 'onboarding/new-repo.md.template', 'onboarding/new-teammate.md.template',
+    'org.md.template', 'repos.md.template', 'stats/README.md.template',
+  ])
 })

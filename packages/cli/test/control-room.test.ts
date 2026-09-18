@@ -1,16 +1,15 @@
 import { describe, expect, test } from 'bun:test'
 import {
-  ageMinutes, defaultClonePath, factoryConfigPath, isStale,
-  loadConfiguredPolicy, parseControlRoomKnob, parseSyncMaxAge, readFactoryConfig, serializeFactoryConfig, withSyncResult,
+  MAX_AGE_MINUTES, ageMinutes, defaultClonePath, factoryConfigPath, isStale,
+  loadProfile, parseControlRoomKnob, readFactoryConfig, safeClonePath, serializeFactoryConfig, withSyncResult,
 } from '../src/control-room.ts'
 
 const DEV_MD = [
   'repo: vegastack/billing · default branch main',
   '',
   '## Knobs',
-  'architect: kmanojkumar',
   'control-room: vegastack/vegafactory-control-room#dev@a1b2c3d   # org control room · group · drafted-from sha',
-  'sync-max-age: 30m           # how stale the clone may be before a session refreshes it',
+  'merge: squash',
 ].join('\n')
 
 describe('control-room knob and machine state', () => {
@@ -25,13 +24,14 @@ describe('control-room knob and machine state', () => {
     expect(parseControlRoomKnob('## Knobs\ncontrol-room: none\n')).toBeNull()
   })
 
-  // The `review:` knob is retired: an old profile keeps resolving, so sync never blocks on it.
+  // The `review:` knob is retired: an old profile keeps resolving, so a session never blocks on it.
   test('a profile that still carries a review knob resolves with no blocks', () => {
-    const resolved = loadConfiguredPolicy({ home: '/nonexistent', repo: 'vegastack/billing', devMd: 'review: cross-agent-risky\ntests: required\n' })
-    expect(resolved.blocks).toEqual([])
-    expect(resolved.ok).toBe(true)
-    expect(resolved.policy.values.review).toBeUndefined()
-    expect(resolved.policy.values.tests).toBe('required')
+    const profile = loadProfile({ home: '/nonexistent', devMd: 'review: cross-agent-risky\ntests: required\n' })
+    expect(profile.blocks).toEqual([])
+    expect(profile.ok).toBe(true)
+    expect(profile.room).toBeNull()
+    expect(profile.values.review).toBeUndefined()
+    expect(profile.values.tests).toBe('required')
   })
 
   test('a knob a profile has never synced parses with a null sha', () => {
@@ -40,16 +40,10 @@ describe('control-room knob and machine state', () => {
     })
   })
 
-  test('sync-max-age reads minutes and hours and falls back to 30 minutes', () => {
-    expect(parseSyncMaxAge(DEV_MD)).toBe(30)
-    expect(parseSyncMaxAge('sync-max-age: 2h')).toBe(120)
-    expect(parseSyncMaxAge('## Knobs\n')).toBe(30)
-    expect(parseSyncMaxAge('sync-max-age: whenever')).toBe(30)
-  })
-
-  test('one clone directory per org under the machine root', () => {
+  test('one copy per org under the machine root, refreshed at five minutes', () => {
     expect(defaultClonePath('vegastack', '/home/mk')).toBe('/home/mk/.vegastack/control-room/vegastack')
     expect(factoryConfigPath('/home/mk')).toBe('/home/mk/.vegastack/factory.json')
+    expect(MAX_AGE_MINUTES).toBe(5)
   })
 
   test('a missing state file is an empty config; an unreadable one is a refusal, never a silent reset', () => {
@@ -61,9 +55,15 @@ describe('control-room knob and machine state', () => {
     const now = Date.parse('2026-09-03T12:00:00Z')
     expect(ageMinutes('2026-09-03T11:15:00Z', now)).toBe(45)
     expect(ageMinutes(null, now)).toBeNull()
-    expect(isStale('2026-09-03T11:15:00Z', now, 30)).toBe(true)
-    expect(isStale('2026-09-03T11:45:00Z', now, 30)).toBe(false)
-    expect(isStale(null, now, 30)).toBe(true)
+    expect(isStale('2026-09-03T11:53:00Z', now, MAX_AGE_MINUTES)).toBe(true)
+    expect(isStale('2026-09-03T11:56:00Z', now, MAX_AGE_MINUTES)).toBe(false)
+    expect(isStale(null, now, MAX_AGE_MINUTES)).toBe(true)
+  })
+
+  test('a copy outside the machine store is refused rather than read', () => {
+    expect(safeClonePath('/home/mk', '/elsewhere/acme')).toMatch(/outside/)
+    expect(safeClonePath('/home/mk', 'relative/acme')).toMatch(/absolute and canonical/)
+    expect(safeClonePath('/home/mk', '/home/mk/.vegastack/control-room/../../etc')).toMatch(/absolute and canonical/)
   })
 
   test('recording one org never drops another, and never mutates the input', () => {
@@ -103,7 +103,38 @@ describe('control-room knob and machine state', () => {
 import { mkdtemp, realpath, readFile, writeFile, mkdir, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { updateSettings, snapshotFreshness } from '../src/control-room.ts'
+import { updateSettings } from '../src/control-room.ts'
+
+test('a repo with no lines of its own inherits a complete profile from the copy on disk', async () => {
+  const home = await realpath(await mkdtemp(join(tmpdir(), 'profile-221-')))
+  try {
+    const room = join(home, '.vegastack/control-room/acme')
+    await mkdir(join(room, 'groups/dev'), { recursive: true })
+    await writeFile(join(room, 'org.md'), 'tests: required   # locked\nstats-people: off\n')
+    await writeFile(join(room, 'groups/dev/group.md'), 'merge: rebase\ngates: 3\n')
+    await writeFile(join(home, '.vegastack/factory.json'), JSON.stringify({
+      schemaVersion: 1,
+      controlRooms: { acme: { repo: 'acme/room', path: room, branch: 'main', sha: 'a'.repeat(40), lastSyncedAt: new Date().toISOString() } },
+    }))
+    const devMd = 'control-room: acme/room#dev\n'
+    const profile = loadProfile({ home, devMd })
+    expect(profile.blocks).toEqual([])
+    expect(profile.ok).toBe(true)
+    expect(profile.stale).toBe(false)
+    expect(profile.values).toMatchObject({ tests: 'required', merge: 'rebase', gates: 3 })
+    expect(profile.locked).toEqual(['tests'])
+    expect(profile.sources.merge).toBe('group')
+    // The org's locked line stands whatever the repo says, and the repo is told why.
+    const overridden = loadProfile({ home, devMd: devMd + 'tests: none\n' })
+    expect(overridden.ok).toBe(false)
+    expect(overridden.blocks.join(' ')).toMatch(/tests is locked in org\.md/)
+    expect(overridden.values.tests).toBe('required')
+    // A copy that was never fetched still resolves, and says it is stale.
+    const never = loadProfile({ home, devMd: 'control-room: other/room#dev\n' })
+    expect(never.stale).toBe(true)
+    expect(never.blocks.join(' ')).toMatch(/vegafactory sync/)
+  } finally { await rm(home, { recursive: true, force: true }) }
+})
 
 test('settings transactions preserve two process updates and inert extension collisions', async () => {
   const root = await realpath(await mkdtemp(join(tmpdir(), 'settings-147-')))
@@ -129,14 +160,6 @@ test('incomplete transaction ownership refuses without changing settings', async
     await expect(updateSettings(root, s => s)).rejects.toThrow(/guard/)
     expect(await readFile(join(root, 'factory.json'), 'utf8').catch(e => e.code)).toBe('ENOENT')
   } finally { await rm(root, { recursive: true, force: true }) }
-})
-
-test('freshness expires exactly at the selected bound and rejects future clocks', () => {
-  const now = Date.parse('2026-09-06T12:00:00Z')
-  for (const [age, state] of [[7199, 'fresh'], [7200, 'stale'], [7201, 'stale'], [-1, 'unavailable']] as const) {
-    expect(snapshotFreshness(new Date(now - age * 1000).toISOString(), now, 7200)).toBe(state)
-  }
-  expect(snapshotFreshness('bad', now, 7200)).toBe('unavailable')
 })
 
 test('unreadable settings and symlink aliases refuse without migration or backup loss', async () => {

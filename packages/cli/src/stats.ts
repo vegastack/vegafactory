@@ -18,7 +18,7 @@ import { closeSync, constants as fsConstants, existsSync, ftruncateSync, lstatSy
 import { homedir, hostname } from 'node:os'
 import { basename, dirname, isAbsolute, join, parse as parsePath, resolve, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { factoryConfigPath, parseControlRoomKnob, readFactoryConfig, type ControlRoomEntry } from './control-room.ts'
+import { factoryConfigPath, parseControlRoomKnob, readFactoryConfig, safeClonePath, type ControlRoomEntry } from './control-room.ts'
 import { defaultRunner, ghRequest, type GhRunner } from './gh.ts'
 import { issueFromBranch, issueFromWorktree } from './hook.ts'
 import { cacheDir, withLock } from './issue-cache.ts'
@@ -855,30 +855,6 @@ const safe = (value: string) => String(value ?? '').replace(/[^A-Za-z0-9._-]+/g,
 export function repoRootFor(cwd: string): string | null {
   const worktree = /^(.*)[/\\]\.vegastack[/\\]\.worktrees[/\\][^/\\]+$/.exec(cwd)
   return repoRootOf(worktree?.[1] ?? cwd)
-}
-
-// Every component of a path is judged by lstat, never followed.
-function realPathTo(path: string, from: string): string | null {
-  let cursor = from
-  for (const part of path.slice(from.length).split(sep).filter(Boolean)) {
-    cursor = join(cursor, part)
-    let info
-    try { info = lstatSync(cursor) } catch { return `nothing at ${cursor}` }
-    if (info.isSymbolicLink()) return `refusing a symlinked path: ${cursor}`
-  }
-  return null
-}
-
-// A control-room clone is only ever read or written where sync puts it: a canonical absolute path
-// inside this machine's control-room store, with no symlink anywhere along it. Returns the reason
-// it is not usable, or null when it is.
-export function safeClonePath(home: string, path: unknown): string | null {
-  const store = join(home, '.vegastack', 'control-room')
-  if (typeof path !== 'string' || !path || !isAbsolute(path) || resolve(path) !== path) return 'the control-room path is not absolute and canonical'
-  if (path !== store && !path.startsWith(store + sep)) return `the control-room clone is outside ${store}`
-  const walked = realPathTo(path, parsePath(path).root)
-  if (walked) return walked.startsWith('nothing at') ? `no control-room clone at ${path}` : walked
-  return null
 }
 
 // A file this push may append to: every directory below the clone must be a real directory, and an
