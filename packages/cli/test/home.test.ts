@@ -65,6 +65,8 @@ describe('moving off the older home', () => {
     env: {} as NodeJS.ProcessEnv,
     home,
     kind: pathKind,
+    read: (path: string) => { try { return readFileSync(path, 'utf8') } catch { return null } },
+    running: () => false,
     move: (from: string, to: string) => { require('node:fs').renameSync(from, to) },
     mkdir: (path: string) => { mkdirSync(path, { recursive: true }) },
     remove: (path: string) => { require('node:fs').rmSync(path, { recursive: true, force: true }) },
@@ -187,6 +189,8 @@ describe('the move cannot be aimed somewhere it was not asked to go', () => {
   const deps = (env: NodeJS.ProcessEnv) => ({
     env, home,
     kind: pathKind,
+    read: (path: string) => { try { return readFileSync(path, 'utf8') } catch { return null } },
+    running: () => false,
     move: (from: string, to: string) => { require('node:fs').renameSync(from, to) },
     mkdir: (path: string) => { mkdirSync(path, { recursive: true }) },
     remove: (path: string) => { require('node:fs').rmSync(path, { recursive: true, force: true }) },
@@ -329,30 +333,64 @@ describe('a home on another device', () => {
 })
 
 describe('work in flight is waited for, not moved', () => {
-  const deps = () => ({
+  const deps = (running: (pid: number) => boolean) => ({
     env: {} as NodeJS.ProcessEnv, home,
     kind: pathKind,
+    read: (path: string) => { try { return readFileSync(path, 'utf8') } catch { return null } },
+    running,
     move: (from: string, to: string) => { require('node:fs').renameSync(from, to) },
     mkdir: (path: string) => { mkdirSync(path, { recursive: true }) },
     remove: (path: string) => { require('node:fs').rmSync(path, { recursive: true, force: true }) },
   })
+  const seedLock = (where: string, lock: string, pid: number) => {
+    mkdirSync(where, { recursive: true })
+    if (lock.endsWith('.guard')) {
+      mkdirSync(join(where, lock), { recursive: true })
+      writeFileSync(join(where, lock, 'owner.json'), JSON.stringify({ token: 't', pid }))
+    } else writeFileSync(join(where, lock), JSON.stringify({ schemaVersion: 1, pid, startedAt: '' }))
+  }
 
-  // A lock says a process is working here right now. Carrying it to a new address breaks that
+  // A lock says a process is writing here right now. Carrying it to a new address breaks that
   // process's cleanup, and it then recreates its state back at the old one.
-  test.each(['.skills-install.lock', 'factory.json.guard'])('a %s refuses the move and touches nothing', (lock) => {
+  test.each(['.skills-install.lock', 'factory.json.guard'])('a live %s refuses and touches nothing', (lock) => {
     const legacy = join(home, '.vegastack')
     mkdirSync(join(legacy, 'guard'), { recursive: true })
     writeFileSync(join(legacy, 'factory.json'), 'state')
-    if (lock.endsWith('.guard')) mkdirSync(join(legacy, lock), { recursive: true })
-    else writeFileSync(join(legacy, lock), 'held')
+    seedLock(legacy, lock, 4242)
 
-    const result = migrateHome(deps())
+    const result = migrateHome(deps((pid) => pid === 4242))
     expect(result.action).toBe('refused')
-    expect(result.reason).toContain('work in flight')
+    expect(result.reason).toContain('work is in flight')
+    expect(result.reason).toContain('4242')
     expect(result.moved).toEqual([])
-    // Nothing was deleted on the way to deciding to refuse.
     expect(existsSync(join(legacy, 'guard'))).toBe(true)
     expect(readFileSync(join(legacy, 'factory.json'), 'utf8')).toBe('state')
+  })
+
+  // The ordinary crash case. Blocking every command on litter nobody holds would be worse than
+  // the problem: the code that takes these locks clears a dead one exactly this way.
+  test.each(['.skills-install.lock', 'factory.json.guard'])('a %s whose holder is gone is cleared, and the move goes on', (lock) => {
+    const legacy = join(home, '.vegastack')
+    mkdirSync(legacy, { recursive: true })
+    writeFileSync(join(legacy, 'factory.json'), 'state')
+    seedLock(legacy, lock, 999999)
+
+    const result = migrateHome(deps(() => false))
+    expect(result.action).toBe('moved')
+    expect(result.moved.join('\n')).toContain('the process that held it is gone')
+    expect(existsSync(join(legacy, lock))).toBe(false)
+    expect(readFileSync(join(home, '.vegafactory', 'factory.json'), 'utf8')).toBe('state')
+  })
+
+  // The destination matters too: moving a file on top of a journal being written splits it.
+  test('a live lock in the destination refuses just as firmly', () => {
+    const legacy = join(home, '.vegastack')
+    mkdirSync(legacy, { recursive: true })
+    writeFileSync(join(legacy, 'factory.json'), 'state')
+    seedLock(join(home, '.vegafactory'), '.skills-install.lock', 7)
+    const result = migrateHome(deps((pid) => pid === 7))
+    expect(result.action).toBe('refused')
+    expect(result.reason).toContain('work is in flight')
   })
 
   test('a refusal over split state deletes nothing first', () => {
@@ -362,9 +400,34 @@ describe('work in flight is waited for, not moved', () => {
     mkdirSync(join(home, '.vegafactory'), { recursive: true })
     writeFileSync(join(home, '.vegafactory', 'factory.json'), 'newer')
 
-    const result = migrateHome(deps())
+    const result = migrateHome(deps(() => false))
     expect(result.action).toBe('refused')
     expect(result.moved).toEqual([])
     expect(existsSync(join(legacy, 'guard'))).toBe(true)
+  })
+
+  // A symlinked entry moved across and then followed reads whatever it points at as this
+  // machine's own configuration.
+  test('a symlinked entry refuses rather than being carried', () => {
+    const legacy = join(home, '.vegastack')
+    mkdirSync(legacy, { recursive: true })
+    writeFileSync(join(home, 'somewhere-else.json'), 'not mine')
+    require('node:fs').symlinkSync(join(home, 'somewhere-else.json'), join(legacy, 'factory.json'))
+    const result = migrateHome(deps(() => false))
+    expect(result.action).toBe('refused')
+    expect(result.reason).toContain('not an ordinary file or directory')
+    expect(existsSync(join(home, '.vegafactory', 'factory.json'))).toBe(false)
+  })
+})
+
+describe('a failed copy leaves the original standing', () => {
+  test('the source is only removed once the copy is whole', () => {
+    let removed = false
+    expect(() => movePath('/a', '/b', {
+      rename: () => { const error = new Error('cross-device link') as NodeJS.ErrnoException; error.code = 'EXDEV'; throw error },
+      copy: () => { throw new Error('disk full') },
+      remove: () => { removed = true },
+    })).toThrow('disk full')
+    expect(removed).toBe(false)
   })
 })

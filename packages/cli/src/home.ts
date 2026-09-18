@@ -9,9 +9,9 @@
 // VegaStack tooling keeps `tools/`, `cache/`, `registry/` and `secrets/` there, none of which this
 // repository references. A directory this product owns entirely is one it may also prune.
 
-import { cpSync, lstatSync, mkdirSync, renameSync, rmSync } from 'node:fs'
+import { cpSync, lstatSync, mkdirSync, readFileSync, renameSync, rmSync } from 'node:fs'
 import { homedir } from 'node:os'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 
 // The one escape hatch, and the reason the tests can run at all: `worktree.ts` used to call
 // `homedir()` with no way to pass anything else, so a careless test wrote to the real home.
@@ -110,8 +110,15 @@ const MOVES: { from: string[]; to: string[] }[] = [
 
 // Locks, which are never moved. A lock exists to say "a process is working here right now", and
 // carrying one to a new address breaks the cleanup of whatever holds it — which then recreates its
-// state back at the old one. A machine with work in flight waits instead.
-const LOCKS = ['.skills-install.lock', 'factory.json.guard'] as const
+// state back at the old one. A machine with live work waits instead; a lock whose holder is gone is
+// litter from a crash, and is cleared the same way the code that took it clears one.
+//
+// Each records the pid that took it: the installer's is a JSON file, the settings writer's a
+// directory with `owner.json` inside.
+const LOCKS: { name: string; owner: string[] }[] = [
+  { name: '.skills-install.lock', owner: ['.skills-install.lock'] },
+  { name: 'factory.json.guard', owner: ['factory.json.guard', 'owner.json'] },
+]
 
 export interface Migration { action: 'none' | 'moved' | 'refused'; reason: string; moved: string[] }
 
@@ -128,6 +135,8 @@ export type Kind = 'absent' | 'directory' | 'file' | 'other' | 'unreadable'
 
 export function migrateHome(deps: {
   kind: (path: string) => Kind
+  read: (path: string) => string | null
+  running: (pid: number) => boolean
   move: (from: string, to: string) => void
   mkdir: (path: string) => void
   remove: (path: string) => void
@@ -141,7 +150,12 @@ export function migrateHome(deps: {
   }
   const to = factoryHome(deps)
   const from = legacyHome(deps)
-  const there = (path: string) => deps.kind(path) !== 'absent'
+  // Movable means an ordinary file or directory. A symlink, a device node or a path this account
+  // cannot read is none of those, and following one would move state out of, or into, somewhere
+  // neither home names.
+  const MOVABLE: Kind[] = ['file', 'directory']
+  const there = (path: string) => MOVABLE.includes(deps.kind(path))
+  const odd = (path: string) => { const kind = deps.kind(path); return kind !== 'absent' && !MOVABLE.includes(kind) }
 
   // Both ends must be ordinary directories this account can read, or not be there at all.
   for (const [path, which] of [[from, 'older'], [to, 'new']] as const) {
@@ -159,13 +173,34 @@ export function migrateHome(deps: {
 
   // Everything that could refuse is decided before anything is touched. A refusal that had already
   // deleted something would be a refusal the operator cannot trust the word of.
-  const held = LOCKS.filter((lock) => there(join(from, lock)))
+  //
+  // Both homes are checked: a live lock in the destination means something is writing there now,
+  // and moving a file on top of it would clobber a journal mid-write or split the settings.
+  const held: string[] = []
+  const stale: string[] = []
+  for (const home of [from, to]) {
+    for (const lock of LOCKS) {
+      const path = join(home, lock.name)
+      if (deps.kind(path) === 'absent') continue
+      const pid = Number(JSON.parse(deps.read(join(home, ...lock.owner)) || 'null')?.pid)
+      if (Number.isInteger(pid) && pid > 0 && deps.running(pid)) held.push(`${path} (pid ${pid})`)
+      else stale.push(path)
+    }
+  }
   if (held.length > 0) {
     return {
       action: 'refused',
-      reason: `${from} has work in flight (${held.join(', ')}) — a lock says a process is working there now, and moving it would break that process's cleanup. Run again once it has finished, or remove the file if nothing holds it`,
+      reason: `work is in flight (${held.join(', ')}) — a lock says a process is writing there now, and moving out from under it would break its cleanup. Run again once it has finished`,
       moved: [],
     }
+  }
+
+  // An entry that is neither a file nor a directory is refused rather than carried: a symlinked
+  // `factory.json` moved across and then followed reads whatever it points at as this machine's
+  // own configuration.
+  const strange = [...MOVES.flatMap((entry) => [join(from, ...entry.from), join(to, ...entry.to)]), ...DEAD_ENTRIES.map((dead) => join(from, dead))].filter(odd)
+  if (strange.length > 0) {
+    return { action: 'refused', reason: `${strange.join(', ')} is not an ordinary file or directory, so it cannot be moved safely — inspect it by hand`, moved: [] }
   }
 
   const waiting = MOVES.filter((entry) => there(join(from, ...entry.from)))
@@ -180,6 +215,9 @@ export function migrateHome(deps: {
   }
 
   const moved: string[] = []
+  // Litter from a crash: nobody holds these, and the code that takes them clears a dead one the
+  // same way rather than waiting forever on a process that is gone.
+  for (const path of stale) { deps.remove(path); moved.push(`${path} → removed, the process that held it is gone`) }
   // Removed whether or not anything else moves: a machine whose only leftover is the dead guard
   // directory is exactly the machine that would otherwise keep it forever.
   for (const dead of DEAD_ENTRIES) {
@@ -216,7 +254,20 @@ export function movePath(from: string, to: string, deps: {
   }
 }
 
+// Every component is checked, not just the last: an intermediate symlink would redirect the read
+// just as surely as a symlinked leaf, and `ENOTDIR` on the way down means an ancestor is a file —
+// which is "something is wrong here", not "nothing is here".
 export function pathKind(path: string): Kind {
+  const parent = dirname(path)
+  if (parent !== path) {
+    const above = lstatKind(parent)
+    if (above === 'absent') return 'absent'
+    if (above !== 'directory') return above === 'unreadable' ? 'unreadable' : 'other'
+  }
+  return lstatKind(path)
+}
+
+function lstatKind(path: string): Kind {
   try {
     const stat = lstatSync(path)
     if (stat.isSymbolicLink()) return 'other'
@@ -224,7 +275,8 @@ export function pathKind(path: string): Kind {
     return stat.isFile() ? 'file' : 'other'
   } catch (error) {
     const code = (error as NodeJS.ErrnoException).code
-    return code === 'ENOENT' || code === 'ENOTDIR' ? 'absent' : 'unreadable'
+    if (code === 'ENOENT') return 'absent'
+    return code === 'ENOTDIR' ? 'other' : 'unreadable'
   }
 }
 
@@ -233,6 +285,8 @@ export function pathKind(path: string): Kind {
 export function settleHome(report: (line: string) => void = console.error): Migration {
   const result = migrateHome({
     kind: pathKind,
+    read: (path) => { try { return readFileSync(path, 'utf8') } catch { return null } },
+    running: (pid) => { try { process.kill(pid, 0); return true } catch (error) { return (error as NodeJS.ErrnoException).code === 'EPERM' } },
     move: (from, to) => movePath(from, to, {
       rename: renameSync,
       copy: (a, b) => { cpSync(a, b, { recursive: true, preserveTimestamps: true, verbatimSymlinks: true }) },

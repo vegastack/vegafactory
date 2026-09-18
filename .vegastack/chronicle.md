@@ -10,7 +10,7 @@ The project's story, newest first: what got built, why, and how it went — for 
 - **Changed:** new `home.ts` with a `VEGAFACTORY_HOME` override · thirteen join sites, including a containment check that had been written separately from the path it guarded · `worktree-roots.json` became `worktrees.json` · the stats spool came out of a hidden `.tmp/` · the App key moved under `worker/` · `~/.vegastack/guard/` removed on the way past · README, the App and control-room references, the onboarding template and the dev-status fixtures.
 - **Decisions:** one — the 04-09-2026 compiled-policy guard entry is recorded as superseded by a new dated line, because the register is append-only and P4 removed the machinery it describes.
 
-— built by claude · branch chore/252-one-home-for-everything-vegafactory-stor
+— approved by operator (kmanojkumar) · built by claude · branch chore/252-one-home-for-everything-vegafactory-stor
 
 ## 18-09-2026 — The drill found what the tests could not ([#224](https://github.com/vegastack/vegafactory/issues/224))
 
