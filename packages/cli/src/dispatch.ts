@@ -101,10 +101,11 @@ export function parseCaps(cell: string): Caps | null {
   return caps
 }
 
-// `caps` is null when the row names caps nobody can read. The row survives so the machine it
-// names is refused by name — a roster that silently dropped the row would refuse it as "not
-// listed", which sends the operator looking for a missing row rather than at the typo.
-export interface Dispatcher { machine: string; operator: string | null; repos: string[]; caps: Caps | null }
+// `caps` is null when this row's limits cannot be established, and `problem` says why. The row
+// survives so the machine it names is refused by name — a roster that silently dropped the row
+// would refuse it as "not listed", which sends the operator looking for a missing row rather than
+// at the thing that is actually wrong.
+export interface Dispatcher { machine: string; operator: string | null; repos: string[]; caps: Caps | null; problem: string | null }
 
 // What a roster may call each column. A header maps a name to a position, so a row is read by what
 // its columns are called rather than by where they happen to sit: a room may add, drop or reorder
@@ -118,9 +119,13 @@ const COLUMN_NAMES = {
 
 interface Layout { machine: number; operator: number | null; repos: number; caps: number | null }
 
-// The shape every roster had before its columns were named. A table with no header is read this
-// way, and then it has no caps column — so it takes the shipped defaults rather than guessing.
+// The shape every roster had before its columns were named: three cells, and no caps. A table with
+// no header is read this way, and a row with a fourth cell is refused rather than guessed at —
+// there is no position a caps cell is known to sit in, so either the columns are named or there
+// are none to name. Legacy three-cell rosters keep working untouched.
 const POSITIONAL: Layout = { machine: 0, operator: 1, repos: 2, caps: null }
+const UNNAMED_COLUMNS = 'the table names no columns, so nothing says which cell holds the caps — add a header row, `| machine | operator | repos | caps |`'
+const UNREADABLE_CAPS = 'the caps cell cannot be read — the shape is `runs 10 · step 72h · poll 1m · retry 15m · park 3`, every field optional'
 
 // A header is the row that names at least the machine column and the repos column. Anything less
 // is not a header, and reading it as one would silently move every column.
@@ -150,6 +155,7 @@ export function parseDispatchers(text: string): Dispatcher[] {
     let repos = ''
     let capsCell = ''
     let named = false
+    let problem: string | null = null
     if (line.startsWith('|')) {
       const row = cells(line)
       if (row.some(separator)) continue
@@ -163,6 +169,9 @@ export function parseDispatchers(text: string): Dispatcher[] {
       repos = row[layout.repos] ?? ''
       capsCell = layout.caps === null ? '' : row[layout.caps] ?? ''
       named = layout.caps !== null
+      // A wider table than the legacy three, with nothing naming its columns: the caps could be in
+      // any of the extra cells or in none of them, and a gate does not guess. Refused by name.
+      if (layout === POSITIONAL && row.length > 3) problem = UNNAMED_COLUMNS
     } else {
       const match = /^-\s+`?([A-Za-z0-9][\w.-]*)`?\s*(?:—|--)\s*(.*)$/.exec(line)
       if (!match) continue
@@ -173,12 +182,18 @@ export function parseDispatchers(text: string): Dispatcher[] {
     if (!machine.trim() || COLUMN_NAMES.machine.includes(name as (typeof COLUMN_NAMES.machine)[number])) continue
     // A declared caps column is read whatever it holds: guessing a cap would be choosing a number
     // on the operator's behalf. `-` and an empty cell are how a row says "the defaults are fine".
-    const caps = named && capsCell !== '-' && capsCell !== '' ? parseCaps(capsCell) : { ...DEFAULT_CAPS }
+    let caps: Caps | null = null
+    if (problem) caps = null
+    else if (named && capsCell !== '-' && capsCell !== '') {
+      caps = parseCaps(capsCell)
+      if (!caps) problem = UNREADABLE_CAPS
+    } else caps = { ...DEFAULT_CAPS }
     found.push({
       machine: name,
       operator: operator && operator !== '-' ? operator.replace(/^@/, '') : null,
       repos: repos.split(/[,\s]+/).map((repo) => repo.replace(/`/g, '').trim()).filter((repo) => repo && repo !== '-'),
       caps,
+      problem,
     })
   }
   return found
@@ -257,9 +272,9 @@ export function listedHere(root: string, options: { repo: string; host?: string;
     return { ok: false, entry: null, file, reason: `${machine} is not listed in ${file} — add the row \`| ${machine} | <operator> | ${options.repo} |\` in a control-room PR before this machine dispatches anything` }
   }
   // A cap nobody can read is not a cap, and the machine it belongs to is named rather than left
-  // to look like a missing row: the operator is sent to the typo, not to the roster.
+  // to look like a missing row: the operator is sent to the thing that is wrong, not to the roster.
   if (!entry.caps) {
-    return { ok: false, entry, file, reason: `${machine}'s caps cell in ${file} cannot be read — the shape is \`runs 10 · step 72h · poll 1m · retry 15m · park 3\`, every field optional; fix it in a control-room PR` }
+    return { ok: false, entry, file, reason: `${machine}'s row in ${file} does not say what its limits are: ${entry.problem} — fix it in a control-room PR` }
   }
   const every = entry.repos.length === 0 || entry.repos.some((repo) => repo === '*' || repo.toLowerCase() === 'all')
   if (!every && !entry.repos.includes(options.repo)) return { ok: false, reason: `${machine} is listed in ${file} for ${entry.repos.join(', ')}, not ${options.repo}`, entry, file }
@@ -1560,6 +1575,8 @@ export function dispatchUsage(): string {
   disable                remove the unit; the machine stops picking work up
   status                 the board, plus this machine's recent dispatcher runs
   run [--once]           the poll loop itself (the unit runs this); --once makes a single pass
+                         and is the only form --json reports, because the document answers when
+                         a pass ends
 
 One merge at a time per machine, and as many runs at once as its roster row allows. The row's
 caps cell sets them — \`runs 10 · step 72h · poll 1m · retry 15m · park 3\`, in any order, every
@@ -1575,6 +1592,11 @@ poll sees the work is taken, except in the seconds an implement run hands that c
 session it starts.
 
 Options: --repo OWNER/NAME · --json · --dry-run (enable and disable show what they would do)
+
+The roster's table names its columns in a header row — \`| machine | operator | repos | caps |\`,
+in any order, extra columns ignored — so a cell is read by what its column is called. A table
+with no header is read as the three columns every roster had before caps existed; a wider one
+without a header refuses, because no position is known to hold the caps.
 
 A machine the control room's dispatchers.md does not name refuses every verb but disable. Writes
 go out as the VegaFactory GitHub App, on an hour-long token minted here from its private key:
@@ -1790,6 +1812,16 @@ export async function runDispatch(argv: string[], deps: CliDeps = {}): Promise<n
       // `--json` puts exactly one document on stdout and nothing else, so every line this loop
       // would have printed is collected and leaves inside it. A caller that has to step over prose
       // to find the JSON is a caller that will one day step over the wrong line.
+      //
+      // That only works for a run that ends: an always-on loop would hold every line it ever
+      // printed and emit them at shutdown, which is a leak and an answer nobody is waiting for.
+      // So the document belongs to `--once`, and the service, which runs without `--json`, prints.
+      if (args.json && !args.once) {
+        print({ ok: false, reason: '--json reports one pass; use it with --once' },
+          'refused: --json reports one pass and answers when that pass ends — add --once, or drop --json and read the lines the loop prints')
+        releaseRunLock(root, runId)
+        return 2
+      }
       const notes: string[] = []
       const note = (text: string) => { if (args.json) notes.push(text); else out(text) }
       const finish = (code: number, runs: RunRecord[]) => {

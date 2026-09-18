@@ -95,9 +95,9 @@ describe('the roster', () => {
       '- `spare-box` — o/r',
     ].join('\n'))
     expect(rows).toEqual([
-      { machine: 'mac-mini', operator: 'mk', repos: ['o/r', 'o/other'], caps: DEFAULT_CAPS },
-      { machine: 'builder', operator: null, repos: ['*'], caps: DEFAULT_CAPS },
-      { machine: 'spare-box', operator: null, repos: ['o/r'], caps: DEFAULT_CAPS },
+      { machine: 'mac-mini', operator: 'mk', repos: ['o/r', 'o/other'], caps: DEFAULT_CAPS, problem: null },
+      { machine: 'builder', operator: null, repos: ['*'], caps: DEFAULT_CAPS, problem: null },
+      { machine: 'spare-box', operator: null, repos: ['o/r'], caps: DEFAULT_CAPS, problem: null },
     ])
   })
 
@@ -136,11 +136,30 @@ describe('the roster', () => {
     project(`| machine | operator | repos | caps |\n|---|---|---|---|\n| ${HOST} | mk | o/r | runs ten |\n`)
     const listing = listedHere(root, { repo: 'o/r', host: HOST, home })
     expect(listing.ok).toBe(false)
-    expect(listing.reason).toContain(`${HOST}'s caps cell`)
+    expect(listing.reason).toContain(`${HOST}'s row`)
     expect(listing.reason).toContain('runs 10 · step 72h')
     expect(listing.reason).not.toContain('is not listed')
     // The row is still there to point at — it was read, and refused, not skipped.
     expect(listing.entry?.machine).toBe(HOST)
+  })
+
+  // Caps can only be read from a column that says it holds them. A wider table with nothing naming
+  // its columns could be hiding caps in any cell, so the gate says so rather than running on
+  // defaults the operator never chose — and rather than reading a notes cell as a limit.
+  test('a wider table with no header refuses, and asks for the columns to be named', () => {
+    project(`| ${HOST} | mk | o/r | runs 10 · step 72h |\n`)
+    const listing = listedHere(root, { repo: 'o/r', host: HOST, home })
+    expect(listing.ok).toBe(false)
+    expect(listing.reason).toContain('names no columns')
+    expect(listing.reason).toContain('add a header row')
+    expect(listing.entry?.machine).toBe(HOST)
+  })
+
+  test('a legacy three-cell roster with no header still works, and takes the defaults', () => {
+    project(`| ${HOST} | mk | o/r |\n`)
+    const listing = listedHere(root, { repo: 'o/r', host: HOST, home })
+    expect(listing.ok).toBe(true)
+    expect(listing.entry?.caps).toEqual(DEFAULT_CAPS)
   })
 })
 
@@ -1263,6 +1282,17 @@ describe('the command', () => {
     expect(document.notes.join('\n')).toContain('#1 implement')
   })
 
+  // The document answers when a pass ends. An always-on loop has no such moment, so collecting
+  // lines for it would hold every line the machine ever printed and answer nobody.
+  test('--json without --once refuses rather than holding its answer forever', async () => {
+    const lines: string[] = []
+    const code = await runDispatch(['run', '--json'], {
+      cwd: root, home, host: HOST, env: {}, out: (text) => lines.push(text), runner: gh.runner, now: () => gh.clock, git: anyGit,
+    })
+    expect(code).toBe(2)
+    expect(JSON.parse(lines[0]!)).toEqual({ ok: false, reason: '--json reports one pass; use it with --once' })
+  })
+
   test('a signal during a blocked run stops it now, not after the next sleep', async () => {
     controlRoomClone(`| machine | operator | repos |\n|---|---|---|\n| ${HOST} | mk | o/r |\n`)
     gh.addIssue({ number: 1, labels: ['planning', 'medium'] })
@@ -1398,7 +1428,7 @@ describe('caps on the roster row', () => {
       '|---|---|---|---|---|---|',
       '| patrick | dev | o/a | mk | runs 4 | the always-on box |',
     ].join('\n')
-    expect(parseDispatchers(roster)).toEqual([{ machine: 'patrick', operator: 'mk', repos: ['o/a'], caps: { ...DEFAULT_CAPS, runs: 4 } }])
+    expect(parseDispatchers(roster)).toEqual([{ machine: 'patrick', operator: 'mk', repos: ['o/a'], caps: { ...DEFAULT_CAPS, runs: 4 }, problem: null }])
   })
 
   test('prose in a notes column is never caps, whatever words it happens to contain', () => {
@@ -1424,7 +1454,21 @@ describe('caps on the roster row', () => {
   })
 
   test('a table with no header is read the way every roster was read before headers', () => {
-    expect(parseDispatchers('| a | mk | o/a |')).toEqual([{ machine: 'a', operator: 'mk', repos: ['o/a'], caps: DEFAULT_CAPS }])
+    expect(parseDispatchers('| a | mk | o/a |')).toEqual([{ machine: 'a', operator: 'mk', repos: ['o/a'], caps: DEFAULT_CAPS, problem: null }])
+  })
+
+  test('without a header there is no column caps are known to sit in, so a wider row refuses', () => {
+    // Valid caps in a headerless row must not be silently ignored, and a notes cell must not be
+    // read as a limit. Neither is guessed at: the row is kept and refused, saying what to fix.
+    for (const row of ['| a | mk | o/a | runs 4 |', '| a | mk | o/a | the box that runs the build |', '| a | mk | o/a | runs ten |']) {
+      const parsed = parseDispatchers(row)[0]!
+      expect(parsed.machine).toBe('a')
+      expect(parsed.caps).toBeNull()
+      expect(parsed.problem).toContain('names no columns')
+    }
+    // Naming the columns is all it takes.
+    const named = parseDispatchers('| machine | operator | repos | caps |\n|---|---|---|---|\n| a | mk | o/a | runs 4 |')
+    expect(named[0]!.caps).toEqual({ ...DEFAULT_CAPS, runs: 4 })
   })
 
   test("the shipped template's header is not a machine called dispatcher", () => {
