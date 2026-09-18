@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { claimBody, claimLine } from '../src/claim.ts'
 import {
-  APP_ID, STEP_TIMEOUT_MS, agentArgs, appJwt, appKeyPath, board, decide, defaultRunStep, dispatchDir, disjointSiblings,
+  APP_ID, STEP_TIMEOUT_MS, TOKEN_MARGIN_MS, agentArgs, appIdentity, appJwt, appKeyPath, board, decide, defaultRunStep, dispatchDir, disjointSiblings,
   drain, filesFromParent, harnessAnswers, hitLimit, hooksWired, listedHere, mintToken, overlaps, parseDispatchArgs,
   parseDispatchers, poll, readActed, readRuns, readiness, resetAt, runDispatch, schedule, serviceCommands, stagePolicy,
   standDown, stepPrompt, tail, unitPath, unitText, unsafeForParallel,
@@ -67,6 +67,14 @@ describe('the roster', () => {
       { machine: 'builder', operator: null, repos: ['*'] },
       { machine: 'spare-box', operator: null, repos: ['o/r'] },
     ])
+  })
+
+  test('a row that lost its repos column is no row at all', () => {
+    project(`| machine | operator | repos |\n|---|---|---|\n| ${HOST} | mk |\n`)
+    expect(parseDispatchers(`| ${HOST} | mk |`)).toEqual([])
+    const listing = listedHere(root, { repo: 'o/r', host: HOST, home })
+    expect(listing.ok).toBe(false)
+    expect(listing.reason).toContain('is not listed')
   })
 
   test('a listed machine passes; an unlisted one refuses and says how to be listed', () => {
@@ -138,6 +146,22 @@ describe('identity', () => {
     const call: Fetch = async () => ({ ok: false, status: 404, json: async () => ({}) })
     await expect(mintToken({ repo: 'o/r', keyPath: keyFile(), appId: APP_ID, fetch: call })).rejects.toThrow(/not installed on o\/r \(GitHub answered 404\)/)
   })
+
+  test('the token is re-minted before it expires, so a month-old dispatcher still writes', async () => {
+    let issued = 0
+    const start = Date.parse('2026-09-18T10:00:00Z')
+    const call: Fetch = async (url) => ({
+      ok: true, status: 200,
+      json: async () => (url.endsWith('/installation') ? { id: 42 } : { token: `ghs_${++issued}`, expires_at: new Date(start + issued * 3_600_000).toISOString() }),
+    })
+    const identity = appIdentity({ repo: 'o/r', keyPath: keyFile(), appId: APP_ID, fetch: call })
+    await identity.freshen(start)
+    await identity.freshen(start + 10 * 60_000)
+    expect(issued).toBe(1)
+    // Within the margin of expiry, the next pass mints a new one instead of failing every call.
+    await identity.freshen(start + 3_600_000 - TOKEN_MARGIN_MS + 1)
+    expect(issued).toBe(2)
+  })
 })
 
 describe('transitions', () => {
@@ -168,6 +192,21 @@ describe('transitions', () => {
     gh.addComment(1, '<!-- vsk:v1 type=plan rev=1 -->\n## Plan', 'mk')
     gh.addComment(1, 'please build it', 'outsider')
     expect(verdict(1).action).toBe('none')
+  })
+
+  test('a claim posted after the operator\'s reply does not swallow it', () => {
+    gh.addIssue({ number: 1, labels: ['waiting-on-operator', 'medium'] })
+    gh.addComment(1, '<!-- vsk:v1 type=plan rev=1 -->\n## Plan', 'mk')
+    const reply = gh.addComment(1, 'yes, that approach', 'mk')
+    gh.addComment(1, claimBody({ owner: 'laptop:1-x', kind: 'session', harness: 'claude', model: 'opus' }), 'mk')
+    expect(verdict(1)).toMatchObject({ action: 'follow-up', trigger: reply.id })
+  })
+
+  test('evidence from an outsider is not evidence', () => {
+    gh.addIssue({ number: 1, labels: ['ready-to-ship', 'small'] })
+    gh.addComment(1, '<!-- vsk:v1 type=evidence sha=abc1234 -->\nbuilt', 'outsider')
+    gh.addComment(1, 'ship it', 'mk')
+    expect(verdict(1)).toMatchObject({ action: 'none', reason: 'ready-to-ship with no evidence comment' })
   })
 
   test('"ship it" after the evidence ships; anything else is corrections', () => {
@@ -205,11 +244,22 @@ describe('transitions', () => {
     expect(verdict(3).action).toBe('none')
   })
 
-  test('a finished run is not repeated for the same trigger', () => {
+  test('a queued issue with an open blocker is left alone', () => {
+    gh.addIssue({ number: 1, labels: ['queued', 'small'], blockedBy: [{ number: 5, state: 'open' }] })
+    expect(verdict(1)).toMatchObject({ action: 'none', reason: 'blocked by #5' })
+  })
+
+  test('a finished run is not repeated for the same trigger, whatever it finished as', () => {
     gh.addIssue({ number: 1, labels: ['queued', 'small'] })
     const acted = { at: gh.clock, action: 'implement' as const, outcome: 'done' as const, trigger: null, failures: 0, retryAt: null }
     expect(verdict(1, { acted }).action).toBe('none')
     expect(verdict(1, { acted: { ...acted, action: 'plan' as const } }).action).toBe('implement')
+    // A stop settles its trigger too, or every pass would stand the issue down again.
+    gh.addIssue({ number: 2, labels: ['in-progress', 'small'] })
+    const word = gh.addComment(2, 'stop', 'mk')
+    const stopped = { at: gh.clock, action: 'stop' as const, outcome: 'stopped' as const, trigger: word.id, failures: 0, retryAt: null }
+    expect(verdict(2).action).toBe('stop')
+    expect(verdict(2, { acted: stopped }).action).toBe('none')
   })
 
   test('a failed run waits out its backoff and is parked after three tries', () => {
@@ -346,13 +396,13 @@ describe('one poll over the board', () => {
     gh.addIssue({ number: 1, labels: ['queued', 'small'] })
     const given: string[] = []
     await pass({
-      runStep: runStep({ outcome: 'limit', note: 'usage limit reached; try again after 2026-09-18T15:00:00Z' }),
+      runStep: runStep({ outcome: 'limit', note: 'usage limit reached; try again after 2026-09-17T15:00:00Z' }),
       standDown: (number: number, reason: string) => { given.push(reason); return reason },
     })
     expect(given[0]).toContain('subscription limit')
     const acted = readActed(root)['o/r#1']!
     expect(acted.outcome).toBe('limit')
-    expect(new Date(acted.retryAt!).toISOString()).toBe('2026-09-18T15:00:00.000Z')
+    expect(new Date(acted.retryAt!).toISOString()).toBe('2026-09-17T15:00:00.000Z')
   })
 
   test('a step that throws is a failed run, not a dead dispatcher', async () => {
@@ -496,6 +546,8 @@ describe('the step a run makes', () => {
     expect(hitLimit('TypeError: undefined is not a function')).toBe(false)
     expect(resetAt('back in 2 hours', 1000)).toBe(1000 + 7_200_000)
     expect(resetAt('nothing readable', 1000)).toBe(1000 + 3_600_000)
+    // A timestamp in a log line is not a promise: nothing parks an issue for more than a day.
+    expect(resetAt('see 2099-01-01T00:00:00Z', 1000)).toBe(1000 + 24 * 3_600_000)
   })
 
   test('a run\'s output is bounded', () => {
@@ -573,6 +625,21 @@ describe('the command', () => {
     expect(result.code).toBe(0)
     expect(seen).toEqual([1])
     expect(result.text).toContain('#1 implement → done')
+  })
+
+  test('a row removed while the loop runs stands this machine down at the next pass', async () => {
+    gh.addIssue({ number: 1, labels: ['queued', 'small'] })
+    const lines: string[] = []
+    let passes = 0
+    const code = await runDispatch(['run'], {
+      cwd: root, home, host: HOST, env: {}, out: (text) => lines.push(text), runner: gh.runner,
+      runStep: (async () => ({ outcome: 'done' as const, note: '', ms: 1 })) as RunStep,
+      // Between the first pass and the second, the control-room PR that de-lists this machine lands.
+      sleep: async () => { if (++passes === 1) writeFileSync(join(home, '.vegastack/control-room/o/dispatchers.md'), '| machine | operator | repos |\n|---|---|---|\n') },
+    })
+    expect(code).toBe(2)
+    expect(lines.join('\n')).toContain('stopping:')
+    expect(lines.join('\n')).toContain('is not listed')
   })
 
   test('the flags parse and an unknown verb says so', () => {

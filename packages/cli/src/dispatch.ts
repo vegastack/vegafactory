@@ -14,8 +14,8 @@ import { APP_ACTOR, holderOf, machineName, release, trustedHolders } from './cla
 import { defaultClonePath, factoryConfigPath, parseControlRoomKnob, readFactoryConfig } from './control-room.ts'
 import { billingVariables, childEnvironment } from './env.ts'
 import { GhError, defaultRunner, ghList, type GhResult, type GhRunner } from './gh.ts'
-import { assertRepo, cacheDir, replaceFile, syncIssue, type GhIssue } from './issue-cache.ts'
-import { detectRepo, latestOfType, permissionLookup, repoRoot, snapshot, type PermissionLookup, type Snapshot } from './issue.ts'
+import { assertRepo, cacheDir, replaceFile, syncIssue, withLock, type CommentEntry, type GhIssue, type IssueEntry } from './issue-cache.ts'
+import { detectRepo, permissionLookup, repoRoot, snapshot, type PermissionLookup, type Snapshot } from './issue.ts'
 import { stateOf, type State } from './labels.ts'
 import { parseIndependentGroups, sharedByEveryChild } from '../../../skills/dev/dev-plan/scripts/plan-lint.mjs'
 
@@ -49,8 +49,10 @@ export function parseDispatchers(text: string): Dispatcher[] {
     let operator: string | null = null
     let repos = ''
     if (line.startsWith('|')) {
+      // Three cells or it is not a row. A truncated row must not read as "every repository": the
+      // roster is a gate, so a shape nobody wrote on purpose refuses rather than widens.
       const row = cells(line)
-      if (row.length < 2 || row.some(separator) || /^machine$/i.test(row[0] ?? '')) continue
+      if (row.length < 3 || row.some(separator) || /^machine$/i.test(row[0] ?? '')) continue
       machine = row[0] ?? ''
       operator = row[1] ?? null
       repos = row[2] ?? ''
@@ -169,16 +171,38 @@ export async function mintToken(input: { repo: string; keyPath: string; appId: s
 }
 
 // `gh` run as the App. The token reaches the child through its environment and nowhere else.
-export function tokenRunner(token: string, timeoutMs = 30_000): GhRunner {
+// `token()` is asked for one on every call, so an expiring token is replaced rather than carried:
+// an installation token lives an hour and the dispatcher lives for months.
+export function tokenRunner(token: () => string, timeoutMs = 30_000): GhRunner {
   return (args, input): GhResult => {
     const result = spawnSync(process.env.VEGAFACTORY_GH || 'gh', args, {
       encoding: 'utf8', input, maxBuffer: 64 * 1024 * 1024, timeout: timeoutMs, killSignal: 'SIGKILL',
       stdio: [input === undefined ? 'ignore' : 'pipe', 'pipe', 'pipe'],
-      env: { ...process.env, GH_TOKEN: token, GITHUB_TOKEN: token },
+      env: { ...process.env, GH_TOKEN: token(), GITHUB_TOKEN: token() },
     })
     if ((result.error as NodeJS.ErrnoException | undefined)?.code === 'ETIMEDOUT') throw new GhError(`gh ${args.slice(0, 2).join(' ')} timed out after ${timeoutMs} ms`)
     if (result.error) throw new GhError(`gh could not start: ${result.error.message}`)
     return { code: result.status ?? 1, stdout: result.stdout ?? '', stderr: result.stderr ?? '' }
+  }
+}
+
+// Re-minted a few minutes before it expires. `gh` is spawned synchronously, so the token has to be
+// ready before the call: the refresh runs between passes, from `freshen`, and never mid-request.
+export const TOKEN_MARGIN_MS = 5 * 60_000
+
+export interface AppIdentity { runner: GhRunner; freshen: (now?: number) => Promise<void> }
+
+export function appIdentity(input: { repo: string; keyPath: string; appId: string; fetch?: Fetch }): AppIdentity {
+  let held: AppToken | null = null
+  return {
+    runner: tokenRunner(() => {
+      if (!held) throw new GhError('the dispatcher has no installation token yet')
+      return held.token
+    }),
+    freshen: async (now = Date.now()) => {
+      if (held && held.expiresAt - now > TOKEN_MARGIN_MS) return
+      held = await mintToken({ ...input, now })
+    },
   }
 }
 
@@ -315,12 +339,26 @@ export function readRuns(root: string, limit = 20): RunRecord[] {
 }
 
 export function readActed(root: string): Record<string, Acted> {
-  try { return JSON.parse(readFileSync(actedPath(root), 'utf8')) as Record<string, Acted> } catch { return {} }
+  try {
+    const saved: unknown = JSON.parse(readFileSync(actedPath(root), 'utf8'))
+    return saved && typeof saved === 'object' && !Array.isArray(saved) ? saved as Record<string, Acted> : {}
+  } catch { return {} }
 }
 
 export function writeActed(root: string, acted: Record<string, Acted>) {
   mkdirSync(dispatchDir(root), { recursive: true })
   replaceFile(actedPath(root), JSON.stringify(acted, null, 2) + '\n')
+}
+
+// Two steps finish at once, and an operator may run a pass by hand beside the service: the
+// read-modify-write takes the same lock the issue cache uses, so neither loses the other's entry.
+export function updateActed(root: string, change: (acted: Record<string, Acted>) => void) {
+  mkdirSync(dispatchDir(root), { recursive: true })
+  withLock(dispatchDir(root), () => {
+    const acted = readActed(root)
+    change(acted)
+    writeActed(root, acted)
+  }, { what: 'the dispatcher\'s record' })
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -336,12 +374,28 @@ const SHIP_IT = /(^|[^\w])ship it([^\w]|$)/i
 const STOP = /^\s*(?:@?[\w-]+[,:]?\s+)?stop\s*(?:$|[\n—–:,.!?])/i
 const WRITE = new Set(['admin', 'maintain', 'write'])
 
-// The operator's own comments: a person with write access, never a bot or an App.
+// Written by someone with write access to the repository. Everything this command acts on is read
+// through it: an outsider's comment is text on a page, never a plan, evidence or an instruction.
+const fromInsider = (permission: PermissionLookup) => (entry: CommentEntry) =>
+  entry.authorType !== 'Bot' && !!entry.author && WRITE.has(permission(entry.author))
+
+// The operator's own comments: a person with write access, in the order they were written.
 function operatorComments(snap: Snapshot, permission: PermissionLookup) {
   return Object.values(snap.state.comments)
-    .filter((entry) => entry.type === 'human' && entry.authorType !== 'Bot' && entry.author && WRITE.has(permission(entry.author)))
+    .filter((entry) => entry.type === 'human' && fromInsider(permission)(entry))
     .sort((a, b) => a.createdAt.localeCompare(b.createdAt) || a.id - b.id)
 }
+
+// The newest comment of a type, from someone with write access.
+function latestFromInsider(snap: Snapshot, type: string, permission: PermissionLookup): CommentEntry | null {
+  return Object.values(snap.state.comments)
+    .filter((entry) => entry.type === type && fromInsider(permission)(entry))
+    .sort((a, b) => a.createdAt.localeCompare(b.createdAt) || a.id - b.id).at(-1) ?? null
+}
+
+// Comments that are bookkeeping, not an answer or a piece of work: they must not move the line an
+// operator's reply has to beat, or a session claiming an issue would swallow the reply forever.
+const BOOKKEEPING = new Set(['claim', 'release', 'ledger', 'ack'])
 
 // The action this issue is waiting for, and the comment that asks for it. `trigger` is what makes
 // a run happen once: a comment already acted on asks for nothing more, and a state label already
@@ -354,41 +408,48 @@ export function decide(snap: Snapshot, permission: PermissionLookup, options: { 
   const { state } = stateOf(issue.labels)
   if (!state) return nothing('no state label')
   const comments = operatorComments(snap, permission)
-  const decided = transitionOf(snap, issue.labels, state, comments)
+  const decided = transitionOf(snap, issue, state, comments, permission)
   if (decided.action === 'none') return decided
 
-  if (acted) {
-    if (acted.outcome === 'done' && acted.action === decided.action && acted.trigger === decided.trigger) {
+  // A trigger is spent once a run of the same action has settled on it, whatever it settled as —
+  // only a failure and a subscription limit come back, and each has its own wait.
+  if (acted && acted.action === decided.action) {
+    if (acted.retryAt !== null && now < acted.retryAt) return nothing(`${decided.action} is waiting until ${new Date(acted.retryAt).toISOString()}`)
+    if (acted.failures >= MAX_FAILURES && acted.trigger === decided.trigger) return nothing(`${decided.action} failed ${acted.failures} times — this issue needs a person`)
+    if (acted.retryAt === null && acted.trigger === decided.trigger) {
       return nothing(`already ran ${decided.action} for this ${decided.trigger === null ? 'state' : 'comment'}`)
-    }
-    if (acted.action === decided.action && acted.failures >= MAX_FAILURES) return nothing(`${decided.action} failed ${acted.failures} times — this issue needs a person`)
-    if (acted.action === decided.action && acted.retryAt !== null && now < acted.retryAt) {
-      return nothing(`${decided.action} is waiting until ${new Date(acted.retryAt).toISOString()}`)
     }
   }
   return decided
 }
 
 type Comments = ReturnType<typeof operatorComments>
+type IssueFacts = IssueEntry
 
-function transitionOf(snap: Snapshot, labels: string[], state: State, comments: Comments): Decision {
-  const issue = snap.state.issue!
+function transitionOf(snap: Snapshot, issue: IssueFacts, state: State, comments: Comments, permission: PermissionLookup): Decision {
+  const labels = issue.labels
   const last = comments.at(-1) ?? null
   if (last && STOP.test(snap.body(last))) return { action: 'stop', reason: `@${last.author} said stop`, trigger: last.id, by: last.author, split: false }
   if (state === 'planning') return { action: 'plan', reason: 'the brief is acked and the plan is not written', trigger: null, by: null, split: labels.includes('large') }
-  if (state === 'queued') return { action: 'implement', reason: 'the plan is acked and nobody has built it', trigger: null, by: null, split: false }
+  if (state === 'queued') {
+    // The same fact `issue check --for implement` blocks on: building on an open blocker wastes
+    // the run and, worse, lands work on a base that is still moving.
+    if (issue.blockedBy.length) return nothing(`blocked by ${issue.blockedBy.map((number) => `#${number}`).join(', ')}`)
+    return { action: 'implement', reason: 'the plan is acked and nobody has built it', trigger: null, by: null, split: false }
+  }
   if (state === 'waiting-on-operator') {
     // The reply the issue was waiting for: an operator comment later than the last thing an agent
-    // wrote and later than the brief's own last edit.
-    const agents = Object.values(snap.state.comments).filter((entry) => entry.type !== 'human').map((entry) => entry.createdAt)
-    const after = [issue.bodyChangedAt, ...agents].sort().at(-1) ?? ''
+    // wrote and later than the brief's own last edit. Claims, releases, acks and the status
+    // comment are bookkeeping and move nothing.
+    const work = Object.values(snap.state.comments).filter((entry) => entry.type !== 'human' && !BOOKKEEPING.has(entry.type)).map((entry) => entry.createdAt)
+    const after = [issue.bodyChangedAt, ...work].sort().at(-1) ?? ''
     const reply = comments.filter((entry) => entry.createdAt > after).at(-1)
     return reply
       ? { action: 'follow-up', reason: `@${reply.author} replied on a waiting-on-operator issue`, trigger: reply.id, by: reply.author, split: false }
       : nothing('waiting on the operator')
   }
   if (state === 'ready-to-ship') {
-    const evidence = latestOfType(snap, 'evidence')
+    const evidence = latestFromInsider(snap, 'evidence', permission)
     if (!evidence) return nothing('ready-to-ship with no evidence comment')
     const word = comments.filter((entry) => entry.createdAt > (evidence.changedAt || evidence.updatedAt)).at(-1)
     if (!word) return nothing('waiting for the operator to read the evidence')
@@ -467,13 +528,15 @@ export type RunStep = (step: Step, context: { root: string }) => Promise<StepRes
 const LIMIT = /\b(usage limit reached|rate limit|quota exceeded|out of (?:usage|credits?)|limit resets?|try again (?:after|at))\b/i
 export const hitLimit = (text: string) => LIMIT.test(text)
 
-// When the subscription said it would be back. Anything unreadable waits an hour.
+// When the subscription said it would be back. Anything unreadable waits an hour, and no reading
+// parks an issue for more than a day: the text is a log line, not a promise.
+export const MAX_WAIT_MS = 24 * 3_600_000
 export function resetAt(text: string, now = Date.now()): number {
   const iso = /\b(\d{4}-\d{2}-\d{2}T[\d:]+(?:\.\d+)?Z)\b/.exec(text)?.[1]
   const parsed = iso ? Date.parse(iso) : NaN
-  if (Number.isFinite(parsed) && parsed > now) return parsed
+  if (Number.isFinite(parsed) && parsed > now) return Math.min(parsed, now + MAX_WAIT_MS)
   const hours = Number(/\bin (\d+)\s*hours?\b/i.exec(text)?.[1] ?? NaN)
-  if (Number.isFinite(hours) && hours > 0) return now + hours * 3_600_000
+  if (Number.isFinite(hours) && hours > 0) return Math.min(now + hours * 3_600_000, now + MAX_WAIT_MS)
   return now + 3_600_000
 }
 
@@ -521,11 +584,21 @@ export function agentArgs(policy: { harness: string; model: string | null; effor
 
 interface Exec { code: number | null; stdout: string; stderr: string; timedOut: boolean; error?: string }
 
+// The limit is enforced inside the child's own process group, so it holds even if the dispatcher
+// dies: an agent orphaned by a crash or a `launchctl bootout` still stops on its own rather than
+// writing to GitHub unsupervised for hours.
+const WATCHDOG = '"$@" & job=$!; (sleep "$VF_LIMIT"; kill -KILL 0) & dog=$!; wait "$job"; code=$?; kill "$dog" 2>/dev/null; exit "$code"'
+
 // One child, in its own process group so a stuck step is killed with everything it started. Only
 // the tail of its output is kept: the record is bounded and the output never reaches the issue.
 function execTool(tool: string, args: string[], options: { cwd: string; env: NodeJS.ProcessEnv; timeoutMs: number }): Promise<Exec> {
   return new Promise((resolve) => {
-    const child = spawn(tool, args, { cwd: options.cwd, env: options.env, stdio: ['ignore', 'pipe', 'pipe'], detached: true })
+    const child = spawn('sh', ['-c', WATCHDOG, 'vegafactory-dispatch', tool, ...args], {
+      // Half a minute behind this process's own timer, so the backstop only ever fires for an
+      // orphan and a killed step is reported as killed rather than as an exit code.
+      cwd: options.cwd, env: { ...options.env, VF_LIMIT: String(Math.ceil(options.timeoutMs / 1000) + 30) },
+      stdio: ['ignore', 'pipe', 'pipe'], detached: true,
+    })
     let stdout = ''
     let stderr = ''
     let timedOut = false
@@ -566,8 +639,10 @@ export function defaultRunStep(devMd: string, env: NodeJS.ProcessEnv, { exec = e
     const ms = Date.now() - started
     const text = `${child.stderr}\n${child.stdout}`
     if (child.timedOut) return { outcome: 'killed', note: `${tool} ran past the ${timeoutMs / 60_000}-minute step limit and was stopped`, ms }
-    if (hitLimit(text)) return { outcome: 'limit', note: tail(text), ms }
     if (child.error) return { outcome: 'failed', note: `could not start ${tool}: ${child.error}`, ms }
+    // A limit is why a run stopped early, never a phrase in the work of a run that finished: the
+    // diff of a retry helper says "rate limit" all day.
+    if (child.code !== 0 && hitLimit(text)) return { outcome: 'limit', note: tail(text), ms }
     if (child.code !== 0) return { outcome: 'failed', note: `${tool} exited ${child.code}: ${tail(text)}`, ms }
     return { outcome: 'done', note: tail(child.stdout), ms }
   }
@@ -612,27 +687,26 @@ export async function poll(deps: PollDeps, inflight: Map<number, Inflight> = new
   const acted = readActed(root)
   const wanted: Array<{ candidate: Candidate; decision: Decision; key: string }> = []
   const plans = new Map<number, string | null>()
+  // One issue nobody can read must not cost the board its pass, so everything per-issue is guarded.
   for (const issue of board(repo, runner)) {
-    let snap: Snapshot
     try {
       syncIssue({ root, repo, number: issue.number, runner })
-      snap = snapshot(cacheDir(root, repo, issue.number))
+      const snap = snapshot(cacheDir(root, repo, issue.number))
+      const key = `${repo}#${issue.number}`
+      const decision = decide(snap, permission, { acted: acted[key] ?? null, now: now() })
+      if (decision.action === 'none') continue
+      // A fresh claim means someone — a person or another machine — is already on it.
+      if (decision.action !== 'stop' && holderOf(snap.state, snap.body, now(), trusted).holder) {
+        deps.out(`#${issue.number}: skipped, a fresh claim holds it`)
+        continue
+      }
+      const parent = snap.state.issue!.parent
+      if (parent !== null && !plans.has(parent)) plans.set(parent, parentPlan(root, repo, parent, runner, permission))
+      const files = parent === null ? [] : filesFromParent(plans.get(parent) ?? null, issue.number)
+      wanted.push({ key, decision, candidate: { number: issue.number, action: decision.action, parent, files } })
     } catch (error) {
       deps.out(`#${issue.number}: could not be read (${(error as Error).message})`)
-      continue
     }
-    const key = `${repo}#${issue.number}`
-    const decision = decide(snap, permission, { acted: acted[key] ?? null, now: now() })
-    if (decision.action === 'none') continue
-    // A fresh claim means someone — a person or another machine — is already on it.
-    if (decision.action !== 'stop' && holderOf(snap.state, snap.body, now(), trusted).holder) {
-      deps.out(`#${issue.number}: skipped, a fresh claim holds it`)
-      continue
-    }
-    const parent = snap.state.issue!.parent
-    if (parent !== null && !plans.has(parent)) plans.set(parent, parentPlan(root, repo, parent, runner))
-    const files = parent === null ? [] : filesFromParent(plans.get(parent) ?? null, issue.number)
-    wanted.push({ key, decision, candidate: { number: issue.number, action: decision.action, parent, files } })
   }
 
   const started: Candidate[] = []
@@ -677,13 +751,17 @@ function settle(deps: PollDeps, candidate: Candidate, item: { key: string; decis
     outcome: result.outcome, ms: result.ms, machine: deps.machine, note: tail(result.note),
   }
   recordRun(deps.root, record)
-  const acted = readActed(deps.root)
-  const previous = acted[item.key]
-  const failed = result.outcome === 'failed' || result.outcome === 'killed'
-  const failures = failed ? (previous && previous.action === candidate.action ? previous.failures : 0) + 1 : 0
-  const retryAt = failed ? at + RETRY_MS * 2 ** (failures - 1) : result.outcome === 'limit' ? resetAt(result.note, at) : null
-  acted[item.key] = { at, action: candidate.action, outcome: result.outcome, trigger: item.decision.trigger, failures, retryAt }
-  writeActed(deps.root, acted)
+  const ended = deps.now()
+  let retryAt: number | null = null
+  updateActed(deps.root, (acted) => {
+    const previous = acted[item.key]
+    const failed = result.outcome === 'failed' || result.outcome === 'killed'
+    const failures = failed ? (previous && previous.action === candidate.action ? previous.failures : 0) + 1 : 0
+    // The wait runs from the end of the run, not its start: a step that failed after twenty
+    // minutes would otherwise be due again the moment it stopped.
+    retryAt = failed ? ended + RETRY_MS * 2 ** (failures - 1) : result.outcome === 'limit' ? resetAt(result.note, ended) : null
+    acted[item.key] = { at, action: candidate.action, outcome: result.outcome, trigger: item.decision.trigger, failures, retryAt }
+  })
   // A subscription limit is not the issue's fault: the work is saved and given back, and this
   // machine tries again after the reset.
   if (result.outcome === 'limit') deps.standDown(candidate.number, `the subscription limit was reached; this machine tries again after ${new Date(retryAt!).toISOString()}`)
@@ -691,12 +769,14 @@ function settle(deps: PollDeps, candidate: Candidate, item: { key: string; decis
   return record
 }
 
-// The parent epic's plan comment, where sibling file sets are declared.
-function parentPlan(root: string, repo: string, parent: number, runner: GhRunner): string | null {
+// The parent epic's plan comment, where sibling file sets are declared. It authorises two agents
+// to run at once, so only a plan from someone with write access counts: anyone can comment on a
+// public issue, and a forged `**Independent groups:**` block would be a forged permission.
+function parentPlan(root: string, repo: string, parent: number, runner: GhRunner, permission: PermissionLookup): string | null {
   try {
     syncIssue({ root, repo, number: parent, runner })
     const snap = snapshot(cacheDir(root, repo, parent))
-    const plan = latestOfType(snap, 'plan')
+    const plan = latestFromInsider(snap, 'plan', permission)
     return plan ? snap.body(plan) : null
   } catch { return null }
 }
@@ -708,12 +788,15 @@ export function standDown(ctx: { root: string; repo: string; number: number; run
   const dir = workingDir(ctx.root, ctx.number)
   const notes: string[] = []
   if (dir) {
-    const git = (args: string[]) => spawnSync('git', args, { cwd: dir, encoding: 'utf8', timeout: 60_000 })
-    if (git(['status', '--porcelain']).stdout.trim()) {
+    const git = (args: string[]) => {
+      const result = spawnSync('git', args, { cwd: dir, encoding: 'utf8', timeout: 60_000 })
+      return { status: result.status, out: (result.stdout ?? '').trim() }
+    }
+    if (git(['status', '--porcelain']).out) {
       git(['add', '--all'])
       notes.push(git(['commit', '--quiet', '-m', `wip: #${ctx.number} saved before standing down`]).status === 0 ? 'committed the open work' : 'the open work could not be committed')
     }
-    const branch = git(['branch', '--show-current']).stdout.trim()
+    const branch = git(['branch', '--show-current']).out
     if (branch) {
       notes.push(git(['push', '--quiet', '-u', 'origin', `HEAD:refs/heads/${branch}`]).status === 0 ? `pushed ${branch}` : `the push of ${branch} was rejected, so the commit stays local`)
     }
@@ -796,12 +879,7 @@ export interface CliDeps {
 
 const wait = (ms: number) => new Promise<void>((resolve) => { setTimeout(resolve, ms) })
 
-// A `gh` that acts as the App. The token is minted per command and never leaves this process
-// except in that child's environment.
-async function appRunner(repo: string, keyPath: string, env: NodeJS.ProcessEnv, call?: Fetch): Promise<GhRunner> {
-  const minted = await mintToken({ repo, keyPath, appId: env.VEGAFACTORY_APP_ID?.trim() || APP_ID, fetch: call })
-  return tokenRunner(minted.token)
-}
+const appIdOf = (env: NodeJS.ProcessEnv) => env.VEGAFACTORY_APP_ID?.trim() || APP_ID
 
 export async function runDispatch(argv: string[], deps: CliDeps = {}): Promise<number> {
   const out = deps.out ?? console.log
@@ -831,7 +909,7 @@ export async function runDispatch(argv: string[], deps: CliDeps = {}): Promise<n
       let keyOk = false
       let keyDetail = ''
       try {
-        await mintToken({ repo, keyPath, appId: env.VEGAFACTORY_APP_ID?.trim() || APP_ID, fetch: deps.fetch })
+        await mintToken({ repo, keyPath, appId: appIdOf(env), fetch: deps.fetch })
         keyOk = true
         keyDetail = `the App key at ${keyPath} mints an installation token for ${repo}`
       } catch (error) { keyDetail = (error as Error).message }
@@ -890,9 +968,15 @@ export async function runDispatch(argv: string[], deps: CliDeps = {}): Promise<n
       const runs = readRuns(root)
       const byState = new Map<string, number[]>()
       for (const row of rows) byState.set(row.state, [...(byState.get(row.state) ?? []), row.number])
-      print({ repo, machine, listed: listing.ok, board: rows, runs }, [
+      // An issue this machine has given up on is the one thing `status` must not leave out: it is
+      // off the board as far as the dispatcher is concerned until a person looks at it.
+      const parked = Object.entries(readActed(root))
+        .filter(([key, entry]) => entry.failures >= MAX_FAILURES && key.startsWith(`${repo}#`))
+        .map(([key, entry]) => ({ issue: Number(key.slice(key.indexOf('#') + 1)), action: entry.action, failures: entry.failures }))
+      print({ repo, machine, listed: listing.ok, board: rows, runs, parked }, [
         `${repo} · ${machine} · ${listing.ok ? 'listed to dispatch' : listing.reason}`,
         ...[...byState].map(([state, numbers]) => `${state.padEnd(20)} ${numbers.map((number) => `#${number}`).join(' ')}`),
+        ...(parked.length ? ['', `parked for a person: ${parked.map((row) => `#${row.issue} (${row.action} failed ${row.failures}×)`).join(', ')}`] : []),
         '',
         runs.length ? 'recent runs on this machine:' : 'no dispatcher runs on this machine yet',
         ...runs.map((run) => `${run.at}  #${run.issue} ${run.action.padEnd(12)} ${run.outcome.padEnd(8)} ${Math.round(run.ms / 1000)}s  ${run.note}`),
@@ -908,7 +992,8 @@ export async function runDispatch(argv: string[], deps: CliDeps = {}): Promise<n
       }
       let devMd = ''
       try { devMd = readFileSync(join(root, '.vegastack', 'dev.md'), 'utf8') } catch { /* no profile, so the tools' own defaults */ }
-      const runner = deps.runner ?? await appRunner(repo, keyPath, env, deps.fetch)
+      const identity = deps.runner ? null : appIdentity({ repo, keyPath, appId: appIdOf(env), fetch: deps.fetch })
+      const runner = deps.runner ?? identity!.runner
       const pollDeps: PollDeps = {
         root, repo, runner, machine, out: args.json ? () => {} : out, now: Date.now,
         runStep: deps.runStep ?? defaultRunStep(devMd, env),
@@ -919,6 +1004,15 @@ export async function runDispatch(argv: string[], deps: CliDeps = {}): Promise<n
       const inflight = new Map<number, Inflight>()
       for (;;) {
         try {
+          // The roster is the enrolment, so it is re-read every pass: a row removed in a
+          // control-room PR stands this machine down at the next poll, with nothing to log into.
+          const still = listedHere(root, { repo, host, home })
+          if (!still.ok) {
+            out(`stopping: ${still.reason}`)
+            await drain(inflight)
+            return 2
+          }
+          await identity?.freshen()
           for (const candidate of await poll(pollDeps, inflight)) out(`#${candidate.number} ${candidate.action} started`)
         } catch (error) {
           out(`poll failed: ${(error as Error).message}`)
