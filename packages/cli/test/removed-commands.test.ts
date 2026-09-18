@@ -11,7 +11,8 @@ const REMOVED = ['children', 'dispatch', 'service', 'runs', 'run-wrapper', 'stat
 const BARE = ['learning (checkpoint|inspect|revert|record)', 'stats (record|rollup|activity|privacy|export|cleanup)', 'children (run|join|plan|launch)', 'service (install|uninstall)']
 // Scripts, assets and hook files that no longer exist; `vegafactory hook`, `ship check` and `issue claim` replace the hook-era ones.
 const DELETED = ['children.mjs', 'implement-children.js', 'release-artifacts.mjs', 'release-publish.mjs', 'readme-sync', 'refresh/sources.json', 'parallel-children.md',
-  'ship-gate.mjs', 'ship-policy.mjs', 'ship-guard.mjs', 'reclaim.mjs', 'approval.mjs', 'session-start.mjs', 'stop-heartbeat.mjs', 'session-end.mjs', 'decision-nudge.mjs', 'guard sync']
+  'ship-gate.mjs', 'ship-policy.mjs', 'ship-guard.mjs', 'reclaim.mjs', 'approval.mjs', 'session-start.mjs', 'stop-heartbeat.mjs', 'session-end.mjs', 'decision-nudge.mjs', 'guard sync',
+  'cross-agent.md', 'dispatch-prompts.md', 'REVIEW REQUEST', 'reviewBinding']
 // Vocabulary the lean rebuild retired: the pre-lean workflow labels, knobs and mechanisms.
 // Matched as the thing itself — a label name in backticks, a knob line, a named mechanism —
 // never as an English word, so `ready to ship` and "the work in progress" stay writable.
@@ -30,11 +31,14 @@ const STALE: Array<[string, RegExp]> = [
 const root = join(import.meta.dir, '../../..')
 
 // One list, used by both sweeps. History files and changesets keep old names, and a test that
-// asserts a name is gone must be allowed to spell it.
+// asserts a name is gone must be allowed to spell it. `retired.json` is the tombstone file: it
+// exists precisely to name skills that left the bundle, and JSON has no room for a marker
+// comment, so it is exempt as a whole — its own shape is checked in label-templates.test.ts.
+const TOMBSTONE = 'packages/cli/retired.json'
 function sweptFiles(includeTests = false): string[] {
   return execFileSync('git', ['ls-files', '-z', '--', 'skills', '*.md', '.codex', '.github', 'packages/cli', 'tooling', 'scripts'], { cwd: root, encoding: 'utf8' })
     .split('\0')
-    .filter((file) => file && !/(^|\/)(CHANGELOG|chronicle|decisions)\.md$/.test(file) && !file.startsWith('.changeset/')
+    .filter((file) => file && file !== TOMBSTONE && !/(^|\/)(CHANGELOG|chronicle|decisions)\.md$/.test(file) && !file.startsWith('.changeset/')
       && (includeTests || !file.includes('/test/') && !file.includes('/tests/')))
 }
 
@@ -90,6 +94,13 @@ test('the sweep exemption covers a named declaration and not the code around it'
     "const stillWrong = 'workflow-labels'",
   ]
   expect(exempt(lines)).toEqual([true, true, true, false, true, false])
+})
+
+// The one file-level exemption has to stay one file.
+test('the tombstone is the only file the sweep skips wholesale', () => {
+  expect(TOMBSTONE).toBe('packages/cli/retired.json')
+  expect(sweptFiles(true)).not.toContain(TOMBSTONE)
+  expect(sweptFiles(true)).toContain('packages/cli/packaging.json')
 })
 
 test('the control-room templates README names no hooks/ snippet folder', () => {

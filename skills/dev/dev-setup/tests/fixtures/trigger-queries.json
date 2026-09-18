@@ -4,7 +4,7 @@
   { "query": "this is a brand new empty folder - set it up for the agent workflow", "should_trigger": true },
   { "query": "install your issue workflow here like we have in the other repos", "should_trigger": true },
   { "query": "we need the .vegastack/dev.md thing in this project", "should_trigger": true },
-  { "query": "re-run dev setup, I want to switch review to cross-agent", "should_trigger": true },
+  { "query": "re-run dev setup, I want to switch the tests knob", "should_trigger": true },
   { "query": "add the workflow labels to this repo", "should_trigger": true },
   { "query": "what changelog convention should this project use - detect it and set it up", "should_trigger": true },
   { "query": "add the changelog and tag guards to our release workflow", "should_trigger": true },

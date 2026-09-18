@@ -51,6 +51,17 @@ Verified mechanics of the two harnesses this workflow targets — Claude Code an
 - **Subagent nesting depth is capped by `CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH`** · it counts levels below the main conversation, defaults to 3, and `1` turns nesting off; set it under settings.json's `env` · since — · checked 03-09-2026 · https://code.claude.com/docs/en/settings
 - **Simultaneous subagents are capped by `CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS`** · it defaults to 20 and is set the same way, under settings.json's `env` · since — · checked 03-09-2026 · https://code.claude.com/docs/en/settings
 
+### Review invocation flags
+
+The flags `vegafactory review` passes, read off the shipped binary rather than the published docs.
+
+- **`--json-schema` takes the schema inline as a string, not a path** · hand it the JSON text; with `--output-format json` the result carries `session_id` and `structured_output` · since 2.1.263 · checked 17-09-2026 · https://code.claude.com/docs/en/cli-reference
+- **`--tools` is variadic, so another flag must follow it** · a review run allows only the read-only tools Read, Grep and Glob, and the prompt goes in on stdin · since 2.1.263 · checked 17-09-2026 · https://code.claude.com/docs/en/cli-reference
+- **`--resume` continues a session by its id** · the second pass of a review keeps the first pass's memory instead of re-reading the diff · since 2.1.263 · checked 17-09-2026 · https://code.claude.com/docs/en/cli-reference
+- **`--restricted` keeps a headless reviewer out of the repository's hooks** · it ignores user, project and local settings files and removes the code-running tools; verified 18-09-2026 in a throwaway repo whose hooks write a sentinel — a plain headless run wrote it, a restricted one with an empty hooks setting and strict MCP config did not, and the structured output still came back · since 2.1.263 · checked 18-09-2026 · https://code.claude.com/docs/en/cli-reference
+- **`claude auth status` does not prove a run will work** · it prints a logged-in result from cached state, so availability is judged from `--version` plus a run that actually failed on credentials · since — · checked 18-09-2026 · https://code.claude.com/docs/en/cli-reference
+- **Claude Code sets `CLAUDECODE` and `CLAUDE_CODE_ENTRYPOINT` for the commands it runs** · `vegafactory review` reads them to tell which tool it is inside, and a run that cannot tell is given the reviewer by hand · since 2.1.263 · checked 17-09-2026 · https://code.claude.com/docs/en/cli-reference
+
 ### Headless runs
 
 - **Hooks fire under `claude -p`** · a headless Claude Code run gets the same hook events as an interactive one, which is what lets the ship guard bound a dark build · since — · checked 03-09-2026 · https://code.claude.com/docs/en/hooks
@@ -101,8 +112,10 @@ Verified mechanics of the two harnesses this workflow targets — Claude Code an
 
 ### Model and effort flags
 
-- **`codex exec` takes the model as a flag or a config override** · `-m` with the model name, or `-c` with a `model=` override · since — · checked 03-09-2026 · https://learn.chatgpt.com/docs/config-file/config-reference
-- **Codex reasoning effort is a config override, not a flag** · `-c` with a `model_reasoning_effort=` value; the docs demonstrate `"high"` and do not enumerate the levels, so read them off the model's own documentation before promising one · since — · checked 03-09-2026 · https://learn.chatgpt.com/docs/config-file/config-reference
+- **`codex exec` takes the model as a flag or a config override** · `-m` with the model name, or `-c` with a `model=` override; the literal `default` in a `harness-policy:` model position means no model flag at all · since — · checked 18-09-2026 · https://learn.chatgpt.com/docs/config-file/config-reference
+- **A pinned model id the account cannot serve fails the whole run** · on 18-09-2026 a ChatGPT account answered "The 'gpt-5.6' model is not supported when using Codex with a ChatGPT account", so a subscription account writes `default` in the model position and lets the tool choose · since — · checked 18-09-2026 · https://learn.chatgpt.com/docs/config-file/config-reference
+- **Codex reasoning effort is a config override, not a flag** · `-c` with a `model_reasoning_effort=` value, and the effort flag is always passed even when the model is left to the tool · since — · checked 18-09-2026 · https://learn.chatgpt.com/docs/config-file/config-reference
+- **The shipped 0.153.4 binary's own effort enum is minimal, low, medium, high, xhigh, max and ultra** · read off the binary on 18-09-2026; the docs demonstrate only `"high"` and enumerate nothing, so read the levels off the installed build rather than a remembered list · since 0.153.4 · checked 18-09-2026 · https://learn.chatgpt.com/docs/config-file/config-reference
 - **`agents.max_concurrent_threads_per_session` caps concurrently open spawned-agent threads** · set it in config.toml; it excludes the primary thread, and unset means Codex picks the default · since — · checked 03-09-2026 · https://learn.chatgpt.com/docs/config-file/config-reference
 
 ### The `codex exec` skill-loading drill
@@ -122,6 +135,17 @@ The token `VSK-PROBE-OK-7413` in the reply means project skills load under `code
 
 - **The skill-loading drill is still unanswered** · a 03-09-2026 attempt on codex-cli 0.149.1 failed with `refresh_token_invalidated` and `token_revoked` (401) before reaching the model although `codex login status` printed "Logged in using ChatGPT", the expired-session case dev.md's Environments section anticipates, so the verdict line stays unwritten rather than guessed and the drill is re-run after a fresh login · since 0.149.1 · checked 03-09-2026 · https://learn.chatgpt.com/docs
 
+### Review invocation flags
+
+The flags `vegafactory review` passes, read off the shipped binary rather than the published docs.
+
+- **`--output-schema` takes a file path holding the JSON Schema** · write the schema to a file first; `-o` writes the final message to a file of its own, and a trailing dash reads the prompt from stdin · since 0.153.4 · checked 17-09-2026 · https://learn.chatgpt.com/docs
+- **The resume subcommand has no sandbox flag** · resuming by session id keeps that session's memory, and read-only comes from a `sandbox_mode=read-only` config override instead; it takes the schema and output flags like a fresh run · since 0.153.4 · checked 17-09-2026 · https://learn.chatgpt.com/docs
+- **Codex ships its own review mode** · it takes a base branch, a commit or the uncommitted diff, and VegaFactory does not use it, because the packet and the finding schema are ours and a plain exec run takes both directly · since 0.153.4 · checked 17-09-2026 · https://learn.chatgpt.com/docs
+- **A headless Codex run does not execute the project's hooks even when the path is trusted** · verified 18-09-2026 against a repo whose hooks write a sentinel; an empty `hooks` override and an untrusted `trust_level` for the path both parse and keep the run working, and the hook-trust bypass flag must never be passed to a reviewer · since 0.153.4 · checked 18-09-2026 · https://learn.chatgpt.com/docs/config-file/config-reference
+- **`codex login status` does not prove a run will work** · it printed a logged-in result while the refresh token was revoked and real runs failed on it, recorded 03-09-2026 and unchanged 18-09-2026, so availability is judged from `--version` plus a run that actually failed on credentials · since — · checked 18-09-2026 · https://learn.chatgpt.com/docs
+- **Codex sets `CODEX_THREAD_ID`, and `CODEX_SANDBOX` inside its sandbox** · `vegafactory review` reads them to tell which tool it is inside, and a run that cannot tell is given the reviewer by hand · since 0.153.4 · checked 17-09-2026 · https://learn.chatgpt.com/docs/config-file/config-reference
+
 ### Headless runs
 
 - **Codex refuses non-managed hooks in an unattended run unless the caller vets them** · the bypass flag on `codex exec` runs the enabled hooks headless, and it is the only way a dispatched Codex run reaches the ship guard at all · since — · checked 03-09-2026 · https://learn.chatgpt.com/docs
@@ -135,7 +159,9 @@ The token `VSK-PROBE-OK-7413` in the reply means project skills load under `code
 
 ## Model, effort and concurrency flags
 
-Which model and which reasoning effort a stage runs at is dev.md's `harness-policy:` knob. The flags each value turns into are facts about one vendor's CLI, so each lives under that vendor above rather than in a table nothing dates. Model ids move, which is why the knob holds them and this file only dates them.
+Which model and which reasoning effort a stage runs at is dev.md's `harness-policy:` knob, one entry per stage as the agent, then the model, then the effort. The literal `default` in the model position means no model flag at all — the tool's own choice — and that is what a subscription account should write, because a pinned id the account cannot serve fails the whole run. The effort is always passed.
+
+The flags each value turns into are facts about one vendor's CLI, so each lives under that vendor above rather than in a table nothing dates. Model ids move, which is why the knob holds them and this file only dates them.
 
 ## GitHub CLI
 
@@ -192,4 +218,4 @@ The prose instruction in the AGENTS.md dev section is the portable base on both 
 - Observed 02-09-2026: the `claude_code` preset already carries the current model guidance on autonomy, delivering work, readability and parallel tool calls; Codex gets none of it. That is why the AGENTS.md conduct paragraph exists and why skill bodies never restate harness behaviour — a restated instruction competes with the harness's own wording.
 - Tasks inside one issue run in order, and sibling sub-issues of an epic run one at a time for now; the plan's independent groups record which could run in parallel once the dispatcher (#218) does so.
 - The OpenTelemetry stream is **optional and never required**: capture is deterministic without a collector — the dispatcher parses each harness's own run output, SessionEnd hooks cover interactive sessions, and skill invocations come from hook payloads. `OTEL_LOG_TOOL_DETAILS` stays off; it exports exactly the tool arguments a record must never hold.
-- Every target harness spawns subagents (Claude Code's Task tool, Codex agents), so dev.md's `review:` knob means the same thing on each; only a headless run that cannot spawn falls back to a labeled self-review.
+- Review is cross-tool and has no knob: whichever tool the session is in, the other one reads the diff read-only. Only a machine with one tool installed falls back, to a labelled same-tool self-review.

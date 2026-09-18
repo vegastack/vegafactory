@@ -13,13 +13,13 @@ const forbidden = new Set(['__proto__', 'prototype', 'constructor'])
 const stages = ['intake', 'plan', 'implement', 'review', 'status', 'chronicle']
 const enums = {
   stats: ['on', 'off', 'inherit'], 'stats-people': ['on', 'off'], 'stats-override': ['allowed', 'locked'],
-  review: ['subagent', 'cross-agent-risky', 'cross-agent'], tests: ['required', 'logic-only', 'best-effort', 'none'],
+  tests: ['required', 'logic-only', 'best-effort', 'none'],
   changelog: ['changesets', 'keep-a-changelog', 'pubspec+changelog', 'none'], chronicle: ['on', 'off'],
   merge: ['rebase', 'squash', 'merge'], dispatch: ['off', 'local'], 'provider-mode': ['subscription-only'],
   learning: ['normal-work', 'off'], 'learning-adoption': ['scoped-reversible', 'propose-only'],
   'stats-export': ['off', 'non-attributed', 'attributed'],
 }
-const lockable = new Set(['stats', 'stats-export', 'tests', 'review', 'provider-mode', 'learning', 'learning-adoption'])
+const lockable = new Set(['stats', 'stats-export', 'tests', 'provider-mode', 'learning', 'learning-adoption'])
 const ordinary = new Set([...Object.keys(enums), 'operators', 'harness-policy', 'branch', 'labels', 'control-room', 'sync-max-age', 'stats-local-retention-days', 'stats-shared-retention-months', 'stats-spool-warning-mib'])
 const loginPattern = /^[a-z\d](?:[a-z\d-]{0,37}[a-z\d])?$/i
 const groupPattern = /^[a-z0-9][a-z0-9-]{0,63}$/
@@ -223,10 +223,17 @@ export function planLabelMigration(repo = {}) {
   }
 }
 
-function parseStage(value) {
-  const parts = value.trim().split(/\s+/)
-  return parts.length === 3 && ['claude', 'codex'].includes(parts[0]) && parts.every(Boolean)
-    ? { harness: parts[0], model: parts[1], effort: parts[2] } : null
+// Reasoning-effort levels each harness takes, read off `claude --help` and the Codex binary's own
+// enum on 18-09-2026. A level neither accepts is a typo that would fail at run time instead.
+const efforts = { claude: ['low', 'medium', 'high', 'xhigh', 'max'], codex: ['minimal', 'low', 'medium', 'high', 'xhigh', 'max', 'ultra'] }
+
+// `<harness> <model> <effort>`, where the model `default` means the tool's own default — nothing
+// pinned, because a pinned id the account cannot use fails the whole run. A pinned id stays legal.
+export function parseStage(value) {
+  const [harness, model, effort, ...rest] = value.trim().split(/\s+/)
+  if (rest.length || !harness || !model || !effort) return null
+  if (!efforts[harness]?.includes(effort)) return null
+  return { harness, model: model === 'default' ? null : model, effort }
 }
 function knobValue(key, text) {
   if (enums[key]) return enums[key].includes(text) ? text : undefined
@@ -274,8 +281,11 @@ export function parsePolicy(text = '', scope = 'repo') {
     if (!match) continue
     const key = match[1], value = match[2].replace(/\s+#.*$/, '').trim()
     if (forbidden.has(key)) { layer.blocks.push('prototype key in policy'); continue }
-    // A retired key blocks rather than falling through to extensions: an unknown key is inert,
-    // and inert is exactly how a profile keeps a removed mechanism without anyone noticing.
+    // The `review:` knob is retired — reviews always run cross-tool — so an old profile's line is
+    // ignored. `review <harness> <model> <effort>` is still that stage's harness-policy line.
+    if (key === 'review' && !parseStage(value)) continue
+    // Every other retired key blocks rather than falling through to extensions: an unknown key
+    // is inert, and inert is how a profile keeps a removed mechanism without anyone noticing.
     if (own(RETIRED_KEYS, key)) { layer.blocks.push(RETIRED_KEYS[key]); continue }
     const stageLine = stages.includes(key) && !enums[key]?.includes(value)
     if (key === 'policy-schema' || ordinary.has(key) || stageLine) {

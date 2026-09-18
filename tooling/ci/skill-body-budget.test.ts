@@ -14,7 +14,6 @@ const NAMED_EXCEPTIONS: Record<string, number> = {
   'dev-implement': 1900,
   'dev-intake': 1650,
   'vegafactory-setup': 1400,
-  'dev-review': 1250,
 }
 
 const repoRoot = resolve(import.meta.dir, '../..')

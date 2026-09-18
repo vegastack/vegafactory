@@ -9,7 +9,7 @@ Write the status comment as the session's **first write after claiming** — bef
 - **After each plan task completes** — and tick the matching `[x]` in the plan comment in the same pass. That box is a second write, to a different comment, that your own resume path never reads — so it is the one that silently lags reality, while the operator's progress view depends on it. The hand-back guard (`evidence-check --issue`) compares immutable task IDs in both directions; equal counts do not prove agreement. Record the task's base sha *before* starting it, so the `complete` line's commit range is exact.
 - **After each review fix round**, with the addressed/open counts.
 - **At every dark-mode judgment call.** A ruling is any decision the brief/plan didn't make for you that a reviewer or the operator could reasonably question. Rulings are cheap; unrecorded decisions are debt.
-- **On findings deferred or parked at review**, per dev-review's adjudication lines.
+- **On findings deferred at review**, per dev-review's fix loop.
 
 Never batch checkpoints "for later" — the progress list's value is exactly that a crash between checkpoints loses one task, not the map. Code needs no checkpoint of its own: the Stop hook commits and pushes a `wip:` commit at the end of every turn.
 

@@ -56,9 +56,9 @@
     "SKILL.md",
     "agents/openai.yaml",
     "references/conventions.md@dev-setup",
-    "references/dispatch-prompts.md",
+    "references/flow.md",
     "references/security-axis.md",
-    "references/cross-agent.md",
+    "references/fallback.md",
     "assets/review-known-patterns.md.template"
   ],
   "dev-setup": [

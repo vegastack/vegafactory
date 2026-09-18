@@ -55,12 +55,12 @@
     {
       "id": 5,
       "prompt": "status — here is the output of `status.mjs --orphan-hours 6 --json` for vegastack/billing (attached); its controlRoom is synced and its knobs array has one entry.",
-      "expected_output": "The board plus one control-room line naming the knob (review), this repo's value (cross-agent-risky), the control room's value (cross-agent) and the two shas (a1b2c3d recorded, e4f5a6b in the clone) — labelled a proposal the operator decides, with no claim that .vegastack/dev.md was edited.",
+      "expected_output": "The board plus one control-room line naming the knob (tests), this repo's value (logic-only), the control room's value (required) and the two shas (a1b2c3d recorded, e4f5a6b in the clone) — labelled a proposal the operator decides, with no claim that .vegastack/dev.md was edited.",
       "files": [
         "evals/files/status.json"
       ],
       "assertions": [
-        "The control-room line names the knob review with both values, cross-agent-risky and cross-agent, and is labelled a proposal",
+        "The control-room line names the knob tests with both values, logic-only and required, and is labelled a proposal",
         "Both shas from the data, a1b2c3d and e4f5a6b, appear on that line",
         "The report does not claim to have changed .vegastack/dev.md"
       ]

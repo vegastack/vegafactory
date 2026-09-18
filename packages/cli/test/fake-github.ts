@@ -29,6 +29,8 @@ export class FakeGitHub {
   calls: string[] = []
   // Runs after each posted comment, to stage a concurrent writer.
   afterPost?: (body: string) => void
+  // Runs before each request, to stage a writer that lands between two of the caller's calls.
+  beforeCall?: (args: string[]) => void
   private nextId = 1000
   clock = Date.parse('2026-09-17T10:00:00Z')
 
@@ -113,6 +115,7 @@ export class FakeGitHub {
     const method = args[args.indexOf('-X') + 1]!
     const path = args[args.indexOf('-X') + 2]!
     const header = args.includes('-H') ? args[args.indexOf('-H') + 1]!.replace(/^If-None-Match: /, '') : undefined
+    this.beforeCall?.(args)
     this.calls.push(`${method} ${path}`)
     const payload = input ? JSON.parse(input) : undefined
     const [route, query = ''] = path.split('?')

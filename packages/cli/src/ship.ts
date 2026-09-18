@@ -5,11 +5,13 @@
 import { spawnSync } from 'node:child_process'
 import { existsSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
+import { trustedAuthors } from './claim.ts'
 import { defaultRunner, ghRequest, type GhRunner } from './gh.ts'
 import { defaultBranch } from './guard-rules.ts'
 import { issueFromBranch } from './hook.ts'
-import { checkIssue, detectRepo, latestOfType, markerKeys, permissionLookup, repoRoot, snapshot } from './issue.ts'
+import { checkIssue, currentHashes, detectRepo, latestOfType, markerKeys, permissionLookup, repoRoot, snapshot } from './issue.ts'
 import { syncIssue } from './issue-cache.ts'
+import { acceptedReview, MAX_ROUNDS, trustedReview } from './review.ts'
 
 export interface ShipCheck { ok: boolean; blocks: string[]; warns: string[]; branch: string | null; pr: number | null }
 
@@ -21,6 +23,11 @@ export function shipUsage(): string {
               branch, and every check passed or skipped.
               Exit 2 when blocked.
 `
+}
+
+// `merge-base --is-ancestor` answers with its exit code and no output.
+function isAncestor(cwd: string, commit: string, ref: string): boolean {
+  return spawnSync('git', ['merge-base', '--is-ancestor', commit, ref], { cwd, encoding: 'utf8', stdio: ['ignore', 'ignore', 'ignore'], timeout: 30_000 }).status === 0
 }
 
 function git(cwd: string, args: string[]): string | null {
@@ -74,9 +81,56 @@ export function shipCheck(input: { cwd: string; root: string; repo: string; numb
     if (resolved !== pushed) blocks.push(`the evidence is for ${sha}, but origin/${branch} is at ${pushed.slice(0, 12)} — post fresh evidence`)
   }
 
+  // GitHub's own answer, not the local origin/HEAD guess: the review's base is judged against the
+  // branch this PR would merge into, and a fact that cannot be read blocks rather than passes.
+  let defaultName: string | null = null
+  try { defaultName = ghRequest<{ default_branch?: string }>(`repos/${repo}`, { runner }).body.default_branch ?? null } catch { defaultName = null }
+  if (!defaultName) blocks.push(`cannot read the default branch of ${repo}`)
+  const defaultRef = defaultName ? git(cwd, ['rev-parse', '--verify', '--quiet', `refs/remotes/origin/${defaultName}`]) : null
+  if (defaultName && !defaultRef) blocks.push(`origin/${defaultName} is not in this checkout — fetch it, so the review's base can be checked against it`)
+
+  // Review is never skipped: the commit that would merge carries a clean review from a reviewer
+  // with write access, covering the whole candidate, or the operator's own written acceptance of
+  // what that review left open.
+  const trusted = trustedAuthors({ repo, runner, root })
+  let review: Awaited<ReturnType<typeof trustedReview>> = null
+  try {
+    review = trustedReview(snap, trusted, pushed ?? undefined)
+  } catch (error) {
+    blocks.push((error as Error).message)
+    review = null
+  }
+  if (!review) {
+    if (!blocks.some((block) => block.startsWith('two review comments disagree'))) blocks.push('no review comment from a reviewer with write access — run vegafactory review')
+  } else if (pushed && review.data.sha !== pushed) {
+    blocks.push(`the review is for ${review.data.sha.slice(0, 7)}, but origin/${branch} is at ${pushed.slice(0, 12)} — review the head that would merge`)
+  } else {
+    // A review of a narrow range judges only part of what merges. Its base must already be in the
+    // default branch, so <review base>...<head> is the whole candidate; an unreadable base or
+    // branch blocks, because an unproven claim is not a proven one.
+    if (defaultName && defaultRef) {
+      if (!git(cwd, ['cat-file', '-e', `${review.data.base}^{commit}`]) && git(cwd, ['cat-file', '-t', review.data.base]) === null) {
+        blocks.push(`the review's base ${review.data.base.slice(0, 7)} is not a commit in this checkout — fetch the branch it was reviewed from`)
+      } else if (!isAncestor(cwd, review.data.base, defaultRef)) {
+        blocks.push(`the review's base ${review.data.base.slice(0, 7)} is not in origin/${defaultName}, so it covered only part of what would merge — re-run the review against the default branch`)
+      }
+    }
+    // F25: the review is about the brief and plan it read.
+    const now = currentHashes(snap)
+    if (review.data.brief !== now.brief) blocks.push(`the brief changed after review round ${review.data.round} — re-run the review`)
+    else if (review.data.plan !== now.plan) blocks.push(`the plan changed after review round ${review.data.round} — re-run the review`)
+    if (review.data.verdict !== 'clean' && !acceptedReview(snap, trusted, review)) {
+      const open = review.data.findings.filter((finding) => finding.severity === 'must-fix').map((finding) => finding.id)
+      const accept = review.data.round >= MAX_ROUNDS
+        ? ` or, now the loop is spent, the operator accepts them in a line of their own: "accept review round ${review.data.round} @ ${review.data.sha.slice(0, 7)}"`
+        : ''
+      blocks.push(`review round ${review.data.round} is needs-fixes (${open.join(', ') || 'see the comment'}) — fix and re-review${accept}`)
+    }
+  }
+
   // dev-debug's tagged debug logs must not ship.
-  const base = defaultBranch(cwd)
-  const diff = base && pushed ? git(cwd, ['diff', '--no-color', '--no-ext-diff', `origin/${base}...${pushed}`]) ?? '' : ''
+  const base = defaultRef ?? (defaultBranch(cwd) ? `origin/${defaultBranch(cwd)}` : null)
+  const diff = base && pushed ? git(cwd, ['diff', '--no-color', '--no-ext-diff', `${base}...${pushed}`]) ?? '' : ''
   const tagged = diff.split('\n').filter((line) => line.startsWith('+') && !line.startsWith('+++') && line.includes('[DEBUG-'))
   if (tagged.length) blocks.push(`${tagged.length} added line(s) still carry a [DEBUG-…] tag`)
 
@@ -89,10 +143,7 @@ export function shipCheck(input: { cwd: string; root: string; repo: string; numb
   }
   if (pr.state !== 'OPEN') blocks.push(`PR #${pr.number} is ${String(pr.state).toLowerCase()}`)
   if (pushed && pr.headRefOid !== pushed) blocks.push(`PR #${pr.number} is not on origin/${branch} yet`)
-  let defaultName: string | null = null
-  try { defaultName = ghRequest<{ default_branch?: string }>(`repos/${repo}`, { runner }).body.default_branch ?? null } catch { defaultName = null }
-  if (!defaultName) blocks.push(`cannot read the default branch of ${repo}`)
-  else if (pr.baseRefName !== defaultName) blocks.push(`PR #${pr.number} targets ${pr.baseRefName || 'an unknown branch'}, not the default branch ${defaultName}`)
+  if (defaultName && pr.baseRefName !== defaultName) blocks.push(`PR #${pr.number} targets ${pr.baseRefName || 'an unknown branch'}, not the default branch ${defaultName}`)
 
   // gh exits non-zero while checks fail or wait, so read the JSON whatever the exit code.
   // Only an explicit pass or skip counts; anything else, or no readable answer, blocks.

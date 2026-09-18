@@ -17,7 +17,7 @@ The main checkout never leaves the default branch and never carries uncommitted 
 | Direct chat trivial fix | `<type>/<slug>` in its own worktree too — the main checkout stays clean even for a one-liner. |
 | Research | `research/<n>-<slug>` worktree only when code is actually written; removed at hand-back, never merged. |
 | Release | `chore/release-<version>` in its own worktree. |
-| Cross-agent review | Read-only, in the same worktree; a reviewer never switches the branch under it. |
+| Cross-tool review | Read-only, in the same worktree; a reviewer never switches the branch under it. |
 | Abandoned issue | Branch and worktree are removed only on the operator's word. |
 
 ## Lifecycle states

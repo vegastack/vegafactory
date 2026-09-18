@@ -26,11 +26,11 @@
     },
     {
       "id": 3,
-      "prompt": "Re-run dev-setup here. `.vegastack/dev.md` already exists from March with `review: subagent` and `tests: logic-only`; since then we added Playwright tests under `e2e/` and a release workflow. Update what changed.",
+      "prompt": "Re-run dev-setup here. `.vegastack/dev.md` already exists from March with `tests: logic-only` and `merge: squash`; since then we added Playwright tests under `e2e/` and a release workflow. Update what changed.",
       "expected_output": "A re-run that detects the new machinery, proposes the affected lines (ui-evidence, the Ship runbook) and leaves the operator's existing knob values in place unless they say otherwise; the report lists exactly what changed.",
       "files": [],
       "assertions": [
-        "No existing knob value (`review: subagent`, `tests: logic-only`) is overwritten without the operator's yes",
+        "No existing knob value (`tests: logic-only`, `merge: squash`) is overwritten without the operator's yes",
         "The newly detected machinery (Playwright, the release workflow) is named with the dev.md lines it affects",
         "The final report lists what changed and what was left alone"
       ]
@@ -49,11 +49,11 @@
     },
     {
       "id": 5,
-      "prompt": "Set up the dev workflow here. This machine has Claude Code installed and nothing else — no Codex.",
-      "expected_output": "Detection records the single harness, the drafted `review:` knob is `subagent` with cross-agent off, `harnesses:` records the two absent harnesses, and `## Environments` names what the absence costs.",
+      "prompt": "Set up the dev workflow here. This machine has Claude Code installed and nothing else \u2014 no Codex.",
+      "expected_output": "Detection records the single harness, says plainly that cross-tool review is off until Codex is installed (reviews fall back to a labelled same-tool self-review), `harnesses:` records the absent harness, and `## Environments` names what the absence costs.",
       "files": [],
       "assertions": [
-        "The recommended `review:` knob value is `review: subagent`, not cross-agent-risky, and cross-agent is said to be off until a second harness exists",
+        "No review knob is drafted; the answer says cross-tool review is off until the other tool is installed and that reviews fall back to a labelled same-tool self-review",
         "The `harnesses:` knob line lists the detected Claude Code version and records `codex absent`",
         "The `harness-policy:` line is still drafted with all six stages (intake, plan, implement, review, status, chronicle)",
         "`## Environments` carries a bullet naming the absent harness and the capability its absence gates"

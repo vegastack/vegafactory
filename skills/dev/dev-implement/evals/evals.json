@@ -3,7 +3,7 @@
   "evals": [
     {
       "id": 1,
-      "prompt": "Issue 27 in vegastack/docs-tools (labeled queued, small, assigned to you). Brief: `scripts/check-links.mjs` prints broken links one per line; add a `--json` flag that prints `{ broken: [{ file, broken: [...] }] }` instead, keep the exit codes, document the flag in the script header. Out of scope: renaming or restructuring existing functions. Plan comment (approved): Task 1 \u2014 failing test in `tests/check-links.test.ts` for `--json`, then the flag; Task 2 \u2014 header comment and changeset. dev.md: `tests: required`, `changelog: changesets`, `review: subagent`, `branch: <type>/<slug>`. Implement it end to end and draft the evidence comment you would post.",
+      "prompt": "Issue 27 in vegastack/docs-tools (labeled queued, small, assigned to you). Brief: `scripts/check-links.mjs` prints broken links one per line; add a `--json` flag that prints `{ broken: [{ file, broken: [...] }] }` instead, keep the exit codes, document the flag in the script header. Out of scope: renaming or restructuring existing functions. Plan comment (approved): Task 1 \u2014 failing test in `tests/check-links.test.ts` for `--json`, then the flag; Task 2 \u2014 header comment and changeset. dev.md: `tests: required`, `changelog: changesets`, `merge: squash`, `branch: <type>/<slug>`. Implement it end to end and draft the evidence comment you would post.",
       "expected_output": "The run claims the issue, writes a ledger comment first, works the two tasks test-first with one commit each, and ends with an evidence comment in the workflow shape whose Review line lists every ruling made; the operator is never asked a question. (prose half only \u2014 the live label, branch and PR flow is the sandbox drill's proof)",
       "files": [],
       "assertions": [
@@ -16,7 +16,7 @@
     },
     {
       "id": 2,
-      "prompt": "the last session on issue 27 died mid-way, pick it up. Issue 27 in vegastack/docs-tools (labeled queued, small, assigned to you). Brief: `scripts/check-links.mjs` prints broken links one per line; add a `--json` flag that prints `{ broken: [{ file, broken: [...] }] }` instead, keep the exit codes, document the flag in the script header. Out of scope: renaming or restructuring existing functions. Plan comment (approved): Task 1 \u2014 failing test in `tests/check-links.test.ts` for `--json`, then the flag; Task 2 \u2014 header comment and changeset. dev.md: `tests: required`, `changelog: changesets`, `review: subagent`, `branch: <type>/<slug>`. The ledger comment on the issue reads: `- Task 1: complete (commits a1b2c3d..e4f5a6b)` and nothing else; `git log` on feat/27-json-flag shows those two commits. Tell me what you do first and what you skip.",
+      "prompt": "the last session on issue 27 died mid-way, pick it up. Issue 27 in vegastack/docs-tools (labeled queued, small, assigned to you). Brief: `scripts/check-links.mjs` prints broken links one per line; add a `--json` flag that prints `{ broken: [{ file, broken: [...] }] }` instead, keep the exit codes, document the flag in the script header. Out of scope: renaming or restructuring existing functions. Plan comment (approved): Task 1 \u2014 failing test in `tests/check-links.test.ts` for `--json`, then the flag; Task 2 \u2014 header comment and changeset. dev.md: `tests: required`, `changelog: changesets`, `merge: squash`, `branch: <type>/<slug>`. The ledger comment on the issue reads: `- Task 1: complete (commits a1b2c3d..e4f5a6b)` and nothing else; `git log` on feat/27-json-flag shows those two commits. Tell me what you do first and what you skip.",
       "expected_output": "The resume protocol is followed and named \u2014 brief, plan, every current issue comment (any age, since old ones can be edited), ledger, then git log \u2014 Task 1 is treated as done because the ledger says so and the commits exist, no operator correction overrides it, and work resumes at Task 2. (prose half only \u2014 the live label, branch and PR flow is the sandbox drill's proof)",
       "files": [],
       "assertions": [
@@ -39,7 +39,7 @@
     },
     {
       "id": 4,
-      "prompt": "You are working epic 88 in vegastack/shop. Its approved plan declares two independent groups: `api` \u2014 #89 \u00b7 Files: `packages/api/src/report.ts`, `packages/api/test/report.test.ts`; `docs` \u2014 #90 \u00b7 Files: `docs/pricing.md`. Both sub-issues are labeled queued and unassigned. dev.md: `tests: required`, `changelog: changesets`, `review: subagent`. Build them and report what you did.",
+      "prompt": "You are working epic 88 in vegastack/shop. Its approved plan declares two independent groups: `api` \u2014 #89 \u00b7 Files: `packages/api/src/report.ts`, `packages/api/test/report.test.ts`; `docs` \u2014 #90 \u00b7 Files: `docs/pricing.md`. Both sub-issues are labeled queued and unassigned. dev.md: `tests: required`, `changelog: changesets`, `merge: squash`. Build them and report what you did.",
       "expected_output": "The epic itself is not built. Each sub-issue is worked as its own issue with its own claim, verification and hand-back, one at a time, on its own branch inside the epic's worktree; the two sub-issues are never built at the same time by this session.",
       "files": [],
       "assertions": [

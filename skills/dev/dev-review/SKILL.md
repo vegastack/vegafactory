@@ -1,76 +1,60 @@
 ---
 name: dev-review
-description: Independent review of finished implementation work — a diff against its brief and plan. Use when dev-implement's review step runs, when asked to "review this branch/diff/issue", "give this a second pair of eyes", "check the finished work on issue N", when a cross-agent session (Claude or Codex) is handed a REVIEW REQUEST, or when review findings need a fix loop, re-review, or adjudication. Not for reviewing an unbuilt plan (dev-plan's approval gate), architecture review (dev-architect), shipping gates (dev-ship), scanning skills for vulnerabilities or vetting a skill you did not write (skill-scan), or generic PR review in repos outside this workflow.
+description: Independent cross-tool review of finished implementation work — a diff against its brief and plan, reviewed by the other tool. Use when dev-implement's review step runs, when asked to "review this branch/diff/issue", "give this a second pair of eyes", "check the finished work on issue N", or when review findings need a fix loop, re-review, or a hand-back. Not for reviewing an unbuilt plan (dev-plan's approval gate), architecture review (dev-architect), shipping gates (dev-ship), scanning skills for vulnerabilities (skill-scan), or generic PR review in repos outside this workflow.
 ---
 
 # dev-review
 
-Advise: report every finding with its confidence and severity, or the verified absence of findings — the loop downstream is the filter.
+Advise: report every verified finding with its severity, or the verified absence of findings — the fix loop downstream is the filter.
 
-Fresh reviewers report findings or their verified absence, with bounded fix loops and recorded dismissals. Briefs: [dispatch-prompts](references/dispatch-prompts.md).
+Review runs on the **other tool**: Codex reviews what Claude Code built, Claude Code reviews what Codex built. One command does it:
 
-Nearest neighbors: `dev-implement` invokes this per dev.md's `review:` knob and applies the findings; `dev-ship` consumes the verdict marker; `dev-plan`'s approval gate reviews plans, this skill reviews built work.
-
-## Inputs — files, not pasted context
-
-Build the review package first — `git log --oneline <base>..<head>` + `git diff --stat` + `git diff -U10` — at `.vegastack/.tmp/<issue>-<slug>/review-<base7>..<head7>.diff`. Reviewers get paths — the brief (issue body), the plan comment, the package file, the project's `.vegastack/review-known-patterns.md` — plus the binding constraints copied verbatim, ordered data first and ask last, as the dispatch prompts show. **Read the file before judging it** — the full files where the diff needs context, because a diff-only read misses invariants. Reviewers write full reports to `.tmp` files and return short status, so a dead reviewer's findings survive on disk.
-
-When dev.md names a `skill-scan:` root, the security dispatch also gets the scan report, at `.vegastack/.tmp/<issue>-<slug>/skill-scan.json`, produced by `node <path-to-skill-scan>/scripts/skill-scan.mjs --json` — the `skill-scan` skill owns running it, its knobs, and its baseline. The same guard already ran at `dev-implement`'s Verify gate; this axis triages what sits below the blocking bar and judges whether anything above it was suppressed rather than fixed.
-
-## The axes — parallel, fresh, reported separately
-
-| Axis | Runs | Judges |
-|---|---|---|
-| **Spec** | always | the diff vs the current brief + plan: missing, scope creep, implemented-but-wrong — quoting the brief line per finding; includes the tests-are-real rubric |
-| **Standards** | always | project rules (known-patterns file + repo docs, which override) + the fixed smell baseline pasted in full into its prompt |
-| **Security** | on `risky`, when touch points hit auth, money, user data, or external input, or when the diff touches a skill under dev.md's `skill-scan:` root | data-flow traces, exploitability before severity, and triage of the skill scan's findings — method in [security-axis](references/security-axis.md) |
-
-Each axis uses a fresh subagent without implementation memory and reports separately. Report every finding with confidence/severity; the loop filters findings.
-
-**Dispatch without pre-judgement** — a brief saying what not to flag ("do not flag…", "don't treat X as a defect", "at most minor") hides a false positive that belongs in the open adjudication below.
-
-## The review comment — one per cycle, rounds appended, marker always current
-
-Use one cycle comment. Update its top marker each round; the issue cache types the comment by it. Keep prior rounds as plain text without markers/bindings. Publish one fenced `reviewBinding` JSON per `references/conventions.md`: full commit/base IDs, plan digest, verdict, stable finding IDs/statuses. Marker/binding stay identical; renew legacy reviews. Consumers accept one SHA/base/scope match from a publisher in the accepted base commit's `operators:` roster; candidate edits cannot appoint a reviewer. A roster change becomes eligible when its commit later serves as the accepted base. Zero or multiple matches refuse. `agent=` records the harness, not cryptographic model/publisher identity.
-
-```markdown
-<!-- vsk:v1 type=review round=<n> sha=<full-head-sha> agent=<claude|codex> verdict=<clean|needs-fixes> -->
-## Review — round <n> @ <sha7>
-
-**Verdict: <clean|needs-fixes>** — spec: <counts> · standards: <counts> · security: <counts | n/a (no surface)>
-
-### <Axis> axis
-**Finding [N]: <title>** — **[SEVERITY]** (confidence: high|medium|low) `path/file.ts:42`
-<issue> / <why it matters> / <fix, fenced snippet> / <quoted brief line, spec axis>
-
-<details><summary>Nitpicks and low-confidence (N) — non-blocking</summary>…</details>
-
-Reviewed: <sha7> · axes: <list> · reviewer: <mode>
+```sh
+vegafactory review <issue-number>
 ```
 
-Severities: `[CRITICAL]` (security axis: exploitable now — blocks) > `[MUST-FIX]` (wrong, broken, or contradicts the brief — blocks) > `[SHOULD-FIX]` (convention or quality, does not block) > `[NIT]`. Finding IDs are `Finding [N]`, because `#N` auto-links to an issue. Low-confidence findings and nitpicks go in the collapsed block, because low-confidence items in the main list dilute it. Group one recurring defect across files into one finding with a location list. Each finding appears once with issue, impact and fix; collapse nitpicks.
+Nearest neighbors: `dev-implement` runs this after its Verify gate and applies the findings; `dev-ship` cannot pass without it — `vegafactory ship check` requires a clean review on the exact commit that would merge; `dev-plan`'s approval gate reviews plans, this skill reviews built work.
 
-## The loop — 3 rounds max, then open adjudication
+## What the command does
 
-`[CRITICAL]` and `[MUST-FIX]` findings enter the loop; `[SHOULD-FIX]`/`[NIT]` are fixed opportunistically or recorded as deferred minors, keeping the loop bounded.
+Run it from the issue's worktree with nothing uncommitted — the packet describes a commit, and a file the reviewer can read but the diff does not carry is not reviewed at all.
 
-- **Rounds 1–2:** resume (or redispatch) the implementer with the open findings verbatim and the report-file path. It fixes, re-runs the covering tests, appends its fix report to the same file.
-- **Round 3:** a fresh implementer — "a prior implementer attempted this; read the report file for what was tried" — because a loop surviving two resumes means the implementer can't see its own problem.
-- **Every round:** the re-review is scoped to the fix diff (`FIX_BASE..HEAD`, a new package file); the re-reviewer verdicts each finding **ADDRESSED / NOT ADDRESSED** ("attempted" is not addressed), new breakage in the fix diff joins the open list, and out-of-scope observations become deferred minors.
-- **At the cap:** fix forward or bring unresolved findings to the operator. Only their explicit same-review decision can accept risk; record the typed `adjudication` in evidence and surface its rulings in the Review line and ledger. Negative prose or an agent’s parked ruling grants no exception. Early adjudication never shortens the loop.
+1. Builds the packet: the brief's acceptance criteria, the plan's task list, `git diff --stat`, the changed files, and the diff with five lines of context against the base (default `origin/<default branch>`, `--base` to override).
+2. Starts the other tool read-only in that worktree with the packet on stdin — no shell string, no read limit: the reviewer may read any file it needs. Model and effort come from dev.md's `harness-policy:` `review` entry when it names that tool; otherwise the tool's own default stands.
+3. Takes back JSON — a verdict plus findings with id, axis, severity, file, line, issue and fix — and validates it. One malformed or stuck run is retried once, then the command hands back.
+4. Posts the single review comment itself, binding the verdict to the commit *and* to the brief and plan the reviewer read. **The reviewer never writes to GitHub**, so what lands is exactly what it returned. Edit a requirement and the review is stale: the command runs again and the ship check refuses until it does.
+5. Exits 0 clean · 2 needs-fixes or hand-back · 1 error.
 
-Risky work requires tests and independent review. Every commit renews full-candidate review. After qualification, review all assembled child/preparation scopes; child reviews bind only their parent base. Transformations/delivery: dev-ship’s runbook.
+Axes: spec (against the acceptance criteria and plan), bugs, security, and style only where a documented rule exists. Large or `risky` diffs split into two parallel reviewers and the findings merge; everything else is one run. Details and the full flag list: [flow](references/flow.md).
 
-## Noise controls — hard filters, not politeness
+## The fix loop — 3 rounds, then the operator
 
-- Default quiet profile: spec, bugs, and security always; style only where a documented rule exists.
-- `.vegastack/review-known-patterns.md` (seed: [template](assets/review-known-patterns.md.template)) holds the project's never-flag patterns — each entry requires a **"Still flag if:"** exception clause; a suppression without one is a blind spot. dev-implement's corrections loop appends operator dismissals there, so a dismissed pattern stays dismissed.
-- The skill scan's suppressions follow the same discipline in the baseline the `skill-scan` skill owns, and its guard enforces the clause — a rule scoped `id:` with no `path:` is a repo-wide blind spot. A finding suppressed rather than fixed is a review finding, not a settled matter.
+Fix the must-fix findings, commit, push, then run the same command again. It resumes the **same reviewer session** on this machine and sends only the fix diff and the open finding ids, so a round costs a fraction of the first pass. On another machine the session is gone: a fresh reviewer starts with the previous findings JSON from the review comment.
 
-## A scan with no issue attached
+- Only must-fix findings block. Should-fix and nit are fixed opportunistically or recorded as deferred minors in the evidence comment.
+- Disagree with a finding → say so openly in the evidence comment with the reason and the cost if you are wrong; a finding dropped in silence is a decision made in secret. An operator dismissal is appended to `.vegastack/review-known-patterns.md` (seed: [template](assets/review-known-patterns.md.template)) so it stays dismissed.
+- Three rounds is one **cycle**, not the end of the road. After round 3 the command hands back — but commit the fixes, or change the brief or plan, and the next run opens cycle 2 at round 1 with the open findings to re-check. Running it again with nothing changed hands back again, which is what the cap is for. **A review is never skipped** — a stuck or failing reviewer is a hand-back, not a pass, and the ship check refuses a commit with no clean review of its own.
+- The operator's one way past open findings without another cycle, and only once the third round is spent, is their own comment on the issue with the acceptance on a line of its own — `accept review round 3 @ abc1234` — posted after that review. Never write it for them, any more than you would write "ship it"; a negated or quoted line, an earlier round, a `vsk:v1` marker or a bot author all count for nothing.
 
-A `skill-scan` run outside an issue — a standalone check, or the pre-publish guard in dev.md's `## Ship` — has no review comment to land in, so its findings go to intake as a `risky` issue, because a comment posted somewhere convenient is a finding nobody owns. Offer the operator one `risky` issue whose brief body carries the findings, their locations, and what is known about each cause; intake's questions, scope call and approval follow.
+## The review comment
 
-## Cross-agent — the independence upgrade
+The command writes it; read it, never hand-write it. One comment per issue, edited each round, marker always current:
 
-The dev.md `review:` knob maps to exactly three states — `subagent` (fresh-subagent axes always, no cross-agent), `cross-agent-risky` (subagent axes normally; the other agent on `risky` — the recommended default where the CLI exists), `cross-agent` (the other agent always). On the other agent, follow [cross-agent](references/cross-agent.md): announce the invocation to the operator at trigger time, send the `REVIEW REQUEST (vsk cross-agent v1)` handoff (`codex exec` from Claude; `claude -p` from Codex), and summarize the outcome at the end. The reviewing agent posts its own review comment (`agent=codex`), so independence is verifiable. CLI absent → the manual relay, noting that dev-setup recommends installing it. Which model and effort the other agent runs at is dev.md's `harness-policy:` `review` entry (`<stage> <agent> <model> <effort>`); with no such line, the reviewing harness's own default stands — never a guessed model id.
+```markdown
+<!-- vsk:v1 type=review round=2 sha=abc1234 agent=codex verdict=needs-fixes -->
+## Review — round 2 @ abc1234
+
+**Verdict: needs-fixes** — must-fix 1 · should-fix 0 · nit 2
+```
+
+Each finding renders as a bold **Finding [F1]** line carrying its severity, its path and line, and its axis, then the problem and the fix. Nits collapse into a `<details>` block, earlier rounds keep one summary line each, and a `Findings JSON` block at the bottom is what a fresh reviewer on another machine reads. Finding ids are `[F1]`, never `#1`, because `#1` auto-links to an issue.
+
+## Noise controls
+
+- Quiet by default: spec, bugs and security always; style only where a documented rule exists.
+- `.vegastack/review-known-patterns.md` goes into every packet as project policy, read from the base commit — an edit on the branch under review is part of the diff, not a suppression. Each entry needs a **"Still flag if:"** clause; a suppression without one is a blind spot, not a calibration.
+- A CI scanner finding (skill-scan in the merge queue) comes back as a correction on the issue, judged like any other finding: suppressed rather than fixed is itself a finding.
+
+## When the other tool is missing — the fallback
+
+Only when the other tool is not installed or not signed in (`vegafactory review` says so): run the same axes as fresh subagents in this session, label the result plainly as a **same-tool self-review** in the evidence comment, and tell the operator that cross-tool review is off until the other tool is installed. The command proves the gap first — a missing tool, or a review run that failed on its credentials — and refuses `--record` otherwise, unless the operator allowed a same-tool review for this head in a line of their own. Run the axes as fresh subagents and hand the findings back with `--record`, so the comment carries the same bindings, says `mode=same-tool`, and names why it was allowed: the axis briefs and the exact command are in [fallback](references/fallback.md), the security axis method in [security-axis](references/security-axis.md). Independence is the one thing this fallback lacks, so never call it cross-tool.
