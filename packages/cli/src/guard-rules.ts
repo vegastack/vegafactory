@@ -93,6 +93,10 @@ function heredocsOpenedOn(line: string): Array<{ delimiter: string; literal: boo
     }
     if (ch === '\\') { i += 1; continue }
     if (ch === "'" || ch === '"') { quote = ch; continue }
+    // A `#` at the start of a word begins a comment: nothing after it opens a heredoc, and a
+    // `<<'EOF'` written there is a remark. Reading one as real would swallow the lines below it,
+    // which the shell runs as ordinary commands.
+    if (ch === '#' && (i === 0 || /[\s;&|(]/.test(line[i - 1]!))) break
     if (ch !== '<' || line[i + 1] !== '<' || line[i + 2] === '<') continue
     let j = i + 2
     let strip = false
@@ -135,24 +139,45 @@ const DATA_SINKS = new Set([
   'diff', 'cmp', 'nl', 'fold', 'column', 'base64', 'md5', 'md5sum', 'shasum', 'sha256sum',
 ])
 
-// Every command the line runs, by name. A path is reduced to its last component, so
-// `/bin/sh` is `sh` and cannot slip past the check by spelling itself differently.
-function commandsOn(line: string): string[] {
+// Every command a stretch of text runs, exactly as written. A name carrying a slash is kept whole,
+// because `./cat` is a file in the repository and only `cat` is the tool this list means.
+function commandsIn(text: string): string[] {
   const segments: Segment[] = []
-  parseInto(line, segments)
-  return segments.map((segment) => segment.words[0] ?? '').map((word) => word.split('/').pop() ?? '')
+  parseInto(text, segments)
+  return segments.map((segment) => segment.words[0] ?? '')
 }
 
 // Whether this line's heredoc body is read and never run. Unknown commands count as executing it:
 // a guard that cannot tell must assume the dangerous answer.
 function bodyIsOnlyData(line: string): boolean {
-  const commands = commandsOn(line)
+  const commands = commandsIn(line)
   return commands.length > 0 && commands.every((name) => name !== '' && DATA_SINKS.has(name))
 }
 
 export function stripHeredocs(text: string): string {
   if (!text.includes('<<')) return text
   const lines = text.split('\n')
+
+  // First pass: which lines are command text, and which are somebody's heredoc body. Only the
+  // command lines are asked what this payload runs.
+  const isBody = new Array<boolean>(lines.length).fill(false)
+  for (let scan = 0; scan < lines.length; scan += 1) {
+    if (isBody[scan]) continue
+    let after = scan + 1
+    for (const doc of heredocsOpenedOn(lines[scan]!)) {
+      while (after < lines.length) {
+        const body = lines[after]!
+        if ((doc.strip ? body.replace(/^[\t]+/, '') : body) === doc.delimiter) { isBody[after] = true; after += 1; break }
+        isBody[after] = true
+        after += 1
+      }
+    }
+  }
+  // A body written to a file is data until something in the same payload runs that file, and the
+  // guard cannot follow a name from one command to the next. So if anything here executes at all,
+  // no body is dropped: `tee x <<'EOF' … EOF; sh x` keeps its lines in view.
+  const runsSomething = lines.some((line, at) => !isBody[at] && commandsIn(line).some((name) => name !== '' && !DATA_SINKS.has(name)))
+
   const kept: string[] = []
   let i = 0
   while (i < lines.length) {
@@ -160,7 +185,7 @@ export function stripHeredocs(text: string): string {
     kept.push(line)
     i += 1
     const docs = heredocsOpenedOn(line)
-    const data = docs.length > 0 && bodyIsOnlyData(line)
+    const data = docs.length > 0 && !runsSomething && bodyIsOnlyData(line)
     for (const doc of docs) {
       while (i < lines.length) {
         const body = lines[i]!

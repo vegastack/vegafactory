@@ -355,7 +355,12 @@ export function pushPath(root: string, run: Probe): Check {
   if (!https) {
     return { name: 'push', ok: false, detail: `origin pushes over ${url.split(':')[0] || 'an unknown transport'} (${url}), which a run's Git has no credential path for — give origin an SSH or https push URL` }
   }
+  // The override a run's Git gets names github.com, so that is the only https host whose credential
+  // path this check can vouch for. Another host would be asked about here and never used there.
   const host = https[1]!
+  if (host !== 'github.com') {
+    return { name: 'push', ok: false, detail: `origin pushes to ${host} over https, and a run's Git is only given a credential for github.com — give origin an SSH push URL: git remote set-url --push origin git@${host}:<owner>/<repo>.git` }
+  }
   // Asked the way a run's Git will ask: with the App's token out of the environment, so what comes
   // back is the machine's own login rather than the credential that cannot push.
   const asked = run('env', ['-u', 'GH_TOKEN', '-u', 'GITHUB_TOKEN', 'gh', 'auth', 'status', '--hostname', host])

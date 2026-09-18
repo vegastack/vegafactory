@@ -461,6 +461,18 @@ describe('heredoc bodies', () => {
     expect(decide("cat <<'EOF' | grep push\nthen `git push origin main`\nEOF").decision).toBe('allow')
   })
 
+  test('a body written to a file is not data once something here runs it', () => {
+    // A `#` starts a comment, so a heredoc written there is a remark — reading it as real would
+    // swallow the lines below, which the shell runs as ordinary commands.
+    expect(decide("cat /dev/null # <<'EOF'\ngit push origin main\nEOF").decision).toBe('ask')
+    // `./cat` is a file in the repository, not the tool the allowlist means.
+    expect(decide("./cat <<'EOF'\ngit push origin main\nEOF").decision).toBe('ask')
+    // The guard cannot follow a file name from one command to the next, so anything that executes
+    // in the same payload keeps every body in view.
+    expect(decide("tee a.sh <<'EOF'\ngit push origin main\nEOF\nsh a.sh").decision).toBe('ask')
+    expect(decide("cat > a.sh <<'EOF'\nnpm publish ./x.tgz\nEOF\nsh a.sh").decision).toBe('ask')
+  })
+
   test('a here-string is not a heredoc', () => {
     expect(decide('cat <<< "hello"').decision).toBe('allow')
   })

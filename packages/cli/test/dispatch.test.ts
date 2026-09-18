@@ -1018,9 +1018,9 @@ describe('the step a run makes', () => {
     expect(given.VEGAFACTORY_APP_PRIVATE_KEY_FILE).toBeUndefined()
     expect(Object.keys(given).some((name) => name.startsWith('VEGAFACTORY_'))).toBe(false)
     expect(given.PATH).toBe('/usr/bin')
-    // The token is for the API. Git gets no credential helper, so it never tries to push with a
-    // token whose Contents permission is read-only. It asks for a credential with that token
-    // scrubbed instead, which hands back the machine's own login and pushes over HTTPS as before.
+    // The token is for the API. Git is given a helper that scrubs it first, so it never pushes
+    // with a token whose Contents permission is read-only — it gets the machine's own login back
+    // instead, and an https remote works exactly as it does for the person at the keyboard.
     expect(given.GIT_CONFIG_COUNT).toBe('2')
     expect(given.GIT_CONFIG_KEY_0).toBe('credential.https://github.com.helper')
     expect(given.GIT_CONFIG_VALUE_0).toBe('')
