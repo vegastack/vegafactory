@@ -4,11 +4,17 @@ How dev-ship runs a dev.md `## Ship` section and the ship situations the skill b
 
 ## Line prefixes
 
-- `auto:` — do it, report the outcome. The exception is a step that touches the release branch or a tag: the recorded "ship it" binds to an issue and its branch, a generated release PR has neither, so the guard asks there and the step waits. #223 adds a `vegafactory ship release` verb that verifies the recorded word and performs the tag push, which the guard can then allow; until it lands, an `auto:` release step ends at the operator.
+- `auto:` — do it, report the outcome. The release exception is below.
 - `ask:` — stop and wait for the operator's word for that step; "ship it" does not cover an `ask:` line. The ship guard asks for every command such a line names in backticks, read from dev.md on the default branch, so editing dev.md in a branch cannot loosen it.
 - `guard:` — a deterministic check. Run its command locally at this position in the runbook order; the CI copy of the same guard is the backstop and stays authoritative for anything that publishes. A failing guard stops the sequence exactly like a failing `auto:` step.
 
 A failing step stops the runbook at that step: report what failed and what remains unrun, hand the failure to the operator (or to dev-implement's corrections loop when it's code), and never skip ahead. A gotcha — a step that surprised you or an instruction the operator had to repeat — is one proposed line folded into the runbook; if the gotcha is directional rather than operational, it's a decision-register candidate instead (on the user's yes, per dev.md `## Decisions`).
+
+## The release exception to `auto:`
+
+An `auto:` line that opens or merges a **release** PR, or pushes a tag, is the one `auto:` step that still waits. The recorded "ship it" binds to an issue and its branch, and the guard matches a merge to that branch; a generated release branch has no issue, so there is no recorded word for the guard to find and it asks. Run the runbook up to that point, report what landed, and hand the release PR's merge and the tag push to the operator. That is the honest state, not a step skipped to be helpful — and it is what the operator's `## Ship` section already describes when its tag line is an `ask:`.
+
+#223 adds a `vegafactory ship release` verb that verifies the recorded word itself and performs the tag push, so the guard can allow that one verb instead of raw tagging. Until it lands, say which steps stopped and why.
 
 ## Release batching (`release: on-request`)
 
