@@ -7,7 +7,7 @@ import { spawn, spawnSync } from 'node:child_process'
 import { existsSync, readFileSync, rmSync } from 'node:fs'
 import { hostname } from 'node:os'
 import { basename, dirname, join } from 'node:path'
-import { claimsOf, holderOf, ownerId, trustedAuthors, HEARTBEAT_EVERY_MS, type Holder } from './claim.ts'
+import { claimsOf, holderOf, ownerId, trustedHolders, HEARTBEAT_EVERY_MS, type Holder } from './claim.ts'
 import { defaultRunner, type GhRunner } from './gh.ts'
 import { canCommit, classifyCommand, extractCommand, isShellTool, loadPolicy, mergeTarget, type Decision, type MergeCheck } from './guard-rules.ts'
 import { cacheDir, readBody, readState, replaceFile, syncIssue, withLock } from './issue-cache.ts'
@@ -276,7 +276,7 @@ function refresh(where: Where, local: LocalClaim, deps: HookDeps, force = false)
   const cached = readState(dir)
   if (!cached?.issue) return { holder: null, state: null }
   const body = (entry: { file: string }) => readBody(dir, entry.file)
-  const trusted = trustedAuthors({ repo: where.repo, runner: deps.runner, root: where.root })
+  const trusted = trustedHolders({ repo: where.repo, runner: deps.runner, root: where.root })
   const { holder } = holderOf(cached, body, deps.now(), trusted)
   const everClaimed = claimsOf(cached, body, trusted).history.some((c) => c.owner === where.owner)
   local.held = holder?.owner === where.owner

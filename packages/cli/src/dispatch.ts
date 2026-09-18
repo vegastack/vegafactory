@@ -10,7 +10,7 @@ import { createSign } from 'node:crypto'
 import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync } from 'node:fs'
 import { homedir, hostname, userInfo } from 'node:os'
 import { join } from 'node:path'
-import { APP_ACTOR, holderOf, machineName, release, trustedAuthors } from './claim.ts'
+import { APP_ACTOR, holderOf, machineName, release, trustedHolders } from './claim.ts'
 import { defaultClonePath, factoryConfigPath, parseControlRoomKnob, readFactoryConfig } from './control-room.ts'
 import { billingVariables, childEnvironment } from './env.ts'
 import { GhError, defaultRunner, ghList, type GhResult, type GhRunner } from './gh.ts'
@@ -593,7 +593,7 @@ export interface PollDeps {
 export async function poll(deps: PollDeps): Promise<RunRecord[]> {
   const { root, repo, runner, now } = deps
   const permission = permissionLookup(repo, runner, { root })
-  const trusted = trustedAuthors({ repo, runner, root })
+  const trusted = trustedHolders({ repo, runner, root })
   const acted = readActed(root)
   const wanted: Array<{ candidate: Candidate; decision: Decision; key: string }> = []
   const plans = new Map<number, string | null>()
@@ -684,7 +684,7 @@ export function standDown(ctx: { root: string; repo: string; number: number; run
   try {
     syncIssue({ ...claimCtx })
     const snap = snapshot(cacheDir(ctx.root, ctx.repo, ctx.number))
-    const held = holderOf(snap.state, snap.body, ctx.now ?? Date.now(), trustedAuthors(claimCtx)).holder
+    const held = holderOf(snap.state, snap.body, ctx.now ?? Date.now(), trustedHolders(claimCtx)).holder
     if (!held) notes.push('no live claim to release')
     else if (!held.owner.startsWith(`${ctx.machine}:`)) notes.push(`the claim is held by ${held.owner}, so it was left alone`)
     else {
@@ -711,9 +711,10 @@ export function dispatchUsage(): string {
 Options: --repo OWNER/NAME · --json · --dry-run (enable and disable show what they would do)
 
 A machine the control room's dispatchers.md does not name refuses every verb but disable. Writes
-go out as the VegaFactory GitHub App, on a token minted here from the key at
-${appKeyPath()} (VEGAFACTORY_APP_PRIVATE_KEY_FILE moves it); the agent runs use the
-operator's own subscription, so an API-key variable in the environment refuses the run.
+go out as the VegaFactory GitHub App, on an hour-long token minted here from its private key:
+  ${appKeyPath()}
+(VEGAFACTORY_APP_PRIVATE_KEY_FILE moves it, VEGAFACTORY_APP_ID names another App.) The agent runs
+use the operator's own subscription, so an API-key variable in the environment refuses the run.
 `
 }
 

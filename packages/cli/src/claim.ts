@@ -77,14 +77,19 @@ type Body = (entry: CommentEntry) => string
 export type Trusted = (entry: CommentEntry) => boolean
 
 // The factory's one automation identity: the VegaFactory GitHub App, which only a holder of its
-// private key can post as. Its claims, releases and status comment count, so a dispatcher's
-// writes are visible to every session; any other bot's never do.
+// private key can post as.
 export const APP_ACTOR = 'vegafactory[bot]'
 
-export const trustBy = (permission: PermissionLookup): Trusted => (entry) =>
-  entry.author === APP_ACTOR || (entry.authorType !== 'Bot' && !!entry.author && WRITE_ROLES.has(permission(entry.author)))
+// A person with write access. This is what judges a review or an ack: no bot stands in for one.
+export const trustBy = (permission: PermissionLookup): Trusted => (entry) => entry.authorType !== 'Bot' && !!entry.author && WRITE_ROLES.has(permission(entry.author))
+
+// Who may hold or hand back an issue. The App counts here and only here: a dispatcher's claim,
+// release and status comment must be visible to every session, while judging finished work stays
+// a person's job.
+export const trustHolderBy = (permission: PermissionLookup): Trusted => (entry) => entry.author === APP_ACTOR || trustBy(permission)(entry)
 
 export const trustedAuthors = (ctx: { repo: string; runner: GhRunner; root?: string }): Trusted => trustBy(permissionLookup(ctx.repo, ctx.runner, { root: ctx.root }))
+export const trustedHolders = (ctx: { repo: string; runner: GhRunner; root?: string }): Trusted => trustHolderBy(permissionLookup(ctx.repo, ctx.runner, { root: ctx.root }))
 
 // Live claims (after the latest release of each owner), every claim ever made, and the one
 // status comment. All three count only from trusted authors.
@@ -158,7 +163,7 @@ function post(ctx: ClaimContext, body: string): number {
 
 // Writes this owner's heartbeat on its own claim comment. Nobody else edits that comment, and
 // heartbeat rows are not content: they never bump the cache cursor.
-export function heartbeat(ctx: ClaimContext, owner: string, activeMinutes = 0, now = Date.now(), trusted = trustedAuthors(ctx)) {
+export function heartbeat(ctx: ClaimContext, owner: string, activeMinutes = 0, now = Date.now(), trusted = trustedHolders(ctx)) {
   const f = fresh(ctx)
   const live = claimsOf(f.state, f.body, trusted).claims.find((claim) => claim.owner === owner)
   const entry = live ? f.state.comments[String(live.commentId)] : undefined
@@ -184,7 +189,7 @@ export interface ClaimOutcome {
 
 export function claim(ctx: ClaimContext, request: ClaimRequest, now = Date.now()): ClaimOutcome {
   const permission = permissionLookup(ctx.repo, ctx.runner, { root: ctx.root })
-  const trusted = trustBy(permission)
+  const trusted = trustHolderBy(permission)
   const holderNow = () => { const f = fresh(ctx); return holderOf(f.state, f.body, now, trusted) }
   const before = holderNow()
   if (before.holder?.owner === request.owner) {
