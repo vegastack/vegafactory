@@ -54,7 +54,51 @@ export const SERVICE_NAME = 'com.vegastack.vegafactory.dispatch'
 // ---------------------------------------------------------------------------------------------
 // The roster: the control room's dispatchers.md
 
-export interface Dispatcher { machine: string; operator: string | null; repos: string[] }
+// What one machine may do at once, and for how long. These belong to the machine — its processor,
+// its subscription — and not to any project it works, which is why they live on its roster row and
+// not in a repository's dev.md: a machine watching ten repositories would otherwise have ten
+// answers. They are re-read from the refreshed roster every pass, so changing one is a
+// control-room PR that takes effect on the next poll rather than a release.
+export interface Caps { runs: number; stepMs: number; pollMs: number; retryMs: number; failures: number }
+
+export const DEFAULT_CAPS: Caps = { runs: MAX_RUNS, stepMs: STEP_TIMEOUT_MS, pollMs: POLL_MS, retryMs: RETRY_MS, failures: MAX_FAILURES }
+
+// `runs 10 · step 72h · poll 1m · retry 15m · park 3`, in any order, separated by `·` or a comma.
+// Every field is optional and falls back to the shipped default. A field that is present and
+// unreadable returns null, and the caller drops that machine: a cap nobody can read is not a cap,
+// and guessing one would be choosing a number on the operator's behalf.
+export function parseCaps(cell: string): Caps | null {
+  const caps = { ...DEFAULT_CAPS }
+  const text = String(cell ?? '').trim()
+  if (!text) return caps
+  for (const field of text.split(/[·,]/).map((part) => part.trim()).filter(Boolean)) {
+    const match = /^(runs|step|poll|retry|park)\s+(\d+)\s*([hms]?)$/i.exec(field)
+    if (!match) return null
+    const [, rawName, rawValue, rawUnit] = match
+    const name = rawName!.toLowerCase()
+    const value = Number(rawValue)
+    const unit = rawUnit!.toLowerCase()
+    if (!Number.isFinite(value) || value <= 0) return null
+    // A count takes no unit; a duration must carry one, so `step 72` cannot silently mean 72ms.
+    if (name === 'runs' || name === 'park') {
+      if (unit) return null
+      if (name === 'runs') caps.runs = value
+      else caps.failures = value
+      continue
+    }
+    if (!unit) return null
+    const ms = value * (unit === 'h' ? 3_600_000 : unit === 'm' ? 60_000 : 1000)
+    if (name === 'step') caps.stepMs = ms
+    else if (name === 'poll') caps.pollMs = ms
+    else caps.retryMs = ms
+  }
+  return caps
+}
+
+export interface Dispatcher { machine: string; operator: string | null; repos: string[]; caps: Caps }
+
+// A header names its columns; whichever word this roster's template uses, it is not a machine.
+const HEADER_WORDS = new Set(['machine', 'dispatcher'])
 
 const cells = (line: string) => line.replace(/^\|/, '').replace(/\|\s*$/, '').split('|').map((cell) => cell.trim())
 const separator = (cell: string) => /^:?-{2,}:?$/.test(cell)
@@ -68,14 +112,16 @@ export function parseDispatchers(text: string): Dispatcher[] {
     let machine = ''
     let operator: string | null = null
     let repos = ''
+    let capsCell = ''
     if (line.startsWith('|')) {
       // Three cells or it is not a row. A truncated row must not read as "every repository": the
       // roster is a gate, so a shape nobody wrote on purpose refuses rather than widens.
       const row = cells(line)
-      if (row.length < 3 || row.some(separator) || /^machine$/i.test(row[0] ?? '')) continue
+      if (row.length < 3 || row.some(separator) || HEADER_WORDS.has((row[0] ?? '').toLowerCase())) continue
       machine = row[0] ?? ''
       operator = row[1] ?? null
       repos = row[2] ?? ''
+      capsCell = row[4] ?? ''
     } else {
       const match = /^-\s+`?([A-Za-z0-9][\w.-]*)`?\s*(?:—|--)\s*(.*)$/.exec(line)
       if (!match) continue
@@ -83,11 +129,16 @@ export function parseDispatchers(text: string): Dispatcher[] {
       repos = match[2] ?? ''
     }
     const name = machineName(machine.replace(/`/g, ''))
-    if (!machine.trim() || name === 'machine') continue
+    if (!machine.trim() || HEADER_WORDS.has(name)) continue
+    // A caps cell nobody can read drops the machine rather than running it on defaults it did not
+    // ask for. `-` is how a row says "the defaults are fine" out loud.
+    const caps = parseCaps(capsCell === '-' ? '' : capsCell)
+    if (!caps) continue
     found.push({
       machine: name,
       operator: operator && operator !== '-' ? operator.replace(/^@/, '') : null,
       repos: repos.split(/[,\s]+/).map((repo) => repo.replace(/`/g, '').trim()).filter((repo) => repo && repo !== '-'),
+      caps,
     })
   }
   return found
@@ -779,7 +830,12 @@ export function overlaps(a: string, b: string): boolean {
   return b.endsWith('/') && a.startsWith(b)
 }
 
-export interface Candidate { number: number; action: Action; parent: number | null; files: string[]; from: State }
+export interface Candidate { repo: string; number: number; action: Action; parent: number | null; files: string[]; from: State }
+
+// What names a run. With one board an issue number was enough; with several, `#12` is two
+// different pieces of work and keying on the number alone would let one silently displace the
+// other in the inflight map.
+export const runKey = (candidate: { repo: string; number: number }) => `${candidate.repo}#${candidate.number}`
 
 const CODE: Action[] = ['implement', 'corrections']
 
@@ -791,9 +847,14 @@ export function schedule(candidates: Candidate[], running: Candidate[] = [], max
   const chosen: Candidate[] = []
   for (const candidate of candidates) {
     if (picked.length >= max) break
-    if (picked.some((other) => other.number === candidate.number)) continue
-    if (candidate.action === 'ship' && picked.some((other) => other.action === 'ship')) continue
-    if (CODE.includes(candidate.action) && !picked.filter((other) => CODE.includes(other.action)).every((other) => disjointSiblings(candidate, other))) continue
+    if (picked.some((other) => runKey(other) === runKey(candidate))) continue
+    // One merge per repository: a merge queue serialises a repository, not an organisation, so two
+    // projects may land at the same time and two issues in one project may not.
+    if (candidate.action === 'ship' && picked.some((other) => other.action === 'ship' && other.repo === candidate.repo)) continue
+    // Two code runs may only go together when they are sibling sub-issues whose declared file sets
+    // are disjoint — a question about one repository's working tree, so runs on other boards are
+    // not siblings and cannot overlap by definition.
+    if (CODE.includes(candidate.action) && !picked.filter((other) => CODE.includes(other.action) && other.repo === candidate.repo).every((other) => disjointSiblings(candidate, other))) continue
     picked.push(candidate)
     chosen.push(candidate)
   }
@@ -1098,7 +1159,7 @@ export async function poll(deps: PollDeps, inflight: Map<number, Inflight> = new
       const parent = snap.state.issue!.parent
       if (parent !== null && !plans.has(parent)) plans.set(parent, parentPlan(root, repo, parent, runner, permission))
       const files = parent === null ? [] : filesFromParent(plans.get(parent) ?? null, issue.number)
-      wanted.push({ key, decision, candidate: { number: issue.number, action: decision.action, parent, files, from: stateOf(snap.state.issue!.labels).state! } })
+      wanted.push({ key, decision, candidate: { repo, number: issue.number, action: decision.action, parent, files, from: stateOf(snap.state.issue!.labels).state! } })
     } catch (error) {
       deps.out(`#${issue.number}: could not be read (${(error as Error).message})`)
     }

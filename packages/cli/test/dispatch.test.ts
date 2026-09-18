@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, test } from 'bun:test'
+import type { Action } from '../src/dispatch.ts'
 import { spawnSync } from 'node:child_process'
 import { generateKeyPairSync } from 'node:crypto'
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
@@ -6,11 +7,11 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { claimBody, claimLine, holderOf, trustedFactory } from '../src/claim.ts'
 import {
-  APP_ID, STEP_TIMEOUT_MS, TOKEN_MARGIN_MS, agentArgs, appIdentity, appJwt, appKeyPath, assertKeyFile, board, decide, defaultRunStep, dispatchDir,
+  APP_ID, DEFAULT_CAPS, MAX_FAILURES, MAX_RUNS, POLL_MS, RETRY_MS, STEP_TIMEOUT_MS, TOKEN_MARGIN_MS, parseCaps, agentArgs, appIdentity, appJwt, appKeyPath, assertKeyFile, board, decide, defaultRunStep, dispatchDir,
   acknowledgedPlan, canonicalPath, childRunEnvironment, confirmShip, disjointSiblings, pushableBranch, shipWord,
   drain, filesFromParent, harnessAnswers, hitLimit, hooksWired, listedHere, mintToken, overlaps, parseDispatchArgs,
   parseDispatchers, poll, readActed, readRuns, readiness, recordRun, resetAt, RUNS_KEPT, runDispatch, schedule, serviceCommands, stagePolicy,
-  standDown, stepPrompt, tail, unitPath, unitText, unsafeForParallel,
+  standDown, stepPrompt, tail, unitPath, unitText, unsafeForParallel, runKey,
   noteChild, readChildren, refreshRoster, releaseRunLock, reserve, runLockPath, takeRunLock, verifiedListing,
   type Candidate, type Fetch, type GitRun, type Inflight, type PollDeps, type Probe, type RunStep, type StepResult,
 } from '../src/dispatch.ts'
@@ -95,9 +96,9 @@ describe('the roster', () => {
       '- `spare-box` — o/r',
     ].join('\n'))
     expect(rows).toEqual([
-      { machine: 'mac-mini', operator: 'mk', repos: ['o/r', 'o/other'] },
-      { machine: 'builder', operator: null, repos: ['*'] },
-      { machine: 'spare-box', operator: null, repos: ['o/r'] },
+      { machine: 'mac-mini', operator: 'mk', repos: ['o/r', 'o/other'], caps: DEFAULT_CAPS },
+      { machine: 'builder', operator: null, repos: ['*'], caps: DEFAULT_CAPS },
+      { machine: 'spare-box', operator: null, repos: ['o/r'], caps: DEFAULT_CAPS },
     ])
   })
 
@@ -392,7 +393,7 @@ describe('transitions', () => {
 })
 
 describe('what may run at once', () => {
-  const candidate = (number: number, extra: Partial<Candidate> = {}): Candidate => ({ number, action: 'implement', parent: null, files: [], from: 'queued', ...extra })
+  const candidate = (number: number, extra: Partial<Candidate> = {}): Candidate => ({ repo: 'o/r', number, action: 'implement', parent: null, files: [], from: 'queued', ...extra })
 
   test('one run per issue, and never more than three', () => {
     const wanted = [1, 2, 3, 4].map((number) => candidate(number, { action: 'plan' }))
@@ -430,8 +431,8 @@ describe('what may run at once', () => {
     expect(overlaps('a/b.ts', 'a/b.ts')).toBe(true)
     expect(overlaps('a/b.ts', 'a/c.ts')).toBe(false)
     expect(disjointSiblings(
-      { number: 1, action: 'implement', parent: 4, files: ['skills/'], from: 'queued' },
-      { number: 2, action: 'implement', parent: 4, files: ['skills/dev/x.md'], from: 'queued' },
+      { repo: 'o/r', number: 1, action: 'implement', parent: 4, files: ['skills/'], from: 'queued' },
+      { repo: 'o/r', number: 2, action: 'implement', parent: 4, files: ['skills/dev/x.md'], from: 'queued' },
     )).toBe(false)
   })
 
@@ -452,8 +453,8 @@ describe('what may run at once', () => {
     const aliased = ['**Independent groups:**', '- `a` — #1 · Files: `src/../src/x.ts`', '- `b` — #2 · Files: `src/x.ts`', ''].join('\n')
     expect(filesFromParent(aliased, 1)).toEqual(['src/x.ts'])
     expect(disjointSiblings(
-      { number: 1, action: 'implement', parent: 9, files: filesFromParent(aliased, 1), from: 'queued' },
-      { number: 2, action: 'implement', parent: 9, files: filesFromParent(aliased, 2), from: 'queued' },
+      { repo: 'o/r', number: 1, action: 'implement', parent: 9, files: filesFromParent(aliased, 1), from: 'queued' },
+      { repo: 'o/r', number: 2, action: 'implement', parent: 9, files: filesFromParent(aliased, 2), from: 'queued' },
     )).toBe(false)
     // One path nobody can check makes the whole set uncheckable, so the siblings run one at a time.
     const traversal = ['**Independent groups:**', '- `a` — #1 · Files: `src/x.ts`, `../elsewhere.ts`', ''].join('\n')
@@ -1270,5 +1271,44 @@ describe('the command', () => {
     expect(parseDispatchArgs(['run', '--once', '--repo', 'o/r', '--json'])).toEqual({ verb: 'run', flags: { repo: 'o/r' }, json: true, dryRun: false, once: true })
     expect(() => parseDispatchArgs(['run', '--repo'])).toThrow('--repo needs a value')
     expect(runDispatch(['frobnicate'], { cwd: root, home, host: HOST, env: {}, out: () => {} })).rejects.toThrow('unknown dispatch verb')
+  })
+})
+
+describe('caps on the roster row', () => {
+  test('every field is optional and falls back to the shipped default', () => {
+    expect(parseCaps('runs 10 · step 72h · poll 1m')).toEqual({ runs: 10, stepMs: 72 * 3_600_000, pollMs: 60_000, retryMs: RETRY_MS, failures: MAX_FAILURES })
+    expect(parseCaps('')).toEqual({ runs: MAX_RUNS, stepMs: STEP_TIMEOUT_MS, pollMs: POLL_MS, retryMs: RETRY_MS, failures: MAX_FAILURES })
+  })
+  test('a cell that cannot be read refuses rather than falling back', () => {
+    expect(parseCaps('runs ten')).toBeNull()
+    expect(parseCaps('step 72 hours')).toBeNull()
+  })
+  test('the row carries them, and a malformed cell drops the machine', () => {
+    const roster = '| patrick-mac-mini | dev | o/a, o/b | mk | runs 10 · step 72h |\n| broken | dev | o/c | mk | runs ten |'
+    const rows = parseDispatchers(roster)
+    expect(rows.map((row) => row.machine)).toEqual(['patrick-mac-mini'])
+    expect(rows[0]!.caps.runs).toBe(10)
+    expect(rows[0]!.repos).toEqual(['o/a', 'o/b'])
+  })
+})
+
+describe('scheduling across repositories', () => {
+  const at = (repo: string, number: number, action: Action): Candidate =>
+    ({ repo, number, action, parent: null, files: [], from: 'queued' })
+  test('the same issue number in two repositories is two runs', () => {
+    const picked = schedule([at('o/a', 12, 'implement'), at('o/b', 12, 'implement')], [], 10)
+    expect(picked.map(runKey)).toEqual(['o/a#12', 'o/b#12'])
+  })
+  test('one merge per repository, in parallel across repositories', () => {
+    const picked = schedule([at('o/a', 1, 'ship'), at('o/a', 2, 'ship'), at('o/b', 3, 'ship')], [], 10)
+    expect(picked.map(runKey)).toEqual(['o/a#1', 'o/b#3'])
+  })
+  test('the run cap is the machine, not the board', () => {
+    const many = [at('o/a', 1, 'implement'), at('o/b', 2, 'implement'), at('o/c', 3, 'implement')]
+    expect(schedule(many, [], 2)).toHaveLength(2)
+  })
+  test('a run already going is not started again on its own board', () => {
+    const running = [at('o/a', 1, 'implement')]
+    expect(schedule([at('o/a', 1, 'implement'), at('o/b', 1, 'implement')], running, 10).map(runKey)).toEqual(['o/b#1'])
   })
 })
