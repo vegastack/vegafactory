@@ -101,8 +101,11 @@ jobs:
       - name: Verify the tarball is the one that was smoked
         run: node scripts/release.mjs verify "$TARBALL" "$INTEGRITY"
 
+      # `./` is load-bearing. npm reads a bare `release/x.tgz` as the GitHub
+      # shorthand `<owner>/<repo>` and tries to clone it; only a path starting
+      # with `./`, `../` or `/` is read as a file.
       - name: Publish with provenance
-        run: npm publish "$TARBALL" --provenance --access public
+        run: npm publish "./$TARBALL" --provenance --access public
 
   registry:
     # Installing and running the published package happens outside the job that can publish.

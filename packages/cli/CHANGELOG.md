@@ -1,5 +1,11 @@
 # @vegastack/skills
 
+## 0.20.1
+
+### Patch Changes
+
+- The release workflow now hands npm the tarball as `./release/<name>.tgz` rather than `release/<name>.tgz`. npm reads a bare `a/b` argument as the GitHub shorthand `<owner>/<repo>`, so the v0.20.0 publish tried to clone a repository named after its own tarball and failed after the package had already been built and smoked. A test now asserts that every `npm publish` in the workflow names a path.
+
 ## 0.20.0
 
 ### Minor Changes

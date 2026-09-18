@@ -55,3 +55,19 @@ async function walk(root: string): Promise<string[]> {
   }
   return output
 }
+
+// The release workflow hands npm a tarball path. npm reads a bare `a/b` as the
+// GitHub shorthand `<owner>/<repo>` and tries to clone it, so only a path that
+// starts with `./`, `../` or `/` is read as a file. That is how v0.20.0 was
+// tagged, packed, smoked and then not published: the pack script resolves to an
+// absolute path, and the workflow's own `npm publish` did not.
+describe('the release workflow', () => {
+  test('every npm publish names a tarball as a path, never as a repository', async () => {
+    const workflow = await readFile(resolve(packageRoot, '../../.github/workflows/release.yml'), 'utf8')
+    const published = [...workflow.matchAll(/npm publish\s+"?([^"\s]+)"?/g)].map((match) => match[1]!)
+    expect(published.length).toBeGreaterThan(0)
+    for (const spec of published) {
+      expect(spec).toMatch(/^(\.\/|\.\.\/|\/)/)
+    }
+  })
+})
