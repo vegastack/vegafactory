@@ -873,6 +873,18 @@ describe('standing an issue down', () => {
 describe('readiness and the service', () => {
   const answers: Probe = (command) => ({ code: 0, stdout: command === 'claude' ? 'ok' : 'ok\n', stderr: '' })
 
+  test('the CLI counts however this machine spells it', () => {
+    mkdirSync(join(root, '.codex'), { recursive: true })
+    mkdirSync(join(root, '.claude'), { recursive: true })
+    // Running the CLI from source is still running the CLI.
+    writeFileSync(join(root, '.codex/hooks.json'), '{"command":"vegafactory hook pre-tool --harness codex"}')
+    writeFileSync(join(root, '.claude/settings.json'), '{"command":"/Users/x/.bun/bin/bun /repo/packages/cli/src/index.ts hook stop --harness claude"}')
+    expect(hooksWired(root).ok).toBe(true)
+    // Something that is not the hook command does not count.
+    writeFileSync(join(root, '.claude/settings.json'), '{"command":"echo vegafactory is great"}')
+    expect(hooksWired(root).ok).toBe(false)
+  })
+
   test('hooks count only when both harnesses call the CLI', () => {
     expect(hooksWired(root).ok).toBe(false)
     mkdirSync(join(root, '.codex'))
@@ -954,8 +966,15 @@ describe('the step a run makes', () => {
     const devMd = readFileSync(join(root, '.vegastack/dev.md'), 'utf8')
     expect(stagePolicy(devMd, 'implement')).toEqual({ harness: 'claude', model: null, effort: 'high' })
     expect(stagePolicy(devMd, 'nothing')).toBeNull()
-    expect(agentArgs({ harness: 'claude', model: null, effort: 'high' }, 'go').args).toEqual(['-p', '--effort', 'high', 'go'])
-    expect(agentArgs({ harness: 'codex', model: 'gpt-5', effort: 'xhigh' }, 'go')).toEqual({ tool: 'codex', args: ['exec', '-c', 'model=gpt-5', '-c', 'model_reasoning_effort=xhigh', 'go'] })
+    expect(agentArgs({ harness: 'claude', model: null, effort: 'high' }, 'go').args).toEqual(['-p', '--dangerously-skip-permissions', '--effort', 'high', 'go'])
+    expect(agentArgs({ harness: 'codex', model: 'gpt-5', effort: 'xhigh' }, 'go')).toEqual({ tool: 'codex', args: ['exec', '--dangerously-bypass-approvals-and-sandbox', '-c', 'model=gpt-5', '-c', 'model_reasoning_effort=xhigh', 'go'] })
+  })
+
+  // The first dispatched run read the repository, was denied every write, and handed the issue
+  // back untouched. A run that cannot write is not unattended, it is stuck.
+  test('both harnesses are told not to stop and ask, because nobody is there to answer', () => {
+    expect(agentArgs({ harness: 'claude', model: null, effort: 'high' }, 'go').args).toContain('--dangerously-skip-permissions')
+    expect(agentArgs({ harness: 'codex', model: null, effort: 'high' }, 'go').args).toContain('--dangerously-bypass-approvals-and-sandbox')
   })
 
   test('the prompt names the issue, the skill and the limits, and never grants a gate', () => {
