@@ -883,6 +883,18 @@ describe('readiness and the service', () => {
     expect(hooksWired(root).ok).toBe(true)
   })
 
+  test('each probe is an invocation its tool actually accepts', () => {
+    const seen: Array<[string, string[]]> = []
+    harnessAnswers((command, args) => { seen.push([command, args]); return { code: 0, stdout: 'ok', stderr: '' } })
+    const codex = seen.find(([command]) => command === 'codex')![1]
+    // `codex exec` has no approval flag; `-a never` was a usage error, so the check could never
+    // pass and enable refused every machine. Sandbox mode is the only thing it needs told.
+    expect(codex).toEqual(['exec', '--sandbox', 'read-only', 'say ok'])
+    expect(codex).not.toContain('-a')
+    const claude = seen.find(([command]) => command === 'claude')![1]
+    expect(claude).toEqual(['-p', 'say ok'])
+  })
+
   test('a real turn from each tool is the proof, and a refusal is quoted', () => {
     expect(harnessAnswers(answers).every((check) => check.ok)).toBe(true)
     const dead: Probe = (command) => (command === 'codex' ? { code: 1, stdout: '', stderr: 'stream error: token_revoked' } : { code: 0, stdout: 'ok', stderr: '' })

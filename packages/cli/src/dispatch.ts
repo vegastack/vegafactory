@@ -300,7 +300,9 @@ export interface Check { name: string; ok: boolean; detail: string }
 export type Probe = (command: string, args: string[]) => { code: number; stdout: string; stderr: string }
 
 export const probe: Probe = (command, args) => {
-  const result = spawnSync(command, args, { encoding: 'utf8', timeout: 120_000 })
+  // stdin is closed, not inherited. Both harnesses read a prompt from stdin when one is open, so
+  // an inherited terminal turns a readiness probe into a wait for input nobody is there to give.
+  const result = spawnSync(command, args, { encoding: 'utf8', timeout: 120_000, stdio: ['ignore', 'pipe', 'pipe'] })
   if (result.error) return { code: 127, stdout: '', stderr: result.error.message }
   return { code: result.status ?? 1, stdout: (result.stdout ?? '').trim(), stderr: (result.stderr ?? '').trim() }
 }
@@ -321,7 +323,9 @@ export function harnessAnswers(run: Probe): Check[] {
   const checks: Check[] = []
   for (const [name, command, args] of [
     ['claude', 'claude', ['-p', 'say ok']],
-    ['codex', 'codex', ['exec', '--sandbox', 'read-only', '-a', 'never', 'say ok']],
+    // `codex exec` takes --sandbox and has no approval flag of its own; `-a never` was a usage
+    // error, so this check could never pass and `dispatch enable` refused every machine.
+    ['codex', 'codex', ['exec', '--sandbox', 'read-only', 'say ok']],
   ] as Array<[string, string, string[]]>) {
     const result = run(command, args)
     const ok = result.code === 0 && /\bok\b/i.test(result.stdout)
