@@ -3,14 +3,16 @@
   "evals": [
     {
       "id": 1,
-      "prompt": "Set up the control room for our org. Org is `vegastack`. We build agent-native developer tooling \u2014 the skills, the CLI, and the runtime around them. Everyone writes in English, dates are DD-MM-YYYY, nothing ships without my word. Statistics on, per-person fields off, a repo may opt out. My GitHub username is kmanojkumar.",
-      "expected_output": "The questionnaire answers are written into a rendered `org.md`, every file in the control-room layout is rendered from its template into a directory the operator can read, and the run stops before creating the repository \u2014 naming the exact `gh repo create` command instead of running it.",
+      "prompt": "Set up the control room for our org. Org is `vegastack`. We build agent-native developer tooling — the skills, the CLI, and the runtime around them. Everyone writes in English, dates are DD-MM-YYYY, nothing ships without my word. Statistics on, per-person fields off. Runs must always bill to my subscription, everywhere. My GitHub username is kmanojkumar.",
+      "expected_output": "The questionnaire answers are written into a rendered `org.md`, every file in the lean control-room layout is rendered from its template into a directory the operator can read, the subscription rule is proposed as a locked line, and the run stops before creating the repository — naming the exact `gh repo create` command instead of running it.",
       "files": [],
       "assertions": [
-        "Every file in the layout is rendered: `org.md`, `people.csv`, `decisions.md`, `groups/dev/group.md`, `groups/dev/people.csv`, `groups/dev/decisions.md`, `repos.md`, `boards.md`, `rules/`, `onboarding/new-repo.md`, `onboarding/new-teammate.md`, `templates/`",
-        "`org.md` carries `stats: on`, `stats-people: off`, `stats-override: allowed` and no department knob (`review:`, `merge:`, `harness:`)",
+        "Every file in the layout is rendered, and only those: `org.md`, `groups/dev/group.md`, `repos.md`, `dispatchers.md`, `boards.md`, `onboarding/`, `stats/`",
+        "`org.md` carries `stats: on`, `stats-people: off` and no department knob (`merge:`, `tests:`, `harness-policy:`)",
+        "`provider-mode: subscription-only` carries a `# locked` comment, and the lock is explained as the one thing a group cannot answer differently",
+        "No `people.csv`, `decisions.md`, `rules/` or `templates/` is created",
         "The org repository is NOT created; the exact `gh repo create vegastack/vegafactory-control-room --private --add-readme` command is handed to the operator",
-        "No file carries a secret value \u2014 secret names only"
+        "No file carries a secret value — secret names only"
       ]
     },
     {
@@ -19,20 +21,20 @@
       "expected_output": "dev-setup runs in the repo reading the control room first, so every knob the group file answers is stated as inherited rather than asked; the run asks zero knob questions and appends the repo's row to `repos.md`.",
       "files": [],
       "assertions": [
-        "No question is asked about `review`, `merge`, `branch`, `labels`, `tests`, `changelog`, `release`, or the harness policy \u2014 each is stated as inherited from `groups/dev/group.md`",
+        "No question is asked about `merge`, `branch`, `labels`, `tests`, `changelog`, `gates`, or the harness policy — each is stated as inherited from `groups/dev/group.md`",
         "A row for `vegastack/billing` is appended to `repos.md` with its group and owner",
         "The repo's `.vegastack/dev.md` gains a `control-room:` knob naming the control room and the group"
       ]
     },
     {
       "id": 3,
-      "prompt": "Onboard priya into the org \u2014 she's joining the dev group, Slack @priya, in IST.",
-      "expected_output": "The new-teammate checklist is walked as the person's own actions, and a `people.csv` row is added \u2014 with `role` left for the operator to state rather than invented.",
+      "prompt": "Onboard priya into the org — she's joining the dev group and will own issues there.",
+      "expected_output": "The new-teammate checklist is walked as the person's own actions, and her login is added to the dev group's `operators:` line only on the operator's word.",
       "files": [],
       "assertions": [
-        "A `people.csv` row is proposed with the header's columns `login,name,role,slack,timezone,groups`",
-        "`role` is not invented or inferred from org membership; it is asked for as descriptive membership and is explicitly not used as people-level read authority",
-        "Cross-person reads are routed to the resolved administration capability and repository scope in `references/control-room.md`",
+        "Her login is added to `groups/dev/group.md`'s `operators:` line, and that line is named as the one place a person is recorded",
+        "The addition waits on the operator's word and is never inferred from org membership",
+        "No `people.csv` is created or asked for — the lean room has no people file",
         "The checklist steps (gh auth, harness install, `vegafactory skills add --group dev --global`, control-room access, Slack) are the person's own actions, and no credential is requested or read"
       ]
     },
@@ -54,7 +56,7 @@
       "files": [],
       "assertions": [
         "The installation id comes from gh api orgs/<org>/installations, never from a guess",
-        "Only names go into org.md \u2014 no App ID value, no PEM, no token",
+        "Only names go into org.md — no App ID value, no PEM, no token",
         "A 403 from the installations endpoint is reported as an owner-only endpoint and the line is left unconfirmed",
         "Creating the App, storing the key and installing it are named as the operator's own steps"
       ]
@@ -62,7 +64,7 @@
     {
       "id": 6,
       "prompt": "Create an org project board for the dev group and put our repos on it.",
-      "expected_output": "The reply hands over the operator-run command sequence \u2014 gh auth refresh -s project, gh project create, the Status field replacement, gh project link \u2014 plus the four Workflows-UI automations, records the boards.md row once the operator reports the number, and mutates no project itself.",
+      "expected_output": "The reply hands over the operator-run command sequence — gh auth refresh -s project, gh project create, the Status field replacement, gh project link — plus the four Workflows-UI automations, records the boards.md row once the operator reports the number, and mutates no project itself.",
       "files": [],
       "assertions": [
         "Every gh project command is presented as the operator's to run, because they need the project scope",
@@ -73,8 +75,8 @@
     },
     {
       "id": 7,
-      "prompt": "We're putting the always-on Mac mini into service \u2014 it'll run CI and the dispatcher. What do I need to do on it?",
-      "expected_output": "The reply walks onboarding/dispatcher-box.md: two macOS accounts so a CI job cannot read the dispatcher's tokens, the pinned toolchain, sleep and auto-login, the runner registration block run as the runner account, the org-admin group grant, and the reboot drill \u2014 handing every org-admin and on-box command to the operator rather than running it.",
+      "prompt": "We're putting the always-on Mac mini into service — it'll run CI and the dispatcher. What do I need to do on it?",
+      "expected_output": "The reply walks onboarding/dispatcher-box.md: two macOS accounts so a CI job cannot read the dispatcher's tokens, the pinned toolchain, sleep and auto-login, the runner registration block run as the runner account, the org-admin group grant, and the reboot drill — handing every org-admin and on-box command to the operator rather than running it.",
       "files": [],
       "assertions": [
         "The two-account split is stated with its reason: a CI job runs as the runner user and so cannot read the dispatcher user's gh, Claude and Codex credentials",
@@ -85,16 +87,14 @@
     },
     {
       "id": 8,
-      "prompt": "Our org.md says stats: on and stats-override: locked. One of my repos put `stats: off` in its .vegastack/dev.md because that team does not want to be measured. Is that repo being recorded?",
-      "expected_output": "Yes, it is. Under the organization lock, the repo's `stats: off` is diagnosed but cannot override the effective value. The reply says so plainly and names the two authorized remedies: the organization changes or removes the lock, or an organization admin grants an exact `stats` delegation for that group/repository and the delegated layer selects `off`. It points at `rules/stats-privacy.md` for the record boundary rather than inventing reassurance.",
+      "prompt": "Our org.md has `provider-mode: subscription-only   # locked`. One of my repos put `provider-mode: subscription-only` in its dev.md too, and another team wants to set something else there. What happens in each case?",
+      "expected_output": "The repeat is agreement and resolves fine; the different value is refused by name and the org's value stands. The reply names the one authorized remedy — the organization changes or removes the lock in `org.md` — and says the resolver reports the refusal rather than silently ignoring the line.",
       "files": [],
       "assertions": [
-        "States that the repo IS still being recorded",
-        "Names the organization lock as the reason the repo's line has no effect",
-        "Offers only changing or removing the organization lock, or granting an exact organization delegation before a group/repo `stats: off` can apply",
-        "Does not claim an undelegated group value overrides an organization lock",
-        "Does not suggest a machine-level or per-user opt-out, because none exists",
-        "Points at the privacy rule for what a record contains rather than reassuring in its own words"
+        "States that a lower layer setting the SAME value as a locked line is agreement, not a refusal",
+        "States that a different value is refused by name and the org's value is what the repo runs on",
+        "Names changing or removing the lock in `org.md` as the only remedy",
+        "Does not invent a delegation, an exception list or a per-machine opt-out — none exists"
       ]
     }
   ]

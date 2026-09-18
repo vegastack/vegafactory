@@ -1,6 +1,0 @@
-# Org CODEOWNERS pattern — copied into each repo's .github/CODEOWNERS at registration.
-# Owners are GitHub logins or teams from people.csv; every path needs one owner who can approve.
-
-*                       @{{org}}/{{default-team}}
-/.vegastack/            @{{architect}}
-/.github/workflows/     @{{architect}}

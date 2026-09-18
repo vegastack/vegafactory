@@ -63,17 +63,18 @@ Agents read issues from `.vegastack/.tmp/issues/<owner>__<repo>/<n>/` — `issue
 
 ## Control-room sync
 
-An organisation keeps its shared defaults in a control-room repository. Each machine keeps a copy at `~/.vegastack/control-room/<org>/`, and skills read that copy instead of the network.
+An organisation keeps its shared defaults in a control-room repository. Each machine keeps one copy per org at `~/.vegastack/control-room/<org>/`, and skills read that copy instead of the network. A repo's profile layers on it: `org.md`, then `groups/<g>/group.md`, then the repo's own `.vegastack/dev.md`, nearest wins — except a line `org.md` marks `# locked`.
 
 ```sh
-vegafactory sync            # refresh when the copy is older than sync-max-age
+vegafactory sync            # refresh when the copy was last fetched more than 5 minutes ago
 vegafactory sync --force    # refresh now
 vegafactory sync --org acme # first run in a repo whose dev.md has no control-room: line yet
 ```
 
 - `.vegastack/dev.md` names the control room: `control-room: <org>/<repo>#<group>@<sha7>`.
-- `sync` uses your existing `gh` login, never commits and never pushes.
-- Exit codes: **0** synced or already fresh · **1** the fetch failed and the old copy stands · **2** a refusal (a hand-edited copy, a symlinked path, an unreadable `~/.vegastack/factory.json`).
+- `sync` is one shallow `git fetch` through your existing `gh` login. It never commits and never pushes.
+- The copy mirrors the room's branch. A copy you have edited by hand refuses the refresh rather than being merged or discarded.
+- Exit codes: **0** fetched or already fresh · **2** a refusal (the fetch failed, a hand-edited copy, a wrong origin, a symlinked path, an unreadable `~/.vegastack/factory.json`). A refusal leaves the old copy standing.
 
 ## Usage numbers
 
