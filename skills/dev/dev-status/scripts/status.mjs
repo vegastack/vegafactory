@@ -6,7 +6,7 @@
 import { execFileSync } from 'node:child_process';
 import { existsSync, readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { join, resolve } from 'node:path';
+import { isAbsolute, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 const policyUrl = new URL('./effective-policy.mjs', import.meta.url);
 const { resolveState, readWorkflowStates } = await import(existsSync(policyUrl) ? policyUrl.href : new URL('../../dev-setup/scripts/effective-policy.mjs', import.meta.url).href);
@@ -195,8 +195,14 @@ export function controlRoomDrift({ devMdText, orgText, groupText, cloneSha }) {
 // the home is. The CLI's `home.ts` is the source of truth; these two lines are the only place it
 // is spelled out again, and `VEGAFACTORY_HOME` has to work here too or a test that points the CLI
 // somewhere harmless would still read the operator's real control room through this script.
-// Same precedence as the CLI's `home.ts`: the variable is the whole home when it is set.
-const factoryHome = (home) => process.env.VEGAFACTORY_HOME?.trim() || join(home ?? homedir(), '.vegafactory');
+// Same rule as the CLI's `home.ts`, including the refusal: the variable is the whole home when it
+// is set, and a relative one would name a different directory from every working directory.
+const factoryHome = (home) => {
+  const named = process.env.VEGAFACTORY_HOME?.trim();
+  if (!named) return join(home ?? homedir(), '.vegafactory');
+  if (!isAbsolute(named)) throw new Error(`VEGAFACTORY_HOME must be an absolute path; it is ${named}`);
+  return resolve(named);
+};
 
 function controlRoomState(devMdText, home) {
   const knob = controlRoomKnob(devMdText);

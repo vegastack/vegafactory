@@ -4,11 +4,11 @@ The project's story, newest first: what got built, why, and how it went — for 
 
 ## 19-09-2026 — One home, and a move it refuses to make ([#252](https://github.com/vegastack/vegafactory/issues/252))
 
-- **What:** Everything this product keeps about a machine moved to `~/.vegafactory/`, computed by one module instead of thirteen paths spelled out across seven files and two languages.
-- **Why:** `~/.vegastack/` is shared with other VegaStack tooling, so nothing here could safely prune it. Step 1 of [#251](https://github.com/vegastack/vegafactory/issues/251), and the step the rest is untestable without — there was no way to point the product at a harmless directory.
-- **How it went:** The first build migrated the old home automatically, and nine review rounds found a new way for it to lose or clobber something in every one: an override that moved the destination but not the source, locks belonging to four protocols it does not own, symlinks, permissions, crossing devices, and the absolute addresses inside the records. It migrated this machine's own home from a test, which is how that class of bug got proven rather than argued. So it stopped migrating: it now finds the old home, prints the exact `mv` lines, and refuses. That is what the register already said this release would do, and it deleted half the module.
-- **Changed:** new `home.ts` with a `VEGAFACTORY_HOME` override · thirteen join sites, including a containment check written separately from the path it guarded · `worktree-roots.json` became `worktrees.json` · the stats spool came out of a hidden `.tmp/` · the App key moved under `worker/` · README, the App and control-room references, the onboarding template and the dev-status fixtures.
-- **Decisions:** none new — it follows the recorded 18-09-2026 clean-break line rather than adding to it.
+- **What:** Everything this product keeps about a machine moved to `~/.vegafactory/`, computed by one module instead of thirteen paths spread over seven files and two languages.
+- **Why:** `~/.vegastack/` is shared with other VegaStack tooling, so nothing here could safely prune it. Step 1 of [#251](https://github.com/vegastack/vegafactory/issues/251), and the step the rest is untestable without.
+- **How it went:** The first build migrated the old home automatically, and ten review rounds found a new way for it to lose or clobber something in every one — an override that moved the destination but not the source, four lock protocols it does not own, symlinks, permissions, devices, interruption, and the absolute addresses inside the records. It migrated this machine's own home from a test, which proved the class rather than arguing it. So it stopped migrating: it finds the old home, prints the exact `mv` lines, and refuses. That is what the register already said this release would do, and it deleted half the module.
+- **Changed:** new `home.ts` with a `VEGAFACTORY_HOME` override · thirteen join sites, including a containment check written apart from the path it guarded · two renames · the App key under `worker/` · README, the App and control-room references, the onboarding template, the dev-status fixtures.
+- **Decisions:** none new — it follows the recorded clean-break line rather than adding to it.
 
 — approved by (kmanojkumar) · built by claude · branch chore/252-one-home-for-everything-vegafactory-stor
 

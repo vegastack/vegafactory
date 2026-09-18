@@ -136,19 +136,40 @@ export function olderHome(deps: {
   if ((deps.env ?? process.env)[HOME_VARIABLE]?.trim()) return quiet
   const to = factoryHome(deps)
   const from = legacyHome(deps)
-  if (deps.kind(from) !== 'directory') return quiet
+  const fromKind = deps.kind(from)
+  if (fromKind === 'absent') return quiet
+  // Silence here would be fail-open: a symlinked or unreadable older home is not an older home
+  // that holds nothing, it is one nobody can answer about.
+  if (fromKind !== 'directory') {
+    return { found: true, reason: `${from} is not an ordinary directory this account can read, so what this machine keeps there cannot be established — inspect it by hand`, commands: [] }
+  }
+  const toKind = deps.kind(to)
+  if (toKind !== 'absent' && toKind !== 'directory') {
+    return { found: true, reason: `${to} is not an ordinary directory, so this release has nowhere it can trust to read — inspect it by hand`, commands: [] }
+  }
 
-  const settled = deps.list(to)
-  // "Cannot be listed" is not "empty", but it is also not this command's problem: either way,
-  // something is there and this machine has already moved.
+  const settled = toKind === 'absent' ? [] : deps.list(to)
+  // "Cannot be listed" is not "empty", but either way something is there and this machine has
+  // already moved; what is left behind is the operator's to tidy.
   if (settled === null || settled.length > 0) return quiet
 
-  const waiting = RENAMES.filter((entry) => deps.kind(join(from, ...entry.from.split('/'))) !== 'absent')
+  const shapes = RENAMES.map((entry) => ({ entry, kind: deps.kind(join(from, ...entry.from.split('/'))) }))
+  const strange = shapes.filter((row) => row.kind === 'other' || row.kind === 'unreadable')
+  if (strange.length > 0) {
+    return {
+      found: true,
+      reason: `${strange.map((row) => join(from, ...row.entry.from.split('/'))).join(', ')} is not an ordinary file or directory, so it cannot be moved by a line anybody can check — inspect it by hand`,
+      commands: [],
+    }
+  }
+  const waiting = shapes.filter((row) => row.kind !== 'absent').map((row) => row.entry)
   const dead = DEAD_ENTRIES.filter((entry) => deps.kind(join(from, entry)) === 'directory')
   if (waiting.length === 0 && dead.length === 0) return quiet
 
   const needsWorker = waiting.some((entry) => entry.to.includes('/'))
-  const commands = [`mkdir -p ${quoted(to)}${needsWorker ? ` ${quoted(join(to, 'worker'))}` : ''}`]
+  // Owner-only: this directory holds the App key and the control-room clones, and a umask of 022
+  // would otherwise leave it readable by everybody on a shared machine.
+  const commands = [`mkdir -m 700 -p ${quoted(to)}${needsWorker ? ` ${quoted(join(to, 'worker'))}` : ''}`]
   for (const entry of waiting) commands.push(`mv ${quoted(join(from, ...entry.from.split('/')))} ${quoted(join(to, ...entry.to.split('/')))}`)
   for (const entry of dead) commands.push(`rm -rf ${quoted(join(from, entry))}`)
 
