@@ -1248,6 +1248,45 @@ describe('the command', () => {
     expect(second.join('\n')).toContain('#1 plan → done')
   })
 
+  // The same thing one state over, and the one the planning case does not reach: standing down
+  // posts a comment saying so, and `waiting-on-operator` looks for the operator's reply to be
+  // later than anything an agent wrote. A hand-back that counted as work would bury the very reply
+  // it was standing down without answering.
+  test('a stood-down follow-up still sees the reply it never answered', async () => {
+    const header = '| machine | operator | repos |\n|---|---|---|\n'
+    const listed = `${header}| ${HOST} | mk | o/r |\n`
+    const delist = controlRoomClone(listed)
+    gh.addIssue({ number: 1, labels: ['waiting-on-operator', 'medium'] })
+    gh.addComment(1, 'here is the answer you asked for', 'mk')
+    let releaseChild = () => {}
+    const blocked = new Promise<void>((resolve) => { releaseChild = resolve })
+    let passes = 0
+
+    const first = await runDispatch(['run'], {
+      cwd: root, home, host: HOST, env: {}, out: () => {}, runner: gh.runner, now: () => gh.clock,
+      runStep: (async (_step, context) => {
+        context.onStart?.(6161, 'claude')
+        await blocked
+        return { outcome: 'killed' as const, note: 'stopped', ms: 1 }
+      }) as RunStep,
+      stop: () => { releaseChild(); return true },
+      start: () => 'Fri Sep 18 09:00:00 2026',
+      sleep: async () => { if (++passes === 1) delist(header) },
+    })
+    expect(first).toBe(2)
+    // The hand-back comment is on the issue, and it is the latest thing written.
+    expect(gh.issues.get(1)!.comments.some((comment) => comment.body.includes('type=handback'))).toBe(true)
+
+    delist(listed)
+    const second: string[] = []
+    const code = await runDispatch(['run', '--once'], {
+      cwd: root, home, host: HOST, env: {}, out: (text) => second.push(text), runner: gh.runner, now: () => gh.clock,
+      runStep: (async () => ({ outcome: 'done' as const, note: '', ms: 1 })) as RunStep,
+    })
+    expect(code).toBe(0)
+    expect(second.join('\n')).toContain('#1 follow-up → done')
+  })
+
   // Two verifications per pass each fetched and merged, and only the first was acted on. A gate
   // asked twice and obeyed once is a gate that can be told "you are de-listed" and carry on.
   test('the roster is verified once a pass, and that one answer is the one acted on', async () => {

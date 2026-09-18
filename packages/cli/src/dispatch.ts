@@ -800,7 +800,11 @@ export function latestArtifact(snap: Snapshot, type: string, permission: Permiss
 
 // Comments that are bookkeeping, not an answer or a piece of work: they must not move the line an
 // operator's reply has to beat, or a session claiming an issue would swallow the reply forever.
-const BOOKKEEPING = new Set(['claim', 'release', 'ledger', 'ack'])
+// Comments a machine writes about itself rather than about the work. They must not count as work
+// done on the issue: `waiting-on-operator` looks for the operator's reply to be *later* than
+// anything an agent wrote, so a machine that stood down and said so would otherwise bury the very
+// reply it was standing down without answering, and no machine would ever pick the issue up.
+const BOOKKEEPING = new Set(['claim', 'release', 'ledger', 'ack', 'handback'])
 
 // The action this issue is waiting for, and the comment that asks for it. `trigger` is what makes
 // a run happen once: a comment already acted on asks for nothing more, and a state label already
