@@ -35,7 +35,9 @@ A group or a repo that sets a locked knob to a different value is refused, by na
 Two more rules that are not precedence:
 
 - `dispatch: local` is a machine-local opt-in. A repo says it for itself; an org or a group saying it changes nothing.
-- Harness stages inherit one at a time, so a repo may pin one stage and inherit the other five. A locked `harness-policy:` line holds all six.
+- Harness stages inherit one at a time, so a repo may pin one stage and inherit the other five. The lock is the whole line or nothing: a locked `harness-policy:` must name all six stages and then holds all six. A locked line naming fewer is refused, and so is a lock on a single stage line — a partial lock reads as "the rest are yours" while leaving the stages the org never chose unanswerable by anyone.
+
+An unreadable `control-room:` line is its own refusal. A bad value would otherwise leave the knob unset and read as "this repo names no control room", and a second line would quietly win over the first — both are how a profile ends up pointed at the wrong room, or at none, with nobody saying so.
 
 ## The knob line
 
@@ -62,9 +64,11 @@ Each record is one assistant turn — time, operator, repo, issue, harness, mode
 
 Each machine keeps one copy of the room per org, at `~/.vegastack/control-room/<org>`, and every skill reads that copy instead of the network. `vegafactory sync` refreshes it: one shallow `git fetch` with the operator's own `gh` login, then the copy is set to the fetched commit. It refreshes when the copy was last fetched more than five minutes ago, and `--force` refreshes now.
 
-The copy is a mirror, not a working branch. A copy with local changes refuses the refresh rather than being merged or discarded, and a copy whose origin is not the room the profile names is refused rather than rewritten. The path is fixed at one directory per org, checked to be canonical and free of symlinked components before anything reads or writes it — nothing in `~/.vegastack/factory.json` can move it somewhere those checks do not cover.
+The copy is a mirror, not a working branch. Before anything is fetched — and before the answer "already fresh" is given — the copy must still be the exact commit the last sync recorded, on the recorded branch and origin, with nothing changed. A local edit or a local commit refuses the refresh rather than being merged or discarded, because `checkout` would otherwise throw it away without a word, and the age window must not be able to hide it. One sync runs at a time per org, and if the record cannot be written the copy goes back to the commit it was on, so the checkout and the record never disagree.
 
-A refusal is never an outage: the previous copy stands and the profile still resolves from it, with the age of the last successful fetch reported alongside. A repo whose dev.md names no control room resolves from its own lines and the skill defaults, and needs no sync at all.
+Reading is just as careful, because everything `~/.vegastack/factory.json` records is a claim rather than a fact. The path must be the one directory this org's copy may live at, canonical and free of symlinked components; the recorded repository must be the one the profile names; and the working tree must still match the recorded commit, branch and origin, clean. `org.md` and `group.md` are then read out of that commit as regular blobs — a tracked symlink is a refusal, not a redirect to somewhere else on the machine. Another org's clone, a wrong-origin copy, the leftovers of a failed sync and a hand edit each fail one of those checks, and a copy that fails any of them is not policy.
+
+A refusal is never an outage: the previous copy stands and the profile still resolves from what is left, with the reason and the age of the last successful fetch reported alongside. A repo whose dev.md names no control room resolves from its own lines and the skill defaults, and needs no sync at all.
 
 ## Boards
 
