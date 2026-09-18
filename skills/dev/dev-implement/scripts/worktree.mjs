@@ -93,20 +93,24 @@ export function titleParts(title, types = DEFAULT_BRANCH_TYPES) {
   return { type, slug: slugify(hasPrefix ? rest.join(':') : text) };
 }
 
-// The type and slug of the one local branch named for an issue — what restore
-// needs when no --slug is given, read from git rather than GitHub because the
-// branch is the fact restore acts on. Several matches need --slug to pick one.
+// The type and slug of the one local branch that carries this issue — or, for
+// the branches that have no issue, this slug. Read from git rather than
+// GitHub, because the branch is the fact restore acts on: it is also where the
+// type comes from, so `restore` never has to be told one it could look up.
+// Several matches need --slug to pick one.
 export function branchPartsForIssue(repoRoot, issue, slug = null) {
   const listed = git(repoRoot, ['for-each-ref', '--format=%(refname:short)', 'refs/heads/']);
   if (!listed.ok) return { error: 'cannot list branches: ' + listed.out };
-  const lead = String(issue) + '-';
-  const named = listed.out.split('\n').filter((name) => name.slice(name.indexOf('/') + 1).startsWith(lead) && name.includes('/'));
+  const lead = issue === null || issue === undefined ? '' : String(issue) + '-';
+  const what = lead ? '#' + issue : lead + slug;
+  const tail = (name) => name.slice(name.indexOf('/') + 1);
+  const named = listed.out.split('\n').filter((name) => name.includes('/') && tail(name).startsWith(lead));
   // --slug is how the caller picks among several, so it narrows before the
   // ambiguity is declared rather than after it.
-  const matches = slug ? named.filter((name) => name.slice(name.indexOf('/') + 1) === lead + slug) : named;
-  if (matches.length === 0 && slug) return { error: 'no branch for #' + issue + ' named ' + lead + slug + (named.length ? ' (there is ' + named.join(', ') + ')' : '') };
-  if (matches.length === 0) return { error: 'no branch for #' + issue + ' — nothing to restore; create it instead' };
-  if (matches.length > 1) return { error: 'several branches match #' + issue + ' (' + matches.join(', ') + ') — pass --slug and --type' };
+  const matches = slug ? named.filter((name) => tail(name) === lead + slug) : named;
+  if (matches.length === 0 && slug) return { error: 'no branch named ' + lead + slug + (named.length ? ' (there is ' + named.join(', ') + ')' : '') };
+  if (matches.length === 0) return { error: 'no branch for ' + what + ' — nothing to restore; create it instead' };
+  if (matches.length > 1) return { error: 'several branches match ' + what + ' (' + matches.join(', ') + ') — pass --slug and --type' };
   const slash = matches[0].indexOf('/');
   return { type: matches[0].slice(0, slash), slug: matches[0].slice(slash + 1 + lead.length) };
 }
@@ -973,10 +977,10 @@ function runVerb(verb, flags) {
     // already carries the number — the branch is the fact it acts on — and
     // create reads the issue title. Either may still come up empty, and then
     // createWorktree refuses and names the types rather than guessing `feat`.
-    if (issue !== null && verb === 'restore') {
+    if (verb === 'restore' && (issue !== null || slug)) {
       if (!named.type || !slug) {
         const parts = branchPartsForIssue(repoRoot, issue, slug);
-        if (parts.error) return { blocks: [at('#' + issue, parts.error)], warns: [] };
+        if (parts.error) return { blocks: [at(issue === null ? slug : '#' + issue, parts.error)], warns: [] };
         named = { type: named.type || parts.type, slug: slug || parts.slug };
       }
     } else if (issue !== null && (!slug || !named.type)) {

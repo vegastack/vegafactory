@@ -44,7 +44,7 @@ The angles, in order — product (who, observable outcome, in/out of scope, slic
 - One issue = one outcome that fits one agent session, sliced vertically; blockers use native dependencies, phases milestones, parents native sub-issues.
 - Deliberately deferred work ("someday, not now") lives in the parent's out-of-scope section, because an icebox issue clutters the tracker; a tracking issue exists only on the operator's ask.
 - **Epics:** a multi-deliverable feature gets a parent whose body is a map, because a parent that is also work gets claimed — `Destination` (the one or two lines every session orients to) · `Decisions so far` (one-line gists linking closed children) · `Not clear yet` (in-scope questions you cannot yet phrase sharply — the test is phrasing, not answering; don't pre-slice fog) · `Out of scope` (the tempting adjacent work, named). Each child is sized independently. Only children get `queued`, because the epic is the map.
-- Titles carry the type prefix (dev.md `branch:` type list + `research:`) and the native issue type where the org has them; issue, branch, and PR agree.
+- Titles carry the type prefix (dev.md's `branch:` type list, plus `research:` for an inquiry) and the native issue type where the org has them; issue and PR titles agree. A branch only ever uses a type the knob lists, so a `research:` issue that does write code takes a listed one — `worktree create` refuses rather than picking.
 
 ## The brief
 
