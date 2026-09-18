@@ -322,9 +322,17 @@ export const dispatchDir = (root: string) => join(root, '.vegastack', '.tmp', 'd
 const runsPath = (root: string) => join(dispatchDir(root), 'runs.jsonl')
 const actedPath = (root: string) => join(dispatchDir(root), 'acted.json')
 
+// The record is a working note on an always-on machine, so it is trimmed to the last RUNS_KEPT
+// rather than grown forever; the control room's statistics are where runs are kept for good.
+export const RUNS_KEPT = 500
+
 export function recordRun(root: string, record: RunRecord) {
   mkdirSync(dispatchDir(root), { recursive: true })
   appendFileSync(runsPath(root), JSON.stringify(record) + '\n')
+  try {
+    const lines = readFileSync(runsPath(root), 'utf8').split('\n').filter(Boolean)
+    if (lines.length > RUNS_KEPT * 2) replaceFile(runsPath(root), lines.slice(-RUNS_KEPT).join('\n') + '\n')
+  } catch { /* the record is a note; failing to trim it is not worth a failed run */ }
 }
 
 export function readRuns(root: string, limit = 20): RunRecord[] {

@@ -8,7 +8,7 @@ import { claimBody, claimLine } from '../src/claim.ts'
 import {
   APP_ID, STEP_TIMEOUT_MS, TOKEN_MARGIN_MS, agentArgs, appIdentity, appJwt, appKeyPath, board, decide, defaultRunStep, dispatchDir, disjointSiblings,
   drain, filesFromParent, harnessAnswers, hitLimit, hooksWired, listedHere, mintToken, overlaps, parseDispatchArgs,
-  parseDispatchers, poll, readActed, readRuns, readiness, resetAt, runDispatch, schedule, serviceCommands, stagePolicy,
+  parseDispatchers, poll, readActed, readRuns, readiness, recordRun, resetAt, RUNS_KEPT, runDispatch, schedule, serviceCommands, stagePolicy,
   standDown, stepPrompt, tail, unitPath, unitText, unsafeForParallel,
   type Candidate, type Fetch, type Inflight, type PollDeps, type Probe, type RunStep, type StepResult,
 } from '../src/dispatch.ts'
@@ -550,8 +550,16 @@ describe('the step a run makes', () => {
     expect(resetAt('see 2099-01-01T00:00:00Z', 1000)).toBe(1000 + 24 * 3_600_000)
   })
 
-  test('a run\'s output is bounded', () => {
+  test('a run\'s output is bounded, and so is the record of runs', () => {
     expect(tail('a\n'.repeat(1000) + 'last').length).toBeLessThanOrEqual(400)
+    for (let i = 0; i < RUNS_KEPT * 2 + 5; i++) {
+      recordRun(root, { at: new Date(i).toISOString(), issue: i, action: 'plan', outcome: 'done', ms: 1, machine: HOST, note: '' })
+    }
+    // Trimmed back to the last RUNS_KEPT each time it doubles, so the file never grows unbounded
+    // and the newest run is always there.
+    const kept = readRuns(root, RUNS_KEPT * 4)
+    expect(kept.length).toBeLessThanOrEqual(RUNS_KEPT * 2)
+    expect(kept.at(-1)!.issue).toBe(RUNS_KEPT * 2 + 4)
   })
 
   test('a step past the limit is killed, and its own output is never the whole record', async () => {
