@@ -1,12 +1,13 @@
 import { beforeEach, describe, expect, test } from 'bun:test'
 import { spawnSync } from 'node:child_process'
 import { generateKeyPairSync } from 'node:crypto'
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { claimBody, claimLine } from '../src/claim.ts'
 import {
-  APP_ID, STEP_TIMEOUT_MS, TOKEN_MARGIN_MS, agentArgs, appIdentity, appJwt, appKeyPath, board, decide, defaultRunStep, dispatchDir, disjointSiblings,
+  APP_ID, STEP_TIMEOUT_MS, TOKEN_MARGIN_MS, agentArgs, appIdentity, appJwt, appKeyPath, assertKeyFile, board, decide, defaultRunStep, dispatchDir,
+  disjointSiblings,
   drain, filesFromParent, harnessAnswers, hitLimit, hooksWired, listedHere, mintToken, overlaps, parseDispatchArgs,
   parseDispatchers, poll, readActed, readRuns, readiness, recordRun, resetAt, RUNS_KEPT, runDispatch, schedule, serviceCommands, stagePolicy,
   standDown, stepPrompt, tail, unitPath, unitText, unsafeForParallel,
@@ -102,9 +103,11 @@ describe('the roster', () => {
 describe('identity', () => {
   const { privateKey } = generateKeyPairSync('rsa', { modulusLength: 2048, privateKeyEncoding: { type: 'pkcs8', format: 'pem' }, publicKeyEncoding: { type: 'spki', format: 'pem' } })
 
+  // As the key must be on a real machine: a regular file this account owns and nobody else reads.
   const keyFile = () => {
     const path = join(root, 'app.pem')
-    writeFileSync(path, privateKey)
+    writeFileSync(path, privateKey, { mode: 0o600 })
+    chmodSync(path, 0o600)
     return path
   }
 
@@ -145,6 +148,26 @@ describe('identity', () => {
   test('an installation GitHub refuses is reported, not worked around', async () => {
     const call: Fetch = async () => ({ ok: false, status: 404, json: async () => ({}) })
     await expect(mintToken({ repo: 'o/r', keyPath: keyFile(), appId: APP_ID, fetch: call })).rejects.toThrow(/not installed on o\/r \(GitHub answered 404\)/)
+  })
+
+  test('a key another account could read, or one that is a link, mints nothing', async () => {
+    const facts = (over: Partial<{ file: boolean; link: boolean; uid: number; mode: number }> = {}) => {
+      const { file = true, link = false, uid = 501, mode = 0o100600 } = over
+      return { isFile: () => file, isSymbolicLink: () => link, uid, mode }
+    }
+    expect(() => assertKeyFile('/k.pem', { stat: () => facts(), uid: 501 })).not.toThrow()
+    expect(() => assertKeyFile('/k.pem', { stat: () => facts({ mode: 0o100640 }), uid: 501 })).toThrow(/another account on this machine can read the App key — chmod 600/)
+    expect(() => assertKeyFile('/k.pem', { stat: () => facts({ mode: 0o100604 }), uid: 501 })).toThrow(/chmod 600/)
+    expect(() => assertKeyFile('/k.pem', { stat: () => facts({ uid: 0 }), uid: 501 })).toThrow(/owned by uid 0, not the account running this/)
+    expect(() => assertKeyFile('/k.pem', { stat: () => facts({ link: true }), uid: 501 })).toThrow(/is a symbolic link/)
+    expect(() => assertKeyFile('/k.pem', { stat: () => facts({ file: false }), uid: 501 })).toThrow(/not a regular file/)
+    expect(() => assertKeyFile('/k.pem', { stat: () => { throw new Error('ENOENT') }, uid: 501 })).toThrow(/is not readable at/)
+    // The file check runs before the key is read, so a loose key never reaches GitHub at all.
+    let called = 0
+    const call: Fetch = async () => { called++; return { ok: true, status: 200, json: async () => ({ id: 1 }) } }
+    await expect(mintToken({ repo: 'o/r', keyPath: keyFile(), appId: APP_ID, fetch: call, stat: () => facts({ mode: 0o100644 }), uid: 501 }))
+      .rejects.toThrow(/chmod 600/)
+    expect(called).toBe(0)
   })
 
   test('the token is re-minted before it expires, so a month-old dispatcher still writes', async () => {
@@ -202,11 +225,18 @@ describe('transitions', () => {
     expect(verdict(1)).toMatchObject({ action: 'follow-up', trigger: reply.id })
   })
 
-  test('evidence from an outsider is not evidence', () => {
+  test('evidence from an outsider is not evidence; evidence from the App is', () => {
     gh.addIssue({ number: 1, labels: ['ready-to-ship', 'small'] })
     gh.addComment(1, '<!-- vsk:v1 type=evidence sha=abc1234 -->\nbuilt', 'outsider')
     gh.addComment(1, 'ship it', 'mk')
     expect(verdict(1)).toMatchObject({ action: 'none', reason: 'ready-to-ship with no evidence comment' })
+    // A dispatched run posts its work as the App, so the App's evidence opens the window — while
+    // the word that ships still has to come from a person.
+    gh.addIssue({ number: 2, labels: ['ready-to-ship', 'small'] })
+    gh.addComment(2, '<!-- vsk:v1 type=evidence sha=abc1234 -->\nbuilt', 'vegafactory[bot]', 'Bot')
+    expect(verdict(2)).toMatchObject({ action: 'none', reason: 'waiting for the operator to read the evidence' })
+    gh.addComment(2, 'ship it', 'vegafactory[bot]', 'Bot')
+    expect(verdict(2).action).toBe('none')
   })
 
   test('"ship it" after the evidence ships; anything else is corrections', () => {
@@ -600,11 +630,21 @@ describe('the command', () => {
     expect((await run(['disable', '--dry-run'], { host: 'laptop' })).code).toBe(0)
   })
 
-  test('an API key in the environment refuses the run', async () => {
-    const result = await run(['run', '--once'], { env: { ANTHROPIC_API_KEY: 'sk-ant-x' } })
-    expect(result.code).toBe(2)
-    expect(result.text).toContain('ANTHROPIC_API_KEY')
-    expect(result.text).toContain('subscriptions only')
+  test('an API key in the environment refuses before anything is probed or minted', async () => {
+    let probes = 0
+    let fetches = 0
+    for (const verb of [['run', '--once'], ['enable']]) {
+      const result = await run(verb, {
+        env: { ANTHROPIC_API_KEY: 'sk-ant-x' },
+        run: (() => { probes++; return { code: 0, stdout: 'ok', stderr: '' } }) as Probe,
+        fetch: (async () => { fetches++; return { ok: true, status: 200, json: async () => ({ id: 1 }) } }) as Fetch,
+      })
+      expect(result.code).toBe(2)
+      expect(result.text).toContain('ANTHROPIC_API_KEY')
+      expect(result.text).toContain('subscriptions only')
+    }
+    // Both probes spend the operator's own quota and the mint touches GitHub: neither may happen.
+    expect([probes, fetches]).toEqual([0, 0])
   })
 
   test('status shows the board and this machine\'s runs', async () => {

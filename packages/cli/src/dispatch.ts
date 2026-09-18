@@ -7,7 +7,7 @@
 // own subscription, and an API key in the environment refuses the whole command.
 import { spawn, spawnSync } from 'node:child_process'
 import { createSign } from 'node:crypto'
-import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync } from 'node:fs'
+import { appendFileSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync } from 'node:fs'
 import { homedir, hostname, userInfo } from 'node:os'
 import { join } from 'node:path'
 import { APP_ACTOR, holderOf, machineName, release, trustedHolders } from './claim.ts'
@@ -144,12 +144,30 @@ export type Fetch = (url: string, init: { method: string; headers: Record<string
 
 export interface AppToken { token: string; expiresAt: number }
 
+export interface KeyFacts { isFile: () => boolean; isSymbolicLink: () => boolean; uid: number; mode: number }
+export type KeyStat = (path: string) => KeyFacts
+
+// The App key is the factory's one long-lived secret, so the file itself is part of the check: a
+// real file this account owns, readable by nobody else. A link is refused outright — what it
+// points at can be swapped after the check — and so is a mode any other account could read.
+export function assertKeyFile(path: string, { stat = lstatSync as unknown as KeyStat, uid = process.getuid?.() ?? -1 } = {}) {
+  let facts: KeyFacts
+  try { facts = stat(path) } catch { throw new Error(missingKeyMessage(path)) }
+  if (facts.isSymbolicLink()) throw new Error(`${path} is a symbolic link — the App key must be a real file, so what it points at cannot be swapped after this check`)
+  if (!facts.isFile()) throw new Error(`${path} is not a regular file — the App key must be a real file`)
+  if (uid >= 0 && facts.uid !== uid) throw new Error(`${path} is owned by uid ${facts.uid}, not the account running this (uid ${uid}) — the App key belongs to the dispatcher account`)
+  if (facts.mode & 0o077) throw new Error(`${path} is mode ${(facts.mode & 0o777).toString(8)}, so another account on this machine can read the App key — chmod 600 it`)
+}
+
 // An installation token for this one repository: a JWT names the App, the installation is read
 // from the repository itself, and the token is narrowed to that repository. It lives an hour and
 // stays in memory — never written down, never printed, never put on a command line.
-export async function mintToken(input: { repo: string; keyPath: string; appId: string; fetch?: Fetch; now?: number }): Promise<AppToken> {
+export async function mintToken(input: { repo: string; keyPath: string; appId: string; fetch?: Fetch; now?: number; stat?: KeyStat; uid?: number }): Promise<AppToken> {
   const { repo, keyPath, appId, fetch: call = globalThis.fetch as unknown as Fetch, now = Date.now() } = input
   assertRepo(repo)
+  // Re-checked on every mint, not once at startup: a key that becomes group-readable or is
+  // replaced by a link to someone else's file stops minting from the next token on.
+  assertKeyFile(keyPath, { stat: input.stat, uid: input.uid })
   let pem: string
   try { pem = readFileSync(keyPath, 'utf8') } catch { throw new Error(missingKeyMessage(keyPath)) }
   if (!/BEGIN (?:RSA )?PRIVATE KEY/.test(pem)) throw new Error(`${keyPath} is not a PEM private key — download the App's key again`)
@@ -382,22 +400,31 @@ const SHIP_IT = /(^|[^\w])ship it([^\w]|$)/i
 const STOP = /^\s*(?:@?[\w-]+[,:]?\s+)?stop\s*(?:$|[\n—–:,.!?])/i
 const WRITE = new Set(['admin', 'maintain', 'write'])
 
-// Written by someone with write access to the repository. Everything this command acts on is read
-// through it: an outsider's comment is text on a page, never a plan, evidence or an instruction.
-const fromInsider = (permission: PermissionLookup) => (entry: CommentEntry) =>
+// Two different questions, and the difference is the whole trust model.
+//
+// *Who may approve* — an ack, a correction, a stop, a "ship it" — is always a person with write
+// access. No bot, and no App, stands in for a human's word.
+//
+// *Who may write the work* is wider: a plan, an evidence comment or the status comment may come
+// from a person with write access or from the factory's own App, because a dispatched run's
+// artifacts are posted by the machine, not by a person sitting behind it.
+const fromPerson = (permission: PermissionLookup) => (entry: CommentEntry) =>
   entry.authorType !== 'Bot' && !!entry.author && WRITE.has(permission(entry.author))
+const fromFactory = (permission: PermissionLookup) => (entry: CommentEntry) =>
+  entry.author === APP_ACTOR || fromPerson(permission)(entry)
 
 // The operator's own comments: a person with write access, in the order they were written.
 function operatorComments(snap: Snapshot, permission: PermissionLookup) {
   return Object.values(snap.state.comments)
-    .filter((entry) => entry.type === 'human' && fromInsider(permission)(entry))
+    .filter((entry) => entry.type === 'human' && fromPerson(permission)(entry))
     .sort((a, b) => a.createdAt.localeCompare(b.createdAt) || a.id - b.id)
 }
 
-// The newest comment of a type, from someone with write access.
-function latestFromInsider(snap: Snapshot, type: string, permission: PermissionLookup): CommentEntry | null {
+// The newest work artifact of a type: written by a person with write access, or by the App on a
+// dispatched run's behalf. An outsider's comment is text on a page and never either.
+export function latestArtifact(snap: Snapshot, type: string, permission: PermissionLookup): CommentEntry | null {
   return Object.values(snap.state.comments)
-    .filter((entry) => entry.type === type && fromInsider(permission)(entry))
+    .filter((entry) => entry.type === type && fromFactory(permission)(entry))
     .sort((a, b) => a.createdAt.localeCompare(b.createdAt) || a.id - b.id).at(-1) ?? null
 }
 
@@ -457,7 +484,7 @@ function transitionOf(snap: Snapshot, issue: IssueFacts, state: State, comments:
       : nothing('waiting on the operator')
   }
   if (state === 'ready-to-ship') {
-    const evidence = latestFromInsider(snap, 'evidence', permission)
+    const evidence = latestArtifact(snap, 'evidence', permission)
     if (!evidence) return nothing('ready-to-ship with no evidence comment')
     const word = comments.filter((entry) => entry.createdAt > (evidence.changedAt || evidence.updatedAt)).at(-1)
     if (!word) return nothing('waiting for the operator to read the evidence')
@@ -784,7 +811,7 @@ function parentPlan(root: string, repo: string, parent: number, runner: GhRunner
   try {
     syncIssue({ root, repo, number: parent, runner })
     const snap = snapshot(cacheDir(root, repo, parent))
-    const plan = latestFromInsider(snap, 'plan', permission)
+    const plan = latestArtifact(snap, 'plan', permission)
     return plan ? snap.body(plan) : null
   } catch { return null }
 }
@@ -905,8 +932,21 @@ export async function runDispatch(argv: string[], deps: CliDeps = {}): Promise<n
   const keyPath = appKeyPath(env, home)
   const print = (value: unknown, text: string) => out(args.json ? JSON.stringify(value, null, 2) : text)
 
-  // The gate, before anything else: an unlisted machine does nothing but say so. `disable` is the
-  // exception, so a machine taken off the roster can still take its own unit down.
+  // The first gate, before the roster and before anything is spawned or minted: a verb that can
+  // start or probe an agent refuses outright while a variable that would bill it is set. The check
+  // costs nothing, and running it later would already have spent paid credit on the probes.
+  const STARTS_AGENTS = ['enable', 'run']
+  if (STARTS_AGENTS.includes(args.verb)) {
+    const billing = billingVariables(env)
+    if (billing.length) {
+      const [is, them] = billing.length === 1 ? ['is', 'it'] : ['are', 'them']
+      print({ ok: false, billing }, `refused: ${billing.join(', ')} ${is} set — VegaFactory runs Claude Code and Codex on their subscriptions only; unset ${them} and retry`)
+      return 2
+    }
+  }
+
+  // The second gate: an unlisted machine does nothing but say so. `disable` is the exception, so a
+  // machine taken off the roster can still take its own unit down.
   if (!listing.ok && args.verb !== 'disable') {
     print({ ok: false, machine, reason: listing.reason }, `refused: ${listing.reason}`)
     return 2
@@ -992,12 +1032,6 @@ export async function runDispatch(argv: string[], deps: CliDeps = {}): Promise<n
       return 0
     }
     case 'run': {
-      const billing = billingVariables(env)
-      if (billing.length) {
-        const [is, them] = billing.length === 1 ? ['is', 'it'] : ['are', 'them']
-        print({ ok: false, billing }, `refused: ${billing.join(', ')} ${is} set — VegaFactory runs Claude Code and Codex on their subscriptions only; unset ${them} and retry`)
-        return 2
-      }
       let devMd = ''
       try { devMd = readFileSync(join(root, '.vegastack', 'dev.md'), 'utf8') } catch { /* no profile, so the tools' own defaults */ }
       const identity = deps.runner ? null : appIdentity({ repo, keyPath, appId: appIdOf(env), fetch: deps.fetch })
