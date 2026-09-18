@@ -57,14 +57,12 @@ Line prefixes: `auto:` (agent just does it) · `ask:` (operator's word first) ·
 
 ## Environments
 
-- npm registry via tag-triggered trusted publishing — routine releases use hosted OIDC and no local credential; the one-time creation of the two renamed packages at `0.19.0` was an operator-authenticated local bootstrap
-- GitHub Actions runs CI (pull requests and the merge queue), the tag-triggered release, and the board mirror
-- Harnesses on this box (03-09-2026): `claude` 2.1.247 and `codex` 0.149.1. Beware that `codex login status` prints "Logged in" on a revoked refresh token, so it is not an auth guard; only a real run is
+- Pull-request and merge-queue CI is one GitHub-hosted `ubuntu-latest` job, `check (node 24)`: fast checks and affected tests on a PR, and on the queue the full suite, the build, the pack smoke and the skill scan — everything once, on main plus the PR. Fork workflows need a maintainer's approval
+- main is protected: PRs only, squash merges only, no force-push or deletion, linear history, conversation resolution, admins included; `check (node 24)` is the one required check, not strict, because the queue tests main + the PR instead
+- The tag-triggered Release workflow is GitHub-hosted too: it packs, smokes the tarball, publishes to npm with trusted publishing and provenance — no token anywhere — waits for the registry, smokes the published version and writes the GitHub release. `vegafactory ship release <n>` creates the tag that starts it; raw `git tag` and tag pushes still ask
+- The Mac mini org runners (`vsk-runners-mac-mini`) serve only trusted jobs — today the board mirror. Self-hosted runners reuse one work directory, so a workflow that sparse-checks-out must check out into its own `path:`
+- Harnesses on this box (18-09-2026): `claude` 2.1.263 and `codex` 0.153.4. Beware that `codex login status` prints "Logged in" on a revoked refresh token, so it is not an auth guard; only a real run is
 - A brief whose acceptance needs a live `claude -p` or `codex exec` proof checks both CLIs are authenticated first (`claude -p 'say ok'`, `codex exec --sandbox read-only -a never 'say ok'`) — an expired session turns that acceptance into a parked finding, as it did on #94
-- main is protected: PRs only, squash merges only, no force-push or deletion, linear history, conversation resolution, admins included; required check `check (node 24)` (not strict — the merge queue tests main + the PR instead)
-- Pull request and merge-queue CI runs only on GitHub-hosted `ubuntu-latest`; fork workflows need a maintainer's approval. The Mac mini org runners (`vsk-runners-mac-mini`) serve only trusted jobs such as the board mirror
-- Self-hosted runners reuse one work directory: a workflow that sparse-checks-out must check out into its own `path:`
-- Pushing a version tag publishes to npm; the ship guard always asks before any tag push
 
 ## Decisions
 
