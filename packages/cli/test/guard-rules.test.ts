@@ -319,6 +319,25 @@ describe('decisions', () => {
     }
   })
 
+  test('vegafactory ship release passes, while raw tagging and anything it cannot read still asks', () => {
+    for (const command of [
+      'vegafactory ship release 223', 'vegafactory ship release 223 --dry-run --json', 'vegafactory ship release 223 --version 0.20.0',
+      'bunx @vegastack/vegafactory ship release 223 --repo vegastack/vegafactory',
+    ]) {
+      expect(decide(command), command).toEqual({ decision: 'allow', reason: null, rule: 'ship-release' })
+    }
+    for (const command of [
+      'git tag v0.20.0', 'git push origin v0.20.0', 'vegafactory ship release $N', 'vegafactory ship $VERB 223',
+      'vegafactory ship release', 'vegafactory ship release --all', 'vegafactory ship release 223 --no-verify',
+      'vegafactory ship release 223 && git push origin main',
+    ]) {
+      expect(decide(command).decision, command).toBe('ask')
+    }
+    // The operator can still make it ask, by naming it on an `ask:` line of their Ship section.
+    expect(decide('vegafactory ship release 223', { ...policy, shipAsk: ['vegafactory ship release'] }).rule).toBe('ship-ask')
+    expect(decide('vegafactory ship check 223').decision).toBe('allow')
+  })
+
   test('mergeTarget reads the PR argument past the flags', () => {
     expect(mergeTarget(['gh', 'pr', 'merge', '--squash', '12'])).toBe('12')
     expect(mergeTarget(['gh', 'pr', 'merge', '-b', 'body text', 'feat/1-x'])).toBe('feat/1-x')

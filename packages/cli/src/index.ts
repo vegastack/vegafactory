@@ -69,6 +69,7 @@ Review (the other tool reviews read-only; this command posts the comment):
 
 Shipping and hooks:
   ship check <n> [--json]                may issue n merge? (ship it recorded, branch pushed, PR green)
+  ship release <n> [--dry-run]           tag the merged release on issue n's "ship it" (never publishes)
   hook <event> --harness claude|codex    the harness hooks: guard, heartbeat, WIP checkpoints ("hook --help")
 
 Learning (the Stop hook asks for these; a dev.md line lands only on the operator's yes):

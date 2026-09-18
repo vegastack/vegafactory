@@ -655,6 +655,29 @@ function worktreeVerb(words: string[]): Decision | null {
   return null
 }
 
+// `vegafactory ship release <n>`: the one verb that may tag. It re-reads the issue's recorded
+// "ship it" itself, so the word is still what authorises the tag — the guard only has to be sure
+// this really is that command, spelled plainly, with an issue number and nothing else on it.
+const RELEASE_FLAGS = new Set(['--json', '--dry-run'])
+const RELEASE_FLAGS_WITH_VALUE = new Set(['--repo', '--version'])
+function shipRelease(words: string[]): Decision | null {
+  const at = words.findIndex((word, index) => index > 0 && word === 'ship')
+  if (words[0] === 'git' || words[0] === 'gh' || at === -1) return null
+  const verb = words[at + 1]
+  if (expanded(verb)) return ask(`a ship command built by shell expansion ${WORD}`, 'unclassified')
+  if (verb !== 'release') return null
+  const args = words.slice(at + 2)
+  const unreadable = ask(`a \`ship release\` the guard cannot read ${WORD}`, 'unclassified')
+  if (args.some(expanded) || !/^\d+$/.test(args[0] ?? '')) return unreadable
+  for (let i = 1; i < args.length; i += 1) {
+    const arg = args[i]!
+    if (RELEASE_FLAGS.has(arg)) continue
+    if (RELEASE_FLAGS_WITH_VALUE.has(arg)) { i += 1; continue }
+    return unreadable
+  }
+  return { decision: 'allow', reason: null, rule: 'ship-release' }
+}
+
 function classifyResolved(segment: Segment, words: string[], policy: Policy, mergeCheck?: MergeCheck, riskyConfig = false): Decision {
   if (words.length === 0) return ALLOW
   const risk = expansionRisk(words) ?? issueVerb(words) ?? worktreeVerb(words)
@@ -738,6 +761,9 @@ function classifyResolved(segment: Segment, words: string[], policy: Policy, mer
   if (words.some((word) => /^publish(:|$)/.test(word)) || words.some((word, index) => word === 'release' && words[index + 1] === 'create')) {
     return ask(`this looks like publishing, which ${WORD}`, 'unclassified')
   }
+  // Last, so a dev.md `ask:` line naming it still wins.
+  const release = shipRelease(words)
+  if (release) return release
   return ALLOW
 }
 

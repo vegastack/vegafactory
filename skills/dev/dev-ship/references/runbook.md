@@ -14,9 +14,9 @@ A failing step stops the runbook at that step: report what failed and what remai
 
 The issue's worktree is removed before the runbook starts, precisely because of this section: the runbook can stop here, and a cleanup queued behind a stop never happens.
 
-An `auto:` line that opens or merges a **release** PR, or pushes a tag, is the one `auto:` step that still waits. The recorded "ship it" binds to an issue and its branch, and the guard matches a merge to that branch; a generated release branch has no issue, so there is no recorded word for the guard to find and it asks. Run the runbook up to that point, report what landed, and hand the release PR's merge and the tag push to the operator. That is the honest state, not a step skipped to be helpful — and it is what the operator's `## Ship` section already describes when its tag line is an `ask:`.
+An `auto:` line that opens or **merges** a release PR is the one `auto:` step that still waits. The recorded "ship it" binds to an issue and its branch, and the guard matches a merge to that branch; a generated release branch has no issue, so there is no recorded word for the guard to find and it asks. Run the runbook up to that point, report what landed, and hand the release PR's merge to the operator. That is the honest state, not a step skipped to be helpful.
 
-#223 adds a `vegafactory ship release` verb that verifies the recorded word itself and performs the tag push, so the guard can allow that one verb instead of raw tagging. Until it lands, say which steps stopped and why.
+The tag is not part of that exception: `vegafactory ship release <n>` re-reads issue n's own recorded "ship it", checks that the version and its changelog entry agree, requires the default branch checked out, clean and level with origin, and then creates and pushes `v<version>` itself. The guard allows that one verb, spelled plainly with the issue number, while raw `git tag` and tag pushes keep asking. It never publishes — the tag-triggered workflow does — and it refuses (exit 2) rather than tagging anything it cannot prove, so a refusal leaves the repository as it was.
 
 ## Release batching (`release: on-request`)
 
