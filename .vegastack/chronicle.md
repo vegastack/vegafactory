@@ -2,6 +2,16 @@
 
 The project's story, newest first: what got built, why, and how it went — for the operator's future recall. Format home: the dev-chronicle skill.
 
+## 18-09-2026 — The factory wrote itself down ([#223](https://github.com/vegastack/vegafactory/issues/223))
+
+- **What:** The docs caught up with the lean rebuild. The README is a third shorter and starts at `init`, with a glossary that finally names the vocabulary — states, the two words, claim, ledger, cycle and round, control room, dispatcher. CONTRIBUTING says how work actually moves here, and dev.md's Ship runbook and Environments now describe what `ship check` and the guard really do. New verb: `vegafactory ship release <n>`, which re-reads an issue's recorded "ship it", checks the version against its changelog entry, and pushes the tag itself.
+- **Why:** Nine phases changed the machinery and left the prose describing the old one — a README whose quick start predated `init`, a runbook whose tag step could not be run by anyone, and no single page that told a newcomer what a claim or a cycle was.
+- **How it went:** Straightforward, except for the tag. P10's review had called it out: the promised one-word landing stopped at a tag push nobody could make, because a generated release branch has no issue and the guard has no word to match. Giving the CLI the verb — and the guard one narrow allow rule, spelled plainly with an issue number and nothing else on it — closes that without loosening raw `git tag`.
+- **Changed:** README rewritten around `init`, the loop and a glossary · AGENTS.md and CONTRIBUTING.md refreshed for the issue cache, claims, the one hook command, the guard, cross-tool review, stats, learning and the merge queue · dev.md: `merge: squash`, the fixed label set, a one-liner Ship runbook, a rewritten Environments, refreshed harness versions · `vegafactory ship release` with its guard rule and tests · ten decision lines.
+- **Decisions:** ten — the clean break at 0.20.0, the two operator words, the issue cache as the read path, claims and heartbeats, log-based stats with a static dashboard, sibling-only parallel work, resume-based cross-tool review behind the ship gate, the skills-refresh sweep, the lean control room, and three test layers behind the merge queue.
+
+— approved by operator (kmanojkumar) · built by claude · branch chore/223-p11-docs-dev-md-release-0-20-0
+
 ## 16-09-2026 — Trusted publishing carries latest itself ([#209](https://github.com/vegastack/vegafactory/issues/209))
 
 - **What:** The retained dashboard and CLI publish directly as npm latest through tokenless OIDC, with dashboard first and the public CLI entrypoint last.
