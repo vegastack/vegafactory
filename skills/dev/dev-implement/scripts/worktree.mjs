@@ -35,10 +35,17 @@ const DISCARD = 'ignore';
 const at = (where, message) => where + ': ' + message;
 
 // An issue title comes from GitHub and reaches an operator's terminal through
-// a block message. Control characters in it could move the cursor, repaint the
-// line or hide what follows, so only printable characters survive, and a long
-// title is cut rather than allowed to fill the screen.
-const printable = (text) => String(text ?? '').replace(/[\u0000-\u001f\u007f-\u009f]+/g, ' ').trim().slice(0, 120);
+// a block message. Two kinds of character in it are dangerous and neither is
+// visible: the C0/C1 controls, which move the cursor and repaint the line, and
+// the Unicode format controls — the bidirectional overrides and isolates most
+// of all — which reorder what is printed, so a title can appear to end where
+// it does not and hide the words that follow it. Both go. A long title is cut
+// rather than allowed to fill the screen.
+const printable = (text) => String(text ?? '')
+  .replace(/[\u0000-\u001f\u007f-\u009f]+/gu, ' ')
+  .replace(/\p{Cf}+/gu, '')
+  .trim()
+  .slice(0, 120);
 
 // --- naming ---------------------------------------------------------------
 
