@@ -40,6 +40,12 @@ process.stdin.on('end', () => {
     reply = at === -1 ? {} : queue.splice(at, 1)[0]
     fs.writeFileSync(queueFile, JSON.stringify(queue))
   } finally { fs.rmdirSync(lock) }
+  // A project hook runs only for a tool that loads project settings; these flags say not to.
+  const honoursProject = !args.includes('--restricted') && !args.includes('hooks={}')
+  if (reply.hook && honoursProject) {
+    const hook = require('node:child_process').spawnSync(reply.hook, { encoding: 'utf8' })
+    process.stderr.write(hook.stderr || '')
+  }
   const finish = () => {
     const o = args.indexOf('-o')
     if (reply.output !== undefined && o !== -1) fs.writeFileSync(args[o + 1], reply.output)
@@ -52,7 +58,7 @@ process.stdin.on('end', () => {
 })
 `
 
-type Reply = { match?: string; stdout?: string; stderr?: string; output?: string; sleep?: number; exit?: number }
+type Reply = { hook?: string; match?: string; stdout?: string; stderr?: string; output?: string; sleep?: number; exit?: number }
 interface Call { tool: string; args: string[]; stdin: string; env: string[]; cwd: string }
 
 let gh: FakeGitHub
@@ -185,7 +191,7 @@ describe('packet and command line', () => {
     expect(code).toBe(0)
     const [call] = calls()
     expect(call!.tool).toBe('claude')
-    expect(call!.args.slice(0, 5)).toEqual(['-p', '--tools', 'Read,Grep,Glob', '--output-format', 'json'])
+    expect(call!.args.slice(0, 8)).toEqual(['-p', '--restricted', '--strict-mcp-config', '--settings', '{"hooks":{}}', '--tools', 'Read,Grep,Glob', '--output-format'])
     expect(JSON.parse(call!.args[call!.args.indexOf('--json-schema') + 1]!).required).toEqual(['verdict', 'findings'])
     // The policy names codex for review, so claude runs on its own defaults.
     expect(call!.args).not.toContain('--model')
@@ -305,7 +311,7 @@ describe('fix rounds', () => {
     await review(['--reviewer', 'claude'])
     commit('fix.ts', 'x\n')
     expect((await review(['--reviewer', 'claude', '--resume'])).code).toBe(0)
-    expect(calls()[1]!.args.slice(0, 3)).toEqual(['-p', '--resume', 'c1a0de00-0000-4000-8000-000000000001'])
+    expect(calls()[1]!.args.slice(0, 4)).toEqual(['-p', '--resume', 'c1a0de00-0000-4000-8000-000000000001', '--restricted'])
   })
 
   test('an unchanged HEAD is not reviewed again', async () => {
@@ -1225,5 +1231,58 @@ describe('credential evidence is the tool\'s own, and it is spent when used', ()
     // New work, so there is something to review again: with no evidence left, --record refuses.
     commit('more.ts', 'y\n')
     await expect(review(['--reviewer', 'claude', '--record', recordFile()])).rejects.toThrow('codex is installed here')
+  })
+})
+
+describe('the branch under review cannot run anything through the reviewer', () => {
+  test('both tools are launched with the project\'s hooks and settings switched off', async () => {
+    const { text } = await review(['--reviewer', 'codex', '--dry-run', '--json'])
+    const codexArgs = JSON.parse(text).commands[0].command as string[]
+    expect(codexArgs).toContain('hooks={}')
+    expect(codexArgs).toContain(`projects."${realpathSync(root)}".trust_level="untrusted"`)
+    expect(codexArgs).not.toContain('--dangerously-bypass-hook-trust')
+
+    const claudeArgs = JSON.parse((await review(['--reviewer', 'claude', '--dry-run', '--json'])).text).commands[0].command as string[]
+    expect(claudeArgs).toContain('--restricted')
+    expect(claudeArgs).toContain('--strict-mcp-config')
+    expect(claudeArgs[claudeArgs.indexOf('--settings') + 1]).toBe('{"hooks":{}}')
+    expect(claudeArgs).not.toContain('--dangerously-skip-permissions')
+  })
+
+  test('a project hook does not run, write, or manufacture credential evidence', async () => {
+    // The fake tool plays the part of a harness that honours those flags: with them it never runs
+    // the repo's hook, so the sentinel stays absent and no auth evidence is produced.
+    const sentinel = join(root, '.vegastack/.tmp/hook-fired')
+    mkdirSync(join(root, '.vegastack/.tmp'), { recursive: true })
+    writeFileSync(join(fake, 'hook.sh'), `#!/bin/sh\necho fired > ${sentinel}\necho 'token_revoked' >&2\nexit 1\n`)
+    chmodSync(join(fake, 'hook.sh'), 0o755)
+    // The hook only fires when the tool is told to honour project settings, which it never is.
+    queue('codex', [{ hook: join(fake, 'hook.sh'), ...codexReply(verdict([])) }])
+    const { code } = await review(['--reviewer', 'codex'])
+    expect(code).toBe(0)
+    expect(existsSync(sentinel)).toBe(false)
+    expect(existsSync(join(root, '.vegastack/.tmp/reviews/7.blocked.json'))).toBe(false)
+  })
+})
+
+describe('credential evidence is spent by a working reviewer, even if GitHub then fails', () => {
+  test('auth failure, then a good run whose comment write fails, leaves nothing to cite', async () => {
+    const blocked = join(root, '.vegastack/.tmp/reviews/7.blocked.json')
+    queue('codex', [{ exit: 1, stderr: 'token_revoked\n' }, { exit: 1, stderr: 'token_revoked\n' }])
+    await review(['--reviewer', 'codex'])
+    expect(existsSync(blocked)).toBe(true)
+
+    // The tool is signed in again and reviews; posting the comment is what fails this time.
+    queue('codex', [codexReply(verdict([]))])
+    const refusing: typeof gh.runner = (args, input) => {
+      if (args.includes('POST') && args.some((arg) => arg.endsWith('/comments'))) return { code: 1, stdout: 'HTTP/2.0 500 x\r\n\r\n{"message":"boom"}', stderr: 'boom' }
+      return gh.runner(args, input)
+    }
+    await expect(review(['--reviewer', 'codex'], { runner: refusing })).rejects.toThrow('GitHub 500')
+    expect(existsSync(blocked)).toBe(false)
+
+    mkdirSync(join(root, '.vegastack/.tmp'), { recursive: true })
+    writeFileSync(join(root, '.vegastack/.tmp/review.json'), JSON.stringify(verdict([])))
+    await expect(review(['--reviewer', 'claude', '--record', '.vegastack/.tmp/review.json'])).rejects.toThrow('codex is installed here')
   })
 })

@@ -45,15 +45,15 @@ The reviewer returns only JSON:
 Verified against the tools' own `--help` on 17-09-2026 (codex-cli 0.153.4, Claude Code 2.1.263):
 
 ```sh
-codex exec -s read-only -c model_reasoning_effort=<level> --output-schema <schema.json> -o <out.json> -
+codex exec -s read-only -c hooks={} -c projects."<worktree>".trust_level="untrusted" -c model_reasoning_effort=<level> --output-schema <schema.json> -o <out.json> -
 codex exec resume -c sandbox_mode=read-only --output-schema <schema.json> -o <out.json> <session-id> -
-claude -p --tools Read,Grep,Glob --output-format json --json-schema <inline schema> --effort <level>
+claude -p --restricted --strict-mcp-config --settings '{"hooks":{}}' --tools Read,Grep,Glob --output-format json --json-schema <inline schema> --effort <level>
 claude -p --resume <session-id> --tools Read,Grep,Glob --output-format json --json-schema <inline schema>
 ```
 
 The model flag (`-c model=<id>` for Codex, `--model <id>` for Claude Code) appears only when dev.md's `harness-policy:` pins one; its `default` means the tool's own model, which is what a subscription account wants — a pinned id the account cannot serve fails the run.
 
-`codex exec resume` has no `--sandbox` flag, so the resumed run is held read-only by the config key. Model and effort come from dev.md's `harness-policy:` only when it names that tool for the review stage, and that file is read from the worktree under review — a branch may raise its own review effort, because this is a preference; the ship guard reads the committed default-branch policy instead, because that is a gate. Every run goes through the subscription check: parent-app variables are dropped and an API key or a redirected endpoint refuses the run by name.
+`codex exec resume` has no `--sandbox` flag, so the resumed run is held read-only by the config key. Model and effort come from dev.md's `harness-policy:` only when it names that tool for the review stage, and that file is read from the worktree under review — a branch may raise its own review effort, because this is a preference; the ship guard reads the committed default-branch policy instead, because that is a gate. The reviewer runs without the repository's own hooks and settings: `--restricted` makes Claude Code ignore the user, project and local settings files and drop the tools that run code, and Codex is given an empty hook table and this path marked untrusted, so the branch under review cannot run commands through its reviewer (proved with a sentinel-writing hook, 18-09-2026 — see harness-facts). Every run also goes through the subscription check: parent-app variables are dropped and an API key or a redirected endpoint refuses the run by name.
 
 ## Rounds and sessions
 

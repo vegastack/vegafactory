@@ -295,17 +295,24 @@ export function resumePrompt(input: { round: number; from: string; head: string;
   ].join('\n')
 }
 
-export function reviewerArgs(reviewer: Reviewer, options: { schemaPath: string; outPath: string; session: string | null; policy: { model: string | null; effort: string } | null }): string[] {
-  const { schemaPath, outPath, session, policy } = options
+export function reviewerArgs(reviewer: Reviewer, options: { schemaPath: string; outPath: string; session: string | null; policy: { model: string | null; effort: string } | null; cwd: string }): string[] {
+  const { schemaPath, outPath, session, policy, cwd } = options
   if (reviewer === 'codex') {
     // A pinned model the account cannot use fails the run, so the policy's `default` pins nothing.
     const model = policy ? [...(policy.model ? ['-c', `model=${policy.model}`] : []), '-c', `model_reasoning_effort=${policy.effort}`] : []
     // `exec resume` has no --sandbox flag; the config key keeps the resumed run read-only.
     const head = session ? ['exec', 'resume', '-c', 'sandbox_mode=read-only'] : ['exec', '-s', 'read-only']
-    return [...head, ...model, '--output-schema', schemaPath, '-o', outPath, ...(session ? [session] : []), '-']
+    // The branch under review must not be able to run anything: `hooks={}` drops any inline hook
+    // table, and marking this path untrusted skips the repo's whole `.codex/` layer (its config,
+    // hooks and rules). `--dangerously-bypass-hook-trust` is exactly what is never passed.
+    return [...head, '-c', 'hooks={}', '-c', `projects."${cwd}".trust_level="untrusted"`, ...model,
+      '--output-schema', schemaPath, '-o', outPath, ...(session ? [session] : []), '-']
   }
-  // --tools takes a list, so the next flag must follow it; the prompt goes on stdin.
-  return ['-p', ...(session ? ['--resume', session] : []), '--tools', 'Read,Grep,Glob', '--output-format', 'json',
+  // --tools takes a list, so the next flag must follow it; the prompt goes on stdin. `--restricted`
+  // ignores the user, project and local settings files — the project's hooks with them — and takes
+  // away the tools that run code; the inline settings then supply an empty hook table of our own.
+  return ['-p', ...(session ? ['--resume', session] : []), '--restricted', '--strict-mcp-config', '--settings', '{"hooks":{}}',
+    '--tools', 'Read,Grep,Glob', '--output-format', 'json',
     '--json-schema', JSON.stringify(REVIEW_SCHEMA),
     ...(policy?.model ? ['--model', policy.model] : []), ...(policy ? ['--effort', policy.effort] : [])]
 }
@@ -784,7 +791,7 @@ export async function runReview(argv: string[], deps: ReviewDeps = {}): Promise<
     facts = diffFacts(top, `${live!.head}..${head}`)
     specs = live!.sessions.map(({ group, id, open }) => {
       const prompt = resumePrompt({ round, from: live!.head, head, open, facts, nonce })
-      return { group, prompt, session: id, prior: open, outPath: outPath(group), args: reviewerArgs(reviewer, { schemaPath, outPath: outPath(group), session: id, policy }) }
+      return { group, prompt, session: id, prior: open, outPath: outPath(group), args: reviewerArgs(reviewer, { schemaPath, outPath: outPath(group), session: id, policy, cwd: top }) }
     })
   } else {
     facts = diffFacts(top, `${base}...${head}`)
@@ -806,7 +813,7 @@ export async function runReview(argv: string[], deps: ReviewDeps = {}): Promise<
       return {
         group, session: null, outPath: outPath(group), prior: mine.map((finding) => finding.id),
         prompt: freshPrompt({ ...input, previous: mine }, group, nonce),
-        args: reviewerArgs(reviewer, { schemaPath, outPath: outPath(group), session: null, policy }),
+        args: reviewerArgs(reviewer, { schemaPath, outPath: outPath(group), session: null, policy, cwd: top }),
       }
     })
   }
@@ -862,6 +869,10 @@ export async function runReview(argv: string[], deps: ReviewDeps = {}): Promise<
     result = mergeFindings(done.map((run) => ({ ...run, prior: specs.find((spec) => spec.group.key === run.group.key)?.prior ?? [] })))
   }
 
+  // The reviewer answered, so any credential evidence is spent — whether or not the comment lands.
+  // Leaving it would let a later `--record` stand in for a tool that is working again.
+  rmSync(blockedPath(dir, number), { force: true })
+
   const data: CommentData = { cycle, round, sha: head, base, brief: artifacts.brief, plan: artifacts.plan, reviewer, mode, fallback, verdict: result.verdict, findings: result.findings }
   const bodyPath = join(dir, `${number}-comment.md`)
   const quiet: string[] = []
@@ -903,9 +914,6 @@ export async function runReview(argv: string[], deps: ReviewDeps = {}): Promise<
     runIssue(current
       ? ['edit-comment', String(number), String(current.entry.id), '--file', bodyPath, '--since', String(cursor), '--repo', repo]
       : ['comment', String(number), '--file', bodyPath, '--repo', repo], { runner, cwd, out: (line) => quiet.push(line) })
-    // The credential evidence has served its purpose — or was never needed, because this round
-    // landed. Either way it must not be reusable later.
-    rmSync(blockedPath(dir, number), { force: true })
     // runIssue synced after writing, so the comment this state describes can be read back by id.
     try {
       next.comment.id = trustedReview(snapshot(cacheDir(root, repo, number)), trusted, head)?.entry.id ?? 0
