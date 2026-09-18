@@ -6,7 +6,7 @@
 // Exit codes: 0 pass · 2 blocked (this guard has no warn class).
 // Usage: node plan-lint.mjs --file <plan.md> --json
 import { readFileSync } from 'node:fs';
-import { resolve } from 'node:path';
+import { basename, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 // Self-contained on purpose: plan-lint ships with dev-plan and must run on a
 // standalone install, so it carries its own tiny flag/result helpers instead of
@@ -160,7 +160,11 @@ export function lintPlan(text) {
   return { blocks, warns: [] };
 }
 
-const invokedDirectly = process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url);
+// The group grammar's parser is imported as a library too (the CLI bundles it), and a bundler
+// rewrites import.meta.url to the bundle's own path — so the name is checked as well, or every
+// command built from that bundle would run this lint and exit.
+const self = fileURLToPath(import.meta.url);
+const invokedDirectly = process.argv[1] && resolve(process.argv[1]) === self && basename(self) === 'plan-lint.mjs';
 if (invokedDirectly) {
   const argv = process.argv.slice(2);
   const json = argv.includes('--json');

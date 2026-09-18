@@ -124,6 +124,11 @@ export class FakeGitHub {
     const perPage = Number(params.get('per_page') ?? 30)
     let m: RegExpExecArray | null
 
+    if (route === 'repos/o/r/issues') {
+      const open = [...this.issues.values()].filter((issue) => params.get('state') !== 'open' || issue.state === 'open')
+        .sort((a, b) => b.updated_at.localeCompare(a.updated_at))
+      return this.respond(200, open.slice((page - 1) * perPage, page * perPage).map((issue) => this.issueJson(issue)))
+    }
     if ((m = /^repos\/o\/r\/issues\/(\d+)$/.exec(route!))) {
       const issue = this.issues.get(Number(m[1]))
       if (!issue) return this.respond(404, { message: 'Not Found' })

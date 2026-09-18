@@ -4,7 +4,23 @@ The one identity every automated write uses. Facts checked 03-09-2026 against th
 
 ## What the App is for
 
-Humans own issues. A person approves a brief, a person says "ship it", and a person's name is on every state flip. The App is the identity for the writes no person is sitting behind: the board mirror that sets a project Status when a label changes, and an Actions job that edits a label. It is **not** the dispatcher's identity — the dispatcher runs headless sessions as the operator's own `gh` login, and giving it the App's identity would hide which human a run belongs to.
+Humans own issues. A person approves a brief, a person says "ship it", and a person's name is on every state flip. The App is the identity for the writes no person is sitting behind: the board mirror that sets a project Status when a label changes, an Actions job that edits a label, and a dispatcher machine working the board with nobody at the keyboard. A dispatcher's labels, status comments and claim releases go out as the App, while the agent runs it starts stay on the operator's own subscription — so the machine's writes are attributable to the factory and its reasoning is still paid for by a person.
+
+The split inside a dispatcher run is worth being exact about, because two identities are in play and they are not interchangeable:
+
+| Written by | What it writes | As |
+|---|---|---|
+| the dispatcher itself | the claim it takes before a run, its heartbeat and release, the hand-back comment, the relayed ack, the state label | the App |
+| the agent run it starts | everything the skill writes — the plan, the evidence, the status comment, the PR | the App |
+
+Both, because a dispatched run gets the same hour-long installation token in its environment as `GH_TOKEN`. That is the point: a run's own output can never pass as a person's word, so a hostile file in a diff cannot talk the factory into stopping, correcting or shipping an issue by writing a sentence. The run is never told where the private key is — it holds a token that expires, not the thing that mints them.
+
+Two consequences worth knowing before the first dispatched run:
+
+- **A dispatched run pushes over SSH, not with that token.** The App's Contents is read-only by design, and `gh auth git-credential` would otherwise hand the token to git and fail every push. So a run's git is given no credential helper at all — the token stays on the API side — and the machine pushes on its own SSH key. `dispatch enable` refuses while `origin`'s push URL is HTTPS, so the box is fixed before a run rather than after its work.
+- **The token is an hour long and the key is not.** A child running under the same account can still read the key file through the filesystem, whatever its mode. The separate dispatcher account in the control room's dispatcher-box checklist is what closes that.
+
+What the App may never do is stand in for a person's own words. It authors the factory's work and is trusted for exactly that: a claim, a release, the status comment, a plan, evidence, a review — each read through the shape it has to have. An ack, an acceptance of what a review left open, a correction and a "ship it" are read only from a human with write access, so a run can produce the work but never the word that approves it.
 
 The alternative worth naming is a credential belonging to a person: it stands for their whole account, outlives the job that used it, and dies when they leave the org. The App stands for a named permission set instead, its tokens live an hour, and uninstalling it revokes every one of them at once.
 
@@ -56,7 +72,9 @@ The operator's own browser flow. `gh` has no create-app command and the manifest
 | `VEGAFACTORY_APP_ID` | organization variable | the numeric App ID |
 | `VEGAFACTORY_APP_PRIVATE_KEY` | organization secret | the PEM, pasted whole |
 
-The private key lives in exactly one place for its whole life: this organization secret. Never on a workstation, never on the dispatcher box, never in a control-room file, never in an issue. Only the key's holder can mint installation tokens.
+The private key lives in the organization secret, and — only on a machine listed in the control room's `dispatchers.md` — in one file on that machine. Never on a workstation, never in a control-room file, never in an issue, never printed. Only the key's holder can mint installation tokens.
+
+On a dispatcher machine the file is `~/.vegastack/vegafactory-app.pem`, owned by the dispatcher account and `chmod 600`, so a CI job running as the runner account cannot read it. `VEGAFACTORY_APP_PRIVATE_KEY_FILE` moves it; `VEGAFACTORY_APP_ID` names another org's App. `vegafactory dispatch` mints an hour-long installation token from it, narrowed to the one repository, keeps it in memory and passes it to `gh` in that child's environment only. A missing key refuses the run with the path to fix — it never falls back to a person's token.
 
 Control-room files record these **names**. The values live in GitHub organization settings and nowhere a repository can read them.
 

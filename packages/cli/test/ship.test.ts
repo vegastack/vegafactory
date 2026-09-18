@@ -101,7 +101,7 @@ test('blocks without a ship it, an unpushed commit, a PR, or with a debug tag le
     'no evidence comment yet',
     'no "ship it": no ship ack yet',
     'feat/7-export differs from origin/feat/7-export — push it',
-    'no review comment from a reviewer with write access — run vegafactory review',
+    'no review comment from a reviewer with write access or from the factory App — run vegafactory review',
     '1 added line(s) still carry a [DEBUG-…] tag',
     'no PR for feat/7-export',
   ])
@@ -173,11 +173,11 @@ test('review is never skipped: the head that merges carries a clean review, or t
   }
   shippable()
   // No review at all.
-  expect(run().blocks).toEqual(['no review comment from a reviewer with write access — run vegafactory review'])
+  expect(run().blocks).toEqual(['no review comment from a reviewer with write access or from the factory App — run vegafactory review'])
 
   // A review someone without write access posted is no review.
   const forged = reviewed({}, 'stranger')
-  expect(run().blocks).toEqual(['no review comment from a reviewer with write access — run vegafactory review'])
+  expect(run().blocks).toEqual(['no review comment from a reviewer with write access or from the factory App — run vegafactory review'])
   gh.deleteComment(forged.id)
 
   // A review of an older commit is no review of this one.
@@ -197,6 +197,28 @@ accept review round 3 @ ${head.slice(0, 7)}`, 'mk')
 
   // A clean review on this head needs no acceptance.
   reviewed()
+  expect(run()).toMatchObject({ code: 0, ok: true, blocks: [] })
+})
+
+test('a dispatched run reviews as the App: that review ships, but the App cannot accept what it left open', () => {
+  const head = git(root, 'rev-parse', 'HEAD')
+  const sha7 = head.slice(0, 7)
+  gh.addComment(7, `<!-- vsk:v1 type=evidence rev=1 branch=feat/7-export sha=${sha7} -->\nit works`)
+  gh.addComment(7, ackBody({ stage: 'ship', by: 'mk', brief: artifactHash('Export CSV'), plan: null, source: 'session', quote: 'ship it' }))
+
+  // Nobody was at the keyboard: the review is authored by the App the dispatcher minted a token
+  // for. It is still a review, checked field by field like any other.
+  const clean = reviewed({}, 'vegafactory[bot]', 'Bot')
+  expect(run()).toMatchObject({ code: 0, ok: true, blocks: [] })
+  gh.deleteComment(clean.id)
+
+  // Findings it left open are a judgement, and the App does not get to make it.
+  reviewed({ round: 3, verdict: 'needs-fixes', findings: [{ id: 'F1', axis: 'bugs', severity: 'must-fix', file: 'a.ts', line: 1, issue: 'x', fix: 'y' }] }, 'vegafactory[bot]', 'Bot')
+  gh.addComment(7, `accept review round 3 @ ${sha7}`, 'vegafactory[bot]', 'Bot')
+  expect(run().blocks).toEqual([`review round 3 is needs-fixes (F1) — fix and re-review or, now the loop is spent, the operator accepts them in a line of their own: "accept review round 3 @ ${sha7}"`])
+
+  // The operator's own line ends it.
+  gh.addComment(7, `accept review round 3 @ ${sha7}`, 'mk')
   expect(run()).toMatchObject({ code: 0, ok: true, blocks: [] })
 })
 
@@ -337,7 +359,7 @@ test('a same-tool fallback review, recorded through the CLI, is trusted and ship
   const head = git(root, 'rev-parse', 'HEAD')
   gh.addComment(7, `<!-- vsk:v1 type=evidence rev=1 branch=feat/7-export sha=${head.slice(0, 7)} -->\nit works`)
   gh.addComment(7, ackBody({ stage: 'ship', by: 'mk', brief: artifactHash('Export CSV'), plan: null, source: 'session', quote: 'ship it' }))
-  expect(run().blocks).toEqual(['no review comment from a reviewer with write access — run vegafactory review'])
+  expect(run().blocks).toEqual(['no review comment from a reviewer with write access or from the factory App — run vegafactory review'])
 
   // The other tool is missing, so this session reviewed the diff itself and hands the JSON over.
   mkdirSync(join(root, '.vegastack/.tmp'), { recursive: true })
