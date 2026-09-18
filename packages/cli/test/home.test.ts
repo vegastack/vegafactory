@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os'
 import { join, sep } from 'node:path'
 import {
   appKeyPath, controlRoomClonePath, controlRoomStore, DEAD_ENTRIES, factoryConfigPath, factoryHome,
+  movePath, pathKind,
   FOREIGN_ENTRIES, HOME_VARIABLE, legacyHome, migrateHome, statsDirectory, statsHtmlPath,
   workerDirectory, worktreesPath,
 } from '../src/home.ts'
@@ -63,8 +64,7 @@ describe('moving off the older home', () => {
   const real = () => ({
     env: {} as NodeJS.ProcessEnv,
     home,
-    exists: (path: string) => existsSync(path),
-    isPlainDirectory: (path: string) => { try { return require('node:fs').lstatSync(path).isDirectory() } catch { return false } },
+    kind: pathKind,
     move: (from: string, to: string) => { require('node:fs').renameSync(from, to) },
     mkdir: (path: string) => { mkdirSync(path, { recursive: true }) },
     remove: (path: string) => { require('node:fs').rmSync(path, { recursive: true, force: true }) },
@@ -186,8 +186,7 @@ describe('the older home stays moved', () => {
 describe('the move cannot be aimed somewhere it was not asked to go', () => {
   const deps = (env: NodeJS.ProcessEnv) => ({
     env, home,
-    exists: (path: string) => existsSync(path),
-    isPlainDirectory: (path: string) => { try { return require('node:fs').lstatSync(path).isDirectory() } catch { return false } },
+    kind: pathKind,
     move: (from: string, to: string) => { require('node:fs').renameSync(from, to) },
     mkdir: (path: string) => { mkdirSync(path, { recursive: true }) },
     remove: (path: string) => { require('node:fs').rmSync(path, { recursive: true, force: true }) },
@@ -226,18 +225,16 @@ describe('the move cannot be aimed somewhere it was not asked to go', () => {
     expect(existsSync(join(home, '.vegastack', 'guard'))).toBe(false)
   })
 
-  test('an interrupted global install moves with the rest, lock and journal both', () => {
+  test('an interrupted global install moves its journal, so the next add can recover it', () => {
     const legacy = join(home, '.vegastack')
     mkdirSync(legacy, { recursive: true })
     writeFileSync(join(legacy, '.skills-install-transaction.json'), '{"schemaVersion":2}')
-    writeFileSync(join(legacy, '.skills-install.lock'), 'held')
-    writeFileSync(join(legacy, 'factory.json.guard'), '')
+    writeFileSync(join(legacy, 'factory.json.schema1.bak'), 'pre-image')
     const result = migrateHome(deps({}))
     expect(result.action).toBe('moved')
     const now = join(home, '.vegafactory')
     expect(readFileSync(join(now, '.skills-install-transaction.json'), 'utf8')).toBe('{"schemaVersion":2}')
-    expect(existsSync(join(now, '.skills-install.lock'))).toBe(true)
-    expect(existsSync(join(now, 'factory.json.guard'))).toBe(true)
+    expect(readFileSync(join(now, 'factory.json.schema1.bak'), 'utf8')).toBe('pre-image')
   })
 })
 
@@ -290,5 +287,84 @@ describe('a real run writes only where it should', () => {
     expect(run.stderr.toString()).toContain('both hold this product')
     expect(readFileSync(join(home, '.vegastack', 'factory.json'), 'utf8')).toBe('older')
     expect(readFileSync(join(home, '.vegafactory', 'factory.json'), 'utf8')).toBe('newer')
+  })
+})
+
+
+describe('what a path is, told apart properly', () => {
+  test('absent, a directory, a file and a symlink are four different answers', () => {
+    expect(pathKind(join(home, 'nothing'))).toBe('absent')
+    mkdirSync(join(home, 'dir'), { recursive: true })
+    expect(pathKind(join(home, 'dir'))).toBe('directory')
+    writeFileSync(join(home, 'file'), 'x')
+    expect(pathKind(join(home, 'file'))).toBe('file')
+    require('node:fs').symlinkSync(join(home, 'dir'), join(home, 'link'))
+    // Never followed: either end of the move could otherwise land somewhere neither path names.
+    expect(pathKind(join(home, 'link'))).toBe('other')
+    // And a symlink pointing nowhere is still a symlink, not an absence.
+    require('node:fs').symlinkSync(join(home, 'nothing'), join(home, 'dangling'))
+    expect(pathKind(join(home, 'dangling'))).toBe('other')
+  })
+})
+
+describe('a home on another device', () => {
+  test('a rename that cannot cross the device copies, and only then removes', () => {
+    const order: string[] = []
+    movePath('/a', '/b', {
+      rename: () => { const error = new Error('cross-device link') as NodeJS.ErrnoException; error.code = 'EXDEV'; throw error },
+      copy: () => order.push('copy'),
+      remove: () => order.push('remove'),
+    })
+    // The original stays until the copy is whole, so a failure halfway leaves something behind.
+    expect(order).toEqual(['copy', 'remove'])
+  })
+
+  test('any other rename failure is not swallowed', () => {
+    expect(() => movePath('/a', '/b', {
+      rename: () => { const error = new Error('denied') as NodeJS.ErrnoException; error.code = 'EACCES'; throw error },
+      copy: () => { throw new Error('must not copy') },
+      remove: () => { throw new Error('must not remove') },
+    })).toThrow('denied')
+  })
+})
+
+describe('work in flight is waited for, not moved', () => {
+  const deps = () => ({
+    env: {} as NodeJS.ProcessEnv, home,
+    kind: pathKind,
+    move: (from: string, to: string) => { require('node:fs').renameSync(from, to) },
+    mkdir: (path: string) => { mkdirSync(path, { recursive: true }) },
+    remove: (path: string) => { require('node:fs').rmSync(path, { recursive: true, force: true }) },
+  })
+
+  // A lock says a process is working here right now. Carrying it to a new address breaks that
+  // process's cleanup, and it then recreates its state back at the old one.
+  test.each(['.skills-install.lock', 'factory.json.guard'])('a %s refuses the move and touches nothing', (lock) => {
+    const legacy = join(home, '.vegastack')
+    mkdirSync(join(legacy, 'guard'), { recursive: true })
+    writeFileSync(join(legacy, 'factory.json'), 'state')
+    if (lock.endsWith('.guard')) mkdirSync(join(legacy, lock), { recursive: true })
+    else writeFileSync(join(legacy, lock), 'held')
+
+    const result = migrateHome(deps())
+    expect(result.action).toBe('refused')
+    expect(result.reason).toContain('work in flight')
+    expect(result.moved).toEqual([])
+    // Nothing was deleted on the way to deciding to refuse.
+    expect(existsSync(join(legacy, 'guard'))).toBe(true)
+    expect(readFileSync(join(legacy, 'factory.json'), 'utf8')).toBe('state')
+  })
+
+  test('a refusal over split state deletes nothing first', () => {
+    const legacy = join(home, '.vegastack')
+    mkdirSync(join(legacy, 'guard'), { recursive: true })
+    writeFileSync(join(legacy, 'factory.json'), 'older')
+    mkdirSync(join(home, '.vegafactory'), { recursive: true })
+    writeFileSync(join(home, '.vegafactory', 'factory.json'), 'newer')
+
+    const result = migrateHome(deps())
+    expect(result.action).toBe('refused')
+    expect(result.moved).toEqual([])
+    expect(existsSync(join(legacy, 'guard'))).toBe(true)
   })
 })

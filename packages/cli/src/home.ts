@@ -9,7 +9,7 @@
 // VegaStack tooling keeps `tools/`, `cache/`, `registry/` and `secrets/` there, none of which this
 // repository references. A directory this product owns entirely is one it may also prune.
 
-import { cpSync, existsSync, lstatSync, mkdirSync, renameSync, rmSync } from 'node:fs'
+import { cpSync, lstatSync, mkdirSync, renameSync, rmSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 
@@ -94,22 +94,24 @@ export function appKeyPath(options: HomeOptions = {}): string {
 // rest of an unattended machine's state lives.
 const MOVES: { from: string[]; to: string[] }[] = [
   { from: ['factory.json'], to: ['factory.json'] },
-  // The settings writer's lock and its pre-image. An interrupted write leaves them behind, and a
-  // machine that moved without them would take the file and leave the evidence of a half-finished
-  // edit where nothing will ever look again.
-  { from: ['factory.json.guard'], to: ['factory.json.guard'] },
+  // The settings writer's pre-image. A machine that moved without it would take the file and
+  // leave the evidence of a half-finished edit where nothing will ever look again.
   { from: ['factory.json.schema1.bak'], to: ['factory.json.schema1.bak'] },
   { from: ['control-room'], to: ['control-room'] },
   { from: ['worktree-roots.json'], to: ['worktrees.json'] },
   { from: ['.tmp', 'stats'], to: ['stats'] },
   { from: ['stats.html'], to: ['stats.html'] },
   { from: ['vegafactory-app.pem'], to: ['worker', 'app.pem'] },
-  // A global skill install keeps its journal and lock here. Leaving them means an interrupted
-  // install is never recovered — the next add rolls its backups forward and brings back skills
-  // somebody removed — and an active lock becomes invisible to the run that should wait for it.
+  // A global skill install keeps its journal here. Leaving it means an interrupted install is
+  // never recovered — the next add rolls its backups forward and brings back skills somebody
+  // removed.
   { from: ['.skills-install-transaction.json'], to: ['.skills-install-transaction.json'] },
-  { from: ['.skills-install.lock'], to: ['.skills-install.lock'] },
 ]
+
+// Locks, which are never moved. A lock exists to say "a process is working here right now", and
+// carrying one to a new address breaks the cleanup of whatever holds it — which then recreates its
+// state back at the old one. A machine with work in flight waits instead.
+const LOCKS = ['.skills-install.lock', 'factory.json.guard'] as const
 
 export interface Migration { action: 'none' | 'moved' | 'refused'; reason: string; moved: string[] }
 
@@ -118,9 +120,14 @@ export interface Migration { action: 'none' | 'moved' | 'refused'; reason: strin
 // migrate its own schema, the stats offsets say "delete it", the installer journal refuses an
 // unknown version — and a home in two places is exactly that kind of ambiguity: a run that read
 // one and wrote the other would split a machine's memory of itself in half.
+// What a path is, told apart properly: "absent" and "this account cannot read it" are different
+// answers, and a check that collapses them lets a run carry on with its memory split across two
+// homes. A symlink is never followed — either end of this move could otherwise land somewhere
+// neither path names.
+export type Kind = 'absent' | 'directory' | 'file' | 'other' | 'unreadable'
+
 export function migrateHome(deps: {
-  exists: (path: string) => boolean
-  isPlainDirectory: (path: string) => boolean
+  kind: (path: string) => Kind
   move: (from: string, to: string) => void
   mkdir: (path: string) => void
   remove: (path: string) => void
@@ -134,14 +141,41 @@ export function migrateHome(deps: {
   }
   const to = factoryHome(deps)
   const from = legacyHome(deps)
-  if (!deps.exists(from)) return { action: 'none', reason: 'there is no older home to move', moved: [] }
+  const there = (path: string) => deps.kind(path) !== 'absent'
 
-  // Both ends must be ordinary directories this account can read. A symlink either side would move
-  // state out of, or into, somewhere neither of these paths names; and a permission error read as
-  // "absent" would let the run carry on with its memory split across two homes.
+  // Both ends must be ordinary directories this account can read, or not be there at all.
   for (const [path, which] of [[from, 'older'], [to, 'new']] as const) {
-    if (deps.exists(path) && !deps.isPlainDirectory(path)) {
-      return { action: 'refused', reason: `${path} is not an ordinary directory this account can read, so the ${which} home cannot be moved safely — inspect it by hand`, moved: [] }
+    const kind = deps.kind(path)
+    if (kind === 'absent' || kind === 'directory') continue
+    return {
+      action: 'refused',
+      reason: kind === 'unreadable'
+        ? `${path} cannot be read by this account, so whether the ${which} home holds anything is unknown — fix its permissions and run again`
+        : `${path} is not an ordinary directory, so the ${which} home cannot be moved safely — inspect it by hand`,
+      moved: [],
+    }
+  }
+  if (deps.kind(from) === 'absent') return { action: 'none', reason: 'there is no older home to move', moved: [] }
+
+  // Everything that could refuse is decided before anything is touched. A refusal that had already
+  // deleted something would be a refusal the operator cannot trust the word of.
+  const held = LOCKS.filter((lock) => there(join(from, lock)))
+  if (held.length > 0) {
+    return {
+      action: 'refused',
+      reason: `${from} has work in flight (${held.join(', ')}) — a lock says a process is working there now, and moving it would break that process's cleanup. Run again once it has finished, or remove the file if nothing holds it`,
+      moved: [],
+    }
+  }
+
+  const waiting = MOVES.filter((entry) => there(join(from, ...entry.from)))
+  const already = MOVES.filter((entry) => there(join(to, ...entry.to)))
+  if (already.length > 0 && waiting.length > 0) {
+    const both = already.map((entry) => entry.to.join('/')).join(', ')
+    return {
+      action: 'refused',
+      reason: `${to} and ${from} both hold this product's state (${both}) — a run that read one and wrote the other would split this machine's memory in half. Keep the one that is current, delete the other, and run again`,
+      moved: [],
     }
   }
 
@@ -150,23 +184,12 @@ export function migrateHome(deps: {
   // directory is exactly the machine that would otherwise keep it forever.
   for (const dead of DEAD_ENTRIES) {
     const path = join(from, dead)
-    if (deps.exists(path)) { deps.remove(path); moved.push(`${dead} → removed, nothing reads it`) }
+    if (there(path)) { deps.remove(path); moved.push(`${dead} → removed, nothing reads it`) }
   }
-
-  const waiting = MOVES.filter((entry) => deps.exists(join(from, ...entry.from)))
-  const already = MOVES.filter((entry) => deps.exists(join(to, ...entry.to)))
   if (waiting.length === 0) {
     return moved.length
       ? { action: 'moved', reason: `removed what nothing reads from ${from}`, moved }
       : { action: 'none', reason: 'the older home holds nothing of ours', moved: [] }
-  }
-  if (already.length > 0) {
-    const both = already.map((entry) => entry.to.join('/')).join(', ')
-    return {
-      action: 'refused',
-      reason: `${to} and ${from} both hold this product's state (${both}) — a run that read one and wrote the other would split this machine's memory in half. Keep the one that is current, delete the other, and run again`,
-      moved,
-    }
   }
 
   deps.mkdir(to)
@@ -179,22 +202,42 @@ export function migrateHome(deps: {
   return { action: 'moved', reason: `moved this machine's state from ${from} to ${to}`, moved }
 }
 
+// `rename` cannot cross a device, and a home can be mounted separately from the directory it sits
+// in. Copy first and remove only once the copy is whole, so a failure leaves the original.
+export function movePath(from: string, to: string, deps: {
+  rename: (from: string, to: string) => void
+  copy: (from: string, to: string) => void
+  remove: (path: string) => void
+}): void {
+  try { deps.rename(from, to) } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'EXDEV') throw error
+    deps.copy(from, to)
+    deps.remove(from)
+  }
+}
+
+export function pathKind(path: string): Kind {
+  try {
+    const stat = lstatSync(path)
+    if (stat.isSymbolicLink()) return 'other'
+    if (stat.isDirectory()) return 'directory'
+    return stat.isFile() ? 'file' : 'other'
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code
+    return code === 'ENOENT' || code === 'ENOTDIR' ? 'absent' : 'unreadable'
+  }
+}
+
 // The one chokepoint. Nothing used to create the home — four writers made it lazily, each in its
 // own way — so there was nowhere to hang a move. Every command passes through here first.
 export function settleHome(report: (line: string) => void = console.error): Migration {
   const result = migrateHome({
-    exists: (path) => existsSync(path),
-    // `lstat`, so a symlink is never followed, and a failure that is not "absent" is not silence.
-    isPlainDirectory: (path) => { try { return lstatSync(path).isDirectory() } catch { return false } },
-    // A cross-device rename fails with EXDEV, which a homedir move can hit when a home is mounted
-    // separately. Copy-then-remove is the fallback, and the original stays until the copy is whole.
-    move: (from, to) => {
-      try { renameSync(from, to) } catch (error) {
-        if ((error as NodeJS.ErrnoException).code !== 'EXDEV') throw error
-        cpSync(from, to, { recursive: true, preserveTimestamps: true, verbatimSymlinks: true })
-        rmSync(from, { recursive: true, force: true })
-      }
-    },
+    kind: pathKind,
+    move: (from, to) => movePath(from, to, {
+      rename: renameSync,
+      copy: (a, b) => { cpSync(a, b, { recursive: true, preserveTimestamps: true, verbatimSymlinks: true }) },
+      remove: (path) => { rmSync(path, { recursive: true, force: true }) },
+    }),
     mkdir: (path) => { mkdirSync(path, { recursive: true }) },
     remove: (path) => { rmSync(path, { recursive: true, force: true }) },
   })

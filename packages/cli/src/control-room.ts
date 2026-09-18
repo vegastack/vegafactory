@@ -59,7 +59,7 @@ export function readFactoryConfig(text: string | null): FactoryConfig {
   try {
     parsed = JSON.parse(text)
   } catch {
-    throw new Error('~/.vegafactory/factory.json is not valid JSON — fix or delete it')
+    throw new Error(`${configPath()} is not valid JSON — fix or delete it`)
   }
   if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) throw new Error('factory.json must be an object')
   const document = parsed as Record<string, unknown>
