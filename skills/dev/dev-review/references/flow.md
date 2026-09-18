@@ -42,14 +42,7 @@ The reviewer returns only JSON:
 
 ## Reviewer invocations
 
-Verified against the tools' own `--help` on 17-09-2026 (codex-cli 0.153.4, Claude Code 2.1.263):
-
-```sh
-codex exec -s read-only -c hooks={} -c projects."<worktree>".trust_level="untrusted" -c model_reasoning_effort=<level> --output-schema <schema.json> -o <out.json> -
-codex exec resume -c sandbox_mode=read-only --output-schema <schema.json> -o <out.json> <session-id> -
-claude -p --restricted --strict-mcp-config --settings '{"hooks":{}}' --tools Read,Grep,Glob --output-format json --json-schema <inline schema> --effort <level>
-claude -p --resume <session-id> --tools Read,Grep,Glob --output-format json --json-schema <inline schema>
-```
+Both invocations are built by `packages/cli/src/review.ts`, which is where the exact argv lives; `vegafactory review <n> --dry-run` prints it for the run in front of you. Verified against the tools' own `--help` on 17-09-2026 (codex-cli 0.153.4, Claude Code 2.1.263): Codex runs `exec` read-only with an empty hook table, this path marked untrusted, the output schema and an output file, taking the packet on standard input, and resumes with the same sandbox key; Claude Code runs headless with restricted settings, read-only tools, JSON output and an inline schema, and resumes by session id.
 
 The model flag (`-c model=<id>` for Codex, `--model <id>` for Claude Code) appears only when dev.md's `harness-policy:` pins one; its `default` means the tool's own model, which is what a subscription account wants — a pinned id the account cannot serve fails the run.
 
