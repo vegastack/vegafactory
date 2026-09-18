@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os'
 import { join, sep } from 'node:path'
 import {
   appKeyPath, controlRoomClonePath, controlRoomStore, DEAD_ENTRIES, factoryConfigPath, factoryHome,
-  movePath, pathKind,
+  movePath, pathKind, rebasePaths,
   FOREIGN_ENTRIES, HOME_VARIABLE, legacyHome, migrateHome, statsDirectory, statsHtmlPath,
   workerDirectory, worktreesPath,
 } from '../src/home.ts'
@@ -16,9 +16,13 @@ beforeEach(() => {
 })
 
 describe('where the home is', () => {
-  test('the env var names the directory itself, and wins over the home', () => {
+  test('the env var names the directory itself, and a different home named outright wins over it', () => {
     const named = join(home, 'elsewhere')
-    expect(factoryHome({ env: { [HOME_VARIABLE]: named }, home })).toBe(named)
+    // Nothing was passed, so the variable answers.
+    expect(factoryHome({ env: { [HOME_VARIABLE]: named } })).toBe(named)
+    // A home that is some other directory has been named outright, so it wins: an ambient setting
+    // must not reach past a caller that said where to look.
+    expect(factoryHome({ env: { [HOME_VARIABLE]: named }, home })).toBe(join(home, '.vegafactory'))
     expect(factoryHome({ env: {}, home })).toBe(join(home, '.vegafactory'))
   })
 
@@ -67,6 +71,7 @@ describe('moving off the older home', () => {
     kind: pathKind,
     list: (path: string) => { try { return require('node:fs').readdirSync(path) as string[] } catch { return [] } },
     readable: () => true,
+    rebase: () => 0,
     move: (from: string, to: string) => { require('node:fs').renameSync(from, to) },
     mkdir: (path: string) => { mkdirSync(path, { recursive: true }) },
     remove: (path: string) => { require('node:fs').rmSync(path, { recursive: true, force: true }) },
@@ -191,6 +196,7 @@ describe('the move cannot be aimed somewhere it was not asked to go', () => {
     kind: pathKind,
     list: (path: string) => { try { return require('node:fs').readdirSync(path) as string[] } catch { return [] } },
     readable: () => true,
+    rebase: () => 0,
     move: (from: string, to: string) => { require('node:fs').renameSync(from, to) },
     mkdir: (path: string) => { mkdirSync(path, { recursive: true }) },
     remove: (path: string) => { require('node:fs').rmSync(path, { recursive: true, force: true }) },
@@ -267,7 +273,7 @@ describe('a real run writes only where it should', () => {
     writeFileSync(join(legacy, 'factory.json'), '{"schemaVersion":2,"controlRooms":{}}')
     writeFileSync(join(legacy, 'secrets', 'keep.txt'), 'not ours')
 
-    const run = Bun.spawnSync([process.execPath, cli, 'version'], { cwd: home, env: { ...process.env, HOME: home } })
+    const run = Bun.spawnSync([process.execPath, cli, 'version'], { cwd: home, env: { ...process.env, HOME: home, VEGAFACTORY_HOME: '' } })
     expect(run.exitCode).toBe(0)
     // The answer is the only thing on stdout: a `--json` caller must never have to step over this.
     expect(run.stdout.toString().trim()).toMatch(/^\d+\.\d+\.\d+/)
@@ -286,7 +292,7 @@ describe('a real run writes only where it should', () => {
     mkdirSync(join(home, '.vegafactory'), { recursive: true })
     writeFileSync(join(home, '.vegastack', 'factory.json'), 'older')
     writeFileSync(join(home, '.vegafactory', 'factory.json'), 'newer')
-    const run = Bun.spawnSync([process.execPath, cli, 'version'], { cwd: home, env: { ...process.env, HOME: home } })
+    const run = Bun.spawnSync([process.execPath, cli, 'version'], { cwd: home, env: { ...process.env, HOME: home, VEGAFACTORY_HOME: '' } })
     expect(run.exitCode).toBe(2)
     expect(run.stderr.toString()).toContain('both hold this product')
     expect(readFileSync(join(home, '.vegastack', 'factory.json'), 'utf8')).toBe('older')
@@ -338,6 +344,7 @@ describe('work in flight is waited for, never judged', () => {
     kind: pathKind,
     list: (path: string) => { try { return require('node:fs').readdirSync(path) as string[] } catch { return [] } },
     readable: () => true,
+    rebase: () => 0,
     move: (from: string, to: string) => { require('node:fs').renameSync(from, to) },
     mkdir: (path: string) => { mkdirSync(path, { recursive: true }) },
     remove: (path: string) => { require('node:fs').rmSync(path, { recursive: true, force: true }) },
@@ -450,5 +457,54 @@ describe('a failed copy leaves the original standing', () => {
       remove: () => { removed = true },
     })).toThrow('disk full')
     expect(removed).toBe(false)
+  })
+})
+
+// `factory.json` records where each control room was cloned, as an absolute path, and
+// `safeClonePath` insists that path is inside the store. Move the files and leave the record
+// alone and every control-room read fails closed — the exact skew this module exists to prevent.
+describe('the record moves with the files', () => {
+  test('every recorded path under the older home is rebased onto the new one', () => {
+    const before = {
+      schemaVersion: 2,
+      controlRooms: {
+        acme: {
+          path: '/home/mk/.vegastack/control-room/acme',
+          remote: 'https://github.com/acme/room.git',
+          snapshots: { 'acme/app': { contentPath: '/home/mk/.vegastack/policy-snapshots/acme/snap-1' } },
+        },
+      },
+      elsewhere: '/home/mk/other/thing',
+    }
+    const { value, changed } = rebasePaths(before, '/home/mk/.vegastack', '/home/mk/.vegafactory')
+    expect(changed).toBe(2)
+    const after = value as typeof before
+    expect(after.controlRooms.acme.path).toBe('/home/mk/.vegafactory/control-room/acme')
+    expect(after.controlRooms.acme.snapshots['acme/app']!.contentPath).toBe('/home/mk/.vegafactory/policy-snapshots/acme/snap-1')
+    // Everything else is left exactly as it was, including a remote that is not a path at all.
+    expect(after.controlRooms.acme.remote).toBe('https://github.com/acme/room.git')
+    expect(after.elsewhere).toBe('/home/mk/other/thing')
+  })
+
+  test('a path that merely starts with the same letters is not a path under the home', () => {
+    const { changed } = rebasePaths({ a: '/home/mk/.vegastack-backup/x' }, '/home/mk/.vegastack', '/home/mk/.vegafactory')
+    expect(changed).toBe(0)
+  })
+
+  test('the record is rebased as part of the move, and the clone is where it says', () => {
+    const legacy = join(home, '.vegastack')
+    mkdirSync(join(legacy, 'control-room', 'acme'), { recursive: true })
+    writeFileSync(join(legacy, 'factory.json'), JSON.stringify({
+      schemaVersion: 2,
+      controlRooms: { acme: { path: join(legacy, 'control-room', 'acme'), branch: 'main' } },
+    }))
+    const run = Bun.spawnSync([process.execPath, join(import.meta.dir, '..', 'src', 'index.ts'), 'version'], {
+      cwd: home, env: { ...process.env, HOME: home, VEGAFACTORY_HOME: '' },
+    })
+    expect(run.exitCode).toBe(0)
+    const recorded = JSON.parse(readFileSync(join(home, '.vegafactory', 'factory.json'), 'utf8')) as { controlRooms: Record<string, { path: string }> }
+    expect(recorded.controlRooms.acme!.path).toBe(join(home, '.vegafactory', 'control-room', 'acme'))
+    expect(existsSync(recorded.controlRooms.acme!.path)).toBe(true)
+    expect(run.stderr.toString()).toContain('recorded path')
   })
 })

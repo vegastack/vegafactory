@@ -9,10 +9,10 @@
 // VegaStack tooling keeps `tools/`, `cache/`, `registry/` and `secrets/` there, none of which this
 // repository references. A directory this product owns entirely is one it may also prune.
 
-import { accessSync, constants, cpSync, lstatSync, mkdirSync, readdirSync, renameSync, rmSync } from 'node:fs'
+import { accessSync, constants, cpSync, lstatSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync } from 'node:fs'
 
 import { homedir } from 'node:os'
-import { dirname, join } from 'node:path'
+import { dirname, join, sep } from 'node:path'
 
 // The one escape hatch, and the reason the tests can run at all: `worktree.ts` used to call
 // `homedir()` with no way to pass anything else, so a careless test wrote to the real home.
@@ -41,18 +41,25 @@ export const DEAD_ENTRIES = ['guard'] as const
 
 export interface HomeOptions { env?: NodeJS.ProcessEnv; home?: string }
 
-// `VEGAFACTORY_HOME` names the directory itself, not the parent: a test points it at a temporary
-// directory and everything below follows. An empty or whitespace value is no value.
+// `VEGAFACTORY_HOME` names the directory itself, not the parent: point it at a temporary directory
+// and everything below follows. An empty or whitespace value is no value.
+//
+// A `home` that is some *other* directory wins over it. The variable is the ambient answer for a
+// process that was not told where to look; a caller naming a different directory has been told,
+// and an ambient setting must not reach past it — that is how a test asking about one directory
+// silently reads another. Passing this machine's own home says nothing the variable does not
+// already know, so it does not count as being told.
 export function factoryHome(options: HomeOptions = {}): string {
+  if (options.home !== undefined && options.home !== homedir()) return join(options.home, FACTORY_DIRECTORY)
   const named = (options.env ?? process.env)[HOME_VARIABLE]?.trim()
-  if (named) return named
-  return join(options.home ?? homedir(), FACTORY_DIRECTORY)
+  return named || join(options.home ?? homedir(), FACTORY_DIRECTORY)
 }
 
 // The home this machine used before, so a first run can find what to move.
 export function legacyHome(options: HomeOptions = {}): string {
   return join(options.home ?? homedir(), LEGACY_DIRECTORY)
 }
+
 
 // Control rooms, compiled policy, and the recorded commit each was verified at.
 export const factoryConfigPath = (options: HomeOptions = {}): string => join(factoryHome(options), 'factory.json')
@@ -119,17 +126,20 @@ const MOVES: { from: string[]; to: string[]; shape: Kind }[] = [
 // the installer's lock documents a steal, and having one rule here beats having four. Guessing
 // wrong renames a directory out from under a live writer; guessing right saves an operator one
 // `rm` of a path this message names, once in the life of a machine.
-const LOCK_NAMES = ['.skills-install.lock', 'factory.json.guard', '.lock'] as const
-
 // Everywhere a lock can sit under either home, including inside the directories this move renames.
 function lockPaths(home: string, list: (path: string) => string[] | null): string[] {
-  const rooms = (list(join(home, 'control-room')) ?? []).filter((entry) => entry.endsWith('.lock'))
+  const rooms = (list(join(home, 'control-room')) ?? []).filter((entry) => entry.endsWith('.lock') || entry.endsWith('.lock.steal'))
   return [
     join(home, '.skills-install.lock'),
     join(home, 'factory.json.guard'),
-    join(home, 'stats', '.lock'), join(home, 'stats', 'push', '.lock'),
-    join(home, '.tmp', 'stats', '.lock'), join(home, '.tmp', 'stats', 'push', '.lock'),
-    ...rooms.map((entry) => join(home, 'control-room', entry)),
+    // `.lock.steal` is the takeover mutex: during a steal the ordinary `.lock` is gone for an
+    // instant while this one is held, and a scan that watched only `.lock` would see a quiet
+    // directory and rename it out from under the process doing the stealing.
+    ...['stats', join('.tmp', 'stats')].flatMap((spool) => [
+      join(home, spool, '.lock'), join(home, spool, '.lock.steal'),
+      join(home, spool, 'push', '.lock'), join(home, spool, 'push', '.lock.steal'),
+    ]),
+    ...rooms.flatMap((entry) => [join(home, 'control-room', entry), join(home, 'control-room', `${entry}.steal`)]),
   ]
 }
 
@@ -151,6 +161,8 @@ export function migrateHome(deps: {
   // null when the directory is there but cannot be listed: "unknown" must never read as "empty".
   list: (path: string) => string[] | null
   readable: (path: string, shape: Kind) => boolean
+  // Returns how many recorded paths were moved onto the new home.
+  rebase: (path: string, from: string, to: string) => number
   move: (from: string, to: string) => void
   mkdir: (path: string) => void
   remove: (path: string) => void
@@ -255,7 +267,33 @@ export function migrateHome(deps: {
     deps.move(join(from, ...entry.from), target)
     moved.push(`${entry.from.join('/')} → ${entry.to.join('/')}`)
   }
+  // `factory.json` records absolute paths — where each control room was cloned, and where its
+  // policy snapshot was written. Move the files and leave those alone and every control-room read
+  // fails closed against the store that now guards a different directory, which is exactly the
+  // skew this module exists to prevent. So the record is rebased in the same breath as the move.
+  const rebased = deps.rebase(join(to, 'factory.json'), from, to)
+  if (rebased > 0) moved.push(`factory.json → ${rebased} recorded path${rebased === 1 ? '' : 's'} rebased onto ${to}`)
   return { action: 'moved', reason: `moved this machine's state from ${from} to ${to}`, moved }
+}
+
+// Every string anywhere in the record that begins with the older home, moved to the new one. It
+// walks the whole document rather than named fields: the snapshot entries nest, and a path this
+// release has not heard of is still a path that will be wrong tomorrow.
+export function rebasePaths(value: unknown, from: string, to: string): { value: unknown; changed: number } {
+  let changed = 0
+  const walk = (node: unknown): unknown => {
+    if (typeof node === 'string') {
+      if (node !== from && !node.startsWith(from + sep)) return node
+      changed += 1
+      return to + node.slice(from.length)
+    }
+    if (Array.isArray(node)) return node.map(walk)
+    if (node && typeof node === 'object') {
+      return Object.fromEntries(Object.entries(node as Record<string, unknown>).map(([key, entry]) => [key, walk(entry)]))
+    }
+    return node
+  }
+  return { value: walk(value), changed }
 }
 
 // `rename` cannot cross a device, and a home can be mounted separately from the directory it sits
@@ -309,9 +347,20 @@ export function settleHome(report: (line: string) => void = console.error): Migr
         return (error as NodeJS.ErrnoException).code === 'ENOENT' ? [] : null
       }
     },
+    rebase: (path, from, to) => {
+      let text: string
+      try { text = readFileSync(path, 'utf8') } catch { return 0 }
+      let parsed: unknown
+      try { parsed = JSON.parse(text) } catch { return 0 }
+      const { value, changed } = rebasePaths(parsed, from, to)
+      if (changed > 0) writeFileSync(path, `${JSON.stringify(value, null, 2)}\n`)
+      return changed
+    },
     readable: (path, shape) => {
       try {
-        if (shape === 'directory') readdirSync(path)
+        // A directory needs search as well as read: one that lists but cannot be entered moves
+        // across perfectly well and nothing inside it can be opened at the far end.
+        if (shape === 'directory') { accessSync(path, constants.R_OK | constants.X_OK); readdirSync(path) }
         else accessSync(path, constants.R_OK)
         return true
       } catch { return false }
