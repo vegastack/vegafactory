@@ -85,9 +85,12 @@ describe('createWorktree', () => {
 // The whole verb, as the CLI runs it: naming is composed in runVerb, which is
 // where a type resolved from the wrong place does its damage.
 const script = join(import.meta.dir, '..', 'scripts', 'worktree.mjs')
+// --home keeps the Codex trust entry inside the temp repo. Without it a
+// --write run edits the real ~/.codex/config.toml, which a test must never do.
 const runScript = (root: string, ...args: string[]) => {
+  const argv = [script, ...args, '--repo-root', root, '--home', root, '--json']
   try {
-    return { code: 0, out: execFileSync('node', [script, ...args, '--repo-root', root, '--json'], { cwd: root, encoding: 'utf8' }) }
+    return { code: 0, out: execFileSync('node', argv, { cwd: root, encoding: 'utf8' }) }
   } catch (error) {
     const failure = error as { status: number; stdout: string }
     return { code: failure.status, out: failure.stdout }
@@ -104,11 +107,15 @@ describe('the create and restore verbs resolve type and slug independently', () 
     expect(r.code).toBe(0)
     expect(JSON.parse(r.out).branch).toBe('fix/106-x')
   })
-  test('create with --slug and no type refuses instead of inventing one', () => {
+  test('create with --slug still wants a type, and says so rather than inventing one', () => {
     const root = repo()
     const r = runScript(root, 'create', '--issue', '224', '--slug', 'x')
     expect(r.code).toBe(2)
-    expect(JSON.parse(r.out).blocks.join(' ')).toContain('names no type')
+    // No repo knob in the fixture, so the title cannot be read — and the
+    // refusal asks for the one thing still missing, not for the slug it has.
+    const blocks = JSON.parse(r.out).blocks.join(' ')
+    expect(blocks).toContain('--type')
+    expect(blocks).not.toContain('--slug')
   })
 })
 

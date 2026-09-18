@@ -34,6 +34,12 @@ const DISCARD = 'ignore';
 // coverage acceptance.
 const at = (where, message) => where + ': ' + message;
 
+// An issue title comes from GitHub and reaches an operator's terminal through
+// a block message. Control characters in it could move the cursor, repaint the
+// line or hide what follows, so only printable characters survive, and a long
+// title is cut rather than allowed to fill the screen.
+const printable = (text) => String(text ?? '').replace(/[\u0000-\u001f\u007f-\u009f]+/g, ' ').trim().slice(0, 120);
+
 // --- naming ---------------------------------------------------------------
 
 // A directory- and branch-safe slug: lowercase, every run of non-alphanumerics
@@ -83,11 +89,15 @@ export function titleParts(title, types = DEFAULT_BRANCH_TYPES) {
 // The type and slug of the one local branch named for an issue — what restore
 // needs when no --slug is given, read from git rather than GitHub because the
 // branch is the fact restore acts on. Several matches need --slug to pick one.
-export function branchPartsForIssue(repoRoot, issue) {
+export function branchPartsForIssue(repoRoot, issue, slug = null) {
   const listed = git(repoRoot, ['for-each-ref', '--format=%(refname:short)', 'refs/heads/']);
   if (!listed.ok) return { error: 'cannot list branches: ' + listed.out };
   const lead = String(issue) + '-';
-  const matches = listed.out.split('\n').filter((name) => name.slice(name.indexOf('/') + 1).startsWith(lead) && name.includes('/'));
+  const named = listed.out.split('\n').filter((name) => name.slice(name.indexOf('/') + 1).startsWith(lead) && name.includes('/'));
+  // --slug is how the caller picks among several, so it narrows before the
+  // ambiguity is declared rather than after it.
+  const matches = slug ? named.filter((name) => name.slice(name.indexOf('/') + 1) === lead + slug) : named;
+  if (matches.length === 0 && slug) return { error: 'no branch for #' + issue + ' named ' + lead + slug + (named.length ? ' (there is ' + named.join(', ') + ')' : '') };
   if (matches.length === 0) return { error: 'no branch for #' + issue + ' — nothing to restore; create it instead' };
   if (matches.length > 1) return { error: 'several branches match #' + issue + ' (' + matches.join(', ') + ') — pass --slug and --type' };
   const slash = matches[0].indexOf('/');
@@ -380,7 +390,7 @@ export function createWorktree({ repoRoot, issue, slug, type, title, base, devMd
   // tells the caller what this project actually has.
   const types = parseBranchTypes(devMd);
   if (!type) {
-    const named = title ? '"' + title + '"' : '#' + issue;
+    const named = title ? '"' + printable(title) + '"' : '#' + issue;
     return { blocks: [at('branch type', named + ' names no type — pass --type <one of: ' + types.join(', ') + '>')], warns, actions };
   }
   if (!types.includes(type)) return { blocks: [at('branch type', type + ' is not one this project has — dev.md lists ' + types.join(', '))], warns, actions };
@@ -958,22 +968,24 @@ function runVerb(verb, flags) {
     // createWorktree refuses and names the types rather than guessing `feat`.
     if (issue !== null && verb === 'restore') {
       if (!named.type || !slug) {
-        const parts = branchPartsForIssue(repoRoot, issue);
+        const parts = branchPartsForIssue(repoRoot, issue, slug);
         if (parts.error) return { blocks: [at('#' + issue, parts.error)], warns: [] };
         named = { type: named.type || parts.type, slug: slug || parts.slug };
       }
-    } else if (!slug && issue !== null) {
+    } else if (issue !== null && (!slug || !named.type)) {
+      // What the title is still needed for: the slug, the type, or both.
+      const wanted = slug ? '--type' : named.type ? '--slug' : '--slug and --type';
       const repo = repoOf();
-      if (!repo) return { blocks: [at('#' + issue, 'no repo known to read the title from — pass --repo, or --slug')], warns: [] };
+      if (!repo) return { blocks: [at('#' + issue, 'no repo known to read the title from — pass --repo, or ' + wanted)], warns: [] };
       let title;
       try {
         title = ghJson(['api', 'repos/' + repo + '/issues/' + issue]).title;
       } catch (error) {
-        return { blocks: [at('#' + issue, 'could not read the issue title (' + error.message + ') — pass --slug')], warns: [] };
+        return { blocks: [at('#' + issue, 'could not read the issue title (' + error.message + ') — pass ' + wanted)], warns: [] };
       }
       const parts = titleParts(title, parseBranchTypes(devMd));
-      if (!parts.slug) return { blocks: [at('#' + issue, 'the title makes no slug — pass --slug')], warns: [] };
-      named = { type: named.type || parts.type, slug: parts.slug, title };
+      if (!slug && !parts.slug) return { blocks: [at('#' + issue, 'the title makes no slug — pass --slug')], warns: [] };
+      named = { type: named.type || parts.type, slug: slug || parts.slug, title };
     }
     if (!named.slug) return { blocks: ['--slug is required for ' + verb + ' without --issue'], warns: [] };
     const options = { ...shared, issue, slug: named.slug, type: named.type, title: named.title };
