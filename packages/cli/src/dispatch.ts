@@ -253,7 +253,7 @@ export function tokenRunner(token: () => string, timeoutMs = 30_000): GhRunner {
 // ready before the call: the refresh runs between passes, from `freshen`, and never mid-request.
 export const TOKEN_MARGIN_MS = 5 * 60_000
 
-export interface AppIdentity { runner: GhRunner; freshen: (now?: number) => Promise<void> }
+export interface AppIdentity { runner: GhRunner; freshen: (now?: number) => Promise<void>; token: () => string | null }
 
 export function appIdentity(input: { repo: string; keyPath: string; appId: string; fetch?: Fetch }): AppIdentity {
   let held: AppToken | null = null
@@ -262,6 +262,9 @@ export function appIdentity(input: { repo: string; keyPath: string; appId: strin
       if (!held) throw new GhError('the dispatcher has no installation token yet')
       return held.token
     }),
+    // What a dispatched run is given so its own writes are the App's too. It is a value, never a
+    // path to the key: a child that could read the key could mint whatever it liked.
+    token: () => held?.token ?? null,
     freshen: async (now = Date.now()) => {
       if (held && held.expiresAt - now > TOKEN_MARGIN_MS) return
       held = await mintToken({ ...input, now })
@@ -471,11 +474,16 @@ export interface Decision { action: Action; reason: string; trigger: number | nu
 
 const nothing = (reason: string): Decision => ({ action: 'none', reason, trigger: null, by: null, split: false, quote: null })
 
-// A line whose whole point is "ship it". "do not ship it", "ship it after fixing X" and "I won't
-// ship it" are corrections that happen to contain the words, and a gate that read them as consent
-// would merge on a sentence that said the opposite. A separator may precede the phrase
-// ("looks good — ship it"), and nothing but punctuation may follow it.
-const SHIP_LINE = /(?:^|[—–:;-]\s+)(?:ok|okay|yes|lgtm)?[,!.]?\s*ship(?:\s+it|\s+this)?$/iu
+// A line whose whole point is "ship it". "do not ship it", "ship it after fixing X", "never: ship
+// it" and "I refuse; ship it" are all corrections that happen to contain the words, and a gate
+// that read any of them as consent would merge on a sentence saying the opposite.
+//
+// So the *whole line* has to be an affirmative: an optional approving lead-in from this list, then
+// the instruction, then nothing. Anything else — a word before it that is not on the list, a
+// condition after it — is a correction. An operator who wants no argument writes "ship it".
+const APPROVING = ['ok', 'okay', 'yes', 'yep', 'yup', 'sure', 'lgtm', 'looks good', 'looks great', 'nice', 'nice work', 'great', 'perfect', 'approved', 'agreed', 'all good']
+// Longest first, so "nice work" is one lead-in rather than "nice" followed by a word that is not.
+const SHIP_LINE = new RegExp(`^(?:(?:${[...APPROVING].sort((a, b) => b.length - a.length).join('|')})[\\s,;:!.\\u2014\\u2013-]+)*ship(?:\\s+it|\\s+this)?$`, 'iu')
 
 export function shipWord(body: string): string | null {
   for (const raw of String(body ?? '').split('\n')) {
@@ -782,15 +790,34 @@ export function workingDir(root: string, number: number): string | null {
 
 // The real step: a headless agent run on the operator's subscription, in the issue's worktree,
 // killed after the step limit. `childEnvironment` is what refuses an API key in the environment.
-export function defaultRunStep(devMd: string, env: NodeJS.ProcessEnv, { exec = execTool, timeoutMs = STEP_TIMEOUT_MS } = {}): RunStep {
+// The environment a dispatched run gets. Three things are true of it and each one matters:
+//
+// - it runs on the operator's subscription, which is what `childEnvironment` proves;
+// - it writes to GitHub as the App, on the short-lived installation token this machine minted, so
+//   everything it posts is authored by `vegafactory[bot]` and nothing it writes can pass as a
+//   person's stop, correction or "ship it";
+// - it is never told where the App's private key is. The token expires in an hour; the key does
+//   not. (A child running under the same account can still read that file through the filesystem —
+//   the separate dispatcher account in the dispatcher-box checklist is what closes that, not this.)
+export function childRunEnvironment(env: NodeJS.ProcessEnv, token: string | null): NodeJS.ProcessEnv {
+  const child: NodeJS.ProcessEnv = { ...childEnvironment(env), VSK_ASK_ROUTE: 'issue' }
+  for (const name of Object.keys(child)) if (name.startsWith('VEGAFACTORY_')) delete child[name]
+  if (token) {
+    child.GH_TOKEN = token
+    child.GITHUB_TOKEN = token
+  }
+  return child
+}
+
+export function defaultRunStep(devMd: string, env: NodeJS.ProcessEnv, { exec = execTool, timeoutMs = STEP_TIMEOUT_MS, token = () => null as string | null } = {}): RunStep {
   return async (step, context) => {
     const started = Date.now()
     const policy = stagePolicy(devMd, STAGE_OF[step.action] ?? 'implement')
     const { tool, args } = agentArgs(policy, stepPrompt(step))
     const cwd = workingDir(context.root, step.number) ?? context.root
     // Nobody is at the keyboard, so a round of questions goes to the issue and waits there for the
-    // operator — dev-setup's references/ask-route.md, where this variable is the first step.
-    const child = await exec(tool, args, { cwd, env: { ...childEnvironment(env), VSK_ASK_ROUTE: 'issue' }, timeoutMs, onStart: context.onStart })
+    // operator — dev-setup's references/ask-route.md, where VSK_ASK_ROUTE is the first step.
+    const child = await exec(tool, args, { cwd, env: childRunEnvironment(env, token()), timeoutMs, onStart: context.onStart })
     const ms = Date.now() - started
     const text = `${child.stderr}\n${child.stdout}`
     if (child.timedOut) return { outcome: 'killed', note: `${tool} ran past the ${timeoutMs / 60_000}-minute step limit and was stopped`, ms }
@@ -1362,7 +1389,7 @@ export async function runDispatch(argv: string[], deps: CliDeps = {}): Promise<n
       const runner = deps.runner ?? identity!.runner
       const pollDeps: PollDeps = {
         root, repo, runner, machine, out: args.json ? () => {} : out, now: deps.now ?? Date.now,
-        runStep: deps.runStep ?? defaultRunStep(devMd, env), stop: deps.stop,
+        runStep: deps.runStep ?? defaultRunStep(devMd, env, { token: () => identity?.token() ?? null }), stop: deps.stop,
         standDown: (number, reason) => standDown({ root, repo, number, runner, machine }, reason),
       }
       // Started steps outlive the pass that began them, so the next pass keeps their slots and

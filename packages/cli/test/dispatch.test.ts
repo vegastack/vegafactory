@@ -7,7 +7,7 @@ import { join } from 'node:path'
 import { claimBody, claimLine, holderOf, trustedHolders } from '../src/claim.ts'
 import {
   APP_ID, STEP_TIMEOUT_MS, TOKEN_MARGIN_MS, agentArgs, appIdentity, appJwt, appKeyPath, assertKeyFile, board, decide, defaultRunStep, dispatchDir,
-  acknowledgedPlan, canonicalPath, confirmShip, disjointSiblings, pushableBranch, shipWord,
+  acknowledgedPlan, canonicalPath, childRunEnvironment, confirmShip, disjointSiblings, pushableBranch, shipWord,
   drain, filesFromParent, harnessAnswers, hitLimit, hooksWired, listedHere, mintToken, overlaps, parseDispatchArgs,
   parseDispatchers, poll, readActed, readRuns, readiness, recordRun, resetAt, RUNS_KEPT, runDispatch, schedule, serviceCommands, stagePolicy,
   standDown, stepPrompt, tail, unitPath, unitText, unsafeForParallel,
@@ -241,6 +241,21 @@ describe('transitions', () => {
     expect(verdict(1)).toMatchObject({ action: 'follow-up', trigger: reply.id, by: 'mk' })
   })
 
+  test('a comment the factory wrote is never a person\'s word', () => {
+    // A dispatched run posts as the App. Its comments are work, never consent — so a run that was
+    // fed a hostile file cannot stop, correct or ship an issue by writing a sentence.
+    for (const [state, text] of [['queued', 'stop'], ['ready-to-ship', 'ship it'], ['ready-to-ship', 'rename the flag']] as Array<[string, string]>) {
+      const number = 20 + Math.floor(Math.random() * 1_000_000)
+      gh.addIssue({ number, labels: [state, 'small'] })
+      gh.addComment(number, '<!-- vsk:v1 type=evidence sha=abc1234 -->\nbuilt', 'vegafactory[bot]', 'Bot')
+      gh.addComment(number, text, 'vegafactory[bot]', 'Bot')
+      expect([text, verdict(number).action]).toEqual([text, state === 'queued' ? 'implement' : 'none'])
+      // The same words from the operator do move it.
+      gh.addComment(number, text, 'mk')
+      expect([text, verdict(number).action]).toEqual([text, state === 'queued' ? 'stop' : text === 'ship it' ? 'ship' : 'corrections'])
+    }
+  })
+
   test('a reply from someone without write access is not the operator', () => {
     gh.addIssue({ number: 1, labels: ['waiting-on-operator', 'medium'] })
     gh.addComment(1, '<!-- vsk:v1 type=plan rev=1 -->\n## Plan', 'mk')
@@ -281,11 +296,13 @@ describe('transitions', () => {
   })
 
   test('a sentence that only contains the words is a correction, not consent', () => {
-    for (const text of ['do not ship it', "don't ship it yet", 'ship it after fixing the flag name', 'I would not ship it like this', '> ship it']) {
-      expect(shipWord(text)).toBeNull()
+    // A separator before the words is not consent either: the whole line has to be the instruction.
+    for (const text of ['do not ship it', "don't ship it yet", 'ship it after fixing the flag name', 'I would not ship it like this', '> ship it',
+      'do not — ship it', 'never: ship it', 'I refuse; ship it', 'maybe ship it', 'ship it when CI is green']) {
+      expect([text, shipWord(text)]).toEqual([text, null])
     }
-    for (const text of ['ship it', 'Ship it.', 'ship it!', 'looks good — ship it', 'yes, ship it', 'ok ship this', 'nice work\nship it']) {
-      expect(shipWord(text)).not.toBeNull()
+    for (const text of ['ship it', 'Ship it.', 'ship it!', 'looks good — ship it', 'yes, ship it', 'ok ship this', 'nice work\nship it', 'LGTM: ship it']) {
+      expect([text, shipWord(text) !== null]).toEqual([text, true])
     }
     gh.addIssue({ number: 1, labels: ['ready-to-ship', 'small'] })
     gh.addComment(1, '<!-- vsk:v1 type=evidence sha=abc1234 -->\nbuilt', 'mk')
@@ -882,6 +899,26 @@ describe('the step a run makes', () => {
     expect(STEP_TIMEOUT_MS).toBe(20 * 60_000)
     expect(result.outcome).toBe('killed')
     expect(result.note).toContain('past the 20-minute step limit')
+  })
+
+  test('a dispatched run writes as the App and is never told where the key is', async () => {
+    let given: NodeJS.ProcessEnv = {}
+    const exec = async (_tool: string, _args: string[], options: { env: NodeJS.ProcessEnv }) => {
+      given = options.env
+      return { code: 0, stdout: 'done', stderr: '', timedOut: false }
+    }
+    const env = { PATH: '/usr/bin', VEGAFACTORY_APP_PRIVATE_KEY_FILE: '/keys/app.pem', VEGAFACTORY_APP_ID: '4812956', HOME: '/home/x' }
+    await defaultRunStep('', env, { exec, token: () => 'ghs_from_the_app' })({ action: 'implement', number: 7, repo: 'o/r', split: false, by: null }, { root })
+    // Its writes are the App's, so nothing it posts can pass as a person's word.
+    expect(given.GH_TOKEN).toBe('ghs_from_the_app')
+    expect(given.GITHUB_TOKEN).toBe('ghs_from_the_app')
+    // And it cannot reach the key that mints them.
+    expect(given.VEGAFACTORY_APP_PRIVATE_KEY_FILE).toBeUndefined()
+    expect(Object.keys(given).some((name) => name.startsWith('VEGAFACTORY_'))).toBe(false)
+    expect(given.PATH).toBe('/usr/bin')
+    // With no token minted yet the child simply gets none; it never gets the key instead.
+    expect(childRunEnvironment(env, null).GH_TOKEN).toBeUndefined()
+    expect(childRunEnvironment(env, null).VEGAFACTORY_APP_PRIVATE_KEY_FILE).toBeUndefined()
   })
 
   test('a step refuses to start while an API key is in the environment', async () => {
