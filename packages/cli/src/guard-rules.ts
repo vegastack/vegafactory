@@ -74,8 +74,136 @@ const isTag = (name: string, tags?: Set<string>) => name.startsWith('refs/tags/'
 // text handed to another program, probed separately.
 export function parseCommand(command: unknown): Segment[] {
   const segments: Segment[] = []
-  if (typeof command === 'string') parseInto(command, segments)
+  if (typeof command === 'string') parseInto(stripHeredocs(command), segments)
   return segments
+}
+
+// Every heredoc opened on one line, in order, with whether its body is literal. A quoted or
+// escaped delimiter — `<<'EOF'`, `<<"EOF"`, `<<\EOF` — makes the body literal; a bare `<<EOF`
+// leaves it subject to expansion. `<<<` is a here-string, not a heredoc, and is left alone.
+function heredocsOpenedOn(line: string): Array<{ delimiter: string; literal: boolean; strip: boolean }> {
+  const found: Array<{ delimiter: string; literal: boolean; strip: boolean }> = []
+  let quote: string | null = null
+  for (let i = 0; i < line.length; i += 1) {
+    const ch = line[i]!
+    if (quote) {
+      if (ch === '\\' && quote === '"') i += 1
+      else if (ch === quote) quote = null
+      continue
+    }
+    if (ch === '\\') { i += 1; continue }
+    if (ch === "'" || ch === '"') { quote = ch; continue }
+    // A `#` at the start of a word begins a comment: nothing after it opens a heredoc, and a
+    // `<<'EOF'` written there is a remark. Reading one as real would swallow the lines below it,
+    // which the shell runs as ordinary commands.
+    if (ch === '#' && (i === 0 || /[\s;&|(]/.test(line[i - 1]!))) break
+    if (ch !== '<' || line[i + 1] !== '<' || line[i + 2] === '<') continue
+    let j = i + 2
+    let strip = false
+    if (line[j] === '-') { strip = true; j += 1 }
+    while (j < line.length && /[ \t]/.test(line[j]!)) j += 1
+    let delimiter = ''
+    let literal = false
+    while (j < line.length && !/[\s;&|<>()]/.test(line[j]!)) {
+      const c = line[j]!
+      // `$'EOF'` and `$"EOF"` are quoting too: the shell removes the `$` and the quotes, and the
+      // terminator is `EOF`. Recording `$EOF` would mean never finding the real one, so every line
+      // below — including a command somebody meant to run — would be swallowed as body.
+      if (c === '$' && (line[j + 1] === "'" || line[j + 1] === '"')) { j += 1; continue }
+      if (c === "'" || c === '"') {
+        literal = true
+        const end = line.indexOf(c, j + 1)
+        const stop = end === -1 ? line.length : end
+        delimiter += line.slice(j + 1, stop)
+        j = stop + 1
+        continue
+      }
+      if (c === '\\') { literal = true; delimiter += line[j + 1] ?? ''; j += 2; continue }
+      delimiter += c
+      j += 1
+    }
+    if (delimiter) found.push({ delimiter, literal, strip })
+    i = j - 1
+  }
+  return found
+}
+
+// A heredoc body is data the command is fed, not command text. With a quoted delimiter a shell
+// expands nothing in it, so a backticked `npm publish` in there is prose — a changeset, a commit
+// message, a release note — and parsing it as a substitution made the guard ask for permission to
+// run words somebody was only writing down. A bare `<<EOF` body really is expanded by the shell,
+// so it always stays.
+//
+// Quoting is only half the question, though, and getting this wrong opens the guard wide: it stops
+// the *outer* shell expanding the body, and says nothing about what the command on the other end
+// does with it. `sh <<'EOF'` runs every line of it. So a body is dropped only when nothing on that
+// line could execute it — every command there reads its stdin as data and no more.
+// Commands that read their input and write it somewhere, and never run a line of it. Anything
+// absent from this list is assumed to run what it is given — including commands that plainly do
+// not, which costs an occasional extra question and is the side to be wrong on.
+const DATA_SINKS = new Set([
+  'cat', 'tee', 'head', 'tail', 'wc', 'sort', 'uniq', 'tr', 'rev', 'grep', 'egrep', 'fgrep',
+  'diff', 'cmp', 'nl', 'fold', 'column', 'base64', 'md5', 'md5sum', 'shasum', 'sha256sum',
+  'echo', 'printf', 'true', ':',
+])
+
+// Every command a stretch of text runs, exactly as written. A name carrying a slash is kept whole,
+// because `./cat` is a file in the repository and only `cat` is the tool this list means.
+function commandsIn(text: string): string[] {
+  const segments: Segment[] = []
+  parseInto(text, segments)
+  return segments.map((segment) => segment.words[0] ?? '')
+}
+
+// Whether this line's heredoc body is read and never run. Unknown commands count as executing it:
+// a guard that cannot tell must assume the dangerous answer.
+function bodyIsOnlyData(line: string): boolean {
+  const commands = commandsIn(line)
+  return commands.length > 0 && commands.every((name) => name !== '' && DATA_SINKS.has(name))
+}
+
+export function stripHeredocs(text: string): string {
+  if (!text.includes('<<')) return text
+  const lines = text.split('\n')
+
+  // First pass: which lines are command text, and which are somebody's heredoc body. Only the
+  // command lines are asked what this payload runs.
+  const isBody = new Array<boolean>(lines.length).fill(false)
+  for (let scan = 0; scan < lines.length; scan += 1) {
+    if (isBody[scan]) continue
+    let after = scan + 1
+    for (const doc of heredocsOpenedOn(lines[scan]!)) {
+      while (after < lines.length) {
+        const body = lines[after]!
+        if ((doc.strip ? body.replace(/^[\t]+/, '') : body) === doc.delimiter) { isBody[after] = true; after += 1; break }
+        isBody[after] = true
+        after += 1
+      }
+    }
+  }
+  // A body written to a file is data until something in the same payload runs that file, and the
+  // guard cannot follow a name from one command to the next. So if anything here executes at all,
+  // no body is dropped: `tee x <<'EOF' … EOF; sh x` keeps its lines in view.
+  const runsSomething = lines.some((line, at) => !isBody[at] && commandsIn(line).some((name) => name !== '' && !DATA_SINKS.has(name)))
+
+  const kept: string[] = []
+  let i = 0
+  while (i < lines.length) {
+    const line = lines[i]!
+    kept.push(line)
+    i += 1
+    const docs = heredocsOpenedOn(line)
+    const data = docs.length > 0 && !runsSomething && bodyIsOnlyData(line)
+    for (const doc of docs) {
+      while (i < lines.length) {
+        const body = lines[i]!
+        i += 1
+        if ((doc.strip ? body.replace(/^[\t]+/, '') : body) === doc.delimiter) break
+        if (!(doc.literal && data)) kept.push(body)
+      }
+    }
+  }
+  return kept.join('\n')
 }
 
 function matchParen(text: string, open: number): number {
