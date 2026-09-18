@@ -1,8 +1,0 @@
-# Templates
-
-Snippets the org prefers over a skill's own defaults. dev-setup reads this directory before falling back to what it ships. Hooks need no snippet here: every harness event runs `vegafactory hook <event> --harness claude|codex`.
-
-- `factory-board.yml` — the board-mirror workflow a registered repo receives.
-- `dev-md/` — dev.md section overrides: a file named after a section replaces that section's default text for every repo in the org.
-
-A template here is a default, not a law: a repo may hand-edit what it received, and the precedence rule says the hand edit wins.

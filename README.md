@@ -171,11 +171,11 @@ The issue-driven development workflow: nine stages from project bootstrap to the
 
 ### Factory
 
-Org-level skills: the control room whose defaults every repo layers on, and the onboarding of repos and people into it.
+Org-level skills: the control room whose defaults every repo layers on, and the onboarding of repos, machines and people into it.
 
 | Skill | What it does | Docs |
 |---|---|---|
-| [vegafactory-setup](skills/factory/vegafactory-setup/) | Bootstraps and maintains the org control room — org, group, people, repos, boards, rules, and onboarding — that every repo's dev profile layers on | [SKILL.md](skills/factory/vegafactory-setup/SKILL.md) |
+| [vegafactory-setup](skills/factory/vegafactory-setup/) | Bootstraps and maintains the org control room — org, group, repos, dispatchers, boards, onboarding and stats — that every repo's dev profile layers on | [SKILL.md](skills/factory/vegafactory-setup/SKILL.md) |
 
 ### Repo tooling
 

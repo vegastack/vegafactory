@@ -18,7 +18,7 @@ import { closeSync, constants as fsConstants, existsSync, ftruncateSync, lstatSy
 import { homedir, hostname } from 'node:os'
 import { basename, dirname, isAbsolute, join, parse as parsePath, resolve, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { factoryConfigPath, parseControlRoomKnob, readFactoryConfig, type ControlRoomEntry } from './control-room.ts'
+import { factoryConfigPath, lockOrgSync, parseControlRoomKnob, readFactoryConfig, recordOrgSha, repositoryReason, safeClonePath, type ControlRoomEntry } from './control-room.ts'
 import { defaultRunner, ghRequest, type GhRunner } from './gh.ts'
 import { issueFromBranch, issueFromWorktree } from './hook.ts'
 import { cacheDir, withLock } from './issue-cache.ts'
@@ -857,30 +857,6 @@ export function repoRootFor(cwd: string): string | null {
   return repoRootOf(worktree?.[1] ?? cwd)
 }
 
-// Every component of a path is judged by lstat, never followed.
-function realPathTo(path: string, from: string): string | null {
-  let cursor = from
-  for (const part of path.slice(from.length).split(sep).filter(Boolean)) {
-    cursor = join(cursor, part)
-    let info
-    try { info = lstatSync(cursor) } catch { return `nothing at ${cursor}` }
-    if (info.isSymbolicLink()) return `refusing a symlinked path: ${cursor}`
-  }
-  return null
-}
-
-// A control-room clone is only ever read or written where sync puts it: a canonical absolute path
-// inside this machine's control-room store, with no symlink anywhere along it. Returns the reason
-// it is not usable, or null when it is.
-export function safeClonePath(home: string, path: unknown): string | null {
-  const store = join(home, '.vegastack', 'control-room')
-  if (typeof path !== 'string' || !path || !isAbsolute(path) || resolve(path) !== path) return 'the control-room path is not absolute and canonical'
-  if (path !== store && !path.startsWith(store + sep)) return `the control-room clone is outside ${store}`
-  const walked = realPathTo(path, parsePath(path).root)
-  if (walked) return walked.startsWith('nothing at') ? `no control-room clone at ${path}` : walked
-  return null
-}
-
 // A file this push may append to: every directory below the clone must be a real directory, and an
 // existing file must be a regular file. A tracked symlink under stats/ would otherwise redirect the
 // write out of the clone.
@@ -994,6 +970,16 @@ export function pushStats(options: PushOptions = {}): PushResult {
   return withLock(join(statsDir(home), 'push'), () => pushLocked(home, options))
 }
 
+// A stats commit moves the copy's HEAD, and the record has to move with it: sync and the profile
+// reader both refuse a copy sitting on a commit the record does not name, so a push that did not
+// say where it left the copy would take this machine's whole profile down until the next fetch.
+function recordHead(home: string, clone: Clone, git: GitRunner): string | null {
+  const head = git([...['-C', clone.path], 'rev-parse', 'HEAD']).out.trim()
+  if (!/^[a-f0-9]{40}$/.test(head)) return 'the control-room clone has no readable HEAD'
+  try { recordOrgSha(factoryConfigPath(home), clone.repo.split('/')[0]!, head); return null }
+  catch (error) { return `the control-room clone is at ${head.slice(0, 7)} but the record could not be updated (${(error as Error).message}); run "vegafactory sync"` }
+}
+
 // The clone's identity: where it points and what it is on. Checked before anything is read or
 // written, and before the state checks, because a crashed push is repaired first.
 function identifyClone(home: string, entry: ControlRoomEntry, repo: string, git: GitRunner): { clone: Clone } | { reason: string; fatal: boolean } {
@@ -1001,6 +987,8 @@ function identifyClone(home: string, entry: ControlRoomEntry, repo: string, git:
   if (unsafe) return { reason: unsafe, fatal: !unsafe.startsWith('no control-room clone') }
   const path = entry.path
   if (!existsSync(join(path, '.git'))) return { reason: `no local clone of the control room at ${path} — run "vegafactory sync" first`, fatal: false }
+  const notARepository = repositoryReason(path)
+  if (notARepository) return { reason: notARepository, fatal: true }
   const origin = git(['-C', path, 'remote', 'get-url', 'origin'])
   if (origin.code !== 0) return { reason: 'the control-room clone has no origin', fatal: true }
   const url = origin.out.trim()
@@ -1036,7 +1024,9 @@ export function authorizedRepos(home: string, clone: Clone, devMd: string): Set<
     for (const row of (config.settings.repos ?? []) as Array<{ repo?: unknown; path?: unknown }>) {
       if (typeof row.repo !== 'string' || typeof row.path !== 'string') continue
       const profile = readFileSync(join(row.path, '.vegastack', 'dev.md'), 'utf8')
-      if (parseControlRoomKnob(profile)?.repo === clone.repo && REPO_LINE.exec(profile)?.[1] === row.repo) allowed.add(row.repo)
+      // One unreadable control-room line authorizes nothing and stops nothing: the other rows are
+      // judged on their own profiles.
+      try { if (parseControlRoomKnob(profile)?.repo === clone.repo && REPO_LINE.exec(profile)?.[1] === row.repo) allowed.add(row.repo) } catch { /* not a usable binding */ }
     }
   } catch { /* unreadable checkouts authorize nothing */ }
   return allowed
@@ -1101,7 +1091,8 @@ function pushLocked(home: string, options: PushOptions): PushResult {
   if (!root) return none('not in a repository — nothing to push')
   let devMd = ''
   try { devMd = readFileSync(join(root, '.vegastack', 'dev.md'), 'utf8') } catch { return none('this repo has no .vegastack/dev.md') }
-  const knob = parseControlRoomKnob(devMd)
+  let knob
+  try { knob = parseControlRoomKnob(devMd) } catch (error) { return refuse(`${(error as Error).message} — fix .vegastack/dev.md`) }
   if (!knob) return none('this repo names no control room')
   if (!/^[A-Za-z0-9][\w.-]*\/[A-Za-z0-9][\w.-]*$/.test(knob.repo)) return refuse(`${knob.repo} is not a repository name — fix the control-room line in .vegastack/dev.md`)
   let entry: ControlRoomEntry | undefined
@@ -1112,6 +1103,24 @@ function pushLocked(home: string, options: PushOptions): PushResult {
   const identified = identifyClone(home, entry, knob.repo, git)
   if ('reason' in identified) return identified.fatal ? refuse(identified.reason) : none(identified.reason)
   const { clone } = identified
+  // The copy belongs to the org, not to this command: sync fetches and checks out in it, and both
+  // of us move its HEAD. One holder at a time, or a fetch lands mid-commit.
+  const unlock = lockOrgSync(clone.path)
+  if (!unlock) return none(`another run is using ${clone.path} — this push waits for the next hour`)
+  try { return pushInsideLock(home, options, { now, git, none, refuse, devMd, clone }) } finally { unlock() }
+}
+
+interface PushContext {
+  now: number
+  git: GitRunner
+  none: (message: string) => PushResult
+  refuse: (message: string) => PushResult
+  devMd: string
+  clone: Clone
+}
+
+function pushInsideLock(home: string, options: PushOptions, context: PushContext): PushResult {
+  const { now, git, none, refuse, devMd, clone } = context
   const repaired = recoverPush(home, clone, git)
   if (!repaired.ok) return refuse(repaired.message)
   const state = cloneState(clone, git)
@@ -1122,7 +1131,10 @@ function pushLocked(home: string, options: PushOptions): PushResult {
   let recovered = 0
   if (state.ahead.length) {
     const sent = sendCommits(clone, git)
+    // A rebase moved HEAD whether or not the push then succeeded, so the record moves either way.
+    const unrecorded = recordHead(home, clone, git)
     if (!sent.ok) return { ok: false, action: 'committed', events: 0, paths: [], message: `an earlier stats commit is still unpushed: ${sent.message}` }
+    if (unrecorded) return refuse(unrecorded)
     recovered = state.ahead.length
   }
   const done = (result: PushResult): PushResult =>
@@ -1227,9 +1239,13 @@ function pushLocked(home: string, options: PushOptions): PushResult {
   writeCursor(home, clone.repo, { lastPushAt: now, offset })
   rmSync(pushJournalPath(home, clone.repo), { force: true })
   const sent = sendCommits(clone, git)
+  // The commit above, and any rebase inside the send, left the copy on a new commit. The record
+  // names that commit before this function returns, however the send went.
+  const unrecorded = recordHead(home, clone, git)
   if (!sent.ok) {
     return { ok: false, action: 'committed', events: taken, paths: relatives, message: `committed in the control-room clone but not sent: ${sent.message}` }
   }
+  if (unrecorded) return refuse(unrecorded)
   return { ok: true, action: 'pushed', events: taken, paths: relatives, message: `pushed ${taken} turns to ${relatives.join(', ')}` }
 }
 

@@ -3,7 +3,6 @@
 This file is the project's handbook and its only process document: short directional bullets, not prose. Skills read the section they need. When reality disagrees with a line, fix the line; when a gotcha or repeated instruction surfaces, fold one line into the right section — never append a log. A section left as TODO because its machinery didn't exist yet: re-run dev-setup detection when the machinery appears.
 
 repo: {{owner/repo}} · default branch {{branch}}
-policy-schema: 2
 stack: {{one line; the `## Architecture` section below carries the architecture facts}}
 commands: test `{{test}}` · build `{{build}}` · dev `{{dev}}` · setup `{{setup}}`
 authority: {{ordered — e.g. "CONTRIBUTING.md → this file → skill defaults"; delete the line when this file is the only process doc}}
@@ -14,7 +13,7 @@ harnesses: {{claude <version> · codex <version>}}   # what dev-setup found on t
 harness-policy: intake {{intake-harness}} {{intake-model}} {{intake-effort}} · plan {{plan-harness}} {{plan-model}} {{plan-effort}} · implement {{implement-harness}} {{implement-model}} {{implement-effort}} · review {{review-harness}} {{review-model}} {{review-effort}} · status {{status-harness}} {{status-model}} {{status-effort}} · chronicle {{chronicle-harness}} {{chronicle-model}} {{chronicle-effort}}   # `<stage> <agent> default|<model id> <effort>`; `default` pins no model (the tool's own, recommended), a pinned id must be one the account can use; confirm every stage, placeholders block execution
 ui-evidence: playwright     # playwright | none
 evidence-repo: {{owner}}/dev-review-evidence   # shared across projects; this project's folder = repo name; delete the line when ui-evidence is none
-tests: required             # required | logic-only | best-effort | none; an org lock governs allowed overrides
+tests: required             # required | logic-only | best-effort | none; a line the org marks locked cannot be answered differently here
 skill-scan: none            # one line only — directory holding the agent skills to scan (the BUILT one where a bundle is generated) | none. the skill-scan skill's guard reads this and refuses if a second line gives a different value
 skillspector-update: auto   # off | notify | auto — how the SkillSpector CLI itself is kept current. auto installs it when absent and upgrades it before each scan, falling back to the installed copy on any failure; notify only reports what upstream has published; off never touches the network. one line only, same as above
 merge: squash
@@ -30,9 +29,8 @@ decisions: .vegastack/decisions.md
 release: on-request         # per-merge = Ship runbook runs as part of shipping · on-request = only when the operator says "release"
 chronicle: on               # on = dev-implement writes a .vegastack/chronicle.md story entry per behavior-changing branch · off
 architect: {{github-username}}   # confirmed architecture owner from `gh api user -q .login`; a display/commit author is not identity authority
-control-room: {{org}}/vegafactory-control-room#{{group}}@{{sha7}}   # org control room · this repo's group · the clone sha this profile was drafted from; delete the line when the org has none
-sync-max-age: 30m           # confirmed maximum validated-policy age, not a task deadline; <n>s, <n>m or <n>h
-# stats: off               # a mandatory org lock needs an exact org delegation; refusal prevents capture/export even when the diagnostic effective value is on
+control-room: {{org}}/vegafactory-control-room#{{group}}@{{sha7}}   # org control room · this repo's group · the sha of the copy this profile was drafted from; delete the line when the org has none
+# stats: off               # a repo may opt out unless org.md marks the line locked, in which case this line is refused by name and the org's value stands
 operators: {{github-username}}   # csv of the humans who own issues here — every state flip assigns per conventions' Labels table; dev-setup writes the detected login, and the line is edited to add people
 dispatch: off               # off | local; repo-only opt-in, current scoped approval and validated policy/guard required; invalid values refuse
 chronicle-style: plain      # plain | story | witty — the voice of chronicle entries; the rule and one worked example per style live in dev-status's references/styles.md

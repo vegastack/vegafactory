@@ -1,5 +1,0 @@
-# Decision register — {{scope}}
-
-Append-only, one dated line per directional decision, in the register line format dev-setup's `references/conventions.md` defines. Registers concatenate across org, group, and repo — a line here never overrides one anywhere else.
-
-- DD-MM-YYYY (github-username) — the decision

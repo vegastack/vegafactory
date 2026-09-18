@@ -1,9 +1,0 @@
-# Org rules
-
-Rules every repo in {{org}} inherits. A repo may add to these; it never silently weakens one.
-
-- `CODEOWNERS` — the org's ownership pattern, copied into each repo's `.github/CODEOWNERS` at registration.
-- `review-known-patterns.md` — review findings the org has dismissed, each with its mandatory "Still flag if:" clause. A repo's own `.vegastack/review-known-patterns.md` concatenates with this one.
-- `security.md` — the org-wide security rules a review's security axis reads before a repo's own.
-
-Add a file here only when the rule genuinely applies org-wide; a rule that fits one repo belongs in that repo.
