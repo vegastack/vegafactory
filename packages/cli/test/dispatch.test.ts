@@ -608,6 +608,10 @@ describe('one poll over the board', () => {
 
   test('a stop saves, pushes and releases instead of running an agent', async () => {
     gh.addIssue({ number: 1, labels: ['in-progress', 'small'] })
+    // The session holding the issue is exactly who a stop is for: taking a claim first would be
+    // refused, and the issue would never be put down.
+    gh.addComment(1, claimBody({ owner: `${HOST}:1-work`, kind: 'session', harness: 'claude', model: 'opus' })
+      .replace('-->\n', `-->\n${claimLine(`${HOST}:1-work`, new Date(gh.clock).toISOString())}\n`), 'mk')
     gh.addComment(1, 'stop', 'mk')
     const given: string[] = []
     const records = await pass({ standDown: (number: number, reason: string) => { given.push(`${number}:${reason}`); return 'saved, pushed, released' } })

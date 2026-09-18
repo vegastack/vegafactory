@@ -884,8 +884,12 @@ export async function poll(deps: PollDeps, inflight: Map<number, Inflight> = new
     const item = wanted.find((entry) => entry.candidate.number === candidate.number)!
     const at = now()
     // Taken before the slot, so a second machine on the same board sees the work is taken. Losing
-    // the race is not a failure: the issue is simply someone else's this pass.
-    const taken = reserve({ root, repo, number: candidate.number, runner }, deps.machine, candidate.action, at)
+    // the race is not a failure: the issue is simply someone else's this pass. A stop takes no
+    // claim — it acts on an issue somebody *is* holding, which is the one case a claim would
+    // refuse, and standing down is what releases that holder.
+    const taken = candidate.action === 'stop'
+      ? { ok: true, owner: '', reason: 'a stop takes no claim' }
+      : reserve({ root, repo, number: candidate.number, runner }, deps.machine, candidate.action, at)
     if (!taken.ok) {
       deps.out(`#${candidate.number}: not started — ${taken.reason}`)
       continue
