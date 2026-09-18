@@ -38,12 +38,13 @@
     {
       "id": 4,
       "prompt": "ship it — issue 31 in vegastack/docs-tools. `vegafactory ship check 31` exits 0. dev.md: `merge: rebase`, `release: on-request`, `chronicle: on`, and a `## Ship` runbook whose first line is `auto: bunx changeset version on chore/release-<version>, open its PR, add it to the merge queue` and whose third is `ask: push the version tag`. The repo has a merge queue. What do you do?",
-      "expected_output": "The issue's landing on that one word — PR queued, merged, issue closed, worktree directory removed — and an honest stop at the release steps: the generated release PR belongs to no issue, so the guard has no recorded word to match and its merge and the tag push go to the operator, with #223's release verb named as what will change that.",
+      "expected_output": "The issue's landing on that one word — PR queued, merged, issue closed, worktree directory removed — and only then the runbook, which stops honestly at the release steps: the generated release PR belongs to no issue, so the guard has no recorded word to match and its merge and the tag push go to the operator, with #223's release verb named as what will change that.",
       "files": [],
       "assertions": [
         "The merge of the issue's own PR is not held for a second operator word — the recorded 'ship it' covers the PR, the queue and that merge",
         "The PR goes into the merge queue rather than being merged directly, because the repo has one",
         "The release PR's merge and the `ask:` tag line both stop for the operator, and the reason is given: the release branch belongs to no issue, so the recorded word does not reach it",
+        "The worktree is removed before the runbook runs, so the release stop cannot leave it behind",
         "The answer does not promise a hands-off release; #223's `vegafactory ship release` verb is named as what will cover the tag push",
         "`vegafactory worktree remove 31` takes the directory only — deleting the local or remote branch is named as its own operator word"
       ]

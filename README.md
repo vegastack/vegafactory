@@ -73,7 +73,7 @@ Work flows through GitHub issues:
 
 | Selector | Installs |
 |---|---|
-| `--group dev` | The ten dev-workflow skills |
+| `--group dev` | The nine dev-workflow skills |
 | `--all` | Every bundled skill except the repo-only ones |
 | `<skill-name>` | That one skill — works for every bundled skill, repo-only ones included |
 

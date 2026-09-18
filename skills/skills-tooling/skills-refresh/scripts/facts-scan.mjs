@@ -77,6 +77,8 @@ export function scanFacts({ root = process.cwd(), watchlist, maxAgeDays = 60, to
   const { rows, problems } = readWatchlist(readFileSync(watchlistPath, 'utf8'))
   const tools = []
   const due = []
+  const uncovered = new Set()
+  let heading = null
   for (const row of rows) {
     const path = isAbsolute(row.file) ? row.file : resolve(root, row.file)
     if (!existsSync(path)) { problems.push(row.tool + ': facts file not found at ' + row.file); continue }
@@ -100,6 +102,19 @@ export function scanFacts({ root = process.cwd(), watchlist, maxAgeDays = 60, to
     if (!facts.length) problems.push(row.tool + ': ' + row.file + ' holds no fact lines under that heading')
     tools.push({ tool: row.tool, file: row.file, pages: row.pages, facts: facts.length, due: facts.filter(fact => fact.ageDays >= maxAgeDays).length, oldestAgeDays: facts.reduce((oldest, fact) => Math.max(oldest, fact.ageDays), 0) })
   }
+  // A fact-bearing section no row covers is the quiet failure this scan exists to prevent: the
+  // lines look maintained, carry dates, and nothing ever re-reads them. Reported per file, once.
+  for (const file of [...new Set(rows.map(row => row.file))]) {
+    const path = isAbsolute(file) ? file : resolve(root, file)
+    if (!existsSync(path)) continue
+    const covered = rows.filter(row => row.file === file).map(row => row.tool.toLowerCase())
+    for (const line of readFileSync(path, 'utf8').split('\n')) {
+      if (!line.startsWith('## ')) { if (heading && FACT.test(line)) { uncovered.add(file + ' ## ' + heading); heading = null } ; continue }
+      const name = line.slice(3).trim()
+      heading = covered.some(tool => name.toLowerCase().startsWith(tool)) ? null : name
+    }
+  }
+  for (const entry of uncovered) problems.push(entry + ' holds dated facts no watchlist row covers')
   return { ok: problems.length === 0, maxAgeDays, tools, due, problems }
 }
 

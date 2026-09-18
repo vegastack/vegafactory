@@ -1,6 +1,6 @@
 import { expect, test } from 'bun:test'
 import { readFileSync } from 'node:fs'
-import { parsePolicy, planLabelMigration, readWorkflowStates, resolveState, resolvePolicy, WORKFLOW_LABELS, WORKFLOW_STATES } from '../scripts/effective-policy.mjs'
+import { migrationMap, parsePolicy, planLabelMigration, readWorkflowStates, resolveState, resolvePolicy, WORKFLOW_LABELS, WORKFLOW_STATES } from '../scripts/effective-policy.mjs'
 
 const actual = /^labels:\s*([^#\n]+)/m.exec(readFileSync(new URL('../../../../.vegastack/dev.md', import.meta.url), 'utf8'))![1]!.trim()
 
@@ -120,10 +120,85 @@ test('the board Status options move with the labels instead of being left behind
 test('a board missing a state gains it; a repo with no board gets no board steps', () => {
   expect(planLabelMigration({ ...legacy, boardStatus: ['ready', 'Done'] }).board).toEqual({
     rename: [{ from: 'ready', to: 'queued' }],
+    transfer: [],
     create: ['waiting-on-operator', 'planning', 'in-progress', 'ready-to-ship'],
+    remove: [],
   })
-  expect(planLabelMigration(legacy.labels as never).board).toEqual({ rename: [], create: [] })
-  expect(planLabelMigration({ ...legacy, boardStatus: [] }).board).toEqual({ rename: [], create: [] })
+  const none = { rename: [], transfer: [], create: [], remove: [] }
+  expect(planLabelMigration(legacy.labels as never).board).toEqual(none)
+  expect(planLabelMigration({ ...legacy, boardStatus: [] }).board).toEqual(none)
+})
+
+// A board half-migrated by an earlier run carries both names. A rename would collide, so the
+// cards move and the stale option goes — otherwise it sits there with its cards forever.
+test('a board already carrying both names moves the cards and removes the stale option', () => {
+  const plan = planLabelMigration({
+    ...legacy,
+    boardStatus: ['ready', 'queued', 'working', 'Done'],
+    boardItems: [{ id: 'A', status: 'ready' }, { id: 'B', status: 'queued' }, { id: 'C', status: 'ready' }, { id: 'D', status: 'working' }],
+  })
+  expect(plan.board.transfer).toEqual([{ from: 'ready', to: 'queued', items: ['A', 'C'] }])
+  expect(plan.board.remove).toEqual(['ready'])
+  // `working` has no replacement on the board yet, so it is renamed and never removed.
+  expect(plan.board.rename).toEqual([{ from: 'working', to: 'in-progress' }])
+  expect(plan.board.create).toEqual(['waiting-on-operator', 'planning', 'ready-to-ship'])
+  expect(plan.writes).toBe(false)
+})
+
+test('a board item with no id still transfers, named as null rather than dropped', () => {
+  const plan = planLabelMigration({ ...legacy, boardStatus: ['ready', 'queued'], boardItems: [{ status: 'ready' }] })
+  expect(plan.board.transfer).toEqual([{ from: 'ready', to: 'queued', items: [null] }])
+})
+
+// A repo that renamed its labels through the removed `workflow-labels` knob calls them anything
+// at all. Its profile is blocked, so the knob's own line is the only place those names survive.
+const custom = {
+  profile: 'labels: decide plan go doing review\nworkflow-labels: {"needsOperator":"decide","needsPlan":"plan","ready":"go","working":"doing","forOperator":"review"}   # a comment\n',
+  labels: ['decide', 'plan', 'go', 'doing', 'review', 'quick-build', 'bug'],
+  issues: [{ number: 21, labels: ['go'] }, { number: 22, labels: ['doing', 'quick-build'] }],
+  boardStatus: ['go', 'doing', 'Done'],
+  boardItems: [{ id: 'A', status: 'go' }, { id: 'B', status: 'doing' }],
+}
+
+test('the configured names from a workflow-labels line are migration input', () => {
+  expect(migrationMap(custom.profile)).toMatchObject({
+    decide: 'waiting-on-operator', plan: 'planning', go: 'queued', doing: 'in-progress', review: 'ready-to-ship',
+    // the former defaults stay in the map, because a repo can carry both
+    'needs-operator': 'waiting-on-operator', 'quick-build': 'small',
+  })
+})
+
+test('a repo on custom names migrates end to end and keeps only what it should', () => {
+  const plan = planLabelMigration(custom)
+  expect(plan.rename).toEqual([
+    { from: 'quick-build', to: 'small' },
+    { from: 'decide', to: 'waiting-on-operator' },
+    { from: 'plan', to: 'planning' },
+    { from: 'go', to: 'queued' },
+    { from: 'doing', to: 'in-progress' },
+    { from: 'review', to: 'ready-to-ship' },
+  ])
+  // Every configured name is migrated, so none of them is left in `keep`.
+  expect(plan.keep).toEqual(['bug'])
+  expect(plan.board.rename).toEqual([{ from: 'go', to: 'queued' }, { from: 'doing', to: 'in-progress' }])
+  // The knob goes last, once nothing depends on the names it holds.
+  expect(plan.dropKnob).toBe(true)
+  expect(JSON.stringify(plan.create)).not.toMatch(/decide|doing|review/)
+})
+
+test('without the knob line those names are invisible, which is the bug this fixes', () => {
+  const plan = planLabelMigration({ ...custom, profile: '' })
+  expect(plan.rename).toEqual([{ from: 'quick-build', to: 'small' }])
+  expect(plan.keep).toEqual(['decide', 'plan', 'go', 'doing', 'review', 'bug'])
+  expect(plan.dropKnob).toBe(false)
+})
+
+test('a malformed or already-migrated knob line adds nothing and never throws', () => {
+  for (const profile of ['workflow-labels: {not json\n', 'workflow-labels: []\n', 'workflow-labels: {"ready":"queued"}\n']) {
+    expect(migrationMap(profile)).toEqual(migrationMap(''))
+  }
+  // A configured name that is another state's fixed name would rename one state onto another.
+  expect(migrationMap('workflow-labels: {"ready":"in-progress"}\n')).toEqual(migrationMap(''))
 })
 
 test('a repo already on the new labels migrates to nothing', () => {

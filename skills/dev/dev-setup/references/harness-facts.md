@@ -46,6 +46,10 @@ Verified mechanics of the two harnesses this workflow targets — Claude Code an
 - **Claude Code's effort levels are low, medium, high, xhigh and max** · they apply on Fable 5.1, Fable 5, Opus 5 and Sonnet 5, and high is the default on every model except Opus 4.7, whose default is xhigh · since — · checked 03-09-2026 · https://code.claude.com/docs/en/cli-reference
 - **`ultracode` is a Claude Code setting on top of the effort level** · it starts the session at xhigh with dynamic workflows on and needs v2.1.203 or later · since 2.1.203 · checked 03-09-2026 · https://code.claude.com/docs/en/cli-reference
 - **The local Claude Code build reads 2.1.247 and lists the five effort levels in its help** · read the levels off the machine rather than a remembered list · since 2.1.247 · checked 03-09-2026 · https://code.claude.com/docs/en/cli-reference
+- **`--model` takes an alias or a full model name** · aliases are `fable`, `sonnet`, `opus` and `haiku`, plus `best`, `default`, `opusplan`, `sonnet[1m]` and `opus[1m]`; full names look like `claude-sonnet-5`, and the flag overrides both the `model` setting and `ANTHROPIC_MODEL` · since — · checked 03-09-2026 · https://code.claude.com/docs/en/cli-reference
+- **`--effort` sets the reasoning level for the session** · it overrides the `modelSettings` and `effortLevel` settings and does not persist · since — · checked 03-09-2026 · https://code.claude.com/docs/en/cli-reference
+- **Subagent nesting depth is capped by `CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH`** · it counts levels below the main conversation, defaults to 3, and `1` turns nesting off; set it under settings.json's `env` · since — · checked 03-09-2026 · https://code.claude.com/docs/en/settings
+- **Simultaneous subagents are capped by `CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS`** · it defaults to 20 and is set the same way, under settings.json's `env` · since — · checked 03-09-2026 · https://code.claude.com/docs/en/settings
 
 ### Headless runs
 
@@ -95,31 +99,11 @@ Verified mechanics of the two harnesses this workflow targets — Claude Code an
 - **Codex OTel log export is off by default** · opt in with an `[otel]` table in config.toml whose `exporter` is `none`, `otlp-http` or `otlp-grpc`, and with `none` Codex records events but sends nothing · since — · checked 03-09-2026 · https://learn.chatgpt.com/docs/config-file/config-reference
 - **The Codex OTel stream names no skill-activation event** · it covers API requests, SSE and events, prompts, and tool approvals and results, which is why skill capture on Codex is a prompt-mention proxy — the skill's name after a dollar sign, recorded as one · since — · checked 03-09-2026 · https://learn.chatgpt.com/docs/config-file/config-reference
 
-### The `codex exec` skill-loading drill
+### Model and effort flags
 
-- **The skill-loading drill is still unanswered** · a 03-09-2026 attempt on codex-cli 0.149.1 failed with `refresh_token_invalidated` and `token_revoked` (401) before reaching the model although `codex login status` printed "Logged in using ChatGPT", the expired-session case dev.md's Environments section anticipates, so the verdict line stays unwritten rather than guessed and the drill is re-run after a fresh login · since 0.149.1 · checked 03-09-2026 · https://learn.chatgpt.com/docs
-
-### Headless runs
-
-- **Codex refuses non-managed hooks in an unattended run unless the caller vets them** · the bypass flag on `codex exec` runs the enabled hooks headless, and it is the only way a dispatched Codex run reaches the ship guard at all · since — · checked 03-09-2026 · https://learn.chatgpt.com/docs
-
-### Native memory under a managed launch
-
-- **Managed execution pins Codex 0.153.4 and Claude Code 2.1.263** · an unknown version refuses managed execution pending qualification · since — · checked 07-09-2026 · https://learn.chatgpt.com/docs/config-file/config-reference
-- **Codex managed launch overrides the memory settings** · it sets `memories.use_memories` and `memories.generate_memories` to false, disables memories and import and `features.context_management.experimental_mode`, and retains hooks and project trust for the exact checkout · since — · checked 07-09-2026 · https://learn.chatgpt.com/docs/config-file/config-reference
-- **The optional task-note and search facility is separate from ordinary project instructions** · do not read one as the other · since — · checked 07-09-2026 · https://learn.chatgpt.com/docs/models
-- **These controls are supported configuration, not runtime qualification** · verify their actual pinned behavior before claiming support · since — · checked 07-09-2026 · https://learn.chatgpt.com/docs/config-file/config-reference
-
-## Model, effort and concurrency flags — the two harnesses side by side
-
-Which model and which reasoning effort a stage runs at is dev.md's `harness-policy:` knob; these are the flags each value turns into.
-
-| Harness | Model control | Effort control | Concurrency cap | Checked |
-|---|---|---|---|---|
-| Claude Code | `--model` takes an alias or a full model name — aliases `fable`, `sonnet`, `opus`, `haiku` (plus `best`, `default`, `opusplan`, `sonnet[1m]`, `opus[1m]`), full names look like `claude-sonnet-5`; overrides the `model` setting and `ANTHROPIC_MODEL` https://code.claude.com/docs/en/cli-reference | `--effort` sets the level for the session; overrides the `modelSettings` and `effortLevel` settings and does not persist https://code.claude.com/docs/en/cli-reference | `CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH` (nesting depth below the main conversation, default 3; `1` turns nesting off) and `CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS` (simultaneous subagents, default 20) — both env vars, settable under settings.json's `env` https://code.claude.com/docs/en/settings | 03-09-2026 |
-| Codex | `codex exec` takes `-m` with the model name, or `-c` with a `model=` config override https://learn.chatgpt.com/docs/config-file/config-reference | `-c` with a `model_reasoning_effort=` override — the config key the docs demonstrate as `"high"` and do not enumerate, so read the level names off the model's own documentation before promising one https://learn.chatgpt.com/docs/config-file/config-reference | `agents.max_concurrent_threads_per_session` in config.toml caps concurrently open spawned-agent threads, excluding the primary; unset means Codex picks the default https://learn.chatgpt.com/docs/config-file/config-reference | 03-09-2026 |
-
-Model ids move, which is why dev.md's `harness-policy:` knob holds them and this file only dates them.
+- **`codex exec` takes the model as a flag or a config override** · `-m` with the model name, or `-c` with a `model=` override · since — · checked 03-09-2026 · https://learn.chatgpt.com/docs/config-file/config-reference
+- **Codex reasoning effort is a config override, not a flag** · `-c` with a `model_reasoning_effort=` value; the docs demonstrate `"high"` and do not enumerate the levels, so read them off the model's own documentation before promising one · since — · checked 03-09-2026 · https://learn.chatgpt.com/docs/config-file/config-reference
+- **`agents.max_concurrent_threads_per_session` caps concurrently open spawned-agent threads** · set it in config.toml; it excludes the primary thread, and unset means Codex picks the default · since — · checked 03-09-2026 · https://learn.chatgpt.com/docs/config-file/config-reference
 
 ### The `codex exec` skill-loading drill
 
@@ -135,6 +119,23 @@ codex --version
 ```
 
 The token `VSK-PROBE-OK-7413` in the reply means project skills load under `codex exec`; its absence means they do not. Record the answer with the date and the exact `codex --version` string.
+
+- **The skill-loading drill is still unanswered** · a 03-09-2026 attempt on codex-cli 0.149.1 failed with `refresh_token_invalidated` and `token_revoked` (401) before reaching the model although `codex login status` printed "Logged in using ChatGPT", the expired-session case dev.md's Environments section anticipates, so the verdict line stays unwritten rather than guessed and the drill is re-run after a fresh login · since 0.149.1 · checked 03-09-2026 · https://learn.chatgpt.com/docs
+
+### Headless runs
+
+- **Codex refuses non-managed hooks in an unattended run unless the caller vets them** · the bypass flag on `codex exec` runs the enabled hooks headless, and it is the only way a dispatched Codex run reaches the ship guard at all · since — · checked 03-09-2026 · https://learn.chatgpt.com/docs
+
+### Native memory under a managed launch
+
+- **Managed execution pins Codex 0.153.4 and Claude Code 2.1.263** · an unknown version refuses managed execution pending qualification · since — · checked 07-09-2026 · https://learn.chatgpt.com/docs/config-file/config-reference
+- **Codex managed launch overrides the memory settings** · it sets `memories.use_memories` and `memories.generate_memories` to false, disables memories and import and `features.context_management.experimental_mode`, and retains hooks and project trust for the exact checkout · since — · checked 07-09-2026 · https://learn.chatgpt.com/docs/config-file/config-reference
+- **The optional task-note and search facility is separate from ordinary project instructions** · do not read one as the other · since — · checked 07-09-2026 · https://learn.chatgpt.com/docs/models
+- **These controls are supported configuration, not runtime qualification** · verify their actual pinned behavior before claiming support · since — · checked 07-09-2026 · https://learn.chatgpt.com/docs/config-file/config-reference
+
+## Model, effort and concurrency flags
+
+Which model and which reasoning effort a stage runs at is dev.md's `harness-policy:` knob. The flags each value turns into are facts about one vendor's CLI, so each lives under that vendor above rather than in a table nothing dates. Model ids move, which is why the knob holds them and this file only dates them.
 
 ## GitHub CLI
 

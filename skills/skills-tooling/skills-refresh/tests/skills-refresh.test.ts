@@ -147,6 +147,25 @@ describe('what the scanner refuses', () => {
     expect(scanFacts({ root, watchlist, today }).problems.join(' ')).toContain('has no matching ## heading')
   })
 
+  // A section full of dated facts that no row covers looks maintained and is never re-read.
+  test('a fact-bearing section no row covers is a problem', () => {
+    const { root, watchlist } = repo({
+      'watchlist.md': table('facts.md'),
+      'facts.md': section(fact('Thing', '01-09-2026')) + '\n## Gadgets\n\n' + fact('Other thing', '01-09-2026'),
+    })
+    const result = scanFacts({ root, watchlist, today })
+    expect(result.ok).toBe(false)
+    expect(result.problems.join(' ')).toContain('## Gadgets holds dated facts no watchlist row covers')
+  })
+
+  test('a covered section and a section with no facts are both fine', () => {
+    const { root, watchlist } = repo({
+      'watchlist.md': table('facts.md') + '| Gadgets | `facts.md` | https://example.test/gadgets |\n',
+      'facts.md': section(fact('Thing', '01-09-2026')) + '\n## Gadgets\n\n' + fact('Other', '01-09-2026') + '\n## Prose only\n\nNo facts here.\n',
+    })
+    expect(scanFacts({ root, watchlist, today }).problems).toEqual([])
+  })
+
   test('a topic with no official page is a problem — a fact with no source is not a fact', () => {
     const { problems } = readWatchlist('| Topic | Facts file | Official pages |\n|---|---|---|\n| A | `a.md` | ask around |\n')
     expect(problems.join(' ')).toContain('names no official page')

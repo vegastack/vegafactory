@@ -117,24 +117,64 @@ const RETIRED_KEYS = Object.freeze({
   gates: 'gates was removed; the operator gives two words per issue, an ack and "ship it"',
 })
 
+// The five semantic keys the retired `workflow-labels` knob used, and the fixed name each one
+// stands for now. A repo that renamed its labels through that knob calls them anything at all,
+// so the knob's own line is the only place its names can be read from — once, as migration
+// input, and never written back.
+const RENAMED_STATES = Object.freeze({ // the superseded semantic keys and what each becomes
+  needsOperator: 'waiting-on-operator', needsPlan: 'planning', ready: 'queued',
+  working: 'in-progress', forOperator: 'ready-to-ship',
+})
+
+/**
+ * The old-to-new steps for one repo: the former default names, plus whatever the profile's
+ * `workflow-labels:` line called them. Reading that line is the one-time migration input a repo
+ * on custom names needs — without it its labels are invisible to the migration while its
+ * profile is blocked, which is the worst of both.
+ */
+export function migrationMap(profileText = '') {
+  const map = { ...SUPERSEDED }
+  const line = /^workflow-labels:\s*(\{.*?\})\s*(?:#.*)?$/m.exec(String(profileText ?? '')) // migration input only
+  if (!line) return map
+  let configured
+  try { configured = policyJson(line[1]) } catch { return map }
+  if (!object(configured)) return map
+  for (const [key, to] of Object.entries(RENAMED_STATES)) {
+    const from = configured[key]
+    // A configured name equal to its replacement is already migrated, and a name that collides
+    // with a different state's fixed name would rename one state onto another.
+    if (typeof from !== 'string' || !from.trim() || from === to) continue
+    if (WORKFLOW_STATES.includes(from)) continue
+    map[from] = to
+  }
+  return map
+}
+
 /**
  * The migration dev-setup shows before it touches an existing repo. Every step preserves what
  * the old label carried: a rename keeps the issues and their history, a transfer copies the new
  * label onto each issue that has the old one before the old one is deleted, and the board's
- * Status options move with them. Unrelated labels are never touched. Presentation only —
+ * Status options move with their cards. Unrelated labels are never touched. Presentation only —
  * `writes: false` — and nothing here records an old name anywhere but the repo it read it from.
  *
- * @param {{labels?: string[], issues?: Array<{number: number, labels: string[]}>, boardStatus?: string[]}} repo
+ * @param {{labels?: string[], issues?: Array<{number: number, labels: string[]}>,
+ *          boardStatus?: string[], boardItems?: Array<{id?: string|number, status: string}>,
+ *          profile?: string}} repo
  */
 export function planLabelMigration(repo = {}) {
   const labels = (Array.isArray(repo.labels) ? repo.labels : []).filter(name => typeof name === 'string')
   const issues = (Array.isArray(repo.issues) ? repo.issues : []).filter(object)
-  const boardStatus = (Array.isArray(repo.boardStatus) ? repo.boardStatus : []).filter(name => typeof name === 'string')
+  const boardItems = (Array.isArray(repo.boardItems) ? repo.boardItems : []).filter(object)
+  const boardStatus = (Array.isArray(repo.boardStatus) ? repo.boardStatus : [])
+    .filter(name => typeof name === 'string')
+  const steps = Object.entries(migrationMap(repo.profile))
+  const superseded = new Set(steps.map(([from]) => from))
+
   const present = new Set(labels)
   const rename = []
   const transfer = []
   const remove = []
-  for (const [from, to] of Object.entries(SUPERSEDED)) {
+  for (const [from, to] of steps) {
     if (!present.has(from)) continue
     // The replacement is free → rename in place, which keeps every issue's label and its history.
     // It is already taken → copy it onto each issue that carries the old one, then drop the old.
@@ -146,19 +186,39 @@ export function planLabelMigration(repo = {}) {
       present.add(to)
     }
   }
+
+  // The board moves the same way, and for the same reason: deleting an option takes its cards
+  // with it. A half-migrated board already carrying both names is the case a rename cannot fix —
+  // the cards on the old option are moved to the new one, then the stale option is removed.
   const boardRename = []
+  const boardTransfer = []
+  const boardRemove = []
   const boardPresent = new Set(boardStatus)
-  for (const [from, to] of Object.entries(SUPERSEDED)) {
+  for (const [from, to] of steps) {
     if (!boardPresent.has(from) || !WORKFLOW_STATES.includes(to)) continue
-    if (!boardPresent.has(to)) { boardRename.push({ from, to }); boardPresent.add(to) }
+    if (boardPresent.has(to)) {
+      boardTransfer.push({ from, to, items: boardItems.filter(item => item.status === from).map(item => item.id ?? null) })
+      boardRemove.push(from)
+    } else {
+      boardRename.push({ from, to })
+      boardPresent.add(to)
+    }
   }
+
   return {
     rename,
     transfer,
     create: WORKFLOW_LABELS.filter(name => !present.has(name)),
     remove,
-    board: { rename: boardRename, create: WORKFLOW_STATES.filter(name => boardStatus.length && !boardPresent.has(name)) },
-    keep: labels.filter(name => !own(SUPERSEDED, name)),
+    board: {
+      rename: boardRename,
+      transfer: boardTransfer,
+      create: WORKFLOW_STATES.filter(name => boardStatus.length && !boardPresent.has(name)),
+      remove: boardRemove,
+    },
+    // The migration's last step, once nothing depends on the names the knob holds.
+    dropKnob: /^workflow-labels:/m.test(String(repo.profile ?? '')), // migration input only
+    keep: labels.filter(name => !superseded.has(name)),
     writes: false,
   }
 }

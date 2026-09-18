@@ -12,6 +12,8 @@ A failing step stops the runbook at that step: report what failed and what remai
 
 ## The release exception to `auto:`
 
+The issue's worktree is removed before the runbook starts, precisely because of this section: the runbook can stop here, and a cleanup queued behind a stop never happens.
+
 An `auto:` line that opens or merges a **release** PR, or pushes a tag, is the one `auto:` step that still waits. The recorded "ship it" binds to an issue and its branch, and the guard matches a merge to that branch; a generated release branch has no issue, so there is no recorded word for the guard to find and it asks. Run the runbook up to that point, report what landed, and hand the release PR's merge and the tag push to the operator. That is the honest state, not a step skipped to be helpful — and it is what the operator's `## Ship` section already describes when its tag line is an `ask:`.
 
 #223 adds a `vegafactory ship release` verb that verifies the recorded word itself and performs the tag push, so the guard can allow that one verb instead of raw tagging. Until it lands, say which steps stopped and why.

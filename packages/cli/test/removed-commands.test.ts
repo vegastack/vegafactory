@@ -51,15 +51,15 @@ test('no skill, doc or hook wiring calls a removed CLI command or a deleted scri
   expect(hits).toEqual([])
 })
 
-// The sweep the lean rebuild owes itself: a retired label, knob or mechanism lives in the
-// chronicle and the changelog, and nowhere an agent reads. Exempt is a line that says
-// `superseded` or `was removed` — the migration, its eval and the resolver's refusal messages
-// all have to name what they are retiring — and the body of a declaration whose own first line
-// says it, which is how the old-to-new map and the retired-key list spell themselves out.
+// The sweep the lean rebuild owes itself: a retired label, knob or mechanism must not appear in
+// a file an agent reads AS SOMETHING TO USE. Naming one in order to migrate away from it is the
+// opposite, so a line is exempt when it says `superseded`, `was removed`, `retired` or
+// `migration` — and so is the body of a declaration whose own first line says one of them,
+// which is how the old-to-new map, the retired-key list and the tombstone spell themselves out.
 function exempt(lines: string[]): boolean[] {
   let openDeclaration = false
   return lines.map((line) => {
-    const named = /superseded|was removed/i.test(line)
+    const named = /superseded|was removed|\bretired\b|\bmigration\b/i.test(line)
     const inside = named || openDeclaration
     if (openDeclaration && /^\s*[)\]}]/.test(line)) openDeclaration = false
     else if (named && /^(const|export const)\s+[A-Z_]+\s*=/.test(line)) openDeclaration = true
@@ -86,8 +86,10 @@ test('the sweep exemption covers a named declaration and not the code around it'
     "  ready: 'queued',",
     '})',
     "const other = ['ready']",
+    '// the migration reads a workflow-labels line once',
+    "const stillWrong = 'workflow-labels'",
   ]
-  expect(exempt(lines)).toEqual([true, true, true, false])
+  expect(exempt(lines)).toEqual([true, true, true, false, true, false])
 })
 
 test('the control-room templates README names no hooks/ snippet folder', () => {

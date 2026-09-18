@@ -35,3 +35,41 @@ test('no shipped skill description still names the old state labels', () => {
     expect(description, path).not.toMatch(/\b(needs-plan|needs-operator|for-operator)\b|\/ ready \/|\/ working \//)
   }
 })
+
+// Counts and inventories in the docs go stale the moment a skill is added or retired, and the
+// staleness is invisible — the sentence still reads fine. Tie each to the built bundle instead.
+const NUMBER_WORDS = ['zero', 'one', 'two', 'three', 'four', 'five', 'six', 'seven', 'eight', 'nine', 'ten', 'eleven', 'twelve']
+
+test('every documented group count and inventory matches the bundle', async () => {
+  const { discoverSkills } = await import('../scripts/lib/skills.mjs')
+  const skills = discoverSkills(join(root, 'skills')) as Map<string, { group: string | null }>
+  const members = (group: string) => [...skills.values()].filter((skill) => skill.group === group).length
+  const names = (group: string) => [...skills.entries()].filter(([, skill]) => skill.group === group).map(([name]) => name).sort()
+
+  // README's selector table and its intro both spell the dev count out in words.
+  const readme = read('README.md')
+  expect(readme, 'README selector table').toContain(`| \`--group dev\` | The ${NUMBER_WORDS[members('dev')]} dev-workflow skills |`)
+  expect(readme, 'README intro').toContain(`a ${NUMBER_WORDS[members('dev')]}-stage, issue-driven development workflow`)
+
+  // CONTRIBUTING names the dev count and lists skills-tooling's members by name.
+  const contributing = read('CONTRIBUTING.md')
+  expect(contributing, 'CONTRIBUTING dev row').toContain(`a \`GROUP.md\` plus ${NUMBER_WORDS[members('dev')]} skills`)
+  const toolingRow = contributing.split('\n').find((line) => line.startsWith('| `skills/skills-tooling/` |'))!
+  for (const name of names('skills-tooling')) expect(toolingRow, name).toContain(`\`${name}\``)
+
+  // The group blurbs share one sentence with README's section text.
+  expect(read('skills/dev/GROUP.md')).toContain(`${NUMBER_WORDS[members('dev')]} stages`)
+  expect(readme).toContain(`The issue-driven development workflow: ${NUMBER_WORDS[members('dev')]} stages`)
+})
+
+// A retirement that drops the skill but not its tombstone leaves an installed copy behind.
+test('a name that left the bundle has a tombstone, and a tombstone names no live skill', async () => {
+  const retired = JSON.parse(read('packages/cli/retired.json')) as Record<string, { group: string; replacedBy: string }>
+  const { discoverSkills } = await import('../scripts/lib/skills.mjs')
+  const skills = discoverSkills(join(root, 'skills')) as Map<string, unknown>
+  for (const [name, entry] of Object.entries(retired)) {
+    expect(skills.has(name), `${name} is retired but still authored`).toBe(false)
+    expect(skills.has(entry.replacedBy) || entry.replacedBy === 'none', `${name} names an unknown replacement`).toBe(true)
+  }
+  expect(retired['dev-chronicle']?.replacedBy).toBe('dev-status')
+})
