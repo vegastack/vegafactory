@@ -100,6 +100,11 @@ export interface Dispatcher { machine: string; operator: string | null; repos: s
 // A header names its columns; whichever word this roster's template uses, it is not a machine.
 const HEADER_WORDS = new Set(['machine', 'dispatcher'])
 
+// A cell meaning to set caps says so: `runs 10`, `step 72h`. Free prose in a notes column does not
+// match, and a cell that means to and is malformed still refuses the machine rather than passing
+// as a note.
+const CAPS_CELL = /\b(runs|step|poll|retry|park)\s+\S/i
+
 const cells = (line: string) => line.replace(/^\|/, '').replace(/\|\s*$/, '').split('|').map((cell) => cell.trim())
 const separator = (cell: string) => /^:?-{2,}:?$/.test(cell)
 
@@ -121,7 +126,9 @@ export function parseDispatchers(text: string): Dispatcher[] {
       machine = row[0] ?? ''
       operator = row[1] ?? null
       repos = row[2] ?? ''
-      capsCell = row[4] ?? ''
+      // The caps cell is found by what it says, not by where it sits: a roster that already has a
+      // notes column should not have to move it, and a column order nobody can see is a trap.
+      capsCell = row.slice(3).find((cell) => CAPS_CELL.test(cell)) ?? ''
     } else {
       const match = /^-\s+`?([A-Za-z0-9][\w.-]*)`?\s*(?:—|--)\s*(.*)$/.exec(line)
       if (!match) continue
@@ -1086,10 +1093,14 @@ export function board(repo: string, runner: GhRunner): GhIssue[] {
 
 export interface PollDeps {
   root: string
-  repo: string
+  // Every repository this machine's roster row lists. One pass walks them all, so a board that is
+  // quiet costs a listing and nothing else.
+  repos: string[]
   runner: GhRunner
   // This dispatcher process, so its claims are its own and no other process reads them as such.
   runId: string
+  // The machine's own limits, from its roster row, re-read every pass.
+  caps?: Caps
   now: () => number
   runStep: RunStep
   out: (text: string) => void
@@ -1118,21 +1129,31 @@ export interface Inflight {
   // reporting the kill as a failure of the work.
   interrupt: Interrupt | null
 }
-export const drain = (inflight: Map<number, Inflight>) => Promise.all([...inflight.values()].map((run) => run.done))
+export const drain = (inflight: Map<string, Inflight>) => Promise.all([...inflight.values()].map((run) => run.done))
 
 // One pass over the board: read what changed, decide, and start what is safe to start now. The
 // steps run to their own end; this returns as soon as they are under way.
-export async function poll(deps: PollDeps, inflight: Map<number, Inflight> = new Map()): Promise<Candidate[]> {
-  const { root, repo, runner, now } = deps
+export async function poll(deps: PollDeps, inflight: Map<string, Inflight> = new Map()): Promise<Candidate[]> {
+  const { root, runner, now } = deps
   // Last pass's finished runs, whose outcomes are now in `acted`: their slots and issues are free.
-  for (const [number, run] of inflight) if (run.settled) inflight.delete(number)
-  const permission = permissionLookup(repo, runner, { root })
-  const trusted = trustedFactory({ repo, runner, root })
+  for (const [key, run] of inflight) if (run.settled) inflight.delete(key)
   const acted = readActed(root)
   const wanted: Array<{ candidate: Candidate; decision: Decision; key: string }> = []
-  const plans = new Map<number, string | null>()
+  // Keyed by repository, because a parent issue number means nothing without one.
+  const plans = new Map<string, string | null>()
+  for (const repo of deps.repos) {
+  const permission = permissionLookup(repo, runner, { root })
+  const trusted = trustedFactory({ repo, runner, root })
+  // A board nobody can read costs that repository its pass and no other's.
+  let issues: GhIssue[]
+  try {
+    issues = board(repo, runner)
+  } catch (error) {
+    deps.out(`${repo}: board could not be read (${(error as Error).message})`)
+    continue
+  }
   // One issue nobody can read must not cost the board its pass, so everything per-issue is guarded.
-  for (const issue of board(repo, runner)) {
+  for (const issue of issues) {
     try {
       syncIssue({ root, repo, number: issue.number, runner })
       const snap = snapshot(cacheDir(root, repo, issue.number))
@@ -1157,33 +1178,35 @@ export async function poll(deps: PollDeps, inflight: Map<number, Inflight> = new
         }
       }
       const parent = snap.state.issue!.parent
-      if (parent !== null && !plans.has(parent)) plans.set(parent, parentPlan(root, repo, parent, runner, permission))
-      const files = parent === null ? [] : filesFromParent(plans.get(parent) ?? null, issue.number)
+      const parentKey = `${repo}#${parent}`
+      if (parent !== null && !plans.has(parentKey)) plans.set(parentKey, parentPlan(root, repo, parent, runner, permission))
+      const files = parent === null ? [] : filesFromParent(plans.get(parentKey) ?? null, issue.number)
       wanted.push({ key, decision, candidate: { repo, number: issue.number, action: decision.action, parent, files, from: stateOf(snap.state.issue!.labels).state! } })
     } catch (error) {
-      deps.out(`#${issue.number}: could not be read (${(error as Error).message})`)
+      deps.out(`${repo}#${issue.number}: could not be read (${(error as Error).message})`)
     }
+  }
   }
 
   // An operator's stop for a run that is already going cannot wait for a slot: scheduling would
   // skip the issue because it is running, and no other machine may release the claim this one
   // holds. So it is handled first — the run is ended, and its own settle hands the issue back.
-  const interrupted: number[] = []
+  const interrupted: string[] = []
   for (const item of wanted) {
-    const run = inflight.get(item.candidate.number)
+    const run = inflight.get(runKey(item.candidate))
     if (item.decision.action !== 'stop' || !run || run.settled) continue
-    deps.out(`#${item.candidate.number}: ${item.decision.reason} — stopping the ${run.candidate.action} run`)
+    deps.out(`${runKey(item.candidate)}: ${item.decision.reason} — stopping the ${run.candidate.action} run`)
     run.interrupt = { reason: item.decision.reason, action: 'stop', trigger: item.decision.trigger }
     run.stop()
     await run.done
-    inflight.delete(item.candidate.number)
-    interrupted.push(item.candidate.number)
+    inflight.delete(runKey(item.candidate))
+    interrupted.push(runKey(item.candidate))
   }
 
   const started: Candidate[] = []
-  const queue = wanted.filter((item) => !interrupted.includes(item.candidate.number))
-  for (const candidate of schedule(queue.map((item) => item.candidate), [...inflight.values()].map((run) => run.candidate))) {
-    const item = queue.find((entry) => entry.candidate.number === candidate.number)!
+  const queue = wanted.filter((item) => !interrupted.includes(runKey(item.candidate)))
+  for (const candidate of schedule(queue.map((item) => item.candidate), [...inflight.values()].map((run) => run.candidate), deps.caps?.runs ?? MAX_RUNS)) {
+    const item = queue.find((entry) => runKey(entry.candidate) === runKey(candidate))!
     const at = now()
     // Taken before the slot, so a second machine on the same board sees the work is taken. Losing
     // the race is not a failure: the issue is simply someone else's this pass. A stop takes no
@@ -1191,14 +1214,14 @@ export async function poll(deps: PollDeps, inflight: Map<number, Inflight> = new
     // refuse, and standing down is what releases that holder.
     const taken = candidate.action === 'stop'
       ? { ok: true, owner: '', reason: 'a stop takes no claim' }
-      : reserve({ root, repo, number: candidate.number, runner }, deps.machine, deps.runId, candidate.action, at)
+      : reserve({ root, repo: candidate.repo, number: candidate.number, runner }, deps.machine, deps.runId, candidate.action, at)
     if (!taken.ok) {
-      deps.out(`#${candidate.number}: not started — ${taken.reason}`)
+      deps.out(`${runKey(candidate)}: not started — ${taken.reason}`)
       continue
     }
     const run: Inflight = { candidate, started: at, settled: false, stop: () => {}, interrupt: null, done: Promise.resolve() as unknown as Promise<RunRecord> }
     run.done = runOne(deps, candidate, item, at, taken.owner, run).then((record) => { run.settled = true; return record })
-    inflight.set(candidate.number, run)
+    inflight.set(runKey(candidate), run)
     started.push(candidate)
   }
   return started
@@ -1235,7 +1258,7 @@ export function reserve(ctx: { root: string; repo: string; number: number; runne
 // One step and everything that follows it. Nothing here may reject: the loop does not await these
 // promises, so a rejection nobody handles would take the whole dispatcher down.
 async function runOne(deps: PollDeps, candidate: Candidate, item: { key: string; decision: Decision }, at: number, held: string | null, run: Inflight): Promise<RunRecord> {
-  const claimCtx = { root: deps.root, repo: deps.repo, number: candidate.number, runner: deps.runner }
+  const claimCtx = { root: deps.root, repo: candidate.repo, number: candidate.number, runner: deps.runner }
   // What the step started, filled in from its own callback, so the finally can forget it.
   const started: ChildRecord[] = []
   // While this machine holds the claim it says so, on the same schedule a session's hooks use.
@@ -1253,7 +1276,7 @@ async function runOne(deps: PollDeps, candidate: Candidate, item: { key: string;
         if (beat) clearInterval(beat)
         try { release(claimCtx, held, APP_ACTOR, 'handing the issue to the run this machine just started') } catch { /* the run still starts */ }
       }
-      result = await deps.runStep({ action: candidate.action, number: candidate.number, repo: deps.repo, split: item.decision.split, by: item.decision.by }, {
+      result = await deps.runStep({ action: candidate.action, number: candidate.number, repo: candidate.repo, split: item.decision.split, by: item.decision.by }, {
         root: deps.root,
         onStart: (pid, command) => {
           const record: ChildRecord = {
@@ -1687,8 +1710,14 @@ export async function runDispatch(argv: string[], deps: CliDeps = {}): Promise<n
       const parked = Object.entries(readActed(root))
         .filter(([key, entry]) => entry.failures >= MAX_FAILURES && key.startsWith(`${repo}#`))
         .map(([key, entry]) => ({ issue: Number(key.slice(key.indexOf('#') + 1)), action: entry.action, failures: entry.failures }))
-      print({ repo, machine, listed: listing.ok, board: rows, runs, parked }, [
+      // What this machine is allowed to do, in the words of the row that allows it, so `status`
+      // answers "why is it doing that?" without anyone opening the control room.
+      const caps = listing.entry?.caps ?? DEFAULT_CAPS
+      const watching = (listing.entry?.repos ?? []).filter((one) => one !== '*' && one.toLowerCase() !== 'all')
+      const capsLine = `caps: ${caps.runs} runs · step ${Math.round(caps.stepMs / 3_600_000 * 10) / 10}h · poll ${Math.round(caps.pollMs / 60_000 * 10) / 10}m · retry ${Math.round(caps.retryMs / 60_000)}m · park ${caps.failures}`
+      print({ repo, machine, listed: listing.ok, caps, watching: watching.length ? watching : [repo], board: rows, runs, parked }, [
         `${repo} · ${machine} · ${listing.ok ? 'listed to dispatch' : listing.reason}`,
+        ...(listing.ok ? [capsLine, `watching: ${(watching.length ? watching : [repo]).join(', ')}`] : []),
         ...[...byState].map(([state, numbers]) => `${state.padEnd(20)} ${numbers.map((number) => `#${number}`).join(' ')}`),
         ...(parked.length ? ['', `parked for a person: ${parked.map((row) => `#${row.issue} (${row.action} failed ${row.failures}×)`).join(', ')}`] : []),
         '',
@@ -1709,21 +1738,27 @@ export async function runDispatch(argv: string[], deps: CliDeps = {}): Promise<n
       try { devMd = readFileSync(join(root, '.vegastack', 'dev.md'), 'utf8') } catch { /* no profile, so the tools' own defaults */ }
       const identity = deps.runner ? null : appIdentity({ repo, keyPath, appId: appIdOf(env), fetch: deps.fetch })
       const runner = deps.runner ?? identity!.runner
+      // The row that authorised this machine also says what it may do and which boards it works.
+      // `*` or an empty cell means the repository this checkout is, because a machine trusted with
+      // every repository of an org still has to be told which one it is standing in.
+      const caps = listing.entry?.caps ?? DEFAULT_CAPS
+      const listed = (listing.entry?.repos ?? []).filter((one) => one !== '*' && one.toLowerCase() !== 'all')
+      const repos = listed.length ? listed : [repo]
       const pollDeps: PollDeps = {
-        root, repo, runner, machine, runId, out: args.json ? () => {} : out, now: deps.now ?? Date.now,
-        runStep: deps.runStep ?? defaultRunStep(devMd, env, { token: () => identity?.token() ?? null }), stop: deps.stop, start: deps.start,
+        root, repos, runner, machine, runId, caps, out: args.json ? () => {} : out, now: deps.now ?? Date.now,
+        runStep: deps.runStep ?? defaultRunStep(devMd, env, { timeoutMs: caps.stepMs, token: () => identity?.token() ?? null }), stop: deps.stop, start: deps.start,
         standDown: (number, reason) => standDown({ root, repo, number, runner, machine }, reason),
       }
       // Started steps outlive the pass that began them, so the next pass keeps their slots and
       // still acts on the rest of the board — a twenty-minute build does not stop the poll.
-      const inflight = new Map<number, Inflight>()
+      const inflight = new Map<string, Inflight>()
       // Stopping means stopping: the agents this machine started are ended, their work saved and
       // their claims released. A dispatcher that walked away leaving three agents writing to
       // GitHub would be worse than one that never started.
       const shutDown = async (why: string) => {
-        for (const [number, run] of inflight) {
+        for (const [key, run] of inflight) {
           if (run.settled) continue
-          out(`#${number} ${run.candidate.action} stopped: ${why}`)
+          out(`${key} ${run.candidate.action} stopped: ${why}`)
           run.interrupt = { reason: why, action: run.candidate.action, trigger: null }
           run.stop()
         }

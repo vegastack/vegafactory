@@ -2,6 +2,16 @@
 
 The project's story, newest first: what got built, why, and how it went — for the operator's future recall. Format home: the dev-chronicle skill.
 
+## 18-09-2026 — One machine, every board, and caps it can be told ([#248](https://github.com/vegastack/vegafactory/issues/248))
+
+- **What:** A dispatcher now works every repository its roster row lists, and that row sets what the machine may do: `runs 10 · step 72h · poll 1m · retry 15m · park 3`. The twenty-minute wall is gone, a merge slot is per repository rather than per machine, and `dispatch status` prints the caps in force and the boards being watched.
+- **Why:** The first live drill found the runtime promising less than the roster did. The roster already listed several repos and checked membership, but a run resolved one repository from its checkout and the launchd label was fixed, so a second project meant a second service that could not exist. Worse, every cap was a module constant: pushing a machine harder, or letting a real feature take more than twenty minutes, meant editing source and cutting a release.
+- **How it went:** The caps went on the machine's row rather than any repo's dev.md, because a box watching ten projects would otherwise take ten answers for one processor. Two things then had to change together: a candidate had to carry its repository, since `#12` stops naming one piece of work once there are several boards and the inflight map would have let one run silently displace another; and the sibling file-overlap rule had to stop comparing across repositories, which cannot share a working tree. The caps cell is found by what it says rather than which column it sits in, so a roster that already had a notes column did not have to move it — which the live roster proved the moment it was read as malformed.
+- **Changed:** `Caps` and `parseCaps` on the roster row, with defaults and a refusal for a cell that means to set one and cannot be read · `Candidate.repo` and `runKey`, with per-repository merge slots · one pass over every listed board, an unreadable one reported and skipped · the step limit threaded to the watchdog that enforces it · the roster template, the dispatcher-box checklist, the control-room reference and `dispatch status`.
+- **Decisions:** none new — the seven knob values were settled in the operator's interview and are recorded on the issue.
+
+— approved by operator (kmanojkumar) · built by claude · branch feat/248-the-dispatcher-watches-every-repo-it-is
+
 ## 18-09-2026 — The drill found what the tests could not ([#224](https://github.com/vegastack/vegafactory/issues/224))
 
 - **What:** Two fixes for things the rebuild had built and nobody had ever run. `dispatch enable` could not pass its own readiness check on any machine, and enrolling a dispatcher demanded an SSH key the machine did not need.

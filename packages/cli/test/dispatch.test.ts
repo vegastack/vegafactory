@@ -517,11 +517,11 @@ describe('one poll over the board', () => {
     return { outcome: 'done', note: 'finished', ms: 10, ...result }
   }
   const deps = (over: Partial<PollDeps> = {}): PollDeps => ({
-    root, repo: 'o/r', runner: gh.runner, now: () => gh.clock, machine: HOST, runId: 'test',
+    root, repos: ['o/r'], runner: gh.runner, now: () => gh.clock, machine: HOST, runId: 'test',
     out: () => {}, runStep: runStep(), standDown: () => 'stood down', ...over,
   })
   // One pass, then everything it started.
-  const pass = async (over: Partial<PollDeps> = {}, inflight = new Map<number, Inflight>()) => {
+  const pass = async (over: Partial<PollDeps> = {}, inflight = new Map<string, Inflight>()) => {
     await poll(deps(over), inflight)
     return drain(inflight)
   }
@@ -541,7 +541,7 @@ describe('one poll over the board', () => {
 
   test('a step already running keeps its slot and its issue on the next pass', async () => {
     for (const number of [1, 2, 3, 4]) gh.addIssue({ number, labels: ['planning', 'medium'] })
-    const inflight = new Map<number, Inflight>()
+    const inflight = new Map<string, Inflight>()
     let release = () => {}
     const held = new Promise<void>((resolve) => { release = resolve })
     const slow: RunStep = async (step) => {
@@ -646,7 +646,7 @@ describe('one poll over the board', () => {
 
   test('an operator stop reaches a run that is already going', async () => {
     gh.addIssue({ number: 1, labels: ['queued', 'small'] })
-    const inflight = new Map<number, Inflight>()
+    const inflight = new Map<string, Inflight>()
     let releaseChild = () => {}
     const blocked = new Promise<void>((resolve) => { releaseChild = resolve })
     let stoppedPid = 0
@@ -1283,6 +1283,20 @@ describe('caps on the roster row', () => {
     expect(parseCaps('runs ten')).toBeNull()
     expect(parseCaps('step 72 hours')).toBeNull()
   })
+  test('the caps cell is found by what it says, not by which column it is in', () => {
+    // A roster that already has a notes column should not have to move it.
+    const roster = '| a | dev | o/a | mk | the always-on box | runs 4 |\n| b | dev | o/b | mk | runs 6 | a note |'
+    const rows = parseDispatchers(roster)
+    expect(rows.map((row) => row.caps.runs)).toEqual([4, 6])
+  })
+  test('prose in a notes column is a note, not a broken caps cell', () => {
+    const rows = parseDispatchers('| a | dev | o/a | mk | the box the rebuild was built on |')
+    expect(rows).toHaveLength(1)
+    expect(rows[0]!.caps).toEqual(DEFAULT_CAPS)
+  })
+  test('a cell that means to set caps and cannot be read still drops the machine', () => {
+    expect(parseDispatchers('| a | dev | o/a | mk | runs lots |')).toEqual([])
+  })
   test('the row carries them, and a malformed cell drops the machine', () => {
     const roster = '| patrick-mac-mini | dev | o/a, o/b | mk | runs 10 · step 72h |\n| broken | dev | o/c | mk | runs ten |'
     const rows = parseDispatchers(roster)
@@ -1310,5 +1324,58 @@ describe('scheduling across repositories', () => {
   test('a run already going is not started again on its own board', () => {
     const running = [at('o/a', 1, 'implement')]
     expect(schedule([at('o/a', 1, 'implement'), at('o/b', 1, 'implement')], running, 10).map(runKey)).toEqual(['o/b#1'])
+  })
+})
+
+describe('one pass over several boards', () => {
+  // A runner that answers for each repository, and cannot read one of them.
+  const boards = (unreadable: string) => {
+    const asked: string[] = []
+    const runner = (args: string[]) => {
+      const route = args.find((arg) => arg.startsWith('repos/')) ?? ''
+      const repo = route.split('/').slice(1, 3).join('/')
+      if (route.includes('/issues')) {
+        asked.push(repo)
+        if (repo === unreadable) return { code: 1, stdout: '', stderr: 'Not Found' }
+        return { code: 0, stdout: '[]', stderr: '' }
+      }
+      return { code: 0, stdout: '{}', stderr: '' }
+    }
+    return { asked, runner }
+  }
+
+  test('every listed repository is read, and one that cannot be is reported and skipped', async () => {
+    const said: string[] = []
+    const gh = boards('o/b')
+    const root = mkdtempSync(join(tmpdir(), 'vf-poll-'))
+    const started = await poll({
+      root, repos: ['o/a', 'o/b', 'o/c'], runner: gh.runner, machine: HOST, runId: 'test',
+      now: () => Date.now(), out: (line) => said.push(line), runStep: async () => ({ outcome: 'done', note: '', ms: 1 }),
+      standDown: () => 'stood down',
+    })
+    expect(gh.asked).toEqual(['o/a', 'o/b', 'o/c'])
+    expect(said.join(' ')).toContain('o/b')
+    expect(started).toEqual([])
+  })
+})
+
+describe('the step limit', () => {
+  test('the watchdog is given the caps limit, not the built-in twenty minutes', async () => {
+    let given = 0
+    const exec = async (_tool: string, _args: string[], options: { env: NodeJS.ProcessEnv; timeoutMs: number }) => {
+      given = options.timeoutMs
+      return { code: 0, stdout: 'done', stderr: '', timedOut: false }
+    }
+    const root = mkdtempSync(join(tmpdir(), 'vf-step-'))
+    const step = defaultRunStep('', { PATH: '/usr/bin' }, { exec, timeoutMs: 72 * 3_600_000 })
+    await step({ action: 'implement', number: 7, repo: 'o/r', split: false, by: null }, { root })
+    expect(given).toBe(72 * 3_600_000)
+  })
+
+  test('a run that ends is not reported as one that ran past its limit', async () => {
+    const exec = async () => ({ code: 0, stdout: 'finished', stderr: '', timedOut: false })
+    const root = mkdtempSync(join(tmpdir(), 'vf-step2-'))
+    const step = defaultRunStep('', { PATH: '/usr/bin' }, { exec, timeoutMs: 72 * 3_600_000 })
+    expect(await step({ action: 'implement', number: 7, repo: 'o/r', split: false, by: null }, { root })).toMatchObject({ outcome: 'done' })
   })
 })
