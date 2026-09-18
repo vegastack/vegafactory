@@ -16,13 +16,11 @@ beforeEach(() => {
 })
 
 describe('where the home is', () => {
-  test('the env var names the directory itself, and a different home named outright wins over it', () => {
+  test('the env var names the directory itself, and wins outright when it is set', () => {
     const named = join(home, 'elsewhere')
-    // Nothing was passed, so the variable answers.
     expect(factoryHome({ env: { [HOME_VARIABLE]: named } })).toBe(named)
-    // A home that is some other directory has been named outright, so it wins: an ambient setting
-    // must not reach past a caller that said where to look.
-    expect(factoryHome({ env: { [HOME_VARIABLE]: named }, home })).toBe(join(home, '.vegafactory'))
+    // It is the whole home, not a base to build one from, so a home passed alongside it loses.
+    expect(factoryHome({ env: { [HOME_VARIABLE]: named }, home })).toBe(named)
     expect(factoryHome({ env: {}, home })).toBe(join(home, '.vegafactory'))
   })
 
@@ -71,7 +69,8 @@ describe('moving off the older home', () => {
     kind: pathKind,
     list: (path: string) => { try { return require('node:fs').readdirSync(path) as string[] } catch { return [] } },
     readable: () => true,
-    rebase: () => 0,
+    rebaseInto: (source: string, target: string) => { require('node:fs').renameSync(source, target); return 0 },
+    rebaseUnder: () => 0,
     move: (from: string, to: string) => { require('node:fs').renameSync(from, to) },
     mkdir: (path: string) => { mkdirSync(path, { recursive: true }) },
     remove: (path: string) => { require('node:fs').rmSync(path, { recursive: true, force: true }) },
@@ -196,7 +195,8 @@ describe('the move cannot be aimed somewhere it was not asked to go', () => {
     kind: pathKind,
     list: (path: string) => { try { return require('node:fs').readdirSync(path) as string[] } catch { return [] } },
     readable: () => true,
-    rebase: () => 0,
+    rebaseInto: (source: string, target: string) => { require('node:fs').renameSync(source, target); return 0 },
+    rebaseUnder: () => 0,
     move: (from: string, to: string) => { require('node:fs').renameSync(from, to) },
     mkdir: (path: string) => { mkdirSync(path, { recursive: true }) },
     remove: (path: string) => { require('node:fs').rmSync(path, { recursive: true, force: true }) },
@@ -344,7 +344,8 @@ describe('work in flight is waited for, never judged', () => {
     kind: pathKind,
     list: (path: string) => { try { return require('node:fs').readdirSync(path) as string[] } catch { return [] } },
     readable: () => true,
-    rebase: () => 0,
+    rebaseInto: (source: string, target: string) => { require('node:fs').renameSync(source, target); return 0 },
+    rebaseUnder: () => 0,
     move: (from: string, to: string) => { require('node:fs').renameSync(from, to) },
     mkdir: (path: string) => { mkdirSync(path, { recursive: true }) },
     remove: (path: string) => { require('node:fs').rmSync(path, { recursive: true, force: true }) },
@@ -506,5 +507,77 @@ describe('the record moves with the files', () => {
     expect(recorded.controlRooms.acme!.path).toBe(join(home, '.vegafactory', 'control-room', 'acme'))
     expect(existsSync(recorded.controlRooms.acme!.path)).toBe(true)
     expect(run.stderr.toString()).toContain('recorded path')
+  })
+})
+
+
+// Every command settles this machine's home before it runs anything. A test that spawns the CLI
+// without saying where that home is settles the home of whoever ran the tests — it moved this
+// machine's own control room, config and App key while this was being written. Bun makes a
+// preload no defence: `os.homedir()` asks the operating system rather than reading `$HOME`, and
+// `spawnSync` does not pass on changes a preload makes to `process.env`. So the rule is checked
+// here instead, across the whole test tree.
+describe('no test can settle a real machine', () => {
+  // The call and whatever follows it, because the options object can run over several lines and
+  // can contain brackets of its own.
+  // An argument array that carries this CLI's entry point, however the call is spelled:
+  // `[CLI, …]`, `['node', cli, …]`, `[executable, cli, …]`.
+  const LAUNCHES_CLI = /\[[^\]]*(?<![\w/.'"-])(?:CLI|cli)(?![\w/.'"-])/g
+  const WINDOW = 420
+
+  const settles = (text: string): string[] => {
+    const found: string[] = []
+    for (const match of text.matchAll(LAUNCHES_CLI)) {
+      const after = text.slice(match.index ?? 0, (match.index ?? 0) + WINDOW)
+      if (!after.includes('VEGAFACTORY_HOME')) found.push(after.replace(/\s+/g, ' ').slice(0, 100))
+    }
+    return found
+  }
+
+  test('every test that launches the CLI names a home for it', () => {
+    const offenders: string[] = []
+    const roots = [join(import.meta.dir), join(import.meta.dir, '..', '..', '..', 'skills')]
+    const walk = (directory: string, depth = 0) => {
+      if (depth > 6) return
+      for (const entry of require('node:fs').readdirSync(directory, { withFileTypes: true })) {
+        const path = join(directory, entry.name)
+        if (entry.isDirectory()) { if (entry.name !== 'node_modules') walk(path, depth + 1); continue }
+        // This file's own examples below are strings about the rule, not uses of it.
+        if (!/\.test\.(ts|mjs)$/.test(entry.name) || entry.name === 'home.test.ts') continue
+        for (const call of settles(readFileSync(path, 'utf8'))) offenders.push(`${entry.name}: ${call}`)
+      }
+    }
+    for (const root of roots) if (existsSync(root)) walk(root)
+    expect(offenders).toEqual([])
+  })
+
+  test('the check would catch a regression', () => {
+    // So an empty result above means "clean" and not "never looked".
+    expect(settles("spawnSync(process.execPath, [CLI, 'version'], { cwd: root })")).toHaveLength(1)
+    expect(settles("spawnSync(process.execPath, [CLI, 'x'], { env: { VEGAFACTORY_HOME: h } })")).toHaveLength(0)
+    // And that it is not fooled by brackets inside the options.
+    expect(settles("spawnSync(process.execPath, [CLI, 'x'], { input: N(m), env: { VEGAFACTORY_HOME: h } })")).toHaveLength(0)
+    expect(settles("spawnSync('git', ['status'], { cwd: root })")).toHaveLength(0)
+    // A path that merely contains the letters is not this CLI.
+    expect(settles("expect(files).toEqual(['packages/cli/src/issue.ts', 'packages/cli/package.json'])")).toHaveLength(0)
+  })
+})
+
+// The push journals live inside the spool that has just moved, and each names the clone it was
+// written for. `recoverPush` refuses one whose room is not where it says it is.
+describe('the journals inside the spool move too', () => {
+  test('a push journal is rebased along with everything else', () => {
+    const legacy = join(home, '.vegastack')
+    const spool = join(legacy, '.tmp', 'stats', 'push-pending')
+    mkdirSync(spool, { recursive: true })
+    writeFileSync(join(spool, 'acme__room.json'), JSON.stringify({ room: { path: join(legacy, 'control-room', 'acme') }, uuid: 'x' }))
+    mkdirSync(join(legacy, 'control-room', 'acme'), { recursive: true })
+
+    const run = Bun.spawnSync([process.execPath, join(import.meta.dir, '..', 'src', 'index.ts'), 'version'], {
+      cwd: home, env: { ...process.env, HOME: home, VEGAFACTORY_HOME: '' },
+    })
+    expect(run.exitCode).toBe(0)
+    const journal = JSON.parse(readFileSync(join(home, '.vegafactory', 'stats', 'push-pending', 'acme__room.json'), 'utf8')) as { room: { path: string } }
+    expect(journal.room.path).toBe(join(home, '.vegafactory', 'control-room', 'acme'))
   })
 })

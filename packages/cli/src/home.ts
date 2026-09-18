@@ -44,13 +44,9 @@ export interface HomeOptions { env?: NodeJS.ProcessEnv; home?: string }
 // `VEGAFACTORY_HOME` names the directory itself, not the parent: point it at a temporary directory
 // and everything below follows. An empty or whitespace value is no value.
 //
-// A `home` that is some *other* directory wins over it. The variable is the ambient answer for a
-// process that was not told where to look; a caller naming a different directory has been told,
-// and an ambient setting must not reach past it — that is how a test asking about one directory
-// silently reads another. Passing this machine's own home says nothing the variable does not
-// already know, so it does not count as being told.
+// The variable wins outright when it is set: it is the whole home, not a base to build one from.
+// A caller that must not be reached by an ambient setting passes its own `env`.
 export function factoryHome(options: HomeOptions = {}): string {
-  if (options.home !== undefined && options.home !== homedir()) return join(options.home, FACTORY_DIRECTORY)
   const named = (options.env ?? process.env)[HOME_VARIABLE]?.trim()
   return named || join(options.home ?? homedir(), FACTORY_DIRECTORY)
 }
@@ -100,6 +96,9 @@ export function appKeyPath(options: HomeOptions = {}): string {
 // is why the move is a table rather than a copy: `worktree-roots.json` became `worktrees.json`,
 // the stats spool came out of a hidden `.tmp/`, and the App key moved under `worker/` where the
 // rest of an unattended machine's state lives.
+// Records that name absolute paths inside the home, and so cannot simply be carried.
+const RECORDS_PATHS = new Set(['factory.json'])
+
 const MOVES: { from: string[]; to: string[]; shape: Kind }[] = [
   { from: ['factory.json'], to: ['factory.json'], shape: 'file' },
   // The settings writer's pre-image. A machine that moved without it would take the file and
@@ -161,8 +160,11 @@ export function migrateHome(deps: {
   // null when the directory is there but cannot be listed: "unknown" must never read as "empty".
   list: (path: string) => string[] | null
   readable: (path: string, shape: Kind) => boolean
-  // Returns how many recorded paths were moved onto the new home.
-  rebase: (path: string, from: string, to: string) => number
+  // Copies a record across, rewriting every path under the older home as it goes, and removes the
+  // original. Returns how many paths it rewrote.
+  rebaseInto: (source: string, target: string, from: string, to: string) => number
+  // The same, in place, for every JSON file directly inside a directory.
+  rebaseUnder: (directory: string, from: string, to: string) => number
   move: (from: string, to: string) => void
   mkdir: (path: string) => void
   remove: (path: string) => void
@@ -261,18 +263,21 @@ export function migrateHome(deps: {
   }
 
   deps.mkdir(to)
+  let rebased = 0
   for (const entry of waiting) {
     const target = join(to, ...entry.to)
     if (entry.to.length > 1) deps.mkdir(join(to, ...entry.to.slice(0, -1)))
-    deps.move(join(from, ...entry.from), target)
+    // A record that names absolute paths is rewritten on the way across rather than moved and then
+    // edited: there must be no instant in which the destination holds the old addresses, because
+    // another command can start in it the moment the last legacy entry is gone.
+    if (RECORDS_PATHS.has(entry.to.join('/'))) rebased += deps.rebaseInto(join(from, ...entry.from), target, from, to)
+    else deps.move(join(from, ...entry.from), target)
     moved.push(`${entry.from.join('/')} → ${entry.to.join('/')}`)
   }
-  // `factory.json` records absolute paths — where each control room was cloned, and where its
-  // policy snapshot was written. Move the files and leave those alone and every control-room read
-  // fails closed against the store that now guards a different directory, which is exactly the
-  // skew this module exists to prevent. So the record is rebased in the same breath as the move.
-  const rebased = deps.rebase(join(to, 'factory.json'), from, to)
-  if (rebased > 0) moved.push(`factory.json → ${rebased} recorded path${rebased === 1 ? '' : 's'} rebased onto ${to}`)
+  // The push journals live inside the spool that has just moved, and each names the clone it was
+  // written for. `recoverPush` refuses one whose room is not where it says.
+  rebased += deps.rebaseUnder(join(to, 'stats', 'push-pending'), from, to)
+  if (rebased > 0) moved.push(`${rebased} recorded path${rebased === 1 ? '' : 's'} rebased onto ${to}`)
   return { action: 'moved', reason: `moved this machine's state from ${from} to ${to}`, moved }
 }
 
@@ -347,13 +352,29 @@ export function settleHome(report: (line: string) => void = console.error): Migr
         return (error as NodeJS.ErrnoException).code === 'ENOENT' ? [] : null
       }
     },
-    rebase: (path, from, to) => {
-      let text: string
-      try { text = readFileSync(path, 'utf8') } catch { return 0 }
-      let parsed: unknown
-      try { parsed = JSON.parse(text) } catch { return 0 }
-      const { value, changed } = rebasePaths(parsed, from, to)
-      if (changed > 0) writeFileSync(path, `${JSON.stringify(value, null, 2)}\n`)
+    rebaseInto: (source, target, from, to) => {
+      const text = readFileSync(source, 'utf8')
+      let changed = 0
+      let output = text
+      try {
+        const rebasedValue = rebasePaths(JSON.parse(text), from, to)
+        changed = rebasedValue.changed
+        if (changed > 0) output = `${JSON.stringify(rebasedValue.value, null, 2)}\n`
+      } catch { /* not JSON this release understands: carried across exactly as it is */ }
+      writeFileSync(target, output)
+      rmSync(source, { force: true })
+      return changed
+    },
+    rebaseUnder: (directory, from, to) => {
+      let changed = 0
+      for (const name of (() => { try { return readdirSync(directory) } catch { return [] } })()) {
+        if (!name.endsWith('.json')) continue
+        const path = join(directory, name)
+        try {
+          const rebasedValue = rebasePaths(JSON.parse(readFileSync(path, 'utf8')), from, to)
+          if (rebasedValue.changed > 0) { writeFileSync(path, `${JSON.stringify(rebasedValue.value, null, 2)}\n`); changed += rebasedValue.changed }
+        } catch { /* leave anything unreadable exactly as it is */ }
+      }
       return changed
     },
     readable: (path, shape) => {

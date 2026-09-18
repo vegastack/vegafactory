@@ -195,11 +195,8 @@ export function controlRoomDrift({ devMdText, orgText, groupText, cloneSha }) {
 // the home is. The CLI's `home.ts` is the source of truth; these two lines are the only place it
 // is spelled out again, and `VEGAFACTORY_HOME` has to work here too or a test that points the CLI
 // somewhere harmless would still read the operator's real control room through this script.
-// Same precedence as the CLI's `home.ts`: a home that is some other directory has been named
-// outright and wins, and the variable answers only when nothing was.
-const factoryHome = (home) => (home !== undefined && home !== homedir()
-  ? join(home, '.vegafactory')
-  : process.env.VEGAFACTORY_HOME?.trim() || join(home ?? homedir(), '.vegafactory'));
+// Same precedence as the CLI's `home.ts`: the variable is the whole home when it is set.
+const factoryHome = (home) => process.env.VEGAFACTORY_HOME?.trim() || join(home ?? homedir(), '.vegafactory');
 
 function controlRoomState(devMdText, home) {
   const knob = controlRoomKnob(devMdText);

@@ -1,3 +1,0 @@
-[test]
-# Runs before every test file, and its environment is inherited by anything a test spawns.
-preload = ["./tooling/test-home.ts"]
