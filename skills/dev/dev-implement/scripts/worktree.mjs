@@ -372,6 +372,13 @@ export function createWorktree({ repoRoot, issue, slug, type, base, devMd, home,
   const blocks = [];
   const warns = [];
   const actions = [];
+  // The branch is named before anything is cut, so an unlisted type is refused
+  // here rather than becoming a branch nobody's conventions expect. `feat` was
+  // the silent answer for a title that named no type; naming the list instead
+  // tells the caller what this project actually has.
+  const types = parseBranchTypes(devMd);
+  if (!type) return { blocks: [at('#' + issue, 'the title names no branch type — pass --type <' + types.join('|') + '>')], warns, actions };
+  if (!types.includes(type)) return { blocks: [at(type, 'is not a branch type in this project — dev.md lists ' + types.join(', '))], warns, actions };
   const branch = branchName(type, issue, slug);
   const name = worktreeName(issue, slug);
 
@@ -954,12 +961,12 @@ function runVerb(verb, flags) {
       } catch (error) {
         return { blocks: [at('#' + issue, 'could not read the issue title (' + error.message + ') — pass --slug')], warns: [] };
       }
-      const parts = titleParts(title);
+      const parts = titleParts(title, devMd);
       if (!parts.slug) return { blocks: [at('#' + issue, 'the title makes no slug — pass --slug')], warns: [] };
       named = { type: named.type || parts.type, slug: parts.slug };
     }
     if (!named.slug) return { blocks: ['--slug is required for ' + verb + ' without --issue'], warns: [] };
-    const options = { ...shared, issue, slug: named.slug, type: named.type || 'feat' };
+    const options = { ...shared, issue, slug: named.slug, type: named.type };
     return verb === 'create' ? createWorktree(options) : restoreWorktree(options);
   }
   return { blocks: [at(verb, 'unknown verb — expected create|restore|remove|list|prune|status')], warns: [] };

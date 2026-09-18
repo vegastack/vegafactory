@@ -21,6 +21,25 @@ function repo() {
 const devMd = 'commands: check `true` · setup `sh -c "echo setup-ran > setup.log"`\nworktree-include: .env\n'
 
 describe('createWorktree', () => {
+  test('a type the project does not list is refused, and the refusal names the ones it does', () => {
+    const root = repo()
+    const r = createWorktree({ repoRoot: root, issue: 224, slug: 'x', type: 'research', base: 'main', devMd, home: root, write: false })
+    expect(r.blocks.join(' ')).toContain('feat, fix, docs, chore, refactor')
+    expect(existsSync(join(root, '.vegastack/.worktrees/224-x'))).toBe(false)
+  })
+  test('no type at all is refused rather than silently becoming feat', () => {
+    const root = repo()
+    const r = createWorktree({ repoRoot: root, issue: 224, slug: 'x', type: null, base: 'main', devMd, home: root, write: false })
+    expect(r.blocks.join(' ')).toContain('--type')
+    expect(r.branch).toBeUndefined()
+  })
+  test('the project\'s own list is what counts', () => {
+    const root = repo()
+    const ownList = devMd + 'branch: <type>/<slug>   # type: feat | spike — the only place this list lives\n'
+    const r = createWorktree({ repoRoot: root, issue: 224, slug: 'x', type: 'spike', base: 'main', devMd: ownList, home: root, write: false })
+    expect(r.blocks).toEqual([])
+    expect(r.branch).toBe('spike/224-x')
+  })
   test('dry run reports the actions and writes nothing', () => {
     const root = repo()
     const r = createWorktree({ repoRoot: root, issue: 106, slug: 'x', type: 'feat', base: 'main', devMd, home: root, write: false })
