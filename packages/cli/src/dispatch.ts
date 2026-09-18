@@ -85,7 +85,7 @@ export function parseCaps(cell: string): Caps | null {
   if (!text) return caps
   // What each field takes: a plain count, or a duration in the units that field is measured in.
   // `poll 2h` and `step 10s` are refused because neither is a limit anybody means.
-  const UNITS: Record<string, string[]> = { runs: [], park: [], step: ['m', 'h'], poll: ['s', 'm'], retry: ['m', 'h'] }
+  const UNITS: Record<string, string[]> = { runs: [], park: [], step: ['m', 'h'], poll: ['s', 'm'], retry: ['m'] }
   for (const field of text.split(/[·,]/).map((part) => part.trim()).filter(Boolean)) {
     const match = /^(runs|step|poll|retry|park)\s+(\d+)\s*([hms]?)$/i.exec(field)
     if (!match) return null
@@ -122,7 +122,7 @@ const HEADER_WORDS = new Set(['machine', 'dispatcher'])
 // A cell meaning to set caps says so: `runs 10`, `step 72h`. Free prose in a notes column does not
 // match, and a cell that means to and is malformed still refuses the machine rather than passing
 // as a note.
-const CAPS_CELL = /\b(runs|step|poll|retry|park)\s+\S/i
+const CAPS_CELL = /\b(runs|step|poll|retry|park)\b/i
 
 const cells = (line: string) => line.replace(/^\|/, '').replace(/\|\s*$/, '').split('|').map((cell) => cell.trim())
 const separator = (cell: string) => /^:?-{2,}:?$/.test(cell)
@@ -457,7 +457,21 @@ export function pushPath(root: string, run: Probe): Check {
   }
 }
 
-export interface ReadyInput { root: string; listing: Listing; run: Probe; keyOk: boolean; keyDetail: string; env: NodeJS.ProcessEnv }
+export interface ReadyInput { root: string; repo: string; listing: Listing; run: Probe; keyOk: boolean; keyDetail: string; env: NodeJS.ProcessEnv; home?: string }
+
+// Every repository the row names needs a checkout here, or this machine cannot work it. Installing
+// the service while a listed board is unusable would mean finding out one repository at a time.
+export function boardsReady(listing: Listing, repo: string, home = homedir(), find = checkoutFor): Check {
+  const named = (listing.entry?.repos ?? []).filter((one) => one !== '*' && one.toLowerCase() !== 'all')
+  const watching = named.length ? named : [repo]
+  const missing = watching.filter((name) => name !== repo && !find(name, home))
+  return {
+    name: 'boards', ok: missing.length === 0,
+    detail: missing.length
+      ? `no checkout on this machine for ${missing.join(', ')} — clone each and run \`vegafactory worktree list\` there, or take them off this machine's row`
+      : `${watching.length} board${watching.length === 1 ? '' : 's'}: ${watching.join(', ')}`,
+  }
+}
 
 export function readiness(input: ReadyInput): Check[] {
   const billing = billingVariables(input.env)
@@ -465,6 +479,7 @@ export function readiness(input: ReadyInput): Check[] {
     { name: 'listed', ok: input.listing.ok, detail: input.listing.reason },
     { name: 'billing', ok: billing.length === 0, detail: billing.length ? `${billing.join(', ')} set — the dispatcher runs on subscriptions only; unset them` : 'no API-key variable is set' },
     hooksWired(input.root),
+    boardsReady(input.listing, input.repo, input.home),
     pushPath(input.root, input.run),
     ...harnessAnswers(input.run),
     { name: 'app-key', ok: input.keyOk, detail: input.keyDetail },
@@ -924,7 +939,7 @@ export function filesFromParent(parentPlan: string | null, number: number): stri
 
 export interface Step { action: Action; number: number; repo: string; split: boolean; by: string | null }
 export interface StepResult { outcome: Outcome; note: string; ms: number }
-export type RunStep = (step: Step, context: { root: string; devMd?: string; token?: string | null; onStart?: (pid: number, command: string) => void }) => Promise<StepResult>
+export type RunStep = (step: Step, context: { root: string; devMd?: string; token?: string | null; timeoutMs?: number; onStart?: (pid: number, command: string) => void }) => Promise<StepResult>
 
 // A run that stopped because the subscription said "enough for now". Each tool words it its own
 // way, and each of these is a limit, not a failure of the work.
@@ -1093,10 +1108,13 @@ export function defaultRunStep(devMd: string, env: NodeJS.ProcessEnv, { exec = e
     // operator — dev-setup's references/ask-route.md, where VSK_ASK_ROUTE is the first step.
     // The token belongs to the board this run is for; a token minted for another repository is
     // refused by GitHub on every call.
-    const child = await exec(tool, args, { cwd, env: childRunEnvironment(env, context.token ?? token()), timeoutMs, onStart: context.onStart })
+    // Both the limit and the token arrive with the run rather than with the step function, so a
+    // roster change lands on the next run instead of the next restart.
+    const limit = context.timeoutMs ?? timeoutMs
+    const child = await exec(tool, args, { cwd, env: childRunEnvironment(env, context.token ?? token()), timeoutMs: limit, onStart: context.onStart })
     const ms = Date.now() - started
     const text = `${child.stderr}\n${child.stdout}`
-    if (child.timedOut) return { outcome: 'killed', note: `${tool} ran past the ${timeoutMs / 60_000}-minute step limit and was stopped`, ms }
+    if (child.timedOut) return { outcome: 'killed', note: `${tool} ran past the ${limit / 60_000}-minute step limit and was stopped`, ms }
     if (child.error) return { outcome: 'failed', note: `could not start ${tool}: ${child.error}`, ms }
     // A limit is why a run stopped early, never a phrase in the work of a run that finished: the
     // diff of a retry helper says "rate limit" all day.
@@ -1120,7 +1138,7 @@ export function board(repo: string, runner: GhRunner): GhIssue[] {
 // All three are per repository and none of them can be borrowed from another: a token is narrowed
 // to the repository it was minted for, a worktree belongs to one checkout, and `harness-policy:`
 // is the project's own answer about which model plans its work.
-export interface BoardContext { repo: string; root: string; runner: GhRunner; devMd: string; token: () => string | null }
+export interface BoardContext { repo: string; root: string; runner: GhRunner; devMd: string; token: () => string | null; freshen: () => Promise<unknown> }
 
 // The checkout this machine has for a repository, from the registry `vegafactory worktree` keeps.
 // A dispatcher never clones anything: a board it has no checkout for is reported and skipped, so
@@ -1343,7 +1361,11 @@ async function runOne(deps: PollDeps, candidate: Candidate, item: { key: string;
         // The repository's own checkout, so #12 on one board never opens #12's worktree on another.
         root: context.root,
         devMd: context.devMd,
+        // Minted now, not when the dispatcher started: a cached token may have minutes left, and a
+        // run that begins with minutes cannot finish with any. It still lives only an hour, which
+        // a run allowed longer than that will outlast — #239 is what closes that for good.
         token: context.token(),
+        timeoutMs: deps.caps?.stepMs ?? STEP_TIMEOUT_MS,
         onStart: (pid, command) => {
           const record: ChildRecord = {
             pid, command, startedAt: (deps.start ?? processStart)(pid) ?? '', issue: candidate.number,
@@ -1712,7 +1734,7 @@ export async function runDispatch(argv: string[], deps: CliDeps = {}): Promise<n
         keyOk = true
         keyDetail = `the App key at ${keyPath} mints an installation token for ${repo}`
       } catch (error) { keyDetail = (error as Error).message }
-      const checks = readiness({ root, listing, run: deps.run ?? probe, keyOk, keyDetail, env })
+      const checks = readiness({ root, repo, listing, run: deps.run ?? probe, keyOk, keyDetail, env, home })
       const path = unitPath(platform, home)
       if (!checks.every((check) => check.ok)) {
         print({ ok: false, checks }, `${renderChecks(checks)}\n\nnot ready — fix the FAIL lines above, then run this again`)
@@ -1788,33 +1810,42 @@ export async function runDispatch(argv: string[], deps: CliDeps = {}): Promise<n
       // rather than being left out, because a board missing from `status` reads as a board with
       // nothing on it.
       const others: string[] = []
+      const otherBoards: Array<{ repo: string; board?: typeof rows; reason?: string }> = []
       for (const name of (listing.entry?.repos ?? []).filter((one) => one !== '*' && one.toLowerCase() !== 'all' && one !== repo)) {
         const checkout = checkoutFor(name, home)
-        if (!checkout) { others.push(`${name}: no checkout on this machine`); continue }
+        if (!checkout) {
+          others.push(`${name}: no checkout on this machine`)
+          otherBoards.push({ repo: name, reason: 'no checkout on this machine' })
+          continue
+        }
         try {
           const theirs = boardRows(name, runner)
           const grouped = new Map<string, number[]>()
           for (const row of theirs) grouped.set(row.state, [...(grouped.get(row.state) ?? []), row.number])
           others.push(`${name}${theirs.length ? '' : ' — nothing on the board'}`, ...[...grouped].map(([state, numbers]) => `  ${state.padEnd(18)} ${numbers.map((number) => `#${number}`).join(' ')}`))
+          otherBoards.push({ repo: name, board: theirs })
         } catch (error) {
           others.push(`${name}: board could not be read (${(error as Error).message})`)
+          otherBoards.push({ repo: name, reason: `board could not be read (${(error as Error).message})` })
         }
       }
       // An issue this machine has given up on is the one thing `status` must not leave out: it is
       // off the board as far as the dispatcher is concerned until a person looks at it.
       const parked = Object.entries(readActed(root))
-        .filter(([key, entry]) => entry.failures >= MAX_FAILURES && key.startsWith(`${repo}#`))
-        .map(([key, entry]) => ({ issue: Number(key.slice(key.indexOf('#') + 1)), action: entry.action, failures: entry.failures }))
+        // Parked under the caps this machine actually runs with, and on every board it watches:
+        // an issue left for a person on a second repository is exactly as invisible as one here.
+        .filter(([, entry]) => entry.failures >= (listing.entry?.caps ?? DEFAULT_CAPS).failures)
+        .map(([key, entry]) => ({ repo: key.slice(0, key.indexOf('#')), issue: Number(key.slice(key.indexOf('#') + 1)), action: entry.action, failures: entry.failures }))
       // What this machine is allowed to do, in the words of the row that allows it, so `status`
       // answers "why is it doing that?" without anyone opening the control room.
       const caps = listing.entry?.caps ?? DEFAULT_CAPS
       const watching = (listing.entry?.repos ?? []).filter((one) => one !== '*' && one.toLowerCase() !== 'all')
       const capsLine = `caps: ${caps.runs} runs · step ${Math.round(caps.stepMs / 3_600_000 * 10) / 10}h · poll ${Math.round(caps.pollMs / 60_000 * 10) / 10}m · retry ${Math.round(caps.retryMs / 60_000)}m · park ${caps.failures}`
-      print({ repo, machine, listed: listing.ok, caps, watching: watching.length ? watching : [repo], board: rows, runs, parked }, [
+      print({ repo, machine, listed: listing.ok, caps, watching: watching.length ? watching : [repo], board: rows, boards: otherBoards, runs, parked }, [
         `${repo} · ${machine} · ${listing.ok ? 'listed to dispatch' : listing.reason}`,
         ...(listing.ok ? [capsLine, `watching: ${(watching.length ? watching : [repo]).join(', ')}`] : []),
         ...[...byState].map(([state, numbers]) => `${state.padEnd(20)} ${numbers.map((number) => `#${number}`).join(' ')}`),
-        ...(parked.length ? ['', `parked for a person: ${parked.map((row) => `#${row.issue} (${row.action} failed ${row.failures}×)`).join(', ')}`] : []),
+        ...(parked.length ? ['', `parked for a person: ${parked.map((row) => `${row.repo === repo ? '' : `${row.repo}`}#${row.issue} (${row.action} failed ${row.failures}×)`).join(', ')}`] : []),
         ...(others.length ? ['', ...others] : []),
         '',
         runs.length ? 'recent runs on this machine:' : 'no dispatcher runs on this machine yet',
@@ -1844,12 +1875,15 @@ export async function runDispatch(argv: string[], deps: CliDeps = {}): Promise<n
       // live there, and borrowing another repository's would run #12's work in the wrong tree.
       // The checkouts this machine has are the ones `vegafactory worktree` registered.
       const identities = new Map<string, ReturnType<typeof appIdentity>>()
+      // Diagnostics go where the pass's own lines go: before `--json`, anything printed here would
+      // sit in front of the result and make it unparseable.
+      const say = args.json ? (_text: string) => {} : out
       const boardsFor = (names: string[]): BoardContext[] => {
         const made: BoardContext[] = []
         for (const name of names) {
           const checkout = name === repo ? root : checkoutFor(name, home)
           if (!checkout) {
-            out(`${name}: no checkout on this machine — clone it and run \`vegafactory worktree list\` there, or take it off this row`)
+            say(`${name}: no checkout on this machine — clone it and run \`vegafactory worktree list\` there, or take it off this row`)
             continue
           }
           // One token per repository: an installation token is narrowed to the repository it was
@@ -1858,12 +1892,14 @@ export async function runDispatch(argv: string[], deps: CliDeps = {}): Promise<n
           let boardDevMd = ''
           try { boardDevMd = readFileSync(join(checkout, '.vegastack', 'dev.md'), 'utf8') } catch { /* the tools' own defaults */ }
           const identity = identities.get(name) ?? null
-          made.push({ repo: name, root: checkout, runner: deps.runner ?? identity!.runner, devMd: boardDevMd, token: () => identity?.token() ?? null })
+          made.push({ repo: name, root: checkout, runner: deps.runner ?? identity!.runner, devMd: boardDevMd, token: () => identity?.token() ?? null, freshen: () => identity?.freshen() ?? Promise.resolve() })
         }
         return made
       }
+      // Diagnostics go where the pass's own lines go: before `--json`, anything printed here would
+      // sit in front of the result and make it unparseable.
       if (caps.stepMs > TOKEN_LIFE_MS) {
-        out(`note: step ${Math.round(caps.stepMs / 3_600_000 * 10) / 10}h is longer than the hour an installation token lives, so a run past that point can still work but can no longer write to GitHub — see #239`)
+        say(`note: step ${Math.round(caps.stepMs / 3_600_000 * 10) / 10}h is longer than the hour an installation token lives, so a run past that point can still work but can no longer write to GitHub — see #239`)
       }
       const runner = deps.runner ?? appIdentity({ repo, keyPath, appId: appIdOf(env), fetch: deps.fetch }).runner
       const pollDeps: PollDeps = {
@@ -1935,9 +1971,34 @@ export async function runDispatch(argv: string[], deps: CliDeps = {}): Promise<n
             caps = fresh.entry.caps
             pollDeps.caps = caps
             listing.entry = fresh.entry
+            const before = pollDeps.boards
             pollDeps.boards = boardsFor(listedRepos())
+            // A repository taken off this row is this machine's business no longer — and a run it
+            // already started is the part that matters. Leaving it going would keep a token and a
+            // push credential working on a board nobody authorises any more, and its settle would
+            // have no context left to hand the issue back with.
+            const dropped = before.filter((was) => !pollDeps.boards.some((now) => now.repo === was.repo))
+            for (const gone of dropped) {
+              for (const [key, run] of inflight) {
+                if (run.settled || run.candidate.repo !== gone.repo) continue
+                out(`${key} ${run.candidate.action} stopped: ${gone.repo} is no longer on this machine's row`)
+                run.interrupt = { reason: `${gone.repo} was taken off this machine's row`, action: run.candidate.action, trigger: null }
+                run.stop()
+              }
+              // Its board is gone, so its run has to be handed back through the context it had.
+              pollDeps.boards = [...pollDeps.boards, gone]
+            }
+            if (dropped.length) {
+              await drain(inflight)
+              pollDeps.boards = pollDeps.boards.filter((context) => !dropped.some((gone) => gone.repo === context.repo))
+            }
           }
-          for (const one of identities.values()) await one.freshen()
+          // One repository that cannot mint a token loses its own pass, never everybody's, and an
+          // identity for a board no longer watched is dropped rather than refreshed forever.
+          for (const [name, one] of identities) {
+            if (!pollDeps.boards.some((context) => context.repo === name)) { identities.delete(name); continue }
+            try { await one.freshen() } catch (error) { say(`${name}: token could not be refreshed (${(error as Error).message})`) }
+          }
           for (const candidate of await poll(pollDeps, inflight)) out(`#${candidate.number} ${candidate.action} started`)
         } catch (error) {
           out(`poll failed: ${(error as Error).message}`)

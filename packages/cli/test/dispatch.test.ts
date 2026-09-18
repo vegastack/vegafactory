@@ -13,7 +13,7 @@ import {
   drain, filesFromParent, harnessAnswers, hitLimit, hooksWired, listedHere, mintToken, overlaps, parseDispatchArgs,
   parseDispatchers, poll, readActed, readRuns, readiness, recordRun, resetAt, RUNS_KEPT, runDispatch, schedule, serviceCommands, stagePolicy,
   standDown, stepPrompt, tail, unitPath, unitText, unsafeForParallel, runKey,
-  noteChild, readChildren, refreshRoster, releaseRunLock, reserve, runLockPath, takeRunLock, verifiedListing,
+  boardsReady, noteChild, readChildren, refreshRoster, releaseRunLock, reserve, runLockPath, takeRunLock, verifiedListing,
   type Candidate, type Fetch, type GitRun, type Inflight, type PollDeps, type Probe, type RunStep, type StepResult,
 } from '../src/dispatch.ts'
 import { ackBody, artifactHash, permissionLookup, snapshot } from '../src/issue.ts'
@@ -521,7 +521,7 @@ describe('one poll over the board', () => {
     // A test that swaps the runner means it for the board too: that is where reads and writes go.
     const runner = over.runner ?? gh.runner
     return {
-      root, runner, boards: [{ repo: 'o/r', root, runner, devMd: '', token: () => null }],
+      root, runner, boards: [{ repo: 'o/r', root, runner, devMd: '', token: () => null, freshen: async () => {} }],
       now: () => gh.clock, machine: HOST, runId: 'test',
       out: () => {}, runStep: runStep(), standDown: () => 'stood down', ...over,
     }
@@ -922,7 +922,7 @@ describe('readiness and the service', () => {
   })
 
   test('an API key in the environment fails the readiness check', () => {
-    const checks = readiness({ root, listing: listedHere(root, { repo: 'o/r', host: HOST, home }), run: answers, keyOk: true, keyDetail: 'minted', env: { ANTHROPIC_API_KEY: 'sk-ant-x' } })
+    const checks = readiness({ root, repo: 'o/r', listing: listedHere(root, { repo: 'o/r', host: HOST, home }), run: answers, keyOk: true, keyDetail: 'minted', env: { ANTHROPIC_API_KEY: 'sk-ant-x' } })
     expect(checks.find((check) => check.name === 'billing')).toMatchObject({ ok: false, detail: expect.stringContaining('ANTHROPIC_API_KEY') })
   })
 
@@ -938,7 +938,7 @@ describe('readiness and the service', () => {
       }
       return answers(command, args)
     }
-    const check = (run: Probe) => readiness({ root, listing: listedHere(root, { repo: 'o/r', host: HOST, home }), run, keyOk: true, keyDetail: 'minted', env: {} }).find((one) => one.name === 'push')!
+    const check = (run: Probe) => readiness({ root, repo: 'o/r', listing: listedHere(root, { repo: 'o/r', host: HOST, home }), run, keyOk: true, keyDetail: 'minted', env: {} }).find((one) => one.name === 'push')!
 
     // SSH answers no credential helper, so the App's token cannot reach it either way.
     expect(check(answer('git@github.com:o/r.git', false))).toMatchObject({ ok: true })
@@ -1288,6 +1288,9 @@ describe('caps on the roster row', () => {
   test('a cell that cannot be read refuses rather than falling back', () => {
     expect(parseCaps('runs ten')).toBeNull()
     expect(parseCaps('step 72 hours')).toBeNull()
+    // A cell that names a cap without giving it a value is still a caps cell, and still refuses.
+    expect(parseCaps('runs')).toBeNull()
+    expect(parseDispatchers('| a | dev | o/a | mk | runs |')).toEqual([])
   })
   test('the caps cell is found by what it says, not by which column it is in', () => {
     // A roster that already has a notes column should not have to move it.
@@ -1380,7 +1383,7 @@ describe('one pass over several boards', () => {
     const root = mkdtempSync(join(tmpdir(), 'vf-poll-'))
     const started = await poll({
       root,
-      boards: ['o/a', 'o/b', 'o/c'].map((repo) => ({ repo, root, runner: gh.runner, devMd: '', token: () => null })),
+      boards: ['o/a', 'o/b', 'o/c'].map((repo) => ({ repo, root, runner: gh.runner, devMd: '', token: () => null, freshen: async () => {} })),
       runner: gh.runner, machine: HOST, runId: 'test',
       now: () => Date.now(), out: (line) => said.push(line), runStep: async () => ({ outcome: 'done', note: '', ms: 1 }),
       standDown: () => 'stood down',
@@ -1420,7 +1423,9 @@ describe('caps reach the things they limit', () => {
     expect(parseCaps('runs 10m')).toBeNull()
     expect(parseCaps('park 3h')).toBeNull()
     expect(parseCaps('poll 30s')!.pollMs).toBe(30_000)
-    expect(parseCaps('retry 2h')!.retryMs).toBe(2 * 3_600_000)
+    // The grammar says retry is in minutes, so hours are somebody meaning something else too.
+    expect(parseCaps('retry 2h')).toBeNull()
+    expect(parseCaps('retry 45m')!.retryMs).toBe(45 * 60_000)
   })
 
   test('a delay no timer can hold is refused, because it would fire at once', () => {
@@ -1435,5 +1440,36 @@ describe('caps reach the things they limit', () => {
     // Two failures is enough when the row says park after two, and not when it says five.
     expect(verdict(1, { acted, failures: 2 }).reason).toContain('needs a person')
     expect(verdict(1, { acted, failures: 5 }).reason ?? '').not.toContain('needs a person')
+  })
+})
+
+describe('a board this machine cannot work', () => {
+  const rowFor = (repos: string) => listedHere(root, { repo: 'o/r', host: HOST, home })
+  test('readiness refuses when a listed repository has no checkout here', () => {
+    const listing = { ok: true, reason: '', file: null, entry: { machine: HOST, operator: 'mk', repos: ['o/r', 'o/other'], caps: DEFAULT_CAPS } }
+    const found = (name: string) => (name === 'o/r' ? '/checkouts/r' : null)
+    expect(boardsReady(listing, 'o/r', home, found)).toMatchObject({ ok: false, detail: expect.stringContaining('o/other') })
+    const all = (_name: string) => '/checkouts/any'
+    expect(boardsReady(listing, 'o/r', home, all)).toMatchObject({ ok: true, detail: expect.stringContaining('2 boards') })
+  })
+  test('a row naming only this repository is one board and is ready', () => {
+    const listing = { ok: true, reason: '', file: null, entry: { machine: HOST, operator: 'mk', repos: ['*'], caps: DEFAULT_CAPS } }
+    expect(boardsReady(listing, 'o/r', home, () => null)).toMatchObject({ ok: true, detail: expect.stringContaining('1 board') })
+  })
+})
+
+describe('the step limit arrives with the run', () => {
+  test('a later run gets the cap in force now, not the one the dispatcher started with', async () => {
+    const seen: number[] = []
+    const exec = async (_tool: string, _args: string[], options: { timeoutMs: number }) => {
+      seen.push(options.timeoutMs)
+      return { code: 0, stdout: 'done', stderr: '', timedOut: false }
+    }
+    const scratch = mkdtempSync(join(tmpdir(), 'vf-limit-'))
+    // Built with the shipped default, then handed a run that carries the roster's own limit.
+    const step = defaultRunStep('', { PATH: '/usr/bin' }, { exec })
+    await step({ action: 'implement', number: 1, repo: 'o/r', split: false, by: null }, { root: scratch, timeoutMs: 72 * 3_600_000 })
+    await step({ action: 'implement', number: 2, repo: 'o/r', split: false, by: null }, { root: scratch, timeoutMs: 4 * 3_600_000 })
+    expect(seen).toEqual([72 * 3_600_000, 4 * 3_600_000])
   })
 })
