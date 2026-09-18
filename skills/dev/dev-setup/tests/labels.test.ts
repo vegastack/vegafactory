@@ -197,8 +197,75 @@ test('a malformed or already-migrated knob line adds nothing and never throws', 
   for (const profile of ['workflow-labels: {not json\n', 'workflow-labels: []\n', 'workflow-labels: {"ready":"queued"}\n']) {
     expect(migrationMap(profile)).toEqual(migrationMap(''))
   }
-  // A configured name that is another state's fixed name would rename one state onto another.
-  expect(migrationMap('workflow-labels: {"ready":"in-progress"}\n')).toEqual(migrationMap(''))
+})
+
+// The collision that used to merge two states under one label: the legacy map calls
+// waiting-on-operator `queued`, and `queued` is also where `go` is headed. Skipping the first
+// one and running the second lost the distinction, and then deleted the only record of it.
+const collided = {
+  profile: 'workflow-labels: {"needsOperator":"queued","needsPlan":"plan","ready":"go","working":"doing","forOperator":"review"}\n',
+  labels: ['queued', 'plan', 'go', 'doing', 'review', 'bug'],
+  issues: [{ number: 1, labels: ['queued'] }, { number: 2, labels: ['go'] }],
+  boardStatus: ['queued', 'go', 'Done'],
+  boardItems: [{ id: 'A', status: 'queued' }, { id: 'B', status: 'go' }],
+}
+
+test('a configured name that is another state\'s fixed name is migrated, not skipped', () => {
+  expect(migrationMap(collided.profile)).toMatchObject({ queued: 'waiting-on-operator', go: 'queued' })
+  // Only a name already equal to its own replacement is a no-op.
+  expect(migrationMap('workflow-labels: {"ready":"queued"}\n')).toEqual(migrationMap(''))
+})
+
+test('the colliding states are ordered so each lands on its own name', () => {
+  const plan = planLabelMigration(collided)
+  expect(plan.blocks).toEqual([])
+  // `queued` must vacate before `go` can take the name — that order is the whole fix.
+  expect(plan.rename).toEqual([
+    { from: 'queued', to: 'waiting-on-operator' },
+    { from: 'plan', to: 'planning' },
+    { from: 'go', to: 'queued' },
+    { from: 'doing', to: 'in-progress' },
+    { from: 'review', to: 'ready-to-ship' },
+  ])
+  const at = (name: string) => plan.rename.findIndex((step: { from: string }) => step.from === name)
+  expect(at('queued')).toBeLessThan(at('go'))
+  // Nothing is merged and nothing is deleted, so issue 1 and issue 2 stay apart.
+  expect(plan.transfer).toEqual([])
+  expect(plan.remove).toEqual([])
+  expect(plan.keep).toEqual(['bug'])
+  expect(plan.dropKnob).toBe(true)
+  expect(plan.board.rename).toEqual([{ from: 'queued', to: 'waiting-on-operator' }, { from: 'go', to: 'queued' }])
+  expect(plan.board.remove).toEqual([])
+})
+
+// Two states swapping names cannot be ordered: whichever moves first lands on an occupied name.
+test('a swap is broken by parking one label under a temporary name', () => {
+  const plan = planLabelMigration({
+    profile: 'workflow-labels: {"needsOperator":"decide","needsPlan":"queued","ready":"planning","working":"doing","forOperator":"review"}\n',
+    labels: ['decide', 'queued', 'planning', 'doing', 'review'],
+    issues: [{ number: 1, labels: ['queued'] }, { number: 2, labels: ['planning'] }],
+  })
+  expect(plan.blocks).toEqual([])
+  const steps = plan.rename.map((step: { from: string; to: string }) => `${step.from}->${step.to}`)
+  expect(steps).toContain('queued->queued-migrating')
+  expect(steps).toContain('planning->queued')
+  expect(steps).toContain('queued-migrating->planning')
+  // Every state still ends on its own fixed name, and nothing is transferred or deleted.
+  const landed = plan.rename.filter((step: { to: string }) => WORKFLOW_STATES.includes(step.to)).map((step: { to: string }) => step.to)
+  expect([...landed].sort()).toEqual([...WORKFLOW_STATES].sort())
+  expect(plan.transfer).toEqual([])
+  expect(plan.remove).toEqual([])
+  expect(plan.dropKnob).toBe(true)
+})
+
+test('a migration that cannot land every state keeps the knob and names the collision', () => {
+  const plan = planLabelMigration({
+    profile: 'workflow-labels: {"needsPlan":"queued","ready":"planning"}\n',
+    // A swap whose parking name is already a label of the repo's own: nothing can be freed.
+    labels: ['queued', 'planning', 'queued-migrating'],
+  })
+  expect(plan.blocks.join(' ')).toMatch(/queued-migrating is taken|without merging two states/)
+  expect(plan.dropKnob).toBe(false)
 })
 
 test('a repo already on the new labels migrates to nothing', () => {

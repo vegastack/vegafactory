@@ -141,13 +141,62 @@ export function migrationMap(profileText = '') {
   if (!object(configured)) return map
   for (const [key, to] of Object.entries(RENAMED_STATES)) {
     const from = configured[key]
-    // A configured name equal to its replacement is already migrated, and a name that collides
-    // with a different state's fixed name would rename one state onto another.
+    // A configured name equal to its own replacement is already migrated. A name that is some
+    // OTHER state's fixed name is not skipped — that is exactly the collision the ordering
+    // below exists to survive, and skipping it merged two states under one label.
     if (typeof from !== 'string' || !from.trim() || from === to) continue
-    if (WORKFLOW_STATES.includes(from)) continue
     map[from] = to
   }
   return map
+}
+
+/**
+ * Orders the moves so each state lands on its own name, and says when it cannot.
+ *
+ * A legacy mapping may call one state by another state's fixed name — `needsOperator: "queued"`
+ * beside `ready: "go"`. Running the steps in declaration order renames `go` onto the `queued`
+ * that still holds waiting-on-operator issues, merging two states under one label. So a step
+ * whose target is still occupied by a label that will itself move waits for that move; a cycle
+ * that leaves nothing free is broken by parking one label under a temporary name first.
+ *
+ * @param {Array<[string,string]>} steps @param {Set<string>} present
+ * @returns {{rename: Array<{from,to}>, transfer: Array<{from,to}>, remove: string[], blocks: string[]}}
+ */
+export function orderMoves(steps, present) {
+  const pending = new Map(steps.filter(([from]) => present.has(from)))
+  const rename = []
+  const transfer = []
+  const remove = []
+  const blocks = []
+  // Each pass either moves something or parks one label, so the loop shrinks `pending` every
+  // time; the counter is a backstop, not the logic.
+  for (let guard = pending.size * 2 + 2; pending.size && guard > 0; guard--) {
+    let moved = false
+    for (const [from, to] of [...pending]) {
+      if (pending.has(to) && to !== from) continue
+      if (present.has(to)) {
+        transfer.push({ from, to })
+        remove.push(from)
+      } else {
+        rename.push({ from, to })
+        present.add(to)
+      }
+      present.delete(from)
+      pending.delete(from)
+      moved = true
+    }
+    if (moved || !pending.size) continue
+    // Nothing is free: every remaining target is occupied by another mover. Park the first one
+    // under a name no state can claim, which frees its target for the state that wants it.
+    const [from, to] = [...pending][0]
+    const parked = from + '-migrating'
+    if (present.has(parked)) { blocks.push('cannot free ' + to + ': ' + parked + ' is taken'); break }
+    rename.push({ from, to: parked })
+    present.delete(from); present.add(parked)
+    pending.delete(from); pending.set(parked, to)
+  }
+  for (const [from, to] of pending) blocks.push('cannot move ' + from + ' to ' + to + ' without merging two states')
+  return { rename, transfer, remove, blocks }
 }
 
 /**
@@ -170,42 +219,36 @@ export function planLabelMigration(repo = {}) {
   const steps = Object.entries(migrationMap(repo.profile))
   const superseded = new Set(steps.map(([from]) => from))
 
+  // The replacement is free → rename in place, which keeps every issue's label and its history.
+  // It is already taken by a label that is not itself moving → copy it onto each issue that
+  // carries the old one, then drop the old. `orderMoves` decides which, and in what order.
   const present = new Set(labels)
-  const rename = []
-  const transfer = []
-  const remove = []
-  for (const [from, to] of steps) {
-    if (!present.has(from)) continue
-    // The replacement is free → rename in place, which keeps every issue's label and its history.
-    // It is already taken → copy it onto each issue that carries the old one, then drop the old.
-    if (present.has(to)) {
-      transfer.push({ from, to, issues: issues.filter(issue => (issue.labels ?? []).includes(from)).map(issue => issue.number) })
-      remove.push(from)
-    } else {
-      rename.push({ from, to })
-      present.add(to)
-    }
-  }
+  const moves = orderMoves(steps, present)
+  const rename = moves.rename
+  const remove = moves.remove
+  const transfer = moves.transfer.map(step => ({
+    ...step,
+    issues: issues.filter(issue => (issue.labels ?? []).includes(step.from)).map(issue => issue.number),
+  }))
 
   // The board moves the same way, and for the same reason: deleting an option takes its cards
   // with it. A half-migrated board already carrying both names is the case a rename cannot fix —
   // the cards on the old option are moved to the new one, then the stale option is removed.
-  const boardRename = []
-  const boardTransfer = []
-  const boardRemove = []
   const boardPresent = new Set(boardStatus)
-  for (const [from, to] of steps) {
-    if (!boardPresent.has(from) || !WORKFLOW_STATES.includes(to)) continue
-    if (boardPresent.has(to)) {
-      boardTransfer.push({ from, to, items: boardItems.filter(item => item.status === from).map(item => item.id ?? null) })
-      boardRemove.push(from)
-    } else {
-      boardRename.push({ from, to })
-      boardPresent.add(to)
-    }
-  }
+  const boardMoves = orderMoves(steps.filter(([, to]) => WORKFLOW_STATES.includes(to)), boardPresent)
+  const boardRename = boardMoves.rename
+  const boardRemove = boardMoves.remove
+  const boardTransfer = boardMoves.transfer.map(step => ({
+    ...step,
+    items: boardItems.filter(item => item.status === step.from).map(item => item.id ?? null),
+  }))
+
+  // A migration that cannot land every state on its own name does not run, and the knob that
+  // still tells the states apart is not deleted — the collision is named instead.
+  const blocks = [...moves.blocks, ...boardMoves.blocks]
 
   return {
+    blocks,
     rename,
     transfer,
     create: WORKFLOW_LABELS.filter(name => !present.has(name)),
@@ -216,8 +259,9 @@ export function planLabelMigration(repo = {}) {
       create: WORKFLOW_STATES.filter(name => boardStatus.length && !boardPresent.has(name)),
       remove: boardRemove,
     },
-    // The migration's last step, once nothing depends on the names the knob holds.
-    dropKnob: /^workflow-labels:/m.test(String(repo.profile ?? '')), // migration input only
+    // The migration's last step, once nothing depends on the names the knob holds — and never
+    // while a collision is unresolved, because that line is the only record of which is which.
+    dropKnob: blocks.length === 0 && /^workflow-labels:/m.test(String(repo.profile ?? '')), // migration input only
     keep: labels.filter(name => !superseded.has(name)),
     writes: false,
   }

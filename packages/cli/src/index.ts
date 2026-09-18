@@ -415,8 +415,21 @@ async function install(options: Options) {
   const base = baseFor(choice.mode, options.dir)
   const agents = resolveAgents(choice.agent, choice.mode)
   if (!agents.length) return
-  if (!options.dryRun) return withInstallLock(base, () => installLocked(options, skillNames, agents, base))
-  return installLocked(options, skillNames, agents, base, false)
+  // A group or --all add IS the documented upgrade (`skills add --group dev --global --force`),
+  // so it sweeps retired skills exactly as `update` does. Inside the same lock and after the
+  // install commits, so a failed transaction never removes anything. Naming one skill sweeps
+  // nothing: that selection is about that skill, not about the family it belongs to.
+  const sweeps = Boolean(options.group || options.all)
+  const run = async (recover = true) => {
+    await installLocked(options, skillNames, agents, base, recover)
+    if (sweeps) {
+      const { kept } = await sweepRetired(options, agents, base)
+      for (const destination of kept) console.log(`kept locally edited copy (run with --force to replace it): ${destination}`)
+      if (kept.length) process.exitCode = 1
+    }
+  }
+  if (!options.dryRun) return withInstallLock(base, () => run())
+  return run(false)
 }
 
 // One selection, one transaction. Every skill is checked and staged before anything is committed,

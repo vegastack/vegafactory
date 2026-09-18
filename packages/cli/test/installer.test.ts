@@ -459,6 +459,51 @@ describe('selecting a family', () => {
       expect(existsSync(old)).toBe(false)
     })
 
+    // The documented upgrade is `skills add --group dev --global --force`, not `skills update`.
+    // It used to install the new bundle and walk past the old skill sitting beside it.
+    test('the documented add --group --force upgrade sweeps it too', async () => {
+      const project = join(temporary, 'retired-add-upgrade')
+      await mkdir(project, { recursive: true })
+      expect(run(temporary, ['skills', 'add', '--group', 'dev', '--agent', 'claude', '--dir', project, '--non-interactive']).exitCode).toBe(0)
+      const old = await installRetired(project, '.claude/skills', 'dev-chronicle')
+
+      const upgrade = run(temporary, ['skills', 'add', '--group', 'dev', '--agent', 'claude', '--dir', project, '--non-interactive', '--force'])
+      expect(upgrade.exitCode).toBe(0)
+      expect(upgrade.stdout.toString()).toContain('removed retired claude:')
+      expect(existsSync(old)).toBe(false)
+      expect(existsSync(join(project, '.claude/skills/dev-status'))).toBe(true)
+    })
+
+    test('--all sweeps it as well, and an edited copy is still kept and reported', async () => {
+      const project = join(temporary, 'retired-add-all')
+      await mkdir(project, { recursive: true })
+      const edited = await installRetired(project, '.claude/skills', 'dev-chronicle', true)
+      const kept = run(temporary, ['skills', 'add', '--all', '--agent', 'claude', '--dir', project, '--non-interactive'])
+      expect(kept.stdout.toString()).toContain('kept locally edited copy')
+      expect(kept.exitCode).toBe(1)
+      expect(existsSync(edited)).toBe(true)
+    })
+
+    // Naming one skill is about that skill, not the family — it must not sweep a sibling.
+    test('installing one skill by name sweeps nothing', async () => {
+      const project = join(temporary, 'retired-add-one')
+      await mkdir(project, { recursive: true })
+      const old = await installRetired(project, '.claude/skills', 'dev-chronicle')
+      expect(run(temporary, ['skills', 'add', 'dev-status', '--agent', 'claude', '--dir', project, '--non-interactive']).exitCode).toBe(0)
+      expect(existsSync(old)).toBe(true)
+    })
+
+    test('a failed group install removes nothing', async () => {
+      const project = join(temporary, 'retired-add-refused')
+      await mkdir(project, { recursive: true })
+      const old = await installRetired(project, '.claude/skills', 'dev-chronicle')
+      // A non-directory where a skill must go refuses the whole transaction.
+      await writeFile(join(project, '.claude/skills/dev-status'), 'not a directory')
+      const refused = run(temporary, ['skills', 'add', '--group', 'dev', '--agent', 'claude', '--dir', project, '--non-interactive'])
+      expect(refused.exitCode).not.toBe(0)
+      expect(existsSync(old)).toBe(true)
+    })
+
     test('a retired name is not offered as a bundled skill and is not installed by --all', async () => {
       const project = join(temporary, 'retired-not-listed')
       await mkdir(project, { recursive: true })
