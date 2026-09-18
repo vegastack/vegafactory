@@ -12,3 +12,7 @@ A dispatcher's limits now come from its roster row instead of being fixed in the
 - A machine's own hand-back comment is bookkeeping, not work. `waiting-on-operator` looks for the operator's reply to be later than anything an agent wrote, so a machine that stood down and said so used to bury the very reply it was standing down without answering — and no machine picked the issue up again.
 - A stop that was nothing to do with the issue — the machine de-listed, the service told to stop, a signal — no longer spends the issue's trigger. Before, `standDown` put the issue back as `queued` or `planning` while the record said the work had already run for that state, so no machine ever picked it up again.
 - Two fixes found alongside: a failed or stopped run now goes back to the state it came from instead of staying `in-progress`, and the shipped roster template's header row is no longer read as a machine called `dispatcher`.
+- A separator with nothing beside it — `·`, `runs 10 ·`, `runs 10,,poll 1m` — is a half-typed cell and refuses, instead of reading as "and the rest are fine".
+- A run that has spent its tries is parked rather than reported as waiting. Every failure sets a retry deadline, so asking about the wait first meant `park 1` never parked anything.
+- Caps read back in the unit they were written in: `step 1m` no longer prints as `0h`.
+- The roster's shape is stated once and the template, the reference and the onboarding row all say the same thing.

@@ -70,6 +70,14 @@ export const DEFAULT_CAPS: Caps = { runs: MAX_RUNS, stepMs: STEP_TIMEOUT_MS, pol
 // Every field is optional and falls back to the shipped default. A field that is present and
 // unreadable returns null and the caller drops that machine: guessing a cap would be choosing a
 // number on the operator's behalf, and a cap nobody can read is not a cap.
+// A duration in the unit somebody would have written it in, so `step 1m` does not read back as
+// `0h`. Whole units only: these come from a cell that was typed in whole units.
+export function sayDuration(ms: number): string {
+  if (ms % 3_600_000 === 0) return `${ms / 3_600_000}h`
+  if (ms % 60_000 === 0) return `${ms / 60_000}m`
+  return `${Math.max(1, Math.round(ms / 1000))}s`
+}
+
 export function parseCaps(cell: string): Caps | null {
   const caps = { ...DEFAULT_CAPS }
   const text = String(cell ?? '').trim()
@@ -77,7 +85,9 @@ export function parseCaps(cell: string): Caps | null {
   // What each field takes: a plain count, or a duration in the units that field is measured in.
   // `poll 2h` and `step 10s` are refused because neither is a limit anybody means.
   const UNITS: Record<string, string[]> = { runs: [], park: [], step: ['m', 'h'], poll: ['s', 'm'], retry: ['m'] }
-  for (const field of text.split(/[·,]/).map((part) => part.trim()).filter(Boolean)) {
+  // An empty segment is a separator with nothing beside it — `·`, `runs 10 ·`, `runs 10,,poll 1m`.
+  // Dropping those would read a half-typed cell as the defaults, and a gate does not do that.
+  for (const field of text.split(/[·,]/).map((part) => part.trim())) {
     const match = /^(runs|step|poll|retry|park)\s+(\d+)\s*([hms]?)$/i.exec(field)
     if (!match) return null
     const name = match[1]!.toLowerCase()
@@ -823,8 +833,11 @@ export function decide(snap: Snapshot, permission: PermissionLookup, options: { 
   // A trigger is spent once a run of the same action has settled on it, whatever it settled as —
   // only a failure and a subscription limit come back, and each has its own wait.
   if (acted && acted.action === decided.action) {
-    if (acted.retryAt !== null && now < acted.retryAt) return nothing(`${decided.action} is waiting until ${new Date(acted.retryAt).toISOString()}`)
+    // Parked before waiting: every failure sets a retry deadline, so asking about the wait first
+    // would report a run that has spent its last try as merely due again later, and `park 1` would
+    // never park anything.
     if (acted.failures >= (options.failures ?? MAX_FAILURES) && acted.trigger === decided.trigger) return nothing(`${decided.action} failed ${acted.failures} times — this issue needs a person`)
+    if (acted.retryAt !== null && now < acted.retryAt) return nothing(`${decided.action} is waiting until ${new Date(acted.retryAt).toISOString()}`)
     if (acted.retryAt === null && acted.trigger === decided.trigger) {
       return nothing(`already ran ${decided.action} for this ${decided.trigger === null ? 'state' : 'comment'}`)
     }
@@ -1789,7 +1802,7 @@ export async function runDispatch(argv: string[], deps: CliDeps = {}): Promise<n
       // What this machine is allowed to do, in the words of the row that allows it, so "why is it
       // doing that?" is answered without anyone opening the control room.
       const statusCaps = listing.entry?.caps ?? DEFAULT_CAPS
-      const capsLine = `caps: ${statusCaps.runs} runs · step ${Math.round(statusCaps.stepMs / 3_600_000 * 10) / 10}h · poll ${Math.round(statusCaps.pollMs / 60_000 * 10) / 10}m · retry ${Math.round(statusCaps.retryMs / 60_000)}m · park ${statusCaps.failures}`
+      const capsLine = `caps: ${statusCaps.runs} runs · step ${sayDuration(statusCaps.stepMs)} · poll ${sayDuration(statusCaps.pollMs)} · retry ${sayDuration(statusCaps.retryMs)} · park ${statusCaps.failures}`
       print({ repo, machine, listed: listing.ok, caps: statusCaps, board: rows, runs, parked }, [
         `${repo} · ${machine} · ${listing.ok ? 'listed to dispatch' : listing.reason}`,
         ...(listing.ok ? [capsLine] : []),
@@ -1842,7 +1855,7 @@ export async function runDispatch(argv: string[], deps: CliDeps = {}): Promise<n
         if (limit.stepMs <= TOKEN_LIFE_MS) { toldAboutStep = false; return }
         if (toldAboutStep) return
         toldAboutStep = true
-        note(`note: step ${Math.round(limit.stepMs / 3_600_000 * 10) / 10}h is longer than the hour an installation token lives, so a run past that point can still work but can no longer write to GitHub — see #239`)
+        note(`note: step ${sayDuration(limit.stepMs)} is longer than the hour an installation token lives, so a run past that point can still work but can no longer write to GitHub — see #239`)
       }
       stepOutlivesToken(caps)
       const pollDeps: PollDeps = {

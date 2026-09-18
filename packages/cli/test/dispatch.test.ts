@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { claimBody, claimLine, holderOf, trustedFactory } from '../src/claim.ts'
 import {
-  APP_ID, DEFAULT_CAPS, MAX_FAILURES, MAX_RUNS, MAX_TIMER_MS, POLL_MS, RETRY_MS, STEP_TIMEOUT_MS, TOKEN_MARGIN_MS, parseCaps, agentArgs, appIdentity, appJwt, appKeyPath, assertKeyFile, board, decide, defaultRunStep, dispatchDir,
+  APP_ID, DEFAULT_CAPS, MAX_FAILURES, MAX_RUNS, MAX_TIMER_MS, POLL_MS, RETRY_MS, STEP_TIMEOUT_MS, TOKEN_MARGIN_MS, parseCaps, sayDuration, agentArgs, appIdentity, appJwt, appKeyPath, assertKeyFile, board, decide, defaultRunStep, dispatchDir,
   acknowledgedPlan, canonicalPath, childRunEnvironment, confirmShip, disjointSiblings, pushableBranch, shipWord,
   drain, filesFromParent, harnessAnswers, hitLimit, hooksWired, listedHere, mintToken, overlaps, parseDispatchArgs,
   parseDispatchers, poll, readActed, readRuns, readiness, recordRun, resetAt, RUNS_KEPT, runDispatch, schedule, serviceCommands, stagePolicy,
@@ -1436,6 +1436,24 @@ describe('caps on the roster row', () => {
     expect(parseCaps('')).toEqual({ runs: MAX_RUNS, stepMs: STEP_TIMEOUT_MS, pollMs: POLL_MS, retryMs: RETRY_MS, failures: MAX_FAILURES })
   })
 
+  test('a separator with nothing beside it is a half-typed cell, not the defaults', () => {
+    // Dropping empty segments would read `runs 10 ·` as "runs 10 and the rest are fine", which is
+    // a number nobody finished choosing.
+    for (const cell of ['·', 'runs 10 ·', '· runs 10', 'runs 10,,poll 1m', ',']) expect(parseCaps(cell)).toBeNull()
+    // A cell that is entirely empty still means "the defaults are fine".
+    expect(parseCaps('')).toEqual(DEFAULT_CAPS)
+    expect(parseCaps('   ')).toEqual(DEFAULT_CAPS)
+  })
+
+  test('a duration reads back in the unit it was written in', () => {
+    expect(sayDuration(72 * 3_600_000)).toBe('72h')
+    expect(sayDuration(60_000)).toBe('1m')
+    expect(sayDuration(30_000)).toBe('30s')
+    // The case that used to print `0h`.
+    expect(sayDuration(parseCaps('step 1m')!.stepMs)).toBe('1m')
+    expect(sayDuration(parseCaps('poll 1s')!.pollMs)).toBe('1s')
+  })
+
   test('a cell that names a cap is held to it, value or no value', () => {
     expect(parseCaps('runs ten')).toBeNull()
     expect(parseCaps('step 72 hours')).toBeNull()
@@ -1535,6 +1553,16 @@ describe('the caps reach what they limit', () => {
     const acted = { at: 0, action: 'implement' as const, outcome: 'failed' as const, trigger: null, failures: 2, retryAt: null }
     expect(verdict(1, { acted, failures: 2 }).reason).toContain('needs a person')
     expect(verdict(1, { acted, failures: 5 }).reason ?? '').not.toContain('needs a person')
+  })
+
+  // Every failure sets a retry deadline, so asking about the wait first reported a run that had
+  // spent its last try as merely due again later — and `park 1` never parked anything.
+  test('a run that has spent its tries is parked, not reported as waiting', () => {
+    gh.addIssue({ number: 1, labels: ['queued', 'small'] })
+    const parked = { at: 0, action: 'implement' as const, outcome: 'failed' as const, trigger: null, failures: 1, retryAt: gh.clock + 900_000 }
+    expect(verdict(1, { acted: parked, failures: 1 }).reason).toContain('needs a person')
+    // One try left, and the wait still standing: that one really is waiting.
+    expect(verdict(1, { acted: parked, failures: 2 }).reason).toContain('waiting until')
   })
 
   // The tests above reach into `schedule`, `decide` and `defaultRunStep` directly, so they would
