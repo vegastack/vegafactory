@@ -9,7 +9,7 @@
 // VegaStack tooling keeps `tools/`, `cache/`, `registry/` and `secrets/` there, none of which this
 // repository references. A directory this product owns entirely is one it may also prune.
 
-import { cpSync, lstatSync, mkdirSync, readFileSync, renameSync, rmSync } from 'node:fs'
+import { cpSync, lstatSync, mkdirSync, readdirSync, renameSync, rmSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { dirname, join } from 'node:path'
 
@@ -108,17 +108,17 @@ const MOVES: { from: string[]; to: string[] }[] = [
   { from: ['.skills-install-transaction.json'], to: ['.skills-install-transaction.json'] },
 ]
 
-// Locks, which are never moved. A lock exists to say "a process is working here right now", and
-// carrying one to a new address breaks the cleanup of whatever holds it — which then recreates its
-// state back at the old one. A machine with live work waits instead; a lock whose holder is gone is
-// litter from a crash, and is cleared the same way the code that took it clears one.
+// Locks, which are neither moved nor removed. A lock says "a process is writing here right now",
+// and carrying one to a new address breaks the cleanup of whatever holds it, which then recreates
+// its state back at the old one.
 //
-// Each records the pid that took it: the installer's is a JSON file, the settings writer's a
-// directory with `owner.json` inside.
-const LOCKS: { name: string; owner: string[] }[] = [
-  { name: '.skills-install.lock', owner: ['.skills-install.lock'] },
-  { name: 'factory.json.guard', owner: ['factory.json.guard', 'owner.json'] },
-]
+// Nor is a lock ever judged dead from here. The settings writer's is explicitly never stolen — a
+// holder that died mid-write wants a person to look — and it is taken before its `owner.json`
+// exists, so "no readable owner" is as likely to mean "a live process, one line earlier" as
+// "litter". Guessing wrong deletes a live lock. So any lock at all stops the move, the message
+// names the file, and the operator clears it if they know nothing holds it. A move happens once
+// in the life of a machine; waiting for it to be quiet is a small price.
+const LOCKS = ['.skills-install.lock', 'factory.json.guard'] as const
 
 export interface Migration { action: 'none' | 'moved' | 'refused'; reason: string; moved: string[] }
 
@@ -135,8 +135,7 @@ export type Kind = 'absent' | 'directory' | 'file' | 'other' | 'unreadable'
 
 export function migrateHome(deps: {
   kind: (path: string) => Kind
-  read: (path: string) => string | null
-  running: (pid: number) => boolean
+  list: (path: string) => string[]
   move: (from: string, to: string) => void
   mkdir: (path: string) => void
   remove: (path: string) => void
@@ -176,21 +175,11 @@ export function migrateHome(deps: {
   //
   // Both homes are checked: a live lock in the destination means something is writing there now,
   // and moving a file on top of it would clobber a journal mid-write or split the settings.
-  const held: string[] = []
-  const stale: string[] = []
-  for (const home of [from, to]) {
-    for (const lock of LOCKS) {
-      const path = join(home, lock.name)
-      if (deps.kind(path) === 'absent') continue
-      const pid = Number(JSON.parse(deps.read(join(home, ...lock.owner)) || 'null')?.pid)
-      if (Number.isInteger(pid) && pid > 0 && deps.running(pid)) held.push(`${path} (pid ${pid})`)
-      else stale.push(path)
-    }
-  }
+  const held = [from, to].flatMap((home) => LOCKS.map((lock) => join(home, lock)).filter((path) => deps.kind(path) !== 'absent'))
   if (held.length > 0) {
     return {
       action: 'refused',
-      reason: `work is in flight (${held.join(', ')}) — a lock says a process is writing there now, and moving out from under it would break its cleanup. Run again once it has finished`,
+      reason: `a lock says a process is writing there now (${held.join(', ')}) — moving out from under it would break its cleanup, and this is never the place to decide a lock is dead. Run again once the work has finished, or remove that path yourself if you know nothing holds it`,
       moved: [],
     }
   }
@@ -204,25 +193,26 @@ export function migrateHome(deps: {
   }
 
   const waiting = MOVES.filter((entry) => there(join(from, ...entry.from)))
-  const already = MOVES.filter((entry) => there(join(to, ...entry.to)))
+  // Anything at all in the destination, not merely a name this table knows. A newer release may
+  // keep things here that this one has never heard of, and moving an older copy in beside them is
+  // the same split by another route.
+  const already = deps.list(to)
   if (already.length > 0 && waiting.length > 0) {
-    const both = already.map((entry) => entry.to.join('/')).join(', ')
     return {
       action: 'refused',
-      reason: `${to} and ${from} both hold this product's state (${both}) — a run that read one and wrote the other would split this machine's memory in half. Keep the one that is current, delete the other, and run again`,
+      reason: `${to} and ${from} both hold this product's state (${already.slice(0, 6).join(', ')}) — a run that read one and wrote the other would split this machine's memory in half. Keep the one that is current, delete the other, and run again`,
       moved: [],
     }
   }
 
   const moved: string[] = []
-  // Litter from a crash: nobody holds these, and the code that takes them clears a dead one the
-  // same way rather than waiting forever on a process that is gone.
-  for (const path of stale) { deps.remove(path); moved.push(`${path} → removed, the process that held it is gone`) }
   // Removed whether or not anything else moves: a machine whose only leftover is the dead guard
   // directory is exactly the machine that would otherwise keep it forever.
   for (const dead of DEAD_ENTRIES) {
     const path = join(from, dead)
-    if (there(path)) { deps.remove(path); moved.push(`${dead} → removed, nothing reads it`) }
+    // The directory is what nothing reads. A regular file of the same name is something else
+    // somebody put there, and deleting it would be this move inventing a reason to.
+    if (deps.kind(path) === 'directory') { deps.remove(path); moved.push(`${dead} → removed, nothing reads it`) }
   }
   if (waiting.length === 0) {
     return moved.length
@@ -285,8 +275,7 @@ function lstatKind(path: string): Kind {
 export function settleHome(report: (line: string) => void = console.error): Migration {
   const result = migrateHome({
     kind: pathKind,
-    read: (path) => { try { return readFileSync(path, 'utf8') } catch { return null } },
-    running: (pid) => { try { process.kill(pid, 0); return true } catch (error) { return (error as NodeJS.ErrnoException).code === 'EPERM' } },
+    list: (path) => { try { return readdirSync(path) } catch { return [] } },
     move: (from, to) => movePath(from, to, {
       rename: renameSync,
       copy: (a, b) => { cpSync(a, b, { recursive: true, preserveTimestamps: true, verbatimSymlinks: true }) },

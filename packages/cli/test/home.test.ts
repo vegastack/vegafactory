@@ -65,8 +65,7 @@ describe('moving off the older home', () => {
     env: {} as NodeJS.ProcessEnv,
     home,
     kind: pathKind,
-    read: (path: string) => { try { return readFileSync(path, 'utf8') } catch { return null } },
-    running: () => false,
+    list: (path: string) => { try { return require('node:fs').readdirSync(path) as string[] } catch { return [] } },
     move: (from: string, to: string) => { require('node:fs').renameSync(from, to) },
     mkdir: (path: string) => { mkdirSync(path, { recursive: true }) },
     remove: (path: string) => { require('node:fs').rmSync(path, { recursive: true, force: true }) },
@@ -189,8 +188,7 @@ describe('the move cannot be aimed somewhere it was not asked to go', () => {
   const deps = (env: NodeJS.ProcessEnv) => ({
     env, home,
     kind: pathKind,
-    read: (path: string) => { try { return readFileSync(path, 'utf8') } catch { return null } },
-    running: () => false,
+    list: (path: string) => { try { return require('node:fs').readdirSync(path) as string[] } catch { return [] } },
     move: (from: string, to: string) => { require('node:fs').renameSync(from, to) },
     mkdir: (path: string) => { mkdirSync(path, { recursive: true }) },
     remove: (path: string) => { require('node:fs').rmSync(path, { recursive: true, force: true }) },
@@ -332,65 +330,57 @@ describe('a home on another device', () => {
   })
 })
 
-describe('work in flight is waited for, not moved', () => {
-  const deps = (running: (pid: number) => boolean) => ({
+describe('work in flight is waited for, never judged', () => {
+  const deps = () => ({
     env: {} as NodeJS.ProcessEnv, home,
     kind: pathKind,
-    read: (path: string) => { try { return readFileSync(path, 'utf8') } catch { return null } },
-    running,
+    list: (path: string) => { try { return require('node:fs').readdirSync(path) as string[] } catch { return [] } },
     move: (from: string, to: string) => { require('node:fs').renameSync(from, to) },
     mkdir: (path: string) => { mkdirSync(path, { recursive: true }) },
     remove: (path: string) => { require('node:fs').rmSync(path, { recursive: true, force: true }) },
   })
-  const seedLock = (where: string, lock: string, pid: number) => {
-    mkdirSync(where, { recursive: true })
-    if (lock.endsWith('.guard')) {
-      mkdirSync(join(where, lock), { recursive: true })
-      writeFileSync(join(where, lock, 'owner.json'), JSON.stringify({ token: 't', pid }))
-    } else writeFileSync(join(where, lock), JSON.stringify({ schemaVersion: 1, pid, startedAt: '' }))
-  }
 
-  // A lock says a process is writing here right now. Carrying it to a new address breaks that
-  // process's cleanup, and it then recreates its state back at the old one.
-  test.each(['.skills-install.lock', 'factory.json.guard'])('a live %s refuses and touches nothing', (lock) => {
+  // Neither moved nor removed, and never judged dead from here: the settings lock is explicitly
+  // never stolen, and it is taken before its owner file exists, so "no readable owner" is as
+  // likely to mean "a live process, one line earlier" as it is to mean litter.
+  test.each(['.skills-install.lock', 'factory.json.guard'])('a %s stops the move and is left alone', (lock) => {
     const legacy = join(home, '.vegastack')
     mkdirSync(join(legacy, 'guard'), { recursive: true })
     writeFileSync(join(legacy, 'factory.json'), 'state')
-    seedLock(legacy, lock, 4242)
+    if (lock.endsWith('.guard')) mkdirSync(join(legacy, lock), { recursive: true })
+    else writeFileSync(join(legacy, lock), '')
 
-    const result = migrateHome(deps((pid) => pid === 4242))
+    const result = migrateHome(deps())
     expect(result.action).toBe('refused')
-    expect(result.reason).toContain('work is in flight')
-    expect(result.reason).toContain('4242')
+    expect(result.reason).toContain('a lock says a process is writing there now')
+    expect(result.reason).toContain(lock)
     expect(result.moved).toEqual([])
+    // Nothing deleted, including the lock itself and the dead directory beside it.
+    expect(existsSync(join(legacy, lock))).toBe(true)
     expect(existsSync(join(legacy, 'guard'))).toBe(true)
     expect(readFileSync(join(legacy, 'factory.json'), 'utf8')).toBe('state')
   })
 
-  // The ordinary crash case. Blocking every command on litter nobody holds would be worse than
-  // the problem: the code that takes these locks clears a dead one exactly this way.
-  test.each(['.skills-install.lock', 'factory.json.guard'])('a %s whose holder is gone is cleared, and the move goes on', (lock) => {
+  test('a lock in the destination stops it just as firmly', () => {
     const legacy = join(home, '.vegastack')
     mkdirSync(legacy, { recursive: true })
     writeFileSync(join(legacy, 'factory.json'), 'state')
-    seedLock(legacy, lock, 999999)
-
-    const result = migrateHome(deps(() => false))
-    expect(result.action).toBe('moved')
-    expect(result.moved.join('\n')).toContain('the process that held it is gone')
-    expect(existsSync(join(legacy, lock))).toBe(false)
-    expect(readFileSync(join(home, '.vegafactory', 'factory.json'), 'utf8')).toBe('state')
+    mkdirSync(join(home, '.vegafactory'), { recursive: true })
+    writeFileSync(join(home, '.vegafactory', '.skills-install.lock'), '')
+    expect(migrateHome(deps()).action).toBe('refused')
   })
 
-  // The destination matters too: moving a file on top of a journal being written splits it.
-  test('a live lock in the destination refuses just as firmly', () => {
+  // A newer release may keep things here this one has never heard of, and moving an older copy
+  // in beside them splits the machine's memory by another route.
+  test('anything at all in the destination counts as state, not just names this table knows', () => {
     const legacy = join(home, '.vegastack')
     mkdirSync(legacy, { recursive: true })
-    writeFileSync(join(legacy, 'factory.json'), 'state')
-    seedLock(join(home, '.vegafactory'), '.skills-install.lock', 7)
-    const result = migrateHome(deps((pid) => pid === 7))
+    writeFileSync(join(legacy, 'factory.json'), 'older')
+    mkdirSync(join(home, '.vegafactory', 'something-newer'), { recursive: true })
+    const result = migrateHome(deps())
     expect(result.action).toBe('refused')
-    expect(result.reason).toContain('work is in flight')
+    expect(result.reason).toContain('something-newer')
+    expect(result.moved).toEqual([])
   })
 
   test('a refusal over split state deletes nothing first', () => {
@@ -399,21 +389,27 @@ describe('work in flight is waited for, not moved', () => {
     writeFileSync(join(legacy, 'factory.json'), 'older')
     mkdirSync(join(home, '.vegafactory'), { recursive: true })
     writeFileSync(join(home, '.vegafactory', 'factory.json'), 'newer')
-
-    const result = migrateHome(deps(() => false))
-    expect(result.action).toBe('refused')
-    expect(result.moved).toEqual([])
+    expect(migrateHome(deps()).action).toBe('refused')
     expect(existsSync(join(legacy, 'guard'))).toBe(true)
   })
 
-  // A symlinked entry moved across and then followed reads whatever it points at as this
-  // machine's own configuration.
+  // Only the directory is what nothing reads; a file of that name is somebody else's.
+  test('a regular file named guard is left exactly where it is', () => {
+    const legacy = join(home, '.vegastack')
+    mkdirSync(legacy, { recursive: true })
+    writeFileSync(join(legacy, 'guard'), 'somebody put this here')
+    writeFileSync(join(legacy, 'factory.json'), 'state')
+    const result = migrateHome(deps())
+    expect(result.action).toBe('moved')
+    expect(readFileSync(join(legacy, 'guard'), 'utf8')).toBe('somebody put this here')
+  })
+
   test('a symlinked entry refuses rather than being carried', () => {
     const legacy = join(home, '.vegastack')
     mkdirSync(legacy, { recursive: true })
     writeFileSync(join(home, 'somewhere-else.json'), 'not mine')
     require('node:fs').symlinkSync(join(home, 'somewhere-else.json'), join(legacy, 'factory.json'))
-    const result = migrateHome(deps(() => false))
+    const result = migrateHome(deps())
     expect(result.action).toBe('refused')
     expect(result.reason).toContain('not an ordinary file or directory')
     expect(existsSync(join(home, '.vegafactory', 'factory.json'))).toBe(false)
