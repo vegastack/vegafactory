@@ -91,7 +91,47 @@ export function controlRoomClone(root: string, home = homedir()): { org: string;
   return { org: knob.org, clone: path ?? defaultClonePath(knob.org, home) }
 }
 
+export type GitRun = (args: string[]) => { status: number | null; out: string }
+
+export const gitIn = (dir: string): GitRun => (args) => {
+  const result = spawnSync('git', ['-C', dir, ...args], { encoding: 'utf8', timeout: 60_000, env: { ...process.env, GIT_TERMINAL_PROMPT: '0' } })
+  return { status: result.status, out: `${result.stdout ?? ''}${result.stderr ?? ''}`.trim() }
+}
+
+export interface Refresh { ok: boolean; reason: string; sha: string | null }
+
+// The roster on disk is only as good as its last fetch. A machine de-listed in a control-room PR
+// has to stop, and a file edited on the machine itself must never be the thing that authorises it,
+// so the copy is fast-forwarded from its remote and refused if it is not exactly what is committed
+// there. Every failure is a refusal: an out-of-date gate is not a gate.
+//
+// TODO(#221): the control room lands `verifiedRoom`/`loadProfile`, which verify the whole room
+// against its recorded commit. Use them here once they are on main and drop this local check.
+export function refreshRoster(clone: string, git: GitRun = gitIn(clone)): Refresh {
+  if (git(['rev-parse', '--git-dir']).status !== 0) return { ok: false, reason: `${clone} is not a git clone of the control room — remove it and run \`vegafactory sync\``, sha: null }
+  if (git(['ls-files', '--error-unmatch', 'dispatchers.md']).status !== 0) return { ok: false, reason: 'dispatchers.md is not committed in the control room, so nothing vouches for it', sha: null }
+  const dirty = git(['status', '--porcelain', '--', 'dispatchers.md'])
+  if (dirty.status !== 0 || dirty.out) return { ok: false, reason: 'dispatchers.md has uncommitted local changes — a roster edited on the machine authorises nothing; reset it and enrol through a control-room PR', sha: null }
+  const fetched = git(['fetch', '--quiet', 'origin'])
+  if (fetched.status !== 0) return { ok: false, reason: `the control room could not be refreshed (${fetched.out.split('\n')[0] || 'fetch failed'}), so this machine cannot prove it is still listed`, sha: null }
+  const upstream = git(['rev-parse', '--verify', '--quiet', '@{u}'])
+  if (upstream.status !== 0) return { ok: false, reason: 'the control-room clone tracks no upstream branch, so there is nothing to refresh it from', sha: null }
+  const merged = git(['merge', '--ff-only', '@{u}'])
+  if (merged.status !== 0) return { ok: false, reason: `the control-room clone has diverged from its remote (${merged.out.split('\n')[0] || 'no fast-forward'}) — fix it by hand`, sha: null }
+  return { ok: true, reason: 'refreshed from the control room', sha: git(['rev-parse', 'HEAD']).out || null }
+}
+
 export interface Listing { ok: boolean; reason: string; entry: Dispatcher | null; file: string | null }
+
+// `listedHere`, but only after the roster has been refreshed and verified. This is what a run
+// asks each pass; a read-only view may ask `listedHere` alone and show what it has.
+export function verifiedListing(root: string, options: { repo: string; host?: string; home?: string; git?: (clone: string) => GitRun }): Listing {
+  const room = controlRoomClone(root, options.home ?? homedir())
+  if (!room) return listedHere(root, options)
+  const refresh = refreshRoster(room.clone, (options.git ?? gitIn)(room.clone))
+  if (!refresh.ok) return { ok: false, reason: refresh.reason, entry: null, file: dispatchersPath(room.clone) }
+  return listedHere(root, options)
+}
 
 // The gate every verb passes. A missing or unreadable roster refuses, never defaults: a machine
 // nobody listed must not start working the board because a file was late.
@@ -1129,6 +1169,7 @@ export interface CliDeps {
   platform?: NodeJS.Platform
   fetch?: Fetch
   runStep?: RunStep
+  git?: (clone: string) => GitRun
   now?: () => number
   sleep?: (ms: number) => Promise<void>
   cli?: string[]
@@ -1150,7 +1191,11 @@ export async function runDispatch(argv: string[], deps: CliDeps = {}): Promise<n
   const root = repoRoot(cwd)
   const repo = assertRepo(args.flags.repo ?? detectRepo(root))
   const machine = machineName(host)
-  const listing = listedHere(root, { repo, host, home })
+  // A verb that will act asks for a roster it has just proved; a read-only view shows what the
+  // machine already has, so `status` still answers while the network is down.
+  const listing = ['enable', 'run'].includes(args.verb)
+    ? verifiedListing(root, { repo, host, home, git: deps.git })
+    : listedHere(root, { repo, host, home })
   const keyPath = appKeyPath(env, home)
   const print = (value: unknown, text: string) => out(args.json ? JSON.stringify(value, null, 2) : text)
 
@@ -1268,9 +1313,10 @@ export async function runDispatch(argv: string[], deps: CliDeps = {}): Promise<n
       const inflight = new Map<number, Inflight>()
       for (;;) {
         try {
-          // The roster is the enrolment, so it is re-read every pass: a row removed in a
-          // control-room PR stands this machine down at the next poll, with nothing to log into.
-          const still = listedHere(root, { repo, host, home })
+          // The roster is the enrolment, so it is refreshed and re-read every pass: a row removed
+          // in a control-room PR stands this machine down at the next poll, with nothing to log
+          // into, and a roster this machine cannot verify stops it just as firmly.
+          const still = verifiedListing(root, { repo, host, home, git: deps.git })
           if (!still.ok) {
             out(`stopping: ${still.reason}`)
             await drain(inflight)

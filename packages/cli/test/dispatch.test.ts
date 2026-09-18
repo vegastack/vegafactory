@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, test } from 'bun:test'
 import { spawnSync } from 'node:child_process'
 import { generateKeyPairSync } from 'node:crypto'
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { claimBody, claimLine, holderOf, trustedHolders } from '../src/claim.ts'
@@ -11,7 +11,8 @@ import {
   drain, filesFromParent, harnessAnswers, hitLimit, hooksWired, listedHere, mintToken, overlaps, parseDispatchArgs,
   parseDispatchers, poll, readActed, readRuns, readiness, recordRun, resetAt, RUNS_KEPT, runDispatch, schedule, serviceCommands, stagePolicy,
   standDown, stepPrompt, tail, unitPath, unitText, unsafeForParallel,
-  type Candidate, type Fetch, type Inflight, type PollDeps, type Probe, type RunStep, type StepResult,
+  refreshRoster, verifiedListing,
+  type Candidate, type Fetch, type GitRun, type Inflight, type PollDeps, type Probe, type RunStep, type StepResult,
 } from '../src/dispatch.ts'
 import { ackBody, artifactHash, permissionLookup, snapshot } from '../src/issue.ts'
 import { cacheDir, syncIssue } from '../src/issue-cache.ts'
@@ -37,6 +38,36 @@ function project(dispatchers: string | null = `| machine | operator | repos |\n|
   const clone = join(home, '.vegastack', 'control-room', 'o')
   mkdirSync(clone, { recursive: true })
   if (dispatchers !== null) writeFileSync(join(clone, 'dispatchers.md'), dispatchers)
+}
+
+// The roster refresh is real git. Most tests are not about it, so they hand the CLI a git that
+// always succeeds; `controlRoomClone()` below builds the real thing for the tests that are.
+const anyGit = () => (() => ({ status: 0, out: '' })) as GitRun
+
+// A bare origin and a clone of it, in place of the plain directory `project()` makes: this is what
+// a real machine has, and the only way to change the roster is to change it upstream.
+function controlRoomClone(rows: string): (next: string) => void {
+  const origin = join(home, 'control-room.git')
+  const seed = join(home, 'control-room-seed')
+  const clone = join(home, '.vegastack', 'control-room', 'o')
+  const run = (cwd: string, args: string[]) => spawnSync('git', args, { cwd, encoding: 'utf8' })
+  spawnSync('git', ['init', '--bare', '-q', '-b', 'main', origin])
+  mkdirSync(seed, { recursive: true })
+  run(seed, ['init', '-q', '-b', 'main'])
+  run(seed, ['config', 'user.email', 't@example.com'])
+  run(seed, ['config', 'user.name', 'T'])
+  writeFileSync(join(seed, 'dispatchers.md'), rows)
+  run(seed, ['add', '-A'])
+  run(seed, ['commit', '-q', '-m', 'roster'])
+  run(seed, ['remote', 'add', 'origin', origin])
+  run(seed, ['push', '-q', '-u', 'origin', 'main'])
+  rmSync(clone, { recursive: true, force: true })
+  spawnSync('git', ['clone', '-q', origin, clone])
+  return (next: string) => {
+    writeFileSync(join(seed, 'dispatchers.md'), next)
+    run(seed, ['commit', '-qam', 'roster'])
+    run(seed, ['push', '-q', 'origin', 'main'])
+  }
 }
 
 const snapOf = (number: number) => {
@@ -859,7 +890,7 @@ describe('the step a run makes', () => {
 describe('the command', () => {
   const run = (argv: string[], over = {}) => {
     const lines: string[] = []
-    return runDispatch(argv, { cwd: root, home, host: HOST, env: {}, out: (text) => lines.push(text), runner: gh.runner, now: () => gh.clock, ...over })
+    return runDispatch(argv, { cwd: root, home, host: HOST, env: {}, out: (text) => lines.push(text), runner: gh.runner, now: () => gh.clock, git: anyGit, ...over })
       .then((code) => ({ code, text: lines.join('\n') }))
   }
 
@@ -917,19 +948,44 @@ describe('the command', () => {
     expect(result.text).toContain('#1 implement → done')
   })
 
-  test('a row removed while the loop runs stands this machine down at the next pass', async () => {
+  test('a row removed upstream stands this machine down, without touching its own copy', async () => {
+    const header = '| machine | operator | repos |\n|---|---|---|\n'
+    const delist = controlRoomClone(`${header}| ${HOST} | mk | o/r |\n`)
+    const roster = join(home, '.vegastack', 'control-room', 'o', 'dispatchers.md')
+    const before = readFileSync(roster, 'utf8')
     gh.addIssue({ number: 1, labels: ['queued', 'small'] })
     const lines: string[] = []
     let passes = 0
     const code = await runDispatch(['run'], {
-      cwd: root, home, host: HOST, env: {}, out: (text) => lines.push(text), runner: gh.runner,
+      cwd: root, home, host: HOST, env: {}, out: (text) => lines.push(text), runner: gh.runner, now: () => gh.clock,
       runStep: (async () => ({ outcome: 'done' as const, note: '', ms: 1 })) as RunStep,
-      // Between the first pass and the second, the control-room PR that de-lists this machine lands.
-      sleep: async () => { if (++passes === 1) writeFileSync(join(home, '.vegastack/control-room/o/dispatchers.md'), '| machine | operator | repos |\n|---|---|---|\n') },
+      // Between the first pass and the second, the control-room PR that de-lists this machine lands
+      // — upstream only. Nothing on this machine is edited.
+      sleep: async () => { if (++passes === 1) delist(header) },
     })
+    expect(readFileSync(roster, 'utf8')).not.toBe(before)
     expect(code).toBe(2)
     expect(lines.join('\n')).toContain('stopping:')
     expect(lines.join('\n')).toContain('is not listed')
+  })
+
+  test('a roster this machine cannot prove is not a roster', async () => {
+    controlRoomClone(`| machine | operator | repos |\n|---|---|---|\n| ${HOST} | mk | o/r |\n`)
+    const clone = join(home, '.vegastack', 'control-room', 'o')
+    expect(verifiedListing(root, { repo: 'o/r', host: HOST, home }).ok).toBe(true)
+    // Edited on the machine: the row is there, and it authorises nothing.
+    writeFileSync(join(clone, 'dispatchers.md'), `| machine | operator | repos |\n|---|---|---|\n| ${HOST} | mk | * |\n`)
+    const edited = verifiedListing(root, { repo: 'o/r', host: HOST, home })
+    expect(edited.ok).toBe(false)
+    expect(edited.reason).toContain('uncommitted local changes')
+    // Unreachable remote: a gate that cannot be refreshed refuses rather than trusting its copy.
+    spawnSync('git', ['-C', clone, 'checkout', '-q', '--', 'dispatchers.md'])
+    spawnSync('git', ['-C', clone, 'remote', 'set-url', 'origin', join(home, 'gone.git')])
+    const offline = verifiedListing(root, { repo: 'o/r', host: HOST, home })
+    expect(offline.ok).toBe(false)
+    expect(offline.reason).toContain('could not be refreshed')
+    // A plain directory is not a control-room clone at all.
+    expect(refreshRoster(join(home, 'not-a-clone')).reason).toContain('not a git clone')
   })
 
   test('the flags parse and an unknown verb says so', () => {
