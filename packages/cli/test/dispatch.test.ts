@@ -11,7 +11,7 @@ import {
   drain, filesFromParent, harnessAnswers, hitLimit, hooksWired, listedHere, mintToken, overlaps, parseDispatchArgs,
   parseDispatchers, poll, readActed, readRuns, readiness, recordRun, resetAt, RUNS_KEPT, runDispatch, schedule, serviceCommands, stagePolicy,
   standDown, stepPrompt, tail, unitPath, unitText, unsafeForParallel,
-  noteChild, readChildren, refreshRoster, verifiedListing,
+  noteChild, readChildren, refreshRoster, releaseRunLock, reserve, runLockPath, takeRunLock, verifiedListing,
   type Candidate, type Fetch, type GitRun, type Inflight, type PollDeps, type Probe, type RunStep, type StepResult,
 } from '../src/dispatch.ts'
 import { ackBody, artifactHash, permissionLookup, snapshot } from '../src/issue.ts'
@@ -516,7 +516,7 @@ describe('one poll over the board', () => {
     return { outcome: 'done', note: 'finished', ms: 10, ...result }
   }
   const deps = (over: Partial<PollDeps> = {}): PollDeps => ({
-    root, repo: 'o/r', runner: gh.runner, now: () => gh.clock, machine: HOST,
+    root, repo: 'o/r', runner: gh.runner, now: () => gh.clock, machine: HOST, runId: 'test',
     out: () => {}, runStep: runStep(), standDown: () => 'stood down', ...over,
   })
   // One pass, then everything it started.
@@ -570,7 +570,7 @@ describe('one poll over the board', () => {
     })
     // A planning run claims for itself: nothing inside it does, so another machine polling the
     // same board while it runs sees the issue is taken.
-    expect(heldDuringRun).toBe(`${HOST}:dispatch-1`)
+    expect(heldDuringRun).toBe(`${HOST}:dispatch-test-1`)
     const after = snapOf(1)
     expect(holderOf(after.state, after.body, gh.clock, trustedHolders({ repo: 'o/r', runner: gh.runner, root })).holder).toBeNull()
   })
@@ -589,6 +589,35 @@ describe('one poll over the board', () => {
     // before the agent starts rather than blocking the claim the workflow actually reads.
     expect(heldDuringRun).toBeNull()
     expect(gh.issues.get(1)!.comments.map((comment) => comment.body).join('\n')).toContain('handing the issue to the run this machine just started')
+  })
+
+  test('two dispatchers on one host do not both start the same issue', async () => {
+    gh.addIssue({ number: 1, labels: ['planning', 'medium'] })
+    const ctx = { root, repo: 'o/r', number: 1, runner: gh.runner }
+    // The service and an operator running a pass by hand: same machine, same issue, two processes.
+    const service = reserve(ctx, HOST, 'aaaa1111', 'plan', gh.clock)
+    const byHand = reserve(ctx, HOST, 'bbbb2222', 'plan', gh.clock)
+    expect(service.ok).toBe(true)
+    expect(byHand.ok).toBe(false)
+    expect(byHand.reason).toContain(service.owner)
+    expect(service.owner).not.toBe(byHand.owner)
+  })
+
+  test('a machine runs one dispatcher, and a crashed one does not block the box', () => {
+    const mine = takeRunLock(root, 'aaaa1111', () => 'Fri Sep 18 09:00:00 2026')
+    expect(mine.ok).toBe(true)
+    // A second process on this host, while the first is alive: refused.
+    const other = takeRunLock(root, 'bbbb2222', (pid) => (pid === process.pid ? 'Fri Sep 18 09:00:00 2026' : 'Fri Sep 18 09:00:00 2026'))
+    expect(other.ok).toBe(true) // the same pid is this process re-taking its own lock
+    writeFileSync(runLockPath(root), JSON.stringify({ pid: 999_999, startedAt: 'Fri Sep 18 08:00:00 2026', runId: 'cccc3333', at: 'x' }))
+    const blocked = takeRunLock(root, 'dddd4444', () => 'Fri Sep 18 08:00:00 2026')
+    expect(blocked.ok).toBe(false)
+    expect(blocked.reason).toContain('another dispatcher is already running on this machine')
+    // The same record, but that pid is now somebody else (or nobody): the lock is taken over.
+    const taken = takeRunLock(root, 'eeee5555', () => null)
+    expect(taken.ok).toBe(true)
+    releaseRunLock(root, 'eeee5555')
+    expect(existsSync(runLockPath(root))).toBe(false)
   })
 
   test('a claim another machine already holds is not started twice', async () => {
@@ -1024,11 +1053,12 @@ describe('the command', () => {
       cwd: root, home, host: HOST, env: {}, out: (text) => lines.push(text), runner: gh.runner, now: () => gh.clock,
       // A child that never finishes on its own: only being stopped ends it.
       runStep: (async (_step, context) => {
-        context.onStart?.(4242)
+        context.onStart?.(4242, 'claude')
         await blocked
         return { outcome: 'killed' as const, note: 'stopped', ms: 1 }
       }) as RunStep,
       stop: (pid: number) => { stopped = pid; releaseChild(); return true },
+      start: () => 'Fri Sep 18 09:00:00 2026',
       sleep: async () => { if (++passes === 1) delist(header) },
     })
     expect(code).toBe(2)
@@ -1039,20 +1069,41 @@ describe('the command', () => {
     void given
   })
 
-  test('disable stops the runs the service had started', async () => {
+  test('disable stops the runs the service had started, and names what they held', async () => {
     const lines: string[] = []
-    noteChild(root, 5150, true)
-    expect(readChildren(root)).toEqual([5150])
+    const live = { pid: 5150, startedAt: 'Fri Sep 18 09:00:00 2026', command: 'claude', issue: 7, action: 'implement' as const, owner: `${HOST}:dispatch-ab12-7`, from: 'queued' as const }
+    noteChild(root, live)
     const stopped: number[] = []
     const code = await runDispatch(['disable'], {
       cwd: root, home, host: HOST, env: {}, out: (text) => lines.push(text), runner: gh.runner,
       run: (() => ({ code: 0, stdout: '', stderr: '' })) as Probe,
       stop: (pid: number) => { stopped.push(pid); return true },
+      start: () => live.startedAt,
     })
     expect(code).toBe(0)
     expect(stopped).toEqual([5150])
     expect(lines.join('\n')).toContain('stopped 1 run it had started')
+    expect(lines.join('\n')).toContain(`#7 (implement, claimed by ${HOST}:dispatch-ab12-7)`)
     expect(readChildren(root)).toEqual([])
+  })
+
+  test('a record whose process is gone is dropped, never signalled', async () => {
+    const lines: string[] = []
+    const stale = { pid: 5151, startedAt: 'Fri Sep 18 09:00:00 2026', command: 'claude', issue: 8, action: 'plan' as const, owner: null, from: 'planning' as const }
+    noteChild(root, stale)
+    const stopped: number[] = []
+    const code = await runDispatch(['disable'], {
+      cwd: root, home, host: HOST, env: {}, out: (text) => lines.push(text), runner: gh.runner,
+      run: (() => ({ code: 0, stdout: '', stderr: '' })) as Probe,
+      stop: (pid: number) => { stopped.push(pid); return true },
+      // The pid has been reused: the process there now started at a different time.
+      start: () => 'Fri Sep 18 11:30:00 2026',
+    })
+    expect(code).toBe(0)
+    // Signalling it would have hit somebody else's process.
+    expect(stopped).toEqual([])
+    expect(readChildren(root)).toEqual([])
+    expect(lines.join('\n')).not.toContain('stopped 1 run')
   })
 
   test('a roster this machine cannot prove is not a roster', async () => {
