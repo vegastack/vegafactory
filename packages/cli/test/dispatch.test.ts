@@ -9,7 +9,7 @@ import {
   APP_ID, STEP_TIMEOUT_MS, agentArgs, appJwt, appKeyPath, board, decide, defaultRunStep, dispatchDir, disjointSiblings,
   drain, filesFromParent, harnessAnswers, hitLimit, hooksWired, listedHere, mintToken, overlaps, parseDispatchArgs,
   parseDispatchers, poll, readActed, readRuns, readiness, resetAt, runDispatch, schedule, serviceCommands, stagePolicy,
-  stepPrompt, tail, unitPath, unitText, unsafeForParallel,
+  standDown, stepPrompt, tail, unitPath, unitText, unsafeForParallel,
   type Candidate, type Fetch, type Inflight, type PollDeps, type Probe, type RunStep, type StepResult,
 } from '../src/dispatch.ts'
 import { permissionLookup, snapshot } from '../src/issue.ts'
@@ -187,10 +187,13 @@ describe('transitions', () => {
     expect(verdict(1).action).toBe('none')
   })
 
-  test('"stop" outranks every other state', () => {
+  test('"stop" outranks every other state, and "stop using X" is a correction, not a stop', () => {
     gh.addIssue({ number: 1, labels: ['queued', 'small'] })
     gh.addComment(1, 'stop — I need to rethink this', 'mk')
     expect(verdict(1)).toMatchObject({ action: 'stop', by: 'mk' })
+    gh.addIssue({ number: 2, labels: ['queued', 'small'] })
+    gh.addComment(2, 'stop using the old API in task 3', 'mk')
+    expect(verdict(2).action).toBe('implement')
   })
 
   test('an epic, a closed issue and an issue with no state label are left alone', () => {
@@ -368,6 +371,36 @@ describe('one poll over the board', () => {
     gh.addIssue({ number: 2, labels: ['small'] })
     gh.addIssue({ number: 3, labels: ['ready-to-ship'], state: 'closed' })
     expect(board('o/r', gh.runner).map((issue) => issue.number)).toEqual([1])
+  })
+})
+
+describe('standing an issue down', () => {
+  const held = (owner: string) => {
+    const body = claimBody({ owner, kind: 'session', harness: 'claude', model: 'opus' })
+    gh.addComment(1, body.replace('-->\n', `-->\n${claimLine(owner, new Date(gh.clock).toISOString())}\n`), 'mk')
+  }
+  const down = (reason: string) => standDown({ root, repo: 'o/r', number: 1, runner: gh.runner, machine: HOST, now: gh.clock }, reason)
+
+  test('the claim this machine took is released, as the App', () => {
+    gh.addIssue({ number: 1, labels: ['in-progress', 'small'] })
+    held(`${HOST}:1-work`)
+    expect(down('@mk said stop')).toContain(`released ${HOST}:1-work`)
+    const release = gh.issues.get(1)!.comments.at(-1)!
+    expect(release.body).toContain(`type=release owner=${HOST}:1-work by=vegafactory[bot]`)
+    expect(release.body).toContain('@mk said stop')
+    // Released, so the next session sees a free issue.
+    expect(verdict(1).action).toBe('none')
+  })
+
+  test('another machine\'s claim is left alone', () => {
+    gh.addIssue({ number: 1, labels: ['in-progress', 'small'] })
+    held('laptop:1-work')
+    expect(down('the subscription limit was reached')).toContain('held by laptop:1-work, so it was left alone')
+  })
+
+  test('with nothing held there is nothing to release', () => {
+    gh.addIssue({ number: 1, labels: ['queued', 'small'] })
+    expect(down('@mk said stop')).toContain('no live claim to release')
   })
 })
 

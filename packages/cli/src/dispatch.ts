@@ -329,7 +329,9 @@ export interface Decision { action: Action; reason: string; trigger: number | nu
 const nothing = (reason: string): Decision => ({ action: 'none', reason, trigger: null, by: null, split: false })
 
 const SHIP_IT = /(^|[^\w])ship it([^\w]|$)/i
-const STOP = /^\s*(?:@?[\w-]+[,:]?\s+)?stop\b/i
+// "stop", "stop.", "@vegafactory stop — I need to rethink this". Not "stop using the old API",
+// which is a correction about the work and not an instruction to put the issue down.
+const STOP = /^\s*(?:@?[\w-]+[,:]?\s+)?stop\s*(?:$|[\n—–:,.!?])/i
 const WRITE = new Set(['admin', 'maintain', 'write'])
 
 // The operator's own comments: a person with write access, never a bot or an App.
@@ -890,7 +892,7 @@ export async function runDispatch(argv: string[], deps: CliDeps = {}): Promise<n
       try { devMd = readFileSync(join(root, '.vegastack', 'dev.md'), 'utf8') } catch { /* no profile, so the tools' own defaults */ }
       const runner = deps.runner ?? await appRunner(repo, keyPath, env, deps.fetch)
       const pollDeps: PollDeps = {
-        root, repo, runner, machine, out, now: Date.now,
+        root, repo, runner, machine, out: args.json ? () => {} : out, now: Date.now,
         runStep: deps.runStep ?? defaultRunStep(devMd, env),
         standDown: (number, reason) => standDown({ root, repo, number, runner, machine }, reason),
       }
