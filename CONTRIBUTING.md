@@ -14,11 +14,13 @@ bun run check          # everything; the merge queue runs this
 bun run build      # builds the CLI and syncs the skill copy into packages/cli
 ```
 
-`bun install` enables the commit-msg hook. Pull requests run the fast checks and affected tests; the merge queue runs the full suite, a packed-tarball smoke test and the skill scan once, on main plus your PR.
+`bun install` enables the commit-msg hook, which runs `check:fast` on every commit and skips `wip:` checkpoints. Pull requests run the fast checks and affected tests; the merge queue runs the full suite, a packed-tarball smoke test and the skill scan once, on main plus your PR. Nothing reaches main except through the queue.
+
+`npx @vegastack/vegafactory@latest init` sets up the rest of the machine — the CLI and skills for Claude Code and Codex, and this repository's hooks — if you have not run it already.
 
 ### Scanning the skills
 
-Every skill this repo ships is scanned by [NVIDIA SkillSpector](https://github.com/NVIDIA/skillspector) in the merge queue, with a pinned install. You don't need it locally; to investigate a finding, install it once (Python 3.12) and run:
+Every skill this repo ships is scanned by [NVIDIA SkillSpector](https://github.com/NVIDIA/skillspector) in the merge queue, from one hash-locked commit run with `--no-provision`. A local run is the opposite by design: under dev.md's `skillspector-update: auto` the guard installs and upgrades the scanner through whatever channel holds it. You don't need it locally; to investigate a finding (Python 3.12):
 
 ```sh
 uv tool install git+https://github.com/NVIDIA/skillspector.git
@@ -33,16 +35,30 @@ The guard still refuses (exit 2) when the binary cannot be found at all, rather 
 
 Suppressions live in `.vegastack/skillspector-baseline.json`. Adding one is a security decision needing the maintainer's word, scoped as narrowly as its cause, with a `reason` carrying a **"Still flag if:"** clause the guard enforces. Widening a rule to make the guard green is the failure mode, not the fix.
 
+## How work moves here
+
+This repository runs on the workflow it ships, so a change starts as an issue and ends as a queued PR.
+
+- **Issues are the unit of work.** Agents read them from a local cache under `.vegastack/.tmp/issues/` and write back with `vegafactory issue`, never raw `gh` for issue content. One state label says whose move it is; the CLI keeps the ledger comment.
+- **One issue, one worktree, one claim.** `vegafactory worktree` keeps the checkout under `.vegastack/.worktrees/`; a session claims the issue before building and the hook keeps the claim's heartbeat alive. `vegafactory hook <event> --harness claude|codex` is the one hook command for both harnesses.
+- **The ship guard asks for what is hard to undo.** A fixed always-ask list plus the commands dev.md's `## Ship` section marks `ask:`, read from the default branch — pushing to main, merging, tagging, publishing, force-pushing, `--no-verify`. Green checks authorise none of it.
+- **Review is cross-tool and it gates the merge.** `vegafactory review <n>` has the other tool read the diff read-only and posts the one review comment; `vegafactory ship check <n>` refuses a merge whose exact commit is not reviewed clean against the current brief and plan.
+- **The loops that keep the docs honest.** `vegafactory learning` holds the lessons a session leaves until one becomes a dev.md line on the operator's yes; `vegafactory stats` and `vegafactory dashboard` count turns from the harnesses' own session logs; `skills-refresh` re-checks the dated facts the skills pin and files what changed as issues.
+
+Everything above is described for users in the [README](README.md), command by command in the [installer README](packages/cli/README.md), and as this project's own policy in [.vegastack/dev.md](.vegastack/dev.md).
+
 ## Repo layout
 
 | Path | What it is |
 |---|---|
 | `skills/` | Authored skill content — the single source of truth. Edit here. A skill sits at `skills/<name>/` or, inside a group, at `skills/<group>/<name>/` — one level, never deeper. |
 | `skills/dev/` | The dev-workflow group (setup, intake, plan, architect, implement, debug, review, ship, status — which also holds the chronicle): a `GROUP.md` plus nine skills, each with `SKILL.md`, references, deterministic scripts where they earn them, tests. |
+| `skills/factory/` | The org group: `vegafactory-setup`, which bootstraps and maintains the control room whose defaults every repo's dev profile layers on. |
 | `skills/skills-tooling/` | The skills-about-skills group — tools that operate on agent skills themselves: `skill-scan`, the SkillSpector guard and its suppression baseline, and `skills-refresh`, the sweep that re-verifies the dated facts the dev skills pin. |
+| `skills/repo-tooling/` | The skills that only make sense inside this repository: `skillify`, the skill factory and auditor, and `skill-maintainer`, the standards and release operations. Both are repo-only, so `add --all` skips them. |
 | `packages/cli/` | The `@vegastack/vegafactory` installer. `packages/cli/skill/` and `skill-integrity.json` are **generated at build** from `skills/` — never edit or commit them. |
 | `packages/cli/repo-only.json` | The skills `add --all` skips because they only make sense inside this repository. Hand-maintained; validated by the build. |
-| `.vegastack/` | The project's own dev workflow instance: `dev.md` (the canonical process doc — release runbook, versioning, rollback), `decisions.md` (the decision register), and `skillspector-baseline.json` (audited skill-scan suppressions). |
+| `.vegastack/` | The project's own instance of the workflow: `dev.md` (the canonical process doc — release runbook, versioning, rollback), `decisions.md` (the decision register), `chronicle.md` (the append-only story) and `skillspector-baseline.json` (audited skill-scan suppressions). `.vegastack/.tmp/` and `.vegastack/.worktrees/` are working state and are gitignored. |
 
 ## Never commit generated files
 
@@ -83,4 +99,4 @@ and no machine-extracted rule format to follow.
 
 ## Releases
 
-Versioning and publishing are maintainer-driven via changesets and tag-triggered CI — the `## Ship` runbook in [.vegastack/dev.md](.vegastack/dev.md) is the release flow, rollback included. Contributors do not bump versions in PRs. Changeset entries follow the shape in the dev-implement skill's changelog rule ([skills/dev/dev-implement/SKILL.md](skills/dev/dev-implement/SKILL.md)) — the published changelog and the release notes reproduce them verbatim.
+Versioning and publishing are maintainer-driven via changesets and tag-triggered CI — the `## Ship` runbook in [.vegastack/dev.md](.vegastack/dev.md) is the release flow, rollback included. The tag itself is `vegafactory ship release <n>`, which re-reads the recorded "ship it", checks the version against its changelog entry and pushes the tag; publishing happens in the workflow that tag triggers, with npm provenance and no token. Contributors do not bump versions in PRs. Changeset entries follow the shape in the dev-implement skill's changelog rule ([skills/dev/dev-implement/SKILL.md](skills/dev/dev-implement/SKILL.md)) — the published changelog and the release notes reproduce them verbatim.

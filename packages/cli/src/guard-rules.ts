@@ -655,6 +655,53 @@ function worktreeVerb(words: string[]): Decision | null {
   return null
 }
 
+// The VegaFactory entry points the guard recognises, and the arguments that follow one. Only
+// these can carry a verb whose own checks the guard is trusting; anything else that merely spells
+// the same words is a different program.
+const VEGAFACTORY_PACKAGE = /^(@vegastack\/vegafactory|vegafactory)(@[^@]+)?$/
+const VEGAFACTORY_ENTRY = /(^|\/)packages\/cli\/(src\/index\.ts|dist\/index\.js)$/
+export function vegafactoryArgs(words: string[]): string[] | null {
+  const head = words[0] === undefined || expanded(words[0]) ? '' : basename(words[0])
+  if (head === 'vegafactory') return words.slice(1)
+  const next = words[1] ?? ''
+  if (expanded(next)) return null
+  if ((head === 'npx' || head === 'bunx') && VEGAFACTORY_PACKAGE.test(next)) return words.slice(2)
+  if ((head === 'bun' || head === 'node') && VEGAFACTORY_ENTRY.test(next)) return words.slice(2)
+  return null
+}
+
+// `vegafactory ship release <n>`: the one verb that may tag. It re-reads the issue's recorded
+// "ship it" itself, so the word is still what authorises the tag — the guard only has to be sure
+// this really is that command: a VegaFactory entry point, spelled plainly, with an issue number
+// and nothing else on it. `ship release` out of any other program is a different thing wearing
+// the name, and asks.
+const RELEASE_FLAGS = new Set(['--json', '--dry-run'])
+const RELEASE_FLAGS_WITH_VALUE = new Set(['--version'])
+function shipRelease(words: string[]): Decision | null {
+  const args = vegafactoryArgs(words)
+  if (args === null) {
+    // A program of any other name, including one called `ship` itself.
+    const spelled = words.map((word, index) => (index === 0 && !expanded(word) ? basename(word) : word))
+    const at = spelled.indexOf('ship')
+    if (at === -1 || spelled[at + 1] !== 'release' || !/^\d+$/.test(spelled[at + 2] ?? '')) return null
+    return ask(`\`ship release\` from something other than the vegafactory CLI never ran its checks, so it ${WORD}`, 'unclassified')
+  }
+  if (args[0] !== 'ship') return null
+  const verb = args[1]
+  if (expanded(verb)) return ask(`a ship command built by shell expansion ${WORD}`, 'unclassified')
+  if (verb !== 'release') return null
+  const rest = args.slice(2)
+  const unreadable = ask(`a \`ship release\` the guard cannot read ${WORD}`, 'unclassified')
+  if (rest.some(expanded) || !/^\d+$/.test(rest[0] ?? '')) return unreadable
+  for (let i = 1; i < rest.length; i += 1) {
+    const arg = rest[i]!
+    if (RELEASE_FLAGS.has(arg)) continue
+    if (RELEASE_FLAGS_WITH_VALUE.has(arg)) { i += 1; continue }
+    return unreadable
+  }
+  return { decision: 'allow', reason: null, rule: 'ship-release' }
+}
+
 function classifyResolved(segment: Segment, words: string[], policy: Policy, mergeCheck?: MergeCheck, riskyConfig = false): Decision {
   if (words.length === 0) return ALLOW
   const risk = expansionRisk(words) ?? issueVerb(words) ?? worktreeVerb(words)
@@ -738,6 +785,9 @@ function classifyResolved(segment: Segment, words: string[], policy: Policy, mer
   if (words.some((word) => /^publish(:|$)/.test(word)) || words.some((word, index) => word === 'release' && words[index + 1] === 'create')) {
     return ask(`this looks like publishing, which ${WORD}`, 'unclassified')
   }
+  // Last, so a dev.md `ask:` line naming it still wins.
+  const release = shipRelease(words)
+  if (release) return release
   return ALLOW
 }
 
