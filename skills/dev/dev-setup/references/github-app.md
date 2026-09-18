@@ -6,7 +6,16 @@ The one identity every automated write uses. Facts checked 03-09-2026 against th
 
 Humans own issues. A person approves a brief, a person says "ship it", and a person's name is on every state flip. The App is the identity for the writes no person is sitting behind: the board mirror that sets a project Status when a label changes, an Actions job that edits a label, and a dispatcher machine working the board with nobody at the keyboard. A dispatcher's labels, status comments and claim releases go out as the App, while the agent runs it starts stay on the operator's own subscription — so the machine's writes are attributable to the factory and its reasoning is still paid for by a person.
 
-What the App may never do is stand in for a person's own words. An ack, a "ship it" and a review comment count only from a human with write access; a comment from `vegafactory[bot]` is trusted as a claim holder and never as approval.
+The split inside a dispatcher run is worth being exact about, because two identities are in play and they are not interchangeable:
+
+| Written by | What it writes | As |
+|---|---|---|
+| the dispatcher itself | the claim it takes before a run, its heartbeat and release, the hand-back comment, the relayed ack, the state label | the App |
+| the agent run it starts | everything the skill writes — the plan, the evidence, the status comment, the PR | the operator's own `gh` login on that machine |
+
+So a dispatched run's artifacts carry a person's name even though no person typed them, and the machine's own bookkeeping carries the App's. Giving the child the App's token as well would need a credential broker that hands out a narrower token per run; until that exists, the child uses the login the machine is already signed in as.
+
+What the App may never do is stand in for a person's own words. An ack, a "ship it" and a review comment count only from a human with write access; a comment from `vegafactory[bot]` is trusted as a claim holder, and as the author of a work artifact, and never as approval.
 
 The alternative worth naming is a credential belonging to a person: it stands for their whole account, outlives the job that used it, and dies when they leave the org. The App stands for a named permission set instead, its tokens live an hour, and uninstalling it revokes every one of them at once.
 

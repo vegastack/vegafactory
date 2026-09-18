@@ -1167,6 +1167,10 @@ export function dispatchUsage(): string {
   status                 the board, plus this machine's recent dispatcher runs
   run [--once]           the poll loop itself (the unit runs this); --once makes a single pass
 
+At most three runs at once and one merge at a time, per machine — two machines on one board each
+get their own three. A run takes the issue's claim before it starts, so the other machine's poll
+sees the work is taken.
+
 Options: --repo OWNER/NAME · --json · --dry-run (enable and disable show what they would do)
 
 A machine the control room's dispatchers.md does not name refuses every verb but disable. Writes
