@@ -27,8 +27,6 @@ interface Options {
   nonInteractive: boolean
   json: boolean
   rest?: string[]
-  apply?: boolean
-  backup?: number
 }
 interface SkillIntegrity { files: Record<string, string>; group?: string | null; repoOnly?: boolean }
 interface RetiredSkill { group: string; since: string; replacedBy: string; note: string }
@@ -80,6 +78,7 @@ Agents:
 
 Control room:
   sync [--org ORG] [--force]             refresh this machine's copy of the org control room
+  sync profile [--json]                  the resolved profile: org, then group, then this repo
 
 Usage numbers (from the harnesses' own session logs — counts only, never prompts or code):
   stats collect|push|show ...            read new turns, share them, print them ("stats --help")
@@ -144,12 +143,6 @@ function parse(argv: string[]): Options {
       const value = argv.shift()
       if (value === undefined || value === '' || value.startsWith('-')) throw new Error('--org requires a value')
       options.org = value
-    }
-    else if (flag === '--apply' && command === 'sync') options.apply = true
-    else if (flag === '--backup' && command === 'sync') {
-      const value = argv.shift()
-      if (!value || !/^\d+$/.test(value) || !Number.isSafeInteger(Number(value))) throw new Error('--backup requires a non-negative integer')
-      options.backup = Number(value)
     }
     else if (flag === '--dry-run') options.dryRun = true
     else if (flag === '--force') options.force = true
@@ -799,20 +792,35 @@ async function doctor(options: Options) {
 }
 
 // `sync` is the one verb that reaches the network on purpose: one shallow fetch of the control
-// room this project names, into a machine-local clone every skill then reads instead of GitHub.
-// It refreshes by default — a hook or a dispatcher tick calling a dry-run-by-default verb would be
-// a silent no-op — and writes nothing outside the clone path and ~/.vegastack/factory.json.
+// room this project names, into a machine-local copy every skill then reads instead of GitHub.
+// It refreshes by default — a hook calling a dry-run-by-default verb would be a silent no-op — and
+// writes nothing outside the copy's path and ~/.vegastack/factory.json.
 async function sync(options: Options) {
-  const {factoryConfigPath,parseSyncMaxAge,readFactoryConfig}=await import('./control-room.ts')
-  const {resolveTarget,syncControlRoom,inspectSnapshots,restoreSnapshot}=await import('./sync.ts')
-  if (options.skill && !['inspect', 'restore'].includes(options.skill)) throw new Error('sync accepts inspect or restore')
-  if (options.apply && (options.skill !== 'restore' || options.dryRun)) throw new Error('--apply requires sync restore without --dry-run')
-  if (options.backup !== undefined && options.skill !== 'restore') throw new Error('--backup requires sync restore')
+  const {factoryConfigPath,loadProfile,readFactoryConfig}=await import('./control-room.ts')
+  const {resolveTarget,syncControlRoom}=await import('./sync.ts')
+  if (options.skill && options.skill !== 'profile') throw new Error('sync takes no subcommand except profile')
   const base = baseFor('project', options.dir)
   const devMdPath = join(base, '.vegastack', 'dev.md')
   const devMdText = await exists(devMdPath) ? await readFile(devMdPath, 'utf8') : ''
   const home = homedir()
   const statePath = factoryConfigPath(home)
+
+  // The one way to read the control room. It resolves org, group and repo through the checked copy
+  // — every identity and symlink check included — so nothing has to open a file in the checkout
+  // and hope it is the file the record describes.
+  if (options.skill === 'profile') {
+    const profile = loadProfile({ home, devMd: devMdText })
+    if (options.json) console.log(JSON.stringify(profile, null, 2))
+    else {
+      console.log(profile.room ? `control room ${profile.room.repo}${profile.room.group ? '#' + profile.room.group : ''}${profile.sha ? ' at ' + profile.sha.slice(0, 7) : ''}${profile.stale ? ' (stale)' : ''}` : 'this repo names no control room — skill defaults apply')
+      for (const [key, value] of Object.entries(profile.values).sort(([a], [b]) => a.localeCompare(b))) {
+        console.log(`  ${key}: ${typeof value === 'object' ? JSON.stringify(value) : value}   # ${profile.sources[key] ?? 'default'}`)
+      }
+      for (const block of profile.blocks) console.error(`  ! ${block}`)
+    }
+    process.exitCode = profile.ok ? 0 : 1
+    return
+  }
 
   let config
   try {
@@ -831,24 +839,8 @@ async function sync(options: Options) {
     return report(options, { command: 'sync', ok: true, action: 'none', org: null, path: null, sha: null, lastSyncedAt: null, ageMinutes: null, message: 'this repo names no control room — skill defaults apply' }, 0)
   }
 
-  if (options.skill === 'inspect' || options.skill === 'restore') {
-    const context = { target: { ...target, repoPath: base }, now: Date.now() }
-    const result = options.skill === 'inspect' ? await inspectSnapshots(context)
-      : await restoreSnapshot({ ...context, index: options.backup ?? 0, apply: options.apply === true })
-    console.log(JSON.stringify(result, null, 2))
-    return
-  }
-
-  const result = await syncControlRoom({
-    target,
-    config,
-    now: Date.now(),
-    maxAgeMinutes: parseSyncMaxAge(devMdText),
-    force: options.force,
-    dryRun: options.dryRun,
-  })
-
-  const code = result.ok ? 0 : result.action === 'refused' ? 2 : 1
+  const result = await syncControlRoom({ target, config, now: Date.now(), force: options.force, dryRun: options.dryRun })
+  const code = result.ok ? 0 : 2
   return report(options, {
     command: 'sync',
     ok: result.ok,

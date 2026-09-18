@@ -1,2 +1,0 @@
-login,name,role,slack,timezone,groups
-{{login}},{{name}},{{role}},{{slack}},{{timezone}},dev

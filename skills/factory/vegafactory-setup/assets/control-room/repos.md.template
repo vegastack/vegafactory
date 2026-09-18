@@ -4,4 +4,4 @@ The registry vegafactory-setup writes when a repo is registered. One row per rep
 
 | repo | group | board | owner |
 |---|---|---|---|
-| {{org}}/{{repo}} | dev | {{board}} | {{owner}} |
+| {{org}}/{{repo}} | {{group}} | {{board}} | {{owner}} |
