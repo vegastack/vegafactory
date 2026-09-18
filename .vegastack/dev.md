@@ -38,9 +38,11 @@ emoji: none                 # none | sparing
 
 Line prefixes: `auto:` (agent just does it) · `ask:` (operator's word first) · `guard:` (deterministic check run locally at this position).
 
-- auto: when merged changes carry changesets and a release is due, run `bunx changeset version && bun install` on `chore/release-<version>`, open its PR and add it to the merge queue — the operator's "ship it" covers this
-- guard: the tag matches the version and the changelog has its entry — `node scripts/release.mjs check-tag v<version>`
-- auto: pull main, then tag and push `v<version>` on the merged release commit — covered by "ship it" (the 0.20.0 clean-break release is the exception: it waits for the operator's own word)
+- guard: the issue may land at all — `vegafactory ship check <n>`: the recorded "ship it" after the latest evidence, the branch clean and pushed, a clean cross-tool review of the head that merges, its PR open and green against main
+- auto: merge that PR through the queue, confirm `Closes #<n>` closed the issue, then take the directory only — `vegafactory worktree remove <n>`
+- auto: when merged changes carry changesets and a release is due, run `bunx changeset version && bun install` on `chore/release-<version>`, open its PR and queue it
+- ask: merging the release PR — it belongs to no issue, so no recorded word covers it and the guard asks
+- auto: pull main, then tag the merged release commit — `vegafactory ship release <n>` re-reads issue n's word, checks the version against its changelog entry and pushes `v<version>` itself; raw `git tag` and tag pushes still ask
 - auto: watch the Release workflow to green; confirm `npm view @vegastack/vegafactory version` shows the new version and `npx @vegastack/vegafactory@latest skills list` works; report old → new
 - Publishing is tag-triggered trusted publishing on GitHub-hosted runners with npm provenance — no tokens. The workflow packs, smokes the tarball, publishes, waits for the registry and smokes the published version
 - A failed release is never re-run: fix forward with a new patch version
