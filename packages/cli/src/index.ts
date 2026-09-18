@@ -27,11 +27,10 @@ interface Options {
   nonInteractive: boolean
   json: boolean
   rest?: string[]
-  apply?: boolean
-  backup?: number
 }
 interface SkillIntegrity { files: Record<string, string>; group?: string | null; repoOnly?: boolean }
-interface Integrity { schemaVersion: number; skills: Record<string, SkillIntegrity> }
+interface RetiredSkill { group: string; since: string; replacedBy: string; note: string }
+interface Integrity { schemaVersion: number; skills: Record<string, SkillIntegrity>; retired?: Record<string, RetiredSkill> }
 interface Operation { skill: string; agent: Agent; destination: string; stage: string; backup?: string; existed: boolean }
 interface InstallJournal { schemaVersion: 2; status: 'prepared' | 'committed'; operations: Operation[] }
 
@@ -81,6 +80,7 @@ Agents:
 
 Control room:
   sync [--org ORG] [--force]             refresh this machine's copy of the org control room
+  sync profile [--json]                  the resolved profile: org, then group, then this repo
 
 Usage numbers (from the harnesses' own session logs — counts only, never prompts or code):
   stats collect|push|show ...            read new turns, share them, print them ("stats --help")
@@ -146,12 +146,6 @@ function parse(argv: string[]): Options {
       if (value === undefined || value === '' || value.startsWith('-')) throw new Error('--org requires a value')
       options.org = value
     }
-    else if (flag === '--apply' && command === 'sync') options.apply = true
-    else if (flag === '--backup' && command === 'sync') {
-      const value = argv.shift()
-      if (!value || !/^\d+$/.test(value) || !Number.isSafeInteger(Number(value))) throw new Error('--backup requires a non-negative integer')
-      options.backup = Number(value)
-    }
     else if (flag === '--dry-run') options.dryRun = true
     else if (flag === '--force') options.force = true
     else if (flag === '--non-interactive' || flag === '--yes') options.nonInteractive = true
@@ -169,11 +163,27 @@ function parse(argv: string[]): Options {
 // checksums, so selection never needs to walk the bundle.
 async function skillCatalog(): Promise<SkillEntry[]> {
   const manifest = await loadManifest()
-  return Object.entries(manifest.skills).map(([name, entry]) => ({
+  const live = Object.entries(manifest.skills).map(([name, entry]) => ({
     name,
     group: entry.group ?? null,
     repoOnly: Boolean(entry.repoOnly),
   }))
+  // Tombstones ride in the same catalog: a retired name is still a name this bundle knows, and
+  // a machine that installed it before the retirement is the only place it still exists.
+  const retired = Object.entries((manifest.retired ?? {}) as Record<string, RetiredSkill>).map(([name, entry]) => ({
+    name,
+    group: entry.group ?? null,
+    repoOnly: false,
+    retired: true,
+    replacedBy: entry.replacedBy,
+  }))
+  return [...live, ...retired]
+}
+
+// Everything this bundle actually ships. Callers that mean "the skills we have" want this;
+// only selection, removal and the retirement sweep look at the tombstones.
+async function liveCatalog(): Promise<SkillEntry[]> {
+  return (await skillCatalog()).filter(entry => !entry.retired)
 }
 
 function hasSelector(options: Options): boolean {
@@ -401,8 +411,21 @@ async function install(options: Options) {
   const base = baseFor(choice.mode, options.dir)
   const agents = resolveAgents(choice.agent, choice.mode)
   if (!agents.length) return
-  if (!options.dryRun) return withInstallLock(base, () => installLocked(options, skillNames, agents, base))
-  return installLocked(options, skillNames, agents, base, false)
+  // A group or --all add IS the documented upgrade (`skills add --group dev --global --force`),
+  // so it sweeps retired skills exactly as `update` does. Inside the same lock and after the
+  // install commits, so a failed transaction never removes anything. Naming one skill sweeps
+  // nothing: that selection is about that skill, not about the family it belongs to.
+  const sweeps = Boolean(options.group || options.all)
+  const run = async (recover = true) => {
+    await installLocked(options, skillNames, agents, base, recover)
+    if (sweeps) {
+      const { kept } = await sweepRetired(options, agents, base)
+      for (const destination of kept) console.log(`kept locally edited copy (run with --force to replace it): ${destination}`)
+      if (kept.length) process.exitCode = 1
+    }
+  }
+  if (!options.dryRun) return withInstallLock(base, () => run())
+  return run(false)
 }
 
 // One selection, one transaction. Every skill is checked and staged before anything is committed,
@@ -503,7 +526,7 @@ async function installLocked(options: Options, skillNames: string[], agents: Age
   if (skillNames.length > 1) {
     // --all silently leaving two skills out is a surprise at the terminal even though both
     // READMEs explain it, so name them where the confusion actually happens.
-    const skipped = options.all ? (await skillCatalog()).filter(entry => entry.repoOnly).map(entry => entry.name) : []
+    const skipped = options.all ? (await liveCatalog()).filter(entry => entry.repoOnly).map(entry => entry.name) : []
     const note = skipped.length ? ` (skipped ${skipped.length} repo-only: ${skipped.join(', ')} — name one explicitly to install it)` : ''
     // Count the skills that actually committed, not the ones selected: with one member already
     // present and unchanged, a selection of ten installs nine.
@@ -577,10 +600,46 @@ async function update(options: Options, quietWhenCurrent = false, includeMissing
     else await withInstallLock(base, run)
     updated += skills.length
   }
+  // An upgrade is the one moment anyone learns a skill went away, so it is where the old copy
+  // goes. Only an installer-owned copy — one still matching its own install receipt — is swept;
+  // an edited one is kept and reported, exactly as an edited copy is on any other update.
+  const swept = includeMissing.length ? { removed: 0, kept: [] as string[] } : await sweepRetired(options, agents, base)
+  updated += swept.removed
+  kept.push(...swept.kept)
   for (const destination of kept) console.log(`kept locally edited copy (run with --force to replace it): ${destination}`)
   if (!updated && !kept.length && !quietWhenCurrent) console.log('installed skills are up to date')
   if (kept.length) process.exitCode = 1
   return { updated, kept }
+}
+
+// Removes installer-owned copies of skills this bundle no longer ships. No source exists to
+// compare against, so the receipt is the whole test: it records what the installer wrote, and a
+// copy that still matches it has never been touched by anyone else.
+async function sweepRetired(options: Options, agents: Agent[], base: string): Promise<{ removed: number; kept: string[] }> {
+  const { retiredIn } = await import('./selection.ts')
+  const catalog = await skillCatalog()
+  const names = retiredIn({ skill: options.skill, group: options.group, all: options.all }, catalog)
+  const kept: string[] = []
+  const doomed: { name: string; agent: Agent; destination: string }[] = []
+  for (const name of names) {
+    for (const agent of agents) {
+      const destination = join(base, surfaces[agent], name)
+      if (!await exists(destination)) continue
+      await assertNoSymlink(destination, false)
+      const receipt = await readReceipt(destination)
+      const untouched = receipt?.files ? (await compare(destination, receipt.files)).status === 'verified' : false
+      if (untouched || options.force) doomed.push({ name, agent, destination })
+      else kept.push(destination)
+    }
+  }
+  const replacement = (name: string) => catalog.find(entry => entry.name === name)?.replacedBy
+  for (const target of doomed) {
+    const instead = replacement(target.name)
+    if (options.dryRun) { console.log(`would remove retired ${target.agent}: ${target.destination}`); continue }
+    await rm(target.destination, { recursive: true, force: true })
+    console.log(`removed retired ${target.agent}: ${target.destination}${instead ? ` (replaced by ${instead})` : ''}`)
+  }
+  return { removed: options.dryRun ? 0 : doomed.length, kept }
 }
 
 function semverLess(a: string, b: string): boolean {
@@ -630,6 +689,7 @@ async function removeLocked(options: Options, skillNames: string[], agents: Agen
   // them first, a removal "succeeds" and the next add rolls those backups forward, bringing the
   // removed skills back. installLocked already recovers; remove must too, under the same lock.
   if (recover) await recoverInstall(base)
+  const retired = new Set((await skillCatalog()).filter(entry => entry.retired).map(entry => entry.name))
   // Every drift check runs across the whole selection BEFORE the first removal, so a locally
   // modified member stops the run instead of leaving a half-removed family behind.
   const targets: { skill: string; agent: Agent; destination: string }[] = []
@@ -639,8 +699,10 @@ async function removeLocked(options: Options, skillNames: string[], agents: Agen
       if (!await exists(destination)) { console.log(`not installed ${agent}: ${destination}`); continue }
       await assertNoSymlink(destination, false)
       if (!options.force) {
-        const { files } = await loadSource(skill)
-        const comparison = await compare(destination, files)
+        // A retired skill has no bundled source left to compare against, so its own install
+        // receipt stands in: same question, same answer — was this copy edited after install?
+        const files = retired.has(skill) ? (await readReceipt(destination))?.files : (await loadSource(skill)).files
+        const comparison = files ? await compare(destination, files) : { status: 'drifted' as const }
         if (comparison.status === 'drifted') throw new Error(`Installation differs from the bundled skill (possibly locally modified); re-run with --force to remove anyway: ${destination}`)
       }
       targets.push({ skill, agent, destination })
@@ -655,7 +717,7 @@ async function removeLocked(options: Options, skillNames: string[], agents: Agen
     console.log(`removed ${target.agent}: ${target.destination}`)
   }
   if (options.all) {
-    const skipped = (await skillCatalog()).filter(entry => entry.repoOnly).map(entry => entry.name)
+    const skipped = (await liveCatalog()).filter(entry => entry.repoOnly).map(entry => entry.name)
     if (skipped.length) console.log(`left ${skipped.length} repo-only skills in place: ${skipped.join(', ')} — name one explicitly to remove it`)
   }
   if (!targets.length) process.exitCode = 1
@@ -663,7 +725,7 @@ async function removeLocked(options: Options, skillNames: string[], agents: Agen
 
 async function list() {
   const manifest = await loadManifest()
-  const entries = await skillCatalog()
+  const entries = await liveCatalog()
   const groups = [...new Set(entries.map(entry => entry.group).filter((group): group is string => group !== null))].sort()
 
   const show = async (entry: SkillEntry) => {
@@ -732,20 +794,35 @@ async function doctor(options: Options) {
 }
 
 // `sync` is the one verb that reaches the network on purpose: one shallow fetch of the control
-// room this project names, into a machine-local clone every skill then reads instead of GitHub.
-// It refreshes by default — a hook or a dispatcher tick calling a dry-run-by-default verb would be
-// a silent no-op — and writes nothing outside the clone path and ~/.vegastack/factory.json.
+// room this project names, into a machine-local copy every skill then reads instead of GitHub.
+// It refreshes by default — a hook calling a dry-run-by-default verb would be a silent no-op — and
+// writes nothing outside the copy's path and ~/.vegastack/factory.json.
 async function sync(options: Options) {
-  const {factoryConfigPath,parseSyncMaxAge,readFactoryConfig}=await import('./control-room.ts')
-  const {resolveTarget,syncControlRoom,inspectSnapshots,restoreSnapshot}=await import('./sync.ts')
-  if (options.skill && !['inspect', 'restore'].includes(options.skill)) throw new Error('sync accepts inspect or restore')
-  if (options.apply && (options.skill !== 'restore' || options.dryRun)) throw new Error('--apply requires sync restore without --dry-run')
-  if (options.backup !== undefined && options.skill !== 'restore') throw new Error('--backup requires sync restore')
+  const {factoryConfigPath,loadProfile,readFactoryConfig}=await import('./control-room.ts')
+  const {resolveTarget,syncControlRoom}=await import('./sync.ts')
+  if (options.skill && options.skill !== 'profile') throw new Error('sync takes no subcommand except profile')
   const base = baseFor('project', options.dir)
   const devMdPath = join(base, '.vegastack', 'dev.md')
   const devMdText = await exists(devMdPath) ? await readFile(devMdPath, 'utf8') : ''
   const home = homedir()
   const statePath = factoryConfigPath(home)
+
+  // The one way to read the control room. It resolves org, group and repo through the checked copy
+  // — every identity and symlink check included — so nothing has to open a file in the checkout
+  // and hope it is the file the record describes.
+  if (options.skill === 'profile') {
+    const profile = loadProfile({ home, devMd: devMdText })
+    if (options.json) console.log(JSON.stringify(profile, null, 2))
+    else {
+      console.log(profile.room ? `control room ${profile.room.repo}${profile.room.group ? '#' + profile.room.group : ''}${profile.sha ? ' at ' + profile.sha.slice(0, 7) : ''}${profile.stale ? ' (stale)' : ''}` : 'this repo names no control room — skill defaults apply')
+      for (const [key, value] of Object.entries(profile.values).sort(([a], [b]) => a.localeCompare(b))) {
+        console.log(`  ${key}: ${typeof value === 'object' ? JSON.stringify(value) : value}   # ${profile.sources[key] ?? 'default'}`)
+      }
+      for (const block of profile.blocks) console.error(`  ! ${block}`)
+    }
+    process.exitCode = profile.ok ? 0 : 1
+    return
+  }
 
   let config
   try {
@@ -764,24 +841,8 @@ async function sync(options: Options) {
     return report(options, { command: 'sync', ok: true, action: 'none', org: null, path: null, sha: null, lastSyncedAt: null, ageMinutes: null, message: 'this repo names no control room — skill defaults apply' }, 0)
   }
 
-  if (options.skill === 'inspect' || options.skill === 'restore') {
-    const context = { target: { ...target, repoPath: base }, now: Date.now() }
-    const result = options.skill === 'inspect' ? await inspectSnapshots(context)
-      : await restoreSnapshot({ ...context, index: options.backup ?? 0, apply: options.apply === true })
-    console.log(JSON.stringify(result, null, 2))
-    return
-  }
-
-  const result = await syncControlRoom({
-    target,
-    config,
-    now: Date.now(),
-    maxAgeMinutes: parseSyncMaxAge(devMdText),
-    force: options.force,
-    dryRun: options.dryRun,
-  })
-
-  const code = result.ok ? 0 : result.action === 'refused' ? 2 : 1
+  const result = await syncControlRoom({ target, config, now: Date.now(), force: options.force, dryRun: options.dryRun })
+  const code = result.ok ? 0 : 2
   return report(options, {
     command: 'sync',
     ok: result.ok,
@@ -830,7 +891,7 @@ async function init(options: Options) {
   const failed = (step: { status: string }) => step.status === 'fail'
   const cli = ensureGlobalCli(probe, packageVersion, options.dryRun)
   console.log(renderSteps([cli]))
-  const everyday = (await skillCatalog()).filter(entry => !entry.repoOnly).map(entry => entry.name)
+  const everyday = (await liveCatalog()).filter(entry => !entry.repoOnly).map(entry => entry.name)
   const { updated, kept } = await update({ ...options, mode: options.mode ?? 'global' }, true, everyday)
   const verb = options.dryRun ? 'would install or update' : 'installed or updated'
   console.log(`${options.dryRun ? 'skip' : 'done'}    skills  ${updated ? `${verb} ${updated}` : 'already up to date'}${kept.length ? ` · kept ${kept.length} locally edited` : ''}`)

@@ -31,7 +31,7 @@ npx @vegastack/vegafactory skills list
 | `issue <verb> <n>` | Read and write an issue through the local cache — `sync`, `check`, `comment`, `edit-comment`, `body`, `label`, `ack`, `drop` (`vegafactory issue --help`) |
 | `review <n>` | Cross-tool review: the other tool reads the issue's diff read-only and this command posts the one review comment (`vegafactory review --help`) |
 | `agent claude\|codex <args…>` | Start a headless run on the subscription; parent-app variables are dropped and API-key billing is refused |
-| `sync` | Refresh this machine's copy of the org control room |
+| `sync` | Refresh this machine's copy of the org control room; `sync profile` prints the resolved profile |
 | `ship check <n>` | Exit 0 when issue n may merge: a "ship it" after the latest evidence, the branch pushed and clean, its PR green |
 | `hook <event> --harness claude\|codex` | The harness hooks: ship guard, claim heartbeat, WIP checkpoint each turn, and the one lessons request per working session |
 | `learning <add\|list\|accept\|decline>` | The lessons a session left for `.vegastack/dev.md`; `add` reads them from a file or standard input, one per line, so no lesson text passes through a shell; accepting or declining drops one from the git-ignored queue, and the dev.md line is yours to write |
@@ -63,17 +63,21 @@ Agents read issues from `.vegastack/.tmp/issues/<owner>__<repo>/<n>/` — `issue
 
 ## Control-room sync
 
-An organisation keeps its shared defaults in a control-room repository. Each machine keeps a copy at `~/.vegastack/control-room/<org>/`, and skills read that copy instead of the network.
+An organisation keeps its shared defaults in a control-room repository. Each machine keeps one copy per org at `~/.vegastack/control-room/<org>/`, and skills read that copy instead of the network. A repo's profile layers on it: `org.md`, then `groups/<g>/group.md`, then the repo's own `.vegastack/dev.md`, nearest wins — except a line `org.md` marks `# locked`.
 
 ```sh
-vegafactory sync            # refresh when the copy is older than sync-max-age
-vegafactory sync --force    # refresh now
-vegafactory sync --org acme # first run in a repo whose dev.md has no control-room: line yet
+vegafactory sync              # refresh when the copy was last fetched more than 5 minutes ago
+vegafactory sync --force      # refresh now
+vegafactory sync --org acme   # first run in a repo whose dev.md has no control-room: line yet
+vegafactory sync profile --json   # the resolved profile: values, sources, locked lines, blocks
 ```
 
 - `.vegastack/dev.md` names the control room: `control-room: <org>/<repo>#<group>@<sha7>`.
-- `sync` uses your existing `gh` login, never commits and never pushes.
-- Exit codes: **0** synced or already fresh · **1** the fetch failed and the old copy stands · **2** a refusal (a hand-edited copy, a symlinked path, an unreadable `~/.vegastack/factory.json`).
+- `sync profile` is the only supported way to read the room. It checks the copy is at this org's one path, on the recorded repository, branch, origin and commit, clean and holding its own Git metadata, and reads `org.md` and `group.md` out of that commit as regular blobs. Opening those files in the copy yourself skips all of it.
+- `sync` is one shallow `git fetch` through your existing `gh` login. It never commits and never pushes.
+- The copy mirrors the room's branch. A copy you have edited by hand refuses the refresh rather than being merged or discarded.
+- `sync profile` exits **0** when the profile resolved cleanly and **1** when it carries blocks; the blocks are in the output either way.
+- Exit codes: **0** fetched or already fresh · **2** a refusal (the fetch failed, a hand-edited copy, a wrong origin, a symlinked path, an unreadable `~/.vegastack/factory.json`). A refusal leaves the old copy standing.
 
 ## Usage numbers
 

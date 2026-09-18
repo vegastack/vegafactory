@@ -93,16 +93,16 @@ jobs:
           import { readFileSync, appendFileSync } from 'node:fs';
           import { resolve } from 'node:path';
           import { pathToFileURL } from 'node:url';
-          const { parsePolicy, readWorkflowLabels, resolveState } = await import(pathToFileURL(resolve(process.env.POLICY_MODULE)).href);
+          const { parsePolicy, readWorkflowStates, resolveState } = await import(pathToFileURL(resolve(process.env.POLICY_MODULE)).href);
           try {
             const policy = parsePolicy(readFileSync(process.env.PROFILE, 'utf8'));
             if (policy.blocks.length) throw new Error(policy.blocks.join('; '));
-            const map = readWorkflowLabels(readFileSync(process.env.PROFILE, 'utf8'));
-            const state = resolveState(JSON.parse(process.env.LABELS), map);
+            readWorkflowStates(readFileSync(process.env.PROFILE, 'utf8'));
+            const state = resolveState(JSON.parse(process.env.LABELS));
             if (state.blocks.length) throw new Error(state.blocks.join('; '));
             const board = policy.extensions.board?.split(/\s/)[0];
             if (!/^[1-9][0-9]*$/.test(board ?? '')) throw new Error('invalid board number');
-            appendFileSync(process.env.GITHUB_OUTPUT, 'decision=sync\nboard=' + board + '\nstatus=' + map[state.state] + '\n');
+            appendFileSync(process.env.GITHUB_OUTPUT, 'decision=sync\nboard=' + board + '\nstatus=' + state.state + '\n');
           } catch (error) {
             console.log('board mirror: skipped - ' + error.message);
             appendFileSync(process.env.GITHUB_OUTPUT, 'decision=skip\n');

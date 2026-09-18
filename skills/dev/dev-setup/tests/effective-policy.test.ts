@@ -1,47 +1,109 @@
 import { expect, test } from 'bun:test'
-import { gitReadBlobs, parsePolicy, parseRepositoryRegistry, resolvePolicy } from '../scripts/effective-policy.mjs'
+import { readFileSync } from 'node:fs'
+import { join } from 'node:path'
+import { parsePolicy, parseControlRoomReference, resolvePolicy } from '../scripts/effective-policy.mjs'
 
-const identity = { org: 'acme', repo: 'acme/app', group: 'dev', roomSha: 'a'.repeat(40) }
-const freshness = { configured: true, validatedAt: '2026-09-06T00:00:00Z', now: '2026-09-06T00:01:00Z', maxAgeSeconds: 7200 }
-const authority = (value: unknown) => `policy-schema: 2\n\`\`\`vsk-policy\n${JSON.stringify({ schemaVersion: 2, ...value as object })}\n\`\`\``
+// A copy of the vegastack control room, so the shipped rules are tested against real authored
+// Markdown rather than a hand-made sample. Refreshed by hand when the live room changes.
+const room = (path: string) => readFileSync(join(import.meta.dir, 'fixtures/control-room', path), 'utf8')
 
-test('group cannot unlock organization capture; diagnostic value remains locked', () => {
-  const result = resolvePolicy({ org: 'stats: on\nstats-override: locked', group: 'stats-override: allowed', repo: 'stats: off', identity, freshness })
-  expect(result.ok).toBe(false)
-  expect(result.blocks.join(' ')).toMatch(/delegation/)
-  expect(result.policy?.values.stats).toBe('on')
-})
-
-test('explicit exact org delegation permits an override, unlike another repo', () => {
-  const org = authority({ locked: { stats: 'on' }, delegations: [{ key: 'stats', groups: ['dev'], repos: ['acme/app'], allowedValues: ['off'] }] })
-  expect(resolvePolicy({ org, repo: 'stats: off', identity, freshness }).ok).toBe(true)
-  expect(resolvePolicy({ org, repo: 'stats: off', identity: { ...identity, repo: 'acme/other' }, freshness }).ok).toBe(false)
-})
-
-test('ordinary stages inherit individually, local dispatch cannot be inherited', () => {
-  const result = resolvePolicy({ org: 'dispatch: local\nharness-policy: plan codex confirmed high · implement claude confirmed high', group: 'tests: required', repo: 'harness-policy: plan claude chosen high', identity })
+test('a repo with no lines of its own still resolves to a complete profile', () => {
+  const result = resolvePolicy({ org: room('org.md'), group: room('groups/dev/group.md'), repo: '' })
+  expect(result.blocks).toEqual([])
   expect(result.ok).toBe(true)
-  expect(result.policy?.values.dispatch).toBe('off')
-  expect(result.policy?.values.stages).toEqual({ plan: { harness: 'claude', model: 'chosen', effort: 'high' }, implement: { harness: 'claude', model: 'confirmed', effort: 'high' } })
+  expect(result.values.tests).toBe('required')
+  expect(result.values.merge).toBe('rebase')
+  expect(result.values.stats).toBe('on')
+  expect(result.values.changelog).toBe('changesets')
+  expect(Object.keys(result.values.stages).sort()).toEqual(['chronicle', 'implement', 'intake', 'plan', 'review', 'status'])
+  expect(result.values.labels).toContain('queued')
+  expect(result.sources.tests).toBe('group')
+  expect(result.sources['stats-people']).toBe('org')
 })
 
-test('chronicle on/off remains an ordinary knob alongside its harness stage', () => {
-  for (const value of ['on', 'off']) {
-    const result = resolvePolicy({ repo: `chronicle: ${value}\nharness-policy: chronicle codex fixture-model high`, identity })
-    expect(result.blocks).toEqual([])
-    expect(result.ok).toBe(true)
-    expect(result.policy.values.chronicle).toBe(value)
-    expect(result.policy.values.stages.chronicle).toEqual({ harness: 'codex', model: 'fixture-model', effort: 'high' })
+test('the live room validates, and its knobs land where the file that wrote them says', () => {
+  for (const [text, scope] of [[room('org.md'), 'org'], [room('groups/dev/group.md'), 'group']] as const) {
+    expect(parsePolicy(text, scope).blocks).toEqual([])
   }
-  const stage = parsePolicy('chronicle: codex fixture-model high')
-  expect(stage.blocks).toEqual([])
-  expect(stage.values.stages.chronicle).toEqual({ harness: 'codex', model: 'fixture-model', effort: 'high' })
-  expect(stage.values.chronicle).toBeUndefined()
-  expect(parsePolicy('chronicle: maybe').blocks).toContain('invalid or duplicate harness stage: chronicle')
+  const repo = room('dev.md')
+  expect(parsePolicy(repo, 'repo').blocks).toEqual([])
+  expect(parseControlRoomReference(repo)).toMatchObject({ org: 'vegastack', repo: 'vegastack/vegafactory-control-room', group: 'dev' })
+  const result = resolvePolicy({ org: room('org.md'), group: room('groups/dev/group.md'), repo })
+  expect(result.blocks).toEqual([])
+  expect(result.values.stages.review.harness).toBe('codex')
 })
 
-test.each(['stats: maybe', 'stats: on\nstats: off', 'policy-schema: 9', 'harness-policy: plan unknown model high', '```vsk-policy\n{bad}\n```'])('known malformed input refuses: %s', text => {
-  expect(resolvePolicy({ repo: text, identity }).ok).toBe(false)
+test('a locked line cannot be overridden by a group or a repo, and keeps its org value', () => {
+  const org = 'tests: required   # locked — every repo runs its tests\nmerge: rebase'
+  const same = resolvePolicy({ org, group: 'tests: required', repo: 'merge: squash' })
+  expect(same.ok).toBe(true)
+  expect(same.values.merge).toBe('squash')
+  for (const layers of [{ org, group: 'tests: none' }, { org, repo: 'tests: best-effort' }]) {
+    const result = resolvePolicy(layers)
+    expect(result.ok).toBe(false)
+    expect(result.blocks.join(' ')).toMatch(/tests is locked in org\.md/)
+    expect(result.values.tests).toBe('required')
+  }
+})
+
+test('only org.md may lock a line; a group or repo marker refuses rather than being ignored', () => {
+  expect(parsePolicy('tests: none   # locked', 'group').blocks).toEqual(['only org.md can lock a line: tests'])
+  expect(parsePolicy('tests: none   # locked', 'repo').blocks).toEqual(['only org.md can lock a line: tests'])
+  expect(parsePolicy('tests: required   # locked', 'org').locked).toEqual(['tests'])
+  // A comment that merely mentions the word later is a comment.
+  expect(parsePolicy('tests: required   # not locked', 'org').locked).toEqual([])
+})
+
+const everyStage = (agent = 'claude', effort = 'high') =>
+  'harness-policy: ' + ['intake', 'plan', 'implement', 'review', 'status', 'chronicle'].map(name => `${name} ${agent} default ${effort}`).join(' · ')
+
+test('a locked harness-policy must name every stage, and then holds all six', () => {
+  // A partial lock would leave the stages the org never chose unanswerable by anyone below it,
+  // so the incomplete line refuses instead of locking what it happens to name.
+  const partial = parsePolicy('harness-policy: plan claude default high · implement claude default high   # locked', 'org')
+  expect(partial.blocks).toEqual(['a locked harness-policy must name every stage'])
+  expect(partial.locked).toEqual([])
+  expect(resolvePolicy({ org: 'harness-policy: plan claude default high   # locked' }).ok).toBe(false)
+  // Locking one stage line is the same trap under another name.
+  expect(parsePolicy('plan: claude default high   # locked', 'org').blocks).toEqual(['lock the whole harness-policy line, not one stage'])
+
+  const org = everyStage() + '   # locked'
+  expect(parsePolicy(org, 'org').locked).toEqual(['harness-policy'])
+  const held = resolvePolicy({ org, repo: 'harness-policy: plan codex default xhigh' })
+  expect(held.ok).toBe(false)
+  expect(held.blocks.join(' ')).toMatch(/harness-policy is locked in org\.md/)
+  expect(held.values.stages.plan).toEqual({ harness: 'claude', model: null, effort: 'high' })
+  expect(Object.keys(held.values.stages).sort()).toEqual(['chronicle', 'implement', 'intake', 'plan', 'review', 'status'])
+  // Repeating the org's own value is agreement, not an override.
+  expect(resolvePolicy({ org, repo: 'harness-policy: plan claude default high' }).ok).toBe(true)
+})
+
+test('an unlocked harness-policy inherits stage by stage', () => {
+  const org = 'harness-policy: plan claude default high · implement claude default high'
+  const free = resolvePolicy({ org, repo: 'harness-policy: plan codex default xhigh' })
+  expect(free.ok).toBe(true)
+  expect(free.values.stages).toEqual({
+    plan: { harness: 'codex', model: null, effort: 'xhigh' },
+    implement: { harness: 'claude', model: null, effort: 'high' },
+  })
+})
+
+test('an unreadable control-room line refuses rather than picking or hiding a room', () => {
+  // A bad value leaves the knob unset, which would otherwise read as "this repo names no room".
+  expect(() => parseControlRoomReference('control-room: not a room')).toThrow(/control-room/)
+  // A duplicate line would otherwise quietly pick the last one.
+  expect(() => parseControlRoomReference('control-room: acme/room#dev\ncontrol-room: other/room#dev')).toThrow(/duplicate/)
+  // A refusal elsewhere in the profile is not this line's business.
+  expect(parseControlRoomReference('stats: maybe\ncontrol-room: acme/room#dev')).toMatchObject({ org: 'acme', group: 'dev' })
+})
+
+test('ordinary values inherit nearest-wins, and local dispatch cannot be inherited', () => {
+  const result = resolvePolicy({ org: 'dispatch: local\ntests: required', group: 'tests: best-effort', repo: 'merge: squash' })
+  expect(result.ok).toBe(true)
+  expect(result.values.dispatch).toBe('off')
+  expect(result.values.tests).toBe('best-effort')
+  expect(result.sources.tests).toBe('group')
+  expect(resolvePolicy({ repo: 'dispatch: local' }).values.dispatch).toBe('local')
 })
 
 test('a stage may pin no model: `default` means the tool\'s own, and an unknown effort refuses', () => {
@@ -60,309 +122,54 @@ test('a stage may pin no model: `default` means the tool\'s own, and an unknown 
 
 test('the retired review knob is ignored, and review stays a harness stage', () => {
   for (const line of ['review: cross-agent-risky', 'review: subagent   # an old profile', 'review: none']) {
-    const result = resolvePolicy({ repo: `${line}\ntests: required`, identity })
+    const result = resolvePolicy({ repo: `${line}\ntests: required` })
     expect(result.blocks).toEqual([])
-    expect(result.ok).toBe(true)
-    expect(result.policy.values.review).toBeUndefined()
-    expect(result.policy.values.tests).toBe('required')
+    expect(result.values.review).toBeUndefined()
+    expect(result.values.tests).toBe('required')
   }
   const stage = parsePolicy('review: codex fixture-model xhigh')
   expect(stage.blocks).toEqual([])
   expect(stage.values.stages.review).toEqual({ harness: 'codex', model: 'fixture-model', effort: 'xhigh' })
-  // An organization cannot lock a knob that no longer exists.
-  const org = authority({ locked: { review: 'cross-agent' } })
-  expect(resolvePolicy({ org, repo: 'tests: required', identity, freshness }).ok).toBe(false)
 })
 
-test('schema2 authority requires an explicit policy-schema2 marker regardless of document order', () => {
-  const block = '```vsk-policy\n' + JSON.stringify({ schemaVersion: 2, locked: { tests: 'required' } }) + '\n```'
-  for (const text of [block, 'policy-schema: 1\n' + block, block + '\npolicy-schema: 1']) {
-    const layer = parsePolicy(text, 'org')
-    expect(layer.authority).toBeNull()
-    expect(layer.blocks.join(' ')).toContain('policy-schema: 2')
+test('chronicle on/off remains an ordinary knob alongside its harness stage', () => {
+  for (const value of ['on', 'off']) {
+    const result = resolvePolicy({ repo: `chronicle: ${value}\nharness-policy: chronicle codex fixture-model high` })
+    expect(result.ok).toBe(true)
+    expect(result.values.chronicle).toBe(value)
+    expect(result.values.stages.chronicle).toEqual({ harness: 'codex', model: 'fixture-model', effort: 'high' })
   }
-  expect(parsePolicy('policy-schema: 2\n' + block, 'org').authority?.locked.tests).toBe('required')
+  expect(parsePolicy('chronicle: maybe').blocks).toContain('invalid or duplicate harness stage: chronicle')
 })
 
-test('repository registry keeps shorter nested fences and their rows inert', () => {
-  const hidden = '````md\n```\n| acme/hidden | dev | | owner | R_hidden |\n```\n````\n'
-  const visible = '| repo | group | board | owner | repository-id |\n|---|---|---|---|---|\n| acme/app | dev | | owner | R_app |\n'
-  expect(parseRepositoryRegistry(hidden + visible)).toEqual({ repoGroups: { 'acme/app': 'dev' }, repositoryIds: { 'acme/app': 'R_app' }, blocks: [] })
+test.each(['stats: maybe', 'stats: on\nstats: off', 'harness-policy: plan unknown model high', 'merge: sometimes', 'operators: not a login!', 'constructor: x'])(
+  'known malformed input refuses: %s', text => {
+    expect(resolvePolicy({ repo: text }).ok).toBe(false)
+  })
+
+// A removed knob is not an unknown one: unknown is inert, and inert is how a profile keeps a
+// retired mechanism without anyone noticing it is doing nothing.
+test('a retired knob refuses by name and says what to do instead', () => {
+  const gates = resolvePolicy({ repo: 'gates: 3' })
+  expect(gates.ok).toBe(false)
+  expect(gates.blocks.join(' ')).toMatch(/gates was removed/)
+  expect(gates.values.gates).toBeUndefined()
+  const renaming = resolvePolicy({ group: 'workflow-labels: {"ready":"queued"}' })
+  expect(renaming.ok).toBe(false)
+  expect(renaming.blocks.join(' ')).toMatch(/label migration/)
+  // And an org cannot lock what no longer exists.
+  expect(resolvePolicy({ org: 'gates: 3   # locked' }).ok).toBe(false)
 })
 
-test('examples and nested lines cannot become policy; unknown extensions remain inert', () => {
+test('examples and nested lines cannot become policy; unknown keys remain inert extensions', () => {
   const layer = parsePolicy('```md\nstats: off\n```\n  stats: off\nstats: on\ncustom: keep me', 'repo')
   expect(layer.values.stats).toBe('on')
   expect(layer.extensions.custom).toBe('keep me')
   expect(layer.blocks).toEqual([])
 })
 
-test('freshness exact boundary, future and missing validated policy fail closed', () => {
-  for (const seconds of [7199, 7200]) {
-    const result = resolvePolicy({ org: 'stats: on', repo: 'dispatch: local', identity, freshness: { ...freshness, now: new Date(Date.parse(freshness.validatedAt) + seconds * 1000).toISOString() } })
-    expect(result.ok).toBe(seconds === 7199)
-  }
-  expect(resolvePolicy({ org: '', identity, freshness }).ok).toBe(false)
-  expect(resolvePolicy({ org: 'stats: on', identity, freshness: { ...freshness, validatedAt: '2026-09-07T00:00:00Z' } }).ok).toBe(false)
-  expect(resolvePolicy({ repo: 'dispatch: local', identity }).ok).toBe(true)
-})
-
-test('digest is stable across observation times and changes with resolved policy or sources', () => {
-  const input = { org: 'stats: on', identity, freshness }
-  const first = resolvePolicy(input).policy!
-  const later = resolvePolicy({ ...input, freshness: { ...freshness, now: '2026-09-06T00:02:00Z' } }).policy!
-  expect(first.policyDigest).toBe(later.policyDigest)
-  expect(resolvePolicy({ ...input, org: 'stats: off' }).policy!.policyDigest).not.toBe(first.policyDigest)
-  expect(first.sources.stats.revision).toBe(identity.roomSha)
-})
-
-const peopleByScope = { org: [{ login: 'owner', groups: ['dev'] }, { login: 'devadmin', groups: ['dev'] }, { login: 'member', groups: ['dev', 'design'] }, { login: 'designer', groups: ['design'] }] }
-const repoGroups = { 'acme/app': 'dev', 'acme/design': 'design' }
-const repositoryIds = { 'acme/app': 'R_app', 'acme/design': 'R_design' }
-const admin = { orgAdmins: ['owner'], groupAdmins: { dev: ['devadmin'] }, groupAdminCapabilities: { dev: ['group.members.manage', 'group.defaults.manage', 'group.people.read'] } }
-const registeredIdentity = { ...identity, peopleByScope, repoGroups, repositoryIds }
-const managed = () => resolvePolicy({ org: 'stats-people: on\n' + authority({ administration: admin }), identity: registeredIdentity }).policy!
-
-test('admin grants come only from confirmed org configuration, not descriptive role replacement', async () => {
-  const { resolveAdministration, authorizeAdministration } = await import('../scripts/effective-policy.mjs')
-  const result = resolveAdministration({ orgLayer: parsePolicy(authority({ administration: admin }), 'org'), peopleByScope, repoGroups })
-  expect(result.ok).toBe(true)
-  const policy = managed()
-  expect(authorizeAdministration({ actor: { login: 'member', verified: true, claimedLogin: 'owner' }, action: 'administration.manage', target: { org: 'acme' }, administration: result.administration, policy }).allowed).toBe(false)
-  expect(authorizeAdministration({ actor: { login: 'owner', verified: true, executionLogin: 'bot' }, action: 'administration.manage', target: { org: 'acme' }, administration: result.administration, policy }).allowed).toBe(true)
-  expect(authorizeAdministration({ actor: { login: 'devadmin', verified: true }, action: 'group.members.manage', target: { org: 'acme', group: 'design' }, administration: result.administration, policy }).allowed).toBe(false)
-  expect(resolveAdministration({ orgLayer: parsePolicy('', 'org'), peopleByScope, repoGroups }).administration).toBeNull()
-  expect(resolveAdministration({ orgLayer: parsePolicy(authority({ administration: { ...admin, orgAdmins: [] } }), 'org'), peopleByScope, repoGroups }).ok).toBe(false)
-})
-
-test('people visibility intersects exact registered repo scope before reading rows', async () => {
-  const { resolvePeopleReadScope } = await import('../scripts/effective-policy.mjs')
-  const policy = managed()
-  const input = { viewer: { login: 'devadmin', verified: true }, subject: 'member', requestedRepos: ['acme/app', 'acme/design'], administration: policy.administration, policy, repoGroups }
-  expect(resolvePeopleReadScope(input).allowedRepos).toEqual(['acme/app'])
-  expect(resolvePeopleReadScope({ ...input, requestedRepos: ['acme/design'] }).allowedRepos).toEqual([])
-  expect(resolvePeopleReadScope({ ...input, viewer: { login: 'owner', verified: false } }).allowedRepos).toEqual([])
-  expect(resolvePeopleReadScope({ ...input, viewer: { login: 'member', verified: true } }).allowedRepos).toEqual(['acme/app', 'acme/design'])
-})
-
-const fleet = () => ({ schemaVersion: 1, coordination: { repositoryId: 'R_room', repository: 'acme/control-room', branch: 'factory-state', rootCommit: 'b'.repeat(40), installationId: '12345678-1234-4123-8123-123456789012' }, defaults: { pollSeconds: 120, maxRuns: 1, childConcurrent: 3, checkpoints: 'task-branch', recovery: 'verified-transfer' }, groupDefaults: {}, groupDelegations: { dev: { fields: ['maxRuns'], maxRunsMax: 2 } }, machines: { 'dev-box': { installationId: '12345678-1234-4123-8123-123456789013', hostBindingDigest: 'c'.repeat(64), executionLogin: 'devadmin', group: 'dev', repositories: ['acme/app'], enabled: false, overrides: {} } } })
-
-test('fleet resolution matches all enrolled identity fields and never enables from local config', async () => {
-  const { resolveMachinePolicy } = await import('../scripts/effective-policy.mjs')
-  const data = fleet()
-  const resolve = () => resolvePolicy({ org: authority({ administration: admin, fleet: data }), identity: registeredIdentity })
-  expect(resolve().ok).toBe(true)
-  const machine = data.machines['dev-box']
-  const input = { machineId: 'dev-box', installationId: machine.installationId, hostBindingDigest: machine.hostBindingDigest, executionLogin: 'devadmin' }
-  expect(resolveMachinePolicy({ ...input, policy: resolve().policy }).ok).toBe(false)
-  machine.enabled = true
-  const policy = resolve().policy!
-  expect(resolveMachinePolicy({ ...input, policy }).machine?.defaults).toEqual(data.defaults)
-  expect(resolveMachinePolicy({ ...input, policy, hostBindingDigest: 'd'.repeat(64) }).ok).toBe(false)
-  machine.repositories.push('acme/missing')
-  expect(resolve().ok).toBe(false)
-})
-
-test('fleet group changes use prior delegation and cannot enroll or enlarge repo scope', async () => {
-  const { authorizeAdministration } = await import('../scripts/effective-policy.mjs')
-  const data = fleet(); data.machines['dev-box'].enabled = true
-  const policy = resolvePolicy({ org: authority({ administration: admin, fleet: data }), identity: registeredIdentity }).policy!
-  const input = { actor: { login: 'devadmin', verified: true }, action: 'fleet.machine.settings', target: { org: 'acme', group: 'dev', machineId: 'dev-box', changes: { maxRuns: 2 } }, administration: policy.administration, policy }
-  expect(authorizeAdministration(input).allowed).toBe(true)
-  expect(authorizeAdministration({ ...input, target: { ...input.target, changes: { maxRuns: 3 } } }).allowed).toBe(false)
-  expect(authorizeAdministration({ ...input, target: { ...input.target, changes: { enabled: true } } }).allowed).toBe(false)
-  expect(authorizeAdministration({ ...input, action: 'fleet.enroll' }).allowed).toBe(false)
-})
-
-test.each([
-  '```vsk-policy\n{"schemaVersion":2,"locked":{"stats":"on","stats":"off"}}\n```',
-  '```vsk-policy\n{"schemaVersion":2,"administration":{"__proto__":{}}}\n```',
-  authority({ locked: { stats: 'on' }, delegations: [{ key: 'stats', groups: ['*'], repos: ['acme/app'], allowedValues: ['off'] }] }),
-])('ambiguous authority refuses rather than overwriting a key', org => {
-  expect(resolvePolicy({ org, identity }).ok).toBe(false)
-})
-
-test('group cannot insert org authority, while learning cannot override a quality lock', () => {
-  expect(resolvePolicy({ group: authority({ administration: admin }), identity: registeredIdentity }).ok).toBe(false)
-  const org = authority({ locked: { tests: 'required', 'provider-mode': 'subscription-only' } })
-  const result = resolvePolicy({ org, repo: 'tests: none\nlearning: normal-work\nlearning-adoption: scoped-reversible\nexecution-budget-minutes: 120', identity })
-  expect(result.ok).toBe(false)
-  expect(result.policy?.values.tests).toBe('required')
-  expect(result.policy?.values).not.toHaveProperty('execution-budget-minutes')
-})
-
-test.each([
-  (f: ReturnType<typeof fleet>) => { f.defaults.pollSeconds = 29 },
-  (f: ReturnType<typeof fleet>) => { f.defaults.maxRuns = Number.MAX_SAFE_INTEGER + 1 },
-  (f: ReturnType<typeof fleet>) => { f.defaults.childConcurrent = 17 },
-  (f: ReturnType<typeof fleet>) => { f.machines['dev-box'].repositories = ['acme/design'] },
-  (f: ReturnType<typeof fleet>) => { f.groupDelegations.dev.maxRunsMax = 0 },
-  (f: ReturnType<typeof fleet>) => { f.machines['other'] = { ...f.machines['dev-box'] } },
-  (f: ReturnType<typeof fleet>) => { f.coordination.branch = '../other' },
-])('invalid fleet cannot produce an effective registration', mutate => {
-  const f = fleet(); mutate(f)
-  expect(resolvePolicy({ org: authority({ administration: admin, fleet: f }), identity: registeredIdentity }).ok).toBe(false)
-})
-
-test('unregistered admin group and foreign organization repo references refuse', () => {
-  const unknown = { ...peopleByScope, org: [...peopleByScope.org, { login: 'outsider', groups: ['missing'] }] }
-  expect(resolvePolicy({ org: authority({ administration: { ...admin, groupAdmins: { missing: ['outsider'] } } }), identity: { ...registeredIdentity, peopleByScope: unknown } }).ok).toBe(false)
-  expect(resolvePolicy({ org: authority({ administration: admin }), identity: { ...registeredIdentity, repoGroups: { ...repoGroups, 'other/private': 'dev' } } }).ok).toBe(false)
-})
-
-test('machine schema refuses credential or host-path fields rather than retaining them in policy', () => {
-  const f = fleet() as ReturnType<typeof fleet> & { credentials?: object }
-  f.credentials = { token: 'example-credential-value' }
-  expect(resolvePolicy({ org: authority({ administration: admin, fleet: f }), identity: registeredIdentity }).ok).toBe(false)
-})
-
-test('real Git snapshot bindings are per code repository and reject drift without renewing age', async () => {
-  const { execFileSync } = await import('node:child_process')
-  const { mkdtemp, mkdir, writeFile, readFile, rm, symlink } = await import('node:fs/promises')
-  const { tmpdir } = await import('node:os')
-  const { join } = await import('node:path')
-  const { loadConfiguredPolicy, parsePeopleRegistry } = await import('../scripts/effective-policy.mjs')
-  const home = await mkdtemp(join(tmpdir(), 'policy-snapshot-'))
-  try {
-    const content = join(home, 'snapshot')
-    const origin = join(home, 'room.git')
-    await mkdir(join(content, 'groups/dev'), { recursive: true })
-    await mkdir(join(content, 'groups/design'), { recursive: true })
-    const git = (...args: string[]) => execFileSync('git', args, { cwd: content, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim()
-    git('init', '-q'); git('config', 'user.name', 'Fixture'); git('config', 'user.email', 'fixture@example.test'); git('remote', 'add', 'origin', origin)
-    const org = 'stats: on\nstats-people: on\ngates: 3\nsync-max-age: 2h\n'
-    const csv = 'login,name,role,slack,timezone,groups\nowner,Owner,lead,,UTC,dev;design\n'
-    await writeFile(join(content, 'org.md'), org)
-    await writeFile(join(content, 'people.csv'), csv)
-    await writeFile(join(content, 'repos.md'), '| repo | group | board | owner | repository-id |\n|---|---|---|---|---|\n| acme/app | dev | | owner | R_app |\n| acme/design | design | | owner | R_design |\n')
-    await writeFile(join(content, 'groups/dev/group.md'), 'tests: required')
-    await writeFile(join(content, 'groups/design/group.md'), 'tests: best-effort')
-    git('add', '.'); git('commit', '-qm', 'Fixture policy')
-    const sha = git('rev-parse', 'HEAD')
-    const profiles = { 'acme/app': 'control-room: acme/room#dev\ndispatch: local', 'acme/design': 'control-room: acme/room#design\ndispatch: local' }
-    const snapshots: Record<string, object> = {}
-    for (const [repo, devMd] of Object.entries(profiles)) {
-      const group = repoGroups[repo as keyof typeof repoGroups]
-      const resolved = resolvePolicy({ org, group: group === 'dev' ? 'tests: required' : 'tests: best-effort', repo: devMd,
-        identity: { org: 'acme', repo, group, roomSha: sha, peopleByScope: { org: parsePeopleRegistry(csv).people }, repoGroups, repositoryIds },
-        freshness: { configured: true, validatedAt: freshness.validatedAt, now: freshness.now } })
-      expect(resolved.ok).toBe(true)
-      snapshots[repo] = { schemaVersion: 2, org: 'acme', group, repository: 'acme/room', origin, sourceCommit: sha, policyDigest: resolved.policy.policyDigest, validatedAt: freshness.validatedAt, contentPath: content }
-    }
-    const state = { schemaVersion: 1, controlRooms: { acme: { remote: origin, snapshots } } }
-    await mkdir(join(home, '.vegastack'))
-    await writeFile(join(home, '.vegastack/factory.json'), JSON.stringify(state))
-    const input = { home, repo: 'acme/app', devMd: profiles['acme/app'], now: freshness.now }
-    const trace = join(home, 'git-trace.log'), previousTrace = process.env.GIT_TRACE
-    let first: ReturnType<typeof loadConfiguredPolicy>
-    try {
-      process.env.GIT_TRACE = trace
-      first = loadConfiguredPolicy(input)
-    } finally {
-      if (previousTrace === undefined) delete process.env.GIT_TRACE
-      else process.env.GIT_TRACE = previousTrace
-    }
-    expect(first.ok).toBe(true)
-    const commands = (await readFile(trace, 'utf8')).split('\n').filter(line => line.includes('built-in: git '))
-    expect(commands).toHaveLength(5)
-    expect(commands.filter(line => line.includes('cat-file --batch'))).toHaveLength(1)
-    expect(loadConfiguredPolicy({ ...input, repo: 'acme/design', devMd: profiles['acme/design'] }).ok).toBe(true)
-    expect(loadConfiguredPolicy({ ...input, devMd: input.devMd + '\ngates: 2' }).blocks.join(' ')).toMatch(/digest changed/)
-    expect(loadConfiguredPolicy({ ...input, now: '2026-09-06T02:00:00Z' }).ok).toBe(false)
-    expect(loadConfiguredPolicy({ ...input, devMd: profiles['acme/design'] }).ok).toBe(false)
-    state.controlRooms.acme.remote = join(home, 'foreign.git')
-    await writeFile(join(home, '.vegastack/factory.json'), JSON.stringify(state))
-    expect(loadConfiguredPolicy(input).blocks.join(' ')).toMatch(/origin/)
-    state.controlRooms.acme.remote = origin
-    await writeFile(join(home, '.vegastack/factory.json'), JSON.stringify(state))
-    await writeFile(join(content, 'org.md'), org + 'stats: off')
-    expect(loadConfiguredPolicy(input).blocks.join(' ')).toMatch(/identity changed/)
-    await writeFile(join(content, 'org.md'), org)
-    expect(loadConfiguredPolicy(input).ok).toBe(true)
-    git('remote', 'set-url', 'origin', join(home, 'foreign.git'))
-    expect(loadConfiguredPolicy(input).blocks.join(' ')).toMatch(/identity changed/)
-    git('remote', 'set-url', 'origin', origin)
-    expect(loadConfiguredPolicy({ ...input, now: '2026-09-05T23:00:00Z' }).ok).toBe(false)
-    await writeFile(join(content, 'people.csv'), 'invalid registry')
-    git('add', '.'); git('commit', '-qm', 'Malformed registry')
-    expect(loadConfiguredPolicy(input).blocks.join(' ')).toMatch(/identity changed/)
-    const appSnapshot = snapshots['acme/app'] as { sourceCommit: string }
-    appSnapshot.sourceCommit = git('rev-parse', 'HEAD')
-    await writeFile(join(home, '.vegastack/factory.json'), JSON.stringify(state))
-    expect(loadConfiguredPolicy(input).ok).toBe(false)
-    await writeFile(join(content, 'people.csv'), csv)
-    await rm(join(content, 'org.md'))
-    await symlink('groups/dev/group.md', join(content, 'org.md'))
-    git('add', '.'); git('commit', '-qm', 'Symlink policy')
-    appSnapshot.sourceCommit = git('rev-parse', 'HEAD')
-    await writeFile(join(home, '.vegastack/factory.json'), JSON.stringify(state))
-    expect(loadConfiguredPolicy(input).blocks.join(' ')).toMatch(/not a regular blob/)
-  } finally { await rm(home, { recursive: true, force: true }) }
-})
-
-test('an own-group target cannot smuggle a cross-group member or repository edit', async () => {
-  const { authorizeAdministration } = await import('../scripts/effective-policy.mjs')
-  const policy = managed()
-  const base = { actor: { login: 'devadmin', verified: true }, administration: policy.administration, policy }
-  expect(authorizeAdministration({ ...base, action: 'group.members.manage', target: { org: 'acme', group: 'dev', changes: { groups: ['design'] } } }).allowed).toBe(false)
-  expect(authorizeAdministration({ ...base, action: 'group.members.manage', target: { org: 'acme', group: 'dev', changes: { administration: { orgAdmins: ['devadmin'] } } } }).allowed).toBe(false)
-})
-
-test('machine-local configured:false cannot turn an authored control room into local policy', () => {
-  expect(resolvePolicy({ repo: 'control-room: acme/room#dev\ndispatch: local', identity, freshness: { configured: false } }).ok).toBe(false)
-})
-
-test('mutating the resolved admin map cannot supply a previous trusted self-grant', async () => {
-  const { authorizeAdministration } = await import('../scripts/effective-policy.mjs')
-  const policy = managed()
-  policy.administration.orgAdmins.push('member')
-  expect(authorizeAdministration({ actor: { login: 'member', verified: true }, action: 'administration.manage', target: { org: 'acme' }, administration: policy.administration, policy }).allowed).toBe(false)
-})
-
-
-test('policy batch reader validates exact byte framing and separate file/aggregate bounds', () => {
-  const oid = 'a'.repeat(40), other = 'b'.repeat(40)
-  let output: Buffer
-  const calls: Array<{ args: string[], options: { input: string, maxBuffer: number, timeout: number } }> = []
-  const run = (command: string, args: string[], options: { input: string, maxBuffer: number, timeout: number }) => {
-    expect(command).toBe('git'); calls.push({ args, options }); return output
-  }
-  const read = (cwd: string, oids: string[]) => gitReadBlobs(cwd, oids, run)
-  const frame = (id: string, text: string) => Buffer.concat([Buffer.from(`${id} blob ${Buffer.byteLength(text)}\n`), Buffer.from(text), Buffer.from('\n')])
-  output = Buffer.concat([frame(oid, 'é\n'), frame(other, '')])
-  expect([...read('/fixture', [oid, other])]).toEqual([[oid, 'é\n'], [other, '']])
-  expect(calls).toHaveLength(1)
-  expect(calls[0]?.args).toEqual(['cat-file', '--batch'])
-  expect(calls[0]?.options.input).toBe(`${oid}\n${other}\n`)
-  expect(calls[0]?.options.timeout).toBe(5000)
-  for (const malformed of [
-    '', `${oid} missing\n`, `${other} blob 0\n\n`, `${oid} tree 0\n\n`,
-    `${oid} blob 01\nx\n`, `${oid} blob 4\nabc\n`, `${oid} blob 3\nabc`,
-    `${oid} blob 3\nabc!`, `${oid} blob 0\n\nextra`, `${oid} blob 4194305\n`,
-    `${oid} blob 9007199254740993\n`, 'x'.repeat(65) + '\n',
-  ]) {
-    output = Buffer.from(malformed)
-    expect(() => read('/fixture', [oid])).toThrow()
-  }
-  output = frame(oid, '')
-  expect(() => read('/fixture', [oid, other])).toThrow()
-  const large = 'x'.repeat(4 * 1024 * 1024)
-  output = Buffer.concat([frame(oid, large), frame(other, large)])
-  expect(read('/fixture', [oid, other]).get(other)?.length).toBe(large.length)
-  expect(calls.at(-1)?.options.maxBuffer).toBeGreaterThan(output.length)
-  const ids = Array.from({ length: 17 }, (_, index) => index.toString(16).padStart(40, '0'))
-  output = Buffer.concat(ids.map(id => frame(id, large)))
-  expect(() => read('/fixture', ids)).toThrow(/byte limit/)
-})
-
-test('policy batch reader retries one transient truncated frame', () => {
-  const oid = 'a'.repeat(40), text = 'policy\n'
-  const complete = Buffer.concat([Buffer.from(`${oid} blob ${Buffer.byteLength(text)}\n`), Buffer.from(text), Buffer.from('\n')])
-  let calls = 0
-  const blobs = gitReadBlobs('/fixture', [oid], () => ++calls === 1 ? complete.subarray(0, -2) : complete)
-  expect(blobs.get(oid)).toBe(text)
-  expect(calls).toBe(2)
-  calls = 0
-  expect(() => gitReadBlobs('/fixture', [oid], () => { calls++; return complete.subarray(0, -2) })).toThrow(/framing/)
-  expect(calls).toBe(2)
+test('the control-room knob reads org, repo, group and a drafted-from sha, or nothing', () => {
+  expect(parseControlRoomReference('control-room: acme/room#platform@a1b2c3d')).toEqual({ org: 'acme', repo: 'acme/room', group: 'platform', sha: 'a1b2c3d' })
+  expect(parseControlRoomReference('control-room: none')).toBeNull()
+  expect(parseControlRoomReference('tests: required')).toBeNull()
 })

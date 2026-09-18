@@ -197,6 +197,25 @@ describe('scaffold-skill runs', () => {
     }
   })
 
+  // Present but unreadable is the same class as absent: `name in packaged` and the assignment
+  // after it both need a plain object, and the parse happens once, in the pre-flight.
+  test.each([
+    ['malformed', '{ this is not valid json'],
+    ['a JSON array', '["architect"]'],
+    ['a JSON scalar', '42'],
+  ])('scaffoldSkill refuses %s packaging.json, and writes nothing', async (_label, body) => {
+    const repo = await makeWiredRepo()
+    try {
+      await writeFile(join(repo, 'packages/cli/packaging.json'), body)
+      await expect(scaffoldSkill({ name: 'demo-skill', dir: repo, write: true })).rejects.toThrow(
+        /packaging\.json.*(not valid JSON|not a JSON object)/s,
+      )
+      expect(await readdir(join(repo, 'skills'))).toEqual([])
+    } finally {
+      await rm(repo, { recursive: true, force: true })
+    }
+  })
+
   // A dry run exists to say what would happen; "it would refuse" is that answer. The
   // existing Skills-table refusal already throws before the !write return, so this
   // matches it rather than introducing a second convention.

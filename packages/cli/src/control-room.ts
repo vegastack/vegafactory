@@ -1,7 +1,9 @@
-import { basename, dirname, isAbsolute, join, resolve, parse } from 'node:path'
+import { basename, dirname, isAbsolute, join, resolve, parse as parsePath, sep } from 'node:path'
 import { lstat, mkdir, open, readFile, rename, rm } from 'node:fs/promises'
+import { lstatSync, mkdirSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync } from 'node:fs'
+import { execFileSync } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
-import { parseControlRoomReference, parsePolicy } from '../../../skills/dev/dev-setup/scripts/effective-policy.mjs'
+import { parseControlRoomReference, resolvePolicy } from '../../../skills/dev/dev-setup/scripts/effective-policy.mjs'
 
 export interface ControlRoomKnob {
   org: string
@@ -17,8 +19,6 @@ export interface ControlRoomEntry {
   remote?: string
   lastSyncedAt: string | null
   sha: string | null
-  snapshots?: Record<string, PolicySnapshot>
-  history?: Record<string, PolicySnapshot>[]
   [key: string]: unknown
 }
 
@@ -33,19 +33,10 @@ export interface FactoryConfig {
   settings: Record<string, unknown>
 }
 
-const DEFAULT_MAX_AGE_MINUTES = 30
-
 // `control-room: <org>/<repo>#<group>@<sha7>` — group and sha are both optional, and the value
 // stops at the first whitespace so the trailing `# comment` every knob line carries is ignored.
 export function parseControlRoomKnob(devMdText: string): ControlRoomKnob | null {
   return parseControlRoomReference(devMdText)
-}
-
-// Freshness is a duration, not a timestamp: `<n>m` or `<n>h`. Anything unparseable falls back to
-// the default rather than disabling the refresh, because a typo must not silently freeze a clone.
-export function parseSyncMaxAge(devMdText: string): number {
-  const seconds = (parsePolicy(devMdText, 'repo').values as Record<string, unknown>)['sync-max-age']
-  return typeof seconds === 'number' ? seconds / 60 : DEFAULT_MAX_AGE_MINUTES
 }
 
 export function defaultClonePath(org: string, home: string): string {
@@ -97,6 +88,9 @@ export function serializeFactoryConfig(config: FactoryConfig): Record<string, un
   return { ...config.settings, schemaVersion: config.schemaVersion, ...(config.schemaVersion === 2 ? { revision: config.revision } : {}), controlRooms: config.controlRooms }
 }
 
+// How stale the local copy of the control room may be before a session refreshes it.
+export const MAX_AGE_MINUTES = 5
+
 // Age is measured from the last successful fetch, never from the clone directory's mtime: a fetch
 // that finds nothing new leaves mtime untouched, so an unchanged control room would look
 // permanently stale and re-fetch on every session.
@@ -113,18 +107,6 @@ export function isStale(lastSyncedAt: string | null, now: number, maxAgeMinutes:
   return age >= maxAgeMinutes
 }
 
-export interface PolicySnapshot {
-  schemaVersion: 2
-  org: string
-  group: string | null
-  repository: string
-  origin: string
-  sourceCommit: string
-  policyDigest: string
-  validatedAt: string
-  contentPath: string
-}
-
 // orgs is only the callback projection of controlRooms. Unknown wire keys, including an
 // extension named orgs, remain in settings. factory.json is the single durable authority.
 export interface SettingsV2 {
@@ -134,15 +116,9 @@ export interface SettingsV2 {
   settings: Record<string, unknown>
 }
 
-export function snapshotFreshness(validatedAt: string, now: number, maxAgeSeconds: number): 'fresh' | 'stale' | 'unavailable' {
-  const at = Date.parse(validatedAt)
-  if (!Number.isFinite(at) || !Number.isFinite(now) || at > now || !Number.isSafeInteger(maxAgeSeconds) || maxAgeSeconds <= 0) return 'unavailable'
-  return now - at >= maxAgeSeconds * 1000 ? 'stale' : 'fresh'
-}
-
 export async function assertSafeLocalPath(path: string): Promise<void> {
   if (!isAbsolute(path) || resolve(path) !== path) throw new Error('settings/content path must be canonical and absolute')
-  let cursor = parse(path).root
+  let cursor = parsePath(path).root
   for (const part of path.slice(cursor.length).split('/').filter(Boolean)) {
     cursor = join(cursor, part)
     const info = await lstat(cursor).catch(error => { if (error.code === 'ENOENT') return null; throw error })
@@ -167,7 +143,28 @@ export async function updateSettings(root: string, mutate: (settings: SettingsV2
 
 // Long network work happens outside this guard. Never steal it from an unknown/dead owner:
 // interrupted ownership requires offline inspection; elapsed time is not ownership proof.
+export interface SettingsError extends Error {
+  // True when the new settings were already renamed into place before the failure. A caller that
+  // rolls its own work back on a failure has to know: rolling back after a successful publication
+  // is the very split the rollback exists to prevent.
+  published?: boolean
+}
+
+export function publishedAlready(error: unknown): boolean {
+  return (error as SettingsError | null)?.published === true
+}
+
 export async function updateSettingsAtPath(path: string, mutate: (settings: SettingsV2) => SettingsV2 | Promise<SettingsV2>): Promise<SettingsV2> {
+  let published = false
+  try {
+    return await publishSettings(path, mutate, () => { published = true })
+  } catch (error) {
+    if (error instanceof Error) (error as SettingsError).published = published
+    throw error
+  }
+}
+
+async function publishSettings(path: string, mutate: (settings: SettingsV2) => SettingsV2 | Promise<SettingsV2>, onPublished: () => void): Promise<SettingsV2> {
   await assertSafeLocalPath(path)
   await mkdir(dirname(path), { recursive: true, mode: 0o700 })
   const guard = path + '.guard', token = randomUUID(), deadline = Date.now() + 2000
@@ -204,7 +201,7 @@ export async function updateSettingsAtPath(path: string, mutate: (settings: Sett
     // bypassing this guard cannot be given an atomic compare-and-swap guarantee.
     const currentText = await readFile(path, 'utf8').catch(error => { if (error.code === 'ENOENT') return null; throw error })
     if (currentText !== beforeText) throw new Error('settings changed outside the transaction; refusing overwrite')
-    await rename(temporary, path); await syncDirectory(dirname(path))
+    await rename(temporary, path); onPublished(); await syncDirectory(dirname(path))
     return structuredClone(committed)
   } finally {
     await rm(temporary, { force: true })
@@ -215,33 +212,206 @@ export async function updateSettingsAtPath(path: string, mutate: (settings: Sett
   }
 }
 
-export { loadSnapshotPolicy } from '../../../skills/dev/dev-setup/scripts/effective-policy.mjs'
-import { loadSnapshotPolicy, resolvePolicy } from '../../../skills/dev/dev-setup/scripts/effective-policy.mjs'
 
-// The exact configured path is used by services as well as interactive CLI readers.
-export function loadConfiguredPolicy(input: { home: string; repo: string; devMd: string; now?: string | number; settingsPath?: string }) {
-  const room = parseControlRoomKnob(input.devMd)
-  if (!room) return resolvePolicy({ repo: input.devMd, identity: { repo: input.repo }, freshness: { configured: false, now: input.now ?? Date.now() } })
-  let entry: ControlRoomEntry | undefined
-  try { entry = readFactoryConfig(readFileSync(input.settingsPath ?? factoryConfigPath(input.home), 'utf8')).controlRooms[room.org] } catch { /* Unavailable, never defaults. */ }
-  return loadSnapshotPolicy({ snapshot: entry?.snapshots?.[input.repo], repo: input.repo, devMd: input.devMd, expectedOrigin: entry?.remote, now: input.now })
+// Every component of a path is judged by lstat, never followed.
+function realPathTo(path: string, from: string): string | null {
+  let cursor = from
+  for (const part of path.slice(from.length).split(sep).filter(Boolean)) {
+    cursor = join(cursor, part)
+    let info
+    try { info = lstatSync(cursor) } catch { return `nothing at ${cursor}` }
+    if (info.isSymbolicLink()) return `refusing a symlinked path: ${cursor}`
+  }
+  return null
 }
-import { readFileSync } from 'node:fs'
 
-export async function getPolicySnapshot(org: string, repo: string, now: number, context: { settingsPath: string; devMd: string }) {
-  const config = await readSettingsFile(context.settingsPath)
-  const entry = config.controlRooms[org], snapshot = entry?.snapshots?.[repo]
-  const resolved = loadSnapshotPolicy({ snapshot, repo, devMd: context.devMd, expectedOrigin: entry?.remote, now })
-  const bootstrap = config.settings.machine as { id?: string; installationId?: string; hostBindingDigest?: string; group?: string } | undefined
-  const registration = bootstrap ? resolved.policy.fleet?.machines?.[bootstrap.id ?? ''] : null
-  const machineReason = !bootstrap ? null : !registration ? 'machine is not enrolled' : !registration.enabled ? 'machine enrollment is disabled'
-    : registration.installationId !== bootstrap.installationId || registration.hostBindingDigest !== bootstrap.hostBindingDigest || registration.group !== bootstrap.group ? 'machine bootstrap and registration disagree' : null
-  const machine = bootstrap ? { id: bootstrap.id ?? null, state: machineReason ? 'unavailable' : 'configured', reason: machineReason,
-    executionIdentityVerified: false, sourceCommit: snapshot?.sourceCommit ?? null,
-    configuration: registration ? { ...registration, defaults: { ...resolved.policy.fleet.defaults, ...resolved.policy.fleet.groupDefaults?.[registration.group], ...registration.overrides } } : null } : null
+// A control-room clone is only ever read or written where sync puts it: a canonical absolute path
+// inside this machine's control-room store, with no symlink anywhere along it. Returns the reason
+// it is not usable, or null when it is.
+export function safeClonePath(home: string, path: unknown): string | null {
+  const store = join(home, '.vegastack', 'control-room')
+  if (typeof path !== 'string' || !path || !isAbsolute(path) || resolve(path) !== path) return 'the control-room path is not absolute and canonical'
+  if (path !== store && !path.startsWith(store + sep)) return `the control-room clone is outside ${store}`
+  const walked = realPathTo(path, parsePath(path).root)
+  if (walked) return walked.startsWith('nothing at') ? `no control-room clone at ${path}` : walked
+  return null
+}
+
+export interface Profile {
+  ok: boolean
+  values: Record<string, unknown>
+  locked: string[]
+  sources: Record<string, string>
+  blocks: string[]
+  room: ControlRoomKnob | null
+  clonePath: string | null
+  sha: string | null
+  lastSyncedAt: string | null
+  stale: boolean
+}
+
+export const SHA = /^[a-f0-9]{40}$/
+
+// Replacement objects are a per-repository redirect: one hand-written entry under `refs/replace`
+// makes `cat-file` hand back different bytes for a commit or a blob while every identity check
+// still passes. Nothing this tool does wants them, so they are off for every read and every
+// mutating command, by flag and by environment, in this file and in sync.
+export const GIT_NO_REPLACE: readonly string[] = ['--no-replace-objects']
+export const gitEnv = (): NodeJS.ProcessEnv => ({ ...process.env, GIT_NO_REPLACE_OBJECTS: '1', GIT_TERMINAL_PROMPT: '0' })
+const git = (cwd: string, args: string[]) =>
+  execFileSync('git', [...GIT_NO_REPLACE, ...args], { cwd, encoding: 'utf8', stdio: 'pipe', timeout: 5000, maxBuffer: 4 * 1024 * 1024, env: gitEnv() })
+
+// The copy must hold its own repository, in the ordinary place, with its worktree where it stands.
+// A symlinked `.git`, a `.git` file pointing elsewhere, a separate common directory or a
+// `core.worktree` redirect all move git's reads and writes outside the store the other checks
+// cover — the metadata is as much a part of the copy as the files are.
+export function repositoryReason(path: string): string | null {
+  const dot = join(path, '.git')
+  let info
+  try { info = lstatSync(dot) } catch { return `no Git repository at ${path}` }
+  if (info.isSymbolicLink()) return `refusing a symlinked .git at ${dot}`
+  if (!info.isDirectory()) return `refusing a .git file at ${dot}; the copy must hold its own repository`
+  try {
+    // git answers these with the resolved path, so the comparison is made on resolved paths too.
+    // That is not a hole: `safeClonePath` has already refused every symlinked component of the
+    // copy's own path, so here the two spellings can only differ above the store.
+    const real = realpathSync(path), realDot = join(real, '.git')
+    if (git(path, ['rev-parse', '--absolute-git-dir']).trim() !== realDot) return `the copy keeps its Git metadata outside ${dot}`
+    if (resolve(real, git(path, ['rev-parse', '--git-common-dir']).trim()) !== realDot) return `the copy shares its Git metadata with another repository`
+    if (git(path, ['rev-parse', '--show-toplevel']).trim() !== real) return `the copy's worktree is not ${path}`
+  } catch (error) { return `the repository at ${path} could not be read (${(error as Error).message.split('\n')[0]})` }
+  return null
+}
+
+// One holder at a time per org, shared by every command that touches that org's copy: sync fetches
+// and checks out, `stats push` commits and pushes, and both move the recorded commit. The lock is
+// never stolen from an owner that looks old — an interrupted run is a human's to inspect.
+export function orgLockPath(clonePath: string): string {
+  return clonePath + '.lock'
+}
+
+export async function lockOrg(clonePath: string, waitMs = 120_000): Promise<() => Promise<void>> {
+  const lock = orgLockPath(clonePath)
+  await assertSafeLocalPath(lock)
+  await mkdir(dirname(lock), { recursive: true, mode: 0o700 })
+  const deadline = Date.now() + waitMs
+  for (;;) {
+    try { await mkdir(lock, { mode: 0o700 }); break }
+    catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error
+      if (Date.now() >= deadline) throw new Error(`another run is using ${clonePath}; wait for it to finish, or remove ${lock}`)
+      await new Promise(resolve => setTimeout(resolve, 100))
+    }
+  }
+  return async () => { await rm(lock, { recursive: true, force: true }) }
+}
+
+// The same lock from synchronous code. It waits a few seconds rather than two minutes: the caller
+// is an hourly best-effort push, and a push that skips one hour costs nothing.
+export function lockOrgSync(clonePath: string, waitMs = 5_000): (() => void) | null {
+  const lock = orgLockPath(clonePath)
+  const deadline = Date.now() + waitMs
+  mkdirSync(dirname(lock), { recursive: true, mode: 0o700 })
+  for (;;) {
+    try { mkdirSync(lock, { mode: 0o700 }); break }
+    catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error
+      if (Date.now() >= deadline) return null
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 50)
+    }
+  }
+  return () => { rmSync(lock, { recursive: true, force: true }) }
+}
+
+// A command that moved the copy records where it left it, through the same guarded file every
+// other writer uses. Anything that advances the checkout must call this, or the next read finds a
+// commit the record does not know and refuses a copy that is perfectly good.
+export function recordOrgSha(settingsPath: string, org: string, sha: string): void {
+  if (!SHA.test(sha)) throw new Error('a recorded commit must be a full SHA')
+  const guard = settingsPath + '.guard'
+  mkdirSync(guard, { mode: 0o700 })
+  try {
+    const config = readFactoryConfig(readFileSync(settingsPath, 'utf8'))
+    const entry = config.controlRooms[org]
+    if (!entry) throw new Error(`${org}'s control room is not linked on this machine`)
+    const next = { ...config, controlRooms: { ...config.controlRooms, [org]: { ...entry, sha } } }
+    const temporary = `${settingsPath}.${randomUUID()}.tmp`
+    writeFileSync(temporary, JSON.stringify(serializeFactoryConfig(next), null, 2) + '\n', { mode: 0o600, flag: 'wx' })
+    renameSync(temporary, settingsPath)
+  } finally { rmSync(guard, { recursive: true, force: true }) }
+}
+
+// The copy `sync` left, or the reason it cannot be read. Everything recorded in factory.json is
+// treated as a claim to check, never as a fact: the path must be the one path this org's copy may
+// live at, the recorded repository must be the one the profile names, and the working tree must
+// still be the exact commit sync validated, on the recorded branch and origin, with nothing
+// changed. Another org's copy, a wrong-origin copy, the leftovers of a failed sync and a hand-edit
+// all fail one of those, and a copy that fails any of them is not policy.
+function verifiedRoom(home: string, room: ControlRoomKnob, entry: ControlRoomEntry | undefined): { path: string | null; sha: string | null; reason: string | null } {
+  const refuse = (reason: string) => ({ path: null, sha: null, reason: `${reason} — run: vegafactory sync` })
+  const path = defaultClonePath(room.org, home)
+  if (!entry) return refuse('this machine has no copy of the control room')
+  if (entry.path !== path) return refuse(`the recorded copy is not at ${path}`)
+  if (entry.repo !== room.repo) return refuse(`the recorded copy is ${entry.repo}, not the ${room.repo} this profile names`)
+  if (!SHA.test(entry.sha ?? '')) return refuse('the recorded copy has no validated commit')
+  // No recorded remote means nothing to hold the origin to, and the schema still allows the field
+  // to be missing — so an entry without one is unverifiable rather than unverified.
+  if (typeof entry.remote !== 'string' || !entry.remote.trim()) return refuse('the recorded copy names no origin')
+  if (typeof entry.branch !== 'string' || !entry.branch.trim()) return refuse('the recorded copy names no branch')
+  const unsafe = safeClonePath(home, path)
+  if (unsafe) return refuse(unsafe)
+  const notARepository = repositoryReason(path)
+  if (notARepository) return refuse(notARepository)
+  try {
+    if (git(path, ['rev-parse', 'HEAD']).trim() !== entry.sha) return refuse('the copy has moved off the commit sync recorded')
+    if (git(path, ['symbolic-ref', '--quiet', '--short', 'HEAD']).trim() !== entry.branch) return refuse(`the copy is not on ${entry.branch}`)
+    if (git(path, ['remote', 'get-url', 'origin']).trim() !== entry.remote) return refuse('the copy has a different origin')
+    if (git(path, ['status', '--porcelain', '--untracked-files=all']).trim()) return refuse('the copy has local changes')
+  } catch (error) { return refuse(`the copy could not be read (${(error as Error).message.split('\n')[0]})`) }
+  return { path, sha: entry.sha!, reason: null }
+}
+
+// Read one file out of the recorded commit rather than off the disk. A tracked symlink under the
+// copy would otherwise send `readFileSync` anywhere on the machine, and only a regular blob in that
+// commit is policy — the mode check is what makes the link a refusal instead of a redirect.
+function readBlob(path: string, sha: string, relative: string): { text: string; reason: string | null } {
+  let listed
+  try { listed = git(path, ['ls-tree', '-z', sha, '--', relative]) } catch { return { text: '', reason: `the control room has no ${relative}` } }
+  const match = /^(\d{6}) (blob|tree|commit) ([a-f0-9]{40})\t/.exec(listed)
+  if (!match || match[2] !== 'blob') return { text: '', reason: `the control room has no ${relative}` }
+  if (!['100644', '100755'].includes(match[1]!)) return { text: '', reason: `${relative} is not a regular file in the control room` }
+  try { return { text: git(path, ['cat-file', 'blob', match[3]!]), reason: null } }
+  catch (error) { return { text: '', reason: `${relative} could not be read (${(error as Error).message.split('\n')[0]})` } }
+}
+
+// The profile a repo actually runs on: the org's `org.md`, its group's `group.md`, then the repo's
+// own dev.md. The room is read from the copy `sync` keeps, never from the network — a copy that is
+// missing, unusable or stale still resolves from what is left, and the caller is told which.
+export function loadProfile(input: { home: string; devMd: string; now?: number }): Profile {
+  const now = input.now ?? Date.now()
+  const blocks: string[] = []
+  let room: ControlRoomKnob | null = null
+  try { room = parseControlRoomKnob(input.devMd) } catch (error) { blocks.push((error as Error).message) }
+  let org = '', group = '', clonePath: string | null = null, sha: string | null = null, lastSyncedAt: string | null = null
+  if (room) {
+    let entry: ControlRoomEntry | undefined
+    try { entry = readFactoryConfig(readFileSync(factoryConfigPath(input.home), 'utf8')).controlRooms[room.org] } catch { /* never synced here */ }
+    lastSyncedAt = entry?.lastSyncedAt ?? null
+    const verified = verifiedRoom(input.home, room, entry)
+    if (verified.reason) blocks.push(verified.reason)
+    else {
+      clonePath = verified.path; sha = verified.sha
+      for (const [relative, into] of [['org.md', 'org'], ...(room.group ? [[`groups/${room.group}/group.md`, 'group']] : [])] as const) {
+        const read = readBlob(verified.path!, verified.sha!, relative)
+        if (read.reason) blocks.push(read.reason)
+        else if (into === 'org') org = read.text
+        else group = read.text
+      }
+    }
+  }
+  const resolved = resolvePolicy({ org, group, repo: input.devMd })
   return {
-    state: machineReason ? 'unavailable' : resolved.ok ? 'fresh' : resolved.policy.freshness.state === 'stale' && resolved.blocks.every((block: string) => block.startsWith('mandatory policy stale:')) ? 'stale' : 'unavailable',
-    snapshot: snapshot ?? null, ageSeconds: resolved.policy.freshness.ageSeconds,
-    reason: machineReason ?? (resolved.ok ? null : resolved.blocks.join('; ')), policy: resolved, machine,
+    ...resolved, blocks: [...blocks, ...resolved.blocks], ok: resolved.ok && blocks.length === 0,
+    room, clonePath, sha, lastSyncedAt, stale: room !== null && isStale(lastSyncedAt, now, MAX_AGE_MINUTES),
   }
 }

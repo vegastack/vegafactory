@@ -31,7 +31,7 @@ architect: kmanojkumar      # the architecture owner dev-architect speaks to —
 control-room: vegastack/vegafactory-control-room#dev@0000000   # org control room · group · the clone sha this profile was drafted from; the sha is recorded on the first real sync, once the control room exists (#112)
 sync-max-age: 30m           # how stale the local control-room clone may be before a session refreshes it — <n>m or <n>h
 operators: kmanojkumar      # csv of the humans who own issues here; every state flip assigns per conventions' Labels table
-chronicle-style: plain      # plain | story | witty — the voice of chronicle entries (dev-chronicle's references/styles.md)
+chronicle-style: plain      # plain | story | witty — the voice of chronicle entries (dev-status's references/styles.md)
 emoji: none                 # none | sparing
 
 ## Ship — what "ship it" does after merge, in order

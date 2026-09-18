@@ -201,12 +201,12 @@ describe("this repo's own factory-board workflow", () => {
 })
 
 
-test('141 board compiler resolves custom map without CSV positional interpretation', () => {
-  const map = { needsOperator: 'Decision', needsPlan: 'Plan', ready: 'Go', working: 'Build', forOperator: 'Review' }
-  const r = runBlock(resolve(), { PROFILE: profile('', 'board: 7\nworkflow-labels: ' + JSON.stringify(map)), APP_ID: '1', LABELS: 'Go,medium' })
+test('141 board compiler mirrors the state label itself and skips a conflicting pair', () => {
+  const labels = 'board: 7\nlabels: waiting-on-operator planning queued in-progress ready-to-ship small medium large research risky epic'
+  const r = runBlock(resolve(), { PROFILE: profile('', labels), APP_ID: '1', LABELS: 'queued,medium' })
   expect(r.code).toBe(0)
-  expect(r.outputs).toContain('status=Go')
-  const conflict = runBlock(resolve(), { PROFILE: profile('', 'board: 7\nworkflow-labels: ' + JSON.stringify(map)), APP_ID: '1', LABELS: 'Go,Decision' })
+  expect(r.outputs).toContain('status=queued')
+  const conflict = runBlock(resolve(), { PROFILE: profile('', labels), APP_ID: '1', LABELS: 'queued,planning' })
   expect(conflict.outputs).toContain('decision=skip')
   expect(conflict.ghLog).toBe('')
 })

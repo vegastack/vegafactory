@@ -1,0 +1,4 @@
+interface:
+  display_name: "skills-refresh"
+  short_description: "Re-verify the pinned facts and file what moved"
+  default_prompt: "Use $skills-refresh to check whether our pinned platform facts are still true."

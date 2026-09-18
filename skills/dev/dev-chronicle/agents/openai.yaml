@@ -1,4 +1,0 @@
-interface:
-  display_name: "dev-chronicle"
-  short_description: "The project's story — entries and the catch-me-up digest"
-  default_prompt: "Use $dev-chronicle to catch me up on this project."

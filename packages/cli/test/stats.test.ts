@@ -503,6 +503,70 @@ describe('stats push', () => {
   const stats = (...parts: string[]) => join(clone, 'stats', ...parts)
   const journalFor = (room: string) => join(statsDir(home), 'push-pending', `${room.replace('/', '__')}.json`)
 
+  // F13: a stats commit moves the copy's HEAD. Sync and the profile reader both refuse a copy
+  // sitting on a commit the record does not name, so the push has to say where it left the copy —
+  // otherwise one hourly push takes this machine's whole profile down until the next fetch.
+  test('a push records the commit it leaves behind, so the profile and the next sync still work', async () => {
+    const { loadProfile, readFactoryConfig, factoryConfigPath } = await import('../src/control-room.ts')
+    const { resolveTarget, syncControlRoom } = await import('../src/sync.ts')
+    const devMd = readFileSync(join(repo, '.vegastack', 'dev.md'), 'utf8')
+    // Give the room a policy to resolve, put it on the remote, and let sync make the copy — the
+    // whole point is that the copy stays the one the record names from there on.
+    const seed = join(base, 'seed')
+    git(base, 'clone', '-q', origin, seed)
+    spawnSync('git', ['-C', seed, 'config', 'user.name', 't']); spawnSync('git', ['-C', seed, 'config', 'user.email', 't@t'])
+    mkdirSync(join(seed, 'groups', 'dev'), { recursive: true })
+    writeFileSync(join(seed, 'org.md'), 'tests: required   # locked\n')
+    writeFileSync(join(seed, 'groups', 'dev', 'group.md'), 'merge: rebase\n')
+    git(seed, 'add', '-A'); git(seed, 'commit', '-q', '-m', 'policy'); git(seed, 'push', '-q', 'origin', 'main')
+    rmSync(clone, { recursive: true, force: true })
+    const recorded = () => readFactoryConfig(readFileSync(factoryConfigPath(home), 'utf8')).controlRooms.acme!
+    const head = () => spawnSync('git', ['-C', clone, 'rev-parse', 'HEAD']).stdout.toString().trim()
+
+    const config = readFactoryConfig(readFileSync(factoryConfigPath(home), 'utf8'))
+    const target = resolveTarget({ devMdText: devMd, config, home })!
+    const synced = await syncControlRoom({ target, config, now: Date.parse('2026-09-18T11:00:00Z') })
+    expect(synced.message).toContain('control room acme')
+    expect(synced.ok).toBe(true)
+    spawnSync('git', ['-C', clone, 'config', 'user.name', 't']); spawnSync('git', ['-C', clone, 'config', 'user.email', 't@t'])
+    expect(loadProfile({ home, devMd, now: Date.parse('2026-09-18T11:00:00Z') }).ok).toBe(true)
+
+    write(event('a', '2026-09-18T11:30:00.000Z'))
+    const pushed = push(Date.parse('2026-09-18T12:00:00Z'))
+    expect(pushed).toMatchObject({ ok: true, action: 'pushed' })
+    expect(head()).not.toBe(synced.sha)
+    expect(recorded().sha).toBe(head())
+
+    const after = loadProfile({ home, devMd, now: Date.parse('2026-09-18T12:00:00Z') })
+    expect(after.blocks).toEqual([])
+    expect(after.values.tests).toBe('required')
+    expect(after.values.merge).toBe('rebase')
+
+    const again = await syncControlRoom({
+      target, config: readFactoryConfig(readFileSync(factoryConfigPath(home), 'utf8')),
+      now: Date.parse('2026-09-18T13:00:00Z'), force: true,
+    })
+    expect(again.ok).toBe(true)
+    expect(again.sha).toBe(head())
+  })
+
+  // The copy belongs to the org, not to this command: sync fetches and checks out in it, and both
+  // move its HEAD. A push that went ahead anyway could commit into a half-finished checkout.
+  test('a push gives up rather than committing into a copy another run holds', async () => {
+    const { lockOrgSync } = await import('../src/control-room.ts')
+    const unlock = lockOrgSync(clone)!
+    expect(unlock).toBeTruthy()
+    try {
+      write(event('a', '2026-09-18T11:00:00.000Z'))
+      const held = push(Date.parse('2026-09-18T12:00:00Z'))
+      expect(held).toMatchObject({ ok: true, action: 'none' })
+      expect(held.message).toMatch(/another run is using/)
+      expect(existsSync(join(clone, 'stats'))).toBe(false)
+    } finally { unlock() }
+    // With the lock free the same push goes through.
+    expect(push(Date.parse('2026-09-18T12:00:00Z'))).toMatchObject({ ok: true, action: 'pushed' })
+  }, 20_000)
+
   test('turns land in the control room as one file per operator, machine and day', () => {
     write(event('a', '2026-09-17T10:00:00.000Z'), event('b', '2026-09-18T11:00:00.000Z'))
     const result = push(Date.parse('2026-09-18T12:00:00Z'))

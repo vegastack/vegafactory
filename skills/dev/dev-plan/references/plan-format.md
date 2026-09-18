@@ -35,16 +35,6 @@ The comment a plan lives in, verbatim. dev-implement executes it task by task an
 **Revisions:** (absent until a post-approval edit; then one line per edit)
 ````
 
-## Fleet parallel declaration
-
-Use this optional field only when the whole selected task set may overlap another independently approved issue across registered machines. It is one structural line after `**Constraints:**` and before `**Independent groups:**` or `### Tasks`:
-
-```markdown
-**Fleet parallel:** {"schemaVersion":1,"eligible":true,"taskIds":["137-T4"],"resources":["control-room:coordination"]}
-```
-
-The closed object has exactly `schemaVersion:1`, literal `eligible:true`, `taskIds` and `resources`. Task IDs equal the current approved selected task list in order; each list is unique and capped at 64, each resource matches `[a-z0-9][a-z0-9._:/-]{0,127}`, and the JSON is at most 8 KiB. Paths are never declared here: the parser derives their unique union from those tasks' single structural `Files —` clauses. Nonliteral, non-normalized, empty or repository-wide shared paths refuse eligibility. A missing, fenced, duplicated, misplaced or invalid declaration is repository-exclusive; config, labels, model output, observed diffs and shared state cannot replace it.
-
 ## Independent groups
 
 Optional. Declare it only when the sibling sub-issues below could run at the same time; its absence means they run in plan order, which is the safe default. A dispatcher runs the declared groups at the same time; undeclared siblings run one at a time.

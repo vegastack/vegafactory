@@ -1,0 +1,8 @@
+{
+  "dev-chronicle": {
+    "group": "dev",
+    "since": "0.20.0",
+    "replacedBy": "dev-status",
+    "note": "The chronicle is a mode of dev-status: same entry format, same digest, one skill."
+  }
+}

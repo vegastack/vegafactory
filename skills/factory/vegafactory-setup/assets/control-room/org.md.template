@@ -1,9 +1,8 @@
 # {{org}} — org profile
 
-The org's global answers. Everything here applies to everyone, in every group and every repo. Group defaults live in `groups/<g>/group.md`; org locks and administration stay here — layout, precedence, and the read path are the vegafactory-setup skill's `references/control-room.md`.
+The org's global answers. Everything here applies to everyone, in every group and every repo. Group defaults live in `groups/<g>/group.md` — layout, precedence, and the read path are the vegafactory-setup skill's `references/control-room.md`.
 
 org: {{org}}
-policy-schema: 2
 
 ## Goals
 
@@ -11,27 +10,27 @@ policy-schema: 2
 
 ## What applies to everyone
 
-- language: {{language}}                  # the language every artifact is written in
-- dates: DD-MM-YYYY                       # the date format in every register, approval, and revision line
+- language: {{language}} — the language every artifact is written in.
+- dates: DD-MM-YYYY — the date format in every register, approval, and revision line.
 - Nothing ships without the operator's explicit instruction — no push to a default branch, merge, tag, publish, or deploy on green checks, schedules, or standing approvals alone. Per issue the operator gives two words: an ack to build and "ship it" to land it.
 - Secrets are named here, never written here. A runbook names `{{secret-name-example}}`; the value lives in the secret store that name points at.
 
-## Statistics policy
+## Knobs
 
-Confirm reporting and quality choices for this organization. Ordinary values inherit; mandatory values and exact exceptions are authored in the organization authority object. The legacy stats-override line below remains readable but is not group delegation.
+Every line here is a default a group or a repo may answer differently — except a line whose comment begins `locked`, which is the org's alone. Lock a line only where one answer must hold everywhere; a lock a group needs to work around is the wrong lock. A locked `harness-policy:` must name all six stages, because a partial lock leaves the rest unanswerable.
 
-stats: on
-stats-people: off
-stats-override: allowed
+provider-mode: subscription-only   # locked — runs bill to the operator's subscription, never an API key
+stats: on                          # on | off — whether a run is recorded at all
+stats-people: off                  # on | off — whether a record carries per-person fields
 
 ## Automation identity
 
 The names of the org's automation identity. Values live in GitHub org settings; nothing here is a secret.
 
 app: VegaFactory   # the public GitHub App every automated write uses; humans still own issues
-app-slug: vegafactory   # GitHub's slug for the App name — confirm it on the App settings page; a bot edit shows the actor <app-slug>[bot]
-app-install: {{installation-id}}   # gh api orgs/{{org}}/installations — filled after the operator installs the App
-app-secrets: variable VEGAFACTORY_APP_ID · secret VEGAFACTORY_APP_PRIVATE_KEY   # names only; the values live in GitHub org settings and nowhere else
+app-slug: vegafactory   # GitHub's slug for the App name — a bot edit shows the actor <app-slug>[bot]
+app-install: {{installation-id}}   # the installation id, read from the org's installations endpoint
+app-secrets: variable VEGAFACTORY_APP_ID · secret VEGAFACTORY_APP_PRIVATE_KEY   # names only
 app-permissions: Issues read/write · Projects (organization) read/write · Metadata read · Pull requests read/write · Contents read   # widening any of these is a register line
 
 ## Unconfirmed
@@ -39,22 +38,3 @@ app-permissions: Issues read/write · Projects (organization) read/write · Meta
 Lines the operator has not confirmed yet. Each is a question the next run asks again rather than an answer anyone may assume.
 
 - (none)
-
-## Explicit authority
-
-Confirm the org admin login against people.csv and verified requester context before replacing the placeholder. Preserve existing assignments on rerun. The empty locks/delegations below make no hidden house-policy choice; render the organization's confirmed constraints and exact reporting exceptions here.
-
-```vsk-policy
-{
-  "schemaVersion": 2,
-  "locked": {},
-  "delegations": [],
-  "administration": {
-    "orgAdmins": ["{{confirmed-org-admin-login}}"],
-    "groupAdmins": {},
-    "groupAdminCapabilities": {}
-  }
-}
-```
-
-Only org admins appoint/remove admins. Confirm optional group capabilities and machine enrollment through the control-room reference's capability/fleet contract. Render registry entries disabled until qualification, preserving other machines. Local bootstrap coordinates, OS accounts, paths and credentials do not belong in this authority object. Each required unknown field blocks completion; preserve explicit optional declines. Learning settings, if selected, are `learning: normal-work|off` and `learning-adoption: scoped-reversible|propose-only`; verified lessons cannot change approvals, quality/privacy rules or enable native vendor memory.

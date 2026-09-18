@@ -174,10 +174,9 @@ describe('gatherStatus over the gh stub', () => {
       expect(all.needsYou.map((i: any) => i.number)).toEqual([11, 12, 13, 14])
     } finally { delete process.env.VSK_GH; delete process.env.GH_STUB_DIR }
   })
-  test('readKnobs: explicit workflow labels and custom register parse; ambiguous legacy labels refuse', () => {
-    const labels = { needsOperator: 'waiting', needsPlan: 'planning', ready: 'go', working: 'doing', forOperator: 'done' }
-    const knobs = readKnobs('workflow-labels: ' + JSON.stringify(labels) + '\ndecisions: docs/register.md\n')
-    expect(knobs.states).toEqual(['waiting', 'planning', 'go', 'doing', 'done'])
+  test('readKnobs: the fixed state set and a custom register parse; an incomplete labels line refuses', () => {
+    const knobs = readKnobs('labels: waiting-on-operator planning queued in-progress ready-to-ship small\ndecisions: docs/register.md\n')
+    expect(knobs.states).toEqual(['waiting-on-operator', 'planning', 'queued', 'in-progress', 'ready-to-ship'])
     expect(knobs.risky).toBe('risky')
     expect(knobs.register).toBe('docs/register.md')
     expect(() => readKnobs('labels: waiting planning go doing done hot q s l parent\n')).toThrow()
@@ -195,7 +194,7 @@ describe('control-room drift', () => {
   const devMd = [
     '## Knobs',
     'tests: logic-only   # this repo overrode the group default',
-    'gates: 3',
+    'merge: rebase',
     'control-room: vegastack/vegafactory-control-room#dev@a1b2c3d   # org control room',
   ].join('\n')
 
@@ -212,7 +211,7 @@ describe('control-room drift', () => {
   test('drift lists only knobs the control room and the repo both name with different values', () => {
     const drift = controlRoomDrift({
       devMdText: devMd,
-      orgText: 'stats: on\ngates: 3\n',
+      orgText: 'stats: on\nmerge: rebase\n',
       groupText: 'tests: required\nchronicle-style: story\n',
       cloneSha: 'e4f5a6b',
     })
@@ -221,7 +220,7 @@ describe('control-room drift', () => {
   })
 
   test('a matching sha with no differing knob is not drift', () => {
-    const drift = controlRoomDrift({ devMdText: devMd, orgText: 'gates: 3\n', groupText: 'tests: logic-only\n', cloneSha: 'a1b2c3d' })
+    const drift = controlRoomDrift({ devMdText: devMd, orgText: 'merge: rebase\n', groupText: 'tests: logic-only\n', cloneSha: 'a1b2c3d' })
     expect(drift).toMatchObject({ behind: false, knobs: [] })
   })
 

@@ -3,7 +3,7 @@
 <!-- vsk-dev:start -->
 ## Dev workflow
 
-Read `.vegastack/dev.md` (stack, commands, knobs); if missing, run dev-setup first. The stages are the dev-family skills: dev-setup (bootstrap) · dev-intake (ideas to briefs) · dev-plan (approved briefs to plans) · dev-architect (stack judgment) · dev-implement (dark builds) · dev-debug (reproduce-first fixes) · dev-review (independent review) · dev-ship (gated landing) · dev-status (the operator's board) · dev-chronicle (the project's story).
+Read `.vegastack/dev.md` (stack, commands, knobs); if missing, run dev-setup first. The stages are the dev-family skills: dev-setup (bootstrap) · dev-intake (ideas to briefs) · dev-plan (approved briefs to plans) · dev-architect (stack judgment) · dev-implement (dark builds) · dev-debug (reproduce-first fixes) · dev-review (independent review) · dev-ship (gated landing) · dev-status (the operator's board and the project's story).
 
 Work flows through GitHub issues, labeled per dev.md's `labels:` knob; read and write them with `vegafactory issue` (never raw `gh` for issue content); artifact formats follow dev-setup's `references/conventions.md`. Route each request by kind:
 
@@ -15,9 +15,9 @@ Work flows through GitHub issues, labeled per dev.md's `labels:` knob; read and 
 | a `queued` issue, a resume handover, or corrections on `ready-to-ship` | dev-implement |
 | a trivial fix asked in chat — one or two files, no new dependency, no behaviour beyond the words | dev-implement's direct path |
 | "ship it", "make the PR", "merge", "release" | dev-ship |
-| "status", "catch me up" | dev-status, dev-chronicle |
+| "status", "catch me up" | dev-status |
 
-**Local, reversible actions proceed; actions that are hard to reverse, affect shared systems, or are visible to others wait for the operator's word** — push to the default branch, merge, tag, publish, deploy, force-push, a hard reset, branch or worktree deletion, `--no-verify`; green checks, schedules, and standing approvals authorise none of them. Per issue the operator gives two words: an ack on the brief or plan (it authorizes building) and "ship it" (it authorizes that issue's PR, merge, release and cleanup); record both with `vegafactory issue ack`. Behavior changes carry their changelog entry (dev.md's `changelog:` knob) before hand-back; after merge, dev.md's `## Ship` runbook says which steps need the operator's word.
+**Local, reversible actions proceed; actions that are hard to reverse, affect shared systems, or are visible to others wait for the operator's word** — push to the default branch, merge, tag, publish, deploy, force-push, a hard reset, branch or worktree deletion, `--no-verify`; green checks, schedules, and standing approvals authorise none of them. Per issue the operator gives two words: an ack on the brief or plan (it authorizes building) and "ship it" (it authorizes that issue's PR, merge and cleanup — a tag push still asks); record both with `vegafactory issue ack`. Behavior changes carry their changelog entry (dev.md's `changelog:` knob) before hand-back; after merge, dev.md's `## Ship` runbook says which steps need the operator's word.
 
 Agent conduct: say what you mean — when a literal phrase is available, use it. Lead with the outcome, for a reader who did not watch the work. Report progress only against a tool result from this session; say plainly what is unverified. Pause for the operator only for a destructive or irreversible action, a real scope change, or input only they can provide; then ask and end the turn instead of promising. The approved brief or plan is the scope; extras are a closing note. Edit files surgically rather than rewriting them whole.
 

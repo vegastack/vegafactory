@@ -15,12 +15,11 @@ Run from the project root, with `<path-to-skill-scan>` standing for wherever thi
 
 ```sh
 node <path-to-skill-scan>/scripts/skill-scan.mjs --json           # the gate: reads the knobs and the project baseline
-node <path-to-skill-scan>/scripts/skill-scan.mjs --llm            # adds the semantic pass — advisory, never a gate
 node <path-to-skill-scan>/scripts/skill-scan.mjs --root ~/Downloads/some-skill   # vet a skill you did not write
 node <path-to-skill-scan>/scripts/skill-scan.mjs --no-provision   # this run installs and upgrades nothing
 ```
 
-**Exit codes are the contract: 0 pass (or skipped) · 1 pass-with-warnings · 2 blocked.** Exit 2 stops the hand-back — fix the finding, or take it to the operator for a justified baseline entry. Widening a rule to reach green is the one move this guard exists to prevent.
+**Exit codes are the contract: 0 pass (or skipped) · 1 pass-with-warnings · 2 blocked.** Exit 2 stops the hand-back — fix the finding, or take it to the operator for a justified baseline entry. Widening a rule to reach green is the one move this guard exists to prevent. The scan is always the deterministic pass; there is no semantic mode, because a report no check gates on is a network call nobody reads.
 
 ## The two knobs, both in `.vegastack/dev.md`
 
@@ -50,10 +49,6 @@ Two rules the guard enforces rather than trusts:
 
 It blocks on any unsuppressed HIGH or CRITICAL finding and never on the aggregate risk score, which is inflated by documentation of the very mechanics being scanned and deflated by unrelated suppressions. A degraded scan blocks too: a run whose analyzer failed reports a *higher* score with fewer filtered findings, so its silence proves nothing. An upgrade that changed anything is reported before the findings, because a new finding after an upgrade is the tool having learned something.
 
-## Vetting a skill you did not write
+## Findings that have nowhere to land
 
-Point `--root` at the directory before it reaches your agent. The report carries each finding's rule, severity, and `file:line`, plus every entry the baseline suppressed, so the judgement is traceable rather than a score taken on trust. Treat a hit as a candidate finding, not a verdict — and never downgrade an unexplained HIGH or CRITICAL on the strength of who published it.
-
-## A scan with no issue attached
-
-A standalone scan, or the pre-publish guard in a project's `## Ship` runbook, has no review comment to land in, so its findings go to `dev-intake` as a `risky` issue — a finding posted somewhere convenient is a finding nobody owns. Offer the operator one `risky` issue whose brief carries the findings, their locations, and what is known about each cause; intake's questions, scope call, and approval follow.
+Point `--root` at a stranger's skill before it reaches your agent; treat a hit as a candidate finding, never a verdict, and never downgrade an unexplained HIGH or CRITICAL on the strength of who published it. A scan run outside a review — a standalone vetting run, or the pre-publish guard in a project's `## Ship` runbook — has no review comment to land in, so its findings go to `dev-intake` as one `risky` issue carrying the findings, their locations and what is known about each cause. A finding posted somewhere convenient is a finding nobody owns.
