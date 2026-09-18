@@ -281,16 +281,36 @@ export function migrateHome(deps: {
   return { action: 'moved', reason: `moved this machine's state from ${from} to ${to}`, moved }
 }
 
-// Every string anywhere in the record that begins with the older home, moved to the new one. It
-// walks the whole document rather than named fields: the snapshot entries nest, and a path this
+// Every string anywhere in a record that names a path inside the older home, moved to where that
+// path actually went. Two entries change their name on the way and not merely their address —
+// `.tmp/stats` became `stats`, `worktree-roots.json` became `worktrees.json` — so a blind swap of
+// the home prefix would produce paths that do not exist. The move table is the authority.
+//
+// It walks the whole document rather than named fields: the snapshot entries nest, and a path this
 // release has not heard of is still a path that will be wrong tomorrow.
 export function rebasePaths(value: unknown, from: string, to: string): { value: unknown; changed: number } {
+  const routes = MOVES
+    .map((entry) => ({ was: join(from, ...entry.from), now: join(to, ...entry.to) }))
+    // Longest first, so `<home>/.tmp/stats` is matched before `<home>/.tmp` ever could be.
+    .sort((a, b) => b.was.length - a.was.length)
+
   let changed = 0
+  const moveOne = (path: string): string | null => {
+    for (const route of routes) {
+      if (path === route.was) return route.now
+      if (path.startsWith(route.was + sep)) return route.now + path.slice(route.was.length)
+    }
+    // Inside the older home but not something this move carries: it is gone, and saying so is
+    // better than pointing at an address in the new home that was never written.
+    return path === from || path.startsWith(from + sep) ? null : path
+  }
+
   const walk = (node: unknown): unknown => {
     if (typeof node === 'string') {
-      if (node !== from && !node.startsWith(from + sep)) return node
+      const moved = moveOne(node)
+      if (moved === null || moved === node) return node
       changed += 1
-      return to + node.slice(from.length)
+      return moved
     }
     if (Array.isArray(node)) return node.map(walk)
     if (node && typeof node === 'object') {
@@ -315,9 +335,14 @@ export function movePath(from: string, to: string, deps: {
   }
 }
 
-// Every component is checked, not just the last: an intermediate symlink would redirect the read
-// just as surely as a symlinked leaf, and `ENOTDIR` on the way down means an ancestor is a file —
-// which is "something is wrong here", not "nothing is here".
+// Written beside and renamed over, so a failure part-way leaves the original whole rather than a
+// truncated file — a journal half-written is a journal `recoverPush` cannot act on.
+function writeExactly(path: string, body: string, mode: number): void {
+  const beside = `${path}.moving`
+  writeFileSync(beside, body, { mode: mode & 0o777 })
+  renameSync(beside, path)
+}
+
 export function pathKind(path: string): Kind {
   const parent = dirname(path)
   if (parent !== path) {
@@ -361,7 +386,9 @@ export function settleHome(report: (line: string) => void = console.error): Migr
         changed = rebasedValue.changed
         if (changed > 0) output = `${JSON.stringify(rebasedValue.value, null, 2)}\n`
       } catch { /* not JSON this release understands: carried across exactly as it is */ }
-      writeFileSync(target, output)
+      // The settings file is published owner-only, and a rewrite that widened it would hand the
+      // next reader on a shared machine this org's control-room addresses.
+      writeExactly(target, output, lstatSync(source).mode)
       rmSync(source, { force: true })
       return changed
     },
@@ -370,9 +397,17 @@ export function settleHome(report: (line: string) => void = console.error): Migr
       for (const name of (() => { try { return readdirSync(directory) } catch { return [] } })()) {
         if (!name.endsWith('.json')) continue
         const path = join(directory, name)
+        // A symlink here would be followed and its target overwritten — somewhere neither home
+        // names. Only an ordinary file is a journal.
+        let mode: number
+        try {
+          const stat = lstatSync(path)
+          if (!stat.isFile()) continue
+          mode = stat.mode
+        } catch { continue }
         try {
           const rebasedValue = rebasePaths(JSON.parse(readFileSync(path, 'utf8')), from, to)
-          if (rebasedValue.changed > 0) { writeFileSync(path, `${JSON.stringify(rebasedValue.value, null, 2)}\n`); changed += rebasedValue.changed }
+          if (rebasedValue.changed > 0) { writeExactly(path, `${JSON.stringify(rebasedValue.value, null, 2)}\n`, mode); changed += rebasedValue.changed }
         } catch { /* leave anything unreadable exactly as it is */ }
       }
       return changed

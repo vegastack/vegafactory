@@ -465,6 +465,29 @@ describe('a failed copy leaves the original standing', () => {
 // `safeClonePath` insists that path is inside the store. Move the files and leave the record
 // alone and every control-room read fails closed — the exact skew this module exists to prevent.
 describe('the record moves with the files', () => {
+  test('a recorded path is moved to where that path actually went, not merely re-homed', () => {
+    // Two entries change their name and not only their address, so a blind prefix swap would
+    // produce paths that do not exist.
+    const { value, changed } = rebasePaths({
+      spool: '/h/.vegastack/.tmp/stats/events.jsonl',
+      registry: '/h/.vegastack/worktree-roots.json',
+      key: '/h/.vegastack/vegafactory-app.pem',
+    }, '/h/.vegastack', '/h/.vegafactory')
+    expect(changed).toBe(3)
+    expect(value).toEqual({
+      spool: '/h/.vegafactory/stats/events.jsonl',
+      registry: '/h/.vegafactory/worktrees.json',
+      key: '/h/.vegafactory/worker/app.pem',
+    })
+  })
+
+  test('a path inside the older home that this move does not carry is left as it is', () => {
+    // Pointing it into the new home would name an address nothing ever wrote.
+    const { value, changed } = rebasePaths({ gone: '/h/.vegastack/policy-snapshots/acme/snap-1' }, '/h/.vegastack', '/h/.vegafactory')
+    expect(changed).toBe(0)
+    expect(value).toEqual({ gone: '/h/.vegastack/policy-snapshots/acme/snap-1' })
+  })
+
   test('every recorded path under the older home is rebased onto the new one', () => {
     const before = {
       schemaVersion: 2,
@@ -478,10 +501,12 @@ describe('the record moves with the files', () => {
       elsewhere: '/home/mk/other/thing',
     }
     const { value, changed } = rebasePaths(before, '/home/mk/.vegastack', '/home/mk/.vegafactory')
-    expect(changed).toBe(2)
+    expect(changed).toBe(1)
     const after = value as typeof before
     expect(after.controlRooms.acme.path).toBe('/home/mk/.vegafactory/control-room/acme')
-    expect(after.controlRooms.acme.snapshots['acme/app']!.contentPath).toBe('/home/mk/.vegafactory/policy-snapshots/acme/snap-1')
+    // The snapshot tree is not carried by this move, so its path stays as written rather than
+    // pointing at somewhere nothing was ever put.
+    expect(after.controlRooms.acme.snapshots['acme/app']!.contentPath).toBe('/home/mk/.vegastack/policy-snapshots/acme/snap-1')
     // Everything else is left exactly as it was, including a remote that is not a path at all.
     expect(after.controlRooms.acme.remote).toBe('https://github.com/acme/room.git')
     expect(after.elsewhere).toBe('/home/mk/other/thing')
@@ -580,4 +605,13 @@ describe('the journals inside the spool move too', () => {
     const journal = JSON.parse(readFileSync(join(home, '.vegafactory', 'stats', 'push-pending', 'acme__room.json'), 'utf8')) as { room: { path: string } }
     expect(journal.room.path).toBe(join(home, '.vegafactory', 'control-room', 'acme'))
   })
+})
+
+// Half the suite calls the path helpers directly with a temporary home and no environment of its
+// own, so the ambient variable would reach past every one of them — `statsDir(home)` would answer
+// about somewhere else entirely, and a test would quietly assert about the wrong directory. The
+// variable is the whole home when it is set, by contract, so the suite requires it unset rather
+// than pretending otherwise.
+test('the suite runs with no ambient home named, because the helpers would obey it', () => {
+  expect(process.env[HOME_VARIABLE] ?? '').toBe('')
 })
