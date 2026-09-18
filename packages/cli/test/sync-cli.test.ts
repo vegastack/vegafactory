@@ -67,7 +67,7 @@ test('missing target, malformed settings and an unknown subcommand preserve sett
   expect(run(f.home, f.repo, ['sync', '--org', 'acme', '--json']).exitCode).toBe(2)
   const unknown = run(f.home, f.repo, ['sync', 'inspect'])
   expect(unknown.exitCode).toBe(1)
-  expect(unknown.stderr.toString()).toContain('sync takes no subcommand')
+  expect(unknown.stderr.toString()).toContain('sync takes no subcommand except profile')
   expect(await readFile(f.settingsPath, 'utf8')).toBe(saved)
   for (const text of ['{bad', '{"schemaVersion":99,"operator":"retained"}']) {
     await writeFile(f.settingsPath, text)
@@ -75,6 +75,41 @@ test('missing target, malformed settings and an unknown subcommand preserve sett
     expect(await readFile(f.settingsPath, 'utf8')).toBe(text)
   }
 })
+// The one supported way to read the room. Every check the reader makes runs behind it, which is
+// the point: a skill that opens org.md in the copy instead goes around all of them.
+test('sync profile prints the resolved profile, its sources and its refusals', async () => {
+  const f = await project('profile')
+  const bare = run(f.home, f.repo, ['sync', 'profile', '--json'])
+  expect(bare.exitCode).toBe(1)
+  expect(JSON.parse(bare.stdout.toString()).blocks.join(' ')).toMatch(/no validated commit — run: vegafactory sync/)
+
+  expect(run(f.home, f.repo, ['sync', '--json']).exitCode).toBe(0)
+  const result = run(f.home, f.repo, ['sync', 'profile', '--json'])
+  expect(result.exitCode).toBe(0)
+  const profile = JSON.parse(result.stdout.toString())
+  expect(profile.blocks).toEqual([])
+  expect(profile.ok).toBe(true)
+  expect(profile.room).toMatchObject({ org: 'acme', repo: 'acme/room', group: 'dev' })
+  expect(profile.sha).toMatch(/^[a-f0-9]{40}$/)
+  expect(profile.values).toMatchObject({ tests: 'required', merge: 'rebase' })
+  expect(profile.sources).toMatchObject({ tests: 'org', merge: 'group' })
+  expect(profile.locked).toEqual(['tests'])
+
+  // Plain output names the layer each value came from.
+  const plain = run(f.home, f.repo, ['sync', 'profile'])
+  expect(plain.exitCode).toBe(0)
+  expect(plain.stdout.toString()).toMatch(/merge: rebase\s+# group/)
+
+  // A repo that tries to answer a locked line is told, and the command exits non-zero.
+  await writeFile(join(f.repo, '.vegastack/dev.md'), 'repo: acme/app\ncontrol-room: acme/room#dev\ntests: none\n')
+  const refused = run(f.home, f.repo, ['sync', 'profile', '--json'])
+  expect(refused.exitCode).toBe(1)
+  const blocked = JSON.parse(refused.stdout.toString())
+  expect(blocked.ok).toBe(false)
+  expect(blocked.blocks.join(' ')).toMatch(/tests is locked in org\.md/)
+  expect(blocked.values.tests).toBe('required')
+})
+
 // A control-room line that cannot be read must stop the CLI, not resolve to "no control room".
 test('a malformed or duplicated control-room line refuses at the CLI', async () => {
   for (const [name, profile, pattern] of [

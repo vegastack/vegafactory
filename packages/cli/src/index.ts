@@ -76,6 +76,7 @@ Agents:
 
 Control room:
   sync [--org ORG] [--force]             refresh this machine's copy of the org control room
+  sync profile [--json]                  the resolved profile: org, then group, then this repo
 
 Usage numbers (from the harnesses' own session logs — counts only, never prompts or code):
   stats collect|push|show ...            read new turns, share them, print them ("stats --help")
@@ -725,14 +726,31 @@ async function doctor(options: Options) {
 // It refreshes by default — a hook calling a dry-run-by-default verb would be a silent no-op — and
 // writes nothing outside the copy's path and ~/.vegastack/factory.json.
 async function sync(options: Options) {
-  const {factoryConfigPath,readFactoryConfig}=await import('./control-room.ts')
+  const {factoryConfigPath,loadProfile,readFactoryConfig}=await import('./control-room.ts')
   const {resolveTarget,syncControlRoom}=await import('./sync.ts')
-  if (options.skill) throw new Error('sync takes no subcommand')
+  if (options.skill && options.skill !== 'profile') throw new Error('sync takes no subcommand except profile')
   const base = baseFor('project', options.dir)
   const devMdPath = join(base, '.vegastack', 'dev.md')
   const devMdText = await exists(devMdPath) ? await readFile(devMdPath, 'utf8') : ''
   const home = homedir()
   const statePath = factoryConfigPath(home)
+
+  // The one way to read the control room. It resolves org, group and repo through the checked copy
+  // — every identity and symlink check included — so nothing has to open a file in the checkout
+  // and hope it is the file the record describes.
+  if (options.skill === 'profile') {
+    const profile = loadProfile({ home, devMd: devMdText })
+    if (options.json) console.log(JSON.stringify(profile, null, 2))
+    else {
+      console.log(profile.room ? `control room ${profile.room.repo}${profile.room.group ? '#' + profile.room.group : ''}${profile.sha ? ' at ' + profile.sha.slice(0, 7) : ''}${profile.stale ? ' (stale)' : ''}` : 'this repo names no control room — skill defaults apply')
+      for (const [key, value] of Object.entries(profile.values).sort(([a], [b]) => a.localeCompare(b))) {
+        console.log(`  ${key}: ${typeof value === 'object' ? JSON.stringify(value) : value}   # ${profile.sources[key] ?? 'default'}`)
+      }
+      for (const block of profile.blocks) console.error(`  ! ${block}`)
+    }
+    process.exitCode = profile.ok ? 0 : 1
+    return
+  }
 
   let config
   try {

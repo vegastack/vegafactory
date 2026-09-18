@@ -150,6 +150,42 @@ test('a settings failure after the checkout puts the copy back', async () => {
   }
 })
 
+// F14: without a recorded commit there is nothing to hold the copy to, so `checkout -B` would
+// take a local commit over the side without a word.
+test('an existing copy with no recorded commit is refused before anything is fetched', async () => {
+  const f = await fixture('unrecorded')
+  const first = await syncControlRoom({ ...f, now: NOW })
+  expect(first.ok).toBe(true)
+  git(['commit', '-qm', 'local work', '--allow-empty'], first.path)
+  const local = git(['rev-parse', 'HEAD'], first.path)
+
+  for (const sha of [null, undefined, 'not-a-sha']) {
+    const entry = { ...first.config.controlRooms.acme!, sha } as Record<string, unknown>
+    const config = { ...first.config, controlRooms: { ...first.config.controlRooms, acme: entry } }
+    await writeFile(join(f.settings, 'factory.json'), JSON.stringify(serializeFactoryConfig(config as never)))
+    const result = await syncControlRoom({ ...f, config: config as never, now: NOW + 10 * 60_000, force: true })
+    expect(result.action, String(sha)).toBe('refused')
+    expect(result.message).toMatch(/no sync recorded its commit/)
+    expect(git(['rev-parse', 'HEAD'], first.path)).toBe(local)
+  }
+})
+
+// F15: a half-made repository left by a failed first fetch would be "an existing clone" to the
+// next run, which would then refuse it for having no recorded commit — a dead end on disk.
+test('a failed first fetch leaves nothing behind, and the retry clones', async () => {
+  const f = await fixture('failed-clone')
+  const missing = await syncControlRoom({ ...f, target: { ...f.target, branch: 'no-such-branch' }, now: NOW })
+  expect(missing.ok).toBe(false)
+  expect(await exists(f.target.clonePath)).toBe(false)
+  expect(await exists(f.target.clonePath + '.lock')).toBe(false)
+  expect(await readFile(join(f.settings, 'factory.json'), 'utf8')).not.toContain('"sha": "')
+
+  const retry = await syncControlRoom({ ...f, now: NOW })
+  expect(retry.ok).toBe(true)
+  expect(retry.action).toBe('clone')
+  expect(loadProfile({ home: f.home, devMd: DEV_MD, now: NOW }).ok).toBe(true)
+})
+
 // One sync at a time per org: the second waits for the lock, then finds the first's work already
 // recorded rather than fetching over the same checkout.
 test('a second sync waits for the first and then finds the copy fresh', async () => {

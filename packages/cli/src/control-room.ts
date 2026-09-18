@@ -1,6 +1,6 @@
 import { basename, dirname, isAbsolute, join, resolve, parse as parsePath, sep } from 'node:path'
 import { lstat, mkdir, open, readFile, rename, rm } from 'node:fs/promises'
-import { lstatSync, readFileSync } from 'node:fs'
+import { lstatSync, mkdirSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync } from 'node:fs'
 import { execFileSync } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
 import { parseControlRoomReference, resolvePolicy } from '../../../skills/dev/dev-setup/scripts/effective-policy.mjs'
@@ -143,7 +143,28 @@ export async function updateSettings(root: string, mutate: (settings: SettingsV2
 
 // Long network work happens outside this guard. Never steal it from an unknown/dead owner:
 // interrupted ownership requires offline inspection; elapsed time is not ownership proof.
+export interface SettingsError extends Error {
+  // True when the new settings were already renamed into place before the failure. A caller that
+  // rolls its own work back on a failure has to know: rolling back after a successful publication
+  // is the very split the rollback exists to prevent.
+  published?: boolean
+}
+
+export function publishedAlready(error: unknown): boolean {
+  return (error as SettingsError | null)?.published === true
+}
+
 export async function updateSettingsAtPath(path: string, mutate: (settings: SettingsV2) => SettingsV2 | Promise<SettingsV2>): Promise<SettingsV2> {
+  let published = false
+  try {
+    return await publishSettings(path, mutate, () => { published = true })
+  } catch (error) {
+    if (error instanceof Error) (error as SettingsError).published = published
+    throw error
+  }
+}
+
+async function publishSettings(path: string, mutate: (settings: SettingsV2) => SettingsV2 | Promise<SettingsV2>, onPublished: () => void): Promise<SettingsV2> {
   await assertSafeLocalPath(path)
   await mkdir(dirname(path), { recursive: true, mode: 0o700 })
   const guard = path + '.guard', token = randomUUID(), deadline = Date.now() + 2000
@@ -180,7 +201,7 @@ export async function updateSettingsAtPath(path: string, mutate: (settings: Sett
     // bypassing this guard cannot be given an atomic compare-and-swap guarantee.
     const currentText = await readFile(path, 'utf8').catch(error => { if (error.code === 'ENOENT') return null; throw error })
     if (currentText !== beforeText) throw new Error('settings changed outside the transaction; refusing overwrite')
-    await rename(temporary, path); await syncDirectory(dirname(path))
+    await rename(temporary, path); onPublished(); await syncDirectory(dirname(path))
     return structuredClone(committed)
   } finally {
     await rm(temporary, { force: true })
@@ -229,9 +250,96 @@ export interface Profile {
   stale: boolean
 }
 
-const SHA = /^[a-f0-9]{40}$/
+export const SHA = /^[a-f0-9]{40}$/
+
+// Replacement objects are a per-repository redirect: one hand-written entry under `refs/replace`
+// makes `cat-file` hand back different bytes for a commit or a blob while every identity check
+// still passes. Nothing this tool does wants them, so they are off for every read and every
+// mutating command, by flag and by environment, in this file and in sync.
+export const GIT_NO_REPLACE: readonly string[] = ['--no-replace-objects']
+export const gitEnv = (): NodeJS.ProcessEnv => ({ ...process.env, GIT_NO_REPLACE_OBJECTS: '1', GIT_TERMINAL_PROMPT: '0' })
 const git = (cwd: string, args: string[]) =>
-  execFileSync('git', args, { cwd, encoding: 'utf8', stdio: 'pipe', timeout: 5000, maxBuffer: 4 * 1024 * 1024 })
+  execFileSync('git', [...GIT_NO_REPLACE, ...args], { cwd, encoding: 'utf8', stdio: 'pipe', timeout: 5000, maxBuffer: 4 * 1024 * 1024, env: gitEnv() })
+
+// The copy must hold its own repository, in the ordinary place, with its worktree where it stands.
+// A symlinked `.git`, a `.git` file pointing elsewhere, a separate common directory or a
+// `core.worktree` redirect all move git's reads and writes outside the store the other checks
+// cover — the metadata is as much a part of the copy as the files are.
+export function repositoryReason(path: string): string | null {
+  const dot = join(path, '.git')
+  let info
+  try { info = lstatSync(dot) } catch { return `no Git repository at ${path}` }
+  if (info.isSymbolicLink()) return `refusing a symlinked .git at ${dot}`
+  if (!info.isDirectory()) return `refusing a .git file at ${dot}; the copy must hold its own repository`
+  try {
+    // git answers these with the resolved path, so the comparison is made on resolved paths too.
+    // That is not a hole: `safeClonePath` has already refused every symlinked component of the
+    // copy's own path, so here the two spellings can only differ above the store.
+    const real = realpathSync(path), realDot = join(real, '.git')
+    if (git(path, ['rev-parse', '--absolute-git-dir']).trim() !== realDot) return `the copy keeps its Git metadata outside ${dot}`
+    if (resolve(real, git(path, ['rev-parse', '--git-common-dir']).trim()) !== realDot) return `the copy shares its Git metadata with another repository`
+    if (git(path, ['rev-parse', '--show-toplevel']).trim() !== real) return `the copy's worktree is not ${path}`
+  } catch (error) { return `the repository at ${path} could not be read (${(error as Error).message.split('\n')[0]})` }
+  return null
+}
+
+// One holder at a time per org, shared by every command that touches that org's copy: sync fetches
+// and checks out, `stats push` commits and pushes, and both move the recorded commit. The lock is
+// never stolen from an owner that looks old — an interrupted run is a human's to inspect.
+export function orgLockPath(clonePath: string): string {
+  return clonePath + '.lock'
+}
+
+export async function lockOrg(clonePath: string, waitMs = 120_000): Promise<() => Promise<void>> {
+  const lock = orgLockPath(clonePath)
+  await assertSafeLocalPath(lock)
+  await mkdir(dirname(lock), { recursive: true, mode: 0o700 })
+  const deadline = Date.now() + waitMs
+  for (;;) {
+    try { await mkdir(lock, { mode: 0o700 }); break }
+    catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error
+      if (Date.now() >= deadline) throw new Error(`another run is using ${clonePath}; wait for it to finish, or remove ${lock}`)
+      await new Promise(resolve => setTimeout(resolve, 100))
+    }
+  }
+  return async () => { await rm(lock, { recursive: true, force: true }) }
+}
+
+// The same lock from synchronous code. It waits a few seconds rather than two minutes: the caller
+// is an hourly best-effort push, and a push that skips one hour costs nothing.
+export function lockOrgSync(clonePath: string, waitMs = 5_000): (() => void) | null {
+  const lock = orgLockPath(clonePath)
+  const deadline = Date.now() + waitMs
+  mkdirSync(dirname(lock), { recursive: true, mode: 0o700 })
+  for (;;) {
+    try { mkdirSync(lock, { mode: 0o700 }); break }
+    catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error
+      if (Date.now() >= deadline) return null
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 50)
+    }
+  }
+  return () => { rmSync(lock, { recursive: true, force: true }) }
+}
+
+// A command that moved the copy records where it left it, through the same guarded file every
+// other writer uses. Anything that advances the checkout must call this, or the next read finds a
+// commit the record does not know and refuses a copy that is perfectly good.
+export function recordOrgSha(settingsPath: string, org: string, sha: string): void {
+  if (!SHA.test(sha)) throw new Error('a recorded commit must be a full SHA')
+  const guard = settingsPath + '.guard'
+  mkdirSync(guard, { mode: 0o700 })
+  try {
+    const config = readFactoryConfig(readFileSync(settingsPath, 'utf8'))
+    const entry = config.controlRooms[org]
+    if (!entry) throw new Error(`${org}'s control room is not linked on this machine`)
+    const next = { ...config, controlRooms: { ...config.controlRooms, [org]: { ...entry, sha } } }
+    const temporary = `${settingsPath}.${randomUUID()}.tmp`
+    writeFileSync(temporary, JSON.stringify(serializeFactoryConfig(next), null, 2) + '\n', { mode: 0o600, flag: 'wx' })
+    renameSync(temporary, settingsPath)
+  } finally { rmSync(guard, { recursive: true, force: true }) }
+}
 
 // The copy `sync` left, or the reason it cannot be read. Everything recorded in factory.json is
 // treated as a claim to check, never as a fact: the path must be the one path this org's copy may
@@ -246,12 +354,18 @@ function verifiedRoom(home: string, room: ControlRoomKnob, entry: ControlRoomEnt
   if (entry.path !== path) return refuse(`the recorded copy is not at ${path}`)
   if (entry.repo !== room.repo) return refuse(`the recorded copy is ${entry.repo}, not the ${room.repo} this profile names`)
   if (!SHA.test(entry.sha ?? '')) return refuse('the recorded copy has no validated commit')
+  // No recorded remote means nothing to hold the origin to, and the schema still allows the field
+  // to be missing — so an entry without one is unverifiable rather than unverified.
+  if (typeof entry.remote !== 'string' || !entry.remote.trim()) return refuse('the recorded copy names no origin')
+  if (typeof entry.branch !== 'string' || !entry.branch.trim()) return refuse('the recorded copy names no branch')
   const unsafe = safeClonePath(home, path)
   if (unsafe) return refuse(unsafe)
+  const notARepository = repositoryReason(path)
+  if (notARepository) return refuse(notARepository)
   try {
     if (git(path, ['rev-parse', 'HEAD']).trim() !== entry.sha) return refuse('the copy has moved off the commit sync recorded')
     if (git(path, ['symbolic-ref', '--quiet', '--short', 'HEAD']).trim() !== entry.branch) return refuse(`the copy is not on ${entry.branch}`)
-    if (entry.remote && git(path, ['remote', 'get-url', 'origin']).trim() !== entry.remote) return refuse('the copy has a different origin')
+    if (git(path, ['remote', 'get-url', 'origin']).trim() !== entry.remote) return refuse('the copy has a different origin')
     if (git(path, ['status', '--porcelain', '--untracked-files=all']).trim()) return refuse('the copy has local changes')
   } catch (error) { return refuse(`the copy could not be read (${(error as Error).message.split('\n')[0]})`) }
   return { path, sha: entry.sha!, reason: null }

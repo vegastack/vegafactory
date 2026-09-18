@@ -1,7 +1,8 @@
 import { expect, test } from 'bun:test'
 import { execFileSync } from 'node:child_process'
-import { readFileSync, readdirSync } from 'node:fs'
-import { join } from 'node:path'
+import { cpSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { dirname, join } from 'node:path'
 
 // Commands the lean rebuild removed. Skills and docs must not tell an agent to run them.
 // `stats`, `dashboard` (P7) and `learning` (P8) are real commands again, with new subcommands;
@@ -50,6 +51,41 @@ test('the prepared control-room refresh is exactly the approved layout', () => {
   for (const line of ['app: VegaFactory', 'app-slug: vegafactory', 'app-install: 158664419', 'app-secrets: ', 'app-permissions: ']) expect(org).toContain(line)
   // No pinned model ids: `default` takes each tool's own.
   expect(readFileSync(join(room, 'groups/dev/group.md'), 'utf8')).not.toMatch(/harness-policy:.*\b(fable|sonnet|opus|gpt)-/)
+})
+
+// The prepared room is half the patch; the other half is the removals the summary documents.
+// What matters is the tree the operator is left with, so this runs the documented commands against
+// the live room's current file list and checks what comes out.
+test('applying the documented patch leaves exactly the seven-entry layout', () => {
+  const summary = readFileSync(join(root, 'control-room-refresh/pull-request.md'), 'utf8')
+  const recipe = /```sh\n([\s\S]*?)```/.exec(summary)?.[1] ?? ''
+  const removed = /^git rm -r (.+)$/m.exec(recipe)?.[1]?.split(/\s+/) ?? []
+  expect(removed.length).toBeGreaterThan(0)
+  expect(recipe).toMatch(/^cp -R .*control-room-refresh\/room\/\. \.$/m)
+
+  // The live room as it stands today, from the listing this change was written against.
+  const live = ['README.md', 'boards.md', 'decisions.md', 'groups/dev/decisions.md', 'groups/dev/group.md',
+    'groups/dev/people.csv', 'onboarding/new-repo.md', 'onboarding/new-teammate.md', 'org.md',
+    'people.csv', 'repos.md', 'rules/CODEOWNERS', 'rules/README.md', 'templates/README.md']
+  const applied = mkdtempSync(join(tmpdir(), 'applied-221-'))
+  try {
+    for (const file of live) {
+      mkdirSync(join(applied, dirname(file)), { recursive: true })
+      writeFileSync(join(applied, file), 'live\n')
+    }
+    // git rm -r <paths>
+    for (const path of removed) rmSync(join(applied, path), { recursive: true, force: true })
+    // Every path the recipe names must actually have been there; a stale removal is a dead line.
+    for (const path of removed) expect(live.some((file) => file === path || file.startsWith(path + '/')), path).toBe(true)
+    // cp -R room/. .
+    cpSync(join(root, 'control-room-refresh/room'), applied, { recursive: true })
+
+    expect(readdirSync(applied).sort()).toEqual(['boards.md', 'dispatchers.md', 'groups', 'onboarding', 'org.md', 'repos.md', 'stats'])
+    // Nothing of the old model survives anywhere in the tree.
+    const walk = (dir: string): string[] => readdirSync(dir, { withFileTypes: true })
+      .flatMap((entry) => entry.isDirectory() ? walk(join(dir, entry.name)) : [join(dir, entry.name).slice(applied.length + 1)])
+    expect(walk(applied).filter((file) => readFileSync(join(applied, file), 'utf8') === 'live\n')).toEqual([])
+  } finally { rmSync(applied, { recursive: true, force: true }) }
 })
 
 // The lean control room is exactly these seven; a file the old model had must not come back.

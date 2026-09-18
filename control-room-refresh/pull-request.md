@@ -2,7 +2,7 @@
 
 The lean control room is seven things: `org.md`, `groups/<g>/group.md`, `repos.md`, `dispatchers.md`, `boards.md`, `onboarding/`, `stats/`. The live room still carries the old model. `room/` here is those seven, laid out exactly as they land at the repository root.
 
-`room/` deliberately carries no `README.md`: seven entries are the approved layout, and an eighth would make the prepared room disagree with it. The live repository's own `README.md` is a front page rather than a policy file — keep it, and edit its file table by hand so it lists the seven named above.
+Seven entries are the whole layout, so the live `README.md` goes with the rest of the old model: an eighth top-level entry is one more place for the room's shape to be described, and to drift. What the README said now lives in the skill's `references/control-room.md`, which is the file that has to be right anyway.
 
 **The operator opens this pull request.** Nothing here was pushed or cloned: the room is private, and only a person's own account should write to it.
 
@@ -28,17 +28,17 @@ Removed
 - `people.csv`, `groups/dev/people.csv` — `operators:` in `group.md` is the one place a person is recorded.
 - `decisions.md`, `groups/dev/decisions.md` — a decision register lives in the repo whose dev.md names it.
 - `rules/` (`CODEOWNERS`, `README.md`) and `templates/` — a repo carries its own CODEOWNERS and its own workflow files.
+- `README.md` — the layout is seven entries and this was the eighth. It described the room; `vegafactory-setup`'s `references/control-room.md` describes it now, in the one place that also has to be right for every other org.
 
 ## Applying it
 
 From a clone of the control room, on a branch:
 
 ```sh
-git rm -r people.csv decisions.md groups/dev/people.csv groups/dev/decisions.md rules templates
+git rm -r README.md people.csv decisions.md groups/dev/people.csv groups/dev/decisions.md rules templates
 cp -R /path/to/vegafactory/control-room-refresh/room/. .
-# README.md is untouched by the copy; edit its file table by hand to match this change.
 git add -A
 git commit -m "feat: lean control room"
 ```
 
-Then open the pull request and read the diff before merging. `vegafactory sync` picks the change up on its next refresh.
+The tree that leaves is exactly `org.md`, `groups/`, `repos.md`, `dispatchers.md`, `boards.md`, `onboarding/` and `stats/`. Then open the pull request and read the diff before merging. `vegafactory sync` picks the change up on its next refresh.
