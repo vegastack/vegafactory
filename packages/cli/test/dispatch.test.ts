@@ -7,13 +7,13 @@ import { join } from 'node:path'
 import { claimBody, claimLine } from '../src/claim.ts'
 import {
   APP_ID, STEP_TIMEOUT_MS, TOKEN_MARGIN_MS, agentArgs, appIdentity, appJwt, appKeyPath, assertKeyFile, board, decide, defaultRunStep, dispatchDir,
-  confirmShip, disjointSiblings, pushableBranch, shipWord,
+  acknowledgedPlan, canonicalPath, confirmShip, disjointSiblings, pushableBranch, shipWord,
   drain, filesFromParent, harnessAnswers, hitLimit, hooksWired, listedHere, mintToken, overlaps, parseDispatchArgs,
   parseDispatchers, poll, readActed, readRuns, readiness, recordRun, resetAt, RUNS_KEPT, runDispatch, schedule, serviceCommands, stagePolicy,
   standDown, stepPrompt, tail, unitPath, unitText, unsafeForParallel,
   type Candidate, type Fetch, type Inflight, type PollDeps, type Probe, type RunStep, type StepResult,
 } from '../src/dispatch.ts'
-import { permissionLookup, snapshot } from '../src/issue.ts'
+import { ackBody, artifactHash, permissionLookup, snapshot } from '../src/issue.ts'
 import { cacheDir, syncIssue } from '../src/issue-cache.ts'
 import { FakeGitHub } from './fake-github.ts'
 
@@ -393,6 +393,71 @@ describe('what may run at once', () => {
     expect(filesFromParent(plan, 132)).toEqual(['docs/'])
     expect(filesFromParent(plan, 999)).toEqual([])
     expect(filesFromParent(null, 131)).toEqual([])
+  })
+
+  test('a path is canonical or it is not a file set', () => {
+    // The same file under two spellings is one file, and a set that hid that would read as disjoint.
+    expect(canonicalPath('src/../src/x.ts')).toBe('src/x.ts')
+    expect(canonicalPath('./a//b.ts')).toBe('a/b.ts')
+    expect(canonicalPath('docs/')).toBe('docs/')
+    for (const bad of ['../outside.ts', '/etc/passwd', 'src/**/*.ts', 'a/{b,c}.ts', '', '.']) expect(canonicalPath(bad)).toBeNull()
+    const aliased = ['**Independent groups:**', '- `a` — #1 · Files: `src/../src/x.ts`', '- `b` — #2 · Files: `src/x.ts`', ''].join('\n')
+    expect(filesFromParent(aliased, 1)).toEqual(['src/x.ts'])
+    expect(disjointSiblings(
+      { number: 1, action: 'implement', parent: 9, files: filesFromParent(aliased, 1), from: 'queued' },
+      { number: 2, action: 'implement', parent: 9, files: filesFromParent(aliased, 2), from: 'queued' },
+    )).toBe(false)
+    // One path nobody can check makes the whole set uncheckable, so the siblings run one at a time.
+    const traversal = ['**Independent groups:**', '- `a` — #1 · Files: `src/x.ts`, `../elsewhere.ts`', ''].join('\n')
+    expect(filesFromParent(traversal, 1)).toEqual([])
+  })
+
+  test('only an acked plan that passes the lint authorises a parallel run', () => {
+    const real = readFileSync(join(import.meta.dir, '../../../skills/dev/dev-plan/tests/fixtures/plan-with-groups.md'), 'utf8')
+    const permission = permissionLookup('o/r', gh.runner)
+    const ackFor = (number: number, planBody: string, by = 'mk') => {
+      const snap = snapOf(number)
+      const plan = Object.values(snap.state.comments).find((entry) => entry.type === 'plan')!
+      gh.addComment(number, ackBody({
+        stage: 'plan', by, source: 'session', quote: 'approved',
+        brief: artifactHash(readFileSync(join(cacheDir(root, 'o/r', number), 'issue.md'), 'utf8').split('\n---\n')[1] ?? ''),
+        plan: artifactHash(planBody),
+      }), by)
+      return plan
+    }
+
+    // Acked, linted, from a person with write access: the groups authorise a parallel run.
+    gh.addIssue({ number: 10, labels: ['planning', 'large', 'epic'] })
+    gh.addComment(10, real, 'mk')
+    ackFor(10, real)
+    expect(acknowledgedPlan(snapOf(10), permission).text).toContain('Independent groups')
+    expect(filesFromParent(acknowledgedPlan(snapOf(10), permission).text, 131)).toEqual(['packages/cli/src/dispatch.ts', 'packages/cli/test/dispatch.test.ts'])
+
+    // Posted by an outsider: not a plan at all.
+    gh.addIssue({ number: 11, labels: ['planning', 'large', 'epic'] })
+    gh.addComment(11, real, 'outsider')
+    expect(acknowledgedPlan(snapOf(11), permission).text).toBeNull()
+
+    // Never acked: a plan nobody approved authorises nothing.
+    gh.addIssue({ number: 12, labels: ['planning', 'large', 'epic'] })
+    gh.addComment(12, real, 'mk')
+    expect(acknowledgedPlan(snapOf(12), permission)).toMatchObject({ text: null, reason: expect.stringContaining('not acked') })
+
+    // Acked, then a second plan appears claiming wider groups. The ack is bound to the hash of the
+    // plan it read, so the newcomer does not inherit it: nothing is authorised until it is acked.
+    gh.addIssue({ number: 13, labels: ['planning', 'large', 'epic'] })
+    gh.addComment(13, real, 'mk')
+    ackFor(13, real)
+    expect(acknowledgedPlan(snapOf(13), permission).text).toBe(real)
+    gh.addComment(13, real.replace('`docs/dispatcher.md`', '`packages/cli/src/dispatch.ts`'), 'mk')
+    expect(acknowledgedPlan(snapOf(13), permission)).toMatchObject({ text: null, reason: expect.stringContaining('changed after') })
+
+    // Acked, but the plan does not pass its own lint.
+    gh.addIssue({ number: 14, labels: ['planning', 'large', 'epic'] })
+    const broken = real.replace('**Goal:** a thing exists.', '**Goal:** TBD')
+    gh.addComment(14, broken, 'mk')
+    ackFor(14, broken)
+    expect(acknowledgedPlan(snapOf(14), permission)).toMatchObject({ text: null, reason: expect.stringContaining('plan-lint') })
   })
 })
 

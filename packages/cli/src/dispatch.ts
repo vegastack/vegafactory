@@ -9,20 +9,20 @@ import { spawn, spawnSync } from 'node:child_process'
 import { createSign } from 'node:crypto'
 import { appendFileSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync } from 'node:fs'
 import { homedir, hostname, userInfo } from 'node:os'
-import { join } from 'node:path'
+import { join, posix } from 'node:path'
 import { APP_ACTOR, holderOf, machineName, release, trustedHolders } from './claim.ts'
 import { defaultClonePath, factoryConfigPath, parseControlRoomKnob, readFactoryConfig } from './control-room.ts'
 import { billingVariables, childEnvironment } from './env.ts'
 import { GhError, defaultRunner, ghList, type GhResult, type GhRunner } from './gh.ts'
 import { assertRepo, cacheDir, readState, replaceFile, syncIssue, withLock, type CommentEntry, type GhIssue, type IssueEntry } from './issue-cache.ts'
 import {
-  ackBody, currentHashes, detectRepo, evidenceChangedAt, findValidAck, locked, nextLabels, permissionLookup, postComment, repoRoot,
-  setLabels, snapshot, type PermissionLookup, type Snapshot,
+  ackBody, artifactHash, currentHashes, detectRepo, evidenceChangedAt, findValidAck, locked, markerKeys, nextLabels, permissionLookup,
+  postComment, repoRoot, setLabels, snapshot, type PermissionLookup, type Snapshot,
 } from './issue.ts'
 import { issueFromBranch } from './hook.ts'
 import { defaultBranch } from './guard-rules.ts'
 import { stateOf, type State } from './labels.ts'
-import { parseIndependentGroups, sharedByEveryChild } from '../../../skills/dev/dev-plan/scripts/plan-lint.mjs'
+import { lintPlan, normalizeGroupPath, parseIndependentGroups, sharedByEveryChild } from '../../../skills/dev/dev-plan/scripts/plan-lint.mjs'
 
 // How often the board is read, how many steps run at once, and how long one step may take.
 export const POLL_MS = 2 * 60_000
@@ -575,12 +575,27 @@ export function disjointSiblings(a: Candidate, b: Candidate): boolean {
   return !a.files.some((file) => b.files.some((their) => overlaps(file, their)))
 }
 
+// A declared path, as one canonical repository-relative spelling — or nothing. `src/../src/x` and
+// `src/x` are the same file, and a set that did not say so would read as disjoint; a glob, an
+// absolute path or one that climbs out of the repository is not a file set anyone can check.
+export function canonicalPath(path: string): string | null {
+  const raw = String(path ?? '').trim()
+  if (!raw || /[*?[\]{}]/.test(raw) || raw.startsWith('/') || /^[a-zA-Z]:/.test(raw) || raw.includes('\0')) return null
+  const directory = raw.endsWith('/')
+  const normalized = posix.normalize(normalizeGroupPath(raw))
+  if (!normalized || normalized === '.' || normalized.startsWith('..') || normalized.startsWith('/')) return null
+  return directory && !normalized.endsWith('/') ? `${normalized}/` : normalized
+}
+
 // The file set a sub-issue declared, from its parent epic's plan `**Independent groups:**` block.
-// No declaration means no parallel run: one at a time is the safe default.
+// No declaration means no parallel run, and neither does one path this cannot canonicalize: one
+// at a time is the safe default, and a set that is only partly checkable is not a set.
 export function filesFromParent(parentPlan: string | null, number: number): string[] {
   if (!parentPlan) return []
   const groups = parseIndependentGroups(parentPlan) as Array<{ id: string | null; members: string[]; files: string[] }>
-  return groups.find((group) => group.id && group.members.includes(`#${number}`))?.files ?? []
+  const declared = groups.find((group) => group.id && group.members.includes(`#${number}`))?.files ?? []
+  const canonical = declared.map(canonicalPath)
+  return canonical.every((path): path is string => path !== null) ? canonical : []
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -882,15 +897,31 @@ export function confirmShip(ctx: { root: string; repo: string; number: number; r
   })
 }
 
-// The parent epic's plan comment, where sibling file sets are declared. It authorises two agents
-// to run at once, so only a plan from someone with write access counts: anyone can comment on a
-// public issue, and a forged `**Independent groups:**` block would be a forged permission.
+// The plan that may authorise two agents to run at once. Three things have to hold, and each one
+// on its own is the difference between a permission and a sentence someone wrote: the operator
+// acked *this* plan (the ack carries its hash), the plan passes the full lint that owns this
+// grammar, and it was posted by someone with write access or by the factory's own App. A forged,
+// stale, unacked or malformed plan authorises nothing, so its siblings run one at a time.
+export function acknowledgedPlan(snap: Snapshot, permission: PermissionLookup): { text: string | null; reason: string } {
+  const ack = findValidAck(snap, 'plan', permission)
+  if (!ack.ok || !ack.ack) return { text: null, reason: `the plan is not acked (${ack.reason})` }
+  const acked = markerKeys(snap.body(ack.ack)).plan
+  if (!acked) return { text: null, reason: 'the plan ack names no plan hash' }
+  const plan = Object.values(snap.state.comments)
+    .filter((entry) => entry.type === 'plan' && fromFactory(permission)(entry) && artifactHash(snap.body(entry)) === acked)
+    .sort((a, b) => a.createdAt.localeCompare(b.createdAt) || a.id - b.id).at(-1)
+  if (!plan) return { text: null, reason: 'no plan comment matches the acked hash' }
+  const text = snap.body(plan)
+  const lint = lintPlan(text) as { blocks: string[] }
+  if (lint.blocks.length) return { text: null, reason: `the acked plan does not pass plan-lint: ${lint.blocks[0]}` }
+  return { text, reason: 'the acked plan' }
+}
+
+// The parent epic's acknowledged plan, where sibling file sets are declared.
 function parentPlan(root: string, repo: string, parent: number, runner: GhRunner, permission: PermissionLookup): string | null {
   try {
     syncIssue({ root, repo, number: parent, runner })
-    const snap = snapshot(cacheDir(root, repo, parent))
-    const plan = latestArtifact(snap, 'plan', permission)
-    return plan ? snap.body(plan) : null
+    return acknowledgedPlan(snapshot(cacheDir(root, repo, parent)), permission).text
   } catch { return null }
 }
 
