@@ -309,10 +309,16 @@ export const probe: Probe = (command, args) => {
 
 // Whether this repository's harness hooks call the CLI. Both files are checked: a machine that
 // dispatches Claude Code and Codex runs needs the guard and the heartbeat on both.
+// The CLI's hook command, however this machine spells the CLI: the published `vegafactory`, a
+// `bun …/src/index.ts` while working on it, a wrapper script. What identifies it is the verb and
+// the harness it names, not the word in front — matching only `vegafactory hook` called a machine
+// unwired for running the very code it was checking.
+const CALLS_HOOK = /\bhook\s+[a-z-]+\s+--harness\s+(claude|codex)\b/
+
 export function hooksWired(root: string): Check {
   const read = (path: string) => { try { return readFileSync(path, 'utf8') } catch { return '' } }
-  const claude = read(join(root, '.claude', 'settings.json')).includes('vegafactory hook')
-  const codex = read(join(root, '.codex', 'hooks.json')).includes('vegafactory hook')
+  const claude = CALLS_HOOK.test(read(join(root, '.claude', 'settings.json')))
+  const codex = CALLS_HOOK.test(read(join(root, '.codex', 'hooks.json')))
   if (claude && codex) return { name: 'hooks', ok: true, detail: 'both harnesses call vegafactory hook' }
   if (claude || codex) return { name: 'hooks', ok: false, detail: `only ${claude ? 'Claude Code' : 'Codex'} calls vegafactory hook — wire the other too` }
   return { name: 'hooks', ok: false, detail: 'no harness hook calls vegafactory hook — run vegafactory init in this repository' }

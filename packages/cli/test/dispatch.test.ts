@@ -873,6 +873,18 @@ describe('standing an issue down', () => {
 describe('readiness and the service', () => {
   const answers: Probe = (command) => ({ code: 0, stdout: command === 'claude' ? 'ok' : 'ok\n', stderr: '' })
 
+  test('the CLI counts however this machine spells it', () => {
+    mkdirSync(join(root, '.codex'), { recursive: true })
+    mkdirSync(join(root, '.claude'), { recursive: true })
+    // Running the CLI from source is still running the CLI.
+    writeFileSync(join(root, '.codex/hooks.json'), '{"command":"vegafactory hook pre-tool --harness codex"}')
+    writeFileSync(join(root, '.claude/settings.json'), '{"command":"/Users/x/.bun/bin/bun /repo/packages/cli/src/index.ts hook stop --harness claude"}')
+    expect(hooksWired(root).ok).toBe(true)
+    // Something that is not the hook command does not count.
+    writeFileSync(join(root, '.claude/settings.json'), '{"command":"echo vegafactory is great"}')
+    expect(hooksWired(root).ok).toBe(false)
+  })
+
   test('hooks count only when both harnesses call the CLI', () => {
     expect(hooksWired(root).ok).toBe(false)
     mkdirSync(join(root, '.codex'))
