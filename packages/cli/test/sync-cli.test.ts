@@ -23,7 +23,7 @@ beforeAll(async () => {
   const source = join(root, 'source'); origin = join(root, 'origin.git')
   await mkdir(join(source, 'groups/dev'), { recursive: true })
   await writeFile(join(source, 'org.md'), 'stats: on\nsync-max-age: 2h\n')
-  await writeFile(join(source, 'groups/dev/group.md'), 'review: subagent\n')
+  await writeFile(join(source, 'groups/dev/group.md'), 'tests: required\n')
   await writeFile(join(source, 'repos.md'), '| repo | group | board | owner |\n|---|---|---|---|\n| acme/app | dev | | owner |\n')
   git(['init', '-b', 'main'], source); git(['add', '.'], source); git(['commit', '-m', 'seed'], source); git(['clone', '--bare', source, origin], root)
 })
@@ -57,7 +57,7 @@ test('actual CLI owns exactly one publication and no-op/dry-run write nothing', 
   expect(wire.controlRooms.acme.snapshots['acme/app'].sourceCommit).toBe(payload.sha)
 })
 test('missing target, malformed/unknown schema and interrupted first setup preserve settings', async () => {
-  const f = await project('no-target', 'review: subagent\n')
+  const f = await project('no-target', 'tests: required\n')
   const saved = await readFile(f.settingsPath, 'utf8')
   expect(JSON.parse(run(f.home, f.repo, ['sync', '--json']).stdout.toString()).action).toBe('none')
   expect(run(f.home, f.repo, ['sync', '--org', 'acme', '--json']).exitCode).toBe(2)
@@ -112,7 +112,7 @@ test('actual CLI inspects backups, previews without mutation and applies without
   expect(fresh.controlRooms.acme.recovery).toBeUndefined()
 })
 test('actual CLI refuses invalid recovery combinations before no-target success', async () => {
-  const f = await project('recovery-no-target', 'review: subagent\n')
+  const f = await project('recovery-no-target', 'tests: required\n')
   const saved = await readFile(f.settingsPath, 'utf8')
   const cases: [string[], string][] = [
     [['unknown'], 'sync accepts inspect or restore'],

@@ -156,9 +156,9 @@
     "behind": true,
     "knobs": [
       {
-        "knob": "review",
-        "repo": "cross-agent-risky",
-        "controlRoom": "cross-agent",
+        "knob": "tests",
+        "repo": "logic-only",
+        "controlRoom": "required",
         "source": "group"
       }
     ]

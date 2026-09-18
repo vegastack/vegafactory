@@ -55,13 +55,13 @@ Pick one or the other per skill rather than installing both: in Claude Code, a p
 
 In the project you want to work in, ask your agent to **set up the dev workflow** — that phrasing triggers the `dev-setup` skill.
 
-`dev-setup` writes `.vegastack/dev.md`: your project's handbook — stack, commands, review mode, shipping gates. Everything else reads from it. It is per-project and lives in the repo, whether the skills themselves were installed globally or locally.
+`dev-setup` writes `.vegastack/dev.md`: your project's handbook — stack, commands, models per stage, shipping steps. Everything else reads from it. It is per-project and lives in the repo, whether the skills themselves were installed globally or locally.
 
 ### 3. Work the loop
 
 Work flows through GitHub issues:
 
-**dev-intake** turns an idea into a brief you approve → **dev-plan** turns the brief into a plan you approve → **dev-implement** builds it and posts evidence → **dev-review** reviews it independently → **dev-ship** opens the PR and merges, each step only on your explicit word.
+**dev-intake** turns an idea into a brief you approve → **dev-plan** turns the brief into a plan you approve → **dev-implement** builds it and posts evidence → **dev-review** has the other tool review it → **dev-ship** opens the PR and merges, each step only on your explicit word.
 
 `/dev-intake` (Claude Code) and `$dev-intake` (Codex) load a skill by name and bypass routing — the same works for every dev skill when the agent picks the wrong one.
 
@@ -165,7 +165,7 @@ The issue-driven development workflow: ten stages from project bootstrap to the 
 | [dev-architect](skills/dev/dev-architect/) | VegaStack's architecture advisor: the locked stack, recorded rejections, and dated platform facts behind a verify-before-you-recommend protocol | [SKILL.md](skills/dev/dev-architect/SKILL.md) |
 | [dev-implement](skills/dev/dev-implement/) | Implements an approved issue end to end without user input: issue check, claim, dark build, tests, independent review, evidence comment, hand-back | [SKILL.md](skills/dev/dev-implement/SKILL.md) |
 | [dev-debug](skills/dev/dev-debug/) | Reproduce-first bug work: a red repro command before any theory, ranked falsifiable suspects, and the regression test before the fix | [SKILL.md](skills/dev/dev-debug/SKILL.md) |
-| [dev-review](skills/dev/dev-review/) | Independent multi-axis review of finished work — spec, standards, security — with severity-tiered findings and a bounded fix loop | [SKILL.md](skills/dev/dev-review/SKILL.md) |
+| [dev-review](skills/dev/dev-review/) | Cross-tool review of finished work — the other tool (Codex ↔ Claude Code) reads the diff read-only and the CLI posts the findings, with a bounded fix loop | [SKILL.md](skills/dev/dev-review/SKILL.md) |
 | [dev-ship](skills/dev/dev-ship/) | The shipping gates, each spent only by the operator's words: PR, merge per the `merge:` knob, then the project's `## Ship` runbook | [SKILL.md](skills/dev/dev-ship/SKILL.md) |
 | [dev-status](skills/dev/dev-status/) | The operator's board: a deterministic gh-backed gather of state, progress, staleness, and PRs, rendered needs-you-first with one Next action | [SKILL.md](skills/dev/dev-status/SKILL.md) |
 | [dev-chronicle](skills/dev/dev-chronicle/) | The project's narrative record — one story entry per behavior-changing branch — plus the "catch me up" digest read from it and the register | [SKILL.md](skills/dev/dev-chronicle/SKILL.md) |

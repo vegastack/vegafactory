@@ -9,8 +9,15 @@ export const BILLING_VARIABLES = [
   'CLAUDE_CODE_USE_BEDROCK', 'CLAUDE_CODE_USE_VERTEX', 'CLAUDE_CODE_USE_FOUNDRY',
 ] as const
 
-// Variables a parent Claude Code session sets for itself; a child run must not inherit them.
-const PARENT_SESSION_PREFIXES = ['CLAUDE_CODE_', 'CLAUDECODE', 'CLAUDE_AGENT_SDK', 'CLAUDE_PID', 'CLAUDE_EFFORT', 'CLAUDE_SSH_']
+// Variables a parent harness session sets for itself. They are dropped whichever harness is the
+// parent and whichever is the child: a Claude reviewer started from Codex must not inherit Codex's
+// session and sandbox markers either, or it reads the parent's run as its own.
+const PARENT_SESSION_PREFIXES = ['CLAUDE_CODE_', 'CLAUDECODE', 'CLAUDE_AGENT_SDK', 'CLAUDE_PID', 'CLAUDE_EFFORT', 'CLAUDE_SSH_', 'CODEX_']
+// What a child still needs: where each tool keeps its own configuration and subscription login.
+const KEPT = new Set(['CODEX_HOME', 'CLAUDE_CONFIG_DIR'])
+// A variable that would bill or redirect the run is never dropped, so it is refused by name below.
+const parentOwned = (name: string) =>
+  !KEPT.has(name) && !(BILLING_VARIABLES as readonly string[]).includes(name) && PARENT_SESSION_PREFIXES.some((prefix) => name.startsWith(prefix))
 
 const isSet = (value: string | undefined) => typeof value === 'string' && value.trim() !== '' && value !== '0'
 
@@ -18,13 +25,13 @@ export function billingVariables(env: NodeJS.ProcessEnv): string[] {
   return BILLING_VARIABLES.filter((name) => isSet(env[name]))
 }
 
-// The environment for a headless `claude -p` / `codex exec` child. Variables the parent
-// Claude Code app set for itself are removed; anything else that would bill or redirect
-// the run is refused with the exact names so the operator can unset them.
+// The environment for a headless `claude -p` / `codex exec` child. Variables a parent harness
+// session set for itself are removed; anything else that would bill or redirect the run is
+// refused with the exact names so the operator can unset them.
 export function childEnvironment(env: NodeJS.ProcessEnv, { insideClaudeCode = isSet(env.CLAUDECODE) || isSet(env.CLAUDE_CODE_ENTRYPOINT) } = {}): NodeJS.ProcessEnv {
   const child: NodeJS.ProcessEnv = {}
   for (const [name, value] of Object.entries(env)) {
-    if (insideClaudeCode && PARENT_SESSION_PREFIXES.some((prefix) => name.startsWith(prefix))) continue
+    if (parentOwned(name)) continue
     child[name] = value
   }
   // The desktop app points ANTHROPIC_BASE_URL at its own proxy; that belongs to the parent only.

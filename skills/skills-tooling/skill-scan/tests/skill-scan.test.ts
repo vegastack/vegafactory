@@ -310,7 +310,7 @@ describe('evaluateScan', () => {
     expect(r.blocks[0]).toContain('did not complete')
   })
 
-  // Codex cross-agent review, Finding [2]: execution_successful alone is not
+  // Codex review, Finding [2]: execution_successful alone is not
   // enough. A run whose analyzer failed reports a HIGHER score with FEWER
   // filtered findings, so passing it because nothing blocking survived is
   // exactly backwards.
@@ -354,7 +354,7 @@ describe('evaluateScan', () => {
     expect(r.blocks[0]).toContain('completeness')
   })
 
-  // Codex cross-agent review, round 2 on Finding [2]: distinct from `status:
+  // Codex review, round 2 on Finding [2]: distinct from `status:
   // "partial"`, which is normal here. Measured across all twelve skills,
   // partially_inspected_files is 0 on a healthy run — so this blocks only
   // genuinely truncated coverage, at no cost to normal operation.
@@ -495,7 +495,7 @@ describe('resolveScanRoot', () => {
 
   test('none and absent both mean no scan', () => {
     expect(resolveScanRoot('skill-scan: none\n')).toBeNull()
-    expect(resolveScanRoot('review: subagent\n')).toBeNull()
+    expect(resolveScanRoot('tests: required\n')).toBeNull()
   })
 })
 
@@ -694,7 +694,7 @@ describe('gatherFacts', () => {
     })
   })
 
-  // Codex cross-agent review, Finding [2]: the analyzer-limitation signal must
+  // Codex review, Finding [2]: the analyzer-limitation signal must
   // survive normalization, or the verdict function can never see it.
   test('analyzer limitations and coverage counts survive into the facts shape', () => {
     const report = JSON.stringify({
@@ -749,7 +749,7 @@ describe('gatherFacts', () => {
     })
   })
 
-  // Codex cross-agent review, round 2 on Finding [1]: the scanner emits the
+  // Codex review, round 2 on Finding [1]: the scanner emits the
   // suppressed entries themselves, not just a count, and the Security axis is
   // told to judge each one against its cause. Discarding them made that
   // impossible while the evidence sat in the report.
@@ -1070,7 +1070,7 @@ describe('adversarial regressions', () => {
   test('declarations are collected in order so the caller can see disagreement', () => {
     expect(scanRootDeclarations('- skill-scan: none\n\nskill-scan: skills/\n')).toEqual(['none', 'skills/'])
     expect(scanRootDeclarations('skill-scan: skills/\n')).toEqual(['skills/'])
-    expect(scanRootDeclarations('review: subagent\n')).toEqual([])
+    expect(scanRootDeclarations('tests: required\n')).toEqual([])
   })
 
   // Two-level discovery makes duplicate basenames reachable. A report path keyed

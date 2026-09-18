@@ -30,7 +30,7 @@ One session owns one issue. Cut the branch and its worktree with `vegafactory wo
 
 No questions. Every progress checkpoint is also the chat update — one text, two destinations — and in a headless run the issue is the only channel. You never commit for safety: the Stop hook commits a dirty worktree as `wip: #<n> turn checkpoint` and pushes the branch at the end of every turn. A `fix:` issue's diagnosis runs under `dev-debug`, whose phases govern the investigation and whose winning suspect feeds the evidence comment. A spike the brief flagged runs first; its result opens the evidence comment. Then work the plan task by task:
 
-- **Red before green**, because a test written after the code proves only that the code runs. Write the failing test first — at the seams the brief names, and only there, because a seam the brief did not name is one review cannot judge — watch it fail for the stated reason, implement the minimal code, watch it pass. One slice at a time. The tests-are-real rubric (implementation-coupled, tautological, horizontal-sliced — defined in `dev-review`'s dispatch prompts) applies to your own tests before a reviewer sees them.
+- **Red before green**, because a test written after the code proves only that the code runs. Write the failing test first — at the seams the brief names, and only there, because a seam the brief did not name is one review cannot judge — watch it fail for the stated reason, implement the minimal code, watch it pass. One slice at a time. The tests-are-real rubric (implementation-coupled, tautological, horizontal-sliced — `dev-review` defines it) applies to your own tests before a reviewer sees them.
 - **Checkpoint the status comment** after every task (`vegafactory issue status <n> --progress-file <file>`) and tick the matching `[x]` in the plan comment in the same pass — the reference says why both writes matter.
 - **Tasks inside one issue run in order.** Parallel work happens only across sibling sub-issues of an epic whose briefs list non-overlapping files — each sibling is its own issue, branch and worktree, built by its own session.
 - The scope ratchet is a stop condition: work revealed bigger than the issue's size (or plainly exceeding one session) → one `handback` comment proposing the upgrade or split (dev-plan's ratchet rules), `waiting-on-operator`, stop.
@@ -52,9 +52,9 @@ Before claiming any status, run the proving command fresh and read its exit code
 - UI changed and `ui-evidence: playwright` → capture screenshots of the key states and upload each with `node <path-to-this-skill>/scripts/evidence-upload.mjs --repo <o/r> --issue <n> --file <png> --write --json` — it reads dev.md's `evidence-repo:` knob and names the file `<this-repo-name>/<issue-number>/<timestamp>-<name>.png` (dry-run without `--write`; exit 2 says what it refused). Link them in the evidence comment as links, because private-repo images don't render inline. Evidence repo unreachable → name local paths and say so, and the hand-back proceeds, because evidence is a link, not a gate.
 - dev.md's Ship or Verify section is an empty TODO next to visible machinery → finish normally, then suggest re-running dev-setup.
 
-## Independent review — invoke dev-review
+## Independent review — the other tool
 
-Run `dev-review` per dev.md's `review:` knob — fresh subagent axes by default, cross-agent (Codex↔Claude, announced to the operator) per the knob's mapping; it owns the axes, severities, review comment, bounded fix loop, and adjudication rules. Apply its findings through its loop and re-run the affected checks. Disagree with a finding → adjudicate openly per its rules, because a skipped finding is a decision made in secret. Every target harness spawns the axes (Claude Code subagents, Codex agents); only a headless run that cannot spawn runs the axis briefs itself, labeled as a self-review, because independence is the one thing it lacks.
+Announce it, then run `vegafactory review <n>` from the worktree: the other tool (Codex↔Claude) reviews the diff read-only and the CLI posts the one review comment. Exit 0 is clean; exit 2 means fix the must-fix findings, commit, push and run it again — the same reviewer session picks up from the fix diff, three rounds at most. `dev-review` owns the axes, severities, comment format, the fix loop and the one fallback when the other tool is missing. Disagree with a finding → say so openly in the evidence comment with the reason, because a dropped finding is a decision made in secret. A hand-back from the command is never a pass: the issue goes to `waiting-on-operator` with its reason.
 
 ## The evidence comment — exactly one, edited in place
 
@@ -63,7 +63,7 @@ Run `dev-review` per dev.md's `review:` knob — fresh subagent axes by default,
 ## Result (v1)
 **Done:** what changed, in behavior terms
 **Tests:** <command> → <fresh result>
-**Review:** <mode> — <verdict; adjudications and rulings surfaced, in order made>
+**Review:** <reviewer tool> round <n> — <verdict>; disagreements and deferred minors, in order made
 **Changelog:** <entry added / none, with reason>
 **Docs:** brief v<n>, plan v<n> — in sync | unchanged since the ack
 **UI evidence:** <links>            (when applicable)

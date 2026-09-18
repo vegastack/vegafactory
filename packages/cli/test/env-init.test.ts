@@ -11,6 +11,15 @@ describe('subscription-only child environment', () => {
     expect(env).toEqual({ PATH: '/bin' })
   })
 
+  test('a Codex parent\'s session markers are dropped too, whichever tool the child is', () => {
+    const env = childEnvironment({ PATH: '/bin', CODEX_THREAD_ID: 't', CODEX_SANDBOX: 'seatbelt', CODEX_HOME: '/home/.codex' })
+    expect(env).toEqual({ PATH: '/bin', CODEX_HOME: '/home/.codex' })
+  })
+
+  test('a billing variable is never dropped as a parent\'s: it is refused by name', () => {
+    expect(() => childEnvironment({ PATH: '/bin', CODEX_API_KEY: 'sk-x', CODEX_THREAD_ID: 't' })).toThrow('CODEX_API_KEY is set')
+  })
+
   test('an API key refuses and names the variable to unset', () => {
     expect(() => childEnvironment({ PATH: '/bin', OPENAI_API_KEY: 'sk-x' })).toThrow('OPENAI_API_KEY is set')
     expect(() => childEnvironment({ ANTHROPIC_API_KEY: 'a', CLAUDE_CODE_USE_BEDROCK: '1' }, { insideClaudeCode: false })).toThrow('ANTHROPIC_API_KEY, CLAUDE_CODE_USE_BEDROCK are set')

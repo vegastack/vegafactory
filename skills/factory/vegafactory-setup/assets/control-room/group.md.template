@@ -6,7 +6,6 @@ policy-schema: 2
 
 ## Knobs
 
-review: cross-agent-risky   # subagent | cross-agent-risky | cross-agent
 merge: rebase               # rebase | squash | merge
 branch: <type>/<slug>       # type: feat | fix | docs | chore | refactor
 labels: waiting-on-operator planning queued in-progress ready-to-ship risky research small medium epic
@@ -27,7 +26,7 @@ operators: {{operators}}    # csv of logins from people.csv who own issues in th
 
 ## Harness policy
 
-harness-policy: intake {{intake-harness}} {{intake-model}} {{intake-effort}} · plan {{plan-harness}} {{plan-model}} {{plan-effort}} · implement {{implement-harness}} {{implement-model}} {{implement-effort}} · review {{review-harness}} {{review-model}} {{review-effort}} · status {{status-harness}} {{status-model}} {{status-effort}} · chronicle {{chronicle-harness}} {{chronicle-model}} {{chronicle-effort}}   # confirm detected supported subscription choices for every stage; placeholders block execution
+harness-policy: intake {{intake-harness}} {{intake-model}} {{intake-effort}} · plan {{plan-harness}} {{plan-model}} {{plan-effort}} · implement {{implement-harness}} {{implement-model}} {{implement-effort}} · review {{review-harness}} {{review-model}} {{review-effort}} · status {{status-harness}} {{status-model}} {{status-effort}} · chronicle {{chronicle-harness}} {{chronicle-model}} {{chronicle-effort}}   # `<stage> <agent> default|<model id> <effort>`; `default` pins no model (the tool's own, recommended), a pinned id must be one the account can use; confirm every stage, placeholders block execution
 
 ## Runtime
 

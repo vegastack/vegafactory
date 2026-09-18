@@ -1,14 +1,14 @@
 # The security axis
 
-Runs on `risky` issues, whenever the diff's touch points hit an auth surface, money, user data, or externally-controlled input, and whenever the diff touches a skill under dev.md's `skill-scan:` root — the trigger is the surface, not the label alone.
+The security axis runs on every review; on a big or `risky` diff it runs as its own reviewer. This file is its method — how a suspicion becomes a finding, and how severity is earned. `vegafactory review` puts the short form in the packet; a same-tool fallback subagent gets this file's steps in full.
 
 ## Scanner evidence — a finding's start, never its end
 
-Where the project runs a scanner (the `skill-scan` skill ships this family's scanner for agent skills; a project may name others), its report is an **input to this axis**, on the same footing as the diff. It is evidence, not a verdict:
+A scanner report (skill-scan in the merge queue, or whatever the project runs) is an **input to this axis**, on the same footing as the diff. It is evidence, not a verdict:
 
-- **A scanner hit is a candidate finding.** It arrives with a rule ID and a `file:line` and nothing else — no data flow, no attacker, no exploitability. Promote it to a finding only after the Method below fills those in; a hit you cannot trace goes to the collapsed low-confidence block like any other hunch.
+- **A scanner hit is a candidate finding.** It arrives with a rule ID and a `file:line` and nothing else — no data flow, no attacker, no exploitability. Promote it to a finding only after the Method below fills those in; a hit you cannot trace is a nit like any other untraced hunch.
 - **Read the source at the location before judging it.** The scanner matched text; whether that text is a vulnerability is your call, made against the file, not the summary.
-- **Severity is yours, not the scanner's.** Map its finding onto this file's ladder by exploitability. A scanner HIGH that cannot be exploited is not `[CRITICAL]`; a scanner MEDIUM with a traced path to a real sink can be.
+- **Severity is yours, not the scanner's.** Map its finding onto the ladder below by exploitability. A scanner HIGH that cannot be exploited is not must-fix; a scanner MEDIUM with a traced path to a real sink is.
 - **Never downgrade an unexplained HIGH or CRITICAL** on reputation, score, or "it's our own code". Either the trace shows why it does not hold, or it stands.
 - **The aggregate risk score is not a finding.** It is distorted upward by documentation of the very mechanics being scanned and downward by unrelated suppressions. Quote it for context; never rank on it.
 - **Suppressions are in scope for this axis.** A finding silenced by a baseline rule rather than fixed is reviewable: check the rule is scoped as narrowly as its cause and that its stated re-trigger condition is one that would actually fire.
@@ -23,7 +23,7 @@ Where the project runs a scanner (the `skill-scan` skill ships this family's sca
 
 ## Finding format — three extra lines
 
-On top of the standard finding shape, every security finding carries:
+Every security finding's `issue` text opens with:
 
 ```
 Data flow: <origin> → <transformations> → <sink>
@@ -31,13 +31,13 @@ Attack prerequisites: <what the attacker needs>
 Mitigating controls: <existing defenses that reduce but don't eliminate>
 ```
 
-A finding that can't fill the Data flow line goes to the collapsed low-confidence block, not the main list.
+A finding that cannot fill the Data flow line is a nit, not a must-fix.
 
 ## Severity
 
-- **[CRITICAL]** — exploitable now: auth bypass at the enforcement layer, injection with a traced user-input path, secret/credential exposure, unprotected sensitive mutation. Blocks, above MUST-FIX.
-- **[MUST-FIX]** — a real weakness needing prerequisites an attacker can plausibly meet.
-- **[SHOULD-FIX]** — hardening: rate limits, PII in logs, missing timeouts, defense-in-depth gaps with a holding layer.
+- **must-fix** — exploitable now (auth bypass at the enforcement layer, injection with a traced user-input path, secret exposure, unprotected sensitive mutation), or a real weakness whose prerequisites an attacker can plausibly meet. Say which of the two it is.
+- **should-fix** — hardening: rate limits, PII in logs, missing timeouts, defense-in-depth gaps with a holding layer.
+- **nit** — untraced suspicion worth a second pair of eyes.
 - Never round up to look thorough; judge against the project's Architecture facts — platform-scale concerns are not defects on a small internal tool.
 
 ## Standing red lines (summary — `dev-architect` remains their home)

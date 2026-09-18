@@ -7,7 +7,7 @@
   { "query": "what are the org-wide defaults every repo inherits", "should_trigger": true },
   { "query": "seed groups/dev/group.md from this repo's knobs", "should_trigger": true },
   { "query": "set up the dev workflow in this repo", "should_trigger": false, "ambiguous_with": ["dev-setup"] },
-  { "query": "re-run dev setup, I want to switch review to cross-agent", "should_trigger": false, "ambiguous_with": ["dev-setup"] },
+  { "query": "re-run dev setup, I want to switch the tests knob", "should_trigger": false, "ambiguous_with": ["dev-setup"] },
   { "query": "turn the notes above into github issues", "should_trigger": false, "ambiguous_with": ["dev-intake"] },
   { "query": "what hosting and database should this new project use", "should_trigger": false, "ambiguous_with": ["dev-architect"] },
   { "query": "pull the latest control-room clone before this run", "should_trigger": false }
