@@ -20,7 +20,7 @@ bun run build      # builds the CLI and syncs the skill copy into packages/cli
 
 ### Scanning the skills
 
-Every skill this repo ships is scanned by [NVIDIA SkillSpector](https://github.com/NVIDIA/skillspector) in the merge queue, with a pinned install. You don't need it locally; to investigate a finding, install it once (Python 3.12) and run:
+Every skill this repo ships is scanned by [NVIDIA SkillSpector](https://github.com/NVIDIA/skillspector) in the merge queue, from one hash-locked commit run with `--no-provision`. A local run is the opposite by design: under dev.md's `skillspector-update: auto` the guard installs and upgrades the scanner through whatever channel holds it. You don't need it locally; to investigate a finding (Python 3.12):
 
 ```sh
 uv tool install git+https://github.com/NVIDIA/skillspector.git

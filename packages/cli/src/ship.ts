@@ -14,7 +14,7 @@ import { trustedAuthors } from './claim.ts'
 import { defaultRunner, ghRequest, type GhRunner } from './gh.ts'
 import { defaultBranch } from './guard-rules.ts'
 import { issueFromBranch } from './hook.ts'
-import { checkIssue, currentHashes, detectRepo, findValidAck, latestOfType, markerKeys, permissionLookup, repoRoot, snapshot } from './issue.ts'
+import { checkIssue, currentHashes, detectRepo, evidenceChangedAt, findValidAck, latestOfType, markerKeys, permissionLookup, repoRoot, snapshot } from './issue.ts'
 import { syncIssue } from './issue-cache.ts'
 import { acceptedReview, MAX_ROUNDS, trustedReview } from './review.ts'
 
@@ -22,17 +22,18 @@ export interface ShipCheck { ok: boolean; blocks: string[]; warns: string[]; bra
 
 export function shipUsage(): string {
   return `Usage: vegafactory ship check <n> [--branch NAME] [--repo OWNER/NAME] [--json]
-       vegafactory ship release <n> [--version X.Y.Z] [--repo OWNER/NAME] [--dry-run] [--json]
+       vegafactory ship release <n> [--version X.Y.Z] [--dry-run] [--json]
 
   check <n>     exit 0 when issue n may merge: a "ship it" after the latest evidence, the evidence
                 on the pushed head, the branch clean, its PR open on that commit against the default
                 branch, and every check passed or skipped.
                 Exit 2 when blocked.
 
-  release <n>   tag the merged release on issue n's recorded "ship it": the word is re-read, the
-                version and its changelog entry must agree, and the default branch must be checked
-                out, clean and level with origin. Then it creates v<version> and pushes it, and
-                stops — the tag-triggered workflow publishes. Exit 2 when refused.
+  release <n>   tag the merged release on issue n's recorded "ship it" — issue n of the repository
+                this checkout is, which is why there is no --repo. The word is re-read against the
+                current evidence, the version and its changelog entry must agree, and the default
+                branch must be checked out, clean and level with origin. Then it creates v<version>
+                and pushes it, and stops — the tag-triggered workflow publishes. Exit 2 when refused.
 `
 }
 
@@ -211,14 +212,35 @@ export function changelogEntry(root: string, dir: string, version: string): { fi
 
 export interface ReleaseCheck { ok: boolean; blocks: string[]; version: string | null; tag: string | null; pushed: boolean }
 
+// A command that must have run, not merely returned nothing: `ls-remote` prints nothing both for
+// "no such tag" and for a fetch it never managed, and those are opposite answers.
+function gitRun(cwd: string, args: string[]): { ok: boolean; out: string } {
+  const result = spawnSync('git', args, { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout: 120_000 })
+  return { ok: result.status === 0, out: (result.stdout ?? '').trim() }
+}
+
+// The GitHub repository this checkout pushes to, or null when origin is not a GitHub remote.
+export function originRepo(cwd: string): string | null {
+  const remote = gitRun(cwd, ['remote', 'get-url', 'origin'])
+  if (!remote.ok) return null
+  return /github\.com[:/]([\w.-]+\/[\w.-]+?)(?:\.git)?$/.exec(remote.out)?.[1] ?? null
+}
+
 // Everything that must hold before a tag exists. The word is the first fact and the release is
 // the last: nothing here writes, so a refusal leaves the repository exactly as it was.
 export function releaseCheck(input: { cwd: string; root: string; repo: string; number: number; runner: GhRunner; version?: string }): ReleaseCheck {
   const { cwd, root, repo, number, runner } = input
   const blocks: string[] = []
+  // The issue that authorises the tag belongs to the repository this checkout pushes to. There is
+  // no --repo on this verb, and an origin that names a different GitHub repository refuses.
+  const origin = originRepo(cwd)
+  if (origin && origin !== repo) blocks.push(`the word would be read from ${repo}, but this checkout pushes to ${origin} — release from the repository the issue belongs to`)
   const { dir } = syncIssue({ root, repo, number, runner })
   const snap = snapshot(dir)
-  const ack = findValidAck(snap, 'ship', permissionLookup(repo, runner))
+  // The same rule `ship check` enforces: a "ship it" is spent by evidence posted or edited after it.
+  const evidence = latestOfType(snap, 'evidence')
+  if (!evidence) blocks.push(`no evidence comment on #${number} — there is nothing the word was given for`)
+  const ack = findValidAck(snap, 'ship', permissionLookup(repo, runner), evidence ? evidenceChangedAt(evidence) : null)
   if (!ack.ok) blocks.push(`no "ship it" on #${number}: ${ack.reason}`)
 
   const candidates = versionCandidates(root)
@@ -248,17 +270,25 @@ export function releaseCheck(input: { cwd: string; root: string; repo: string; n
     const current = git(cwd, ['branch', '--show-current'])
     if (current !== defaultName) blocks.push(`a release is tagged on ${defaultName}, but ${current || 'a detached HEAD'} is checked out`)
     if (git(cwd, ['status', '--porcelain'])) blocks.push(`${defaultName} has uncommitted changes`)
-    git(cwd, ['fetch', '--quiet', 'origin', defaultName])
+    // A fetch that did not run leaves a stale ref that can look level with HEAD, so its failure
+    // is a refusal rather than a silent fall back to what this checkout happens to hold.
+    const fetched = gitRun(cwd, ['fetch', '--quiet', 'origin', defaultName])
+    if (!fetched.ok) blocks.push(`cannot fetch origin/${defaultName} — a release is tagged on what origin has, not on a stale copy of it`)
     const head = git(cwd, ['rev-parse', '--verify', '--quiet', 'HEAD'])
     const remote = git(cwd, ['rev-parse', '--verify', '--quiet', `refs/remotes/origin/${defaultName}`])
     if (!remote) blocks.push(`origin/${defaultName} is not in this checkout — fetch it`)
-    else if (head !== remote) blocks.push(`HEAD is at ${(head ?? '').slice(0, 12)} but origin/${defaultName} is at ${remote.slice(0, 12)} — pull the merged release commit`)
+    else if (fetched.ok && head !== remote) blocks.push(`HEAD is at ${(head ?? '').slice(0, 12)} but origin/${defaultName} is at ${remote.slice(0, 12)} — pull the merged release commit`)
   }
 
   const tag = version ? `v${version}` : null
   if (tag) {
     if (git(cwd, ['rev-parse', '--verify', '--quiet', `refs/tags/${tag}`])) blocks.push(`${tag} already exists here — a released version is never re-tagged, fix forward with a new one`)
-    else if ((git(cwd, ['ls-remote', '--tags', 'origin', tag]) ?? '').trim()) blocks.push(`${tag} is already on origin — a released version is never re-tagged, fix forward with a new one`)
+    else {
+      // Empty output means "origin has no such tag" only when the lookup itself succeeded.
+      const remoteTag = gitRun(cwd, ['ls-remote', '--tags', 'origin', tag])
+      if (!remoteTag.ok) blocks.push(`cannot ask origin whether ${tag} already exists — refusing to tag on an unanswered question`)
+      else if (remoteTag.out) blocks.push(`${tag} is already on origin — a released version is never re-tagged, fix forward with a new one`)
+    }
   }
   return { ok: blocks.length === 0, blocks, version, tag, pushed: false }
 }
@@ -269,6 +299,8 @@ function gitOrThrow(cwd: string, args: string[]): void {
 }
 
 // Creates the tag and pushes it — the one write in this file, reached only through a clean check.
+// A failed push is cleaned up locally on a best effort; whether origin took the tag is origin's
+// answer to give, so the error says to look there before trying again.
 export function releaseRun(input: { cwd: string; root: string; repo: string; number: number; runner: GhRunner; version?: string; dryRun?: boolean }): ReleaseCheck {
   const result = releaseCheck(input)
   if (!result.ok || input.dryRun) return result
@@ -276,8 +308,9 @@ export function releaseRun(input: { cwd: string; root: string; repo: string; num
   try {
     gitOrThrow(input.cwd, ['push', 'origin', `refs/tags/${result.tag!}`])
   } catch (error) {
-    gitOrThrow(input.cwd, ['tag', '-d', result.tag!])
-    throw error
+    const removed = gitRun(input.cwd, ['tag', '-d', result.tag!])
+    const local = removed.ok ? `the local ${result.tag!} was removed` : `the local ${result.tag!} is still here and could not be removed`
+    throw new Error(`${(error as Error).message}\n${local}; check whether origin has ${result.tag!} (git ls-remote --tags origin ${result.tag!}) before running this again`)
   }
   return { ...result, pushed: true }
 }
@@ -293,17 +326,20 @@ export function runShip(argv: string[], { runner = defaultRunner, cwd = process.
     return at === -1 ? undefined : rest[at + 1]
   }
   const root = repoRoot(cwd)
-  const repo = flag('--repo') ?? detectRepo(root)
   if (verb === 'release') {
+    // No --repo here: the repository whose word authorises the tag is the one this checkout is.
+    if (rest.some((arg) => arg === '--repo' || arg.startsWith('--repo='))) {
+      throw new Error('ship release takes no --repo — it releases the repository this checkout is, and reads the word from that repository')
+    }
     const dryRun = rest.includes('--dry-run')
-    const result = releaseRun({ cwd, root, repo, number, version: flag('--version'), dryRun, runner })
+    const result = releaseRun({ cwd, root, repo: detectRepo(root), number, version: flag('--version'), dryRun, runner })
     if (rest.includes('--json')) out(JSON.stringify(result, null, 2))
     else if (!result.ok) out(['refused', ...result.blocks.map((b) => `block: ${b}`)].join('\n'))
     else if (dryRun) out(`would tag ${result.tag} on the merged release commit and push it to origin`)
     else out(`${result.tag} tagged and pushed — the tag-triggered workflow publishes; watch it before reporting the release`)
     return result.ok ? 0 : 2
   }
-  const result = shipCheck({ cwd, root, repo, number, branch: flag('--branch'), runner })
+  const result = shipCheck({ cwd, root, repo: flag('--repo') ?? detectRepo(root), number, branch: flag('--branch'), runner })
   if (rest.includes('--json')) out(JSON.stringify(result, null, 2))
   else out([result.ok ? 'ok' : 'blocked', ...result.blocks.map((b) => `block: ${b}`), ...result.warns.map((w) => `warn: ${w}`)].join('\n'))
   return result.ok ? 0 : 2

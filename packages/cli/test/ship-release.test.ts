@@ -14,7 +14,10 @@ let gh: FakeGitHub
 let root: string
 const runner: GhRunner = (args, input) => gh.runner(args, input)
 
-const shipIt = () => gh.addComment(7, ackBody({ stage: 'ship', by: 'mk', brief: artifactHash('Cut 1.2.0'), plan: null, source: 'session', quote: 'ship it' }))
+const evidence = () => gh.addComment(7, `<!-- vsk:v1 type=evidence rev=1 branch=chore/7-release sha=${git(root, 'rev-parse', '--short', 'HEAD')} -->\nit works`)
+const ack = () => gh.addComment(7, ackBody({ stage: 'ship', by: 'mk', brief: artifactHash('Cut 1.2.0'), plan: null, source: 'session', quote: 'ship it' }))
+// The word counts only against evidence already posted and unedited since, exactly as at merge.
+const shipIt = () => { evidence(); ack() }
 
 const run = (...extra: string[]) => {
   const lines: string[] = []
@@ -62,17 +65,64 @@ test('tags and pushes on a recorded ship it, and never twice', () => {
 test('refuses without the operator word, and the refusal writes nothing', () => {
   const result = run()
   expect(result.code).toBe(2)
-  expect(result.blocks).toEqual(['no "ship it" on #7: no ship ack yet'])
+  expect(result.blocks).toEqual(['no evidence comment on #7 — there is nothing the word was given for', 'no "ship it" on #7: no ship ack yet'])
   expect(git(root, 'tag', '--list')).toBe('')
 
   // An ack from someone without write access is not the operator's word either.
+  evidence()
   gh.addComment(7, ackBody({ stage: 'ship', by: 'drive-by', brief: artifactHash('Cut 1.2.0'), plan: null, source: 'session', quote: 'ship it' }), 'drive-by')
   expect(run().blocks).toEqual(['no "ship it" on #7: @drive-by has no write access'])
 
   // So is a brief that moved after the word.
-  shipIt()
+  ack()
   gh.editBody(7, 'Cut 1.2.0, with the docs')
   expect(run().blocks).toEqual(['no "ship it" on #7: the brief changed after the ship ack'])
+  expect(git(root, 'tag', '--list')).toBe('')
+})
+
+test('the word must postdate the evidence it was given for', () => {
+  // A word recorded before the evidence never covered it.
+  ack()
+  evidence()
+  expect(run().blocks).toEqual(['no "ship it" on #7: the ship ack predates the latest evidence'])
+
+  // A fresh word after fresh evidence stands — until that evidence is edited in place.
+  const fresh = evidence()
+  ack()
+  expect(run('--dry-run')).toMatchObject({ ok: true })
+  gh.editComment(fresh.id, `<!-- vsk:v1 type=evidence rev=2 branch=chore/7-release sha=${git(root, 'rev-parse', '--short', 'HEAD')} -->\nit works, again`)
+  expect(run().blocks).toEqual(['no "ship it" on #7: the ship ack predates the latest evidence'])
+  expect(git(root, 'tag', '--list')).toBe('')
+})
+
+test('the issue is read from the repository this checkout pushes to, and --repo is not a way round it', () => {
+  shipIt()
+  expect(run('--dry-run')).toMatchObject({ ok: true })
+
+  // dev.md names o/r; an origin that is a different GitHub repository refuses.
+  git(root, 'remote', 'set-url', 'origin', 'https://github.com/other/repo.git')
+  const blocked = run()
+  expect(blocked.code).toBe(2)
+  expect(blocked.blocks.at(0)).toBe('the word would be read from o/r, but this checkout pushes to other/repo — release from the repository the issue belongs to')
+  expect(git(root, 'tag', '--list')).toBe('')
+
+  expect(() => runShip(['release', '7', '--repo', 'o/r'], { runner, cwd: root, out: () => {} }))
+    .toThrow('ship release takes no --repo — it releases the repository this checkout is, and reads the word from that repository')
+})
+
+test('a fetch or a remote-tag lookup that did not run refuses instead of passing', () => {
+  shipIt()
+  expect(run('--dry-run')).toMatchObject({ ok: true })
+
+  // origin.git is gone, while `origin/main` is still here and still equals HEAD — exactly the
+  // stale ref a silently failing fetch would be read against.
+  rmSync(join(root, '..', 'origin.git'), { recursive: true, force: true })
+  expect(git(root, 'rev-parse', 'HEAD')).toBe(git(root, 'rev-parse', 'refs/remotes/origin/main'))
+  expect(run().blocks).toEqual([
+    'cannot fetch origin/main — a release is tagged on what origin has, not on a stale copy of it',
+    'cannot ask origin whether v1.2.0 already exists — refusing to tag on an unanswered question',
+  ])
+  expect(git(root, 'tag', '--list')).toBe('')
 })
 
 test('refuses when the version or the changelog does not match', () => {

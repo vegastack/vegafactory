@@ -3,7 +3,7 @@ import { spawnSync } from 'node:child_process'
 import { mkdirSync, mkdtempSync, realpathSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { canCommit, classifyCommand, EXPANDED, extractCommand, isShellTool, loadPolicy, mergeTarget, parseCommand, shipAskCommands, splitSegments, type Policy } from '../src/guard-rules.ts'
+import { canCommit, classifyCommand, EXPANDED, extractCommand, isShellTool, loadPolicy, mergeTarget, parseCommand, shipAskCommands, splitSegments, vegafactoryArgs, type Policy } from '../src/guard-rules.ts'
 
 const policy: Policy = { defaultBranch: 'main', shipAsk: ['bun run docs:publish', 'wrangler deploy --env production'] }
 const decide = (command: string, p: Policy = policy) => classifyCommand(command, p)
@@ -322,7 +322,9 @@ describe('decisions', () => {
   test('vegafactory ship release passes, while raw tagging and anything it cannot read still asks', () => {
     for (const command of [
       'vegafactory ship release 223', 'vegafactory ship release 223 --dry-run --json', 'vegafactory ship release 223 --version 0.20.0',
-      'bunx @vegastack/vegafactory ship release 223 --repo vegastack/vegafactory',
+      '/opt/homebrew/bin/vegafactory ship release 223', 'bunx @vegastack/vegafactory ship release 223',
+      'npx @vegastack/vegafactory@latest ship release 223', 'bun packages/cli/src/index.ts ship release 223',
+      'node /repo/packages/cli/dist/index.js ship release 223',
     ]) {
       expect(decide(command), command).toEqual({ decision: 'allow', reason: null, rule: 'ship-release' })
     }
@@ -330,12 +332,29 @@ describe('decisions', () => {
       'git tag v0.20.0', 'git push origin v0.20.0', 'vegafactory ship release $N', 'vegafactory ship $VERB 223',
       'vegafactory ship release', 'vegafactory ship release --all', 'vegafactory ship release 223 --no-verify',
       'vegafactory ship release 223 && git push origin main',
+      // --repo is gone from the verb: the repository is the checkout's own.
+      'vegafactory ship release 223 --repo vegastack/vegafactory',
     ]) {
       expect(decide(command).decision, command).toBe('ask')
     }
     // The operator can still make it ask, by naming it on an `ask:` line of their Ship section.
     expect(decide('vegafactory ship release 223', { ...policy, shipAsk: ['vegafactory ship release'] }).rule).toBe('ship-ask')
     expect(decide('vegafactory ship check 223').decision).toBe('allow')
+  })
+
+  test('only a real vegafactory invocation may tag — another program spelling the words asks', () => {
+    for (const command of [
+      'bash ship release 223', 'node ship release 223', 'npx evil ship release 223', 'bunx evil-vegafactory ship release 223',
+      './ship release 223', 'sh -c "ship release 223"', 'bun scripts/ship.ts ship release 223', 'node dist/index.js ship release 223',
+      'npx @evil/vegafactory ship release 223', 'vegafactory-wrapper ship release 223',
+    ]) {
+      const decision = decide(command)
+      expect(decision.decision, command).toBe('ask')
+      expect(decision.rule, command).toBe('unclassified')
+    }
+    expect(vegafactoryArgs(['vegafactory', 'ship', 'release', '7'])).toEqual(['ship', 'release', '7'])
+    expect(vegafactoryArgs(['bash', 'ship', 'release', '7'])).toBe(null)
+    expect(vegafactoryArgs(['npx', `${EXPANDED}PKG`, 'ship', 'release', '7'])).toBe(null)
   })
 
   test('mergeTarget reads the PR argument past the flags', () => {
