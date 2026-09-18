@@ -550,16 +550,16 @@ export function workingDir(root: string, number: number): string | null {
 
 // The real step: a headless agent run on the operator's subscription, in the issue's worktree,
 // killed after the step limit. `childEnvironment` is what refuses an API key in the environment.
-export function defaultRunStep(devMd: string, env: NodeJS.ProcessEnv): RunStep {
+export function defaultRunStep(devMd: string, env: NodeJS.ProcessEnv, { exec = execTool, timeoutMs = STEP_TIMEOUT_MS } = {}): RunStep {
   return async (step, context) => {
     const started = Date.now()
     const policy = stagePolicy(devMd, STAGE_OF[step.action] ?? 'implement')
     const { tool, args } = agentArgs(policy, stepPrompt(step))
     const cwd = workingDir(context.root, step.number) ?? context.root
-    const child = await execTool(tool, args, { cwd, env: childEnvironment(env), timeoutMs: STEP_TIMEOUT_MS })
+    const child = await exec(tool, args, { cwd, env: childEnvironment(env), timeoutMs })
     const ms = Date.now() - started
     const text = `${child.stderr}\n${child.stdout}`
-    if (child.timedOut) return { outcome: 'killed', note: `${tool} ran past the ${STEP_TIMEOUT_MS / 60_000}-minute step limit and was stopped`, ms }
+    if (child.timedOut) return { outcome: 'killed', note: `${tool} ran past the ${timeoutMs / 60_000}-minute step limit and was stopped`, ms }
     if (hitLimit(text)) return { outcome: 'limit', note: tail(text), ms }
     if (child.error) return { outcome: 'failed', note: `could not start ${tool}: ${child.error}`, ms }
     if (child.code !== 0) return { outcome: 'failed', note: `${tool} exited ${child.code}: ${tail(text)}`, ms }
@@ -589,8 +589,14 @@ export interface PollDeps {
   standDown: (number: number, reason: string) => string
 }
 
-// One pass over the board: read what changed, decide, keep only what is safe to start now, run it.
-export async function poll(deps: PollDeps): Promise<RunRecord[]> {
+// The steps this machine has started and not yet seen finish. It lives across polls, so the next
+// pass two minutes later sees them, keeps their slots and can still act on the rest of the board.
+export interface Inflight { candidate: Candidate; started: number; done: Promise<RunRecord> }
+export const drain = (inflight: Map<number, Inflight>) => Promise.all([...inflight.values()].map((run) => run.done))
+
+// One pass over the board: read what changed, decide, and start what is safe to start now. The
+// steps run to their own end; this returns as soon as they are under way.
+export async function poll(deps: PollDeps, inflight: Map<number, Inflight> = new Map()): Promise<Candidate[]> {
   const { root, repo, runner, now } = deps
   const permission = permissionLookup(repo, runner, { root })
   const trusted = trustedHolders({ repo, runner, root })
@@ -620,37 +626,49 @@ export async function poll(deps: PollDeps): Promise<RunRecord[]> {
     wanted.push({ key, decision, candidate: { number: issue.number, action: decision.action, parent, files } })
   }
 
-  const records: RunRecord[] = []
-  for (const candidate of schedule(wanted.map((item) => item.candidate))) {
+  const started: Candidate[] = []
+  for (const candidate of schedule(wanted.map((item) => item.candidate), [...inflight.values()].map((run) => run.candidate))) {
     const item = wanted.find((entry) => entry.candidate.number === candidate.number)!
-    const started = now()
-    let result: StepResult
-    if (candidate.action === 'stop') {
-      result = { outcome: 'stopped', note: deps.standDown(candidate.number, item.decision.reason), ms: 0 }
-    } else {
-      try {
-        result = await deps.runStep({ action: candidate.action, number: candidate.number, repo, split: item.decision.split, by: item.decision.by }, { root })
-      } catch (error) {
-        result = { outcome: 'failed', note: (error as Error).message, ms: now() - started }
-      }
-    }
-    const record: RunRecord = {
-      at: new Date(started).toISOString(), issue: candidate.number, action: candidate.action,
-      outcome: result.outcome, ms: result.ms, machine: deps.machine, note: tail(result.note),
-    }
-    recordRun(root, record)
-    records.push(record)
-    const previous = acted[item.key]
-    const failed = result.outcome === 'failed' || result.outcome === 'killed'
-    const failures = failed ? (previous && previous.action === candidate.action ? previous.failures : 0) + 1 : 0
-    const retryAt = failed ? started + RETRY_MS * 2 ** (failures - 1) : result.outcome === 'limit' ? resetAt(result.note, started) : null
-    acted[item.key] = { at: started, action: candidate.action, outcome: result.outcome, trigger: item.decision.trigger, failures, retryAt }
-    // A subscription limit is not the issue's fault: the work is saved and given back, and this
-    // machine tries again after the reset.
-    if (result.outcome === 'limit') deps.standDown(candidate.number, `the subscription limit was reached; this machine tries again after ${new Date(retryAt!).toISOString()}`)
+    const at = now()
+    const done = step(deps, candidate, item.decision, at)
+      .then((result) => settle(deps, candidate, item, at, result))
+      .finally(() => { inflight.delete(candidate.number) })
+    inflight.set(candidate.number, { candidate, started: at, done })
+    started.push(candidate)
   }
-  writeActed(root, acted)
-  return records
+  return started
+}
+
+// One step, whatever it is. A stop needs no agent: it is this machine giving the issue back.
+async function step(deps: PollDeps, candidate: Candidate, decision: Decision, at: number): Promise<StepResult> {
+  if (candidate.action === 'stop') return { outcome: 'stopped', note: deps.standDown(candidate.number, decision.reason), ms: 0 }
+  try {
+    return await deps.runStep({ action: candidate.action, number: candidate.number, repo: deps.repo, split: decision.split, by: decision.by }, { root: deps.root })
+  } catch (error) {
+    return { outcome: 'failed', note: (error as Error).message, ms: deps.now() - at }
+  }
+}
+
+// What a finished step leaves behind: one bounded record, and what the next pass reads to know
+// this trigger is spent. `acted` is re-read here, because another step may have settled meanwhile.
+function settle(deps: PollDeps, candidate: Candidate, item: { key: string; decision: Decision }, at: number, result: StepResult): RunRecord {
+  const record: RunRecord = {
+    at: new Date(at).toISOString(), issue: candidate.number, action: candidate.action,
+    outcome: result.outcome, ms: result.ms, machine: deps.machine, note: tail(result.note),
+  }
+  recordRun(deps.root, record)
+  const acted = readActed(deps.root)
+  const previous = acted[item.key]
+  const failed = result.outcome === 'failed' || result.outcome === 'killed'
+  const failures = failed ? (previous && previous.action === candidate.action ? previous.failures : 0) + 1 : 0
+  const retryAt = failed ? at + RETRY_MS * 2 ** (failures - 1) : result.outcome === 'limit' ? resetAt(result.note, at) : null
+  acted[item.key] = { at, action: candidate.action, outcome: result.outcome, trigger: item.decision.trigger, failures, retryAt }
+  writeActed(deps.root, acted)
+  // A subscription limit is not the issue's fault: the work is saved and given back, and this
+  // machine tries again after the reset.
+  if (result.outcome === 'limit') deps.standDown(candidate.number, `the subscription limit was reached; this machine tries again after ${new Date(retryAt!).toISOString()}`)
+  deps.out(`#${record.issue} ${record.action} → ${record.outcome}${record.note ? ` (${record.note})` : ''}`)
+  return record
 }
 
 // The parent epic's plan comment, where sibling file sets are declared.
@@ -876,16 +894,20 @@ export async function runDispatch(argv: string[], deps: CliDeps = {}): Promise<n
         runStep: deps.runStep ?? defaultRunStep(devMd, env),
         standDown: (number, reason) => standDown({ root, repo, number, runner, machine }, reason),
       }
+      // Started steps outlive the pass that began them, so the next pass keeps their slots and
+      // still acts on the rest of the board — a twenty-minute build does not stop the poll.
+      const inflight = new Map<number, Inflight>()
       for (;;) {
-        let records: RunRecord[] = []
         try {
-          records = await poll(pollDeps)
+          for (const candidate of await poll(pollDeps, inflight)) out(`#${candidate.number} ${candidate.action} started`)
         } catch (error) {
           out(`poll failed: ${(error as Error).message}`)
         }
-        if (args.json) out(JSON.stringify(records))
-        else for (const record of records) out(`#${record.issue} ${record.action} → ${record.outcome}${record.note ? ` (${record.note})` : ''}`)
-        if (args.once) return 0
+        if (args.once) {
+          const records = await drain(inflight)
+          if (args.json) out(JSON.stringify(records))
+          return 0
+        }
         await (deps.sleep ?? wait)(POLL_MS)
       }
     }

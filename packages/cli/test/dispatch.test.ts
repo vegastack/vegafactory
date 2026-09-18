@@ -6,10 +6,11 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { claimBody, claimLine } from '../src/claim.ts'
 import {
-  APP_ID, agentArgs, appJwt, appKeyPath, board, decide, dispatchDir, disjointSiblings, filesFromParent, harnessAnswers,
-  hitLimit, hooksWired, listedHere, mintToken, overlaps, parseDispatchArgs, parseDispatchers, poll, readActed, readRuns,
-  readiness, resetAt, runDispatch, schedule, serviceCommands, stagePolicy, stepPrompt, tail, unitPath, unitText,
-  unsafeForParallel, type Candidate, type Fetch, type Probe, type RunStep, type StepResult,
+  APP_ID, STEP_TIMEOUT_MS, agentArgs, appJwt, appKeyPath, board, decide, defaultRunStep, dispatchDir, disjointSiblings,
+  drain, filesFromParent, harnessAnswers, hitLimit, hooksWired, listedHere, mintToken, overlaps, parseDispatchArgs,
+  parseDispatchers, poll, readActed, readRuns, readiness, resetAt, runDispatch, schedule, serviceCommands, stagePolicy,
+  stepPrompt, tail, unitPath, unitText, unsafeForParallel,
+  type Candidate, type Fetch, type Inflight, type PollDeps, type Probe, type RunStep, type StepResult,
 } from '../src/dispatch.ts'
 import { permissionLookup, snapshot } from '../src/issue.ts'
 import { cacheDir, syncIssue } from '../src/issue-cache.ts'
@@ -276,22 +277,47 @@ describe('one poll over the board', () => {
     steps.push({ action: step.action, number: step.number })
     return { outcome: 'done', note: 'finished', ms: 10, ...result }
   }
-  const deps = (over: Partial<Parameters<typeof poll>[0]> = {}) => ({
+  const deps = (over: Partial<PollDeps> = {}): PollDeps => ({
     root, repo: 'o/r', runner: gh.runner, now: () => gh.clock, machine: HOST,
     out: () => {}, runStep: runStep(), standDown: () => 'stood down', ...over,
   })
+  // One pass, then everything it started.
+  const pass = async (over: Partial<PollDeps> = {}, inflight = new Map<number, Inflight>()) => {
+    await poll(deps(over), inflight)
+    return drain(inflight)
+  }
 
   beforeEach(() => { steps.length = 0 })
 
   test('every wanted transition runs once and is written down', async () => {
     gh.addIssue({ number: 1, labels: ['planning', 'medium'] })
     gh.addIssue({ number: 2, labels: ['queued', 'small'] })
-    const records = await poll(deps())
+    const records = await pass()
     expect(steps.map((step) => step.action).sort()).toEqual(['implement', 'plan'])
     expect(records.map((record) => record.outcome)).toEqual(['done', 'done'])
     expect(readRuns(root)).toHaveLength(2)
     // The second pass has nothing left to do: each trigger was acted on.
-    expect(await poll(deps())).toEqual([])
+    expect(await pass()).toEqual([])
+  })
+
+  test('a step already running keeps its slot and its issue on the next pass', async () => {
+    for (const number of [1, 2, 3, 4]) gh.addIssue({ number, labels: ['planning', 'medium'] })
+    const inflight = new Map<number, Inflight>()
+    let release = () => {}
+    const held = new Promise<void>((resolve) => { release = resolve })
+    const slow: RunStep = async (step) => {
+      steps.push({ action: step.action, number: step.number })
+      await held
+      return { outcome: 'done', note: '', ms: 1 }
+    }
+    // Three start; the fourth waits for a free slot, and none of the three is started twice.
+    expect(await poll(deps({ runStep: slow }), inflight)).toHaveLength(3)
+    expect(await poll(deps({ runStep: slow }), inflight)).toEqual([])
+    expect(steps).toHaveLength(3)
+    release()
+    await drain(inflight)
+    expect(await poll(deps({ runStep: slow }), inflight)).toHaveLength(1)
+    expect(steps.map((step) => step.number).sort()).toEqual([1, 2, 3, 4])
   })
 
   test('an issue with a fresh claim is skipped', async () => {
@@ -299,7 +325,7 @@ describe('one poll over the board', () => {
     const body = claimBody({ owner: 'laptop:1-x', kind: 'session', harness: 'claude', model: 'opus' })
     gh.addComment(1, body.replace('-->\n', `-->\n${claimLine('laptop:1-x', new Date(gh.clock).toISOString())}\n`), 'mk')
     const notes: string[] = []
-    expect(await poll(deps({ out: (text: string) => notes.push(text) }))).toEqual([])
+    expect(await pass({ out: (text: string) => notes.push(text) })).toEqual([])
     expect(notes.join('\n')).toContain('a fresh claim holds it')
   })
 
@@ -307,7 +333,7 @@ describe('one poll over the board', () => {
     gh.addIssue({ number: 1, labels: ['in-progress', 'small'] })
     gh.addComment(1, 'stop', 'mk')
     const given: string[] = []
-    const records = await poll(deps({ standDown: (number: number, reason: string) => { given.push(`${number}:${reason}`); return 'saved, pushed, released' } }))
+    const records = await pass({ standDown: (number: number, reason: string) => { given.push(`${number}:${reason}`); return 'saved, pushed, released' } })
     expect(steps).toEqual([])
     expect(given[0]).toContain('1:@mk said stop')
     expect(records[0]).toMatchObject({ action: 'stop', outcome: 'stopped', note: 'saved, pushed, released' })
@@ -316,10 +342,10 @@ describe('one poll over the board', () => {
   test('a subscription limit gives the issue back and retries after the reset', async () => {
     gh.addIssue({ number: 1, labels: ['queued', 'small'] })
     const given: string[] = []
-    await poll(deps({
+    await pass({
       runStep: runStep({ outcome: 'limit', note: 'usage limit reached; try again after 2026-09-18T15:00:00Z' }),
       standDown: (number: number, reason: string) => { given.push(reason); return reason },
-    }))
+    })
     expect(given[0]).toContain('subscription limit')
     const acted = readActed(root)['o/r#1']!
     expect(acted.outcome).toBe('limit')
@@ -329,7 +355,7 @@ describe('one poll over the board', () => {
   test('a failed step backs off, and its own error never lands on the issue', async () => {
     gh.addIssue({ number: 1, labels: ['queued', 'small'] })
     const before = gh.issues.get(1)!.comments.length
-    await poll(deps({ runStep: runStep({ outcome: 'failed', note: 'claude exited 1: ' + 'x'.repeat(5000) }) }))
+    await pass({ runStep: runStep({ outcome: 'failed', note: 'claude exited 1: ' + 'x'.repeat(5000) }) })
     expect(gh.issues.get(1)!.comments).toHaveLength(before)
     const acted = readActed(root)['o/r#1']!
     expect(acted.failures).toBe(1)
@@ -413,6 +439,25 @@ describe('the step a run makes', () => {
 
   test('a run\'s output is bounded', () => {
     expect(tail('a\n'.repeat(1000) + 'last').length).toBeLessThanOrEqual(400)
+  })
+
+  test('a step past the limit is killed, and its own output is never the whole record', async () => {
+    const seen: Array<{ timeoutMs: number; cwd: string }> = []
+    const exec = async (_tool: string, _args: string[], options: { cwd: string; env: NodeJS.ProcessEnv; timeoutMs: number }) => {
+      seen.push({ timeoutMs: options.timeoutMs, cwd: options.cwd })
+      return { code: null, stdout: 'x'.repeat(9000), stderr: '', timedOut: true }
+    }
+    const result = await defaultRunStep('', {}, { exec })({ action: 'implement', number: 7, repo: 'o/r', split: false, by: null }, { root })
+    expect(seen[0]!.timeoutMs).toBe(STEP_TIMEOUT_MS)
+    expect(STEP_TIMEOUT_MS).toBe(20 * 60_000)
+    expect(result.outcome).toBe('killed')
+    expect(result.note).toContain('past the 20-minute step limit')
+  })
+
+  test('a step refuses to start while an API key is in the environment', async () => {
+    const exec = async () => ({ code: 0, stdout: 'done', stderr: '', timedOut: false })
+    const step = defaultRunStep('', { ANTHROPIC_API_KEY: 'sk-ant-x' }, { exec })
+    await expect(step({ action: 'implement', number: 7, repo: 'o/r', split: false, by: null }, { root })).rejects.toThrow(/ANTHROPIC_API_KEY.*subscriptions only/s)
   })
 })
 
