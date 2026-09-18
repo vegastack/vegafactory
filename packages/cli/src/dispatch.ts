@@ -889,11 +889,18 @@ export function stagePolicy(devMd: string, stage: string): { harness: string; mo
 const STAGE_OF: Record<string, string> = { plan: 'plan', implement: 'implement', corrections: 'implement', 'follow-up': 'intake', ship: 'implement' }
 
 // A pinned model the account cannot serve fails the run, so `default` in the policy pins nothing.
+//
+// Both tools are told not to stop and ask. Nobody is at the keyboard, and the first dispatched run
+// proved what the default costs: `claude -p` alone denied every write and handed the issue back
+// untouched, having read the repository and changed nothing. What still holds the run is not the
+// harness prompt — it is the worktree it is confined to, the branch it pushes, the step limit its
+// own process group enforces, and the ship guard in the hook, which asks through the issue rather
+// than a terminal (VSK_ASK_ROUTE). A run that cannot write is not unattended, it is stuck.
 export function agentArgs(policy: { harness: string; model: string | null; effort: string } | null, prompt: string): { tool: string; args: string[] } {
   if (policy?.harness === 'codex') {
-    return { tool: 'codex', args: ['exec', ...(policy.model ? ['-c', `model=${policy.model}`] : []), '-c', `model_reasoning_effort=${policy.effort}`, prompt] }
+    return { tool: 'codex', args: ['exec', '--dangerously-bypass-approvals-and-sandbox', ...(policy.model ? ['-c', `model=${policy.model}`] : []), '-c', `model_reasoning_effort=${policy.effort}`, prompt] }
   }
-  return { tool: 'claude', args: ['-p', ...(policy?.model ? ['--model', policy.model] : []), ...(policy ? ['--effort', policy.effort] : []), prompt] }
+  return { tool: 'claude', args: ['-p', '--dangerously-skip-permissions', ...(policy?.model ? ['--model', policy.model] : []), ...(policy ? ['--effort', policy.effort] : []), prompt] }
 }
 
 interface Exec { code: number | null; stdout: string; stderr: string; timedOut: boolean; error?: string }
@@ -901,7 +908,13 @@ interface Exec { code: number | null; stdout: string; stderr: string; timedOut: 
 // The limit is enforced inside the child's own process group, so it holds even if the dispatcher
 // dies: an agent orphaned by a crash or a `launchctl bootout` still stops on its own rather than
 // writing to GitHub unsupervised for hours.
-const WATCHDOG = '"$@" & job=$!; (sleep "$VF_LIMIT"; kill -KILL 0) & dog=$!; wait "$job"; code=$?; kill "$dog" 2>/dev/null; exit "$code"'
+// The backstop sleeps with its own stdio, detached from the job's pipes, and is killed by name
+// rather than through the subshell that started it. Both halves are load-bearing: killing a
+// subshell leaves the `sleep` inside it running, and an orphan sleep holding the job's stdout means
+// the reader never sees end-of-file. The first dispatched run finished its work in twelve seconds
+// and held its slot for the full twenty-minute limit, because of exactly that.
+const WATCHDOG = '"$@" & job=$!; { sleep "$VF_LIMIT" & dog=$!; wait "$dog"; kill -KILL 0; } </dev/null >/dev/null 2>&1 & guard=$!;'
+  + ' wait "$job"; code=$?; pkill -P "$guard" 2>/dev/null; kill "$guard" 2>/dev/null; exit "$code"'
 
 // One child, in its own process group so a stuck step is killed with everything it started. Only
 // the tail of its output is kept: the record is bounded and the output never reaches the issue.

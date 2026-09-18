@@ -966,8 +966,15 @@ describe('the step a run makes', () => {
     const devMd = readFileSync(join(root, '.vegastack/dev.md'), 'utf8')
     expect(stagePolicy(devMd, 'implement')).toEqual({ harness: 'claude', model: null, effort: 'high' })
     expect(stagePolicy(devMd, 'nothing')).toBeNull()
-    expect(agentArgs({ harness: 'claude', model: null, effort: 'high' }, 'go').args).toEqual(['-p', '--effort', 'high', 'go'])
-    expect(agentArgs({ harness: 'codex', model: 'gpt-5', effort: 'xhigh' }, 'go')).toEqual({ tool: 'codex', args: ['exec', '-c', 'model=gpt-5', '-c', 'model_reasoning_effort=xhigh', 'go'] })
+    expect(agentArgs({ harness: 'claude', model: null, effort: 'high' }, 'go').args).toEqual(['-p', '--dangerously-skip-permissions', '--effort', 'high', 'go'])
+    expect(agentArgs({ harness: 'codex', model: 'gpt-5', effort: 'xhigh' }, 'go')).toEqual({ tool: 'codex', args: ['exec', '--dangerously-bypass-approvals-and-sandbox', '-c', 'model=gpt-5', '-c', 'model_reasoning_effort=xhigh', 'go'] })
+  })
+
+  // The first dispatched run read the repository, was denied every write, and handed the issue
+  // back untouched. A run that cannot write is not unattended, it is stuck.
+  test('both harnesses are told not to stop and ask, because nobody is there to answer', () => {
+    expect(agentArgs({ harness: 'claude', model: null, effort: 'high' }, 'go').args).toContain('--dangerously-skip-permissions')
+    expect(agentArgs({ harness: 'codex', model: null, effort: 'high' }, 'go').args).toContain('--dangerously-bypass-approvals-and-sandbox')
   })
 
   test('the prompt names the issue, the skill and the limits, and never grants a gate', () => {
