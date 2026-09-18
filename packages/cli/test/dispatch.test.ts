@@ -355,6 +355,21 @@ describe('one poll over the board', () => {
     expect(new Date(acted.retryAt!).toISOString()).toBe('2026-09-18T15:00:00.000Z')
   })
 
+  test('a step that throws is a failed run, not a dead dispatcher', async () => {
+    gh.addIssue({ number: 1, labels: ['queued', 'small'] })
+    const throws: RunStep = async () => { throw new Error('claude is not on PATH') }
+    const records = await pass({ runStep: throws })
+    expect(records[0]).toMatchObject({ outcome: 'failed', note: 'claude is not on PATH' })
+    expect(readActed(root)['o/r#1']!.failures).toBe(1)
+  })
+
+  test('a stop whose stand-down throws is a failed run, not a dead dispatcher', async () => {
+    gh.addIssue({ number: 1, labels: ['in-progress', 'small'] })
+    gh.addComment(1, 'stop', 'mk')
+    const records = await pass({ standDown: () => { throw new Error('git is missing') } })
+    expect(records[0]).toMatchObject({ action: 'stop', outcome: 'failed', note: 'git is missing' })
+  })
+
   test('a failed step backs off, and its own error never lands on the issue', async () => {
     gh.addIssue({ number: 1, labels: ['queued', 'small'] })
     const before = gh.issues.get(1)!.comments.length

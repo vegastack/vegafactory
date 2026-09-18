@@ -593,15 +593,18 @@ export interface PollDeps {
   standDown: (number: number, reason: string) => string
 }
 
-// The steps this machine has started and not yet seen finish. It lives across polls, so the next
-// pass two minutes later sees them, keeps their slots and can still act on the rest of the board.
-export interface Inflight { candidate: Candidate; started: number; done: Promise<RunRecord> }
+// The steps this machine has started. It lives across polls, so the next pass two minutes later
+// sees them, keeps their slots and can still act on the rest of the board. A finished run stays in
+// the map until the next pass sweeps it, so nothing can disappear between starting and being read.
+export interface Inflight { candidate: Candidate; started: number; settled: boolean; done: Promise<RunRecord> }
 export const drain = (inflight: Map<number, Inflight>) => Promise.all([...inflight.values()].map((run) => run.done))
 
 // One pass over the board: read what changed, decide, and start what is safe to start now. The
 // steps run to their own end; this returns as soon as they are under way.
 export async function poll(deps: PollDeps, inflight: Map<number, Inflight> = new Map()): Promise<Candidate[]> {
   const { root, repo, runner, now } = deps
+  // Last pass's finished runs, whose outcomes are now in `acted`: their slots and issues are free.
+  for (const [number, run] of inflight) if (run.settled) inflight.delete(number)
   const permission = permissionLookup(repo, runner, { root })
   const trusted = trustedHolders({ repo, runner, root })
   const acted = readActed(root)
@@ -634,22 +637,33 @@ export async function poll(deps: PollDeps, inflight: Map<number, Inflight> = new
   for (const candidate of schedule(wanted.map((item) => item.candidate), [...inflight.values()].map((run) => run.candidate))) {
     const item = wanted.find((entry) => entry.candidate.number === candidate.number)!
     const at = now()
-    const done = step(deps, candidate, item.decision, at)
-      .then((result) => settle(deps, candidate, item, at, result))
-      .finally(() => { inflight.delete(candidate.number) })
-    inflight.set(candidate.number, { candidate, started: at, done })
+    const run: Inflight = { candidate, started: at, settled: false, done: Promise.resolve() as unknown as Promise<RunRecord> }
+    run.done = runOne(deps, candidate, item, at).then((record) => { run.settled = true; return record })
+    inflight.set(candidate.number, run)
     started.push(candidate)
   }
   return started
 }
 
-// One step, whatever it is. A stop needs no agent: it is this machine giving the issue back.
-async function step(deps: PollDeps, candidate: Candidate, decision: Decision, at: number): Promise<StepResult> {
-  if (candidate.action === 'stop') return { outcome: 'stopped', note: deps.standDown(candidate.number, decision.reason), ms: 0 }
+// One step and everything that follows it. Nothing here may reject: the loop does not await these
+// promises, so a rejection nobody handles would take the whole dispatcher down.
+async function runOne(deps: PollDeps, candidate: Candidate, item: { key: string; decision: Decision }, at: number): Promise<RunRecord> {
+  let result: StepResult
   try {
-    return await deps.runStep({ action: candidate.action, number: candidate.number, repo: deps.repo, split: decision.split, by: decision.by }, { root: deps.root })
+    result = candidate.action === 'stop'
+      // A stop needs no agent: it is this machine giving the issue back.
+      ? { outcome: 'stopped', note: deps.standDown(candidate.number, item.decision.reason), ms: 0 }
+      : await deps.runStep({ action: candidate.action, number: candidate.number, repo: deps.repo, split: item.decision.split, by: item.decision.by }, { root: deps.root })
   } catch (error) {
-    return { outcome: 'failed', note: (error as Error).message, ms: deps.now() - at }
+    result = { outcome: 'failed', note: (error as Error).message, ms: deps.now() - at }
+  }
+  try {
+    return settle(deps, candidate, item, at, result)
+  } catch (error) {
+    // The record could not be written down. Say so rather than dying, and let the next pass decide
+    // again: without a saved outcome this trigger simply looks unacted-on.
+    deps.out(`#${candidate.number} ${candidate.action} → ${result.outcome}, but the run could not be recorded: ${(error as Error).message}`)
+    return { at: new Date(at).toISOString(), issue: candidate.number, action: candidate.action, outcome: result.outcome, ms: result.ms, machine: deps.machine, note: tail(result.note) }
   }
 }
 
