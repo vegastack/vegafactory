@@ -38,6 +38,7 @@ import { issueFromBranch } from './hook.ts'
 import { defaultBranch } from './guard-rules.ts'
 import { stateOf, type State } from './labels.ts'
 import { lintPlan, normalizeGroupPath, parseIndependentGroups, sharedByEveryChild } from '../../../skills/dev/dev-plan/scripts/plan-lint.mjs'
+import { appKeyPath as workerAppKey } from './home.ts'
 
 // How often the board is read, how many steps run at once, and how long one step may take.
 export const POLL_MS = 2 * 60_000
@@ -180,7 +181,7 @@ export { APP_ACTOR }
 
 export function appKeyPath(env: NodeJS.ProcessEnv = process.env, home = homedir()): string {
   const named = env.VEGAFACTORY_APP_PRIVATE_KEY_FILE?.trim()
-  return named || join(home, '.vegastack', 'vegafactory-app.pem')
+  return named || workerAppKey({ env, home })
 }
 
 export function missingKeyMessage(path: string): string {

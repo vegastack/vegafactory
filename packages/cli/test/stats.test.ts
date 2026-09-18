@@ -358,11 +358,11 @@ describe('offsets', () => {
 // F16
 describe('reading events back', () => {
   const shared = (rows: unknown[]) => {
-    const clone = join(home, '.vegastack', 'control-room', 'acme')
+    const clone = join(home, '.vegafactory', 'control-room', 'acme')
     const dir = join(clone, 'stats', '2026', '09', '18')
     mkdirSync(dir, { recursive: true })
     writeFileSync(join(dir, 'mk-box.jsonl'), rows.map((row) => JSON.stringify(row)).join('\n') + '\n')
-    writeFileSync(join(home, '.vegastack', 'factory.json'), JSON.stringify({
+    writeFileSync(join(home, '.vegafactory', 'factory.json'), JSON.stringify({
       schemaVersion: 1, controlRooms: { acme: { repo: 'acme/room', path: clone, branch: 'main', lastSyncedAt: null, sha: null } },
     }))
     return dir
@@ -470,7 +470,7 @@ describe('stats push', () => {
   let repo: string
   let origin: string
 
-  const link = () => writeFileSync(join(home, '.vegastack', 'factory.json'), JSON.stringify({
+  const link = () => writeFileSync(join(home, '.vegafactory', 'factory.json'), JSON.stringify({
     schemaVersion: 1,
     controlRooms: { acme: { repo: 'acme/room', path: clone, branch: 'main', remote: origin, lastSyncedAt: null, sha: null } },
   }))
@@ -478,7 +478,7 @@ describe('stats push', () => {
   beforeEach(() => {
     origin = join(base, 'room.git')
     git(base, 'init', '-q', '--bare', '-b', 'main', origin)
-    clone = join(home, '.vegastack', 'control-room', 'acme')
+    clone = join(home, '.vegafactory', 'control-room', 'acme')
     git(base, 'clone', '-q', origin, clone)
     git(clone, 'commit', '-q', '--allow-empty', '-m', 'seed')
     git(clone, 'push', '-q', 'origin', 'main')
@@ -610,7 +610,7 @@ describe('stats push', () => {
     write(event('a', '2026-09-18T10:00:00.000Z'))
     writeFileSync(join(repo, '.vegastack', 'dev.md'), 'repo: acme/app\n')
     expect(push(Date.parse('2026-09-18T12:00:00Z'))).toMatchObject({ ok: true, action: 'none' })
-    rmSync(join(home, '.vegastack', 'factory.json'))
+    rmSync(join(home, '.vegafactory', 'factory.json'))
     writeFileSync(join(repo, '.vegastack', 'dev.md'), 'repo: acme/app\ncontrol-room: acme/room#dev\n')
     expect(push(Date.parse('2026-09-18T12:00:00Z')).ok).toBe(true)
   })
@@ -907,7 +907,7 @@ describe('stats push', () => {
     expect(push(Date.parse('2026-09-18T12:00:00Z'))).toMatchObject({ ok: false, action: 'refused' })
     expect(push(Date.parse('2026-09-18T12:00:00Z')).message).toContain('outside')
     // A path inside the store whose last component is a link out of it.
-    clone = join(home, '.vegastack', 'control-room', 'linked')
+    clone = join(home, '.vegafactory', 'control-room', 'linked')
     symlinkSync(elsewhere, clone)
     link()
     expect(push(Date.parse('2026-09-18T12:00:00Z')).message).toContain('symlinked')
@@ -923,7 +923,7 @@ describe('stats push with two control rooms', () => {
   const build = (org: string, code: string): Room => {
     const origin = join(base, `${org}.git`)
     git(base, 'init', '-q', '--bare', '-b', 'main', origin)
-    const clone = join(home, '.vegastack', 'control-room', org)
+    const clone = join(home, '.vegafactory', 'control-room', org)
     git(base, 'clone', '-q', origin, clone)
     git(clone, 'commit', '-q', '--allow-empty', '-m', 'seed')
     git(clone, 'push', '-q', 'origin', 'main')
@@ -938,7 +938,7 @@ describe('stats push with two control rooms', () => {
 
   beforeEach(() => {
     rooms = [build('acme', 'acme/app'), build('other', 'other/app')]
-    writeFileSync(join(home, '.vegastack', 'factory.json'), JSON.stringify({
+    writeFileSync(join(home, '.vegafactory', 'factory.json'), JSON.stringify({
       schemaVersion: 1,
       controlRooms: Object.fromEntries(rooms.map((room) => [room.org, { repo: room.room, path: room.clone, branch: 'main', remote: room.origin, lastSyncedAt: null, sha: null }])),
     }))

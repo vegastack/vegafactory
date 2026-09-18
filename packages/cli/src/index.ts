@@ -7,6 +7,7 @@ import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'nod
 import { fileURLToPath } from 'node:url'
 import { createInterface } from 'node:readline/promises'
 import type { SkillEntry } from './selection.ts'
+import { factoryHome, settleHome } from './home.ts'
 
 type Agent = 'codex' | 'claude'
 type AgentChoice = Agent | 'both'
@@ -280,8 +281,8 @@ async function durableJson(path: string, value: unknown) {
   await syncDirectory(dirname(path))
 }
 
-async function recoverInstall(base: string) {
-  const journalPath = join(base, '.vegastack', '.skills-install-transaction.json')
+async function recoverInstall(state: string, base: string) {
+  const journalPath = join(state, '.skills-install-transaction.json')
   if (!await exists(journalPath)) return
   await assertNoSymlink(journalPath, false)
   const journal = JSON.parse(await readFile(journalPath, 'utf8')) as InstallJournal
@@ -318,8 +319,8 @@ async function recoverInstall(base: string) {
   await syncDirectory(dirname(journalPath))
 }
 
-async function withInstallLock<T>(base: string, callback: () => Promise<T>): Promise<T> {
-  const directory = join(base, '.vegastack')
+async function withInstallLock<T>(state: string, callback: () => Promise<T>): Promise<T> {
+  const directory = state
   const lockPath = join(directory, '.skills-install.lock')
   await assertNoSymlink(directory)
   await mkdir(directory, { recursive: true })
@@ -338,7 +339,7 @@ async function withInstallLock<T>(base: string, callback: () => Promise<T>): Pro
     } catch { active = false }
     if (active) throw new Error(`Another VegaStack skill installation is active: ${lockPath}`)
     await rm(lockPath, { force: true })
-    return withInstallLock(base, callback)
+    return withInstallLock(state, callback)
   }
   try {
     await handle.writeFile(`${JSON.stringify({ schemaVersion: 1, pid: process.pid, startedAt: new Date().toISOString() })}\n`)
@@ -388,8 +389,14 @@ async function loadSource(skillName: string) {
   return { source, files: skillManifest.files }
 }
 
-function baseFor(mode: Mode, directory?: string) {
-  return mode === 'global' ? homedir() : resolve(directory ?? process.cwd())
+// Where the skills go, and where the installer keeps the lock and journal that guard them. The
+// two differ by mode and this is the only place that knows it: a project keeps both in its own
+// `.vegastack/`, while a global install puts the skills in the agent's own directory and its
+// bookkeeping in this product's home — which is no longer inside `.vegastack` at all.
+function baseFor(mode: Mode, directory?: string): { base: string; state: string } {
+  if (mode === 'global') return { base: homedir(), state: factoryHome() }
+  const base = resolve(directory ?? process.cwd())
+  return { base, state: join(base, '.vegastack') }
 }
 
 async function compare(destination: string, files: Record<string, string>) {
@@ -409,7 +416,7 @@ async function compare(destination: string, files: Record<string, string>) {
 async function install(options: Options) {
   const skillNames = await requireSelection(options)
   const choice = await prompt(options)
-  const base = baseFor(choice.mode, options.dir)
+  const { base, state } = baseFor(choice.mode, options.dir)
   const agents = resolveAgents(choice.agent, choice.mode)
   if (!agents.length) return
   // A group or --all add IS the documented upgrade (`skills add --group dev --global --force`),
@@ -418,22 +425,22 @@ async function install(options: Options) {
   // nothing: that selection is about that skill, not about the family it belongs to.
   const sweeps = Boolean(options.group || options.all)
   const run = async (recover = true) => {
-    await installLocked(options, skillNames, agents, base, recover)
+    await installLocked(options, skillNames, agents, base, state, recover)
     if (sweeps) {
       const { kept } = await sweepRetired(options, agents, base)
       for (const destination of kept) console.log(`kept locally edited copy (run with --force to replace it): ${destination}`)
       if (kept.length) process.exitCode = 1
     }
   }
-  if (!options.dryRun) return withInstallLock(base, () => run())
+  if (!options.dryRun) return withInstallLock(state, () => run())
   return run(false)
 }
 
 // One selection, one transaction. Every skill is checked and staged before anything is committed,
 // so a refusal or a staging failure anywhere leaves the destination exactly as it was — the whole
 // point of installing a family with one command.
-async function installLocked(options: Options, skillNames: string[], agents: Agent[], base: string, recover = true) {
-  if (recover) await recoverInstall(base)
+async function installLocked(options: Options, skillNames: string[], agents: Agent[], base: string, state: string, recover = true) {
+  if (recover) await recoverInstall(state, base)
   const sources = new Map<string, { source: string; files: Record<string, string> }>()
   for (const skillName of skillNames) sources.set(skillName, await loadSource(skillName))
   const operations: Operation[] = []
@@ -480,7 +487,7 @@ async function installLocked(options: Options, skillNames: string[], agents: Age
     if (skillNames.length > 1) console.log(`${skillNames.length} skills already installed and unchanged${options.group ? ` (${options.group})` : ''}`)
     return
   }
-  const journalPath = join(base, '.vegastack', '.skills-install-transaction.json')
+  const journalPath = join(state, '.skills-install-transaction.json')
   const staged: Operation[] = []
   const applied: Operation[] = []
   try {
@@ -509,7 +516,7 @@ async function installLocked(options: Options, skillNames: string[], agents: Age
     }
     await durableJson(journalPath, { schemaVersion: 2, status: 'committed', operations } satisfies InstallJournal)
   } catch (error) {
-    if (await exists(journalPath)) await recoverInstall(base)
+    if (await exists(journalPath)) await recoverInstall(state, base)
     else for (const operation of [...applied].reverse()) {
       await rm(operation.destination, { recursive: true, force: true })
       if (operation.backup && await exists(operation.backup)) await rename(operation.backup, operation.destination)
@@ -540,7 +547,7 @@ async function installLocked(options: Options, skillNames: string[], agents: Age
 
 async function verify(options: Options) {
   const choice = await prompt(options)
-  const base = baseFor(choice.mode, options.dir)
+  const { base } = baseFor(choice.mode, options.dir)
   const agents = resolveAgents(choice.agent, choice.mode)
   // With no selector at all, verify keeps walking every bundled skill and reports missing ones
   // rather than failing on them; an explicit selection treats a missing skill as a failure.
@@ -574,7 +581,7 @@ async function readReceipt(destination: string): Promise<Receipt | null> {
 // edited, so replacing it loses nothing; an edited copy is kept unless --force.
 async function update(options: Options, quietWhenCurrent = false, includeMissing: string[] = []): Promise<{ updated: number; kept: string[] }> {
   const choice = await prompt(options)
-  const base = baseFor(choice.mode, options.dir)
+  const { base, state } = baseFor(choice.mode, options.dir)
   const agents = resolveAgents(choice.agent, choice.mode)
   const wanted = includeMissing.length ? includeMissing : hasSelector(options) ? await requireSelection(options, 'update') : await bundledSkills()
   const plan = new Map<Agent, string[]>()
@@ -596,9 +603,9 @@ async function update(options: Options, quietWhenCurrent = false, includeMissing
   }
   let updated = 0
   for (const [agent, skills] of plan) {
-    const run = () => installLocked({ ...options, force: true, group: undefined, all: false }, skills, [agent], base, !options.dryRun)
+    const run = () => installLocked({ ...options, force: true, group: undefined, all: false }, skills, [agent], base, state, !options.dryRun)
     if (options.dryRun) await run()
-    else await withInstallLock(base, run)
+    else await withInstallLock(state, run)
     updated += skills.length
   }
   // An upgrade is the one moment anyone learns a skill went away, so it is where the old copy
@@ -675,21 +682,21 @@ async function confirm(question: string, options: Options): Promise<boolean> {
 async function removeSkill(options: Options) {
   const skillNames = await requireSelection(options, 'remove')
   const choice = await prompt(options)
-  const base = baseFor(choice.mode, options.dir)
+  const { base, state } = baseFor(choice.mode, options.dir)
   const agents = resolveAgents(choice.agent, choice.mode)
   if (!await confirm(`Remove ${skillNames.length} skill(s) for ${agents.join(' and ')} from ${base}?`, options)) {
     console.log('nothing removed')
     return
   }
-  if (!options.dryRun) return withInstallLock(base, () => removeLocked(options, skillNames, agents, base))
-  return removeLocked(options, skillNames, agents, base, false)
+  if (!options.dryRun) return withInstallLock(state, () => removeLocked(options, skillNames, agents, base, state))
+  return removeLocked(options, skillNames, agents, base, state, false)
 }
 
-async function removeLocked(options: Options, skillNames: string[], agents: Agent[], base: string, recover = true) {
+async function removeLocked(options: Options, skillNames: string[], agents: Agent[], base: string, state: string, recover = true) {
   // An interrupted install leaves a journal plus .<skill>.backup-* directories. Without settling
   // them first, a removal "succeeds" and the next add rolls those backups forward, bringing the
   // removed skills back. installLocked already recovers; remove must too, under the same lock.
-  if (recover) await recoverInstall(base)
+  if (recover) await recoverInstall(state, base)
   const retired = new Set((await skillCatalog()).filter(entry => entry.retired).map(entry => entry.name))
   // Every drift check runs across the whole selection BEFORE the first removal, so a locally
   // modified member stops the run instead of leaving a half-removed family behind.
@@ -750,7 +757,7 @@ async function list() {
 }
 
 async function doctor(options: Options) {
-  const base = baseFor(options.mode ?? (options.dir ? 'project' : 'global'), options.dir)
+  const { base } = baseFor(options.mode ?? (options.dir ? 'project' : 'global'), options.dir)
   await access(base, fsConstants.R_OK | fsConstants.W_OK)
   await assertNoSymlink(base, false)
   let failed = false
@@ -802,7 +809,7 @@ async function sync(options: Options) {
   const {factoryConfigPath,loadProfile,readFactoryConfig}=await import('./control-room.ts')
   const {resolveTarget,syncControlRoom}=await import('./sync.ts')
   if (options.skill && options.skill !== 'profile') throw new Error('sync takes no subcommand except profile')
-  const base = baseFor('project', options.dir)
+  const { base } = baseFor('project', options.dir)
   const devMdPath = join(base, '.vegastack', 'dev.md')
   const devMdText = await exists(devMdPath) ? await readFile(devMdPath, 'utf8') : ''
   const home = homedir()
@@ -910,6 +917,9 @@ async function init(options: Options) {
 async function main() {
   const { assertSupportedPlatform } = await import('./env.ts')
   assertSupportedPlatform()
+  // Before any verb reads or writes this machine's state: an older release kept it somewhere else,
+  // and a run that read one home and wrote the other would split what this machine knows in half.
+  if (settleHome().action === 'refused') { process.exitCode = 2; return }
   const options = parse(process.argv.slice(2))
   if (options.command === 'hook') {
     const { hookUsage, runHook } = await import('./hook.ts')

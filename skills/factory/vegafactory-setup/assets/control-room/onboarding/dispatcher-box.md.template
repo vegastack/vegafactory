@@ -9,7 +9,7 @@ Two macOS accounts, neither an admin of the other:
 - `{{runner-user}}` — runs the Actions runner and nothing else.
 - `{{dispatcher-user}}` — owns the `gh`, Claude, and Codex credentials, the GitHub App key, and the dispatcher.
 
-The split is the whole point: a CI job runs as `{{runner-user}}` and so **cannot read** the tokens in `{{dispatcher-user}}`'s home — a workflow edited in a pull request gets a repository token and no more. The App's private key is one of those files: `~/.vegastack/vegafactory-app.pem` in `{{dispatcher-user}}`'s home, `chmod 600`, the same PEM as the org secret `VEGAFACTORY_APP_PRIVATE_KEY` and readable by nobody else on this box.
+The split is the whole point: a CI job runs as `{{runner-user}}` and so **cannot read** the tokens in `{{dispatcher-user}}`'s home — a workflow edited in a pull request gets a repository token and no more. The App's private key is one of those files: `~/.vegafactory/worker/app.pem` in `{{dispatcher-user}}`'s home, `chmod 600`, the same PEM as the org secret `VEGAFACTORY_APP_PRIVATE_KEY` and readable by nobody else on this box.
 
 ## Toolchain
 

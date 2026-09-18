@@ -4,6 +4,7 @@ import { lstatSync, mkdirSync, readFileSync, realpathSync, renameSync, rmSync, w
 import { execFileSync } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
 import { parseControlRoomReference, resolvePolicy } from '../../../skills/dev/dev-setup/scripts/effective-policy.mjs'
+import { controlRoomClonePath, controlRoomStore, factoryConfigPath as configPath } from './home.ts'
 
 export interface ControlRoomKnob {
   org: string
@@ -39,12 +40,15 @@ export function parseControlRoomKnob(devMdText: string): ControlRoomKnob | null 
   return parseControlRoomReference(devMdText)
 }
 
+// These three are one fact spelled three ways, so they come from one place: `safeClonePath`
+// contains what `defaultClonePath` produces, and a skew between them fails every control-room read
+// closed rather than loudly.
 export function defaultClonePath(org: string, home: string): string {
-  return join(home, '.vegastack', 'control-room', org)
+  return controlRoomClonePath(org, { home })
 }
 
 export function factoryConfigPath(home: string): string {
-  return join(home, '.vegastack', 'factory.json')
+  return configPath({ home })
 }
 
 // A missing state file is an empty config — the first sync writes it. An unreadable one throws:
@@ -229,7 +233,7 @@ function realPathTo(path: string, from: string): string | null {
 // inside this machine's control-room store, with no symlink anywhere along it. Returns the reason
 // it is not usable, or null when it is.
 export function safeClonePath(home: string, path: unknown): string | null {
-  const store = join(home, '.vegastack', 'control-room')
+  const store = controlRoomStore({ home })
   if (typeof path !== 'string' || !path || !isAbsolute(path) || resolve(path) !== path) return 'the control-room path is not absolute and canonical'
   if (path !== store && !path.startsWith(store + sep)) return `the control-room clone is outside ${store}`
   const walked = realPathTo(path, parsePath(path).root)

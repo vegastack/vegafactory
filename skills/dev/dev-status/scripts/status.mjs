@@ -191,13 +191,19 @@ export function controlRoomDrift({ devMdText, orgText, groupText, cloneSha }) {
   };
 }
 
+// This tree is plain .mjs and imports nothing from the CLI, so it carries its own copy of where
+// the home is. The CLI's `home.ts` is the source of truth; these two lines are the only place it
+// is spelled out again, and `VEGAFACTORY_HOME` has to work here too or a test that points the CLI
+// somewhere harmless would still read the operator's real control room through this script.
+const factoryHome = (home) => process.env.VEGAFACTORY_HOME?.trim() || join(home, '.vegafactory');
+
 function controlRoomState(devMdText, home) {
   const knob = controlRoomKnob(devMdText);
   if (!knob) return null;
-  let path = join(home, '.vegastack/control-room', knob.org);
+  let path = join(factoryHome(home), 'control-room', knob.org);
   let lastSyncedAt = null;
   try {
-    const state = JSON.parse(readFileSync(join(home, '.vegastack/factory.json'), 'utf8'));
+    const state = JSON.parse(readFileSync(join(factoryHome(home), 'factory.json'), 'utf8'));
     const entry = state?.controlRooms?.[knob.org];
     if (entry && typeof entry === 'object') {
       if (typeof entry.path === 'string') path = entry.path;

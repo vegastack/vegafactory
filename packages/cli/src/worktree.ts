@@ -7,9 +7,9 @@
 import { spawnSync } from 'node:child_process'
 import { existsSync } from 'node:fs'
 import { mkdir, readFile, writeFile } from 'node:fs/promises'
-import { homedir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { worktreesPath, type HomeOptions } from './home.ts'
 
 const verbs = ['list', 'create', 'restore', 'remove', 'prune', 'status'] as const
 export type WorktreeVerb = (typeof verbs)[number]
@@ -113,8 +113,10 @@ export async function recordRepoRoot(registryPath: string, repoRoot: string): Pr
   return roots
 }
 
-export function defaultRegistryPath(): string {
-  return join(homedir(), '.vegastack', 'worktree-roots.json')
+// Takes the home rather than reaching for `homedir()`, because this used to be the one path in
+// the product a test could not point somewhere harmless.
+export function defaultRegistryPath(options: HomeOptions = {}): string {
+  return worktreesPath(options)
 }
 
 function defaultSpawn(args: string[], cwd?: string): SpawnResult {

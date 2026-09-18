@@ -35,7 +35,7 @@ function project(dispatchers: string | null = `| machine | operator | repos |\n|
     'harness-policy: intake claude default high · plan claude default high · implement claude default high · review codex default xhigh',
     '',
   ].join('\n'))
-  const clone = join(home, '.vegastack', 'control-room', 'o')
+  const clone = join(home, '.vegafactory', 'control-room', 'o')
   mkdirSync(clone, { recursive: true })
   if (dispatchers !== null) writeFileSync(join(clone, 'dispatchers.md'), dispatchers)
 }
@@ -49,7 +49,7 @@ const anyGit = () => (() => ({ status: 0, out: '' })) as GitRun
 function controlRoomClone(rows: string): (next: string) => void {
   const origin = join(home, 'control-room.git')
   const seed = join(home, 'control-room-seed')
-  const clone = join(home, '.vegastack', 'control-room', 'o')
+  const clone = join(home, '.vegafactory', 'control-room', 'o')
   const run = (cwd: string, args: string[]) => spawnSync('git', args, { cwd, encoding: 'utf8' })
   spawnSync('git', ['init', '--bare', '-q', '-b', 'main', origin])
   mkdirSync(seed, { recursive: true })
@@ -144,7 +144,7 @@ describe('identity', () => {
 
   test('the key path follows the environment, then the home default', () => {
     expect(appKeyPath({ VEGAFACTORY_APP_PRIVATE_KEY_FILE: '/keys/app.pem' }, '/home/x')).toBe('/keys/app.pem')
-    expect(appKeyPath({}, '/home/x')).toBe('/home/x/.vegastack/vegafactory-app.pem')
+    expect(appKeyPath({}, '/home/x')).toBe('/home/x/.vegafactory/worker/app.pem')
   })
 
   test('the JWT names the App and expires inside ten minutes', () => {
@@ -1125,7 +1125,7 @@ describe('the command', () => {
   test('a row removed upstream stands this machine down, without touching its own copy', async () => {
     const header = '| machine | operator | repos |\n|---|---|---|\n'
     const delist = controlRoomClone(`${header}| ${HOST} | mk | o/r |\n`)
-    const roster = join(home, '.vegastack', 'control-room', 'o', 'dispatchers.md')
+    const roster = join(home, '.vegafactory', 'control-room', 'o', 'dispatchers.md')
     const before = readFileSync(roster, 'utf8')
     gh.addIssue({ number: 1, labels: ['queued', 'small'] })
     const lines: string[] = []
@@ -1249,7 +1249,7 @@ describe('the command', () => {
 
   test('a roster this machine cannot prove is not a roster', async () => {
     controlRoomClone(`| machine | operator | repos |\n|---|---|---|\n| ${HOST} | mk | o/r |\n`)
-    const clone = join(home, '.vegastack', 'control-room', 'o')
+    const clone = join(home, '.vegafactory', 'control-room', 'o')
     expect(verifiedListing(root, { repo: 'o/r', host: HOST, home }).ok).toBe(true)
     // Edited on the machine: the row is there, and it authorises nothing.
     writeFileSync(join(clone, 'dispatchers.md'), `| machine | operator | repos |\n|---|---|---|\n| ${HOST} | mk | * |\n`)

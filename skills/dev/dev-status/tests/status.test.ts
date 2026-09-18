@@ -240,12 +240,12 @@ describe('control-room drift', () => {
 
   test('gatherStatus reads org.md and group.md out of the clone the state file names', () => {
     const home = mkdtempSync(join(tmpdir(), 'vsk-home-'))
-    const clone = join(home, '.vegastack/control-room/vegastack')
+    const clone = join(home, '.vegafactory/control-room/vegastack')
     mkdirSync(join(clone, 'groups/dev'), { recursive: true })
     writeFileSync(join(clone, 'org.md'), 'stats: on\n')
     writeFileSync(join(clone, 'groups/dev/group.md'), 'tests: required\n')
-    mkdirSync(join(home, '.vegastack'), { recursive: true })
-    writeFileSync(join(home, '.vegastack/factory.json'), JSON.stringify({ schemaVersion: 1, controlRooms: { vegastack: { repo: 'vegastack/vegafactory-control-room', path: clone, branch: 'main', lastSyncedAt: '2026-09-03T11:00:00Z', sha: 'e4f5a6b' } } }))
+    mkdirSync(join(home, '.vegafactory'), { recursive: true })
+    writeFileSync(join(home, '.vegafactory/factory.json'), JSON.stringify({ schemaVersion: 1, controlRooms: { vegastack: { repo: 'vegastack/vegafactory-control-room', path: clone, branch: 'main', lastSyncedAt: '2026-09-03T11:00:00Z', sha: 'e4f5a6b' } } }))
     const repo = mkdtempSync(join(tmpdir(), 'vsk-repo-'))
     mkdirSync(join(repo, '.vegastack'), { recursive: true })
     writeFileSync(join(repo, '.vegastack/dev.md'), devMd)

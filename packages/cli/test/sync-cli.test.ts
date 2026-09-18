@@ -30,11 +30,11 @@ beforeAll(async () => {
 afterAll(async () => { await rm(root, { recursive: true, force: true }) })
 async function project(name: string, profile = 'repo: acme/app\ncontrol-room: acme/room#dev\n') {
   const home = join(root, name), repo = join(home, 'repo')
-  await mkdir(join(repo, '.vegastack'), { recursive: true }); await mkdir(join(home, '.vegastack'), { recursive: true })
+  await mkdir(join(repo, '.vegastack'), { recursive: true }); await mkdir(join(home, '.vegafactory'), { recursive: true })
   await writeFile(join(repo, '.vegastack/dev.md'), profile)
   git(['init', '-b', 'main'], repo); git(['remote', 'add', 'origin', 'https://github.com/acme/app.git'], repo)
-  await writeFile(join(home, '.vegastack/factory.json'), JSON.stringify({ schemaVersion: 1, marker: 'preserved', controlRooms: { acme: { repo: 'acme/room', remote: origin, path: join(home, '.vegastack/control-room/acme'), branch: 'main', sha: null, lastSyncedAt: null } } }))
-  return { home, repo, settingsPath: join(home, '.vegastack/factory.json'), clonePath: join(home, '.vegastack/control-room/acme') }
+  await writeFile(join(home, '.vegafactory/factory.json'), JSON.stringify({ schemaVersion: 1, marker: 'preserved', controlRooms: { acme: { repo: 'acme/room', remote: origin, path: join(home, '.vegafactory/control-room/acme'), branch: 'main', sha: null, lastSyncedAt: null } } }))
+  return { home, repo, settingsPath: join(home, '.vegafactory/factory.json'), clonePath: join(home, '.vegafactory/control-room/acme') }
 }
 test('the CLI fetches once, leaves a fresh copy alone, and a dry run writes nothing', async () => {
   const f = await project('basic')
@@ -129,7 +129,7 @@ test('two CLI processes and a transaction editor retain every completed publicat
   const f = await project('concurrent')
   const children = [1, 2].map(() => Bun.spawn([executable, cli, 'sync', '--json'], { cwd: f.repo, env: { ...process.env, HOME: f.home }, stdout: 'pipe', stderr: 'pipe' }))
   const { updateSettings } = await import('../src/control-room.ts')
-  await updateSettings(join(f.home, '.vegastack'), s => ({ ...s, settings: { ...s.settings, concurrentMachineSetting: 42 } }))
+  await updateSettings(join(f.home, '.vegafactory'), s => ({ ...s, settings: { ...s.settings, concurrentMachineSetting: 42 } }))
   const codes = await Promise.all(children.map(child => child.exited))
   expect(codes).toContain(0)
   const wire = JSON.parse(await readFile(f.settingsPath, 'utf8'))
