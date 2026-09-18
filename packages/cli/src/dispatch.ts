@@ -100,7 +100,9 @@ export function listedHere(root: string, options: { repo: string; host?: string;
     return { ok: false, reason: `${file} is not on this machine — run \`vegafactory sync\` to refresh the ${room.org} control room, and add ${machine} to dispatchers.md in a control-room PR`, entry: null, file }
   }
   const entry = parseDispatchers(text).find((row) => row.machine === machine) ?? null
-  if (!entry) return { ok: false, reason: `${machine} is not listed in ${file} — add it in a control-room PR before this machine dispatches anything`, entry: null, file }
+  if (!entry) {
+    return { ok: false, entry: null, file, reason: `${machine} is not listed in ${file} — add the row \`| ${machine} | <operator> | ${options.repo} |\` in a control-room PR before this machine dispatches anything` }
+  }
   const every = entry.repos.length === 0 || entry.repos.some((repo) => repo === '*' || repo.toLowerCase() === 'all')
   if (!every && !entry.repos.includes(options.repo)) return { ok: false, reason: `${machine} is listed in ${file} for ${entry.repos.join(', ')}, not ${options.repo}`, entry, file }
   return { ok: true, reason: `${machine} is listed in ${file}`, entry, file }
