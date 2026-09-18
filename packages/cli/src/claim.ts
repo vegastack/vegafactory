@@ -76,8 +76,13 @@ type Body = (entry: CommentEntry) => string
 // Whether a claim or release comment counts: its author must be a person with write access.
 export type Trusted = (entry: CommentEntry) => boolean
 
-// No automation identity is configured, so a bot's claim or release never counts.
-export const trustBy = (permission: PermissionLookup): Trusted => (entry) => entry.authorType !== 'Bot' && !!entry.author && WRITE_ROLES.has(permission(entry.author))
+// The factory's one automation identity: the VegaFactory GitHub App, which only a holder of its
+// private key can post as. Its claims, releases and status comment count, so a dispatcher's
+// writes are visible to every session; any other bot's never do.
+export const APP_ACTOR = 'vegafactory[bot]'
+
+export const trustBy = (permission: PermissionLookup): Trusted => (entry) =>
+  entry.author === APP_ACTOR || (entry.authorType !== 'Bot' && !!entry.author && WRITE_ROLES.has(permission(entry.author)))
 
 export const trustedAuthors = (ctx: { repo: string; runner: GhRunner; root?: string }): Trusted => trustBy(permissionLookup(ctx.repo, ctx.runner, { root: ctx.root }))
 
