@@ -25,7 +25,7 @@ import { createSign, randomUUID } from 'node:crypto'
 import { appendFileSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync } from 'node:fs'
 import { homedir, hostname, userInfo } from 'node:os'
 import { join, posix } from 'node:path'
-import { APP_ACTOR, HEARTBEAT_EVERY_MS, claim, heartbeat, holderOf, machineName, release, trustedFactory } from './claim.ts'
+import { APP_ACTOR, HEARTBEAT_EVERY_MS, claim, heartbeat, holderOf, machineName, release, trustedFactory, type Trusted } from './claim.ts'
 import { defaultClonePath, factoryConfigPath, parseControlRoomKnob, readFactoryConfig } from './control-room.ts'
 import { billingVariables, childEnvironment } from './env.ts'
 import { GhError, defaultRunner, ghList, type GhResult, type GhRunner } from './gh.ts'
@@ -61,6 +61,18 @@ export const SERVICE_NAME = 'com.vegastack.vegafactory.dispatch'
 // control-room PR that takes effect on the next poll rather than a release.
 export interface Caps { runs: number; stepMs: number; pollMs: number; retryMs: number; failures: number }
 
+// Node's timers are a signed 32-bit count of milliseconds: a longer delay overflows and fires
+// immediately. About 24.8 days, which is far past any cap worth setting.
+export const MAX_TIMER_MS = 2 ** 31 - 1
+
+// An installation token lives an hour and a child is handed one when it starts — nothing can put a
+// fresh one into a process already running. So a run allowed to last longer than a token does will
+// keep working and stop being able to write to GitHub partway through, which is worse than being
+// stopped: the work exists and the evidence for it never lands. The caps may say so, and the
+// dispatcher says it out loud every time it starts. Closing it properly is the credential broker
+// in #239, where a child asks for a token instead of holding one.
+export const TOKEN_LIFE_MS = 55 * 60_000
+
 export const DEFAULT_CAPS: Caps = { runs: MAX_RUNS, stepMs: STEP_TIMEOUT_MS, pollMs: POLL_MS, retryMs: RETRY_MS, failures: MAX_FAILURES }
 
 // `runs 10 · step 72h · poll 1m · retry 15m · park 3`, in any order, separated by `·` or a comma.
@@ -71,6 +83,9 @@ export function parseCaps(cell: string): Caps | null {
   const caps = { ...DEFAULT_CAPS }
   const text = String(cell ?? '').trim()
   if (!text) return caps
+  // What each field takes: a plain count, or a duration in the units that field is measured in.
+  // `poll 2h` and `step 10s` are refused because neither is a limit anybody means.
+  const UNITS: Record<string, string[]> = { runs: [], park: [], step: ['m', 'h'], poll: ['s', 'm'], retry: ['m', 'h'] }
   for (const field of text.split(/[·,]/).map((part) => part.trim()).filter(Boolean)) {
     const match = /^(runs|step|poll|retry|park)\s+(\d+)\s*([hms]?)$/i.exec(field)
     if (!match) return null
@@ -79,15 +94,19 @@ export function parseCaps(cell: string): Caps | null {
     const value = Number(rawValue)
     const unit = rawUnit!.toLowerCase()
     if (!Number.isFinite(value) || value <= 0) return null
-    // A count takes no unit; a duration must carry one, so `step 72` cannot silently mean 72ms.
-    if (name === 'runs' || name === 'park') {
+    const allowed = UNITS[name]!
+    if (allowed.length === 0) {
+      // A count takes no unit, so `runs 10m` is somebody meaning something else.
       if (unit) return null
       if (name === 'runs') caps.runs = value
       else caps.failures = value
       continue
     }
-    if (!unit) return null
+    if (!allowed.includes(unit)) return null
     const ms = value * (unit === 'h' ? 3_600_000 : unit === 'm' ? 60_000 : 1000)
+    // A delay a timer cannot hold fires at once, which would be the opposite of the limit asked
+    // for, so the largest a timer can carry is as high as any of these go.
+    if (ms > MAX_TIMER_MS) return null
     if (name === 'step') caps.stepMs = ms
     else if (name === 'poll') caps.pollMs = ms
     else caps.retryMs = ms
@@ -508,7 +527,9 @@ export function serviceCommands(platform: NodeJS.Platform, path: string, verb: '
 export type Action = 'follow-up' | 'plan' | 'implement' | 'corrections' | 'ship' | 'stop' | 'none'
 export type Outcome = 'done' | 'blocked' | 'failed' | 'killed' | 'limit' | 'stopped'
 
-export interface RunRecord { at: string; issue: number; action: Action; outcome: Outcome; ms: number; machine: string; note: string }
+// `repo` is optional only so records written before a machine watched more than one still read;
+// everything written now carries it, because `#12` names nothing on its own.
+export interface RunRecord { at: string; repo?: string; issue: number; action: Action; outcome: Outcome; ms: number; machine: string; note: string }
 export interface Acted { at: number; action: Action; outcome: Outcome; trigger: number | null; failures: number; retryAt: number | null }
 
 export const dispatchDir = (root: string) => join(root, '.vegastack', '.tmp', 'dispatch')
@@ -745,7 +766,7 @@ const BOOKKEEPING = new Set(['claim', 'release', 'ledger', 'ack'])
 // The action this issue is waiting for, and the comment that asks for it. `trigger` is what makes
 // a run happen once: a comment already acted on asks for nothing more, and a state label already
 // worked is not worked again until the issue moves.
-export function decide(snap: Snapshot, permission: PermissionLookup, options: { acted?: Acted | null; now?: number; held?: boolean } = {}): Decision {
+export function decide(snap: Snapshot, permission: PermissionLookup, options: { acted?: Acted | null; now?: number; held?: boolean; failures?: number } = {}): Decision {
   const issue = snap.state.issue!
   const { acted = null, now = Date.now(), held = false } = options
   if (issue.state !== 'open') return nothing('the issue is closed')
@@ -760,7 +781,7 @@ export function decide(snap: Snapshot, permission: PermissionLookup, options: { 
   // only a failure and a subscription limit come back, and each has its own wait.
   if (acted && acted.action === decided.action) {
     if (acted.retryAt !== null && now < acted.retryAt) return nothing(`${decided.action} is waiting until ${new Date(acted.retryAt).toISOString()}`)
-    if (acted.failures >= MAX_FAILURES && acted.trigger === decided.trigger) return nothing(`${decided.action} failed ${acted.failures} times — this issue needs a person`)
+    if (acted.failures >= (options.failures ?? MAX_FAILURES) && acted.trigger === decided.trigger) return nothing(`${decided.action} failed ${acted.failures} times — this issue needs a person`)
     if (acted.retryAt === null && acted.trigger === decided.trigger) {
       return nothing(`already ran ${decided.action} for this ${decided.trigger === null ? 'state' : 'comment'}`)
     }
@@ -903,7 +924,7 @@ export function filesFromParent(parentPlan: string | null, number: number): stri
 
 export interface Step { action: Action; number: number; repo: string; split: boolean; by: string | null }
 export interface StepResult { outcome: Outcome; note: string; ms: number }
-export type RunStep = (step: Step, context: { root: string; onStart?: (pid: number, command: string) => void }) => Promise<StepResult>
+export type RunStep = (step: Step, context: { root: string; devMd?: string; token?: string | null; onStart?: (pid: number, command: string) => void }) => Promise<StepResult>
 
 // A run that stopped because the subscription said "enough for now". Each tool words it its own
 // way, and each of these is a limit, not a failure of the work.
@@ -1063,12 +1084,16 @@ export function childRunEnvironment(env: NodeJS.ProcessEnv, token: string | null
 export function defaultRunStep(devMd: string, env: NodeJS.ProcessEnv, { exec = execTool, timeoutMs = STEP_TIMEOUT_MS, token = () => null as string | null } = {}): RunStep {
   return async (step, context) => {
     const started = Date.now()
-    const policy = stagePolicy(devMd, STAGE_OF[step.action] ?? 'implement')
+    // The board's own profile decides which model works that project; the dispatcher's is only a
+    // fallback for a run that arrives without one.
+    const policy = stagePolicy(context.devMd ?? devMd, STAGE_OF[step.action] ?? 'implement')
     const { tool, args } = agentArgs(policy, stepPrompt(step))
     const cwd = workingDir(context.root, step.number) ?? context.root
     // Nobody is at the keyboard, so a round of questions goes to the issue and waits there for the
     // operator — dev-setup's references/ask-route.md, where VSK_ASK_ROUTE is the first step.
-    const child = await exec(tool, args, { cwd, env: childRunEnvironment(env, token()), timeoutMs, onStart: context.onStart })
+    // The token belongs to the board this run is for; a token minted for another repository is
+    // refused by GitHub on every call.
+    const child = await exec(tool, args, { cwd, env: childRunEnvironment(env, context.token ?? token()), timeoutMs, onStart: context.onStart })
     const ms = Date.now() - started
     const text = `${child.stderr}\n${child.stdout}`
     if (child.timedOut) return { outcome: 'killed', note: `${tool} ran past the ${timeoutMs / 60_000}-minute step limit and was stopped`, ms }
@@ -1091,11 +1116,34 @@ export function board(repo: string, runner: GhRunner): GhIssue[] {
   return issues.filter((issue) => !issue.pull_request && stateOf(issue.labels.map((label) => (typeof label === 'string' ? label : label.name))).state !== null)
 }
 
+// One repository this machine works: where its checkout is, who reads it, and its own profile.
+// All three are per repository and none of them can be borrowed from another: a token is narrowed
+// to the repository it was minted for, a worktree belongs to one checkout, and `harness-policy:`
+// is the project's own answer about which model plans its work.
+export interface BoardContext { repo: string; root: string; runner: GhRunner; devMd: string; token: () => string | null }
+
+// The checkout this machine has for a repository, from the registry `vegafactory worktree` keeps.
+// A dispatcher never clones anything: a board it has no checkout for is reported and skipped, so
+// adding a repository to a row is a deliberate two-step — the PR, and a clone on the box.
+export function checkoutFor(repo: string, home = homedir(), read = readFileSync, git: (dir: string, args: string[]) => string = (dir, args) => gitIn(dir)(args).out): string | null {
+  let roots: string[] = []
+  try { roots = JSON.parse(String(read(join(home, '.vegastack', 'worktree-roots.json'), 'utf8'))) as string[] } catch { return null }
+  if (!Array.isArray(roots)) return null
+  for (const candidate of roots) {
+    if (typeof candidate !== 'string' || !existsSync(candidate)) continue
+    // A worktree of a checkout is not the checkout; only the main one carries the whole repository.
+    const url = git(candidate, ['remote', 'get-url', 'origin'])
+    const named = /[:/]([^/:]+\/[^/]+?)(?:\.git)?\s*$/.exec(url.trim())?.[1]
+    if (named && named.toLowerCase() === repo.toLowerCase()) return candidate
+  }
+  return null
+}
+
 export interface PollDeps {
+  // The dispatcher's own checkout, where its ledger, its run records and its lock live.
   root: string
-  // Every repository this machine's roster row lists. One pass walks them all, so a board that is
-  // quiet costs a listing and nothing else.
-  repos: string[]
+  // Every repository this machine's roster row lists and this machine has a checkout for.
+  boards: BoardContext[]
   runner: GhRunner
   // This dispatcher process, so its claims are its own and no other process reads them as such.
   runId: string
@@ -1107,7 +1155,9 @@ export interface PollDeps {
   machine: string
   // Saves, pushes, releases and hands an issue back: the reason goes on the issue, and the state
   // label goes back to where the run picked it up.
-  standDown: (number: number, reason: string, restoreTo?: State) => string
+  // Hands an issue back on its own board: a run that failed on one repository must not restore,
+  // comment on or push the same-numbered issue of another.
+  standDown: (repo: string, number: number, reason: string, restoreTo?: State) => string
   // How a started run is ended: its whole process group, so the tools it spawned go with it.
   stop?: (pid: number, signal: NodeJS.Signals) => boolean
   // What the operating system says about a pid, which is half of a child's identity.
@@ -1129,6 +1179,14 @@ export interface Inflight {
   // reporting the kill as a failure of the work.
   interrupt: Interrupt | null
 }
+// The board a run belongs to. A run without one cannot be started at all, because every path it
+// would take — its checkout, its token, its profile — belongs to a repository.
+export function boardFor(deps: PollDeps, repo: string): BoardContext {
+  const found = deps.boards.find((context) => context.repo === repo)
+  if (!found) throw new Error(`${repo} is not a board this dispatcher watches`)
+  return found
+}
+
 export const drain = (inflight: Map<string, Inflight>) => Promise.all([...inflight.values()].map((run) => run.done))
 
 // One pass over the board: read what changed, decide, and start what is safe to start now. The
@@ -1141,13 +1199,17 @@ export async function poll(deps: PollDeps, inflight: Map<string, Inflight> = new
   const wanted: Array<{ candidate: Candidate; decision: Decision; key: string }> = []
   // Keyed by repository, because a parent issue number means nothing without one.
   const plans = new Map<string, string | null>()
-  for (const repo of deps.repos) {
-  const permission = permissionLookup(repo, runner, { root })
-  const trusted = trustedFactory({ repo, runner, root })
-  // A board nobody can read costs that repository its pass and no other's.
+  for (const context of deps.boards) {
+  const { repo, root: repoRoot, runner: repoRunner } = context
+  // A board nobody can read — an unreachable API, a name the guard refuses — costs that
+  // repository its pass and no other's, so the whole of its setup is guarded too.
   let issues: GhIssue[]
+  let permission: PermissionLookup
+  let trusted: Trusted
   try {
-    issues = board(repo, runner)
+    permission = permissionLookup(repo, repoRunner, { root: repoRoot })
+    trusted = trustedFactory({ repo, runner: repoRunner, root: repoRoot })
+    issues = board(repo, repoRunner)
   } catch (error) {
     deps.out(`${repo}: board could not be read (${(error as Error).message})`)
     continue
@@ -1155,11 +1217,11 @@ export async function poll(deps: PollDeps, inflight: Map<string, Inflight> = new
   // One issue nobody can read must not cost the board its pass, so everything per-issue is guarded.
   for (const issue of issues) {
     try {
-      syncIssue({ root, repo, number: issue.number, runner })
-      const snap = snapshot(cacheDir(root, repo, issue.number))
+      syncIssue({ root: repoRoot, repo, number: issue.number, runner: repoRunner })
+      const snap = snapshot(cacheDir(repoRoot, repo, issue.number))
       const key = `${repo}#${issue.number}`
       const held = !!holderOf(snap.state, snap.body, now(), trusted).holder
-      const decision = decide(snap, permission, { acted: acted[key] ?? null, now: now(), held })
+      const decision = decide(snap, permission, { acted: acted[key] ?? null, now: now(), held, failures: deps.caps?.failures })
       if (decision.action === 'none') continue
       // A fresh claim means someone — a person or another machine — is already on it.
       if (decision.action !== 'stop' && held) {
@@ -1169,17 +1231,17 @@ export async function poll(deps: PollDeps, inflight: Map<string, Inflight> = new
       // The operator's word becomes a recorded ack, read back by the ship gate's own check. A word
       // that does not survive that is spent here rather than re-relayed on every pass.
       if (decision.action === 'ship') {
-        const confirmed = confirmShip({ root, repo, number: issue.number, runner }, permission, { id: decision.trigger!, by: decision.by!, quote: decision.quote! })
+        const confirmed = confirmShip({ root: repoRoot, repo, number: issue.number, runner: repoRunner }, permission, { id: decision.trigger!, by: decision.by!, quote: decision.quote! })
         if (!confirmed.ok) {
           deps.out(`#${issue.number}: not shipping — ${confirmed.reason}`)
-          recordRun(root, { at: new Date(now()).toISOString(), issue: issue.number, action: 'ship', outcome: 'blocked', ms: 0, machine: deps.machine, note: tail(confirmed.reason) })
+          recordRun(root, { at: new Date(now()).toISOString(), repo, issue: issue.number, action: 'ship', outcome: 'blocked', ms: 0, machine: deps.machine, note: tail(confirmed.reason) })
           updateActed(root, (saved) => { saved[key] = { at: now(), action: 'ship', outcome: 'blocked', trigger: decision.trigger, failures: 0, retryAt: null } })
           continue
         }
       }
       const parent = snap.state.issue!.parent
       const parentKey = `${repo}#${parent}`
-      if (parent !== null && !plans.has(parentKey)) plans.set(parentKey, parentPlan(root, repo, parent, runner, permission))
+      if (parent !== null && !plans.has(parentKey)) plans.set(parentKey, parentPlan(repoRoot, repo, parent, repoRunner, permission))
       const files = parent === null ? [] : filesFromParent(plans.get(parentKey) ?? null, issue.number)
       wanted.push({ key, decision, candidate: { repo, number: issue.number, action: decision.action, parent, files, from: stateOf(snap.state.issue!.labels).state! } })
     } catch (error) {
@@ -1214,7 +1276,7 @@ export async function poll(deps: PollDeps, inflight: Map<string, Inflight> = new
     // refuse, and standing down is what releases that holder.
     const taken = candidate.action === 'stop'
       ? { ok: true, owner: '', reason: 'a stop takes no claim' }
-      : reserve({ root, repo: candidate.repo, number: candidate.number, runner }, deps.machine, deps.runId, candidate.action, at)
+      : reserve({ root: boardFor(deps, candidate.repo).root, repo: candidate.repo, number: candidate.number, runner: boardFor(deps, candidate.repo).runner }, deps.machine, deps.runId, candidate.action, at)
     if (!taken.ok) {
       deps.out(`${runKey(candidate)}: not started — ${taken.reason}`)
       continue
@@ -1258,7 +1320,8 @@ export function reserve(ctx: { root: string; repo: string; number: number; runne
 // One step and everything that follows it. Nothing here may reject: the loop does not await these
 // promises, so a rejection nobody handles would take the whole dispatcher down.
 async function runOne(deps: PollDeps, candidate: Candidate, item: { key: string; decision: Decision }, at: number, held: string | null, run: Inflight): Promise<RunRecord> {
-  const claimCtx = { root: deps.root, repo: candidate.repo, number: candidate.number, runner: deps.runner }
+  const context = boardFor(deps, candidate.repo)
+  const claimCtx = { root: context.root, repo: candidate.repo, number: candidate.number, runner: context.runner }
   // What the step started, filled in from its own callback, so the finally can forget it.
   const started: ChildRecord[] = []
   // While this machine holds the claim it says so, on the same schedule a session's hooks use.
@@ -1268,7 +1331,7 @@ async function runOne(deps: PollDeps, candidate: Candidate, item: { key: string;
   try {
     if (candidate.action === 'stop') {
       // A stop needs no agent: it is this machine giving the issue back.
-      result = { outcome: 'stopped', note: deps.standDown(candidate.number, item.decision.reason, candidate.from), ms: 0 }
+      result = { outcome: 'stopped', note: deps.standDown(candidate.repo, candidate.number, item.decision.reason, candidate.from), ms: 0 }
     } else {
       // The agent claims for itself from inside its own worktree, so this machine's reservation
       // steps aside first — holding both would stop the run it just started.
@@ -1277,7 +1340,10 @@ async function runOne(deps: PollDeps, candidate: Candidate, item: { key: string;
         try { release(claimCtx, held, APP_ACTOR, 'handing the issue to the run this machine just started') } catch { /* the run still starts */ }
       }
       result = await deps.runStep({ action: candidate.action, number: candidate.number, repo: candidate.repo, split: item.decision.split, by: item.decision.by }, {
-        root: deps.root,
+        // The repository's own checkout, so #12 on one board never opens #12's worktree on another.
+        root: context.root,
+        devMd: context.devMd,
+        token: context.token(),
         onStart: (pid, command) => {
           const record: ChildRecord = {
             pid, command, startedAt: (deps.start ?? processStart)(pid) ?? '', issue: candidate.number,
@@ -1324,7 +1390,7 @@ function settle(deps: PollDeps, candidate: Candidate, item: { key: string; decis
   const action = interrupt?.action ?? candidate.action
   const trigger = interrupt ? interrupt.trigger : item.decision.trigger
   const record: RunRecord = {
-    at: new Date(at).toISOString(), issue: candidate.number, action,
+    at: new Date(at).toISOString(), repo: candidate.repo, issue: candidate.number, action,
     outcome: result.outcome, ms: result.ms, machine: deps.machine, note: tail(result.note),
   }
   recordRun(deps.root, record)
@@ -1336,7 +1402,7 @@ function settle(deps: PollDeps, candidate: Candidate, item: { key: string; decis
     const failures = failed ? (previous && previous.action === action ? previous.failures : 0) + 1 : 0
     // The wait runs from the end of the run, not its start: a step that failed after twenty
     // minutes would otherwise be due again the moment it stopped.
-    retryAt = failed ? ended + RETRY_MS * 2 ** (failures - 1) : result.outcome === 'limit' ? resetAt(result.note, ended) : null
+    retryAt = failed ? ended + (deps.caps?.retryMs ?? RETRY_MS) * 2 ** (failures - 1) : result.outcome === 'limit' ? resetAt(result.note, ended) : null
     acted[item.key] = { at, action, outcome: result.outcome, trigger, failures, retryAt }
   })
   // Every run that did not finish hands the issue back the same way: the work is committed and
@@ -1348,7 +1414,7 @@ function settle(deps: PollDeps, candidate: Candidate, item: { key: string; decis
     const why = interrupt ? interrupt.reason
       : result.outcome === 'limit' ? 'the subscription limit was reached'
         : `the ${candidate.action} run ${result.outcome === 'killed' ? 'ran past its time limit' : 'failed'}`
-    deps.standDown(candidate.number, `${why}; this machine has saved and released the issue${when}`, candidate.from)
+    deps.standDown(candidate.repo, candidate.number, `${why}; this machine has saved and released the issue${when}`, candidate.from)
   }
   deps.out(`#${record.issue} ${record.action} → ${record.outcome}${record.note ? ` (${record.note})` : ''}`)
   return record
@@ -1518,21 +1584,30 @@ export function dispatchUsage(): string {
                          harness hooks wired, a real \`claude -p\` and \`codex exec\` answering, the
                          GitHub App key present — then install the launchd or systemd unit
   disable                remove the unit; the machine stops picking work up
-  status                 the board, plus this machine's recent dispatcher runs
+  status                 every board this machine watches, its caps, and its recent runs
   run [--once]           the poll loop itself (the unit runs this); --once makes a single pass
 
-At most three runs at once and one merge at a time, per machine — two machines on one board
-each get their own three, and each keeps its own retry and subscription-reset deadlines. A run
-takes the issue's claim before it starts, so another machine's poll sees the work is taken, except
-in the seconds an implement run hands that claim to the session it starts.
+One machine works every repository its roster row lists, and that row's caps cell says what it may
+do while working them: \`runs <n> · step <n>h · poll <n>m · retry <n>m · park <n>\`, each optional
+and each falling back to the built-in default. The run cap is the machine's, across every board;
+a merge slot is per repository, so two projects may land at once and two issues in one project may
+not. A board needs a checkout on this machine — a repository without one is named and skipped.
+
+The caps and the boards are re-read from the refreshed roster every pass, so changing either is a
+control-room PR that takes effect on the next poll rather than a restart. They are still per
+machine: two machines listed for one repository each get their own full number, and each keeps its
+own retry and subscription-reset deadlines. A run takes the issue's claim before it starts, so
+another machine's poll sees the work is taken, except in the seconds an implement run hands that
+claim to the session it starts.
 
 Options: --repo OWNER/NAME · --json · --dry-run (enable and disable show what they would do)
 
 A machine the control room's dispatchers.md does not name refuses every verb but disable. Writes
 go out as the VegaFactory GitHub App, on an hour-long token minted here from its private key:
   ${appKeyPath()}
-(VEGAFACTORY_APP_PRIVATE_KEY_FILE moves it, VEGAFACTORY_APP_ID names another App.) Each run gets
-that token too, so everything it posts is the App's and none of it can pass as a person's word; it
+(VEGAFACTORY_APP_PRIVATE_KEY_FILE moves it, VEGAFACTORY_APP_ID names another App.) One token is
+minted per repository, because an installation token is narrowed to the repository it was minted
+for. Each run gets its own board's token, so everything it posts is the App's and none of it can pass as a person's word; it
 is never given the key itself. The runs think on the operator's own subscription, so an API-key
 variable in the environment refuses the command.
 `
@@ -1660,7 +1735,10 @@ export async function runDispatch(argv: string[], deps: CliDeps = {}): Promise<n
           return 1
         }
       }
-      print({ ok: true, checks, unit: path }, `${renderChecks(checks)}\n\nenabled — ${path} is loaded; this machine polls ${repo} every ${POLL_MS / 60_000} minutes`)
+      const enabledCaps = listing.entry?.caps ?? DEFAULT_CAPS
+      const enabledRepos = (listing.entry?.repos ?? []).filter((one) => one !== '*' && one.toLowerCase() !== 'all')
+      print({ ok: true, checks, unit: path, caps: enabledCaps, watching: enabledRepos.length ? enabledRepos : [repo] },
+        `${renderChecks(checks)}\n\nenabled — ${path} is loaded; this machine polls ${(enabledRepos.length ? enabledRepos : [repo]).join(', ')} every ${Math.round(enabledCaps.pollMs / 60_000 * 10) / 10} minutes, ${enabledCaps.runs} runs at once`)
       return 0
     }
     case 'disable': {
@@ -1698,13 +1776,30 @@ export async function runDispatch(argv: string[], deps: CliDeps = {}): Promise<n
       // Reading the board changes nothing, so it does not need the App: whoever runs this reads
       // with their own `gh`, and the key is only needed once the machine starts writing.
       const runner = deps.runner ?? defaultRunner
-      const rows = board(repo, runner).map((issue) => ({
+      const boardRows = (name: string, with_: GhRunner) => board(name, with_).map((issue) => ({
         number: issue.number, title: issue.title, url: issue.html_url,
         state: stateOf(issue.labels.map((label) => (typeof label === 'string' ? label : label.name))).state!,
       }))
+      const rows = boardRows(repo, runner)
       const runs = readRuns(root)
       const byState = new Map<string, number[]>()
       for (const row of rows) byState.set(row.state, [...(byState.get(row.state) ?? []), row.number])
+      // Every other board this machine watches, read the same way. One that cannot be read says so
+      // rather than being left out, because a board missing from `status` reads as a board with
+      // nothing on it.
+      const others: string[] = []
+      for (const name of (listing.entry?.repos ?? []).filter((one) => one !== '*' && one.toLowerCase() !== 'all' && one !== repo)) {
+        const checkout = checkoutFor(name, home)
+        if (!checkout) { others.push(`${name}: no checkout on this machine`); continue }
+        try {
+          const theirs = boardRows(name, runner)
+          const grouped = new Map<string, number[]>()
+          for (const row of theirs) grouped.set(row.state, [...(grouped.get(row.state) ?? []), row.number])
+          others.push(`${name}${theirs.length ? '' : ' — nothing on the board'}`, ...[...grouped].map(([state, numbers]) => `  ${state.padEnd(18)} ${numbers.map((number) => `#${number}`).join(' ')}`))
+        } catch (error) {
+          others.push(`${name}: board could not be read (${(error as Error).message})`)
+        }
+      }
       // An issue this machine has given up on is the one thing `status` must not leave out: it is
       // off the board as far as the dispatcher is concerned until a person looks at it.
       const parked = Object.entries(readActed(root))
@@ -1720,9 +1815,10 @@ export async function runDispatch(argv: string[], deps: CliDeps = {}): Promise<n
         ...(listing.ok ? [capsLine, `watching: ${(watching.length ? watching : [repo]).join(', ')}`] : []),
         ...[...byState].map(([state, numbers]) => `${state.padEnd(20)} ${numbers.map((number) => `#${number}`).join(' ')}`),
         ...(parked.length ? ['', `parked for a person: ${parked.map((row) => `#${row.issue} (${row.action} failed ${row.failures}×)`).join(', ')}`] : []),
+        ...(others.length ? ['', ...others] : []),
         '',
         runs.length ? 'recent runs on this machine:' : 'no dispatcher runs on this machine yet',
-        ...runs.map((run) => `${run.at}  #${run.issue} ${run.action.padEnd(12)} ${run.outcome.padEnd(8)} ${Math.round(run.ms / 1000)}s  ${run.note}`),
+        ...runs.map((run) => `${run.at}  ${run.repo ? `${run.repo}#${run.issue}` : `#${run.issue}`} ${run.action.padEnd(12)} ${run.outcome.padEnd(8)} ${Math.round(run.ms / 1000)}s  ${run.note}`),
       ].join('\n'))
       return 0
     }
@@ -1736,18 +1832,48 @@ export async function runDispatch(argv: string[], deps: CliDeps = {}): Promise<n
       }
       let devMd = ''
       try { devMd = readFileSync(join(root, '.vegastack', 'dev.md'), 'utf8') } catch { /* no profile, so the tools' own defaults */ }
-      const identity = deps.runner ? null : appIdentity({ repo, keyPath, appId: appIdOf(env), fetch: deps.fetch })
-      const runner = deps.runner ?? identity!.runner
-      // The row that authorised this machine also says what it may do and which boards it works.
-      // `*` or an empty cell means the repository this checkout is, because a machine trusted with
-      // every repository of an org still has to be told which one it is standing in.
-      const caps = listing.entry?.caps ?? DEFAULT_CAPS
-      const listed = (listing.entry?.repos ?? []).filter((one) => one !== '*' && one.toLowerCase() !== 'all')
-      const repos = listed.length ? listed : [repo]
+      // The row that authorised this machine also says which boards it works and what it may do
+      // while working them. `*` or an empty cell means the repository this checkout is: a machine
+      // trusted with every repository of an org still has to be told which one it is standing in.
+      let caps = listing.entry?.caps ?? DEFAULT_CAPS
+      const listedRepos = () => {
+        const named = (listing.entry?.repos ?? []).filter((one) => one !== '*' && one.toLowerCase() !== 'all')
+        return named.length ? named : [repo]
+      }
+      // A board needs a checkout of its own: its worktrees, its issue cache and its profile all
+      // live there, and borrowing another repository's would run #12's work in the wrong tree.
+      // The checkouts this machine has are the ones `vegafactory worktree` registered.
+      const identities = new Map<string, ReturnType<typeof appIdentity>>()
+      const boardsFor = (names: string[]): BoardContext[] => {
+        const made: BoardContext[] = []
+        for (const name of names) {
+          const checkout = name === repo ? root : checkoutFor(name, home)
+          if (!checkout) {
+            out(`${name}: no checkout on this machine — clone it and run \`vegafactory worktree list\` there, or take it off this row`)
+            continue
+          }
+          // One token per repository: an installation token is narrowed to the repository it was
+          // minted for, so another board's would be refused by GitHub on every call.
+          if (!deps.runner && !identities.has(name)) identities.set(name, appIdentity({ repo: name, keyPath, appId: appIdOf(env), fetch: deps.fetch }))
+          let boardDevMd = ''
+          try { boardDevMd = readFileSync(join(checkout, '.vegastack', 'dev.md'), 'utf8') } catch { /* the tools' own defaults */ }
+          const identity = identities.get(name) ?? null
+          made.push({ repo: name, root: checkout, runner: deps.runner ?? identity!.runner, devMd: boardDevMd, token: () => identity?.token() ?? null })
+        }
+        return made
+      }
+      if (caps.stepMs > TOKEN_LIFE_MS) {
+        out(`note: step ${Math.round(caps.stepMs / 3_600_000 * 10) / 10}h is longer than the hour an installation token lives, so a run past that point can still work but can no longer write to GitHub — see #239`)
+      }
+      const runner = deps.runner ?? appIdentity({ repo, keyPath, appId: appIdOf(env), fetch: deps.fetch }).runner
       const pollDeps: PollDeps = {
-        root, repos, runner, machine, runId, caps, out: args.json ? () => {} : out, now: deps.now ?? Date.now,
-        runStep: deps.runStep ?? defaultRunStep(devMd, env, { timeoutMs: caps.stepMs, token: () => identity?.token() ?? null }), stop: deps.stop, start: deps.start,
-        standDown: (number, reason) => standDown({ root, repo, number, runner, machine }, reason),
+        root, boards: boardsFor(listedRepos()), runner, machine, runId, caps, out: args.json ? () => {} : out, now: deps.now ?? Date.now,
+        runStep: deps.runStep ?? defaultRunStep(devMd, env, { timeoutMs: caps.stepMs, token: () => null }), stop: deps.stop, start: deps.start,
+        standDown: (repoName, number, reason) => {
+          const context = pollDeps.boards.find((one) => one.repo === repoName)
+          if (!context) return `${repoName} is not a board this dispatcher watches`
+          return standDown({ root: context.root, repo: repoName, number, runner: context.runner, machine }, reason)
+        },
       }
       // Started steps outlive the pass that began them, so the next pass keeps their slots and
       // still acts on the rest of the board — a twenty-minute build does not stop the poll.
@@ -1782,7 +1908,7 @@ export async function runDispatch(argv: string[], deps: CliDeps = {}): Promise<n
         // wait checks for it rather than starting and never being told.
         if (signalled) { resolve(); return }
         wake = () => { wake = null; resolve() }
-        void (deps.sleep ?? wait)(POLL_MS).then(() => { wake = null; resolve() })
+        void (deps.sleep ?? wait)(pollDeps.caps?.pollMs ?? POLL_MS).then(() => { wake = null; resolve() })
       })
       for (;;) {
         if (signalled) {
@@ -1801,7 +1927,17 @@ export async function runDispatch(argv: string[], deps: CliDeps = {}): Promise<n
             releaseRunLock(root, runId)
             return 2
           }
-          await identity?.freshen()
+          // The roster is refreshed and verified every pass, so the caps and the boards it names
+          // are re-read with it: changing either is a control-room PR that lands on the next poll
+          // rather than a restart.
+          const fresh = verifiedListing(root, { repo, host, home, git: deps.git })
+          if (fresh.ok && fresh.entry) {
+            caps = fresh.entry.caps
+            pollDeps.caps = caps
+            listing.entry = fresh.entry
+            pollDeps.boards = boardsFor(listedRepos())
+          }
+          for (const one of identities.values()) await one.freshen()
           for (const candidate of await poll(pollDeps, inflight)) out(`#${candidate.number} ${candidate.action} started`)
         } catch (error) {
           out(`poll failed: ${(error as Error).message}`)
