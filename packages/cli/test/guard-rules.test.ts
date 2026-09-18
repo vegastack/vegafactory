@@ -3,7 +3,7 @@ import { spawnSync } from 'node:child_process'
 import { mkdirSync, mkdtempSync, realpathSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { canCommit, classifyCommand, EXPANDED, extractCommand, isShellTool, loadPolicy, mergeTarget, parseCommand, shipAskCommands, splitSegments, vegafactoryArgs, type Policy } from '../src/guard-rules.ts'
+import { canCommit, classifyCommand, guardLevel, EXPANDED, extractCommand, isShellTool, loadPolicy, mergeTarget, parseCommand, shipAskCommands, splitSegments, vegafactoryArgs, type Policy } from '../src/guard-rules.ts'
 
 const policy: Policy = { defaultBranch: 'main', shipAsk: ['bun run docs:publish', 'wrangler deploy --env production'] }
 const decide = (command: string, p: Policy = policy) => classifyCommand(command, p)
@@ -135,7 +135,10 @@ describe('decisions', () => {
       'git worktree remove --force x', 'git worktree remove x --force', 'git worktree remove -f x',
       'git commit --no-verify -m x', 'git commit -m x --no-verify', 'git tag v1', 'npm publish',
     ]) {
-      expect(decide(command), command).toMatchObject({ decision: 'ask', rule: 'always-ask' })
+      // `irreversible` is the always-ask list's subset that survives `guard: loose`.
+      const got = decide(command)
+      expect(got.decision, command).toBe('ask')
+      expect(['always-ask', 'irreversible'], command).toContain(got.rule)
     }
   })
 
@@ -493,5 +496,41 @@ describe('heredoc bodies', () => {
     for (const command of ['git push origin main', 'npm publish ./x.tgz', 'git push --force origin main', 'git push origin refs/tags/v1.2.3']) {
       expect(decide(command).decision).toBe('ask')
     }
+  })
+})
+
+// dev.md's `guard:` knob. A repository whose contributors are all trusted and whose work is all
+// recoverable keeps only what nothing undoes; every other project gets the whole list.
+describe('guard: loose', () => {
+  const loose: Policy = { ...policy, level: 'loose' }
+  const both = [
+    'git push origin main', 'npm publish ./x.tgz', 'git push origin refs/tags/v1.2.3',
+    'gh pr merge 12 --squash', 'gh api -X POST repos/o/r/issues', 'git push origin --delete feat/x',
+    '$CMD --force',
+  ]
+
+  test('only what cannot be undone still asks', () => {
+    expect(decide('git push --force origin main', loose).decision).toBe('ask')
+    expect(decide('git push origin +main:main', loose).decision).toBe('ask')
+    expect(decide('git reset --hard origin/main', loose).decision).toBe('ask')
+  })
+
+  test("the project's own ask: lines are still the project's own", () => {
+    expect(decide('bun run docs:publish', loose).decision).toBe('ask')
+  })
+
+  test('everything else is internal work a trusted team can undo', () => {
+    for (const command of both) expect(decide(command, loose).decision).toBe('allow')
+  })
+
+  test('strict is untouched, because every other project gets it', () => {
+    for (const command of both) expect(decide(command, policy).decision).toBe('ask')
+  })
+
+  test('the knob reads only the word loose, so a typo tightens', () => {
+    expect(guardLevel('guard: loose')).toBe('loose')
+    expect(guardLevel('guard: strict')).toBe('strict')
+    expect(guardLevel('guard: loosen')).toBe('strict')
+    expect(guardLevel(null)).toBe('strict')
   })
 })

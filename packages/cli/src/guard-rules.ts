@@ -17,7 +17,13 @@ export const EXPANDED = '\u0000'
 const expanded = (word: string | undefined) => word !== undefined && word.includes(EXPANDED)
 // A `$` that starts an expansion rather than standing for itself.
 const EXPANSION_START = /[A-Za-z0-9_{@*#?$!'"-]/
-export interface Policy { defaultBranch: string | null; shipAsk: string[]; tags?: Set<string> }
+// `level` is dev.md's `guard:` knob. `strict` is the default and the shipped one: the whole
+// always-ask list. `loose` is for a repository whose contributors are all trusted and whose work
+// is all recoverable — it keeps only what cannot be undone, plus whatever the project named on its
+// own `ask:` lines. It is read from the committed default branch like the rest of the policy, so a
+// branch cannot loosen itself.
+export type GuardLevel = 'strict' | 'loose'
+export interface Policy { defaultBranch: string | null; shipAsk: string[]; tags?: Set<string>; level?: GuardLevel }
 export interface Decision { decision: 'allow' | 'ask'; reason: string | null; rule: string }
 // Says whether `gh pr merge` with these (resolved) arguments is already covered by a recorded "ship it".
 // `raw` is the argv as written, so the check can refuse a `--repo` the resolver stripped.
@@ -55,12 +61,22 @@ export function defaultBranch(cwd: string): string | null {
   return null
 }
 
+// dev.md's `guard:` knob. Anything but the word `loose` is `strict`, so a typo tightens.
+export function guardLevel(devMd: string | null): GuardLevel {
+  const value = /^guard:[ \t]*(\S+)/m.exec(String(devMd ?? ''))?.[1]
+  return value === 'loose' ? 'loose' : 'strict'
+}
+
 export function loadPolicy(cwd: string): Policy {
   const branch = defaultBranch(cwd)
   const devMd = branch ? git(cwd, ['show', `origin/${branch}:.vegastack/dev.md`]) : null
   const tags = new Set((git(cwd, ['tag', '--list']) ?? '').split('\n').filter(Boolean))
-  return { defaultBranch: branch, shipAsk: devMd ? shipAskCommands(devMd) : [], tags }
+  return { defaultBranch: branch, shipAsk: devMd ? shipAskCommands(devMd) : [], tags, level: guardLevel(devMd) }
 }
+
+// What survives `guard: loose`: the two things no amount of trust makes recoverable, and the
+// project's own `ask:` lines, which it wrote on purpose.
+const LOOSE_KEEPS = new Set(['irreversible', 'ship-ask'])
 
 // A push destination is a tag when it is spelled as one, names a local tag, or looks like a version.
 const isTag = (name: string, tags?: Set<string>) => name.startsWith('refs/tags/') || Boolean(tags?.has(name)) || /^v?\d+\.\d+/.test(name)
@@ -850,12 +866,12 @@ function classifyResolved(segment: Segment, words: string[], policy: Policy, mer
     if (sub === 'push') {
       const { flags, positionals } = pushArguments(words)
       const refspecs = positionals.slice(1)
-      if (flags.includes('--force') || shortFlag(flags, 'f') || refspecs.some((spec) => spec.startsWith('+'))) return ask(`a force push ${WORD}`, 'always-ask')
+      if (flags.includes('--force') || shortFlag(flags, 'f') || refspecs.some((spec) => spec.startsWith('+'))) return ask(`a force push ${WORD}`, 'irreversible')
       if (flags.includes('--delete') || shortFlag(flags, 'd') || refspecs.map(pushDestination).some((d) => d.kind === 'delete')) {
         return ask(`deleting a remote branch ${WORD}`, 'always-ask')
       }
     }
-    if (sub === 'reset' && words.includes('--hard')) return ask(`a hard reset ${WORD}`, 'always-ask')
+    if (sub === 'reset' && words.includes('--hard')) return ask(`a hard reset ${WORD}`, 'irreversible')
     if (sub === 'branch') {
       const flags = words.slice(2).filter((word) => word.startsWith('-'))
       if (flags.includes('--delete') || shortFlag(flags, 'd') || shortFlag(flags, 'D')) return ask(`deleting a branch ${WORD}`, 'always-ask')
@@ -1002,6 +1018,9 @@ export function classifyCommand(command: unknown, policy: Policy, mergeCheck?: M
   let allowed = ALLOW
   for (const segment of parseCommand(command)) {
     const result = classifySegment(segment, policy, mergeCheck)
+    // One place decides what `guard: loose` keeps, so the answer to "what still asks here?" is a
+    // list and not a reading of every rule in this file.
+    if (result.decision === 'ask' && policy.level === 'loose' && !LOOSE_KEEPS.has(result.rule)) continue
     if (result.decision === 'ask') return result
     if (allowed.rule === 'not-guarded') allowed = result
   }
