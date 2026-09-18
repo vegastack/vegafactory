@@ -11,7 +11,7 @@ import {
   drain, filesFromParent, harnessAnswers, hitLimit, hooksWired, listedHere, mintToken, overlaps, parseDispatchArgs,
   parseDispatchers, poll, readActed, readRuns, readiness, recordRun, resetAt, RUNS_KEPT, runDispatch, schedule, serviceCommands, stagePolicy,
   standDown, stepPrompt, tail, unitPath, unitText, unsafeForParallel,
-  refreshRoster, verifiedListing,
+  noteChild, readChildren, refreshRoster, verifiedListing,
   type Candidate, type Fetch, type GitRun, type Inflight, type PollDeps, type Probe, type RunStep, type StepResult,
 } from '../src/dispatch.ts'
 import { ackBody, artifactHash, permissionLookup, snapshot } from '../src/issue.ts'
@@ -967,6 +967,51 @@ describe('the command', () => {
     expect(code).toBe(2)
     expect(lines.join('\n')).toContain('stopping:')
     expect(lines.join('\n')).toContain('is not listed')
+  })
+
+  test('a de-listed machine stops the runs it started and hands them back', async () => {
+    const header = '| machine | operator | repos |\n|---|---|---|\n'
+    const delist = controlRoomClone(`${header}| ${HOST} | mk | o/r |\n`)
+    gh.addIssue({ number: 1, labels: ['planning', 'medium'] })
+    const lines: string[] = []
+    const given: string[] = []
+    let stopped = 0
+    let passes = 0
+    let releaseChild = () => {}
+    const blocked = new Promise<void>((resolve) => { releaseChild = resolve })
+    const code = await runDispatch(['run'], {
+      cwd: root, home, host: HOST, env: {}, out: (text) => lines.push(text), runner: gh.runner, now: () => gh.clock,
+      // A child that never finishes on its own: only being stopped ends it.
+      runStep: (async (_step, context) => {
+        context.onStart?.(4242)
+        await blocked
+        return { outcome: 'killed' as const, note: 'stopped', ms: 1 }
+      }) as RunStep,
+      stop: (pid: number) => { stopped = pid; releaseChild(); return true },
+      sleep: async () => { if (++passes === 1) delist(header) },
+    })
+    expect(code).toBe(2)
+    expect(stopped).toBe(4242)
+    expect(lines.join('\n')).toContain('#1 plan stopped: this machine is no longer listed')
+    // The run's work is saved and its claim released rather than left behind.
+    expect(lines.join('\n')).toContain('this machine is no longer listed, so this machine stopped the run')
+    void given
+  })
+
+  test('disable stops the runs the service had started', async () => {
+    const lines: string[] = []
+    noteChild(root, 5150, true)
+    expect(readChildren(root)).toEqual([5150])
+    const stopped: number[] = []
+    const code = await runDispatch(['disable'], {
+      cwd: root, home, host: HOST, env: {}, out: (text) => lines.push(text), runner: gh.runner,
+      run: (() => ({ code: 0, stdout: '', stderr: '' })) as Probe,
+      stop: (pid: number) => { stopped.push(pid); return true },
+    })
+    expect(code).toBe(0)
+    expect(stopped).toEqual([5150])
+    expect(lines.join('\n')).toContain('stopped 1 run it had started')
+    expect(readChildren(root)).toEqual([])
   })
 
   test('a roster this machine cannot prove is not a roster', async () => {

@@ -382,6 +382,7 @@ export interface RunRecord { at: string; issue: number; action: Action; outcome:
 export interface Acted { at: number; action: Action; outcome: Outcome; trigger: number | null; failures: number; retryAt: number | null }
 
 export const dispatchDir = (root: string) => join(root, '.vegastack', '.tmp', 'dispatch')
+export const childrenPath = (root: string) => join(dispatchDir(root), 'children.json')
 const runsPath = (root: string) => join(dispatchDir(root), 'runs.jsonl')
 const actedPath = (root: string) => join(dispatchDir(root), 'acted.json')
 
@@ -419,6 +420,37 @@ export function readActed(root: string): Record<string, Acted> {
 export function writeActed(root: string, acted: Record<string, Acted>) {
   mkdirSync(dispatchDir(root), { recursive: true })
   replaceFile(actedPath(root), JSON.stringify(acted, null, 2) + '\n')
+}
+
+// The process groups this machine's runs are in. It is on disk because `dispatch disable` is a
+// different process from the service it takes down: without this the service's agents would keep
+// running and keep writing to GitHub after the unit is gone.
+export function readChildren(root: string): number[] {
+  try {
+    const saved: unknown = JSON.parse(readFileSync(childrenPath(root), 'utf8'))
+    return Array.isArray(saved) ? saved.filter((pid): pid is number => Number.isSafeInteger(pid) && pid > 1) : []
+  } catch { return [] }
+}
+
+export function noteChild(root: string, pid: number, live: boolean) {
+  mkdirSync(dispatchDir(root), { recursive: true })
+  withLock(dispatchDir(root), () => {
+    const pids = new Set(readChildren(root))
+    if (live) pids.add(pid)
+    else pids.delete(pid)
+    replaceFile(childrenPath(root), JSON.stringify([...pids]) + '\n')
+  }, { what: 'the dispatcher\'s children' })
+}
+
+// Stops a run and everything it started. The group is signalled, not the one process: an agent
+// spawns its own tools, and leaving those behind is how a "stopped" dispatcher keeps working.
+export function stopGroup(pid: number, signal: NodeJS.Signals = 'SIGTERM'): boolean {
+  try {
+    process.kill(-pid, signal)
+    return true
+  } catch {
+    try { process.kill(pid, signal); return true } catch { return false }
+  }
 }
 
 // Two steps finish at once, and an operator may run a pass by hand beside the service: the
@@ -643,7 +675,7 @@ export function filesFromParent(parentPlan: string | null, number: number): stri
 
 export interface Step { action: Action; number: number; repo: string; split: boolean; by: string | null }
 export interface StepResult { outcome: Outcome; note: string; ms: number }
-export type RunStep = (step: Step, context: { root: string }) => Promise<StepResult>
+export type RunStep = (step: Step, context: { root: string; onStart?: (pid: number) => void }) => Promise<StepResult>
 
 // A run that stopped because the subscription said "enough for now". Each tool words it its own
 // way, and each of these is a limit, not a failure of the work.
@@ -713,7 +745,7 @@ const WATCHDOG = '"$@" & job=$!; (sleep "$VF_LIMIT"; kill -KILL 0) & dog=$!; wai
 
 // One child, in its own process group so a stuck step is killed with everything it started. Only
 // the tail of its output is kept: the record is bounded and the output never reaches the issue.
-function execTool(tool: string, args: string[], options: { cwd: string; env: NodeJS.ProcessEnv; timeoutMs: number }): Promise<Exec> {
+function execTool(tool: string, args: string[], options: { cwd: string; env: NodeJS.ProcessEnv; timeoutMs: number; onStart?: (pid: number) => void }): Promise<Exec> {
   return new Promise((resolve) => {
     const child = spawn('sh', ['-c', WATCHDOG, 'vegafactory-dispatch', tool, ...args], {
       // Half a minute behind this process's own timer, so the backstop only ever fires for an
@@ -721,6 +753,7 @@ function execTool(tool: string, args: string[], options: { cwd: string; env: Nod
       cwd: options.cwd, env: { ...options.env, VF_LIMIT: String(Math.ceil(options.timeoutMs / 1000) + 30) },
       stdio: ['ignore', 'pipe', 'pipe'], detached: true,
     })
+    if (child.pid) options.onStart?.(child.pid)
     let stdout = ''
     let stderr = ''
     let timedOut = false
@@ -757,7 +790,7 @@ export function defaultRunStep(devMd: string, env: NodeJS.ProcessEnv, { exec = e
     const cwd = workingDir(context.root, step.number) ?? context.root
     // Nobody is at the keyboard, so a round of questions goes to the issue and waits there for the
     // operator — dev-setup's references/ask-route.md, where this variable is the first step.
-    const child = await exec(tool, args, { cwd, env: { ...childEnvironment(env), VSK_ASK_ROUTE: 'issue' }, timeoutMs })
+    const child = await exec(tool, args, { cwd, env: { ...childEnvironment(env), VSK_ASK_ROUTE: 'issue' }, timeoutMs, onStart: context.onStart })
     const ms = Date.now() - started
     const text = `${child.stderr}\n${child.stdout}`
     if (child.timedOut) return { outcome: 'killed', note: `${tool} ran past the ${timeoutMs / 60_000}-minute step limit and was stopped`, ms }
@@ -791,12 +824,14 @@ export interface PollDeps {
   // Saves, pushes, releases and hands an issue back: the reason goes on the issue, and the state
   // label goes back to where the run picked it up.
   standDown: (number: number, reason: string, restoreTo?: State) => string
+  // How a started run is ended: its whole process group, so the tools it spawned go with it.
+  stop?: (pid: number, signal: NodeJS.Signals) => boolean
 }
 
 // The steps this machine has started. It lives across polls, so the next pass two minutes later
 // sees them, keeps their slots and can still act on the rest of the board. A finished run stays in
 // the map until the next pass sweeps it, so nothing can disappear between starting and being read.
-export interface Inflight { candidate: Candidate; started: number; settled: boolean; done: Promise<RunRecord> }
+export interface Inflight { candidate: Candidate; started: number; settled: boolean; done: Promise<RunRecord>; stop: () => void }
 export const drain = (inflight: Map<number, Inflight>) => Promise.all([...inflight.values()].map((run) => run.done))
 
 // One pass over the board: read what changed, decide, and start what is safe to start now. The
@@ -855,8 +890,8 @@ export async function poll(deps: PollDeps, inflight: Map<number, Inflight> = new
       deps.out(`#${candidate.number}: not started — ${taken.reason}`)
       continue
     }
-    const run: Inflight = { candidate, started: at, settled: false, done: Promise.resolve() as unknown as Promise<RunRecord> }
-    run.done = runOne(deps, candidate, item, at, taken.owner).then((record) => { run.settled = true; return record })
+    const run: Inflight = { candidate, started: at, settled: false, stop: () => {}, done: Promise.resolve() as unknown as Promise<RunRecord> }
+    run.done = runOne(deps, candidate, item, at, taken.owner, run).then((record) => { run.settled = true; return record })
     inflight.set(candidate.number, run)
     started.push(candidate)
   }
@@ -888,7 +923,7 @@ export function reserve(ctx: { root: string; repo: string; number: number; runne
 
 // One step and everything that follows it. Nothing here may reject: the loop does not await these
 // promises, so a rejection nobody handles would take the whole dispatcher down.
-async function runOne(deps: PollDeps, candidate: Candidate, item: { key: string; decision: Decision }, at: number, held: string | null): Promise<RunRecord> {
+async function runOne(deps: PollDeps, candidate: Candidate, item: { key: string; decision: Decision }, at: number, held: string | null, run: Inflight): Promise<RunRecord> {
   const claimCtx = { root: deps.root, repo: deps.repo, number: candidate.number, runner: deps.runner }
   // While this machine holds the claim it says so, on the same schedule a session's hooks use.
   const beat = held ? setInterval(() => { try { heartbeat(claimCtx, held) } catch { /* a missed beat is not a failure */ } }, HEARTBEAT_EVERY_MS) : null
@@ -905,12 +940,19 @@ async function runOne(deps: PollDeps, candidate: Candidate, item: { key: string;
         if (beat) clearInterval(beat)
         try { release(claimCtx, held, APP_ACTOR, 'handing the issue to the run this machine just started') } catch { /* the run still starts */ }
       }
-      result = await deps.runStep({ action: candidate.action, number: candidate.number, repo: deps.repo, split: item.decision.split, by: item.decision.by }, { root: deps.root })
+      result = await deps.runStep({ action: candidate.action, number: candidate.number, repo: deps.repo, split: item.decision.split, by: item.decision.by }, {
+        root: deps.root,
+        onStart: (pid) => {
+          run.stop = () => { (deps.stop ?? stopGroup)(pid, 'SIGTERM') }
+          try { noteChild(deps.root, pid, true) } catch { /* the run still stops from here */ }
+        },
+      })
     }
   } catch (error) {
     result = { outcome: 'failed', note: (error as Error).message, ms: deps.now() - at }
   } finally {
     if (beat) clearInterval(beat)
+    run.stop = () => {}
   }
   // Whatever happened, this machine's own reservation goes back. A step that stood the issue down
   // has already released the session's claim; this releases the one taken before the launch.
@@ -1170,6 +1212,7 @@ export interface CliDeps {
   fetch?: Fetch
   runStep?: RunStep
   git?: (clone: string) => GitRun
+  stop?: (pid: number, signal: NodeJS.Signals) => boolean
   now?: () => number
   sleep?: (ms: number) => Promise<void>
   cli?: string[]
@@ -1267,9 +1310,15 @@ export async function runDispatch(argv: string[], deps: CliDeps = {}): Promise<n
         const result = run(command[0]!, command.slice(1))
         if (result.code !== 0 && !/no such|not (?:find|loaded|exist)/i.test(result.stderr)) problems.push(`${command.join(' ')}: ${result.stderr.split('\n')[0] || `exit ${result.code}`}`)
       }
+      // Taking the unit away does not reach the agents it started: they were detached on purpose,
+      // so the service could be restarted without killing a build. Disabling is not a restart.
+      const children = readChildren(root)
+      const stopped = children.filter((pid) => (deps.stop ?? stopGroup)(pid, 'SIGTERM'))
+      for (const pid of children) { try { noteChild(root, pid, false) } catch { /* the note is a note */ } }
       rmSync(path, { force: true })
-      print({ ok: problems.length === 0, unit: path, problems },
-        problems.length ? `removed ${path}, with: ${problems.join('; ')}` : `disabled — ${path} is unloaded and deleted`)
+      const ended = stopped.length ? ` and stopped ${stopped.length} run${stopped.length === 1 ? '' : 's'} it had started` : ''
+      print({ ok: problems.length === 0, unit: path, problems, stopped },
+        problems.length ? `removed ${path}${ended}, with: ${problems.join('; ')}` : `disabled — ${path} is unloaded and deleted${ended}`)
       return problems.length ? 1 : 0
     }
     case 'status': {
@@ -1305,13 +1354,33 @@ export async function runDispatch(argv: string[], deps: CliDeps = {}): Promise<n
       const runner = deps.runner ?? identity!.runner
       const pollDeps: PollDeps = {
         root, repo, runner, machine, out: args.json ? () => {} : out, now: deps.now ?? Date.now,
-        runStep: deps.runStep ?? defaultRunStep(devMd, env),
+        runStep: deps.runStep ?? defaultRunStep(devMd, env), stop: deps.stop,
         standDown: (number, reason) => standDown({ root, repo, number, runner, machine }, reason),
       }
       // Started steps outlive the pass that began them, so the next pass keeps their slots and
       // still acts on the rest of the board — a twenty-minute build does not stop the poll.
       const inflight = new Map<number, Inflight>()
+      // Stopping means stopping: the agents this machine started are ended, their work saved and
+      // their claims released. A dispatcher that walked away leaving three agents writing to
+      // GitHub would be worse than one that never started.
+      const shutDown = async (why: string) => {
+        for (const [number, run] of inflight) {
+          if (run.settled) continue
+          run.stop()
+          out(`#${number} ${run.candidate.action} stopped: ${why}`)
+          try { out(pollDeps.standDown(number, `${why}, so this machine stopped the run`, run.candidate.from)) } catch (error) { out(`#${number} could not be handed back: ${(error as Error).message}`) }
+        }
+        await drain(inflight)
+      }
+      let signalled: string | null = null
+      const onSignal = (signal: string) => { signalled = signal }
+      process.once('SIGINT', () => onSignal('SIGINT'))
+      process.once('SIGTERM', () => onSignal('SIGTERM'))
       for (;;) {
+        if (signalled) {
+          await shutDown(`this machine was asked to stop (${signalled})`)
+          return 0
+        }
         try {
           // The roster is the enrolment, so it is refreshed and re-read every pass: a row removed
           // in a control-room PR stands this machine down at the next poll, with nothing to log
@@ -1319,7 +1388,7 @@ export async function runDispatch(argv: string[], deps: CliDeps = {}): Promise<n
           const still = verifiedListing(root, { repo, host, home, git: deps.git })
           if (!still.ok) {
             out(`stopping: ${still.reason}`)
-            await drain(inflight)
+            await shutDown('this machine is no longer listed')
             return 2
           }
           await identity?.freshen()
