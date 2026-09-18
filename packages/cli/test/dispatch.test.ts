@@ -1445,13 +1445,18 @@ describe('caps on the roster row', () => {
     expect(parseCaps('   ')).toEqual(DEFAULT_CAPS)
   })
 
-  test('a duration reads back in the unit it was written in', () => {
-    expect(sayDuration(72 * 3_600_000)).toBe('72h')
-    expect(sayDuration(60_000)).toBe('1m')
-    expect(sayDuration(30_000)).toBe('30s')
+  test('a duration reads back in a unit its own field accepts', () => {
+    expect(sayDuration(72 * 3_600_000, 'step')).toBe('72h')
     // The case that used to print `0h`.
-    expect(sayDuration(parseCaps('step 1m')!.stepMs)).toBe('1m')
-    expect(sayDuration(parseCaps('poll 1s')!.pollMs)).toBe('1s')
+    expect(sayDuration(parseCaps('step 1m')!.stepMs, 'step')).toBe('1m')
+    expect(sayDuration(parseCaps('poll 1s')!.pollMs, 'poll')).toBe('1s')
+    // And what is printed can be pasted back into the cell it came from: `poll` and `retry` take
+    // no hours, so an hour's worth of either says so in minutes.
+    expect(sayDuration(60 * 60_000, 'poll')).toBe('60m')
+    expect(sayDuration(60 * 60_000, 'retry')).toBe('60m')
+    for (const [field, ms] of [['step', 72 * 3_600_000], ['poll', 60 * 60_000], ['retry', 90 * 60_000]] as const) {
+      expect(parseCaps(`${field} ${sayDuration(ms, field)}`)).not.toBeNull()
+    }
   })
 
   test('a cell that names a cap is held to it, value or no value', () => {
@@ -1614,4 +1619,19 @@ describe('the caps reach what they limit', () => {
     expect(schedule(many, [], 5)).toHaveLength(5)
     expect(schedule(many, [], 1)).toHaveLength(1)
   })
+})
+
+// A hand-back that promised a retry the next poll would refuse is a message that teaches the
+// operator to distrust the messages.
+test('a hand-back promises a retry only when there is a try left', async () => {
+  gh.addIssue({ number: 1, labels: ['planning', 'medium'] })
+  controlRoomClone(`| machine | operator | repos | caps |\n|---|---|---|---|\n| ${HOST} | mk | o/r | park 1 |\n`)
+  await runDispatch(['run', '--once'], {
+    cwd: root, home, host: HOST, env: {}, out: () => {}, runner: gh.runner, now: () => gh.clock,
+    runStep: (async () => ({ outcome: 'failed' as const, note: 'boom', ms: 1 })) as RunStep,
+  })
+  const handbacks = gh.issues.get(1)!.comments.filter((comment) => comment.body.includes('type=handback'))
+  expect(handbacks).toHaveLength(1)
+  expect(handbacks[0]!.body).toContain('needs a person')
+  expect(handbacks[0]!.body).not.toContain('tries again after')
 })

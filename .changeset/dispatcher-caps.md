@@ -13,6 +13,6 @@ A dispatcher's limits now come from its roster row instead of being fixed in the
 - A stop that was nothing to do with the issue — the machine de-listed, the service told to stop, a signal — no longer spends the issue's trigger. Before, `standDown` put the issue back as `queued` or `planning` while the record said the work had already run for that state, so no machine ever picked it up again.
 - Two fixes found alongside: a failed or stopped run now goes back to the state it came from instead of staying `in-progress`, and the shipped roster template's header row is no longer read as a machine called `dispatcher`.
 - A separator with nothing beside it — `·`, `runs 10 ·`, `runs 10,,poll 1m` — is a half-typed cell and refuses, instead of reading as "and the rest are fine".
-- A run that has spent its tries is parked rather than reported as waiting. Every failure sets a retry deadline, so asking about the wait first meant `park 1` never parked anything.
-- Caps read back in the unit they were written in: `step 1m` no longer prints as `0h`.
+- A run that has spent its tries is parked rather than reported as waiting, and its hand-back says so instead of promising a retry the next poll would refuse. Every failure sets a retry deadline, so asking about the wait first meant `park 1` never parked anything.
+- Caps read back in a unit their own field accepts, so what is printed can be pasted into the cell it came from: `step 1m` no longer prints as `0h`, and an hour of `poll` says `60m` rather than an `1h` the parser would refuse.
 - The roster's shape is stated once and the template, the reference and the onboarding row all say the same thing.

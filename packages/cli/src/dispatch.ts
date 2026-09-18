@@ -70,12 +70,17 @@ export const DEFAULT_CAPS: Caps = { runs: MAX_RUNS, stepMs: STEP_TIMEOUT_MS, pol
 // Every field is optional and falls back to the shipped default. A field that is present and
 // unreadable returns null and the caller drops that machine: guessing a cap would be choosing a
 // number on the operator's behalf, and a cap nobody can read is not a cap.
-// A duration in the unit somebody would have written it in, so `step 1m` does not read back as
-// `0h`. Whole units only: these come from a cell that was typed in whole units.
-export function sayDuration(ms: number): string {
-  if (ms % 3_600_000 === 0) return `${ms / 3_600_000}h`
-  if (ms % 60_000 === 0) return `${ms / 60_000}m`
-  return `${Math.max(1, Math.round(ms / 1000))}s`
+// A duration written the way that field accepts it, so what is printed can be pasted back into
+// the cell it came from. `poll 60m` must not read back as `poll 1h`, which `parseCaps` refuses.
+const FIELD_UNITS: Record<'step' | 'poll' | 'retry', ('h' | 'm' | 's')[]> = { step: ['h', 'm'], poll: ['m', 's'], retry: ['m'] }
+
+export function sayDuration(ms: number, field: 'step' | 'poll' | 'retry' = 'step'): string {
+  const size = { h: 3_600_000, m: 60_000, s: 1000 }
+  for (const unit of FIELD_UNITS[field]) if (ms % size[unit] === 0) return `${ms / size[unit]}${unit}`
+  // Not a whole number of any unit the field takes — say the smallest one it does, rounded up, so
+  // the number stays a limit rather than becoming zero.
+  const smallest = FIELD_UNITS[field].at(-1)!
+  return `${Math.max(1, Math.ceil(ms / size[smallest]))}${smallest}`
 }
 
 export function parseCaps(cell: string): Caps | null {
@@ -1391,6 +1396,7 @@ function settle(deps: PollDeps, candidate: Candidate, item: { key: string; decis
   recordRun(deps.root, record)
   const ended = deps.now()
   let retryAt: number | null = null
+  let failuresNow = 0
   // A stop that was nothing to do with the issue spends nothing. The run is still recorded and the
   // issue still handed back, but `acted` is left exactly as the last real run left it — write a
   // spent trigger here and the restored issue looks already-done to the next pass and to every
@@ -1408,6 +1414,7 @@ function settle(deps: PollDeps, candidate: Candidate, item: { key: string; decis
     const failures = failed ? (previous && previous.action === action ? previous.failures : 0) + 1 : 0
     // The wait runs from the end of the run, not its start: a step that failed after twenty
     // minutes would otherwise be due again the moment it stopped.
+    failuresNow = failures
     retryAt = failed ? ended + (deps.caps?.retryMs ?? RETRY_MS) * 2 ** (failures - 1) : result.outcome === 'limit' ? resetAt(result.note, ended) : null
     acted[item.key] = { at, action, outcome: result.outcome, trigger, failures, retryAt }
   })
@@ -1416,7 +1423,11 @@ function settle(deps: PollDeps, candidate: Candidate, item: { key: string; decis
   // found it — a failure that left the issue `in-progress` with nobody on it is a dead end. It
   // happens exactly once: a `stop` step has already done it, and an interrupted run does it here.
   if (result.outcome !== 'done' && !alreadyHandedBack) {
-    const when = retryAt ? `, and tries again after ${new Date(retryAt).toISOString()}` : ''
+    // Only when there is a try left. A run that has spent them is parked, and saying it will try
+    // again would be a promise the next poll refuses.
+    const spent = failuresNow >= (deps.caps?.failures ?? MAX_FAILURES)
+    const when = retryAt && !spent ? `, and tries again after ${new Date(retryAt).toISOString()}`
+      : spent ? `, and has now failed ${failuresNow} times — it needs a person` : ''
     const why = interrupt ? interrupt.reason
       : result.outcome === 'limit' ? 'the subscription limit was reached'
         : `the ${candidate.action} run ${result.outcome === 'killed' ? 'ran past its time limit' : 'failed'}`
@@ -1749,7 +1760,7 @@ export async function runDispatch(argv: string[], deps: CliDeps = {}): Promise<n
       }
       const enabledCaps = listing.entry?.caps ?? DEFAULT_CAPS
       print({ ok: true, checks, unit: path, caps: enabledCaps },
-        `${renderChecks(checks)}\n\nenabled — ${path} is loaded; this machine polls ${repo} every ${Math.round(enabledCaps.pollMs / 60_000 * 10) / 10} minutes, ${enabledCaps.runs} runs at once`)
+        `${renderChecks(checks)}\n\nenabled — ${path} is loaded; this machine polls ${repo} every ${sayDuration(enabledCaps.pollMs, 'poll')}, ${enabledCaps.runs} runs at once`)
       return 0
     }
     case 'disable': {
@@ -1802,7 +1813,7 @@ export async function runDispatch(argv: string[], deps: CliDeps = {}): Promise<n
       // What this machine is allowed to do, in the words of the row that allows it, so "why is it
       // doing that?" is answered without anyone opening the control room.
       const statusCaps = listing.entry?.caps ?? DEFAULT_CAPS
-      const capsLine = `caps: ${statusCaps.runs} runs · step ${sayDuration(statusCaps.stepMs)} · poll ${sayDuration(statusCaps.pollMs)} · retry ${sayDuration(statusCaps.retryMs)} · park ${statusCaps.failures}`
+      const capsLine = `caps: ${statusCaps.runs} runs · step ${sayDuration(statusCaps.stepMs, 'step')} · poll ${sayDuration(statusCaps.pollMs, 'poll')} · retry ${sayDuration(statusCaps.retryMs, 'retry')} · park ${statusCaps.failures}`
       print({ repo, machine, listed: listing.ok, caps: statusCaps, board: rows, runs, parked }, [
         `${repo} · ${machine} · ${listing.ok ? 'listed to dispatch' : listing.reason}`,
         ...(listing.ok ? [capsLine] : []),
