@@ -9,12 +9,9 @@
 // VegaStack tooling keeps `tools/`, `cache/`, `registry/` and `secrets/` there, none of which this
 // repository references. A directory this product owns entirely is one it may also prune.
 
-import { cpSync, lstatSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync } from 'node:fs'
+import { accessSync, constants, cpSync, lstatSync, mkdirSync, readdirSync, renameSync, rmSync } from 'node:fs'
 
-const readJson = (path: string): Record<string, unknown> | null => {
-  try { return JSON.parse(readFileSync(path, 'utf8')) as Record<string, unknown> } catch { return null }
-}
-import { homedir, hostname } from 'node:os'
+import { homedir } from 'node:os'
 import { dirname, join } from 'node:path'
 
 // The one escape hatch, and the reason the tests can run at all: `worktree.ts` used to call
@@ -112,32 +109,27 @@ const MOVES: { from: string[]; to: string[]; shape: Kind }[] = [
   { from: ['.skills-install-transaction.json'], to: ['.skills-install-transaction.json'], shape: 'file' },
 ]
 
-// A live lock means a process is writing inside a directory this move would rename out from under
-// it. None is ever removed here — a lock belongs to the code that took it, and that code already
-// knows how to clear its own — but a live one stops the move.
+// A lock means a process may be writing inside a directory this move would rename out from under
+// it. Any lock stops the move, and none is ever removed by it.
 //
-// Liveness is each lock's own rule, not a third one invented here:
-//   · `factory.json.guard` is explicitly never stolen, and it is taken before its `owner.json`
-//     exists, so it counts as live whenever it is there at all and a person decides the rest.
-//   · `.skills-install.lock` names the pid that took it and the installer itself steals a dead
-//     one, so a dead pid is not a reason to wait.
-//   · the directory locks (`.lock` with `owner.json`) follow `withLock`'s rule: a live pid on
-//     this host, or younger than the stale window, is live.
-// A lock nothing holds neither blocks the move nor is deleted by it; it travels or it stays.
-const NEVER_STOLEN = 'factory.json.guard'
-const INSTALL_LOCK = '.skills-install.lock'
-// Ten minutes: `withLock`'s own staleMs.
-export const LOCK_STALE_MS = 10 * 60_000
+// Nothing here tries to work out whether a lock is dead. Three of the four protocols say not to:
+// `factory.json.guard` is explicitly never stolen, `lockOrg`'s `<org>.lock` is never stolen and
+// carries no owner file at all, and both are taken before anything is written inside them — so an
+// ownerless lock is as likely to be a live process one line earlier as it is to be litter. Only
+// the installer's lock documents a steal, and having one rule here beats having four. Guessing
+// wrong renames a directory out from under a live writer; guessing right saves an operator one
+// `rm` of a path this message names, once in the life of a machine.
+const LOCK_NAMES = ['.skills-install.lock', 'factory.json.guard', '.lock'] as const
 
 // Everywhere a lock can sit under either home, including inside the directories this move renames.
 function lockPaths(home: string, list: (path: string) => string[] | null): string[] {
-  const rooms = list(join(home, 'control-room')) ?? []
+  const rooms = (list(join(home, 'control-room')) ?? []).filter((entry) => entry.endsWith('.lock'))
   return [
-    join(home, INSTALL_LOCK),
-    join(home, NEVER_STOLEN),
+    join(home, '.skills-install.lock'),
+    join(home, 'factory.json.guard'),
     join(home, 'stats', '.lock'), join(home, 'stats', 'push', '.lock'),
     join(home, '.tmp', 'stats', '.lock'), join(home, '.tmp', 'stats', 'push', '.lock'),
-    ...rooms.filter((entry) => entry.endsWith('.lock')).map((entry) => join(home, 'control-room', entry)),
+    ...rooms.map((entry) => join(home, 'control-room', entry)),
   ]
 }
 
@@ -158,7 +150,7 @@ export function migrateHome(deps: {
   kind: (path: string) => Kind
   // null when the directory is there but cannot be listed: "unknown" must never read as "empty".
   list: (path: string) => string[] | null
-  lockHolder: (path: string) => { alive: boolean; label: string } | null
+  readable: (path: string, shape: Kind) => boolean
   move: (from: string, to: string) => void
   mkdir: (path: string) => void
   remove: (path: string) => void
@@ -198,18 +190,11 @@ export function migrateHome(deps: {
   //
   // Both homes are checked: a live lock in the destination means something is writing there now,
   // and moving a file on top of it would clobber a journal mid-write or split the settings.
-  const held: string[] = []
-  for (const home of [from, to]) {
-    for (const path of lockPaths(home, deps.list)) {
-      if (deps.kind(path) === 'absent') continue
-      const holder = deps.lockHolder(path)
-      if (holder?.alive !== false) held.push(`${path}${holder?.label ? ` (${holder.label})` : ''}`)
-    }
-  }
+  const held = [from, to].flatMap((home) => lockPaths(home, deps.list)).filter((path) => deps.kind(path) !== 'absent')
   if (held.length > 0) {
     return {
       action: 'refused',
-      reason: `a lock says a process is writing there now (${held.join(', ')}) — this move would rename a directory out from under it. Run again once the work has finished`,
+      reason: `a lock is held there (${held.join(', ')}) — this move would rename a directory out from under whatever took it, and three of these four locks are never stolen even by the code that owns them. Run again once the work has finished; if you know nothing holds it, remove that path and run again`,
       moved: [],
     }
   }
@@ -221,7 +206,11 @@ export function migrateHome(deps: {
   for (const entry of MOVES) {
     for (const path of [join(from, ...entry.from), join(to, ...entry.to)]) {
       const kind = deps.kind(path)
-      if (kind !== 'absent' && kind !== entry.shape) strange.push(`${path} is ${kind === 'unreadable' ? 'unreadable' : `not a ${entry.shape}`}`)
+      if (kind === 'absent') continue
+      if (kind !== entry.shape) { strange.push(`${path} is ${kind === 'unreadable' ? 'unreadable' : `not a ${entry.shape}`}`); continue }
+      // Present and the right shape is not enough: a mode-000 file or a directory this account
+      // cannot list moves across perfectly well and is unreadable at the far end.
+      if (!deps.readable(path, entry.shape)) strange.push(`${path} cannot be read by this account`)
     }
   }
   if (strange.length > 0) {
@@ -320,21 +309,12 @@ export function settleHome(report: (line: string) => void = console.error): Migr
         return (error as NodeJS.ErrnoException).code === 'ENOENT' ? [] : null
       }
     },
-    lockHolder: (path) => {
-      if (path.endsWith(NEVER_STOLEN)) return { alive: true, label: 'never stolen; a person decides' }
-      const owner = readJson(path.endsWith(INSTALL_LOCK) ? path : join(path, 'owner.json'))
-      const pid = Number(owner?.pid)
-      if (!Number.isInteger(pid) || pid <= 0) {
-        // Taken but not yet written, or written by a process that died mid-write: judge by age,
-        // the same way `withLock` does.
-        try { return { alive: Date.now() - lstatSync(path).mtimeMs <= LOCK_STALE_MS, label: 'no readable owner' } } catch { return { alive: true, label: 'unreadable' } }
-      }
-      if (typeof owner?.host === 'string' && owner.host !== hostname()) {
-        return { alive: Date.now() - Number(owner.at ?? 0) <= LOCK_STALE_MS, label: `pid ${pid} on ${owner.host}` }
-      }
-      try { process.kill(pid, 0); return { alive: true, label: `pid ${pid}` } } catch (error) {
-        return { alive: (error as NodeJS.ErrnoException).code !== 'ESRCH', label: `pid ${pid}` }
-      }
+    readable: (path, shape) => {
+      try {
+        if (shape === 'directory') readdirSync(path)
+        else accessSync(path, constants.R_OK)
+        return true
+      } catch { return false }
     },
     move: (from, to) => movePath(from, to, {
       rename: renameSync,
