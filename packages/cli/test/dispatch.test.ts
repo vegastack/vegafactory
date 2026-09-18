@@ -883,6 +883,18 @@ describe('readiness and the service', () => {
     expect(hooksWired(root).ok).toBe(true)
   })
 
+  test('each probe is an invocation its tool actually accepts', () => {
+    const seen: Array<[string, string[]]> = []
+    harnessAnswers((command, args) => { seen.push([command, args]); return { code: 0, stdout: 'ok', stderr: '' } })
+    const codex = seen.find(([command]) => command === 'codex')![1]
+    // `codex exec` has no approval flag; `-a never` was a usage error, so the check could never
+    // pass and enable refused every machine. Sandbox mode is the only thing it needs told.
+    expect(codex).toEqual(['exec', '--sandbox', 'read-only', 'say ok'])
+    expect(codex).not.toContain('-a')
+    const claude = seen.find(([command]) => command === 'claude')![1]
+    expect(claude).toEqual(['-p', 'say ok'])
+  })
+
   test('a real turn from each tool is the proof, and a refusal is quoted', () => {
     expect(harnessAnswers(answers).every((check) => check.ok)).toBe(true)
     const dead: Probe = (command) => (command === 'codex' ? { code: 1, stdout: '', stderr: 'stream error: token_revoked' } : { code: 0, stdout: 'ok', stderr: '' })
@@ -895,17 +907,30 @@ describe('readiness and the service', () => {
     expect(checks.find((check) => check.name === 'billing')).toMatchObject({ ok: false, detail: expect.stringContaining('ANTHROPIC_API_KEY') })
   })
 
-  test('a dispatched run pushes over SSH, so an HTTPS push URL fails readiness', () => {
-    const remote = (url: string): Probe => (command, args) => (command === 'git'
-      ? { code: 0, stdout: `${url}\n`, stderr: '' }
-      : answers(command, args))
-    const check = (url: string) => readiness({ root, listing: listedHere(root, { repo: 'o/r', host: HOST, home }), run: remote(url), keyOk: true, keyDetail: 'minted', env: {} }).find((one) => one.name === 'push')!
-    expect(check('git@github.com:o/r.git')).toMatchObject({ ok: true })
-    expect(check('ssh://git@github.com/o/r.git')).toMatchObject({ ok: true })
-    expect(check('https://github.com/o/r.git')).toMatchObject({ ok: false, detail: expect.stringContaining('git remote set-url --push origin') })
+  test('a run must be able to push: SSH always, HTTPS only with a login of the machine\'s own', () => {
+    const answer = (url: string, loggedIn: boolean): Probe => (command, args) => {
+      if (command === 'git') return { code: 0, stdout: `${url}\n`, stderr: '' }
+      // Asked with the App's token scrubbed, which is how a run's Git asks.
+      if (command === 'env') {
+        expect(args.slice(0, 4)).toEqual(['-u', 'GH_TOKEN', '-u', 'GITHUB_TOKEN'])
+        return loggedIn
+          ? { code: 0, stdout: 'github.com\n  \u2713 Logged in to github.com account kmanojkumar (keyring)', stderr: '' }
+          : { code: 1, stdout: '', stderr: 'You are not logged into any GitHub hosts' }
+      }
+      return answers(command, args)
+    }
+    const check = (run: Probe) => readiness({ root, listing: listedHere(root, { repo: 'o/r', host: HOST, home }), run, keyOk: true, keyDetail: 'minted', env: {} }).find((one) => one.name === 'push')!
+
+    // SSH answers no credential helper, so the App's token cannot reach it either way.
+    expect(check(answer('git@github.com:o/r.git', false))).toMatchObject({ ok: true })
+    expect(check(answer('ssh://git@github.com/o/r.git', false))).toMatchObject({ ok: true })
+    // HTTPS is fine when the machine has its own login — that is what a run's Git will get.
+    expect(check(answer('https://github.com/o/r.git', true))).toMatchObject({ ok: true, detail: expect.stringContaining('kmanojkumar') })
+    // HTTPS with only the App to go on would finish the work and fail at the push.
+    expect(check(answer('https://github.com/o/r.git', false))).toMatchObject({ ok: false, detail: expect.stringContaining('gh auth login') })
+
     const broken: Probe = (command, args) => (command === 'git' ? { code: 128, stdout: '', stderr: 'No such remote' } : answers(command, args))
-    expect(readiness({ root, listing: listedHere(root, { repo: 'o/r', host: HOST, home }), run: broken, keyOk: true, keyDetail: 'minted', env: {} }).find((one) => one.name === 'push'))
-      .toMatchObject({ ok: false, detail: expect.stringContaining('No such remote') })
+    expect(check(broken)).toMatchObject({ ok: false, detail: expect.stringContaining('No such remote') })
   })
 
   test('the unit runs this CLI\'s own dispatch run and carries no token', () => {
@@ -993,18 +1018,21 @@ describe('the step a run makes', () => {
     expect(given.VEGAFACTORY_APP_PRIVATE_KEY_FILE).toBeUndefined()
     expect(Object.keys(given).some((name) => name.startsWith('VEGAFACTORY_'))).toBe(false)
     expect(given.PATH).toBe('/usr/bin')
-    // The token is for the API. Git gets no credential helper, so it never tries to push with a
-    // token whose Contents permission is read-only; it pushes over SSH instead.
-    expect(given.GIT_CONFIG_COUNT).toBe('1')
-    expect(given.GIT_CONFIG_KEY_0).toBe('credential.helper')
+    // The token is for the API. Git is given a helper that scrubs it first, so it never pushes
+    // with a token whose Contents permission is read-only — it gets the machine's own login back
+    // instead, and an https remote works exactly as it does for the person at the keyboard.
+    expect(given.GIT_CONFIG_COUNT).toBe('2')
+    expect(given.GIT_CONFIG_KEY_0).toBe('credential.https://github.com.helper')
     expect(given.GIT_CONFIG_VALUE_0).toBe('')
+    expect(given.GIT_CONFIG_KEY_1).toBe('credential.https://github.com.helper')
+    expect(given.GIT_CONFIG_VALUE_1).toBe('!env -u GH_TOKEN -u GITHUB_TOKEN gh auth git-credential')
     // With no token minted yet the child simply gets none; it never gets the key instead.
     expect(childRunEnvironment(env, null).GH_TOKEN).toBeUndefined()
     expect(childRunEnvironment(env, null).VEGAFACTORY_APP_PRIVATE_KEY_FILE).toBeUndefined()
     // A GIT_CONFIG_* pair already in the environment cannot survive to outrank that reset.
     const smuggled = childRunEnvironment({ ...env, GIT_CONFIG_COUNT: '1', GIT_CONFIG_KEY_0: 'credential.helper', GIT_CONFIG_VALUE_0: '!gh auth git-credential' }, 'ghs_x')
     expect(smuggled.GIT_CONFIG_VALUE_0).toBe('')
-    expect(smuggled.GIT_CONFIG_COUNT).toBe('1')
+    expect(smuggled.GIT_CONFIG_COUNT).toBe('2')
   })
 
   test('a step refuses to start while an API key is in the environment', async () => {

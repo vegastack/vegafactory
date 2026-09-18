@@ -3,7 +3,7 @@ import { spawnSync } from 'node:child_process'
 import { mkdirSync, mkdtempSync, realpathSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { canCommit, classifyCommand, EXPANDED, extractCommand, isShellTool, loadPolicy, mergeTarget, parseCommand, shipAskCommands, splitSegments, vegafactoryArgs, type Policy } from '../src/guard-rules.ts'
+import { canCommit, classifyCommand, guardLevel, EXPANDED, extractCommand, isShellTool, loadPolicy, mergeTarget, parseCommand, shipAskCommands, splitSegments, vegafactoryArgs, type Policy } from '../src/guard-rules.ts'
 
 const policy: Policy = { defaultBranch: 'main', shipAsk: ['bun run docs:publish', 'wrangler deploy --env production'] }
 const decide = (command: string, p: Policy = policy) => classifyCommand(command, p)
@@ -135,7 +135,10 @@ describe('decisions', () => {
       'git worktree remove --force x', 'git worktree remove x --force', 'git worktree remove -f x',
       'git commit --no-verify -m x', 'git commit -m x --no-verify', 'git tag v1', 'npm publish',
     ]) {
-      expect(decide(command), command).toMatchObject({ decision: 'ask', rule: 'always-ask' })
+      // `irreversible` is the always-ask list's subset that survives `guard: loose`.
+      const got = decide(command)
+      expect(got.decision, command).toBe('ask')
+      expect(['always-ask', 'irreversible'], command).toContain(got.rule)
     }
   })
 
@@ -421,5 +424,113 @@ describe('commit capability', () => {
     for (const command of [null, undefined, 42, '$CMD', 'eval "$STEP"', 'xargs git commit']) {
       expect(canCommit(command), String(command)).toBe(true)
     }
+  })
+})
+
+// A heredoc body is data the command is fed, not command text. A quoted delimiter means the shell
+// expands nothing in it, so a changeset or a release note that mentions `npm publish` in backticks
+// is prose — and the guard used to ask for permission to run words somebody was writing down.
+describe('heredoc bodies', () => {
+  test("prose in a quoted heredoc is data, whatever command it names", () => {
+    expect(decide("cat > a.md <<'EOF'\nwe run `npm publish ./x.tgz` now\nEOF").decision).toBe('allow')
+    expect(decide("cat > a.md <<'EOF'\nthen `git push origin main`\nEOF").decision).toBe('allow')
+    expect(decide('cat > a.md <<"EOF"\nsee `git push origin main`\nEOF').decision).toBe('allow')
+    expect(decide("cat > a.md <<-'EOF'\n\tsee `npm publish`\n\tEOF").decision).toBe('allow')
+  })
+
+  test('an unquoted delimiter really is expanded by the shell, so it still counts', () => {
+    expect(decide('cat > a.md <<EOF\n$(git push origin main)\nEOF').decision).toBe('ask')
+    expect(decide('cat > a.md <<EOF\n`npm publish ./x.tgz`\nEOF').decision).toBe('ask')
+  })
+
+  test('the command after a heredoc body is still read', () => {
+    expect(decide("cat > a.md <<'EOF'\nprose\nEOF\ngit push origin main").decision).toBe('ask')
+  })
+
+  test('the body is only data when nothing on the line could run it', () => {
+    // Quoting stops the outer shell expanding the body. It says nothing about what the command on
+    // the other end does with it, and `sh` runs every line.
+    expect(decide("sh <<'EOF'\ngit push origin main\nEOF").decision).toBe('ask')
+    expect(decide("bash <<'EOF'\nnpm publish ./x.tgz\nEOF").decision).toBe('ask')
+    expect(decide("/bin/sh <<'EOF'\ngit push origin main\nEOF").decision).toBe('ask')
+    expect(decide("python3 - <<'EOF'\ngit push origin main\nEOF").decision).toBe('ask')
+    expect(decide("ssh box <<'EOF'\ngit push origin main\nEOF").decision).toBe('ask')
+    // A reader on the line is not enough if something downstream runs what it read.
+    expect(decide("cat <<'EOF' | sh\ngit push origin main\nEOF").decision).toBe('ask')
+    // A command the guard does not recognise is assumed to run it.
+    expect(decide("weirdtool <<'EOF'\ngit push origin main\nEOF").decision).toBe('ask')
+    // And the case the change exists for still holds.
+    expect(decide("tee a.md <<'EOF'\nthen `git push origin main`\nEOF").decision).toBe('allow')
+    expect(decide("cat <<'EOF' | grep push\nthen `git push origin main`\nEOF").decision).toBe('allow')
+  })
+
+  test('a body written to a file is not data once something here runs it', () => {
+    // A `#` starts a comment, so a heredoc written there is a remark — reading it as real would
+    // swallow the lines below, which the shell runs as ordinary commands.
+    expect(decide("cat /dev/null # <<'EOF'\ngit push origin main\nEOF").decision).toBe('ask')
+    // `./cat` is a file in the repository, not the tool the allowlist means.
+    expect(decide("./cat <<'EOF'\ngit push origin main\nEOF").decision).toBe('ask')
+    // The guard cannot follow a file name from one command to the next, so anything that executes
+    // in the same payload keeps every body in view.
+    expect(decide("tee a.sh <<'EOF'\ngit push origin main\nEOF\nsh a.sh").decision).toBe('ask')
+    expect(decide("cat > a.sh <<'EOF'\nnpm publish ./x.tgz\nEOF\nsh a.sh").decision).toBe('ask')
+  })
+
+  test('a delimiter is read after the shell removes its quotes', () => {
+    // $'EOF' terminates at EOF. Recording $EOF would find no terminator, swallow every line below
+    // as body, and hide the command somebody meant to run.
+    expect(decide("cat <<$'EOF'\nprose\nEOF\ngit push origin main").decision).toBe('ask')
+    expect(decide('cat <<$"EOF"\nprose\nEOF\nnpm publish ./x.tgz').decision).toBe('ask')
+  })
+
+  test('writing prose beside a command that runs nothing is still prose', () => {
+    expect(decide("cat > a.md <<'EOF'\nwe run `git push origin main`\nEOF\necho done").decision).toBe('allow')
+    expect(decide("cat > a.md <<'EOF'\nwe run `npm publish`\nEOF\nprintf ok").decision).toBe('allow')
+  })
+
+  test('a here-string is not a heredoc', () => {
+    expect(decide('cat <<< "hello"').decision).toBe('allow')
+  })
+
+  test('the real command always asks, heredoc or no heredoc', () => {
+    for (const command of ['git push origin main', 'npm publish ./x.tgz', 'git push --force origin main', 'git push origin refs/tags/v1.2.3']) {
+      expect(decide(command).decision).toBe('ask')
+    }
+  })
+})
+
+// dev.md's `guard:` knob. A repository whose contributors are all trusted and whose work is all
+// recoverable keeps only what nothing undoes; every other project gets the whole list.
+describe('guard: loose', () => {
+  const loose: Policy = { ...policy, level: 'loose' }
+  const both = [
+    'git push origin main', 'npm publish ./x.tgz', 'git push origin refs/tags/v1.2.3',
+    'gh pr merge 12 --squash', 'gh api -X POST repos/o/r/issues', 'git push origin --delete feat/x',
+    '$CMD --force',
+  ]
+
+  test('only what cannot be undone still asks', () => {
+    expect(decide('git push --force origin main', loose).decision).toBe('ask')
+    expect(decide('git push origin +main:main', loose).decision).toBe('ask')
+    expect(decide('git reset --hard origin/main', loose).decision).toBe('ask')
+  })
+
+  test("the project's own ask: lines are still the project's own", () => {
+    expect(decide('bun run docs:publish', loose).decision).toBe('ask')
+  })
+
+  test('everything else is internal work a trusted team can undo', () => {
+    for (const command of both) expect(decide(command, loose).decision).toBe('allow')
+  })
+
+  test('strict is untouched, because every other project gets it', () => {
+    for (const command of both) expect(decide(command, policy).decision).toBe('ask')
+  })
+
+  test('the knob reads only the word loose, so a typo tightens', () => {
+    expect(guardLevel('guard: loose')).toBe('loose')
+    expect(guardLevel('guard: strict')).toBe('strict')
+    expect(guardLevel('guard: loosen')).toBe('strict')
+    expect(guardLevel(null)).toBe('strict')
   })
 })

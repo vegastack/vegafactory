@@ -17,7 +17,13 @@ export const EXPANDED = '\u0000'
 const expanded = (word: string | undefined) => word !== undefined && word.includes(EXPANDED)
 // A `$` that starts an expansion rather than standing for itself.
 const EXPANSION_START = /[A-Za-z0-9_{@*#?$!'"-]/
-export interface Policy { defaultBranch: string | null; shipAsk: string[]; tags?: Set<string> }
+// `level` is dev.md's `guard:` knob. `strict` is the default and the shipped one: the whole
+// always-ask list. `loose` is for a repository whose contributors are all trusted and whose work
+// is all recoverable — it keeps only what cannot be undone, plus whatever the project named on its
+// own `ask:` lines. It is read from the committed default branch like the rest of the policy, so a
+// branch cannot loosen itself.
+export type GuardLevel = 'strict' | 'loose'
+export interface Policy { defaultBranch: string | null; shipAsk: string[]; tags?: Set<string>; level?: GuardLevel }
 export interface Decision { decision: 'allow' | 'ask'; reason: string | null; rule: string }
 // Says whether `gh pr merge` with these (resolved) arguments is already covered by a recorded "ship it".
 // `raw` is the argv as written, so the check can refuse a `--repo` the resolver stripped.
@@ -55,12 +61,22 @@ export function defaultBranch(cwd: string): string | null {
   return null
 }
 
+// dev.md's `guard:` knob. Anything but the word `loose` is `strict`, so a typo tightens.
+export function guardLevel(devMd: string | null): GuardLevel {
+  const value = /^guard:[ \t]*(\S+)/m.exec(String(devMd ?? ''))?.[1]
+  return value === 'loose' ? 'loose' : 'strict'
+}
+
 export function loadPolicy(cwd: string): Policy {
   const branch = defaultBranch(cwd)
   const devMd = branch ? git(cwd, ['show', `origin/${branch}:.vegastack/dev.md`]) : null
   const tags = new Set((git(cwd, ['tag', '--list']) ?? '').split('\n').filter(Boolean))
-  return { defaultBranch: branch, shipAsk: devMd ? shipAskCommands(devMd) : [], tags }
+  return { defaultBranch: branch, shipAsk: devMd ? shipAskCommands(devMd) : [], tags, level: guardLevel(devMd) }
 }
+
+// What survives `guard: loose`: the two things no amount of trust makes recoverable, and the
+// project's own `ask:` lines, which it wrote on purpose.
+const LOOSE_KEEPS = new Set(['irreversible', 'ship-ask'])
 
 // A push destination is a tag when it is spelled as one, names a local tag, or looks like a version.
 const isTag = (name: string, tags?: Set<string>) => name.startsWith('refs/tags/') || Boolean(tags?.has(name)) || /^v?\d+\.\d+/.test(name)
@@ -74,8 +90,136 @@ const isTag = (name: string, tags?: Set<string>) => name.startsWith('refs/tags/'
 // text handed to another program, probed separately.
 export function parseCommand(command: unknown): Segment[] {
   const segments: Segment[] = []
-  if (typeof command === 'string') parseInto(command, segments)
+  if (typeof command === 'string') parseInto(stripHeredocs(command), segments)
   return segments
+}
+
+// Every heredoc opened on one line, in order, with whether its body is literal. A quoted or
+// escaped delimiter — `<<'EOF'`, `<<"EOF"`, `<<\EOF` — makes the body literal; a bare `<<EOF`
+// leaves it subject to expansion. `<<<` is a here-string, not a heredoc, and is left alone.
+function heredocsOpenedOn(line: string): Array<{ delimiter: string; literal: boolean; strip: boolean }> {
+  const found: Array<{ delimiter: string; literal: boolean; strip: boolean }> = []
+  let quote: string | null = null
+  for (let i = 0; i < line.length; i += 1) {
+    const ch = line[i]!
+    if (quote) {
+      if (ch === '\\' && quote === '"') i += 1
+      else if (ch === quote) quote = null
+      continue
+    }
+    if (ch === '\\') { i += 1; continue }
+    if (ch === "'" || ch === '"') { quote = ch; continue }
+    // A `#` at the start of a word begins a comment: nothing after it opens a heredoc, and a
+    // `<<'EOF'` written there is a remark. Reading one as real would swallow the lines below it,
+    // which the shell runs as ordinary commands.
+    if (ch === '#' && (i === 0 || /[\s;&|(]/.test(line[i - 1]!))) break
+    if (ch !== '<' || line[i + 1] !== '<' || line[i + 2] === '<') continue
+    let j = i + 2
+    let strip = false
+    if (line[j] === '-') { strip = true; j += 1 }
+    while (j < line.length && /[ \t]/.test(line[j]!)) j += 1
+    let delimiter = ''
+    let literal = false
+    while (j < line.length && !/[\s;&|<>()]/.test(line[j]!)) {
+      const c = line[j]!
+      // `$'EOF'` and `$"EOF"` are quoting too: the shell removes the `$` and the quotes, and the
+      // terminator is `EOF`. Recording `$EOF` would mean never finding the real one, so every line
+      // below — including a command somebody meant to run — would be swallowed as body.
+      if (c === '$' && (line[j + 1] === "'" || line[j + 1] === '"')) { j += 1; continue }
+      if (c === "'" || c === '"') {
+        literal = true
+        const end = line.indexOf(c, j + 1)
+        const stop = end === -1 ? line.length : end
+        delimiter += line.slice(j + 1, stop)
+        j = stop + 1
+        continue
+      }
+      if (c === '\\') { literal = true; delimiter += line[j + 1] ?? ''; j += 2; continue }
+      delimiter += c
+      j += 1
+    }
+    if (delimiter) found.push({ delimiter, literal, strip })
+    i = j - 1
+  }
+  return found
+}
+
+// A heredoc body is data the command is fed, not command text. With a quoted delimiter a shell
+// expands nothing in it, so a backticked `npm publish` in there is prose — a changeset, a commit
+// message, a release note — and parsing it as a substitution made the guard ask for permission to
+// run words somebody was only writing down. A bare `<<EOF` body really is expanded by the shell,
+// so it always stays.
+//
+// Quoting is only half the question, though, and getting this wrong opens the guard wide: it stops
+// the *outer* shell expanding the body, and says nothing about what the command on the other end
+// does with it. `sh <<'EOF'` runs every line of it. So a body is dropped only when nothing on that
+// line could execute it — every command there reads its stdin as data and no more.
+// Commands that read their input and write it somewhere, and never run a line of it. Anything
+// absent from this list is assumed to run what it is given — including commands that plainly do
+// not, which costs an occasional extra question and is the side to be wrong on.
+const DATA_SINKS = new Set([
+  'cat', 'tee', 'head', 'tail', 'wc', 'sort', 'uniq', 'tr', 'rev', 'grep', 'egrep', 'fgrep',
+  'diff', 'cmp', 'nl', 'fold', 'column', 'base64', 'md5', 'md5sum', 'shasum', 'sha256sum',
+  'echo', 'printf', 'true', ':',
+])
+
+// Every command a stretch of text runs, exactly as written. A name carrying a slash is kept whole,
+// because `./cat` is a file in the repository and only `cat` is the tool this list means.
+function commandsIn(text: string): string[] {
+  const segments: Segment[] = []
+  parseInto(text, segments)
+  return segments.map((segment) => segment.words[0] ?? '')
+}
+
+// Whether this line's heredoc body is read and never run. Unknown commands count as executing it:
+// a guard that cannot tell must assume the dangerous answer.
+function bodyIsOnlyData(line: string): boolean {
+  const commands = commandsIn(line)
+  return commands.length > 0 && commands.every((name) => name !== '' && DATA_SINKS.has(name))
+}
+
+export function stripHeredocs(text: string): string {
+  if (!text.includes('<<')) return text
+  const lines = text.split('\n')
+
+  // First pass: which lines are command text, and which are somebody's heredoc body. Only the
+  // command lines are asked what this payload runs.
+  const isBody = new Array<boolean>(lines.length).fill(false)
+  for (let scan = 0; scan < lines.length; scan += 1) {
+    if (isBody[scan]) continue
+    let after = scan + 1
+    for (const doc of heredocsOpenedOn(lines[scan]!)) {
+      while (after < lines.length) {
+        const body = lines[after]!
+        if ((doc.strip ? body.replace(/^[\t]+/, '') : body) === doc.delimiter) { isBody[after] = true; after += 1; break }
+        isBody[after] = true
+        after += 1
+      }
+    }
+  }
+  // A body written to a file is data until something in the same payload runs that file, and the
+  // guard cannot follow a name from one command to the next. So if anything here executes at all,
+  // no body is dropped: `tee x <<'EOF' … EOF; sh x` keeps its lines in view.
+  const runsSomething = lines.some((line, at) => !isBody[at] && commandsIn(line).some((name) => name !== '' && !DATA_SINKS.has(name)))
+
+  const kept: string[] = []
+  let i = 0
+  while (i < lines.length) {
+    const line = lines[i]!
+    kept.push(line)
+    i += 1
+    const docs = heredocsOpenedOn(line)
+    const data = docs.length > 0 && !runsSomething && bodyIsOnlyData(line)
+    for (const doc of docs) {
+      while (i < lines.length) {
+        const body = lines[i]!
+        i += 1
+        if ((doc.strip ? body.replace(/^[\t]+/, '') : body) === doc.delimiter) break
+        if (!(doc.literal && data)) kept.push(body)
+      }
+    }
+  }
+  return kept.join('\n')
 }
 
 function matchParen(text: string, open: number): number {
@@ -722,12 +866,12 @@ function classifyResolved(segment: Segment, words: string[], policy: Policy, mer
     if (sub === 'push') {
       const { flags, positionals } = pushArguments(words)
       const refspecs = positionals.slice(1)
-      if (flags.includes('--force') || shortFlag(flags, 'f') || refspecs.some((spec) => spec.startsWith('+'))) return ask(`a force push ${WORD}`, 'always-ask')
+      if (flags.includes('--force') || shortFlag(flags, 'f') || refspecs.some((spec) => spec.startsWith('+'))) return ask(`a force push ${WORD}`, 'irreversible')
       if (flags.includes('--delete') || shortFlag(flags, 'd') || refspecs.map(pushDestination).some((d) => d.kind === 'delete')) {
         return ask(`deleting a remote branch ${WORD}`, 'always-ask')
       }
     }
-    if (sub === 'reset' && words.includes('--hard')) return ask(`a hard reset ${WORD}`, 'always-ask')
+    if (sub === 'reset' && words.includes('--hard')) return ask(`a hard reset ${WORD}`, 'irreversible')
     if (sub === 'branch') {
       const flags = words.slice(2).filter((word) => word.startsWith('-'))
       if (flags.includes('--delete') || shortFlag(flags, 'd') || shortFlag(flags, 'D')) return ask(`deleting a branch ${WORD}`, 'always-ask')
@@ -874,6 +1018,9 @@ export function classifyCommand(command: unknown, policy: Policy, mergeCheck?: M
   let allowed = ALLOW
   for (const segment of parseCommand(command)) {
     const result = classifySegment(segment, policy, mergeCheck)
+    // One place decides what `guard: loose` keeps, so the answer to "what still asks here?" is a
+    // list and not a reading of every rule in this file.
+    if (result.decision === 'ask' && policy.level === 'loose' && !LOOSE_KEEPS.has(result.rule)) continue
     if (result.decision === 'ask') return result
     if (allowed.rule === 'not-guarded') allowed = result
   }

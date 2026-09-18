@@ -27,6 +27,7 @@ changelog: changesets
 decisions: .vegastack/decisions.md
 release: on-request         # only when the operator says "release" — covers everything merged since the last one (switched from per-merge for the v3 epic, operator 28-08-2026)
 chronicle: on               # story entry per behavior-changing branch in .vegastack/chronicle.md
+guard: loose                # strict | loose — loose asks only before a force push and a hard reset, plus this file's own `ask:` lines; everything else is internal work a trusted team can undo. Read from the default branch, so a branch cannot loosen itself
 architect: kmanojkumar      # the architecture owner dev-architect speaks to — gh api user -q .login at setup, one edit to change
 control-room: vegastack/vegafactory-control-room#dev@0000000   # org control room · group · the clone sha this profile was drafted from; the sha is recorded on the first real sync, once the control room exists (#112)
 sync-max-age: 30m           # how stale the local control-room clone may be before a session refreshes it — <n>m or <n>h
