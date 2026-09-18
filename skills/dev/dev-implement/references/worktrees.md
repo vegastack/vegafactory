@@ -6,7 +6,7 @@ The main checkout never leaves the default branch and never carries uncommitted 
 
 | Scenario | What happens |
 |---|---|
-| New issue | `vegafactory worktree create <n>` — the slug and type come off the issue title (`<type>:` prefix, the rest slugified; `--slug`/`--type` override, and GitHub being unreachable blocks rather than guesses) — fetches `origin/<default>`, `git worktree add` on a new branch, copies dev.md's `worktree-include:` files, runs `commands: setup`, adds the Codex trust entry. The ledger's first line records the path. |
+| New issue | `vegafactory worktree create <n>` — the slug and type come off the issue title (`<type>:` prefix, the rest slugified; `--slug`/`--type` override, and GitHub being unreachable blocks rather than guesses). The types are dev.md's `branch:` knob and nowhere else; a prefix outside that list is not a type, leaves the slug, and makes `create` refuse and name the ones this project has, rather than quietly becoming `feat`. Then it fetches `origin/<default>`, `git worktree add` on a new branch, copies dev.md's `worktree-include:` files, runs `commands: setup`, adds the Codex trust entry. The ledger's first line records the path. |
 | Epic parent | A map only — no branch or worktree of its own. |
 | Sub-issue of an epic | Its own branch and worktree cut from the default branch, like any issue, and its own PR. The plan records which siblings' file sets do not overlap and so *may* run at the same time; the dispatcher (#218) is what will run them, and until then they are worked one at a time. |
 | Resume | Same branch, same worktree, reused. The resume read-order — brief → plan → ledger → `git log` — runs *there*, and the ledger names which "there" that is. |
@@ -15,7 +15,7 @@ The main checkout never leaves the default branch and never carries uncommitted 
 | Ship, merge | After the merge: `vegafactory worktree remove <n>`. That removes the **directory only** — deleting the local branch and the remote branch are separate operator words. A parent's worktree goes only when the parent PR merges. |
 | Rebase onto the default branch | Done inside the worktree; re-verify whatever the rebase touched. |
 | Direct chat trivial fix | `<type>/<slug>` in its own worktree too — the main checkout stays clean even for a one-liner. |
-| Research | `research/<n>-<slug>` worktree only when code is actually written; removed at hand-back, never merged. |
+| Research | A worktree only when code is actually written, on a type dev.md's `branch:` knob lists — `chore/<n>-<slug>` unless the project adds `research` to that knob; removed at hand-back, never merged. |
 | Release | `chore/release-<version>` in its own worktree. |
 | Cross-tool review | Read-only, in the same worktree; a reviewer never switches the branch under it. |
 | Abandoned issue | Branch and worktree are removed only on the operator's word. |

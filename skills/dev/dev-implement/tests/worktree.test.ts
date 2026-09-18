@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test'
-import { branchName, classifyWorktree, parseWorktreeList, slugify, worktreeName, worktreePath } from '../scripts/worktree.mjs'
+import { branchName, classifyWorktree, parseWorktreeList, slugify, titleParts, worktreeName, worktreePath } from '../scripts/worktree.mjs'
 
 const base = { dirExists: true, branchExists: true, locked: false, issueState: 'open' as const, mergedIntoDefault: false }
 
@@ -14,6 +14,30 @@ describe('naming', () => {
     expect(branchName('feat', 106, 'one-worktree')).toBe('feat/106-one-worktree')
     expect(branchName('chore', null, 'release-0-19-0')).toBe('chore/release-0-19-0')
     expect(worktreeName(null, 'release-0-19-0')).toBe('release-0-19-0')
+  })
+})
+
+describe('titleParts', () => {
+  test('a known prefix is the type', () => {
+    expect(titleParts('fix: the guard drops a flag')).toEqual({ type: 'fix', slug: 'the-guard-drops-a-flag' })
+  })
+  test('an unknown prefix is not a type, and is not slug either', () => {
+    expect(titleParts('research: P12 — prove the lean factory works'))
+      .toEqual({ type: null, slug: 'p12-prove-the-lean-factory-works' })
+  })
+  test('a title with no colon is untouched', () => {
+    expect(titleParts('prove the lean factory works')).toEqual({ type: null, slug: 'prove-the-lean-factory-works' })
+  })
+  test('a colon inside the sentence is not a prefix', () => {
+    expect(titleParts('feat: one thing: and another')).toEqual({ type: 'feat', slug: 'one-thing-and-another' })
+  })
+  test('the caller\'s list decides, not a frozen one', () => {
+    const types = ['feat', 'spike']
+    expect(titleParts('spike: try the thing', types)).toEqual({ type: 'spike', slug: 'try-the-thing' })
+    expect(titleParts('chore: tidy up', types)).toEqual({ type: null, slug: 'tidy-up' })
+  })
+  test('a hyphen inside a type name is part of it', () => {
+    expect(titleParts('hot-fix: the urgent one', ['hot-fix'])).toEqual({ type: 'hot-fix', slug: 'the-urgent-one' })
   })
 })
 
@@ -43,7 +67,7 @@ describe('classifyWorktree', () => {
   })
 })
 
-import { evaluateRemoval, isPastRetention, parseDuration, parseIncludeKnob, parseRetentionKnob } from '../scripts/worktree.mjs'
+import { evaluateRemoval, isPastRetention, parseBranchTypes, parseDuration, parseIncludeKnob, parseRetentionKnob } from '../scripts/worktree.mjs'
 
 const devMd = [
   'commands: test `bun test` · check `bun run check` · build `bun run build` · setup `bun install --frozen-lockfile`',
@@ -80,6 +104,20 @@ describe('knobs and retention', () => {
     expect(parseDuration('soon')).toBeNull()
     expect(parseRetentionKnob(devMd)).toBe(7 * 86_400_000)
     expect(parseRetentionKnob('repo: o/r')).toBe(14 * 86_400_000)
+  })
+  test('the branch: knob is the one home for the type list', () => {
+    expect(parseBranchTypes('branch: <type>/<slug>   # type: feat | fix | spike — the only place this list lives'))
+      .toEqual(['feat', 'fix', 'spike'])
+  })
+  test('prose after the list is not a type, and a hyphen inside one is', () => {
+    expect(parseBranchTypes('branch: <type>/<slug>   # type: feat | hot-fix — the only place this list lives'))
+      .toEqual(['feat', 'hot-fix'])
+    expect(parseBranchTypes('branch: <type>/<slug>   # type: feat | fix - and nothing else'))
+      .toEqual(['feat', 'fix'])
+  })
+  test('an unreadable dev.md keeps the five defaults', () => {
+    expect(parseBranchTypes(null)).toEqual(['feat', 'fix', 'docs', 'chore', 'refactor'])
+    expect(parseBranchTypes('branch: <type>/<slug>')).toEqual(['feat', 'fix', 'docs', 'chore', 'refactor'])
   })
   test('include list and setup command come off dev.md', () => {
     expect(parseIncludeKnob(devMd)).toEqual(['.env', '.dev.vars'])

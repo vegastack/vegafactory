@@ -56,7 +56,7 @@ Size, one per issue: `small` (brief and plan together, one ack) · `medium` (bri
 
 ## Titles, types, hierarchy
 
-- Issues, branches and PRs use dev.md's `branch:` types plus `research:`; the PR title is the issue title.
+- Issue titles use dev.md's `branch:` types, plus `research:` for an inquiry. A branch uses those types and nothing else, so a `research:` issue that does write code takes a listed type — `worktree create` refuses rather than choosing one, and naming the list is the knob's job. The PR title is the issue title.
 - Native issue types: Feature (feat) · Bug (fix) · Task (docs/chore/refactor/research).
 - An epic is a map only (Destination · Decisions so far · Not clear yet · Out of scope) with native sub-issues. Tasks are checkboxes in the plan comment only. Blockers use GitHub dependencies.
 - Tasks inside one issue run in order, and so do sibling sub-issues. The plan records which siblings' files do not overlap and so may run at the same time; the dispatcher (#218) is what will run them.

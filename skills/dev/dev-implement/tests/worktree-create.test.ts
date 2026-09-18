@@ -21,6 +21,31 @@ function repo() {
 const devMd = 'commands: check `true` · setup `sh -c "echo setup-ran > setup.log"`\nworktree-include: .env\n'
 
 describe('createWorktree', () => {
+  test('a type the project does not list is refused, and the refusal names the ones it does', () => {
+    const root = repo()
+    const r = createWorktree({ repoRoot: root, issue: 224, slug: 'x', type: 'research', base: 'main', devMd, home: root, write: false })
+    expect(r.blocks.join(' ')).toContain('feat, fix, docs, chore, refactor')
+    expect(existsSync(join(root, '.vegastack/.worktrees/224-x'))).toBe(false)
+  })
+  test('no type at all is refused rather than silently becoming feat, and the refusal quotes the title', () => {
+    const root = repo()
+    const r = createWorktree({ repoRoot: root, issue: 224, slug: 'x', type: null, title: 'research: P12 — prove the lean factory works', base: 'main', devMd, home: root, write: false })
+    expect(r.blocks).toEqual(['branch type: "research: P12 — prove the lean factory works" names no type — pass --type <one of: feat, fix, docs, chore, refactor>'])
+    expect(r.branch).toBeUndefined()
+    expect(existsSync(join(root, '.vegastack/.worktrees/224-x'))).toBe(false)
+  })
+  test('with no title to quote, the refusal names the issue', () => {
+    const root = repo()
+    const r = createWorktree({ repoRoot: root, issue: 224, slug: 'x', type: null, base: 'main', devMd, home: root, write: false })
+    expect(r.blocks.join(' ')).toContain('#224 names no type')
+  })
+  test('the project\'s own list is what counts', () => {
+    const root = repo()
+    const ownList = devMd + 'branch: <type>/<slug>   # type: feat | spike — the only place this list lives\n'
+    const r = createWorktree({ repoRoot: root, issue: 224, slug: 'x', type: 'spike', base: 'main', devMd: ownList, home: root, write: false })
+    expect(r.blocks).toEqual([])
+    expect(r.branch).toBe('spike/224-x')
+  })
   test('dry run reports the actions and writes nothing', () => {
     const root = repo()
     const r = createWorktree({ repoRoot: root, issue: 106, slug: 'x', type: 'feat', base: 'main', devMd, home: root, write: false })
@@ -54,6 +79,103 @@ describe('createWorktree', () => {
     symlinkSync(elsewhere, join(root, '.vegastack/.worktrees'))
     const r = createWorktree({ repoRoot: root, issue: 106, slug: 'x', type: 'feat', base: 'main', devMd, home: root, write: true })
     expect(r.blocks[0]).toContain('symlink')
+  })
+})
+
+// The whole verb, as the CLI runs it: naming is composed in runVerb, which is
+// where a type resolved from the wrong place does its damage.
+const script = join(import.meta.dir, '..', 'scripts', 'worktree.mjs')
+// --home keeps the Codex trust entry inside the temp repo. Without it a
+// --write run edits the real ~/.codex/config.toml, which a test must never do.
+// These tests assert `blocks` and the branch, never the exit code: 0 and 1
+// both mean the verb ran, and which one comes back depends on warnings that
+// differ between a developer's machine and CI.
+const runScript = (root: string, ...args: string[]) => {
+  const argv = [script, ...args, '--repo-root', root, '--home', root, '--json']
+  const stub = join(root, 'stub-bin')
+  const env = { ...process.env, PATH: existsSync(stub) ? stub + ':' + process.env.PATH : process.env.PATH }
+  try {
+    return { code: 0, out: execFileSync('node', argv, { cwd: root, encoding: 'utf8', env }) }
+  } catch (error) {
+    const failure = error as { status: number; stdout: string }
+    return { code: failure.status, out: failure.stdout }
+  }
+}
+
+const writeDevMd = (root: string) => {
+  mkdirSync(join(root, '.vegastack'), { recursive: true })
+  writeFileSync(join(root, '.vegastack', 'dev.md'), devMd + 'repo: o/r\n')
+}
+
+// A `gh` on PATH that answers the one call `create` makes: the issue's title.
+const stubGh = (root: string, title: string) => {
+  const bin = join(root, 'stub-bin')
+  mkdirSync(bin, { recursive: true })
+  const path = join(bin, 'gh')
+  writeFileSync(path, '#!/bin/sh\ncat <<\'JSON\'\n' + JSON.stringify({ title }) + '\nJSON\n')
+  chmodSync(path, 0o755)
+  return bin
+}
+
+describe('the create and restore verbs resolve type and slug independently', () => {
+  test('restore with --slug still takes the type from the branch, not from a default', () => {
+    const root = repo()
+    const created = createWorktree({ repoRoot: root, issue: 106, slug: 'x', type: 'fix', base: 'main', devMd, home: root, write: true })
+    expect(created.branch).toBe('fix/106-x')
+    git(root, 'worktree', 'remove', '--force', created.path)
+    const r = runScript(root, 'restore', '--issue', '106', '--slug', 'x', '--write')
+    expect(JSON.parse(r.out).blocks).toEqual([])
+    expect(JSON.parse(r.out).branch).toBe('fix/106-x')
+  })
+  test('--slug picks among several branches for one issue instead of being ambiguous', () => {
+    const root = repo()
+    const first = createWorktree({ repoRoot: root, issue: 106, slug: 'x', type: 'fix', base: 'main', devMd, home: root, write: true })
+    const second = createWorktree({ repoRoot: root, issue: 106, slug: 'y', type: 'docs', base: 'main', devMd, home: root, write: true })
+    git(root, 'worktree', 'remove', '--force', first.path)
+    git(root, 'worktree', 'remove', '--force', second.path)
+    // Without --slug the two are genuinely ambiguous and it says so.
+    expect(JSON.parse(runScript(root, 'restore', '--issue', '106').out).blocks.join(' ')).toContain('several branches match')
+    // With it, the one named is the one restored — on its own type.
+    const r = runScript(root, 'restore', '--issue', '106', '--slug', 'y', '--write')
+    expect(JSON.parse(r.out).blocks).toEqual([])
+    expect(JSON.parse(r.out).branch).toBe('docs/106-y')
+  })
+  test('a branch with no issue restores on its own type, not on a guessed one', () => {
+    const root = repo()
+    const created = createWorktree({ repoRoot: root, issue: null, slug: 'release-0-19-0', type: 'chore', base: 'main', devMd, home: root, write: true })
+    expect(created.branch).toBe('chore/release-0-19-0')
+    git(root, 'worktree', 'remove', '--force', created.path)
+    const r = runScript(root, 'restore', '--slug', 'release-0-19-0', '--write')
+    expect(JSON.parse(r.out).blocks).toEqual([])
+    expect(JSON.parse(r.out).branch).toBe('chore/release-0-19-0')
+  })
+  test('create with --slug reads the title for the type alone', () => {
+    const root = repo()
+    stubGh(root, 'fix: the guard drops a flag')
+    writeDevMd(root)
+    const r = runScript(root, 'create', '--issue', '106', '--slug', 'custom')
+    expect(JSON.parse(r.out).blocks).toEqual([])
+    // The type is the title's; the slug stays the one that was passed.
+    expect(JSON.parse(r.out).branch).toBe('fix/106-custom')
+  })
+  test('an unsafe title cannot repaint the refusal it appears in', () => {
+    const root = repo()
+    stubGh(root, 'nope\u001b[2K\u202e: definitely a feat')
+    writeDevMd(root)
+    const blocks = JSON.parse(runScript(root, 'create', '--issue', '106').out).blocks.join(' ')
+    expect(blocks).toContain('names no type')
+    expect(blocks).not.toMatch(/[\u0000-\u001f\u007f-\u009f]/)
+    expect(blocks).not.toMatch(/\p{Cf}/u)
+  })
+  test('create with --slug still wants a type, and says so rather than inventing one', () => {
+    const root = repo()
+    const r = runScript(root, 'create', '--issue', '224', '--slug', 'x')
+    expect(r.code).toBe(2)
+    // No repo knob in the fixture, so the title cannot be read — and the
+    // refusal asks for the one thing still missing, not for the slug it has.
+    const blocks = JSON.parse(r.out).blocks.join(' ')
+    expect(blocks).toContain('--type')
+    expect(blocks).not.toContain('--slug')
   })
 })
 
