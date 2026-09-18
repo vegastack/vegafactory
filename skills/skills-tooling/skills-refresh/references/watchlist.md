@@ -1,27 +1,28 @@
 # The watchlist
 
-Every topic whose facts this repo pins, the file and section that holds them, and the official pages a sweep reads. **A row names a section, not a file** — a facts file holds several topics, and a sweep reads one topic at a time. The topic must match the opening words of a `## ` heading in that file.
+Every tool whose facts this repo pins, the file and section that holds them, and the official pages a sweep reads. **One row per tool, and a row names a section, not a file** — a facts file holds several tools, and a sweep reads one tool at a time, in its own subagent, against that vendor's own pages. A row's tool name must match the opening words of a `## ` heading in that file, and no two rows may resolve to the same heading: two tools sharing a section means one subagent reading two vendors' changelogs, which is the thing this layout exists to prevent.
 
 `scripts/facts-scan.mjs` parses this table, so the shape matters: three cells, the file path relative to the repo root, and at least one `https://` link in the third cell.
 
-A topic belongs here when a wrong answer changes a decision — a version floor, a price, a limit, a flag that moved. A topic nobody decides anything on does not belong here, however interesting it is.
+A tool belongs here when a wrong answer changes a decision — a version floor, a price, a limit, a flag that moved. A tool nobody decides anything on does not belong here, however interesting it is.
 
-| Topic | Facts file | Official pages |
+| Tool | Facts file section | Official pages |
 |---|---|---|
 | Cloudflare | `skills/dev/dev-architect/references/pinned-facts.md` | https://developers.cloudflare.com/changelog/ · https://developers.cloudflare.com/r2/pricing/ |
 | Cloudflare Workers hard limits | `skills/dev/dev-architect/references/pinned-facts.md` | https://developers.cloudflare.com/workers/platform/limits/ |
 | Next.js | `skills/dev/dev-architect/references/pinned-facts.md` | https://nextjs.org/blog · https://nextjs.org/docs |
 | Better Auth | `skills/dev/dev-architect/references/pinned-facts.md` | https://www.better-auth.com/docs/introduction · https://github.com/better-auth/better-auth/releases |
 | Claude API | `skills/dev/dev-architect/references/pinned-facts.md` | https://docs.claude.com/en/docs/about-claude/models/overview · https://docs.claude.com/en/docs/about-claude/pricing |
-| Agents & jobs | `skills/dev/dev-architect/references/pinned-facts.md` | https://vercel.com/docs · https://github.com/timgit/pg-boss/releases · https://trigger.dev/docs |
-| Databases & mobile | `skills/dev/dev-architect/references/pinned-facts.md` | https://planetscale.com/pricing · https://docs.flutter.dev |
-| Self-hosting | `skills/dev/dev-architect/references/pinned-facts.md` | https://coolify.io/docs · https://github.com/coollabsio/coolify/releases |
-| Claude Code | `skills/dev/dev-setup/references/harness-facts.md` | https://code.claude.com/docs/en/overview · https://code.claude.com/docs/en/hooks · https://code.claude.com/docs/en/skills |
-| Codex | `skills/dev/dev-setup/references/harness-facts.md` | https://learn.chatgpt.com/docs · https://learn.chatgpt.com/docs/config-file/config-reference |
+| EVE | `skills/dev/dev-architect/references/pinned-facts.md` | https://vercel.com/docs/eve |
+| Workflow world-postgres | `skills/dev/dev-architect/references/pinned-facts.md` | https://workflow-sdk.dev/worlds/postgres |
+| pg-boss | `skills/dev/dev-architect/references/pinned-facts.md` | https://www.npmjs.com/package/pg-boss · https://github.com/timgit/pg-boss/releases |
+| Trigger.dev | `skills/dev/dev-architect/references/pinned-facts.md` | https://trigger.dev/docs |
+| PlanetScale | `skills/dev/dev-architect/references/pinned-facts.md` | https://planetscale.com/pricing |
+| Flutter | `skills/dev/dev-architect/references/pinned-facts.md` | https://docs.flutter.dev |
+| Coolify | `skills/dev/dev-architect/references/pinned-facts.md` | https://coolify.io/docs · https://github.com/coollabsio/coolify/releases |
+| Claude Code | `skills/dev/dev-setup/references/harness-facts.md` | https://code.claude.com/docs/en/overview · https://code.claude.com/docs/en/hooks · https://code.claude.com/docs/en/skills · https://code.claude.com/docs/en/cli-reference · https://code.claude.com/docs/en/memory |
+| Codex | `skills/dev/dev-setup/references/harness-facts.md` | https://learn.chatgpt.com/docs · https://learn.chatgpt.com/docs/config-file/config-reference · https://learn.chatgpt.com/docs/models |
 | GitHub CLI | `skills/dev/dev-setup/references/harness-facts.md` | https://github.com/cli/cli/releases |
-| Model, effort, and concurrency controls | `skills/dev/dev-setup/references/harness-facts.md` | https://code.claude.com/docs/en/cli-reference · https://learn.chatgpt.com/docs/config-file/config-reference |
-| Headless runs | `skills/dev/dev-setup/references/harness-facts.md` | https://code.claude.com/docs/en/cli-reference · https://learn.chatgpt.com/docs |
-| Native-memory contract | `skills/dev/dev-setup/references/harness-facts.md` | https://code.claude.com/docs/en/memory · https://learn.chatgpt.com/docs/config-file/config-reference |
 
 ## The fact line
 

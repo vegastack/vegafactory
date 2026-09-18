@@ -61,24 +61,36 @@ Facts that change architecture decisions and that models routinely get wrong fro
 - **Thinking blocks bind to their conversation prefix on Claude Fable 5.1** · replaying one after the system prompt, tools or an earlier message changed returns a 400 for accounts created on or after 31-08-2026, and for everyone on future models, so keep product agent loops append-only · since Fable 5.1 · checked 03-09-2026 · https://platform.claude.com/docs/en/build-with-claude/prompt-engineering
 - **Assistant prefill on the last turn returns a 400** · use structured outputs instead of prefilling · since Claude 4.6 · checked 03-09-2026 · https://platform.claude.com/docs/en/build-with-claude/prompt-engineering
 
-## Agents & jobs
+## EVE
 
 - **EVE is Vercel's durable-agent framework** · `eve` on npm, github.com/vercel/eve; filesystem-first agents where every session is a durable, resumable workflow · since — · checked 29-08-2026 · https://vercel.com/docs/eve
 - **EVE is still beta and pre-GA** · v0.47.3 landed 2026-08-28 and it ships several releases a day, so pin behavior rather than minor versions · since 0.47.3 · checked 29-08-2026 · https://vercel.com/docs/eve
+
+## Workflow world-postgres
+
 - **Self-hosted EVE durability needs a long-lived worker process** · `@workflow/world-postgres`, stable at 4.3.x, is documented as not compatible with serverless platforms · since 4.3 · checked 29-08-2026 · https://workflow-sdk.dev/worlds/postgres
 - **`@workflow/world-postgres` has a 5.0.0-beta channel** · do not pin it without a documented reason · since 5.0.0-beta · checked 29-08-2026 · https://workflow-sdk.dev/worlds/postgres
 - **`@workflow/world-postgres` runs on graphile-worker internally** · it is not pg-boss and does not replace it · since — · checked 29-08-2026 · https://workflow-sdk.dev/worlds/postgres
+
+## pg-boss
+
 - **pg-boss is at 12.x** · Postgres-native through `SKIP LOCKED` with no Redis, the right default for simple background jobs and cron on this stack; BullMQ only when a genuinely complex job graph of flows, dependencies or rate-limited pipelines demands Redis · since 12.0 · checked 12-08-2026 · https://www.npmjs.com/package/pg-boss
+
+## Trigger.dev
+
 - **trigger.dev v4 is Apache-2.0 and self-hostable free with unlimited runs** · the credible escape hatch when a job needs multi-hour runtimes off-platform · since v4 · checked 12-08-2026 · https://trigger.dev
 
-## Databases & mobile
+## PlanetScale
 
 - **PlanetScale Postgres is built on Neki, not Vitess** · it is a newer product, so do not transfer Vitess or MySQL assumptions onto it · since GA 2025-09 · checked 12-08-2026 · https://planetscale.com/pricing
 - **PlanetScale has no free tier** · the free Hobby plan died in April 2024, so even a prototype needs a paid SKU · since — · checked 12-08-2026 · https://planetscale.com/pricing
 - **PlanetScale Postgres pricing is SKU-based from $5/mo** · PS-5 non-HA is $5/mo and HA runs about $15-50/mo; the $39/mo figures seen elsewhere are the Vitess and MySQL PS-10 tier, a different product · since — · checked 12-08-2026 · https://planetscale.com/pricing
+
+## Flutter
+
 - **Flutter's default renderer is Impeller on iOS, Android and macOS** · guidance that says to disable Impeller on Android is stale · since — · checked 12-08-2026 · https://docs.flutter.dev
 
-## Self-hosting
+## Coolify
 
 - **Coolify needs about 2GB RAM for its own control plane** · size Hetzner VMs accordingly, with CX22 at 4GB the floor for Coolify plus one small app · since — · checked 12-08-2026 · https://coolify.io
 - **Coolify requires active patching** · two critical-CVE waves hit in 2026 alone, in January at beta.445 and beta.451 and in June and July with CVE-2026-34047, 34049 and 34050 fixed in beta.471, a recurring pattern rather than a closed incident · since — · checked 12-08-2026 · https://coolify.io

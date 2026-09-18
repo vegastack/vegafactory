@@ -8,7 +8,7 @@ The main checkout never leaves the default branch and never carries uncommitted 
 |---|---|
 | New issue | `vegafactory worktree create <n>` — the slug and type come off the issue title (`<type>:` prefix, the rest slugified; `--slug`/`--type` override, and GitHub being unreachable blocks rather than guesses) — fetches `origin/<default>`, `git worktree add` on a new branch, copies dev.md's `worktree-include:` files, runs `commands: setup`, adds the Codex trust entry. The ledger's first line records the path. |
 | Epic parent | A map only — no branch or worktree of its own. |
-| Sub-issue of an epic | Its own branch and worktree cut from the default branch, like any issue, and its own PR. Siblings whose declared file sets do not overlap may run at the same time. |
+| Sub-issue of an epic | Its own branch and worktree cut from the default branch, like any issue, and its own PR. The plan records which siblings' file sets do not overlap and so *may* run at the same time; the dispatcher (#218) is what will run them, and until then they are worked one at a time. |
 | Resume | Same branch, same worktree, reused. The resume read-order — brief → plan → ledger → `git log` — runs *there*, and the ledger names which "there" that is. |
 | Corrections / take-back | Reuse the worktree. Directory gone but branch alive → `vegafactory worktree restore <n>`, which finds the branch carrying the number (`--slug` picks one when several do), re-adds the checkout and re-runs include-copy, setup and trust. `restore` never creates a branch: a missing branch means the work is elsewhere. |
 | Ship, PR | `vegafactory ship check <n>` runs in the issue's worktree: it reads the branch there and refuses uncommitted changes. |

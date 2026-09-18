@@ -9,7 +9,7 @@ VegaFactory ships Agent Skills for [Claude Code](https://code.claude.com) and [C
 
 Each skill is self-contained: its own entry point (`SKILL.md`), references, deterministic scripts, tests and evals. Volatile facts carry a checked date and an official source.
 
-The headline set is **`dev`**: a ten-stage, issue-driven development workflow where every gate that matters is held by a person, not an agent.
+The headline set is **`dev`**: a nine-stage, issue-driven development workflow where every gate that matters is held by a person, not an agent.
 
 - [Quick start](#quick-start)
 - [Installing](#installing)

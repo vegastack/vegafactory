@@ -82,7 +82,14 @@ Every knob `groups/<g>/group.md` or `org.md` already answers is stated as inheri
 - CLAUDE.md already has content → add the `@AGENTS.md` import as its first line (default) or move its content into AGENTS.md and leave only the import
 - Gitignored files a fresh checkout needs (`.env`) or a setup command detected → confirm `worktree-include:`, `commands: setup` and `worktree-retention:` (default 14d), replayed into every new worktree; nothing detected → `worktree-include: none`
 - No control room exists and the operator wants one → hand the request to `vegafactory-setup`, which bootstraps it; this skill never creates the org repository itself
-- Existing repo whose labels predate this workflow → show the migration before touching anything: `planLabelMigration` in [effective-policy](scripts/effective-policy.mjs) takes `gh label list`'s names and returns what goes, what arrives and what is left alone. Show all three lists, then on the user's yes delete the superseded ones and create the missing ones; issues keep every other label, and nothing records the old names anywhere — `labels:` carries the new set and the profile has no mapping knob. A no leaves the repo exactly as it was and the report says the workflow will not resolve a state until the set exists
+- Existing repo whose labels predate this workflow → show the migration before touching anything. `planLabelMigration` in [effective-policy](scripts/effective-policy.mjs) takes the repo's label names, its open issues with their labels, and the board's Status options, and returns the steps in the order they must run. **Deleting a label takes it off every issue it is on**, so nothing is deleted until its replacement is in place:
+  1. `rename` — the replacement name is free, so the label is renamed in place (`gh label edit`) and every issue keeps it, history included. This is most of the list.
+  2. `transfer` — the replacement already exists, so each named issue gets the new label added before the old one is deleted.
+  3. `create` — the labels no old name maps to.
+  4. `board.rename` and `board.create` — the project's Status options move with the states, or the board keeps options nothing can reach.
+  5. `remove` — only the transferred names, and only now.
+
+  Show `rename`, `transfer`, `create`, `board` and `keep` before acting; `keep` is the project's own labels, which the migration never touches. Act only on the user's yes; a no leaves the repo exactly as it was and the report says the workflow cannot resolve a state until the set exists. Afterwards `labels:` carries the new set and nothing records an old name anywhere — the profile has no mapping knob, and a `labels:` line still carrying one is a block
 - A different decision-register path, when the situation or the user brings it up
 
 Everything else — merge style, branch naming, the stop-and-ask list, the `architect:` owner (the detected username), `chronicle-style: plain`, and `emoji: none` — takes its documented default straight into dev.md, because the profile is plain text the user can edit anytime.

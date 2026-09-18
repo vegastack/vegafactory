@@ -4,12 +4,12 @@
     {
       "id": 1,
       "prompt": "Run the facts sweep on vegastack/vegafactory. `facts-scan.mjs --root . --json` exited 1 with the output attached: four Cloudflare lines and two Codex lines are due. Say exactly what you would do, in order.",
-      "expected_output": "A plan that reads the two topics in two separate subagents against the watchlist's official pages, asks each for Unchanged / Changed / New / Gone, then files one issue per change, one date-bump issue for the unchanged lines, and one digest comment on the pinned log issue — and edits no file under skills/.",
+      "expected_output": "A plan that reads the two tools in two separate subagents against the watchlist's official pages, asks each for Unchanged / Changed / New / Gone, then files one issue per change, one date-bump issue for the unchanged lines, and one digest comment on the pinned log issue — and edits no file under skills/.",
       "files": [
         "evals/files/facts-scan-due.json"
       ],
       "assertions": [
-        "One subagent per topic is named — Cloudflare and Codex are not read by the same agent",
+        "One subagent per tool is named — Cloudflare and Codex are not read by the same agent",
         "Each subagent is asked for the four categories Unchanged, Changed, New and Gone",
         "The plan states that this skill edits no file under skills/ and routes the edits through issues",
         "The unchanged lines become a single date-bump issue, not one issue per line",

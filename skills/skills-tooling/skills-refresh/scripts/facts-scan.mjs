@@ -28,7 +28,7 @@ export function parseDate(text) {
 }
 
 /**
- * Reads the watchlist's one table: topic, facts file, official pages.
+ * Reads the watchlist's one table: tool, facts file section, official pages.
  * Every message below is concatenated rather than templated: a template literal that opens on
  * its interpolation degrades SkillSpector's tool-misuse analyzer for the whole skill, and a
  * degraded scan scores higher than a clean one while proving nothing (skill-maintainer's
@@ -40,24 +40,32 @@ export function readWatchlist(text) {
   for (const [index, line] of text.split('\n').entries()) {
     const cells = line.trim().startsWith('|') ? line.trim().slice(1, -1).split('|').map(cell => cell.trim()) : null
     if (!cells || cells.length !== 3) continue
-    const [topic, file, pages] = cells
-    if (!topic || /^-+$/.test(topic) || topic.toLowerCase() === 'topic') continue
+    const [tool, raw, pages] = cells
+    const file = raw.replace(/^`|`$/g, '')
+    // A data row is the one whose middle cell is a Markdown path. The header and the separator
+    // are skipped by that shape rather than by their wording, so renaming a column heading
+    // cannot turn the header into a tool nobody notices.
+    if (cells.every(cell => /^:?-+:?$/.test(cell))) continue
+    if (!file.endsWith('.md')) {
+      if (tool && !/^(tool|topic)$/i.test(tool)) problems.push('watchlist row ' + (index + 1) + ': ' + tool + ' names no facts file')
+      continue
+    }
     const links = [...pages.matchAll(/https:\/\/[^\s)\]]+/g)].map(match => match[0])
-    if (!links.length) problems.push('watchlist row ' + (index + 1) + ': topic ' + topic + ' names no official page')
-    rows.push({ topic, file: file.replace(/^`|`$/g, ''), pages: links })
+    if (!links.length) problems.push('watchlist row ' + (index + 1) + ': ' + tool + ' names no official page')
+    rows.push({ tool, file, pages: links })
   }
-  if (!rows.length) problems.push('watchlist: no topic rows found')
+  if (!rows.length) problems.push('watchlist: no tool rows found')
   return { rows, problems }
 }
 
 /**
- * The lines under `## <topic>` in a facts file, with their 1-based numbers. A topic row names
- * a section, not a whole file: several topics share one file, and a sweep reads one topic at a
+ * The lines under `## <tool>` in a facts file, with their 1-based numbers. A row names a
+ * section, not a whole file: several tools share one file, and a sweep reads one tool at a
  * time. The heading may carry a version in parentheses, so the match is on its opening words.
  */
-export function sectionLines(text, topic) {
+export function sectionLines(text, tool) {
   const lines = text.split('\n')
-  const start = lines.findIndex(line => line.startsWith('## ') && line.slice(3).trim().toLowerCase().startsWith(topic.toLowerCase()))
+  const start = lines.findIndex(line => line.startsWith('## ') && line.slice(3).trim().toLowerCase().startsWith(tool.toLowerCase()))
   if (start === -1) return null
   const after = lines.findIndex((line, index) => index > start && line.startsWith('## '))
   return lines.slice(start + 1, after === -1 ? lines.length : after).map((line, index) => [line, start + 2 + index])
@@ -65,15 +73,15 @@ export function sectionLines(text, topic) {
 
 export function scanFacts({ root = process.cwd(), watchlist, maxAgeDays = 60, today = Date.now() } = {}) {
   const watchlistPath = watchlist ?? join(here, '../references/watchlist.md')
-  if (!existsSync(watchlistPath)) return { ok: false, topics: [], due: [], problems: ['watchlist not found at ' + watchlistPath] }
+  if (!existsSync(watchlistPath)) return { ok: false, tools: [], due: [], problems: ['watchlist not found at ' + watchlistPath] }
   const { rows, problems } = readWatchlist(readFileSync(watchlistPath, 'utf8'))
-  const topics = []
+  const tools = []
   const due = []
   for (const row of rows) {
     const path = isAbsolute(row.file) ? row.file : resolve(root, row.file)
-    if (!existsSync(path)) { problems.push(row.topic + ': facts file not found at ' + row.file); continue }
-    const section = sectionLines(readFileSync(path, 'utf8'), row.topic)
-    if (!section) { problems.push(row.topic + ': ' + row.file + ' has no matching ## heading'); continue }
+    if (!existsSync(path)) { problems.push(row.tool + ': facts file not found at ' + row.file); continue }
+    const section = sectionLines(readFileSync(path, 'utf8'), row.tool)
+    if (!section) { problems.push(row.tool + ': ' + row.file + ' has no matching ## heading'); continue }
     const facts = []
     for (const [line, index] of section) {
       const where = row.file + ' line ' + index
@@ -85,14 +93,14 @@ export function scanFacts({ root = process.cwd(), watchlist, maxAgeDays = 60, to
       const at = parseDate(match.groups.checked)
       if (at === null) { problems.push(where + ': checked date is not a real date'); continue }
       const ageDays = Math.floor((today - at) / DAY)
-      const fact = { topic: row.topic, file: row.file, line: index, capability: match.groups.capability.trim(), since: match.groups.since.trim(), checked: match.groups.checked, ageDays, link: match.groups.link }
+      const fact = { tool: row.tool, file: row.file, line: index, capability: match.groups.capability.trim(), since: match.groups.since.trim(), checked: match.groups.checked, ageDays, link: match.groups.link }
       facts.push(fact)
       if (ageDays >= maxAgeDays) due.push(fact)
     }
-    if (!facts.length) problems.push(row.topic + ': ' + row.file + ' holds no fact lines under that heading')
-    topics.push({ topic: row.topic, file: row.file, pages: row.pages, facts: facts.length, due: facts.filter(fact => fact.ageDays >= maxAgeDays).length, oldestAgeDays: facts.reduce((oldest, fact) => Math.max(oldest, fact.ageDays), 0) })
+    if (!facts.length) problems.push(row.tool + ': ' + row.file + ' holds no fact lines under that heading')
+    tools.push({ tool: row.tool, file: row.file, pages: row.pages, facts: facts.length, due: facts.filter(fact => fact.ageDays >= maxAgeDays).length, oldestAgeDays: facts.reduce((oldest, fact) => Math.max(oldest, fact.ageDays), 0) })
   }
-  return { ok: problems.length === 0, maxAgeDays, topics, due, problems }
+  return { ok: problems.length === 0, maxAgeDays, tools, due, problems }
 }
 
 const invokedDirectly = process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)
@@ -109,7 +117,7 @@ if (invokedDirectly) {
   })
   if (argv.includes('--json')) console.log(JSON.stringify(result, null, 2))
   else {
-    for (const topic of result.topics) console.log(topic.topic + ': ' + topic.facts + ' facts, ' + topic.due + ' due, oldest ' + topic.oldestAgeDays + 'd')
+    for (const entry of result.tools) console.log(entry.tool + ': ' + entry.facts + ' facts, ' + entry.due + ' due, oldest ' + entry.oldestAgeDays + 'd')
     for (const problem of result.problems) console.log('problem: ' + problem)
   }
   process.exit(result.problems.length ? 2 : result.due.length ? 1 : 0)

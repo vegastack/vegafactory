@@ -41,6 +41,25 @@ Verified mechanics of the two harnesses this workflow targets — Claude Code an
 - **`OTEL_LOG_TOOL_DETAILS=1` exports tool arguments** · it adds Bash commands, MCP server and tool names, skill names and tool input; it is off by default and this workflow never turns it on · since — · checked 03-09-2026 · https://code.claude.com/docs/en/monitoring-usage
 - **The Agent SDK's `claude_code` preset is Claude Code's own system prompt** · select it as a preset system prompt named `claude_code`, and anything that prompt already says reaches every Claude Code session without a skill repeating it · since — · checked 03-09-2026 · https://code.claude.com/docs/en/overview
 
+### Model and effort flags
+
+- **Claude Code's effort levels are low, medium, high, xhigh and max** · they apply on Fable 5.1, Fable 5, Opus 5 and Sonnet 5, and high is the default on every model except Opus 4.7, whose default is xhigh · since — · checked 03-09-2026 · https://code.claude.com/docs/en/cli-reference
+- **`ultracode` is a Claude Code setting on top of the effort level** · it starts the session at xhigh with dynamic workflows on and needs v2.1.203 or later · since 2.1.203 · checked 03-09-2026 · https://code.claude.com/docs/en/cli-reference
+- **The local Claude Code build reads 2.1.247 and lists the five effort levels in its help** · read the levels off the machine rather than a remembered list · since 2.1.247 · checked 03-09-2026 · https://code.claude.com/docs/en/cli-reference
+
+### Headless runs
+
+- **Hooks fire under `claude -p`** · a headless Claude Code run gets the same hook events as an interactive one, which is what lets the ship guard bound a dark build · since — · checked 03-09-2026 · https://code.claude.com/docs/en/hooks
+- **Agent teams do not spawn under `-p`** · a headless Claude Code run has subagents bounded by `CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH` and `CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS`, and a run needing a team belongs in an interactive session · since — · checked 03-09-2026 · https://code.claude.com/docs/en/settings
+- **A headless run has no question tool at all** · the dispatcher sets `VSK_ASK_ROUTE=issue`, the round goes into the issue with its options and the recommendation, and the next run reads the answer there · since — · checked 03-09-2026 · https://code.claude.com/docs/en/cli-reference
+
+### Native memory under a managed launch
+
+- **Claude managed launch currently refuses** · version and help output plus a cached or raw settings cascade cannot establish effective managed-hook or memory applicability, and no SDK dependency or CLI-session probe is implied · since — · checked 07-09-2026 · https://code.claude.com/docs/en/memory
+- **Claude managed launch sets `CLAUDE_CODE_DISABLE_AUTO_MEMORY=1`** · the session also carries `autoMemoryEnabled` as false, without bare or safe mode and without disabling CLAUDE.md · since — · checked 07-09-2026 · https://code.claude.com/docs/en/memory
+- **Native memory is excluded only in VegaFactory-managed processes** · nothing outside a managed launch is touched · since — · checked 07-09-2026 · https://code.claude.com/docs/en/memory
+- **No global setting or existing vendor store is changed or read** · a managed run leaves the user's own memory store alone · since — · checked 07-09-2026 · https://code.claude.com/docs/en/memory
+
 ## Codex
 
 - **Codex reads AGENTS.md natively** · it starts at `~/.codex/`, where `AGENTS.override.md` wins over `AGENTS.md` · since — · checked 03-09-2026 · https://learn.chatgpt.com/docs/config-file/config-reference
@@ -76,7 +95,22 @@ Verified mechanics of the two harnesses this workflow targets — Claude Code an
 - **Codex OTel log export is off by default** · opt in with an `[otel]` table in config.toml whose `exporter` is `none`, `otlp-http` or `otlp-grpc`, and with `none` Codex records events but sends nothing · since — · checked 03-09-2026 · https://learn.chatgpt.com/docs/config-file/config-reference
 - **The Codex OTel stream names no skill-activation event** · it covers API requests, SSE and events, prompts, and tool approvals and results, which is why skill capture on Codex is a prompt-mention proxy — the skill's name after a dollar sign, recorded as one · since — · checked 03-09-2026 · https://learn.chatgpt.com/docs/config-file/config-reference
 
-## Model, effort, and concurrency controls
+### The `codex exec` skill-loading drill
+
+- **The skill-loading drill is still unanswered** · a 03-09-2026 attempt on codex-cli 0.149.1 failed with `refresh_token_invalidated` and `token_revoked` (401) before reaching the model although `codex login status` printed "Logged in using ChatGPT", the expired-session case dev.md's Environments section anticipates, so the verdict line stays unwritten rather than guessed and the drill is re-run after a fresh login · since 0.149.1 · checked 03-09-2026 · https://learn.chatgpt.com/docs
+
+### Headless runs
+
+- **Codex refuses non-managed hooks in an unattended run unless the caller vets them** · the bypass flag on `codex exec` runs the enabled hooks headless, and it is the only way a dispatched Codex run reaches the ship guard at all · since — · checked 03-09-2026 · https://learn.chatgpt.com/docs
+
+### Native memory under a managed launch
+
+- **Managed execution pins Codex 0.153.4 and Claude Code 2.1.263** · an unknown version refuses managed execution pending qualification · since — · checked 07-09-2026 · https://learn.chatgpt.com/docs/config-file/config-reference
+- **Codex managed launch overrides the memory settings** · it sets `memories.use_memories` and `memories.generate_memories` to false, disables memories and import and `features.context_management.experimental_mode`, and retains hooks and project trust for the exact checkout · since — · checked 07-09-2026 · https://learn.chatgpt.com/docs/config-file/config-reference
+- **The optional task-note and search facility is separate from ordinary project instructions** · do not read one as the other · since — · checked 07-09-2026 · https://learn.chatgpt.com/docs/models
+- **These controls are supported configuration, not runtime qualification** · verify their actual pinned behavior before claiming support · since — · checked 07-09-2026 · https://learn.chatgpt.com/docs/config-file/config-reference
+
+## Model, effort and concurrency flags — the two harnesses side by side
 
 Which model and which reasoning effort a stage runs at is dev.md's `harness-policy:` knob; these are the flags each value turns into.
 
@@ -84,10 +118,6 @@ Which model and which reasoning effort a stage runs at is dev.md's `harness-poli
 |---|---|---|---|---|
 | Claude Code | `--model` takes an alias or a full model name — aliases `fable`, `sonnet`, `opus`, `haiku` (plus `best`, `default`, `opusplan`, `sonnet[1m]`, `opus[1m]`), full names look like `claude-sonnet-5`; overrides the `model` setting and `ANTHROPIC_MODEL` https://code.claude.com/docs/en/cli-reference | `--effort` sets the level for the session; overrides the `modelSettings` and `effortLevel` settings and does not persist https://code.claude.com/docs/en/cli-reference | `CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH` (nesting depth below the main conversation, default 3; `1` turns nesting off) and `CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS` (simultaneous subagents, default 20) — both env vars, settable under settings.json's `env` https://code.claude.com/docs/en/settings | 03-09-2026 |
 | Codex | `codex exec` takes `-m` with the model name, or `-c` with a `model=` config override https://learn.chatgpt.com/docs/config-file/config-reference | `-c` with a `model_reasoning_effort=` override — the config key the docs demonstrate as `"high"` and do not enumerate, so read the level names off the model's own documentation before promising one https://learn.chatgpt.com/docs/config-file/config-reference | `agents.max_concurrent_threads_per_session` in config.toml caps concurrently open spawned-agent threads, excluding the primary; unset means Codex picks the default https://learn.chatgpt.com/docs/config-file/config-reference | 03-09-2026 |
-
-- **Claude Code's effort levels are low, medium, high, xhigh and max** · they apply on Fable 5.1, Fable 5, Opus 5 and Sonnet 5, and high is the default on every model except Opus 4.7, whose default is xhigh · since — · checked 03-09-2026 · https://code.claude.com/docs/en/cli-reference
-- **`ultracode` is a Claude Code setting on top of the effort level** · it starts the session at xhigh with dynamic workflows on and needs v2.1.203 or later · since 2.1.203 · checked 03-09-2026 · https://code.claude.com/docs/en/cli-reference
-- **The local Claude Code build reads 2.1.247 and lists the five effort levels in its help** · read the levels off the machine rather than a remembered list · since 2.1.247 · checked 03-09-2026 · https://code.claude.com/docs/en/cli-reference
 
 Model ids move, which is why dev.md's `harness-policy:` knob holds them and this file only dates them.
 
@@ -105,8 +135,6 @@ codex --version
 ```
 
 The token `VSK-PROBE-OK-7413` in the reply means project skills load under `codex exec`; its absence means they do not. Record the answer with the date and the exact `codex --version` string.
-
-- **The skill-loading drill is still unanswered** · a 03-09-2026 attempt on codex-cli 0.149.1 failed with `refresh_token_invalidated` and `token_revoked` (401) before reaching the model although `codex login status` printed "Logged in using ChatGPT", the expired-session case dev.md's Environments section anticipates, so the verdict line stays unwritten rather than guessed and the drill is re-run after a fresh login · since 0.149.1 · checked 03-09-2026 · https://learn.chatgpt.com/docs
 
 ## GitHub CLI
 
@@ -156,15 +184,6 @@ What the guard is not: same-user hooks are cooperative. The hook runs as the sam
 
 The prose instruction in the AGENTS.md dev section is the portable base on both harnesses; these hooks are deterministic checks on top, not a replacement.
 
-## Headless runs
-
-What a dispatcher can rely on when it starts a run with no human at the keyboard.
-
-- **Hooks fire under `claude -p`** · a headless Claude Code run gets the same hook events as an interactive one, which is what lets the ship guard bound a dark build · since — · checked 03-09-2026 · https://code.claude.com/docs/en/hooks
-- **Codex refuses non-managed hooks in an unattended run unless the caller vets them** · the bypass flag on `codex exec` runs the enabled hooks headless, and it is the only way a dispatched Codex run reaches the ship guard at all · since — · checked 03-09-2026 · https://learn.chatgpt.com/docs
-- **Agent teams do not spawn under `-p`** · a headless Claude Code run has subagents bounded by `CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH` and `CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS`, and a run needing a team belongs in an interactive session · since — · checked 03-09-2026 · https://code.claude.com/docs/en/settings
-- **A headless run has no question tool at all** · the dispatcher sets `VSK_ASK_ROUTE=issue`, the round goes into the issue with its options and the recommendation, and the next run reads the answer there · since — · checked 03-09-2026 · https://code.claude.com/docs/en/cli-reference
-
 ## What this means for the dev skills
 
 - AGENTS.md is the shared instruction file; the one-line CLAUDE.md import makes it reach Claude Code. Keep the marked section small — it counts against Codex's 32 KiB budget along with everything else in AGENTS.md.
@@ -173,14 +192,3 @@ What a dispatcher can rely on when it starts a run with no human at the keyboard
 - Tasks inside one issue run in order, and sibling sub-issues of an epic run one at a time for now; the plan's independent groups record which could run in parallel once the dispatcher (#218) does so.
 - The OpenTelemetry stream is **optional and never required**: capture is deterministic without a collector — the dispatcher parses each harness's own run output, SessionEnd hooks cover interactive sessions, and skill invocations come from hook payloads. `OTEL_LOG_TOOL_DETAILS` stays off; it exports exactly the tool arguments a record must never hold.
 - Every target harness spawns subagents (Claude Code's Task tool, Codex agents), so dev.md's `review:` knob means the same thing on each; only a headless run that cannot spawn falls back to a labeled self-review.
-
-## Native-memory contract
-
-- **Native memory is excluded only in VegaFactory-managed processes** · nothing outside a managed launch is touched · since — · checked 07-09-2026 · https://code.claude.com/docs/en/memory
-- **Managed execution pins Codex 0.153.4 and Claude Code 2.1.263** · an unknown version refuses managed execution pending qualification · since — · checked 07-09-2026 · https://learn.chatgpt.com/docs/config-file/config-reference
-- **Claude managed launch currently refuses** · version and help output plus a cached or raw settings cascade cannot establish effective managed-hook or memory applicability, and no SDK dependency or CLI-session probe is implied · since — · checked 07-09-2026 · https://code.claude.com/docs/en/memory
-- **Codex managed launch overrides the memory settings** · it sets `memories.use_memories` and `memories.generate_memories` to false, disables memories and import and `features.context_management.experimental_mode`, and retains hooks and project trust for the exact checkout · since — · checked 07-09-2026 · https://learn.chatgpt.com/docs/config-file/config-reference
-- **The optional task-note and search facility is separate from ordinary project instructions** · do not read one as the other · since — · checked 07-09-2026 · https://learn.chatgpt.com/docs/models
-- **Claude managed launch sets `CLAUDE_CODE_DISABLE_AUTO_MEMORY=1`** · the session also carries `autoMemoryEnabled` as false, without bare or safe mode and without disabling CLAUDE.md · since — · checked 07-09-2026 · https://code.claude.com/docs/en/memory
-- **No global setting or existing vendor store is changed or read** · a managed run leaves the user's own memory store alone · since — · checked 07-09-2026 · https://code.claude.com/docs/en/memory
-- **These controls are supported configuration, not runtime qualification** · verify their actual pinned behavior before claiming support · since — · checked 07-09-2026 · https://learn.chatgpt.com/docs/config-file/config-reference

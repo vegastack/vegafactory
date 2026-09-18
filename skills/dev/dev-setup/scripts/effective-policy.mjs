@@ -95,22 +95,70 @@ function workflowStatesFromValues(values) {
   if (values.labels === undefined) return [...WORKFLOW_STATES]
   const names = String(values.labels).trim().split(/[,\s]+/).filter(Boolean)
   if (new Set(names).size !== names.length) throw new Error('labels: repeats a name')
+  const stale = names.filter(name => own(SUPERSEDED, name))
+  if (stale.length) throw new Error('labels: still carries superseded names (' + stale.join(', ') + '); run the dev-setup label migration, which maps each to its replacement')
   if (!WORKFLOW_STATES.every(state => names.includes(state))) throw new Error('labels: is missing a state label; the set is ' + WORKFLOW_STATES.join(' '))
   return [...WORKFLOW_STATES]
 }
 
 export const labelsDigest = labels => policyHash([...new Set(labels)].sort())
 
-// What dev-setup shows the operator before it touches an existing repo's labels: every label
-// from the pre-lean workflow that is still there, and the set that replaces it. Presentation
-// only — `writes: false` — and the old names live nowhere but the repo it read them from.
-const SUPERSEDED = ['ready', 'working', 'needs-plan', 'needs-operator', 'for-operator', 'quick-build', 'deep-build'] // the one list of superseded names to delete
-export function planLabelMigration(existing = []) {
-  const names = (Array.isArray(existing) ? existing : []).filter(name => typeof name === 'string')
+// The one old-to-new map. Every superseded name has a replacement, so a migration never drops
+// an issue's state or size on the floor — it moves it. The map is also what the resolver reads
+// to refuse a profile still carrying an old name.
+const SUPERSEDED = Object.freeze({ // the superseded names and what each becomes
+  'needs-operator': 'waiting-on-operator', 'needs-plan': 'planning', ready: 'queued',
+  working: 'in-progress', 'for-operator': 'ready-to-ship',
+  'quick-build': 'small', 'deep-build': 'medium',
+})
+// Keys a profile may no longer carry at all, with the sentence that says what to do instead.
+const RETIRED_KEYS = Object.freeze({
+  'workflow-labels': 'workflow-labels was removed with the label-renaming knob; delete the line and run the dev-setup label migration',
+  gates: 'gates was removed; the operator gives two words per issue, an ack and "ship it"',
+})
+
+/**
+ * The migration dev-setup shows before it touches an existing repo. Every step preserves what
+ * the old label carried: a rename keeps the issues and their history, a transfer copies the new
+ * label onto each issue that has the old one before the old one is deleted, and the board's
+ * Status options move with them. Unrelated labels are never touched. Presentation only —
+ * `writes: false` — and nothing here records an old name anywhere but the repo it read it from.
+ *
+ * @param {{labels?: string[], issues?: Array<{number: number, labels: string[]}>, boardStatus?: string[]}} repo
+ */
+export function planLabelMigration(repo = {}) {
+  const labels = (Array.isArray(repo.labels) ? repo.labels : []).filter(name => typeof name === 'string')
+  const issues = (Array.isArray(repo.issues) ? repo.issues : []).filter(object)
+  const boardStatus = (Array.isArray(repo.boardStatus) ? repo.boardStatus : []).filter(name => typeof name === 'string')
+  const present = new Set(labels)
+  const rename = []
+  const transfer = []
+  const remove = []
+  for (const [from, to] of Object.entries(SUPERSEDED)) {
+    if (!present.has(from)) continue
+    // The replacement is free → rename in place, which keeps every issue's label and its history.
+    // It is already taken → copy it onto each issue that carries the old one, then drop the old.
+    if (present.has(to)) {
+      transfer.push({ from, to, issues: issues.filter(issue => (issue.labels ?? []).includes(from)).map(issue => issue.number) })
+      remove.push(from)
+    } else {
+      rename.push({ from, to })
+      present.add(to)
+    }
+  }
+  const boardRename = []
+  const boardPresent = new Set(boardStatus)
+  for (const [from, to] of Object.entries(SUPERSEDED)) {
+    if (!boardPresent.has(from) || !WORKFLOW_STATES.includes(to)) continue
+    if (!boardPresent.has(to)) { boardRename.push({ from, to }); boardPresent.add(to) }
+  }
   return {
-    remove: SUPERSEDED.filter(name => names.includes(name)),
-    add: WORKFLOW_LABELS.filter(name => !names.includes(name)),
-    keep: names.filter(name => !SUPERSEDED.includes(name)),
+    rename,
+    transfer,
+    create: WORKFLOW_LABELS.filter(name => !present.has(name)),
+    remove,
+    board: { rename: boardRename, create: WORKFLOW_STATES.filter(name => boardStatus.length && !boardPresent.has(name)) },
+    keep: labels.filter(name => !own(SUPERSEDED, name)),
     writes: false,
   }
 }
@@ -166,6 +214,9 @@ export function parsePolicy(text = '', scope = 'repo') {
     if (!match) continue
     const key = match[1], value = match[2].replace(/\s+#.*$/, '').trim()
     if (forbidden.has(key)) { layer.blocks.push('prototype key in policy'); continue }
+    // A retired key blocks rather than falling through to extensions: an unknown key is inert,
+    // and inert is exactly how a profile keeps a removed mechanism without anyone noticing.
+    if (own(RETIRED_KEYS, key)) { layer.blocks.push(RETIRED_KEYS[key]); continue }
     const stageLine = stages.includes(key) && !enums[key]?.includes(value)
     if (key === 'policy-schema' || ordinary.has(key) || stageLine) {
       if (seen.has(key)) layer.blocks.push(`duplicate policy key: ${key}`)

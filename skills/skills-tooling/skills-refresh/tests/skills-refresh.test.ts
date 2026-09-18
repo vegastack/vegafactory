@@ -3,7 +3,7 @@ import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import { validateSkill } from '../../../../packages/cli/scripts/validate-skill.mjs'
-import { parseDate, readWatchlist, scanFacts } from '../scripts/facts-scan.mjs'
+import { parseDate, readWatchlist, scanFacts, sectionLines } from '../scripts/facts-scan.mjs'
 
 const skillRoot = resolve(import.meta.dir, '..')
 const repoRoot = resolve(skillRoot, '../../..')
@@ -19,7 +19,7 @@ function repo(files: Record<string, string>): { root: string; watchlist: string 
   return { root, watchlist: join(root, 'watchlist.md') }
 }
 
-const table = (file: string) => `| Topic | Facts file | Official pages |\n|---|---|---|\n| Widgets | \`${file}\` | https://example.test/docs |\n`
+const table = (file: string) => `| Tool | Facts file section | Official pages |\n|---|---|---|\n| Widgets | \`${file}\` | https://example.test/docs |\n`
 const section = (body: string) => `# Facts\n\n## Widgets\n\n${body}`
 const fact = (capability: string, checked: string) =>
   `- **${capability}** · do the thing · since 1.2 · checked ${checked} · https://example.test/docs\n`
@@ -42,7 +42,7 @@ describe('skills-refresh contract', () => {
 })
 
 describe('the watchlist table', () => {
-  test('every row carries a topic, a file and at least one official page', () => {
+  test('every row carries a tool, a file and at least one official page', () => {
     const { rows, problems } = readWatchlist(readFileSync(watchlistPath, 'utf8'))
     expect(problems).toEqual([])
     expect(rows.length).toBeGreaterThanOrEqual(3)
@@ -52,9 +52,45 @@ describe('the watchlist table', () => {
     }
   })
 
-  test('the header and separator rows are not topics', () => {
-    const { rows } = readWatchlist('| Topic | Facts file | Official pages |\n|---|---|---|\n| A | `a.md` | https://e.test |\n')
-    expect(rows).toEqual([{ topic: 'A', file: 'a.md', pages: ['https://e.test'] }])
+  test('the header and separator rows are not tools, whatever the column is called', () => {
+    for (const heading of ['Tool | Facts file section', 'Topic | Facts file']) {
+      const { rows, problems } = readWatchlist(`| ${heading} | Official pages |\n|---|---|---|\n| A | \`a.md\` | https://e.test |\n`)
+      expect(rows).toEqual([{ tool: 'A', file: 'a.md', pages: ['https://e.test'] }])
+      expect(problems).toEqual([])
+    }
+  })
+
+  test('a row whose middle cell is not a facts file is a problem, not a skipped line', () => {
+    const { rows, problems } = readWatchlist('| Tool | Facts file section | Official pages |\n|---|---|---|\n| Widgets | ask someone | https://e.test |\n')
+    expect(rows).toEqual([])
+    expect(problems.join(' ')).toContain('Widgets names no facts file')
+  })
+
+  // One subagent per tool only means something if one row is one vendor: two rows resolving to
+  // the same section is one agent reading two changelogs, which is what the split prevents.
+  test('every tool resolves to its own section, and no two share one', () => {
+    const { rows } = readWatchlist(readFileSync(watchlistPath, 'utf8'))
+    const seen = new Map<string, string>()
+    for (const row of rows) {
+      const text = readFileSync(join(repoRoot, row.file), 'utf8')
+      const section = sectionLines(text, row.tool)
+      expect(section, `${row.tool} has no section in ${row.file}`).not.toBeNull()
+      const key = `${row.file}#${section![0]![1]}`
+      expect(seen.get(key), `${row.tool} and ${seen.get(key)} resolve to the same section`).toBeUndefined()
+      seen.set(key, row.tool)
+    }
+    expect(seen.size).toBe(rows.length)
+  })
+
+  // The hosts each row's pages live on: one vendor per row, so a subagent reads one site.
+  test('a row names pages from one vendor, never several', () => {
+    const { rows } = readWatchlist(readFileSync(watchlistPath, 'utf8'))
+    for (const row of rows) {
+      const hosts = new Set(row.pages.map((page: string) => new URL(page).hostname.replace(/^www\./, '')))
+      // github.com carries a vendor's own releases, so it pairs with that vendor's docs host.
+      const others = [...hosts].filter((host) => host !== 'github.com')
+      expect(others.length, `${row.tool} spans ${[...hosts].join(', ')}`).toBeLessThanOrEqual(1)
+    }
   })
 })
 
@@ -67,7 +103,7 @@ describe('the sweep window', () => {
     const result = scanFacts({ root, watchlist, today })
     expect(result.problems).toEqual([])
     expect(result.due.map((f: { capability: string }) => f.capability)).toEqual(['Old thing'])
-    expect(result.topics[0]).toMatchObject({ topic: 'Widgets', facts: 2, due: 1 })
+    expect(result.tools[0]).toMatchObject({ tool: 'Widgets', facts: 2, due: 1 })
     expect(result.due[0]).toMatchObject({ file: 'facts.md', line: 6, link: 'https://example.test/docs' })
   })
 
@@ -121,6 +157,6 @@ describe('this repo', () => {
   test('every watchlisted facts file parses, so the sweep can actually run here', () => {
     const result = scanFacts({ root: repoRoot, watchlist: watchlistPath, today: Date.now() })
     expect(result.problems).toEqual([])
-    expect(result.topics.every((topic: { facts: number }) => topic.facts > 0)).toBe(true)
+    expect(result.tools.every((entry: { facts: number }) => entry.facts > 0)).toBe(true)
   })
 })

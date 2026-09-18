@@ -4,7 +4,7 @@ How dev-ship runs a dev.md `## Ship` section and the ship situations the skill b
 
 ## Line prefixes
 
-- `auto:` — do it, report the outcome.
+- `auto:` — do it, report the outcome. The exception is a step that touches the release branch or a tag: the recorded "ship it" binds to an issue and its branch, a generated release PR has neither, so the guard asks there and the step waits. #223 adds a `vegafactory ship release` verb that verifies the recorded word and performs the tag push, which the guard can then allow; until it lands, an `auto:` release step ends at the operator.
 - `ask:` — stop and wait for the operator's word for that step; "ship it" does not cover an `ask:` line. The ship guard asks for every command such a line names in backticks, read from dev.md on the default branch, so editing dev.md in a branch cannot loosen it.
 - `guard:` — a deterministic check. Run its command locally at this position in the runbook order; the CI copy of the same guard is the backstop and stays authoritative for anything that publishes. A failing guard stops the sequence exactly like a failing `auto:` step.
 

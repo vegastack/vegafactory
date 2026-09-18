@@ -38,7 +38,7 @@ Suppressions live in `.vegastack/skillspector-baseline.json`. Adding one is a se
 | Path | What it is |
 |---|---|
 | `skills/` | Authored skill content — the single source of truth. Edit here. A skill sits at `skills/<name>/` or, inside a group, at `skills/<group>/<name>/` — one level, never deeper. |
-| `skills/dev/` | The dev-workflow group (setup, intake, plan, architect, implement, debug, review, ship, status, chronicle): a `GROUP.md` plus ten skills, each with `SKILL.md`, references, deterministic scripts where they earn them, tests. |
+| `skills/dev/` | The dev-workflow group (setup, intake, plan, architect, implement, debug, review, ship, status — which also holds the chronicle): a `GROUP.md` plus nine skills, each with `SKILL.md`, references, deterministic scripts where they earn them, tests. |
 | `skills/skills-tooling/` | The skills-about-skills group — tools that operate on agent skills themselves; currently `skill-scan`, the SkillSpector guard and its suppression baseline. |
 | `packages/cli/` | The `@vegastack/vegafactory` installer. `packages/cli/skill/` and `skill-integrity.json` are **generated at build** from `skills/` — never edit or commit them. |
 | `packages/cli/repo-only.json` | The skills `add --all` skips because they only make sense inside this repository. Hand-maintained; validated by the build. |

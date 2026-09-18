@@ -25,6 +25,7 @@ const STALE: Array<[string, RegExp]> = [
   ['the token broker', /token broker|vegafactory broker/],
   ['Hermes', /\bHermes\b/],
   ['the refresh registry', /refresh registry|refresh\/sources\.json|refresh\.json/],
+  ['the dev-chronicle skill', /dev-chronicle/],
 ]
 const root = join(import.meta.dir, '../../..')
 
@@ -51,17 +52,42 @@ test('no skill, doc or hook wiring calls a removed CLI command or a deleted scri
 })
 
 // The sweep the lean rebuild owes itself: a retired label, knob or mechanism lives in the
-// chronicle and the changelog, and nowhere an agent reads. The one exemption is a line that
-// says `superseded` — the migration that deletes the old labels, and the eval that exercises
-// it, both have to name them, and saying so on the line is cheaper than a file-level hole.
+// chronicle and the changelog, and nowhere an agent reads. Exempt is a line that says
+// `superseded` or `was removed` — the migration, its eval and the resolver's refusal messages
+// all have to name what they are retiring — and the body of a declaration whose own first line
+// says it, which is how the old-to-new map and the retired-key list spell themselves out.
+function exempt(lines: string[]): boolean[] {
+  let openDeclaration = false
+  return lines.map((line) => {
+    const named = /superseded|was removed/i.test(line)
+    const inside = named || openDeclaration
+    if (openDeclaration && /^\s*[)\]}]/.test(line)) openDeclaration = false
+    else if (named && /^(const|export const)\s+[A-Z_]+\s*=/.test(line)) openDeclaration = true
+    return inside
+  })
+}
+
 test('no shipped file still names a retired label, knob or mechanism', () => {
   const hits = sweptFiles().flatMap((file) => {
-    const text = readFileSync(join(root, file), 'utf8')
-    return text.split('\n').flatMap((line, index) =>
-      /superseded/i.test(line) ? []
+    const lines = readFileSync(join(root, file), 'utf8').split('\n')
+    const skip = exempt(lines)
+    return lines.flatMap((line, index) =>
+      skip[index] ? []
         : STALE.filter(([, pattern]) => pattern.test(line)).map(([what]) => `${file}:${index + 1}: ${what}`))
   })
   expect(hits).toEqual([])
+})
+
+// The exemption is narrow on purpose: it covers a declaration that says what it retires, and
+// nothing else. A file that simply uses an old name still fails.
+test('the sweep exemption covers a named declaration and not the code around it', () => {
+  const lines = [
+    'const SUPERSEDED = Object.freeze({ // the superseded names',
+    "  ready: 'queued',",
+    '})',
+    "const other = ['ready']",
+  ]
+  expect(exempt(lines)).toEqual([true, true, true, false])
 })
 
 test('the control-room templates README names no hooks/ snippet folder', () => {

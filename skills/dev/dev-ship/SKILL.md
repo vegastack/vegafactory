@@ -5,7 +5,9 @@ description: Land finished work, each step only on the operator's explicit word.
 
 # dev-ship
 
-Act on the operator's word only. Per issue the operator gives exactly two words: an ack on the brief or plan (it authorized building) and **"ship it"**, which carries the whole landing — PR, merge queue, merge, the Ship runbook's `auto:` steps including a release when one is due, and the worktree cleanup. Two words per issue, not one per step: asking again at each stage is its own kind of noise.
+Act on the operator's word only. Per issue the operator gives exactly two words: an ack on the brief or plan (it authorized building) and **"ship it"**, which carries that issue's landing — PR, merge queue, merge and the worktree cleanup. Two words per issue, not one per step: asking again at each stage is its own kind of noise.
+
+**What that one word does not yet cover is the tag push.** The recorded "ship it" binds to an issue and its branch, and the guard matches a merge to that branch — a generated release PR has neither, so its merge and its tag push both still ask. Say so plainly when a runbook reaches them rather than promising a hands-off release. #223 adds a `vegafactory ship release` verb that checks the recorded word itself and performs the tag push, so the guard can allow that one verb instead of raw tagging; until it lands, the release steps stop for the operator.
 
 **"Ship it" is spent only by the operator's own words** — passing checks, PR permissions and the calendar say nothing about consent. Record the word before acting on it: `vegafactory issue ack <n> --stage ship --by <login> --quote "<their words>"`. It binds to the current brief and plan and counts only when it comes after the latest evidence comment, so new evidence needs a new "ship it". Words asking only for a PR ("make the PR") authorize the PR and nothing more.
 
@@ -40,7 +42,9 @@ On "ship it", run it through without stopping again: PR → merge queue → merg
 
 ## After the merge — the Ship runbook
 
-Merge is not the end when dev.md has a `## Ship` section: follow its steps in order — `auto:` lines you just do under the same "ship it", `ask:` lines wait for the operator's own word (the guard asks for any command they name in backticks, read from the default branch's dev.md), `guard:` lines are deterministic checks you run locally at their position (their CI copies are the backstop). With `release: per-merge`, the runbook is part of shipping the issue; with `release: on-request`, it runs only when the operator says "release" (covering everything merged since the last one). Report each step's outcome; a failing step — guard included — stops the sequence and goes to the operator. Execution detail, release batching, bot PRs, and rollback: [runbook](references/runbook.md).
+Merge is not the end when dev.md has a `## Ship` section: follow its steps in order — `auto:` lines you just do under the same "ship it", `ask:` lines wait for the operator's own word (the guard asks for any command they name in backticks, read from the default branch's dev.md), `guard:` lines are deterministic checks you run locally at their position (their CI copies are the backstop). With `release: per-merge`, the runbook is part of shipping the issue; with `release: on-request`, it runs only when the operator says "release" (covering everything merged since the last one). Report each step's outcome; a failing step — guard included — stops the sequence and goes to the operator.
+
+An `auto:` line that opens or merges a **release** PR, or pushes a tag, is the exception the paragraph above names: the release branch belongs to no issue, so the guard has no recorded word to match and asks. Run the line up to that point, report what landed, and hand the tag push to the operator — that is the honest state until #223's release verb lands, not a step skipped to be helpful. Execution detail, release batching, bot PRs, and rollback: [runbook](references/runbook.md).
 
 Rollback rolls forward through the Ship section's rollback line, because a force-push erases the record the rollback needs. Gotchas surfaced here feed the Report's closing retro below.
 

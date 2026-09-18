@@ -97,15 +97,15 @@
     },
     {
       "id": 9,
-      "prompt": "Set up the dev workflow in vegastack/legacy-api. `gh label list` returns the superseded pre-lean set — `ready`, `working`, `needs-plan`, `needs-operator`, `for-operator`, `quick-build`, `deep-build` — alongside `bug` and `documentation`. Thirty open issues carry those labels.",
-      "expected_output": "The label migration shown before anything is touched: the seven superseded names to delete, the eleven new ones to create, and `bug` and `documentation` named as untouched — then nothing done until the operator says yes, and no old name written into dev.md's `labels:` line afterwards.",
+      "prompt": "Set up the dev workflow in vegastack/legacy-api. `gh label list` returns the superseded pre-lean set — `ready`, `working`, `needs-plan`, `needs-operator`, `for-operator`, `quick-build`, `deep-build` — alongside `bug` and `documentation`. Thirty open issues carry those labels, and org project board 12 has Status options matching the old state names.",
+      "expected_output": "The ordered migration shown before anything is touched — each superseded label renamed in place so its issues keep it, the board's Status options renamed with them, the labels no old name maps to created, and `bug` and `documentation` named as untouched — then nothing done until the operator says yes, and no old name written into dev.md's `labels:` line afterwards.",
       "files": [],
       "assertions": [
-        "All three lists are shown — what goes, what arrives, what is left alone — before any label is created or deleted",
+        "The plan renames each superseded label to its replacement rather than deleting and recreating, and says why: deleting a label strips it from every issue that has it",
+        "The board's Status options are migrated too, not left pointing at names no label produces any more",
         "`bug` and `documentation` are named as kept, not swept up with the workflow labels",
-        "No label is created or deleted without the operator's yes, and a no leaves the repo exactly as it was",
-        "The written `labels:` line carries only the new set; no mapping knob and no old name is recorded anywhere",
-        "The thirty open issues' other labels are not touched"
+        "No label is created, renamed or deleted without the operator's yes, and a no leaves the repo exactly as it was",
+        "The written `labels:` line carries only the new set; no mapping knob and no old name is recorded anywhere"
       ]
     }
   ]
