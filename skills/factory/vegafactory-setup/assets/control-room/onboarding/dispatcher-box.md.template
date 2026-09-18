@@ -68,9 +68,13 @@ As `{{dispatcher-user}}`, once that account is signed in to `gh`, Claude Code an
 2. In the repository checkout, `vegafactory dispatch enable`. It checks the row, the harness hooks, a real `claude -p` and `codex exec` answer and the App key before it installs the LaunchAgent; a FAIL line names what to fix and nothing is installed.
 3. `vegafactory dispatch status` shows the board and this machine's runs. `vegafactory dispatch disable` takes the unit away again and stops the runs it had started, and removing the row stands the machine down at its next poll without touching it.
 
-Two identities are in play and they are not the same. The dispatcher's own writes — the claim it takes before a run, its heartbeat and release, the hand-back comment, the relayed ack, the state label — go out as the VegaFactory App, on a token minted from the key in `{{dispatcher-user}}`'s home. Everything the agent run itself writes goes out as `{{dispatcher-user}}`'s own `gh` login, because that is the credential the run has. Neither is ever an approval: an ack, a "ship it" and a review still need a person.
+Everything this box writes to GitHub goes out as the VegaFactory App — the dispatcher's own bookkeeping and everything the agent runs post — on an hour-long token minted from the key in `{{dispatcher-user}}`'s home and handed to each run in its environment. None of it is ever an approval: an ack, a "ship it" and a review still need a person, which is what stops a run consenting to its own work.
 
-The three-runs-at-once and one-merge-at-a-time caps are **per machine**. Two boxes listed for the same repository can each run three; a fleet-wide lease is not in place yet.
+Three things that follow, and one of them will bite on the first run if the box is not set up for it:
+
+- **A dispatched run cannot push with the App token** — the App's Contents is read-only. Make `origin` an SSH remote on this box, or give git a credential the token does not shadow, before the first implement run.
+- **The key outlives the token.** A run under `{{dispatcher-user}}` can read the key file whatever its mode; that is exactly why the dispatcher has an account of its own here and runs nothing else under it.
+- **The caps are per machine.** Three runs at once, one merge at a time, and each machine's own retry and subscription-reset deadlines. Two boxes listed for the same repository can each run three, and one can start work the other is waiting out; a fleet-wide lease is not in place yet.
 
 ## Verify
 

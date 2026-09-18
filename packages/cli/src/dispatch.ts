@@ -1,10 +1,25 @@
 // `vegafactory dispatch …` — the listed machine that works the board on its own.
 //
-// It refuses to run at all unless this machine is named in the control room's `dispatchers.md`:
-// the roster is the enrolment, and removing a row is how a machine is stood down. Every write the
-// dispatcher makes to GitHub goes out as the VegaFactory GitHub App, on an installation token
-// minted here from the private key on this machine; the agent runs themselves use the operator's
-// own subscription, and an API key in the environment refuses the whole command.
+// It refuses to run at all unless this machine is named in the control room's `dispatchers.md`,
+// refreshed and verified before every pass: the roster is the enrolment, and removing a row is how
+// a machine is stood down.
+//
+// Every write reaching GitHub from this machine — the dispatcher's own bookkeeping and everything
+// the agent runs it starts post — goes out as the VegaFactory GitHub App, on an hour-long
+// installation token minted here from the private key. The agent still *thinks* on the operator's
+// own subscription, so an API key in the environment refuses the whole command. Nothing the App
+// writes is ever an approval: an ack, a stop, a correction and a "ship it" need a person with
+// write access, which is what keeps a run from consenting to its own work.
+//
+// Three things this does not cover, each needing the fleet-wide lease tracked separately:
+//
+// - **The run caps are per machine.** Two machines listed for one repository can each run three
+//   steps at once, and each can merge one at a time.
+// - **The hand-over window.** An implement run releases this machine's claim just before the agent
+//   claims for itself; in those seconds a second machine's poll sees a free issue.
+// - **Retry and reset deadlines are local.** `acted.json` is this machine's memory, so a backoff
+//   or a subscription-reset wait binds this machine only: another machine can start that work
+//   before the deadline this one is keeping.
 import { spawn, spawnSync } from 'node:child_process'
 import { createSign, randomUUID } from 'node:crypto'
 import { appendFileSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync } from 'node:fs'
@@ -195,6 +210,12 @@ export type KeyStat = (path: string) => KeyFacts
 // The App key is the factory's one long-lived secret, so the file itself is part of the check: a
 // real file this account owns, readable by nobody else. A link is refused outright — what it
 // points at can be swapped after the check — and so is a mode any other account could read.
+//
+// What this does not cover: a dispatched run is a child of this process and runs as the same user,
+// so the filesystem lets it read this file however tight the mode is. The child is never told
+// where the key is and is given an hour-long token instead, but that is a smaller door, not a shut
+// one. The separate dispatcher account in the control room's dispatcher-box checklist is what
+// closes it — the key belongs to an account that runs nothing else.
 export function assertKeyFile(path: string, { stat = lstatSync as unknown as KeyStat, uid = process.getuid?.() ?? -1 } = {}) {
   let facts: KeyFacts
   try { facts = stat(path) } catch { throw new Error(missingKeyMessage(path)) }
@@ -1337,9 +1358,10 @@ export function dispatchUsage(): string {
   status                 the board, plus this machine's recent dispatcher runs
   run [--once]           the poll loop itself (the unit runs this); --once makes a single pass
 
-At most three runs at once and one merge at a time, per machine — two machines on one board each
-get their own three. A run takes the issue's claim before it starts, so the other machine's poll
-sees the work is taken.
+At most three runs at once and one merge at a time, **per machine** — two machines on one board
+each get their own three, and each keeps its own retry and subscription-reset deadlines. A run
+takes the issue's claim before it starts, so another machine's poll sees the work is taken, except
+in the seconds an implement run hands that claim to the session it starts.
 
 Options: --repo OWNER/NAME · --json · --dry-run (enable and disable show what they would do)
 

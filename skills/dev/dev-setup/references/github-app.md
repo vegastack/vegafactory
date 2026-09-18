@@ -11,9 +11,14 @@ The split inside a dispatcher run is worth being exact about, because two identi
 | Written by | What it writes | As |
 |---|---|---|
 | the dispatcher itself | the claim it takes before a run, its heartbeat and release, the hand-back comment, the relayed ack, the state label | the App |
-| the agent run it starts | everything the skill writes — the plan, the evidence, the status comment, the PR | the operator's own `gh` login on that machine |
+| the agent run it starts | everything the skill writes — the plan, the evidence, the status comment, the PR | the App |
 
-So a dispatched run's artifacts carry a person's name even though no person typed them, and the machine's own bookkeeping carries the App's. Giving the child the App's token as well would need a credential broker that hands out a narrower token per run; until that exists, the child uses the login the machine is already signed in as.
+Both, because a dispatched run gets the same hour-long installation token in its environment as `GH_TOKEN`. That is the point: a run's own output can never pass as a person's word, so a hostile file in a diff cannot talk the factory into stopping, correcting or shipping an issue by writing a sentence. The run is never told where the private key is — it holds a token that expires, not the thing that mints them.
+
+Two consequences worth knowing before the first dispatched run:
+
+- **A dispatched run cannot push with that token.** The App's Contents is read-only by design. The machine's git credential for `origin` has to be its own — an SSH remote, or a credential helper the token does not shadow — or the branch will not push.
+- **The token is an hour long and the key is not.** A child running under the same account can still read the key file through the filesystem, whatever its mode. The separate dispatcher account in the control room's dispatcher-box checklist is what closes that.
 
 What the App may never do is stand in for a person's own words. An ack, a "ship it" and a review comment count only from a human with write access; a comment from `vegafactory[bot]` is trusted as a claim holder, and as the author of a work artifact, and never as approval.
 
