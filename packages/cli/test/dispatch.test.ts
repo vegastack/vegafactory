@@ -129,6 +129,19 @@ describe('the roster', () => {
     expect(listing.ok).toBe(false)
     expect(listing.reason).toContain('vegafactory sync')
   })
+
+  // A row whose caps cannot be read used to be dropped, and the machine then refused as "not
+  // listed" — which sends the operator looking for a missing row instead of at the typo.
+  test('a caps cell nobody can read refuses this machine by name, and says the shape', () => {
+    project(`| machine | operator | repos | caps |\n|---|---|---|---|\n| ${HOST} | mk | o/r | runs ten |\n`)
+    const listing = listedHere(root, { repo: 'o/r', host: HOST, home })
+    expect(listing.ok).toBe(false)
+    expect(listing.reason).toContain(`${HOST}'s caps cell`)
+    expect(listing.reason).toContain('runs 10 · step 72h')
+    expect(listing.reason).not.toContain('is not listed')
+    // The row is still there to point at — it was read, and refused, not skipped.
+    expect(listing.entry?.machine).toBe(HOST)
+  })
 })
 
 describe('identity', () => {
@@ -1177,6 +1190,79 @@ describe('the command', () => {
     void given
   })
 
+  // A stop nobody asked the issue for must leave the issue exactly as it found it. The run is
+  // recorded and handed back, but the trigger stays unspent — otherwise `standDown` puts the issue
+  // back as `planning` while `acted` says the plan already ran for that state, and every machine
+  // that ever looks at it, including this one after a restart, skips it forever.
+  test('an administrative stop does not spend the trigger, so the work is picked up again', async () => {
+    const header = '| machine | operator | repos |\n|---|---|---|\n'
+    const listed = `${header}| ${HOST} | mk | o/r |\n`
+    const delist = controlRoomClone(listed)
+    gh.addIssue({ number: 1, labels: ['planning', 'medium'] })
+    let releaseChild = () => {}
+    const blocked = new Promise<void>((resolve) => { releaseChild = resolve })
+    let passes = 0
+
+    const first = await runDispatch(['run'], {
+      cwd: root, home, host: HOST, env: {}, out: () => {}, runner: gh.runner, now: () => gh.clock,
+      runStep: (async (_step, context) => {
+        context.onStart?.(5151, 'claude')
+        await blocked
+        return { outcome: 'killed' as const, note: 'stopped', ms: 1 }
+      }) as RunStep,
+      stop: () => { releaseChild(); return true },
+      start: () => 'Fri Sep 18 09:00:00 2026',
+      sleep: async () => { if (++passes === 1) delist(header) },
+    })
+    expect(first).toBe(2)
+    // The issue is back where the run found it, and nobody holds it.
+    expect(gh.issues.get(1)!.labels).toContain('planning')
+
+    // The control-room PR is reverted and the machine runs again. It must take the issue up.
+    delist(listed)
+    const second: string[] = []
+    const code = await runDispatch(['run', '--once'], {
+      cwd: root, home, host: HOST, env: {}, out: (text) => second.push(text), runner: gh.runner, now: () => gh.clock,
+      runStep: (async () => ({ outcome: 'done' as const, note: '', ms: 1 })) as RunStep,
+    })
+    expect(code).toBe(0)
+    expect(second.join('\n')).toContain('#1 plan → done')
+  })
+
+  // Two verifications per pass each fetched and merged, and only the first was acted on. A gate
+  // asked twice and obeyed once is a gate that can be told "you are de-listed" and carry on.
+  test('the roster is verified once a pass, and that one answer is the one acted on', async () => {
+    let verifications = 0
+    let passes = 0
+    gh.addIssue({ number: 1, labels: ['queued', 'small'] })
+    await runDispatch(['run'], {
+      cwd: root, home, host: HOST, env: {}, out: () => {}, runner: gh.runner, now: () => gh.clock,
+      runStep: (async () => ({ outcome: 'done' as const, note: '', ms: 1 })) as RunStep,
+      git: () => { verifications++; return (() => ({ status: 0, out: '' })) as GitRun },
+      sleep: async () => { if (++passes === 2) process.emit('SIGTERM' as NodeJS.Signals) },
+    })
+    // One for the gate the command passes before it starts, then exactly one for each pass.
+    expect(verifications).toBe(1 + passes)
+  })
+
+  test('--json puts one document on stdout and no prose beside it', async () => {
+    gh.addIssue({ number: 1, labels: ['queued', 'small'] })
+    const lines: string[] = []
+    const code = await runDispatch(['run', '--once', '--json'], {
+      cwd: root, home, host: HOST, env: {}, out: (text) => lines.push(text), runner: gh.runner, now: () => gh.clock,
+      runStep: (async () => ({ outcome: 'done' as const, note: '', ms: 1 })) as RunStep,
+      git: anyGit,
+    })
+    expect(code).toBe(0)
+    expect(lines).toHaveLength(1)
+    const document = JSON.parse(lines[0]!) as { machine: string; repo: string; runs: { issue: number }[]; notes: string[] }
+    expect(document.machine).toBe(HOST)
+    expect(document.repo).toBe('o/r')
+    expect(document.runs.map((run) => run.issue)).toEqual([1])
+    // The lines a human would have read are inside the document, not printed beside it.
+    expect(document.notes.join('\n')).toContain('#1 implement')
+  })
+
   test('a signal during a blocked run stops it now, not after the next sleep', async () => {
     controlRoomClone(`| machine | operator | repos |\n|---|---|---|\n| ${HOST} | mk | o/r |\n`)
     gh.addIssue({ number: 1, labels: ['planning', 'medium'] })
@@ -1285,7 +1371,8 @@ describe('caps on the roster row', () => {
     expect(parseCaps('runs ten')).toBeNull()
     expect(parseCaps('step 72 hours')).toBeNull()
     expect(parseCaps('runs')).toBeNull()
-    expect(parseDispatchers('| a | dev | o/a | mk | runs |')).toEqual([])
+    const roster = '| machine | operator | repos | caps |\n|---|---|---|---|\n| a | mk | o/a | runs |'
+    expect(parseDispatchers(roster)[0]!.caps).toBeNull()
   })
 
   test('units are per field, because a poll in hours is somebody meaning something else', () => {
@@ -1303,15 +1390,41 @@ describe('caps on the roster row', () => {
     expect(MAX_TIMER_MS).toBe(2 ** 31 - 1)
   })
 
-  test('the caps cell is found by what it says, not by which column it is in', () => {
-    const rows = parseDispatchers('| a | dev | o/a | mk | the always-on box | runs 4 |\n| b | dev | o/b | mk | runs 6 | a note |')
-    expect(rows.map((row) => row.caps.runs)).toEqual([4, 6])
+  test('the header says which column is which, so the roster may reorder and add columns', () => {
+    // The shipped template's own order: the owner is the fourth cell, not the second, and a
+    // positional read would take `group` for the operator and `yes` for a repository.
+    const roster = [
+      '| dispatcher | group | repos | owner | caps | notes |',
+      '|---|---|---|---|---|---|',
+      '| patrick | dev | o/a | mk | runs 4 | the always-on box |',
+    ].join('\n')
+    expect(parseDispatchers(roster)).toEqual([{ machine: 'patrick', operator: 'mk', repos: ['o/a'], caps: { ...DEFAULT_CAPS, runs: 4 } }])
   })
 
-  test('prose in a notes column is a note, and a malformed caps cell drops the machine', () => {
-    expect(parseDispatchers('| a | dev | o/a | mk | the box the rebuild was built on |')[0]!.caps).toEqual(DEFAULT_CAPS)
-    const roster = '| patrick | dev | o/a, o/b | mk | runs 10 · step 72h |\n| broken | dev | o/c | mk | runs ten |'
-    expect(parseDispatchers(roster).map((row) => row.machine)).toEqual(['patrick'])
+  test('prose in a notes column is never caps, whatever words it happens to contain', () => {
+    // "runs" in a sentence used to be sniffed out as a caps cell and then refuse the machine.
+    const roster = [
+      '| machine | operator | repos | caps | notes |',
+      '|---|---|---|---|---|',
+      '| a | mk | o/a | - | the box that runs the nightly step |',
+    ].join('\n')
+    expect(parseDispatchers(roster)[0]!.caps).toEqual(DEFAULT_CAPS)
+  })
+
+  test('a caps cell nobody can read keeps its row, so the machine is refused by name', () => {
+    const roster = [
+      '| machine | operator | repos | caps |',
+      '|---|---|---|---|',
+      '| patrick | mk | o/a | runs 10 · step 72h |',
+      '| broken | mk | o/c | runs ten |',
+    ].join('\n')
+    const rows = parseDispatchers(roster)
+    expect(rows.map((row) => row.machine)).toEqual(['patrick', 'broken'])
+    expect(rows[1]!.caps).toBeNull()
+  })
+
+  test('a table with no header is read the way every roster was read before headers', () => {
+    expect(parseDispatchers('| a | mk | o/a |')).toEqual([{ machine: 'a', operator: 'mk', repos: ['o/a'], caps: DEFAULT_CAPS }])
   })
 
   test("the shipped template's header is not a machine called dispatcher", () => {
@@ -1339,6 +1452,47 @@ describe('the caps reach what they limit', () => {
     const acted = { at: 0, action: 'implement' as const, outcome: 'failed' as const, trigger: null, failures: 2, retryAt: null }
     expect(verdict(1, { acted, failures: 2 }).reason).toContain('needs a person')
     expect(verdict(1, { acted, failures: 5 }).reason ?? '').not.toContain('needs a person')
+  })
+
+  // The tests above reach into `schedule`, `decide` and `defaultRunStep` directly, so they would
+  // still pass if `runDispatch` stopped refreshing the roster or stopped forwarding what it read.
+  // This one changes the caps upstream between two real passes and watches what the loop does.
+  test('a caps change upstream reaches the next pass: how many start, how long they get, how long it waits', async () => {
+    const header = '| machine | operator | repos | caps |\n|---|---|---|---|\n'
+    const row = (caps: string) => `${header}| ${HOST} | mk | o/r | ${caps} |\n`
+    const recap = controlRoomClone(row('runs 1 · step 72h · poll 1m'))
+    for (const number of [1, 2, 3, 4]) gh.addIssue({ number, labels: ['planning', 'medium'] })
+
+    const startsPerPass: number[] = []
+    const timeouts: (number | undefined)[] = []
+    const sleeps: number[] = []
+    let pass = 0
+    let started = 0
+
+    const code = await runDispatch(['run'], {
+      cwd: root, home, host: HOST, env: {}, out: () => {}, runner: gh.runner, now: () => gh.clock,
+      runStep: (async (_step, context) => {
+        started++
+        timeouts.push(context.timeoutMs)
+        return { outcome: 'done' as const, note: '', ms: 1 }
+      }) as RunStep,
+      sleep: async (ms: number) => {
+        startsPerPass.push(started)
+        started = 0
+        sleeps.push(ms)
+        // The control-room PR that loosens this machine's caps lands between the passes.
+        if (++pass === 1) recap(row('runs 3 · step 4h · poll 5m'))
+        else process.emit('SIGTERM' as NodeJS.Signals)
+      },
+    })
+
+    expect(code).toBe(0)
+    // One run in the first pass because the row said one, three in the second because it said three.
+    expect(startsPerPass.slice(0, 2)).toEqual([1, 3])
+    // Every run in a pass carries that pass's step limit, not the one the process started with.
+    expect(timeouts).toEqual([72 * 3_600_000, 4 * 3_600_000, 4 * 3_600_000, 4 * 3_600_000])
+    // And the wait between passes is the poll the roster asked for, each time.
+    expect(sleeps.slice(0, 2)).toEqual([60_000, 5 * 60_000])
   })
 
   test('the run cap is the roster\'s, not the built-in three', () => {

@@ -101,37 +101,68 @@ export function parseCaps(cell: string): Caps | null {
   return caps
 }
 
-export interface Dispatcher { machine: string; operator: string | null; repos: string[]; caps: Caps }
+// `caps` is null when the row names caps nobody can read. The row survives so the machine it
+// names is refused by name — a roster that silently dropped the row would refuse it as "not
+// listed", which sends the operator looking for a missing row rather than at the typo.
+export interface Dispatcher { machine: string; operator: string | null; repos: string[]; caps: Caps | null }
 
-// A header names its columns; whichever word this roster's template uses, it is not a machine.
-const HEADER_WORDS = new Set(['machine', 'dispatcher'])
+// What a roster may call each column. A header maps a name to a position, so a row is read by what
+// its columns are called rather than by where they happen to sit: a room may add, drop or reorder
+// columns, and a notes column is never mistaken for caps.
+const COLUMN_NAMES = {
+  machine: ['machine', 'dispatcher', 'node'],
+  operator: ['operator', 'owner'],
+  repos: ['repos', 'repositories'],
+  caps: ['caps'],
+} as const
 
-// A cell meaning to set caps names one. Free prose in a notes column does not, and a cell that
-// names one and cannot be read still refuses the machine rather than passing as a note.
-const CAPS_CELL = /\b(runs|step|poll|retry|park)\b/i
+interface Layout { machine: number; operator: number | null; repos: number; caps: number | null }
+
+// The shape every roster had before its columns were named. A table with no header is read this
+// way, and then it has no caps column — so it takes the shipped defaults rather than guessing.
+const POSITIONAL: Layout = { machine: 0, operator: 1, repos: 2, caps: null }
+
+// A header is the row that names at least the machine column and the repos column. Anything less
+// is not a header, and reading it as one would silently move every column.
+function layoutOf(row: string[]): Layout | null {
+  const at = (names: readonly string[]) => {
+    const found = row.findIndex((cell) => names.includes(cell.toLowerCase()))
+    return found === -1 ? null : found
+  }
+  const machine = at(COLUMN_NAMES.machine)
+  const repos = at(COLUMN_NAMES.repos)
+  if (machine === null || repos === null) return null
+  return { machine, operator: at(COLUMN_NAMES.operator), repos, caps: at(COLUMN_NAMES.caps) }
+}
 
 const cells = (line: string) => line.replace(/^\|/, '').replace(/\|\s*$/, '').split('|').map((cell) => cell.trim())
 const separator = (cell: string) => /^:?-{2,}:?$/.test(cell)
 
-// One row per machine. A table row is `| machine | operator | repos | note |`, and a bullet is
+// One row per machine. A table names its columns in a header row, and a bullet is
 // `- machine — repos`; `*`, `all` or an empty repos cell means every repository of the org.
 export function parseDispatchers(text: string): Dispatcher[] {
   const found: Dispatcher[] = []
+  let layout = POSITIONAL
   for (const raw of String(text ?? '').split('\n')) {
     const line = raw.trim()
     let machine = ''
     let operator: string | null = null
     let repos = ''
     let capsCell = ''
+    let named = false
     if (line.startsWith('|')) {
-      // Three cells or it is not a row. A truncated row must not read as "every repository": the
-      // roster is a gate, so a shape nobody wrote on purpose refuses rather than widens.
       const row = cells(line)
-      if (row.length < 3 || row.some(separator) || HEADER_WORDS.has((row[0] ?? '').toLowerCase())) continue
-      machine = row[0] ?? ''
-      operator = row[1] ?? null
-      repos = row[2] ?? ''
-      capsCell = row.slice(3).find((cell) => CAPS_CELL.test(cell)) ?? ''
+      if (row.some(separator)) continue
+      const header = layoutOf(row)
+      if (header) { layout = header; continue }
+      // A row the header does not reach is a shape nobody wrote on purpose. The roster is a gate,
+      // so it refuses rather than widens — a truncated row must not read as "every repository".
+      if (row.length <= Math.max(layout.machine, layout.repos)) continue
+      machine = row[layout.machine] ?? ''
+      operator = layout.operator === null ? null : row[layout.operator] ?? null
+      repos = row[layout.repos] ?? ''
+      capsCell = layout.caps === null ? '' : row[layout.caps] ?? ''
+      named = layout.caps !== null
     } else {
       const match = /^-\s+`?([A-Za-z0-9][\w.-]*)`?\s*(?:—|--)\s*(.*)$/.exec(line)
       if (!match) continue
@@ -139,10 +170,10 @@ export function parseDispatchers(text: string): Dispatcher[] {
       repos = match[2] ?? ''
     }
     const name = machineName(machine.replace(/`/g, ''))
-    if (!machine.trim() || HEADER_WORDS.has(name)) continue
-    // `-` is how a row says "the defaults are fine" out loud.
-    const caps = parseCaps(capsCell === '-' ? '' : capsCell)
-    if (!caps) continue
+    if (!machine.trim() || COLUMN_NAMES.machine.includes(name as (typeof COLUMN_NAMES.machine)[number])) continue
+    // A declared caps column is read whatever it holds: guessing a cap would be choosing a number
+    // on the operator's behalf. `-` and an empty cell are how a row says "the defaults are fine".
+    const caps = named && capsCell !== '-' && capsCell !== '' ? parseCaps(capsCell) : { ...DEFAULT_CAPS }
     found.push({
       machine: name,
       operator: operator && operator !== '-' ? operator.replace(/^@/, '') : null,
@@ -224,6 +255,11 @@ export function listedHere(root: string, options: { repo: string; host?: string;
   const entry = parseDispatchers(text).find((row) => row.machine === machine) ?? null
   if (!entry) {
     return { ok: false, entry: null, file, reason: `${machine} is not listed in ${file} — add the row \`| ${machine} | <operator> | ${options.repo} |\` in a control-room PR before this machine dispatches anything` }
+  }
+  // A cap nobody can read is not a cap, and the machine it belongs to is named rather than left
+  // to look like a missing row: the operator is sent to the typo, not to the roster.
+  if (!entry.caps) {
+    return { ok: false, entry, file, reason: `${machine}'s caps cell in ${file} cannot be read — the shape is \`runs 10 · step 72h · poll 1m · retry 15m · park 3\`, every field optional; fix it in a control-room PR` }
   }
   const every = entry.repos.length === 0 || entry.repos.some((repo) => repo === '*' || repo.toLowerCase() === 'all')
   if (!every && !entry.repos.includes(options.repo)) return { ok: false, reason: `${machine} is listed in ${file} for ${entry.repos.join(', ')}, not ${options.repo}`, entry, file }
@@ -1117,7 +1153,11 @@ export interface PollDeps {
 // The steps this machine has started. It lives across polls, so the next pass two minutes later
 // sees them, keeps their slots and can still act on the rest of the board. A finished run stays in
 // the map until the next pass sweeps it, so nothing can disappear between starting and being read.
-export interface Interrupt { reason: string; action: Action; trigger: number | null }
+// `consumes` says whether the stop spends the trigger the run was working on. An operator's stop
+// does: they asked for this, and it is their comment the record points at. An administrative stop
+// — the machine de-listed, the service told to stop, a signal — does not: nothing about the issue
+// changed, so the work has to look unstarted again or no machine ever picks it up.
+export interface Interrupt { reason: string; action: Action; trigger: number | null; consumes: boolean }
 
 export interface Inflight {
   candidate: Candidate
@@ -1184,7 +1224,7 @@ export async function poll(deps: PollDeps, inflight: Map<number, Inflight> = new
     const run = inflight.get(item.candidate.number)
     if (item.decision.action !== 'stop' || !run || run.settled) continue
     deps.out(`#${item.candidate.number}: ${item.decision.reason} — stopping the ${run.candidate.action} run`)
-    run.interrupt = { reason: item.decision.reason, action: 'stop', trigger: item.decision.trigger }
+    run.interrupt = { reason: item.decision.reason, action: 'stop', trigger: item.decision.trigger, consumes: true }
     run.stop()
     await run.done
     inflight.delete(item.candidate.number)
@@ -1319,6 +1359,17 @@ function settle(deps: PollDeps, candidate: Candidate, item: { key: string; decis
   recordRun(deps.root, record)
   const ended = deps.now()
   let retryAt: number | null = null
+  // A stop that was nothing to do with the issue spends nothing. The run is still recorded and the
+  // issue still handed back, but `acted` is left exactly as the last real run left it — write a
+  // spent trigger here and the restored issue looks already-done to the next pass and to every
+  // other machine, which is how an administrative stop turns into an issue nobody ever picks up.
+  if (interrupt && !interrupt.consumes) {
+    deps.out(`#${record.issue} ${record.action} → ${record.outcome}${record.note ? ` (${record.note})` : ''}`)
+    if (result.outcome !== 'done' && !alreadyHandedBack) {
+      deps.standDown(candidate.number, `${interrupt.reason}; this machine has saved and released the issue`, candidate.from)
+    }
+    return record
+  }
   updateActed(deps.root, (acted) => {
     const previous = acted[item.key]
     const failed = result.outcome === 'failed' || result.outcome === 'killed'
@@ -1510,10 +1561,18 @@ export function dispatchUsage(): string {
   status                 the board, plus this machine's recent dispatcher runs
   run [--once]           the poll loop itself (the unit runs this); --once makes a single pass
 
-At most three runs at once and one merge at a time, per machine — two machines on one board
-each get their own three, and each keeps its own retry and subscription-reset deadlines. A run
-takes the issue's claim before it starts, so another machine's poll sees the work is taken, except
-in the seconds an implement run hands that claim to the session it starts.
+One merge at a time per machine, and as many runs at once as its roster row allows. The row's
+caps cell sets them — \`runs 10 · step 72h · poll 1m · retry 15m · park 3\`, in any order, every
+field optional and separated by \`·\` or a comma. \`runs\` and \`park\` take a count; \`step\` takes
+minutes or hours, \`poll\` seconds or minutes, \`retry\` minutes. A field that is present and
+unreadable refuses the machine rather than being guessed at. With no caps cell the defaults are
+${MAX_RUNS} runs, step ${STEP_TIMEOUT_MS / 60_000}m, poll ${POLL_MS / 60_000}m, retry ${RETRY_MS / 60_000}m, park ${MAX_FAILURES}. The caps are re-read from the refreshed roster
+every pass, so changing one is a control-room PR that lands on the next poll, not a release.
+
+Two machines on one board each get their own caps, and each keeps its own retry and
+subscription-reset deadlines. A run takes the issue's claim before it starts, so another machine's
+poll sees the work is taken, except in the seconds an implement run hands that claim to the
+session it starts.
 
 Options: --repo OWNER/NAME · --json · --dry-run (enable and disable show what they would do)
 
@@ -1728,13 +1787,30 @@ export async function runDispatch(argv: string[], deps: CliDeps = {}): Promise<n
       try { devMd = readFileSync(join(root, '.vegastack', 'dev.md'), 'utf8') } catch { /* no profile, so the tools' own defaults */ }
       const identity = deps.runner ? null : appIdentity({ repo, keyPath, appId: appIdOf(env), fetch: deps.fetch })
       const runner = deps.runner ?? identity!.runner
-      // The row that authorised this machine also says what it may do while working it.
-      let caps = listing.entry?.caps ?? DEFAULT_CAPS
-      if (caps.stepMs > TOKEN_LIFE_MS && !args.json) {
-        out(`note: step ${Math.round(caps.stepMs / 3_600_000 * 10) / 10}h is longer than the hour an installation token lives, so a run past that point can still work but can no longer write to GitHub — see #239`)
+      // `--json` puts exactly one document on stdout and nothing else, so every line this loop
+      // would have printed is collected and leaves inside it. A caller that has to step over prose
+      // to find the JSON is a caller that will one day step over the wrong line.
+      const notes: string[] = []
+      const note = (text: string) => { if (args.json) notes.push(text); else out(text) }
+      const finish = (code: number, runs: RunRecord[]) => {
+        if (args.json) out(JSON.stringify({ machine, repo, runs, notes }, null, 2))
+        releaseRunLock(root, runId)
+        return code
       }
+      // The row that authorised this machine also says what it may do while working it.
+      const caps = listing.entry!.caps!
+      // Said once when it becomes true, not every pass: a roster edit that lengthens the step past
+      // the token's hour is worth a line, and the same line every two minutes is worth nothing.
+      let toldAboutStep = false
+      const stepOutlivesToken = (limit: Caps) => {
+        if (limit.stepMs <= TOKEN_LIFE_MS) { toldAboutStep = false; return }
+        if (toldAboutStep) return
+        toldAboutStep = true
+        note(`note: step ${Math.round(limit.stepMs / 3_600_000 * 10) / 10}h is longer than the hour an installation token lives, so a run past that point can still work but can no longer write to GitHub — see #239`)
+      }
+      stepOutlivesToken(caps)
       const pollDeps: PollDeps = {
-        root, repo, runner, machine, runId, caps, out: args.json ? () => {} : out, now: deps.now ?? Date.now,
+        root, repo, runner, machine, runId, caps, out: note, now: deps.now ?? Date.now,
         runStep: deps.runStep ?? defaultRunStep(devMd, env, { token: () => identity?.token() ?? null }), stop: deps.stop, start: deps.start,
         standDown: (number, reason, restoreTo) => standDown({ root, repo, number, runner, machine, restoreTo }, reason),
       }
@@ -1747,13 +1823,13 @@ export async function runDispatch(argv: string[], deps: CliDeps = {}): Promise<n
       const shutDown = async (why: string) => {
         for (const [number, run] of inflight) {
           if (run.settled) continue
-          out(`#${number} ${run.candidate.action} stopped: ${why}`)
-          run.interrupt = { reason: why, action: run.candidate.action, trigger: null }
+          note(`#${number} ${run.candidate.action} stopped: ${why}`)
+          run.interrupt = { reason: why, action: run.candidate.action, trigger: null, consumes: false }
           run.stop()
         }
         // Every process group is ended and waited for before anything is written: each run's own
         // settle saves its work, releases its claim and puts its issue back, exactly once.
-        await drain(inflight)
+        return drain(inflight)
       }
       // A signal wakes the loop rather than waiting for the current sleep to run out: `launchctl
       // bootout` and Ctrl-C both mean now, and two minutes of agents writing to GitHub after the
@@ -1775,36 +1851,28 @@ export async function runDispatch(argv: string[], deps: CliDeps = {}): Promise<n
       })
       for (;;) {
         if (signalled) {
-          await shutDown(`this machine was asked to stop (${signalled})`)
-          releaseRunLock(root, runId)
-          return 0
+          return finish(0, await shutDown(`this machine was asked to stop (${signalled})`))
         }
         try {
-          // The roster is the enrolment, so it is refreshed and re-read every pass: a row removed
-          // in a control-room PR stands this machine down at the next poll, with nothing to log
-          // into, and a roster this machine cannot verify stops it just as firmly.
+          // The roster is the enrolment, so it is refreshed and re-read once per pass: a row
+          // removed in a control-room PR stands this machine down at the next poll, with nothing
+          // to log into, and a roster this machine cannot verify stops it just as firmly. One
+          // reading, because two would each fetch and merge, and a second answer nobody acts on is
+          // a gate that has been asked and ignored — the caps come off this same reading, so a
+          // control-room PR that changes one lands on the next poll rather than on a restart.
           const still = verifiedListing(root, { repo, host, home, git: deps.git })
-          if (!still.ok) {
-            out(`stopping: ${still.reason}`)
-            await shutDown('this machine is no longer listed')
-            releaseRunLock(root, runId)
-            return 2
+          if (!still.ok || !still.entry?.caps) {
+            note(`stopping: ${still.reason}`)
+            return finish(2, await shutDown('this machine is no longer listed'))
           }
-          // The roster is refreshed and verified every pass, so the caps on it are re-read with it:
-          // changing one is a control-room PR that lands on the next poll, not a restart.
-          const fresh = verifiedListing(root, { repo, host, home, git: deps.git })
-          if (fresh.ok && fresh.entry) pollDeps.caps = caps = fresh.entry.caps
+          pollDeps.caps = still.entry.caps
+          stepOutlivesToken(still.entry.caps)
           await identity?.freshen()
-          for (const candidate of await poll(pollDeps, inflight)) out(`#${candidate.number} ${candidate.action} started`)
+          for (const candidate of await poll(pollDeps, inflight)) note(`#${candidate.number} ${candidate.action} started`)
         } catch (error) {
-          out(`poll failed: ${(error as Error).message}`)
+          note(`poll failed: ${(error as Error).message}`)
         }
-        if (args.once) {
-          const records = await drain(inflight)
-          if (args.json) out(JSON.stringify(records))
-          releaseRunLock(root, runId)
-          return 0
-        }
+        if (args.once) return finish(0, await drain(inflight))
         await untilNextPass()
       }
     }
