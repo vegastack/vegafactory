@@ -23,6 +23,8 @@ Before starting: every phase of the epic is merged, `main` is green, and `.chang
 
    `ship release` re-reads that word, checks `0.20.0` against its changelog entry, requires `main` checked out, clean and level with origin, and then creates and pushes `v0.20.0`. It refuses (exit 2) and writes nothing if any of that does not hold — the block text says which. The `vegafactory` on your PATH is still the released `0.19.9`, which has no `release` verb; run it from this checkout as `bun packages/cli/src/index.ts ship release 223` until you have installed 0.20.0, or `npm install -g @vegastack/vegafactory@0.20.0` afterwards.
 
+   Today a dry run of that command refuses with `no "ship it" on #223: no plan comment yet` — #223 is `medium`, and an ack on a non-`small` issue is only valid against a plan comment on the issue itself, while this epic's plans live in the approved artifact. Post the plan as a comment on the issue you name before recording the word, or tag by hand instead (`git tag -a v0.20.0 -m v0.20.0 && git push origin refs/tags/v0.20.0`) — the guard asks for both, and you are the one answering.
+
 4. **Watch the workflow.** The tag triggers Release: it packs, smokes the tarball, publishes with provenance, waits for the registry, smokes the published version and writes the GitHub release. Then confirm:
 
    ```sh

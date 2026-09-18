@@ -10,7 +10,7 @@ The project's story, newest first: what got built, why, and how it went — for 
 - **Changed:** README rewritten around `init`, the loop and a glossary · AGENTS.md and CONTRIBUTING.md refreshed for the issue cache, claims, the one hook command, the guard, cross-tool review, stats, learning and the merge queue · dev.md: `merge: squash`, the fixed label set, a one-liner Ship runbook, a rewritten Environments, refreshed harness versions · `vegafactory ship release` with its guard rule and tests · ten decision lines.
 - **Decisions:** ten — the clean break at 0.20.0, the two operator words, the issue cache as the read path, claims and heartbeats, log-based stats with a static dashboard, sibling-only parallel work, resume-based cross-tool review behind the ship gate, the skills-refresh sweep, the lean control room, and three test layers behind the merge queue.
 
-— approved by operator (kmanojkumar) · built by claude · branch feat/223-p11-docs-dev-md-release-0-20-0
+— approved by operator (kmanojkumar) · built by claude · branch chore/223-p11-docs-dev-md-release-0-20-0
 
 ## 16-09-2026 — Trusted publishing carries latest itself ([#209](https://github.com/vegastack/vegafactory/issues/209))
 
