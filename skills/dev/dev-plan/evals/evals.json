@@ -43,7 +43,7 @@
     {
       "id": 4,
       "prompt": "Plan issue 88 in vegastack/shop, an epic parent whose two children can be built at the same time: #89 adds a `--json` flag to `packages/api/src/report.ts` (tests in `packages/api/test/report.test.ts`), #90 rewrites the pricing rows in `docs/pricing.md`. Nothing else is in scope. Post the plan comment.",
-      "expected_output": "A plan comment in the workflow format that also carries an `**Independent groups:**` block with one line per sub-issue, each declaring a disjoint file set, recording that the two could run at the same time (they still run one at a time until the dispatcher does so).",
+      "expected_output": "A plan comment in the workflow format that also carries an `**Independent groups:**` block with one line per sub-issue, each declaring a disjoint file set, recording that the two could run at the same time.",
       "files": [],
       "assertions": [
         "The plan carries an `**Independent groups:**` block",

@@ -560,7 +560,9 @@ export function defaultRunStep(devMd: string, env: NodeJS.ProcessEnv, { exec = e
     const policy = stagePolicy(devMd, STAGE_OF[step.action] ?? 'implement')
     const { tool, args } = agentArgs(policy, stepPrompt(step))
     const cwd = workingDir(context.root, step.number) ?? context.root
-    const child = await exec(tool, args, { cwd, env: childEnvironment(env), timeoutMs })
+    // Nobody is at the keyboard, so a round of questions goes to the issue and waits there for the
+    // operator — dev-setup's references/ask-route.md, where this variable is the first step.
+    const child = await exec(tool, args, { cwd, env: { ...childEnvironment(env), VSK_ASK_ROUTE: 'issue' }, timeoutMs })
     const ms = Date.now() - started
     const text = `${child.stderr}\n${child.stdout}`
     if (child.timedOut) return { outcome: 'killed', note: `${tool} ran past the ${timeoutMs / 60_000}-minute step limit and was stopped`, ms }

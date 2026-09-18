@@ -30,7 +30,7 @@ harness-policy: intake {{intake-harness}} {{intake-model}} {{intake-effort}} · 
 
 ## Runtime
 
-dispatcher: {{dispatcher-host}}            # the always-on box that turns labels and reactions into headless runs
+dispatcher: {{dispatcher-host}}            # the always-on box this group's repos expect to work their board; the roster that allows it is dispatchers.md
 ship-environments: preview auto · staging auto · production ask
 design-system: {{design-system}}           # the design layer a repo in this group consumes by default, or `none`
 secrets: {{secret-names}}                  # NAMES of the secrets a repo in this group expects — never values

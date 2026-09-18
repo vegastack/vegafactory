@@ -503,13 +503,15 @@ describe('the step a run makes', () => {
   })
 
   test('a step past the limit is killed, and its own output is never the whole record', async () => {
-    const seen: Array<{ timeoutMs: number; cwd: string }> = []
+    const seen: Array<{ timeoutMs: number; cwd: string; env: NodeJS.ProcessEnv }> = []
     const exec = async (_tool: string, _args: string[], options: { cwd: string; env: NodeJS.ProcessEnv; timeoutMs: number }) => {
-      seen.push({ timeoutMs: options.timeoutMs, cwd: options.cwd })
+      seen.push({ timeoutMs: options.timeoutMs, cwd: options.cwd, env: options.env })
       return { code: null, stdout: 'x'.repeat(9000), stderr: '', timedOut: true }
     }
     const result = await defaultRunStep('', {}, { exec })({ action: 'implement', number: 7, repo: 'o/r', split: false, by: null }, { root })
     expect(seen[0]!.timeoutMs).toBe(STEP_TIMEOUT_MS)
+    // Nobody is watching, so a round of questions goes to the issue rather than a question tool.
+    expect(seen[0]!.env.VSK_ASK_ROUTE).toBe('issue')
     expect(STEP_TIMEOUT_MS).toBe(20 * 60_000)
     expect(result.outcome).toBe('killed')
     expect(result.note).toContain('past the 20-minute step limit')
