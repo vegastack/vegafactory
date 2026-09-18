@@ -1358,7 +1358,7 @@ export function dispatchUsage(): string {
   status                 the board, plus this machine's recent dispatcher runs
   run [--once]           the poll loop itself (the unit runs this); --once makes a single pass
 
-At most three runs at once and one merge at a time, **per machine** — two machines on one board
+At most three runs at once and one merge at a time, per machine — two machines on one board
 each get their own three, and each keeps its own retry and subscription-reset deadlines. A run
 takes the issue's claim before it starts, so another machine's poll sees the work is taken, except
 in the seconds an implement run hands that claim to the session it starts.
@@ -1368,8 +1368,10 @@ Options: --repo OWNER/NAME · --json · --dry-run (enable and disable show what 
 A machine the control room's dispatchers.md does not name refuses every verb but disable. Writes
 go out as the VegaFactory GitHub App, on an hour-long token minted here from its private key:
   ${appKeyPath()}
-(VEGAFACTORY_APP_PRIVATE_KEY_FILE moves it, VEGAFACTORY_APP_ID names another App.) The agent runs
-use the operator's own subscription, so an API-key variable in the environment refuses the run.
+(VEGAFACTORY_APP_PRIVATE_KEY_FILE moves it, VEGAFACTORY_APP_ID names another App.) Each run gets
+that token too, so everything it posts is the App's and none of it can pass as a person's word; it
+is never given the key itself. The runs think on the operator's own subscription, so an API-key
+variable in the environment refuses the command.
 `
 }
 
