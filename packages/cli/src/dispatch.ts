@@ -14,8 +14,13 @@ import { APP_ACTOR, holderOf, machineName, release, trustedHolders } from './cla
 import { defaultClonePath, factoryConfigPath, parseControlRoomKnob, readFactoryConfig } from './control-room.ts'
 import { billingVariables, childEnvironment } from './env.ts'
 import { GhError, defaultRunner, ghList, type GhResult, type GhRunner } from './gh.ts'
-import { assertRepo, cacheDir, replaceFile, syncIssue, withLock, type CommentEntry, type GhIssue, type IssueEntry } from './issue-cache.ts'
-import { detectRepo, permissionLookup, repoRoot, snapshot, type PermissionLookup, type Snapshot } from './issue.ts'
+import { assertRepo, cacheDir, readState, replaceFile, syncIssue, withLock, type CommentEntry, type GhIssue, type IssueEntry } from './issue-cache.ts'
+import {
+  ackBody, currentHashes, detectRepo, evidenceChangedAt, findValidAck, locked, nextLabels, permissionLookup, postComment, repoRoot,
+  setLabels, snapshot, type PermissionLookup, type Snapshot,
+} from './issue.ts'
+import { issueFromBranch } from './hook.ts'
+import { defaultBranch } from './guard-rules.ts'
 import { stateOf, type State } from './labels.ts'
 import { parseIndependentGroups, sharedByEveryChild } from '../../../skills/dev/dev-plan/scripts/plan-lint.mjs'
 
@@ -390,11 +395,26 @@ export function updateActed(root: string, change: (acted: Record<string, Acted>)
 // ---------------------------------------------------------------------------------------------
 // The transitions
 
-export interface Decision { action: Action; reason: string; trigger: number | null; by: string | null; split: boolean }
+export interface Decision { action: Action; reason: string; trigger: number | null; by: string | null; split: boolean; quote: string | null }
 
-const nothing = (reason: string): Decision => ({ action: 'none', reason, trigger: null, by: null, split: false })
+const nothing = (reason: string): Decision => ({ action: 'none', reason, trigger: null, by: null, split: false, quote: null })
 
-const SHIP_IT = /(^|[^\w])ship it([^\w]|$)/i
+// A line whose whole point is "ship it". "do not ship it", "ship it after fixing X" and "I won't
+// ship it" are corrections that happen to contain the words, and a gate that read them as consent
+// would merge on a sentence that said the opposite. A separator may precede the phrase
+// ("looks good — ship it"), and nothing but punctuation may follow it.
+const SHIP_LINE = /(?:^|[—–:;-]\s+)(?:ok|okay|yes|lgtm)?[,!.]?\s*ship(?:\s+it|\s+this)?$/iu
+
+export function shipWord(body: string): string | null {
+  for (const raw of String(body ?? '').split('\n')) {
+    // A quoted reply is someone else's words being repeated, not this person's instruction.
+    const line = raw.trim()
+    if (!line || line.startsWith('>')) continue
+    const bare = line.replace(/^[*\-\s]+/, '').replace(/[^\p{L}\s]+$/u, '').trim()
+    if (SHIP_LINE.test(bare)) return line
+  }
+  return null
+}
 // "stop", "stop.", "@vegafactory stop — I need to rethink this". Not "stop using the old API",
 // which is a correction about the work and not an instruction to put the issue down.
 const STOP = /^\s*(?:@?[\w-]+[,:]?\s+)?stop\s*(?:$|[\n—–:,.!?])/i
@@ -435,15 +455,15 @@ const BOOKKEEPING = new Set(['claim', 'release', 'ledger', 'ack'])
 // The action this issue is waiting for, and the comment that asks for it. `trigger` is what makes
 // a run happen once: a comment already acted on asks for nothing more, and a state label already
 // worked is not worked again until the issue moves.
-export function decide(snap: Snapshot, permission: PermissionLookup, options: { acted?: Acted | null; now?: number } = {}): Decision {
+export function decide(snap: Snapshot, permission: PermissionLookup, options: { acted?: Acted | null; now?: number; held?: boolean } = {}): Decision {
   const issue = snap.state.issue!
-  const { acted = null, now = Date.now() } = options
+  const { acted = null, now = Date.now(), held = false } = options
   if (issue.state !== 'open') return nothing('the issue is closed')
   if (issue.labels.includes('epic')) return nothing('an epic is a map; its sub-issues carry the work')
   const { state } = stateOf(issue.labels)
   if (!state) return nothing('no state label')
   const comments = operatorComments(snap, permission)
-  const decided = transitionOf(snap, issue, state, comments, permission)
+  const decided = transitionOf(snap, issue, state, comments, permission, { acted, held })
   if (decided.action === 'none') return decided
 
   // A trigger is spent once a run of the same action has settled on it, whatever it settled as —
@@ -461,16 +481,16 @@ export function decide(snap: Snapshot, permission: PermissionLookup, options: { 
 type Comments = ReturnType<typeof operatorComments>
 type IssueFacts = IssueEntry
 
-function transitionOf(snap: Snapshot, issue: IssueFacts, state: State, comments: Comments, permission: PermissionLookup): Decision {
+function transitionOf(snap: Snapshot, issue: IssueFacts, state: State, comments: Comments, permission: PermissionLookup, run: { acted: Acted | null; held: boolean }): Decision {
   const labels = issue.labels
   const last = comments.at(-1) ?? null
-  if (last && STOP.test(snap.body(last))) return { action: 'stop', reason: `@${last.author} said stop`, trigger: last.id, by: last.author, split: false }
-  if (state === 'planning') return { action: 'plan', reason: 'the brief is acked and the plan is not written', trigger: null, by: null, split: labels.includes('large') }
+  if (last && STOP.test(snap.body(last))) return { action: 'stop', reason: `@${last.author} said stop`, trigger: last.id, by: last.author, split: false, quote: null }
+  if (state === 'planning') return { action: 'plan', reason: 'the brief is acked and the plan is not written', trigger: null, by: null, split: labels.includes('large'), quote: null }
   if (state === 'queued') {
     // The same fact `issue check --for implement` blocks on: building on an open blocker wastes
     // the run and, worse, lands work on a base that is still moving.
     if (issue.blockedBy.length) return nothing(`blocked by ${issue.blockedBy.map((number) => `#${number}`).join(', ')}`)
-    return { action: 'implement', reason: 'the plan is acked and nobody has built it', trigger: null, by: null, split: false }
+    return { action: 'implement', reason: 'the plan is acked and nobody has built it', trigger: null, by: null, split: false, quote: null }
   }
   if (state === 'waiting-on-operator') {
     // The reply the issue was waiting for: an operator comment later than the last thing an agent
@@ -480,17 +500,29 @@ function transitionOf(snap: Snapshot, issue: IssueFacts, state: State, comments:
     const after = [issue.bodyChangedAt, ...work].sort().at(-1) ?? ''
     const reply = comments.filter((entry) => entry.createdAt > after).at(-1)
     return reply
-      ? { action: 'follow-up', reason: `@${reply.author} replied on a waiting-on-operator issue`, trigger: reply.id, by: reply.author, split: false }
+      ? { action: 'follow-up', reason: `@${reply.author} replied on a waiting-on-operator issue`, trigger: reply.id, by: reply.author, split: false, quote: null }
       : nothing('waiting on the operator')
+  }
+  if (state === 'in-progress') {
+    // A run that claimed moved the issue here. While a claim is alive it is someone's; once the
+    // claim is gone the run is over and did not finish, so this machine picks its own work back
+    // up rather than leaving the issue where no state label will ever move it again.
+    if (run.held) return nothing('a live claim holds it')
+    const resume = run.acted && run.acted.outcome !== 'done' ? run.acted.action : 'implement'
+    if (resume === 'none' || resume === 'stop') return nothing('in-progress with nothing to resume')
+    return { action: resume, reason: 'an interrupted run left it in-progress with no holder', trigger: run.acted?.trigger ?? null, by: null, split: false, quote: null }
   }
   if (state === 'ready-to-ship') {
     const evidence = latestArtifact(snap, 'evidence', permission)
     if (!evidence) return nothing('ready-to-ship with no evidence comment')
     const word = comments.filter((entry) => entry.createdAt > (evidence.changedAt || evidence.updatedAt)).at(-1)
     if (!word) return nothing('waiting for the operator to read the evidence')
-    return SHIP_IT.test(snap.body(word))
-      ? { action: 'ship', reason: `@${word.author} said ship it`, trigger: word.id, by: word.author, split: false }
-      : { action: 'corrections', reason: `@${word.author} left corrections on a ready-to-ship issue`, trigger: word.id, by: word.author, split: false }
+    // A candidate only: the word is not consent until it has been recorded as an ack and read
+    // back by the same check `issue check --for ship` runs. `confirmShip` does that.
+    const quote = shipWord(snap.body(word))
+    return quote
+      ? { action: 'ship', reason: `@${word.author} said ship it`, trigger: word.id, by: word.author, split: false, quote }
+      : { action: 'corrections', reason: `@${word.author} left corrections on a ready-to-ship issue`, trigger: word.id, by: word.author, split: false, quote: null }
   }
   return nothing(`nothing to do while the issue is ${state}`)
 }
@@ -515,7 +547,7 @@ export function overlaps(a: string, b: string): boolean {
   return b.endsWith('/') && a.startsWith(b)
 }
 
-export interface Candidate { number: number; action: Action; parent: number | null; files: string[] }
+export interface Candidate { number: number; action: Action; parent: number | null; files: string[]; from: State }
 
 const CODE: Action[] = ['implement', 'corrections']
 
@@ -701,8 +733,9 @@ export interface PollDeps {
   runStep: RunStep
   out: (text: string) => void
   machine: string
-  // Saves, pushes and releases an issue this machine is giving up.
-  standDown: (number: number, reason: string) => string
+  // Saves, pushes, releases and hands an issue back: the reason goes on the issue, and the state
+  // label goes back to where the run picked it up.
+  standDown: (number: number, reason: string, restoreTo?: State) => string
 }
 
 // The steps this machine has started. It lives across polls, so the next pass two minutes later
@@ -728,17 +761,29 @@ export async function poll(deps: PollDeps, inflight: Map<number, Inflight> = new
       syncIssue({ root, repo, number: issue.number, runner })
       const snap = snapshot(cacheDir(root, repo, issue.number))
       const key = `${repo}#${issue.number}`
-      const decision = decide(snap, permission, { acted: acted[key] ?? null, now: now() })
+      const held = !!holderOf(snap.state, snap.body, now(), trusted).holder
+      const decision = decide(snap, permission, { acted: acted[key] ?? null, now: now(), held })
       if (decision.action === 'none') continue
       // A fresh claim means someone — a person or another machine — is already on it.
-      if (decision.action !== 'stop' && holderOf(snap.state, snap.body, now(), trusted).holder) {
+      if (decision.action !== 'stop' && held) {
         deps.out(`#${issue.number}: skipped, a fresh claim holds it`)
         continue
+      }
+      // The operator's word becomes a recorded ack, read back by the ship gate's own check. A word
+      // that does not survive that is spent here rather than re-relayed on every pass.
+      if (decision.action === 'ship') {
+        const confirmed = confirmShip({ root, repo, number: issue.number, runner }, permission, { id: decision.trigger!, by: decision.by!, quote: decision.quote! })
+        if (!confirmed.ok) {
+          deps.out(`#${issue.number}: not shipping — ${confirmed.reason}`)
+          recordRun(root, { at: new Date(now()).toISOString(), issue: issue.number, action: 'ship', outcome: 'blocked', ms: 0, machine: deps.machine, note: tail(confirmed.reason) })
+          updateActed(root, (saved) => { saved[key] = { at: now(), action: 'ship', outcome: 'blocked', trigger: decision.trigger, failures: 0, retryAt: null } })
+          continue
+        }
       }
       const parent = snap.state.issue!.parent
       if (parent !== null && !plans.has(parent)) plans.set(parent, parentPlan(root, repo, parent, runner, permission))
       const files = parent === null ? [] : filesFromParent(plans.get(parent) ?? null, issue.number)
-      wanted.push({ key, decision, candidate: { number: issue.number, action: decision.action, parent, files } })
+      wanted.push({ key, decision, candidate: { number: issue.number, action: decision.action, parent, files, from: stateOf(snap.state.issue!.labels).state! } })
     } catch (error) {
       deps.out(`#${issue.number}: could not be read (${(error as Error).message})`)
     }
@@ -763,7 +808,7 @@ async function runOne(deps: PollDeps, candidate: Candidate, item: { key: string;
   try {
     result = candidate.action === 'stop'
       // A stop needs no agent: it is this machine giving the issue back.
-      ? { outcome: 'stopped', note: deps.standDown(candidate.number, item.decision.reason), ms: 0 }
+      ? { outcome: 'stopped', note: deps.standDown(candidate.number, item.decision.reason, candidate.from), ms: 0 }
       : await deps.runStep({ action: candidate.action, number: candidate.number, repo: deps.repo, split: item.decision.split, by: item.decision.by }, { root: deps.root })
   } catch (error) {
     result = { outcome: 'failed', note: (error as Error).message, ms: deps.now() - at }
@@ -797,11 +842,44 @@ function settle(deps: PollDeps, candidate: Candidate, item: { key: string; decis
     retryAt = failed ? ended + RETRY_MS * 2 ** (failures - 1) : result.outcome === 'limit' ? resetAt(result.note, ended) : null
     acted[item.key] = { at, action: candidate.action, outcome: result.outcome, trigger: item.decision.trigger, failures, retryAt }
   })
-  // A subscription limit is not the issue's fault: the work is saved and given back, and this
-  // machine tries again after the reset.
-  if (result.outcome === 'limit') deps.standDown(candidate.number, `the subscription limit was reached; this machine tries again after ${new Date(retryAt!).toISOString()}`)
+  // Every run that did not finish hands the issue back the same way: the work is committed and
+  // pushed, the claim released, the reason posted, and the state label put back where the run
+  // found it — a failure that left the issue `in-progress` with nobody on it is a dead end.
+  if (result.outcome !== 'done' && result.outcome !== 'stopped') {
+    const when = retryAt ? `, and tries again after ${new Date(retryAt).toISOString()}` : ' and will not try again without a person'
+    const why = result.outcome === 'limit' ? 'the subscription limit was reached' : `the ${candidate.action} run ${result.outcome === 'killed' ? 'ran past its time limit' : 'failed'}`
+    deps.standDown(candidate.number, `${why}; this machine has saved and released the issue${when}`, candidate.from)
+  }
   deps.out(`#${record.issue} ${record.action} → ${record.outcome}${record.note ? ` (${record.note})` : ''}`)
   return record
+}
+
+// The operator's word, recorded and read back the way the ship gate reads it. The dispatcher
+// relays the ack — an App may do that only by citing the person's own comment — and then asks
+// `findValidAck` the same question `vegafactory issue check --for ship` asks. A relayed ack that
+// does not validate ships nothing: the words on the page were never the gate, the ack is.
+export interface ShipConfirmation { ok: boolean; reason: string }
+
+export function confirmShip(ctx: { root: string; repo: string; number: number; runner: GhRunner },
+  permission: PermissionLookup, word: { id: number; by: string; quote: string }): ShipConfirmation {
+  const read = () => {
+    syncIssue({ root: ctx.root, repo: ctx.repo, number: ctx.number, runner: ctx.runner })
+    return snapshot(cacheDir(ctx.root, ctx.repo, ctx.number))
+  }
+  const verdict = (snap: Snapshot) => {
+    const evidence = latestArtifact(snap, 'evidence', permission)
+    if (!evidence) return { ok: false, reason: 'the evidence comment went away' }
+    const ack = findValidAck(snap, 'ship', permission, evidenceChangedAt(evidence))
+    return { ok: ack.ok, reason: ack.reason }
+  }
+  return locked(ctx, () => {
+    const before = verdict(read())
+    if (before.ok) return before
+    const snap = snapshot(cacheDir(ctx.root, ctx.repo, ctx.number))
+    const hashes = currentHashes(snap)
+    postComment(ctx, ackBody({ stage: 'ship', by: word.by, brief: hashes.brief, plan: hashes.plan, source: `comment:${word.id}`, quote: word.quote }))
+    return verdict(read())
+  })
 }
 
 // The parent epic's plan comment, where sibling file sets are declared. It authorises two agents
@@ -819,35 +897,98 @@ function parentPlan(root: string, repo: string, parent: number, runner: GhRunner
 // Giving an issue up: commit and push whatever the worktree holds, then release the claim the run
 // took, with a note. Nothing is forced, and a rejected push leaves the commit local for a person.
 // Only a claim held by this machine is released: another machine's claim is not ours to drop.
-export function standDown(ctx: { root: string; repo: string; number: number; runner: GhRunner; machine: string; now?: number }, reason: string): string {
-  const dir = workingDir(ctx.root, ctx.number)
-  const notes: string[] = []
-  if (dir) {
-    const git = (args: string[]) => {
-      const result = spawnSync('git', args, { cwd: dir, encoding: 'utf8', timeout: 60_000 })
-      return { status: result.status, out: (result.stdout ?? '').trim() }
-    }
-    if (git(['status', '--porcelain']).out) {
-      git(['add', '--all'])
-      notes.push(git(['commit', '--quiet', '-m', `wip: #${ctx.number} saved before standing down`]).status === 0 ? 'committed the open work' : 'the open work could not be committed')
-    }
-    const branch = git(['branch', '--show-current']).out
-    if (branch) {
-      notes.push(git(['push', '--quiet', '-u', 'origin', `HEAD:refs/heads/${branch}`]).status === 0 ? `pushed ${branch}` : `the push of ${branch} was rejected, so the commit stays local`)
-    }
-  }
+export interface StandDownContext {
+  root: string
+  repo: string
+  number: number
+  runner: GhRunner
+  machine: string
+  now?: number
+  // Where the state label goes back to, when a run left the issue in-progress.
+  restoreTo?: State
+}
+
+// The branch a stand-down may touch, or why it may not. The directory alone proves nothing: a
+// parked worktree left on the default branch, or one for another issue, must never be committed
+// to or pushed just because it happens to sit at `.vegastack/.worktrees/<n>-…`.
+export function pushableBranch(dir: string, number: number, git: Git): { branch: string | null; refusal: string | null } {
+  const head = git(['symbolic-ref', '--quiet', '--short', 'HEAD'])
+  if (head.status !== 0 || !head.out) return { branch: null, refusal: 'the worktree is on a detached head, so nothing was committed or pushed' }
+  const branch = head.out
+  // The default branch first: it is the answer the operator most needs to see, and `main` fails
+  // the issue-name check too, so checking it second would hide it behind a vaguer message.
+  const fallback = defaultBranch(dir)
+  if (fallback && branch === fallback) return { branch: null, refusal: `the worktree is on the default branch ${branch}, so nothing was committed or pushed` }
+  if (issueFromBranch(branch) !== number) return { branch: null, refusal: `the worktree is on ${branch}, which does not name #${number}, so nothing was committed or pushed` }
+  return { branch, refusal: null }
+}
+
+type Git = (args: string[]) => { status: number | null; out: string }
+
+// Giving an issue up: release the claim this run took, save and push its branch, say why on the
+// issue, and put the state label back. The claim is checked *first* — a worktree this machine no
+// longer owns is not ours to commit in — and the branch is checked before any write.
+export function standDown(ctx: StandDownContext, reason: string): string {
   const claimCtx = { root: ctx.root, repo: ctx.repo, number: ctx.number, runner: ctx.runner }
+  const notes: string[] = []
+  // Who holds the issue, as three answers and not two: ours to finish, somebody else's to leave
+  // alone, or unknown. Only the first two are safe, and they are safe for different reasons.
+  let whose: 'ours' | 'free' | 'theirs' | 'unreadable' = 'unreadable'
+  let owner: string | null = null
   try {
     syncIssue({ ...claimCtx })
     const snap = snapshot(cacheDir(ctx.root, ctx.repo, ctx.number))
     const held = holderOf(snap.state, snap.body, ctx.now ?? Date.now(), trustedHolders(claimCtx)).holder
-    if (!held) notes.push('no live claim to release')
-    else if (!held.owner.startsWith(`${ctx.machine}:`)) notes.push(`the claim is held by ${held.owner}, so it was left alone`)
-    else {
-      release(claimCtx, held.owner, APP_ACTOR, reason)
-      notes.push(`released ${held.owner}`)
+    if (!held) { whose = 'free'; notes.push('no live claim to release') }
+    else if (!held.owner.startsWith(`${ctx.machine}:`)) { whose = 'theirs'; notes.push(`the claim is held by ${held.owner}, so nothing here was touched`) }
+    else { whose = 'ours'; owner = held.owner }
+  } catch (error) {
+    notes.push(`the claim could not be read (${(error as Error).message}), so nothing here was touched`)
+  }
+
+  // Only a claim this machine holds authorises writing to its worktree, and a claim that could not
+  // be read is not one. With no live claim at all the work is still this machine's to save: it is
+  // the run we just started that left it there.
+  const dir = whose === 'ours' || whose === 'free' ? workingDir(ctx.root, ctx.number) : null
+  if (dir) {
+    const git: Git = (args) => {
+      const result = spawnSync('git', args, { cwd: dir, encoding: 'utf8', timeout: 60_000 })
+      return { status: result.status, out: (result.stdout ?? '').trim() }
     }
-  } catch (error) { notes.push(`the claim could not be released: ${(error as Error).message}`) }
+    const { branch, refusal } = pushableBranch(dir, ctx.number, git)
+    if (refusal) notes.push(refusal)
+    else {
+      if (git(['status', '--porcelain']).out) {
+        git(['add', '--all'])
+        notes.push(git(['commit', '--quiet', '-m', `wip: #${ctx.number} saved before standing down`]).status === 0 ? 'committed the open work' : 'the open work could not be committed')
+      }
+      notes.push(git(['push', '--quiet', '-u', 'origin', `HEAD:refs/heads/${branch}`]).status === 0 ? `pushed ${branch}` : `the push of ${branch} was rejected, so the commit stays local`)
+    }
+  }
+
+  if (whose === 'ours' && owner) {
+    try {
+      release(claimCtx, owner, APP_ACTOR, reason)
+      notes.push(`released ${owner}`)
+    } catch (error) { notes.push(`the claim could not be released: ${(error as Error).message}`) }
+  }
+
+  const note = `${reason} — ${notes.join(', ')}`
+  // The issue says what happened and goes back to a state a later pass can pick up. Both are
+  // best-effort: a stand-down that cannot reach GitHub still reports what it did locally.
+  try {
+    postComment(claimCtx, `<!-- vsk:v1 type=handback -->\n**${ctx.machine}** stood down from #${ctx.number}: ${note}\n`)
+  } catch (error) { notes.push(`the hand-back comment failed: ${(error as Error).message}`) }
+  if (ctx.restoreTo) {
+    try {
+      syncIssue({ ...claimCtx })
+      const labels = readState(cacheDir(ctx.root, ctx.repo, ctx.number))!.issue!.labels
+      if (stateOf(labels).state === 'in-progress' && ctx.restoreTo !== 'in-progress') {
+        setLabels(claimCtx, nextLabels(labels, { state: ctx.restoreTo }))
+        notes.push(`put it back to ${ctx.restoreTo}`)
+      }
+    } catch (error) { notes.push(`the state label could not be put back: ${(error as Error).message}`) }
+  }
   return `${reason} — ${notes.join(', ')}`
 }
 

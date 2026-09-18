@@ -7,7 +7,7 @@ import { join } from 'node:path'
 import { claimBody, claimLine } from '../src/claim.ts'
 import {
   APP_ID, STEP_TIMEOUT_MS, TOKEN_MARGIN_MS, agentArgs, appIdentity, appJwt, appKeyPath, assertKeyFile, board, decide, defaultRunStep, dispatchDir,
-  disjointSiblings,
+  confirmShip, disjointSiblings, pushableBranch, shipWord,
   drain, filesFromParent, harnessAnswers, hitLimit, hooksWired, listedHere, mintToken, overlaps, parseDispatchArgs,
   parseDispatchers, poll, readActed, readRuns, readiness, recordRun, resetAt, RUNS_KEPT, runDispatch, schedule, serviceCommands, stagePolicy,
   standDown, stepPrompt, tail, unitPath, unitText, unsafeForParallel,
@@ -249,6 +249,48 @@ describe('transitions', () => {
     expect(verdict(1).action).toBe('corrections')
   })
 
+  test('a sentence that only contains the words is a correction, not consent', () => {
+    for (const text of ['do not ship it', "don't ship it yet", 'ship it after fixing the flag name', 'I would not ship it like this', '> ship it']) {
+      expect(shipWord(text)).toBeNull()
+    }
+    for (const text of ['ship it', 'Ship it.', 'ship it!', 'looks good — ship it', 'yes, ship it', 'ok ship this', 'nice work\nship it']) {
+      expect(shipWord(text)).not.toBeNull()
+    }
+    gh.addIssue({ number: 1, labels: ['ready-to-ship', 'small'] })
+    gh.addComment(1, '<!-- vsk:v1 type=evidence sha=abc1234 -->\nbuilt', 'mk')
+    gh.addComment(1, 'ship it once the flag is renamed', 'mk')
+    expect(verdict(1).action).toBe('corrections')
+  })
+
+  test('the word only ships once it is a recorded ack the ship gate accepts', () => {
+    gh.addIssue({ number: 1, labels: ['ready-to-ship', 'small'] })
+    evidence(1)
+    const word = gh.addComment(1, 'ship it', 'mk')
+    const ctx = { root, repo: 'o/r', number: 1, runner: gh.runner }
+    const permission = permissionLookup('o/r', gh.runner)
+    const confirmed = confirmShip(ctx, permission, { id: word.id, by: 'mk', quote: 'ship it' })
+    expect(confirmed.ok).toBe(true)
+    // The dispatcher relays the ack by citing the person's own comment; it never writes the word.
+    const ack = gh.issues.get(1)!.comments.map((comment) => comment.body).find((body) => body.includes('type=ack'))!
+    expect(ack).toContain('stage=ship')
+    expect(ack).toContain('by=mk')
+    expect(ack).toContain(`source=comment:${word.id}`)
+    // Asking again records nothing new: the ack already validates.
+    const acks = gh.issues.get(1)!.comments.filter((comment) => comment.body.includes('type=ack')).length
+    expect(confirmShip(ctx, permission, { id: word.id, by: 'mk', quote: 'ship it' }).ok).toBe(true)
+    expect(gh.issues.get(1)!.comments.filter((comment) => comment.body.includes('type=ack'))).toHaveLength(acks)
+  })
+
+  test('a relayed ack that cannot validate ships nothing', () => {
+    gh.addIssue({ number: 1, labels: ['ready-to-ship', 'small'] })
+    evidence(1)
+    const word = gh.addComment(1, 'ship it', 'mk')
+    // The quote is not in the cited comment, so the ack fails the same check the ship gate runs.
+    const confirmed = confirmShip({ root, repo: 'o/r', number: 1, runner: gh.runner }, permissionLookup('o/r', gh.runner), { id: word.id, by: 'mk', quote: 'merge everything' })
+    expect(confirmed.ok).toBe(false)
+    expect(confirmed.reason).toContain('does not contain the quoted words')
+  })
+
   test('a "ship it" from someone without write access ships nothing', () => {
     gh.addIssue({ number: 1, labels: ['ready-to-ship', 'small'] })
     evidence(1)
@@ -302,7 +344,7 @@ describe('transitions', () => {
 })
 
 describe('what may run at once', () => {
-  const candidate = (number: number, extra: Partial<Candidate> = {}): Candidate => ({ number, action: 'implement', parent: null, files: [], ...extra })
+  const candidate = (number: number, extra: Partial<Candidate> = {}): Candidate => ({ number, action: 'implement', parent: null, files: [], from: 'queued', ...extra })
 
   test('one run per issue, and never more than three', () => {
     const wanted = [1, 2, 3, 4].map((number) => candidate(number, { action: 'plan' }))
@@ -340,8 +382,8 @@ describe('what may run at once', () => {
     expect(overlaps('a/b.ts', 'a/b.ts')).toBe(true)
     expect(overlaps('a/b.ts', 'a/c.ts')).toBe(false)
     expect(disjointSiblings(
-      { number: 1, action: 'implement', parent: 4, files: ['skills/'] },
-      { number: 2, action: 'implement', parent: 4, files: ['skills/dev/x.md'] },
+      { number: 1, action: 'implement', parent: 4, files: ['skills/'], from: 'queued' },
+      { number: 2, action: 'implement', parent: 4, files: ['skills/dev/x.md'], from: 'queued' },
     )).toBe(false)
   })
 
@@ -424,15 +466,41 @@ describe('one poll over the board', () => {
 
   test('a subscription limit gives the issue back and retries after the reset', async () => {
     gh.addIssue({ number: 1, labels: ['queued', 'small'] })
-    const given: string[] = []
+    const given: Array<{ reason: string; restoreTo?: string }> = []
     await pass({
       runStep: runStep({ outcome: 'limit', note: 'usage limit reached; try again after 2026-09-17T15:00:00Z' }),
-      standDown: (number: number, reason: string) => { given.push(reason); return reason },
+      standDown: (number: number, reason: string, restoreTo?: string) => { given.push({ reason, restoreTo }); return reason },
     })
-    expect(given[0]).toContain('subscription limit')
+    expect(given[0]!.reason).toContain('subscription limit')
+    expect(given[0]!.restoreTo).toBe('queued')
     const acted = readActed(root)['o/r#1']!
     expect(acted.outcome).toBe('limit')
     expect(new Date(acted.retryAt!).toISOString()).toBe('2026-09-17T15:00:00.000Z')
+  })
+
+  // Every run that did not finish leaves the issue where a later pass can pick it up: one that
+  // stopped at `in-progress` with nobody on it would otherwise never move again.
+  test('a timeout and a crash both hand the issue back, not leave it in-progress', async () => {
+    const given: Array<{ number: number; reason: string; restoreTo?: string }> = []
+    const record = (number: number, reason: string, restoreTo?: string) => { given.push({ number, reason, restoreTo }); return reason }
+    gh.addIssue({ number: 1, labels: ['queued', 'small'] })
+    await pass({ runStep: runStep({ outcome: 'killed', note: 'past the limit' }), standDown: record })
+    expect(given[0]).toMatchObject({ number: 1, restoreTo: 'queued' })
+    expect(given[0]!.reason).toContain('ran past its time limit')
+
+    gh.addIssue({ number: 2, labels: ['planning', 'medium'] })
+    await pass({ runStep: (async () => { throw new Error('claude is not on PATH') }) as RunStep, standDown: record })
+    expect(given[1]).toMatchObject({ number: 2, restoreTo: 'planning' })
+    expect(given[1]!.reason).toContain('failed')
+  })
+
+  test('a run that crashed before settling is picked back up once its claim is gone', async () => {
+    // The dispatcher died mid-run: the issue is in-progress, nothing is in `acted`, and the claim
+    // has gone stale. The next pass resumes it rather than walking past it forever.
+    gh.addIssue({ number: 1, labels: ['in-progress', 'small'] })
+    expect(readActed(root)['o/r#1']).toBeUndefined()
+    const started = await poll(deps(), new Map())
+    expect(started.map((candidate) => candidate.action)).toEqual(['implement'])
   })
 
   test('a step that throws is a failed run, not a dead dispatcher', async () => {
@@ -493,22 +561,75 @@ describe('standing an issue down', () => {
     gh.addIssue({ number: 1, labels: ['in-progress', 'small'] })
     held(`${HOST}:1-work`)
     expect(down('@mk said stop')).toContain(`released ${HOST}:1-work`)
-    const release = gh.issues.get(1)!.comments.at(-1)!
-    expect(release.body).toContain(`type=release owner=${HOST}:1-work by=vegafactory[bot]`)
-    expect(release.body).toContain('@mk said stop')
-    // Released, so the next session sees a free issue.
-    expect(verdict(1).action).toBe('none')
+    const bodies = gh.issues.get(1)!.comments.map((comment) => comment.body)
+    expect(bodies.some((body) => body.includes(`type=release owner=${HOST}:1-work by=vegafactory[bot]`) && body.includes('@mk said stop'))).toBe(true)
+    // The issue also says what happened, so an operator reading it knows why the run stopped.
+    expect(bodies.at(-1)).toContain('type=handback')
+    expect(bodies.at(-1)).toContain('@mk said stop')
+    // Released, so the next pass sees a free issue — and one left in-progress is picked back up.
+    expect(verdict(1)).toMatchObject({ action: 'implement', reason: 'an interrupted run left it in-progress with no holder' })
+    expect(verdict(1, { held: true }).action).toBe('none')
   })
 
   test('another machine\'s claim is left alone', () => {
     gh.addIssue({ number: 1, labels: ['in-progress', 'small'] })
     held('laptop:1-work')
-    expect(down('the subscription limit was reached')).toContain('held by laptop:1-work, so it was left alone')
+    expect(down('the subscription limit was reached')).toContain('held by laptop:1-work, so nothing here was touched')
   })
 
   test('with nothing held there is nothing to release', () => {
     gh.addIssue({ number: 1, labels: ['queued', 'small'] })
     expect(down('@mk said stop')).toContain('no live claim to release')
+  })
+
+  test('the state label goes back where the run found it', () => {
+    gh.addIssue({ number: 1, labels: ['in-progress', 'small'] })
+    held(`${HOST}:1-work`)
+    standDown({ root, repo: 'o/r', number: 1, runner: gh.runner, machine: HOST, now: gh.clock, restoreTo: 'queued' }, 'the run failed')
+    expect(gh.issues.get(1)!.labels).toContain('queued')
+    expect(gh.issues.get(1)!.labels).not.toContain('in-progress')
+  })
+
+  // A worktree is a directory, and a directory proves nothing about what may be pushed from it.
+  test('only the issue\'s own branch is committed to and pushed', () => {
+    const worktree = join(root, '.vegastack', '.worktrees', '1-work')
+    mkdirSync(worktree, { recursive: true })
+    spawnSync('git', ['init', '-q', '-b', 'main'], { cwd: worktree })
+    spawnSync('git', ['commit', '-q', '--allow-empty', '-m', 'first'], { cwd: worktree })
+    const git = (args: string[]) => {
+      const result = spawnSync('git', args, { cwd: worktree, encoding: 'utf8' })
+      return { status: result.status, out: (result.stdout ?? '').trim() }
+    }
+    // Left on the default branch: refused before anything is committed. With an origin that names
+    // it, the refusal says so; with no remote at all the branch simply does not name the issue.
+    expect(pushableBranch(worktree, 1, git).refusal).toContain('main')
+    spawnSync('git', ['update-ref', 'refs/remotes/origin/main', 'HEAD'], { cwd: worktree })
+    spawnSync('git', ['symbolic-ref', 'refs/remotes/origin/HEAD', 'refs/remotes/origin/main'], { cwd: worktree })
+    expect(pushableBranch(worktree, 1, git).refusal).toContain('default branch main')
+    // Left on another issue's branch: refused.
+    spawnSync('git', ['switch', '-q', '-c', 'feat/9-other'], { cwd: worktree })
+    expect(pushableBranch(worktree, 1, git).refusal).toContain('does not name #1')
+    // A detached head has no branch to push.
+    const head = spawnSync('git', ['rev-parse', 'HEAD'], { cwd: worktree, encoding: 'utf8' }).stdout.trim()
+    spawnSync('git', ['checkout', '-q', head], { cwd: worktree })
+    expect(pushableBranch(worktree, 1, git).refusal).toContain('detached head')
+    // Its own branch: allowed.
+    spawnSync('git', ['switch', '-q', '-c', 'feat/1-work'], { cwd: worktree })
+    expect(pushableBranch(worktree, 1, git)).toEqual({ branch: 'feat/1-work', refusal: null })
+  })
+
+  test('a foreign claim means the worktree is not touched at all', () => {
+    gh.addIssue({ number: 1, labels: ['in-progress', 'small'] })
+    held('laptop:1-work')
+    const worktree = join(root, '.vegastack', '.worktrees', '1-work')
+    mkdirSync(worktree, { recursive: true })
+    spawnSync('git', ['init', '-q', '-b', 'feat/1-work'], { cwd: worktree })
+    writeFileSync(join(worktree, 'note.txt'), 'someone else\'s work')
+    const note = down('the subscription limit was reached')
+    expect(note).toContain('the claim is held by laptop:1-work, so nothing here was touched')
+    // Still uncommitted: another machine's claim is not ours to commit under.
+    const st = spawnSync('git', ['status', '--porcelain'], { cwd: worktree, encoding: 'utf8' })
+    expect(st.stdout).toContain('note.txt')
   })
 })
 
