@@ -74,8 +74,76 @@ const isTag = (name: string, tags?: Set<string>) => name.startsWith('refs/tags/'
 // text handed to another program, probed separately.
 export function parseCommand(command: unknown): Segment[] {
   const segments: Segment[] = []
-  if (typeof command === 'string') parseInto(command, segments)
+  if (typeof command === 'string') parseInto(stripHeredocs(command), segments)
   return segments
+}
+
+// Every heredoc opened on one line, in order, with whether its body is literal. A quoted or
+// escaped delimiter — `<<'EOF'`, `<<"EOF"`, `<<\EOF` — makes the body literal; a bare `<<EOF`
+// leaves it subject to expansion. `<<<` is a here-string, not a heredoc, and is left alone.
+function heredocsOpenedOn(line: string): Array<{ delimiter: string; literal: boolean; strip: boolean }> {
+  const found: Array<{ delimiter: string; literal: boolean; strip: boolean }> = []
+  let quote: string | null = null
+  for (let i = 0; i < line.length; i += 1) {
+    const ch = line[i]!
+    if (quote) {
+      if (ch === '\\' && quote === '"') i += 1
+      else if (ch === quote) quote = null
+      continue
+    }
+    if (ch === '\\') { i += 1; continue }
+    if (ch === "'" || ch === '"') { quote = ch; continue }
+    if (ch !== '<' || line[i + 1] !== '<' || line[i + 2] === '<') continue
+    let j = i + 2
+    let strip = false
+    if (line[j] === '-') { strip = true; j += 1 }
+    while (j < line.length && /[ \t]/.test(line[j]!)) j += 1
+    let delimiter = ''
+    let literal = false
+    while (j < line.length && !/[\s;&|<>()]/.test(line[j]!)) {
+      const c = line[j]!
+      if (c === "'" || c === '"') {
+        literal = true
+        const end = line.indexOf(c, j + 1)
+        const stop = end === -1 ? line.length : end
+        delimiter += line.slice(j + 1, stop)
+        j = stop + 1
+        continue
+      }
+      if (c === '\\') { literal = true; delimiter += line[j + 1] ?? ''; j += 2; continue }
+      delimiter += c
+      j += 1
+    }
+    if (delimiter) found.push({ delimiter, literal, strip })
+    i = j - 1
+  }
+  return found
+}
+
+// A heredoc body is data the command is fed, not command text. With a quoted delimiter a shell
+// expands nothing in it, so a backticked `npm publish` in there is prose — a changeset, a commit
+// message, a release note — and parsing it as a substitution made the guard ask for permission to
+// run words somebody was only writing down. Those bodies are dropped before the command is read.
+// A bare `<<EOF` body really is expanded by the shell, so it stays exactly as it was.
+export function stripHeredocs(text: string): string {
+  if (!text.includes('<<')) return text
+  const lines = text.split('\n')
+  const kept: string[] = []
+  let i = 0
+  while (i < lines.length) {
+    const line = lines[i]!
+    kept.push(line)
+    i += 1
+    for (const doc of heredocsOpenedOn(line)) {
+      while (i < lines.length) {
+        const body = lines[i]!
+        i += 1
+        if ((doc.strip ? body.replace(/^[\t]+/, '') : body) === doc.delimiter) break
+        if (!doc.literal) kept.push(body)
+      }
+    }
+  }
+  return kept.join('\n')
 }
 
 function matchParen(text: string, open: number): number {

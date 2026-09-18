@@ -423,3 +423,34 @@ describe('commit capability', () => {
     }
   })
 })
+
+// A heredoc body is data the command is fed, not command text. A quoted delimiter means the shell
+// expands nothing in it, so a changeset or a release note that mentions `npm publish` in backticks
+// is prose — and the guard used to ask for permission to run words somebody was writing down.
+describe('heredoc bodies', () => {
+  test("prose in a quoted heredoc is data, whatever command it names", () => {
+    expect(decide("cat > a.md <<'EOF'\nwe run `npm publish ./x.tgz` now\nEOF").decision).toBe('allow')
+    expect(decide("cat > a.md <<'EOF'\nthen `git push origin main`\nEOF").decision).toBe('allow')
+    expect(decide('cat > a.md <<"EOF"\nsee `git push origin main`\nEOF').decision).toBe('allow')
+    expect(decide("cat > a.md <<-'EOF'\n\tsee `npm publish`\n\tEOF").decision).toBe('allow')
+  })
+
+  test('an unquoted delimiter really is expanded by the shell, so it still counts', () => {
+    expect(decide('cat > a.md <<EOF\n$(git push origin main)\nEOF').decision).toBe('ask')
+    expect(decide('cat > a.md <<EOF\n`npm publish ./x.tgz`\nEOF').decision).toBe('ask')
+  })
+
+  test('the command after a heredoc body is still read', () => {
+    expect(decide("cat > a.md <<'EOF'\nprose\nEOF\ngit push origin main").decision).toBe('ask')
+  })
+
+  test('a here-string is not a heredoc', () => {
+    expect(decide('cat <<< "hello"').decision).toBe('allow')
+  })
+
+  test('the real command always asks, heredoc or no heredoc', () => {
+    for (const command of ['git push origin main', 'npm publish ./x.tgz', 'git push --force origin main', 'git push origin refs/tags/v1.2.3']) {
+      expect(decide(command).decision).toBe('ask')
+    }
+  })
+})
