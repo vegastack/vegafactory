@@ -13,12 +13,6 @@
     "references/security.md",
     "references/mobile.md"
   ],
-  "dev-chronicle": [
-    "SKILL.md",
-    "agents/openai.yaml",
-    "references/conventions.md@dev-setup",
-    "references/styles.md"
-  ],
   "dev-debug": [
     "SKILL.md",
     "agents/openai.yaml",
@@ -90,9 +84,11 @@
   "dev-status": [
     "SKILL.md",
     "agents/openai.yaml",
+    "references/chronicle.md",
     "references/conventions.md@dev-setup",
-    "scripts/status.mjs",
-    "scripts/effective-policy.mjs@dev-setup"
+    "references/styles.md",
+    "scripts/effective-policy.mjs@dev-setup",
+    "scripts/status.mjs"
   ],
   "skill-maintainer": [
     "SKILL.md",
@@ -118,6 +114,12 @@
     "assets/templates/evals.json.template",
     "scripts/scaffold-skill.mjs",
     "scripts/trigger-check.mjs"
+  ],
+  "skills-refresh": [
+    "SKILL.md",
+    "agents/openai.yaml",
+    "references/watchlist.md",
+    "scripts/facts-scan.mjs"
   ],
   "vegafactory-setup": [
     "SKILL.md",

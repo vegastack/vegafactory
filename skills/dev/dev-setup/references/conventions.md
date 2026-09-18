@@ -59,7 +59,7 @@ Size, one per issue: `small` (brief and plan together, one ack) · `medium` (bri
 - Issues, branches and PRs use dev.md's `branch:` types plus `research:`; the PR title is the issue title.
 - Native issue types: Feature (feat) · Bug (fix) · Task (docs/chore/refactor/research).
 - An epic is a map only (Destination · Decisions so far · Not clear yet · Out of scope) with native sub-issues. Tasks are checkboxes in the plan comment only. Blockers use GitHub dependencies.
-- Parallel work happens only across sibling sub-issues whose plans list non-overlapping files; tasks inside one issue run in order.
+- Tasks inside one issue run in order, and so do sibling sub-issues. The plan records which siblings' files do not overlap and so may run at the same time; the dispatcher (#218) is what will run them.
 
 ## Revisions
 
@@ -78,7 +78,7 @@ One status comment per issue (`type=ledger`), edited in place:
 - Deferred minor: <one-liner>
 ```
 
-Resume: brief → plan → ledger → `git log` on the issue branch; keep completed work.
+Resume: the status comment and `git log` on the issue branch recover the position; brief and plan confirm the scope; keep completed work.
 
 ## Workspaces
 

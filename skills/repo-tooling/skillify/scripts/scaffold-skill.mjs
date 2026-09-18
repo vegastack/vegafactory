@@ -87,13 +87,30 @@ async function writeAtomic(path, body) {
   await rename(staging, path)
 }
 
+// The one place packaging.json is parsed. A file that is present but unreadable is as unusable
+// as an absent one — `name in packaged` and the assignment after it both need a plain object —
+// so the pre-flight calls this too and refuses before anything is staged, rather than letting a
+// raw parser error surface here with the skill tree already on disk.
+async function readPackaging(path) {
+  let packaged
+  try {
+    packaged = JSON.parse(await readFile(path, 'utf8'))
+  } catch (error) {
+    throw new Error(`packages/cli/packaging.json at ${path} is not valid JSON (${error.message}) - every skill needs its packaging entry, so refusing rather than scaffolding a skill the structure check would block`)
+  }
+  if (packaged === null || typeof packaged !== 'object' || Array.isArray(packaged)) {
+    throw new Error(`packages/cli/packaging.json at ${path} is not a JSON object - every skill needs its packaging entry, so refusing rather than scaffolding a skill the structure check would block`)
+  }
+  return packaged
+}
+
 // Adds the new skill's entry to packages/cli/packaging.json with the default
 // scaffolded runtime files. Extra authored files added later must be appended
 // there by hand — sync-skill.mjs still fails loudly on anything unlisted.
 async function wirePackaging(repoRoot, name, write) {
   const path = join(repoRoot, 'packages/cli/packaging.json')
   if (!(await entryAt(path))?.isFile()) return { step: 'packaging.json entry', status: 'skipped: packages/cli/packaging.json not found' }
-  const packaged = JSON.parse(await readFile(path, 'utf8'))
+  const packaged = await readPackaging(path)
   if (name in packaged) return { step: 'packaging.json entry', status: 'skipped: entry already exists' }
   if (!write) return { step: 'packaging.json entry', status: 'planned' }
   packaged[name] = defaultPackagedFiles
@@ -242,6 +259,7 @@ export async function scaffoldSkill({ name, dir, group = null, write = false, no
   if (!(await entryAt(packagingPath))?.isFile()) {
     throw new Error(`packages/cli/packaging.json not found at ${packagingPath} - every skill needs its packaging entry, so refusing rather than scaffolding a skill the structure check would block`)
   }
+  await readPackaging(packagingPath)
 
   // The generated test imports the repo validator by relative path, so its depth follows the
   // skill's: skills/<name>/tests/ is three levels up, skills/<group>/<name>/tests/ is four.

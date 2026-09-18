@@ -1,0 +1,92 @@
+{
+  "ok": true,
+  "maxAgeDays": 60,
+  "due": [
+    {
+      "tool": "Cloudflare",
+      "file": "skills/dev/dev-architect/references/pinned-facts.md",
+      "line": 18,
+      "capability": "Workflows cap steps and bill per step",
+      "since": "2026-08-10",
+      "checked": "12-07-2026",
+      "ageDays": 68,
+      "link": "https://developers.cloudflare.com/workflows"
+    },
+    {
+      "tool": "Cloudflare",
+      "file": "skills/dev/dev-architect/references/pinned-facts.md",
+      "line": 12,
+      "capability": "R2 egress is $0 at any volume",
+      "since": "GA",
+      "checked": "12-07-2026",
+      "ageDays": 68,
+      "link": "https://developers.cloudflare.com/r2/pricing"
+    },
+    {
+      "tool": "Cloudflare",
+      "file": "skills/dev/dev-architect/references/pinned-facts.md",
+      "line": 14,
+      "capability": "Hyperdrive supports PostgreSQL 9.0 to 17.x",
+      "since": "2026-08-07",
+      "checked": "15-07-2026",
+      "ageDays": 65,
+      "link": "https://developers.cloudflare.com/hyperdrive"
+    },
+    {
+      "tool": "Cloudflare",
+      "file": "skills/dev/dev-architect/references/pinned-facts.md",
+      "line": 16,
+      "capability": "Durable Objects default to SQLite storage",
+      "since": "GA",
+      "checked": "15-07-2026",
+      "ageDays": 65,
+      "link": "https://developers.cloudflare.com/durable-objects"
+    },
+    {
+      "tool": "Codex",
+      "file": "skills/dev/dev-setup/references/harness-facts.md",
+      "line": 41,
+      "capability": "spawn_agent has no cwd parameter",
+      "since": "0.149.1",
+      "checked": "12-07-2026",
+      "ageDays": 68,
+      "link": "https://learn.chatgpt.com/docs"
+    },
+    {
+      "tool": "Codex",
+      "file": "skills/dev/dev-setup/references/harness-facts.md",
+      "line": 44,
+      "capability": "OTel log export is off by default",
+      "since": "\u2014",
+      "checked": "12-07-2026",
+      "ageDays": 68,
+      "link": "https://learn.chatgpt.com/docs"
+    }
+  ],
+  "problems": [],
+  "tools": [
+    {
+      "tool": "Cloudflare",
+      "file": "skills/dev/dev-architect/references/pinned-facts.md",
+      "pages": [
+        "https://developers.cloudflare.com/changelog/",
+        "https://developers.cloudflare.com/workers/platform/limits/",
+        "https://developers.cloudflare.com/r2/pricing/"
+      ],
+      "facts": 9,
+      "due": 4,
+      "oldestAgeDays": 37
+    },
+    {
+      "tool": "Codex",
+      "file": "skills/dev/dev-setup/references/harness-facts.md",
+      "pages": [
+        "https://learn.chatgpt.com/docs",
+        "https://learn.chatgpt.com/docs/config-file/config-reference"
+      ],
+      "facts": 11,
+      "due": 2,
+      "oldestAgeDays": 68
+    }
+  ]
+}

@@ -7,7 +7,7 @@
 //
 // Exit codes: 0 pass (or skipped) · 1 pass-with-warnings · 2 blocked.
 // Usage: node skill-scan.mjs [--root <path>] [--dev-md <path>] [--baseline <path>]
-//        [--llm] [--json]
+//        [--json]
 
 import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
@@ -584,7 +584,7 @@ function normalizeIssue(raw) {
 // Impure: shells out to the scanner, once per skill. `--baseline` is rejected
 // together with `--recursive` ("scan each sub-skill with its own baseline"), so
 // the loop is the supported path, not an optimization we passed up.
-export function gatherFacts({ root, baselinePath, llm, binary: binaryOverride }) {
+export function gatherFacts({ root, baselinePath, binary: binaryOverride }) {
   // VSK_SKILLSPECTOR is a TEST SEAM (stubs the scanner in unit tests), mirroring
   // dev-implement's VSK_GH. `binaryOverride` is the absolute path the CLI
   // resolved through the tool's own install channel; a bare PATH lookup is the
@@ -662,8 +662,9 @@ export function gatherFacts({ root, baselinePath, llm, binary: binaryOverride })
     // one skill's result stand in for another's — a wrong verdict that looks
     // exactly like a right one. `index` is unique per run by construction.
     const reportPath = join(outDir, `${index}.json`);
-    const args = ['scan', dir, '--format', 'json', '--output', reportPath];
-    if (!llm) args.push('--no-llm');
+    // Always --no-llm: the gate is the deterministic pass, and a semantic pass nobody gates on
+    // is a network call and a bill for a report no check reads.
+    const args = ['scan', dir, '--format', 'json', '--output', reportPath, '--no-llm'];
     if (baselineUsable) args.push('--baseline', baselinePath);
 
     try {
@@ -938,7 +939,7 @@ if (invokedDirectly) {
     // An uncaught throw would leave node exiting 1 — which in this guard's own
     // scheme reads as "pass with warnings". A crash is not a pass.
     try {
-      facts = gatherFacts({ root, baselinePath, llm: argv.includes('--llm'), binary });
+      facts = gatherFacts({ root, baselinePath, binary });
       facts.skillspector = skillspector;
       outcome = evaluateScan(facts);
     } catch (error) {

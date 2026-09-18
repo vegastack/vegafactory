@@ -29,24 +29,15 @@
   },
   {
     "query": "what happened while I was away on this repo",
-    "should_trigger": false,
-    "ambiguous_with": [
-      "dev-chronicle"
-    ]
+    "should_trigger": true
   },
   {
     "query": "catch me up on this project",
-    "should_trigger": false,
-    "ambiguous_with": [
-      "dev-chronicle"
-    ]
+    "should_trigger": true
   },
   {
     "query": "what did we build here over the months",
-    "should_trigger": false,
-    "ambiguous_with": [
-      "dev-chronicle"
-    ]
+    "should_trigger": true
   },
   {
     "query": "implement the next ready issue",
@@ -71,6 +62,55 @@
   },
   {
     "query": "what's the status of the npm outage",
+    "should_trigger": false
+  },
+  {
+    "query": "what did we build here over the last few months?",
+    "should_trigger": true
+  },
+  {
+    "query": "tell me the story so far in this repo",
+    "should_trigger": true
+  },
+  {
+    "query": "I forgot what happened in this project — recap it",
+    "should_trigger": true
+  },
+  {
+    "query": "write the chronicle entry for the invoice reminders work",
+    "should_trigger": true,
+    "ambiguous_with": [
+      "dev-implement"
+    ]
+  },
+  {
+    "query": "what's the project story",
+    "should_trigger": true
+  },
+  {
+    "query": "summarize how this codebase got to where it is",
+    "should_trigger": true
+  },
+  {
+    "query": "write a changelog entry for this PR",
+    "should_trigger": false,
+    "ambiguous_with": [
+      "dev-implement"
+    ]
+  },
+  {
+    "query": "draft the release notes for 0.4",
+    "should_trigger": false,
+    "ambiguous_with": [
+      "dev-ship"
+    ]
+  },
+  {
+    "query": "catch this ball",
+    "should_trigger": false
+  },
+  {
+    "query": "summarize this PDF",
     "should_trigger": false
   }
 ]

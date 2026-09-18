@@ -145,7 +145,7 @@ test('people visibility intersects exact registered repo scope before reading ro
   expect(resolvePeopleReadScope({ ...input, viewer: { login: 'member', verified: true } }).allowedRepos).toEqual(['acme/app', 'acme/design'])
 })
 
-const fleet = () => ({ schemaVersion: 1, coordination: { repositoryId: 'R_room', repository: 'acme/control-room', branch: 'factory-state', rootCommit: 'b'.repeat(40), installationId: '12345678-1234-4123-8123-123456789012' }, defaults: { pollSeconds: 120, maxRuns: 1, childConcurrent: 3, checkpoints: 'task-branch', recovery: 'verified-transfer' }, groupDefaults: {}, groupDelegations: { dev: { fields: ['maxRuns'], maxRunsMax: 2 } }, machines: { 'dev-box': { installationId: '12345678-1234-4123-8123-123456789013', hostBindingDigest: 'c'.repeat(64), executionLogin: 'devadmin', group: 'dev', repositories: ['acme/app'], enabled: false, overrides: {} } } })
+const fleet = () => ({ schemaVersion: 1, coordination: { repositoryId: 'R_room', repository: 'acme/control-room', branch: 'factory-state', rootCommit: 'b'.repeat(40), installationId: '12345678-1234-4123-8123-123456789012' }, defaults: { pollSeconds: 120, maxRuns: 1, checkpoints: 'task-branch', recovery: 'verified-transfer' }, groupDefaults: {}, groupDelegations: { dev: { fields: ['maxRuns'], maxRunsMax: 2 } }, machines: { 'dev-box': { installationId: '12345678-1234-4123-8123-123456789013', hostBindingDigest: 'c'.repeat(64), executionLogin: 'devadmin', group: 'dev', repositories: ['acme/app'], enabled: false, overrides: {} } } })
 
 test('fleet resolution matches all enrolled identity fields and never enables from local config', async () => {
   const { resolveMachinePolicy } = await import('../scripts/effective-policy.mjs')
@@ -194,7 +194,7 @@ test('group cannot insert org authority, while learning cannot override a qualit
 test.each([
   (f: ReturnType<typeof fleet>) => { f.defaults.pollSeconds = 29 },
   (f: ReturnType<typeof fleet>) => { f.defaults.maxRuns = Number.MAX_SAFE_INTEGER + 1 },
-  (f: ReturnType<typeof fleet>) => { f.defaults.childConcurrent = 17 },
+  (f: ReturnType<typeof fleet>) => { f.defaults.checkpoints = 'everywhere' },
   (f: ReturnType<typeof fleet>) => { f.machines['dev-box'].repositories = ['acme/design'] },
   (f: ReturnType<typeof fleet>) => { f.groupDelegations.dev.maxRunsMax = 0 },
   (f: ReturnType<typeof fleet>) => { f.machines['other'] = { ...f.machines['dev-box'] } },
@@ -230,7 +230,7 @@ test('real Git snapshot bindings are per code repository and reject drift withou
     await mkdir(join(content, 'groups/design'), { recursive: true })
     const git = (...args: string[]) => execFileSync('git', args, { cwd: content, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim()
     git('init', '-q'); git('config', 'user.name', 'Fixture'); git('config', 'user.email', 'fixture@example.test'); git('remote', 'add', 'origin', origin)
-    const org = 'stats: on\nstats-people: on\ngates: 3\nsync-max-age: 2h\n'
+    const org = 'stats: on\nstats-people: on\nmerge: rebase\nsync-max-age: 2h\n'
     const csv = 'login,name,role,slack,timezone,groups\nowner,Owner,lead,,UTC,dev;design\n'
     await writeFile(join(content, 'org.md'), org)
     await writeFile(join(content, 'people.csv'), csv)
@@ -267,7 +267,7 @@ test('real Git snapshot bindings are per code repository and reject drift withou
     expect(commands).toHaveLength(5)
     expect(commands.filter(line => line.includes('cat-file --batch'))).toHaveLength(1)
     expect(loadConfiguredPolicy({ ...input, repo: 'acme/design', devMd: profiles['acme/design'] }).ok).toBe(true)
-    expect(loadConfiguredPolicy({ ...input, devMd: input.devMd + '\ngates: 2' }).blocks.join(' ')).toMatch(/digest changed/)
+    expect(loadConfiguredPolicy({ ...input, devMd: input.devMd + '\nmerge: squash' }).blocks.join(' ')).toMatch(/digest changed/)
     expect(loadConfiguredPolicy({ ...input, now: '2026-09-06T02:00:00Z' }).ok).toBe(false)
     expect(loadConfiguredPolicy({ ...input, devMd: profiles['acme/design'] }).ok).toBe(false)
     state.controlRooms.acme.remote = join(home, 'foreign.git')

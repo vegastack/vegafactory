@@ -19,8 +19,8 @@ const enums = {
   learning: ['normal-work', 'off'], 'learning-adoption': ['scoped-reversible', 'propose-only'],
   'stats-export': ['off', 'non-attributed', 'attributed'],
 }
-const lockable = new Set(['stats', 'stats-export', 'gates', 'tests', 'provider-mode', 'learning', 'learning-adoption'])
-const ordinary = new Set([...Object.keys(enums), 'operators', 'harness-policy', 'gates', 'branch', 'labels', 'control-room', 'sync-max-age', 'workflow-labels', 'stats-local-retention-days', 'stats-shared-retention-months', 'stats-spool-warning-mib'])
+const lockable = new Set(['stats', 'stats-export', 'tests', 'provider-mode', 'learning', 'learning-adoption'])
+const ordinary = new Set([...Object.keys(enums), 'operators', 'harness-policy', 'branch', 'labels', 'control-room', 'sync-max-age', 'stats-local-retention-days', 'stats-shared-retention-months', 'stats-spool-warning-mib'])
 const loginPattern = /^[a-z\d](?:[a-z\d-]{0,37}[a-z\d])?$/i
 const groupPattern = /^[a-z0-9][a-z0-9-]{0,63}$/
 const repoPattern = /^[a-z\d][a-z\d-]*\/[a-z\d_.-]+$/i
@@ -69,60 +69,202 @@ function policyJson(text) {
   return parsed
 }
 
-/** @typedef {'needsOperator'|'needsPlan'|'ready'|'working'|'forOperator'} State */
-/** @typedef {Record<State,string>} LabelMap */
-/** @type {LabelMap} */
-export const DEFAULT_LABELS = Object.freeze({ needsOperator: 'waiting-on-operator', needsPlan: 'planning', ready: 'queued', working: 'in-progress', forOperator: 'ready-to-ship' })
-export const WORKFLOW_STATES = Object.freeze(Object.keys(DEFAULT_LABELS))
+// The five state labels, in order, and the rest of the set dev-setup creates. These are the
+// names themselves — there is no second semantic vocabulary to keep in step, and no knob that
+// renames them, because every skill, script and board option spells them the same way.
+/** @typedef {'waiting-on-operator'|'planning'|'queued'|'in-progress'|'ready-to-ship'} State */
+export const WORKFLOW_STATES = Object.freeze(['waiting-on-operator', 'planning', 'queued', 'in-progress', 'ready-to-ship'])
+export const WORKFLOW_LABELS = Object.freeze([...WORKFLOW_STATES, 'small', 'medium', 'large', 'risky', 'epic', 'research'])
 
-/** @param {unknown} value @returns {LabelMap} */
-export function resolveLabels(value) {
-  if (value === undefined) return { ...DEFAULT_LABELS }
-  if (typeof value === 'string' || Array.isArray(value)) {
-    const names = typeof value === 'string' ? value.trim().split(/[,\s]+/) : value
-    if (!names.length || names.some(name => typeof name !== 'string' || !name.trim())
-      || new Set(names).size !== names.length || !Object.values(DEFAULT_LABELS).every(name => names.includes(name))) {
-      throw new Error('ambiguous legacy labels: preview an explicit workflow-labels semantic mapping; no labels or board options changed')
-    }
-    return { ...DEFAULT_LABELS }
-  }
-  if (!object(value) || Object.keys(value).length !== WORKFLOW_STATES.length
-    || !WORKFLOW_STATES.every(key => own(value, key) && typeof value[key] === 'string' && value[key].trim() === value[key]
-      && value[key].length > 0 && value[key].length <= 50 && !/[\x00-\x1f\x7f]/.test(value[key]))
-    || new Set(Object.values(value).map(name => name.toLowerCase())).size !== WORKFLOW_STATES.length) {
-    throw new Error('workflow-labels requires exactly five semantic keys with distinct nonempty label names')
-  }
-  return Object.fromEntries(WORKFLOW_STATES.map(key => [key, value[key]]))
-}
-
-/** @param {string[]} labels @param {LabelMap} map @returns {{state:State|null,blocks:string[]}} */
-export function resolveState(labels, map) {
-  if (map === undefined || map === null) return { state: null, blocks: ['workflow label map unavailable'] }
-  try { map = resolveLabels(map) } catch (error) { return { state: null, blocks: [error.message] } }
+/** @param {string[]} labels @returns {{state:State|null,blocks:string[]}} */
+export function resolveState(labels) {
   if (!Array.isArray(labels) || labels.some(label => typeof label !== 'string')) return { state: null, blocks: ['unreadable issue labels'] }
-  const states = WORKFLOW_STATES.filter(key => labels.includes(map[key]))
+  const states = WORKFLOW_STATES.filter(state => labels.includes(state))
   return states.length === 1 ? { state: states[0], blocks: [] }
-    : { state: null, blocks: [states.length ? 'conflicting state labels: ' + states.map(key => map[key]).join(', ') : 'no known workflow state label'] }
+    : { state: null, blocks: [states.length ? 'conflicting state labels: ' + states.join(', ') : 'no known workflow state label'] }
 }
 
 // Resolve just the local label contract for read-only profile tooling. Runtime admission
 // supplies the complete configured policy separately; this helper grants no authority.
-export function readWorkflowLabels(text = '') {
+export function readWorkflowStates(text = '') {
   const layer = parsePolicy(text)
   if (layer.blocks.length) throw new Error(layer.blocks.join('; '))
-  return workflowLabelsFromValues(layer.values)
+  return workflowStatesFromValues(layer.values)
 }
-function workflowLabelsFromValues(values) {
-  const map = resolveLabels(values['workflow-labels'] ?? values.labels)
-  if (values['workflow-labels'] !== undefined && values.labels !== undefined && !same(map, resolveLabels(values.labels))) throw new Error('labels and workflow-labels disagree; explicit migration required')
-  return map
+function workflowStatesFromValues(values) {
+  if (values.labels === undefined) return [...WORKFLOW_STATES]
+  const names = String(values.labels).trim().split(/[,\s]+/).filter(Boolean)
+  if (new Set(names).size !== names.length) throw new Error('labels: repeats a name')
+  const stale = names.filter(name => own(SUPERSEDED, name))
+  if (stale.length) throw new Error('labels: still carries superseded names (' + stale.join(', ') + '); run the dev-setup label migration, which maps each to its replacement')
+  if (!WORKFLOW_STATES.every(state => names.includes(state))) throw new Error('labels: is missing a state label; the set is ' + WORKFLOW_STATES.join(' '))
+  return [...WORKFLOW_STATES]
 }
 
 export const labelsDigest = labels => policyHash([...new Set(labels)].sort())
 
-// Presentation-only preview; callers obtain an explicit mapping before writing any profile.
-export function previewLabelMigration(value, proposed) {
-  return { oldNames: typeof value === 'string' ? value.trim().split(/[,\s]+/) : value ?? [], proposed: proposed === undefined ? null : resolveLabels(proposed), writes: false }
+// The one old-to-new map. Every superseded name has a replacement, so a migration never drops
+// an issue's state or size on the floor — it moves it. The map is also what the resolver reads
+// to refuse a profile still carrying an old name.
+const SUPERSEDED = Object.freeze({ // the superseded names and what each becomes
+  'needs-operator': 'waiting-on-operator', 'needs-plan': 'planning', ready: 'queued',
+  working: 'in-progress', 'for-operator': 'ready-to-ship',
+  'quick-build': 'small', 'deep-build': 'medium',
+})
+// Keys a profile may no longer carry at all, with the sentence that says what to do instead.
+const RETIRED_KEYS = Object.freeze({
+  'workflow-labels': 'workflow-labels was removed with the label-renaming knob; delete the line and run the dev-setup label migration',
+  gates: 'gates was removed; the operator gives two words per issue, an ack and "ship it"',
+})
+
+// The five semantic keys the retired `workflow-labels` knob used, and the fixed name each one
+// stands for now. A repo that renamed its labels through that knob calls them anything at all,
+// so the knob's own line is the only place its names can be read from — once, as migration
+// input, and never written back.
+const RENAMED_STATES = Object.freeze({ // the superseded semantic keys and what each becomes
+  needsOperator: 'waiting-on-operator', needsPlan: 'planning', ready: 'queued',
+  working: 'in-progress', forOperator: 'ready-to-ship',
+})
+
+/**
+ * The old-to-new steps for one repo: the former default names, plus whatever the profile's
+ * `workflow-labels:` line called them. Reading that line is the one-time migration input a repo
+ * on custom names needs — without it its labels are invisible to the migration while its
+ * profile is blocked, which is the worst of both.
+ */
+export function migrationMap(profileText = '') {
+  const map = { ...SUPERSEDED }
+  const line = /^workflow-labels:\s*(\{.*?\})\s*(?:#.*)?$/m.exec(String(profileText ?? '')) // migration input only
+  if (!line) return map
+  let configured
+  try { configured = policyJson(line[1]) } catch { return map }
+  if (!object(configured)) return map
+  for (const [key, to] of Object.entries(RENAMED_STATES)) {
+    const from = configured[key]
+    // A configured name equal to its own replacement is already migrated. A name that is some
+    // OTHER state's fixed name is not skipped — that is exactly the collision the ordering
+    // below exists to survive, and skipping it merged two states under one label.
+    if (typeof from !== 'string' || !from.trim() || from === to) continue
+    map[from] = to
+  }
+  return map
+}
+
+/**
+ * Orders the moves so each state lands on its own name, and says when it cannot.
+ *
+ * A legacy mapping may call one state by another state's fixed name — `needsOperator: "queued"`
+ * beside `ready: "go"`. Running the steps in declaration order renames `go` onto the `queued`
+ * that still holds waiting-on-operator issues, merging two states under one label. So a step
+ * whose target is still occupied by a label that will itself move waits for that move; a cycle
+ * that leaves nothing free is broken by parking one label under a temporary name first.
+ *
+ * @param {Array<[string,string]>} steps @param {Set<string>} present
+ * @returns {{rename: Array<{from,to}>, transfer: Array<{from,to}>, remove: string[], blocks: string[]}}
+ */
+export function orderMoves(steps, present) {
+  const pending = new Map(steps.filter(([from]) => present.has(from)))
+  const rename = []
+  const transfer = []
+  const remove = []
+  const blocks = []
+  // Each pass either moves something or parks one label, so the loop shrinks `pending` every
+  // time; the counter is a backstop, not the logic.
+  for (let guard = pending.size * 2 + 2; pending.size && guard > 0; guard--) {
+    let moved = false
+    for (const [from, to] of [...pending]) {
+      if (pending.has(to) && to !== from) continue
+      if (present.has(to)) {
+        transfer.push({ from, to })
+        remove.push(from)
+      } else {
+        rename.push({ from, to })
+        present.add(to)
+      }
+      present.delete(from)
+      pending.delete(from)
+      moved = true
+    }
+    if (moved || !pending.size) continue
+    // Nothing is free: every remaining target is occupied by another mover. Park the first one
+    // under a name no state can claim, which frees its target for the state that wants it.
+    const [from, to] = [...pending][0]
+    const parked = from + '-migrating'
+    if (present.has(parked)) { blocks.push('cannot free ' + to + ': ' + parked + ' is taken'); break }
+    rename.push({ from, to: parked })
+    present.delete(from); present.add(parked)
+    pending.delete(from); pending.set(parked, to)
+  }
+  for (const [from, to] of pending) blocks.push('cannot move ' + from + ' to ' + to + ' without merging two states')
+  return { rename, transfer, remove, blocks }
+}
+
+/**
+ * The migration dev-setup shows before it touches an existing repo. Every step preserves what
+ * the old label carried: a rename keeps the issues and their history, a transfer copies the new
+ * label onto each issue that has the old one before the old one is deleted, and the board's
+ * Status options move with their cards. Unrelated labels are never touched. Presentation only —
+ * `writes: false` — and nothing here records an old name anywhere but the repo it read it from.
+ *
+ * @param {{labels?: string[], issues?: Array<{number: number, labels: string[]}>,
+ *          boardStatus?: string[], boardItems?: Array<{id?: string|number, status: string}>,
+ *          profile?: string}} repo
+ */
+export function planLabelMigration(repo = {}) {
+  const labels = (Array.isArray(repo.labels) ? repo.labels : []).filter(name => typeof name === 'string')
+  const issues = (Array.isArray(repo.issues) ? repo.issues : []).filter(object)
+  const boardItems = (Array.isArray(repo.boardItems) ? repo.boardItems : []).filter(object)
+  const boardStatus = (Array.isArray(repo.boardStatus) ? repo.boardStatus : [])
+    .filter(name => typeof name === 'string')
+  const steps = Object.entries(migrationMap(repo.profile))
+  const superseded = new Set(steps.map(([from]) => from))
+
+  // The replacement is free → rename in place, which keeps every issue's label and its history.
+  // It is already taken by a label that is not itself moving → copy it onto each issue that
+  // carries the old one, then drop the old. `orderMoves` decides which, and in what order.
+  const present = new Set(labels)
+  const moves = orderMoves(steps, present)
+  const rename = moves.rename
+  const remove = moves.remove
+  const transfer = moves.transfer.map(step => ({
+    ...step,
+    issues: issues.filter(issue => (issue.labels ?? []).includes(step.from)).map(issue => issue.number),
+  }))
+
+  // The board moves the same way, and for the same reason: deleting an option takes its cards
+  // with it. A half-migrated board already carrying both names is the case a rename cannot fix —
+  // the cards on the old option are moved to the new one, then the stale option is removed.
+  const boardPresent = new Set(boardStatus)
+  const boardMoves = orderMoves(steps.filter(([, to]) => WORKFLOW_STATES.includes(to)), boardPresent)
+  const boardRename = boardMoves.rename
+  const boardRemove = boardMoves.remove
+  const boardTransfer = boardMoves.transfer.map(step => ({
+    ...step,
+    items: boardItems.filter(item => item.status === step.from).map(item => item.id ?? null),
+  }))
+
+  // A migration that cannot land every state on its own name does not run, and the knob that
+  // still tells the states apart is not deleted — the collision is named instead.
+  const blocks = [...moves.blocks, ...boardMoves.blocks]
+
+  return {
+    blocks,
+    rename,
+    transfer,
+    create: WORKFLOW_LABELS.filter(name => !present.has(name)),
+    remove,
+    board: {
+      rename: boardRename,
+      transfer: boardTransfer,
+      create: WORKFLOW_STATES.filter(name => boardStatus.length && !boardPresent.has(name)),
+      remove: boardRemove,
+    },
+    // The migration's last step, once nothing depends on the names the knob holds — and never
+    // while a collision is unresolved, because that line is the only record of which is which.
+    dropKnob: blocks.length === 0 && /^workflow-labels:/m.test(String(repo.profile ?? '')), // migration input only
+    keep: labels.filter(name => !superseded.has(name)),
+    writes: false,
+  }
 }
 
 // Reasoning-effort levels each harness takes, read off `claude --help` and the Codex binary's own
@@ -139,7 +281,6 @@ export function parseStage(value) {
 }
 function knobValue(key, text) {
   if (enums[key]) return enums[key].includes(text) ? text : undefined
-  if (key === 'gates') return /^[123]$/.test(text) ? Number(text) : undefined
   if (key === 'operators') return text && strings(text.split(/[,\s]+/), loginPattern) ? unique(text.toLowerCase().split(/[,\s]+/)) : undefined
   if (key === 'sync-max-age') {
     const m = /^(\d+)([smh])$/.exec(text)
@@ -150,9 +291,6 @@ function knobValue(key, text) {
   if (key === 'control-room') return text === 'none' || /^[a-z\d][a-z\d-]*\/[a-z\d_.-]+(?:#[a-z\d-]+)?(?:@[a-f\d]{7,40})?$/i.test(text) ? text : undefined
   if (key === 'branch') return text && /^[a-z\d_/-]+$/i.test(text.replace(/<(?:type|issue|slug)>/g, 'value')) ? text : undefined
   if (key === 'labels') return text && text.split(/[,\s]+/).every(label => /^[\w-]+$/.test(label)) ? text.split(/[,\s]+/) : undefined
-  if (key === 'workflow-labels') {
-    try { return resolveLabels(policyJson(text)) } catch { return undefined }
-  }
   return undefined
 }
 
@@ -190,6 +328,9 @@ export function parsePolicy(text = '', scope = 'repo') {
     // The `review:` knob is retired — reviews always run cross-tool — so an old profile's line is
     // ignored. `review <harness> <model> <effort>` is still that stage's harness-policy line.
     if (key === 'review' && !parseStage(value)) continue
+    // Every other retired key blocks rather than falling through to extensions: an unknown key
+    // is inert, and inert is how a profile keeps a removed mechanism without anyone noticing.
+    if (own(RETIRED_KEYS, key)) { layer.blocks.push(RETIRED_KEYS[key]); continue }
     const stageLine = stages.includes(key) && !enums[key]?.includes(value)
     if (key === 'policy-schema' || ordinary.has(key) || stageLine) {
       if (seen.has(key)) layer.blocks.push(`duplicate policy key: ${key}`)
@@ -271,7 +412,7 @@ export function resolvePolicy({ org = '', group = '', repo = '', identity = {}, 
     }
     if (layer.scope === 'org') for (const [key, value] of Object.entries(locked)) { values[key] = value; sources[key] = source(layer) }
   }
-  try { values['workflow-labels'] = workflowLabelsFromValues(values) } catch (error) { blocks.push(error.message) }
+  try { workflowStatesFromValues(values) } catch (error) { blocks.push(error.message) }
   const configured = freshness.configured === true || Boolean(values['control-room'] && values['control-room'] !== 'none')
   const now = typeof freshness.now === 'number' ? freshness.now : Date.parse(freshness.now ?? '')
   const validated = Date.parse(freshness.validatedAt ?? '')
@@ -353,11 +494,10 @@ export function resolveAdministration({ orgLayer, peopleByScope = {}, repoGroups
   return { ok: blocks.length === 0, administration: blocks.length ? null : administration, blocks }
 }
 
-const fleetDefaults = { pollSeconds: 120, maxRuns: 1, childConcurrent: 3, checkpoints: 'task-branch', recovery: 'verified-transfer' }
+const fleetDefaults = { pollSeconds: 120, maxRuns: 1, checkpoints: 'task-branch', recovery: 'verified-transfer' }
 function validFleetValue(key, value) {
   if (key === 'pollSeconds') return Number.isSafeInteger(value) && value >= 30 && value <= 3600
   if (key === 'maxRuns') return Number.isSafeInteger(value) && value > 0
-  if (key === 'childConcurrent') return Number.isSafeInteger(value) && value >= 1 && value <= 16
   if (key === 'checkpoints') return ['off', 'task-branch'].includes(value)
   if (key === 'recovery') return ['original-host', 'verified-transfer'].includes(value)
   return false
@@ -368,9 +508,9 @@ function validDefaults(value, full = false) {
 }
 function validDelegation(value) {
   if (!object(value) || !Array.isArray(value.fields) || value.fields.some(key => !own(fleetDefaults, key))) return false
-  const fields = new Set(['fields', 'maxRunsMax', 'childConcurrentMax', 'pollSecondsMin', 'pollSecondsMax', 'checkpointValues', 'recoveryValues'])
+  const fields = new Set(['fields', 'maxRunsMax', 'pollSecondsMin', 'pollSecondsMax', 'checkpointValues', 'recoveryValues'])
   if (Object.keys(value).some(key => !fields.has(key))) return false
-  for (const [field, key] of [['maxRunsMax', 'maxRuns'], ['childConcurrentMax', 'childConcurrent'], ['pollSecondsMin', 'pollSeconds'], ['pollSecondsMax', 'pollSeconds']]) {
+  for (const [field, key] of [['maxRunsMax', 'maxRuns'], ['pollSecondsMin', 'pollSeconds'], ['pollSecondsMax', 'pollSeconds']]) {
     if (value[field] !== undefined && !validFleetValue(key, value[field])) return false
   }
   if ((value.pollSecondsMin ?? 30) > (value.pollSecondsMax ?? 3600)) return false
@@ -435,7 +575,6 @@ function delegatedFleetChange(changes, delegation) {
   return Object.entries(changes).every(([key, value]) => {
     if (!delegation.fields.includes(key)) return false
     if (key === 'maxRuns') return value <= (delegation.maxRunsMax ?? Number.MAX_SAFE_INTEGER)
-    if (key === 'childConcurrent') return value <= (delegation.childConcurrentMax ?? 16)
     if (key === 'pollSeconds') return value >= (delegation.pollSecondsMin ?? 30) && value <= (delegation.pollSecondsMax ?? 3600)
     if (key === 'checkpoints') return delegation.checkpointValues === undefined || delegation.checkpointValues.includes(value)
     if (key === 'recovery') return delegation.recoveryValues === undefined || delegation.recoveryValues.includes(value)

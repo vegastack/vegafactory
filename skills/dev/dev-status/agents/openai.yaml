@@ -1,4 +1,4 @@
 interface:
   display_name: "dev-status"
-  short_description: "The operator's board — whose move is it"
+  short_description: "The operator's board, and the project's story"
   default_prompt: "Use $dev-status to show what needs me."

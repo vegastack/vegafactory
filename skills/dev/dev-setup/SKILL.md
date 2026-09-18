@@ -39,7 +39,7 @@ Gather these silently and present them as findings — "here's what I found — 
 | environments and run commands | CI/deploy configs, env examples (names only), dev/start scripts — these draft `## Environments` and `## Verify` |
 | architecture (app repos) | wrangler files, drizzle config, better-auth usage, S3/R2 bindings, pg-boss, `eve`/`ai` packages, Dockerfiles/compose, pubspec.yaml — these draft `## Architecture` (a `d1_databases` binding with no Postgres driver is the D1-only class) |
 | existing files | AGENTS.md, CLAUDE.md, `.vegastack/dev.md`, a legacy `.vegastack/arch.md`, the decision register — read before writing, because hand edits in them are the truth |
-| existing labels | `gh label list` |
+| existing labels | `gh label list` — the names feed the Round C label migration, which is the only thing that removes a label |
 | project board | `gh project list --owner <org>` and `gh project field-list` — an existing board drafts `board: <number>`, none found drafts `board: none` |
 | native issue types | `gh api orgs/<org>/issue-types` — an `Epic` type routes parents to it, otherwise the `epic` label ([conventions](references/conventions.md)); the enabled names draft the `issue-types:` knob, `none` where the call 404s |
 | org automation identity | `gh api orgs/<org>/installations` — a `vegafactory` installation means workflows mint tokens from the App ([github-app](references/github-app.md)); owners only, so a 403 is an unknown, not a missing App |
@@ -82,8 +82,18 @@ Every knob `groups/<g>/group.md` or `org.md` already answers is stated as inheri
 - CLAUDE.md already has content → add the `@AGENTS.md` import as its first line (default) or move its content into AGENTS.md and leave only the import
 - Gitignored files a fresh checkout needs (`.env`) or a setup command detected → confirm `worktree-include:`, `commands: setup` and `worktree-retention:` (default 14d), replayed into every new worktree; nothing detected → `worktree-include: none`
 - No control room exists and the operator wants one → hand the request to `vegafactory-setup`, which bootstraps it; this skill never creates the org repository itself
-- Labels use `scripts/effective-policy.mjs`: defaults accept the complete space/CSV list with scope labels; custom names require five-key `workflow-labels` JSON. Preview semantic conversion; write only an accepted migration, preserving issues and board options. Both knobs must agree.
-- Different label names or a different decision-register path, when the situation or the user brings it up
+- Existing repo whose labels predate this workflow → show the migration before touching anything. `planLabelMigration` in [effective-policy](scripts/effective-policy.mjs) takes the repo's label names, its open issues with their labels, the board's Status options **and its items**, plus the existing `.vegastack/dev.md` text, and returns the steps in the order they must run. **Deleting a label or a board option takes it off every issue or card that has it**, so nothing is deleted until its replacement is in place:
+  1. `rename` — the replacement name is free, so the label is renamed in place (`gh label edit`) and every issue keeps it, history included. This is most of the list.
+  2. `transfer` — the replacement already exists, so each named issue gets the new label added before the old one is deleted.
+  3. `create` — the labels no old name maps to.
+  4. `board.rename`, `board.transfer`, `board.create` — Status options move with the states; where the board already carries both names, the named cards move to the replacement first.
+  5. **The deletions, last** — the plan's two removal lists name the transferred labels and board options, and only at this point is anything deleted.
+  6. `dropKnob` — the migration's last step: delete the `workflow-labels:` line, once nothing depends on the names it holds.
+
+  **A repo that renamed its labels through the removed `workflow-labels` knob calls them anything at all**, so that line is read once, as migration input: its five semantic keys give this repo's own name for each state, and those names are migrated like any other. They are never written back — after the migration `labels:` carries the fixed set and the knob line is gone. A `labels:` line still naming an old label, or a leftover `workflow-labels:` or `gates:` line, blocks the profile until then, and the block says so.
+
+  Show `rename`, `transfer`, `create`, `board` and `keep` before acting; `keep` is the project's own labels, which the migration never touches. Act only on the user's yes; a no leaves the repo exactly as it was and the report says the workflow cannot resolve a state until the set exists
+- A different decision-register path, when the situation or the user brings it up
 
 Everything else — merge style, branch naming, the stop-and-ask list, the `architect:` owner (the detected username), `chronicle-style: plain`, and `emoji: none` — takes its documented default straight into dev.md, because the profile is plain text the user can edit anytime.
 

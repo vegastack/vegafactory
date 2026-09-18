@@ -21,8 +21,7 @@ merge: squash
 branch: <type>/<issue>-<slug>   # type: feat | fix | docs | chore | refactor — the only place this list lives
 worktree-include: {{files}}   # space-separated gitignored files a fresh checkout needs (local env and secret files) | none — copied into every new worktree
 worktree-retention: 14d     # how long a parked worktree survives with no session, measured from the later of its last commit and its last ledger edit; prune pushes first and never removes uncommitted or unpushed work
-labels: waiting-on-operator planning queued in-progress ready-to-ship risky research small medium epic   # epic label marks map parents only where the org has no native Epic issue type
-workflow-labels: {"needsOperator":"waiting-on-operator","needsPlan":"planning","ready":"queued","working":"in-progress","forOperator":"ready-to-ship"}   # custom names need explicit mapping; if labels: remains, both must agree
+labels: waiting-on-operator planning queued in-progress ready-to-ship small medium large research risky epic   # the fixed set: one state at a time, one size (or research); epic marks map parents only where the org has no native Epic issue type
 board: none                 # project board number the five state labels mirror into, one way, or none — .github/workflows/factory-board.yml reads this line and a card dragged on the board is cosmetic until the next label change
 issue-types: {{Feature=feat · Bug=fix · Task=docs,chore,refactor,research | none}}   # native org issue types dev-setup detected; dev-intake sets one at creation. none = personal repo, or an org that defines none
 issue-fields: {{Priority=<options> default <option> · Effort=<options> default lowest for research/small, middle for medium | none}}   # org issue fields dev-setup detected; dev-intake asks for both and writes them at creation. none = org defines none
@@ -36,7 +35,7 @@ sync-max-age: 30m           # confirmed maximum validated-policy age, not a task
 # stats: off               # a mandatory org lock needs an exact org delegation; refusal prevents capture/export even when the diagnostic effective value is on
 operators: {{github-username}}   # csv of the humans who own issues here — every state flip assigns per conventions' Labels table; dev-setup writes the detected login, and the line is edited to add people
 dispatch: off               # off | local; repo-only opt-in, current scoped approval and validated policy/guard required; invalid values refuse
-chronicle-style: plain      # plain | story | witty — the voice of chronicle entries; the rule and one worked example per style live in dev-chronicle's references/styles.md
+chronicle-style: plain      # plain | story | witty — the voice of chronicle entries; the rule and one worked example per style live in dev-status's references/styles.md
 emoji: none                 # none | sparing — sparing allows at most one emoji per chronicle entry, in the title or footer, never inside a field's facts
 
 # provider-mode: subscription-only       # confirmed organization policy; no usage-billed fallback

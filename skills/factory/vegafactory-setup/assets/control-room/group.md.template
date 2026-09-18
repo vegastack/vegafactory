@@ -8,8 +8,7 @@ policy-schema: 2
 
 merge: rebase               # rebase | squash | merge
 branch: <type>/<slug>       # type: feat | fix | docs | chore | refactor
-labels: waiting-on-operator planning queued in-progress ready-to-ship risky research small medium epic
-workflow-labels: {"needsOperator":"waiting-on-operator","needsPlan":"planning","ready":"queued","working":"in-progress","forOperator":"ready-to-ship"}   # custom names need explicit mapping; if labels: remains, both must agree
+labels: waiting-on-operator planning queued in-progress ready-to-ship small medium large research risky epic
 tests: required             # required | best-effort | none
 ui-evidence: playwright     # playwright | none
 worktree-retention: 14d     # how long a parked worktree survives with no session

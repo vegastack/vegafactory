@@ -9,13 +9,11 @@ import { homedir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 const policyUrl = new URL('./effective-policy.mjs', import.meta.url);
-const { resolveState, readWorkflowLabels } = await import(existsSync(policyUrl) ? policyUrl.href : new URL('../../dev-setup/scripts/effective-policy.mjs', import.meta.url).href);
+const { resolveState, readWorkflowStates } = await import(existsSync(policyUrl) ? policyUrl.href : new URL('../../dev-setup/scripts/effective-policy.mjs', import.meta.url).href);
 
 export function readKnobs(devMdText) {
-  const labelMap = readWorkflowLabels(devMdText ?? '');
   return {
-    labelMap,
-    states: Object.values(labelMap),
+    states: readWorkflowStates(devMdText ?? ''),
     risky: 'risky',
     scopes: ['small', 'medium', 'large', 'research'],
     register: /^decisions:\s*(\S+)/m.exec(devMdText ?? '')?.[1] ?? '.vegastack/decisions.md',
@@ -104,7 +102,7 @@ export function taskProgress(comments) {
   return null;
 }
 
-// The last time the ledger or a claim comment moved → staleness signal for working
+// The last time the ledger or a claim comment moved → the in-progress staleness signal
 // issues. The hooks' heartbeat edits the holder's own claim comment.
 export function ledgerMovedAt(comments) {
   let at = null;
@@ -238,13 +236,13 @@ export function gatherStatus({ repo, orphanHours = 6, devMdPath = '.vegastack/de
   for (const label of knobs.states) {
     board[label] = gh(['issue', 'list', '-R', resolvedRepo, '--label', label, '--state', 'open',
       '--json', 'number,title,url,updatedAt,labels,assignees,author']).filter((i) => {
-        const state = resolveState((i.labels ?? []).map(l => l.name), knobs.labelMap);
+        const state = resolveState((i.labels ?? []).map(l => l.name));
         if (state.blocks.length) {
           if (!unresolvedSeen.has(i.number)) board.unresolved.push({ ...i, state: null, blocks: state.blocks });
           unresolvedSeen.add(i.number);
           return false;
         }
-        return knobs.labelMap[state.state] === label;
+        return state.state === label;
       }).map((i) => ({
       number: i.number, title: i.title, url: i.url,
       ageDays: ageDays(i.updatedAt, now),
@@ -256,7 +254,7 @@ export function gatherStatus({ repo, orphanHours = 6, devMdPath = '.vegastack/de
     }));
   }
 
-  // Enrich working + ready-to-ship issues with comment-derived signals.
+  // Enrich in-progress + ready-to-ship issues with comment-derived signals.
   const registerText = existsSync(knobs.register) ? readFileSync(knobs.register, 'utf8') : '';
   const decisions = [];
   for (const bucket of [knobs.states[3], knobs.states[4]]) {
@@ -266,7 +264,7 @@ export function gatherStatus({ repo, orphanHours = 6, devMdPath = '.vegastack/de
       issue.operator = resolveOperator({ approvalAuthor: approvalAuthor(comments), issueAuthor: issue.author, operators: knobs.operators });
       const moved = ledgerMovedAt(comments);
       issue.ledgerAgeHours = moved ? ageHours(moved, now) : null;
-      // possiblyOrphaned: a working issue whose ledger has been silent past the
+      // possiblyOrphaned: an in-progress issue whose ledger has been silent past the
       // orphan threshold — or which never got a ledger comment at all (claimed,
       // then died before its first write). A fact for the operator to act on,
       // never an automatic reclaim: the reset is theirs to run.

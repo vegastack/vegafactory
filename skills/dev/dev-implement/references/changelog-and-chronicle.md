@@ -18,4 +18,4 @@ A changeset entry's first line is **one plain sentence** naming the change in be
 
 ## Chronicle
 
-When dev.md says `chronicle: on`, the story entry is prepended to `.vegastack/chronicle.md` in the format the `dev-chronicle` skill owns (title, what, why, how it went, what changed, decisions; voice per dev.md's `chronicle-style:` and `emoji:` knobs). It is written on the branch alongside the changelog entry, so the merge carries both or neither.
+When dev.md says `chronicle: on`, the story entry is prepended to `.vegastack/chronicle.md` in the format the `dev-status` skill owns (title, what, why, how it went, what changed, decisions; voice per dev.md's `chronicle-style:` and `emoji:` knobs). It is written on the branch alongside the changelog entry, so the merge carries both or neither.
