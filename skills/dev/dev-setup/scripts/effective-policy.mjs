@@ -139,7 +139,13 @@ export function parsePolicy(text = '', scope = 'repo') {
         if (!stages.includes(name) || !parsed || Object.hasOwn(layer.values.stages, name)) layer.blocks.push(`invalid or duplicate harness stage: ${name}`)
         else layer.values.stages[name] = parsed
       }
-      if (locked) layer.locked.push('harness-policy')
+      // The lock covers all six stages at once rather than the stages one line happens to name:
+      // a stage-by-stage lock reads as "these five are yours" while silently holding the sixth,
+      // and a partial lock would leave a repo unable to supply the stages the org never chose.
+      // So an org that locks the line must answer the whole line.
+      if (locked && key !== 'harness-policy') layer.blocks.push('lock the whole harness-policy line, not one stage')
+      else if (locked && !stages.every(name => Object.hasOwn(layer.values.stages, name))) layer.blocks.push('a locked harness-policy must name every stage')
+      else if (locked) layer.locked.push('harness-policy')
       continue
     }
     const parsed = knobValue(key, value)
@@ -179,9 +185,19 @@ export function resolvePolicy({ org = '', group = '', repo = '' } = {}) {
   return { ok: blocks.length === 0, values, locked: [...locked], sources, blocks }
 }
 
-// `control-room: <org>/<repo>#<group>@<sha7>` — group and sha are both optional.
+/**
+ * `control-room: <org>/<repo>#<group>@<sha7>` — group and sha are both optional.
+ *
+ * Throws when the line itself is unreadable. A bad value would otherwise leave the knob unset and
+ * read as "this repo names no control room", and a duplicate line would quietly pick the last one:
+ * both are how a profile ends up pointed at the wrong room, or at none, without anyone saying so.
+ * A refusal elsewhere in the profile is not this function's business and does not throw here.
+ */
 export function parseControlRoomReference(text) {
-  const value = parsePolicy(text, 'repo').values['control-room']
+  const layer = parsePolicy(text, 'repo')
+  const blocks = layer.blocks.filter(block => block.includes('control-room'))
+  if (blocks.length) throw new Error(blocks.join('; '))
+  const value = layer.values['control-room']
   if (!value || value === 'none') return null
   const [room, suffix = ''] = value.split('#')
   const [group, sha] = suffix.split('@')

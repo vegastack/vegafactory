@@ -1012,7 +1012,9 @@ export function authorizedRepos(home: string, clone: Clone, devMd: string): Set<
     for (const row of (config.settings.repos ?? []) as Array<{ repo?: unknown; path?: unknown }>) {
       if (typeof row.repo !== 'string' || typeof row.path !== 'string') continue
       const profile = readFileSync(join(row.path, '.vegastack', 'dev.md'), 'utf8')
-      if (parseControlRoomKnob(profile)?.repo === clone.repo && REPO_LINE.exec(profile)?.[1] === row.repo) allowed.add(row.repo)
+      // One unreadable control-room line authorizes nothing and stops nothing: the other rows are
+      // judged on their own profiles.
+      try { if (parseControlRoomKnob(profile)?.repo === clone.repo && REPO_LINE.exec(profile)?.[1] === row.repo) allowed.add(row.repo) } catch { /* not a usable binding */ }
     }
   } catch { /* unreadable checkouts authorize nothing */ }
   return allowed
@@ -1077,7 +1079,8 @@ function pushLocked(home: string, options: PushOptions): PushResult {
   if (!root) return none('not in a repository — nothing to push')
   let devMd = ''
   try { devMd = readFileSync(join(root, '.vegastack', 'dev.md'), 'utf8') } catch { return none('this repo has no .vegastack/dev.md') }
-  const knob = parseControlRoomKnob(devMd)
+  let knob
+  try { knob = parseControlRoomKnob(devMd) } catch (error) { return refuse(`${(error as Error).message} — fix .vegastack/dev.md`) }
   if (!knob) return none('this repo names no control room')
   if (!/^[A-Za-z0-9][\w.-]*\/[A-Za-z0-9][\w.-]*$/.test(knob.repo)) return refuse(`${knob.repo} is not a repository name — fix the control-room line in .vegastack/dev.md`)
   let entry: ControlRoomEntry | undefined

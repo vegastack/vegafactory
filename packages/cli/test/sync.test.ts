@@ -1,9 +1,11 @@
 import { afterAll, beforeAll, expect, test } from 'bun:test'
-import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises'
+import { lstat, mkdir, mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { loadProfile, readFactoryConfig, serializeFactoryConfig, updateSettings } from '../src/control-room.ts'
 import { planSync, resolveTarget, syncControlRoom } from '../src/sync.ts'
+
+const exists = (path: string) => lstat(path).then(() => true).catch(() => false)
 
 let root = '', origin = '', source = ''
 const NOW = Date.parse('2026-09-06T07:00:00Z')
@@ -91,6 +93,94 @@ test('a hand-edited copy, a wrong origin and a dry run all leave the copy and th
   expect(await readFile(join(f.settings, 'factory.json'), 'utf8')).toBe(saved)
 })
 
+// The fresh answer is "the room's policy is what this machine is running on". A copy that is
+// edited or a commit ahead is not that, so the age window must not be able to hide it.
+test('an edit or a local commit refuses inside the fresh window as well as outside it', async () => {
+  const f = await fixture('fresh-window')
+  const first = await syncControlRoom({ ...f, now: NOW })
+  expect(first.ok).toBe(true)
+  const saved = await readFile(join(f.settings, 'factory.json'), 'utf8')
+
+  await writeFile(join(first.path, 'org.md'), 'operator edit\n')
+  for (const [when, label] of [[NOW + 60_000, 'inside the window'], [NOW + 10 * 60_000, 'outside it']] as const) {
+    const result = await syncControlRoom({ ...f, config: first.config, now: when })
+    expect(result.action, label).toBe('refused')
+    expect(result.message).toMatch(/local changes/)
+  }
+  expect((await syncControlRoom({ ...f, config: first.config, now: NOW + 60_000, dryRun: true })).ok).toBe(false)
+
+  // A committed edit is clean to git, so the recorded commit is what catches it — and the commit
+  // must survive, because `checkout -B` would have thrown it away without a word.
+  git(['commit', '-aqm', 'operator commit'], first.path)
+  const local = git(['rev-parse', 'HEAD'], first.path)
+  expect(local).not.toBe(first.sha)
+  for (const now of [NOW + 60_000, NOW + 10 * 60_000]) {
+    const result = await syncControlRoom({ ...f, config: first.config, now, force: true })
+    expect(result.action).toBe('refused')
+    expect(result.message).toMatch(/not the .* sync recorded/)
+  }
+  expect(git(['rev-parse', 'HEAD'], first.path)).toBe(local)
+  expect(await readFile(join(first.path, 'org.md'), 'utf8')).toBe('operator edit\n')
+  expect(await readFile(join(f.settings, 'factory.json'), 'utf8')).toBe(saved)
+})
+
+// The checkout and the record have to end up agreeing: a refusal that says the previous copy
+// stands while the new one sits on disk is a lie the next session acts on.
+test('a settings failure after the checkout puts the copy back', async () => {
+  const f = await fixture('incoherent')
+  const first = await syncControlRoom({ ...f, now: NOW })
+  expect(first.ok).toBe(true)
+  const saved = await readFile(join(f.settings, 'factory.json'), 'utf8')
+
+  await writeFile(join(source, 'groups/dev/group.md'), 'merge: squash\ngates: 3\n')
+  git(['add', '.'], source); git(['commit', '-m', 'moved on'], source); git(['push', origin, 'main'], source)
+  try {
+    await mkdir(join(f.settings, 'factory.json.guard'))
+    const result = await syncControlRoom({ ...f, config: first.config, now: NOW + 10 * 60_000 })
+    expect(result.ok).toBe(false)
+    expect(result.message).toMatch(first.sha!.slice(0, 7))
+    expect(git(['rev-parse', 'HEAD'], first.path)).toBe(first.sha!)
+    expect(await readFile(join(first.path, 'groups/dev/group.md'), 'utf8')).toContain('merge: rebase')
+    expect(await readFile(join(f.settings, 'factory.json'), 'utf8')).toBe(saved)
+    // And the profile the copy resolves to is still the one the record describes.
+    expect(loadProfile({ home: f.home, devMd: DEV_MD, now: NOW }).values.merge).toBe('rebase')
+  } finally {
+    await rm(join(f.settings, 'factory.json.guard'), { recursive: true, force: true })
+    git(['revert', '--no-edit', 'HEAD'], source); git(['push', origin, 'main'], source)
+  }
+})
+
+// One sync at a time per org: the second waits for the lock, then finds the first's work already
+// recorded rather than fetching over the same checkout.
+test('a second sync waits for the first and then finds the copy fresh', async () => {
+  const f = await fixture('serial')
+  const module = new URL('../src/sync.ts', import.meta.url).pathname
+  const call = JSON.stringify({ target: f.target, config: f.config, now: NOW })
+  const children = [1, 2].map(() => Bun.spawn([process.execPath, '-e', `import {syncControlRoom} from ${JSON.stringify(module)}; console.log(JSON.stringify(await syncControlRoom(${call})));`], { stdout: 'pipe', stderr: 'pipe' }))
+  const results = await Promise.all(children.map(async child => { expect(await child.exited).toBe(0); return JSON.parse(await new Response(child.stdout).text()) }))
+  expect(results.every(r => r.ok)).toBe(true)
+  expect(results.map(r => r.action).sort()).toEqual(['clone', 'fresh'])
+  const wire = JSON.parse(await readFile(join(f.settings, 'factory.json'), 'utf8'))
+  expect(wire.revision).toBe(1)
+  expect(wire.controlRooms.acme.sha).toMatch(/^[a-f0-9]{40}$/)
+  expect(await exists(f.target.clonePath + '.lock')).toBe(false)
+})
+
+// A caller holding settings from before someone re-pointed the org's copy must not publish over
+// it from its stale target. The same comparison guards the settings transaction itself.
+test('a connection that changed under the caller is refused rather than overwritten', async () => {
+  const f = await fixture('raced')
+  const first = await syncControlRoom({ ...f, now: NOW })
+  expect(first.ok).toBe(true)
+  await updateSettings(f.settings, state => { state.orgs.acme!.branch = 'other'; return state })
+  const stale = await syncControlRoom({ ...f, config: first.config, now: NOW + 10 * 60_000, force: true })
+  expect(stale.ok).toBe(false)
+  expect(stale.message).toMatch(/connection changed/)
+  const wire = JSON.parse(await readFile(join(f.settings, 'factory.json'), 'utf8'))
+  expect(wire.controlRooms.acme.sha).toBe(first.sha)
+  expect(wire.controlRooms.acme.branch).toBe('other')
+})
+
 test('a new commit in the room arrives on the next refresh', async () => {
   const f = await fixture('moving')
   const first = await syncControlRoom({ ...f, now: NOW })
@@ -107,25 +197,15 @@ test('a new commit in the room arrives on the next refresh', async () => {
   }
 })
 
-test('two syncs and an unrelated settings editor preserve committed updates', async () => {
-  const f = await fixture('concurrent')
-  const module = new URL('../src/sync.ts', import.meta.url).pathname
-  const children = [1, 2].map(() => Bun.spawn([process.execPath, '-e', `import {syncControlRoom} from ${JSON.stringify(module)}; const r=await syncControlRoom(${JSON.stringify({ target: f.target, config: f.config, now: NOW })}); console.log(JSON.stringify(r));`], { stdout: 'pipe', stderr: 'pipe' }))
-  await updateSettings(f.settings, s => ({ ...s, settings: { ...s.settings, editor: 'preserved' } }))
-  const results = await Promise.all(children.map(async child => { expect(await child.exited).toBe(0); return JSON.parse(await new Response(child.stdout).text()) }))
-  expect(results.some(r => r.ok)).toBe(true)
-  const wire = JSON.parse(await readFile(join(f.settings, 'factory.json'), 'utf8'))
-  expect(wire.editor).toBe('preserved')
-  expect(wire.controlRooms.acme.sha).toMatch(/^[a-f0-9]{40}$/)
-})
-
-test('an interrupted settings transaction refuses without touching the record', async () => {
+test('an interrupted settings transaction refuses and leaves no half-made copy', async () => {
   const f = await fixture('interrupted')
   const before = await readFile(join(f.settings, 'factory.json'), 'utf8')
   await mkdir(join(f.settings, 'factory.json.guard'))
   const result = await syncControlRoom({ ...f, now: NOW })
   expect(result.ok).toBe(false)
   expect(await readFile(join(f.settings, 'factory.json'), 'utf8')).toBe(before)
+  expect(await exists(f.target.clonePath)).toBe(false)
+  expect(await exists(f.target.clonePath + '.lock')).toBe(false)
 })
 
 test('a repo that names no room needs no sync, and a mismatched --org refuses', async () => {

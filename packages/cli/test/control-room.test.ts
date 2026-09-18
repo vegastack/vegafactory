@@ -100,40 +100,114 @@ describe('control-room knob and machine state', () => {
   })
 })
 
-import { mkdtemp, realpath, readFile, writeFile, mkdir, rm } from 'node:fs/promises'
+import { mkdtemp, realpath, readFile, writeFile, mkdir, rm, symlink } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { updateSettings } from '../src/control-room.ts'
 
-test('a repo with no lines of its own inherits a complete profile from the copy on disk', async () => {
-  const home = await realpath(await mkdtemp(join(tmpdir(), 'profile-221-')))
+function git(args: string[], cwd: string) {
+  const result = Bun.spawnSync(['git', ...args], { cwd, env: { ...process.env, GIT_AUTHOR_NAME: 't', GIT_AUTHOR_EMAIL: 't@e', GIT_COMMITTER_NAME: 't', GIT_COMMITTER_EMAIL: 't@e' } })
+  if (result.exitCode) throw new Error(result.stderr.toString())
+  return result.stdout.toString().trim()
+}
+
+// A machine with one verified copy of acme's room, exactly as a successful sync leaves it.
+async function machine(name: string) {
+  const home = await realpath(await mkdtemp(join(tmpdir(), `profile-221-${name}-`)))
+  const room = join(home, '.vegastack/control-room/acme')
+  const origin = join(home, 'origin.git')
+  await mkdir(join(room, 'groups/dev'), { recursive: true })
+  await writeFile(join(room, 'org.md'), 'tests: required   # locked\nstats-people: off\n')
+  await writeFile(join(room, 'groups/dev/group.md'), 'merge: rebase\ngates: 3\n')
+  git(['init', '-q', '-b', 'main'], room)
+  git(['remote', 'add', 'origin', origin], room)
+  git(['add', '.'], room); git(['commit', '-qm', 'seed'], room)
+  const sha = git(['rev-parse', 'HEAD'], room)
+  const record = { repo: 'acme/room', path: room, branch: 'main', remote: origin, sha, lastSyncedAt: new Date().toISOString() }
+  const write = async (entry: Record<string, unknown>) =>
+    writeFile(join(home, '.vegastack/factory.json'), JSON.stringify({ schemaVersion: 1, controlRooms: { acme: entry } }))
+  await write(record)
+  return { home, room, origin, sha, record, write, devMd: 'control-room: acme/room#dev\n' }
+}
+
+test('a repo with no lines of its own inherits a complete profile from the verified copy', async () => {
+  const m = await machine('inherit')
   try {
-    const room = join(home, '.vegastack/control-room/acme')
-    await mkdir(join(room, 'groups/dev'), { recursive: true })
-    await writeFile(join(room, 'org.md'), 'tests: required   # locked\nstats-people: off\n')
-    await writeFile(join(room, 'groups/dev/group.md'), 'merge: rebase\ngates: 3\n')
-    await writeFile(join(home, '.vegastack/factory.json'), JSON.stringify({
-      schemaVersion: 1,
-      controlRooms: { acme: { repo: 'acme/room', path: room, branch: 'main', sha: 'a'.repeat(40), lastSyncedAt: new Date().toISOString() } },
-    }))
-    const devMd = 'control-room: acme/room#dev\n'
-    const profile = loadProfile({ home, devMd })
+    const profile = loadProfile({ home: m.home, devMd: m.devMd })
     expect(profile.blocks).toEqual([])
     expect(profile.ok).toBe(true)
     expect(profile.stale).toBe(false)
+    expect(profile.sha).toBe(m.sha)
     expect(profile.values).toMatchObject({ tests: 'required', merge: 'rebase', gates: 3 })
     expect(profile.locked).toEqual(['tests'])
     expect(profile.sources.merge).toBe('group')
     // The org's locked line stands whatever the repo says, and the repo is told why.
-    const overridden = loadProfile({ home, devMd: devMd + 'tests: none\n' })
+    const overridden = loadProfile({ home: m.home, devMd: m.devMd + 'tests: none\n' })
     expect(overridden.ok).toBe(false)
     expect(overridden.blocks.join(' ')).toMatch(/tests is locked in org\.md/)
     expect(overridden.values.tests).toBe('required')
     // A copy that was never fetched still resolves, and says it is stale.
-    const never = loadProfile({ home, devMd: 'control-room: other/room#dev\n' })
+    const never = loadProfile({ home: m.home, devMd: 'control-room: other/room#dev\n' })
     expect(never.stale).toBe(true)
     expect(never.blocks.join(' ')).toMatch(/vegafactory sync/)
-  } finally { await rm(home, { recursive: true, force: true }) }
+  } finally { await rm(m.home, { recursive: true, force: true }) }
+})
+
+// Everything factory.json records is a claim. A copy that fails any check is not policy: it is
+// another org's clone, a wrong-origin copy, the leftovers of a failed sync, or a hand edit.
+test('an unverified copy is refused rather than read as the org\'s policy', async () => {
+  const m = await machine('verify')
+  try {
+    const refusal = async (entry: Record<string, unknown>, pattern: RegExp) => {
+      await m.write(entry)
+      const profile = loadProfile({ home: m.home, devMd: m.devMd })
+      expect(profile.ok).toBe(false)
+      expect(profile.blocks.join(' ')).toMatch(pattern)
+      // Nothing of the room's is used, so the repo falls back to its own lines and the defaults.
+      expect(profile.values.tests).toBeUndefined()
+      expect(profile.clonePath).toBeNull()
+    }
+    await refusal({ ...m.record, path: join(m.home, 'elsewhere') }, /not at .*control-room\/acme/)
+    await refusal({ ...m.record, repo: 'other/room' }, /the recorded copy is other\/room/)
+    await refusal({ ...m.record, sha: null }, /no validated commit/)
+    await refusal({ ...m.record, sha: 'b'.repeat(40) }, /moved off the commit sync recorded/)
+    await refusal({ ...m.record, branch: 'other' }, /not on other/)
+    await refusal({ ...m.record, remote: join(m.home, 'foreign.git') }, /different origin/)
+
+    await m.write(m.record)
+    await writeFile(join(m.room, 'org.md'), 'tests: none\n')
+    await refusal(m.record, /local changes/)
+    git(['checkout', '--', 'org.md'], m.room)
+
+    // A local commit is not a local change to git, so HEAD is what catches it.
+    await writeFile(join(m.room, 'org.md'), 'tests: none\n')
+    git(['commit', '-aqm', 'hand edit'], m.room)
+    await refusal(m.record, /moved off the commit sync recorded/)
+  } finally { await rm(m.home, { recursive: true, force: true }) }
+})
+
+// The copy is read out of the recorded commit, so a tracked symlink is a refusal rather than a
+// redirect to whatever it points at on this machine.
+test('a symlinked policy file in the copy is refused, not followed', async () => {
+  const m = await machine('symlink')
+  try {
+    await writeFile(join(m.home, 'secret.md'), 'tests: none\n')
+    await rm(join(m.room, 'org.md'))
+    await symlink(join(m.home, 'secret.md'), join(m.room, 'org.md'))
+    git(['add', '-A'], m.room); git(['commit', '-qm', 'symlink'], m.room)
+    await m.write({ ...m.record, sha: git(['rev-parse', 'HEAD'], m.room) })
+    const profile = loadProfile({ home: m.home, devMd: m.devMd })
+    expect(profile.ok).toBe(false)
+    expect(profile.blocks.join(' ')).toMatch(/org\.md is not a regular file in the control room/)
+    expect(profile.values.tests).toBeUndefined()
+  } finally { await rm(m.home, { recursive: true, force: true }) }
+})
+
+test('an unreadable control-room line refuses instead of resolving without the room', () => {
+  const profile = loadProfile({ home: '/nonexistent', devMd: 'control-room: acme/room#dev\ncontrol-room: other/room#dev\n' })
+  expect(profile.ok).toBe(false)
+  expect(profile.room).toBeNull()
+  expect(profile.blocks.join(' ')).toMatch(/duplicate policy key: control-room/)
 })
 
 test('settings transactions preserve two process updates and inert extension collisions', async () => {

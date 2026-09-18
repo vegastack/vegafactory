@@ -19,7 +19,7 @@ operators: kmanojkumar      # the logins who own issues in this group
 
 One line, `<stage> <agent> <model> <effort>` per stage, separated by `·`. `default` as the model pins nothing and takes the tool's own.
 
-harness-policy: intake claude fable-5-1 high · plan claude fable-5-1 high · implement claude fable-5-1 high · review codex gpt-5.6 xhigh · status claude sonnet-5 medium · chronicle claude sonnet-5 medium
+harness-policy: intake claude default high · plan claude default high · implement claude default high · review codex default xhigh · status claude default medium · chronicle claude default medium
 
 ## Notes
 

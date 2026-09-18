@@ -1,6 +1,6 @@
 import { expect, test } from 'bun:test'
 import { execFileSync } from 'node:child_process'
-import { readFileSync } from 'node:fs'
+import { readFileSync, readdirSync } from 'node:fs'
 import { join } from 'node:path'
 
 // Commands the lean rebuild removed. Skills and docs must not tell an agent to run them.
@@ -28,6 +28,28 @@ test('no skill, doc or hook wiring calls a removed CLI command or a deleted scri
       prose.test(line) || bare.test(line) || DELETED.some((name) => line.includes(name)) ? [`${file}:${index + 1}`] : [])
   })
   expect(hits).toEqual([])
+})
+
+// The room prepared for the live control-room pull request is the approved layout and nothing
+// else: seven top-level entries, every onboarding checklist the skill routes through rendered,
+// and no placeholder left in any of them.
+test('the prepared control-room refresh is exactly the approved layout', () => {
+  const room = join(root, 'control-room-refresh/room')
+  const top = readdirSync(room).sort()
+  expect(top).toEqual(['boards.md', 'dispatchers.md', 'groups', 'onboarding', 'org.md', 'repos.md', 'stats'])
+  expect(readdirSync(join(room, 'onboarding')).sort()).toEqual(['dispatcher-box.md', 'new-repo.md', 'new-teammate.md'])
+  expect(readdirSync(join(room, 'groups/dev'))).toEqual(['group.md'])
+  expect(readdirSync(join(room, 'stats'))).toEqual(['README.md'])
+  const files = execFileSync('git', ['ls-files', '-z', '--', 'control-room-refresh/room'], { cwd: root, encoding: 'utf8' }).split('\0').filter(Boolean)
+  for (const file of files) expect(readFileSync(join(root, file), 'utf8'), file).not.toContain('{{')
+  // Every onboarding checklist the skill ships a template for is rendered here.
+  const templates = readdirSync(join(root, 'skills/factory/vegafactory-setup/assets/control-room/onboarding')).map((name) => name.replace('.template', '')).sort()
+  expect(readdirSync(join(room, 'onboarding')).sort()).toEqual(templates)
+  // org.md keeps the automation identity the skill and its template both require.
+  const org = readFileSync(join(room, 'org.md'), 'utf8')
+  for (const line of ['app: VegaFactory', 'app-slug: vegafactory', 'app-install: 158664419', 'app-secrets: ', 'app-permissions: ']) expect(org).toContain(line)
+  // No pinned model ids: `default` takes each tool's own.
+  expect(readFileSync(join(room, 'groups/dev/group.md'), 'utf8')).not.toMatch(/harness-policy:.*\b(fable|sonnet|opus|gpt)-/)
 })
 
 // The lean control room is exactly these seven; a file the old model had must not come back.

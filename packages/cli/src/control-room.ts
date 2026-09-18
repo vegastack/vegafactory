@@ -1,6 +1,7 @@
 import { basename, dirname, isAbsolute, join, resolve, parse as parsePath, sep } from 'node:path'
 import { lstat, mkdir, open, readFile, rename, rm } from 'node:fs/promises'
 import { lstatSync, readFileSync } from 'node:fs'
+import { execFileSync } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
 import { parseControlRoomReference, resolvePolicy } from '../../../skills/dev/dev-setup/scripts/effective-policy.mjs'
 
@@ -223,37 +224,80 @@ export interface Profile {
   blocks: string[]
   room: ControlRoomKnob | null
   clonePath: string | null
+  sha: string | null
   lastSyncedAt: string | null
   stale: boolean
 }
 
+const SHA = /^[a-f0-9]{40}$/
+const git = (cwd: string, args: string[]) =>
+  execFileSync('git', args, { cwd, encoding: 'utf8', stdio: 'pipe', timeout: 5000, maxBuffer: 4 * 1024 * 1024 })
+
+// The copy `sync` left, or the reason it cannot be read. Everything recorded in factory.json is
+// treated as a claim to check, never as a fact: the path must be the one path this org's copy may
+// live at, the recorded repository must be the one the profile names, and the working tree must
+// still be the exact commit sync validated, on the recorded branch and origin, with nothing
+// changed. Another org's copy, a wrong-origin copy, the leftovers of a failed sync and a hand-edit
+// all fail one of those, and a copy that fails any of them is not policy.
+function verifiedRoom(home: string, room: ControlRoomKnob, entry: ControlRoomEntry | undefined): { path: string | null; sha: string | null; reason: string | null } {
+  const refuse = (reason: string) => ({ path: null, sha: null, reason: `${reason} — run: vegafactory sync` })
+  const path = defaultClonePath(room.org, home)
+  if (!entry) return refuse('this machine has no copy of the control room')
+  if (entry.path !== path) return refuse(`the recorded copy is not at ${path}`)
+  if (entry.repo !== room.repo) return refuse(`the recorded copy is ${entry.repo}, not the ${room.repo} this profile names`)
+  if (!SHA.test(entry.sha ?? '')) return refuse('the recorded copy has no validated commit')
+  const unsafe = safeClonePath(home, path)
+  if (unsafe) return refuse(unsafe)
+  try {
+    if (git(path, ['rev-parse', 'HEAD']).trim() !== entry.sha) return refuse('the copy has moved off the commit sync recorded')
+    if (git(path, ['symbolic-ref', '--quiet', '--short', 'HEAD']).trim() !== entry.branch) return refuse(`the copy is not on ${entry.branch}`)
+    if (entry.remote && git(path, ['remote', 'get-url', 'origin']).trim() !== entry.remote) return refuse('the copy has a different origin')
+    if (git(path, ['status', '--porcelain', '--untracked-files=all']).trim()) return refuse('the copy has local changes')
+  } catch (error) { return refuse(`the copy could not be read (${(error as Error).message.split('\n')[0]})`) }
+  return { path, sha: entry.sha!, reason: null }
+}
+
+// Read one file out of the recorded commit rather than off the disk. A tracked symlink under the
+// copy would otherwise send `readFileSync` anywhere on the machine, and only a regular blob in that
+// commit is policy — the mode check is what makes the link a refusal instead of a redirect.
+function readBlob(path: string, sha: string, relative: string): { text: string; reason: string | null } {
+  let listed
+  try { listed = git(path, ['ls-tree', '-z', sha, '--', relative]) } catch { return { text: '', reason: `the control room has no ${relative}` } }
+  const match = /^(\d{6}) (blob|tree|commit) ([a-f0-9]{40})\t/.exec(listed)
+  if (!match || match[2] !== 'blob') return { text: '', reason: `the control room has no ${relative}` }
+  if (!['100644', '100755'].includes(match[1]!)) return { text: '', reason: `${relative} is not a regular file in the control room` }
+  try { return { text: git(path, ['cat-file', 'blob', match[3]!]), reason: null } }
+  catch (error) { return { text: '', reason: `${relative} could not be read (${(error as Error).message.split('\n')[0]})` } }
+}
+
 // The profile a repo actually runs on: the org's `org.md`, its group's `group.md`, then the repo's
-// own dev.md. The room is read from the clone `sync` keeps, never from the network — a clone that
-// is missing, unsafe or stale still resolves, and the caller is told which of the three it was.
+// own dev.md. The room is read from the copy `sync` keeps, never from the network — a copy that is
+// missing, unusable or stale still resolves from what is left, and the caller is told which.
 export function loadProfile(input: { home: string; devMd: string; now?: number }): Profile {
-  const room = parseControlRoomKnob(input.devMd)
   const now = input.now ?? Date.now()
   const blocks: string[] = []
-  let org = '', group = '', clonePath: string | null = null, lastSyncedAt: string | null = null
+  let room: ControlRoomKnob | null = null
+  try { room = parseControlRoomKnob(input.devMd) } catch (error) { blocks.push((error as Error).message) }
+  let org = '', group = '', clonePath: string | null = null, sha: string | null = null, lastSyncedAt: string | null = null
   if (room) {
     let entry: ControlRoomEntry | undefined
     try { entry = readFactoryConfig(readFileSync(factoryConfigPath(input.home), 'utf8')).controlRooms[room.org] } catch { /* never synced here */ }
     lastSyncedAt = entry?.lastSyncedAt ?? null
-    const path = entry?.path ?? defaultClonePath(room.org, input.home)
-    const unsafe = safeClonePath(input.home, path)
-    if (unsafe) blocks.push(`${unsafe} — run: vegafactory sync`)
+    const verified = verifiedRoom(input.home, room, entry)
+    if (verified.reason) blocks.push(verified.reason)
     else {
-      clonePath = path
-      const read = (relative: string) => {
-        try { return readFileSync(join(path, ...relative.split('/')), 'utf8') } catch { blocks.push(`the control room has no ${relative}`); return '' }
+      clonePath = verified.path; sha = verified.sha
+      for (const [relative, into] of [['org.md', 'org'], ...(room.group ? [[`groups/${room.group}/group.md`, 'group']] : [])] as const) {
+        const read = readBlob(verified.path!, verified.sha!, relative)
+        if (read.reason) blocks.push(read.reason)
+        else if (into === 'org') org = read.text
+        else group = read.text
       }
-      org = read('org.md')
-      if (room.group) group = read(`groups/${room.group}/group.md`)
     }
   }
   const resolved = resolvePolicy({ org, group, repo: input.devMd })
   return {
     ...resolved, blocks: [...blocks, ...resolved.blocks], ok: resolved.ok && blocks.length === 0,
-    room, clonePath, lastSyncedAt, stale: room !== null && isStale(lastSyncedAt, now, MAX_AGE_MINUTES),
+    room, clonePath, sha, lastSyncedAt, stale: room !== null && isStale(lastSyncedAt, now, MAX_AGE_MINUTES),
   }
 }

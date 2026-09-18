@@ -23,8 +23,18 @@ provider-mode: subscription-only   # locked — runs bill to the operator's subs
 stats: on                          # a run is recorded
 stats-people: off                  # no per-person fields
 
+## Automation identity
+
+The names of the org's automation identity. Values live in GitHub org settings; nothing here is a secret.
+
+app: VegaFactory   # the public GitHub App every automated write uses; humans still own issues
+app-slug: vegafactory   # GitHub's slug for the App name — a bot edit shows the actor vegafactory[bot]
+app-install: 158664419   # the installation id, on all repositories, current and future
+app-secrets: variable VEGAFACTORY_APP_ID · secret VEGAFACTORY_APP_PRIVATE_KEY   # names only
+app-permissions: Issues read/write · Projects (organization) read/write · Metadata read · Pull requests read/write · Contents read   # widening any of these is a register line
+
 ## Unconfirmed
 
 Lines the operator has not confirmed yet. Each is a question the next run asks again rather than an answer anyone may assume.
 
-- (none)
+- 18-09-2026 — the two macOS account names, the runner group and the runner name in `onboarding/dispatcher-box.md`: the checklist carries proposals, and the operator confirms them on the box.

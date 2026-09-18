@@ -75,6 +75,21 @@ test('missing target, malformed settings and an unknown subcommand preserve sett
     expect(await readFile(f.settingsPath, 'utf8')).toBe(text)
   }
 })
+// A control-room line that cannot be read must stop the CLI, not resolve to "no control room".
+test('a malformed or duplicated control-room line refuses at the CLI', async () => {
+  for (const [name, profile, pattern] of [
+    ['bad-value', 'repo: acme/app\ncontrol-room: not a room\n', /invalid control-room value/],
+    ['duplicate', 'repo: acme/app\ncontrol-room: acme/room#dev\ncontrol-room: other/room#dev\n', /duplicate policy key: control-room/],
+  ] as const) {
+    const f = await project(name, profile)
+    const saved = await readFile(f.settingsPath, 'utf8')
+    const result = run(f.home, f.repo, ['sync', '--json'])
+    expect(result.exitCode, name).toBe(2)
+    expect(JSON.parse(result.stdout.toString()).message).toMatch(pattern)
+    expect(await readFile(f.settingsPath, 'utf8')).toBe(saved)
+  }
+})
+
 test('two CLI processes and a transaction editor retain every completed publication', async () => {
   const f = await project('concurrent')
   const children = [1, 2].map(() => Bun.spawn([executable, cli, 'sync', '--json'], { cwd: f.repo, env: { ...process.env, HOME: f.home }, stdout: 'pipe', stderr: 'pipe' }))

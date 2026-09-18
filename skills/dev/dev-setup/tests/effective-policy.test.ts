@@ -54,17 +54,47 @@ test('only org.md may lock a line; a group or repo marker refuses rather than be
   expect(parsePolicy('tests: required   # not locked', 'org').locked).toEqual([])
 })
 
-test('a locked harness-policy holds every stage; an unlocked one inherits stage by stage', () => {
-  const org = 'harness-policy: plan claude fable-5-1 high · implement claude fable-5-1 high   # locked'
-  const held = resolvePolicy({ org, repo: 'harness-policy: plan codex gpt-5.6 xhigh' })
+const everyStage = (agent = 'claude', effort = 'high') =>
+  'harness-policy: ' + ['intake', 'plan', 'implement', 'review', 'status', 'chronicle'].map(name => `${name} ${agent} default ${effort}`).join(' · ')
+
+test('a locked harness-policy must name every stage, and then holds all six', () => {
+  // A partial lock would leave the stages the org never chose unanswerable by anyone below it,
+  // so the incomplete line refuses instead of locking what it happens to name.
+  const partial = parsePolicy('harness-policy: plan claude default high · implement claude default high   # locked', 'org')
+  expect(partial.blocks).toEqual(['a locked harness-policy must name every stage'])
+  expect(partial.locked).toEqual([])
+  expect(resolvePolicy({ org: 'harness-policy: plan claude default high   # locked' }).ok).toBe(false)
+  // Locking one stage line is the same trap under another name.
+  expect(parsePolicy('plan: claude default high   # locked', 'org').blocks).toEqual(['lock the whole harness-policy line, not one stage'])
+
+  const org = everyStage() + '   # locked'
+  expect(parsePolicy(org, 'org').locked).toEqual(['harness-policy'])
+  const held = resolvePolicy({ org, repo: 'harness-policy: plan codex default xhigh' })
   expect(held.ok).toBe(false)
-  expect(held.values.stages.plan).toEqual({ harness: 'claude', model: 'fable-5-1', effort: 'high' })
-  const free = resolvePolicy({ org: org.replace('   # locked', ''), repo: 'harness-policy: plan codex gpt-5.6 xhigh' })
+  expect(held.blocks.join(' ')).toMatch(/harness-policy is locked in org\.md/)
+  expect(held.values.stages.plan).toEqual({ harness: 'claude', model: null, effort: 'high' })
+  expect(Object.keys(held.values.stages).sort()).toEqual(['chronicle', 'implement', 'intake', 'plan', 'review', 'status'])
+  // Repeating the org's own value is agreement, not an override.
+  expect(resolvePolicy({ org, repo: 'harness-policy: plan claude default high' }).ok).toBe(true)
+})
+
+test('an unlocked harness-policy inherits stage by stage', () => {
+  const org = 'harness-policy: plan claude default high · implement claude default high'
+  const free = resolvePolicy({ org, repo: 'harness-policy: plan codex default xhigh' })
   expect(free.ok).toBe(true)
   expect(free.values.stages).toEqual({
-    plan: { harness: 'codex', model: 'gpt-5.6', effort: 'xhigh' },
-    implement: { harness: 'claude', model: 'fable-5-1', effort: 'high' },
+    plan: { harness: 'codex', model: null, effort: 'xhigh' },
+    implement: { harness: 'claude', model: null, effort: 'high' },
   })
+})
+
+test('an unreadable control-room line refuses rather than picking or hiding a room', () => {
+  // A bad value leaves the knob unset, which would otherwise read as "this repo names no room".
+  expect(() => parseControlRoomReference('control-room: not a room')).toThrow(/control-room/)
+  // A duplicate line would otherwise quietly pick the last one.
+  expect(() => parseControlRoomReference('control-room: acme/room#dev\ncontrol-room: other/room#dev')).toThrow(/duplicate/)
+  // A refusal elsewhere in the profile is not this line's business.
+  expect(parseControlRoomReference('stats: maybe\ncontrol-room: acme/room#dev')).toMatchObject({ org: 'acme', group: 'dev' })
 })
 
 test('ordinary values inherit nearest-wins, and local dispatch cannot be inherited', () => {
