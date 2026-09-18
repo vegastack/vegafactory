@@ -1136,6 +1136,25 @@ describe('the command', () => {
     expect(result.text).toContain('no dispatcher runs on this machine yet')
   })
 
+  // The unit tests for the formatter would stay green if a call site dropped its field argument,
+  // which is how `poll 1s` came to be reported as "every 0 minutes" in the first place. These read
+  // what the commands actually print.
+  test('the caps a command reports can be pasted back into the cell they came from', async () => {
+    project(`| machine | operator | repos | caps |\n|---|---|---|---|\n| ${HOST} | mk | o/r | step 90m · poll 1s · retry 60m |\n`)
+    gh.addIssue({ number: 1, labels: ['queued', 'small'] })
+    const result = await run(['status'])
+    expect(result.code).toBe(0)
+    const line = result.text.split('\n').find((row) => row.startsWith('caps:'))!
+    expect(line).toContain('step 90m')
+    expect(line).toContain('poll 1s')
+    expect(line).toContain('retry 60m')
+    // Nothing rounded to zero, and nothing in a unit the parser would refuse.
+    expect(line).not.toMatch(/\b0[hms]\b/)
+    for (const [field, shown] of [...line.matchAll(/\b(step|poll|retry) (\d+[hms])/g)].map((m) => [m[1]!, m[2]!])) {
+      expect(parseCaps(`${field} ${shown}`), `${field} ${shown}`).not.toBeNull()
+    }
+  })
+
   test('enable stops at the first thing that is not ready and installs nothing', async () => {
     const result = await run(['enable'], { run: (() => ({ code: 127, stdout: '', stderr: 'not found' })) as Probe, fetch: (async () => ({ ok: false, status: 404, json: async () => ({}) })) as Fetch })
     expect(result.code).toBe(2)
