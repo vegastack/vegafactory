@@ -918,8 +918,8 @@ async function main() {
   const { assertSupportedPlatform } = await import('./env.ts')
   assertSupportedPlatform()
   // Before any verb reads or writes this machine's state: an older release kept it somewhere else,
-  // and a run that read one home and wrote the other would split what this machine knows in half.
-  if (settleHome().action === 'refused') { process.exitCode = 2; return }
+  // and a command that read one home while the other held the truth would act on half a machine.
+  if (settleHome().found) { process.exitCode = 2; return }
   const options = parse(process.argv.slice(2))
   if (options.command === 'hook') {
     const { hookUsage, runHook } = await import('./hook.ts')

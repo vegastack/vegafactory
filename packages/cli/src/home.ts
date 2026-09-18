@@ -9,10 +9,10 @@
 // VegaStack tooling keeps `tools/`, `cache/`, `registry/` and `secrets/` there, none of which this
 // repository references. A directory this product owns entirely is one it may also prune.
 
-import { accessSync, constants, cpSync, lstatSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync } from 'node:fs'
+import { lstatSync, readdirSync } from 'node:fs'
 
 import { homedir } from 'node:os'
-import { dirname, join, sep } from 'node:path'
+import { dirname, isAbsolute, join, resolve } from 'node:path'
 
 // The one escape hatch, and the reason the tests can run at all: `worktree.ts` used to call
 // `homedir()` with no way to pass anything else, so a careless test wrote to the real home.
@@ -33,12 +33,6 @@ export const OWNED_ENTRIES = ['factory.json', 'control-room', 'worktrees.json', 
 // take a colleague's credentials with it.
 export const FOREIGN_ENTRIES = ['tools', 'cache', 'registry', 'secrets'] as const
 
-// Directories the old home carried that nothing reads any more. `guard/` went when `guard.ts` did
-// — the guard reads its policy from git now — and leaving it behind strands a file that still
-// looks authoritative. Only what the plan named is removed: this is the one destructive step in
-// the move, so it deletes by an explicit list and never by inference.
-export const DEAD_ENTRIES = ['guard'] as const
-
 export interface HomeOptions { env?: NodeJS.ProcessEnv; home?: string }
 
 // `VEGAFACTORY_HOME` names the directory itself, not the parent: point it at a temporary directory
@@ -48,7 +42,11 @@ export interface HomeOptions { env?: NodeJS.ProcessEnv; home?: string }
 // A caller that must not be reached by an ambient setting passes its own `env`.
 export function factoryHome(options: HomeOptions = {}): string {
   const named = (options.env ?? process.env)[HOME_VARIABLE]?.trim()
-  return named || join(options.home ?? homedir(), FACTORY_DIRECTORY)
+  if (!named) return join(options.home ?? homedir(), FACTORY_DIRECTORY)
+  // A relative home names a different directory from every working directory, which is one
+  // machine's state split across as many places as it has repositories.
+  if (!isAbsolute(named)) throw new Error(`${HOME_VARIABLE} must be an absolute path; it is ${named}`)
+  return resolve(named)
 }
 
 // The home this machine used before, so a first run can find what to move.
@@ -90,259 +88,108 @@ export function appKeyPath(options: HomeOptions = {}): string {
 }
 
 // ---------------------------------------------------------------------------------------------
-// Moving off the old home
+// The older home
 
-// What the old home called each thing, and what the new one calls it. The two lists differ, which
-// is why the move is a table rather than a copy: `worktree-roots.json` became `worktrees.json`,
-// the stats spool came out of a hidden `.tmp/`, and the App key moved under `worker/` where the
-// rest of an unattended machine's state lives.
-// Records that name absolute paths inside the home, and so cannot simply be carried.
-const RECORDS_PATHS = new Set(['factory.json'])
+// This release does not move a machine's state for it, and that is deliberate. The register
+// records it: "VegaFactory 0.20.0 is a clean break: the lean rebuild ships with no compatibility
+// shims, migration paths or deprecated aliases" (18-09-2026).
+//
+// It is also the safer answer by some distance. A routine that moves this directory has to reason
+// about four lock protocols it does not own, about symlinks at either end and at every path
+// component, about permissions, about crossing devices, about being interrupted part-way, and
+// about the absolute addresses the records inside it contain — and get all of it right while
+// holding the operator's App key and their control-room clones. The same operator runs a handful
+// of `mv` lines instead, once per machine, and can see exactly what moved.
+//
+// So: find it, say precisely what to run, and refuse until it is gone.
 
-const MOVES: { from: string[]; to: string[]; shape: Kind }[] = [
-  { from: ['factory.json'], to: ['factory.json'], shape: 'file' },
-  // The settings writer's pre-image. A machine that moved without it would take the file and
-  // leave the evidence of a half-finished edit where nothing will ever look again.
-  { from: ['factory.json.schema1.bak'], to: ['factory.json.schema1.bak'], shape: 'file' },
-  { from: ['control-room'], to: ['control-room'], shape: 'directory' },
-  { from: ['worktree-roots.json'], to: ['worktrees.json'], shape: 'file' },
-  { from: ['.tmp', 'stats'], to: ['stats'], shape: 'directory' },
-  { from: ['stats.html'], to: ['stats.html'], shape: 'file' },
-  { from: ['vegafactory-app.pem'], to: ['worker', 'app.pem'], shape: 'file' },
-  // A global skill install keeps its journal here. Leaving it means an interrupted install is
-  // never recovered — the next add rolls its backups forward and brings back skills somebody
-  // removed.
-  { from: ['.skills-install-transaction.json'], to: ['.skills-install-transaction.json'], shape: 'file' },
+export interface OlderHome { found: boolean; reason: string; commands: string[] }
+
+// What the old home called each thing, and what the new one calls it. Two change name as well as
+// address, which is why this is a table rather than one `mv`.
+const RENAMES: { from: string; to: string }[] = [
+  { from: 'factory.json', to: 'factory.json' },
+  { from: 'control-room', to: 'control-room' },
+  { from: 'worktree-roots.json', to: 'worktrees.json' },
+  { from: '.tmp/stats', to: 'stats' },
+  { from: 'stats.html', to: 'stats.html' },
+  { from: 'vegafactory-app.pem', to: 'worker/app.pem' },
+  { from: '.skills-install-transaction.json', to: '.skills-install-transaction.json' },
 ]
 
-// A lock means a process may be writing inside a directory this move would rename out from under
-// it. Any lock stops the move, and none is ever removed by it.
-//
-// Nothing here tries to work out whether a lock is dead. Three of the four protocols say not to:
-// `factory.json.guard` is explicitly never stolen, `lockOrg`'s `<org>.lock` is never stolen and
-// carries no owner file at all, and both are taken before anything is written inside them — so an
-// ownerless lock is as likely to be a live process one line earlier as it is to be litter. Only
-// the installer's lock documents a steal, and having one rule here beats having four. Guessing
-// wrong renames a directory out from under a live writer; guessing right saves an operator one
-// `rm` of a path this message names, once in the life of a machine.
-// Everywhere a lock can sit under either home, including inside the directories this move renames.
-function lockPaths(home: string, list: (path: string) => string[] | null): string[] {
-  const rooms = (list(join(home, 'control-room')) ?? []).filter((entry) => entry.endsWith('.lock') || entry.endsWith('.lock.steal'))
-  return [
-    join(home, '.skills-install.lock'),
-    join(home, 'factory.json.guard'),
-    // `.lock.steal` is the takeover mutex: during a steal the ordinary `.lock` is gone for an
-    // instant while this one is held, and a scan that watched only `.lock` would see a quiet
-    // directory and rename it out from under the process doing the stealing.
-    ...['stats', join('.tmp', 'stats')].flatMap((spool) => [
-      join(home, spool, '.lock'), join(home, spool, '.lock.steal'),
-      join(home, spool, 'push', '.lock'), join(home, spool, 'push', '.lock.steal'),
-    ]),
-    ...rooms.flatMap((entry) => [join(home, 'control-room', entry), join(home, 'control-room', `${entry}.steal`)]),
-  ]
-}
+// Directories the old home carried that nothing reads any more: the guard compiled a policy file
+// there until it started reading its policy from git.
+export const DEAD_ENTRIES = ['guard'] as const
 
-export interface Migration { action: 'none' | 'moved' | 'refused'; reason: string; moved: string[] }
+const quoted = (path: string) => (/^[\w@%+=:,./-]+$/.test(path) ? path : `'${path.split("'").join(`'\\''`)}'`)
 
-// Moved once, loudly, and never straddling both. Everywhere else in this product an unreadable or
-// ambiguous state refuses and says what to delete rather than guessing — `factory.json` will not
-// migrate its own schema, the stats offsets say "delete it", the installer journal refuses an
-// unknown version — and a home in two places is exactly that kind of ambiguity: a run that read
-// one and wrote the other would split a machine's memory of itself in half.
-// What a path is, told apart properly: "absent" and "this account cannot read it" are different
-// answers, and a check that collapses them lets a run carry on with its memory split across two
-// homes. A symlink is never followed — either end of this move could otherwise land somewhere
-// neither path names.
-export type Kind = 'absent' | 'directory' | 'file' | 'other' | 'unreadable'
-
-export function migrateHome(deps: {
+// Answers only while the new home holds nothing of ours. Once this machine has moved, whatever is
+// left behind is the operator's to tidy and no concern of any command that runs afterwards.
+export function olderHome(deps: {
   kind: (path: string) => Kind
-  // null when the directory is there but cannot be listed: "unknown" must never read as "empty".
   list: (path: string) => string[] | null
-  readable: (path: string, shape: Kind) => boolean
-  // Copies a record across, rewriting every path under the older home as it goes, and removes the
-  // original. Returns how many paths it rewrote.
-  rebaseInto: (source: string, target: string, from: string, to: string) => number
-  // The same, in place, for every JSON file directly inside a directory.
-  rebaseUnder: (directory: string, from: string, to: string) => number
-  move: (from: string, to: string) => void
-  mkdir: (path: string) => void
-  remove: (path: string) => void
-} & HomeOptions): Migration {
-  // An explicit home is a caller saying where it wants this product to live — a test, a sandbox, a
-  // second checkout. It must never also mean "and go and fetch the real machine's state into it":
-  // the source would still be the operator's own `~/.vegastack`, and a temporary override that is
-  // deleted afterwards would take their control room, their config and their App key with it.
-  if ((deps.env ?? process.env)[HOME_VARIABLE]?.trim()) {
-    return { action: 'none', reason: `${HOME_VARIABLE} names the home, so nothing is moved into it`, moved: [] }
-  }
+} & HomeOptions): OlderHome {
+  const quiet: OlderHome = { found: false, reason: '', commands: [] }
+  // A named home is a caller saying where this product lives — a test, a sandbox, a second
+  // checkout. It must not also mean "and go looking at the real machine's older home", whose
+  // contents have nothing to do with the directory that was asked about.
+  if ((deps.env ?? process.env)[HOME_VARIABLE]?.trim()) return quiet
   const to = factoryHome(deps)
   const from = legacyHome(deps)
-  // Movable means an ordinary file or directory. A symlink, a device node or a path this account
-  // cannot read is none of those, and following one would move state out of, or into, somewhere
-  // neither home names.
-  const MOVABLE: Kind[] = ['file', 'directory']
-  const there = (path: string) => MOVABLE.includes(deps.kind(path))
-  const odd = (path: string) => { const kind = deps.kind(path); return kind !== 'absent' && !MOVABLE.includes(kind) }
+  if (deps.kind(from) !== 'directory') return quiet
 
-  // Both ends must be ordinary directories this account can read, or not be there at all.
-  for (const [path, which] of [[from, 'older'], [to, 'new']] as const) {
-    const kind = deps.kind(path)
-    if (kind === 'absent' || kind === 'directory') continue
-    return {
-      action: 'refused',
-      reason: kind === 'unreadable'
-        ? `${path} cannot be read by this account, so whether the ${which} home holds anything is unknown — fix its permissions and run again`
-        : `${path} is not an ordinary directory, so the ${which} home cannot be moved safely — inspect it by hand`,
-      moved: [],
-    }
-  }
-  if (deps.kind(from) === 'absent') return { action: 'none', reason: 'there is no older home to move', moved: [] }
+  const settled = deps.list(to)
+  // "Cannot be listed" is not "empty", but it is also not this command's problem: either way,
+  // something is there and this machine has already moved.
+  if (settled === null || settled.length > 0) return quiet
 
-  // Everything that could refuse is decided before anything is touched. A refusal that had already
-  // deleted something would be a refusal the operator cannot trust the word of.
-  //
-  // Both homes are checked: a live lock in the destination means something is writing there now,
-  // and moving a file on top of it would clobber a journal mid-write or split the settings.
-  const held = [from, to].flatMap((home) => lockPaths(home, deps.list)).filter((path) => deps.kind(path) !== 'absent')
-  if (held.length > 0) {
-    return {
-      action: 'refused',
-      reason: `a lock is held there (${held.join(', ')}) — this move would rename a directory out from under whatever took it, and three of these four locks are never stolen even by the code that owns them. Run again once the work has finished; if you know nothing holds it, remove that path and run again`,
-      moved: [],
-    }
-  }
+  const waiting = RENAMES.filter((entry) => deps.kind(join(from, ...entry.from.split('/'))) !== 'absent')
+  const dead = DEAD_ENTRIES.filter((entry) => deps.kind(join(from, entry)) === 'directory')
+  if (waiting.length === 0 && dead.length === 0) return quiet
 
-  // Each entry must be the shape it is supposed to be. A symlinked `factory.json` moved across and
-  // then followed reads whatever it points at as this machine's own configuration; a *directory*
-  // named `factory.json` is not this product's file at all.
-  const strange: string[] = []
-  for (const entry of MOVES) {
-    for (const path of [join(from, ...entry.from), join(to, ...entry.to)]) {
-      const kind = deps.kind(path)
-      if (kind === 'absent') continue
-      if (kind !== entry.shape) { strange.push(`${path} is ${kind === 'unreadable' ? 'unreadable' : `not a ${entry.shape}`}`); continue }
-      // Present and the right shape is not enough: a mode-000 file or a directory this account
-      // cannot list moves across perfectly well and is unreadable at the far end.
-      if (!deps.readable(path, entry.shape)) strange.push(`${path} cannot be read by this account`)
-    }
-  }
-  if (strange.length > 0) {
-    return { action: 'refused', reason: `${strange.join('; ')}, so it cannot be moved safely — inspect it by hand`, moved: [] }
-  }
+  const needsWorker = waiting.some((entry) => entry.to.includes('/'))
+  const commands = [`mkdir -p ${quoted(to)}${needsWorker ? ` ${quoted(join(to, 'worker'))}` : ''}`]
+  for (const entry of waiting) commands.push(`mv ${quoted(join(from, ...entry.from.split('/')))} ${quoted(join(to, ...entry.to.split('/')))}`)
+  for (const entry of dead) commands.push(`rm -rf ${quoted(join(from, entry))}`)
 
-  const waiting = MOVES.filter((entry) => there(join(from, ...entry.from)))
-  // Anything at all in the destination, not merely a name this table knows. A newer release may
-  // keep things here that this one has never heard of, and moving an older copy in beside them is
-  // the same split by another route.
-  const already = deps.list(to)
-  if (already === null) {
-    return { action: 'refused', reason: `${to} is there but cannot be listed by this account, so whether it already holds state is unknown — fix its permissions and run again`, moved: [] }
-  }
-  if (already.length > 0 && waiting.length > 0) {
-    return {
-      action: 'refused',
-      reason: `${to} and ${from} both hold this product's state (${already.slice(0, 6).join(', ')}) — a run that read one and wrote the other would split this machine's memory in half. Keep the one that is current, delete the other, and run again`,
-      moved: [],
-    }
-  }
-
-  const moved: string[] = []
-  // Removed whether or not anything else moves: a machine whose only leftover is the dead guard
-  // directory is exactly the machine that would otherwise keep it forever.
-  for (const dead of DEAD_ENTRIES) {
-    const path = join(from, dead)
-    // The directory is what nothing reads. A regular file of the same name is something else
-    // somebody put there, and deleting it would be this move inventing a reason to.
-    if (deps.kind(path) === 'directory') { deps.remove(path); moved.push(`${dead} → removed, nothing reads it`) }
-  }
-  if (waiting.length === 0) {
-    return moved.length
-      ? { action: 'moved', reason: `removed what nothing reads from ${from}`, moved }
-      : { action: 'none', reason: 'the older home holds nothing of ours', moved: [] }
-  }
-
-  deps.mkdir(to)
-  let rebased = 0
-  for (const entry of waiting) {
-    const target = join(to, ...entry.to)
-    if (entry.to.length > 1) deps.mkdir(join(to, ...entry.to.slice(0, -1)))
-    // A record that names absolute paths is rewritten on the way across rather than moved and then
-    // edited: there must be no instant in which the destination holds the old addresses, because
-    // another command can start in it the moment the last legacy entry is gone.
-    if (RECORDS_PATHS.has(entry.to.join('/'))) rebased += deps.rebaseInto(join(from, ...entry.from), target, from, to)
-    else deps.move(join(from, ...entry.from), target)
-    moved.push(`${entry.from.join('/')} → ${entry.to.join('/')}`)
-  }
-  // The push journals live inside the spool that has just moved, and each names the clone it was
-  // written for. `recoverPush` refuses one whose room is not where it says.
-  rebased += deps.rebaseUnder(join(to, 'stats', 'push-pending'), from, to)
-  if (rebased > 0) moved.push(`${rebased} recorded path${rebased === 1 ? '' : 's'} rebased onto ${to}`)
-  return { action: 'moved', reason: `moved this machine's state from ${from} to ${to}`, moved }
-}
-
-// Every string anywhere in a record that names a path inside the older home, moved to where that
-// path actually went. Two entries change their name on the way and not merely their address —
-// `.tmp/stats` became `stats`, `worktree-roots.json` became `worktrees.json` — so a blind swap of
-// the home prefix would produce paths that do not exist. The move table is the authority.
-//
-// It walks the whole document rather than named fields: the snapshot entries nest, and a path this
-// release has not heard of is still a path that will be wrong tomorrow.
-export function rebasePaths(value: unknown, from: string, to: string): { value: unknown; changed: number } {
-  const routes = MOVES
-    .map((entry) => ({ was: join(from, ...entry.from), now: join(to, ...entry.to) }))
-    // Longest first, so `<home>/.tmp/stats` is matched before `<home>/.tmp` ever could be.
-    .sort((a, b) => b.was.length - a.was.length)
-
-  let changed = 0
-  const moveOne = (path: string): string | null => {
-    for (const route of routes) {
-      if (path === route.was) return route.now
-      if (path.startsWith(route.was + sep)) return route.now + path.slice(route.was.length)
-    }
-    // Inside the older home but not something this move carries: it is gone, and saying so is
-    // better than pointing at an address in the new home that was never written.
-    return path === from || path.startsWith(from + sep) ? null : path
-  }
-
-  const walk = (node: unknown): unknown => {
-    if (typeof node === 'string') {
-      const moved = moveOne(node)
-      if (moved === null || moved === node) return node
-      changed += 1
-      return moved
-    }
-    if (Array.isArray(node)) return node.map(walk)
-    if (node && typeof node === 'object') {
-      return Object.fromEntries(Object.entries(node as Record<string, unknown>).map(([key, entry]) => [key, walk(entry)]))
-    }
-    return node
-  }
-  return { value: walk(value), changed }
-}
-
-// `rename` cannot cross a device, and a home can be mounted separately from the directory it sits
-// in. Copy first and remove only once the copy is whole, so a failure leaves the original.
-export function movePath(from: string, to: string, deps: {
-  rename: (from: string, to: string) => void
-  copy: (from: string, to: string) => void
-  remove: (path: string) => void
-}): void {
-  try { deps.rename(from, to) } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== 'EXDEV') throw error
-    deps.copy(from, to)
-    deps.remove(from)
+  return {
+    found: true,
+    reason: `this machine keeps its state in ${from}, and this release reads ${to}. Nothing is moved for you: that directory holds the App key and the control-room clones, and a move you can see is a move you can check. With nothing else of this product running, run:`,
+    commands,
   }
 }
 
-// Written beside and renamed over, so a failure part-way leaves the original whole rather than a
-// truncated file — a journal half-written is a journal `recoverPush` cannot act on.
-function writeExactly(path: string, body: string, mode: number): void {
-  const beside = `${path}.moving`
-  writeFileSync(beside, body, { mode: mode & 0o777 })
-  renameSync(beside, path)
+// `factory.json` records where each control room was cloned, as an absolute path, so after the
+// move those records still name the old address. `vegafactory sync` already refuses a clone that
+// is not where it is recorded, and `--force` re-records it, which is the documented way back.
+export const AFTER_THE_MOVE = 'Then, once: vegafactory sync --force — the records still name where each control room used to sit.'
+
+// The one chokepoint: every command passes through here before it reads or writes anything.
+export function settleHome(report: (line: string) => void = console.error): OlderHome {
+  const result = olderHome({
+    kind: pathKind,
+    list: (path) => {
+      try { return readdirSync(path) } catch (error) {
+        return (error as NodeJS.ErrnoException).code === 'ENOENT' ? [] : null
+      }
+    },
+  })
+  // On stderr, not stdout: a `--json` caller must still get exactly one document.
+  if (result.found) {
+    report(`vegafactory: ${result.reason}`)
+    for (const line of result.commands) report(`vegafactory:   ${line}`)
+    report(`vegafactory: ${AFTER_THE_MOVE}`)
+  }
+  return result
 }
 
+// What a path is, told apart properly: "absent" and "this account cannot read it" are different
+// answers, and a check that collapses them lets a command carry on believing a directory is empty.
+export type Kind = 'absent' | 'directory' | 'file' | 'other' | 'unreadable'
+
+// Every component is checked, not just the last: an intermediate symlink redirects the read just
+// as surely as a symlinked leaf, and `ENOTDIR` on the way down means an ancestor is a file —
+// which is "something is wrong here", not "nothing is here".
 export function pathKind(path: string): Kind {
   const parent = dirname(path)
   if (parent !== path) {
@@ -364,77 +211,4 @@ function lstatKind(path: string): Kind {
     if (code === 'ENOENT') return 'absent'
     return code === 'ENOTDIR' ? 'other' : 'unreadable'
   }
-}
-
-// The one chokepoint. Nothing used to create the home — four writers made it lazily, each in its
-// own way — so there was nowhere to hang a move. Every command passes through here first.
-export function settleHome(report: (line: string) => void = console.error): Migration {
-  const result = migrateHome({
-    kind: pathKind,
-    list: (path) => {
-      try { return readdirSync(path) } catch (error) {
-        // Absent is empty; anything else is unknown, and unknown must not read as empty.
-        return (error as NodeJS.ErrnoException).code === 'ENOENT' ? [] : null
-      }
-    },
-    rebaseInto: (source, target, from, to) => {
-      const text = readFileSync(source, 'utf8')
-      let changed = 0
-      let output = text
-      try {
-        const rebasedValue = rebasePaths(JSON.parse(text), from, to)
-        changed = rebasedValue.changed
-        if (changed > 0) output = `${JSON.stringify(rebasedValue.value, null, 2)}\n`
-      } catch { /* not JSON this release understands: carried across exactly as it is */ }
-      // The settings file is published owner-only, and a rewrite that widened it would hand the
-      // next reader on a shared machine this org's control-room addresses.
-      writeExactly(target, output, lstatSync(source).mode)
-      rmSync(source, { force: true })
-      return changed
-    },
-    rebaseUnder: (directory, from, to) => {
-      let changed = 0
-      for (const name of (() => { try { return readdirSync(directory) } catch { return [] } })()) {
-        if (!name.endsWith('.json')) continue
-        const path = join(directory, name)
-        // A symlink here would be followed and its target overwritten — somewhere neither home
-        // names. Only an ordinary file is a journal.
-        let mode: number
-        try {
-          const stat = lstatSync(path)
-          if (!stat.isFile()) continue
-          mode = stat.mode
-        } catch { continue }
-        try {
-          const rebasedValue = rebasePaths(JSON.parse(readFileSync(path, 'utf8')), from, to)
-          if (rebasedValue.changed > 0) { writeExactly(path, `${JSON.stringify(rebasedValue.value, null, 2)}\n`, mode); changed += rebasedValue.changed }
-        } catch { /* leave anything unreadable exactly as it is */ }
-      }
-      return changed
-    },
-    readable: (path, shape) => {
-      try {
-        // A directory needs search as well as read: one that lists but cannot be entered moves
-        // across perfectly well and nothing inside it can be opened at the far end.
-        if (shape === 'directory') { accessSync(path, constants.R_OK | constants.X_OK); readdirSync(path) }
-        else accessSync(path, constants.R_OK)
-        return true
-      } catch { return false }
-    },
-    move: (from, to) => movePath(from, to, {
-      rename: renameSync,
-      copy: (a, b) => { cpSync(a, b, { recursive: true, preserveTimestamps: true, verbatimSymlinks: true }) },
-      remove: (path) => { rmSync(path, { recursive: true, force: true }) },
-    }),
-    mkdir: (path) => { mkdirSync(path, { recursive: true }) },
-    remove: (path) => { rmSync(path, { recursive: true, force: true }) },
-  })
-  // On stderr, not stdout: a `--json` caller must still get one document, and this speaks once in
-  // the life of a machine.
-  if (result.action === 'moved') {
-    report(`vegafactory: ${result.reason}`)
-    for (const line of result.moved) report(`vegafactory:   ${line}`)
-  }
-  if (result.action === 'refused') report(`vegafactory: ${result.reason}`)
-  return result
 }
