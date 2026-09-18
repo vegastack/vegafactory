@@ -366,6 +366,19 @@ describe('one poll over the board', () => {
     expect(readRuns(root)[0]!.note.length).toBeLessThanOrEqual(400)
   })
 
+  test('a second pass over an unchanged board is one list and a conditional read per issue', async () => {
+    for (const number of [1, 2]) gh.addIssue({ number, labels: ['waiting-on-operator', 'medium'] })
+    await pass()
+    gh.calls = []
+    await pass()
+    // The list, then the issue and its comments page for each — every one of them an ETag request.
+    expect([...gh.calls].sort()).toEqual([
+      'GET repos/o/r/issues/1', 'GET repos/o/r/issues/1/comments?per_page=100&page=1',
+      'GET repos/o/r/issues/2', 'GET repos/o/r/issues/2/comments?per_page=100&page=1',
+      'GET repos/o/r/issues?state=open&sort=updated&direction=desc&per_page=100&page=1',
+    ])
+  })
+
   test('the board is the open issues that carry a state label', () => {
     gh.addIssue({ number: 1, labels: ['queued', 'small'] })
     gh.addIssue({ number: 2, labels: ['small'] })
