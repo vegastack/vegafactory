@@ -1,0 +1,5 @@
+---
+"@vegastack/vegafactory": minor
+---
+
+The org control room is seven files — `org.md`, `groups/<g>/group.md`, `repos.md`, `dispatchers.md`, `boards.md`, `onboarding/` and `stats/` — and a repo's profile layers on them nearest-wins: its own `.vegastack/dev.md`, then its group, then the org. A knob line in `org.md` whose comment begins `locked` is the exception and cannot be answered differently lower down; a lower layer repeating the same value is agreement, and a different one is refused by name with the org's value standing. Only `org.md` may lock. Gone with the old model: delegations, policy snapshots and digests, policy-schema versions, the `vsk-policy` authority block, the people and decisions files, and the `rules/` and `templates/` trees. `vegafactory sync` is now one shallow `git fetch` into `~/.vegastack/control-room/<org>`, refreshed when the copy was last fetched more than five minutes ago; `sync inspect`, `sync restore`, `--apply`, `--backup` and the `sync-max-age:` knob are removed, and a copy you have edited by hand refuses the refresh rather than being merged or discarded.

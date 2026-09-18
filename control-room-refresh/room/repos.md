@@ -1,0 +1,7 @@
+# Repos
+
+The registry `vegafactory-setup` writes when a repo is registered. One row per repo; the `group` cell names the `groups/<g>/` whose defaults that repo layers on.
+
+| repo | group | board | owner |
+|---|---|---|---|
+| vegastack/vegafactory | dev | none | kmanojkumar |
