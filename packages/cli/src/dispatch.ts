@@ -10,7 +10,7 @@ import { createSign } from 'node:crypto'
 import { appendFileSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync } from 'node:fs'
 import { homedir, hostname, userInfo } from 'node:os'
 import { join, posix } from 'node:path'
-import { APP_ACTOR, holderOf, machineName, release, trustedHolders } from './claim.ts'
+import { APP_ACTOR, HEARTBEAT_EVERY_MS, claim, heartbeat, holderOf, machineName, release, trustedHolders } from './claim.ts'
 import { defaultClonePath, factoryConfigPath, parseControlRoomKnob, readFactoryConfig } from './control-room.ts'
 import { billingVariables, childEnvironment } from './env.ts'
 import { GhError, defaultRunner, ghList, type GhResult, type GhRunner } from './gh.ts'
@@ -808,25 +808,74 @@ export async function poll(deps: PollDeps, inflight: Map<number, Inflight> = new
   for (const candidate of schedule(wanted.map((item) => item.candidate), [...inflight.values()].map((run) => run.candidate))) {
     const item = wanted.find((entry) => entry.candidate.number === candidate.number)!
     const at = now()
+    // Taken before the slot, so a second machine on the same board sees the work is taken. Losing
+    // the race is not a failure: the issue is simply someone else's this pass.
+    const taken = reserve({ root, repo, number: candidate.number, runner }, deps.machine, candidate.action, at)
+    if (!taken.ok) {
+      deps.out(`#${candidate.number}: not started — ${taken.reason}`)
+      continue
+    }
     const run: Inflight = { candidate, started: at, settled: false, done: Promise.resolve() as unknown as Promise<RunRecord> }
-    run.done = runOne(deps, candidate, item, at).then((record) => { run.settled = true; return record })
+    run.done = runOne(deps, candidate, item, at, taken.owner).then((record) => { run.settled = true; return record })
     inflight.set(candidate.number, run)
     started.push(candidate)
   }
   return started
 }
 
+// The claim a dispatched run takes before it starts, so another machine polling the same board
+// sees the work is taken rather than starting it again. It is an App-authored `dispatch` claim,
+// kept alive while the step runs and released on every way out.
+//
+// A step that runs an agent which claims for itself — dev-implement and its corrections path —
+// hands the claim over instead: the rest of the workflow reads the session's own claim from inside
+// its worktree, whose name this machine cannot know in advance. That hand-over is a seconds-wide
+// window in which a second machine could start the same issue; closing it needs the fleet-wide
+// lease that #3 tracks, not a longer claim here.
+export const HANDS_OVER: Action[] = ['implement', 'corrections']
+
+export interface Reservation { ok: boolean; owner: string; reason: string }
+
+export function reserve(ctx: { root: string; repo: string; number: number; runner: GhRunner }, machine: string, action: Action, now = Date.now()): Reservation {
+  const owner = `${machine}:dispatch-${ctx.number}`
+  try {
+    const outcome = claim(ctx, { owner, kind: 'dispatch', harness: 'dispatch', model: action }, now)
+    return { ok: outcome.ok, owner, reason: outcome.message }
+  } catch (error) {
+    return { ok: false, owner, reason: `the claim could not be taken: ${(error as Error).message}` }
+  }
+}
+
 // One step and everything that follows it. Nothing here may reject: the loop does not await these
 // promises, so a rejection nobody handles would take the whole dispatcher down.
-async function runOne(deps: PollDeps, candidate: Candidate, item: { key: string; decision: Decision }, at: number): Promise<RunRecord> {
+async function runOne(deps: PollDeps, candidate: Candidate, item: { key: string; decision: Decision }, at: number, held: string | null): Promise<RunRecord> {
+  const claimCtx = { root: deps.root, repo: deps.repo, number: candidate.number, runner: deps.runner }
+  // While this machine holds the claim it says so, on the same schedule a session's hooks use.
+  const beat = held ? setInterval(() => { try { heartbeat(claimCtx, held) } catch { /* a missed beat is not a failure */ } }, HEARTBEAT_EVERY_MS) : null
+  beat?.unref?.()
   let result: StepResult
   try {
-    result = candidate.action === 'stop'
+    if (candidate.action === 'stop') {
       // A stop needs no agent: it is this machine giving the issue back.
-      ? { outcome: 'stopped', note: deps.standDown(candidate.number, item.decision.reason, candidate.from), ms: 0 }
-      : await deps.runStep({ action: candidate.action, number: candidate.number, repo: deps.repo, split: item.decision.split, by: item.decision.by }, { root: deps.root })
+      result = { outcome: 'stopped', note: deps.standDown(candidate.number, item.decision.reason, candidate.from), ms: 0 }
+    } else {
+      // The agent claims for itself from inside its own worktree, so this machine's reservation
+      // steps aside first — holding both would stop the run it just started.
+      if (held && HANDS_OVER.includes(candidate.action)) {
+        if (beat) clearInterval(beat)
+        try { release(claimCtx, held, APP_ACTOR, 'handing the issue to the run this machine just started') } catch { /* the run still starts */ }
+      }
+      result = await deps.runStep({ action: candidate.action, number: candidate.number, repo: deps.repo, split: item.decision.split, by: item.decision.by }, { root: deps.root })
+    }
   } catch (error) {
     result = { outcome: 'failed', note: (error as Error).message, ms: deps.now() - at }
+  } finally {
+    if (beat) clearInterval(beat)
+  }
+  // Whatever happened, this machine's own reservation goes back. A step that stood the issue down
+  // has already released the session's claim; this releases the one taken before the launch.
+  if (held && !HANDS_OVER.includes(candidate.action)) {
+    try { release(claimCtx, held, APP_ACTOR, `the ${candidate.action} run finished (${result.outcome})`) } catch { /* the record still lands */ }
   }
   try {
     return settle(deps, candidate, item, at, result)
@@ -1080,6 +1129,7 @@ export interface CliDeps {
   platform?: NodeJS.Platform
   fetch?: Fetch
   runStep?: RunStep
+  now?: () => number
   sleep?: (ms: number) => Promise<void>
   cli?: string[]
 }
@@ -1209,7 +1259,7 @@ export async function runDispatch(argv: string[], deps: CliDeps = {}): Promise<n
       const identity = deps.runner ? null : appIdentity({ repo, keyPath, appId: appIdOf(env), fetch: deps.fetch })
       const runner = deps.runner ?? identity!.runner
       const pollDeps: PollDeps = {
-        root, repo, runner, machine, out: args.json ? () => {} : out, now: Date.now,
+        root, repo, runner, machine, out: args.json ? () => {} : out, now: deps.now ?? Date.now,
         runStep: deps.runStep ?? defaultRunStep(devMd, env),
         standDown: (number, reason) => standDown({ root, repo, number, runner, machine }, reason),
       }

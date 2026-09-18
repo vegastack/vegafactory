@@ -4,7 +4,7 @@ import { generateKeyPairSync } from 'node:crypto'
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { claimBody, claimLine } from '../src/claim.ts'
+import { claimBody, claimLine, holderOf, trustedHolders } from '../src/claim.ts'
 import {
   APP_ID, STEP_TIMEOUT_MS, TOKEN_MARGIN_MS, agentArgs, appIdentity, appJwt, appKeyPath, assertKeyFile, board, decide, defaultRunStep, dispatchDir,
   acknowledgedPlan, canonicalPath, confirmShip, disjointSiblings, pushableBranch, shipWord,
@@ -510,6 +510,62 @@ describe('one poll over the board', () => {
     expect(steps.map((step) => step.number).sort()).toEqual([1, 2, 3, 4])
   })
 
+  test('a run takes the claim before it launches, and gives it back when it ends', async () => {
+    gh.addIssue({ number: 1, labels: ['planning', 'medium'] })
+    let heldDuringRun: string | null | undefined
+    await pass({
+      runStep: (async () => {
+        const snap = snapOf(1)
+        heldDuringRun = holderOf(snap.state, snap.body, gh.clock, trustedHolders({ repo: 'o/r', runner: gh.runner, root })).holder?.owner ?? null
+        return { outcome: 'done' as const, note: '', ms: 1 }
+      }) as RunStep,
+    })
+    // A planning run claims for itself: nothing inside it does, so another machine polling the
+    // same board while it runs sees the issue is taken.
+    expect(heldDuringRun).toBe(`${HOST}:dispatch-1`)
+    const after = snapOf(1)
+    expect(holderOf(after.state, after.body, gh.clock, trustedHolders({ repo: 'o/r', runner: gh.runner, root })).holder).toBeNull()
+  })
+
+  test('an implement run hands its claim to the session it starts', async () => {
+    gh.addIssue({ number: 1, labels: ['queued', 'small'] })
+    let heldDuringRun: string | null | undefined
+    await pass({
+      runStep: (async () => {
+        const snap = snapOf(1)
+        heldDuringRun = holderOf(snap.state, snap.body, gh.clock, trustedHolders({ repo: 'o/r', runner: gh.runner, root })).holder?.owner ?? null
+        return { outcome: 'done' as const, note: '', ms: 1 }
+      }) as RunStep,
+    })
+    // dev-implement claims from inside its own worktree, so this machine's reservation steps aside
+    // before the agent starts rather than blocking the claim the workflow actually reads.
+    expect(heldDuringRun).toBeNull()
+    expect(gh.issues.get(1)!.comments.map((comment) => comment.body).join('\n')).toContain('handing the issue to the run this machine just started')
+  })
+
+  test('a claim another machine already holds is not started twice', async () => {
+    gh.addIssue({ number: 1, labels: ['planning', 'medium'] })
+    // Another machine's dispatcher got there first, between this pass's read and its launch.
+    const body = claimBody({ owner: 'builder:dispatch-1', kind: 'dispatch', harness: 'dispatch', model: 'plan' })
+    const notes: string[] = []
+    const steps: number[] = []
+    await pass({
+      out: (text: string) => notes.push(text),
+      runStep: (async (step) => { steps.push(step.number); return { outcome: 'done' as const, note: '', ms: 1 } }) as RunStep,
+      runner: ((args: string[], input?: string) => {
+        // The rival claim lands just before this machine posts its own, so it is the earlier one.
+        const method = args[args.indexOf('-X') + 1]
+        const path = args[args.indexOf('-X') + 2] ?? ''
+        if (method === 'POST' && path.endsWith('/comments') && !gh.issues.get(1)!.comments.some((c) => c.body.includes('builder:dispatch-1'))) {
+          gh.addComment(1, body.replace('-->\n', `-->\n${claimLine('builder:dispatch-1', new Date(gh.clock).toISOString())}\n`), 'mk')
+        }
+        return gh.runner(args, input)
+      }) as typeof gh.runner,
+    })
+    expect(steps).toEqual([])
+    expect(notes.join('\n')).toContain('not started — lost the race to builder:dispatch-1')
+  })
+
   test('an issue with a fresh claim is skipped', async () => {
     gh.addIssue({ number: 1, labels: ['queued', 'small'] })
     const body = claimBody({ owner: 'laptop:1-x', kind: 'session', harness: 'claude', model: 'opus' })
@@ -585,9 +641,9 @@ describe('one poll over the board', () => {
 
   test('a failed step backs off, and its own error never lands on the issue', async () => {
     gh.addIssue({ number: 1, labels: ['queued', 'small'] })
-    const before = gh.issues.get(1)!.comments.length
     await pass({ runStep: runStep({ outcome: 'failed', note: 'claude exited 1: ' + 'x'.repeat(5000) }) })
-    expect(gh.issues.get(1)!.comments).toHaveLength(before)
+    // The claim and its release are on the issue; the run's own output never is.
+    expect(gh.issues.get(1)!.comments.map((comment) => comment.body).join('\n')).not.toContain('xxxx')
     const acted = readActed(root)['o/r#1']!
     expect(acted.failures).toBe(1)
     expect(acted.retryAt).toBeGreaterThan(gh.clock)
@@ -803,7 +859,7 @@ describe('the step a run makes', () => {
 describe('the command', () => {
   const run = (argv: string[], over = {}) => {
     const lines: string[] = []
-    return runDispatch(argv, { cwd: root, home, host: HOST, env: {}, out: (text) => lines.push(text), runner: gh.runner, ...over })
+    return runDispatch(argv, { cwd: root, home, host: HOST, env: {}, out: (text) => lines.push(text), runner: gh.runner, now: () => gh.clock, ...over })
       .then((code) => ({ code, text: lines.join('\n') }))
   }
 
