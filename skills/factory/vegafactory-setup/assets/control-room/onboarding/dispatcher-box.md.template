@@ -72,7 +72,7 @@ Everything this box writes to GitHub goes out as the VegaFactory App — the dis
 
 Three things that follow, and one of them will bite on the first run if the box is not set up for it:
 
-- **A dispatched run pushes over SSH, never with the App token** — the App's Contents is read-only, so git in a run is given no credential helper at all and the token stays on the API side. Give `origin` an SSH push URL on this box (`git remote set-url --push origin git@github.com:{{org}}/{{repo}}.git`); `dispatch enable` refuses while it is HTTPS, rather than letting the first run finish its work and fail at the push.
+- **A dispatched run pushes with this box's own login, never with the App token** — the App's Contents is read-only, and the gh credential helper would hand a run the App's token instead of the login this box already has. A run's git asks with that token scrubbed out, so `gh auth login` on this machine is all an https remote needs, and an SSH remote never asked a helper anyway. `dispatch enable` asks the same way and refuses only when the App's token is the sole credential here, rather than letting the first run finish its work and fail at the push.
 - **The key outlives the token.** A run under `{{dispatcher-user}}` can read the key file whatever its mode; that is exactly why the dispatcher has an account of its own here and runs nothing else under it.
 - **The caps are per machine.** Three runs at once, one merge at a time, and each machine's own retry and subscription-reset deadlines. Two boxes listed for the same repository can each run three, and one can start work the other is waiting out; a fleet-wide lease is not in place yet.
 

@@ -348,7 +348,14 @@ export function pushPath(root: string, run: Probe): Check {
   if (result.code !== 0 || !url) return { name: 'push', ok: false, detail: `cannot read the push URL of origin in ${root}: ${(result.stderr || result.stdout).split('\n').at(-1)?.slice(0, 160) ?? `exit ${result.code}`}` }
   if (/^(git@|ssh:\/\/)/.test(url)) return { name: 'push', ok: true, detail: `origin pushes over SSH (${url})` }
 
-  const host = /^https?:\/\/([^/]+)\//.exec(url)?.[1] ?? 'github.com'
+  // Only an https remote uses the credential helper a run's Git is given. Anything else — http,
+  // git://, a local path, a host alias — would not, so proving a credential proves nothing about
+  // it, and a readiness check that passed would be a check that lied.
+  const https = /^https:\/\/([^/]+)\//.exec(url)
+  if (!https) {
+    return { name: 'push', ok: false, detail: `origin pushes over ${url.split(':')[0] || 'an unknown transport'} (${url}), which a run's Git has no credential path for — give origin an SSH or https push URL` }
+  }
+  const host = https[1]!
   // Asked the way a run's Git will ask: with the App's token out of the environment, so what comes
   // back is the machine's own login rather than the credential that cannot push.
   const asked = run('env', ['-u', 'GH_TOKEN', '-u', 'GITHUB_TOKEN', 'gh', 'auth', 'status', '--hostname', host])

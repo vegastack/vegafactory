@@ -2,4 +2,8 @@
 "@vegastack/vegafactory": patch
 ---
 
-The ship guard no longer asks permission to run commands somebody was only writing down. A heredoc body is data the command is fed, and with a quoted delimiter — `<<'EOF'` — a shell expands nothing in it, but the guard parsed backticks there as command substitution. Writing a changeset, a release note or a doc that mentioned a guarded command in backticks therefore asked for the operator's word: a file that says "we run `npm publish`" was read as running it. Quoted heredoc bodies are now dropped before the command is read. A bare `<<EOF` body really is expanded by the shell, so it still counts, and every real invocation asks exactly as before.
+The ship guard no longer asks permission to run commands somebody was only writing down.
+
+- A heredoc body is data the command is fed, and a quoted delimiter stops the shell expanding it, so backticks in a changeset or a release note were being read as command substitution.
+- A body is dropped only when every command on that line reads its stdin as data; `sh`, an interpreter, a pipe into one, or a command the guard does not recognise all keep it, because they run it.
+- An unquoted delimiter is expanded by the shell, so those bodies still count.

@@ -123,8 +123,33 @@ function heredocsOpenedOn(line: string): Array<{ delimiter: string; literal: boo
 // A heredoc body is data the command is fed, not command text. With a quoted delimiter a shell
 // expands nothing in it, so a backticked `npm publish` in there is prose — a changeset, a commit
 // message, a release note — and parsing it as a substitution made the guard ask for permission to
-// run words somebody was only writing down. Those bodies are dropped before the command is read.
-// A bare `<<EOF` body really is expanded by the shell, so it stays exactly as it was.
+// run words somebody was only writing down. A bare `<<EOF` body really is expanded by the shell,
+// so it always stays.
+//
+// Quoting is only half the question, though, and getting this wrong opens the guard wide: it stops
+// the *outer* shell expanding the body, and says nothing about what the command on the other end
+// does with it. `sh <<'EOF'` runs every line of it. So a body is dropped only when nothing on that
+// line could execute it — every command there reads its stdin as data and no more.
+const DATA_SINKS = new Set([
+  'cat', 'tee', 'head', 'tail', 'wc', 'sort', 'uniq', 'tr', 'rev', 'grep', 'egrep', 'fgrep',
+  'diff', 'cmp', 'nl', 'fold', 'column', 'base64', 'md5', 'md5sum', 'shasum', 'sha256sum',
+])
+
+// Every command the line runs, by name. A path is reduced to its last component, so
+// `/bin/sh` is `sh` and cannot slip past the check by spelling itself differently.
+function commandsOn(line: string): string[] {
+  const segments: Segment[] = []
+  parseInto(line, segments)
+  return segments.map((segment) => segment.words[0] ?? '').map((word) => word.split('/').pop() ?? '')
+}
+
+// Whether this line's heredoc body is read and never run. Unknown commands count as executing it:
+// a guard that cannot tell must assume the dangerous answer.
+function bodyIsOnlyData(line: string): boolean {
+  const commands = commandsOn(line)
+  return commands.length > 0 && commands.every((name) => name !== '' && DATA_SINKS.has(name))
+}
+
 export function stripHeredocs(text: string): string {
   if (!text.includes('<<')) return text
   const lines = text.split('\n')
@@ -134,12 +159,14 @@ export function stripHeredocs(text: string): string {
     const line = lines[i]!
     kept.push(line)
     i += 1
-    for (const doc of heredocsOpenedOn(line)) {
+    const docs = heredocsOpenedOn(line)
+    const data = docs.length > 0 && bodyIsOnlyData(line)
+    for (const doc of docs) {
       while (i < lines.length) {
         const body = lines[i]!
         i += 1
         if ((doc.strip ? body.replace(/^[\t]+/, '') : body) === doc.delimiter) break
-        if (!doc.literal) kept.push(body)
+        if (!(doc.literal && data)) kept.push(body)
       }
     }
   }

@@ -2,6 +2,16 @@
 
 The project's story, newest first: what got built, why, and how it went — for the operator's future recall. Format home: the dev-chronicle skill.
 
+## 18-09-2026 — The drill found what the tests could not ([#224](https://github.com/vegastack/vegafactory/issues/224))
+
+- **What:** Three fixes, each for something the rebuild had built and nobody had ever run. `dispatch enable` could not pass its own readiness check on any machine. The ship guard read prose as commands. Enrolling a dispatcher demanded an SSH key the machine did not need.
+- **Why:** P12 is the phase that turns "passes tests and review" into "works", and the dispatcher was the last thing in 0.20 proven only by tests. Running it for the first time, on the box the rebuild was built on, broke it three ways in the first ten minutes.
+- **How it went:** The Codex probe passed `-a never`, a flag `codex exec` does not have, so the check had never once succeeded anywhere. The guard had no heredoc handling at all, so a changeset that mentioned a guarded command in backticks asked for permission to run it — most of the prompting that had been making go-dark work painful. And the first attempt at the push credential killed git's helper outright, inventing an SSH requirement to work around a problem that was really the App's token shadowing a login the machine already had. The review then caught that dropping a quoted heredoc body let `sh <<'"'"'EOF'"'"'` smuggle a push past the guard — quoting stops the outer shell expanding, and says nothing about what the command on the other end does with it. A body is now dropped only when every command on the line reads its stdin as data.
+- **Changed:** the Codex readiness probe and stdin handling on all probes · heredoc parsing in the guard, with the executing-command rule · a run'"'"'s git credential path and the `push` readiness check · the App and dispatcher-box docs that described the SSH requirement.
+- **Decisions:** none — three corrections, no new direction.
+
+— asked by operator (kmanojkumar) · built by claude · branch fix/codex-readiness-probe
+
 ## 18-09-2026 — The factory wrote itself down ([#223](https://github.com/vegastack/vegafactory/issues/223))
 
 - **What:** The docs caught up with the lean rebuild. The README is a third shorter and starts at `init`, with a glossary that finally names the vocabulary — states, the two words, claim, ledger, cycle and round, control room, dispatcher. CONTRIBUTING says how work actually moves here, and dev.md's Ship runbook and Environments now describe what `ship check` and the guard really do. New verb: `vegafactory ship release <n>`, which re-reads an issue's recorded "ship it", checks the version against its changelog entry, and pushes the tag itself.

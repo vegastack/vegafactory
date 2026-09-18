@@ -444,6 +444,23 @@ describe('heredoc bodies', () => {
     expect(decide("cat > a.md <<'EOF'\nprose\nEOF\ngit push origin main").decision).toBe('ask')
   })
 
+  test('the body is only data when nothing on the line could run it', () => {
+    // Quoting stops the outer shell expanding the body. It says nothing about what the command on
+    // the other end does with it, and `sh` runs every line.
+    expect(decide("sh <<'EOF'\ngit push origin main\nEOF").decision).toBe('ask')
+    expect(decide("bash <<'EOF'\nnpm publish ./x.tgz\nEOF").decision).toBe('ask')
+    expect(decide("/bin/sh <<'EOF'\ngit push origin main\nEOF").decision).toBe('ask')
+    expect(decide("python3 - <<'EOF'\ngit push origin main\nEOF").decision).toBe('ask')
+    expect(decide("ssh box <<'EOF'\ngit push origin main\nEOF").decision).toBe('ask')
+    // A reader on the line is not enough if something downstream runs what it read.
+    expect(decide("cat <<'EOF' | sh\ngit push origin main\nEOF").decision).toBe('ask')
+    // A command the guard does not recognise is assumed to run it.
+    expect(decide("weirdtool <<'EOF'\ngit push origin main\nEOF").decision).toBe('ask')
+    // And the case the change exists for still holds.
+    expect(decide("tee a.md <<'EOF'\nthen `git push origin main`\nEOF").decision).toBe('allow')
+    expect(decide("cat <<'EOF' | grep push\nthen `git push origin main`\nEOF").decision).toBe('allow')
+  })
+
   test('a here-string is not a heredoc', () => {
     expect(decide('cat <<< "hello"').decision).toBe('allow')
   })
