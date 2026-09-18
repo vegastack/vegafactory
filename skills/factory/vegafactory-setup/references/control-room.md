@@ -41,7 +41,9 @@ An unreadable `control-room:` line is its own refusal. A bad value would otherwi
 
 ## The knob line
 
-A knob is a line at column zero: `key: value`, with an optional trailing `# comment`. Anything indented, and anything inside a fenced code block, is prose — so an example in this file never becomes policy. A key the resolver does not know stays an inert extension rather than a refusal, which is how a group file carries notes beside its knobs. A bad value for a key it does know is a refusal, never a default.
+A knob is a line at column zero: `key: value`, with an optional trailing `# comment`. Anything indented, and anything inside a fenced code block, is prose — so an example in this file never becomes policy. A key the resolver does not know stays an inert extension rather than a refusal, which is how a group file carries notes beside its knobs. A bad value for a key it does know is a refusal, never a default — and so is a key that was removed rather than never known, `workflow-labels:` and `gates:` among them, because inert is how a file keeps a retired mechanism without anyone noticing.
+
+The workflow's labels are the one thing a group file lists rather than decides. The set is fixed — `waiting-on-operator planning queued in-progress ready-to-ship` plus `small medium large research risky epic` — and no knob renames them, so a `labels:` line that drops a state, repeats a name or still carries a superseded one refuses. A room whose repos are on the old names runs dev-setup's label migration, which moves every issue and board card onto the new name rather than deleting the old one.
 
 `scripts/effective-policy.mjs` in dev-setup is the whole implementation: `parsePolicy(text, scope)` reads one layer, `resolvePolicy({org, group, repo})` returns `{ok, values, locked, sources, blocks}`. `sources` names the layer each value came from; `blocks` says in plain words why a refusal happened. Consumers check `ok` before acting — the resolved values are still useful to show even when an attempted override was refused.
 

@@ -1,10 +1,10 @@
 # Using the status comment
 
-`references/conventions.md`, authored by `dev-setup` and shipped with every dev skill, defines the resume order: brief → plan → status comment (the ledger) → `git log` → targeted source reconciliation. The status comment is written by `vegafactory issue status`, never by hand: it shows the state, who holds the issue, a stage timeline from GitHub's label history, and your progress list. This file defines how dev-implement uses it as recovery map and live progress view.
+`references/conventions.md`, authored by `dev-setup` and shipped with every dev skill, defines the resume order: the status comment (the ledger) and `git log` on the issue branch first, with the brief and plan read afterwards as the scope check. The status comment is written by `vegafactory issue status`, never by hand: it shows the state, who holds the issue, a stage timeline from GitHub's label history, and your progress list. This file defines how dev-implement uses it as recovery map and live progress view.
 
 ## When to checkpoint
 
-Write the status comment as the session's **first write after claiming** — before any code — with `vegafactory issue status <n> --progress-file <file>`, the file's first line naming the branch's worktree path, so a resuming session reads brief → plan → status comment → `git log` in the right checkout rather than the main one. Keep the progress file in the worktree's `.vegastack/.tmp/` and re-run the command to checkpoint:
+Write the status comment as the session's **first write after claiming** — before any code — with `vegafactory issue status <n> --progress-file <file>`, the file's first line naming the branch's worktree path, so a resuming session reads this comment and the branch's `git log` in the right checkout rather than the main one. Keep the progress file in the worktree's `.vegastack/.tmp/` and re-run the command to checkpoint:
 
 - **After each plan task completes** — and tick the matching `[x]` in the plan comment in the same pass. That box is a second write, to a different comment, that your own resume path never reads — so it is the one that silently lags reality, while the operator's progress view depends on it. The hand-back guard (`evidence-check --issue`) compares immutable task IDs in both directions; equal counts do not prove agreement. Record the task's base sha *before* starting it, so the `complete` line's commit range is exact.
 - **After each review fix round**, with the addressed/open counts.
@@ -15,11 +15,13 @@ Never batch checkpoints "for later" — the progress list's value is exactly tha
 
 A checkpoint retains what a compaction summary must retain: difficulties and their resolutions; options tried or set aside, and why; anything decided, ruled out, or established as a constraint, stated exactly; where things stand; what is open; exact names, numbers, links — the operator's words near-verbatim, the agent's reasoning condensed.
 
-The claim's **heartbeat** is not yours to write: the hooks update it on your own claim comment (a `vsk:claim` row) at most every five minutes while tools run, and `vegafactory issue holder <n>` shows it. A claim with no heartbeat for 4 hours (30 minutes for a dispatched run) is stale, and the next `issue claim` releases it. A live claim is taken back only on the operator's word — the flag is theirs to act on (check, resume, or take back), never an automatic reset.
+The claim's **heartbeat** is not yours to write: the hooks update it on your own claim comment (a `vsk:claim` row) at most every five minutes while tools run, and `vegafactory issue holder <n>` shows it. A claim with no heartbeat for 4 hours is stale, and the next `issue claim` releases it. A live claim is taken back only on the operator's word — the flag is theirs to act on (check, resume, or take back), never an automatic reset.
 
 ## Resuming
 
-A resuming session claims the issue again (`vegafactory issue claim <n> …`), reads brief → plan → status comment (`vegafactory issue sync <n>`) → `git log` on the issue branch in its worktree (`vegafactory worktree restore <n>` when the folder is gone; `git pull` first after a take-back, since the last holder's final push may land late), then continues from the first task the progress list does not mark complete.
+**Two sources recover a session: the status comment and the branch.** The comment says which task was last completed and every ruling made getting there; `git log` on the issue branch says what actually landed, `wip:` commits included. Where they disagree, the branch wins and the comment gets corrected. Everything else — the brief, the plan — is read to confirm the scope still holds, not to rebuild the position.
+
+A resuming session claims the issue again (`vegafactory issue claim <n> …`), reads the status comment (`vegafactory issue sync <n>`) and `git log` on the issue branch in its worktree (`vegafactory worktree restore <n>` when the folder is gone; `git pull` first after a take-back, since the last holder's final push may land late), re-reads brief and plan for the scope check, then continues from the first task the progress list does not mark complete.
 
 - Resume only unfinished work within the acked brief and plan; `vegafactory issue check <n> --for implement --resume true` confirms the ack still matches.
 - Re-read the brief, the plan, every comment on the issue (old ones can be edited, so age does not matter) and `git log`; any current operator correction wins over the ledger.

@@ -9,7 +9,7 @@ VegaFactory ships Agent Skills for [Claude Code](https://code.claude.com) and [C
 
 Each skill is self-contained: its own entry point (`SKILL.md`), references, deterministic scripts, tests and evals. Volatile facts carry a checked date and an official source.
 
-The headline set is **`dev`**: a ten-stage, issue-driven development workflow where every gate that matters is held by a person, not an agent.
+The headline set is **`dev`**: a nine-stage, issue-driven development workflow where every gate that matters is held by a person, not an agent.
 
 - [Quick start](#quick-start)
 - [Installing](#installing)
@@ -73,7 +73,7 @@ Work flows through GitHub issues:
 
 | Selector | Installs |
 |---|---|
-| `--group dev` | The ten dev-workflow skills |
+| `--group dev` | The nine dev-workflow skills |
 | `--all` | Every bundled skill except the repo-only ones |
 | `<skill-name>` | That one skill — works for every bundled skill, repo-only ones included |
 
@@ -140,7 +140,7 @@ If you are an agent reading this repository, or pointing a user at it:
 
 - **Load a skill by name.** Each skill's `SKILL.md` is the entry point; its `description` states when to trigger. Detail lives in `references/` and loads only when the workflow routes to it.
 - **`dev.md` outranks the skills.** A project's `.vegastack/dev.md` is its handbook, and where it disagrees with a skill's default, it wins.
-- **Gates are human-held.** No skill authorises approving a brief or a plan, pushing to the default branch, merging, or releasing. Those need the operator's explicit words, every time.
+- **Gates are human-held.** No skill authorises approving a brief or a plan, pushing to the default branch, merging, or releasing. Per issue the operator gives two words — an ack, then "ship it" — and nothing happens without them.
 - **The install layout is flat.** A skill is always at `<surface>/<name>/`. Never construct a path containing a group.
 
 ## Skills
@@ -155,7 +155,7 @@ Every skill currently belongs to a group; the table below is where an ungrouped 
 
 ### Dev workflow
 
-The issue-driven development workflow: ten stages from project bootstrap to the shipped, chronicled change.
+The issue-driven development workflow: nine stages from project bootstrap to the shipped, chronicled change.
 
 | Skill | What it does | Docs |
 |---|---|---|
@@ -166,9 +166,8 @@ The issue-driven development workflow: ten stages from project bootstrap to the 
 | [dev-implement](skills/dev/dev-implement/) | Implements an approved issue end to end without user input: issue check, claim, dark build, tests, independent review, evidence comment, hand-back | [SKILL.md](skills/dev/dev-implement/SKILL.md) |
 | [dev-debug](skills/dev/dev-debug/) | Reproduce-first bug work: a red repro command before any theory, ranked falsifiable suspects, and the regression test before the fix | [SKILL.md](skills/dev/dev-debug/SKILL.md) |
 | [dev-review](skills/dev/dev-review/) | Cross-tool review of finished work — the other tool (Codex ↔ Claude Code) reads the diff read-only and the CLI posts the findings, with a bounded fix loop | [SKILL.md](skills/dev/dev-review/SKILL.md) |
-| [dev-ship](skills/dev/dev-ship/) | The shipping gates, each spent only by the operator's words: PR, merge per the `merge:` knob, then the project's `## Ship` runbook | [SKILL.md](skills/dev/dev-ship/SKILL.md) |
-| [dev-status](skills/dev/dev-status/) | The operator's board: a deterministic gh-backed gather of state, progress, staleness, and PRs, rendered needs-you-first with one Next action | [SKILL.md](skills/dev/dev-status/SKILL.md) |
-| [dev-chronicle](skills/dev/dev-chronicle/) | The project's narrative record — one story entry per behavior-changing branch — plus the "catch me up" digest read from it and the register | [SKILL.md](skills/dev/dev-chronicle/SKILL.md) |
+| [dev-ship](skills/dev/dev-ship/) | Lands finished work on one operator word: PR, merge queue, merge, the worktree cleanup and then the project's `## Ship` runbook | [SKILL.md](skills/dev/dev-ship/SKILL.md) |
+| [dev-status](skills/dev/dev-status/) | The operator's board — a deterministic gh-backed gather of state, progress, staleness and PRs, rendered needs-you-first with one Next action — and the project's chronicle: one story entry per behavior-changing branch, plus the "catch me up" digest read from it and the register | [SKILL.md](skills/dev/dev-status/SKILL.md) |
 
 ### Factory
 
@@ -194,6 +193,7 @@ Tools that work on agent skills themselves: scanning them for vulnerabilities, v
 | Skill | What it does | Docs |
 |---|---|---|
 | [skill-scan](skills/skills-tooling/skill-scan/) | Scans agent skills with NVIDIA SkillSpector and holds the suppression baseline: the Verify-gate guard, and the answer to "is this downloaded skill safe to install" | [SKILL.md](skills/skills-tooling/skill-scan/SKILL.md) |
+| [skills-refresh](skills/skills-tooling/skills-refresh/) | Re-verifies the dated platform and harness facts the dev skills pin: a watchlist, a 60-day sweep, one subagent per tool, and one issue per change — it never edits a skill itself | [SKILL.md](skills/skills-tooling/skills-refresh/SKILL.md) |
 
 ## Repository structure
 

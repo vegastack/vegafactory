@@ -12,7 +12,7 @@ VegaStack builds agent-native developer tooling: the skills that run an issue-dr
 
 - language: English — the language every artifact is written in.
 - dates: DD-MM-YYYY — the date format in every register, approval, and revision line.
-- Nothing ships without the operator's explicit instruction — no push to a default branch, merge, tag, publish, or deploy on green checks, schedules, or standing approvals alone. A repo's gates knob changes how many actions one instruction covers, never whether an instruction is needed.
+- Nothing ships without the operator's explicit instruction — no push to a default branch, merge, tag, publish, or deploy on green checks, schedules, or standing approvals alone. Per issue the operator gives two words: an ack to build and "ship it" to land it.
 - Secrets are named here, never written here. A runbook names `NPM_TOKEN`; the value lives in the secret store that name points at.
 
 ## Knobs

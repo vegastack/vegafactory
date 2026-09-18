@@ -15,7 +15,7 @@
     },
     {
       "id": 2,
-      "prompt": "bootstrap this for agents \u2014 it's an empty folder called `acme-portal`, nothing in it yet, not even git. we'll be doing bun + hono, deploying to fly",
+      "prompt": "bootstrap this for agents — it's an empty folder called `acme-portal`, nothing in it yet, not even git. we'll be doing bun + hono, deploying to fly",
       "expected_output": "The greenfield path: the stack interview fills what an empty directory cannot, `git init` and `gh repo create` are each offered as their own yes/no question, and dev.md is rendered from the Bun playbook with placeholder lines where the machinery (CI, changelog, release) does not exist yet.",
       "files": [],
       "assertions": [
@@ -61,7 +61,7 @@
     },
     {
       "id": 6,
-      "prompt": "Re-run dev-setup here and wire the hooks. We deploy with wrangler \u2014 preview and staging are fine to run unattended, production is not. I use Claude Code and Codex.",
+      "prompt": "Re-run dev-setup here and wire the hooks. We deploy with wrangler — preview and staging are fine to run unattended, production is not. I use Claude Code and Codex.",
       "expected_output": "Round C offers the hooks as one set with a short explanation and one yes; the production deploy is drafted as a `## Ship` `ask:` line with its wrangler command in backticks; the `vegafactory hook <event> --harness <h>` wiring is merged into `.claude/settings.json` and `<repo>/.codex/hooks.json`; the Codex offer states the trust prerequisite.",
       "files": [],
       "assertions": [
@@ -86,13 +86,26 @@
     {
       "id": 8,
       "prompt": "Set up the workflow here and put the issues on our org project board 12.",
-      "expected_output": "Round C offers .github/workflows/factory-board.yml from the factory-board template, records board: 12 in dev.md, and states that the mirror is one way \u2014 labels drive the Status field and a card dragged on the board is cosmetic until the next label change.",
+      "expected_output": "Round C offers .github/workflows/factory-board.yml from the factory-board template, records board: 12 in dev.md, and states that the mirror is one way — labels drive the Status field and a card dragged on the board is cosmetic until the next label change.",
       "files": [],
       "assertions": [
         "board: 12 is written into .vegastack/dev.md's Knobs section",
         ".github/workflows/factory-board.yml is written only after an explicit yes, with {{runs-on}}, {{profile}} and {{product-revision}} bound and the authoring notes above the # --- marker dropped",
         "The reply states the mirror is one way: no reverse sync from the board back to labels",
         "The reply names the factory App and the gh 2.97.0 runner floor as the workflow's requirements"
+      ]
+    },
+    {
+      "id": 9,
+      "prompt": "Set up the dev workflow in vegastack/legacy-api. `gh label list` returns the superseded pre-lean set — `ready`, `working`, `needs-plan`, `needs-operator`, `for-operator`, `quick-build`, `deep-build` — alongside `bug` and `documentation`. Thirty open issues carry those labels, and org project board 12 has Status options matching the old state names.",
+      "expected_output": "The ordered migration shown before anything is touched — each superseded label renamed in place so its issues keep it, the board's Status options renamed with them, the labels no old name maps to created, and `bug` and `documentation` named as untouched — then nothing done until the operator says yes, and no old name written into dev.md's `labels:` line afterwards.",
+      "files": [],
+      "assertions": [
+        "The plan renames each superseded label to its replacement rather than deleting and recreating, and says why: deleting a label strips it from every issue that has it",
+        "The board's Status options are migrated too, not left pointing at names no label produces any more",
+        "`bug` and `documentation` are named as kept, not swept up with the workflow labels",
+        "No label is created, renamed or deleted without the operator's yes, and a no leaves the repo exactly as it was",
+        "The written `labels:` line carries only the new set; no mapping knob and no old name is recorded anywhere"
       ]
     }
   ]

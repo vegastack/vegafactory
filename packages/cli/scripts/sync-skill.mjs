@@ -66,8 +66,34 @@ const unknownRepoOnly = repoOnly.filter(name => !skillPaths.has(name))
 if (unknownRepoOnly.length) throw new Error(`repo-only.json names skills that do not exist: ${unknownRepoOnly.join(', ')}`)
 const repoOnlySet = new Set(repoOnly)
 
+// Skills this bundle used to ship. Dropping a name from packaging.json stops shipping it but
+// never removes the copy already on someone's machine, so each retirement leaves a tombstone:
+// enough for `update` to sweep an installer-owned copy and for `remove <name>` to still work.
+// A name that is both retired and still packaged is a contradiction the build refuses.
+const retiredPath = join(packageRoot, 'retired.json')
+let retired = {}
+try {
+  retired = JSON.parse(await readFile(retiredPath, 'utf8'))
+} catch (error) {
+  if (error.code !== 'ENOENT') throw error
+}
+if (retired === null || typeof retired !== 'object' || Array.isArray(retired)) {
+  throw new Error('packages/cli/retired.json must be a JSON object keyed by skill name')
+}
+for (const [name, entry] of Object.entries(retired)) {
+  if (skillPaths.has(name)) throw new Error(`retired.json names a skill that still exists: ${name}`)
+  if (packagedSkills[name]) throw new Error(`retired.json and packaging.json both name: ${name}`)
+  if (entry === null || typeof entry !== 'object' || Array.isArray(entry)) throw new Error(`retired.json entry is not an object: ${name}`)
+  for (const key of ['group', 'since', 'replacedBy', 'note']) {
+    if (typeof entry[key] !== 'string' || !entry[key].trim()) throw new Error(`retired.json entry ${name} needs a non-empty ${key}`)
+  }
+  if (entry.replacedBy !== 'none' && !skillPaths.has(entry.replacedBy)) {
+    throw new Error(`retired.json entry ${name} names an unknown replacement: ${entry.replacedBy}`)
+  }
+}
+
 await rm(bundleRoot, { recursive: true, force: true })
-const manifest = { schemaVersion: 2, skills: {} }
+const manifest = { schemaVersion: 2, skills: {}, retired }
 
 for (const skillName of listedSkills) {
   const source = skillPaths.get(skillName).path

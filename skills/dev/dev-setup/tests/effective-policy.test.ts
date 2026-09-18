@@ -13,10 +13,10 @@ test('a repo with no lines of its own still resolves to a complete profile', () 
   expect(result.ok).toBe(true)
   expect(result.values.tests).toBe('required')
   expect(result.values.merge).toBe('rebase')
-  expect(result.values.gates).toBe(3)
   expect(result.values.stats).toBe('on')
+  expect(result.values.changelog).toBe('changesets')
   expect(Object.keys(result.values.stages).sort()).toEqual(['chronicle', 'implement', 'intake', 'plan', 'review', 'status'])
-  expect(result.values['workflow-labels'].ready).toBe('queued')
+  expect(result.values.labels).toContain('queued')
   expect(result.sources.tests).toBe('group')
   expect(result.sources['stats-people']).toBe('org')
 })
@@ -142,10 +142,24 @@ test('chronicle on/off remains an ordinary knob alongside its harness stage', ()
   expect(parsePolicy('chronicle: maybe').blocks).toContain('invalid or duplicate harness stage: chronicle')
 })
 
-test.each(['stats: maybe', 'stats: on\nstats: off', 'harness-policy: plan unknown model high', 'gates: 4', 'operators: not a login!', 'constructor: x'])(
+test.each(['stats: maybe', 'stats: on\nstats: off', 'harness-policy: plan unknown model high', 'merge: sometimes', 'operators: not a login!', 'constructor: x'])(
   'known malformed input refuses: %s', text => {
     expect(resolvePolicy({ repo: text }).ok).toBe(false)
   })
+
+// A removed knob is not an unknown one: unknown is inert, and inert is how a profile keeps a
+// retired mechanism without anyone noticing it is doing nothing.
+test('a retired knob refuses by name and says what to do instead', () => {
+  const gates = resolvePolicy({ repo: 'gates: 3' })
+  expect(gates.ok).toBe(false)
+  expect(gates.blocks.join(' ')).toMatch(/gates was removed/)
+  expect(gates.values.gates).toBeUndefined()
+  const renaming = resolvePolicy({ group: 'workflow-labels: {"ready":"queued"}' })
+  expect(renaming.ok).toBe(false)
+  expect(renaming.blocks.join(' ')).toMatch(/label migration/)
+  // And an org cannot lock what no longer exists.
+  expect(resolvePolicy({ org: 'gates: 3   # locked' }).ok).toBe(false)
+})
 
 test('examples and nested lines cannot become policy; unknown keys remain inert extensions', () => {
   const layer = parsePolicy('```md\nstats: off\n```\n  stats: off\nstats: on\ncustom: keep me', 'repo')

@@ -119,7 +119,7 @@ async function machine(name: string) {
   const origin = join(home, 'origin.git')
   await mkdir(join(room, 'groups/dev'), { recursive: true })
   await writeFile(join(room, 'org.md'), 'tests: required   # locked\nstats-people: off\n')
-  await writeFile(join(room, 'groups/dev/group.md'), 'merge: rebase\ngates: 3\n')
+  await writeFile(join(room, 'groups/dev/group.md'), 'merge: rebase\nchangelog: changesets\n')
   git(['init', '-q', '-b', 'main'], room)
   git(['remote', 'add', 'origin', origin], room)
   git(['add', '.'], room); git(['commit', '-qm', 'seed'], room)
@@ -139,7 +139,7 @@ test('a repo with no lines of its own inherits a complete profile from the verif
     expect(profile.ok).toBe(true)
     expect(profile.stale).toBe(false)
     expect(profile.sha).toBe(m.sha)
-    expect(profile.values).toMatchObject({ tests: 'required', merge: 'rebase', gates: 3 })
+    expect(profile.values).toMatchObject({ tests: 'required', merge: 'rebase', changelog: 'changesets' })
     expect(profile.locked).toEqual(['tests'])
     expect(profile.sources.merge).toBe('group')
     // The org's locked line stands whatever the repo says, and the repo is told why.

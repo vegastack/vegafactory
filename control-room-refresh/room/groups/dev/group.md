@@ -4,10 +4,9 @@ One default for every knob a repo's `.vegastack/dev.md` can hold, so a repo that
 
 ## Knobs
 
-gates: 3                    # 3 = approve/PR/merge · 2 = approve + one "ship it" · 1 = direct-to-main
 merge: rebase               # rebase | squash | merge
 branch: <type>/<slug>       # type: feat | fix | docs | chore | refactor
-labels: waiting-on-operator planning queued in-progress ready-to-ship risky research small medium large epic
+labels: waiting-on-operator planning queued in-progress ready-to-ship small medium large research risky epic
 tests: required             # required | logic-only | best-effort | none
 changelog: changesets       # changesets | keep-a-changelog | pubspec+changelog | none
 chronicle: on               # on | off

@@ -22,7 +22,7 @@ beforeAll(async () => {
   source = join(root, 'source'); origin = join(root, 'origin.git')
   await mkdir(join(source, 'groups/dev'), { recursive: true })
   await writeFile(join(source, 'org.md'), 'stats: on\ntests: required   # locked\n')
-  await writeFile(join(source, 'groups/dev/group.md'), 'merge: rebase\ngates: 3\n')
+  await writeFile(join(source, 'groups/dev/group.md'), 'merge: rebase\nchangelog: changesets\n')
   await writeFile(join(source, 'repos.md'), '| repo | group | board | owner |\n|---|---|---|---|\n| acme/app | dev | none | owner |\n')
   git(['init', '-b', 'main'], source); git(['add', '.'], source); git(['commit', '-m', 'seed'], source)
   git(['clone', '--bare', source, origin], root)
@@ -51,7 +51,7 @@ test('the copy lands where every skill reads it, and a repo with no lines gets t
   expect(await readFile(join(first.path, 'org.md'), 'utf8')).toContain('stats: on')
   const profile = loadProfile({ home: f.home, devMd: DEV_MD, now: NOW })
   expect(profile.blocks).toEqual([])
-  expect(profile.values).toMatchObject({ tests: 'required', merge: 'rebase', gates: 3, stats: 'on' })
+  expect(profile.values).toMatchObject({ tests: 'required', merge: 'rebase', changelog: 'changesets', stats: 'on' })
   expect(profile.locked).toEqual(['tests'])
   expect(loadProfile({ home: f.home, devMd: DEV_MD + 'tests: none\n', now: NOW }).ok).toBe(false)
 })
@@ -132,7 +132,7 @@ test('a settings failure after the checkout puts the copy back', async () => {
   expect(first.ok).toBe(true)
   const saved = await readFile(join(f.settings, 'factory.json'), 'utf8')
 
-  await writeFile(join(source, 'groups/dev/group.md'), 'merge: squash\ngates: 3\n')
+  await writeFile(join(source, 'groups/dev/group.md'), 'merge: squash\nchangelog: changesets\n')
   git(['add', '.'], source); git(['commit', '-m', 'moved on'], source); git(['push', origin, 'main'], source)
   try {
     await mkdir(join(f.settings, 'factory.json.guard'))
@@ -221,7 +221,7 @@ test('a new commit in the room arrives on the next refresh', async () => {
   const f = await fixture('moving')
   const first = await syncControlRoom({ ...f, now: NOW })
   expect(first.ok).toBe(true)
-  await writeFile(join(source, 'groups/dev/group.md'), 'merge: squash\ngates: 3\n')
+  await writeFile(join(source, 'groups/dev/group.md'), 'merge: squash\nchangelog: changesets\n')
   git(['add', '.'], source); git(['commit', '-m', 'group change'], source); git(['push', origin, 'main'], source)
   try {
     const next = await syncControlRoom({ ...f, config: first.config, now: NOW + 10 * 60_000 })

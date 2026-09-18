@@ -1,6 +1,6 @@
 # Chronicle — vegastack/billing
 
-The project's story, newest first: what got built, why, and how it went — for the operator's future recall. Format home: the dev-chronicle skill.
+The project's story, newest first: what got built, why, and how it went — for the operator's future recall. Format home: the dev-status skill.
 
 ## 28-08-2026 — Invoices can be filtered by status ([#22](https://github.com/vegastack/billing/issues/22))
 
