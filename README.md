@@ -5,7 +5,7 @@
 [![Node](https://img.shields.io/node/v/@vegastack/vegafactory?logo=node.js&logoColor=white)](https://nodejs.org)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-VegaFactory is an issue-driven development workflow for coding agents, and the tool that runs it. GitHub issues hold the work, agents build in their own worktrees, the other tool reviews the diff, and every gate that matters is held by a person.
+VegaFactory is a nine-stage, issue-driven development workflow for coding agents, and the tool that runs it. GitHub issues hold the work, agents build in their own worktrees, the other tool reviews the diff, and every gate that matters is held by a person.
 
 It ships as Agent Skills for [Claude Code](https://code.claude.com) and [Codex](https://developers.openai.com/codex) plus one command-line tool, `@vegastack/vegafactory`, which carries the integrity-checked skill bundle.
 
@@ -128,7 +128,15 @@ Tools that work on agent skills themselves: scanning them for vulnerabilities, v
 
 ## Installing a few, or upgrading
 
-`init` installs everything. To pick, `add`, `update`, `verify` and `remove` each take **exactly one** selector — a skill name, `--group <group>`, or `--all` (which skips the repo-only skills):
+`init` installs everything. To pick, `add`, `update`, `verify` and `remove` each take **exactly one** selector; combining two is an error, not a merge.
+
+| Selector | Installs |
+|---|---|
+| `--group dev` | The nine dev-workflow skills |
+| `--all` | Every bundled skill except the repo-only ones |
+| `<skill-name>` | That one skill, repo-only ones included |
+
+A `--group` or `--all` install is one transaction: every skill is staged before any is committed, so if one fails, none are installed.
 
 ```sh
 npx @vegastack/vegafactory@latest skills add --group dev --global --force

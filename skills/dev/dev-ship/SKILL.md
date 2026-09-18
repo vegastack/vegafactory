@@ -5,7 +5,7 @@ description: Land finished work, each step only on the operator's explicit word.
 
 # dev-ship
 
-Act on the operator's word only. Per issue the operator gives two words: an ack on the brief or plan (it authorized building) and **"ship it"**, which carries that issue's landing — PR, merge queue, merge, cleanup. Two words per issue, not one per step. Not the release PR, though: it belongs to no issue, so its merge still asks — while the tag it leads to is `vegafactory ship release <n>`, which re-reads that issue's word itself ([runbook](references/runbook.md)).
+Act on the operator's word only. Per issue the operator gives two words: an ack on the brief or plan (it authorized building) and **"ship it"**, which carries that issue's landing — PR, merge queue, merge, cleanup. Two words per issue, not one per step. Not the release PR: it belongs to no issue, so its merge asks; its tag is `vegafactory ship release <n>`, which re-reads that word itself ([runbook](references/runbook.md)).
 
 **"Ship it" is spent only by the operator's own words** — passing checks, PR permissions and the calendar say nothing about consent. Record the word before acting on it: `vegafactory issue ack <n> --stage ship --by <login> --quote "<their words>"`. It binds to the current brief and plan and counts only when it comes after the latest evidence comment, so new evidence needs a new "ship it". Words asking only for a PR ("make the PR") authorize the PR and nothing more.
 
