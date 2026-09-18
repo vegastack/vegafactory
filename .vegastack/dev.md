@@ -15,7 +15,7 @@ ui-evidence: none           # no UI in this repo
 tests: required             # scripts' deterministic branches; prose quality bar is the behavioral eval
 skillspector-update: auto   # off | notify | auto — the CLI self-installs and self-upgrades through whatever channel holds it (uv here); a failed update falls back to the installed copy
 skill-scan: packages/cli/skill   # the BUILT bundle — authored skills/ carries unpackaged tests/ fixtures that are deliberately adversarial and score higher than anything shipped; suppressions in .vegastack/skillspector-baseline.json
-merge: rebase               # meaningful commits, linear history
+merge: squash               # one commit per issue on main, matching the branch protection
 branch: <type>/<slug>       # type: feat | fix | docs | chore | refactor — the only place this list lives
 worktree-include: .claude/settings.json      # the Claude hook wiring is gitignored, so each worktree needs its own copy; .codex/hooks.json is tracked and needs none
 worktree-retention: 14d     # a parked worktree survives this long with no session, measured from the later of its last commit and its last ledger edit
