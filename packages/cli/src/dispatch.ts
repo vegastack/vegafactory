@@ -945,7 +945,18 @@ export interface PollDeps {
 // The steps this machine has started. It lives across polls, so the next pass two minutes later
 // sees them, keeps their slots and can still act on the rest of the board. A finished run stays in
 // the map until the next pass sweeps it, so nothing can disappear between starting and being read.
-export interface Inflight { candidate: Candidate; started: number; settled: boolean; done: Promise<RunRecord>; stop: () => void }
+export interface Interrupt { reason: string; action: Action; trigger: number | null }
+
+export interface Inflight {
+  candidate: Candidate
+  started: number
+  settled: boolean
+  done: Promise<RunRecord>
+  stop: () => void
+  // Set before the run is stopped, so the record and the hand-back say why it ended rather than
+  // reporting the kill as a failure of the work.
+  interrupt: Interrupt | null
+}
 export const drain = (inflight: Map<number, Inflight>) => Promise.all([...inflight.values()].map((run) => run.done))
 
 // One pass over the board: read what changed, decide, and start what is safe to start now. The
@@ -993,9 +1004,25 @@ export async function poll(deps: PollDeps, inflight: Map<number, Inflight> = new
     }
   }
 
+  // An operator's stop for a run that is already going cannot wait for a slot: scheduling would
+  // skip the issue because it is running, and no other machine may release the claim this one
+  // holds. So it is handled first — the run is ended, and its own settle hands the issue back.
+  const interrupted: number[] = []
+  for (const item of wanted) {
+    const run = inflight.get(item.candidate.number)
+    if (item.decision.action !== 'stop' || !run || run.settled) continue
+    deps.out(`#${item.candidate.number}: ${item.decision.reason} — stopping the ${run.candidate.action} run`)
+    run.interrupt = { reason: item.decision.reason, action: 'stop', trigger: item.decision.trigger }
+    run.stop()
+    await run.done
+    inflight.delete(item.candidate.number)
+    interrupted.push(item.candidate.number)
+  }
+
   const started: Candidate[] = []
-  for (const candidate of schedule(wanted.map((item) => item.candidate), [...inflight.values()].map((run) => run.candidate))) {
-    const item = wanted.find((entry) => entry.candidate.number === candidate.number)!
+  const queue = wanted.filter((item) => !interrupted.includes(item.candidate.number))
+  for (const candidate of schedule(queue.map((item) => item.candidate), [...inflight.values()].map((run) => run.candidate))) {
+    const item = queue.find((entry) => entry.candidate.number === candidate.number)!
     const at = now()
     // Taken before the slot, so a second machine on the same board sees the work is taken. Losing
     // the race is not a failure: the issue is simply someone else's this pass. A stop takes no
@@ -1008,7 +1035,7 @@ export async function poll(deps: PollDeps, inflight: Map<number, Inflight> = new
       deps.out(`#${candidate.number}: not started — ${taken.reason}`)
       continue
     }
-    const run: Inflight = { candidate, started: at, settled: false, stop: () => {}, done: Promise.resolve() as unknown as Promise<RunRecord> }
+    const run: Inflight = { candidate, started: at, settled: false, stop: () => {}, interrupt: null, done: Promise.resolve() as unknown as Promise<RunRecord> }
     run.done = runOne(deps, candidate, item, at, taken.owner, run).then((record) => { run.settled = true; return record })
     inflight.set(candidate.number, run)
     started.push(candidate)
@@ -1091,8 +1118,11 @@ async function runOne(deps: PollDeps, candidate: Candidate, item: { key: string;
   if (held && !HANDS_OVER.includes(candidate.action)) {
     try { release(claimCtx, held, APP_ACTOR, `the ${candidate.action} run finished (${result.outcome})`) } catch { /* the record still lands */ }
   }
+  // A run this machine stopped on purpose reports the reason it was stopped, not the exit code
+  // that killing it produced.
+  if (run.interrupt) result = { outcome: 'stopped', note: run.interrupt.reason, ms: result.ms }
   try {
-    return settle(deps, candidate, item, at, result)
+    return settle(deps, candidate, item, at, result, run.interrupt, candidate.action === 'stop')
   } catch (error) {
     // The record could not be written down. Say so rather than dying, and let the next pass decide
     // again: without a saved outcome this trigger simply looks unacted-on.
@@ -1103,9 +1133,14 @@ async function runOne(deps: PollDeps, candidate: Candidate, item: { key: string;
 
 // What a finished step leaves behind: one bounded record, and what the next pass reads to know
 // this trigger is spent. `acted` is re-read here, because another step may have settled meanwhile.
-function settle(deps: PollDeps, candidate: Candidate, item: { key: string; decision: Decision }, at: number, result: StepResult): RunRecord {
+function settle(deps: PollDeps, candidate: Candidate, item: { key: string; decision: Decision }, at: number, result: StepResult,
+  interrupt: Interrupt | null = null, alreadyHandedBack = false): RunRecord {
+  // An interrupted run is recorded as what interrupted it: an operator's stop is a stop, and the
+  // trigger it consumes is that operator's comment, not the run's own.
+  const action = interrupt?.action ?? candidate.action
+  const trigger = interrupt ? interrupt.trigger : item.decision.trigger
   const record: RunRecord = {
-    at: new Date(at).toISOString(), issue: candidate.number, action: candidate.action,
+    at: new Date(at).toISOString(), issue: candidate.number, action,
     outcome: result.outcome, ms: result.ms, machine: deps.machine, note: tail(result.note),
   }
   recordRun(deps.root, record)
@@ -1114,18 +1149,21 @@ function settle(deps: PollDeps, candidate: Candidate, item: { key: string; decis
   updateActed(deps.root, (acted) => {
     const previous = acted[item.key]
     const failed = result.outcome === 'failed' || result.outcome === 'killed'
-    const failures = failed ? (previous && previous.action === candidate.action ? previous.failures : 0) + 1 : 0
+    const failures = failed ? (previous && previous.action === action ? previous.failures : 0) + 1 : 0
     // The wait runs from the end of the run, not its start: a step that failed after twenty
     // minutes would otherwise be due again the moment it stopped.
     retryAt = failed ? ended + RETRY_MS * 2 ** (failures - 1) : result.outcome === 'limit' ? resetAt(result.note, ended) : null
-    acted[item.key] = { at, action: candidate.action, outcome: result.outcome, trigger: item.decision.trigger, failures, retryAt }
+    acted[item.key] = { at, action, outcome: result.outcome, trigger, failures, retryAt }
   })
   // Every run that did not finish hands the issue back the same way: the work is committed and
   // pushed, the claim released, the reason posted, and the state label put back where the run
-  // found it — a failure that left the issue `in-progress` with nobody on it is a dead end.
-  if (result.outcome !== 'done' && result.outcome !== 'stopped') {
-    const when = retryAt ? `, and tries again after ${new Date(retryAt).toISOString()}` : ' and will not try again without a person'
-    const why = result.outcome === 'limit' ? 'the subscription limit was reached' : `the ${candidate.action} run ${result.outcome === 'killed' ? 'ran past its time limit' : 'failed'}`
+  // found it — a failure that left the issue `in-progress` with nobody on it is a dead end. It
+  // happens exactly once: a `stop` step has already done it, and an interrupted run does it here.
+  if (result.outcome !== 'done' && !alreadyHandedBack) {
+    const when = retryAt ? `, and tries again after ${new Date(retryAt).toISOString()}` : ''
+    const why = interrupt ? interrupt.reason
+      : result.outcome === 'limit' ? 'the subscription limit was reached'
+        : `the ${candidate.action} run ${result.outcome === 'killed' ? 'ran past its time limit' : 'failed'}`
     deps.standDown(candidate.number, `${why}; this machine has saved and released the issue${when}`, candidate.from)
   }
   deps.out(`#${record.issue} ${record.action} → ${record.outcome}${record.note ? ` (${record.note})` : ''}`)
@@ -1355,7 +1393,11 @@ export interface CliDeps {
   cli?: string[]
 }
 
-const wait = (ms: number) => new Promise<void>((resolve) => { setTimeout(resolve, ms) })
+const wait = (ms: number) => new Promise<void>((resolve) => {
+  const timer = setTimeout(resolve, ms)
+  // A shutdown must not be held up by a two-minute sleep nobody is waiting for any more.
+  timer.unref?.()
+})
 
 const appIdOf = (env: NodeJS.ProcessEnv) => env.VEGAFACTORY_APP_ID?.trim() || APP_ID
 
@@ -1517,16 +1559,32 @@ export async function runDispatch(argv: string[], deps: CliDeps = {}): Promise<n
       const shutDown = async (why: string) => {
         for (const [number, run] of inflight) {
           if (run.settled) continue
-          run.stop()
           out(`#${number} ${run.candidate.action} stopped: ${why}`)
-          try { out(pollDeps.standDown(number, `${why}, so this machine stopped the run`, run.candidate.from)) } catch (error) { out(`#${number} could not be handed back: ${(error as Error).message}`) }
+          run.interrupt = { reason: why, action: run.candidate.action, trigger: null }
+          run.stop()
         }
+        // Every process group is ended and waited for before anything is written: each run's own
+        // settle saves its work, releases its claim and puts its issue back, exactly once.
         await drain(inflight)
       }
+      // A signal wakes the loop rather than waiting for the current sleep to run out: `launchctl
+      // bootout` and Ctrl-C both mean now, and two minutes of agents writing to GitHub after the
+      // operator asked them to stop is not stopping.
       let signalled: string | null = null
-      const onSignal = (signal: string) => { signalled = signal }
+      let wake: (() => void) | null = null
+      const onSignal = (signal: string) => {
+        signalled ??= signal
+        wake?.()
+      }
       process.once('SIGINT', () => onSignal('SIGINT'))
       process.once('SIGTERM', () => onSignal('SIGTERM'))
+      const untilNextPass = () => new Promise<void>((resolve) => {
+        // A signal that arrived while the pass was still running has nothing to wake yet, so the
+        // wait checks for it rather than starting and never being told.
+        if (signalled) { resolve(); return }
+        wake = () => { wake = null; resolve() }
+        void (deps.sleep ?? wait)(POLL_MS).then(() => { wake = null; resolve() })
+      })
       for (;;) {
         if (signalled) {
           await shutDown(`this machine was asked to stop (${signalled})`)
@@ -1555,7 +1613,7 @@ export async function runDispatch(argv: string[], deps: CliDeps = {}): Promise<n
           releaseRunLock(root, runId)
           return 0
         }
-        await (deps.sleep ?? wait)(POLL_MS)
+        await untilNextPass()
       }
     }
     default:

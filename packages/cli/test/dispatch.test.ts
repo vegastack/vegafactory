@@ -643,6 +643,41 @@ describe('one poll over the board', () => {
     expect(notes.join('\n')).toContain('not started — lost the race to builder:dispatch-1')
   })
 
+  test('an operator stop reaches a run that is already going', async () => {
+    gh.addIssue({ number: 1, labels: ['queued', 'small'] })
+    const inflight = new Map<number, Inflight>()
+    let releaseChild = () => {}
+    const blocked = new Promise<void>((resolve) => { releaseChild = resolve })
+    let stoppedPid = 0
+    const slow: RunStep = async (_step, context) => {
+      context.onStart?.(7777, 'claude')
+      await blocked
+      return { outcome: 'failed', note: 'killed', ms: 1 }
+    }
+    const given: string[] = []
+    const shared = {
+      runStep: slow,
+      stop: (pid: number) => { stoppedPid = pid; releaseChild(); return true },
+      start: () => 'Fri Sep 18 09:00:00 2026',
+      standDown: (number: number, reason: string) => { given.push(`${number}:${reason}`); return reason },
+    }
+    // The run is going, and the operator says stop.
+    expect(await poll(deps(shared), inflight)).toHaveLength(1)
+    gh.addComment(1, 'stop', 'mk')
+    const notes: string[] = []
+    await poll(deps({ ...shared, out: (text: string) => notes.push(text) }), inflight)
+    // The run's process group was ended, waited for, and the issue handed back with the operator's
+    // own reason — a scheduler that skipped the issue because it was running would never get here.
+    expect(stoppedPid).toBe(7777)
+    expect(notes.join('\n')).toContain('stopping the implement run')
+    expect(given.join('\n')).toContain('1:@mk said stop')
+    expect(inflight.size).toBe(0)
+    // The stop is spent, so the next pass does not stop it again.
+    const acted = readActed(root)['o/r#1']!
+    expect(acted).toMatchObject({ action: 'stop', outcome: 'stopped' })
+    expect(readRuns(root).at(-1)).toMatchObject({ action: 'stop', outcome: 'stopped' })
+  })
+
   test('an issue with a fresh claim is skipped', async () => {
     gh.addIssue({ number: 1, labels: ['queued', 'small'] })
     const body = claimBody({ owner: 'laptop:1-x', kind: 'session', harness: 'claude', model: 'opus' })
@@ -1064,9 +1099,46 @@ describe('the command', () => {
     expect(code).toBe(2)
     expect(stopped).toBe(4242)
     expect(lines.join('\n')).toContain('#1 plan stopped: this machine is no longer listed')
-    // The run's work is saved and its claim released rather than left behind.
-    expect(lines.join('\n')).toContain('this machine is no longer listed, so this machine stopped the run')
+    // The run is recorded as stopped for that reason, not as a failure of the work, and the issue
+    // is handed back once — by the run's own settle, after its process group has been waited for.
+    expect(lines.join('\n')).toContain('#1 plan → stopped (this machine is no longer listed)')
+    const handbacks = gh.issues.get(1)!.comments.filter((comment) => comment.body.includes('type=handback'))
+    expect(handbacks).toHaveLength(1)
+    expect(handbacks[0]!.body).toContain('this machine is no longer listed')
     void given
+  })
+
+  test('a signal during a blocked run stops it now, not after the next sleep', async () => {
+    controlRoomClone(`| machine | operator | repos |\n|---|---|---|\n| ${HOST} | mk | o/r |\n`)
+    gh.addIssue({ number: 1, labels: ['planning', 'medium'] })
+    const lines: string[] = []
+    let stoppedPid = 0
+    let releaseChild = () => {}
+    const blocked = new Promise<void>((resolve) => { releaseChild = resolve })
+    let sleepStarted = 0
+    const code = await runDispatch(['run'], {
+      cwd: root, home, host: HOST, env: {}, out: (text) => lines.push(text), runner: gh.runner, now: () => gh.clock,
+      runStep: (async (_step, context) => {
+        context.onStart?.(8888, 'claude')
+        // The signal arrives while the run is blocked and the loop is asleep.
+        process.emit('SIGTERM' as NodeJS.Signals)
+        await blocked
+        return { outcome: 'failed' as const, note: 'killed', ms: 1 }
+      }) as RunStep,
+      stop: (pid: number) => { stoppedPid = pid; releaseChild(); return true },
+      start: () => 'Fri Sep 18 09:00:00 2026',
+      // A sleep that never finishes: only the signal can end the wait.
+      sleep: () => { sleepStarted++; return new Promise<void>(() => {}) },
+    })
+    // The injected sleep never resolves, so returning at all proves the shutdown did not wait for
+    // it — whether the signal arrived before the wait was installed or during it.
+    expect(code).toBe(0)
+    expect(sleepStarted).toBeLessThanOrEqual(1)
+    expect(stoppedPid).toBe(8888)
+    expect(lines.join('\n')).toContain('#1 plan stopped: this machine was asked to stop (SIGTERM)')
+    // Stopped, waited for, and handed back once — before the command returned.
+    expect(gh.issues.get(1)!.comments.filter((comment) => comment.body.includes('type=handback'))).toHaveLength(1)
+    expect(existsSync(runLockPath(root))).toBe(false)
   })
 
   test('disable stops the runs the service had started, and names what they held', async () => {
