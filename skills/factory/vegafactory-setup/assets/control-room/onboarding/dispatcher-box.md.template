@@ -1,15 +1,15 @@
 # Provisioning the dispatcher box for {{org}}/{{repo}}
 
-The always-on Mac mini runs the GitHub Actions runner for trusted jobs (pull request CI runs on GitHub-hosted runners). A second account is kept for the dispatcher, which is being rebuilt (#218). Every step below is a human's own action on the box or on the org's settings; the skill positions the operator, it never reaches for the credential.
+The always-on Mac mini runs the GitHub Actions runner for trusted jobs (pull request CI runs on GitHub-hosted runners), and a second account runs the dispatcher. Every step below is a human's own action on the box or on the org's settings; the skill positions the operator, it never reaches for the credential.
 
 ## Accounts
 
 Two macOS accounts, neither an admin of the other:
 
 - `{{runner-user}}` — runs the Actions runner and nothing else.
-- `{{dispatcher-user}}` — owns the `gh`, Claude, and Codex credentials, and will run the dispatcher.
+- `{{dispatcher-user}}` — owns the `gh`, Claude, and Codex credentials, the GitHub App key, and the dispatcher.
 
-The split is the whole point: a CI job runs as `{{runner-user}}` and so **cannot read** the tokens in `{{dispatcher-user}}`'s home — a workflow edited in a pull request gets a repository token and no more. The GitHub App private key is never on this box; it lives in org settings as the secret `VEGAFACTORY_APP_PRIVATE_KEY`.
+The split is the whole point: a CI job runs as `{{runner-user}}` and so **cannot read** the tokens in `{{dispatcher-user}}`'s home — a workflow edited in a pull request gets a repository token and no more. The App's private key is one of those files: `~/.vegastack/vegafactory-app.pem` in `{{dispatcher-user}}`'s home, `chmod 600`, the same PEM as the org secret `VEGAFACTORY_APP_PRIVATE_KEY` and readable by nobody else on this box.
 
 ## Toolchain
 
@@ -60,11 +60,20 @@ tar xzf runner.tar.gz && rm runner.tar.gz
 ./svc.sh install && ./svc.sh start && ./svc.sh status
 ```
 
+## Turn the dispatcher on
+
+As `{{dispatcher-user}}`, once that account is signed in to `gh`, Claude Code and Codex, and the App key is in place:
+
+1. Add this machine to the control room's `dispatchers.md` — one row, `| {{machine}} | {{operator}} | {{org}}/{{repo}} |` — in a control-room PR. Until that row is merged and `vegafactory sync` has pulled it, every dispatch verb refuses.
+2. In the repository checkout, `vegafactory dispatch enable`. It checks the row, the harness hooks, a real `claude -p` and `codex exec` answer and the App key before it installs the LaunchAgent; a FAIL line names what to fix and nothing is installed.
+3. `vegafactory dispatch status` shows the board and this machine's runs. `vegafactory dispatch disable` takes the unit away again, and removing the row stands the machine down without touching it.
+
 ## Verify
 
 ```sh
 gh api orgs/{{org}}/actions/runner-groups/<GROUP_ID>/runners -q '.runners[] | "\(.name) \(.status)"'
 ps -axo user,command | grep '[R]unner.Listener'
+launchctl print gui/$(id -u {{dispatcher-user}})/com.vegastack.vegafactory.dispatch | head -3
 ```
 
 The first prints `{{runner-name}} online` — the org endpoint is the one that lists a group's runners, while `repos/{{org}}/{{repo}}/actions/runners` lists repository-level runners. The second prints `{{runner-user}}` and never `{{dispatcher-user}}`.

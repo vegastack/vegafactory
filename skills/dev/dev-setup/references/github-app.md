@@ -4,7 +4,9 @@ The one identity every automated write uses. Facts checked 03-09-2026 against th
 
 ## What the App is for
 
-Humans own issues. A person approves a brief, a person says "ship it", and a person's name is on every state flip. The App is the identity for the writes no person is sitting behind: the board mirror that sets a project Status when a label changes, and an Actions job that edits a label. It is **not** the dispatcher's identity — the dispatcher runs headless sessions as the operator's own `gh` login, and giving it the App's identity would hide which human a run belongs to.
+Humans own issues. A person approves a brief, a person says "ship it", and a person's name is on every state flip. The App is the identity for the writes no person is sitting behind: the board mirror that sets a project Status when a label changes, an Actions job that edits a label, and a dispatcher machine working the board with nobody at the keyboard. A dispatcher's labels, status comments and claim releases go out as the App, while the agent runs it starts stay on the operator's own subscription — so the machine's writes are attributable to the factory and its reasoning is still paid for by a person.
+
+What the App may never do is stand in for a person's own words. An ack, a "ship it" and a review comment count only from a human with write access; a comment from `vegafactory[bot]` is trusted as a claim holder and never as approval.
 
 The alternative worth naming is a credential belonging to a person: it stands for their whole account, outlives the job that used it, and dies when they leave the org. The App stands for a named permission set instead, its tokens live an hour, and uninstalling it revokes every one of them at once.
 
@@ -56,7 +58,9 @@ The operator's own browser flow. `gh` has no create-app command and the manifest
 | `VEGAFACTORY_APP_ID` | organization variable | the numeric App ID |
 | `VEGAFACTORY_APP_PRIVATE_KEY` | organization secret | the PEM, pasted whole |
 
-The private key lives in exactly one place for its whole life: this organization secret. Never on a workstation, never on the dispatcher box, never in a control-room file, never in an issue. Only the key's holder can mint installation tokens.
+The private key lives in the organization secret, and — only on a machine listed in the control room's `dispatchers.md` — in one file on that machine. Never on a workstation, never in a control-room file, never in an issue, never printed. Only the key's holder can mint installation tokens.
+
+On a dispatcher machine the file is `~/.vegastack/vegafactory-app.pem`, owned by the dispatcher account and `chmod 600`, so a CI job running as the runner account cannot read it. `VEGAFACTORY_APP_PRIVATE_KEY_FILE` moves it; `VEGAFACTORY_APP_ID` names another org's App. `vegafactory dispatch` mints an hour-long installation token from it, narrowed to the one repository, keeps it in memory and passes it to `gh` in that child's environment only. A missing key refuses the run with the path to fix — it never falls back to a person's token.
 
 Control-room files record these **names**. The values live in GitHub organization settings and nowhere a repository can read them.
 
