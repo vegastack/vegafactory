@@ -72,11 +72,11 @@ const DEFAULT_BRANCH_TYPES = ['feat', 'fix', 'docs', 'chore', 'refactor'];
 // A leading `<word>:` is the title's prefix whether or not the project's list
 // names it. Only a listed one becomes the type; either way it leaves the slug,
 // because a slug beginning `research-` reads like a type that lost its slash.
-export function titleParts(title, devMd = null) {
+export function titleParts(title, types = DEFAULT_BRANCH_TYPES) {
   const text = String(title ?? '');
   const [prefix, ...rest] = text.split(':');
   const hasPrefix = rest.length > 0 && /^[a-z][a-z0-9-]*$/i.test(prefix.trim());
-  const type = hasPrefix && parseBranchTypes(devMd).includes(prefix.trim()) ? prefix.trim() : null;
+  const type = hasPrefix && types.includes(prefix.trim()) ? prefix.trim() : null;
   return { type, slug: slugify(hasPrefix ? rest.join(':') : text) };
 }
 
@@ -218,7 +218,9 @@ export function parseRetentionKnob(devMd) {
 // so a guard never widens the list by failing to read it.
 export function parseBranchTypes(devMd) {
   const line = new RegExp('^branch:[ \\t]*(.*)$', 'm').exec(String(devMd ?? ''))?.[1] ?? '';
-  const listed = /#[ \t]*type:[ \t]*([^—\-\n]*)/.exec(line)?.[1] ?? '';
+  // Stop at the prose that follows the list — an em-dash, or a hyphen with
+  // space on both sides. Never at a bare hyphen: `hot-fix` is one type name.
+  const listed = (/#[ \t]*type:[ \t]*(.*)$/.exec(line)?.[1] ?? '').split(/\s—|\s-\s/)[0];
   const types = listed.split('|').map((one) => one.trim()).filter(Boolean);
   return types.length ? types : [...DEFAULT_BRANCH_TYPES];
 }
@@ -368,7 +370,7 @@ function prepareCheckout({ repoRoot, path, devMd, home, write, actions, warns, b
 
 // Create the checkout for a branch: a fresh worktree cut from origin/<base>. Every issue —
 // sub-issues of an epic included — gets its own branch, worktree and PR.
-export function createWorktree({ repoRoot, issue, slug, type, base, devMd, home, write = false }) {
+export function createWorktree({ repoRoot, issue, slug, type, title, base, devMd, home, write = false }) {
   const blocks = [];
   const warns = [];
   const actions = [];
@@ -377,8 +379,11 @@ export function createWorktree({ repoRoot, issue, slug, type, base, devMd, home,
   // the silent answer for a title that named no type; naming the list instead
   // tells the caller what this project actually has.
   const types = parseBranchTypes(devMd);
-  if (!type) return { blocks: [at('#' + issue, 'the title names no branch type — pass --type <' + types.join('|') + '>')], warns, actions };
-  if (!types.includes(type)) return { blocks: [at(type, 'is not a branch type in this project — dev.md lists ' + types.join(', '))], warns, actions };
+  if (!type) {
+    const named = title ? '"' + title + '"' : '#' + issue;
+    return { blocks: [at('branch type', named + ' names no type — pass --type <one of: ' + types.join(', ') + '>')], warns, actions };
+  }
+  if (!types.includes(type)) return { blocks: [at('branch type', type + ' is not one this project has — dev.md lists ' + types.join(', '))], warns, actions };
   const branch = branchName(type, issue, slug);
   const name = worktreeName(issue, slug);
 
@@ -945,13 +950,18 @@ function runVerb(verb, flags) {
     return { ...pruned, warns: [...warns, ...pruned.warns] };
   }
   if (verb === 'create' || verb === 'restore') {
-    // No --slug: create reads the issue title (GitHub unreachable blocks, never
-    // guesses), restore reads the branch that already carries the number.
     let named = { type: flags.type || null, slug };
-    if (!slug && issue !== null && verb === 'restore') {
-      const parts = branchPartsForIssue(repoRoot, issue);
-      if (parts.error) return { blocks: [at('#' + issue, parts.error)], warns: [] };
-      named = { type: named.type || parts.type, slug: parts.slug };
+    // Type and slug are resolved independently: --slug says what to call it and
+    // never says which type it is. restore reads the type off the branch that
+    // already carries the number — the branch is the fact it acts on — and
+    // create reads the issue title. Either may still come up empty, and then
+    // createWorktree refuses and names the types rather than guessing `feat`.
+    if (issue !== null && verb === 'restore') {
+      if (!named.type || !slug) {
+        const parts = branchPartsForIssue(repoRoot, issue);
+        if (parts.error) return { blocks: [at('#' + issue, parts.error)], warns: [] };
+        named = { type: named.type || parts.type, slug: slug || parts.slug };
+      }
     } else if (!slug && issue !== null) {
       const repo = repoOf();
       if (!repo) return { blocks: [at('#' + issue, 'no repo known to read the title from — pass --repo, or --slug')], warns: [] };
@@ -961,12 +971,12 @@ function runVerb(verb, flags) {
       } catch (error) {
         return { blocks: [at('#' + issue, 'could not read the issue title (' + error.message + ') — pass --slug')], warns: [] };
       }
-      const parts = titleParts(title, devMd);
+      const parts = titleParts(title, parseBranchTypes(devMd));
       if (!parts.slug) return { blocks: [at('#' + issue, 'the title makes no slug — pass --slug')], warns: [] };
-      named = { type: named.type || parts.type, slug: parts.slug };
+      named = { type: named.type || parts.type, slug: parts.slug, title };
     }
     if (!named.slug) return { blocks: ['--slug is required for ' + verb + ' without --issue'], warns: [] };
-    const options = { ...shared, issue, slug: named.slug, type: named.type };
+    const options = { ...shared, issue, slug: named.slug, type: named.type, title: named.title };
     return verb === 'create' ? createWorktree(options) : restoreWorktree(options);
   }
   return { blocks: [at(verb, 'unknown verb — expected create|restore|remove|list|prune|status')], warns: [] };

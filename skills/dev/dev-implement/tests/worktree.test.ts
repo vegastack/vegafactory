@@ -31,10 +31,13 @@ describe('titleParts', () => {
   test('a colon inside the sentence is not a prefix', () => {
     expect(titleParts('feat: one thing: and another')).toEqual({ type: 'feat', slug: 'one-thing-and-another' })
   })
-  test('the project\'s own list decides, not a frozen one', () => {
-    const devMd = 'branch: <type>/<slug>   # type: feat | spike — the only place this list lives'
-    expect(titleParts('spike: try the thing', devMd)).toEqual({ type: 'spike', slug: 'try-the-thing' })
-    expect(titleParts('chore: tidy up', devMd)).toEqual({ type: null, slug: 'tidy-up' })
+  test('the caller\'s list decides, not a frozen one', () => {
+    const types = ['feat', 'spike']
+    expect(titleParts('spike: try the thing', types)).toEqual({ type: 'spike', slug: 'try-the-thing' })
+    expect(titleParts('chore: tidy up', types)).toEqual({ type: null, slug: 'tidy-up' })
+  })
+  test('a hyphen inside a type name is part of it', () => {
+    expect(titleParts('hot-fix: the urgent one', ['hot-fix'])).toEqual({ type: 'hot-fix', slug: 'the-urgent-one' })
   })
 })
 
@@ -105,6 +108,12 @@ describe('knobs and retention', () => {
   test('the branch: knob is the one home for the type list', () => {
     expect(parseBranchTypes('branch: <type>/<slug>   # type: feat | fix | spike — the only place this list lives'))
       .toEqual(['feat', 'fix', 'spike'])
+  })
+  test('prose after the list is not a type, and a hyphen inside one is', () => {
+    expect(parseBranchTypes('branch: <type>/<slug>   # type: feat | hot-fix — the only place this list lives'))
+      .toEqual(['feat', 'hot-fix'])
+    expect(parseBranchTypes('branch: <type>/<slug>   # type: feat | fix - and nothing else'))
+      .toEqual(['feat', 'fix'])
   })
   test('an unreadable dev.md keeps the five defaults', () => {
     expect(parseBranchTypes(null)).toEqual(['feat', 'fix', 'docs', 'chore', 'refactor'])

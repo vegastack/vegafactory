@@ -27,11 +27,17 @@ describe('createWorktree', () => {
     expect(r.blocks.join(' ')).toContain('feat, fix, docs, chore, refactor')
     expect(existsSync(join(root, '.vegastack/.worktrees/224-x'))).toBe(false)
   })
-  test('no type at all is refused rather than silently becoming feat', () => {
+  test('no type at all is refused rather than silently becoming feat, and the refusal quotes the title', () => {
+    const root = repo()
+    const r = createWorktree({ repoRoot: root, issue: 224, slug: 'x', type: null, title: 'research: P12 — prove the lean factory works', base: 'main', devMd, home: root, write: false })
+    expect(r.blocks).toEqual(['branch type: "research: P12 — prove the lean factory works" names no type — pass --type <one of: feat, fix, docs, chore, refactor>'])
+    expect(r.branch).toBeUndefined()
+    expect(existsSync(join(root, '.vegastack/.worktrees/224-x'))).toBe(false)
+  })
+  test('with no title to quote, the refusal names the issue', () => {
     const root = repo()
     const r = createWorktree({ repoRoot: root, issue: 224, slug: 'x', type: null, base: 'main', devMd, home: root, write: false })
-    expect(r.blocks.join(' ')).toContain('--type')
-    expect(r.branch).toBeUndefined()
+    expect(r.blocks.join(' ')).toContain('#224 names no type')
   })
   test('the project\'s own list is what counts', () => {
     const root = repo()
@@ -73,6 +79,36 @@ describe('createWorktree', () => {
     symlinkSync(elsewhere, join(root, '.vegastack/.worktrees'))
     const r = createWorktree({ repoRoot: root, issue: 106, slug: 'x', type: 'feat', base: 'main', devMd, home: root, write: true })
     expect(r.blocks[0]).toContain('symlink')
+  })
+})
+
+// The whole verb, as the CLI runs it: naming is composed in runVerb, which is
+// where a type resolved from the wrong place does its damage.
+const script = join(import.meta.dir, '..', 'scripts', 'worktree.mjs')
+const runScript = (root: string, ...args: string[]) => {
+  try {
+    return { code: 0, out: execFileSync('node', [script, ...args, '--repo-root', root, '--json'], { cwd: root, encoding: 'utf8' }) }
+  } catch (error) {
+    const failure = error as { status: number; stdout: string }
+    return { code: failure.status, out: failure.stdout }
+  }
+}
+
+describe('the create and restore verbs resolve type and slug independently', () => {
+  test('restore with --slug still takes the type from the branch, not from a default', () => {
+    const root = repo()
+    const created = createWorktree({ repoRoot: root, issue: 106, slug: 'x', type: 'fix', base: 'main', devMd, home: root, write: true })
+    expect(created.branch).toBe('fix/106-x')
+    git(root, 'worktree', 'remove', '--force', created.path)
+    const r = runScript(root, 'restore', '--issue', '106', '--slug', 'x', '--write')
+    expect(r.code).toBe(0)
+    expect(JSON.parse(r.out).branch).toBe('fix/106-x')
+  })
+  test('create with --slug and no type refuses instead of inventing one', () => {
+    const root = repo()
+    const r = runScript(root, 'create', '--issue', '224', '--slug', 'x')
+    expect(r.code).toBe(2)
+    expect(JSON.parse(r.out).blocks.join(' ')).toContain('names no type')
   })
 })
 
