@@ -337,18 +337,28 @@ export function harnessAnswers(run: Probe): Check[] {
   return checks
 }
 
-// Where a dispatched run's work would go. Its Git has no credential helper — the App token is for
-// the API — so the push URL of origin has to be one an SSH key answers for. An HTTPS URL here
-// means every run would finish its work and then fail to push it.
+// Where a dispatched run's work would go. A run must be able to push code, and the App's token
+// cannot: its Contents is read-only. SSH answers no credential helper at all, so an SSH remote is
+// always fine. An HTTPS remote has to prove that a credential comes back which is not the App's —
+// the run asks for one with the App's token scrubbed from the environment, and this asks the same
+// way, so a machine that is only logged in as the App finds out now rather than after a run's work.
 export function pushPath(root: string, run: Probe): Check {
   const result = run('git', ['-C', root, 'remote', 'get-url', '--push', 'origin'])
   const url = result.stdout.trim().split('\n').at(-1)?.trim() ?? ''
   if (result.code !== 0 || !url) return { name: 'push', ok: false, detail: `cannot read the push URL of origin in ${root}: ${(result.stderr || result.stdout).split('\n').at(-1)?.slice(0, 160) ?? `exit ${result.code}`}` }
-  const ssh = /^(git@|ssh:\/\/)/.test(url)
+  if (/^(git@|ssh:\/\/)/.test(url)) return { name: 'push', ok: true, detail: `origin pushes over SSH (${url})` }
+
+  const host = /^https?:\/\/([^/]+)\//.exec(url)?.[1] ?? 'github.com'
+  // Asked the way a run's Git will ask: with the App's token out of the environment, so what comes
+  // back is the machine's own login rather than the credential that cannot push.
+  const asked = run('env', ['-u', 'GH_TOKEN', '-u', 'GITHUB_TOKEN', 'gh', 'auth', 'status', '--hostname', host])
+  const account = /Logged in to \S+ account (\S+)/.exec(`${asked.stdout}\n${asked.stderr}`)?.[1] ?? ''
+  if (asked.code === 0 && account) {
+    return { name: 'push', ok: true, detail: `origin pushes over HTTPS as ${account}, which is what a run's Git gets once the App's token is scrubbed` }
+  }
   return {
-    name: 'push', ok: ssh,
-    detail: ssh ? `origin pushes over SSH (${url})`
-      : `origin pushes over HTTPS (${url}) — a dispatched run has no Git credential for that, and the App's token cannot write code. Give it an SSH push URL: git remote set-url --push origin git@github.com:<owner>/<repo>.git`,
+    name: 'push', ok: false,
+    detail: `origin pushes over HTTPS (${url}) and this machine has no ${host} login of its own — the App's token cannot write code, so a run would finish its work and fail to push it. Log in with \`gh auth login\`, or give origin an SSH push URL: git remote set-url --push origin git@${host}:<owner>/<repo>.git`,
   }
 }
 
@@ -929,15 +939,24 @@ export function childRunEnvironment(env: NodeJS.ProcessEnv, token: string | null
   if (token) {
     child.GH_TOKEN = token
     child.GITHUB_TOKEN = token
-    // GH_TOKEN is for the API and nothing else. `gh auth git-credential` would hand the same token
-    // to Git, and the App's Contents permission is read-only, so a push carrying it fails — after
-    // the work, which is the worst moment to find out. Git in a dispatched run therefore gets no
-    // credential helper at all and pushes over SSH on the machine's own key, which the `push`
-    // readiness check proves before the dispatcher ever starts.
+    // GH_TOKEN is for the API and nothing else. `gh auth git-credential` prefers it over the
+    // credential the machine is logged in with, and the App's Contents is read-only, so a push
+    // carrying it fails — after the work, which is the worst moment to find out. Git therefore
+    // asks for a credential with the App's token scrubbed out of the environment first, which
+    // hands back the machine's own login instead. HTTPS keeps working exactly as it does for the
+    // person at the keyboard, and an SSH remote ignores all of this because SSH asks no helper.
+    //
+    // This is attribution, not isolation: a child under this account can read that login for
+    // itself whenever it likes. The separate dispatcher account closes that, and nothing here
+    // pretends to (#239).
     for (const name of Object.keys(child)) if (/^GIT_CONFIG_(COUNT|KEY_|VALUE_)/.test(name)) delete child[name]
-    child.GIT_CONFIG_COUNT = '1'
-    child.GIT_CONFIG_KEY_0 = 'credential.helper'
+    child.GIT_CONFIG_COUNT = '2'
+    // An empty value resets the helper list, so the machine's own github.com helper cannot answer
+    // first with the token we are trying to keep away from Git.
+    child.GIT_CONFIG_KEY_0 = 'credential.https://github.com.helper'
     child.GIT_CONFIG_VALUE_0 = ''
+    child.GIT_CONFIG_KEY_1 = 'credential.https://github.com.helper'
+    child.GIT_CONFIG_VALUE_1 = '!env -u GH_TOKEN -u GITHUB_TOKEN gh auth git-credential'
   }
   return child
 }
