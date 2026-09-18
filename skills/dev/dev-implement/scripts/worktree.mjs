@@ -67,12 +67,17 @@ export function branchName(type, issue, slug) {
 // The branch type and slug an issue title carries: a `<type>:` prefix from the
 // branch: knob's list is the type, the rest is the slug. The dispatcher
 // predicts a run's worktree the same way, so a title names one path.
-const BRANCH_TYPES = ['feat', 'fix', 'docs', 'chore', 'refactor'];
+const DEFAULT_BRANCH_TYPES = ['feat', 'fix', 'docs', 'chore', 'refactor'];
 
-export function titleParts(title) {
-  const [prefix, ...rest] = String(title ?? '').split(':');
-  const hasType = rest.length > 0 && BRANCH_TYPES.includes(prefix.trim());
-  return { type: hasType ? prefix.trim() : null, slug: slugify(hasType ? rest.join(':') : title) };
+// A leading `<word>:` is the title's prefix whether or not the project's list
+// names it. Only a listed one becomes the type; either way it leaves the slug,
+// because a slug beginning `research-` reads like a type that lost its slash.
+export function titleParts(title, devMd = null) {
+  const text = String(title ?? '');
+  const [prefix, ...rest] = text.split(':');
+  const hasPrefix = rest.length > 0 && /^[a-z][a-z0-9-]*$/i.test(prefix.trim());
+  const type = hasPrefix && parseBranchTypes(devMd).includes(prefix.trim()) ? prefix.trim() : null;
+  return { type, slug: slugify(hasPrefix ? rest.join(':') : text) };
 }
 
 // The type and slug of the one local branch named for an issue — what restore
@@ -203,6 +208,19 @@ const knobLine = (devMd, knob) => {
 // shorter window than the documented default.
 export function parseRetentionKnob(devMd) {
   return parseDuration(knobLine(devMd, 'worktree-retention')) ?? DEFAULT_RETENTION_MS;
+}
+
+// branch: the type list, which lives in the comment on that knob's own line —
+// `branch: <type>/<slug>   # type: feat | fix | docs | chore | refactor — …`.
+// knobLine() cannot read it, because it drops everything after the `#`, and
+// that is where the list is. A project that edits the knob changes which
+// prefixes name a branch here; an unreadable dev.md keeps the five defaults,
+// so a guard never widens the list by failing to read it.
+export function parseBranchTypes(devMd) {
+  const line = new RegExp('^branch:[ \\t]*(.*)$', 'm').exec(String(devMd ?? ''))?.[1] ?? '';
+  const listed = /#[ \t]*type:[ \t]*([^—\-\n]*)/.exec(line)?.[1] ?? '';
+  const types = listed.split('|').map((one) => one.trim()).filter(Boolean);
+  return types.length ? types : [...DEFAULT_BRANCH_TYPES];
 }
 
 // worktree-include: gitignored files a fresh checkout lacks (.env, .dev.vars).
