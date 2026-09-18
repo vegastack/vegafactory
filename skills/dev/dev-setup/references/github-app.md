@@ -17,10 +17,10 @@ Both, because a dispatched run gets the same hour-long installation token in its
 
 Two consequences worth knowing before the first dispatched run:
 
-- **A dispatched run cannot push with that token.** The App's Contents is read-only by design. The machine's git credential for `origin` has to be its own — an SSH remote, or a credential helper the token does not shadow — or the branch will not push.
+- **A dispatched run pushes over SSH, not with that token.** The App's Contents is read-only by design, and `gh auth git-credential` would otherwise hand the token to git and fail every push. So a run's git is given no credential helper at all — the token stays on the API side — and the machine pushes on its own SSH key. `dispatch enable` refuses while `origin`'s push URL is HTTPS, so the box is fixed before a run rather than after its work.
 - **The token is an hour long and the key is not.** A child running under the same account can still read the key file through the filesystem, whatever its mode. The separate dispatcher account in the control room's dispatcher-box checklist is what closes that.
 
-What the App may never do is stand in for a person's own words. An ack, a "ship it" and a review comment count only from a human with write access; a comment from `vegafactory[bot]` is trusted as a claim holder, and as the author of a work artifact, and never as approval.
+What the App may never do is stand in for a person's own words. It authors the factory's work and is trusted for exactly that: a claim, a release, the status comment, a plan, evidence, a review — each read through the shape it has to have. An ack, an acceptance of what a review left open, a correction and a "ship it" are read only from a human with write access, so a run can produce the work but never the word that approves it.
 
 The alternative worth naming is a credential belonging to a person: it stands for their whole account, outlives the job that used it, and dies when they leave the org. The App stands for a named permission set instead, its tokens live an hour, and uninstalling it revokes every one of them at once.
 

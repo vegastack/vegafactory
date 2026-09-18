@@ -1,7 +1,7 @@
 // The status comment: one per issue, written by the CLI, never by hand. It shows where the
 // issue is now, how long each stage took (from GitHub's label history), and the progress list.
 import { spawnSync } from 'node:child_process'
-import { claimsOf, holderOf, LEDGER_MARKER, trustedHolders, type Claim, type ClaimContext, type Trusted } from './claim.ts'
+import { claimsOf, holderOf, LEDGER_MARKER, trustedFactory, type Claim, type ClaimContext, type Trusted } from './claim.ts'
 import { ghList, ghRequest } from './gh.ts'
 import { readBody, readState, syncIssue, type CacheState, type CommentEntry } from './issue-cache.ts'
 import { STATES, stateOf, type State } from './labels.ts'
@@ -103,7 +103,7 @@ export function writeStatus(ctx: ClaimContext, options: { cwd: string; branch?: 
   saveSpans(dir, spans)
   const branch = options.branch ?? gitLine(options.cwd, ['branch', '--show-current'])
   const lastPush = branch ? gitLine(options.cwd, ['log', '-1', '--format=%cI', `origin/${branch}`]) : null
-  const trusted = trustedHolders(ctx)
+  const trusted = trustedFactory(ctx)
   const text = renderLedger({ state, body, trusted, spans, branch, lastPush, progress: options.progress ?? null, now: options.now ?? Date.now() })
   const { ledger } = claimsOf(state, body, trusted)
   if (ledger) {

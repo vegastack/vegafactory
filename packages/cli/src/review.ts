@@ -5,7 +5,7 @@ import { spawn, spawnSync } from 'node:child_process'
 import { createHash, randomBytes } from 'node:crypto'
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { join, resolve } from 'node:path'
-import { machineName, trustedAuthors, type Trusted } from './claim.ts'
+import { machineName, trustedAuthors, trustedFactory, type Trusted } from './claim.ts'
 import { childEnvironment } from './env.ts'
 import { defaultRunner, ghRequest, type GhRunner } from './gh.ts'
 import { defaultBranch } from './guard-rules.ts'
@@ -493,8 +493,9 @@ const canonical = (value: unknown): unknown =>
 export const commentDigest = (data: CommentData) =>
   createHash('sha256').update(JSON.stringify(canonical({ ...data, findings: [...data.findings].sort((a, b) => a.id.localeCompare(b.id)) }))).digest('hex').slice(0, 16)
 
-// The review comment counts only when a person with write access posted it — anyone can write a
-// marker and a Findings JSON block, and a forged "clean at this head" would skip the review.
+// The review comment counts only when the factory posted it — a person with write access, or the
+// App a dispatched run reviews as. Anyone else can write a marker and a Findings JSON block, and a
+// forged "clean at this head" would skip the review.
 // Every marker field must also agree with the JSON it claims to summarise.
 export function trustedReviews(snap: Snapshot, trusted: Trusted): PostedReview[] {
   const found: PostedReview[] = []
@@ -684,14 +685,18 @@ export async function runReview(argv: string[], deps: ReviewDeps = {}): Promise<
   const state = saved && saved.schema === 1 && saved.repo === repo ? saved : null
 
   const ctx: WriteContext = { root, repo, number, runner }
-  const trusted = trustedAuthors({ repo, runner, root })
+  // Two different questions. A review comment is the factory's own work — a dispatched run posts
+  // it as the App — and every field in it is checked against the findings it summarises. Accepting
+  // what a review left open is a judgement, so it stays a person's.
+  const factory = trustedFactory({ repo, runner, root })
+  const person = trustedAuthors({ repo, runner, root })
   const { dir: cache } = syncIssue({ root, repo, number, runner })
   const snap = snapshot(cache)
   const brief = readBody(cache, 'issue.md')
   const head = git(top, ['rev-parse', 'HEAD']).trim()
   let posted: PostedReview | null
   try {
-    posted = trustedReview(snap, trusted, head)
+    posted = trustedReview(snap, factory, head)
   } catch (error) {
     return handBack((error as Error).message)
   }
@@ -767,7 +772,7 @@ export async function runReview(argv: string[], deps: ReviewDeps = {}): Promise<
   let fallback: string | null = null
   if (args.record) {
     const missing: Reviewer = reviewer === 'codex' ? 'claude' : 'codex'
-    const approval = acceptedFallback(snap, trusted, head)
+    const approval = acceptedFallback(snap, person, head)
     const probe = probeReviewer(missing, { env })
     // The recorded failure counts for the round it happened in, on these inputs, and no other.
     const blocked = readBlocked(dir, number)
@@ -902,7 +907,7 @@ export async function runReview(argv: string[], deps: ReviewDeps = {}): Promise<
     if (moved) return { conflict: `${moved} while the review ran, so it judged something else` }
     let current: PostedReview | null
     try {
-      current = trustedReview(snapshot(cacheDir(root, repo, number)), trusted, head)
+      current = trustedReview(snapshot(cacheDir(root, repo, number)), factory, head)
     } catch (error) {
       return { conflict: (error as Error).message }
     }
@@ -916,7 +921,7 @@ export async function runReview(argv: string[], deps: ReviewDeps = {}): Promise<
       : ['comment', String(number), '--file', bodyPath, '--repo', repo], { runner, cwd, out: (line) => quiet.push(line) })
     // runIssue synced after writing, so the comment this state describes can be read back by id.
     try {
-      next.comment.id = trustedReview(snapshot(cacheDir(root, repo, number)), trusted, head)?.entry.id ?? 0
+      next.comment.id = trustedReview(snapshot(cacheDir(root, repo, number)), factory, head)?.entry.id ?? 0
     } catch { next.comment.id = 0 }
     writeFileSync(statePath, JSON.stringify(next, null, 2) + '\n')
     return { conflict: null }

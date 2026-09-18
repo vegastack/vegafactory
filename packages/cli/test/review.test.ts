@@ -489,10 +489,19 @@ describe('only a trusted review comment counts', () => {
     expect(readState().round).toBe(1)
   })
 
-  test('a bot cannot stand in for a review either, however good its marker looks', async () => {
+  test('the factory App counts: a dispatched run reviews as the App, and the round it posted is the round that landed', async () => {
     const head = git(root, 'rev-parse', 'HEAD')
-    gh.permissions.set('vegafactory[bot]', 'write')
     gh.addComment(7, comment({ sha: head, verdict: 'clean' }), 'vegafactory[bot]', 'Bot')
+    queue('codex', [codexReply(verdict([]))])
+    expect((await review(['--reviewer', 'codex'])).code).toBe(0)
+    // The App's clean review at this head is the record, so no second round runs over it.
+    expect(calls()).toHaveLength(0)
+  })
+
+  test('any other bot cannot stand in for a review, however good its marker looks', async () => {
+    const head = git(root, 'rev-parse', 'HEAD')
+    gh.permissions.set('helpful[bot]', 'write')
+    gh.addComment(7, comment({ sha: head, verdict: 'clean' }), 'helpful[bot]', 'Bot')
     queue('codex', [codexReply(verdict([]))])
     expect((await review(['--reviewer', 'codex'])).code).toBe(0)
     expect(calls()).toHaveLength(1)

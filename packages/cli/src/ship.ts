@@ -5,7 +5,7 @@
 import { spawnSync } from 'node:child_process'
 import { existsSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
-import { trustedAuthors } from './claim.ts'
+import { trustedAuthors, trustedFactory } from './claim.ts'
 import { defaultRunner, ghRequest, type GhRunner } from './gh.ts'
 import { defaultBranch } from './guard-rules.ts'
 import { issueFromBranch } from './hook.ts'
@@ -89,19 +89,21 @@ export function shipCheck(input: { cwd: string; root: string; repo: string; numb
   const defaultRef = defaultName ? git(cwd, ['rev-parse', '--verify', '--quiet', `refs/remotes/origin/${defaultName}`]) : null
   if (defaultName && !defaultRef) blocks.push(`origin/${defaultName} is not in this checkout — fetch it, so the review's base can be checked against it`)
 
-  // Review is never skipped: the commit that would merge carries a clean review from a reviewer
-  // with write access, covering the whole candidate, or the operator's own written acceptance of
-  // what that review left open.
-  const trusted = trustedAuthors({ repo, runner, root })
+  // Review is never skipped: the commit that would merge carries a clean review covering the whole
+  // candidate, or the operator's own written acceptance of what that review left open. The review
+  // may come from a reviewer with write access or from the App a dispatched run posts as; the
+  // acceptance may not — that word is the operator's own.
+  const reviewer = trustedFactory({ repo, runner, root })
+  const person = trustedAuthors({ repo, runner, root })
   let review: Awaited<ReturnType<typeof trustedReview>> = null
   try {
-    review = trustedReview(snap, trusted, pushed ?? undefined)
+    review = trustedReview(snap, reviewer, pushed ?? undefined)
   } catch (error) {
     blocks.push((error as Error).message)
     review = null
   }
   if (!review) {
-    if (!blocks.some((block) => block.startsWith('two review comments disagree'))) blocks.push('no review comment from a reviewer with write access — run vegafactory review')
+    if (!blocks.some((block) => block.startsWith('two review comments disagree'))) blocks.push('no review comment from a reviewer with write access or from the factory App — run vegafactory review')
   } else if (pushed && review.data.sha !== pushed) {
     blocks.push(`the review is for ${review.data.sha.slice(0, 7)}, but origin/${branch} is at ${pushed.slice(0, 12)} — review the head that would merge`)
   } else {
@@ -119,7 +121,7 @@ export function shipCheck(input: { cwd: string; root: string; repo: string; numb
     const now = currentHashes(snap)
     if (review.data.brief !== now.brief) blocks.push(`the brief changed after review round ${review.data.round} — re-run the review`)
     else if (review.data.plan !== now.plan) blocks.push(`the plan changed after review round ${review.data.round} — re-run the review`)
-    if (review.data.verdict !== 'clean' && !acceptedReview(snap, trusted, review)) {
+    if (review.data.verdict !== 'clean' && !acceptedReview(snap, person, review)) {
       const open = review.data.findings.filter((finding) => finding.severity === 'must-fix').map((finding) => finding.id)
       const accept = review.data.round >= MAX_ROUNDS
         ? ` or, now the loop is spent, the operator accepts them in a line of their own: "accept review round ${review.data.round} @ ${review.data.sha.slice(0, 7)}"`

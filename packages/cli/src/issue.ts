@@ -5,7 +5,7 @@ import { spawnSync } from 'node:child_process'
 import { existsSync, readFileSync } from 'node:fs'
 import { basename, dirname, join, resolve } from 'node:path'
 import { ghRequest, type GhRunner, defaultRunner } from './gh.ts'
-import { claim, heartbeat, holderOf, ownerId, release, trustedHolders, type ClaimKind } from './claim.ts'
+import { claim, heartbeat, holderOf, ownerId, release, trustedFactory, type ClaimKind } from './claim.ts'
 import { writeStatus } from './status-comment.ts'
 import { artifactHash, assertRepo, cacheDir, commentType, dropIssue, permissionLookup, readBody, readState, syncIssue, withLock, WRITE_ROLES, type CacheState, type CommentEntry, type GhComment, type PermissionLookup } from './issue-cache.ts'
 import { STATES, sizeOf, stateOf, transition, type State } from './labels.ts'
@@ -452,7 +452,7 @@ export function runIssue(argv: string[], { runner = defaultRunner, cwd = process
     case 'holder': {
       const dir = sync().dir
       const snap = snapshot(dir)
-      const { holder, stale } = holderOf(snap.state, snap.body, Date.now(), trustedHolders(ctx))
+      const { holder, stale } = holderOf(snap.state, snap.body, Date.now(), trustedFactory(ctx))
       print({ holder, stale }, holder ? `${holder.owner} (${holder.harness}${holder.model ? ` · ${holder.model}` : ''}) · last active ${holder.heartbeat}` : 'nobody')
       return 0
     }

@@ -4,7 +4,7 @@ import { generateKeyPairSync } from 'node:crypto'
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { claimBody, claimLine, holderOf, trustedHolders } from '../src/claim.ts'
+import { claimBody, claimLine, holderOf, trustedFactory } from '../src/claim.ts'
 import {
   APP_ID, STEP_TIMEOUT_MS, TOKEN_MARGIN_MS, agentArgs, appIdentity, appJwt, appKeyPath, assertKeyFile, board, decide, defaultRunStep, dispatchDir,
   acknowledgedPlan, canonicalPath, childRunEnvironment, confirmShip, disjointSiblings, pushableBranch, shipWord,
@@ -564,7 +564,7 @@ describe('one poll over the board', () => {
     await pass({
       runStep: (async () => {
         const snap = snapOf(1)
-        heldDuringRun = holderOf(snap.state, snap.body, gh.clock, trustedHolders({ repo: 'o/r', runner: gh.runner, root })).holder?.owner ?? null
+        heldDuringRun = holderOf(snap.state, snap.body, gh.clock, trustedFactory({ repo: 'o/r', runner: gh.runner, root })).holder?.owner ?? null
         return { outcome: 'done' as const, note: '', ms: 1 }
       }) as RunStep,
     })
@@ -572,7 +572,7 @@ describe('one poll over the board', () => {
     // same board while it runs sees the issue is taken.
     expect(heldDuringRun).toBe(`${HOST}:dispatch-test-1`)
     const after = snapOf(1)
-    expect(holderOf(after.state, after.body, gh.clock, trustedHolders({ repo: 'o/r', runner: gh.runner, root })).holder).toBeNull()
+    expect(holderOf(after.state, after.body, gh.clock, trustedFactory({ repo: 'o/r', runner: gh.runner, root })).holder).toBeNull()
   })
 
   test('an implement run hands its claim to the session it starts', async () => {
@@ -581,7 +581,7 @@ describe('one poll over the board', () => {
     await pass({
       runStep: (async () => {
         const snap = snapOf(1)
-        heldDuringRun = holderOf(snap.state, snap.body, gh.clock, trustedHolders({ repo: 'o/r', runner: gh.runner, root })).holder?.owner ?? null
+        heldDuringRun = holderOf(snap.state, snap.body, gh.clock, trustedFactory({ repo: 'o/r', runner: gh.runner, root })).holder?.owner ?? null
         return { outcome: 'done' as const, note: '', ms: 1 }
       }) as RunStep,
     })
@@ -895,6 +895,19 @@ describe('readiness and the service', () => {
     expect(checks.find((check) => check.name === 'billing')).toMatchObject({ ok: false, detail: expect.stringContaining('ANTHROPIC_API_KEY') })
   })
 
+  test('a dispatched run pushes over SSH, so an HTTPS push URL fails readiness', () => {
+    const remote = (url: string): Probe => (command, args) => (command === 'git'
+      ? { code: 0, stdout: `${url}\n`, stderr: '' }
+      : answers(command, args))
+    const check = (url: string) => readiness({ root, listing: listedHere(root, { repo: 'o/r', host: HOST, home }), run: remote(url), keyOk: true, keyDetail: 'minted', env: {} }).find((one) => one.name === 'push')!
+    expect(check('git@github.com:o/r.git')).toMatchObject({ ok: true })
+    expect(check('ssh://git@github.com/o/r.git')).toMatchObject({ ok: true })
+    expect(check('https://github.com/o/r.git')).toMatchObject({ ok: false, detail: expect.stringContaining('git remote set-url --push origin') })
+    const broken: Probe = (command, args) => (command === 'git' ? { code: 128, stdout: '', stderr: 'No such remote' } : answers(command, args))
+    expect(readiness({ root, listing: listedHere(root, { repo: 'o/r', host: HOST, home }), run: broken, keyOk: true, keyDetail: 'minted', env: {} }).find((one) => one.name === 'push'))
+      .toMatchObject({ ok: false, detail: expect.stringContaining('No such remote') })
+  })
+
   test('the unit runs this CLI\'s own dispatch run and carries no token', () => {
     const plist = unitText('darwin', { cli: ['/usr/bin/node', '/opt/vegafactory/index.js'], root, repo: 'o/r', logDir: dispatchDir(root) })
     expect(plist).toContain('<string>dispatch</string>')
@@ -980,9 +993,18 @@ describe('the step a run makes', () => {
     expect(given.VEGAFACTORY_APP_PRIVATE_KEY_FILE).toBeUndefined()
     expect(Object.keys(given).some((name) => name.startsWith('VEGAFACTORY_'))).toBe(false)
     expect(given.PATH).toBe('/usr/bin')
+    // The token is for the API. Git gets no credential helper, so it never tries to push with a
+    // token whose Contents permission is read-only; it pushes over SSH instead.
+    expect(given.GIT_CONFIG_COUNT).toBe('1')
+    expect(given.GIT_CONFIG_KEY_0).toBe('credential.helper')
+    expect(given.GIT_CONFIG_VALUE_0).toBe('')
     // With no token minted yet the child simply gets none; it never gets the key instead.
     expect(childRunEnvironment(env, null).GH_TOKEN).toBeUndefined()
     expect(childRunEnvironment(env, null).VEGAFACTORY_APP_PRIVATE_KEY_FILE).toBeUndefined()
+    // A GIT_CONFIG_* pair already in the environment cannot survive to outrank that reset.
+    const smuggled = childRunEnvironment({ ...env, GIT_CONFIG_COUNT: '1', GIT_CONFIG_KEY_0: 'credential.helper', GIT_CONFIG_VALUE_0: '!gh auth git-credential' }, 'ghs_x')
+    expect(smuggled.GIT_CONFIG_VALUE_0).toBe('')
+    expect(smuggled.GIT_CONFIG_COUNT).toBe('1')
   })
 
   test('a step refuses to start while an API key is in the environment', async () => {

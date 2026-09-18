@@ -25,7 +25,7 @@ import { createSign, randomUUID } from 'node:crypto'
 import { appendFileSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync } from 'node:fs'
 import { homedir, hostname, userInfo } from 'node:os'
 import { join, posix } from 'node:path'
-import { APP_ACTOR, HEARTBEAT_EVERY_MS, claim, heartbeat, holderOf, machineName, release, trustedHolders } from './claim.ts'
+import { APP_ACTOR, HEARTBEAT_EVERY_MS, claim, heartbeat, holderOf, machineName, release, trustedFactory } from './claim.ts'
 import { defaultClonePath, factoryConfigPath, parseControlRoomKnob, readFactoryConfig } from './control-room.ts'
 import { billingVariables, childEnvironment } from './env.ts'
 import { GhError, defaultRunner, ghList, type GhResult, type GhRunner } from './gh.ts'
@@ -333,6 +333,21 @@ export function harnessAnswers(run: Probe): Check[] {
   return checks
 }
 
+// Where a dispatched run's work would go. Its Git has no credential helper — the App token is for
+// the API — so the push URL of origin has to be one an SSH key answers for. An HTTPS URL here
+// means every run would finish its work and then fail to push it.
+export function pushPath(root: string, run: Probe): Check {
+  const result = run('git', ['-C', root, 'remote', 'get-url', '--push', 'origin'])
+  const url = result.stdout.trim().split('\n').at(-1)?.trim() ?? ''
+  if (result.code !== 0 || !url) return { name: 'push', ok: false, detail: `cannot read the push URL of origin in ${root}: ${(result.stderr || result.stdout).split('\n').at(-1)?.slice(0, 160) ?? `exit ${result.code}`}` }
+  const ssh = /^(git@|ssh:\/\/)/.test(url)
+  return {
+    name: 'push', ok: ssh,
+    detail: ssh ? `origin pushes over SSH (${url})`
+      : `origin pushes over HTTPS (${url}) — a dispatched run has no Git credential for that, and the App's token cannot write code. Give it an SSH push URL: git remote set-url --push origin git@github.com:<owner>/<repo>.git`,
+  }
+}
+
 export interface ReadyInput { root: string; listing: Listing; run: Probe; keyOk: boolean; keyDetail: string; env: NodeJS.ProcessEnv }
 
 export function readiness(input: ReadyInput): Check[] {
@@ -341,6 +356,7 @@ export function readiness(input: ReadyInput): Check[] {
     { name: 'listed', ok: input.listing.ok, detail: input.listing.reason },
     { name: 'billing', ok: billing.length === 0, detail: billing.length ? `${billing.join(', ')} set — the dispatcher runs on subscriptions only; unset them` : 'no API-key variable is set' },
     hooksWired(input.root),
+    pushPath(input.root, input.run),
     ...harnessAnswers(input.run),
     { name: 'app-key', ok: input.keyOk, detail: input.keyDetail },
   ]
@@ -909,6 +925,15 @@ export function childRunEnvironment(env: NodeJS.ProcessEnv, token: string | null
   if (token) {
     child.GH_TOKEN = token
     child.GITHUB_TOKEN = token
+    // GH_TOKEN is for the API and nothing else. `gh auth git-credential` would hand the same token
+    // to Git, and the App's Contents permission is read-only, so a push carrying it fails — after
+    // the work, which is the worst moment to find out. Git in a dispatched run therefore gets no
+    // credential helper at all and pushes over SSH on the machine's own key, which the `push`
+    // readiness check proves before the dispatcher ever starts.
+    for (const name of Object.keys(child)) if (/^GIT_CONFIG_(COUNT|KEY_|VALUE_)/.test(name)) delete child[name]
+    child.GIT_CONFIG_COUNT = '1'
+    child.GIT_CONFIG_KEY_0 = 'credential.helper'
+    child.GIT_CONFIG_VALUE_0 = ''
   }
   return child
 }
@@ -987,7 +1012,7 @@ export async function poll(deps: PollDeps, inflight: Map<number, Inflight> = new
   // Last pass's finished runs, whose outcomes are now in `acted`: their slots and issues are free.
   for (const [number, run] of inflight) if (run.settled) inflight.delete(number)
   const permission = permissionLookup(repo, runner, { root })
-  const trusted = trustedHolders({ repo, runner, root })
+  const trusted = trustedFactory({ repo, runner, root })
   const acted = readActed(root)
   const wanted: Array<{ candidate: Candidate; decision: Decision; key: string }> = []
   const plans = new Map<number, string | null>()
@@ -1291,7 +1316,7 @@ export function standDown(ctx: StandDownContext, reason: string): string {
   try {
     syncIssue({ ...claimCtx })
     const snap = snapshot(cacheDir(ctx.root, ctx.repo, ctx.number))
-    const held = holderOf(snap.state, snap.body, ctx.now ?? Date.now(), trustedHolders(claimCtx)).holder
+    const held = holderOf(snap.state, snap.body, ctx.now ?? Date.now(), trustedFactory(claimCtx)).holder
     if (!held) { whose = 'free'; notes.push('no live claim to release') }
     else if (!held.owner.startsWith(`${ctx.machine}:`)) { whose = 'theirs'; notes.push(`the claim is held by ${held.owner}, so nothing here was touched`) }
     else { whose = 'ours'; owner = held.owner }
