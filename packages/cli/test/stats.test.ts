@@ -345,7 +345,7 @@ describe('offsets', () => {
     writeFileSync(join(statsDir(home), 'identity.json'), JSON.stringify({ login: 'mk', at: Date.now() }))
     const cli = join(import.meta.dir, '../src/index.ts')
     const once = () => new Promise<number>((done) => {
-      const child = spawn(process.execPath, [cli, 'stats', 'collect'], { env: { ...process.env, HOME: home }, stdio: 'ignore' })
+      const child = spawn(process.execPath, [cli, 'stats', 'collect'], { env: { ...process.env, HOME: home, VEGAFACTORY_HOME: join(home, '.vegafactory') }, stdio: 'ignore' })
       child.on('exit', (code) => done(code ?? 1))
     })
     expect(await Promise.all([once(), once()])).toEqual([0, 0])

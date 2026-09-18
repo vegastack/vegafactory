@@ -2,6 +2,14 @@
 
 The project's story, newest first: what got built, why, and how it went — for the operator's future recall. Format home: the dev-chronicle skill.
 
+## 19-09-2026 — One home, and a move that refuses to guess ([#252](https://github.com/vegastack/vegafactory/issues/252))
+
+- **What:** Everything this product keeps about a machine moved to `~/.vegafactory/`, computed by one module instead of thirteen paths spelled out across seven files and two languages.
+- **Why:** `~/.vegastack/` is shared with other VegaStack tooling — its `tools/`, `cache/`, `registry/` and `secrets/` have no reader anywhere in this repo — so nothing here could ever safely prune it. Step 1 of #251, and the step the rest of that epic is untestable without: there was no way to point the product at a harmless directory, and one path, the worktree registry, could not be redirected at all.
+- **How it went:** The review caught the thing that mattered. `VEGAFACTORY_HOME` moved the migration's destination but not its source, so a sandboxed run would have renamed the operator's real control room, config and App key into a temporary directory that whatever created it would then delete. Naming the home now moves nothing into it. Four more came with it: an interrupted global install's journal and lock were being left behind, the dead `guard/` directory survived on the one machine where it was all that remained, a symlinked home either side would have moved state somewhere neither path named, and `policy-snapshots/` was on a delete list nobody had authorised.
+- **Changed:** new `home.ts` with a `VEGAFACTORY_HOME` override · thirteen join sites, including a containment check that had been written separately from the path it guarded · `worktree-roots.json` became `worktrees.json` · the stats spool came out of a hidden `.tmp/` · the App key moved under `worker/` · `~/.vegastack/guard/` removed on the way past · README, the App and control-room references, the onboarding template and the dev-status fixtures.
+- **Decisions:** none new. The superseded guard entry in the register was left alone — it is append-only, and correcting it is the operator's line to write.
+
 ## 18-09-2026 — The drill found what the tests could not ([#224](https://github.com/vegastack/vegafactory/issues/224))
 
 - **What:** Two fixes for things the rebuild had built and nobody had ever run. `dispatch enable` could not pass its own readiness check on any machine, and enrolling a dispatcher demanded an SSH key the machine did not need.

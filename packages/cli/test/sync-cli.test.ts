@@ -13,7 +13,7 @@ function git(args: string[], cwd: string) {
   if (result.exitCode) throw new Error(result.stderr.toString())
   return result.stdout.toString().trim()
 }
-const run = (home: string, cwd: string, args: string[]) => Bun.spawnSync([executable, cli, ...args], { cwd, env: { ...process.env, HOME: home } })
+const run = (home: string, cwd: string, args: string[]) => Bun.spawnSync([executable, cli, ...args], { cwd, env: { ...process.env, HOME: home, VEGAFACTORY_HOME: join(home, '.vegafactory') } })
 beforeAll(async () => {
   root = await realpath(await mkdtemp(join(tmpdir(), 'sync-cli-221-')))
   if (!sourceMode && !assembledCli) {
@@ -127,7 +127,7 @@ test('a malformed or duplicated control-room line refuses at the CLI', async () 
 
 test('two CLI processes and a transaction editor retain every completed publication', async () => {
   const f = await project('concurrent')
-  const children = [1, 2].map(() => Bun.spawn([executable, cli, 'sync', '--json'], { cwd: f.repo, env: { ...process.env, HOME: f.home }, stdout: 'pipe', stderr: 'pipe' }))
+  const children = [1, 2].map(() => Bun.spawn([executable, cli, 'sync', '--json'], { cwd: f.repo, env: { ...process.env, HOME: f.home, VEGAFACTORY_HOME: join(f.home, '.vegafactory') }, stdout: 'pipe', stderr: 'pipe' }))
   const { updateSettings } = await import('../src/control-room.ts')
   await updateSettings(join(f.home, '.vegafactory'), s => ({ ...s, settings: { ...s.settings, concurrentMachineSetting: 42 } }))
   const codes = await Promise.all(children.map(child => child.exited))

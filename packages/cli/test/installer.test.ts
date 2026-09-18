@@ -9,7 +9,7 @@ const cli = join(packageRoot, 'dist/index.js')
 let temporary = ''
 
 function run(home: string, args: string[]) {
-  return Bun.spawnSync(['node', cli, ...args], { cwd: packageRoot, env: { ...process.env, HOME: home } })
+  return Bun.spawnSync(['node', cli, ...args], { cwd: packageRoot, env: { ...process.env, HOME: home, VEGAFACTORY_HOME: join(home, '.vegafactory') } })
 }
 
 beforeAll(async () => {
@@ -237,7 +237,7 @@ describe('@vegastack/vegafactory installer', () => {
     await script('npm', 'echo "npm error 403 Forbidden" >&2; exit 1')
     const home = join(temporary, 'init-home')
     await mkdir(home, { recursive: true })
-    const result = Bun.spawnSync(['node', cli, 'init'], { cwd: home, env: { ...process.env, HOME: home, PATH: `${bin}:${process.env.PATH}` } })
+    const result = Bun.spawnSync(['node', cli, 'init'], { cwd: home, env: { ...process.env, HOME: home, VEGAFACTORY_HOME: join(home, '.vegafactory'), PATH: `${bin}:${process.env.PATH}` } })
     const out = result.stdout.toString()
     expect(result.exitCode).toBe(1)
     expect(out).toContain('FAIL  cli')

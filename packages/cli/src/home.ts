@@ -9,7 +9,7 @@
 // VegaStack tooling keeps `tools/`, `cache/`, `registry/` and `secrets/` there, none of which this
 // repository references. A directory this product owns entirely is one it may also prune.
 
-import { existsSync, mkdirSync, renameSync, rmSync } from 'node:fs'
+import { cpSync, existsSync, lstatSync, mkdirSync, renameSync, rmSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 
@@ -34,8 +34,9 @@ export const FOREIGN_ENTRIES = ['tools', 'cache', 'registry', 'secrets'] as cons
 
 // Directories the old home carried that nothing reads any more. `guard/` went when `guard.ts` did
 // — the guard reads its policy from git now — and leaving it behind strands a file that still
-// looks authoritative.
-export const DEAD_ENTRIES = ['guard', 'policy-snapshots'] as const
+// looks authoritative. Only what the plan named is removed: this is the one destructive step in
+// the move, so it deletes by an explicit list and never by inference.
+export const DEAD_ENTRIES = ['guard'] as const
 
 export interface HomeOptions { env?: NodeJS.ProcessEnv; home?: string }
 
@@ -93,11 +94,21 @@ export function appKeyPath(options: HomeOptions = {}): string {
 // rest of an unattended machine's state lives.
 const MOVES: { from: string[]; to: string[] }[] = [
   { from: ['factory.json'], to: ['factory.json'] },
+  // The settings writer's lock and its pre-image. An interrupted write leaves them behind, and a
+  // machine that moved without them would take the file and leave the evidence of a half-finished
+  // edit where nothing will ever look again.
+  { from: ['factory.json.guard'], to: ['factory.json.guard'] },
+  { from: ['factory.json.schema1.bak'], to: ['factory.json.schema1.bak'] },
   { from: ['control-room'], to: ['control-room'] },
   { from: ['worktree-roots.json'], to: ['worktrees.json'] },
   { from: ['.tmp', 'stats'], to: ['stats'] },
   { from: ['stats.html'], to: ['stats.html'] },
   { from: ['vegafactory-app.pem'], to: ['worker', 'app.pem'] },
+  // A global skill install keeps its journal and lock here. Leaving them means an interrupted
+  // install is never recovered — the next add rolls its backups forward and brings back skills
+  // somebody removed — and an active lock becomes invisible to the run that should wait for it.
+  { from: ['.skills-install-transaction.json'], to: ['.skills-install-transaction.json'] },
+  { from: ['.skills-install.lock'], to: ['.skills-install.lock'] },
 ]
 
 export interface Migration { action: 'none' | 'moved' | 'refused'; reason: string; moved: string[] }
@@ -109,39 +120,61 @@ export interface Migration { action: 'none' | 'moved' | 'refused'; reason: strin
 // one and wrote the other would split a machine's memory of itself in half.
 export function migrateHome(deps: {
   exists: (path: string) => boolean
+  isPlainDirectory: (path: string) => boolean
   move: (from: string, to: string) => void
   mkdir: (path: string) => void
   remove: (path: string) => void
 } & HomeOptions): Migration {
+  // An explicit home is a caller saying where it wants this product to live — a test, a sandbox, a
+  // second checkout. It must never also mean "and go and fetch the real machine's state into it":
+  // the source would still be the operator's own `~/.vegastack`, and a temporary override that is
+  // deleted afterwards would take their control room, their config and their App key with it.
+  if ((deps.env ?? process.env)[HOME_VARIABLE]?.trim()) {
+    return { action: 'none', reason: `${HOME_VARIABLE} names the home, so nothing is moved into it`, moved: [] }
+  }
   const to = factoryHome(deps)
   const from = legacyHome(deps)
   if (!deps.exists(from)) return { action: 'none', reason: 'there is no older home to move', moved: [] }
 
+  // Both ends must be ordinary directories this account can read. A symlink either side would move
+  // state out of, or into, somewhere neither of these paths names; and a permission error read as
+  // "absent" would let the run carry on with its memory split across two homes.
+  for (const [path, which] of [[from, 'older'], [to, 'new']] as const) {
+    if (deps.exists(path) && !deps.isPlainDirectory(path)) {
+      return { action: 'refused', reason: `${path} is not an ordinary directory this account can read, so the ${which} home cannot be moved safely — inspect it by hand`, moved: [] }
+    }
+  }
+
+  const moved: string[] = []
+  // Removed whether or not anything else moves: a machine whose only leftover is the dead guard
+  // directory is exactly the machine that would otherwise keep it forever.
+  for (const dead of DEAD_ENTRIES) {
+    const path = join(from, dead)
+    if (deps.exists(path)) { deps.remove(path); moved.push(`${dead} → removed, nothing reads it`) }
+  }
+
   const waiting = MOVES.filter((entry) => deps.exists(join(from, ...entry.from)))
   const already = MOVES.filter((entry) => deps.exists(join(to, ...entry.to)))
-  if (waiting.length === 0) return { action: 'none', reason: 'the older home holds nothing of ours', moved: [] }
+  if (waiting.length === 0) {
+    return moved.length
+      ? { action: 'moved', reason: `removed what nothing reads from ${from}`, moved }
+      : { action: 'none', reason: 'the older home holds nothing of ours', moved: [] }
+  }
   if (already.length > 0) {
     const both = already.map((entry) => entry.to.join('/')).join(', ')
     return {
       action: 'refused',
       reason: `${to} and ${from} both hold this product's state (${both}) — a run that read one and wrote the other would split this machine's memory in half. Keep the one that is current, delete the other, and run again`,
-      moved: [],
+      moved,
     }
   }
 
-  const moved: string[] = []
   deps.mkdir(to)
   for (const entry of waiting) {
     const target = join(to, ...entry.to)
     if (entry.to.length > 1) deps.mkdir(join(to, ...entry.to.slice(0, -1)))
     deps.move(join(from, ...entry.from), target)
     moved.push(`${entry.from.join('/')} → ${entry.to.join('/')}`)
-  }
-  // Gone with the code that read them: the guard compiled a policy file here until it started
-  // reading policy from git, and the snapshots went with the model that needed them.
-  for (const dead of DEAD_ENTRIES) {
-    const path = join(from, dead)
-    if (deps.exists(path)) { deps.remove(path); moved.push(`${dead} → removed, nothing reads it`) }
   }
   return { action: 'moved', reason: `moved this machine's state from ${from} to ${to}`, moved }
 }
@@ -151,7 +184,17 @@ export function migrateHome(deps: {
 export function settleHome(report: (line: string) => void = console.error): Migration {
   const result = migrateHome({
     exists: (path) => existsSync(path),
-    move: (from, to) => renameSync(from, to),
+    // `lstat`, so a symlink is never followed, and a failure that is not "absent" is not silence.
+    isPlainDirectory: (path) => { try { return lstatSync(path).isDirectory() } catch { return false } },
+    // A cross-device rename fails with EXDEV, which a homedir move can hit when a home is mounted
+    // separately. Copy-then-remove is the fallback, and the original stays until the copy is whole.
+    move: (from, to) => {
+      try { renameSync(from, to) } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'EXDEV') throw error
+        cpSync(from, to, { recursive: true, preserveTimestamps: true, verbatimSymlinks: true })
+        rmSync(from, { recursive: true, force: true })
+      }
+    },
     mkdir: (path) => { mkdirSync(path, { recursive: true }) },
     remove: (path) => { rmSync(path, { recursive: true, force: true }) },
   })

@@ -64,6 +64,7 @@ describe('moving off the older home', () => {
     env: {} as NodeJS.ProcessEnv,
     home,
     exists: (path: string) => existsSync(path),
+    isPlainDirectory: (path: string) => { try { return require('node:fs').lstatSync(path).isDirectory() } catch { return false } },
     move: (from: string, to: string) => { require('node:fs').renameSync(from, to) },
     mkdir: (path: string) => { mkdirSync(path, { recursive: true }) },
     remove: (path: string) => { require('node:fs').rmSync(path, { recursive: true, force: true }) },
@@ -178,5 +179,116 @@ describe('the older home stays moved', () => {
     for (const fine of ["join(root, '.vegastack', '.tmp', 'issues')", "join(where.top, '.vegastack', 'dev.md')"]) {
       expect(HOME_JOIN.test(fine)).toBe(false)
     }
+  })
+})
+
+
+describe('the move cannot be aimed somewhere it was not asked to go', () => {
+  const deps = (env: NodeJS.ProcessEnv) => ({
+    env, home,
+    exists: (path: string) => existsSync(path),
+    isPlainDirectory: (path: string) => { try { return require('node:fs').lstatSync(path).isDirectory() } catch { return false } },
+    move: (from: string, to: string) => { require('node:fs').renameSync(from, to) },
+    mkdir: (path: string) => { mkdirSync(path, { recursive: true }) },
+    remove: (path: string) => { require('node:fs').rmSync(path, { recursive: true, force: true }) },
+  })
+
+  // The dangerous shape: the override moved where things were going, but not where they came
+  // from. A sandboxed run would have pulled the operator's real control room, config and App key
+  // into a temporary directory, and whatever deleted that directory afterwards took them along.
+  test('naming the home moves nothing into it', () => {
+    const legacy = join(home, '.vegastack')
+    mkdirSync(legacy, { recursive: true })
+    writeFileSync(join(legacy, 'factory.json'), 'real')
+    const elsewhere = join(home, 'sandbox')
+    const result = migrateHome(deps({ [HOME_VARIABLE]: elsewhere }))
+    expect(result.action).toBe('none')
+    expect(readFileSync(join(legacy, 'factory.json'), 'utf8')).toBe('real')
+    expect(existsSync(join(elsewhere, 'factory.json'))).toBe(false)
+  })
+
+  test('a symlinked home either side refuses instead of moving through it', () => {
+    const real = join(home, 'real-state')
+    mkdirSync(real, { recursive: true })
+    writeFileSync(join(real, 'factory.json'), 'real')
+    require('node:fs').symlinkSync(real, join(home, '.vegastack'))
+    const result = migrateHome(deps({}))
+    expect(result.action).toBe('refused')
+    expect(result.reason).toContain('not an ordinary directory')
+    expect(readFileSync(join(real, 'factory.json'), 'utf8')).toBe('real')
+  })
+
+  // Otherwise the machine with nothing else left is exactly the one that keeps it forever.
+  test('the dead guard directory goes even when it is all that is left', () => {
+    mkdirSync(join(home, '.vegastack', 'guard'), { recursive: true })
+    const result = migrateHome(deps({}))
+    expect(result.action).toBe('moved')
+    expect(existsSync(join(home, '.vegastack', 'guard'))).toBe(false)
+  })
+
+  test('an interrupted global install moves with the rest, lock and journal both', () => {
+    const legacy = join(home, '.vegastack')
+    mkdirSync(legacy, { recursive: true })
+    writeFileSync(join(legacy, '.skills-install-transaction.json'), '{"schemaVersion":2}')
+    writeFileSync(join(legacy, '.skills-install.lock'), 'held')
+    writeFileSync(join(legacy, 'factory.json.guard'), '')
+    const result = migrateHome(deps({}))
+    expect(result.action).toBe('moved')
+    const now = join(home, '.vegafactory')
+    expect(readFileSync(join(now, '.skills-install-transaction.json'), 'utf8')).toBe('{"schemaVersion":2}')
+    expect(existsSync(join(now, '.skills-install.lock'))).toBe(true)
+    expect(existsSync(join(now, 'factory.json.guard'))).toBe(true)
+  })
+})
+
+// The source scan above proves no site is spelled the old way. This one proves the product
+// behaves that way: a real command, a real home, and nothing of ours left behind in the old one.
+describe('a real run writes only where it should', () => {
+  const cli = join(import.meta.dir, '..', 'src', 'index.ts')
+
+  test('a command with the home named touches neither the real home nor the older one', () => {
+    const named = join(home, 'named-home')
+    const run = Bun.spawnSync([process.execPath, cli, 'version'], {
+      cwd: home,
+      env: { ...process.env, HOME: home, VEGAFACTORY_HOME: named },
+    })
+    expect(run.exitCode).toBe(0)
+    // Nothing was created beside the named home, under either name.
+    expect(existsSync(join(home, '.vegastack'))).toBe(false)
+    expect(existsSync(join(home, '.vegafactory'))).toBe(false)
+  })
+
+  test('an older home is moved, and what is not ours is left exactly where it was', () => {
+    const legacy = join(home, '.vegastack')
+    mkdirSync(join(legacy, 'control-room', 'acme'), { recursive: true })
+    mkdirSync(join(legacy, 'secrets'), { recursive: true })
+    mkdirSync(join(legacy, 'guard'), { recursive: true })
+    writeFileSync(join(legacy, 'factory.json'), '{"schemaVersion":2,"controlRooms":{}}')
+    writeFileSync(join(legacy, 'secrets', 'keep.txt'), 'not ours')
+
+    const run = Bun.spawnSync([process.execPath, cli, 'version'], { cwd: home, env: { ...process.env, HOME: home } })
+    expect(run.exitCode).toBe(0)
+    // The answer is the only thing on stdout: a `--json` caller must never have to step over this.
+    expect(run.stdout.toString().trim()).toMatch(/^\d+\.\d+\.\d+/)
+    expect(run.stderr.toString()).toContain('moved this machine')
+
+    expect(readFileSync(join(home, '.vegafactory', 'factory.json'), 'utf8')).toContain('schemaVersion')
+    expect(existsSync(join(home, '.vegafactory', 'control-room', 'acme'))).toBe(true)
+    expect(existsSync(join(legacy, 'factory.json'))).toBe(false)
+    expect(existsSync(join(legacy, 'guard'))).toBe(false)
+    // Another tool's directory, untouched.
+    expect(readFileSync(join(legacy, 'secrets', 'keep.txt'), 'utf8')).toBe('not ours')
+  })
+
+  test('state in both homes stops the command instead of splitting it', () => {
+    mkdirSync(join(home, '.vegastack'), { recursive: true })
+    mkdirSync(join(home, '.vegafactory'), { recursive: true })
+    writeFileSync(join(home, '.vegastack', 'factory.json'), 'older')
+    writeFileSync(join(home, '.vegafactory', 'factory.json'), 'newer')
+    const run = Bun.spawnSync([process.execPath, cli, 'version'], { cwd: home, env: { ...process.env, HOME: home } })
+    expect(run.exitCode).toBe(2)
+    expect(run.stderr.toString()).toContain('both hold this product')
+    expect(readFileSync(join(home, '.vegastack', 'factory.json'), 'utf8')).toBe('older')
+    expect(readFileSync(join(home, '.vegafactory', 'factory.json'), 'utf8')).toBe('newer')
   })
 })

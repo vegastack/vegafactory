@@ -804,7 +804,7 @@ async function doctor(options: Options) {
 // `sync` is the one verb that reaches the network on purpose: one shallow fetch of the control
 // room this project names, into a machine-local copy every skill then reads instead of GitHub.
 // It refreshes by default — a hook calling a dry-run-by-default verb would be a silent no-op — and
-// writes nothing outside the copy's path and ~/.vegastack/factory.json.
+// writes nothing outside the copy's path and ~/.vegafactory/factory.json.
 async function sync(options: Options) {
   const {factoryConfigPath,loadProfile,readFactoryConfig}=await import('./control-room.ts')
   const {resolveTarget,syncControlRoom}=await import('./sync.ts')

@@ -108,7 +108,7 @@ Writes one self-contained HTML file from the collected and pushed turns — oper
 issues, models, days and stages. No server and no network.
 
 Options:
-  --out PATH        where to write it (default ~/.vegastack/stats.html)
+  --out PATH        where to write it (default ~/.vegafactory/stats.html)
   --since 7d        only turns since then (7d, 12h, 30m or a date)
   --local           only this machine's own turns, not the control room
   --open            open the file afterwards
