@@ -625,7 +625,7 @@ describe('one poll over the board', () => {
     })
     // A planning run claims for itself: nothing inside it does, so another machine polling the
     // same board while it runs sees the issue is taken.
-    expect(heldDuringRun).toBe(`${HOST}:dispatch-test-1`)
+    expect(heldDuringRun).toBe(`${HOST}:worker-test-1`)
     const after = snapOf(1)
     expect(holderOf(after.state, after.body, gh.clock, trustedFactory({ repo: 'o/r', runner: gh.runner, root })).holder).toBeNull()
   })
@@ -658,7 +658,7 @@ describe('one poll over the board', () => {
     expect(service.owner).not.toBe(byHand.owner)
   })
 
-  test('a machine runs one dispatcher, and a crashed one does not block the box', () => {
+  test('a machine runs one worker, and a crashed one does not block the box', () => {
     const mine = takeRunLock(root, 'aaaa1111', () => 'Fri Sep 18 09:00:00 2026')
     expect(mine.ok).toBe(true)
     // A second process on this host, while the first is alive: refused.
@@ -667,7 +667,7 @@ describe('one poll over the board', () => {
     writeFileSync(runLockPath(root), JSON.stringify({ pid: 999_999, startedAt: 'Fri Sep 18 08:00:00 2026', runId: 'cccc3333', at: 'x' }))
     const blocked = takeRunLock(root, 'dddd4444', () => 'Fri Sep 18 08:00:00 2026')
     expect(blocked.ok).toBe(false)
-    expect(blocked.reason).toContain('another dispatcher is already running on this machine')
+    expect(blocked.reason).toContain('another worker is already running on this machine')
     // The same record, but that pid is now somebody else (or nobody): the lock is taken over.
     const taken = takeRunLock(root, 'eeee5555', () => null)
     expect(taken.ok).toBe(true)
@@ -1595,7 +1595,7 @@ describe('caps on the roster row', () => {
     // The shipped template's own order: the owner is the fourth cell, not the second, and a
     // positional read would take `group` for the operator and `yes` for a repository.
     const roster = [
-      '| dispatcher | group | repos | owner | caps | notes |',
+      '| node | group | repos | owner | caps | notes |',
       '|---|---|---|---|---|---|',
       '| patrick | dev | o/a | mk | runs 4 | the always-on box |',
     ].join('\n')
@@ -1643,7 +1643,7 @@ describe('caps on the roster row', () => {
   })
 
   test("the shipped template's header is not a machine called dispatcher", () => {
-    expect(parseNodes('| dispatcher | group | repos | owner | caps | notes |\n|---|---|---|---|---|---|')).toEqual([])
+    expect(parseNodes('| node | group | repos | owner | caps | notes |\n|---|---|---|---|---|---|')).toEqual([])
   })
 })
 

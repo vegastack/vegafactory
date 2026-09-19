@@ -4,7 +4,7 @@
 // refreshed and verified before every pass: the roster is the enrolment, and removing a row is how
 // a machine is stood down.
 //
-// Every write reaching GitHub from this machine — the dispatcher's own bookkeeping and everything
+// Every write reaching GitHub from this machine — the worker's own bookkeeping and everything
 // the agent runs it starts post — goes out as the VegaFactory GitHub App, on an hour-long
 // installation token minted here from the private key. The agent still *thinks* on the operator's
 // own subscription, so an API key in the environment refuses the whole command. Nothing the App
@@ -132,7 +132,7 @@ export interface Node { machine: string; operator: string | null; repos: string[
 // its columns are called rather than by where they happen to sit: a room may add, drop or reorder
 // columns, and a notes column is never mistaken for caps.
 const COLUMN_NAMES = {
-  machine: ['machine', 'dispatcher', 'node'],
+  machine: ['node', 'machine'],
   operator: ['operator', 'owner'],
   repos: ['repos', 'repositories'],
   caps: ['caps'],
@@ -424,7 +424,7 @@ export function appKeyPath(env: NodeJS.ProcessEnv = process.env, home = homedir(
 }
 
 export function missingKeyMessage(path: string): string {
-  return `the VegaFactory App private key is not readable at ${path} — put the .pem there (chmod 600) or set VEGAFACTORY_APP_PRIVATE_KEY_FILE to where it is; the dispatcher writes as the App and never falls back to a person's token`
+  return `the VegaFactory App private key is not readable at ${path} — put the .pem there (chmod 600) or set VEGAFACTORY_APP_PRIVATE_KEY_FILE to where it is; the worker writes as the App and never falls back to a person's token`
 }
 
 const base64url = (value: string) => Buffer.from(value).toString('base64url')
@@ -451,17 +451,17 @@ export type KeyStat = (path: string) => KeyFacts
 // real file this account owns, readable by nobody else. A link is refused outright — what it
 // points at can be swapped after the check — and so is a mode any other account could read.
 //
-// What this does not cover: a dispatched run is a child of this process and runs as the same user,
+// What this does not cover: a worker run is a child of this process and runs as the same user,
 // so the filesystem lets it read this file however tight the mode is. The child is never told
 // where the key is and is given an hour-long token instead, but that is a smaller door, not a shut
-// one. The separate dispatcher account in the control room's dispatcher-box checklist is what
+// one. The separate worker account in the control room's worker-box checklist is what
 // closes it — the key belongs to an account that runs nothing else.
 export function assertKeyFile(path: string, { stat = lstatSync as unknown as KeyStat, uid = process.getuid?.() ?? -1 } = {}) {
   let facts: KeyFacts
   try { facts = stat(path) } catch { throw new Error(missingKeyMessage(path)) }
   if (facts.isSymbolicLink()) throw new Error(`${path} is a symbolic link — the App key must be a real file, so what it points at cannot be swapped after this check`)
   if (!facts.isFile()) throw new Error(`${path} is not a regular file — the App key must be a real file`)
-  if (uid >= 0 && facts.uid !== uid) throw new Error(`${path} is owned by uid ${facts.uid}, not the account running this (uid ${uid}) — the App key belongs to the dispatcher account`)
+  if (uid >= 0 && facts.uid !== uid) throw new Error(`${path} is owned by uid ${facts.uid}, not the account running this (uid ${uid}) — the App key belongs to the worker's account`)
   if (facts.mode & 0o077) throw new Error(`${path} is mode ${(facts.mode & 0o777).toString(8)}, so another account on this machine can read the App key — chmod 600 it`)
 }
 
@@ -496,7 +496,7 @@ export async function mintToken(input: { repo: string; keyPath: string; appId: s
 
 // `gh` run as the App. The token reaches the child through its environment and nowhere else.
 // `token()` is asked for one on every call, so an expiring token is replaced rather than carried:
-// an installation token lives an hour and the dispatcher lives for months.
+// an installation token lives an hour and a worker lives for months.
 export function tokenRunner(token: () => string, timeoutMs = 30_000): GhRunner {
   return (args, input): GhResult => {
     const result = spawnSync(process.env.VEGAFACTORY_GH || 'gh', args, {
@@ -517,7 +517,7 @@ export const TOKEN_MARGIN_MS = 5 * 60_000
 // An installation token lives an hour and a child is handed one when it starts — nothing can put a
 // fresh one into a process already running. A run allowed to last longer keeps working and stops
 // being able to write to GitHub partway through, which is worse than being stopped: the work
-// exists and the evidence for it never lands. The caps may say so, and the dispatcher says it out
+// exists and the evidence for it never lands. The caps may say so, and the worker says it out
 // loud. Closing it properly is the credential broker in #239.
 export const TOKEN_LIFE_MS = 55 * 60_000
 
@@ -527,10 +527,10 @@ export function appIdentity(input: { repo: string; keyPath: string; appId: strin
   let held: AppToken | null = null
   return {
     runner: tokenRunner(() => {
-      if (!held) throw new GhError('the dispatcher has no installation token yet')
+      if (!held) throw new GhError('the worker has no installation token yet')
       return held.token
     }),
-    // What a dispatched run is given so its own writes are the App's too. It is a value, never a
+    // What a worker run is given so its own writes are the App's too. It is a value, never a
     // path to the key: a child that could read the key could mint whatever it liked.
     token: () => held?.token ?? null,
     freshen: async (now = Date.now()) => {
@@ -555,7 +555,7 @@ export const probe: Probe = (command, args) => {
 }
 
 // Whether this repository's harness hooks call the CLI. Both files are checked: a machine that
-// dispatches Claude Code and Codex runs needs the guard and the heartbeat on both.
+// starts Claude Code and Codex runs needs the guard and the heartbeat on both.
 // The CLI's hook command, however this machine spells the CLI: the published `vegafactory`, a
 // `bun …/src/index.ts` while working on it, a wrapper script. What identifies it is the verb and
 // the harness it names, not the word in front — matching only `vegafactory hook` called a machine
@@ -590,7 +590,7 @@ export function harnessAnswers(run: Probe): Check[] {
   return checks
 }
 
-// Where a dispatched run's work would go. A run must be able to push code, and the App's token
+// Where a worker run's work would go. A run must be able to push code, and the App's token
 // cannot: its Contents is read-only. SSH answers no credential helper at all, so an SSH remote is
 // always fine. An HTTPS remote has to prove that a credential comes back which is not the App's —
 // the run asks for one with the App's token scrubbed from the environment, and this asks the same
@@ -633,7 +633,7 @@ export function readiness(input: ReadyInput): Check[] {
   const billing = billingVariables(input.env)
   return [
     { name: 'listed', ok: input.listing.ok, detail: input.listing.reason },
-    { name: 'billing', ok: billing.length === 0, detail: billing.length ? `${billing.join(', ')} set — the dispatcher runs on subscriptions only; unset them` : 'no API-key variable is set' },
+    { name: 'billing', ok: billing.length === 0, detail: billing.length ? `${billing.join(', ')} set — a worker runs on subscriptions only; unset them` : 'no API-key variable is set' },
     hooksWired(input.root),
     pushPath(input.root, input.run),
     ...harnessAnswers(input.run),
@@ -649,7 +649,7 @@ export function unitPath(platform: NodeJS.Platform, home = homedir()): string {
     : join(home, '.config', 'systemd', 'user', 'vegafactory-worker.service')
 }
 
-// The unit runs one command: this CLI's own `dispatch run`, in the repository, restarted when it
+// The unit runs one command: this CLI's own `worker run`, in the repository, restarted when it
 // stops. Nothing in it carries a token; the repository and the log path are all it knows.
 export function unitText(platform: NodeJS.Platform, input: { cli: string[]; root: string; repo: string; logDir: string }): string {
   const argv = [...input.cli, 'worker', 'run', '--repo', input.repo]
@@ -665,8 +665,8 @@ export function unitText(platform: NodeJS.Platform, input: { cli: string[]; root
       '  </array>',
       `  <key>WorkingDirectory</key><string>${escaped(input.root)}</string>`,
       '  <key>RunAtLoad</key><true/>', '  <key>KeepAlive</key><true/>',
-      `  <key>StandardOutPath</key><string>${escaped(join(input.logDir, 'dispatch.log'))}</string>`,
-      `  <key>StandardErrorPath</key><string>${escaped(join(input.logDir, 'dispatch.err.log'))}</string>`,
+      `  <key>StandardOutPath</key><string>${escaped(join(input.logDir, 'worker.log'))}</string>`,
+      `  <key>StandardErrorPath</key><string>${escaped(join(input.logDir, 'worker.err.log'))}</string>`,
       '</dict>', '</plist>', '',
     ].join('\n')
   }
@@ -785,7 +785,7 @@ function writeChildren(root: string, change: (rows: ChildRecord[]) => ChildRecor
   mkdirSync(workerDir(root), { recursive: true })
   withLock(workerDir(root), () => {
     replaceFile(childrenPath(root), JSON.stringify(change(readChildren(root)), null, 2) + '\n')
-  }, { what: 'the dispatcher\'s children' })
+  }, { what: 'the worker\'s children' })
 }
 
 export function noteChild(root: string, record: ChildRecord) {
@@ -834,7 +834,7 @@ export function updateActed(root: string, change: (acted: Record<string, Acted>)
     const acted = readActed(root)
     change(acted)
     writeActed(root, acted)
-  }, { what: 'the dispatcher\'s record' })
+  }, { what: 'the worker\'s record' })
 }
 
 // One dispatcher per machine. Two are not twice the work: they double every poll, race for every
@@ -851,12 +851,12 @@ export function takeRunLock(root: string, runId: string, start: ProcessStart = p
     let held: RunLock | null = null
     try { held = JSON.parse(readFileSync(runLockPath(root), 'utf8')) as RunLock } catch { held = null }
     if (held && Number.isSafeInteger(held.pid) && held.pid !== process.pid && start(held.pid) === held.startedAt) {
-      return { ok: false, held, reason: `another dispatcher is already running on this machine (pid ${held.pid}, since ${held.at}) — stop it, or let it work` }
+      return { ok: false, held, reason: `another worker is already running on this machine (pid ${held.pid}, since ${held.at}) — stop it, or let it work` }
     }
     const mine: RunLock = { pid: process.pid, startedAt: start(process.pid) ?? '', runId, at: new Date().toISOString() }
     replaceFile(runLockPath(root), JSON.stringify(mine, null, 2) + '\n')
-    return { ok: true, held: mine, reason: 'this machine\'s dispatcher' }
-  }, { what: 'the dispatcher lock' })
+    return { ok: true, held: mine, reason: 'this machine\'s worker' }
+  }, { what: 'the worker lock' })
 }
 
 export function releaseRunLock(root: string, runId: string) {
@@ -905,7 +905,7 @@ const WRITE = new Set(['admin', 'maintain', 'write'])
 // access. No bot, and no App, stands in for a human's word.
 //
 // *Who may write the work* is wider: a plan, an evidence comment or the status comment may come
-// from a person with write access or from the factory's own App, because a dispatched run's
+// from a person with write access or from the factory's own App, because a worker run's
 // artifacts are posted by the machine, not by a person sitting behind it.
 const fromPerson = (permission: PermissionLookup) => (entry: CommentEntry) =>
   entry.authorType !== 'Bot' && !!entry.author && WRITE.has(permission(entry.author))
@@ -1140,7 +1140,7 @@ const ACTION_TEXT: Record<string, string> = {
 
 export function stepPrompt(step: Step): string {
   return [
-    `You are a dispatched run on issue #${step.number} in ${step.repo}. Nobody is watching this session.`,
+    `You are a worker run on issue #${step.number} in ${step.repo}. Nobody is watching this session.`,
     `Read the issue first: \`vegafactory issue sync ${step.number}\`, then read what it names.`,
     ACTION_TEXT[step.action] ?? '',
     ...(step.split ? ['This issue is `large`: planning splits it into sub-issues under an `epic` parent.'] : []),
@@ -1231,7 +1231,7 @@ export function workingDir(root: string, number: number): string | null {
 
 // The real step: a headless agent run on the operator's subscription, in the issue's worktree,
 // killed after the step limit. `childEnvironment` is what refuses an API key in the environment.
-// The environment a dispatched run gets. Three things are true of it and each one matters:
+// The environment a worker run gets. Three things are true of it and each one matters:
 //
 // - it runs on the operator's subscription, which is what `childEnvironment` proves;
 // - it writes to GitHub as the App, on the short-lived installation token this machine minted, so
@@ -1428,7 +1428,7 @@ export async function poll(deps: PollDeps, inflight: Map<number, Inflight> = new
   return started
 }
 
-// The claim a dispatched run takes before it starts, so another machine polling the same board
+// The claim a worker run takes before it starts, so another machine polling the same board
 // sees the work is taken rather than starting it again. It is an App-authored `dispatch` claim,
 // kept alive while the step runs and released on every way out.
 //
@@ -1444,7 +1444,7 @@ export interface Reservation { ok: boolean; owner: string; reason: string }
 // The owner carries the *process*, not just the machine and the issue. Two dispatchers on one host
 // — the service and an operator running a pass by hand — would otherwise compute the same owner,
 // each read it as its own claim, and both start the run.
-export const ownerFor = (machine: string, runId: string, number: number) => `${machine}:dispatch-${runId}-${number}`
+export const ownerFor = (machine: string, runId: string, number: number) => `${machine}:worker-${runId}-${number}`
 
 export function reserve(ctx: { root: string; repo: string; number: number; runner: GhRunner }, machine: string, runId: string, action: Action, now = Date.now()): Reservation {
   const owner = ownerFor(machine, runId, ctx.number)
