@@ -13,7 +13,7 @@ repos.md                     registry: repo, group, board, owner
 nodes.md               registry: the always-on machines, and which group's repos they serve
 boards.md                    registry: project boards and the repos that mirror onto them
 onboarding/                  the new-repo, new-teammate and worker-box checklists
-stats/YYYY/MM/DD/<operator>-<machine>.jsonl   one record per assistant turn, appended by the CLI
+stats/YYYY/MM/DD/<owner>-<node>.jsonl         one record per assistant turn, appended by the CLI
 ```
 
 A person is recorded once, on a group's `operators:` line. A decision register lives in the repo whose dev.md names it. A repo carries its own CODEOWNERS and its own workflow files. None of the three has a home here: a second copy of a fact is a second answer waiting to disagree with the first.
@@ -61,9 +61,29 @@ Nothing reads the room by opening files in the copy. `vegafactory sync profile -
 
 ## `stats/`
 
-`stats/` is the one tree automation writes, and its shape is the reason it can. One file per operator, per **machine**, per day means two machines never touch the same file, so a concurrent push is a non-fast-forward — solved by a rebase and a retry — and never a content conflict needing a human. Nothing here is summarised in the repository: a summary that accumulated would drift the first time a record arrived late from a machine that was offline, so totals are computed when they are read.
+`stats/` is the one tree automation writes, and its shape is the reason it can. One file per **owner**, per **node**, per day means two OS users on one host never touch the same file even when both use the same GitHub login, so a concurrent push is a non-fast-forward — solved by a rebase and a retry — and never a content conflict needing a human. The owner is who did the work, read from that machine's own `gh` login; the node is `<os-user>@<hostname>`, and the `@` is written as `-` in the filename while the record keeps the full form. Nothing here is summarised in the repository: a summary that accumulated would drift the first time a record arrived late from a machine that was offline, so totals are computed when they are read.
 
-Each record is one assistant turn — time, operator, repo, issue, harness, model, skill, tokens, duration and outcome — and nothing else: never prompt text, assistant text, tool arguments, file contents, or which subscription paid for the turn. Machines write through the CLI, which appends what it has read from the harnesses' own session logs and pushes with the operator's own GitHub login, at most once an hour. Anyone with the copy can read the tree back offline, with `stats show` or as a local page from `vegafactory dashboard`.
+Each record is one assistant turn — time, owner, node, repo, issue, harness, model, skill, tokens, duration and outcome — and nothing else: never prompt text, assistant text, tool arguments, file contents, or which subscription paid for the turn. Machines write through the CLI, which appends what it has read from the harnesses' own session logs and pushes with the operator's own GitHub login, at most once an hour. Anyone with the copy can read the tree back offline, with `stats show` or as a local page from `vegafactory dashboard`.
+
+### What the machine keeps for itself
+
+The shared tree is the only thing anybody else sees. The spool that feeds it lives under
+`~/.vegafactory/stats/` and never leaves the machine:
+
+| Path | What it is |
+|---|---|
+| `events.jsonl` | every record this machine has collected, newest last |
+| `offsets.json` | how far each harness session log has been read, so a log is never read twice |
+| `identity.json` | the `gh` login this machine writes as, and when it was last checked |
+| `pending.json` | the collect journal — a half-finished collect is finished or undone on the next run |
+| `push.json` | per room, how far `events.jsonl` has been pushed and when |
+| `push-pending/<owner>__<repo>.json` | the push journal for one room, for the same reason as `pending.json` |
+| `push/` | a **lock** directory, not a spool: it is how two pushes on one machine take turns |
+
+`push/` being a lock rather than a place records are staged is the one thing here worth saying out
+loud, because a tree listing that shows it beside `push.json` reads as though records queue in it.
+They do not — `push.json` and `push-pending/` hold all the state, and `push/` is empty whenever a
+push is not running.
 
 ## The read path
 

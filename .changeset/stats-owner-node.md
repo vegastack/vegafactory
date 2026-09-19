@@ -9,3 +9,4 @@ Stats now identify each turn by owner and node, including two OS users who share
 - Summaries, the CLI, and the offline dashboard expose owners and a nodes bucket.
 - Harness model and outcome labels are restricted to 64 safe characters before storage.
 - Checkouts without a profile or GitHub origin remain unnamed instead of exposing their local folder name.
+- The control room's own reference now says what the machine keeps for itself, including that `push/` is a lock directory rather than somewhere records queue — a listing that showed it beside `push.json` read as though they did.
