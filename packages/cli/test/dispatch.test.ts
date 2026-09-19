@@ -833,7 +833,7 @@ describe('standing an issue down', () => {
     const bodies = gh.issues.get(1)!.comments.map((comment) => comment.body)
     expect(bodies.some((body) => body.includes(`type=release owner=${HOST}:1-work by=vegafactory[bot]`) && body.includes('@mk said stop'))).toBe(true)
     // The issue also says what happened, so an operator reading it knows why the run stopped.
-    expect(bodies.at(-1)).toContain('type=handback')
+    expect(bodies.at(-1)).toContain('type=standdown')
     expect(bodies.at(-1)).toContain('@mk said stop')
     // Released, so the next pass sees a free issue — and one left in-progress is picked back up.
     expect(verdict(1)).toMatchObject({ action: 'implement', reason: 'an interrupted run left it in-progress with no holder' })
@@ -1222,7 +1222,7 @@ describe('the command', () => {
     // The run is recorded as stopped for that reason, not as a failure of the work, and the issue
     // is handed back once — by the run's own settle, after its process group has been waited for.
     expect(lines.join('\n')).toContain('#1 plan → stopped (this machine is no longer listed)')
-    const handbacks = gh.issues.get(1)!.comments.filter((comment) => comment.body.includes('type=handback'))
+    const handbacks = gh.issues.get(1)!.comments.filter((comment) => comment.body.includes('type=standdown'))
     expect(handbacks).toHaveLength(1)
     expect(handbacks[0]!.body).toContain('this machine is no longer listed')
     void given
@@ -1294,7 +1294,7 @@ describe('the command', () => {
     })
     expect(first).toBe(2)
     // The hand-back comment is on the issue, and it is the latest thing written.
-    expect(gh.issues.get(1)!.comments.some((comment) => comment.body.includes('type=handback'))).toBe(true)
+    expect(gh.issues.get(1)!.comments.some((comment) => comment.body.includes('type=standdown'))).toBe(true)
 
     delist(listed)
     const second: string[] = []
@@ -1380,7 +1380,7 @@ describe('the command', () => {
     expect(stoppedPid).toBe(8888)
     expect(lines.join('\n')).toContain('#1 plan stopped: this machine was asked to stop (SIGTERM)')
     // Stopped, waited for, and handed back once — before the command returned.
-    expect(gh.issues.get(1)!.comments.filter((comment) => comment.body.includes('type=handback'))).toHaveLength(1)
+    expect(gh.issues.get(1)!.comments.filter((comment) => comment.body.includes('type=standdown'))).toHaveLength(1)
     expect(existsSync(runLockPath(root))).toBe(false)
   })
 
@@ -1649,8 +1649,36 @@ test('a hand-back promises a retry only when there is a try left', async () => {
     cwd: root, home, host: HOST, env: {}, out: () => {}, runner: gh.runner, now: () => gh.clock,
     runStep: (async () => ({ outcome: 'failed' as const, note: 'boom', ms: 1 })) as RunStep,
   })
-  const handbacks = gh.issues.get(1)!.comments.filter((comment) => comment.body.includes('type=handback'))
+  const handbacks = gh.issues.get(1)!.comments.filter((comment) => comment.body.includes('type=standdown'))
   expect(handbacks).toHaveLength(1)
   expect(handbacks[0]!.body).toContain('needs a person')
   expect(handbacks[0]!.body).not.toContain('tries again after')
+})
+
+// A `handback` is an agent stopping to ask the operator something — the smallest question, a
+// missing artifact, a scope ratchet — and it is exactly what their reply answers. Only a machine
+// saying it put the issue back is bookkeeping. Confusing the two lets a comment written before
+// the question was asked read as the answer to it.
+test('an agent asking a question is not bookkeeping, and is not answered by an older comment', () => {
+  gh.addIssue({ number: 1, labels: ['waiting-on-operator', 'medium'] })
+  gh.addComment(1, 'here are the details you asked for', 'mk')
+  // Then the agent stops and asks something new. The operator has not replied to *this*.
+  gh.addComment(1, '<!-- vsk:v1 type=handback -->\nStopping: the plan assumes a queue that does not exist.', 'mk')
+  expect(verdict(1).action).toBe('none')
+
+  // A machine standing the issue down says nothing and answers nothing, so the reply before it
+  // still counts.
+  gh.addIssue({ number: 2, labels: ['waiting-on-operator', 'medium'] })
+  gh.addComment(2, 'here are the details you asked for', 'mk')
+  gh.addComment(2, '<!-- vsk:v1 type=standdown -->\n**box** stood down from #2: this machine is no longer listed', 'mk')
+  expect(verdict(2).action).toBe('follow-up')
+})
+
+// The field is required, so a dropped argument is a type error rather than a duration printed in
+// the wrong units. This pins that, because restoring the default would be a one-character change
+// that compiles and quietly reintroduces both bugs it caused.
+test('the duration formatter cannot be called without naming its field', () => {
+  const source = readFileSync(join(import.meta.dir, '..', 'src', 'dispatch.ts'), 'utf8')
+  expect(source).toContain("field: 'step' | 'poll' | 'retry'):")
+  expect(source).not.toContain("field: 'step' | 'poll' | 'retry' =")
 })

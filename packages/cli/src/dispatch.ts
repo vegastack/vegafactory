@@ -74,7 +74,9 @@ export const DEFAULT_CAPS: Caps = { runs: MAX_RUNS, stepMs: STEP_TIMEOUT_MS, pol
 // the cell it came from. `poll 60m` must not read back as `poll 1h`, which `parseCaps` refuses.
 const FIELD_UNITS: Record<'step' | 'poll' | 'retry', ('h' | 'm' | 's')[]> = { step: ['h', 'm'], poll: ['m', 's'], retry: ['m'] }
 
-export function sayDuration(ms: number, field: 'step' | 'poll' | 'retry' = 'step'): string {
+// The field is required rather than defaulted: a default is what makes a dropped argument silent,
+// and the two bugs this fixed were both a call site printing a duration in the wrong field's units.
+export function sayDuration(ms: number, field: 'step' | 'poll' | 'retry'): string {
   const size = { h: 3_600_000, m: 60_000, s: 1000 }
   for (const unit of FIELD_UNITS[field]) if (ms % size[unit] === 0) return `${ms / size[unit]}${unit}`
   // Not a whole number of any unit the field takes — say the smallest one it does, rounded up, so
@@ -819,7 +821,16 @@ export function latestArtifact(snap: Snapshot, type: string, permission: Permiss
 // done on the issue: `waiting-on-operator` looks for the operator's reply to be *later* than
 // anything an agent wrote, so a machine that stood down and said so would otherwise bury the very
 // reply it was standing down without answering, and no machine would ever pick the issue up.
-const BOOKKEEPING = new Set(['claim', 'release', 'ledger', 'ack', 'handback'])
+// Comments a machine writes about itself rather than about the work, so they must not count as
+// work done on the issue: `waiting-on-operator` looks for the operator's reply to be *later* than
+// anything an agent wrote, and a machine that stood down and said so would otherwise bury the very
+// reply it was standing down without answering.
+//
+// A `handback` is emphatically not one of these. That is an agent stopping to *ask* something —
+// the smallest question, a missing artifact, a scope ratchet — and it is the thing the operator's
+// reply answers. Counting it as bookkeeping would let a comment written before the question was
+// asked read as the answer to it.
+const BOOKKEEPING = new Set(['claim', 'release', 'ledger', 'ack', 'standdown'])
 
 // The action this issue is waiting for, and the comment that asks for it. `trigger` is what makes
 // a run happen once: a comment already acted on asks for nothing more, and a state label already
@@ -1576,7 +1587,7 @@ export function standDown(ctx: StandDownContext, reason: string): string {
   // The issue says what happened and goes back to a state a later pass can pick up. Both are
   // best-effort: a stand-down that cannot reach GitHub still reports what it did locally.
   try {
-    postComment(claimCtx, `<!-- vsk:v1 type=handback -->\n**${ctx.machine}** stood down from #${ctx.number}: ${note}\n`)
+    postComment(claimCtx, `<!-- vsk:v1 type=standdown -->\n**${ctx.machine}** stood down from #${ctx.number}: ${note}\n`)
   } catch (error) { notes.push(`the hand-back comment failed: ${(error as Error).message}`) }
   if (ctx.restoreTo) {
     try {
@@ -1866,7 +1877,7 @@ export async function runDispatch(argv: string[], deps: CliDeps = {}): Promise<n
         if (limit.stepMs <= TOKEN_LIFE_MS) { toldAboutStep = false; return }
         if (toldAboutStep) return
         toldAboutStep = true
-        note(`note: step ${sayDuration(limit.stepMs)} is longer than the hour an installation token lives, so a run past that point can still work but can no longer write to GitHub — see #239`)
+        note(`note: step ${sayDuration(limit.stepMs, 'step')} is longer than the hour an installation token lives, so a run past that point can still work but can no longer write to GitHub — see #239`)
       }
       stepOutlivesToken(caps)
       const pollDeps: PollDeps = {
