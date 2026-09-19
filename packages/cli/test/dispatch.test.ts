@@ -32,6 +32,7 @@ function project(dispatchers: string | null = `| machine | operator | repos |\n|
   writeFileSync(join(root, '.vegastack/dev.md'), [
     'repo: o/r',
     'control-room: o/control-room#dev@0000000',
+    'vegafactory-update: off',
     'harness-policy: intake claude default high · plan claude default high · implement claude default high · review codex default xhigh',
     '',
   ].join('\n'))
@@ -1246,6 +1247,42 @@ describe('the command', () => {
     expect(result.code).toBe(0)
     expect(seen).toEqual([1])
     expect(result.text).toContain('#1 implement → done')
+  })
+
+  test('the worker updates between passes only when no agent is running', async () => {
+    let updates = 0
+    const idle = await run(['run'], {
+      update: async () => {
+        updates++
+        return { action: 'updated', before: '0.20.1', after: '0.21.0', latest: '0.21.0', message: 'updated vegafactory 0.20.1 → 0.21.0' }
+      },
+      sleep: async () => { process.emit('SIGTERM' as NodeJS.Signals) },
+    })
+    expect(idle.code).toBe(0)
+    expect(updates).toBe(1)
+    expect(idle.text).toContain('updated vegafactory 0.20.1 → 0.21.0; restarting the dispatcher')
+
+    project()
+    gh.addIssue({ number: 1, labels: ['planning', 'medium'] })
+    updates = 0
+    let releaseChild = () => {}
+    const blocked = new Promise<void>((resolve) => { releaseChild = resolve })
+    const busy = await run(['run'], {
+      update: async () => {
+        updates++
+        return { action: 'current', before: '0.20.1', after: '0.20.1', latest: '0.20.1', message: 'current' }
+      },
+      runStep: (async (_step, context) => {
+        context.onStart?.(7373, 'claude')
+        await blocked
+        return { outcome: 'killed' as const, note: 'stopped', ms: 1 }
+      }) as RunStep,
+      stop: () => { releaseChild(); return true },
+      start: () => 'Fri Sep 18 09:00:00 2026',
+      sleep: async () => { process.emit('SIGTERM' as NodeJS.Signals) },
+    })
+    expect(busy.code).toBe(0)
+    expect(updates).toBe(0)
   })
 
   test('a row removed upstream stands this machine down, without touching its own copy', async () => {

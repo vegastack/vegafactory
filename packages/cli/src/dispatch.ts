@@ -37,6 +37,7 @@ import {
 import { issueFromBranch } from './hook.ts'
 import { defaultBranch } from './guard-rules.ts'
 import { stateOf, type State } from './labels.ts'
+import { maintainSelfUpdate, selfUpdateMode, type UpdateResult } from './self-update.ts'
 import { lintPlan, normalizeGroupPath, parseIndependentGroups, sharedByEveryChild } from '../../../skills/dev/dev-plan/scripts/plan-lint.mjs'
 
 // How often the board is read, how many steps run at once, and how long one step may take.
@@ -1738,6 +1739,7 @@ export interface CliDeps {
   now?: () => number
   sleep?: (ms: number) => Promise<void>
   cli?: string[]
+  update?: () => Promise<UpdateResult>
 }
 
 const wait = (ms: number) => new Promise<void>((resolve) => {
@@ -1897,6 +1899,7 @@ export async function runDispatch(argv: string[], deps: CliDeps = {}): Promise<n
       }
       let devMd = ''
       try { devMd = readFileSync(join(root, '.vegastack', 'dev.md'), 'utf8') } catch { /* no profile, so the tools' own defaults */ }
+      const update = deps.update ?? (() => maintainSelfUpdate({ mode: selfUpdateMode(devMd) }))
       const identity = deps.runner ? null : appIdentity({ repo, keyPath, appId: appIdOf(env), fetch: deps.fetch })
       const runner = deps.runner ?? identity!.runner
       // `--json` puts exactly one document on stdout and nothing else, so every line this loop
@@ -1995,6 +1998,17 @@ export async function runDispatch(argv: string[], deps: CliDeps = {}): Promise<n
           note(`poll failed: ${(error as Error).message}`)
         }
         if (args.once) return finish(0, await drain(inflight))
+        // A global install can replace this process's entry file, so it runs only with no agent
+        // alive. A successful update ends the old process; the service starts the new copy.
+        if (![...inflight.values()].some(run => !run.settled)) {
+          let result: UpdateResult
+          try { result = await update() } catch { result = { action: 'failed', before: '', after: '', latest: null, message: 'vegafactory update failed; continuing with the installed copy' } }
+          if (result.action === 'updated') {
+            note(`${result.message}; restarting the dispatcher`)
+            return finish(0, await drain(inflight))
+          }
+          if (result.action === 'available' || result.action === 'failed') note(result.message)
+        }
         await untilNextPass()
       }
     }

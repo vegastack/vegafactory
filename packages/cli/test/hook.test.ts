@@ -37,6 +37,7 @@ const runner: GhRunner = (args, input) => {
 
 const deps = (): HookDeps => ({
   runner, now: () => gh.clock, out: (text) => out.push(text), cli: ['vf'], host: 'box',
+  latest: async () => '0.20.1',
   // Usage collection rides on the same detached runner; every other assertion counts the rest.
   detach: (command) => { (command[1] === 'stats' ? stats : detached).push(command); return detachPid },
 })
@@ -82,7 +83,7 @@ beforeEach(() => {
   git(base, 'init', '-q', '--bare', '-b', 'main', origin)
   git(base, 'clone', '-q', origin, root)
   mkdirSync(join(root, '.vegastack'))
-  writeFileSync(join(root, '.vegastack/dev.md'), 'repo: o/r · default branch main\n\n## Ship\n- ask: `bun run release`\n')
+  writeFileSync(join(root, '.vegastack/dev.md'), 'repo: o/r · default branch main\nvegafactory-update: off\n\n## Ship\n- ask: `bun run release`\n')
   writeFileSync(join(root, '.gitignore'), '.vegastack/.tmp/\n.vegastack/.worktrees/\n')
   git(root, 'add', '-A')
   git(root, 'commit', '-q', '-m', 'init')
@@ -668,5 +669,23 @@ describe('usage collection', () => {
   test('a checkout with no issue still collects', async () => {
     await hook('session-start', { cwd: plain })
     expect(stats).toHaveLength(2)
+  })
+
+  test('session start updates from every repository through a stable command and its own bound', async () => {
+    writeFileSync(join(plain, '.vegastack/dev.md'), 'repo: o/r · default branch main\nvegafactory-update: auto\n')
+    const calls: Array<{ command: string[]; cwd: string; limit: number | undefined }> = []
+    out = []
+    const input = Readable.from([Buffer.from(JSON.stringify({ cwd: plain }))])
+    const code = await runHook(['session-start', '--harness', 'claude'], {
+      ...deps(),
+      latest: async () => '9.0.0',
+      detach: (command, cwd, limit) => { calls.push({ command, cwd, limit }) },
+    }, input)
+    expect(code).toBe(0)
+    expect(JSON.parse(out.join('\n')).hookSpecificOutput.additionalContext).toContain('updating vegafactory 0.20.1 → 9.0.0 in the background')
+    expect(calls.filter(call => call.command[0] === 'npm')).toEqual([{
+      command: ['npm', 'install', '-g', '@vegastack/vegafactory@latest'], cwd: plain, limit: 300,
+    }])
+    expect(calls.some(call => call.command[0] === 'vf' && call.command.includes('update'))).toBe(false)
   })
 })

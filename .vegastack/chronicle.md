@@ -2,6 +2,16 @@
 
 The project's story, newest first: what got built, why, and how it went — for the operator's future recall. Format home: the dev-chronicle skill.
 
+## 19-09-2026 — The factory keeps its own tools sharp ([#258](https://github.com/vegastack/vegafactory/issues/258))
+
+- **What:** VegaFactory gained an explicit global update command, a session-start version check for attended work, and idle self-updates for unattended dispatchers.
+- **Why:** A long-running dispatcher and a person starting a session could both stay on an old CLI after npm had a newer release, leaving fixes installed nowhere until somebody remembered a manual command.
+- **How it went:** The dangerous edge was the updater itself: a global install may replace the entry file currently running, while the hook's normal 60-second watchdog is too short for a cold npm install. Attended hooks now launch npm directly with a five-minute bound and return the check through session context; dispatchers update only with no agent alive, then restart.
+- **Changed:** `vegafactory update` · shared never-throw version/update logic · session and dispatcher integration · the `vegafactory-update: off | notify | auto` profile knob and dev-setup defaults.
+- **Decisions:** none new.
+
+— approved by (kmanojkumar) · built by claude · branch feat/258-vegafactory-update-for-attended-sessions
+
 ## 19-09-2026 — A node knows its own name ([#253](https://github.com/vegastack/vegafactory/issues/253))
 
 - **What:** `nodeId()` — `<os-user>@<hostname>`, derived and never configured.

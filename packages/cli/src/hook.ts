@@ -14,6 +14,7 @@ import { cacheDir, readBody, readState, replaceFile, syncIssue, withLock } from 
 import { askText, learningsPath, pendingNote } from './learning.ts'
 import { detectRepo, evidenceChangedAt, findValidAck, latestOfType, permissionLookup, repoRoot, snapshot } from './issue.ts'
 import { stateOf } from './labels.ts'
+import { latestPublishedVersion, maintainSelfUpdate, packageVersion, selfUpdateMode, SELF_UPDATE_LIMIT_S, type LatestVersion } from './self-update.ts'
 
 export const HOOK_EVENTS = ['session-start', 'prompt', 'pre-tool', 'post-tool', 'stop', 'session-end'] as const
 export type HookEvent = typeof HOOK_EVENTS[number]
@@ -325,10 +326,11 @@ export interface HookDeps {
   now: () => number
   out: (text: string) => void
   // Starts a process that outlives the hook; returns its pid when known.
-  detach: (command: string[], cwd: string) => number | undefined | void
+  detach: (command: string[], cwd: string, limitSeconds?: number) => number | undefined | void
   // How to run this CLI again: the runtime and the entry file.
   cli: string[]
   host: string
+  latest: LatestVersion
 }
 
 export const DETACHED_LIMIT_S = 60
@@ -345,8 +347,8 @@ export function detachBounded(command: string[], cwd: string, limitSeconds = DET
 }
 
 export const defaultDeps = (): HookDeps => ({
-  runner: defaultRunner, now: Date.now, out: (text) => process.stdout.write(text + '\n'), detach: (command, cwd) => detachBounded(command, cwd),
-  cli: [process.execPath, process.argv[1]!], host: hostname(),
+  runner: defaultRunner, now: Date.now, out: (text) => process.stdout.write(text + '\n'), detach: (command, cwd, limit) => detachBounded(command, cwd, limit),
+  cli: [process.execPath, process.argv[1]!], host: hostname(), latest: latestPublishedVersion,
 })
 
 // Secrets never leave the machine in an automatic commit: file names, then the added lines.
@@ -568,11 +570,33 @@ function collectStats(event: HookEvent, cwd: string, deps: HookDeps) {
   if (event === 'session-start') deps.detach([...deps.cli, 'stats', 'push'], cwd)
 }
 
-function advisory(event: HookEvent, harness: Harness, payload: Record<string, unknown>, deps: HookDeps): void {
+async function attendedUpdate(cwd: string, deps: HookDeps): Promise<string | null> {
+  try {
+    const root = repoRoot(cwd)
+    let profile = ''
+    try { profile = readFileSync(join(root, '.vegastack', 'dev.md'), 'utf8') } catch { /* an old profile uses the shipped default */ }
+    const mode = selfUpdateMode(profile)
+    if (mode === 'off') return null
+    const result = await maintainSelfUpdate({ mode: 'notify', latest: deps.latest })
+    if (result.action !== 'available' || mode !== 'auto') return result.message
+    // npm gets its own bound and executable. Calling this entry file again races the global
+    // install replacing that file, and ordinary hook work has a deliberately shorter watchdog.
+    deps.detach(['npm', 'install', '-g', '@vegastack/vegafactory@latest'], cwd, SELF_UPDATE_LIMIT_S)
+    return `updating vegafactory ${result.before} → ${result.latest} in the background; this session continues with ${result.before}`
+  } catch {
+    return `could not check npm; continuing with vegafactory ${packageVersion}`
+  }
+}
+
+async function advisory(event: HookEvent, harness: Harness, payload: Record<string, unknown>, deps: HookDeps): Promise<void> {
   const cwd = typeof payload.cwd === 'string' ? payload.cwd : process.cwd()
   try { collectStats(event, cwd, deps) } catch { /* stats never affect a session */ }
+  const update = event === 'session-start' ? await attendedUpdate(cwd, deps) : null
   const where = locate(cwd, deps.host)
-  if (!where) return
+  if (!where) {
+    if (update) deps.out(context('SessionStart', update))
+    return
+  }
   const local = readLocal(where)
   const model = typeof payload.model === 'string' && payload.model ? payload.model : '<model>'
   const session = typeof payload.session_id === 'string' && payload.session_id ? payload.session_id : null
@@ -583,6 +607,7 @@ function advisory(event: HookEvent, harness: Harness, payload: Record<string, un
     const { holder, state } = refresh(where, local, deps, true)
     writeLocal(where, local)
     const lines = [
+      ...(update ? [update] : []),
       `This worktree works issue #${where.number} (${where.repo}), state ${state ?? 'unknown'}, held by ${holder ? `${label(holder)}${local.held ? ' — this worktree' : ''}` : 'nobody'}.`,
       `Its local copy is ${cacheDir(where.root, where.repo, where.number)}; read it with \`vegafactory issue sync ${where.number}\` first.`,
     ]
@@ -671,6 +696,6 @@ export async function runHook(argv: string[], deps: HookDeps = defaultDeps(), st
     return 0
   }
   if (!harness || !input.payload) return 0
-  try { advisory(event, harness, input.payload, deps) } catch { /* advisory only */ }
+  try { await advisory(event, harness, input.payload, deps) } catch { /* advisory only */ }
   return 0
 }
