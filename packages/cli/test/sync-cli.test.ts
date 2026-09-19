@@ -36,7 +36,7 @@ async function project(name: string, profile = 'repo: acme/app\ncontrol-room: ac
   await mkdir(join(repo, '.vegastack'), { recursive: true }); await mkdir(join(home, '.vegafactory'), { recursive: true })
   await writeFile(join(repo, '.vegastack/dev.md'), profile)
   git(['init', '-b', 'main'], repo); git(['remote', 'add', 'origin', 'https://github.com/acme/app.git'], repo)
-  await writeFile(join(home, '.vegafactory/factory.json'), JSON.stringify({ schemaVersion: 1, marker: 'preserved', controlRooms: { acme: { repo: 'acme/room', remote: origin, path: join(home, '.vegafactory/control-room/acme'), branch: 'main', sha: null, lastSyncedAt: null } } }))
+  await writeFile(join(home, '.vegafactory/factory.json'), JSON.stringify({ schemaVersion: 2, revision: 0, marker: 'preserved', controlRooms: { acme: { repo: 'acme/room', remote: origin, path: join(home, '.vegafactory/control-room/acme'), branch: 'main', sha: null, lastSyncedAt: null } } }))
   return { home, repo, settingsPath: join(home, '.vegafactory/factory.json'), clonePath: join(home, '.vegafactory/control-room/acme') }
 }
 test('the CLI fetches once, leaves a fresh copy alone, and a dry run writes nothing', async () => {
