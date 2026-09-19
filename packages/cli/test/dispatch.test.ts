@@ -109,6 +109,19 @@ describe('the roster', () => {
     expect(listing.reason).toContain('is not listed')
   })
 
+  test('a row that does not reach its declared caps column is refused by name', () => {
+    const roster = `| machine | operator | repos | notes | caps |\n|---|---|---|---|---|\n| ${HOST} | mk | o/r |\n`
+    project(roster)
+    const row = parseDispatchers(roster)[0]!
+    expect(row.machine).toBe(HOST)
+    expect(row.caps).toBeNull()
+    expect(row.problem).toContain('does not reach its declared caps column')
+    const listing = listedHere(root, { repo: 'o/r', host: HOST, home })
+    expect(listing.ok).toBe(false)
+    expect(listing.reason).toContain(`${HOST}'s row`)
+    expect(listing.reason).toContain('does not reach its declared caps column')
+  })
+
   test('a listed machine passes; an unlisted one refuses and says how to be listed', () => {
     expect(listedHere(root, { repo: 'o/r', host: HOST, home }).ok).toBe(true)
     const other = listedHere(root, { repo: 'o/r', host: 'laptop', home })
@@ -843,7 +856,25 @@ describe('standing an issue down', () => {
   test('another machine\'s claim is left alone', () => {
     gh.addIssue({ number: 1, labels: ['in-progress', 'small'] })
     held('laptop:1-work')
-    expect(down('the subscription limit was reached')).toContain('held by laptop:1-work, so nothing here was touched')
+    const result = standDown({ root, repo: 'o/r', number: 1, runner: gh.runner, machine: HOST, now: gh.clock, restoreTo: 'queued' }, 'the subscription limit was reached')
+    expect(result).toContain('held by laptop:1-work, so nothing here was touched')
+    expect(result).toContain('the state label was left alone')
+    expect(gh.issues.get(1)!.labels).toContain('in-progress')
+    expect(gh.issues.get(1)!.labels).not.toContain('queued')
+  })
+
+  test('an unreadable claim leaves the state label alone', () => {
+    gh.addIssue({ number: 1, labels: ['in-progress', 'small'] })
+    let calls = 0
+    const runner = ((args: string[], input?: string) => {
+      if (calls++ === 0) throw new Error('GitHub is unavailable')
+      return gh.runner(args, input)
+    }) as typeof gh.runner
+    const result = standDown({ root, repo: 'o/r', number: 1, runner, machine: HOST, now: gh.clock, restoreTo: 'queued' }, 'the subscription limit was reached')
+    expect(result).toContain('claim could not be read')
+    expect(result).toContain('the state label was left alone')
+    expect(gh.issues.get(1)!.labels).toContain('in-progress')
+    expect(gh.issues.get(1)!.labels).not.toContain('queued')
   })
 
   test('with nothing held there is nothing to release', () => {
@@ -1160,6 +1191,33 @@ describe('the command', () => {
     expect(result.code).toBe(2)
     expect(result.text).toContain('not ready')
     expect(existsSync(unitPath(process.platform, home))).toBe(false)
+  })
+
+  test('enable reports a seconds-valued poll cap as seconds', async () => {
+    project(`| machine | operator | repos | caps |\n|---|---|---|---|\n| ${HOST} | mk | o/r | poll 1s |\n`)
+    mkdirSync(join(root, '.claude'), { recursive: true })
+    mkdirSync(join(root, '.codex'), { recursive: true })
+    writeFileSync(join(root, '.claude', 'settings.json'), 'vegafactory hook stop --harness claude')
+    writeFileSync(join(root, '.codex', 'hooks.json'), 'vegafactory hook stop --harness codex')
+    mkdirSync(join(home, '.config', 'systemd', 'user'), { recursive: true })
+    const { privateKey } = generateKeyPairSync('rsa', { modulusLength: 2048, privateKeyEncoding: { type: 'pkcs8', format: 'pem' }, publicKeyEncoding: { type: 'spki', format: 'pem' } })
+    const key = join(root, 'enable.pem')
+    writeFileSync(key, privateKey, { mode: 0o600 })
+    chmodSync(key, 0o600)
+    const probe: Probe = (command, args) => {
+      if (command === 'git') return { code: 0, stdout: 'git@github.com:o/r.git', stderr: '' }
+      if (command === 'claude' || command === 'codex') return { code: 0, stdout: 'ok', stderr: '' }
+      return { code: 0, stdout: '', stderr: '' }
+    }
+    const fetch: Fetch = async (url) => ({
+      ok: true,
+      status: 200,
+      json: async () => url.endsWith('/installation') ? { id: 42 } : { token: 'ghs_test', expires_at: '2026-09-18T11:00:00Z' },
+    })
+    const result = await run(['enable'], { platform: 'linux', run: probe, fetch, env: { VEGAFACTORY_APP_PRIVATE_KEY_FILE: key } })
+    expect(result.code).toBe(0)
+    expect(result.text).toContain('enabled —')
+    expect(result.text).toContain('polls o/r every 1s')
   })
 
   test('run --once makes one pass with the injected step', async () => {
@@ -1672,6 +1730,13 @@ test('an agent asking a question is not bookkeeping, and is not answered by an o
   gh.addComment(2, 'here are the details you asked for', 'mk')
   gh.addComment(2, '<!-- vsk:v1 type=standdown -->\n**box** stood down from #2: this machine is no longer listed', 'mk')
   expect(verdict(2).action).toBe('follow-up')
+
+  // Released dispatchers used `handback` for this exact machine notice. Those live comments have
+  // the same meaning as the current marker and must not bury the answer they did not act on.
+  gh.addIssue({ number: 3, labels: ['waiting-on-operator', 'medium'] })
+  gh.addComment(3, 'here are the details you asked for', 'mk')
+  gh.addComment(3, '<!-- vsk:v1 type=handback -->\n**box** stood down from #3: this machine is no longer listed', 'mk')
+  expect(verdict(3).action).toBe('follow-up')
 })
 
 // The field is required, so a dropped argument is a type error rather than a duration printed in

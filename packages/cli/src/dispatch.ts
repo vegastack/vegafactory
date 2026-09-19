@@ -143,6 +143,7 @@ interface Layout { machine: number; operator: number | null; repos: number; caps
 const POSITIONAL: Layout = { machine: 0, operator: 1, repos: 2, caps: null }
 const UNNAMED_COLUMNS = 'the table names no columns, so nothing says which cell holds the caps — add a header row, `| machine | operator | repos | caps |`'
 const UNREADABLE_CAPS = 'the caps cell cannot be read — the shape is `runs 10 · step 72h · poll 1m · retry 15m · park 3`, every field optional'
+const MISSING_CAPS = 'the row does not reach its declared caps column — add an empty cell or `-` when the defaults are fine'
 
 // A header is the row that names at least the machine column and the repos column. Anything less
 // is not a header, and reading it as one would silently move every column.
@@ -186,6 +187,7 @@ export function parseDispatchers(text: string): Dispatcher[] {
       repos = row[layout.repos] ?? ''
       capsCell = layout.caps === null ? '' : row[layout.caps] ?? ''
       named = layout.caps !== null
+      if (layout.caps !== null && row.length <= layout.caps) problem = MISSING_CAPS
       // A wider table than the legacy three, with nothing naming its columns: the caps could be in
       // any of the extra cells or in none of them, and a gate does not guess. Refused by name.
       if (layout === POSITIONAL && row.length > 3) problem = UNNAMED_COLUMNS
@@ -831,6 +833,10 @@ export function latestArtifact(snap: Snapshot, type: string, permission: Permiss
 // reply answers. Counting it as bookkeeping would let a comment written before the question was
 // asked read as the answer to it.
 const BOOKKEEPING = new Set(['claim', 'release', 'ledger', 'ack', 'standdown'])
+const LEGACY_STANDDOWN = /^\*\*[^*\n]+\*\* stood down from #\d+: .+$/m
+
+const isBookkeeping = (snap: Snapshot, entry: CommentEntry) =>
+  BOOKKEEPING.has(entry.type) || (entry.type === 'handback' && LEGACY_STANDDOWN.test(snap.body(entry)))
 
 // The action this issue is waiting for, and the comment that asks for it. `trigger` is what makes
 // a run happen once: a comment already acted on asks for nothing more, and a state label already
@@ -879,7 +885,7 @@ function transitionOf(snap: Snapshot, issue: IssueFacts, state: State, comments:
     // The reply the issue was waiting for: an operator comment later than the last thing an agent
     // wrote and later than the brief's own last edit. Claims, releases, acks and the status
     // comment are bookkeeping and move nothing.
-    const work = Object.values(snap.state.comments).filter((entry) => entry.type !== 'human' && !BOOKKEEPING.has(entry.type)).map((entry) => entry.createdAt)
+    const work = Object.values(snap.state.comments).filter((entry) => entry.type !== 'human' && !isBookkeeping(snap, entry)).map((entry) => entry.createdAt)
     const after = [issue.bodyChangedAt, ...work].sort().at(-1) ?? ''
     const reply = comments.filter((entry) => entry.createdAt > after).at(-1)
     return reply
@@ -1550,10 +1556,10 @@ export function standDown(ctx: StandDownContext, reason: string): string {
     const snap = snapshot(cacheDir(ctx.root, ctx.repo, ctx.number))
     const held = holderOf(snap.state, snap.body, ctx.now ?? Date.now(), trustedFactory(claimCtx)).holder
     if (!held) { whose = 'free'; notes.push('no live claim to release') }
-    else if (!held.owner.startsWith(`${ctx.machine}:`)) { whose = 'theirs'; notes.push(`the claim is held by ${held.owner}, so nothing here was touched`) }
+    else if (!held.owner.startsWith(`${ctx.machine}:`)) { whose = 'theirs'; notes.push(`the claim is held by ${held.owner}, so nothing here was touched and the state label was left alone`) }
     else { whose = 'ours'; owner = held.owner }
   } catch (error) {
-    notes.push(`the claim could not be read (${(error as Error).message}), so nothing here was touched`)
+    notes.push(`the claim could not be read (${(error as Error).message}), so nothing here was touched and the state label was left alone`)
   }
 
   // Only a claim this machine holds authorises writing to its worktree, and a claim that could not
@@ -1589,7 +1595,7 @@ export function standDown(ctx: StandDownContext, reason: string): string {
   try {
     postComment(claimCtx, `<!-- vsk:v1 type=standdown -->\n**${ctx.machine}** stood down from #${ctx.number}: ${note}\n`)
   } catch (error) { notes.push(`the hand-back comment failed: ${(error as Error).message}`) }
-  if (ctx.restoreTo) {
+  if (ctx.restoreTo && (whose === 'ours' || whose === 'free')) {
     try {
       syncIssue({ ...claimCtx })
       const labels = readState(cacheDir(ctx.root, ctx.repo, ctx.number))!.issue!.labels

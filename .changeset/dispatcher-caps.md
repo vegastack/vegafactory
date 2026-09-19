@@ -17,3 +17,6 @@ A dispatcher's limits now come from its roster row instead of being fixed in the
 - Caps read back in a unit their own field accepts, so what is printed can be pasted into the cell it came from: `step 1m` no longer prints as `0h`, and an hour of `poll` says `60m` rather than an `1h` the parser would refuse.
 - The roster's shape is stated once and the template, the reference and the onboarding row all say the same thing.
 - The duration formatter takes its field as a required argument, because a default is what let two call sites print a duration in another field's units.
+- A roster row that does not reach a declared `caps` column is refused by name instead of silently receiving defaults; an empty caps cell or `-` still chooses the defaults explicitly.
+- Standing down leaves the state label unchanged when another machine owns the live claim or claim ownership cannot be verified.
+- Legacy stand-down notices written with a `handback` marker no longer bury the operator reply they did not answer.
