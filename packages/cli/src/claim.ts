@@ -2,7 +2,7 @@
 // comment; only people with write access can post either. The holder is the earliest claim
 // after the latest release, as long as its heartbeat is fresh. The heartbeat is a
 // `vsk:claim` row on the holder's own claim comment, which only that holder's hooks edit.
-import { hostname } from 'node:os'
+import { hostname, userInfo } from 'node:os'
 import { ghRequest, type GhRunner } from './gh.ts'
 import { permissionLookup, readBody, readState, syncIssue, WRITE_ROLES, type CacheState, type CommentEntry, type PermissionLookup } from './issue-cache.ts'
 import { stateOf, transition } from './labels.ts'
@@ -25,6 +25,29 @@ export interface Holder extends Claim { heartbeat: string; active: number; stale
 export function machineName(host = hostname()): string {
   return host.toLowerCase().replace(/\.local$/, '').replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') || 'machine'
 }
+
+// The name a node answers to: `<os-user>@<hostname>`, for example `mk@patrick-mac-mini`.
+//
+// Derived, never configured, so there is nothing to set up and nothing to drift. Two people
+// sharing one machine are two nodes, and one person with three machines is three nodes and one
+// owner — which is what makes "everything this person did" answerable across machines.
+//
+// The hostname is cut to its first label because that is the part that names the machine:
+// `os.hostname()` answers `patrick-mac-mini.local` on macOS and a full domain name on many Linux
+// hosts, and neither belongs in an identity a person has to recognise in a table. `scutil --get
+// LocalHostName` gives the clean name directly but exists only on macOS, and this has to be the
+// same rule on both.
+//
+// Deliberately **not** `machineName`: that maps every non-alphanumeric to a dash, which would turn
+// this into `mk-patrick-mac-mini`, and it is also what `ownerId` stamps on every session claim
+// that exists right now. Changing it would reshape claims already posted on GitHub.
+export function nodeId(user = userInfo().username, host = hostname()): string {
+  return `${namePart(user) || 'someone'}@${namePart(host.split('.')[0] ?? '') || 'machine'}`
+}
+
+// One rule for both halves, so the two sides of an id cannot be normalised differently.
+const namePart = (value: string): string =>
+  String(value ?? '').toLowerCase().replace(/[^a-z0-9._-]+/g, '-').replace(/^[-.]+|[-.]+$/g, '')
 
 // One worktree is used by one session at a time, so machine + worktree folder names the holder.
 export function ownerId(worktreeName: string, host = hostname()): string {
