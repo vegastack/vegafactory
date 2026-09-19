@@ -67,18 +67,55 @@ function safe(text: unknown): string {
   return String(text ?? '').replace(/[\u0000-\u001f\u007f-\u009f]/g, '?').trim()
 }
 
+// Release order, not string order. The prerelease rule is the part that matters here: `1.0.0-rc.1`
+// comes *before* `1.0.0`, so a machine on a prerelease is behind the stable release of the same
+// number and has to be told so — comparing only the numbers made the two equal and left it there.
 export function semverLess(a: string, b: string): boolean {
-  const parse = (value: string) => value.split('-')[0]!.split('.').map(part => Number.parseInt(part, 10) || 0)
-  const [aMajor = 0, aMinor = 0, aPatch = 0] = parse(a)
-  const [bMajor = 0, bMinor = 0, bPatch = 0] = parse(b)
+  const numbers = (value: string) => value.split('+')[0]!.split('-')[0]!.split('.').map(part => Number.parseInt(part, 10) || 0)
+  const pre = (value: string) => {
+    const dash = value.split('+')[0]!.indexOf('-')
+    return dash === -1 ? null : value.split('+')[0]!.slice(dash + 1)
+  }
+  const [aMajor = 0, aMinor = 0, aPatch = 0] = numbers(a)
+  const [bMajor = 0, bMinor = 0, bPatch = 0] = numbers(b)
   if (aMajor !== bMajor) return aMajor < bMajor
   if (aMinor !== bMinor) return aMinor < bMinor
-  return aPatch < bPatch
+  if (aPatch !== bPatch) return aPatch < bPatch
+  const [aPre, bPre] = [pre(a), pre(b)]
+  if (aPre === bPre) return false
+  // Having a prerelease tag makes a version earlier than the same numbers without one.
+  if (aPre === null) return false
+  if (bPre === null) return true
+  // Both are prereleases of the same version: dot-separated, numbers below strings, per semver.
+  const aParts = aPre.split('.'), bParts = bPre.split('.')
+  for (let index = 0; index < Math.max(aParts.length, bParts.length); index += 1) {
+    const left = aParts[index], right = bParts[index]
+    if (left === undefined) return true
+    if (right === undefined) return false
+    if (left === right) continue
+    const leftNumber = /^\d+$/.test(left), rightNumber = /^\d+$/.test(right)
+    if (leftNumber && rightNumber) return Number(left) < Number(right)
+    if (leftNumber !== rightNumber) return leftNumber
+    return left < right
+  }
+  return false
+}
+
+// npm's own variable, so a machine behind a mirror or a private registry is asked the same
+// question its `npm install` would be — and a test can point it somewhere it controls.
+export function registryBase(env: NodeJS.ProcessEnv = process.env): string {
+  const named = env.npm_config_registry?.trim()
+  if (!named) return 'https://registry.npmjs.org'
+  try {
+    const url = new URL(named)
+    if (url.protocol !== 'https:' && url.protocol !== 'http:') return 'https://registry.npmjs.org'
+    return named.replace(/\/+$/, '')
+  } catch { return 'https://registry.npmjs.org' }
 }
 
 export async function latestPublishedVersion(fetcher: typeof fetch = fetch): Promise<string | null> {
   try {
-    const response = await fetcher('https://registry.npmjs.org/@vegastack%2fvegafactory/latest', { signal: AbortSignal.timeout(3000) })
+    const response = await fetcher(`${registryBase()}/@vegastack%2fvegafactory/latest`, { signal: AbortSignal.timeout(3000) })
     if (!response.ok) return null
     const version = ((await response.json()) as { version?: unknown }).version
     return typeof version === 'string' && VERSION.test(version) ? version : null

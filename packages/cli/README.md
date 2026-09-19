@@ -21,6 +21,7 @@ npx @vegastack/vegafactory skills list
 | Command | What it does |
 |---|---|
 | `init [--org ORG]` | Set up this machine and repository; exits 1 when a step fails |
+| `update [--dry-run]` | Install the latest published CLI globally with npm; `--dry-run` reports what it would do and installs nothing |
 | `skills list` | Show the bundled skills, by group |
 | `skills update [selection]` | Bring installed skills up to date; keeps locally edited copies unless `--force` |
 | `skills add <selection>` | Install skills into the agent directories |
@@ -141,7 +142,7 @@ Install each skill globally or per project, not both: in Claude Code a personal 
 
 ## Integrity and network
 
-The package ships a checksum manifest, checked at install and by `verify`. `add`, `verify` and `remove` work offline. Network calls: `doctor`'s version check and `init`'s `npm install -g` reach the npm registry; `issue` commands call the GitHub API through your `gh` login (conditional requests, so an unchanged issue costs almost nothing); `sync` fetches your own control room with git, and `stats push` commits usage counts to that same repository with your `gh` login. VegaFactory sends nothing anywhere else.
+The package ships a checksum manifest, checked at install and by `verify`. `add`, `verify` and `remove` work offline. Network calls: `doctor`'s version check, `init`'s `npm install -g` and `update` reach the npm registry; an attended session start and an idle worker ask the registry for the published version, at most once an hour per machine, and under `vegafactory-update: auto` run `npm install -g` when it is newer; `issue` commands call the GitHub API through your `gh` login (conditional requests, so an unchanged issue costs almost nothing); `sync` fetches your own control room with git, and `stats push` commits usage counts to that same repository with your `gh` login. The registry is npm's own, or whatever `npm_config_registry` names, so a machine behind a mirror asks the same host its `npm install` would. `vegafactory-update: off` stops every one of those registry calls. VegaFactory sends nothing anywhere else.
 
 ## Requirements
 

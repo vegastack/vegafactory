@@ -2,7 +2,7 @@ import { describe, expect, test } from 'bun:test'
 import { mkdirSync, mkdtempSync, realpathSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { maintainSelfUpdate, readUpdateNote, selfUpdateMode, SELF_UPDATE_LIMIT_S, UPDATE_CHECK_EVERY_MS, type UpdateRunner } from '../src/self-update.ts'
+import { maintainSelfUpdate, readUpdateNote, selfUpdateMode, semverLess, SELF_UPDATE_LIMIT_S, UPDATE_CHECK_EVERY_MS, type UpdateRunner } from '../src/self-update.ts'
 
 describe('the VegaFactory updater', () => {
   test('the explicit update is version-guarded, runs plain npm, and always returns a usable result', async () => {
@@ -37,6 +37,28 @@ describe('the VegaFactory updater', () => {
   })
 })
 
+
+describe('release order', () => {
+  // A prerelease comes before the stable release of the same number. Comparing only the numbers
+  // made them equal, so a machine on `1.0.0-rc.1` was told it was current and stayed there.
+  test('a prerelease is behind the release it precedes', () => {
+    expect(semverLess('1.0.0-rc.1', '1.0.0')).toBe(true)
+    expect(semverLess('1.0.0', '1.0.0-rc.1')).toBe(false)
+    expect(semverLess('1.0.0-rc.1', '1.0.0-rc.2')).toBe(true)
+    expect(semverLess('1.0.0-rc.2', '1.0.0-rc.10')).toBe(true)
+    expect(semverLess('1.0.0-alpha', '1.0.0-beta')).toBe(true)
+    // A numeric identifier ranks below an alphanumeric one.
+    expect(semverLess('1.0.0-1', '1.0.0-alpha')).toBe(true)
+    // More identifiers rank above fewer when the shared ones are equal.
+    expect(semverLess('1.0.0-rc', '1.0.0-rc.1')).toBe(true)
+    // Build metadata is not part of the order.
+    expect(semverLess('1.0.0+build.9', '1.0.0')).toBe(false)
+    // And the ordinary cases still hold.
+    expect(semverLess('0.20.1', '0.21.0')).toBe(true)
+    expect(semverLess('0.21.0', '0.21.0')).toBe(false)
+    expect(semverLess('1.0.0', '0.21.0')).toBe(false)
+  })
+})
 
 describe('what one machine remembers between runs', () => {
   const homeDir = () => realpathSync(mkdtempSync(join(tmpdir(), 'vf-update-note-')))

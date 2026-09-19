@@ -593,11 +593,27 @@ function finishedUpdate(now: number, home: { home: string }): string | null {
   return null
 }
 
+// What a session should still be told when the rest of the advisory failed after the install was
+// already detached. Read from the note rather than remembered in a variable, because the throw can
+// happen anywhere between the two.
+function pendingUpdateLine(deps: HookDeps): string | null {
+  const note = readUpdateNote({ home: deps.home })
+  if (!note.startedFrom || typeof note.startedAt !== 'number' || deps.now() - note.startedAt > 60_000) return null
+  return `updating vegafactory ${note.startedFrom} → ${note.startedTo ?? 'the latest version'} in the background; this session continues with ${note.startedFrom}`
+}
+
 async function attendedUpdate(cwd: string, deps: HookDeps): Promise<string | null> {
   try {
     const root = repoRoot(cwd)
     let profile = ''
-    try { profile = readFileSync(join(root, '.vegastack', 'dev.md'), 'utf8') } catch { /* an old profile uses the shipped default */ }
+    try {
+      profile = readFileSync(join(root, '.vegastack', 'dev.md'), 'utf8')
+    } catch (error) {
+      // No profile at all is a project that predates the knob, and it gets the shipped default.
+      // A profile that exists and cannot be read is different: it may be the one saying `off`,
+      // and reading it as "auto" would start a networked global install the operator refused.
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') return null
+    }
     const mode = selfUpdateMode(profile)
     if (mode === 'off') return null
     const settled = finishedUpdate(deps.now(), { home: deps.home })
@@ -722,6 +738,14 @@ export async function runHook(argv: string[], deps: HookDeps = defaultDeps(), st
     return 0
   }
   if (!harness || !input.payload) return 0
-  try { await advisory(event, harness, input.payload, deps) } catch { /* advisory only */ }
+  // The update is started before the rest of the advisory runs, and the rest talks to GitHub and
+  // can throw. Losing the whole context then would mean an install began with the session never
+  // told — so the update line is carried out on its own rather than silently dropped.
+  try {
+    await advisory(event, harness, input.payload, deps)
+  } catch {
+    const started = event === 'session-start' ? pendingUpdateLine(deps) : null
+    if (started) deps.out(context('SessionStart', started))
+  }
   return 0
 }

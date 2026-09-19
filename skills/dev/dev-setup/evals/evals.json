@@ -49,7 +49,7 @@
     },
     {
       "id": 5,
-      "prompt": "Set up the dev workflow here. This machine has Claude Code installed and nothing else \u2014 no Codex.",
+      "prompt": "Set up the dev workflow here. This machine has Claude Code installed and nothing else — no Codex.",
       "expected_output": "Detection records the single harness, says plainly that cross-tool review is off until Codex is installed (reviews fall back to a labelled same-tool self-review), `harnesses:` records the absent harness, and `## Environments` names what the absence costs.",
       "files": [],
       "assertions": [
@@ -106,6 +106,18 @@
         "`bug` and `documentation` are named as kept, not swept up with the workflow labels",
         "No label is created, renamed or deleted without the operator's yes, and a no leaves the repo exactly as it was",
         "The written `labels:` line carries only the new set; no mapping knob and no old name is recorded anywhere"
+      ]
+    },
+    {
+      "id": 10,
+      "prompt": "Set up the dev workflow here for vegastack/billing. This box is locked down — it has no route to the npm registry, and I do not want anything installing itself behind my back.",
+      "expected_output": "The drafted `vegafactory-update:` value is confirmed with the operator rather than assumed, and a machine that must not reach npm is recorded as `off` with what that costs said plainly: the CLI stays on the version installed now and is updated by hand.",
+      "files": [],
+      "assertions": [
+        "The detection summary names `vegafactory-update:` as a value to confirm rather than silently taking the shipped default",
+        "`vegafactory-update: off` is written to `.vegastack/dev.md`, because the operator said this machine must not reach the registry",
+        "The answer says plainly what `off` costs — no registry check at a session start or on an idle worker, and the CLI is updated by hand with `vegafactory update`",
+        "No `npm install -g` is run or offered as part of setup on the strength of this knob"
       ]
     }
   ]

@@ -786,9 +786,15 @@ async function doctor(options: Options) {
   if (failed) process.exitCode = 1
 }
 
-async function updateCli() {
-  const result = await maintainSelfUpdate({ mode: 'auto' })
-  console.log(result.message)
+async function updateCli(dryRun: boolean) {
+  // `--dry-run` is the one promise the whole CLI makes the same way everywhere: it shows what
+  // would change and changes nothing. Asking npm which version is published is a read, so it
+  // still happens; installing is what does not.
+  const result = await maintainSelfUpdate({ mode: dryRun ? 'notify' : 'auto', home: {}, now: Date.now() })
+  if (!dryRun) { console.log(result.message); return }
+  console.log(result.action === 'available'
+    ? `dry run: would run npm install -g @vegastack/vegafactory@latest (${result.before} → ${result.latest})`
+    : result.message)
 }
 
 // `sync` is the one verb that reaches the network on purpose: one shallow fetch of the control
@@ -916,7 +922,7 @@ async function main() {
     return
   }
   if (options.command === 'init') return init(options)
-  if (options.command === 'self-update') return updateCli()
+  if (options.command === 'self-update') return updateCli(options.dryRun)
   if (options.command === 'update') { await update(options); return }
   if (options.command === 'worktree') {
     const {runWorktree, worktreeUsage}=await import('./worktree.ts')

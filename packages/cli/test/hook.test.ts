@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, test } from 'bun:test'
 import { spawnSync } from 'node:child_process'
-import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { Readable } from 'node:stream'
@@ -707,6 +707,32 @@ describe('usage collection', () => {
     }
     expect(await start()).toContain('a background update to vegafactory 9.0.0 did not finish')
     expect(await start()).not.toContain('did not finish')
+  })
+
+  // A profile that exists and cannot be read may be the one that says `off`. Treating it as
+  // absent — which means the shipped `auto` — would start a networked global install the operator
+  // had refused, on the strength of a permission error.
+  test('an unreadable profile stops the update rather than falling back to auto', async () => {
+    const calls: string[][] = []
+    writeFileSync(join(plain, '.vegastack/dev.md'), 'repo: o/r\nvegafactory-update: auto\n')
+    chmodSync(join(plain, '.vegastack/dev.md'), 0)
+    try {
+      out = []
+      await runHook(['session-start', '--harness', 'claude'], {
+        ...deps(), latest: async () => '9.0.0', detach: (command) => { calls.push(command); return undefined },
+      }, Readable.from([Buffer.from(JSON.stringify({ cwd: plain }))]))
+      expect(calls.filter(command => command[0] === 'npm')).toEqual([])
+      expect(out.join('\n')).not.toContain('updating vegafactory')
+    } finally { chmodSync(join(plain, '.vegastack/dev.md'), 0o644) }
+
+    // A profile that is simply absent is a project older than the knob, and still gets the default.
+    rmSync(join(plain, '.vegastack/dev.md'))
+    calls.length = 0
+    out = []
+    await runHook(['session-start', '--harness', 'claude'], {
+      ...deps(), latest: async () => '9.0.0', detach: (command) => { calls.push(command); return undefined },
+    }, Readable.from([Buffer.from(JSON.stringify({ cwd: plain }))]))
+    expect(calls.filter(command => command[0] === 'npm')).toHaveLength(1)
   })
 
   test('session start updates from every repository through a stable command and its own bound', async () => {
