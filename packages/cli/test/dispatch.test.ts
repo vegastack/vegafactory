@@ -4,9 +4,9 @@ import { generateKeyPairSync } from 'node:crypto'
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { claimBody, claimLine, holderOf, trustedFactory } from '../src/claim.ts'
+import { claimBody, claimLine, holderOf, nodeId, trustedFactory } from '../src/claim.ts'
 import {
-  APP_ID, DEFAULT_CAPS, MAX_FAILURES, MAX_RUNS, MAX_TIMER_MS, POLL_MS, RETRY_MS, STEP_TIMEOUT_MS, TOKEN_MARGIN_MS, parseCaps, sayDuration, agentArgs, appIdentity, appJwt, appKeyPath, assertKeyFile, board, decide, defaultRunStep, dispatchDir,
+  APP_ID, DEFAULT_CAPS, MAX_FAILURES, MAX_RUNS, MAX_TIMER_MS, POLL_MS, RETRY_MS, STEP_TIMEOUT_MS, TOKEN_MARGIN_MS, parseCaps, rosterName, sayDuration, agentArgs, appIdentity, appJwt, appKeyPath, assertKeyFile, board, decide, defaultRunStep, dispatchDir,
   acknowledgedPlan, canonicalPath, childRunEnvironment, confirmShip, disjointSiblings, pushableBranch, shipWord,
   drain, filesFromParent, harnessAnswers, hitLimit, hooksWired, listedHere, mintToken, overlaps, parseDispatchArgs,
   parseDispatchers, poll, readActed, readRuns, readiness, recordRun, resetAt, RUNS_KEPT, runDispatch, schedule, serviceCommands, stagePolicy,
@@ -1791,12 +1791,13 @@ test('the row it tells you to add is one the same parser accepts', () => {
   const listing = listedHere(root, { repo: 'o/r', host: HOST, home })
   expect(listing.ok).toBe(false)
   const row = /`(\| .*? \|)`/.exec(listing.reason)![1]!
-  expect(row).toContain(HOST)
+  // The row names this node, which is what the roster lists now.
+  expect(row).toContain(nodeId(undefined, HOST))
   expect(row).toContain('o/r')
 
   // Paste it under that header and the machine is listed, with the shipped defaults.
   const parsed = parseDispatchers(`${header}${row}\n`)[0]!
-  expect(parsed.machine).toBe(HOST)
+  expect(parsed.machine).toBe(nodeId(undefined, HOST))
   expect(parsed.problem).toBeNull()
   expect(parsed.caps).toEqual(DEFAULT_CAPS)
   expect(parsed.repos).toEqual(['o/r'])
@@ -1867,5 +1868,45 @@ describe('the worker gate', () => {
     expect(listedHere(root, { repo: 'o/anything', host: HOST, home }).ok).toBe(true)
     project(`${header}| ${HOST} | mk | yes | all | |\n`)
     expect(listedHere(root, { repo: 'o/anything', host: HOST, home }).ok).toBe(true)
+  })
+})
+
+describe('a node answers to its own name', () => {
+  // The roster names `<os-user>@<hostname>`, and `machineName` maps every non-alphanumeric to a
+  // dash — it would turn `mk@patrick-mac-mini` into `mk-patrick-mac-mini` and no row would match.
+  test('a node id in the roster matches the machine it names', () => {
+    const header = '| node | owner | worker | repos | caps |\n|---|---|---|---|---|\n'
+    project(`${header}| ${nodeId(undefined, HOST)} | mk | yes | o/r | |\n`)
+    expect(listedHere(root, { repo: 'o/r', host: HOST, home }).ok).toBe(true)
+    expect(rosterName('mk@Patrick-Mac-Mini.local')).toBe(nodeId('mk', 'patrick-mac-mini'))
+  })
+
+  // A roster written before node ids listed bare hostnames, and those machines are still listed.
+  test('a bare hostname still matches, so an older roster keeps working', () => {
+    project(`| machine | operator | repos |\n|---|---|---|\n| ${HOST} | mk | o/r |\n`)
+    expect(listedHere(root, { repo: 'o/r', host: HOST, home }).ok).toBe(true)
+  })
+
+  // Somebody writing the gate and missing the name meant to gate something. Reading it as "no
+  // gate at all" would grant every row in the file.
+  test('a heading that nearly names the gate grants nothing', () => {
+    for (const heading of ['workers', 'worker?', 'Worker (y/n)']) {
+      project(`| node | owner | ${heading} | repos |\n|---|---|---|---|\n| ${nodeId(undefined, HOST)} | mk | yes | o/r |\n`)
+      const listing = listedHere(root, { repo: 'o/r', host: HOST, home })
+      expect(listing.ok, heading).toBe(false)
+      expect(listing.reason, heading).toContain('not named `worker`')
+    }
+  })
+
+  // A row pasted from the refusal is a row somebody is adding so this machine can work a board.
+  test('the row it tells you to add says yes in the gate', () => {
+    const header = '| node | owner | worker | repos | caps |\n|---|---|---|---|---|\n'
+    project(`${header}| someone-else | mk | yes | o/r | |\n`)
+    const listing = listedHere(root, { repo: 'o/r', host: HOST, home })
+    const row = /`(\| .*? \|)`/.exec(listing.reason)![1]!
+    const parsed = parseDispatchers(`${header}${row}\n`)[0]!
+    expect(parsed.worker).toBe(true)
+    expect(parsed.repos).toEqual(['o/r'])
+    expect(parsed.problem).toBeNull()
   })
 })

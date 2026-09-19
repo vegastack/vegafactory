@@ -25,7 +25,7 @@ import { createSign, randomUUID } from 'node:crypto'
 import { appendFileSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync } from 'node:fs'
 import { homedir, hostname, userInfo } from 'node:os'
 import { join, posix } from 'node:path'
-import { APP_ACTOR, HEARTBEAT_EVERY_MS, claim, heartbeat, holderOf, machineName, release, trustedFactory } from './claim.ts'
+import { APP_ACTOR, HEARTBEAT_EVERY_MS, claim, heartbeat, holderOf, machineName, nodeId, release, trustedFactory } from './claim.ts'
 import { defaultClonePath, factoryConfigPath, parseControlRoomKnob, readFactoryConfig } from './control-room.ts'
 import { billingVariables, childEnvironment } from './env.ts'
 import { GhError, defaultRunner, ghList, type GhResult, type GhRunner } from './gh.ts'
@@ -139,20 +139,26 @@ const COLUMN_NAMES = {
   worker: ['worker'],
 } as const
 
-interface Layout { machine: number; operator: number | null; repos: number; caps: number | null; worker: number | null }
+interface Layout { machine: number; operator: number | null; repos: number; caps: number | null; worker: number | null; misnamed: boolean }
 
 // The shape every roster had before its columns were named: three cells, and no caps. A table with
 // no header is read this way, and a row with a fourth cell is refused rather than guessed at —
 // there is no position a caps cell is known to sit in, so either the columns are named or there
 // are none to name. Legacy three-cell rosters keep working untouched.
-const POSITIONAL: Layout = { machine: 0, operator: 1, repos: 2, caps: null, worker: null }
+const POSITIONAL: Layout = { machine: 0, operator: 1, repos: 2, caps: null, worker: null, misnamed: false }
 const UNNAMED_COLUMNS = 'the table names no columns, so nothing says which cell holds the caps — add a header row, `| machine | operator | repos | caps |`'
 const UNREADABLE_CAPS = 'the caps cell cannot be read — the shape is `runs 10 · step 72h · poll 1m · retry 15m · park 3`, every field optional'
 const MISSING_CAPS = 'the row does not reach its declared caps column — add an empty cell or `-` when the defaults are fine'
-const UNREADABLE_WORKER = "the worker cell says something this file does not read as an answer — it takes `yes` or `no`, and anything else is refused rather than guessed at"
+const UNREADABLE_WORKER = 'the worker cell says something this file does not read as an answer — it takes `yes` or `no`, and anything else is refused rather than guessed at'
+const MISNAMED_WORKER = 'the gate column is not named `worker`, so nothing here grants unattended work — rename the heading'
 
 // A header is the row that names at least the machine column and the repos column. Anything less
 // is not a header, and reading it as one would silently move every column.
+// A heading that is trying to be the gate and missing it — `workers`, `worker?`, `Worker (y/n)`.
+// Read as "no worker column at all" it would grant every row, which is the opposite of what
+// somebody writing that heading meant.
+const NEARLY_WORKER = /worker/i
+
 function layoutOf(row: string[]): Layout | null {
   const at = (names: readonly string[]) => {
     const found = row.findIndex((cell) => names.includes(cell.toLowerCase()))
@@ -161,7 +167,9 @@ function layoutOf(row: string[]): Layout | null {
   const machine = at(COLUMN_NAMES.machine)
   const repos = at(COLUMN_NAMES.repos)
   if (machine === null || repos === null) return null
-  return { machine, operator: at(COLUMN_NAMES.operator), repos, caps: at(COLUMN_NAMES.caps), worker: at(COLUMN_NAMES.worker) }
+  const worker = at(COLUMN_NAMES.worker)
+  const nearly = row.findIndex((cell) => NEARLY_WORKER.test(cell))
+  return { machine, operator: at(COLUMN_NAMES.operator), repos, caps: at(COLUMN_NAMES.caps), worker: worker ?? (nearly === -1 ? null : nearly), misnamed: worker === null && nearly !== -1 }
 }
 
 const cells = (line: string) => line.replace(/^\|/, '').replace(/\|\s*$/, '').split('|').map((cell) => cell.trim())
@@ -185,9 +193,21 @@ function suggestedCell(column: string, machine: string, repo: string): string {
   if (COLUMN_NAMES.machine.includes(name as (typeof COLUMN_NAMES.machine)[number])) return machine
   if (COLUMN_NAMES.repos.includes(name as (typeof COLUMN_NAMES.repos)[number])) return repo
   if (COLUMN_NAMES.operator.includes(name as (typeof COLUMN_NAMES.operator)[number])) return '<operator>'
+  // The gate is filled in, because a row pasted from here is a row somebody is adding so this
+  // machine can work a board — and left blank it would be refused by the very next check.
+  if (COLUMN_NAMES.worker.includes(name as (typeof COLUMN_NAMES.worker)[number])) return 'yes'
   return ''
 }
 const separator = (cell: string) => /^:?-{2,}:?$/.test(cell)
+
+// How a roster cell and this machine are spelled so they can be compared. A node id is normalised
+// on each side of its `@`; anything else is a bare hostname from a roster written before them.
+export function rosterName(value: string): string {
+  const text = String(value ?? '').trim()
+  if (!text.includes('@')) return machineName(text)
+  const [user = '', host = ''] = text.split('@', 2)
+  return nodeId(user, host)
+}
 
 // One row per machine. A table names its columns in a header row, and a bullet is
 // `- machine — repos`; `*`, `all` or an empty repos cell means every repository of the org.
@@ -202,8 +222,9 @@ export function parseDispatchers(text: string): Dispatcher[] {
     let capsCell = ''
     let named = false
     let problem: string | null = null
-    // A roster with no worker column predates the gate, and every row in it was written to mean a
-    // machine that works the board. One that has the column answers for itself.
+    // A roster with no worker column at all predates the gate, and every row in it was written to
+    // mean a machine that works the board. A header that *nearly* names one — `workers`, `Worker?`
+    // — is somebody trying to write the gate and missing, which must not read as every row granted.
     let worker = true
     let repoDefault: 'all' | 'none' = 'all'
     if (line.startsWith('|')) {
@@ -229,6 +250,7 @@ export function parseDispatchers(text: string): Dispatcher[] {
         // purpose as consent, so the row is kept and its machine refused by name.
         else { worker = false; problem ??= UNREADABLE_WORKER }
         if (row.length <= layout.worker) { worker = false; problem ??= UNREADABLE_WORKER }
+        if (layout.misnamed) { worker = false; problem ??= MISNAMED_WORKER }
       }
       // A wider table than the legacy three, with nothing naming its columns: the caps could be in
       // any of the extra cells or in none of them, and a gate does not guess. Refused by name.
@@ -239,7 +261,10 @@ export function parseDispatchers(text: string): Dispatcher[] {
       machine = match[1]!
       repos = match[2] ?? ''
     }
-    const name = machineName(machine.replace(/`/g, ''))
+    // A node is `<os-user>@<hostname>`, and `machineName` maps every non-alphanumeric to a dash —
+    // it would turn `mk@patrick-mac-mini` into `mk-patrick-mac-mini` and no row would ever match.
+    // A cell with no `@` is a hostname written before node ids existed, and keeps its old spelling.
+    const name = rosterName(machine.replace(/`/g, ''))
     if (!machine.trim() || COLUMN_NAMES.machine.includes(name as (typeof COLUMN_NAMES.machine)[number])) continue
     // A declared caps column is read whatever it holds: guessing a cap would be choosing a number
     // on the operator's behalf. `-` and an empty cell are how a row says "the defaults are fine".
@@ -323,7 +348,10 @@ export function verifiedListing(root: string, options: { repo: string; host?: st
 // The gate every verb passes. A missing or unreadable roster refuses, never defaults: a machine
 // nobody listed must not start working the board because a file was late.
 export function listedHere(root: string, options: { repo: string; host?: string; home?: string }): Listing {
-  const machine = machineName(options.host ?? hostname())
+  // This machine answers to its node id and, for a roster written before node ids, to the bare
+  // machine name it used to be listed under.
+  const machine = nodeId(undefined, options.host ?? hostname())
+  const knownAs = [machine, machineName(options.host ?? hostname())]
   const room = controlRoomClone(root, options.home ?? homedir())
   if (!room) return { ok: false, reason: `this repository names no control room (dev.md's control-room: knob), so no machine is listed to dispatch it`, entry: null, file: null }
   const file = dispatchersPath(room.clone)
@@ -333,7 +361,7 @@ export function listedHere(root: string, options: { repo: string; host?: string;
   } catch {
     return { ok: false, reason: `${file} is not on this machine — run \`vegafactory sync\` to refresh the ${room.org} control room, and add ${machine} to nodes.md in a control-room PR`, entry: null, file }
   }
-  const entry = parseDispatchers(text).find((row) => row.machine === machine) ?? null
+  const entry = parseDispatchers(text).find((row) => knownAs.includes(row.machine)) ?? null
   if (!entry) {
     // The row is spelled to fit the table that is actually there: a row shorter than the header
     // is refused for the cell it never reached, so advice that ignored the header would send the
