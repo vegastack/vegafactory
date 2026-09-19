@@ -3,6 +3,9 @@ import { existsSync } from 'node:fs'
 import { chmod, cp, mkdtemp, mkdir, readFile, realpath, rm, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
+import { refuseAmbientHome } from './no-ambient-home.ts'
+
+refuseAmbientHome()
 
 const packageRoot = resolve(import.meta.dir, '..')
 const cli = join(packageRoot, 'dist/index.js')

@@ -4,6 +4,9 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { loadProfile, readFactoryConfig, serializeFactoryConfig, updateSettings } from '../src/control-room.ts'
 import { planSync, resolveTarget, syncControlRoom } from '../src/sync.ts'
+import { refuseAmbientHome } from './no-ambient-home.ts'
+
+refuseAmbientHome()
 
 const exists = (path: string) => lstat(path).then(() => true).catch(() => false)
 

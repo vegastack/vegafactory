@@ -8,7 +8,7 @@ import {
   compact, duration, loadEvents, parseSince, summarize, totalTokens,
   type Bucket, type StatsEvent, type Summary, type Tokens,
 } from './stats.ts'
-import { statsHtmlPath } from './home.ts'
+import { makeFactoryHome, statsHtmlPath } from './home.ts'
 
 const escape = (text: string) => text.replace(/[&<>"']/g, (char) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[char]!))
 
@@ -130,6 +130,7 @@ export function runDashboard(argv: string[], options: { home?: string; now?: () 
   const since = value('--since') ? parseSince(value('--since')!, now()) : null
   const target = expandHome(value('--out') ?? statsHtmlPath({ home }), home)
   const events = loadEvents(home, { since, shared: !argv.includes('--local') })
+  makeFactoryHome({ home })
   mkdirSync(dirname(target), { recursive: true })
   writeFileSync(target, renderDashboard(events, { generatedAt: new Date(now()).toISOString() }))
   out(`${target} — ${events.length} turns`)

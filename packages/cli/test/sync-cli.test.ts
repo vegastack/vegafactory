@@ -2,6 +2,9 @@ import { afterAll, beforeAll, expect, test } from 'bun:test'
 import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
+import { refuseAmbientHome } from './no-ambient-home.ts'
+
+refuseAmbientHome()
 const packageRoot = resolve(import.meta.dir, '..')
 const sourceMode = process.env.VF_SYNC_SOURCE_TEST === '1'
 const executable = sourceMode ? process.execPath : 'node'
