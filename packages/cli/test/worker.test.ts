@@ -176,22 +176,17 @@ describe('the roster', () => {
     expect(listing.entry?.machine).toBe(NODE)
   })
 
-  // Caps can only be read from a column that says it holds them. A wider table with nothing naming
-  // its columns could be hiding caps in any cell, so the gate says so rather than running on
-  // defaults the operator never chose — and rather than reading a notes cell as a limit.
-  test('a wider table with no header names no columns, so it holds no caps and no gate', () => {
-    const row = parseNodes(`| ${NODE} | mk | o/r | runs 10 · step 72h |\n`)[0]!
-    expect(row.problem).toContain('names no columns')
-    expect(row.caps).toBeNull()
-    expect(row.worker).toBe(false)
-  })
-
-  test('a three-cell roster with no header parses, and grants nothing', () => {
-    const row = parseNodes(`| ${NODE} | mk | o/r |\n`)[0]!
-    expect(row.caps).toEqual(DEFAULT_CAPS)
-    expect(row.worker).toBe(false)
+  // A table is read by its header or not at all. Nothing says which cell is the machine, which is
+  // the caps and which is the gate, so counting cells would be a guess — and the one thing that
+  // fixes it is the header, which is what the refusal asks for.
+  test('a table with no header holds no rows, whatever its width', () => {
+    for (const width of [`| ${NODE} | mk | o/r |`, `| ${NODE} | mk | o/r | runs 10 · step 72h |`]) {
+      expect(parseNodes(`${width}\n`)).toEqual([])
+    }
     project(`| ${NODE} | mk | o/r |\n`)
-    expect(listedHere(root, { repo: 'o/r', host: HOST, home }).reason).toContain('no `worker` column')
+    const reason = listedHere(root, { repo: 'o/r', host: HOST, home }).reason
+    expect(reason).toContain('no `worker` column')
+    expect(reason).toContain('| node | owner | worker | repos | caps |')
   })
 })
 
@@ -1623,20 +1618,12 @@ describe('caps on the roster row', () => {
     expect(rows[1]!.caps).toBeNull()
   })
 
-  test('a table with no header is read the way every roster was read before headers', () => {
-    expect(parseNodes('| a | mk | o/a |')).toEqual([{ machine: 'a', operator: 'mk', repos: ['o/a'], caps: DEFAULT_CAPS, worker: false, problem: null }])
-  })
-
-  test('without a header there is no column caps are known to sit in, so a wider row refuses', () => {
-    // Valid caps in a headerless row must not be silently ignored, and a notes cell must not be
-    // read as a limit. Neither is guessed at: the row is kept and refused, saying what to fix.
-    for (const row of ['| a | mk | o/a | runs 4 |', '| a | mk | o/a | the box that runs the build |', '| a | mk | o/a | runs ten |']) {
-      const parsed = parseNodes(row)[0]!
-      expect(parsed.machine).toBe('a')
-      expect(parsed.caps).toBeNull()
-      expect(parsed.problem).toContain('names no columns')
+  test('without a header no row is read at all, whatever the cells hold', () => {
+    // Caps, a note, or a typo: none of them is guessed at, because nothing says which column any
+    // of them sits in. Naming the columns is all it takes.
+    for (const row of ['| a | mk | o/a |', '| a | mk | o/a | runs 4 |', '| a | mk | o/a | the box that runs the build |', '| a | mk | o/a | runs ten |']) {
+      expect(parseNodes(row)).toEqual([])
     }
-    // Naming the columns is all it takes.
     const named = parseNodes('| machine | operator | repos | caps |\n|---|---|---|---|\n| a | mk | o/a | runs 4 |')
     expect(named[0]!.caps).toEqual({ ...DEFAULT_CAPS, runs: 4 })
   })
@@ -1762,12 +1749,12 @@ test('an agent asking a question is not bookkeeping, and is not answered by an o
   gh.addComment(2, '<!-- vsk:v1 type=standdown -->\n**box** stood down from #2: this machine is no longer listed', 'mk')
   expect(verdict(2).action).toBe('follow-up')
 
-  // Released workers used `handback` for this exact machine notice. Those live comments have
-  // the same meaning as the current marker and must not bury the answer they did not act on.
+  // A stand-down is bookkeeping because of its marker, never because of the words in it. A
+  // `handback` saying the very same sentence is still an agent stopping to ask.
   gh.addIssue({ number: 3, labels: ['waiting-on-operator', 'medium'] })
   gh.addComment(3, 'here are the details you asked for', 'mk')
   gh.addComment(3, '<!-- vsk:v1 type=handback -->\n**box** stood down from #3: this machine is no longer listed', 'mk')
-  expect(verdict(3).action).toBe('follow-up')
+  expect(verdict(3).action).toBe('none')
 })
 
 // The field is required, so a dropped argument is a type error rather than a duration printed in
@@ -1779,19 +1766,26 @@ test('the duration formatter cannot be called without naming its field', () => {
   expect(source).not.toContain("field: 'step' | 'poll' | 'retry' =")
 })
 
-// A hand-back may quote a stand-down while asking something new. Reading that as bookkeeping
-// would let a comment written before the question be chosen as its answer.
-test('a hand-back that repeats a stand-down is still a question', () => {
+// What makes a comment bookkeeping is its marker, not a sentence inside it. A hand-back may quote
+// a stand-down while asking something new, and reading the quote as bookkeeping would let a
+// comment written before the question be chosen as its answer.
+test('a hand-back is a question whatever it quotes', () => {
   gh.addIssue({ number: 1, labels: ['waiting-on-operator', 'medium'] })
   gh.addComment(1, 'here are the details you asked for', 'mk')
   gh.addComment(1, '<!-- vsk:v1 type=handback -->\n**box** stood down from #1: this machine is no longer listed\n\nStopping: that leaves the base moving under the plan. Which branch should this build on?', 'mk')
   expect(verdict(1).action).toBe('none')
 
-  // The released version's own stand-down, which is the whole body, still counts as bookkeeping.
+  // The same sentence and nothing else, still under `handback`: still a question.
   gh.addIssue({ number: 2, labels: ['waiting-on-operator', 'medium'] })
   gh.addComment(2, 'here are the details you asked for', 'mk')
   gh.addComment(2, '<!-- vsk:v1 type=handback -->\n**box** stood down from #2: this machine is no longer listed', 'mk')
-  expect(verdict(2).action).toBe('follow-up')
+  expect(verdict(2).action).toBe('none')
+
+  // Under its own marker it is bookkeeping, and the reply before it still counts.
+  gh.addIssue({ number: 3, labels: ['waiting-on-operator', 'medium'] })
+  gh.addComment(3, 'here are the details you asked for', 'mk')
+  gh.addComment(3, '<!-- vsk:v1 type=standdown -->\n**box** stood down from #3: this machine is no longer listed', 'mk')
+  expect(verdict(3).action).toBe('follow-up')
 })
 
 // Advice that ignores the header sends the operator from one refusal straight into the next: a

@@ -141,12 +141,9 @@ const COLUMN_NAMES = {
 
 interface Layout { machine: number; operator: number | null; repos: number; caps: number | null; worker: number | null; misnamed: boolean }
 
-// The shape every roster had before its columns were named: three cells, and no caps. A table with
-// no header is read this way, and a row with a fourth cell is refused rather than guessed at —
-// there is no position a caps cell is known to sit in, so either the columns are named or there
-// are none to name. Legacy three-cell rosters keep working untouched.
-const POSITIONAL: Layout = { machine: 0, operator: 1, repos: 2, caps: null, worker: null, misnamed: false }
-const UNNAMED_COLUMNS = 'the table names no columns, so nothing says which cell holds the caps or the gate — add a header row, `| node | owner | worker | repos | caps |`'
+// A table is read by its header or not at all. There is no position a cell is known to sit in, so
+// a row before any header names nothing and grants nothing — it is reported as the missing header
+// rather than guessed at by counting cells.
 const UNREADABLE_CAPS = 'the caps cell cannot be read — the shape is `runs 10 · step 72h · poll 1m · retry 15m · park 3`, every field optional'
 const MISSING_CAPS = 'the row does not reach its declared caps column — add an empty cell or `-` when the defaults are fine'
 const UNREADABLE_WORKER = 'the worker cell says something this file does not read as an answer — it takes `yes` or `no`, and anything else is refused rather than guessed at'
@@ -221,7 +218,7 @@ export function rosterName(value: string): string {
 // `- node — repos`. `*` or `all` means every repository of the org; an empty cell means none.
 export function parseNodes(text: string): Node[] {
   const found: Node[] = []
-  let layout = POSITIONAL
+  let layout: Layout | null = null
   for (const raw of String(text ?? '').split('\n')) {
     const line = raw.trim()
     let machine = ''
@@ -242,6 +239,10 @@ export function parseNodes(text: string): Node[] {
       if (row.every(separator)) continue
       const header = layoutOf(row)
       if (header) { layout = header; continue }
+      // A row before any header. Nothing says which cell is the machine, so counting them would be
+      // a guess, and a gate does not guess: the table contributes no rows and `listedHere` reports
+      // the missing header, which is the one thing that would fix it.
+      if (!layout) continue
       // A row the header does not reach is a shape nobody wrote on purpose. The roster is a gate,
       // so it refuses rather than widens — a truncated row must not read as "every repository".
       if (row.length <= Math.max(layout.machine, layout.repos)) continue
@@ -264,9 +265,6 @@ export function parseNodes(text: string): Node[] {
         // Nothing to say per row: a roster with no gate is a fault in the file, not in any of its
         // rows, and `listedHere` reports it where the refusal is made.
       }
-      // A wider table than the legacy three, with nothing naming its columns: the caps could be in
-      // any of the extra cells or in none of them, and a gate does not guess. Refused by name.
-      if (layout === POSITIONAL && row.length > 3) problem = UNNAMED_COLUMNS
     } else {
       const match = /^-\s+`?([A-Za-z0-9][\w.-]*)`?\s*(?:—|--)\s*(.*)$/.exec(line)
       if (!match) continue
@@ -943,19 +941,7 @@ export function latestArtifact(snap: Snapshot, type: string, permission: Permiss
 // reply answers. Counting it as bookkeeping would let a comment written before the question was
 // asked read as the answer to it.
 const BOOKKEEPING = new Set(['claim', 'release', 'ledger', 'ack', 'standdown'])
-// A stand-down the released version wrote, which carried `type=handback` before stand-downs had
-// their own marker. It is matched as the *whole* body and not a line within one, because a genuine
-// hand-back may repeat a stand-down while asking something new — and reading that as bookkeeping
-// would let a comment written before the question be chosen as its answer.
-//
-// The name is held to the shape `machineName` produces rather than to any bold run, so a sentence
-// that merely begins with emphasis — `**Note** stood down from #5: …` — is still a question.
-const LEGACY_STANDDOWN = /^\*\*[a-z0-9][a-z0-9-]*\*\* stood down from #\d+: [^\n]+$/
-
-const withoutMarker = (body: string) => String(body ?? '').replace(/<!--[\s\S]*?-->/, '').trim()
-
-const isBookkeeping = (snap: Snapshot, entry: CommentEntry) =>
-  BOOKKEEPING.has(entry.type) || (entry.type === 'handback' && LEGACY_STANDDOWN.test(withoutMarker(snap.body(entry))))
+const isBookkeeping = (_snap: Snapshot, entry: CommentEntry) => BOOKKEEPING.has(entry.type)
 
 // The action this issue is waiting for, and the comment that asks for it. `trigger` is what makes
 // a run happen once: a comment already acted on asks for nothing more, and a state label already

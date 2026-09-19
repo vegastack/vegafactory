@@ -7,7 +7,7 @@ The project's story, newest first: what got built, why, and how it went — for 
 - **What:** The command for a machine that works a board with nobody watching is `vegafactory worker` — `enable`, `disable`, `status`, `run`. It is the word that machine's row in `nodes.md` already used to grant the permission, so the thing turned on and the cell allowing it now read the same. Setting a machine up did not change.
 - **Why:** Step 4 of [#251](https://github.com/vegastack/vegafactory/issues/251). "Dispatch" named both the machine and the act of handing it work; only the second is worth keeping.
 - **How it went:** The first pass carried two compatibility paths for upgrading an older machine. Both were checked rather than assumed: no service of the old name is installed anywhere, and no claim was ever written with the old kind, so both went. A review round caught a refusal message the rename had left reading "listed as a worker it".
-- **Changed:** the verb · the service, its logs and its working directory · a claim's `kind`, where anything unrecognised is read as a session · the `in-progress` label · the onboarding checklist, which now names the account `worker enable` actually looks for.
+- **Changed:** the verb · the service, its logs and its working directory · a claim's `kind`, where anything unrecognised is read as a session · the `in-progress` label · the onboarding checklist, which now names the account `worker enable` actually looks for · two readers of an older format, deleted: `nodes.md` is read by its header or not at all, and a stand-down counts by its own marker rather than by a sentence inside a hand-back.
 - **Decisions:** none new.
 
 — approved by (kmanojkumar) · built by claude · branch feat/255-dispatch-becomes-worker
