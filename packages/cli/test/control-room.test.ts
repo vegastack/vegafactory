@@ -47,7 +47,10 @@ describe('control-room knob and machine state', () => {
   })
 
   test('a missing state file is an empty config; an unreadable one is a refusal, never a silent reset', () => {
-    expect(readFactoryConfig(null)).toEqual({ schemaVersion: 1, controlRooms: {}, settings: {} })
+    expect(readFactoryConfig(null)).toEqual({ schemaVersion: 2, revision: 0, controlRooms: {}, settings: {} })
+    // One schema and no migration: a document written by any other version is refused whole.
+    expect(() => readFactoryConfig('{"schemaVersion":1,"controlRooms":{}}')).toThrow(/unsupported settings schema 1/)
+    expect(() => readFactoryConfig('{"schemaVersion":99,"controlRooms":{}}')).toThrow(/unsupported settings schema 99/)
     expect(() => readFactoryConfig('{ not json')).toThrow(/not valid JSON/)
   })
 
@@ -68,7 +71,7 @@ describe('control-room knob and machine state', () => {
 
   test('recording one org never drops another, and never mutates the input', () => {
     const before = readFactoryConfig(JSON.stringify({
-      schemaVersion: 1,
+      schemaVersion: 2, revision: 0,
       controlRooms: { acme: { repo: 'acme/cr', path: '/x', branch: 'main', lastSyncedAt: '2026-09-01T00:00:00Z', sha: '0000000' } },
     }))
     const after = withSyncResult(before, 'vegastack', {
@@ -83,7 +86,7 @@ describe('control-room knob and machine state', () => {
 
   test('the worker settings sharing this file survive a sync write, never clobbered', () => {
     const before = readFactoryConfig(JSON.stringify({
-      schemaVersion: 1,
+      schemaVersion: 2, revision: 0,
       repos: [{ path: '~/code/app', repo: 'acme/app', org: 'acme' }],
       interval: 300,
       controlRooms: {},
@@ -129,7 +132,7 @@ async function machine(name: string) {
   const sha = git(['rev-parse', 'HEAD'], room)
   const record = { repo: 'acme/room', path: room, branch: 'main', remote: origin, sha, lastSyncedAt: new Date().toISOString() }
   const write = async (entry: Record<string, unknown>) =>
-    writeFile(join(home, '.vegafactory/factory.json'), JSON.stringify({ schemaVersion: 1, controlRooms: { acme: entry } }))
+    writeFile(join(home, '.vegafactory/factory.json'), JSON.stringify({ schemaVersion: 2, revision: 0, controlRooms: { acme: entry } }))
   await write(record)
   return { home, room, origin, sha, record, write, devMd: 'control-room: acme/room#dev\n' }
 }
@@ -271,7 +274,7 @@ test('a replacement object cannot substitute the policy the recorded commit hold
 test('the settings transaction says whether it published before it failed', async () => {
   const root = await realpath(await mkdtemp(join(tmpdir(), 'published-221-')))
   try {
-    await writeFile(join(root, 'factory.json'), JSON.stringify({ schemaVersion: 1, controlRooms: {} }))
+    await writeFile(join(root, 'factory.json'), JSON.stringify({ schemaVersion: 2, revision: 0, controlRooms: {} }))
     const before = await updateSettingsAtPath(join(root, 'factory.json'), state => state)
     expect(before.revision).toBe(1)
 
@@ -302,14 +305,15 @@ test('an unreadable control-room line refuses instead of resolving without the r
 test('settings transactions preserve two process updates and inert extension collisions', async () => {
   const root = await realpath(await mkdtemp(join(tmpdir(), 'settings-147-')))
   try {
-    await writeFile(join(root, 'factory.json'), JSON.stringify({ schemaVersion: 1, orgs: { inert: true }, custom: 9, controlRooms: {} }))
+    await writeFile(join(root, 'factory.json'), JSON.stringify({ schemaVersion: 2, revision: 0, orgs: { inert: true }, custom: 9, controlRooms: {} }))
     const module = new URL('../src/control-room.ts', import.meta.url).pathname
     const children = ['alpha', 'beta'].map(org => Bun.spawn([process.execPath, '-e', `import {updateSettings} from ${JSON.stringify(module)}; await updateSettings(${JSON.stringify(root)}, s => ({...s,orgs:{...s.orgs,${org}:{repo:'${org}/room'}}}));`], { stdout: 'pipe', stderr: 'pipe' }))
     expect(await Promise.all(children.map(child => child.exited))).toEqual([0, 0])
     const wire = JSON.parse(await readFile(join(root, 'factory.json'), 'utf8'))
     expect(wire).toMatchObject({ schemaVersion: 2, revision: 2, orgs: { inert: true }, custom: 9 })
     expect(Object.keys(wire.controlRooms).sort()).toEqual(['alpha', 'beta'])
-    expect(JSON.parse(await readFile(join(root, 'factory.json.schema1.bak'), 'utf8')).schemaVersion).toBe(1)
+    // Nothing is migrated, so nothing is backed up: there is one schema and no older bytes to keep.
+    expect(await readFile(join(root, 'factory.json.schema1.bak'), 'utf8').catch(error => error.code)).toBe('ENOENT')
     await writeFile(join(root, 'factory.json'), '{"schemaVersion":99,"controlRooms":{}}')
     await expect(updateSettings(root, s => s)).rejects.toThrow(/schema/)
     expect(await readFile(join(root, 'factory.json'), 'utf8')).toBe('{"schemaVersion":99,"controlRooms":{}}')
@@ -325,10 +329,10 @@ test('incomplete transaction ownership refuses without changing settings', async
   } finally { await rm(root, { recursive: true, force: true }) }
 })
 
-test('unreadable settings and symlink aliases refuse without migration or backup loss', async () => {
+test('unreadable settings and symlink aliases refuse without losing the operator’s own keys', async () => {
   const { chmod, symlink } = await import('node:fs/promises')
   const root = await realpath(await mkdtemp(join(tmpdir(), 'settings-permissions-147-')))
-  const path = join(root, 'factory.json'), original = '{"schemaVersion":1,"controlRooms":{},"operator":"kept"}'
+  const path = join(root, 'factory.json'), original = '{"schemaVersion":2,"revision":0,"controlRooms":{},"operator":"kept"}'
   try {
     await writeFile(path, original)
     await chmod(path, 0)

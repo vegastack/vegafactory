@@ -36,7 +36,7 @@ async function fixture(name: string) {
   const home = join(root, name), settings = join(home, '.vegafactory')
   await mkdir(settings, { recursive: true })
   const config = readFactoryConfig(JSON.stringify({
-    schemaVersion: 1, extension: 'kept',
+    schemaVersion: 2, revision: 0, extension: 'kept',
     controlRooms: { acme: { repo: 'acme/room', remote: origin, path: join(home, '.vegafactory/control-room/acme'), branch: 'main', sha: null, lastSyncedAt: null } },
   }))
   await writeFile(join(settings, 'factory.json'), JSON.stringify(serializeFactoryConfig(config)))
@@ -251,6 +251,6 @@ test('a repo that names no room needs no sync, and a mismatched --org refuses', 
   const f = await fixture('none')
   expect(resolveTarget({ devMdText: 'tests: required\n', config: f.config, home: f.home })).toBeNull()
   expect(() => resolveTarget({ devMdText: DEV_MD, config: f.config, home: f.home, org: 'other' })).toThrow(/disagrees/)
-  expect(resolveTarget({ devMdText: 'tests: required\n', config: { schemaVersion: 1, controlRooms: {}, settings: {} }, home: f.home, org: 'acme' })!.repo)
+  expect(resolveTarget({ devMdText: 'tests: required\n', config: { schemaVersion: 2, revision: 0, controlRooms: {}, settings: {} }, home: f.home, org: 'acme' })!.repo)
     .toBe('acme/vegafactory-control-room')
 })

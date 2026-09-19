@@ -366,7 +366,7 @@ describe('reading events back', () => {
     mkdirSync(dir, { recursive: true })
     writeFileSync(join(dir, 'mk-box.jsonl'), rows.map((row) => JSON.stringify(row)).join('\n') + '\n')
     writeFileSync(join(home, '.vegafactory', 'factory.json'), JSON.stringify({
-      schemaVersion: 1, controlRooms: { acme: { repo: 'acme/room', path: clone, branch: 'main', lastSyncedAt: null, sha: null } },
+      schemaVersion: 2, revision: 0, controlRooms: { acme: { repo: 'acme/room', path: clone, branch: 'main', lastSyncedAt: null, sha: null } },
     }))
     return dir
   }
@@ -474,7 +474,7 @@ describe('stats push', () => {
   let origin: string
 
   const link = () => writeFileSync(join(home, '.vegafactory', 'factory.json'), JSON.stringify({
-    schemaVersion: 1,
+    schemaVersion: 2, revision: 0,
     controlRooms: { acme: { repo: 'acme/room', path: clone, branch: 'main', remote: origin, lastSyncedAt: null, sha: null } },
   }))
 
@@ -943,7 +943,7 @@ describe('stats push with two control rooms', () => {
   beforeEach(() => {
     rooms = [build('acme', 'acme/app'), build('other', 'other/app')]
     writeFileSync(join(home, '.vegafactory', 'factory.json'), JSON.stringify({
-      schemaVersion: 1,
+      schemaVersion: 2, revision: 0,
       controlRooms: Object.fromEntries(rooms.map((room) => [room.org, { repo: room.room, path: room.clone, branch: 'main', remote: room.origin, lastSyncedAt: null, sha: null }])),
     }))
     mkdirSync(statsDir(home), { recursive: true })

@@ -2,6 +2,16 @@
 
 The project's story, newest first: what got built, why, and how it went — for the operator's future recall. Format home: the dev-chronicle skill.
 
+## 19-09-2026 — One settings schema, and no migration ([#251](https://github.com/vegastack/vegafactory/issues/251))
+
+- **What:** `factory.json` is read at schema 2 only. A file at any other version is refused by name and left untouched, instead of being converted with a `.schema1.bak` copy left beside it.
+- **Why:** The operator's greenfield ruling: this project is deployed nowhere, no backward compatibility is required, and compatibility code that exists is to be removed. This was the fifth such path, found while checking the last box on [#255](https://github.com/vegastack/vegafactory/issues/255).
+- **How it went:** Checked before deleting, the same way as the other four: the only `factory.json` that exists is already schema 2, and no `.schema1.bak` exists anywhere. So the migration had never run and never would. Taking it out also made `revision` unconditional, which it always should have been.
+- **Changed:** the reader, the writer and the transaction · the `.schema1.bak` backup, deleted · `revision`, now always present and always validated.
+- **Decisions:** none new.
+
+— approved by (kmanojkumar) · built by claude · branch fix/no-schema-1-migration
+
 ## 19-09-2026 — A machine that works alone is a worker ([#255](https://github.com/vegastack/vegafactory/issues/255))
 
 - **What:** The command for a machine that works a board unattended is `vegafactory worker` — `enable`, `disable`, `status`, `run`. It is the word that machine's row in `nodes.md` already used to grant the permission, so the switch and the cell allowing it match.
