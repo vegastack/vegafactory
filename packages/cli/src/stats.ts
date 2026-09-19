@@ -15,9 +15,10 @@
 import { spawnSync } from 'node:child_process'
 import { createHash, randomUUID } from 'node:crypto'
 import { closeSync, constants as fsConstants, existsSync, ftruncateSync, lstatSync, mkdirSync, openSync, readFileSync, readSync, readdirSync, renameSync, rmSync, statSync, truncateSync, writeFileSync, writeSync } from 'node:fs'
-import { homedir, hostname } from 'node:os'
-import { basename, dirname, isAbsolute, join, parse as parsePath, resolve, sep } from 'node:path'
+import { homedir } from 'node:os'
+import { dirname, isAbsolute, join, parse as parsePath, resolve, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { nodeId } from './claim.ts'
 import { factoryConfigPath, lockOrgSync, parseControlRoomKnob, readFactoryConfig, recordOrgSha, repositoryReason, safeClonePath, type ControlRoomEntry } from './control-room.ts'
 import { defaultRunner, ghRequest, type GhRunner } from './gh.ts'
 import { issueFromBranch, issueFromWorktree } from './hook.ts'
@@ -35,8 +36,8 @@ export interface StatsEvent {
   // Rises each time a later line completes this turn; readers keep the highest revision per id.
   rev: number
   at: string
-  operator: string
-  machine: string
+  owner: string
+  node: string
   harness: Harness
   model: string
   repo: string | null
@@ -56,7 +57,7 @@ const MAX_SLICE_BYTES = 8 * 1024 * 1024
 const PASSES_PER_FILE = 4
 // A single record longer than this is not a turn — it is stepped over rather than re-read for ever.
 const MAX_RECORD_BYTES = 64 * 1024 * 1024
-const OPERATOR_TTL_MS = 12 * 60 * 60_000
+const OWNER_TTL_MS = 12 * 60 * 60_000
 export const PUSH_EVERY_MS = 60 * 60_000
 
 export const statsDir = (home: string) => statsDirectory({ home })
@@ -71,6 +72,26 @@ const identityPath = (home: string) => join(statsDir(home), 'identity.json')
 const hash = (text: string) => createHash('sha256').update(text).digest('hex').slice(0, 16)
 const zero = (): Tokens => ({ input: 0, output: 0, cacheRead: 0, cacheWrite: 0 })
 const count = (value: unknown) => (typeof value === 'number' && Number.isFinite(value) && value > 0 ? Math.round(value) : 0)
+// Trimming happens *after* the cut, because cutting first can leave the dash that trimming was
+// meant to remove: 63 safe characters plus `-b` came back 64 characters long ending in `-`.
+const label = (value: unknown, fallback = 'unknown') =>
+  String(value ?? '').replace(/[^A-Za-z0-9._:/-]+/g, '-').slice(0, 64).replace(/^-+|-+$/g, '') || fallback
+
+// An identity is read back out of a file other people write, and it reaches a terminal by way of
+// `stats show`. Only the characters that a terminal acts on are removed — C0, DEL and C1, which is
+// where ESC and every OSC and CSI introducer live — so a row written on another machine cannot
+// address this one. Everything a person might legitimately have in a login or a hostname survives,
+// accents included: flattening those would change whose turn a record says it is. The filename is
+// a separate question and `safe()` still answers it.
+//
+// The bound is 256 rather than 64 on purpose. A login and a hostname are both far shorter than
+// that in practice, so nothing real is cut — and cutting an identity is not a cosmetic loss: two
+// machines whose names agree for 64 characters would become the same recorded identity, which no
+// filename scheme downstream could tell apart again.
+const IDENTITY_LIMIT = 256
+const identityLabel = (value: unknown, fallback = 'unknown') =>
+  // eslint-disable-next-line no-control-regex
+  String(value ?? '').replace(/[\u0000-\u001F\u007F-\u009F]+/g, '').trim().slice(0, IDENTITY_LIMIT).trim() || fallback
 
 function atomicWrite(path: string, text: string) {
   mkdirSync(dirname(path), { recursive: true })
@@ -126,7 +147,8 @@ function repoRootOf(dir: string): string | null {
 
 // The main checkout and the repository name, the way the rest of the CLI reads them: `.git` is a
 // directory in a checkout and a file pointing into the main one in a worktree, the `repo:` line of
-// dev.md wins over the origin URL, and the folder name is the last resort.
+// dev.md wins over the origin URL. A local folder can name a customer, so an unbound checkout is
+// anonymous rather than sending that name to a shared control room.
 export function checkoutOf(dir: string): { root: string | null; repo: string | null } {
   const root = repoRootOf(dir)
   if (!root) return { root: null, repo: null }
@@ -147,8 +169,8 @@ export function checkoutOf(dir: string): { root: string | null; repo: string | n
     const url = /\[remote "origin"\][^[]*?url\s*=\s*(\S+)/.exec(readFileSync(join(gitDir, 'config'), 'utf8'))?.[1]
     const remote = url ? canonicalRepo(url) : null
     if (remote) return { root: main, repo: remote }
-  } catch { /* an unreadable checkout is named after its folder */ }
-  return { root: main, repo: basename(main) }
+  } catch { /* An unreadable checkout has no safe shared name. */ }
+  return { root: main, repo: null }
 }
 
 export function defaultSite(): SiteLookup {
@@ -228,15 +250,25 @@ export interface Carry {
   pending?: { key: string; event: StatsEvent } | null
 }
 
-export interface ParseContext { operator: string; machine: string; carry: Carry; site: SiteLookup; skill: SkillLookup }
+export interface ParseContext { owner: string; node: string; carry: Carry; site: SiteLookup; skill: SkillLookup }
 export interface ParseResult { events: StatsEvent[]; consumed: number }
 
 // A turn already written down, and whether this slice has already appended it.
 interface Known { event: StatsEvent; fresh: boolean }
 
+// Released records used the old pair, so every disk boundary folds it into the current shape.
+// Removing the old keys here also keeps retries from writing the retired spelling back out.
+function readEvent(value: unknown): StatsEvent {
+  const stored = (value && typeof value === 'object' ? value : {}) as Record<string, unknown>
+  const { operator, machine, ...current } = stored
+  const owner = typeof current.owner === 'string' && current.owner ? current.owner : typeof operator === 'string' && operator ? operator : 'unknown'
+  const node = typeof current.node === 'string' && current.node ? current.node : typeof machine === 'string' && machine ? machine : 'unknown'
+  return { ...current, owner: identityLabel(owner), node: identityLabel(node), model: label(current.model), outcome: label(current.outcome) } as unknown as StatsEvent
+}
+
 function opened(carry: Carry): Map<string, Known> {
   const known = new Map<string, Known>()
-  if (carry.pending?.key) known.set(carry.pending.key, { event: structuredClone(carry.pending.event), fresh: false })
+  if (carry.pending?.key) known.set(carry.pending.key, { event: readEvent(structuredClone(carry.pending.event)), fresh: false })
   return known
 }
 
@@ -290,7 +322,7 @@ export function parseClaude(text: string, context: ParseContext): ParseResult {
     const already = known.get(message.id)
     if (already) {
       correct(already, events, (event) => {
-        event.outcome = String(message.stop_reason ?? event.outcome)
+        event.outcome = label(message.stop_reason ?? event.outcome)
         event.skill ??= chosen
       })
       carry.pending = { key: message.id, event: already.event }
@@ -300,13 +332,13 @@ export function parseClaude(text: string, context: ParseContext): ParseResult {
     const branch = typeof entry.gitBranch === 'string' ? entry.gitBranch : null
     const site = context.site(cwd, branch, at)
     const event: StatsEvent = {
-      id, rev: 1, at: new Date(at).toISOString(), operator: context.operator, machine: context.machine, harness: 'claude',
-      model: message.model, repo: site.repo, issue: site.issue, state: site.state, skill: chosen,
+      id, rev: 1, at: new Date(at).toISOString(), owner: context.owner, node: context.node, harness: 'claude',
+      model: label(message.model), repo: site.repo, issue: site.issue, state: site.state, skill: chosen,
       tokens: {
         input: count(message.usage.input_tokens), output: count(message.usage.output_tokens),
         cacheRead: count(message.usage.cache_read_input_tokens), cacheWrite: count(message.usage.cache_creation_input_tokens),
       },
-      durationMs: span(carry.last, at), outcome: String(message.stop_reason ?? 'unknown'),
+      durationMs: span(carry.last, at), outcome: label(message.stop_reason),
     }
     events.push(event)
     known.set(message.id, { event, fresh: true })
@@ -342,7 +374,7 @@ export function parseCodex(text: string, context: ParseContext): ParseResult {
       continue
     }
     if (entry.type === 'turn_context') {
-      if (typeof payload.model === 'string') carry.model = payload.model
+      if (typeof payload.model === 'string') carry.model = label(payload.model)
       if (typeof payload.cwd === 'string') carry.cwd = payload.cwd
       continue
     }
@@ -368,8 +400,8 @@ export function parseCodex(text: string, context: ParseContext): ParseResult {
     const cacheRead = count(usage.cached_input_tokens)
     const event: StatsEvent = {
       id: hash(`codex|${carry.session ?? ''}|${String(payload.response_id ?? '')}`), rev: 1,
-      at: new Date(at).toISOString(), operator: context.operator, machine: context.machine, harness: 'codex',
-      model: carry.model ?? 'unknown', repo: site.repo, issue: site.issue, state: site.state, skill: carry.skill ?? null,
+      at: new Date(at).toISOString(), owner: context.owner, node: context.node, harness: 'codex',
+      model: label(carry.model), repo: site.repo, issue: site.issue, state: site.state, skill: carry.skill ?? null,
       tokens: {
         input: Math.max(0, count(usage.input_tokens) - cacheRead), output: count(usage.output_tokens),
         cacheRead, cacheWrite: count(usage.cache_write_input_tokens),
@@ -464,8 +496,8 @@ export function sliceAt(path: string, offset: number, size: number): Slice {
 
 export interface CollectOptions {
   home?: string
-  machine?: string
-  operator?: string
+  node?: string
+  owner?: string
   runner?: GhRunner
   now?: () => number
   site?: SiteLookup
@@ -476,9 +508,9 @@ export interface CollectResult { files: number; events: number; bytes: number }
 
 // The gh login, asked at most twice a day and kept on disk: every event carries it, and a collect
 // run must not depend on the network.
-export function resolveOperator(home: string, runner: GhRunner, now: number): string {
+export function resolveOwner(home: string, runner: GhRunner, now: number): string {
   const saved = readJson<{ login?: string; at?: number }>(identityPath(home), {})
-  if (saved.login && typeof saved.at === 'number' && now - saved.at < OPERATOR_TTL_MS && now >= saved.at) return saved.login
+  if (saved.login && typeof saved.at === 'number' && now - saved.at < OWNER_TTL_MS && now >= saved.at) return saved.login
   try {
     const login = ghRequest<{ login?: string }>('user', { runner }).body.login
     if (login) {
@@ -507,14 +539,17 @@ function tailLines(home: string, wanted: number): string[] {
 }
 
 function recover(home: string) {
-  const pending = readJson<{ events?: StatsEvent[]; offsets?: Offsets } | null>(journalPath(home), null)
+  const pending = readJson<{ events?: unknown[]; offsets?: Offsets } | null>(journalPath(home), null)
   if (!pending?.events || !pending.offsets) {
     rmSync(journalPath(home), { force: true })
     return
   }
   repairEvents(home)
-  const rows = pending.events.map((event) => JSON.stringify(event))
-  const tail = tailLines(home, rows.length)
+  const events = pending.events.map(readEvent)
+  const rows = events.map((event) => JSON.stringify(event))
+  const tail = tailLines(home, rows.length).map((row) => {
+    try { return JSON.stringify(readEvent(JSON.parse(row))) } catch { return row }
+  })
   let landed = 0
   for (let take = Math.min(rows.length, tail.length); take > 0; take--) {
     if (tail.slice(-take).join('\n') === rows.slice(0, take).join('\n')) { landed = take; break }
@@ -545,8 +580,8 @@ export function collectStats(options: CollectOptions = {}): CollectResult {
 function collectLocked(home: string, options: CollectOptions): CollectResult {
   recover(home)
   const now = options.now ?? Date.now
-  const machine = options.machine ?? hostname()
-  const operator = options.operator ?? resolveOperator(home, options.runner ?? defaultRunner, now())
+  const node = options.node ?? nodeId()
+  const owner = options.owner ?? resolveOwner(home, options.runner ?? defaultRunner, now())
   const site = options.site ?? defaultSite()
   const skill = options.skill ?? skillResolver(home)
   const offsets = readJson<Offsets>(offsetsPath(home), { schema: 1, files: {} })
@@ -567,7 +602,7 @@ function collectLocked(home: string, options: CollectOptions): CollectResult {
       try { slice = sliceAt(log.path, state.offset, info.size) } catch { break }
       if (slice.skipped) { state.offset += slice.skipped; continue }
       if (!slice.text) break
-      const context: ParseContext = { operator, machine, carry: state.carry ?? {}, site, skill }
+      const context: ParseContext = { owner, node, carry: state.carry ?? {}, site, skill }
       const result = log.harness === 'claude' ? parseClaude(slice.text, context) : parseCodex(slice.text, context)
       collected.push(...result.events)
       state.carry = context.carry
@@ -585,7 +620,7 @@ function collectLocked(home: string, options: CollectOptions): CollectResult {
 }
 
 // ---------------------------------------------------------------------------------------------
-// Reading events back: whatever every operator pushed into the control-room clones this machine
+// Reading events back: whatever every owner pushed into the control-room clones this machine
 // keeps, then this machine's own file. The newest revision of an id wins, so a turn corrected here
 // but not pushed yet still reads as its finished self.
 
@@ -593,7 +628,7 @@ function parseEvents(text: string, into: Map<string, StatsEvent>, since: number 
   for (const line of text.split('\n')) {
     if (!line.trim()) continue
     let event: StatsEvent
-    try { event = JSON.parse(line) as StatsEvent } catch { continue }
+    try { event = readEvent(JSON.parse(line)) } catch { continue }
     if (!event?.id || !event.at) continue
     if (since !== null && Date.parse(event.at) < since) continue
     const seen = into.get(event.id)
@@ -661,7 +696,8 @@ export interface Bucket {
   turns: number
   tokens: Tokens
   durationMs: number
-  operators: string[]
+  owners: string[]
+  nodes: string[]
   harnesses: string[]
   models: string[]
   repos: string[]
@@ -689,16 +725,17 @@ export function group(events: StatsEvent[], keyOf: (event: StatsEvent) => string
     let bucket = buckets.get(key)
     if (!bucket) {
       bucket = {
-        key, turns: 0, tokens: zero(), durationMs: 0, operators: [], harnesses: [], models: [], repos: [], issues: [], skills: [],
+        key, turns: 0, tokens: zero(), durationMs: 0, owners: [], nodes: [], harnesses: [], models: [], repos: [], issues: [], skills: [],
         state: null, last: event.at,
-        sets: { operators: new Set(), harnesses: new Set(), models: new Set(), repos: new Set(), issues: new Set(), skills: new Set() },
+        sets: { owners: new Set(), nodes: new Set(), harnesses: new Set(), models: new Set(), repos: new Set(), issues: new Set(), skills: new Set() },
       }
       buckets.set(key, bucket)
     }
     bucket.turns += 1
     add(bucket.tokens, event.tokens ?? zero())
     bucket.durationMs += event.durationMs ?? 0
-    bucket.sets.operators!.add(event.operator)
+    bucket.sets.owners!.add(event.owner)
+    bucket.sets.nodes!.add(event.node)
     bucket.sets.harnesses!.add(event.harness)
     bucket.sets.models!.add(event.model)
     if (event.repo) bucket.sets.repos!.add(event.repo)
@@ -711,7 +748,7 @@ export function group(events: StatsEvent[], keyOf: (event: StatsEvent) => string
   }
   return [...buckets.values()].map(({ sets, ...bucket }) => ({
     ...bucket,
-    operators: [...sets.operators!].sort(), harnesses: [...sets.harnesses!].sort(), models: [...sets.models!].sort(),
+    owners: [...sets.owners!].sort(), nodes: [...sets.nodes!].sort(), harnesses: [...sets.harnesses!].sort(), models: [...sets.models!].sort(),
     repos: [...sets.repos!].sort(), issues: [...sets.issues!].sort(), skills: [...sets.skills!].sort(),
   })).sort((a, b) => b.turns - a.turns || a.key.localeCompare(b.key))
 }
@@ -722,14 +759,15 @@ export interface Summary {
   turns: number
   tokens: Tokens
   durationMs: number
-  operators: Bucket[]
+  owners: Bucket[]
+  nodes: Bucket[]
   projects: Bucket[]
   issues: Bucket[]
   models: Bucket[]
   skills: Bucket[]
   days: Bucket[]
   stages: Bucket[]
-  operatorModels: Bucket[]
+  ownerModels: Bucket[]
   projectModels: Bucket[]
 }
 
@@ -743,14 +781,15 @@ export function summarize(events: StatsEvent[]): Summary {
     turns: events.length,
     tokens,
     durationMs,
-    operators: group(events, (event) => event.operator || 'unknown'),
+    owners: group(events, (event) => event.owner || 'unknown'),
+    nodes: group(events, (event) => event.node || 'unknown'),
     projects: group(events, (event) => event.repo),
     issues: group(events, (event) => (event.issue ? `${event.repo ?? '?'}#${event.issue}` : null)),
     models: group(events, (event) => `${event.harness} · ${event.model}`),
     skills: group(events, (event) => event.skill),
     days: group(events, (event) => event.at.slice(0, 10)).sort((a, b) => a.key.localeCompare(b.key)),
     stages: group(events, (event) => event.state),
-    operatorModels: group(events, (event) => `${event.operator} · ${event.model}`),
+    ownerModels: group(events, (event) => `${event.owner} · ${event.model}`),
     projectModels: group(events, (event) => (event.repo ? `${event.repo} · ${event.model}` : null)),
   }
 }
@@ -785,7 +824,9 @@ export function renderShow(summary: Summary): string {
   const parts = [
     `${summary.from?.slice(0, 10)} → ${summary.to?.slice(0, 10)} · ${summary.turns} turns · ${compact(totalTokens(summary.tokens))} tokens · ${duration(summary.durationMs)}`,
     '',
-    table(['operator', ...HEADERS.slice(1)], summary.operators.map(bucketRow)),
+    table(['owner', ...HEADERS.slice(1)], summary.owners.map(bucketRow)),
+    '',
+    table(['node', ...HEADERS.slice(1)], summary.nodes.map(bucketRow)),
     '',
     table(['project', ...HEADERS.slice(1)], summary.projects.map(bucketRow)),
     '',
@@ -797,8 +838,8 @@ export function renderShow(summary: Summary): string {
 }
 
 // ---------------------------------------------------------------------------------------------
-// Pushing to the control room: one file per operator, per machine, per day, appended in the clone
-// `vegafactory sync` already keeps, committed and pushed with the operator's own gh credentials.
+// Pushing to the control room: one file per owner, per node, per day, appended in the clone
+// `vegafactory sync` already keeps, committed and pushed with the owner's own gh credentials.
 // The clone belongs to sync, so this must hand it back exactly as it found it: the clone is checked
 // before anything is written, only the generated files are staged, and a failure puts them back.
 
@@ -851,7 +892,16 @@ export const defaultGit: GitRunner = (args) => {
   return { code: result.status ?? 1, out: `${result.stdout ?? ''}${result.stderr ?? ''}`.trim() }
 }
 
-const safe = (value: string) => String(value ?? '').replace(/[^A-Za-z0-9._-]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 64) || 'unknown'
+const safe = (value: string) => String(value ?? '').replace(/[^A-Za-z0-9._-]+/g, '-').slice(0, 64).replace(/^-+|-+$/g, '') || 'unknown'
+
+// The readable part is for a person scanning the tree; the digest is what actually keeps two
+// identities apart. `safe()` cannot: it rewrites `@` to `-` and truncates at 64, so `a-b@c` and
+// `a@b-c` both read as `a-b-c`, and two long nodes sharing a prefix read as each other. Either
+// collision puts two machines back on one file, which is the conflict this layout exists to
+// prevent. Twelve hex characters of the exact pair, joined by a separator neither half can
+// contain, so the pair that produced a name is the only pair that produces it.
+export const statsFileName = (owner: string, node: string) =>
+  `${safe(owner)}-${safe(node)}-${hash(`${owner}\u0000${node}`).slice(0, 12)}.jsonl`
 
 // The repository this session is in, with a worktree path folded back to its main checkout.
 export function repoRootFor(cwd: string): string | null {
@@ -1163,21 +1213,21 @@ function pushInsideLock(home: string, options: PushOptions, context: PushContext
   // that belongs somewhere else is never this room's to send, and its own room has its own cursor.
   const offset = from + end + 1
 
-  // Each turn is filed under the operator and machine it was recorded on, never under whoever is
-  // logged in now: a batch collected before a login or a hostname change belongs to its own file.
+  // Each turn is filed under the owner and node it was recorded on, never under whoever is logged
+  // in now: a batch collected before an identity change belongs to its own file.
   // Only turns from a repository this room is bound to go anywhere; the rest stay on this machine.
   const allowed = authorizedRepos(home, clone, devMd)
   const groups = new Map<string, { relative: string; rows: string[] }>()
   let taken = 0
   for (const line of lines) {
     let event: StatsEvent
-    try { event = JSON.parse(line) as StatsEvent } catch { continue }
+    try { event = readEvent(JSON.parse(line)) } catch { continue }
     if (!event.repo || !allowed.has(event.repo)) continue
     const day = String(event.at ?? '').slice(0, 10).replace(/-/g, '/')
     if (!/^\d{4}\/\d{2}\/\d{2}$/.test(day)) continue
-    const relative = `stats/${day}/${safe(event.operator)}-${safe(event.machine)}.jsonl`
+    const relative = `stats/${day}/${statsFileName(event.owner, event.node)}`
     const group = groups.get(relative) ?? { relative, rows: [] }
-    group.rows.push(line)
+    group.rows.push(JSON.stringify(event))
     groups.set(relative, group)
     taken += 1
   }
@@ -1260,11 +1310,11 @@ export function statsUsage(): string {
 
   collect                 read new turns from the Claude Code and Codex session logs on this machine
   push [--force]          append this machine's new turns to the org control room (at most hourly)
-  show [--since 7d]       turns, tokens and time by operator, project, model, stage and skill
+  show [--since 7d]       turns, tokens and time by owner, node, project, model, stage and skill
 
 Options:
   --since 7d|12h|30m|DATE   only turns since then (show)
-  --local                   only this machine's own turns, not the control room (show)
+  --local                   only this node's own turns, not the control room (show)
   --json                    machine-readable output
 `
 }
