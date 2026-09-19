@@ -86,4 +86,4 @@ launchctl print gui/$(id -u {{worker-user}})/com.vegastack.vegafactory.worker | 
 
 The first prints `{{runner-name}} online` — the org endpoint is the one that lists a group's runners, while `repos/{{org}}/{{repo}}/actions/runners` lists repository-level runners. The second prints `{{runner-user}}` and never `{{worker-user}}`.
 
-Then the reboot drill: `sudo reboot`, wait for the box, and run both checks again **without logging anything in by hand**. A box that needs a human at the keyboard after a power cut is not always-on.
+Then the reboot drill: `sudo reboot`, wait for the box, and run every check above again **without logging anything in by hand**. A box that needs a human at the keyboard after a power cut is not always-on.

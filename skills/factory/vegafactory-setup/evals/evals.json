@@ -82,7 +82,7 @@
         "The two-account split is stated with its reason: a CI job runs as the runner user and so cannot read the worker user's gh, Claude and Codex credentials",
         "The runner registration and the org runner-group grant are presented as the operator's own commands, and no registration token is minted by the agent",
         "The reply says an ungranted runner group queues jobs forever with runner: null rather than failing",
-        "The GitHub App private key is stated as never living on the box"
+        "The GitHub App private key is stated as living on the worker box at ~/.vegafactory/worker/app.pem, chmod 600, readable only by the worker account"
       ]
     },
     {
