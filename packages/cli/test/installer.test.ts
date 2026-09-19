@@ -614,45 +614,13 @@ describe('selecting a family', () => {
     expect(bare.stderr.toString()).toContain('vegafactory skills add')
   })
 
-  // `--dry-run` is the one promise the CLI makes the same way everywhere, and `update` is the verb
-  // where breaking it replaces the binary the operator is running. Tested through the real command
-  // against a registry this test serves, so "a newer version exists" is a fact rather than a hope,
-  // with a fake `npm` first on PATH to catch an install if one happens. The child is spawned
-  // asynchronously on purpose: a blocking spawn holds the event loop and the server never answers.
-  test('vegafactory update --dry-run reports the newer version and installs nothing', async () => {
-    const bin = join(temporary, 'fake-bin')
-    const marker = join(temporary, 'npm-was-called')
-    await mkdir(bin, { recursive: true })
-    await writeFile(join(bin, 'npm'), `#!/bin/sh\necho "$@" >> ${JSON.stringify(marker)}\nexit 0\n`, { mode: 0o755 })
-
-    const server = Bun.serve({ hostname: '127.0.0.1', port: 0, fetch: () => Response.json({ version: '99.0.0' }) })
-    const update = async (args: string[]) => {
-      const child = Bun.spawn(['node', cli, ...args], {
-        cwd: packageRoot,
-        // The home is named at the launch site on purpose: this is the one thing that keeps a test
-        // off the operator's real machine, and it is checked by reading this call.
-        env: {
-          ...process.env, HOME: temporary, VEGAFACTORY_HOME: join(temporary, '.vegafactory'),
-          PATH: `${bin}:${process.env.PATH ?? ''}`, npm_config_registry: `http://127.0.0.1:${server.port}`,
-        },
-        stdout: 'pipe', stderr: 'pipe',
-      })
-      const stdout = await new Response(child.stdout).text()
-      return { code: await child.exited, stdout }
-    }
-    try {
-      const dry = await update(['update', '--dry-run'])
-      expect(dry.code).toBe(0)
-      expect(dry.stdout).toContain('dry run: would run npm install -g @vegastack/vegafactory@latest')
-      expect(dry.stdout).toContain('99.0.0')
-      expect(existsSync(marker)).toBe(false)
-
-      // Without the flag the same command installs, through the same seam.
-      const real = await update(['update'])
-      expect(real.code).toBe(0)
-      expect(existsSync(marker)).toBe(true)
-      expect(await readFile(marker, 'utf8')).toContain('install -g @vegastack/vegafactory@latest')
-    } finally { server.stop(true) }
+  // `vegafactory update` routes to the self-update command and takes `--dry-run` like everything
+  // else; that the flag reaches it is checked here, and what it then does is checked against the
+  // command itself in self-update.test.ts.
+  test('update is a command of its own and accepts --dry-run', () => {
+    const help = run(temporary, ['--help']).stdout.toString()
+    expect(help).toContain('\n  update ')
+    expect(run(temporary, ['update', '--help']).exitCode).toBe(0)
   })
 
   test('usage names the installer, worktree, sync, ship and hook verbs, and removed verbs are unknown', () => {

@@ -101,21 +101,14 @@ export function semverLess(a: string, b: string): boolean {
   return false
 }
 
-// npm's own variable, so a machine behind a mirror or a private registry is asked the same
-// question its `npm install` would be — and a test can point it somewhere it controls.
-export function registryBase(env: NodeJS.ProcessEnv = process.env): string {
-  const named = env.npm_config_registry?.trim()
-  if (!named) return 'https://registry.npmjs.org'
-  try {
-    const url = new URL(named)
-    if (url.protocol !== 'https:' && url.protocol !== 'http:') return 'https://registry.npmjs.org'
-    return named.replace(/\/+$/, '')
-  } catch { return 'https://registry.npmjs.org' }
-}
+// One registry, over TLS, and not configurable. This answer decides whether a global install of
+// executable code runs unattended, so a redirectable base — an environment variable, a mirror —
+// would let whoever set it choose what this machine installs and then runs as its own user.
+const REGISTRY = 'https://registry.npmjs.org'
 
 export async function latestPublishedVersion(fetcher: typeof fetch = fetch): Promise<string | null> {
   try {
-    const response = await fetcher(`${registryBase()}/@vegastack%2fvegafactory/latest`, { signal: AbortSignal.timeout(3000) })
+    const response = await fetcher(`${REGISTRY}/@vegastack%2fvegafactory/latest`, { signal: AbortSignal.timeout(3000) })
     if (!response.ok) return null
     const version = ((await response.json()) as { version?: unknown }).version
     return typeof version === 'string' && VERSION.test(version) ? version : null

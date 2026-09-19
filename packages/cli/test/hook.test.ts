@@ -689,8 +689,12 @@ describe('usage collection', () => {
     }
 
     expect(await start()).toContain(`updating vegafactory ${packageVersion} → 9.0.0 in the background`)
-    // The install landed: this process is a different version from the one the note recorded.
-    writeUpdateNote({ ...readUpdateNote({ home: fakeHome }), startedFrom: '0.0.1' }, { home: fakeHome })
+    // The note the real path just wrote is what the next session reads. Only the one fact a
+    // finished install would have changed is changed here — the version this process reports —
+    // because that is the difference the next session is supposed to notice.
+    const written = readUpdateNote({ home: fakeHome })
+    expect(written).toMatchObject({ startedFrom: packageVersion, startedTo: '9.0.0' })
+    writeUpdateNote({ ...written, startedFrom: '0.0.1' }, { home: fakeHome })
     expect(await start()).toBe(`vegafactory updated 0.0.1 → ${packageVersion} in the background since the last session`)
     // Said once, then forgotten — not repeated at every session for the rest of time.
     expect(await start()).not.toContain('updated 0.0.1')

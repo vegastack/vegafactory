@@ -37,7 +37,7 @@ import {
 import { issueFromBranch } from './hook.ts'
 import { defaultBranch } from './guard-rules.ts'
 import { stateOf, type State } from './labels.ts'
-import { maintainSelfUpdate, selfUpdateMode, type UpdateResult } from './self-update.ts'
+import { maintainSelfUpdate, selfUpdateMode, type UpdateMode, type UpdateResult } from './self-update.ts'
 import { lintPlan, normalizeGroupPath, parseIndependentGroups, sharedByEveryChild } from '../../../skills/dev/dev-plan/scripts/plan-lint.mjs'
 import { appKeyPath as workerAppKey } from './home.ts'
 
@@ -354,6 +354,18 @@ export function verifiedListing(root: string, options: { repo: string; host?: st
 
 // The gate every verb passes. A missing or unreadable roster refuses, never defaults: a machine
 // nobody listed must not start working the board because a file was late.
+// The update policy for this checkout. No profile at all is a project older than the knob and
+// gets the shipped default. A profile that exists and cannot be read is not the same thing: it
+// may be the one saying `off`, and reading it as `auto` would start a networked global install
+// of executable code that the operator had refused.
+export function updateModeFor(root: string): UpdateMode {
+  try {
+    return selfUpdateMode(readFileSync(join(root, '.vegastack', 'dev.md'), 'utf8'))
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === 'ENOENT' ? selfUpdateMode('') : 'off'
+  }
+}
+
 export function listedHere(root: string, options: { repo: string; host?: string; home?: string }): Listing {
   // One spelling, and only one: a node is `<os-user>@<hostname>`. Accepting a bare hostname as
   // well would mean two rows could name this machine and a roster could grant through either.
@@ -1969,8 +1981,8 @@ export async function runWorker(argv: string[], deps: CliDeps = {}): Promise<num
         return 2
       }
       let devMd = ''
-      try { devMd = readFileSync(join(root, '.vegastack', 'dev.md'), 'utf8') } catch { /* no profile, so the tools' own defaults */ }
-      const update = deps.update ?? (() => maintainSelfUpdate({ mode: selfUpdateMode(devMd), home: { home }, now: Date.now() }))
+      try { devMd = readFileSync(join(root, '.vegastack', 'dev.md'), 'utf8') } catch { /* see updateModeFor */ }
+      const update = deps.update ?? (() => maintainSelfUpdate({ mode: updateModeFor(root), home: { home }, now: Date.now() }))
       const identity = deps.runner ? null : appIdentity({ repo, keyPath, appId: appIdOf(env), fetch: deps.fetch })
       const runner = deps.runner ?? identity!.runner
       // `--json` puts exactly one document on stdout and nothing else, so every line this loop

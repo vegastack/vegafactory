@@ -12,6 +12,7 @@ import {
   parseNodes, poll, readActed, readRuns, readiness, recordRun, resetAt, RUNS_KEPT, runWorker, schedule, serviceCommands, stagePolicy,
   standDown, stepPrompt, tail, unitPath, unitText, unsafeForParallel,
   noteChild, readChildren, refreshRoster, releaseRunLock, reserve, runLockPath, takeRunLock, verifiedListing,
+  updateModeFor,
   type Candidate, type Fetch, type GitRun, type Inflight, type PollDeps, type Probe, type RunStep, type StepResult,
 } from '../src/worker.ts'
 import { ackBody, artifactHash, permissionLookup, snapshot } from '../src/issue.ts'
@@ -1256,6 +1257,25 @@ describe('the command', () => {
     expect(result.code).toBe(0)
     expect(seen).toEqual([1])
     expect(result.text).toContain('#1 implement → done')
+  })
+
+  // A profile that exists and cannot be read may be the one saying `off`. Reading it as the
+  // shipped `auto` would have this machine fetch and install executable code the operator refused,
+  // on the strength of a permission error.
+  test('an unreadable profile stops the worker updating itself', () => {
+    const box = realpathSync(mkdtempSync(join(tmpdir(), 'worker-policy-')))
+    mkdirSync(join(box, '.vegastack'), { recursive: true })
+
+    // No profile at all: a project older than the knob, so the shipped default stands.
+    expect(updateModeFor(box)).toBe('auto')
+
+    writeFileSync(join(box, '.vegastack', 'dev.md'), 'repo: o/r\nvegafactory-update: notify\n')
+    expect(updateModeFor(box)).toBe('notify')
+
+    chmodSync(join(box, '.vegastack', 'dev.md'), 0)
+    try {
+      expect(updateModeFor(box)).toBe('off')
+    } finally { chmodSync(join(box, '.vegastack', 'dev.md'), 0o644) }
   })
 
   test('the worker updates between passes only when no agent is running', async () => {

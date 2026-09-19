@@ -8,7 +8,7 @@ import { fileURLToPath } from 'node:url'
 import { createInterface } from 'node:readline/promises'
 import type { SkillEntry } from './selection.ts'
 import { factoryHome } from './home.ts'
-import { latestPublishedVersion, maintainSelfUpdate, packageVersion, semverLess } from './self-update.ts'
+import { latestPublishedVersion, maintainSelfUpdate, packageVersion, semverLess, type LatestVersion, type UpdateRunner } from './self-update.ts'
 
 type Agent = 'codex' | 'claude'
 type AgentChoice = Agent | 'both'
@@ -786,13 +786,17 @@ async function doctor(options: Options) {
   if (failed) process.exitCode = 1
 }
 
-async function updateCli(dryRun: boolean) {
+// A person typing this has asked for the current answer, so no `home` is passed: the remembered
+// one exists to stop an idle worker polling npm every couple of minutes, and reusing it here
+// would answer "already current" from a check made up to an hour ago. Leaving `home` out also
+// means nothing is written, which is what `--dry-run` promises.
+export async function updateCli(dryRun: boolean, latest?: LatestVersion, run?: UpdateRunner, say: (text: string) => void = console.log): Promise<void> {
   // `--dry-run` is the one promise the whole CLI makes the same way everywhere: it shows what
   // would change and changes nothing. Asking npm which version is published is a read, so it
-  // still happens; installing is what does not.
-  const result = await maintainSelfUpdate({ mode: dryRun ? 'notify' : 'auto', home: {}, now: Date.now() })
-  if (!dryRun) { console.log(result.message); return }
-  console.log(result.action === 'available'
+  // still happens; installing and remembering are what do not.
+  const result = await maintainSelfUpdate({ mode: dryRun ? 'notify' : 'auto', latest, run })
+  if (!dryRun) { say(result.message); return }
+  say(result.action === 'available'
     ? `dry run: would run npm install -g @vegastack/vegafactory@latest (${result.before} → ${result.latest})`
     : result.message)
 }

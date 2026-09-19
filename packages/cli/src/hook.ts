@@ -593,15 +593,6 @@ function finishedUpdate(now: number, home: { home: string }): string | null {
   return null
 }
 
-// What a session should still be told when the rest of the advisory failed after the install was
-// already detached. Read from the note rather than remembered in a variable, because the throw can
-// happen anywhere between the two.
-function pendingUpdateLine(deps: HookDeps): string | null {
-  const note = readUpdateNote({ home: deps.home })
-  if (!note.startedFrom || typeof note.startedAt !== 'number' || deps.now() - note.startedAt > 60_000) return null
-  return `updating vegafactory ${note.startedFrom} → ${note.startedTo ?? 'the latest version'} in the background; this session continues with ${note.startedFrom}`
-}
-
 async function attendedUpdate(cwd: string, deps: HookDeps): Promise<string | null> {
   try {
     const root = repoRoot(cwd)
@@ -630,10 +621,9 @@ async function attendedUpdate(cwd: string, deps: HookDeps): Promise<string | nul
   }
 }
 
-async function advisory(event: HookEvent, harness: Harness, payload: Record<string, unknown>, deps: HookDeps): Promise<void> {
+async function advisory(event: HookEvent, harness: Harness, payload: Record<string, unknown>, deps: HookDeps, update: string | null): Promise<void> {
   const cwd = typeof payload.cwd === 'string' ? payload.cwd : process.cwd()
   try { collectStats(event, cwd, deps) } catch { /* stats never affect a session */ }
-  const update = event === 'session-start' ? await attendedUpdate(cwd, deps) : null
   const where = locate(cwd, deps.host)
   if (!where) {
     if (update) deps.out(context('SessionStart', update))
@@ -738,14 +728,17 @@ export async function runHook(argv: string[], deps: HookDeps = defaultDeps(), st
     return 0
   }
   if (!harness || !input.payload) return 0
-  // The update is started before the rest of the advisory runs, and the rest talks to GitHub and
-  // can throw. Losing the whole context then would mean an install began with the session never
-  // told — so the update line is carried out on its own rather than silently dropped.
+  // The update runs first and its line is held right here, because the rest of the advisory talks
+  // to GitHub and can throw. Re-deriving the line after a failure was not enough: the update may
+  // already have cleared the note it would have been read from, and the session would be told
+  // nothing about an install that had started.
+  const update = event === 'session-start'
+    ? await attendedUpdate(typeof input.payload.cwd === 'string' ? input.payload.cwd : process.cwd(), deps).catch(() => null)
+    : null
   try {
-    await advisory(event, harness, input.payload, deps)
+    await advisory(event, harness, input.payload, deps, update)
   } catch {
-    const started = event === 'session-start' ? pendingUpdateLine(deps) : null
-    if (started) deps.out(context('SessionStart', started))
+    if (update) deps.out(context('SessionStart', update))
   }
   return 0
 }
