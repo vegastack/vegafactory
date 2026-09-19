@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test'
-import { ageDays, ageHours, ledgerMovedAt, parseMarker, pendingDecisions, stripLinks, taskProgress } from '../scripts/status.mjs'
+import { controlRoomState, ageDays, ageHours, ledgerMovedAt, parseMarker, pendingDecisions, stripLinks, taskProgress } from '../scripts/status.mjs'
 
 const NOW = Date.parse('2026-08-29T12:00:00Z')
 const planComment = (body: string) => ({ body: `<!-- vsk:v1 type=plan rev=1 -->\n${body}`, updated_at: '2026-08-29T10:00:00Z' })
@@ -240,12 +240,12 @@ describe('control-room drift', () => {
 
   test('gatherStatus reads org.md and group.md out of the clone the state file names', () => {
     const home = mkdtempSync(join(tmpdir(), 'vsk-home-'))
-    const clone = join(home, '.vegastack/control-room/vegastack')
+    const clone = join(home, '.vegafactory/control-room/vegastack')
     mkdirSync(join(clone, 'groups/dev'), { recursive: true })
     writeFileSync(join(clone, 'org.md'), 'stats: on\n')
     writeFileSync(join(clone, 'groups/dev/group.md'), 'tests: required\n')
-    mkdirSync(join(home, '.vegastack'), { recursive: true })
-    writeFileSync(join(home, '.vegastack/factory.json'), JSON.stringify({ schemaVersion: 1, controlRooms: { vegastack: { repo: 'vegastack/vegafactory-control-room', path: clone, branch: 'main', lastSyncedAt: '2026-09-03T11:00:00Z', sha: 'e4f5a6b' } } }))
+    mkdirSync(join(home, '.vegafactory'), { recursive: true })
+    writeFileSync(join(home, '.vegafactory/factory.json'), JSON.stringify({ schemaVersion: 1, controlRooms: { vegastack: { repo: 'vegastack/vegafactory-control-room', path: clone, branch: 'main', lastSyncedAt: '2026-09-03T11:00:00Z', sha: 'e4f5a6b' } } }))
     const repo = mkdtempSync(join(tmpdir(), 'vsk-repo-'))
     mkdirSync(join(repo, '.vegastack'), { recursive: true })
     writeFileSync(join(repo, '.vegastack/dev.md'), devMd)
@@ -258,3 +258,29 @@ describe('control-room drift', () => {
     } finally { delete process.env.VSK_GH; delete process.env.GH_STUB_DIR }
   })
 })
+
+describe('the home this script reads', () => {
+  const devMd = 'repo: o/r\ncontrol-room: acme/room#dev@a1b2c3d\n';
+  const restore = (before) => { if (before === undefined) delete process.env.VEGAFACTORY_HOME; else process.env.VEGAFACTORY_HOME = before; };
+
+  test('the variable names the whole home, and wins over the one passed in', () => {
+    const before = process.env.VEGAFACTORY_HOME;
+    try {
+      process.env.VEGAFACTORY_HOME = '/somewhere/else';
+      expect(controlRoomState(devMd, '/home/mk').reason).toContain('/somewhere/else/control-room/acme');
+      delete process.env.VEGAFACTORY_HOME;
+      expect(controlRoomState(devMd, '/home/mk').reason).toContain('/home/mk/.vegafactory/control-room/acme');
+    } finally { restore(before); }
+  });
+
+  // A relative home would name a different directory from every working directory, which is one
+  // machine's state split across as many places as it has repositories. The CLI refuses it, and
+  // this script has to give the same answer or the two disagree about where anything is.
+  test('a relative home is refused, exactly as the CLI refuses it', () => {
+    const before = process.env.VEGAFACTORY_HOME;
+    try {
+      process.env.VEGAFACTORY_HOME = 'state';
+      expect(() => controlRoomState(devMd, '/home/mk')).toThrow('absolute path');
+    } finally { restore(before); }
+  });
+});

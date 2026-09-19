@@ -494,7 +494,7 @@ export const commentDigest = (data: CommentData) =>
   createHash('sha256').update(JSON.stringify(canonical({ ...data, findings: [...data.findings].sort((a, b) => a.id.localeCompare(b.id)) }))).digest('hex').slice(0, 16)
 
 // The review comment counts only when the factory posted it — a person with write access, or the
-// App a dispatched run reviews as. Anyone else can write a marker and a Findings JSON block, and a
+// App a worker run reviews as. Anyone else can write a marker and a Findings JSON block, and a
 // forged "clean at this head" would skip the review.
 // Every marker field must also agree with the JSON it claims to summarise.
 export function trustedReviews(snap: Snapshot, trusted: Trusted): PostedReview[] {
@@ -685,7 +685,7 @@ export async function runReview(argv: string[], deps: ReviewDeps = {}): Promise<
   const state = saved && saved.schema === 1 && saved.repo === repo ? saved : null
 
   const ctx: WriteContext = { root, repo, number, runner }
-  // Two different questions. A review comment is the factory's own work — a dispatched run posts
+  // Two different questions. A review comment is the factory's own work — a worker run posts
   // it as the App — and every field in it is checked against the findings it summarises. Accepting
   // what a review left open is a judgement, so it stays a person's.
   const factory = trustedFactory({ repo, runner, root })

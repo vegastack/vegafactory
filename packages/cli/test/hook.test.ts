@@ -9,6 +9,7 @@ import type { GhRunner } from '../src/gh.ts'
 import { detachBounded, issueFromBranch, issueFromWorktree, readHookInput, runHook, type HookDeps } from '../src/hook.ts'
 import { ackBody, artifactHash } from '../src/issue.ts'
 import { addLesson, readLessons } from '../src/learning.ts'
+import { packageVersion } from '../src/self-update.ts'
 import { FakeGitHub } from './fake-github.ts'
 
 const git = (cwd: string, ...args: string[]) => {
@@ -682,7 +683,8 @@ describe('usage collection', () => {
       detach: (command, cwd, limit) => { calls.push({ command, cwd, limit }) },
     }, input)
     expect(code).toBe(0)
-    expect(JSON.parse(out.join('\n')).hookSpecificOutput.additionalContext).toContain('updating vegafactory 0.20.1 → 9.0.0 in the background')
+    // The version comes from the package, not a literal: a release would otherwise break this test.
+    expect(JSON.parse(out.join('\n')).hookSpecificOutput.additionalContext).toContain(`updating vegafactory ${packageVersion} → 9.0.0 in the background`)
     expect(calls.filter(call => call.command[0] === 'npm')).toEqual([{
       command: ['npm', 'install', '-g', '@vegastack/vegafactory@latest'], cwd: plain, limit: 300,
     }])

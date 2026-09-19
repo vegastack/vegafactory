@@ -7,7 +7,7 @@
       "expected_output": "The questionnaire answers are written into a rendered `org.md`, every file in the lean control-room layout is rendered from its template into a directory the operator can read, the subscription rule is proposed as a locked line, and the run stops before creating the repository — naming the exact `gh repo create` command instead of running it.",
       "files": [],
       "assertions": [
-        "Every file in the layout is rendered, and only those: `org.md`, `groups/dev/group.md`, `repos.md`, `dispatchers.md`, `boards.md`, `onboarding/`, `stats/`",
+        "Every file in the layout is rendered, and only those: `org.md`, `groups/dev/group.md`, `repos.md`, `nodes.md`, `boards.md`, `onboarding/`, `stats/`",
         "`org.md` carries `stats: on`, `stats-people: off` and no department knob (`merge:`, `tests:`, `harness-policy:`)",
         "`provider-mode: subscription-only` carries a `# locked` comment, and the lock is explained as the one thing a group cannot answer differently",
         "No `people.csv`, `decisions.md`, `rules/` or `templates/` is created",
@@ -75,14 +75,14 @@
     },
     {
       "id": 7,
-      "prompt": "We're putting the always-on Mac mini into service — it'll run CI and the dispatcher. What do I need to do on it?",
-      "expected_output": "The reply walks onboarding/dispatcher-box.md: two macOS accounts so a CI job cannot read the dispatcher's tokens, the pinned toolchain, sleep and auto-login, the runner registration block run as the runner account, the org-admin group grant, and the reboot drill — handing every org-admin and on-box command to the operator rather than running it.",
+      "prompt": "We're putting the always-on Mac mini into service — it'll run CI and the worker. What do I need to do on it?",
+      "expected_output": "The reply walks onboarding/worker-box.md: two macOS accounts so a CI job cannot read the worker's tokens, the pinned toolchain, sleep and auto-login, the runner registration block run as the runner account, the org-admin group grant, and the reboot drill — handing every org-admin and on-box command to the operator rather than running it.",
       "files": [],
       "assertions": [
-        "The two-account split is stated with its reason: a CI job runs as the runner user and so cannot read the dispatcher user's gh, Claude and Codex credentials",
+        "The two-account split is stated with its reason: a CI job runs as the runner user and so cannot read the worker user's gh, Claude and Codex credentials",
         "The runner registration and the org runner-group grant are presented as the operator's own commands, and no registration token is minted by the agent",
         "The reply says an ungranted runner group queues jobs forever with runner: null rather than failing",
-        "The GitHub App private key is stated as never living on the box"
+        "The GitHub App private key is stated as living on the worker box at ~/.vegafactory/worker/app.pem, chmod 600, readable only by the worker account"
       ]
     },
     {

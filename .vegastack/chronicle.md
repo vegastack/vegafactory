@@ -11,6 +11,54 @@ The project's story, newest first: what got built, why, and how it went — for 
 - **Decisions:** none new.
 
 — approved by (kmanojkumar) · built by claude · branch feat/258-vegafactory-update-for-attended-sessions
+## 19-09-2026 — Stats speak owner and node ([#256](https://github.com/vegastack/vegafactory/issues/256))
+
+- **What:** Stats records, summaries, filenames and the offline dashboard now name an owner and a node. The node is the existing `<os-user>@<hostname>` identity, and old `operator`/`machine` records still read cleanly.
+- **Why:** A bare hostname merged two people on one machine, while two OS users sharing that host and a GitHub login could append the same control-room file and create a real rebase conflict.
+- **How it went:** The compatibility boundary had to cover more than display: old local rows are normalised before a push, so the control room receives only the new shape. The portable filename keeps owner and node separately bounded and renders `@` as `-`. The privacy pass also capped harness labels and stopped unnamed local checkouts from publishing their folder names.
+- **Changed:** `owner` and `node` records · legacy read shim · node grouping and dashboard table · per-node filenames · bounded model and outcome labels · no repository folder fallback.
+- **Decisions:** none new.
+
+— approved by (kmanojkumar) · built by claude · branch feat/256-stats-speak-owner-and-node
+## 19-09-2026 — One settings schema, and no migration ([#251](https://github.com/vegastack/vegafactory/issues/251))
+
+- **What:** `factory.json` is read at schema 2 only. A file at any other version is refused by name and left untouched, instead of being converted with a `.schema1.bak` copy left beside it.
+- **Why:** The operator's greenfield ruling: this project is deployed nowhere, no backward compatibility is required, and compatibility code that exists is to be removed. This was the fifth such path, found while checking the last box on [#255](https://github.com/vegastack/vegafactory/issues/255).
+- **How it went:** Checked before deleting, the same way as the other four: the only `factory.json` that exists is already schema 2, and no `.schema1.bak` exists anywhere. So the migration had never run and never would. Taking it out also made `revision` unconditional, which it always should have been.
+- **Changed:** the reader, the writer and the transaction · the `.schema1.bak` backup, deleted · `revision`, now always present and always validated.
+- **Decisions:** none new.
+
+— approved by (kmanojkumar) · built by claude · branch fix/no-schema-1-migration
+
+## 19-09-2026 — A machine that works alone is a worker ([#255](https://github.com/vegastack/vegafactory/issues/255))
+
+- **What:** The command for a machine that works a board unattended is `vegafactory worker` — `enable`, `disable`, `status`, `run`. It is the word that machine's row in `nodes.md` already used to grant the permission, so the switch and the cell allowing it match.
+- **Why:** Step 4 of [#251](https://github.com/vegastack/vegafactory/issues/251). "Dispatch" named both the machine and the act of handing it work; only the act is worth keeping.
+- **How it went:** Four paths existed only to read what an older version wrote. Each was checked, not assumed — no old service installed, no claim of the old kind, no headerless roster, no stand-down comment — and nothing is deployed, so all four went. A review round caught a refusal reading "listed as a worker it".
+- **Changed:** the verb · the service, its logs and its directory · a claim's `kind` · the `in-progress` label · the onboarding checklist, now naming the account `worker enable` looks for · `nodes.md`, read by its header or not at all.
+- **Decisions:** none new.
+
+— approved by (kmanojkumar) · built by claude · branch feat/255-dispatch-becomes-worker
+
+## 19-09-2026 — A row is not consent ([#254](https://github.com/vegastack/vegafactory/issues/254))
+
+- **What:** The machine roster is `nodes.md`, it lists every machine rather than only the always-on ones, and a new `worker` column is the only thing that grants unattended work.
+- **Why:** Step 3 of [#251](https://github.com/vegastack/vegafactory/issues/251). Once every machine has a row — which is what makes stats answerable per person and per box — being in the file stops meaning anything, so the authority had to move to a cell.
+- **How it went:** The dangerous part was the old default, not the new column. An empty `repos` cell meant "every repository in the org", and the commonest row on a roster of every machine is a laptop with that cell blank. Read the old way, the machine written down to say it is *not* a worker would have been handed the whole board. Empty now authorises nothing, and `*` or `all` has to be said out loud.
+- **Changed:** the `worker` gate and its refusals · the reversed `repos` default · `dispatchers.md` renamed to `nodes.md` through the CLI, templates, references, evals and the staged room.
+- **Decisions:** none new.
+
+— approved by (kmanojkumar) · built by claude · branch feat/254-nodes-md-read-by-header-and-gated-by-wor
+
+## 19-09-2026 — One home, and nothing to reach the old one ([#252](https://github.com/vegastack/vegafactory/issues/252))
+
+- **What:** Everything this product keeps about a machine moved to `~/.vegafactory/`, computed by one module instead of thirteen paths spread over seven files and two languages.
+- **Why:** `~/.vegastack/` is shared with other VegaStack tooling, so nothing here could safely prune it. Step 1 of [#251](https://github.com/vegastack/vegafactory/issues/251), and the step the rest is untestable without.
+- **How it went:** Most of the cost was a migration that should never have been written. Ten review rounds found a new way for it to lose something in every one, and it moved this machine's own files during a test. It went when the operator pointed out that one machine has anything to move and the rest is greenfield. The module went from 236 lines to 73.
+- **Changed:** `home.ts` with a `VEGAFACTORY_HOME` override · thirteen join sites, including a containment check written apart from the path it guarded · two renames · the App key under `worker/` · README and the App, control-room and onboarding references.
+- **Decisions:** none new.
+
+— approved by (kmanojkumar) · built by claude · branch chore/252-one-home-for-everything-vegafactory-stor
 
 ## 19-09-2026 — A node knows its own name ([#253](https://github.com/vegastack/vegafactory/issues/253))
 

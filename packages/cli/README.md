@@ -35,6 +35,7 @@ npx @vegastack/vegafactory skills list
 | `ship check <n>` | Exit 0 when issue n may merge: a "ship it" after the latest evidence, the branch pushed and clean, its PR green |
 | `ship release <n>` | Tag the merged release on issue n's recorded "ship it" — issue n of the repository this checkout pushes to, so there is no `--repo`. It re-reads the word against the current evidence, checks the version and its changelog entry, then creates and pushes `v<version>`. It never publishes — the tag-triggered workflow does |
 | `hook <event> --harness claude\|codex` | The harness hooks: ship guard, claim heartbeat, WIP checkpoint each turn, and the one lessons request per working session |
+| `worker enable\|disable\|status\|run` | work a board with nobody at the keyboard — only on a machine whose `nodes.md` row says `worker: yes` |
 | `learning <add\|list\|accept\|decline>` | The lessons a session left for `.vegastack/dev.md`; `add` reads them from a file or standard input, one per line, so no lesson text passes through a shell; accepting or declining drops one from the git-ignored queue, and the dev.md line is yours to write |
 | `stats <collect\|push\|show>` | Usage numbers from the Claude Code and Codex session logs on this machine: read new turns, share them with the org, print them |
 
@@ -64,7 +65,7 @@ Agents read issues from `.vegastack/.tmp/issues/<owner>__<repo>/<n>/` — `issue
 
 ## Control-room sync
 
-An organisation keeps its shared defaults in a control-room repository. Each machine keeps one copy per org at `~/.vegastack/control-room/<org>/`, and skills read that copy instead of the network. A repo's profile layers on it: `org.md`, then `groups/<g>/group.md`, then the repo's own `.vegastack/dev.md`, nearest wins — except a line `org.md` marks `# locked`.
+An organisation keeps its shared defaults in a control-room repository. Each machine keeps one copy per org at `~/.vegafactory/control-room/<org>/`, and skills read that copy instead of the network. A repo's profile layers on it: `org.md`, then `groups/<g>/group.md`, then the repo's own `.vegastack/dev.md`, nearest wins — except a line `org.md` marks `# locked`.
 
 ```sh
 vegafactory sync              # refresh when the copy was last fetched more than 5 minutes ago
@@ -78,15 +79,15 @@ vegafactory sync profile --json   # the resolved profile: values, sources, locke
 - `sync` is one shallow `git fetch` through your existing `gh` login. It never commits and never pushes.
 - The copy mirrors the room's branch. A copy you have edited by hand refuses the refresh rather than being merged or discarded.
 - `sync profile` exits **0** when the profile resolved cleanly and **1** when it carries blocks; the blocks are in the output either way.
-- Exit codes: **0** fetched or already fresh · **2** a refusal (the fetch failed, a hand-edited copy, a wrong origin, a symlinked path, an unreadable `~/.vegastack/factory.json`). A refusal leaves the old copy standing.
+- Exit codes: **0** fetched or already fresh · **2** a refusal (the fetch failed, a hand-edited copy, a wrong origin, a symlinked path, an unreadable `~/.vegafactory/factory.json`). A refusal leaves the old copy standing.
 
 ## Usage numbers
 
 Both harnesses write a session log in your home directory. `stats collect` reads the new lines of
 each log — from a saved byte offset, so a killed session is counted once, at the next run — and
-keeps one record per assistant turn under `~/.vegastack/.tmp/stats/` — one collector at a time, so
-two hooks never count the same turn twice: time, your `gh` login, the
-machine, the repository, the issue, the harness, the exact model id, the skill the turn used, the
+keeps one record per assistant turn under `~/.vegafactory/stats/` — one collector at a time, so
+two hooks never count the same turn twice: time, the owner (your `gh` login), the node
+(`<os-user>@<hostname>`), the repository, the issue, the harness, the model id, the skill the turn used, the
 tokens, the duration, how the turn ended, and the workflow stage the issue was in **at that moment**
 — written down as the CLI moves a state label, so a session collected days later still counts in the
 stage it worked in, and turns nothing is known about carry no stage at all. Never a prompt, a file, tool arguments or which
@@ -95,13 +96,16 @@ subscription paid for the turn — a skill is named only when it resolves to one
 skill name is dropped. The harness hooks run it in the background at each turn boundary.
 
 ```sh
-vegafactory stats show --since 7d   # turns, tokens and time by operator, project, model and stage
+vegafactory stats show --since 7d   # turns, tokens and time by owner, node, project, model and stage
 vegafactory stats push              # append this machine's new turns to the org control room
 vegafactory dashboard --open        # one offline HTML page, built from what you have
 ```
 
-`push` appends each turn to `stats/YYYY/MM/DD/<operator>-<machine>.jsonl` — the operator and machine
-the turn was recorded on, not whoever is logged in now — in the control-room clone `sync` already
+`push` appends each turn to `stats/YYYY/MM/DD/<owner>-<node>-<digest>.jsonl` — the owner and node
+the turn was recorded on, not whoever is logged in now. The owner is the `gh` login that did the
+work and the node is `<os-user>@<hostname>`, so two people sharing one machine stay apart; the
+digest is twelve characters of the exact pair, because the readable part rewrites `@` to `-` and
+truncates, and two identities must never land on one file — in the control-room clone `sync` already
 keeps, then commits and pushes it with your own `gh` login, at most once an hour and never with
 credentials of its own. A room only ever receives turns from the repositories bound to it: the repo
 you are pushing from, the ones its `repos.md` registry lists, and other checkouts on this machine
