@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { claimBody, claimLine, holderOf, trustedFactory } from '../src/claim.ts'
 import {
-  APP_ID, STEP_TIMEOUT_MS, TOKEN_MARGIN_MS, agentArgs, appIdentity, appJwt, appKeyPath, assertKeyFile, board, decide, defaultRunStep, dispatchDir,
+  APP_ID, DEFAULT_CAPS, MAX_FAILURES, MAX_RUNS, MAX_TIMER_MS, POLL_MS, RETRY_MS, STEP_TIMEOUT_MS, TOKEN_MARGIN_MS, parseCaps, sayDuration, agentArgs, appIdentity, appJwt, appKeyPath, assertKeyFile, board, decide, defaultRunStep, dispatchDir,
   acknowledgedPlan, canonicalPath, childRunEnvironment, confirmShip, disjointSiblings, pushableBranch, shipWord,
   drain, filesFromParent, harnessAnswers, hitLimit, hooksWired, listedHere, mintToken, overlaps, parseDispatchArgs,
   parseDispatchers, poll, readActed, readRuns, readiness, recordRun, resetAt, RUNS_KEPT, runDispatch, schedule, serviceCommands, stagePolicy,
@@ -95,9 +95,9 @@ describe('the roster', () => {
       '- `spare-box` — o/r',
     ].join('\n'))
     expect(rows).toEqual([
-      { machine: 'mac-mini', operator: 'mk', repos: ['o/r', 'o/other'] },
-      { machine: 'builder', operator: null, repos: ['*'] },
-      { machine: 'spare-box', operator: null, repos: ['o/r'] },
+      { machine: 'mac-mini', operator: 'mk', repos: ['o/r', 'o/other'], caps: DEFAULT_CAPS, problem: null },
+      { machine: 'builder', operator: null, repos: ['*'], caps: DEFAULT_CAPS, problem: null },
+      { machine: 'spare-box', operator: null, repos: ['o/r'], caps: DEFAULT_CAPS, problem: null },
     ])
   })
 
@@ -107,6 +107,24 @@ describe('the roster', () => {
     const listing = listedHere(root, { repo: 'o/r', host: HOST, home })
     expect(listing.ok).toBe(false)
     expect(listing.reason).toContain('is not listed')
+  })
+
+  test('a row that does not reach its declared caps column is refused by name', () => {
+    const roster = `| machine | operator | repos | notes | caps |\n|---|---|---|---|---|\n| ${HOST} | mk | o/r |\n`
+    project(roster)
+    const row = parseDispatchers(roster)[0]!
+    expect(row.machine).toBe(HOST)
+    expect(row.caps).toBeNull()
+    expect(row.problem).toContain('does not reach its declared caps column')
+    const listing = listedHere(root, { repo: 'o/r', host: HOST, home })
+    expect(listing.ok).toBe(false)
+    expect(listing.reason).toContain(`${HOST}'s row`)
+    expect(listing.reason).toContain('does not reach its declared caps column')
+    for (const cell of ['', '-']) {
+      const complete = parseDispatchers(`| machine | operator | repos | notes | caps |\n|---|---|---|---|---|\n| ${HOST} | mk | o/r | | ${cell} |\n`)[0]!
+      expect(complete.caps).toEqual(DEFAULT_CAPS)
+      expect(complete.problem).toBeNull()
+    }
   })
 
   test('a listed machine passes; an unlisted one refuses and says how to be listed', () => {
@@ -128,6 +146,38 @@ describe('the roster', () => {
     const listing = listedHere(root, { repo: 'o/r', host: HOST, home })
     expect(listing.ok).toBe(false)
     expect(listing.reason).toContain('vegafactory sync')
+  })
+
+  // A row whose caps cannot be read used to be dropped, and the machine then refused as "not
+  // listed" — which sends the operator looking for a missing row instead of at the typo.
+  test('a caps cell nobody can read refuses this machine by name, and says the shape', () => {
+    project(`| machine | operator | repos | caps |\n|---|---|---|---|\n| ${HOST} | mk | o/r | runs ten |\n`)
+    const listing = listedHere(root, { repo: 'o/r', host: HOST, home })
+    expect(listing.ok).toBe(false)
+    expect(listing.reason).toContain(`${HOST}'s row`)
+    expect(listing.reason).toContain('runs 10 · step 72h')
+    expect(listing.reason).not.toContain('is not listed')
+    // The row is still there to point at — it was read, and refused, not skipped.
+    expect(listing.entry?.machine).toBe(HOST)
+  })
+
+  // Caps can only be read from a column that says it holds them. A wider table with nothing naming
+  // its columns could be hiding caps in any cell, so the gate says so rather than running on
+  // defaults the operator never chose — and rather than reading a notes cell as a limit.
+  test('a wider table with no header refuses, and asks for the columns to be named', () => {
+    project(`| ${HOST} | mk | o/r | runs 10 · step 72h |\n`)
+    const listing = listedHere(root, { repo: 'o/r', host: HOST, home })
+    expect(listing.ok).toBe(false)
+    expect(listing.reason).toContain('names no columns')
+    expect(listing.reason).toContain('add a header row')
+    expect(listing.entry?.machine).toBe(HOST)
+  })
+
+  test('a legacy three-cell roster with no header still works, and takes the defaults', () => {
+    project(`| ${HOST} | mk | o/r |\n`)
+    const listing = listedHere(root, { repo: 'o/r', host: HOST, home })
+    expect(listing.ok).toBe(true)
+    expect(listing.entry?.caps).toEqual(DEFAULT_CAPS)
   })
 })
 
@@ -801,7 +851,7 @@ describe('standing an issue down', () => {
     const bodies = gh.issues.get(1)!.comments.map((comment) => comment.body)
     expect(bodies.some((body) => body.includes(`type=release owner=${HOST}:1-work by=vegafactory[bot]`) && body.includes('@mk said stop'))).toBe(true)
     // The issue also says what happened, so an operator reading it knows why the run stopped.
-    expect(bodies.at(-1)).toContain('type=handback')
+    expect(bodies.at(-1)).toContain('type=standdown')
     expect(bodies.at(-1)).toContain('@mk said stop')
     // Released, so the next pass sees a free issue — and one left in-progress is picked back up.
     expect(verdict(1)).toMatchObject({ action: 'implement', reason: 'an interrupted run left it in-progress with no holder' })
@@ -811,7 +861,37 @@ describe('standing an issue down', () => {
   test('another machine\'s claim is left alone', () => {
     gh.addIssue({ number: 1, labels: ['in-progress', 'small'] })
     held('laptop:1-work')
-    expect(down('the subscription limit was reached')).toContain('held by laptop:1-work, so nothing here was touched')
+    const result = standDown({ root, repo: 'o/r', number: 1, runner: gh.runner, machine: HOST, now: gh.clock, restoreTo: 'queued' }, 'the subscription limit was reached')
+    expect(result).toContain('held by laptop:1-work, so nothing here was touched')
+    expect(result).toContain('the state label was left alone')
+    expect(gh.issues.get(1)!.labels).toContain('in-progress')
+    expect(gh.issues.get(1)!.labels).not.toContain('queued')
+  })
+
+  test('an unreadable claim leaves the state label alone', () => {
+    gh.addIssue({ number: 1, labels: ['in-progress', 'small'] })
+    let calls = 0
+    const runner = ((args: string[], input?: string) => {
+      if (calls++ === 0) throw new Error('GitHub is unavailable')
+      return gh.runner(args, input)
+    }) as typeof gh.runner
+    const result = standDown({ root, repo: 'o/r', number: 1, runner, machine: HOST, now: gh.clock, restoreTo: 'queued' }, 'the subscription limit was reached')
+    expect(result).toContain('claim could not be read')
+    expect(result).toContain('the state label was left alone')
+    expect(gh.issues.get(1)!.labels).toContain('in-progress')
+    expect(gh.issues.get(1)!.labels).not.toContain('queued')
+  })
+
+  test('a claim taken while this machine stands down leaves the state label alone', () => {
+    gh.addIssue({ number: 1, labels: ['in-progress', 'small'] })
+    held(`${HOST}:1-work`)
+    gh.afterPost = (body) => {
+      if (body.includes('type=standdown')) held('laptop:1-work')
+    }
+    const result = standDown({ root, repo: 'o/r', number: 1, runner: gh.runner, machine: HOST, now: gh.clock, restoreTo: 'queued' }, 'the subscription limit was reached')
+    expect(result).toContain('laptop:1-work claimed it meanwhile, so the state label was left alone')
+    expect(gh.issues.get(1)!.labels).toContain('in-progress')
+    expect(gh.issues.get(1)!.labels).not.toContain('queued')
   })
 
   test('with nothing held there is nothing to release', () => {
@@ -1104,11 +1184,57 @@ describe('the command', () => {
     expect(result.text).toContain('no dispatcher runs on this machine yet')
   })
 
+  // The unit tests for the formatter would stay green if a call site dropped its field argument,
+  // which is how `poll 1s` came to be reported as "every 0 minutes" in the first place. These read
+  // what the commands actually print.
+  test('the caps a command reports can be pasted back into the cell they came from', async () => {
+    project(`| machine | operator | repos | caps |\n|---|---|---|---|\n| ${HOST} | mk | o/r | step 90m · poll 1s · retry 60m |\n`)
+    gh.addIssue({ number: 1, labels: ['queued', 'small'] })
+    const result = await run(['status'])
+    expect(result.code).toBe(0)
+    const line = result.text.split('\n').find((row) => row.startsWith('caps:'))!
+    expect(line).toContain('step 90m')
+    expect(line).toContain('poll 1s')
+    expect(line).toContain('retry 60m')
+    // Nothing rounded to zero, and nothing in a unit the parser would refuse.
+    expect(line).not.toMatch(/\b0[hms]\b/)
+    for (const [field, shown] of [...line.matchAll(/\b(step|poll|retry) (\d+[hms])/g)].map((m) => [m[1]!, m[2]!])) {
+      expect(parseCaps(`${field} ${shown}`), `${field} ${shown}`).not.toBeNull()
+    }
+  })
+
   test('enable stops at the first thing that is not ready and installs nothing', async () => {
     const result = await run(['enable'], { run: (() => ({ code: 127, stdout: '', stderr: 'not found' })) as Probe, fetch: (async () => ({ ok: false, status: 404, json: async () => ({}) })) as Fetch })
     expect(result.code).toBe(2)
     expect(result.text).toContain('not ready')
     expect(existsSync(unitPath(process.platform, home))).toBe(false)
+  })
+
+  test('enable reports a seconds-valued poll cap as seconds', async () => {
+    project(`| machine | operator | repos | caps |\n|---|---|---|---|\n| ${HOST} | mk | o/r | poll 1s |\n`)
+    mkdirSync(join(root, '.claude'), { recursive: true })
+    mkdirSync(join(root, '.codex'), { recursive: true })
+    writeFileSync(join(root, '.claude', 'settings.json'), 'vegafactory hook stop --harness claude')
+    writeFileSync(join(root, '.codex', 'hooks.json'), 'vegafactory hook stop --harness codex')
+    mkdirSync(join(home, '.config', 'systemd', 'user'), { recursive: true })
+    const { privateKey } = generateKeyPairSync('rsa', { modulusLength: 2048, privateKeyEncoding: { type: 'pkcs8', format: 'pem' }, publicKeyEncoding: { type: 'spki', format: 'pem' } })
+    const key = join(root, 'enable.pem')
+    writeFileSync(key, privateKey, { mode: 0o600 })
+    chmodSync(key, 0o600)
+    const probe: Probe = (command, args) => {
+      if (command === 'git') return { code: 0, stdout: 'git@github.com:o/r.git', stderr: '' }
+      if (command === 'claude' || command === 'codex') return { code: 0, stdout: 'ok', stderr: '' }
+      return { code: 0, stdout: '', stderr: '' }
+    }
+    const fetch: Fetch = async (url) => ({
+      ok: true,
+      status: 200,
+      json: async () => url.endsWith('/installation') ? { id: 42 } : { token: 'ghs_test', expires_at: '2026-09-18T11:00:00Z' },
+    })
+    const result = await run(['enable'], { platform: 'linux', run: probe, fetch, env: { VEGAFACTORY_APP_PRIVATE_KEY_FILE: key } })
+    expect(result.code).toBe(0)
+    expect(result.text).toContain('enabled —')
+    expect(result.text).toContain('polls o/r every 1s')
   })
 
   test('run --once makes one pass with the injected step', async () => {
@@ -1171,10 +1297,133 @@ describe('the command', () => {
     // The run is recorded as stopped for that reason, not as a failure of the work, and the issue
     // is handed back once — by the run's own settle, after its process group has been waited for.
     expect(lines.join('\n')).toContain('#1 plan → stopped (this machine is no longer listed)')
-    const handbacks = gh.issues.get(1)!.comments.filter((comment) => comment.body.includes('type=handback'))
+    const handbacks = gh.issues.get(1)!.comments.filter((comment) => comment.body.includes('type=standdown'))
     expect(handbacks).toHaveLength(1)
     expect(handbacks[0]!.body).toContain('this machine is no longer listed')
     void given
+  })
+
+  // A stop nobody asked the issue for must leave the issue exactly as it found it. The run is
+  // recorded and handed back, but the trigger stays unspent — otherwise `standDown` puts the issue
+  // back as `planning` while `acted` says the plan already ran for that state, and every machine
+  // that ever looks at it, including this one after a restart, skips it forever.
+  test('an administrative stop does not spend the trigger, so the work is picked up again', async () => {
+    const header = '| machine | operator | repos |\n|---|---|---|\n'
+    const listed = `${header}| ${HOST} | mk | o/r |\n`
+    const delist = controlRoomClone(listed)
+    gh.addIssue({ number: 1, labels: ['planning', 'medium'] })
+    let releaseChild = () => {}
+    const blocked = new Promise<void>((resolve) => { releaseChild = resolve })
+    let passes = 0
+
+    const first = await runDispatch(['run'], {
+      cwd: root, home, host: HOST, env: {}, out: () => {}, runner: gh.runner, now: () => gh.clock,
+      runStep: (async (_step, context) => {
+        context.onStart?.(5151, 'claude')
+        await blocked
+        return { outcome: 'killed' as const, note: 'stopped', ms: 1 }
+      }) as RunStep,
+      stop: () => { releaseChild(); return true },
+      start: () => 'Fri Sep 18 09:00:00 2026',
+      sleep: async () => { if (++passes === 1) delist(header) },
+    })
+    expect(first).toBe(2)
+    // The issue is back where the run found it, and nobody holds it.
+    expect(gh.issues.get(1)!.labels).toContain('planning')
+
+    // The control-room PR is reverted and the machine runs again. It must take the issue up.
+    delist(listed)
+    const second: string[] = []
+    const code = await runDispatch(['run', '--once'], {
+      cwd: root, home, host: HOST, env: {}, out: (text) => second.push(text), runner: gh.runner, now: () => gh.clock,
+      runStep: (async () => ({ outcome: 'done' as const, note: '', ms: 1 })) as RunStep,
+    })
+    expect(code).toBe(0)
+    expect(second.join('\n')).toContain('#1 plan → done')
+  })
+
+  // The same thing one state over, and the one the planning case does not reach: standing down
+  // posts a comment saying so, and `waiting-on-operator` looks for the operator's reply to be
+  // later than anything an agent wrote. A hand-back that counted as work would bury the very reply
+  // it was standing down without answering.
+  test('a stood-down follow-up still sees the reply it never answered', async () => {
+    const header = '| machine | operator | repos |\n|---|---|---|\n'
+    const listed = `${header}| ${HOST} | mk | o/r |\n`
+    const delist = controlRoomClone(listed)
+    gh.addIssue({ number: 1, labels: ['waiting-on-operator', 'medium'] })
+    gh.addComment(1, 'here is the answer you asked for', 'mk')
+    let releaseChild = () => {}
+    const blocked = new Promise<void>((resolve) => { releaseChild = resolve })
+    let passes = 0
+
+    const first = await runDispatch(['run'], {
+      cwd: root, home, host: HOST, env: {}, out: () => {}, runner: gh.runner, now: () => gh.clock,
+      runStep: (async (_step, context) => {
+        context.onStart?.(6161, 'claude')
+        await blocked
+        return { outcome: 'killed' as const, note: 'stopped', ms: 1 }
+      }) as RunStep,
+      stop: () => { releaseChild(); return true },
+      start: () => 'Fri Sep 18 09:00:00 2026',
+      sleep: async () => { if (++passes === 1) delist(header) },
+    })
+    expect(first).toBe(2)
+    // The hand-back comment is on the issue, and it is the latest thing written.
+    expect(gh.issues.get(1)!.comments.some((comment) => comment.body.includes('type=standdown'))).toBe(true)
+
+    delist(listed)
+    const second: string[] = []
+    const code = await runDispatch(['run', '--once'], {
+      cwd: root, home, host: HOST, env: {}, out: (text) => second.push(text), runner: gh.runner, now: () => gh.clock,
+      runStep: (async () => ({ outcome: 'done' as const, note: '', ms: 1 })) as RunStep,
+    })
+    expect(code).toBe(0)
+    expect(second.join('\n')).toContain('#1 follow-up → done')
+  })
+
+  // Two verifications per pass each fetched and merged, and only the first was acted on. A gate
+  // asked twice and obeyed once is a gate that can be told "you are de-listed" and carry on.
+  test('the roster is verified once a pass, and that one answer is the one acted on', async () => {
+    let verifications = 0
+    let passes = 0
+    gh.addIssue({ number: 1, labels: ['queued', 'small'] })
+    await runDispatch(['run'], {
+      cwd: root, home, host: HOST, env: {}, out: () => {}, runner: gh.runner, now: () => gh.clock,
+      runStep: (async () => ({ outcome: 'done' as const, note: '', ms: 1 })) as RunStep,
+      git: () => { verifications++; return (() => ({ status: 0, out: '' })) as GitRun },
+      sleep: async () => { if (++passes === 2) process.emit('SIGTERM' as NodeJS.Signals) },
+    })
+    // One for the gate the command passes before it starts, then exactly one for each pass.
+    expect(verifications).toBe(1 + passes)
+  })
+
+  test('--json puts one document on stdout and no prose beside it', async () => {
+    gh.addIssue({ number: 1, labels: ['queued', 'small'] })
+    const lines: string[] = []
+    const code = await runDispatch(['run', '--once', '--json'], {
+      cwd: root, home, host: HOST, env: {}, out: (text) => lines.push(text), runner: gh.runner, now: () => gh.clock,
+      runStep: (async () => ({ outcome: 'done' as const, note: '', ms: 1 })) as RunStep,
+      git: anyGit,
+    })
+    expect(code).toBe(0)
+    expect(lines).toHaveLength(1)
+    const document = JSON.parse(lines[0]!) as { machine: string; repo: string; runs: { issue: number }[]; notes: string[] }
+    expect(document.machine).toBe(HOST)
+    expect(document.repo).toBe('o/r')
+    expect(document.runs.map((run) => run.issue)).toEqual([1])
+    // The lines a human would have read are inside the document, not printed beside it.
+    expect(document.notes.join('\n')).toContain('#1 implement')
+  })
+
+  // The document answers when a pass ends. An always-on loop has no such moment, so collecting
+  // lines for it would hold every line the machine ever printed and answer nobody.
+  test('--json without --once refuses rather than holding its answer forever', async () => {
+    const lines: string[] = []
+    const code = await runDispatch(['run', '--json'], {
+      cwd: root, home, host: HOST, env: {}, out: (text) => lines.push(text), runner: gh.runner, now: () => gh.clock, git: anyGit,
+    })
+    expect(code).toBe(2)
+    expect(JSON.parse(lines[0]!)).toEqual({ ok: false, reason: '--json reports one pass; use it with --once' })
   })
 
   test('a signal during a blocked run stops it now, not after the next sleep', async () => {
@@ -1206,7 +1455,7 @@ describe('the command', () => {
     expect(stoppedPid).toBe(8888)
     expect(lines.join('\n')).toContain('#1 plan stopped: this machine was asked to stop (SIGTERM)')
     // Stopped, waited for, and handed back once — before the command returned.
-    expect(gh.issues.get(1)!.comments.filter((comment) => comment.body.includes('type=handback'))).toHaveLength(1)
+    expect(gh.issues.get(1)!.comments.filter((comment) => comment.body.includes('type=standdown'))).toHaveLength(1)
     expect(existsSync(runLockPath(root))).toBe(false)
   })
 
@@ -1271,4 +1520,290 @@ describe('the command', () => {
     expect(() => parseDispatchArgs(['run', '--repo'])).toThrow('--repo needs a value')
     expect(runDispatch(['frobnicate'], { cwd: root, home, host: HOST, env: {}, out: () => {} })).rejects.toThrow('unknown dispatch verb')
   })
+})
+
+// The caps a machine runs with come from its own roster row, because they belong to the machine —
+// its processor, its subscription — and not to any project it works.
+describe('caps on the roster row', () => {
+  test('every field is optional and falls back to the shipped default', () => {
+    expect(parseCaps('runs 10 · step 72h · poll 1m')).toEqual({ runs: 10, stepMs: 72 * 3_600_000, pollMs: 60_000, retryMs: RETRY_MS, failures: MAX_FAILURES })
+    expect(parseCaps('')).toEqual({ runs: MAX_RUNS, stepMs: STEP_TIMEOUT_MS, pollMs: POLL_MS, retryMs: RETRY_MS, failures: MAX_FAILURES })
+  })
+
+  test('a separator with nothing beside it is a half-typed cell, not the defaults', () => {
+    // Dropping empty segments would read `runs 10 ·` as "runs 10 and the rest are fine", which is
+    // a number nobody finished choosing.
+    for (const cell of ['·', 'runs 10 ·', '· runs 10', 'runs 10,,poll 1m', ',']) expect(parseCaps(cell)).toBeNull()
+    // A cell that is entirely empty still means "the defaults are fine".
+    expect(parseCaps('')).toEqual(DEFAULT_CAPS)
+    expect(parseCaps('   ')).toEqual(DEFAULT_CAPS)
+  })
+
+  test('a duration reads back in a unit its own field accepts', () => {
+    expect(sayDuration(72 * 3_600_000, 'step')).toBe('72h')
+    // The case that used to print `0h`.
+    expect(sayDuration(parseCaps('step 1m')!.stepMs, 'step')).toBe('1m')
+    expect(sayDuration(parseCaps('poll 1s')!.pollMs, 'poll')).toBe('1s')
+    // And what is printed can be pasted back into the cell it came from: `poll` and `retry` take
+    // no hours, so an hour's worth of either says so in minutes.
+    expect(sayDuration(60 * 60_000, 'poll')).toBe('60m')
+    expect(sayDuration(60 * 60_000, 'retry')).toBe('60m')
+    for (const [field, ms] of [['step', 72 * 3_600_000], ['poll', 60 * 60_000], ['retry', 90 * 60_000]] as const) {
+      expect(parseCaps(`${field} ${sayDuration(ms, field)}`)).not.toBeNull()
+    }
+  })
+
+  test('a cell that names a cap is held to it, value or no value', () => {
+    expect(parseCaps('runs ten')).toBeNull()
+    expect(parseCaps('step 72 hours')).toBeNull()
+    expect(parseCaps('runs')).toBeNull()
+    const roster = '| machine | operator | repos | caps |\n|---|---|---|---|\n| a | mk | o/a | runs |'
+    expect(parseDispatchers(roster)[0]!.caps).toBeNull()
+  })
+
+  test('units are per field, because a poll in hours is somebody meaning something else', () => {
+    expect(parseCaps('poll 2h')).toBeNull()
+    expect(parseCaps('step 10s')).toBeNull()
+    expect(parseCaps('retry 2h')).toBeNull()
+    expect(parseCaps('runs 10m')).toBeNull()
+    expect(parseCaps('poll 30s')!.pollMs).toBe(30_000)
+    expect(parseCaps('retry 45m')!.retryMs).toBe(45 * 60_000)
+  })
+
+  test('a delay no timer can hold is refused, because it would fire at once', () => {
+    expect(parseCaps('step 600h')).toBeNull()
+    expect(parseCaps('step 500h')!.stepMs).toBe(500 * 3_600_000)
+    expect(MAX_TIMER_MS).toBe(2 ** 31 - 1)
+  })
+
+  test('the header says which column is which, so the roster may reorder and add columns', () => {
+    // The shipped template's own order: the owner is the fourth cell, not the second, and a
+    // positional read would take `group` for the operator and `yes` for a repository.
+    const roster = [
+      '| dispatcher | group | repos | owner | caps | notes |',
+      '|---|---|---|---|---|---|',
+      '| patrick | dev | o/a | mk | runs 4 | the always-on box |',
+    ].join('\n')
+    expect(parseDispatchers(roster)).toEqual([{ machine: 'patrick', operator: 'mk', repos: ['o/a'], caps: { ...DEFAULT_CAPS, runs: 4 }, problem: null }])
+  })
+
+  test('prose in a notes column is never caps, whatever words it happens to contain', () => {
+    // "runs" in a sentence used to be sniffed out as a caps cell and then refuse the machine.
+    const roster = [
+      '| machine | operator | repos | caps | notes |',
+      '|---|---|---|---|---|',
+      '| a | mk | o/a | - | the box that runs the nightly step |',
+    ].join('\n')
+    expect(parseDispatchers(roster)[0]!.caps).toEqual(DEFAULT_CAPS)
+  })
+
+  test('a caps cell nobody can read keeps its row, so the machine is refused by name', () => {
+    const roster = [
+      '| machine | operator | repos | caps |',
+      '|---|---|---|---|',
+      '| patrick | mk | o/a | runs 10 · step 72h |',
+      '| broken | mk | o/c | runs ten |',
+    ].join('\n')
+    const rows = parseDispatchers(roster)
+    expect(rows.map((row) => row.machine)).toEqual(['patrick', 'broken'])
+    expect(rows[1]!.caps).toBeNull()
+  })
+
+  test('a table with no header is read the way every roster was read before headers', () => {
+    expect(parseDispatchers('| a | mk | o/a |')).toEqual([{ machine: 'a', operator: 'mk', repos: ['o/a'], caps: DEFAULT_CAPS, problem: null }])
+  })
+
+  test('without a header there is no column caps are known to sit in, so a wider row refuses', () => {
+    // Valid caps in a headerless row must not be silently ignored, and a notes cell must not be
+    // read as a limit. Neither is guessed at: the row is kept and refused, saying what to fix.
+    for (const row of ['| a | mk | o/a | runs 4 |', '| a | mk | o/a | the box that runs the build |', '| a | mk | o/a | runs ten |']) {
+      const parsed = parseDispatchers(row)[0]!
+      expect(parsed.machine).toBe('a')
+      expect(parsed.caps).toBeNull()
+      expect(parsed.problem).toContain('names no columns')
+    }
+    // Naming the columns is all it takes.
+    const named = parseDispatchers('| machine | operator | repos | caps |\n|---|---|---|---|\n| a | mk | o/a | runs 4 |')
+    expect(named[0]!.caps).toEqual({ ...DEFAULT_CAPS, runs: 4 })
+  })
+
+  test("the shipped template's header is not a machine called dispatcher", () => {
+    expect(parseDispatchers('| dispatcher | group | repos | owner | caps | notes |\n|---|---|---|---|---|---|')).toEqual([])
+  })
+})
+
+describe('the caps reach what they limit', () => {
+  test('the step limit arrives with the run, so a roster change lands on the next run', async () => {
+    const seen: number[] = []
+    const exec = async (_tool: string, _args: string[], options: { timeoutMs: number }) => {
+      seen.push(options.timeoutMs)
+      return { code: 0, stdout: 'done', stderr: '', timedOut: false }
+    }
+    const scratch = mkdtempSync(join(tmpdir(), 'vf-limit-'))
+    // Built with the shipped default, then handed runs that carry the roster's own limit.
+    const step = defaultRunStep('', { PATH: '/usr/bin' }, { exec })
+    await step({ action: 'implement', number: 1, repo: 'o/r', split: false, by: null }, { root: scratch, timeoutMs: 72 * 3_600_000 })
+    await step({ action: 'implement', number: 2, repo: 'o/r', split: false, by: null }, { root: scratch, timeoutMs: 4 * 3_600_000 })
+    expect(seen).toEqual([72 * 3_600_000, 4 * 3_600_000])
+  })
+
+  test('the park cap decides when an issue is left for a person', () => {
+    gh.addIssue({ number: 1, labels: ['queued', 'small'] })
+    const acted = { at: 0, action: 'implement' as const, outcome: 'failed' as const, trigger: null, failures: 2, retryAt: null }
+    expect(verdict(1, { acted, failures: 2 }).reason).toContain('needs a person')
+    expect(verdict(1, { acted, failures: 5 }).reason ?? '').not.toContain('needs a person')
+  })
+
+  // Every failure sets a retry deadline, so asking about the wait first reported a run that had
+  // spent its last try as merely due again later — and `park 1` never parked anything.
+  test('a run that has spent its tries is parked, not reported as waiting', () => {
+    gh.addIssue({ number: 1, labels: ['queued', 'small'] })
+    const parked = { at: 0, action: 'implement' as const, outcome: 'failed' as const, trigger: null, failures: 1, retryAt: gh.clock + 900_000 }
+    expect(verdict(1, { acted: parked, failures: 1 }).reason).toContain('needs a person')
+    // One try left, and the wait still standing: that one really is waiting.
+    expect(verdict(1, { acted: parked, failures: 2 }).reason).toContain('waiting until')
+  })
+
+  // The tests above reach into `schedule`, `decide` and `defaultRunStep` directly, so they would
+  // still pass if `runDispatch` stopped refreshing the roster or stopped forwarding what it read.
+  // This one changes the caps upstream between two real passes and watches what the loop does.
+  test('a caps change upstream reaches the next pass: how many start, how long they get, how long it waits', async () => {
+    const header = '| machine | operator | repos | caps |\n|---|---|---|---|\n'
+    const row = (caps: string) => `${header}| ${HOST} | mk | o/r | ${caps} |\n`
+    const recap = controlRoomClone(row('runs 1 · step 72h · poll 1m'))
+    for (const number of [1, 2, 3, 4]) gh.addIssue({ number, labels: ['planning', 'medium'] })
+
+    const startsPerPass: number[] = []
+    const timeouts: (number | undefined)[] = []
+    const sleeps: number[] = []
+    let pass = 0
+    let started = 0
+
+    const code = await runDispatch(['run'], {
+      cwd: root, home, host: HOST, env: {}, out: () => {}, runner: gh.runner, now: () => gh.clock,
+      runStep: (async (_step, context) => {
+        started++
+        timeouts.push(context.timeoutMs)
+        return { outcome: 'done' as const, note: '', ms: 1 }
+      }) as RunStep,
+      sleep: async (ms: number) => {
+        startsPerPass.push(started)
+        started = 0
+        sleeps.push(ms)
+        // The control-room PR that loosens this machine's caps lands between the passes.
+        if (++pass === 1) recap(row('runs 3 · step 4h · poll 5m'))
+        else process.emit('SIGTERM' as NodeJS.Signals)
+      },
+    })
+
+    expect(code).toBe(0)
+    // One run in the first pass because the row said one, three in the second because it said three.
+    expect(startsPerPass.slice(0, 2)).toEqual([1, 3])
+    // Every run in a pass carries that pass's step limit, not the one the process started with.
+    expect(timeouts).toEqual([72 * 3_600_000, 4 * 3_600_000, 4 * 3_600_000, 4 * 3_600_000])
+    // And the wait between passes is the poll the roster asked for, each time.
+    expect(sleeps.slice(0, 2)).toEqual([60_000, 5 * 60_000])
+  })
+
+  test('the run cap is the roster\'s, not the built-in three', () => {
+    // Unrelated code runs never go together whatever the cap says — that is the sibling rule, not
+    // the cap — so this is the cap on its own, over steps that may run beside each other.
+    const many = [1, 2, 3, 4, 5].map((number) => ({ repo: 'o/r', number, action: 'plan' as const, parent: null, files: [], from: 'planning' as const }))
+    expect(schedule(many, [], DEFAULT_CAPS.runs)).toHaveLength(3)
+    expect(schedule(many, [], 5)).toHaveLength(5)
+    expect(schedule(many, [], 1)).toHaveLength(1)
+  })
+})
+
+// A hand-back that promised a retry the next poll would refuse is a message that teaches the
+// operator to distrust the messages.
+test('a hand-back promises a retry only when there is a try left', async () => {
+  gh.addIssue({ number: 1, labels: ['planning', 'medium'] })
+  controlRoomClone(`| machine | operator | repos | caps |\n|---|---|---|---|\n| ${HOST} | mk | o/r | park 1 |\n`)
+  await runDispatch(['run', '--once'], {
+    cwd: root, home, host: HOST, env: {}, out: () => {}, runner: gh.runner, now: () => gh.clock,
+    runStep: (async () => ({ outcome: 'failed' as const, note: 'boom', ms: 1 })) as RunStep,
+  })
+  const handbacks = gh.issues.get(1)!.comments.filter((comment) => comment.body.includes('type=standdown'))
+  expect(handbacks).toHaveLength(1)
+  expect(handbacks[0]!.body).toContain('needs a person')
+  expect(handbacks[0]!.body).not.toContain('tries again after')
+})
+
+// A `handback` is an agent stopping to ask the operator something — the smallest question, a
+// missing artifact, a scope ratchet — and it is exactly what their reply answers. Only a machine
+// saying it put the issue back is bookkeeping. Confusing the two lets a comment written before
+// the question was asked read as the answer to it.
+test('an agent asking a question is not bookkeeping, and is not answered by an older comment', () => {
+  gh.addIssue({ number: 1, labels: ['waiting-on-operator', 'medium'] })
+  gh.addComment(1, 'here are the details you asked for', 'mk')
+  // Then the agent stops and asks something new. The operator has not replied to *this*.
+  gh.addComment(1, '<!-- vsk:v1 type=handback -->\nStopping: the plan assumes a queue that does not exist.', 'mk')
+  expect(verdict(1).action).toBe('none')
+
+  // A machine standing the issue down says nothing and answers nothing, so the reply before it
+  // still counts.
+  gh.addIssue({ number: 2, labels: ['waiting-on-operator', 'medium'] })
+  gh.addComment(2, 'here are the details you asked for', 'mk')
+  gh.addComment(2, '<!-- vsk:v1 type=standdown -->\n**box** stood down from #2: this machine is no longer listed', 'mk')
+  expect(verdict(2).action).toBe('follow-up')
+
+  // Released dispatchers used `handback` for this exact machine notice. Those live comments have
+  // the same meaning as the current marker and must not bury the answer they did not act on.
+  gh.addIssue({ number: 3, labels: ['waiting-on-operator', 'medium'] })
+  gh.addComment(3, 'here are the details you asked for', 'mk')
+  gh.addComment(3, '<!-- vsk:v1 type=handback -->\n**box** stood down from #3: this machine is no longer listed', 'mk')
+  expect(verdict(3).action).toBe('follow-up')
+})
+
+// The field is required, so a dropped argument is a type error rather than a duration printed in
+// the wrong units. This pins that, because restoring the default would be a one-character change
+// that compiles and quietly reintroduces both bugs it caused.
+test('the duration formatter cannot be called without naming its field', () => {
+  const source = readFileSync(join(import.meta.dir, '..', 'src', 'dispatch.ts'), 'utf8')
+  expect(source).toContain("field: 'step' | 'poll' | 'retry'):")
+  expect(source).not.toContain("field: 'step' | 'poll' | 'retry' =")
+})
+
+// A hand-back may quote a stand-down while asking something new. Reading that as bookkeeping
+// would let a comment written before the question be chosen as its answer.
+test('a hand-back that repeats a stand-down is still a question', () => {
+  gh.addIssue({ number: 1, labels: ['waiting-on-operator', 'medium'] })
+  gh.addComment(1, 'here are the details you asked for', 'mk')
+  gh.addComment(1, '<!-- vsk:v1 type=handback -->\n**box** stood down from #1: this machine is no longer listed\n\nStopping: that leaves the base moving under the plan. Which branch should this build on?', 'mk')
+  expect(verdict(1).action).toBe('none')
+
+  // The released version's own stand-down, which is the whole body, still counts as bookkeeping.
+  gh.addIssue({ number: 2, labels: ['waiting-on-operator', 'medium'] })
+  gh.addComment(2, 'here are the details you asked for', 'mk')
+  gh.addComment(2, '<!-- vsk:v1 type=handback -->\n**box** stood down from #2: this machine is no longer listed', 'mk')
+  expect(verdict(2).action).toBe('follow-up')
+})
+
+// Advice that ignores the header sends the operator from one refusal straight into the next: a
+// three-cell row under the shipped six-column header never reaches its declared caps column.
+test('the row it tells you to add is one the same parser accepts', () => {
+  const header = '| dispatcher | group | repos | owner | caps | notes |\n|---|---|---|---|---|---|\n'
+  project(`${header}| someone-else | dev | o/r | mk | | |\n`)
+  const listing = listedHere(root, { repo: 'o/r', host: HOST, home })
+  expect(listing.ok).toBe(false)
+  const row = /`(\| .*? \|)`/.exec(listing.reason)![1]!
+  expect(row).toContain(HOST)
+  expect(row).toContain('o/r')
+
+  // Paste it under that header and the machine is listed, with the shipped defaults.
+  const parsed = parseDispatchers(`${header}${row}\n`)[0]!
+  expect(parsed.machine).toBe(HOST)
+  expect(parsed.problem).toBeNull()
+  expect(parsed.caps).toEqual(DEFAULT_CAPS)
+  expect(parsed.repos).toEqual(['o/r'])
+})
+
+// Only a name `machineName` could have produced counts, so a hand-back that opens with emphasis
+// and happens to use the same words is still a question.
+test('a bold run that is not a machine name does not make a comment bookkeeping', () => {
+  gh.addIssue({ number: 1, labels: ['waiting-on-operator', 'medium'] })
+  gh.addComment(1, 'here are the details you asked for', 'mk')
+  gh.addComment(1, '<!-- vsk:v1 type=handback -->\n**Note to self** stood down from #1: needs a decision on the base', 'mk')
+  expect(verdict(1).action).toBe('none')
 })

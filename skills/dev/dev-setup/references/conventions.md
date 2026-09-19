@@ -26,7 +26,8 @@ Machine-read comments open with one marker line:
 | `ledger` | `branch` | one status comment, edited in place |
 | `evidence` | `branch sha` | one, edited in place |
 | `review` | `round sha agent=<claude\|codex> verdict=<clean\|needs-fixes>` | one per review cycle |
-| `handback` | — | one per stop |
+| `handback` | — | one per stop — an agent asking the operator something, so an issue waiting on them is waiting on its answer |
+| `standdown` | — | one per stand-down — a machine saying it put the issue back, which is bookkeeping and answers nothing |
 | `decision` | — | one per decision proposal |
 
 A comment without a marker is a person's comment (`human`). Find artifacts by marker, never by heading.

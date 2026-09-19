@@ -3,7 +3,7 @@ import { spawnSync } from 'node:child_process'
 import { mkdirSync, mkdtempSync, realpathSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { claim, claimBody, heartbeat, heartbeatOf, holderOf, machineName, ownerId, release, releaseBody, trustedAuthors, type ClaimContext } from '../src/claim.ts'
+import { claim, claimBody, heartbeat, heartbeatOf, holderOf, machineName, nodeId, ownerId, release, releaseBody, trustedAuthors, type ClaimContext } from '../src/claim.ts'
 import { cacheDir, readBody, readState, syncIssue } from '../src/issue-cache.ts'
 import { runIssue } from '../src/issue.ts'
 import { FakeGitHub } from './fake-github.ts'
@@ -36,6 +36,41 @@ describe('owner ids', () => {
     expect(machineName('MK-Mac-mini.local')).toBe('mk-mac-mini')
     expect(ownerId('216-coordination', 'Build Box')).toBe('build-box:216-coordination')
   })
+
+
+describe('the name a node answers to', () => {
+  test('it is the person and the machine, and the machine is its first label', () => {
+    // `os.hostname()` answers `patrick-mac-mini.local` here and a full domain name on many Linux
+    // hosts. Neither belongs in an identity somebody has to recognise in a table.
+    expect(nodeId('mk', 'patrick-mac-mini.local')).toBe('mk@patrick-mac-mini')
+    expect(nodeId('mk', 'build-box.internal.example.com')).toBe('mk@build-box')
+    expect(nodeId('mk', 'patrick-mac-mini')).toBe('mk@patrick-mac-mini')
+  })
+
+  test('two people on one machine are two nodes, and one person on three is one owner', () => {
+    expect(nodeId('mk', 'box')).not.toBe(nodeId('sam', 'box'))
+    expect(nodeId('mk', 'box-a').split('@')[0]).toBe(nodeId('mk', 'box-b').split('@')[0])
+  })
+
+  test('both halves are normalised by one rule, so an id cannot be half-tidied', () => {
+    expect(nodeId('K Manoj Kumar', 'Build Box.local')).toBe('k-manoj-kumar@build-box')
+    expect(nodeId('mk', '--weird--')).toBe('mk@weird')
+  })
+
+  test('a name that normalises to nothing still leaves a readable id', () => {
+    expect(nodeId('', '')).toBe('someone@machine')
+    expect(nodeId('!!!', '???')).toBe('someone@machine')
+  })
+
+  // `machineName` maps every non-alphanumeric to a dash, so it would turn this into
+  // `mk-patrick-mac-mini` — and it is what `ownerId` stamps on every session claim that exists
+  // right now, so it must not change underneath them.
+  test('the claim owner is untouched by any of this', () => {
+    expect(machineName('MK-Mac-mini.local')).toBe('mk-mac-mini')
+    expect(ownerId('216-coordination', 'Build Box')).toBe('build-box:216-coordination')
+    expect(machineName('patrick-mac-mini.local')).not.toContain('@')
+  })
+})
 })
 
 describe('claim', () => {
