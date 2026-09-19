@@ -1970,7 +1970,7 @@ export async function runWorker(argv: string[], deps: CliDeps = {}): Promise<num
       }
       let devMd = ''
       try { devMd = readFileSync(join(root, '.vegastack', 'dev.md'), 'utf8') } catch { /* no profile, so the tools' own defaults */ }
-      const update = deps.update ?? (() => maintainSelfUpdate({ mode: selfUpdateMode(devMd) }))
+      const update = deps.update ?? (() => maintainSelfUpdate({ mode: selfUpdateMode(devMd), home: { home }, now: Date.now() }))
       const identity = deps.runner ? null : appIdentity({ repo, keyPath, appId: appIdOf(env), fetch: deps.fetch })
       const runner = deps.runner ?? identity!.runner
       // `--json` puts exactly one document on stdout and nothing else, so every line this loop
@@ -2071,6 +2071,10 @@ export async function runWorker(argv: string[], deps: CliDeps = {}): Promise<num
         if (args.once) return finish(0, await drain(inflight))
         // A global install can replace this process's entry file, so it runs only with no agent
         // alive. A successful update ends the old process; the service starts the new copy.
+        // A run is unsettled from the moment it is started until its own completion handler
+        // runs, so a run picked up in this very pass still counts as alive here — which is what
+        // keeps an update from starting while the board has work. The registry check above it is
+        // asked at most once an hour, so an idle box is not calling npm every couple of minutes.
         if (![...inflight.values()].some(run => !run.settled)) {
           let result: UpdateResult
           try { result = await update() } catch { result = { action: 'failed', before: '', after: '', latest: null, message: 'vegafactory update failed; continuing with the installed copy' } }

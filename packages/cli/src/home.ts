@@ -64,6 +64,10 @@ export const statsDirectory = (options: HomeOptions = {}): string => join(factor
 export const statsHtmlPath = (options: HomeOptions = {}): string => join(factoryHome(options), 'stats.html')
 
 // Present only on a machine that accepts unattended work, so the role is visible on disk.
+// What the last update check learned, so a session start does not ask npm on every launch and a
+// background install can be reported by the session that comes after it.
+export const updateNotePath = (options: HomeOptions = {}): string => join(factoryHome(options), 'update.json')
+
 export const workerDirectory = (options: HomeOptions = {}): string => join(factoryHome(options), 'worker')
 
 // The App key. `VEGAFACTORY_APP_PRIVATE_KEY_FILE` still moves it, because a machine may keep its

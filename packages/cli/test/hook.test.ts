@@ -9,7 +9,7 @@ import type { GhRunner } from '../src/gh.ts'
 import { detachBounded, issueFromBranch, issueFromWorktree, readHookInput, runHook, type HookDeps } from '../src/hook.ts'
 import { ackBody, artifactHash } from '../src/issue.ts'
 import { addLesson, readLessons } from '../src/learning.ts'
-import { packageVersion } from '../src/self-update.ts'
+import { packageVersion, readUpdateNote, SELF_UPDATE_LIMIT_S, writeUpdateNote } from '../src/self-update.ts'
 import { FakeGitHub } from './fake-github.ts'
 
 const git = (cwd: string, ...args: string[]) => {
@@ -20,6 +20,7 @@ const git = (cwd: string, ...args: string[]) => {
 
 let gh: FakeGitHub
 let root: string
+let fakeHome: string
 let tree: string
 let plain: string
 let out: string[]
@@ -39,6 +40,9 @@ const runner: GhRunner = (args, input) => {
 const deps = (): HookDeps => ({
   runner, now: () => gh.clock, out: (text) => out.push(text), cli: ['vf'], host: 'box',
   latest: async () => '0.20.1',
+  // Never the real home: the update note lives there, and a test that wrote to it would change
+  // what this operator's own machine believes about the last registry check.
+  home: fakeHome,
   // Usage collection rides on the same detached runner; every other assertion counts the rest.
   detach: (command) => { (command[1] === 'stats' ? stats : detached).push(command); return detachPid },
 })
@@ -79,6 +83,8 @@ beforeEach(() => {
   detachPid = undefined
   prHead = 'feat/7-export'
   const base = realpathSync(mkdtempSync(join(tmpdir(), 'hook-')))
+  fakeHome = join(base, 'home')
+  mkdirSync(fakeHome, { recursive: true })
   const origin = join(base, 'origin.git')
   root = join(base, 'repo')
   git(base, 'init', '-q', '--bare', '-b', 'main', origin)
@@ -670,6 +676,37 @@ describe('usage collection', () => {
   test('a checkout with no issue still collects', async () => {
     await hook('session-start', { cwd: plain })
     expect(stats).toHaveLength(2)
+  })
+
+  // The install outlives the session that started it, so the next session is the one that can say
+  // whether it worked. Without this, a background update was announced and never resolved.
+  test('the session after a background update says how it went', async () => {
+    writeFileSync(join(plain, '.vegastack/dev.md'), 'repo: o/r · default branch main\nvegafactory-update: auto\n')
+    const start = async (extra: Partial<HookDeps> = {}) => {
+      out = []
+      await runHook(['session-start', '--harness', 'claude'], { ...deps(), latest: async () => '9.0.0', detach: () => undefined, ...extra }, Readable.from([Buffer.from(JSON.stringify({ cwd: plain }))]))
+      return JSON.parse(out.join('\n')).hookSpecificOutput.additionalContext as string
+    }
+
+    expect(await start()).toContain(`updating vegafactory ${packageVersion} → 9.0.0 in the background`)
+    // The install landed: this process is a different version from the one the note recorded.
+    writeUpdateNote({ ...readUpdateNote({ home: fakeHome }), startedFrom: '0.0.1' }, { home: fakeHome })
+    expect(await start()).toBe(`vegafactory updated 0.0.1 → ${packageVersion} in the background since the last session`)
+    // Said once, then forgotten — not repeated at every session for the rest of time.
+    expect(await start()).not.toContain('updated 0.0.1')
+  })
+
+  test('a background update that never landed is reported once, not forever', async () => {
+    writeFileSync(join(plain, '.vegastack/dev.md'), 'repo: o/r · default branch main\nvegafactory-update: auto\n')
+    const at = gh.clock
+    writeUpdateNote({ startedFrom: packageVersion, startedTo: '9.0.0', startedAt: at }, { home: fakeHome })
+    const start = async () => {
+      out = []
+      await runHook(['session-start', '--harness', 'claude'], { ...deps(), now: () => at + SELF_UPDATE_LIMIT_S * 2 * 1000 + 1, latest: async () => '9.0.0', detach: () => undefined }, Readable.from([Buffer.from(JSON.stringify({ cwd: plain }))]))
+      return JSON.parse(out.join('\n')).hookSpecificOutput.additionalContext as string
+    }
+    expect(await start()).toContain('a background update to vegafactory 9.0.0 did not finish')
+    expect(await start()).not.toContain('did not finish')
   })
 
   test('session start updates from every repository through a stable command and its own bound', async () => {

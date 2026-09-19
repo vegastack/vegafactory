@@ -5,7 +5,7 @@
 // exit 0 on any error; only pre-tool can deny, and its guard fails closed.
 import { spawn, spawnSync } from 'node:child_process'
 import { existsSync, readFileSync, rmSync } from 'node:fs'
-import { hostname } from 'node:os'
+import { homedir, hostname } from 'node:os'
 import { basename, dirname, join } from 'node:path'
 import { claimsOf, holderOf, ownerId, trustedFactory, HEARTBEAT_EVERY_MS, type Holder } from './claim.ts'
 import { defaultRunner, type GhRunner } from './gh.ts'
@@ -14,7 +14,7 @@ import { cacheDir, readBody, readState, replaceFile, syncIssue, withLock } from 
 import { askText, learningsPath, pendingNote } from './learning.ts'
 import { detectRepo, evidenceChangedAt, findValidAck, latestOfType, permissionLookup, repoRoot, snapshot } from './issue.ts'
 import { stateOf } from './labels.ts'
-import { latestPublishedVersion, maintainSelfUpdate, packageVersion, selfUpdateMode, SELF_UPDATE_LIMIT_S, type LatestVersion } from './self-update.ts'
+import { clearUpdateNote, latestPublishedVersion, maintainSelfUpdate, packageVersion, readUpdateNote, selfUpdateMode, SELF_UPDATE_LIMIT_S, writeUpdateNote, type LatestVersion } from './self-update.ts'
 
 export const HOOK_EVENTS = ['session-start', 'prompt', 'pre-tool', 'post-tool', 'stop', 'session-end'] as const
 export type HookEvent = typeof HOOK_EVENTS[number]
@@ -331,6 +331,10 @@ export interface HookDeps {
   cli: string[]
   host: string
   latest: LatestVersion
+  // Where this machine keeps its own files. Injected so a test can point it somewhere harmless:
+  // the update note lives here, and a test that reached the real home would rewrite what the
+  // operator's own machine believes about the last registry check.
+  home: string
 }
 
 export const DETACHED_LIMIT_S = 60
@@ -348,7 +352,7 @@ export function detachBounded(command: string[], cwd: string, limitSeconds = DET
 
 export const defaultDeps = (): HookDeps => ({
   runner: defaultRunner, now: Date.now, out: (text) => process.stdout.write(text + '\n'), detach: (command, cwd, limit) => detachBounded(command, cwd, limit),
-  cli: [process.execPath, process.argv[1]!], host: hostname(), latest: latestPublishedVersion,
+  cli: [process.execPath, process.argv[1]!], host: hostname(), latest: latestPublishedVersion, home: homedir(),
 })
 
 // Secrets never leave the machine in an automatic commit: file names, then the added lines.
@@ -570,6 +574,25 @@ function collectStats(event: HookEvent, cwd: string, deps: HookDeps) {
   if (event === 'session-start') deps.detach([...deps.cli, 'stats', 'push'], cwd)
 }
 
+// A background install finishes after the session that started it has moved on, so the session
+// that comes next is the one that can say whether it worked. The note records what was being
+// attempted; this reads it back against the version actually running now.
+function finishedUpdate(now: number, home: { home: string }): string | null {
+  const note = readUpdateNote(home)
+  if (!note.startedFrom || typeof note.startedAt !== 'number') return null
+  if (packageVersion !== note.startedFrom) {
+    clearUpdateNote(home)
+    return `vegafactory updated ${note.startedFrom} → ${packageVersion} in the background since the last session`
+  }
+  // Still on the old version well past npm's own bound: the install did not land. Say so once
+  // rather than every session forever, and let the next check start again from scratch.
+  if (now - note.startedAt > SELF_UPDATE_LIMIT_S * 2 * 1000) {
+    clearUpdateNote(home)
+    return `a background update to vegafactory ${note.startedTo ?? 'a newer version'} did not finish; still on ${packageVersion} — run: vegafactory update`
+  }
+  return null
+}
+
 async function attendedUpdate(cwd: string, deps: HookDeps): Promise<string | null> {
   try {
     const root = repoRoot(cwd)
@@ -577,11 +600,14 @@ async function attendedUpdate(cwd: string, deps: HookDeps): Promise<string | nul
     try { profile = readFileSync(join(root, '.vegastack', 'dev.md'), 'utf8') } catch { /* an old profile uses the shipped default */ }
     const mode = selfUpdateMode(profile)
     if (mode === 'off') return null
-    const result = await maintainSelfUpdate({ mode: 'notify', latest: deps.latest })
+    const settled = finishedUpdate(deps.now(), { home: deps.home })
+    if (settled) return settled
+    const result = await maintainSelfUpdate({ mode: 'notify', latest: deps.latest, home: { home: deps.home }, now: deps.now() })
     if (result.action !== 'available' || mode !== 'auto') return result.message
     // npm gets its own bound and executable. Calling this entry file again races the global
     // install replacing that file, and ordinary hook work has a deliberately shorter watchdog.
     deps.detach(['npm', 'install', '-g', '@vegastack/vegafactory@latest'], cwd, SELF_UPDATE_LIMIT_S)
+    writeUpdateNote({ ...readUpdateNote({ home: deps.home }), startedFrom: result.before, startedTo: result.latest ?? undefined, startedAt: deps.now() }, { home: deps.home })
     return `updating vegafactory ${result.before} → ${result.latest} in the background; this session continues with ${result.before}`
   } catch {
     return `could not check npm; continuing with vegafactory ${packageVersion}`

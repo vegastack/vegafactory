@@ -1,7 +1,8 @@
 import { spawnSync } from 'node:child_process'
-import { readFileSync } from 'node:fs'
+import { mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { updateNotePath, type HomeOptions } from './home.ts'
 
 const packageRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 export const packageVersion = (JSON.parse(readFileSync(join(packageRoot, 'package.json'), 'utf8')) as { version: string }).version
@@ -21,6 +22,44 @@ export type UpdateRunner = (command: string, args: string[], timeoutMs: number) 
 export type LatestVersion = () => Promise<string | null>
 
 export const SELF_UPDATE_LIMIT_S = 5 * 60
+
+// npm publishes a new version every week or two, and an idle worker polls every couple of minutes.
+// Asking the registry each pass is a few hundred calls a day to learn something that changed once,
+// so the answer is remembered and the question is asked at most this often.
+export const UPDATE_CHECK_EVERY_MS = 60 * 60 * 1000
+
+// What one machine remembers between runs: when npm was last asked, and the version a background
+// install was working towards. The note is advisory — every read falls back to "nothing known",
+// because a machine that cannot read it must still run.
+export interface UpdateNote { checkedAt?: number; latest?: string | null; startedFrom?: string; startedTo?: string; startedAt?: number }
+
+export function readUpdateNote(options: HomeOptions = {}): UpdateNote {
+  try {
+    const parsed = JSON.parse(readFileSync(updateNotePath(options), 'utf8')) as unknown
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed as UpdateNote : {}
+  } catch { return {} }
+}
+
+export function writeUpdateNote(note: UpdateNote, options: HomeOptions = {}): void {
+  const path = updateNotePath(options)
+  try {
+    mkdirSync(dirname(path), { recursive: true, mode: 0o700 })
+    const temporary = `${path}.${process.pid}.tmp`
+    writeFileSync(temporary, JSON.stringify(note, null, 2) + '\n', { mode: 0o600 })
+    renameSync(temporary, path)
+  } catch { /* the note is a convenience; a machine that cannot write it still runs */ }
+}
+
+export function clearUpdateNote(options: HomeOptions = {}): void {
+  try { rmSync(updateNotePath(options), { force: true }) } catch { /* see writeUpdateNote */ }
+}
+
+// A registry answer remembered from less than an hour ago, or null to go and ask.
+export function rememberedLatest(now: number, options: HomeOptions = {}): string | null {
+  const note = readUpdateNote(options)
+  if (typeof note.checkedAt !== 'number' || now - note.checkedAt >= UPDATE_CHECK_EVERY_MS) return null
+  return typeof note.latest === 'string' ? note.latest : null
+}
 const VERSION = /^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$/
 
 function safe(text: unknown): string {
@@ -72,12 +111,23 @@ export async function maintainSelfUpdate(options: {
   before?: string
   latest?: LatestVersion
   run?: UpdateRunner
+  // Passing a home turns on the remembered answer: the registry is asked at most once an hour,
+  // which is what keeps an idle worker from calling npm on every pass.
+  home?: HomeOptions
+  now?: number
 }): Promise<UpdateResult> {
   const before = options.before ?? packageVersion
   if (options.mode === 'off') return idle('none', before, null, '')
 
-  let latest: string | null
-  try { latest = await (options.latest ?? latestPublishedVersion)() } catch { latest = null }
+  const now = options.now ?? Date.now()
+  const remembered = options.home ? rememberedLatest(now, options.home) : null
+  let latest: string | null = remembered
+  if (!latest) {
+    try { latest = await (options.latest ?? latestPublishedVersion)() } catch { latest = null }
+    // Only a real answer is remembered. Remembering a failure would hold the machine on a stale
+    // version for an hour because npm was briefly unreachable.
+    if (latest && options.home) writeUpdateNote({ ...readUpdateNote(options.home), checkedAt: now, latest }, options.home)
+  }
   if (!latest) return idle('unavailable', before, null, `could not check npm; continuing with vegafactory ${before}`)
   if (!semverLess(before, latest)) {
     const detail = semverLess(latest, before) ? ` (ahead of npm latest ${latest})` : ''
