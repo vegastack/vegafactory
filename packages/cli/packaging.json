@@ -134,6 +134,6 @@
     "assets/control-room/stats/README.md.template",
     "assets/control-room/onboarding/new-repo.md.template",
     "assets/control-room/onboarding/new-teammate.md.template",
-    "assets/control-room/onboarding/dispatcher-box.md.template"
+    "assets/control-room/onboarding/worker-box.md.template"
   ]
 }

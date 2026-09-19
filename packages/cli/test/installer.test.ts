@@ -617,7 +617,7 @@ describe('selecting a family', () => {
   test('usage names the installer, worktree, sync, ship and hook verbs, and removed verbs are unknown', () => {
     const help = run(temporary, ['--help']).stdout.toString()
     expect(help).toContain('skills add <skill>')
-    for (const verb of ['init', 'skills update', 'issue sync', 'worktree', 'sync', 'ship check', 'hook <event>', 'stats collect', 'dashboard', 'learning add|list', 'dispatch enable|disable|status|run']) expect(help).toContain(verb)
+    for (const verb of ['init', 'skills update', 'issue sync', 'worktree', 'sync', 'ship check', 'hook <event>', 'stats collect', 'dashboard', 'learning add|list', 'worker enable|disable|status|run']) expect(help).toContain(verb)
     // Bare `stats` prints its own verbs and writes nothing.
     const stats = run(temporary, ['stats'])
     expect(stats.exitCode).toBe(0)
@@ -627,10 +627,14 @@ describe('selecting a family', () => {
       expect(result.exitCode).toBe(1)
       expect(result.stderr.toString()).toContain(`Unknown command: ${verb}`)
     }
-    // Bare `dispatch` prints its own verbs and reaches neither the control room nor GitHub.
-    const dispatch = run(temporary, ['dispatch'])
-    expect(dispatch.exitCode).toBe(0)
-    expect(dispatch.stdout.toString()).toContain('dispatch <enable|disable|status|run>')
+    // Bare `worker` prints its own verbs and reaches neither the control room nor GitHub.
+    const worker = run(temporary, ['worker'])
+    expect(worker.exitCode).toBe(0)
+    expect(worker.stdout.toString()).toContain('worker <enable|disable|status|run>')
+    // And the verb it replaced is gone rather than quietly still working.
+    const retired = run(temporary, ['dispatch'])
+    expect(retired.exitCode).toBe(1)
+    expect(retired.stderr.toString()).toContain('Unknown command: dispatch')
   })
 
   test('worktree has landed: it is no longer reserved and prints its own verbs', () => {

@@ -73,7 +73,7 @@ describe('plan-lint', () => {
 
 const groupPlan = goodPlan.replace('### Tasks', `**Independent groups:**
 - \`api\` — #131 · Files: \`packages/cli/src/dispatch.ts\`, \`packages/cli/test/dispatch.test.ts\`
-- \`docs\` — #132 · Files: \`docs/dispatcher.md\`
+- \`docs\` — #132 · Files: \`docs/worker.md\`
 
 ### Tasks`)
 
@@ -84,20 +84,20 @@ describe('independent groups', () => {
     expect(groups.map((g) => g.id)).toEqual(['api', 'docs'])
     expect(groups[0].members).toEqual(['#131'])
     expect(groups[0].files).toEqual(['packages/cli/src/dispatch.ts', 'packages/cli/test/dispatch.test.ts'])
-    expect(groups[1].files).toEqual(['docs/dispatcher.md'])
+    expect(groups[1].files).toEqual(['docs/worker.md'])
   })
   test('a plan with no groups block passes and parses to nothing', () => {
     expect(lintPlan(goodPlan).blocks).toEqual([])
     expect(parseIndependentGroups(goodPlan)).toEqual([])
   })
   test('a group without a file set blocks', () => {
-    const r = lintPlan(groupPlan.replace(' · Files: `docs/dispatcher.md`', ''))
+    const r = lintPlan(groupPlan.replace(' · Files: `docs/worker.md`', ''))
     expect(r.blocks.some((b) => b.includes('no file set'))).toBe(true)
   })
   test('exact and directory-prefix overlaps block, naming both groups and the path', () => {
-    const exact = lintPlan(groupPlan.replace('`docs/dispatcher.md`', '`packages/cli/src/dispatch.ts`'))
+    const exact = lintPlan(groupPlan.replace('`docs/worker.md`', '`packages/cli/src/dispatch.ts`'))
     expect(exact.blocks.some((b) => b.includes('overlap') && b.includes('api') && b.includes('docs'))).toBe(true)
-    const prefix = lintPlan(groupPlan.replace('`docs/dispatcher.md`', '`packages/cli/`'))
+    const prefix = lintPlan(groupPlan.replace('`docs/worker.md`', '`packages/cli/`'))
     expect(prefix.blocks.some((b) => b.includes('overlap') && b.includes('packages/cli/'))).toBe(true)
   })
   test('a repeated id and a member in two groups each block', () => {
@@ -110,12 +110,12 @@ describe('independent groups', () => {
   })
   test('a file every child edits blocks, naming the group and the file', () => {
     for (const shared of ['bun.lock', 'packages/cli/packaging.json', '.vegastack/dev.md', 'skills/dev/dev-plan/README.md']) {
-      const r = lintPlan(groupPlan.replace('`docs/dispatcher.md`', '`' + shared + '`'))
+      const r = lintPlan(groupPlan.replace('`docs/worker.md`', '`' + shared + '`'))
       expect(r.blocks.some((b) => b.includes(shared) && b.includes('run in sequence'))).toBe(true)
     }
   })
   test('a malformed group line is reported, never silently skipped', () => {
-    const r = lintPlan(groupPlan.replace('- `docs` — #132 · Files: `docs/dispatcher.md`', '- docs: whatever'))
+    const r = lintPlan(groupPlan.replace('- `docs` — #132 · Files: `docs/worker.md`', '- docs: whatever'))
     expect(r.blocks.some((b) => b.includes('independent group line'))).toBe(true)
   })
 })
@@ -133,7 +133,7 @@ describe('--groups output', () => {
     expect(out.guard).toBe('plan-lint')
     expect(out.ok).toBe(true)
     expect(out.groups.map((g: { id: string }) => g.id)).toEqual(['api', 'docs'])
-    expect(out.groups[1].files).toEqual(['docs/dispatcher.md'])
+    expect(out.groups[1].files).toEqual(['docs/worker.md'])
   })
   test('an overlapping plan prints no groups and exits 2', () => {
     const r = run('plan-overlapping-groups.md', '--groups', '--json')

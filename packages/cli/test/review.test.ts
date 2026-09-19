@@ -489,7 +489,7 @@ describe('only a trusted review comment counts', () => {
     expect(readState().round).toBe(1)
   })
 
-  test('the factory App counts: a dispatched run reviews as the App, and the round it posted is the round that landed', async () => {
+  test('the factory App counts: a worker run reviews as the App, and the round it posted is the round that landed', async () => {
     const head = git(root, 'rev-parse', 'HEAD')
     gh.addComment(7, comment({ sha: head, verdict: 'clean' }), 'vegafactory[bot]', 'Bot')
     queue('codex', [codexReply(verdict([]))])

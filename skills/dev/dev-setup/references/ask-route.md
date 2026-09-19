@@ -6,7 +6,7 @@ Where a round of questions goes when a skill needs the user. Two surfaces: the h
 
 Three steps, in this order, first match wins:
 
-1. `VSK_ASK_ROUTE` is set to `issue` or `tool` — the dispatcher and CI set it; any other non-empty value is refused rather than guessed.
+1. `VSK_ASK_ROUTE` is set to `issue` or `tool` — the worker and CI set it; any other non-empty value is refused rather than guessed.
 2. This harness and this run have no question tool → `issue`.
 3. The asker is not the issue's operator → `issue`. An unresolved asker or operator is also `issue`.
 

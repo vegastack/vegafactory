@@ -8,8 +8,8 @@ import { permissionLookup, readBody, readState, syncIssue, WRITE_ROLES, type Cac
 import { stateOf, transition } from './labels.ts'
 import { recordStage } from './stages.ts'
 
-export type ClaimKind = 'session' | 'dispatch'
-export const TIMEOUT_MS: Record<ClaimKind, number> = { session: 4 * 60 * 60_000, dispatch: 30 * 60_000 }
+export type ClaimKind = 'session' | 'worker'
+export const TIMEOUT_MS: Record<ClaimKind, number> = { session: 4 * 60 * 60_000, worker: 30 * 60_000 }
 export const HEARTBEAT_EVERY_MS = 5 * 60_000
 
 export interface Claim {
@@ -107,7 +107,7 @@ export const APP_ACTOR = 'vegafactory[bot]'
 export const trustBy = (permission: PermissionLookup): Trusted => (entry) => entry.authorType !== 'Bot' && !!entry.author && WRITE_ROLES.has(permission(entry.author))
 
 // Who may post the factory's own work: a claim, a release, the status comment, a review. A
-// dispatched run writes all of them as the App, and each one is judged by its own shape — a claim
+// worker run writes all of them as the App, and each one is judged by its own shape — a claim
 // by its marker, a review by the fields that must agree with the findings it summarises. Judging
 // finished work is the other half and never comes here: an acknowledgement, an acceptance of what
 // a review left open and "ship it" go through `trustBy`, where a bot never counts.
@@ -135,7 +135,9 @@ export function claimsOf(state: CacheState, body: Body, trusted: Trusted): { cla
       const keys = markerKeys(body(entry))
       if (!keys.owner) continue
       const claim: Claim = {
-        owner: keys.owner, kind: keys.kind === 'dispatch' ? 'dispatch' : 'session',
+        // Anything this file does not recognise is a session, which is the longer-lived and so
+        // the safer answer: a claim read as a worker's would be taken over after thirty minutes.
+        owner: keys.owner, kind: keys.kind === 'worker' ? 'worker' : 'session',
         harness: keys.harness ?? '', model: keys.model ?? '', claimedAt: entry.createdAt, commentId: entry.id,
       }
       history.push(claim)

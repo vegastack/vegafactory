@@ -2,6 +2,16 @@
 
 The project's story, newest first: what got built, why, and how it went — for the operator's future recall. Format home: the dev-chronicle skill.
 
+## 19-09-2026 — A machine that works alone is a worker ([#255](https://github.com/vegastack/vegafactory/issues/255))
+
+- **What:** The command for a machine that works a board unattended is `vegafactory worker` — `enable`, `disable`, `status`, `run`. It is the word that machine's row in `nodes.md` already used to grant the permission, so the switch and the cell allowing it match.
+- **Why:** Step 4 of [#251](https://github.com/vegastack/vegafactory/issues/251). "Dispatch" named both the machine and the act of handing it work; only the act is worth keeping.
+- **How it went:** Four paths existed only to read what an older version wrote. Each was checked, not assumed — no old service installed, no claim of the old kind, no headerless roster, no stand-down comment — and nothing is deployed, so all four went. A review round caught a refusal reading "listed as a worker it".
+- **Changed:** the verb · the service, its logs and its directory · a claim's `kind` · the `in-progress` label · the onboarding checklist, now naming the account `worker enable` looks for · `nodes.md`, read by its header or not at all.
+- **Decisions:** none new.
+
+— approved by (kmanojkumar) · built by claude · branch feat/255-dispatch-becomes-worker
+
 ## 19-09-2026 — A row is not consent ([#254](https://github.com/vegastack/vegafactory/issues/254))
 
 - **What:** The machine roster is `nodes.md`, it lists every machine rather than only the always-on ones, and a new `worker` column is the only thing that grants unattended work.

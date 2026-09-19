@@ -200,13 +200,13 @@ accept review round 3 @ ${head.slice(0, 7)}`, 'mk')
   expect(run()).toMatchObject({ code: 0, ok: true, blocks: [] })
 })
 
-test('a dispatched run reviews as the App: that review ships, but the App cannot accept what it left open', () => {
+test('a worker run reviews as the App: that review ships, but the App cannot accept what it left open', () => {
   const head = git(root, 'rev-parse', 'HEAD')
   const sha7 = head.slice(0, 7)
   gh.addComment(7, `<!-- vsk:v1 type=evidence rev=1 branch=feat/7-export sha=${sha7} -->\nit works`)
   gh.addComment(7, ackBody({ stage: 'ship', by: 'mk', brief: artifactHash('Export CSV'), plan: null, source: 'session', quote: 'ship it' }))
 
-  // Nobody was at the keyboard: the review is authored by the App the dispatcher minted a token
+  // Nobody was at the keyboard: the review is authored by the App the worker minted a token
   // for. It is still a review, checked field by field like any other.
   const clean = reviewed({}, 'vegafactory[bot]', 'Bot')
   expect(run()).toMatchObject({ code: 0, ok: true, blocks: [] })

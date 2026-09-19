@@ -12,7 +12,7 @@ import { factoryHome } from './home.ts'
 type Agent = 'codex' | 'claude'
 type AgentChoice = Agent | 'both'
 type Mode = 'project' | 'global'
-type Command = 'add' | 'update' | 'verify' | 'doctor' | 'remove' | 'list' | 'version' | 'help' | 'worktree' | 'sync' | 'hook' | 'ship' | 'issue' | 'init' | 'agent' | 'stats' | 'dashboard' | 'learning' | 'review' | 'dispatch'
+type Command = 'add' | 'update' | 'verify' | 'doctor' | 'remove' | 'list' | 'version' | 'help' | 'worktree' | 'sync' | 'hook' | 'ship' | 'issue' | 'init' | 'agent' | 'stats' | 'dashboard' | 'learning' | 'review' | 'worker'
 const installerVerbs: readonly string[] = ['add', 'update', 'verify', 'doctor', 'remove', 'list'] as const
 interface Options {
   command: Command
@@ -71,8 +71,8 @@ Shipping and hooks:
   ship release <n> [--dry-run]           tag the merged release on issue n's "ship it" (never publishes)
   hook <event> --harness claude|codex    the harness hooks: guard, heartbeat, WIP checkpoints ("hook --help")
 
-Dispatcher (only on a machine the control room's nodes.md names):
-  dispatch enable|disable|status|run     work the board with no person at the keyboard ("dispatch --help")
+Worker (only on a machine whose nodes.md row says worker: yes):
+  worker enable|disable|status|run     work the board with no person at the keyboard ("worker --help")
 
 Learning (the Stop hook asks for these; a dev.md line lands only on the operator's yes):
   learning add|list|accept|decline …     the lessons waiting for a dev.md line
@@ -122,7 +122,7 @@ function parse(argv: string[]): Options {
       if (!installerVerbs.includes(verb) && verb !== 'help' && verb !== 'version') throw new Error(`Unknown command: skills ${verb}`)
       command = verb as Command
     }
-    else if (head === 'worktree' || head === 'hook' || head === 'ship' || head === 'issue' || head === 'agent' || head === 'stats' || head === 'dashboard' || head === 'learning' || head === 'review' || head === 'dispatch') return { command: head, all: false, dryRun: false, force: false, nonInteractive: false, json: false, rest: argv.splice(0) }
+    else if (head === 'worktree' || head === 'hook' || head === 'ship' || head === 'issue' || head === 'agent' || head === 'stats' || head === 'dashboard' || head === 'learning' || head === 'review' || head === 'worker') return { command: head, all: false, dryRun: false, force: false, nonInteractive: false, json: false, rest: argv.splice(0) }
     else if (installerVerbs.includes(head)) throw new Error(`Unknown command: ${head} — installer verbs moved under the skills namespace: run "vegafactory skills ${head} …"`)
     else if (head === 'sync' || head === 'help' || head === 'version' || head === 'init') command = head
     else throw new Error(`Unknown command: ${head}`)
@@ -974,9 +974,9 @@ async function main() {
     process.exitCode = runShip(options.rest ?? [])
     return
   }
-  if (options.command === 'dispatch') {
-    const { runDispatch } = await import('./dispatch.ts')
-    process.exitCode = await runDispatch(options.rest ?? [])
+  if (options.command === 'worker') {
+    const { runWorker } = await import('./worker.ts')
+    process.exitCode = await runWorker(options.rest ?? [])
     return
   }
   if (options.command === 'sync') return sync(options)

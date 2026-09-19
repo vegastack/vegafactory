@@ -35,6 +35,7 @@ npx @vegastack/vegafactory skills list
 | `ship check <n>` | Exit 0 when issue n may merge: a "ship it" after the latest evidence, the branch pushed and clean, its PR green |
 | `ship release <n>` | Tag the merged release on issue n's recorded "ship it" — issue n of the repository this checkout pushes to, so there is no `--repo`. It re-reads the word against the current evidence, checks the version and its changelog entry, then creates and pushes `v<version>`. It never publishes — the tag-triggered workflow does |
 | `hook <event> --harness claude\|codex` | The harness hooks: ship guard, claim heartbeat, WIP checkpoint each turn, and the one lessons request per working session |
+| `worker enable\|disable\|status\|run` | work a board with nobody at the keyboard — only on a machine whose `nodes.md` row says `worker: yes` |
 | `learning <add\|list\|accept\|decline>` | The lessons a session left for `.vegastack/dev.md`; `add` reads them from a file or standard input, one per line, so no lesson text passes through a shell; accepting or declining drops one from the git-ignored queue, and the dev.md line is yours to write |
 | `stats <collect\|push\|show>` | Usage numbers from the Claude Code and Codex session logs on this machine: read new turns, share them with the org, print them |
 
