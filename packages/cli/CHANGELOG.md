@@ -1,4 +1,108 @@
-# @vegastack/skills
+# @vegastack/vegafactory
+
+## 0.21.0
+
+### Minor Changes
+
+- 83f9f34: `vegafactory dispatch` is now `vegafactory worker`, the word a machine's `nodes.md` row already used to grant it unattended work.
+
+  - The verb, the module, the service unit, the claim kind, the `--kind` flag, the on-disk paths and the prose all move together, with nothing left behind to be compatible with. Nothing is deployed and no claim of the old kind exists, so there is no older spelling to carry and get wrong.
+  - `GhRunner` does not move: "runner" there is the thing that shells out to `gh`, and `worker` was chosen over `runner` precisely so that name — and the Actions runner the onboarding document describes — could stay put.
+  - A claim whose kind this release does not recognise is read as a session, which is the longer-lived and so the safer answer: read as a worker's, it would be taken over after thirty minutes.
+  - Two paths that existed only to read what an older version wrote are gone with it. `nodes.md` is read by its header or not at all — a table with no header holds no rows, instead of having its first three cells guessed at — and a stand-down is bookkeeping because of its own marker, never because of a sentence inside a hand-back. Both were checked against the repository before being removed: no roster without a header exists, and no stand-down comment of either shape has ever been written.
+  - The rename reaches the parts a grep for the verb misses: the run's own prompt, the claim owner it writes, the service's log filenames, the roster's column aliases, the readiness messages and the onboarding checklist. The `in-progress` label's description lives on GitHub and was updated there.
+
+- 3dfa89d: A dispatcher's limits now come from its roster row instead of being fixed in the code, and the roster is read by the names of its columns.
+
+  - `runs 10 · step 72h · poll 1m · retry 15m · park 3` in a `caps` cell on the machine's row: how many runs at once, how long one may take, how often the board is read, how long a failure waits, and how many failures park an issue for a person.
+  - Every field is optional and falls back to the shipped default. A cell that names a cap and cannot be read refuses that machine **by name**, saying what the shape is — the row is still read, so the operator is sent to the typo rather than to a row that looks missing.
+  - The roster's header row says which column is which, so a room may reorder or add columns and the shipped template's own order is read correctly. Prose in a notes column is never mistaken for caps, whatever words it contains. A table with no header holds no rows at all, and the refusal asks for the header, because no position is known to hold any cell and a gate does not guess.
+  - The caps are re-read from the refreshed roster every pass, so changing one is a control-room PR that takes effect on the next poll without a restart or a release. The roster is now verified **once** a pass and that one answer is acted on; before, a second verification could see this machine de-listed and be ignored.
+  - `--json` puts exactly one document on stdout and nothing beside it; the lines a human would read travel inside it. It reports one pass, so it needs `--once` and refuses without it — an always-on loop has no moment to answer at, and collecting its lines for one would hold every line the machine ever printed.
+  - A machine's own stand-down comment gets its own marker, `type=standdown`, and only that is bookkeeping. `waiting-on-operator` looks for the operator's reply to be later than anything an agent wrote, so a machine that stood down and said so used to bury the very reply it was standing down without answering — and no machine picked the issue up again. A `handback` is the opposite and stays work: that is an agent stopping to _ask_ something, and it is what the operator's reply answers.
+  - A stop that was nothing to do with the issue — the machine de-listed, the service told to stop, a signal — no longer spends the issue's trigger. Before, `standDown` put the issue back as `queued` or `planning` while the record said the work had already run for that state, so no machine ever picked it up again.
+  - Two fixes found alongside: a failed or stopped run now goes back to the state it came from instead of staying `in-progress`, and the shipped roster template's header row is no longer read as a machine called `dispatcher`.
+  - A separator with nothing beside it — `·`, `runs 10 ·`, `runs 10,,poll 1m` — is a half-typed cell and refuses, instead of reading as "and the rest are fine".
+  - A run that has spent its tries is parked rather than reported as waiting, and its hand-back says so instead of promising a retry the next poll would refuse. Every failure sets a retry deadline, so asking about the wait first meant `park 1` never parked anything.
+  - Caps read back in a unit their own field accepts, so what is printed can be pasted into the cell it came from: `step 1m` no longer prints as `0h`, and an hour of `poll` says `60m` rather than an `1h` the parser would refuse.
+  - The roster's shape is stated once and the template, the reference and the onboarding row all say the same thing.
+  - The duration formatter takes its field as a required argument, because a default is what let two call sites print a duration in another field's units.
+  - A roster row that does not reach a declared `caps` column is refused by name instead of silently receiving defaults; an empty caps cell or `-` still chooses the defaults explicitly.
+  - Standing down leaves the state label unchanged when another machine owns the live claim or claim ownership cannot be verified.
+  - A stand-down re-reads the claim at the moment it moves the state label, not minutes earlier before the work was saved, pushed and the claim released — long enough for another machine to have taken the issue.
+  - The row an unlisted machine is told to add is spelled to fit the header the roster actually has, so pasting it in is not refused for a cell it never reached.
+
+- 4881be3: New dev.md knob `guard: strict | loose`, for a repository whose contributors are all trusted and whose work is all recoverable.
+
+  - `strict` is the default and what every project gets without the knob: the whole always-ask list, unchanged.
+  - `loose` keeps only what nothing undoes — a force push and a hard reset — plus whatever the project named on its own `ask:` lines. Pushing to the default branch, merging, publishing, tagging, `gh api` writes and an unclassifiable command all go through.
+  - Like the rest of the policy it is read from the committed default branch, so a branch cannot loosen itself, and anything but the exact word `loose` reads as `strict`.
+
+- edbc458: `factory.json` is read at schema 2 and nothing else — the schema 1 reader and its migration are gone.
+
+  - A document at any other `schemaVersion` is refused by name rather than migrated, and the file is left exactly as it was. It holds the operator's own settings, so rewriting it on the strength of a version number would lose whatever the writer meant by them.
+  - Nothing is written to `factory.json.schema1.bak` any more, because nothing is converted. A file already at schema 2 — which is every file this project has — is unaffected.
+  - `revision` is now always present and always checked, instead of only on schema 2.
+
+- ef7c8fe: A node knows its own name: `<os-user>@<hostname>`, for example `mk@patrick-mac-mini`.
+
+  - Derived, never configured, so there is nothing to set up and nothing to drift. Two people sharing one machine are two nodes; one person with three machines is three nodes and one owner, which is what makes "everything this person did" answerable across machines.
+  - The hostname is cut to its first label, because that is the part that names the machine: `os.hostname()` answers `patrick-mac-mini.local` on macOS and a full domain name on many Linux hosts, and neither belongs in an identity somebody has to recognise in a table. `scutil --get LocalHostName` gives the clean name directly but exists only on macOS, and this has to be one rule on both.
+  - Both halves are normalised by the same rule, so an id cannot come out half-tidied, and a name that normalises to nothing still leaves something readable rather than a bare `@host`.
+  - Deliberately a new function rather than a change to `machineName`, which maps every non-alphanumeric to a dash — it would have turned this into `mk-patrick-mac-mini`, and it is what `ownerId` stamps on every session claim that exists right now.
+
+- 401ebf8: The control room's machine roster is `nodes.md`, and being in it no longer authorises anything.
+
+  - Every machine that runs vegafactory gets a row: `node | owner | worker | repos | caps`. That is what makes "which machines do we have" and, later, "everything this person did" answerable — and it is why presence alone cannot mean consent.
+  - **`worker` is the gate.** Only `yes` lets a machine work a board with nobody watching. `no`, an empty cell, and anything that is not an answer — `y`, `true`, `TODO confirm` — all refuse, and the machine is named in the refusal rather than left looking unlisted.
+  - **An empty `repos` cell now authorises nothing.** It used to mean every repository in the org, which on a roster that lists every machine would hand the whole board to the laptop written down precisely to say it is not a worker. `*` and `all` still mean everything, said out loud.
+  - A roster with **no** `worker` column grants nothing either. There are no rosters written before the gate — the only control room that exists is being written now — so there is no older shape to be compatible with and get wrong.
+  - `owner` says who is responsible for the **machine**. That is deliberately not the owner on a statistics record, which is whoever did that piece of work — on a shared box the two differ, and the roster says so.
+  - A machine looks itself up by its node id, `<os-user>@<hostname>`, and by nothing else. The lookup used `machineName`, which maps every non-alphanumeric to a dash, so it would have turned `mk@patrick-mac-mini` into `mk-patrick-mac-mini` and never matched a row. One spelling, so two rows cannot name one machine.
+  - A heading that is trying to be the gate and missing it — `workers`, `worker?` — grants nothing. Read as "no gate at all" it would have granted every row in the file.
+  - The row an unlisted machine is told to add says `yes` in the gate, because a row pasted from a refusal is one somebody is adding so that machine can work a board.
+  - The App's private key belongs only on a machine whose row says `worker: yes`. `nodes.md` now names every machine, most of which only report what they did, and possession of that key is by itself enough to mint installation tokens.
+  - A node name is exactly one name: `mk@box@anything` and a name with an empty half authorise nobody, rather than being cut down to a real node's name and matching it.
+  - A dash in a notes cell no longer deletes the row. Only a line that is entirely separators is the one under a header, and a row that vanishes is a machine that looks unlisted.
+
+- b70190c: Everything this product keeps about a machine now lives in one place it owns: `~/.vegafactory/`.
+
+  - `factory.json`, the control-room clones, the checkouts this machine knows about, the stats spool and the built page all live there, and the App key at `worker/app.pem` — `worker/` exists only on a machine that accepts unattended work, so the role is visible on disk.
+  - `~/.vegastack/` is shared with other VegaStack tooling, which is why this is a separate directory: one this product owns entirely is one it may also prune.
+  - Two things are named differently from the release before: `worktree-roots.json` is `worktrees.json`, and the stats spool is no longer inside a hidden `.tmp/` — the directory anything tidying a machine empties first, which would have taken the read offsets and push cursors with it.
+  - **Nothing migrates.** A machine that still has files under `~/.vegastack/` is moved by hand, once. There is one such machine, and this release ships no code to find or move them — which is what the register already said it would do.
+  - `VEGAFACTORY_HOME` points the whole product somewhere else, and must be an absolute path: a relative one would name a different directory from every working directory.
+  - The home is created owner-only everywhere this product creates it — the stats spool, the worktree registry, the built page and a global skill install — because it holds the App key and the control-room clones and a umask of 022 would leave them readable by anybody on the machine.
+
+### Patch Changes
+
+- 4881be3: `vegafactory dispatch enable` can now pass its readiness check.
+
+  - The Codex probe passed `-a never`, which `codex exec` does not accept, so every machine was told `codex did not answer ok` and the dispatcher installed nowhere.
+  - Probes no longer inherit stdin, which both harnesses read a prompt from when it is open.
+  - A test pins each probe's arguments, because the failure mode is a tool changing its flags under a check nothing runs.
+
+- 4881be3: Enrolling a dispatcher no longer needs an SSH key when the machine is already logged in to GitHub.
+
+  - The App's token is for the API and cannot write code, and the gh credential helper prefers it over the machine's own login, so a run's git now asks with that token scrubbed out.
+  - `dispatch enable` asks the same way: an SSH remote passes, an https remote passes when the machine has a login of its own and names the account, and any other transport refuses because a run's git has no credential path for it.
+  - The boundary is attribution, not isolation: a child under the same account can read that login itself, which the separate dispatcher account is what closes.
+
+- a8166fb: A dispatched run can now do the work it was started for, and stops holding its slot after it finishes.
+
+  - `claude -p` was spawned with no permission mode, so every write was denied: the first dispatched run read the repository, changed nothing and handed the issue back untouched. Claude runs get `--dangerously-skip-permissions` and Codex runs `--dangerously-bypass-approvals-and-sandbox`, because nobody is at the keyboard to answer a prompt.
+  - The step watchdog leaked its `sleep`: killing the subshell left the sleep running, and an orphan holding the job's stdout meant the dispatcher never saw the run end. Work that took twelve seconds held a run slot for the full twenty-minute limit. The backstop now sleeps with its own stdio and is killed by name, and it still ends a job that runs past the limit.
+
+- 4881be3: The ship guard no longer asks permission to run commands somebody was only writing down.
+
+  - A heredoc body is data the command is fed, and a quoted delimiter stops the shell expanding it, so backticks in a changeset or a release note were being read as command substitution.
+  - A body is dropped only when every command on that line reads its stdin as data; `sh`, an interpreter, a pipe into one, or a command the guard does not recognise all keep it, because they run it.
+  - An unquoted delimiter is expanded by the shell, so those bodies still count.
+
+- a8166fb: `dispatch enable`'s hooks check now recognises the CLI however this machine spells it.
+
+  - It matched the literal `vegafactory hook`, so a machine running the CLI from source — `bun .../src/index.ts hook stop --harness claude` — was called unwired while running the very code it was checking.
+  - What identifies the hook is the verb and the harness it names, not the word in front, so a wrapper script or a pinned path counts too.
 
 ## 0.20.1
 
