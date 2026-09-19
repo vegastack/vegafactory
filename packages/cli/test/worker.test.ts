@@ -4,16 +4,16 @@ import { generateKeyPairSync } from 'node:crypto'
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { claimBody, claimLine, holderOf, nodeId, trustedFactory } from '../src/claim.ts'
+import { claimBody, claimLine, claimsOf, holderOf, nodeId, TIMEOUT_MS, trustedFactory } from '../src/claim.ts'
 import {
-  APP_ID, DEFAULT_CAPS, MAX_FAILURES, MAX_RUNS, MAX_TIMER_MS, POLL_MS, RETRY_MS, STEP_TIMEOUT_MS, TOKEN_MARGIN_MS, parseCaps, rosterName, sayDuration, agentArgs, appIdentity, appJwt, appKeyPath, assertKeyFile, board, decide, defaultRunStep, dispatchDir,
+  APP_ID, DEFAULT_CAPS, MAX_FAILURES, MAX_RUNS, MAX_TIMER_MS, POLL_MS, RETRY_MS, STEP_TIMEOUT_MS, TOKEN_MARGIN_MS, parseCaps, rosterName, sayDuration, agentArgs, appIdentity, appJwt, appKeyPath, assertKeyFile, board, decide, defaultRunStep, workerDir,
   acknowledgedPlan, canonicalPath, childRunEnvironment, confirmShip, disjointSiblings, pushableBranch, shipWord,
-  drain, filesFromParent, harnessAnswers, hitLimit, hooksWired, listedHere, mintToken, overlaps, parseDispatchArgs,
-  parseDispatchers, poll, readActed, readRuns, readiness, recordRun, resetAt, RUNS_KEPT, runDispatch, schedule, serviceCommands, stagePolicy,
+  drain, filesFromParent, harnessAnswers, hitLimit, hooksWired, listedHere, mintToken, overlaps, parseWorkerArgs,
+  parseNodes, poll, readActed, readRuns, readiness, recordRun, resetAt, RUNS_KEPT, runWorker, schedule, serviceCommands, stagePolicy,
   standDown, stepPrompt, tail, unitPath, unitText, unsafeForParallel,
-  noteChild, readChildren, refreshRoster, releaseRunLock, reserve, runLockPath, takeRunLock, verifiedListing,
+  noteChild, readChildren, refreshRoster, RETIRED_SERVICE_NAME, RETIRED_UNIT, releaseRunLock, reserve, runLockPath, takeRunLock, verifiedListing,
   type Candidate, type Fetch, type GitRun, type Inflight, type PollDeps, type Probe, type RunStep, type StepResult,
-} from '../src/dispatch.ts'
+} from '../src/worker.ts'
 import { ackBody, artifactHash, permissionLookup, snapshot } from '../src/issue.ts'
 import { cacheDir, syncIssue } from '../src/issue-cache.ts'
 import { FakeGitHub } from './fake-github.ts'
@@ -91,7 +91,7 @@ beforeEach(() => {
 
 describe('the roster', () => {
   test('a table row, a bullet row, the header and the separator', () => {
-    const rows = parseDispatchers([
+    const rows = parseNodes([
       '# Dispatchers', '',
       '| machine | operator | repos | note |',
       '|---|---|:---:|---|',
@@ -109,7 +109,7 @@ describe('the roster', () => {
 
   test('a row that lost its repos column is no row at all', () => {
     project(`| machine | operator | repos |\n|---|---|---|\n| ${HOST} | mk |\n`)
-    expect(parseDispatchers(`| ${HOST} | mk |`)).toEqual([])
+    expect(parseNodes(`| ${HOST} | mk |`)).toEqual([])
     const listing = listedHere(root, { repo: 'o/r', host: HOST, home })
     expect(listing.ok).toBe(false)
     expect(listing.reason).toContain('is not listed')
@@ -118,7 +118,7 @@ describe('the roster', () => {
   test('a row that does not reach its declared caps column is refused by name', () => {
     const roster = `| node | owner | worker | repos | notes | caps |\n|---|---|---|---|---|---|\n| ${NODE} | mk | yes | o/r |\n`
     project(roster)
-    const row = parseDispatchers(roster)[0]!
+    const row = parseNodes(roster)[0]!
     expect(row.machine).toBe(NODE)
     expect(row.caps).toBeNull()
     expect(row.problem).toContain('does not reach its declared caps column')
@@ -127,7 +127,7 @@ describe('the roster', () => {
     expect(listing.reason).toContain(`${NODE}'s row`)
     expect(listing.reason).toContain('does not reach its declared caps column')
     for (const cell of ['', '-']) {
-      const complete = parseDispatchers(`| node | owner | worker | repos | notes | caps |\n|---|---|---|---|---|---|\n| ${NODE} | mk | yes | o/r | | ${cell} |\n`)[0]!
+      const complete = parseNodes(`| node | owner | worker | repos | notes | caps |\n|---|---|---|---|---|---|\n| ${NODE} | mk | yes | o/r | | ${cell} |\n`)[0]!
       expect(complete.caps).toEqual(DEFAULT_CAPS)
       expect(complete.problem).toBeNull()
     }
@@ -171,14 +171,14 @@ describe('the roster', () => {
   // its columns could be hiding caps in any cell, so the gate says so rather than running on
   // defaults the operator never chose — and rather than reading a notes cell as a limit.
   test('a wider table with no header names no columns, so it holds no caps and no gate', () => {
-    const row = parseDispatchers(`| ${NODE} | mk | o/r | runs 10 · step 72h |\n`)[0]!
+    const row = parseNodes(`| ${NODE} | mk | o/r | runs 10 · step 72h |\n`)[0]!
     expect(row.problem).toContain('names no columns')
     expect(row.caps).toBeNull()
     expect(row.worker).toBe(false)
   })
 
   test('a three-cell roster with no header parses, and grants nothing', () => {
-    const row = parseDispatchers(`| ${NODE} | mk | o/r |\n`)[0]!
+    const row = parseNodes(`| ${NODE} | mk | o/r |\n`)[0]!
     expect(row.caps).toEqual(DEFAULT_CAPS)
     expect(row.worker).toBe(false)
     project(`| ${NODE} | mk | o/r |\n`)
@@ -552,7 +552,7 @@ describe('what may run at once', () => {
     gh.addComment(13, real, 'mk')
     ackFor(13, real)
     expect(acknowledgedPlan(snapOf(13), permission).text).toBe(real)
-    gh.addComment(13, real.replace('`docs/dispatcher.md`', '`packages/cli/src/dispatch.ts`'), 'mk')
+    gh.addComment(13, real.replace('`docs/dispatcher.md`', '`packages/cli/src/worker.ts`'), 'mk')
     expect(acknowledgedPlan(snapOf(13), permission)).toMatchObject({ text: null, reason: expect.stringContaining('changed after') })
 
     // Acked, but the plan does not pass its own lint.
@@ -678,7 +678,7 @@ describe('one poll over the board', () => {
   test('a claim another machine already holds is not started twice', async () => {
     gh.addIssue({ number: 1, labels: ['planning', 'medium'] })
     // Another machine's dispatcher got there first, between this pass's read and its launch.
-    const body = claimBody({ owner: 'builder:dispatch-1', kind: 'dispatch', harness: 'dispatch', model: 'plan' })
+    const body = claimBody({ owner: 'builder:dispatch-1', kind: 'dispatch', harness: 'worker', model: 'plan' })
     const notes: string[] = []
     const steps: number[] = []
     await pass({
@@ -1031,18 +1031,39 @@ describe('readiness and the service', () => {
   })
 
   test('the unit runs this CLI\'s own dispatch run and carries no token', () => {
-    const plist = unitText('darwin', { cli: ['/usr/bin/node', '/opt/vegafactory/index.js'], root, repo: 'o/r', logDir: dispatchDir(root) })
-    expect(plist).toContain('<string>dispatch</string>')
+    const plist = unitText('darwin', { cli: ['/usr/bin/node', '/opt/vegafactory/index.js'], root, repo: 'o/r', logDir: workerDir(root) })
+    expect(plist).toContain('<string>worker</string>')
     expect(plist).toContain('<string>--repo</string>')
     expect(plist).toContain('<key>KeepAlive</key><true/>')
     expect(plist).not.toMatch(/token|TOKEN|pem/)
-    const unit = unitText('linux', { cli: ['vegafactory'], root, repo: 'o/r', logDir: dispatchDir(root) })
-    expect(unit).toContain('ExecStart="vegafactory" "dispatch" "run" "--repo" "o/r"')
+    const unit = unitText('linux', { cli: ['vegafactory'], root, repo: 'o/r', logDir: workerDir(root) })
+    expect(unit).toContain('ExecStart="vegafactory" "worker" "run" "--repo" "o/r"')
     expect(unit).toContain('Restart=always')
-    expect(unitPath('darwin', '/home/x')).toBe('/home/x/Library/LaunchAgents/com.vegastack.vegafactory.dispatch.plist')
-    expect(unitPath('linux', '/home/x')).toBe('/home/x/.config/systemd/user/vegafactory-dispatch.service')
-    expect(serviceCommands('linux', '/u', 'disable')[0]).toEqual(['systemctl', '--user', 'disable', '--now', 'vegafactory-dispatch.service'])
-    expect(serviceCommands('darwin', '/u', 'enable', 501)[0]).toEqual(['launchctl', 'bootstrap', 'gui/501', '/u'])
+    expect(unitPath('darwin', '/home/x')).toBe('/home/x/Library/LaunchAgents/com.vegastack.vegafactory.worker.plist')
+    expect(unitPath('linux', '/home/x')).toBe('/home/x/.config/systemd/user/vegafactory-worker.service')
+    expect(serviceCommands('linux', '/u', 'disable')[0]).toEqual(['systemctl', '--user', 'disable', '--now', 'vegafactory-worker.service'])
+    // The retired label goes first. `disable` finds its unit path from the platform alone, so
+    // after the rename it would take the new service away and leave the old one restarting on a
+    // verb this CLI no longer has — or running beside the new one and holding its lock.
+    const enable = serviceCommands('darwin', '/u', 'enable', 501)
+    expect(enable[0]).toEqual(['launchctl', 'bootout', `gui/501/${RETIRED_SERVICE_NAME}`])
+    expect(enable[1]).toEqual(['launchctl', 'bootstrap', 'gui/501', '/u'])
+    expect(serviceCommands('linux', '/u', 'enable')[0]).toEqual(['systemctl', '--user', 'disable', '--now', RETIRED_UNIT])
+    // And the tombstones still name what the released version installed.
+    expect(RETIRED_SERVICE_NAME).toBe('com.vegastack.vegafactory.dispatch')
+    expect(RETIRED_UNIT).toBe('vegafactory-dispatch.service')
+  })
+
+  // The released version wrote `kind=dispatch` on claims that are on issues now. An unrecognised
+  // kind falls back to `session`, which goes stale after four hours rather than thirty minutes.
+  test('a claim written by the released version is still a worker claim', () => {
+    const body = claimBody({ owner: 'box:1', kind: 'dispatch', harness: 'dispatch', model: 'x' })
+    expect(body).toContain('kind=dispatch')
+    const older = { id: 1, author: 'mk', authorType: 'User', type: 'claim', createdAt: '2026-09-01T00:00:00Z', updatedAt: '', changedAt: '' }
+    const state = { issue: { labels: [] }, comments: { 1: older } } as never
+    const found = claimsOf(state, () => body, () => true).claims[0]!
+    expect(found.kind).toBe('dispatch')
+    expect(TIMEOUT_MS[found.kind]).toBe(30 * 60_000)
   })
 })
 
@@ -1149,7 +1170,7 @@ describe('the step a run makes', () => {
 describe('the command', () => {
   const run = (argv: string[], over = {}) => {
     const lines: string[] = []
-    return runDispatch(argv, { cwd: root, home, host: HOST, env: {}, out: (text) => lines.push(text), runner: gh.runner, now: () => gh.clock, git: anyGit, ...over })
+    return runWorker(argv, { cwd: root, home, host: HOST, env: {}, out: (text) => lines.push(text), runner: gh.runner, now: () => gh.clock, git: anyGit, ...over })
       .then((code) => ({ code, text: lines.join('\n') }))
   }
 
@@ -1186,7 +1207,7 @@ describe('the command', () => {
     expect(result.code).toBe(0)
     expect(result.text).toContain(`${'queued'.padEnd(20)} #1`)
     expect(result.text).toContain(`${'ready-to-ship'.padEnd(20)} #2`)
-    expect(result.text).toContain('no dispatcher runs on this machine yet')
+    expect(result.text).toContain('no worker runs on this machine yet')
   })
 
   // The unit tests for the formatter would stay green if a call site dropped its field argument,
@@ -1261,7 +1282,7 @@ describe('the command', () => {
     gh.addIssue({ number: 1, labels: ['queued', 'small'] })
     const lines: string[] = []
     let passes = 0
-    const code = await runDispatch(['run'], {
+    const code = await runWorker(['run'], {
       cwd: root, home, host: HOST, env: {}, out: (text) => lines.push(text), runner: gh.runner, now: () => gh.clock,
       runStep: (async () => ({ outcome: 'done' as const, note: '', ms: 1 })) as RunStep,
       // Between the first pass and the second, the control-room PR that de-lists this machine lands
@@ -1284,7 +1305,7 @@ describe('the command', () => {
     let passes = 0
     let releaseChild = () => {}
     const blocked = new Promise<void>((resolve) => { releaseChild = resolve })
-    const code = await runDispatch(['run'], {
+    const code = await runWorker(['run'], {
       cwd: root, home, host: HOST, env: {}, out: (text) => lines.push(text), runner: gh.runner, now: () => gh.clock,
       // A child that never finishes on its own: only being stopped ends it.
       runStep: (async (_step, context) => {
@@ -1321,7 +1342,7 @@ describe('the command', () => {
     const blocked = new Promise<void>((resolve) => { releaseChild = resolve })
     let passes = 0
 
-    const first = await runDispatch(['run'], {
+    const first = await runWorker(['run'], {
       cwd: root, home, host: HOST, env: {}, out: () => {}, runner: gh.runner, now: () => gh.clock,
       runStep: (async (_step, context) => {
         context.onStart?.(5151, 'claude')
@@ -1339,7 +1360,7 @@ describe('the command', () => {
     // The control-room PR is reverted and the machine runs again. It must take the issue up.
     delist(listed)
     const second: string[] = []
-    const code = await runDispatch(['run', '--once'], {
+    const code = await runWorker(['run', '--once'], {
       cwd: root, home, host: HOST, env: {}, out: (text) => second.push(text), runner: gh.runner, now: () => gh.clock,
       runStep: (async () => ({ outcome: 'done' as const, note: '', ms: 1 })) as RunStep,
     })
@@ -1361,7 +1382,7 @@ describe('the command', () => {
     const blocked = new Promise<void>((resolve) => { releaseChild = resolve })
     let passes = 0
 
-    const first = await runDispatch(['run'], {
+    const first = await runWorker(['run'], {
       cwd: root, home, host: HOST, env: {}, out: () => {}, runner: gh.runner, now: () => gh.clock,
       runStep: (async (_step, context) => {
         context.onStart?.(6161, 'claude')
@@ -1378,7 +1399,7 @@ describe('the command', () => {
 
     delist(listed)
     const second: string[] = []
-    const code = await runDispatch(['run', '--once'], {
+    const code = await runWorker(['run', '--once'], {
       cwd: root, home, host: HOST, env: {}, out: (text) => second.push(text), runner: gh.runner, now: () => gh.clock,
       runStep: (async () => ({ outcome: 'done' as const, note: '', ms: 1 })) as RunStep,
     })
@@ -1392,7 +1413,7 @@ describe('the command', () => {
     let verifications = 0
     let passes = 0
     gh.addIssue({ number: 1, labels: ['queued', 'small'] })
-    await runDispatch(['run'], {
+    await runWorker(['run'], {
       cwd: root, home, host: HOST, env: {}, out: () => {}, runner: gh.runner, now: () => gh.clock,
       runStep: (async () => ({ outcome: 'done' as const, note: '', ms: 1 })) as RunStep,
       git: () => { verifications++; return (() => ({ status: 0, out: '' })) as GitRun },
@@ -1405,7 +1426,7 @@ describe('the command', () => {
   test('--json puts one document on stdout and no prose beside it', async () => {
     gh.addIssue({ number: 1, labels: ['queued', 'small'] })
     const lines: string[] = []
-    const code = await runDispatch(['run', '--once', '--json'], {
+    const code = await runWorker(['run', '--once', '--json'], {
       cwd: root, home, host: HOST, env: {}, out: (text) => lines.push(text), runner: gh.runner, now: () => gh.clock,
       runStep: (async () => ({ outcome: 'done' as const, note: '', ms: 1 })) as RunStep,
       git: anyGit,
@@ -1424,7 +1445,7 @@ describe('the command', () => {
   // lines for it would hold every line the machine ever printed and answer nobody.
   test('--json without --once refuses rather than holding its answer forever', async () => {
     const lines: string[] = []
-    const code = await runDispatch(['run', '--json'], {
+    const code = await runWorker(['run', '--json'], {
       cwd: root, home, host: HOST, env: {}, out: (text) => lines.push(text), runner: gh.runner, now: () => gh.clock, git: anyGit,
     })
     expect(code).toBe(2)
@@ -1439,7 +1460,7 @@ describe('the command', () => {
     let releaseChild = () => {}
     const blocked = new Promise<void>((resolve) => { releaseChild = resolve })
     let sleepStarted = 0
-    const code = await runDispatch(['run'], {
+    const code = await runWorker(['run'], {
       cwd: root, home, host: HOST, env: {}, out: (text) => lines.push(text), runner: gh.runner, now: () => gh.clock,
       runStep: (async (_step, context) => {
         context.onStart?.(8888, 'claude')
@@ -1469,7 +1490,7 @@ describe('the command', () => {
     const live = { pid: 5150, startedAt: 'Fri Sep 18 09:00:00 2026', command: 'claude', issue: 7, action: 'implement' as const, owner: `${HOST}:dispatch-ab12-7`, from: 'queued' as const }
     noteChild(root, live)
     const stopped: number[] = []
-    const code = await runDispatch(['disable'], {
+    const code = await runWorker(['disable'], {
       cwd: root, home, host: HOST, env: {}, out: (text) => lines.push(text), runner: gh.runner,
       run: (() => ({ code: 0, stdout: '', stderr: '' })) as Probe,
       stop: (pid: number) => { stopped.push(pid); return true },
@@ -1487,7 +1508,7 @@ describe('the command', () => {
     const stale = { pid: 5151, startedAt: 'Fri Sep 18 09:00:00 2026', command: 'claude', issue: 8, action: 'plan' as const, owner: null, from: 'planning' as const }
     noteChild(root, stale)
     const stopped: number[] = []
-    const code = await runDispatch(['disable'], {
+    const code = await runWorker(['disable'], {
       cwd: root, home, host: HOST, env: {}, out: (text) => lines.push(text), runner: gh.runner,
       run: (() => ({ code: 0, stdout: '', stderr: '' })) as Probe,
       stop: (pid: number) => { stopped.push(pid); return true },
@@ -1521,9 +1542,9 @@ describe('the command', () => {
   })
 
   test('the flags parse and an unknown verb says so', () => {
-    expect(parseDispatchArgs(['run', '--once', '--repo', 'o/r', '--json'])).toEqual({ verb: 'run', flags: { repo: 'o/r' }, json: true, dryRun: false, once: true })
-    expect(() => parseDispatchArgs(['run', '--repo'])).toThrow('--repo needs a value')
-    expect(runDispatch(['frobnicate'], { cwd: root, home, host: HOST, env: {}, out: () => {} })).rejects.toThrow('unknown dispatch verb')
+    expect(parseWorkerArgs(['run', '--once', '--repo', 'o/r', '--json'])).toEqual({ verb: 'run', flags: { repo: 'o/r' }, json: true, dryRun: false, once: true })
+    expect(() => parseWorkerArgs(['run', '--repo'])).toThrow('--repo needs a value')
+    expect(runWorker(['frobnicate'], { cwd: root, home, host: HOST, env: {}, out: () => {} })).rejects.toThrow('unknown worker verb')
   })
 })
 
@@ -1563,7 +1584,7 @@ describe('caps on the roster row', () => {
     expect(parseCaps('step 72 hours')).toBeNull()
     expect(parseCaps('runs')).toBeNull()
     const roster = '| machine | operator | repos | caps |\n|---|---|---|---|\n| a | mk | o/a | runs |'
-    expect(parseDispatchers(roster)[0]!.caps).toBeNull()
+    expect(parseNodes(roster)[0]!.caps).toBeNull()
   })
 
   test('units are per field, because a poll in hours is somebody meaning something else', () => {
@@ -1589,7 +1610,7 @@ describe('caps on the roster row', () => {
       '|---|---|---|---|---|---|',
       '| patrick | dev | o/a | mk | runs 4 | the always-on box |',
     ].join('\n')
-    expect(parseDispatchers(roster)).toEqual([{ machine: 'patrick', operator: 'mk', repos: ['o/a'], caps: { ...DEFAULT_CAPS, runs: 4 }, worker: false, problem: null }])
+    expect(parseNodes(roster)).toEqual([{ machine: 'patrick', operator: 'mk', repos: ['o/a'], caps: { ...DEFAULT_CAPS, runs: 4 }, worker: false, problem: null }])
   })
 
   test('prose in a notes column is never caps, whatever words it happens to contain', () => {
@@ -1599,7 +1620,7 @@ describe('caps on the roster row', () => {
       '|---|---|---|---|---|',
       '| a | mk | o/a | - | the box that runs the nightly step |',
     ].join('\n')
-    expect(parseDispatchers(roster)[0]!.caps).toEqual(DEFAULT_CAPS)
+    expect(parseNodes(roster)[0]!.caps).toEqual(DEFAULT_CAPS)
   })
 
   test('a caps cell nobody can read keeps its row, so the machine is refused by name', () => {
@@ -1609,31 +1630,31 @@ describe('caps on the roster row', () => {
       '| patrick | mk | o/a | runs 10 · step 72h |',
       '| broken | mk | o/c | runs ten |',
     ].join('\n')
-    const rows = parseDispatchers(roster)
+    const rows = parseNodes(roster)
     expect(rows.map((row) => row.machine)).toEqual(['patrick', 'broken'])
     expect(rows[1]!.caps).toBeNull()
   })
 
   test('a table with no header is read the way every roster was read before headers', () => {
-    expect(parseDispatchers('| a | mk | o/a |')).toEqual([{ machine: 'a', operator: 'mk', repos: ['o/a'], caps: DEFAULT_CAPS, worker: false, problem: null }])
+    expect(parseNodes('| a | mk | o/a |')).toEqual([{ machine: 'a', operator: 'mk', repos: ['o/a'], caps: DEFAULT_CAPS, worker: false, problem: null }])
   })
 
   test('without a header there is no column caps are known to sit in, so a wider row refuses', () => {
     // Valid caps in a headerless row must not be silently ignored, and a notes cell must not be
     // read as a limit. Neither is guessed at: the row is kept and refused, saying what to fix.
     for (const row of ['| a | mk | o/a | runs 4 |', '| a | mk | o/a | the box that runs the build |', '| a | mk | o/a | runs ten |']) {
-      const parsed = parseDispatchers(row)[0]!
+      const parsed = parseNodes(row)[0]!
       expect(parsed.machine).toBe('a')
       expect(parsed.caps).toBeNull()
       expect(parsed.problem).toContain('names no columns')
     }
     // Naming the columns is all it takes.
-    const named = parseDispatchers('| machine | operator | repos | caps |\n|---|---|---|---|\n| a | mk | o/a | runs 4 |')
+    const named = parseNodes('| machine | operator | repos | caps |\n|---|---|---|---|\n| a | mk | o/a | runs 4 |')
     expect(named[0]!.caps).toEqual({ ...DEFAULT_CAPS, runs: 4 })
   })
 
   test("the shipped template's header is not a machine called dispatcher", () => {
-    expect(parseDispatchers('| dispatcher | group | repos | owner | caps | notes |\n|---|---|---|---|---|---|')).toEqual([])
+    expect(parseNodes('| dispatcher | group | repos | owner | caps | notes |\n|---|---|---|---|---|---|')).toEqual([])
   })
 })
 
@@ -1670,7 +1691,7 @@ describe('the caps reach what they limit', () => {
   })
 
   // The tests above reach into `schedule`, `decide` and `defaultRunStep` directly, so they would
-  // still pass if `runDispatch` stopped refreshing the roster or stopped forwarding what it read.
+  // still pass if `runWorker` stopped refreshing the roster or stopped forwarding what it read.
   // This one changes the caps upstream between two real passes and watches what the loop does.
   test('a caps change upstream reaches the next pass: how many start, how long they get, how long it waits', async () => {
     const header = '| node | owner | worker | repos | caps |\n|---|---|---|---|---|\n'
@@ -1684,7 +1705,7 @@ describe('the caps reach what they limit', () => {
     let pass = 0
     let started = 0
 
-    const code = await runDispatch(['run'], {
+    const code = await runWorker(['run'], {
       cwd: root, home, host: HOST, env: {}, out: () => {}, runner: gh.runner, now: () => gh.clock,
       runStep: (async (_step, context) => {
         started++
@@ -1725,7 +1746,7 @@ describe('the caps reach what they limit', () => {
 test('a hand-back promises a retry only when there is a try left', async () => {
   gh.addIssue({ number: 1, labels: ['planning', 'medium'] })
   controlRoomClone(`| node | owner | worker | repos | caps |\n|---|---|---|---|---|\n| ${NODE} | mk | yes | o/r | park 1 |\n`)
-  await runDispatch(['run', '--once'], {
+  await runWorker(['run', '--once'], {
     cwd: root, home, host: HOST, env: {}, out: () => {}, runner: gh.runner, now: () => gh.clock,
     runStep: (async () => ({ outcome: 'failed' as const, note: 'boom', ms: 1 })) as RunStep,
   })
@@ -1765,7 +1786,7 @@ test('an agent asking a question is not bookkeeping, and is not answered by an o
 // the wrong units. This pins that, because restoring the default would be a one-character change
 // that compiles and quietly reintroduces both bugs it caused.
 test('the duration formatter cannot be called without naming its field', () => {
-  const source = readFileSync(join(import.meta.dir, '..', 'src', 'dispatch.ts'), 'utf8')
+  const source = readFileSync(join(import.meta.dir, '..', 'src', 'worker.ts'), 'utf8')
   expect(source).toContain("field: 'step' | 'poll' | 'retry'):")
   expect(source).not.toContain("field: 'step' | 'poll' | 'retry' =")
 })
@@ -1798,7 +1819,7 @@ test('the row it tells you to add is one the same parser accepts', () => {
   expect(row).toContain('o/r')
 
   // Paste it under that header and the machine is listed, with the shipped defaults.
-  const parsed = parseDispatchers(`${header}${row}\n`)[0]!
+  const parsed = parseNodes(`${header}${row}\n`)[0]!
   expect(parsed.machine).toBe(nodeId(undefined, HOST))
   expect(parsed.problem).toBeNull()
   expect(parsed.caps).toEqual(DEFAULT_CAPS)
@@ -1910,7 +1931,7 @@ describe('a node answers to its own name', () => {
     project(`${header}| someone-else | mk | yes | o/r | |\n`)
     const listing = listedHere(root, { repo: 'o/r', host: HOST, home })
     const row = /`(\| .*? \|)`/.exec(listing.reason)![1]!
-    const parsed = parseDispatchers(`${header}${row}\n`)[0]!
+    const parsed = parseNodes(`${header}${row}\n`)[0]!
     expect(parsed.worker).toBe(true)
     expect(parsed.repos).toEqual(['o/r'])
     expect(parsed.problem).toBeNull()

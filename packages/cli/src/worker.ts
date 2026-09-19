@@ -1,4 +1,4 @@
-// `vegafactory dispatch …` — the listed machine that works the board on its own.
+// `vegafactory worker …` — the listed machine that works the board on its own.
 //
 // It refuses to run at all unless this machine is named in the control room's `nodes.md`,
 // refreshed and verified before every pass: the roster is the enrolment, and removing a row is how
@@ -50,7 +50,12 @@ export const MAX_FAILURES = 3
 // What a run's own output contributes to its record; the output never reaches the issue.
 export const MAX_NOTE = 400
 
-export const SERVICE_NAME = 'com.vegastack.vegafactory.dispatch'
+export const SERVICE_NAME = 'com.vegastack.vegafactory.worker'
+// The label the released version installed. Kept so `enable` can boot out a service that would
+// otherwise keep restarting on an `ExecStart` naming a verb this CLI no longer has — and, if the
+// old verb survived as an alias, would hold the run lock and silence the new one silently.
+export const RETIRED_SERVICE_NAME = 'com.vegastack.vegafactory.dispatch'
+export const RETIRED_UNIT = 'vegafactory-dispatch.service'
 
 // ---------------------------------------------------------------------------------------------
 // The roster: the control room's nodes.md
@@ -126,7 +131,7 @@ export function parseCaps(cell: string): Caps | null {
 // `worker` is the gate. Every machine has a row once a control room lists its nodes, so being in
 // the file authorises nothing; only `worker: yes` does. A row from a roster with no worker column
 // at all is one written before the column existed, and is read the way it was written.
-export interface Dispatcher { machine: string; operator: string | null; repos: string[]; caps: Caps | null; worker: boolean; problem: string | null }
+export interface Node { machine: string; operator: string | null; repos: string[]; caps: Caps | null; worker: boolean; problem: string | null }
 
 // What a roster may call each column. A header maps a name to a position, so a row is read by what
 // its columns are called rather than by where they happen to sit: a room may add, drop or reorder
@@ -219,8 +224,8 @@ export function rosterName(value: string): string {
 
 // One row per machine. A table names its columns in a header row, and a bullet is
 // `- node — repos`. `*` or `all` means every repository of the org; an empty cell means none.
-export function parseDispatchers(text: string): Dispatcher[] {
-  const found: Dispatcher[] = []
+export function parseNodes(text: string): Node[] {
+  const found: Node[] = []
   let layout = POSITIONAL
   for (const raw of String(text ?? '').split('\n')) {
     const line = raw.trim()
@@ -298,7 +303,7 @@ export function parseDispatchers(text: string): Dispatcher[] {
   return found
 }
 
-export const dispatchersPath = (clone: string) => join(clone, 'nodes.md')
+export const nodesPath = (clone: string) => join(clone, 'nodes.md')
 
 // Where this machine's copy of the org control room lives: the path the last sync recorded, else
 // the default clone path for the org this repository's dev.md names.
@@ -341,7 +346,7 @@ export function refreshRoster(clone: string, git: GitRun = gitIn(clone)): Refres
   return { ok: true, reason: 'refreshed from the control room', sha: git(['rev-parse', 'HEAD']).out || null }
 }
 
-export interface Listing { ok: boolean; reason: string; entry: Dispatcher | null; file: string | null }
+export interface Listing { ok: boolean; reason: string; entry: Node | null; file: string | null }
 
 // `listedHere`, but only after the roster has been refreshed and verified. This is what a run
 // asks each pass; a read-only view may ask `listedHere` alone and show what it has.
@@ -349,7 +354,7 @@ export function verifiedListing(root: string, options: { repo: string; host?: st
   const room = controlRoomClone(root, options.home ?? homedir())
   if (!room) return listedHere(root, options)
   const refresh = refreshRoster(room.clone, (options.git ?? gitIn)(room.clone))
-  if (!refresh.ok) return { ok: false, reason: refresh.reason, entry: null, file: dispatchersPath(room.clone) }
+  if (!refresh.ok) return { ok: false, reason: refresh.reason, entry: null, file: nodesPath(room.clone) }
   return listedHere(root, options)
 }
 
@@ -360,15 +365,15 @@ export function listedHere(root: string, options: { repo: string; host?: string;
   // well would mean two rows could name this machine and a roster could grant through either.
   const machine = nodeId(undefined, options.host ?? hostname())
   const room = controlRoomClone(root, options.home ?? homedir())
-  if (!room) return { ok: false, reason: `this repository names no control room (dev.md's control-room: knob), so no machine is listed to dispatch it`, entry: null, file: null }
-  const file = dispatchersPath(room.clone)
+  if (!room) return { ok: false, reason: `this repository names no control room (dev.md's control-room: knob), so no machine is listed as a worker it`, entry: null, file: null }
+  const file = nodesPath(room.clone)
   let text: string
   try {
     text = readFileSync(file, 'utf8')
   } catch {
     return { ok: false, reason: `${file} is not on this machine — run \`vegafactory sync\` to refresh the ${room.org} control room, and add ${machine} to nodes.md in a control-room PR`, entry: null, file }
   }
-  const entry = parseDispatchers(text).find((row) => row.machine === machine) ?? null
+  const entry = parseNodes(text).find((row) => row.machine === machine) ?? null
   if (!entry) {
     // The row is spelled to fit the table that is actually there: a row shorter than the header
     // is refused for the cell it never reached, so advice that ignored the header would send the
@@ -479,7 +484,7 @@ export async function mintToken(input: { repo: string; keyPath: string; appId: s
   if (!/BEGIN (?:RSA )?PRIVATE KEY/.test(pem)) throw new Error(`${keyPath} is not a PEM private key — download the App's key again`)
   let jwt: string
   try { jwt = appJwt(pem, appId, now) } catch (error) { throw new Error(`the App key at ${keyPath} could not sign: ${(error as Error).message}`) }
-  const headers = { Authorization: `Bearer ${jwt}`, Accept: 'application/vnd.github+json', 'User-Agent': 'vegafactory-dispatch' }
+  const headers = { Authorization: `Bearer ${jwt}`, Accept: 'application/vnd.github+json', 'User-Agent': 'vegafactory-worker' }
   const install = await call(`https://api.github.com/repos/${repo}/installation`, { method: 'GET', headers })
   if (!install.ok) throw new Error(`the VegaFactory App is not installed on ${repo} (GitHub answered ${install.status}) — install it, or check VEGAFACTORY_APP_ID`)
   const id = (await install.json() as { id?: number }).id
@@ -577,7 +582,7 @@ export function harnessAnswers(run: Probe): Check[] {
   for (const [name, command, args] of [
     ['claude', 'claude', ['-p', 'say ok']],
     // `codex exec` takes --sandbox and has no approval flag of its own; `-a never` was a usage
-    // error, so this check could never pass and `dispatch enable` refused every machine.
+    // error, so this check could never pass and `worker enable` refused every machine.
     ['codex', 'codex', ['exec', '--sandbox', 'read-only', 'say ok']],
   ] as Array<[string, string, string[]]>) {
     const result = run(command, args)
@@ -646,13 +651,13 @@ export const renderChecks = (checks: Check[]) => checks.map((check) => `${check.
 export function unitPath(platform: NodeJS.Platform, home = homedir()): string {
   return platform === 'darwin'
     ? join(home, 'Library', 'LaunchAgents', `${SERVICE_NAME}.plist`)
-    : join(home, '.config', 'systemd', 'user', 'vegafactory-dispatch.service')
+    : join(home, '.config', 'systemd', 'user', 'vegafactory-worker.service')
 }
 
 // The unit runs one command: this CLI's own `dispatch run`, in the repository, restarted when it
 // stops. Nothing in it carries a token; the repository and the log path are all it knows.
 export function unitText(platform: NodeJS.Platform, input: { cli: string[]; root: string; repo: string; logDir: string }): string {
-  const argv = [...input.cli, 'dispatch', 'run', '--repo', input.repo]
+  const argv = [...input.cli, 'worker', 'run', '--repo', input.repo]
   if (platform === 'darwin') {
     const escaped = (value: string) => value.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
     return [
@@ -671,7 +676,7 @@ export function unitText(platform: NodeJS.Platform, input: { cli: string[]; root
     ].join('\n')
   }
   return [
-    '[Unit]', 'Description=VegaFactory dispatcher', '',
+    '[Unit]', 'Description=VegaFactory worker', '',
     '[Service]', 'Type=simple', `WorkingDirectory=${input.root}`,
     `ExecStart=${argv.map((arg) => JSON.stringify(arg)).join(' ')}`,
     'Restart=always', 'RestartSec=30', '',
@@ -683,12 +688,15 @@ export function serviceCommands(platform: NodeJS.Platform, path: string, verb: '
   if (platform === 'darwin') {
     const target = `gui/${uid}`
     return verb === 'enable'
-      ? [['launchctl', 'bootstrap', target, path], ['launchctl', 'enable', `${target}/${SERVICE_NAME}`]]
+      // The retired label goes first. `disable` finds its unit path from the platform alone, so
+      // after the rename it would take the new service away and leave the old one restarting on a
+      // verb this CLI no longer has — or, worse, running beside the new one and holding its lock.
+      ? [['launchctl', 'bootout', `${target}/${RETIRED_SERVICE_NAME}`], ['launchctl', 'bootstrap', target, path], ['launchctl', 'enable', `${target}/${SERVICE_NAME}`]]
       : [['launchctl', 'bootout', `${target}/${SERVICE_NAME}`]]
   }
   return verb === 'enable'
-    ? [['systemctl', '--user', 'daemon-reload'], ['systemctl', '--user', 'enable', '--now', 'vegafactory-dispatch.service']]
-    : [['systemctl', '--user', 'disable', '--now', 'vegafactory-dispatch.service']]
+    ? [['systemctl', '--user', 'disable', '--now', RETIRED_UNIT], ['systemctl', '--user', 'daemon-reload'], ['systemctl', '--user', 'enable', '--now', 'vegafactory-worker.service']]
+    : [['systemctl', '--user', 'disable', '--now', 'vegafactory-worker.service']]
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -700,17 +708,20 @@ export type Outcome = 'done' | 'blocked' | 'failed' | 'killed' | 'limit' | 'stop
 export interface RunRecord { at: string; issue: number; action: Action; outcome: Outcome; ms: number; machine: string; note: string }
 export interface Acted { at: number; action: Action; outcome: Outcome; trigger: number | null; failures: number; retryAt: number | null }
 
-export const dispatchDir = (root: string) => join(root, '.vegastack', '.tmp', 'dispatch')
-export const childrenPath = (root: string) => join(dispatchDir(root), 'children.json')
-const runsPath = (root: string) => join(dispatchDir(root), 'runs.jsonl')
-const actedPath = (root: string) => join(dispatchDir(root), 'acted.json')
+// The directory keeps the name the released version gave it. Renaming it would strand the run
+// records, the child list and the lock of a machine that upgrades mid-run, and nobody reads this
+// path by hand.
+export const workerDir = (root: string) => join(root, '.vegastack', '.tmp', 'dispatch')
+export const childrenPath = (root: string) => join(workerDir(root), 'children.json')
+const runsPath = (root: string) => join(workerDir(root), 'runs.jsonl')
+const actedPath = (root: string) => join(workerDir(root), 'acted.json')
 
 // The record is a working note on an always-on machine, so it is trimmed to the last RUNS_KEPT
 // rather than grown forever; the control room's statistics are where runs are kept for good.
 export const RUNS_KEPT = 500
 
 export function recordRun(root: string, record: RunRecord) {
-  mkdirSync(dispatchDir(root), { recursive: true })
+  mkdirSync(workerDir(root), { recursive: true })
   appendFileSync(runsPath(root), JSON.stringify(record) + '\n')
   try {
     const lines = readFileSync(runsPath(root), 'utf8').split('\n').filter(Boolean)
@@ -737,7 +748,7 @@ export function readActed(root: string): Record<string, Acted> {
 }
 
 export function writeActed(root: string, acted: Record<string, Acted>) {
-  mkdirSync(dispatchDir(root), { recursive: true })
+  mkdirSync(workerDir(root), { recursive: true })
   replaceFile(actedPath(root), JSON.stringify(acted, null, 2) + '\n')
 }
 
@@ -782,8 +793,8 @@ export function readChildren(root: string): ChildRecord[] {
 }
 
 function writeChildren(root: string, change: (rows: ChildRecord[]) => ChildRecord[]) {
-  mkdirSync(dispatchDir(root), { recursive: true })
-  withLock(dispatchDir(root), () => {
+  mkdirSync(workerDir(root), { recursive: true })
+  withLock(workerDir(root), () => {
     replaceFile(childrenPath(root), JSON.stringify(change(readChildren(root)), null, 2) + '\n')
   }, { what: 'the dispatcher\'s children' })
 }
@@ -829,8 +840,8 @@ export function stopChild(root: string, record: ChildRecord, deps: { stop?: (pid
 // Two steps finish at once, and an operator may run a pass by hand beside the service: the
 // read-modify-write takes the same lock the issue cache uses, so neither loses the other's entry.
 export function updateActed(root: string, change: (acted: Record<string, Acted>) => void) {
-  mkdirSync(dispatchDir(root), { recursive: true })
-  withLock(dispatchDir(root), () => {
+  mkdirSync(workerDir(root), { recursive: true })
+  withLock(workerDir(root), () => {
     const acted = readActed(root)
     change(acted)
     writeActed(root, acted)
@@ -841,13 +852,13 @@ export function updateActed(root: string, change: (acted: Record<string, Acted>)
 // claim and split the run budget in ways neither can see. The lock records the process that holds
 // it the same way a child record does, so a crashed dispatcher's lock is taken over rather than
 // blocking the box for ever.
-export const runLockPath = (root: string) => join(dispatchDir(root), 'run.lock')
+export const runLockPath = (root: string) => join(workerDir(root), 'run.lock')
 
 export interface RunLock { pid: number; startedAt: string; runId: string; at: string }
 
 export function takeRunLock(root: string, runId: string, start: ProcessStart = processStart): { ok: boolean; reason: string; held: RunLock | null } {
-  mkdirSync(dispatchDir(root), { recursive: true })
-  return withLock(dispatchDir(root), () => {
+  mkdirSync(workerDir(root), { recursive: true })
+  return withLock(workerDir(root), () => {
     let held: RunLock | null = null
     try { held = JSON.parse(readFileSync(runLockPath(root), 'utf8')) as RunLock } catch { held = null }
     if (held && Number.isSafeInteger(held.pid) && held.pid !== process.pid && start(held.pid) === held.startedAt) {
@@ -1196,7 +1207,7 @@ const WATCHDOG = '"$@" & job=$!; { sleep "$VF_LIMIT" & dog=$!; wait "$dog"; kill
 // the tail of its output is kept: the record is bounded and the output never reaches the issue.
 function execTool(tool: string, args: string[], options: { cwd: string; env: NodeJS.ProcessEnv; timeoutMs: number; onStart?: (pid: number, command: string) => void }): Promise<Exec> {
   return new Promise((resolve) => {
-    const child = spawn('sh', ['-c', WATCHDOG, 'vegafactory-dispatch', tool, ...args], {
+    const child = spawn('sh', ['-c', WATCHDOG, 'vegafactory-worker', tool, ...args], {
       // Half a minute behind this process's own timer, so the backstop only ever fires for an
       // orphan and a killed step is reported as killed rather than as an exit code.
       cwd: options.cwd, env: { ...options.env, VF_LIMIT: String(Math.ceil(options.timeoutMs / 1000) + 30) },
@@ -1449,7 +1460,7 @@ export const ownerFor = (machine: string, runId: string, number: number) => `${m
 export function reserve(ctx: { root: string; repo: string; number: number; runner: GhRunner }, machine: string, runId: string, action: Action, now = Date.now()): Reservation {
   const owner = ownerFor(machine, runId, ctx.number)
   try {
-    const outcome = claim(ctx, { owner, kind: 'dispatch', harness: 'dispatch', model: action }, now)
+    const outcome = claim(ctx, { owner, kind: 'dispatch', harness: 'worker', model: action }, now)
     return { ok: outcome.ok, owner, reason: outcome.message }
   } catch (error) {
     return { ok: false, owner, reason: `the claim could not be taken: ${(error as Error).message}` }
@@ -1739,8 +1750,8 @@ export function standDown(ctx: StandDownContext, reason: string): string {
 // ---------------------------------------------------------------------------------------------
 // CLI
 
-export function dispatchUsage(): string {
-  return `Usage: vegafactory dispatch <enable|disable|status|run> [options]
+export function workerUsage(): string {
+  return `Usage: vegafactory worker <enable|disable|status|run> [options]
 
   enable                 check this machine is ready — listed in the control room's nodes.md,
                          harness hooks wired, a real \`claude -p\` and \`codex exec\` answering, the
@@ -1785,9 +1796,9 @@ variable in the environment refuses the command.
 
 interface Args { verb: string; flags: Record<string, string>; json: boolean; dryRun: boolean; once: boolean }
 
-export function parseDispatchArgs(argv: string[]): Args {
+export function parseWorkerArgs(argv: string[]): Args {
   const [verb, ...rest] = argv
-  if (!verb) throw new Error('missing verb — run vegafactory dispatch --help')
+  if (!verb) throw new Error('missing verb — run vegafactory worker --help')
   const flags: Record<string, string> = {}
   let json = false
   let dryRun = false
@@ -1833,10 +1844,10 @@ const wait = (ms: number) => new Promise<void>((resolve) => {
 
 const appIdOf = (env: NodeJS.ProcessEnv) => env.VEGAFACTORY_APP_ID?.trim() || APP_ID
 
-export async function runDispatch(argv: string[], deps: CliDeps = {}): Promise<number> {
+export async function runWorker(argv: string[], deps: CliDeps = {}): Promise<number> {
   const out = deps.out ?? console.log
-  if (!argv.length || ['help', '--help', '-h'].includes(argv[0]!)) { out(dispatchUsage()); return 0 }
-  const args = parseDispatchArgs(argv)
+  if (!argv.length || ['help', '--help', '-h'].includes(argv[0]!)) { out(workerUsage()); return 0 }
+  const args = parseWorkerArgs(argv)
   const cwd = deps.cwd ?? process.cwd()
   const env = deps.env ?? process.env
   const home = deps.home ?? homedir()
@@ -1893,8 +1904,8 @@ export async function runDispatch(argv: string[], deps: CliDeps = {}): Promise<n
         print({ ok: true, checks, unit: path, dryRun: true }, `${renderChecks(checks)}\n\ndry run: would write ${path}, then ${commands.map((command) => command.join(' ')).join(' && ')}`)
         return 0
       }
-      mkdirSync(dispatchDir(root), { recursive: true })
-      replaceFile(path, unitText(platform, { cli: deps.cli ?? cliPath(), root, repo, logDir: dispatchDir(root) }))
+      mkdirSync(workerDir(root), { recursive: true })
+      replaceFile(path, unitText(platform, { cli: deps.cli ?? cliPath(), root, repo, logDir: workerDir(root) }))
       const run = deps.run ?? probe
       for (const command of commands) {
         const result = run(command[0]!, command.slice(1))
@@ -1962,12 +1973,12 @@ export async function runDispatch(argv: string[], deps: CliDeps = {}): Promise<n
       const statusCaps = listing.entry?.caps ?? DEFAULT_CAPS
       const capsLine = `caps: ${statusCaps.runs} runs · step ${sayDuration(statusCaps.stepMs, 'step')} · poll ${sayDuration(statusCaps.pollMs, 'poll')} · retry ${sayDuration(statusCaps.retryMs, 'retry')} · park ${statusCaps.failures}`
       print({ repo, machine, listed: listing.ok, caps: statusCaps, board: rows, runs, parked }, [
-        `${repo} · ${machine} · ${listing.ok ? 'listed to dispatch' : listing.reason}`,
+        `${repo} · ${machine} · ${listing.ok ? 'listed as a worker' : listing.reason}`,
         ...(listing.ok ? [capsLine] : []),
         ...[...byState].map(([state, numbers]) => `${state.padEnd(20)} ${numbers.map((number) => `#${number}`).join(' ')}`),
         ...(parked.length ? ['', `parked for a person: ${parked.map((row) => `#${row.issue} (${row.action} failed ${row.failures}×)`).join(', ')}`] : []),
         '',
-        runs.length ? 'recent runs on this machine:' : 'no dispatcher runs on this machine yet',
+        runs.length ? 'recent runs on this machine:' : 'no worker runs on this machine yet',
         ...runs.map((run) => `${run.at}  #${run.issue} ${run.action.padEnd(12)} ${run.outcome.padEnd(8)} ${Math.round(run.ms / 1000)}s  ${run.note}`),
       ].join('\n'))
       return 0
@@ -2084,7 +2095,7 @@ export async function runDispatch(argv: string[], deps: CliDeps = {}): Promise<n
       }
     }
     default:
-      throw new Error(`unknown dispatch verb: ${args.verb} — run vegafactory dispatch --help`)
+      throw new Error(`unknown worker verb: ${args.verb} — run vegafactory worker --help`)
   }
 }
 

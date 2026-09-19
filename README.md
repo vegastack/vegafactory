@@ -39,7 +39,7 @@ npx @vegastack/vegafactory skills list   # everything bundled
 
 `/dev-intake` (Claude Code) and `$dev-intake` (Codex) load a skill by name when the agent picks the wrong one.
 
-An always-on machine can work that loop for you. `vegafactory dispatch enable` turns one on, but only where your org's control room lists that machine by name: it then reads the board every two minutes and takes each transition — a reply on a waiting issue, a plan to write, a queued issue to build and review, corrections, and your "ship it" — running at most three steps at once. Its writes to GitHub go out as the VegaFactory GitHub App; the agent runs stay on your own subscription. Your two words per issue still gate everything: an ack and a "ship it".
+An always-on machine can work that loop for you. `vegafactory worker enable` turns one on, but only where your org's control room lists that machine by name: it then reads the board every two minutes and takes each transition — a reply on a waiting issue, a plan to write, a queued issue to build and review, corrections, and your "ship it" — running at most three steps at once. Its writes to GitHub go out as the VegaFactory GitHub App; the agent runs stay on your own subscription. Your two words per issue still gate everything: an ack and a "ship it".
 
 ## How the workflow runs
 

@@ -135,7 +135,11 @@ export function claimsOf(state: CacheState, body: Body, trusted: Trusted): { cla
       const keys = markerKeys(body(entry))
       if (!keys.owner) continue
       const claim: Claim = {
-        owner: keys.owner, kind: keys.kind === 'dispatch' ? 'dispatch' : 'session',
+        // `worker` and `dispatch` are one kind. The released version wrote `dispatch` and those
+        // claims are on issues now; an unrecognised kind falls back to `session`, whose claim goes
+        // stale after four hours rather than thirty minutes, so renaming what is written without
+        // reading both would be a silent correctness change.
+        owner: keys.owner, kind: keys.kind === 'dispatch' || keys.kind === 'worker' ? 'dispatch' : 'session',
         harness: keys.harness ?? '', model: keys.model ?? '', claimedAt: entry.createdAt, commentId: entry.id,
       }
       history.push(claim)

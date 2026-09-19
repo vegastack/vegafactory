@@ -2,6 +2,16 @@
 
 The project's story, newest first: what got built, why, and how it went — for the operator's future recall. Format home: the dev-chronicle skill.
 
+## 19-09-2026 — Dispatch becomes worker ([#255](https://github.com/vegastack/vegafactory/issues/255))
+
+- **What:** The verb, the module and the service are `worker`, matching the column in `nodes.md` that decides which machines may run unattended.
+- **Why:** Step 4 of [#251](https://github.com/vegastack/vegafactory/issues/251). "Dispatch" was a noun for a thing; it is now only the act of handing work over.
+- **How it went:** The renaming was the easy half. Two things would have broken quietly: the old launchd service, which `disable` could no longer find, would have restarted forever on a verb that no longer exists — or run beside the new one and hold its lock, so the rename looked successful while nothing ran. And `kind=dispatch` is written on claims that exist on issues now; an unrecognised kind falls back to `session`, which goes stale after four hours instead of thirty minutes. Both are covered by tests that fail when the fix is reverted.
+- **Changed:** the verb tree, `worker.ts`, the unit and its tombstones, the claim alias, the `--kind` flag, the `in-progress` label text and the prose.
+- **Decisions:** none new.
+
+— approved by (kmanojkumar) · built by claude · branch feat/255-dispatch-becomes-worker
+
 ## 19-09-2026 — A row is not consent ([#254](https://github.com/vegastack/vegafactory/issues/254))
 
 - **What:** The machine roster is `nodes.md`, it lists every machine rather than only the always-on ones, and a new `worker` column is the only thing that grants unattended work.
