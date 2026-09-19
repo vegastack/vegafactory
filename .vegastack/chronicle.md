@@ -2,12 +2,12 @@
 
 The project's story, newest first: what got built, why, and how it went — for the operator's future recall. Format home: the dev-chronicle skill.
 
-## 19-09-2026 — Dispatch becomes worker ([#255](https://github.com/vegastack/vegafactory/issues/255))
+## 19-09-2026 — A machine that works alone is a worker ([#255](https://github.com/vegastack/vegafactory/issues/255))
 
-- **What:** The verb, the module, the service, the claim kind and the paths are all `worker`, matching the column in `nodes.md` that decides which machines run unattended.
-- **Why:** Step 4 of [#251](https://github.com/vegastack/vegafactory/issues/251). "Dispatch" was a noun for a thing; it is now only the act of handing work over.
-- **How it went:** The first pass carried two compatibility paths — a tombstone so `enable` could retire the old service, and an alias so claims written `kind=dispatch` kept their thirty-minute staleness. Both were then checked against the machine rather than assumed: no launchd unit is installed and no claim of that kind exists anywhere. The operator confirmed nothing is deployed, so both went. What is left is one spelling with nothing behind it.
-- **Changed:** the verb tree, `worker.ts`, the unit, the claim kind and its timeout, the `--kind` flag, the `in-progress` label text and the prose.
+- **What:** The command for a machine that works a board with nobody watching is `vegafactory worker` — `enable`, `disable`, `status`, `run`. It is the word that machine's row in `nodes.md` already used to grant the permission, so the thing turned on and the cell allowing it now read the same. Setting a machine up did not change.
+- **Why:** Step 4 of [#251](https://github.com/vegastack/vegafactory/issues/251). "Dispatch" named both the machine and the act of handing it work; only the second is worth keeping.
+- **How it went:** The first pass carried two compatibility paths for upgrading an older machine. Both were checked rather than assumed: no service of the old name is installed anywhere, and no claim was ever written with the old kind, so both went. A review round caught a refusal message the rename had left reading "listed as a worker it".
+- **Changed:** the verb · the service, its logs and its working directory · a claim's `kind`, where anything unrecognised is read as a session · the `in-progress` label · the onboarding checklist, which now names the account `worker enable` actually looks for.
 - **Decisions:** none new.
 
 — approved by (kmanojkumar) · built by claude · branch feat/255-dispatch-becomes-worker

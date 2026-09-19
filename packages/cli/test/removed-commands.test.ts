@@ -179,7 +179,8 @@ test('the control-room templates are the lean room and nothing else', () => {
 test('the staged worker checklist is the shipped template with its values filled in', () => {
   const values: Record<string, string> = {
     '{{org}}/{{repo}}': 'vegastack/vegafactory', '{{org}}': 'vegastack', '{{repo}}': 'vegafactory',
-    '{{node}}': 'mk@patrick-mac-mini', '{{operator}}': 'kmanojkumar', '{{owner}}': 'kmanojkumar',
+    '{{node}}': 'mk@patrick-mac-mini', '{{worker-node}}': 'vf-worker@patrick-mac-mini',
+    '{{operator}}': 'kmanojkumar', '{{owner}}': 'kmanojkumar',
     '{{worker-user}}': 'vf-worker', '{{runner-user}}': 'vf-runner', '{{runner-group}}': 'vsk-runners',
     '{{runner-name}}': 'patrick-mac-mini', '{{machine}}': 'mk@patrick-mac-mini',
   }
