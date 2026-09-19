@@ -3,7 +3,7 @@ import { spawnSync } from 'node:child_process'
 import { mkdirSync, mkdtempSync, realpathSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { claim, claimBody, heartbeat, heartbeatOf, holderOf, machineName, nodeId, ownerId, release, releaseBody, trustedAuthors, type ClaimContext } from '../src/claim.ts'
+import { appIdentityConfig, claim, claimBody, heartbeat, heartbeatOf, holderOf, machineName, nodeId, ownerId, release, releaseBody, trustedAuthors, trustedFactory, type ClaimContext } from '../src/claim.ts'
 import { cacheDir, readBody, readState, syncIssue } from '../src/issue-cache.ts'
 import { runIssue } from '../src/issue.ts'
 import { FakeGitHub } from './fake-github.ts'
@@ -181,6 +181,20 @@ describe('heartbeats', () => {
 })
 
 describe('who may claim', () => {
+  test('a self-hosted App is trusted when its id and actor move together', () => {
+    const entry = {
+      id: 1, author: 'acmefactory[bot]', authorType: 'Bot', createdAt: '', updatedAt: '', changedAt: '',
+      type: 'claim', file: '', url: '', sha: '', artifact: '', rev: 1,
+    }
+    const trusted = trustedFactory({ ...ctx, env: { VEGAFACTORY_APP_ID: '12345', VEGAFACTORY_APP_ACTOR: 'acmefactory[bot]' } })
+    expect(trusted(entry)).toBe(true)
+  })
+
+  test('a partial self-hosted App identity refuses instead of distrusting its own writes', () => {
+    expect(() => appIdentityConfig({ VEGAFACTORY_APP_ID: '12345' })).toThrow(/VEGAFACTORY_APP_ID.*VEGAFACTORY_APP_ACTOR.*set together/)
+    expect(() => appIdentityConfig({ VEGAFACTORY_APP_ACTOR: 'acmefactory[bot]' })).toThrow(/VEGAFACTORY_APP_ID.*VEGAFACTORY_APP_ACTOR.*set together/)
+  })
+
   test('claims and releases count only from people with write access, never from a bot', () => {
     gh.permissions.set('visitor', 'read')
     gh.permissions.set('helper[bot]', 'write')

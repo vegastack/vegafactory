@@ -24,9 +24,9 @@ What the App may never do is stand in for a person's own words. It authors the f
 
 The alternative worth naming is a credential belonging to a person: it stands for their whole account, outlives the job that used it, and dies when they leave the org. The App stands for a named permission set instead, its tokens live an hour, and uninstalling it revokes every one of them at once.
 
-The App is public, so any account may install it. That is the point: one App, installed by any org that wants the factory, with a permission set each of them can read before consenting.
+The App is public, so any account may install it. That is the point: one App, installed by any org that wants the factory, with a permission set each of them can read before consenting. The values below describe VegaStack's published App; they are examples for a company that runs its own.
 
-| Fact | Value |
+| Fact | VegaStack example |
 |---|---|
 | Name | VegaFactory |
 | Slug | `vegafactory` |
@@ -70,11 +70,12 @@ The operator's own browser flow. `gh` has no create-app command and the manifest
 | Name | Kind | Value |
 |---|---|---|
 | `VEGAFACTORY_APP_ID` | organization variable | the numeric App ID |
+| `VEGAFACTORY_APP_ACTOR` | dispatcher environment | the bot login GitHub derives from the App slug, including `[bot]` |
 | `VEGAFACTORY_APP_PRIVATE_KEY` | organization secret | the PEM, pasted whole |
 
 The private key lives in the organization secret, and — only on a machine listed in the control room's `dispatchers.md` — in one file on that machine. Never on a workstation, never in a control-room file, never in an issue, never printed. Only the key's holder can mint installation tokens.
 
-On a dispatcher machine the file is `~/.vegastack/vegafactory-app.pem`, owned by the dispatcher account and `chmod 600`, so a CI job running as the runner account cannot read it. `VEGAFACTORY_APP_PRIVATE_KEY_FILE` moves it; `VEGAFACTORY_APP_ID` names another org's App. `vegafactory dispatch` mints an hour-long installation token from it, narrowed to the one repository, keeps it in memory and passes it to `gh` in that child's environment only. A missing key refuses the run with the path to fix — it never falls back to a person's token.
+On a dispatcher machine the file is `~/.vegastack/vegafactory-app.pem`, owned by the dispatcher account and `chmod 600`, so a CI job running as the runner account cannot read it. `VEGAFACTORY_APP_PRIVATE_KEY_FILE` moves it. A company running its own App must set both `VEGAFACTORY_APP_ID` to that App's numeric id and `VEGAFACTORY_APP_ACTOR` to its bot login, such as `acmefactory[bot]`; setting only one refuses the dispatcher because it would mint as one App and distrust that App's writes. `vegafactory dispatch` mints an hour-long installation token from the key, narrowed to the one repository, keeps it in memory and passes it to `gh` in that child's environment only. A missing key refuses the run with the path to fix — it never falls back to a person's token.
 
 Control-room files record these **names**. The values live in GitHub organization settings and nowhere a repository can read them.
 

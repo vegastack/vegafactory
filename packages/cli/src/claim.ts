@@ -99,9 +99,19 @@ type Body = (entry: CommentEntry) => string
 // Whether a claim or release comment counts: its author must be a person with write access.
 export type Trusted = (entry: CommentEntry) => boolean
 
-// The factory's one automation identity: the VegaFactory GitHub App, which only a holder of its
-// private key can post as.
+// The published App identity. A company running its own App overrides both halves, because minting
+// as one App while trusting another would silently discard the factory's own coordination writes.
+export const APP_ID = '4812956'
 export const APP_ACTOR = 'vegafactory[bot]'
+
+export function appIdentityConfig(env: NodeJS.ProcessEnv = process.env): { appId: string; appActor: string } {
+  const appId = env.VEGAFACTORY_APP_ID?.trim() ?? ''
+  const appActor = env.VEGAFACTORY_APP_ACTOR?.trim() ?? ''
+  if (!!appId !== !!appActor) {
+    throw new Error('VEGAFACTORY_APP_ID and VEGAFACTORY_APP_ACTOR must be set together — one mints the App token and the other trusts what that App writes')
+  }
+  return { appId: appId || APP_ID, appActor: appActor || APP_ACTOR }
+}
 
 // A person with write access. This is what judges a review or an ack: no bot stands in for one.
 export const trustBy = (permission: PermissionLookup): Trusted => (entry) => entry.authorType !== 'Bot' && !!entry.author && WRITE_ROLES.has(permission(entry.author))
@@ -111,10 +121,12 @@ export const trustBy = (permission: PermissionLookup): Trusted => (entry) => ent
 // by its marker, a review by the fields that must agree with the findings it summarises. Judging
 // finished work is the other half and never comes here: an acknowledgement, an acceptance of what
 // a review left open and "ship it" go through `trustBy`, where a bot never counts.
-export const trustFactoryBy = (permission: PermissionLookup): Trusted => (entry) => entry.author === APP_ACTOR || trustBy(permission)(entry)
+export const trustFactoryBy = (permission: PermissionLookup, appActor = appIdentityConfig().appActor): Trusted =>
+  (entry) => entry.author === appActor || trustBy(permission)(entry)
 
 export const trustedAuthors = (ctx: { repo: string; runner: GhRunner; root?: string }): Trusted => trustBy(permissionLookup(ctx.repo, ctx.runner, { root: ctx.root }))
-export const trustedFactory = (ctx: { repo: string; runner: GhRunner; root?: string }): Trusted => trustFactoryBy(permissionLookup(ctx.repo, ctx.runner, { root: ctx.root }))
+export const trustedFactory = (ctx: { repo: string; runner: GhRunner; root?: string; env?: NodeJS.ProcessEnv; appActor?: string }): Trusted =>
+  trustFactoryBy(permissionLookup(ctx.repo, ctx.runner, { root: ctx.root }), ctx.appActor ?? appIdentityConfig(ctx.env).appActor)
 
 // Live claims (after the latest release of each owner), every claim ever made, and the one
 // status comment. All three count only from trusted authors.
@@ -171,6 +183,8 @@ export interface ClaimContext {
   repo: string
   number: number
   runner: GhRunner
+  env?: NodeJS.ProcessEnv
+  appActor?: string
 }
 
 interface Fresh { state: CacheState; dir: string; body: Body }
@@ -214,7 +228,7 @@ export interface ClaimOutcome {
 
 export function claim(ctx: ClaimContext, request: ClaimRequest, now = Date.now()): ClaimOutcome {
   const permission = permissionLookup(ctx.repo, ctx.runner, { root: ctx.root })
-  const trusted = trustFactoryBy(permission)
+  const trusted = trustedFactory(ctx)
   const holderNow = () => { const f = fresh(ctx); return holderOf(f.state, f.body, now, trusted) }
   const before = holderNow()
   if (before.holder?.owner === request.owner) {

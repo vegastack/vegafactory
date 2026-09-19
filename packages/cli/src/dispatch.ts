@@ -25,7 +25,7 @@ import { createSign, randomUUID } from 'node:crypto'
 import { appendFileSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync } from 'node:fs'
 import { homedir, hostname, userInfo } from 'node:os'
 import { join, posix } from 'node:path'
-import { APP_ACTOR, HEARTBEAT_EVERY_MS, claim, heartbeat, holderOf, machineName, release, trustedFactory } from './claim.ts'
+import { APP_ACTOR, APP_ID, HEARTBEAT_EVERY_MS, appIdentityConfig, claim, heartbeat, holderOf, machineName, release, trustedFactory } from './claim.ts'
 import { defaultClonePath, factoryConfigPath, parseControlRoomKnob, readFactoryConfig } from './control-room.ts'
 import { billingVariables, childEnvironment } from './env.ts'
 import { GhError, defaultRunner, ghList, type GhResult, type GhRunner } from './gh.ts'
@@ -330,10 +330,7 @@ export function listedHere(root: string, options: { repo: string; host?: string;
 // ---------------------------------------------------------------------------------------------
 // Identity: the VegaFactory GitHub App
 
-// The published App (dev-setup's references/github-app.md). An org running its own copy sets
-// VEGAFACTORY_APP_ID; the key file is the only other input, and neither is ever printed.
-export const APP_ID = '4812956'
-export { APP_ACTOR }
+export { APP_ACTOR, APP_ID }
 
 export function appKeyPath(env: NodeJS.ProcessEnv = process.env, home = homedir()): string {
   const named = env.VEGAFACTORY_APP_PRIVATE_KEY_FILE?.trim()
@@ -826,8 +823,8 @@ const WRITE = new Set(['admin', 'maintain', 'write'])
 // artifacts are posted by the machine, not by a person sitting behind it.
 const fromPerson = (permission: PermissionLookup) => (entry: CommentEntry) =>
   entry.authorType !== 'Bot' && !!entry.author && WRITE.has(permission(entry.author))
-const fromFactory = (permission: PermissionLookup) => (entry: CommentEntry) =>
-  entry.author === APP_ACTOR || fromPerson(permission)(entry)
+const fromFactory = (permission: PermissionLookup, appActor = appIdentityConfig().appActor) => (entry: CommentEntry) =>
+  entry.author === appActor || fromPerson(permission)(entry)
 
 // The operator's own comments: a person with write access, in the order they were written.
 function operatorComments(snap: Snapshot, permission: PermissionLookup) {
@@ -838,9 +835,9 @@ function operatorComments(snap: Snapshot, permission: PermissionLookup) {
 
 // The newest work artifact of a type: written by a person with write access, or by the App on a
 // dispatched run's behalf. An outsider's comment is text on a page and never either.
-export function latestArtifact(snap: Snapshot, type: string, permission: PermissionLookup): CommentEntry | null {
+export function latestArtifact(snap: Snapshot, type: string, permission: PermissionLookup, appActor?: string): CommentEntry | null {
   return Object.values(snap.state.comments)
-    .filter((entry) => entry.type === type && fromFactory(permission)(entry))
+    .filter((entry) => entry.type === type && fromFactory(permission, appActor)(entry))
     .sort((a, b) => a.createdAt.localeCompare(b.createdAt) || a.id - b.id).at(-1) ?? null
 }
 
@@ -877,7 +874,7 @@ const isBookkeeping = (snap: Snapshot, entry: CommentEntry) =>
 // The action this issue is waiting for, and the comment that asks for it. `trigger` is what makes
 // a run happen once: a comment already acted on asks for nothing more, and a state label already
 // worked is not worked again until the issue moves.
-export function decide(snap: Snapshot, permission: PermissionLookup, options: { acted?: Acted | null; now?: number; held?: boolean; failures?: number } = {}): Decision {
+export function decide(snap: Snapshot, permission: PermissionLookup, options: { acted?: Acted | null; now?: number; held?: boolean; failures?: number; appActor?: string } = {}): Decision {
   const issue = snap.state.issue!
   const { acted = null, now = Date.now(), held = false } = options
   if (issue.state !== 'open') return nothing('the issue is closed')
@@ -885,7 +882,7 @@ export function decide(snap: Snapshot, permission: PermissionLookup, options: { 
   const { state } = stateOf(issue.labels)
   if (!state) return nothing('no state label')
   const comments = operatorComments(snap, permission)
-  const decided = transitionOf(snap, issue, state, comments, permission, { acted, held })
+  const decided = transitionOf(snap, issue, state, comments, permission, { acted, held, appActor: options.appActor })
   if (decided.action === 'none') return decided
 
   // A trigger is spent once a run of the same action has settled on it, whatever it settled as —
@@ -906,7 +903,8 @@ export function decide(snap: Snapshot, permission: PermissionLookup, options: { 
 type Comments = ReturnType<typeof operatorComments>
 type IssueFacts = IssueEntry
 
-function transitionOf(snap: Snapshot, issue: IssueFacts, state: State, comments: Comments, permission: PermissionLookup, run: { acted: Acted | null; held: boolean }): Decision {
+function transitionOf(snap: Snapshot, issue: IssueFacts, state: State, comments: Comments, permission: PermissionLookup,
+  run: { acted: Acted | null; held: boolean; appActor?: string }): Decision {
   const labels = issue.labels
   const last = comments.at(-1) ?? null
   if (last && STOP.test(snap.body(last))) return { action: 'stop', reason: `@${last.author} said stop`, trigger: last.id, by: last.author, split: false, quote: null }
@@ -938,7 +936,7 @@ function transitionOf(snap: Snapshot, issue: IssueFacts, state: State, comments:
     return { action: resume, reason: 'an interrupted run left it in-progress with no holder', trigger: run.acted?.trigger ?? null, by: null, split: false, quote: null }
   }
   if (state === 'ready-to-ship') {
-    const evidence = latestArtifact(snap, 'evidence', permission)
+    const evidence = latestArtifact(snap, 'evidence', permission, run.appActor)
     if (!evidence) return nothing('ready-to-ship with no evidence comment')
     const word = comments.filter((entry) => entry.createdAt > (evidence.changedAt || evidence.updatedAt)).at(-1)
     if (!word) return nothing('waiting for the operator to read the evidence')
@@ -1151,15 +1149,19 @@ export function workingDir(root: string, number: number): string | null {
 // The environment a dispatched run gets. Three things are true of it and each one matters:
 //
 // - it runs on the operator's subscription, which is what `childEnvironment` proves;
-// - it writes to GitHub as the App, on the short-lived installation token this machine minted, so
-//   everything it posts is authored by `vegafactory[bot]` and nothing it writes can pass as a
-//   person's stop, correction or "ship it";
+// - it writes to GitHub as the configured App, on the short-lived installation token this machine
+//   minted, so nothing it writes can pass as a person's stop, correction or "ship it";
 // - it is never told where the App's private key is. The token expires in an hour; the key does
 //   not. (A child running under the same account can still read that file through the filesystem —
 //   the separate dispatcher account in the dispatcher-box checklist is what closes that, not this.)
 export function childRunEnvironment(env: NodeJS.ProcessEnv, token: string | null): NodeJS.ProcessEnv {
   const child: NodeJS.ProcessEnv = { ...childEnvironment(env), VSK_ASK_ROUTE: 'issue' }
   for (const name of Object.keys(child)) if (name.startsWith('VEGAFACTORY_')) delete child[name]
+  if (env.VEGAFACTORY_APP_ID?.trim() || env.VEGAFACTORY_APP_ACTOR?.trim()) {
+    const identity = appIdentityConfig(env)
+    child.VEGAFACTORY_APP_ID = identity.appId
+    child.VEGAFACTORY_APP_ACTOR = identity.appActor
+  }
   if (token) {
     child.GH_TOKEN = token
     child.GITHUB_TOKEN = token
@@ -1231,6 +1233,7 @@ export interface PollDeps {
   runStep: RunStep
   out: (text: string) => void
   machine: string
+  appActor?: string
   // Saves, pushes, releases and hands an issue back: the reason goes on the issue, and the state
   // label goes back to where the run picked it up.
   standDown: (number: number, reason: string, restoreTo?: State) => string
@@ -1268,7 +1271,7 @@ export async function poll(deps: PollDeps, inflight: Map<number, Inflight> = new
   // Last pass's finished runs, whose outcomes are now in `acted`: their slots and issues are free.
   for (const [number, run] of inflight) if (run.settled) inflight.delete(number)
   const permission = permissionLookup(repo, runner, { root })
-  const trusted = trustedFactory({ repo, runner, root })
+  const trusted = trustedFactory({ repo, runner, root, appActor: deps.appActor })
   const acted = readActed(root)
   const wanted: Array<{ candidate: Candidate; decision: Decision; key: string }> = []
   const plans = new Map<number, string | null>()
@@ -1279,7 +1282,7 @@ export async function poll(deps: PollDeps, inflight: Map<number, Inflight> = new
       const snap = snapshot(cacheDir(root, repo, issue.number))
       const key = `${repo}#${issue.number}`
       const held = !!holderOf(snap.state, snap.body, now(), trusted).holder
-      const decision = decide(snap, permission, { acted: acted[key] ?? null, now: now(), held, failures: deps.caps?.failures })
+      const decision = decide(snap, permission, { acted: acted[key] ?? null, now: now(), held, failures: deps.caps?.failures, appActor: deps.appActor })
       if (decision.action === 'none') continue
       // A fresh claim means someone — a person or another machine — is already on it.
       if (decision.action !== 'stop' && held) {
@@ -1289,7 +1292,7 @@ export async function poll(deps: PollDeps, inflight: Map<number, Inflight> = new
       // The operator's word becomes a recorded ack, read back by the ship gate's own check. A word
       // that does not survive that is spent here rather than re-relayed on every pass.
       if (decision.action === 'ship') {
-        const confirmed = confirmShip({ root, repo, number: issue.number, runner }, permission, { id: decision.trigger!, by: decision.by!, quote: decision.quote! })
+        const confirmed = confirmShip({ root, repo, number: issue.number, runner, appActor: deps.appActor }, permission, { id: decision.trigger!, by: decision.by!, quote: decision.quote! })
         if (!confirmed.ok) {
           deps.out(`#${issue.number}: not shipping — ${confirmed.reason}`)
           recordRun(root, { at: new Date(now()).toISOString(), issue: issue.number, action: 'ship', outcome: 'blocked', ms: 0, machine: deps.machine, note: tail(confirmed.reason) })
@@ -1298,7 +1301,7 @@ export async function poll(deps: PollDeps, inflight: Map<number, Inflight> = new
         }
       }
       const parent = snap.state.issue!.parent
-      if (parent !== null && !plans.has(parent)) plans.set(parent, parentPlan(root, repo, parent, runner, permission))
+      if (parent !== null && !plans.has(parent)) plans.set(parent, parentPlan(root, repo, parent, runner, permission, deps.appActor))
       const files = parent === null ? [] : filesFromParent(plans.get(parent) ?? null, issue.number)
       wanted.push({ key, decision, candidate: { number: issue.number, action: decision.action, parent, files, from: stateOf(snap.state.issue!.labels).state! } })
     } catch (error) {
@@ -1332,7 +1335,7 @@ export async function poll(deps: PollDeps, inflight: Map<number, Inflight> = new
     // refuse, and standing down is what releases that holder.
     const taken = candidate.action === 'stop'
       ? { ok: true, owner: '', reason: 'a stop takes no claim' }
-      : reserve({ root, repo, number: candidate.number, runner }, deps.machine, deps.runId, candidate.action, at)
+      : reserve({ root, repo, number: candidate.number, runner, appActor: deps.appActor }, deps.machine, deps.runId, candidate.action, at)
     if (!taken.ok) {
       deps.out(`#${candidate.number}: not started — ${taken.reason}`)
       continue
@@ -1363,7 +1366,7 @@ export interface Reservation { ok: boolean; owner: string; reason: string }
 // each read it as its own claim, and both start the run.
 export const ownerFor = (machine: string, runId: string, number: number) => `${machine}:dispatch-${runId}-${number}`
 
-export function reserve(ctx: { root: string; repo: string; number: number; runner: GhRunner }, machine: string, runId: string, action: Action, now = Date.now()): Reservation {
+export function reserve(ctx: { root: string; repo: string; number: number; runner: GhRunner; appActor?: string }, machine: string, runId: string, action: Action, now = Date.now()): Reservation {
   const owner = ownerFor(machine, runId, ctx.number)
   try {
     const outcome = claim(ctx, { owner, kind: 'dispatch', harness: 'dispatch', model: action }, now)
@@ -1376,7 +1379,7 @@ export function reserve(ctx: { root: string; repo: string; number: number; runne
 // One step and everything that follows it. Nothing here may reject: the loop does not await these
 // promises, so a rejection nobody handles would take the whole dispatcher down.
 async function runOne(deps: PollDeps, candidate: Candidate, item: { key: string; decision: Decision }, at: number, held: string | null, run: Inflight): Promise<RunRecord> {
-  const claimCtx = { root: deps.root, repo: deps.repo, number: candidate.number, runner: deps.runner }
+  const claimCtx = { root: deps.root, repo: deps.repo, number: candidate.number, runner: deps.runner, appActor: deps.appActor }
   // What the step started, filled in from its own callback, so the finally can forget it.
   const started: ChildRecord[] = []
   // While this machine holds the claim it says so, on the same schedule a session's hooks use.
@@ -1392,7 +1395,7 @@ async function runOne(deps: PollDeps, candidate: Candidate, item: { key: string;
       // steps aside first — holding both would stop the run it just started.
       if (held && HANDS_OVER.includes(candidate.action)) {
         if (beat) clearInterval(beat)
-        try { release(claimCtx, held, APP_ACTOR, 'handing the issue to the run this machine just started') } catch { /* the run still starts */ }
+        try { release(claimCtx, held, deps.appActor ?? APP_ACTOR, 'handing the issue to the run this machine just started') } catch { /* the run still starts */ }
       }
       result = await deps.runStep({ action: candidate.action, number: candidate.number, repo: deps.repo, split: item.decision.split, by: item.decision.by }, {
         root: deps.root,
@@ -1419,7 +1422,7 @@ async function runOne(deps: PollDeps, candidate: Candidate, item: { key: string;
   // Whatever happened, this machine's own reservation goes back. A step that stood the issue down
   // has already released the session's claim; this releases the one taken before the launch.
   if (held && !HANDS_OVER.includes(candidate.action)) {
-    try { release(claimCtx, held, APP_ACTOR, `the ${candidate.action} run finished (${result.outcome})`) } catch { /* the record still lands */ }
+    try { release(claimCtx, held, deps.appActor ?? APP_ACTOR, `the ${candidate.action} run finished (${result.outcome})`) } catch { /* the record still lands */ }
   }
   // A run this machine stopped on purpose reports the reason it was stopped, not the exit code
   // that killing it produced.
@@ -1496,14 +1499,14 @@ function settle(deps: PollDeps, candidate: Candidate, item: { key: string; decis
 // does not validate ships nothing: the words on the page were never the gate, the ack is.
 export interface ShipConfirmation { ok: boolean; reason: string }
 
-export function confirmShip(ctx: { root: string; repo: string; number: number; runner: GhRunner },
+export function confirmShip(ctx: { root: string; repo: string; number: number; runner: GhRunner; appActor?: string },
   permission: PermissionLookup, word: { id: number; by: string; quote: string }): ShipConfirmation {
   const read = () => {
     syncIssue({ root: ctx.root, repo: ctx.repo, number: ctx.number, runner: ctx.runner })
     return snapshot(cacheDir(ctx.root, ctx.repo, ctx.number))
   }
   const verdict = (snap: Snapshot) => {
-    const evidence = latestArtifact(snap, 'evidence', permission)
+    const evidence = latestArtifact(snap, 'evidence', permission, ctx.appActor)
     if (!evidence) return { ok: false, reason: 'the evidence comment went away' }
     const ack = findValidAck(snap, 'ship', permission, evidenceChangedAt(evidence))
     return { ok: ack.ok, reason: ack.reason }
@@ -1523,13 +1526,13 @@ export function confirmShip(ctx: { root: string; repo: string; number: number; r
 // acked *this* plan (the ack carries its hash), the plan passes the full lint that owns this
 // grammar, and it was posted by someone with write access or by the factory's own App. A forged,
 // stale, unacked or malformed plan authorises nothing, so its siblings run one at a time.
-export function acknowledgedPlan(snap: Snapshot, permission: PermissionLookup): { text: string | null; reason: string } {
+export function acknowledgedPlan(snap: Snapshot, permission: PermissionLookup, appActor?: string): { text: string | null; reason: string } {
   const ack = findValidAck(snap, 'plan', permission)
   if (!ack.ok || !ack.ack) return { text: null, reason: `the plan is not acked (${ack.reason})` }
   const acked = markerKeys(snap.body(ack.ack)).plan
   if (!acked) return { text: null, reason: 'the plan ack names no plan hash' }
   const plan = Object.values(snap.state.comments)
-    .filter((entry) => entry.type === 'plan' && fromFactory(permission)(entry) && artifactHash(snap.body(entry)) === acked)
+    .filter((entry) => entry.type === 'plan' && fromFactory(permission, appActor)(entry) && artifactHash(snap.body(entry)) === acked)
     .sort((a, b) => a.createdAt.localeCompare(b.createdAt) || a.id - b.id).at(-1)
   if (!plan) return { text: null, reason: 'no plan comment matches the acked hash' }
   const text = snap.body(plan)
@@ -1539,10 +1542,10 @@ export function acknowledgedPlan(snap: Snapshot, permission: PermissionLookup): 
 }
 
 // The parent epic's acknowledged plan, where sibling file sets are declared.
-function parentPlan(root: string, repo: string, parent: number, runner: GhRunner, permission: PermissionLookup): string | null {
+function parentPlan(root: string, repo: string, parent: number, runner: GhRunner, permission: PermissionLookup, appActor?: string): string | null {
   try {
     syncIssue({ root, repo, number: parent, runner })
-    return acknowledgedPlan(snapshot(cacheDir(root, repo, parent)), permission).text
+    return acknowledgedPlan(snapshot(cacheDir(root, repo, parent)), permission, appActor).text
   } catch { return null }
 }
 
@@ -1555,6 +1558,7 @@ export interface StandDownContext {
   number: number
   runner: GhRunner
   machine: string
+  appActor?: string
   now?: number
   // Where the state label goes back to, when a run left the issue in-progress.
   restoreTo?: State
@@ -1581,7 +1585,7 @@ type Git = (args: string[]) => { status: number | null; out: string }
 // issue, and put the state label back. The claim is checked *first* — a worktree this machine no
 // longer owns is not ours to commit in — and the branch is checked before any write.
 export function standDown(ctx: StandDownContext, reason: string): string {
-  const claimCtx = { root: ctx.root, repo: ctx.repo, number: ctx.number, runner: ctx.runner }
+  const claimCtx = { root: ctx.root, repo: ctx.repo, number: ctx.number, runner: ctx.runner, appActor: ctx.appActor }
   const notes: string[] = []
   // Who holds the issue, as three answers and not two: ours to finish, somebody else's to leave
   // alone, or unknown. Only the first two are safe, and they are safe for different reasons.
@@ -1620,7 +1624,7 @@ export function standDown(ctx: StandDownContext, reason: string): string {
 
   if (whose === 'ours' && owner) {
     try {
-      release(claimCtx, owner, APP_ACTOR, reason)
+      release(claimCtx, owner, ctx.appActor ?? APP_ACTOR, reason)
       notes.push(`released ${owner}`)
     } catch (error) { notes.push(`the claim could not be released: ${(error as Error).message}`) }
   }
@@ -1691,7 +1695,8 @@ without a header refuses, because no position is known to hold the caps.
 A machine the control room's dispatchers.md does not name refuses every verb but disable. Writes
 go out as the VegaFactory GitHub App, on an hour-long token minted here from its private key:
   ${appKeyPath()}
-(VEGAFACTORY_APP_PRIVATE_KEY_FILE moves it, VEGAFACTORY_APP_ID names another App.) Each run gets
+(VEGAFACTORY_APP_PRIVATE_KEY_FILE moves it; VEGAFACTORY_APP_ID and VEGAFACTORY_APP_ACTOR name
+another App and must be set together.) Each run gets
 that token too, so everything it posts is the App's and none of it can pass as a person's word; it
 is never given the key itself. The runs think on the operator's own subscription, so an API-key
 variable in the environment refuses the command.
@@ -1746,8 +1751,6 @@ const wait = (ms: number) => new Promise<void>((resolve) => {
   timer.unref?.()
 })
 
-const appIdOf = (env: NodeJS.ProcessEnv) => env.VEGAFACTORY_APP_ID?.trim() || APP_ID
-
 export async function runDispatch(argv: string[], deps: CliDeps = {}): Promise<number> {
   const out = deps.out ?? console.log
   if (!argv.length || ['help', '--help', '-h'].includes(argv[0]!)) { out(dispatchUsage()); return 0 }
@@ -1772,11 +1775,16 @@ export async function runDispatch(argv: string[], deps: CliDeps = {}): Promise<n
   // start or probe an agent refuses outright while a variable that would bill it is set. The check
   // costs nothing, and running it later would already have spent paid credit on the probes.
   const STARTS_AGENTS = ['enable', 'run']
+  let app = { appId: APP_ID, appActor: APP_ACTOR }
   if (STARTS_AGENTS.includes(args.verb)) {
     const billing = billingVariables(env)
     if (billing.length) {
       const [is, them] = billing.length === 1 ? ['is', 'it'] : ['are', 'them']
       print({ ok: false, billing }, `refused: ${billing.join(', ')} ${is} set — VegaFactory runs Claude Code and Codex on their subscriptions only; unset ${them} and retry`)
+      return 2
+    }
+    try { app = appIdentityConfig(env) } catch (error) {
+      print({ ok: false, reason: (error as Error).message }, `refused: ${(error as Error).message}`)
       return 2
     }
   }
@@ -1793,7 +1801,7 @@ export async function runDispatch(argv: string[], deps: CliDeps = {}): Promise<n
       let keyOk = false
       let keyDetail = ''
       try {
-        await mintToken({ repo, keyPath, appId: appIdOf(env), fetch: deps.fetch })
+        await mintToken({ repo, keyPath, appId: app.appId, fetch: deps.fetch })
         keyOk = true
         keyDetail = `the App key at ${keyPath} mints an installation token for ${repo}`
       } catch (error) { keyDetail = (error as Error).message }
@@ -1897,7 +1905,7 @@ export async function runDispatch(argv: string[], deps: CliDeps = {}): Promise<n
       }
       let devMd = ''
       try { devMd = readFileSync(join(root, '.vegastack', 'dev.md'), 'utf8') } catch { /* no profile, so the tools' own defaults */ }
-      const identity = deps.runner ? null : appIdentity({ repo, keyPath, appId: appIdOf(env), fetch: deps.fetch })
+      const identity = deps.runner ? null : appIdentity({ repo, keyPath, appId: app.appId, fetch: deps.fetch })
       const runner = deps.runner ?? identity!.runner
       // `--json` puts exactly one document on stdout and nothing else, so every line this loop
       // would have printed is collected and leaves inside it. A caller that has to step over prose
@@ -1932,9 +1940,9 @@ export async function runDispatch(argv: string[], deps: CliDeps = {}): Promise<n
       }
       stepOutlivesToken(caps)
       const pollDeps: PollDeps = {
-        root, repo, runner, machine, runId, caps, out: note, now: deps.now ?? Date.now,
+        root, repo, runner, machine, runId, caps, appActor: app.appActor, out: note, now: deps.now ?? Date.now,
         runStep: deps.runStep ?? defaultRunStep(devMd, env, { token: () => identity?.token() ?? null }), stop: deps.stop, start: deps.start,
-        standDown: (number, reason, restoreTo) => standDown({ root, repo, number, runner, machine, restoreTo }, reason),
+        standDown: (number, reason, restoreTo) => standDown({ root, repo, number, runner, machine, appActor: app.appActor, restoreTo }, reason),
       }
       // Started steps outlive the pass that began them, so the next pass keeps their slots and
       // still acts on the rest of the board — a twenty-minute build does not stop the poll.

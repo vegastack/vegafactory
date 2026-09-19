@@ -335,6 +335,14 @@ describe('transitions', () => {
     expect(verdict(2).action).toBe('none')
   })
 
+  test('evidence from a self-hosted App opens the operator approval window', () => {
+    gh.addIssue({ number: 1, labels: ['ready-to-ship', 'small'] })
+    gh.addComment(1, '<!-- vsk:v1 type=evidence sha=abc1234 -->\nbuilt', 'acmefactory[bot]', 'Bot')
+    expect(verdict(1, { appActor: 'acmefactory[bot]' })).toMatchObject({ action: 'none', reason: 'waiting for the operator to read the evidence' })
+    gh.addComment(1, 'ship it', 'mk')
+    expect(verdict(1, { appActor: 'acmefactory[bot]' }).action).toBe('ship')
+  })
+
   test('"ship it" after the evidence ships; anything else is corrections', () => {
     gh.addIssue({ number: 1, labels: ['ready-to-ship', 'small'] })
     evidence(1)
@@ -377,6 +385,15 @@ describe('transitions', () => {
     const acks = gh.issues.get(1)!.comments.filter((comment) => comment.body.includes('type=ack')).length
     expect(confirmShip(ctx, permission, { id: word.id, by: 'mk', quote: 'ship it' }).ok).toBe(true)
     expect(gh.issues.get(1)!.comments.filter((comment) => comment.body.includes('type=ack'))).toHaveLength(acks)
+  })
+
+  test('ship confirmation accepts evidence from a self-hosted App', () => {
+    gh.addIssue({ number: 1, labels: ['ready-to-ship', 'small'] })
+    gh.addComment(1, '<!-- vsk:v1 type=evidence sha=abc1234 -->\nbuilt', 'acmefactory[bot]', 'Bot')
+    const word = gh.addComment(1, 'ship it', 'mk')
+    const permission = permissionLookup('o/r', gh.runner)
+    const confirmed = confirmShip({ root, repo: 'o/r', number: 1, runner: gh.runner, appActor: 'acmefactory[bot]' }, permission, { id: word.id, by: 'mk', quote: 'ship it' })
+    expect(confirmed.ok).toBe(true)
   })
 
   test('a relayed ack that cannot validate ships nothing', () => {
@@ -556,6 +573,12 @@ describe('what may run at once', () => {
     gh.addComment(14, broken, 'mk')
     ackFor(14, broken)
     expect(acknowledgedPlan(snapOf(14), permission)).toMatchObject({ text: null, reason: expect.stringContaining('plan-lint') })
+
+    // A self-hosted App writes the plan under its own bot login, while the ack remains a person's.
+    gh.addIssue({ number: 15, labels: ['planning', 'large', 'epic'] })
+    gh.addComment(15, real, 'acmefactory[bot]', 'Bot')
+    ackFor(15, real)
+    expect(acknowledgedPlan(snapOf(15), permission, 'acmefactory[bot]').text).toBe(real)
   })
 })
 
@@ -588,6 +611,18 @@ describe('one poll over the board', () => {
     expect(await pass()).toEqual([])
   })
 
+  test('a claim from a self-hosted App keeps another dispatcher off the issue', async () => {
+    gh.addIssue({ number: 1, labels: ['planning', 'medium'] })
+    const owner = 'other:dispatch-abcd1234-1'
+    const body = claimBody({ owner, kind: 'dispatch', harness: 'dispatch', model: 'plan' })
+      .replace('-->\n', `-->\n${claimLine(owner, new Date(gh.clock).toISOString())}\n`)
+    gh.addComment(1, body, 'acmefactory[bot]', 'Bot')
+    const lines: string[] = []
+    expect(await pass({ appActor: 'acmefactory[bot]', out: (line) => lines.push(line) })).toEqual([])
+    expect(steps).toEqual([])
+    expect(lines).toEqual(['#1: skipped, a fresh claim holds it'])
+  })
+
   test('a step already running keeps its slot and its issue on the next pass', async () => {
     for (const number of [1, 2, 3, 4]) gh.addIssue({ number, labels: ['planning', 'medium'] })
     const inflight = new Map<number, Inflight>()
@@ -612,6 +647,7 @@ describe('one poll over the board', () => {
     gh.addIssue({ number: 1, labels: ['planning', 'medium'] })
     let heldDuringRun: string | null | undefined
     await pass({
+      appActor: 'acmefactory[bot]',
       runStep: (async () => {
         const snap = snapOf(1)
         heldDuringRun = holderOf(snap.state, snap.body, gh.clock, trustedFactory({ repo: 'o/r', runner: gh.runner, root })).holder?.owner ?? null
@@ -623,12 +659,14 @@ describe('one poll over the board', () => {
     expect(heldDuringRun).toBe(`${HOST}:dispatch-test-1`)
     const after = snapOf(1)
     expect(holderOf(after.state, after.body, gh.clock, trustedFactory({ repo: 'o/r', runner: gh.runner, root })).holder).toBeNull()
+    expect(gh.issues.get(1)!.comments.map((comment) => comment.body).join('\n')).toContain('by=acmefactory[bot]')
   })
 
   test('an implement run hands its claim to the session it starts', async () => {
     gh.addIssue({ number: 1, labels: ['queued', 'small'] })
     let heldDuringRun: string | null | undefined
     await pass({
+      appActor: 'acmefactory[bot]',
       runStep: (async () => {
         const snap = snapOf(1)
         heldDuringRun = holderOf(snap.state, snap.body, gh.clock, trustedFactory({ repo: 'o/r', runner: gh.runner, root })).holder?.owner ?? null
@@ -638,7 +676,9 @@ describe('one poll over the board', () => {
     // dev-implement claims from inside its own worktree, so this machine's reservation steps aside
     // before the agent starts rather than blocking the claim the workflow actually reads.
     expect(heldDuringRun).toBeNull()
-    expect(gh.issues.get(1)!.comments.map((comment) => comment.body).join('\n')).toContain('handing the issue to the run this machine just started')
+    const bodies = gh.issues.get(1)!.comments.map((comment) => comment.body).join('\n')
+    expect(bodies).toContain('handing the issue to the run this machine just started')
+    expect(bodies).toContain('by=acmefactory[bot]')
   })
 
   test('two dispatchers on one host do not both start the same issue', async () => {
@@ -856,6 +896,16 @@ describe('standing an issue down', () => {
     // Released, so the next pass sees a free issue — and one left in-progress is picked back up.
     expect(verdict(1)).toMatchObject({ action: 'implement', reason: 'an interrupted run left it in-progress with no holder' })
     expect(verdict(1, { held: true }).action).toBe('none')
+  })
+
+  test('a self-hosted dispatcher names its own actor when it stands down', () => {
+    gh.addIssue({ number: 1, labels: ['in-progress', 'small'] })
+    const owner = `${HOST}:1-work`
+    const body = claimBody({ owner, kind: 'session', harness: 'claude', model: 'opus' })
+      .replace('-->\n', `-->\n${claimLine(owner, new Date(gh.clock).toISOString())}\n`)
+    gh.addComment(1, body, 'acmefactory[bot]', 'Bot')
+    standDown({ root, repo: 'o/r', number: 1, runner: gh.runner, machine: HOST, appActor: 'acmefactory[bot]', now: gh.clock }, 'the run stopped')
+    expect(gh.issues.get(1)!.comments.map((comment) => comment.body).join('\n')).toContain(`type=release owner=${HOST}:1-work by=acmefactory[bot]`)
   })
 
   test('another machine\'s claim is left alone', () => {
@@ -1108,14 +1158,15 @@ describe('the step a run makes', () => {
       given = options.env
       return { code: 0, stdout: 'done', stderr: '', timedOut: false }
     }
-    const env = { PATH: '/usr/bin', VEGAFACTORY_APP_PRIVATE_KEY_FILE: '/keys/app.pem', VEGAFACTORY_APP_ID: '4812956', HOME: '/home/x' }
+    const env = { PATH: '/usr/bin', VEGAFACTORY_APP_PRIVATE_KEY_FILE: '/keys/app.pem', VEGAFACTORY_APP_ID: '12345', VEGAFACTORY_APP_ACTOR: 'acmefactory[bot]', HOME: '/home/x' }
     await defaultRunStep('', env, { exec, token: () => 'ghs_from_the_app' })({ action: 'implement', number: 7, repo: 'o/r', split: false, by: null }, { root })
     // Its writes are the App's, so nothing it posts can pass as a person's word.
     expect(given.GH_TOKEN).toBe('ghs_from_the_app')
     expect(given.GITHUB_TOKEN).toBe('ghs_from_the_app')
     // And it cannot reach the key that mints them.
     expect(given.VEGAFACTORY_APP_PRIVATE_KEY_FILE).toBeUndefined()
-    expect(Object.keys(given).some((name) => name.startsWith('VEGAFACTORY_'))).toBe(false)
+    expect(given.VEGAFACTORY_APP_ID).toBe('12345')
+    expect(given.VEGAFACTORY_APP_ACTOR).toBe('acmefactory[bot]')
     expect(given.PATH).toBe('/usr/bin')
     // The token is for the API. Git is given a helper that scrubs it first, so it never pushes
     // with a token whose Contents permission is read-only — it gets the machine's own login back
@@ -1171,6 +1222,19 @@ describe('the command', () => {
       expect(result.text).toContain('subscriptions only')
     }
     // Both probes spend the operator's own quota and the mint touches GitHub: neither may happen.
+    expect([probes, fetches]).toEqual([0, 0])
+  })
+
+  test('a partial self-hosted App identity refuses before anything is probed or minted', async () => {
+    let probes = 0
+    let fetches = 0
+    const result = await run(['enable'], {
+      env: { VEGAFACTORY_APP_ID: '12345' },
+      run: (() => { probes++; return { code: 0, stdout: 'ok', stderr: '' } }) as Probe,
+      fetch: (async () => { fetches++; return { ok: true, status: 200, json: async () => ({ id: 1 }) } }) as Fetch,
+    })
+    expect(result.code).toBe(2)
+    expect(result.text).toMatch(/VEGAFACTORY_APP_ID.*VEGAFACTORY_APP_ACTOR.*set together/)
     expect([probes, fetches]).toEqual([0, 0])
   })
 
