@@ -1788,8 +1788,8 @@ test('a hand-back that repeats a stand-down is still a question', () => {
 // Advice that ignores the header sends the operator from one refusal straight into the next: a
 // three-cell row under the shipped six-column header never reaches its declared caps column.
 test('the row it tells you to add is one the same parser accepts', () => {
-  const header = '| dispatcher | group | repos | owner | caps | notes |\n|---|---|---|---|---|---|\n'
-  project(`${header}| someone-else | dev | yes | o/r | |\n`)
+  const header = '| node | group | repos | worker | owner | caps | notes |\n|---|---|---|---|---|---|---|\n'
+  project(`${header}| someone-else | dev | o/r | yes | mk | | |\n`)
   const listing = listedHere(root, { repo: 'o/r', host: HOST, home })
   expect(listing.ok).toBe(false)
   const row = /`(\| .*? \|)`/.exec(listing.reason)![1]!
@@ -1915,4 +1915,14 @@ describe('a node answers to its own name', () => {
     expect(parsed.repos).toEqual(['o/r'])
     expect(parsed.problem).toBeNull()
   })
+})
+
+// A row pasted under a header with no gate would be refused by the very next check, so the advice
+// has to name what is actually missing rather than hand over a row that cannot work.
+test('an unlisted machine on a gateless roster is told about the column, not given a row', () => {
+  project(`| node | owner | repos |\n|---|---|---|\n| someone-else | mk | o/r |\n`)
+  const listing = listedHere(root, { repo: 'o/r', host: HOST, home })
+  expect(listing.ok).toBe(false)
+  expect(listing.reason).toContain('no `worker` column')
+  expect(listing.reason).not.toMatch(/add the row/)
 })

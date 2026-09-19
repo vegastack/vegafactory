@@ -12,3 +12,4 @@ The control room's machine roster is `nodes.md`, and being in it no longer autho
 - A machine looks itself up by its node id, `<os-user>@<hostname>`, and by nothing else. The lookup used `machineName`, which maps every non-alphanumeric to a dash, so it would have turned `mk@patrick-mac-mini` into `mk-patrick-mac-mini` and never matched a row. One spelling, so two rows cannot name one machine.
 - A heading that is trying to be the gate and missing it — `workers`, `worker?` — grants nothing. Read as "no gate at all" it would have granted every row in the file.
 - The row an unlisted machine is told to add says `yes` in the gate, because a row pasted from a refusal is one somebody is adding so that machine can work a board.
+- The App's private key belongs only on a machine whose row says `worker: yes`. `nodes.md` now names every machine, most of which only report what they did, and possession of that key is by itself enough to mint installation tokens.

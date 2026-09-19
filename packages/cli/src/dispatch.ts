@@ -364,8 +364,14 @@ export function listedHere(root: string, options: { repo: string; host?: string;
     // is refused for the cell it never reached, so advice that ignored the header would send the
     // operator straight from one refusal into the next.
     const header = headerOf(text)
-    const cells = header ? header.map((column) => suggestedCell(column, machine, options.repo)) : [machine, '<operator>', options.repo]
-    return { ok: false, entry: null, file, reason: `${machine} is not listed in ${file} — add the row \`| ${cells.join(' | ')} |\` in a control-room PR before this machine dispatches anything` }
+    const gated = header?.some((column) => COLUMN_NAMES.worker.includes(column.toLowerCase() as (typeof COLUMN_NAMES.worker)[number])) ?? false
+    // A row pasted under a header with no gate would be refused by the very next check, so the
+    // advice says what is actually missing: the column, before any row can grant anything.
+    if (header && !gated) {
+      return { ok: false, entry: null, file, reason: `${machine} is not listed in ${file}, and ${NO_GATE} — do both in one control-room PR` }
+    }
+    const cells = header ? header.map((column) => suggestedCell(column, machine, options.repo)) : [machine, '<owner>', 'yes', options.repo]
+    return { ok: false, entry: null, file, reason: `${machine} is not listed in ${file} — add the row \`| ${cells.join(' | ')} |\` in a control-room PR before this machine works a board on its own` }
   }
   // A cap nobody can read is not a cap, and the machine it belongs to is named rather than left
   // to look like a missing row: the operator is sent to the thing that is wrong, not to the roster.
