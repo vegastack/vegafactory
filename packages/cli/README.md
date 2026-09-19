@@ -86,8 +86,8 @@ vegafactory sync profile --json   # the resolved profile: values, sources, locke
 Both harnesses write a session log in your home directory. `stats collect` reads the new lines of
 each log — from a saved byte offset, so a killed session is counted once, at the next run — and
 keeps one record per assistant turn under `~/.vegafactory/stats/` — one collector at a time, so
-two hooks never count the same turn twice: time, your `gh` login, the
-machine, the repository, the issue, the harness, the exact model id, the skill the turn used, the
+two hooks never count the same turn twice: time, the owner (your `gh` login), the node
+(`<os-user>@<hostname>`), the repository, the issue, the harness, the model id, the skill the turn used, the
 tokens, the duration, how the turn ended, and the workflow stage the issue was in **at that moment**
 — written down as the CLI moves a state label, so a session collected days later still counts in the
 stage it worked in, and turns nothing is known about carry no stage at all. Never a prompt, a file, tool arguments or which
@@ -96,7 +96,7 @@ subscription paid for the turn — a skill is named only when it resolves to one
 skill name is dropped. The harness hooks run it in the background at each turn boundary.
 
 ```sh
-vegafactory stats show --since 7d   # turns, tokens and time by operator, project, model and stage
+vegafactory stats show --since 7d   # turns, tokens and time by owner, node, project, model and stage
 vegafactory stats push              # append this machine's new turns to the org control room
 vegafactory dashboard --open        # one offline HTML page, built from what you have
 ```
