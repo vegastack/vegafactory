@@ -833,10 +833,16 @@ export function latestArtifact(snap: Snapshot, type: string, permission: Permiss
 // reply answers. Counting it as bookkeeping would let a comment written before the question was
 // asked read as the answer to it.
 const BOOKKEEPING = new Set(['claim', 'release', 'ledger', 'ack', 'standdown'])
-const LEGACY_STANDDOWN = /^\*\*[^*\n]+\*\* stood down from #\d+: .+$/m
+// A stand-down the released version wrote, which carried `type=handback` before stand-downs had
+// their own marker. It is matched as the *whole* body and not a line within one, because a genuine
+// hand-back may quote a stand-down while asking something new — and reading that as bookkeeping
+// would let a comment written before the question be chosen as its answer.
+const LEGACY_STANDDOWN = /^\*\*[^*\n]+\*\* stood down from #\d+: [^\n]+$/
+
+const withoutMarker = (body: string) => String(body ?? '').replace(/<!--[\s\S]*?-->/, '').trim()
 
 const isBookkeeping = (snap: Snapshot, entry: CommentEntry) =>
-  BOOKKEEPING.has(entry.type) || (entry.type === 'handback' && LEGACY_STANDDOWN.test(snap.body(entry)))
+  BOOKKEEPING.has(entry.type) || (entry.type === 'handback' && LEGACY_STANDDOWN.test(withoutMarker(snap.body(entry))))
 
 // The action this issue is waiting for, and the comment that asks for it. `trigger` is what makes
 // a run happen once: a comment already acted on asks for nothing more, and a state label already
@@ -1598,6 +1604,15 @@ export function standDown(ctx: StandDownContext, reason: string): string {
   if (ctx.restoreTo && (whose === 'ours' || whose === 'free')) {
     try {
       syncIssue({ ...claimCtx })
+      // Read again, here. The check above happened before this run saved, pushed and released,
+      // which is long enough for another machine to have claimed the issue — and moving one out
+      // of `in-progress` while somebody is working it is worse than leaving it where it is.
+      const now = snapshot(cacheDir(ctx.root, ctx.repo, ctx.number))
+      const taken = holderOf(now.state, now.body, ctx.now ?? Date.now(), trustedFactory(claimCtx)).holder
+      if (taken && !taken.owner.startsWith(`${ctx.machine}:`)) {
+        notes.push(`${taken.owner} claimed it meanwhile, so the state label was left alone`)
+        return `${reason} — ${notes.join(', ')}`
+      }
       const labels = readState(cacheDir(ctx.root, ctx.repo, ctx.number))!.issue!.labels
       if (stateOf(labels).state === 'in-progress' && ctx.restoreTo !== 'in-progress') {
         setLabels(claimCtx, nextLabels(labels, { state: ctx.restoreTo }))

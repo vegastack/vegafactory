@@ -120,6 +120,11 @@ describe('the roster', () => {
     expect(listing.ok).toBe(false)
     expect(listing.reason).toContain(`${HOST}'s row`)
     expect(listing.reason).toContain('does not reach its declared caps column')
+    for (const cell of ['', '-']) {
+      const complete = parseDispatchers(`| machine | operator | repos | notes | caps |\n|---|---|---|---|---|\n| ${HOST} | mk | o/r | | ${cell} |\n`)[0]!
+      expect(complete.caps).toEqual(DEFAULT_CAPS)
+      expect(complete.problem).toBeNull()
+    }
   })
 
   test('a listed machine passes; an unlisted one refuses and says how to be listed', () => {
@@ -873,6 +878,18 @@ describe('standing an issue down', () => {
     const result = standDown({ root, repo: 'o/r', number: 1, runner, machine: HOST, now: gh.clock, restoreTo: 'queued' }, 'the subscription limit was reached')
     expect(result).toContain('claim could not be read')
     expect(result).toContain('the state label was left alone')
+    expect(gh.issues.get(1)!.labels).toContain('in-progress')
+    expect(gh.issues.get(1)!.labels).not.toContain('queued')
+  })
+
+  test('a claim taken while this machine stands down leaves the state label alone', () => {
+    gh.addIssue({ number: 1, labels: ['in-progress', 'small'] })
+    held(`${HOST}:1-work`)
+    gh.afterPost = (body) => {
+      if (body.includes('type=standdown')) held('laptop:1-work')
+    }
+    const result = standDown({ root, repo: 'o/r', number: 1, runner: gh.runner, machine: HOST, now: gh.clock, restoreTo: 'queued' }, 'the subscription limit was reached')
+    expect(result).toContain('laptop:1-work claimed it meanwhile, so the state label was left alone')
     expect(gh.issues.get(1)!.labels).toContain('in-progress')
     expect(gh.issues.get(1)!.labels).not.toContain('queued')
   })
@@ -1746,4 +1763,19 @@ test('the duration formatter cannot be called without naming its field', () => {
   const source = readFileSync(join(import.meta.dir, '..', 'src', 'dispatch.ts'), 'utf8')
   expect(source).toContain("field: 'step' | 'poll' | 'retry'):")
   expect(source).not.toContain("field: 'step' | 'poll' | 'retry' =")
+})
+
+// A hand-back may quote a stand-down while asking something new. Reading that as bookkeeping
+// would let a comment written before the question be chosen as its answer.
+test('a hand-back that quotes a stand-down is still a question', () => {
+  gh.addIssue({ number: 1, labels: ['waiting-on-operator', 'medium'] })
+  gh.addComment(1, 'here are the details you asked for', 'mk')
+  gh.addComment(1, '<!-- vsk:v1 type=handback -->\n> **box** stood down from #1: this machine is no longer listed\n\nStopping: that leaves the base moving under the plan. Which branch should this build on?', 'mk')
+  expect(verdict(1).action).toBe('none')
+
+  // The released version's own stand-down, which is the whole body, still counts as bookkeeping.
+  gh.addIssue({ number: 2, labels: ['waiting-on-operator', 'medium'] })
+  gh.addComment(2, 'here are the details you asked for', 'mk')
+  gh.addComment(2, '<!-- vsk:v1 type=handback -->\n**box** stood down from #2: this machine is no longer listed', 'mk')
+  expect(verdict(2).action).toBe('follow-up')
 })

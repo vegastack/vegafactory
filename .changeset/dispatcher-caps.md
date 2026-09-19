@@ -20,3 +20,5 @@ A dispatcher's limits now come from its roster row instead of being fixed in the
 - A roster row that does not reach a declared `caps` column is refused by name instead of silently receiving defaults; an empty caps cell or `-` still chooses the defaults explicitly.
 - Standing down leaves the state label unchanged when another machine owns the live claim or claim ownership cannot be verified.
 - Legacy stand-down notices written with a `handback` marker no longer bury the operator reply they did not answer.
+- A stand-down re-reads the claim at the moment it moves the state label, not minutes earlier before the work was saved, pushed and the claim released — long enough for another machine to have taken the issue.
+- A stand-down notice written by the released version is still read as bookkeeping, matched as a whole comment so a hand-back that quotes one while asking something new stays a question.
