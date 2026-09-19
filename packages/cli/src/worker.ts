@@ -753,7 +753,7 @@ export const processStart: ProcessStart = (pid) => {
 }
 
 // The runs this machine has started, and enough about each to prove it is still that run and to
-// clean up after it. It is on disk because `dispatch disable` is a different process from the
+// clean up after it. It is on disk because `worker disable` is a different process from the
 // service it takes down: without this, the service's agents would keep running and keep writing to
 // GitHub after the unit is gone.
 export interface ChildRecord {
@@ -1429,7 +1429,7 @@ export async function poll(deps: PollDeps, inflight: Map<number, Inflight> = new
 }
 
 // The claim a worker run takes before it starts, so another machine polling the same board
-// sees the work is taken rather than starting it again. It is an App-authored `dispatch` claim,
+// sees the work is taken rather than starting it again. It is an App-authored `worker` claim,
 // kept alive while the step runs and released on every way out.
 //
 // A step that runs an agent which claims for itself — dev-implement and its corrections path —

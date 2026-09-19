@@ -74,7 +74,7 @@ An always-on machine can work that loop for you. `vegafactory worker enable` tur
 | **Round** | One pass of the cross-tool review: findings out, fixes in. At most three per cycle |
 | **Cycle** | A review's run of rounds against one head. Committing fixes, or editing the brief or plan, opens the next cycle at round 1 with the open findings carried over |
 | **Control room** | The org's repository of shared defaults — people, repos, rules — that each project's dev.md layers on. `vegafactory sync` keeps a local copy |
-| **Dispatcher** | The operator-side runner that picks up queued issues and starts sessions on them, so work moves without you opening each one |
+| **Worker** | The operator-side runner that picks up queued issues and starts sessions on them, so work moves without you opening each one |
 
 ## Skills
 
@@ -108,7 +108,7 @@ Org-level skills: the control room whose defaults every repo layers on, and the 
 
 | Skill | What it does | Docs |
 |---|---|---|
-| [vegafactory-setup](skills/factory/vegafactory-setup/) | Bootstraps and maintains the org control room — org, group, repos, dispatchers, boards, onboarding and stats — that every repo's dev profile layers on | [SKILL.md](skills/factory/vegafactory-setup/SKILL.md) |
+| [vegafactory-setup](skills/factory/vegafactory-setup/) | Bootstraps and maintains the org control room — org, group, repos, workers, boards, onboarding and stats — that every repo's dev profile layers on | [SKILL.md](skills/factory/vegafactory-setup/SKILL.md) |
 
 ### Repo tooling
 

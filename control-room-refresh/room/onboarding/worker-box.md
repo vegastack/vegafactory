@@ -1,17 +1,15 @@
 # Provisioning the worker box for vegastack/vegafactory
 
-The always-on Mac mini runs the GitHub Actions runner for trusted jobs (pull request CI runs on GitHub-hosted runners). A second account is kept for the worker, which is being rebuilt (#218). Every step below is a human's own action on the box or on the org's settings; the skill positions the operator, it never reaches for the credential.
-
-The account names, the runner group and the runner name below are proposals, recorded as unconfirmed in `org.md` until the operator confirms them on the box.
+The always-on Mac mini runs the GitHub Actions runner for trusted jobs (pull request CI runs on GitHub-hosted runners), and a second account runs the worker. Every step below is a human's own action on the box or on the org's settings; the skill positions the operator, it never reaches for the credential.
 
 ## Accounts
 
 Two macOS accounts, neither an admin of the other:
 
 - `vf-runner` — runs the Actions runner and nothing else.
-- `vf-worker` — owns the `gh`, Claude, and Codex credentials, and will run the worker.
+- `vf-worker` — owns the `gh`, Claude, and Codex credentials, the GitHub App key, and the worker.
 
-The split is the whole point: a CI job runs as `vf-runner` and so **cannot read** the tokens in `vf-worker`'s home — a workflow edited in a pull request gets a repository token and no more. The GitHub App private key is never on this box; it lives in org settings as the secret `VEGAFACTORY_APP_PRIVATE_KEY`.
+The split is the whole point: a CI job runs as `vf-runner` and so **cannot read** the tokens in `vf-worker`'s home — a workflow edited in a pull request gets a repository token and no more. The App's private key is one of those files: `~/.vegafactory/worker/app.pem` in `vf-worker`'s home, `chmod 600`, the same PEM as the org secret `VEGAFACTORY_APP_PRIVATE_KEY` and readable by nobody else on this box.
 
 ## Toolchain
 
@@ -37,7 +35,7 @@ Org-admin commands, run in an admin's own session (`vf-worker`'s, or any admin's
 
 ```sh
 gh api orgs/vegastack/actions/runner-groups -q '.runner_groups[] | "\(.id) \(.name) \(.visibility)"'
-gh api -X POST orgs/vegastack/actions/runner-groups -f name=vegastack-macs -f visibility=selected
+gh api -X POST orgs/vegastack/actions/runner-groups -f name=vsk-runners -f visibility=selected
 gh api -X PUT orgs/vegastack/actions/runner-groups/<GROUP_ID>/repositories/$(gh api repos/vegastack/vegafactory -q .id)
 gh api -X POST orgs/vegastack/actions/runners/registration-token -q .token   # the registration token for the block below; it expires in an hour
 ```
@@ -58,17 +56,34 @@ curl -fsSL -o runner.tar.gz \
   "https://github.com/actions/runner/releases/download/v${RUNNER_VERSION}/actions-runner-osx-arm64-${RUNNER_VERSION}.tar.gz"
 tar xzf runner.tar.gz && rm runner.tar.gz
 ./config.sh --url "https://github.com/vegastack" --token "$RUNNER_TOKEN" \
-  --runnergroup vegastack-macs --name mac-mini-1 --unattended --replace
+  --runnergroup vsk-runners --name patrick-mac-mini --unattended --replace
 ./svc.sh install && ./svc.sh start && ./svc.sh status
 ```
+
+## Turn the worker on
+
+As `vf-worker`, once that account is signed in to `gh`, Claude Code and Codex, and the App key is in place:
+
+1. Add this machine to the control room's `nodes.md` — one row under that file's header, `| mk@patrick-mac-mini | kmanojkumar | yes | vegastack/vegafactory | | |` — in a control-room PR. The header names the columns, so cells are read by what their column is called and not by where they sit. `mk@patrick-mac-mini` is `<os-user>@<hostname>` — this account's login and this machine's hostname cut to its first label, lowercased. `worker` must say `yes`: that cell is the only thing that grants unattended work, and an empty `repos` cell grants nothing. Leave `caps` empty for the shipped defaults, or set it (`runs 10 · step 72h · poll 1m · retry 15m · park 3`, every field optional)
+2. In the repository checkout, `vegafactory worker enable`. It checks the row, the harness hooks, a real `claude -p` and `codex exec` answer and the App key before it installs the LaunchAgent; a FAIL line names what to fix and nothing is installed.
+3. `vegafactory worker status` shows the board and this machine's runs. `vegafactory worker disable` takes the unit away again and stops the runs it had started, and removing the row stands the machine down at its next poll without touching it.
+
+Everything this box writes to GitHub goes out as the VegaFactory App — the worker's own bookkeeping and everything the agent runs post — on an hour-long token minted from the key in `vf-worker`'s home and handed to each run in its environment. The App authors the factory's work, and only that: its claims, its status comments and the reviews a worker run posts all count, because each is checked by its own shape. What it can never author is a word of consent — an ack, an acceptance of open findings, a "ship it" and a correction are read only from a person with write access, which is what stops a run approving its own work.
+
+Three things that follow, and one of them will bite on the first run if the box is not set up for it:
+
+- **A worker run pushes with this box's own login, never with the App token** — the App's Contents is read-only, and the gh credential helper would hand a run the App's token instead of the login this box already has. A run's git asks with that token scrubbed out, so `gh auth login` on this machine is all an https remote needs, and an SSH remote never asked a helper anyway. `worker enable` asks the same way and refuses only when the App's token is the sole credential here, rather than letting the first run finish its work and fail at the push.
+- **The key outlives the token.** A run under `vf-worker` can read the key file whatever its mode; that is exactly why the worker has an account of its own here and runs nothing else under it.
+- **The caps are per machine, and this row sets them.** `runs 10 · step 72h · poll 1m` in the caps cell, re-read every pass so a change needs no restart. One merge at a time, and each machine's own retry and subscription-reset deadlines. A step longer than an hour outlives the installation token a run is handed, so its later GitHub writes fail — the worker says so when it starts. Two boxes listed for the same repository can each run three, and one can start work the other is waiting out; a fleet-wide lease is not in place yet.
 
 ## Verify
 
 ```sh
 gh api orgs/vegastack/actions/runner-groups/<GROUP_ID>/runners -q '.runners[] | "\(.name) \(.status)"'
 ps -axo user,command | grep '[R]unner.Listener'
+launchctl print gui/$(id -u vf-worker)/com.vegastack.vegafactory.worker | head -3
 ```
 
-The first prints `mac-mini-1 online` — the org endpoint is the one that lists a group's runners, while `repos/vegastack/vegafactory/actions/runners` lists repository-level runners. The second prints `vf-runner` and never `vf-worker`.
+The first prints `patrick-mac-mini online` — the org endpoint is the one that lists a group's runners, while `repos/vegastack/vegafactory/actions/runners` lists repository-level runners. The second prints `vf-runner` and never `vf-worker`.
 
 Then the reboot drill: `sudo reboot`, wait for the box, and run both checks again **without logging anything in by hand**. A box that needs a human at the keyboard after a power cut is not always-on.
