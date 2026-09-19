@@ -210,12 +210,15 @@ export function rosterName(value: string): string {
   // down to `mk@box` and authorise the real node, and an empty half would fall back to the
   // stand-in names and let `@box` or `mk@` match a machine nobody wrote down.
   const halves = text.split('@')
-  if (halves.length !== 2 || !halves[0]!.trim() || !halves[1]!.trim()) return ''
+  // Both halves must survive normalising to something. `nodeId` substitutes `someone` and
+  // `machine` for a half that comes out empty, so `!!!@???` would otherwise become the very name a
+  // machine falls back to when it cannot read its own identity — and authorise it.
+  if (halves.length !== 2 || !halves.every((half) => /[a-z0-9]/i.test(half))) return ''
   return nodeId(halves[0]!, halves[1]!)
 }
 
 // One row per machine. A table names its columns in a header row, and a bullet is
-// `- machine — repos`; `*`, `all` or an empty repos cell means every repository of the org.
+// `- node — repos`. `*` or `all` means every repository of the org; an empty cell means none.
 export function parseDispatchers(text: string): Dispatcher[] {
   const found: Dispatcher[] = []
   let layout = POSITIONAL

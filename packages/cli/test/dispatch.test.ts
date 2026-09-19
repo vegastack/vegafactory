@@ -1948,3 +1948,20 @@ describe('a node name is exactly one name', () => {
     expect(listedHere(root, { repo: 'o/r', host: HOST, home }).ok).toBe(true)
   })
 })
+
+// A name whose halves normalise to nothing becomes the very name a machine falls back to when it
+// cannot read its own identity, which would authorise that machine.
+test('a name that normalises to nothing authorises nobody', () => {
+  for (const bad of ['!!!@???', '---@...', '@@']) expect(rosterName(bad), bad).toBe('')
+})
+
+// The remediation branch for a roster with no header at all: pasting a row there cannot work,
+// so the advice has to name the header.
+test('an unlisted machine on a headerless roster is told to add the header', () => {
+  project(`| someone-else | mk | o/r |\n`)
+  const listing = listedHere(root, { repo: 'o/r', host: HOST, home })
+  expect(listing.ok).toBe(false)
+  expect(listing.reason).toContain('no `worker` column')
+  expect(listing.reason).toContain('| node | owner | worker | repos | caps |')
+  expect(listing.reason).not.toMatch(/add the row/)
+})

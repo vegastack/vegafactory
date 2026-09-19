@@ -10,7 +10,7 @@ Seven entries are the whole layout, so the live `README.md` goes with the rest o
 
 Added
 
-- `nodes.md` — the dispatcher registry, empty, with the rule that a repo reaches a dispatcher only through its group.
+- `nodes.md` — every machine that runs vegafactory, one row each, with a `worker` column that is the only thing granting unattended work.
 - `stats/README.md` — creates `stats/`, the one tree automation writes, and says what a record may and may not carry.
 - `onboarding/dispatcher-box.md` — the third onboarding path, which `nodes.md` and the skill both route through: two macOS accounts so a CI job cannot read the dispatcher's tokens, the toolchain, the runner registration and the reboot drill. The account names, the runner group and the runner name in it are proposals; `org.md`'s `## Unconfirmed` says so until the operator confirms them on the box.
 - `org.md`'s `## Automation identity` block — the App name, slug, installation id (`158664419`, from dev-setup's `references/github-app.md`), the two secret **names** and the granted permissions. The live `org.md` never carried this block although the skill and its template both require it; nothing in it is a secret.
