@@ -2,6 +2,16 @@
 
 The project's story, newest first: what got built, why, and how it went — for the operator's future recall. Format home: the dev-chronicle skill.
 
+## 19-09-2026 — A node knows its own name ([#253](https://github.com/vegastack/vegafactory/issues/253))
+
+- **What:** `nodeId()` — `<os-user>@<hostname>`, derived and never configured.
+- **Why:** Step 2 of [#251](https://github.com/vegastack/vegafactory/issues/251). The roster gate and the stats fields both key off it, and neither could tell two people on one machine apart before: identity was a bare hostname.
+- **How it went:** Measuring first was the whole of it. `os.hostname()` answers `patrick-mac-mini.local` here, so the raw value would have produced `mk@patrick-mac-mini.local`; a Linux FQDN would be worse. Cutting to the first label is one rule that works on both. The other trap was reusing `machineName`, which maps every non-alphanumeric to a dash and would have silently produced `mk-patrick-mac-mini` — and which is stamped on every session claim that exists right now.
+- **Changed:** `nodeId` and a shared normaliser in `claim.ts`, with `machineName` and `ownerId` untouched.
+- **Decisions:** none new.
+
+— approved by (kmanojkumar) · built by claude · branch feat/253-a-node-knows-its-own-name
+
 ## 18-09-2026 — The machine's limits come from its row ([#248](https://github.com/vegastack/vegafactory/issues/248))
 
 - **What:** A dispatcher's run count, step limit, poll interval, retry delay and park threshold now come from its roster row and are re-read every pass. Named columns may be reordered without confusing notes for caps.
