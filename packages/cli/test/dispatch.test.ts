@@ -1767,7 +1767,7 @@ test('the duration formatter cannot be called without naming its field', () => {
 
 // A hand-back may quote a stand-down while asking something new. Reading that as bookkeeping
 // would let a comment written before the question be chosen as its answer.
-test('a hand-back that quotes a stand-down is still a question', () => {
+test('a hand-back that repeats a stand-down is still a question', () => {
   gh.addIssue({ number: 1, labels: ['waiting-on-operator', 'medium'] })
   gh.addComment(1, 'here are the details you asked for', 'mk')
   gh.addComment(1, '<!-- vsk:v1 type=handback -->\n**box** stood down from #1: this machine is no longer listed\n\nStopping: that leaves the base moving under the plan. Which branch should this build on?', 'mk')
