@@ -45,9 +45,9 @@ function issuesTable(buckets: Bucket[]): string {
   const rows = buckets.map((bucket) => {
     const link = issueLink(bucket.key)
     const label = link ? `<a href="${escape(link)}">${escape(bucket.key)}</a>` : escape(bucket.key)
-    return `<tr><th scope="row">${label}</th>${cells([bucket.state ?? '—', bucket.operators.join(', '), bucket.harnesses.join(', '), bucket.models.join(', '), bucket.turns, compact(totalTokens(bucket.tokens)), duration(bucket.durationMs), bucket.last.slice(0, 10)])}</tr>`
+    return `<tr><th scope="row">${label}</th>${cells([bucket.state ?? '—', bucket.owners.join(', '), bucket.harnesses.join(', '), bucket.models.join(', '), bucket.turns, compact(totalTokens(bucket.tokens)), duration(bucket.durationMs), bucket.last.slice(0, 10)])}</tr>`
   })
-  return table('Issues', ['issue', 'state', 'operator', 'harness', 'model', 'turns', 'tokens', 'time', 'last'], rows)
+  return table('Issues', ['issue', 'state', 'owner', 'harness', 'model', 'turns', 'tokens', 'time', 'last'], rows)
 }
 
 function bars(caption: string, buckets: Bucket[]): string {
@@ -79,7 +79,7 @@ footer{margin-top:40px;color:var(--muted);font-size:13px}`
 export function renderDashboard(events: StatsEvent[], { generatedAt = new Date().toISOString() } = {}): string {
   const summary: Summary = summarize(events)
   const head = summary.turns
-    ? `${summary.turns} turns · ${compact(totalTokens(summary.tokens))} tokens · ${duration(summary.durationMs)} · ${summary.from?.slice(0, 10)} to ${summary.to?.slice(0, 10)} · ${summary.operators.length} operators · ${summary.projects.length} projects`
+    ? `${summary.turns} turns · ${compact(totalTokens(summary.tokens))} tokens · ${duration(summary.durationMs)} · ${summary.from?.slice(0, 10)} to ${summary.to?.slice(0, 10)} · ${summary.owners.length} owners · ${summary.nodes.length} nodes · ${summary.projects.length} projects`
     : 'no turns collected yet'
   return `<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
@@ -87,11 +87,12 @@ export function renderDashboard(events: StatsEvent[], { generatedAt = new Date()
 <body>
 <h1>VegaFactory stats</h1>
 <p class="sub">${escape(head)}</p>
-${usageTable('Operators', 'operator', summary.operators, { header: 'projects', of: (bucket) => bucket.repos.join(', ') })}
-${usageTable('Projects', 'project', summary.projects, { header: 'operators', of: (bucket) => bucket.operators.join(', ') })}
+${usageTable('Owners', 'owner', summary.owners, { header: 'projects', of: (bucket) => bucket.repos.join(', ') })}
+${usageTable('Nodes', 'node', summary.nodes, { header: 'projects', of: (bucket) => bucket.repos.join(', ') })}
+${usageTable('Projects', 'project', summary.projects, { header: 'owners', of: (bucket) => bucket.owners.join(', ') })}
 ${issuesTable(summary.issues)}
-${usageTable('Models', 'harness · model', summary.models, { header: 'operators', of: (bucket) => bucket.operators.join(', ') })}
-${usageTable('Model use per operator', 'operator · model', summary.operatorModels)}
+${usageTable('Models', 'harness · model', summary.models, { header: 'owners', of: (bucket) => bucket.owners.join(', ') })}
+${usageTable('Model use per owner', 'owner · model', summary.ownerModels)}
 ${usageTable('Model use per project', 'project · model', summary.projectModels)}
 ${bars('By day', summary.days)}
 ${usageTable('Time per stage', 'stage', summary.stages)}
@@ -104,13 +105,13 @@ ${usageTable('Skills', 'skill', summary.skills)}
 export function dashboardUsage(): string {
   return `Usage: vegafactory dashboard [options]
 
-Writes one self-contained HTML file from the collected and pushed turns — operators, projects,
-issues, models, days and stages. No server and no network.
+Writes one self-contained HTML file from the collected and pushed turns — owners, nodes,
+projects, issues, models, days and stages. No server and no network.
 
 Options:
   --out PATH        where to write it (default ${statsHtmlPath()})
   --since 7d        only turns since then (7d, 12h, 30m or a date)
-  --local           only this machine's own turns, not the control room
+  --local           only this node's own turns, not the control room
   --open            open the file afterwards
 `
 }

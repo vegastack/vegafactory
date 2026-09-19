@@ -11,14 +11,14 @@ refuseAmbientHome()
 let home: string
 
 const event = (partial: Partial<StatsEvent> & { id: string }): StatsEvent => ({
-  rev: 1, at: '2026-09-17T10:00:00.000Z', operator: 'mk', machine: 'box', harness: 'claude', model: 'claude-opus-5',
+  rev: 1, at: '2026-09-17T10:00:00.000Z', owner: 'mk', node: 'mk@box', harness: 'claude', model: 'claude-opus-5',
   repo: 'acme/app', issue: 42, state: 'in-progress', skill: null,
   tokens: { input: 100, output: 20, cacheRead: 5000, cacheWrite: 400 }, durationMs: 90_000, outcome: 'end_turn', ...partial,
 })
 
 const DATA: StatsEvent[] = [
   event({ id: '1', skill: 'dev-implement' }),
-  event({ id: '2', at: '2026-09-18T09:00:00.000Z', operator: 'sam', harness: 'codex', model: 'gpt-5.6-sol', issue: 43, state: 'ready-to-ship' }),
+  event({ id: '2', at: '2026-09-18T09:00:00.000Z', owner: 'sam', node: 'sam@box', harness: 'codex', model: 'gpt-5.6-sol', issue: 43, state: 'ready-to-ship' }),
   event({ id: '3', at: '2026-09-18T10:00:00.000Z', repo: 'acme/other', issue: 7, state: 'planning' }),
 ]
 
@@ -28,11 +28,13 @@ beforeEach(() => {
 
 test('the page carries every section, links its issues and works offline', () => {
   const html = renderDashboard(DATA, { generatedAt: '2026-09-18T12:00:00.000Z' })
-  for (const heading of ['Operators', 'Projects', 'Issues', 'Models', 'Model use per operator', 'Model use per project', 'By day', 'Time per stage', 'Skills']) {
+  for (const heading of ['Owners', 'Nodes', 'Projects', 'Issues', 'Models', 'Model use per owner', 'Model use per project', 'By day', 'Time per stage', 'Skills']) {
     expect(html).toContain(`<h2>${heading}</h2>`)
   }
   expect(html).toContain('3 turns')
-  expect(html).toContain('2 operators')
+  expect(html).toContain('2 owners')
+  expect(html).toContain('mk@box')
+  expect(html).toContain('sam@box')
   expect(html).toContain('https://github.com/acme/app/issues/42')
   expect(html).toContain('ready-to-ship')
   expect(html).toContain('gpt-5.6-sol')

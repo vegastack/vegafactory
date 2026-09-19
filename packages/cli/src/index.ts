@@ -86,7 +86,7 @@ Control room:
 
 Usage numbers (from the harnesses' own session logs — counts only, never prompts or code):
   stats collect|push|show ...            read new turns, share them, print them ("stats --help")
-  dashboard [--out FILE] [--open]        one offline HTML file of operators, projects and issues
+  dashboard [--out FILE] [--open]        one offline HTML file of owners, nodes, projects and issues
 
 Options:
   --group NAME · --all                   choose skills (--all skips the repo-only ones)
