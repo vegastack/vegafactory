@@ -248,8 +248,8 @@ describe('lesson text never passes through a shell', () => {
     const marker = join(root, 'pwned')
     const draft = join(root, 'draft.md')
     writeFileSync(draft, NASTY(marker).map((line) => `- ${line}`).join('\n') + '\n')
-    const result = spawnSync(process.execPath, [CLI, 'learning', 'add', '--file', draft], { cwd: root, encoding: 'utf8' })
-    expect(result.status, result.stderr).toBe(0)
+    const result = spawnSync(process.execPath, [CLI, 'learning', 'add', '--file', draft], { cwd: root, encoding: 'utf8', env: { ...process.env, VEGAFACTORY_HOME: join(root, '.home') } })
+    expect(result.status, `${result.stderr}${result.stdout}`).toBe(0)
     expect(readLessons(root).map((lesson) => lesson.text)).toEqual(NASTY(marker))
     expect(existsSync(marker)).toBe(false)
     expect(devMd()).toBe(DEV_MD)
@@ -258,9 +258,9 @@ describe('lesson text never passes through a shell', () => {
   test('add --stdin does the same, and a bare list is accepted with or without markers', () => {
     const marker = join(root, 'pwned-stdin')
     const result = spawnSync(process.execPath, [CLI, 'learning', 'add', '--stdin'], {
-      cwd: root, encoding: 'utf8', input: NASTY(marker).join('\n') + '\n\n',
+      cwd: root, encoding: 'utf8', input: NASTY(marker).join('\n') + '\n\n', env: { ...process.env, VEGAFACTORY_HOME: join(root, '.home') },
     })
-    expect(result.status, result.stderr).toBe(0)
+    expect(result.status, `${result.stderr}${result.stdout}`).toBe(0)
     expect(readLessons(root).map((lesson) => lesson.text)).toEqual(NASTY(marker))
     expect(existsSync(marker)).toBe(false)
   })

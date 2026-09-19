@@ -76,7 +76,7 @@ export function planSync(input: { cloneExists: boolean; lastSyncedAt: string | n
 const connection = (entry?: ControlRoomEntry) => entry ? JSON.stringify([entry.repo, entry.path, entry.branch, entry.remote ?? null]) : null
 
 /**
- * Fetch the control room into `~/.vegastack/control-room/<org>`, unless the copy was fetched less
+ * Fetch the control room into `~/.vegafactory/control-room/<org>`, unless the copy was fetched less
  * than five minutes ago. The copy mirrors the room's branch: it must be a repository of its own,
  * still on the exact commit the last sync recorded, on the recorded branch and origin, with
  * nothing changed — anything else is a refusal, because the mirror would otherwise throw away a

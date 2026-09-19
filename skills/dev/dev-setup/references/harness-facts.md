@@ -66,7 +66,7 @@ The flags `vegafactory review` passes, read off the shipped binary rather than t
 
 - **Hooks fire under `claude -p`** · a headless Claude Code run gets the same hook events as an interactive one, which is what lets the ship guard bound a dark build · since — · checked 03-09-2026 · https://code.claude.com/docs/en/hooks
 - **Agent teams do not spawn under `-p`** · a headless Claude Code run has subagents bounded by `CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH` and `CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS`, and a run needing a team belongs in an interactive session · since — · checked 03-09-2026 · https://code.claude.com/docs/en/settings
-- **A headless run has no question tool at all** · the dispatcher sets `VSK_ASK_ROUTE=issue`, the round goes into the issue with its options and the recommendation, and the next run reads the answer there · since — · checked 03-09-2026 · https://code.claude.com/docs/en/cli-reference
+- **A headless run has no question tool at all** · the worker sets `VSK_ASK_ROUTE=issue`, the round goes into the issue with its options and the recommendation, and the next run reads the answer there · since — · checked 03-09-2026 · https://code.claude.com/docs/en/cli-reference
 
 ### Native memory under a managed launch
 
@@ -120,7 +120,7 @@ The flags `vegafactory review` passes, read off the shipped binary rather than t
 
 ### The `codex exec` skill-loading drill
 
-Whether a headless Codex run discovers project skills on its own decides one thing downstream: if it does not, every dispatched Codex run has to name the SKILL.md path in its prompt. The drill answers it in one command. **The operator runs it by hand.** It starts a real Codex session, so it spends the operator's own Codex quota on the operator's own account — no skill, hook or dispatcher may run it unasked, and dev-setup only ever prints it for the operator to copy. Run it from a scratch directory so the repo's un-ignored `.agents/` is never written to:
+Whether a headless Codex run discovers project skills on its own decides one thing downstream: if it does not, every dispatched Codex run has to name the SKILL.md path in its prompt. The drill answers it in one command. **The operator runs it by hand.** It starts a real Codex session, so it spends the operator's own Codex quota on the operator's own account — no skill, hook or worker may run it unasked, and dev-setup only ever prints it for the operator to copy. Run it from a scratch directory so the repo's un-ignored `.agents/` is never written to:
 
 ```sh
 codex login status                      # must print "Logged in"; a revoked session still prints it — the run below is the real check
@@ -217,5 +217,5 @@ The prose instruction in the AGENTS.md dev section is the portable base on both 
 - Any skill that wants to ask the user degrades by `references/ask-route.md`: intake, plan and implement put the round in the issue and stop at `waiting-on-operator` (intake creates the issue first when the round comes before one exists); dev-setup, which can run before any issue exists, writes documented defaults marked `# TODO confirm` instead and says so.
 - Observed 02-09-2026: the `claude_code` preset already carries the current model guidance on autonomy, delivering work, readability and parallel tool calls; Codex gets none of it. That is why the AGENTS.md conduct paragraph exists and why skill bodies never restate harness behaviour — a restated instruction competes with the harness's own wording.
 - Tasks inside one issue run in order; sibling sub-issues of an epic run at the same time only where the parent plan's independent groups declare disjoint file sets, and one at a time otherwise.
-- The OpenTelemetry stream is **optional and never required**: capture is deterministic without a collector — the dispatcher parses each harness's own run output, SessionEnd hooks cover interactive sessions, and skill invocations come from hook payloads. `OTEL_LOG_TOOL_DETAILS` stays off; it exports exactly the tool arguments a record must never hold.
+- The OpenTelemetry stream is **optional and never required**: capture is deterministic without a collector — the worker parses each harness's own run output, SessionEnd hooks cover interactive sessions, and skill invocations come from hook payloads. `OTEL_LOG_TOOL_DETAILS` stays off; it exports exactly the tool arguments a record must never hold.
 - Review is cross-tool and has no knob: whichever tool the session is in, the other one reads the diff read-only. Only a machine with one tool installed falls back, to a labelled same-tool self-review.

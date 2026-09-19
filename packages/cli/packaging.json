@@ -129,11 +129,11 @@
     "assets/control-room/org.md.template",
     "assets/control-room/group.md.template",
     "assets/control-room/repos.md.template",
-    "assets/control-room/dispatchers.md.template",
+    "assets/control-room/nodes.md.template",
     "assets/control-room/boards.md.template",
     "assets/control-room/stats/README.md.template",
     "assets/control-room/onboarding/new-repo.md.template",
     "assets/control-room/onboarding/new-teammate.md.template",
-    "assets/control-room/onboarding/dispatcher-box.md.template"
+    "assets/control-room/onboarding/worker-box.md.template"
   ]
 }

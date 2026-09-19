@@ -261,7 +261,7 @@ export function parseRound(commentText) {
 }
 
 // Which surface the round goes to, in one precedence a caller cannot reorder:
-// the environment the dispatcher sets, then whether this harness and run have a
+// the environment the worker sets, then whether this harness and run have a
 // question tool at all, then whether the person being asked is the person who
 // owns the issue. Anything unresolved routes to the issue, because a round in a
 // comment is always readable and a round put to the wrong person is not.

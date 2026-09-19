@@ -1,13 +1,13 @@
 ---
 name: vegafactory-setup
-description: Bootstrap and maintain the org control room — the org, group, repo, dispatcher and board files whose defaults every repo's dev profile layers on. Use when asked to "set up the control room", "bootstrap the org for the factory", "register this repo in the control room", "onboard a teammate", "add someone to the org", or "what are the org defaults here", and when a repo's control-room knob names a control room that does not exist yet. Not for a single repo's profile, labels, or knobs (dev-setup), not for architecture advice (dev-architect), not for writing or approving issues (dev-intake), and not for refreshing the local copy of the room (the `vegafactory sync` command).
+description: Bootstrap and maintain the org control room — the org, group, repo, worker and board files whose defaults every repo's dev profile layers on. Use when asked to "set up the control room", "bootstrap the org for the factory", "register this repo in the control room", "onboard a teammate", "add someone to the org", or "what are the org defaults here", and when a repo's control-room knob names a control room that does not exist yet. Not for a single repo's profile, labels, or knobs (dev-setup), not for architecture advice (dev-architect), not for writing or approving issues (dev-intake), and not for refreshing the local copy of the room (the `vegafactory sync` command).
 ---
 
 # vegafactory-setup
 
 Act: give the org one control room, so every repo inherits the answers it would otherwise be asked for.
 
-The control room is `<org>/vegafactory-control-room`, and it is seven things: `org.md`, `groups/<g>/group.md`, `repos.md`, `dispatchers.md`, `boards.md`, `onboarding/` and `stats/`. Nothing else belongs in it. `dev-setup` reads it before its interview and states an inherited knob instead of asking for it. The layout, the precedence rule, the lock, the read path, and what each file may carry live in [control-room](references/control-room.md); this file is the procedure.
+The control room is `<org>/vegafactory-control-room`, and it is seven things: `org.md`, `groups/<g>/group.md`, `repos.md`, `nodes.md`, `boards.md`, `onboarding/` and `stats/`. Nothing else belongs in it. `dev-setup` reads it before its interview and states an inherited knob instead of asking for it. The layout, the precedence rule, the lock, the read path, and what each file may carry live in [control-room](references/control-room.md); this file is the procedure.
 
 Nearest neighbor: `dev-setup` owns one repo's profile — its knobs, labels, runbooks, and AGENTS.md section. This skill owns the defaults that profile layers on. When the question is "what should this repo do", that is dev-setup; when it is "what should every repo do", it is this one.
 
@@ -15,7 +15,7 @@ Nearest neighbor: `dev-setup` owns one repo's profile — its knobs, labels, run
 
 1. **Ask the questionnaire.** Only what `org.md` holds and nothing a department owns: the org name, the goals in one paragraph, and what applies to everyone — the language, the date format (DD-MM-YYYY across the workflow), the "nothing ships without the operator's explicit instruction" stance, and the two statistics lines `stats:` and `stats-people:`. A knob a department decides — the merge style, the tests, the harness policy — is never asked here, because two departments reading one org answer would each need the other's to be wrong.
 2. **Ask which lines are locked, one at a time, and default to none.** A locked line is one the org will not let a group or a repo answer differently; the comment `# locked` on the line is the whole mechanism. Propose a lock only where one answer must hold everywhere — the provider mode is the usual one — and say what a group loses by it. A lock a group will need to work around is the wrong lock, and a locked `harness-policy:` must name all six stages or it is refused.
-3. **Render every template** in `assets/control-room/` into a working directory the operator can read before anything is pushed: `org.md`, `groups/dev/group.md`, `repos.md`, `dispatchers.md`, `boards.md`, `onboarding/`, `stats/`. Rendering is substitution only: a template is a default, and a default nobody has confirmed is still a default.
+3. **Render every template** in `assets/control-room/` into a working directory the operator can read before anything is pushed: `org.md`, `groups/dev/group.md`, `repos.md`, `nodes.md`, `boards.md`, `onboarding/`, `stats/`. Rendering is substitution only: a template is a default, and a default nobody has confirmed is still a default.
 4. **Stop before the repository exists.** Creating the org repository and granting anyone access are the operator's own account actions. Name the exact commands, say what each one does, and let the operator run them. The skill positions the operator; it does not reach for the credential.
 
 **Nothing secret goes in any file — names of secrets only.** A control room is readable by everyone the org onboards, so `NPM_TOKEN` is the entry and the value stays in the store that name points at.
@@ -55,7 +55,7 @@ A knob whose value differs between two repos in the group is a question, not an 
 
 The full checklist ships as `onboarding/new-repo.md`, so the org can edit the procedure without editing this skill.
 
-A dispatcher is the third onboarding path — a machine rather than a repo or a person. `onboarding/dispatcher-box.md` provisions the always-on box under two accounts, so a CI job cannot read the dispatcher's tokens, and its row in `dispatchers.md` says which group's repos it serves.
+A machine is the third onboarding path, in two shapes. Any machine gets a `nodes.md` row with `worker: no`, which makes statistics answerable per machine and grants nothing. One that works boards alone is provisioned by `onboarding/worker-box.md` under two accounts, so a CI job cannot read its tokens; its row says `worker: yes`.
 
 ## `onboard <login>`
 

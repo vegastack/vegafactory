@@ -7,7 +7,7 @@
 
 **Independent groups:**
 - `api` — #131 · Files: `packages/cli/src/dispatch.ts`, `packages/cli/test/dispatch.test.ts`
-- `docs` — #132 · Files: `docs/dispatcher.md`
+- `docs` — #132 · Files: `docs/worker.md`
 
 ### Tasks
 - [ ] **Task 1: build it**

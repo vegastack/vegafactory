@@ -8,7 +8,7 @@ The main checkout never leaves the default branch and never carries uncommitted 
 |---|---|
 | New issue | `vegafactory worktree create <n>` — the slug and type come off the issue title (`<type>:` prefix, the rest slugified; `--slug`/`--type` override, and GitHub being unreachable blocks rather than guesses). The types are dev.md's `branch:` knob and nowhere else; a prefix outside that list is not a type, leaves the slug, and makes `create` refuse and name the ones this project has, rather than quietly becoming `feat`. Then it fetches `origin/<default>`, `git worktree add` on a new branch, copies dev.md's `worktree-include:` files, runs `commands: setup`, adds the Codex trust entry. The ledger's first line records the path. |
 | Epic parent | A map only — no branch or worktree of its own. |
-| Sub-issue of an epic | Its own branch and worktree cut from the default branch, like any issue, and its own PR. The plan records which siblings' file sets do not overlap and so *may* run at the same time; the dispatcher (#218) is what will run them, and until then they are worked one at a time. |
+| Sub-issue of an epic | Its own branch and worktree cut from the default branch, like any issue, and its own PR. The plan records which siblings' file sets do not overlap and so *may* run at the same time; the worker (#218) is what will run them, and until then they are worked one at a time. |
 | Resume | Same branch, same worktree, reused. The resume read-order — brief → plan → ledger → `git log` — runs *there*, and the ledger names which "there" that is. |
 | Corrections / take-back | Reuse the worktree. Directory gone but branch alive → `vegafactory worktree restore <n>`, which finds the branch carrying the number (`--slug` picks one when several do), re-adds the checkout and re-runs include-copy, setup and trust. `restore` never creates a branch: a missing branch means the work is elsewhere. |
 | Ship, PR | `vegafactory ship check <n>` runs in the issue's worktree: it reads the branch there and refuses uncommitted changes. |
@@ -28,7 +28,7 @@ Derived from git plus GitHub on every read, never stored — a second source of 
 |---|---|
 | `orphan-dir` | The directory exists, its branch does not. |
 | `branch-only` | The branch exists, its directory does not — what `restore` fixes. |
-| `active` | A session holds it: `git worktree lock`, or the dispatcher's lock. |
+| `active` | A session holds it: `git worktree lock`, or the worker's lock. |
 | `merged` | The branch is on the remote **and** on `origin/<default>` — by ancestry, or by content when a squash or rebase merge rewrote the commits: its whole diff against the merge base, or every one of its commits, has a patch-id already there. A never-pushed branch cannot have merged: the default branch is reached through a PR. |
 | `abandoned` | The issue is closed and the branch never merged. |
 | `parked` | The residue: issue open, no session. |
