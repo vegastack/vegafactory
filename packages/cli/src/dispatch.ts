@@ -862,9 +862,12 @@ export function latestArtifact(snap: Snapshot, type: string, permission: Permiss
 const BOOKKEEPING = new Set(['claim', 'release', 'ledger', 'ack', 'standdown'])
 // A stand-down the released version wrote, which carried `type=handback` before stand-downs had
 // their own marker. It is matched as the *whole* body and not a line within one, because a genuine
-// hand-back may quote a stand-down while asking something new — and reading that as bookkeeping
+// hand-back may repeat a stand-down while asking something new — and reading that as bookkeeping
 // would let a comment written before the question be chosen as its answer.
-const LEGACY_STANDDOWN = /^\*\*[^*\n]+\*\* stood down from #\d+: [^\n]+$/
+//
+// The name is held to the shape `machineName` produces rather than to any bold run, so a sentence
+// that merely begins with emphasis — `**Note** stood down from #5: …` — is still a question.
+const LEGACY_STANDDOWN = /^\*\*[a-z0-9][a-z0-9-]*\*\* stood down from #\d+: [^\n]+$/
 
 const withoutMarker = (body: string) => String(body ?? '').replace(/<!--[\s\S]*?-->/, '').trim()
 

@@ -1798,3 +1798,12 @@ test('the row it tells you to add is one the same parser accepts', () => {
   expect(parsed.caps).toEqual(DEFAULT_CAPS)
   expect(parsed.repos).toEqual(['o/r'])
 })
+
+// Only a name `machineName` could have produced counts, so a hand-back that opens with emphasis
+// and happens to use the same words is still a question.
+test('a bold run that is not a machine name does not make a comment bookkeeping', () => {
+  gh.addIssue({ number: 1, labels: ['waiting-on-operator', 'medium'] })
+  gh.addComment(1, 'here are the details you asked for', 'mk')
+  gh.addComment(1, '<!-- vsk:v1 type=handback -->\n**Note to self** stood down from #1: needs a decision on the base', 'mk')
+  expect(verdict(1).action).toBe('none')
+})
