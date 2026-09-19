@@ -37,7 +37,7 @@ import {
 import { issueFromBranch } from './hook.ts'
 import { defaultBranch } from './guard-rules.ts'
 import { stateOf, type State } from './labels.ts'
-import { maintainSelfUpdate, selfUpdateMode, type UpdateMode, type UpdateResult } from './self-update.ts'
+import { effectiveUpdateMode, maintainSelfUpdate, type UpdateMode, type UpdateResult } from './self-update.ts'
 import { lintPlan, normalizeGroupPath, parseIndependentGroups, sharedByEveryChild } from '../../../skills/dev/dev-plan/scripts/plan-lint.mjs'
 import { appKeyPath as workerAppKey } from './home.ts'
 
@@ -358,12 +358,14 @@ export function verifiedListing(root: string, options: { repo: string; host?: st
 // gets the shipped default. A profile that exists and cannot be read is not the same thing: it
 // may be the one saying `off`, and reading it as `auto` would start a networked global install
 // of executable code that the operator had refused.
-export function updateModeFor(root: string): UpdateMode {
+export function updateModeFor(root: string, home: string): UpdateMode {
+  let devMd: string | null = null
   try {
-    return selfUpdateMode(readFileSync(join(root, '.vegastack', 'dev.md'), 'utf8'))
+    devMd = readFileSync(join(root, '.vegastack', 'dev.md'), 'utf8')
   } catch (error) {
-    return (error as NodeJS.ErrnoException).code === 'ENOENT' ? selfUpdateMode('') : 'off'
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') return 'off'
   }
+  return effectiveUpdateMode({ home, devMd })
 }
 
 export function listedHere(root: string, options: { repo: string; host?: string; home?: string }): Listing {
@@ -1320,6 +1322,10 @@ export interface PollDeps {
   stop?: (pid: number, signal: NodeJS.Signals) => boolean
   // What the operating system says about a pid, which is half of a child's identity.
   start?: ProcessStart
+  // An issue this pass could not read. Those failures are deliberately swallowed so one bad issue
+  // does not cost the board its pass — but a pass that could not read everything has not shown the
+  // board is idle, and idle is the only state a five-minute install may run in.
+  onUnreadable?: (number: number, reason: string) => void
 }
 
 // The steps this machine has started. It lives across polls, so the next pass two minutes later
@@ -1385,6 +1391,7 @@ export async function poll(deps: PollDeps, inflight: Map<number, Inflight> = new
       wanted.push({ key, decision, candidate: { number: issue.number, action: decision.action, parent, files, from: stateOf(snap.state.issue!.labels).state! } })
     } catch (error) {
       deps.out(`#${issue.number}: could not be read (${(error as Error).message})`)
+      deps.onUnreadable?.(issue.number, (error as Error).message)
     }
   }
 
@@ -1982,7 +1989,7 @@ export async function runWorker(argv: string[], deps: CliDeps = {}): Promise<num
       }
       let devMd = ''
       try { devMd = readFileSync(join(root, '.vegastack', 'dev.md'), 'utf8') } catch { /* see updateModeFor */ }
-      const update = deps.update ?? (() => maintainSelfUpdate({ mode: updateModeFor(root), home: { home }, now: Date.now() }))
+      const update = deps.update ?? (() => maintainSelfUpdate({ mode: updateModeFor(root, home), home: { home }, now: Date.now() }))
       const identity = deps.runner ? null : appIdentity({ repo, keyPath, appId: appIdOf(env), fetch: deps.fetch })
       const runner = deps.runner ?? identity!.runner
       // `--json` puts exactly one document on stdout and nothing else, so every line this loop
@@ -2017,10 +2024,13 @@ export async function runWorker(argv: string[], deps: CliDeps = {}): Promise<num
         note(`note: step ${sayDuration(limit.stepMs, 'step')} is longer than the hour an installation token lives, so a run past that point can still work but can no longer write to GitHub — see #239`)
       }
       stepOutlivesToken(caps)
+      // Counted per pass by `onUnreadable`, which `poll` calls for every issue it had to skip.
+      let unreadable = 0
       const pollDeps: PollDeps = {
         root, repo, runner, machine, runId, caps, out: note, now: deps.now ?? Date.now,
         runStep: deps.runStep ?? defaultRunStep(devMd, env, { token: () => identity?.token() ?? null }), stop: deps.stop, start: deps.start,
         standDown: (number, reason, restoreTo) => standDown({ root, repo, number, runner, machine, restoreTo }, reason),
+        onUnreadable: () => { unreadable += 1 },
       }
       // Started steps outlive the pass that began them, so the next pass keeps their slots and
       // still acts on the rest of the board — a twenty-minute build does not stop the poll.
@@ -2061,6 +2071,10 @@ export async function runWorker(argv: string[], deps: CliDeps = {}): Promise<num
         if (signalled) {
           return finish(0, await shutDown(`this machine was asked to stop (${signalled})`))
         }
+        // Whether this pass actually finished reading the board. A pass that threw, or that could
+        // not read an issue, never learned whether work is waiting — so it is not the pass to
+        // spend five minutes installing in.
+        let boardRead = false
         try {
           // The roster is the enrolment, so it is refreshed and re-read once per pass: a row
           // removed in a control-room PR stands this machine down at the next poll, with nothing
@@ -2076,7 +2090,12 @@ export async function runWorker(argv: string[], deps: CliDeps = {}): Promise<num
           pollDeps.caps = still.entry.caps
           stepOutlivesToken(still.entry.caps)
           await identity?.freshen()
-          for (const candidate of await poll(pollDeps, inflight)) note(`#${candidate.number} ${candidate.action} started`)
+          unreadable = 0
+          const picked = await poll(pollDeps, inflight)
+          for (const candidate of picked) note(`#${candidate.number} ${candidate.action} started`)
+          // Idle means the whole board was read and nothing needed doing. An issue that could not
+          // be read might have been the one with work on it.
+          boardRead = unreadable === 0
         } catch (error) {
           note(`poll failed: ${(error as Error).message}`)
         }
@@ -2087,7 +2106,7 @@ export async function runWorker(argv: string[], deps: CliDeps = {}): Promise<num
         // runs, so a run picked up in this very pass still counts as alive here — which is what
         // keeps an update from starting while the board has work. The registry check above it is
         // asked at most once an hour, so an idle box is not calling npm every couple of minutes.
-        if (![...inflight.values()].some(run => !run.settled)) {
+        if (boardRead && ![...inflight.values()].some(run => !run.settled)) {
           let result: UpdateResult
           try { result = await update() } catch { result = { action: 'failed', before: '', after: '', latest: null, message: 'vegafactory update failed; continuing with the installed copy' } }
           if (result.action === 'updated') {

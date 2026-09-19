@@ -14,7 +14,7 @@ import { cacheDir, readBody, readState, replaceFile, syncIssue, withLock } from 
 import { askText, learningsPath, pendingNote } from './learning.ts'
 import { detectRepo, evidenceChangedAt, findValidAck, latestOfType, permissionLookup, repoRoot, snapshot } from './issue.ts'
 import { stateOf } from './labels.ts'
-import { clearUpdateNote, latestPublishedVersion, maintainSelfUpdate, packageVersion, readUpdateNote, selfUpdateMode, SELF_UPDATE_LIMIT_S, writeUpdateNote, type LatestVersion } from './self-update.ts'
+import { effectiveUpdateMode, installArgs, latestPublishedVersion, maintainSelfUpdate, packageVersion, readUpdateNote, SELF_UPDATE_LIMIT_S, writeUpdateNote, type LatestVersion } from './self-update.ts'
 
 export const HOOK_EVENTS = ['session-start', 'prompt', 'pre-tool', 'post-tool', 'stop', 'session-end'] as const
 export type HookEvent = typeof HOOK_EVENTS[number]
@@ -580,14 +580,17 @@ function collectStats(event: HookEvent, cwd: string, deps: HookDeps) {
 function finishedUpdate(now: number, home: { home: string }): string | null {
   const note = readUpdateNote(home)
   if (!note.startedFrom || typeof note.startedAt !== 'number') return null
+  // Only the attempt is consumed. Clearing the whole note would drop `checkedAt` and `latest`
+  // too, and the very next session would ask npm again inside the hour this note exists to hold.
+  const keep = () => writeUpdateNote({ checkedAt: note.checkedAt, latest: note.latest }, home)
   if (packageVersion !== note.startedFrom) {
-    clearUpdateNote(home)
+    keep()
     return `vegafactory updated ${note.startedFrom} → ${packageVersion} in the background since the last session`
   }
   // Still on the old version well past npm's own bound: the install did not land. Say so once
   // rather than every session forever, and let the next check start again from scratch.
   if (now - note.startedAt > SELF_UPDATE_LIMIT_S * 2 * 1000) {
-    clearUpdateNote(home)
+    keep()
     return `a background update to vegafactory ${note.startedTo ?? 'a newer version'} did not finish; still on ${packageVersion} — run: vegafactory update`
   }
   return null
@@ -596,24 +599,32 @@ function finishedUpdate(now: number, home: { home: string }): string | null {
 async function attendedUpdate(cwd: string, deps: HookDeps): Promise<string | null> {
   try {
     const root = repoRoot(cwd)
-    let profile = ''
+    let devMd: string | null = null
     try {
-      profile = readFileSync(join(root, '.vegastack', 'dev.md'), 'utf8')
+      devMd = readFileSync(join(root, '.vegastack', 'dev.md'), 'utf8')
     } catch (error) {
       // No profile at all is a project that predates the knob, and it gets the shipped default.
       // A profile that exists and cannot be read is different: it may be the one saying `off`,
       // and reading it as "auto" would start a networked global install the operator refused.
       if ((error as NodeJS.ErrnoException).code !== 'ENOENT') return null
     }
-    const mode = selfUpdateMode(profile)
+    const mode = effectiveUpdateMode({ home: deps.home, devMd })
     if (mode === 'off') return null
     const settled = finishedUpdate(deps.now(), { home: deps.home })
     if (settled) return settled
+    // One attempt at a time. Two sessions opened a minute apart would otherwise each start their
+    // own global install of the same package, over each other, and each reset the clock the
+    // failure report is measured from — so the second is told what the first is doing instead.
+    const claim = readUpdateNote({ home: deps.home })
+    if (claim.startedFrom && typeof claim.startedAt === 'number') {
+      return `vegafactory ${claim.startedTo ?? 'a newer version'} is already installing in the background; this session continues with ${packageVersion}`
+    }
     const result = await maintainSelfUpdate({ mode: 'notify', latest: deps.latest, home: { home: deps.home }, now: deps.now() })
     if (result.action !== 'available' || mode !== 'auto') return result.message
     // npm gets its own bound and executable. Calling this entry file again races the global
     // install replacing that file, and ordinary hook work has a deliberately shorter watchdog.
-    deps.detach(['npm', 'install', '-g', '@vegastack/vegafactory@latest'], cwd, SELF_UPDATE_LIMIT_S)
+    // The install is pinned to the registry and the version the check just approved.
+    deps.detach(['npm', ...installArgs(result.latest!)], cwd, SELF_UPDATE_LIMIT_S)
     writeUpdateNote({ ...readUpdateNote({ home: deps.home }), startedFrom: result.before, startedTo: result.latest ?? undefined, startedAt: deps.now() }, { home: deps.home })
     return `updating vegafactory ${result.before} → ${result.latest} in the background; this session continues with ${result.before}`
   } catch {

@@ -9,7 +9,7 @@ import type { GhRunner } from '../src/gh.ts'
 import { detachBounded, issueFromBranch, issueFromWorktree, readHookInput, runHook, type HookDeps } from '../src/hook.ts'
 import { ackBody, artifactHash } from '../src/issue.ts'
 import { addLesson, readLessons } from '../src/learning.ts'
-import { packageVersion, readUpdateNote, SELF_UPDATE_LIMIT_S, writeUpdateNote } from '../src/self-update.ts'
+import { installArgs, packageVersion, readUpdateNote, SELF_UPDATE_LIMIT_S, writeUpdateNote } from '../src/self-update.ts'
 import { FakeGitHub } from './fake-github.ts'
 
 const git = (cwd: string, ...args: string[]) => {
@@ -700,6 +700,48 @@ describe('usage collection', () => {
     expect(await start()).not.toContain('updated 0.0.1')
   })
 
+  // Two sessions a minute apart would each have started their own global install of the same
+  // package, over each other, and each reset the clock the failure report is measured from.
+  test('only one background install runs at a time', async () => {
+    writeFileSync(join(plain, '.vegastack/dev.md'), 'repo: o/r · default branch main\nvegafactory-update: auto\n')
+    const calls: string[][] = []
+    const start = async () => {
+      out = []
+      await runHook(['session-start', '--harness', 'claude'], {
+        ...deps(), latest: async () => '9.0.0', detach: (command) => { calls.push(command); return undefined },
+      }, Readable.from([Buffer.from(JSON.stringify({ cwd: plain }))]))
+      return JSON.parse(out.join('\n')).hookSpecificOutput.additionalContext as string
+    }
+    expect(await start()).toContain('in the background')
+    expect(calls.filter(command => command[0] === 'npm')).toHaveLength(1)
+
+    // The second session is told what the first is doing, and starts nothing.
+    expect(await start()).toContain('is already installing in the background')
+    expect(calls.filter(command => command[0] === 'npm')).toHaveLength(1)
+    // And the first attempt's clock is untouched, so its failure is still reported on time.
+    expect(readUpdateNote({ home: fakeHome }).startedAt).toBe(gh.clock)
+  })
+
+  // The note holds two different things: which install is running, and when npm was last asked.
+  // Consuming the first used to throw away the second, so the next session asked npm again inside
+  // the hour the note exists to hold.
+  test('reporting an outcome keeps the hourly registry answer', async () => {
+    writeFileSync(join(plain, '.vegastack/dev.md'), 'repo: o/r · default branch main\nvegafactory-update: auto\n')
+    const checkedAt = gh.clock
+    writeUpdateNote({ checkedAt, latest: '9.0.0', startedFrom: '0.0.1', startedTo: '9.0.0', startedAt: checkedAt }, { home: fakeHome })
+    let asked = 0
+    out = []
+    await runHook(['session-start', '--harness', 'claude'], {
+      ...deps(), latest: async () => { asked += 1; return '9.0.0' }, detach: () => undefined,
+    }, Readable.from([Buffer.from(JSON.stringify({ cwd: plain }))]))
+    expect(JSON.parse(out.join('\n')).hookSpecificOutput.additionalContext).toContain('updated 0.0.1')
+    // The attempt is consumed; what npm said is kept.
+    const after = readUpdateNote({ home: fakeHome })
+    expect(after.startedFrom).toBeUndefined()
+    expect(after).toMatchObject({ checkedAt, latest: '9.0.0' })
+    expect(asked).toBe(0)
+  })
+
   test('a background update that never landed is reported once, not forever', async () => {
     writeFileSync(join(plain, '.vegastack/dev.md'), 'repo: o/r · default branch main\nvegafactory-update: auto\n')
     const at = gh.clock
@@ -752,8 +794,10 @@ describe('usage collection', () => {
     expect(code).toBe(0)
     // The version comes from the package, not a literal: a release would otherwise break this test.
     expect(JSON.parse(out.join('\n')).hookSpecificOutput.additionalContext).toContain(`updating vegafactory ${packageVersion} → 9.0.0 in the background`)
+    // The detached install is pinned the same way the foreground one is: the registry the check
+    // used and the exact version it returned, so npm's own configuration cannot redirect it.
     expect(calls.filter(call => call.command[0] === 'npm')).toEqual([{
-      command: ['npm', 'install', '-g', '@vegastack/vegafactory@latest'], cwd: plain, limit: 300,
+      command: ['npm', ...installArgs('9.0.0')], cwd: plain, limit: 300,
     }])
     expect(calls.some(call => call.command[0] === 'vf' && call.command.includes('update'))).toBe(false)
   })

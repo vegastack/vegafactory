@@ -15,6 +15,7 @@ import {
   updateModeFor,
   type Candidate, type Fetch, type GitRun, type Inflight, type PollDeps, type Probe, type RunStep, type StepResult,
 } from '../src/worker.ts'
+import type { GhRunner } from '../src/gh.ts'
 import { ackBody, artifactHash, permissionLookup, snapshot } from '../src/issue.ts'
 import { cacheDir, syncIssue } from '../src/issue-cache.ts'
 import { FakeGitHub } from './fake-github.ts'
@@ -1267,15 +1268,39 @@ describe('the command', () => {
     mkdirSync(join(box, '.vegastack'), { recursive: true })
 
     // No profile at all: a project older than the knob, so the shipped default stands.
-    expect(updateModeFor(box)).toBe('auto')
+    expect(updateModeFor(box, box)).toBe('auto')
 
     writeFileSync(join(box, '.vegastack', 'dev.md'), 'repo: o/r\nvegafactory-update: notify\n')
-    expect(updateModeFor(box)).toBe('notify')
+    expect(updateModeFor(box, box)).toBe('notify')
 
     chmodSync(join(box, '.vegastack', 'dev.md'), 0)
     try {
-      expect(updateModeFor(box)).toBe('off')
+      expect(updateModeFor(box, box)).toBe('off')
     } finally { chmodSync(join(box, '.vegastack', 'dev.md'), 0o644) }
+  })
+
+  // An install takes its own five-minute bound and runs in the poll loop. A pass that could not
+  // read the whole board has not shown the box is idle — the issue it failed to read may have been
+  // the one with work on it — so that is not the pass to spend five minutes in.
+  test('a pass that could not read the board does not stop to update', async () => {
+    project()
+    gh.addIssue({ number: 1, labels: ['planning', 'medium'] })
+    let updates = 0
+    const counting = async () => {
+      updates += 1
+      return { action: 'current' as const, before: '0.21.0', after: '0.21.0', latest: '0.21.0', message: 'current' }
+    }
+    // Every issue read throws, so the pass finishes but knows nothing about the board.
+    const broken = await run(['run'], {
+      update: counting,
+      runner: ((args: string[], input?: string) => (args.some((arg) => String(arg).includes('issues/1')) ? { code: 1, stdout: '', stderr: 'the issue could not be fetched' } : gh.runner(args, input))) as GhRunner,
+      sleep: async () => { process.emit('SIGTERM' as NodeJS.Signals) },
+    })
+    expect(broken.code).toBe(0)
+    expect(broken.text).toContain('could not be read')
+    expect(updates).toBe(0)
+    // The idle pass that *does* update is the test above this one; this is only about the pass
+    // that could not see the board.
   })
 
   test('the worker updates between passes only when no agent is running', async () => {

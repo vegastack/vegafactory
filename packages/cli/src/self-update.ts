@@ -3,12 +3,13 @@ import { mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { updateNotePath, type HomeOptions } from './home.ts'
+import { loadProfile } from './control-room.ts'
 
 const packageRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 export const packageVersion = (JSON.parse(readFileSync(join(packageRoot, 'package.json'), 'utf8')) as { version: string }).version
 
 export type UpdateMode = 'off' | 'notify' | 'auto'
-export type UpdateAction = 'none' | 'current' | 'available' | 'updated' | 'failed' | 'unavailable'
+export type UpdateAction = 'none' | 'current' | 'available' | 'updated' | 'unverified' | 'failed' | 'unavailable'
 export interface UpdateResult {
   action: UpdateAction
   before: string
@@ -20,6 +21,8 @@ export interface UpdateResult {
 export interface UpdateRunResult { code: number; stdout: string; stderr: string }
 export type UpdateRunner = (command: string, args: string[], timeoutMs: number) => UpdateRunResult
 export type LatestVersion = () => Promise<string | null>
+
+const defaultResolve = (input: { home: string; devMd: string }) => loadProfile(input)
 
 export const SELF_UPDATE_LIMIT_S = 5 * 60
 
@@ -105,6 +108,17 @@ export function semverLess(a: string, b: string): boolean {
 // executable code runs unattended, so a redirectable base — an environment variable, a mirror —
 // would let whoever set it choose what this machine installs and then runs as its own user.
 const REGISTRY = 'https://registry.npmjs.org'
+export const PACKAGE = '@vegastack/vegafactory'
+
+// The install has to land the thing the check approved. `npm install -g <name>@latest` resolves
+// through whatever registry npm is configured with — `registry=` in any .npmrc, an `@vegastack:`
+// scope mapping, or an inherited environment variable — so an official registry saying "newer"
+// could install a different package entirely from somewhere else, and run it as this user. Both
+// flags are passed because the scope mapping wins over the plain one, and the version is the exact
+// one the check returned rather than a second, later `@latest`.
+export function installArgs(version: string): string[] {
+  return ['install', '-g', `--registry=${REGISTRY}`, `--${PACKAGE.split('/')[0]}:registry=${REGISTRY}`, `${PACKAGE}@${version}`]
+}
 
 export async function latestPublishedVersion(fetcher: typeof fetch = fetch): Promise<string | null> {
   try {
@@ -115,6 +129,22 @@ export async function latestPublishedVersion(fetcher: typeof fetch = fetch): Pro
   } catch {
     return null
   }
+}
+
+// The value that actually applies here: the org's, then the group's, then this repo's — a locked
+// `off` in `org.md` is the whole point of the control room, and reading only the local file made
+// every inherited value look like a missing one, which means the shipped `auto`.
+//
+// Failure is closed, not open. A profile that cannot be resolved may be the one refusing this, and
+// the thing being decided is whether to fetch and run executable code unattended.
+export function effectiveUpdateMode(input: { home: string; devMd: string | null; resolve?: (input: { home: string; devMd: string }) => { ok: boolean; values: Record<string, unknown> } }): UpdateMode {
+  if (input.devMd === null) return selfUpdateMode('')
+  let profile: { ok: boolean; values: Record<string, unknown> }
+  try { profile = (input.resolve ?? defaultResolve)({ home: input.home, devMd: input.devMd }) } catch { return 'off' }
+  if (!profile.ok) return 'off'
+  const value = profile.values['vegafactory-update']
+  if (value === undefined || value === null) return selfUpdateMode('')
+  return selfUpdateMode(`vegafactory-update: ${String(value)}`)
 }
 
 // An unreadable policy leaves the machine untouched. A missing line keeps existing projects on
@@ -168,7 +198,7 @@ export async function maintainSelfUpdate(options: {
   const run = options.run ?? defaultUpdateRunner
   let installed: UpdateRunResult
   try {
-    installed = run('npm', ['install', '-g', '@vegastack/vegafactory@latest'], SELF_UPDATE_LIMIT_S * 1000)
+    installed = run('npm', installArgs(latest), SELF_UPDATE_LIMIT_S * 1000)
   } catch (error) {
     return idle('failed', before, latest, `update failed; continuing with vegafactory ${before}: ${safe((error as Error).message)}`)
   }
@@ -177,11 +207,21 @@ export async function maintainSelfUpdate(options: {
     return idle('failed', before, latest, `update failed; continuing with vegafactory ${before}: ${detail}`)
   }
 
-  let after = latest
+  // npm exiting zero says the command ran, not that this machine now has the new copy. The version
+  // it actually reports is the only evidence of that, so the three answers are kept apart: the new
+  // version is an update, the old one is a failure however npm exited, and no usable answer is
+  // neither — reported as unverified rather than announced as a success nobody checked.
+  let observed: string | null = null
   try {
     const checked = run('vegafactory', ['--version'], 10_000)
     const value = checked.stdout.trim()
-    if (checked.code === 0 && VERSION.test(value)) after = value
-  } catch { /* npm completed; the registry version is the best available after value */ }
-  return { action: 'updated', before, after, latest, message: `updated vegafactory ${before} → ${after}` }
+    if (checked.code === 0 && VERSION.test(value)) observed = value
+  } catch { /* no answer is its own answer, below */ }
+  if (observed === null) {
+    return { action: 'unverified', before, after: before, latest, message: `installed vegafactory ${latest}, but could not confirm the version now on this machine; continuing with ${before}` }
+  }
+  if (semverLess(observed, latest)) {
+    return { action: 'failed', before, after: observed, latest, message: `update did not take: npm finished but this machine still reports vegafactory ${observed}` }
+  }
+  return { action: 'updated', before, after: observed, latest, message: `updated vegafactory ${before} → ${observed}` }
 }
