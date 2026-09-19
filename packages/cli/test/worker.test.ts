@@ -11,7 +11,7 @@ import {
   drain, filesFromParent, harnessAnswers, hitLimit, hooksWired, listedHere, mintToken, overlaps, parseWorkerArgs,
   parseNodes, poll, readActed, readRuns, readiness, recordRun, resetAt, RUNS_KEPT, runWorker, schedule, serviceCommands, stagePolicy,
   standDown, stepPrompt, tail, unitPath, unitText, unsafeForParallel,
-  noteChild, readChildren, refreshRoster, RETIRED_SERVICE_NAME, RETIRED_UNIT, releaseRunLock, reserve, runLockPath, takeRunLock, verifiedListing,
+  noteChild, readChildren, refreshRoster, releaseRunLock, reserve, runLockPath, takeRunLock, verifiedListing,
   type Candidate, type Fetch, type GitRun, type Inflight, type PollDeps, type Probe, type RunStep, type StepResult,
 } from '../src/worker.ts'
 import { ackBody, artifactHash, permissionLookup, snapshot } from '../src/issue.ts'
@@ -678,7 +678,7 @@ describe('one poll over the board', () => {
   test('a claim another machine already holds is not started twice', async () => {
     gh.addIssue({ number: 1, labels: ['planning', 'medium'] })
     // Another machine's dispatcher got there first, between this pass's read and its launch.
-    const body = claimBody({ owner: 'builder:dispatch-1', kind: 'dispatch', harness: 'worker', model: 'plan' })
+    const body = claimBody({ owner: 'builder:dispatch-1', kind: 'worker', harness: 'worker', model: 'plan' })
     const notes: string[] = []
     const steps: number[] = []
     await pass({
@@ -1042,28 +1042,17 @@ describe('readiness and the service', () => {
     expect(unitPath('darwin', '/home/x')).toBe('/home/x/Library/LaunchAgents/com.vegastack.vegafactory.worker.plist')
     expect(unitPath('linux', '/home/x')).toBe('/home/x/.config/systemd/user/vegafactory-worker.service')
     expect(serviceCommands('linux', '/u', 'disable')[0]).toEqual(['systemctl', '--user', 'disable', '--now', 'vegafactory-worker.service'])
-    // The retired label goes first. `disable` finds its unit path from the platform alone, so
-    // after the rename it would take the new service away and leave the old one restarting on a
-    // verb this CLI no longer has — or running beside the new one and holding its lock.
-    const enable = serviceCommands('darwin', '/u', 'enable', 501)
-    expect(enable[0]).toEqual(['launchctl', 'bootout', `gui/501/${RETIRED_SERVICE_NAME}`])
-    expect(enable[1]).toEqual(['launchctl', 'bootstrap', 'gui/501', '/u'])
-    expect(serviceCommands('linux', '/u', 'enable')[0]).toEqual(['systemctl', '--user', 'disable', '--now', RETIRED_UNIT])
-    // And the tombstones still name what the released version installed.
-    expect(RETIRED_SERVICE_NAME).toBe('com.vegastack.vegafactory.dispatch')
-    expect(RETIRED_UNIT).toBe('vegafactory-dispatch.service')
+    expect(serviceCommands('darwin', '/u', 'enable', 501)[0]).toEqual(['launchctl', 'bootstrap', 'gui/501', '/u'])
   })
 
-  // The released version wrote `kind=dispatch` on claims that are on issues now. An unrecognised
-  // kind falls back to `session`, which goes stale after four hours rather than thirty minutes.
-  test('a claim written by the released version is still a worker claim', () => {
-    const body = claimBody({ owner: 'box:1', kind: 'dispatch', harness: 'dispatch', model: 'x' })
-    expect(body).toContain('kind=dispatch')
-    const older = { id: 1, author: 'mk', authorType: 'User', type: 'claim', createdAt: '2026-09-01T00:00:00Z', updatedAt: '', changedAt: '' }
-    const state = { issue: { labels: [] }, comments: { 1: older } } as never
-    const found = claimsOf(state, () => body, () => true).claims[0]!
-    expect(found.kind).toBe('dispatch')
-    expect(TIMEOUT_MS[found.kind]).toBe(30 * 60_000)
+  // A kind this file does not recognise is a session, which is the longer-lived and so the safer
+  // answer: read as a worker's, a claim would be taken over after thirty minutes.
+  test('an unknown claim kind is a session, not a worker', () => {
+    const body = claimBody({ owner: 'box:1', kind: 'worker', harness: 'worker', model: 'x' }).replace('kind=worker', 'kind=something')
+    const entry = { id: 1, author: 'mk', authorType: 'User', type: 'claim', createdAt: '2026-09-01T00:00:00Z', updatedAt: '', changedAt: '' }
+    const state = { issue: { labels: [] }, comments: { 1: entry } } as never
+    expect(claimsOf(state, () => body, () => true).claims[0]!.kind).toBe('session')
+    expect(TIMEOUT_MS.worker).toBe(30 * 60_000)
   })
 })
 

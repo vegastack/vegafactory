@@ -51,11 +51,6 @@ export const MAX_FAILURES = 3
 export const MAX_NOTE = 400
 
 export const SERVICE_NAME = 'com.vegastack.vegafactory.worker'
-// The label the released version installed. Kept so `enable` can boot out a service that would
-// otherwise keep restarting on an `ExecStart` naming a verb this CLI no longer has — and, if the
-// old verb survived as an alias, would hold the run lock and silence the new one silently.
-export const RETIRED_SERVICE_NAME = 'com.vegastack.vegafactory.dispatch'
-export const RETIRED_UNIT = 'vegafactory-dispatch.service'
 
 // ---------------------------------------------------------------------------------------------
 // The roster: the control room's nodes.md
@@ -688,14 +683,11 @@ export function serviceCommands(platform: NodeJS.Platform, path: string, verb: '
   if (platform === 'darwin') {
     const target = `gui/${uid}`
     return verb === 'enable'
-      // The retired label goes first. `disable` finds its unit path from the platform alone, so
-      // after the rename it would take the new service away and leave the old one restarting on a
-      // verb this CLI no longer has — or, worse, running beside the new one and holding its lock.
-      ? [['launchctl', 'bootout', `${target}/${RETIRED_SERVICE_NAME}`], ['launchctl', 'bootstrap', target, path], ['launchctl', 'enable', `${target}/${SERVICE_NAME}`]]
+      ? [['launchctl', 'bootstrap', target, path], ['launchctl', 'enable', `${target}/${SERVICE_NAME}`]]
       : [['launchctl', 'bootout', `${target}/${SERVICE_NAME}`]]
   }
   return verb === 'enable'
-    ? [['systemctl', '--user', 'disable', '--now', RETIRED_UNIT], ['systemctl', '--user', 'daemon-reload'], ['systemctl', '--user', 'enable', '--now', 'vegafactory-worker.service']]
+    ? [['systemctl', '--user', 'daemon-reload'], ['systemctl', '--user', 'enable', '--now', 'vegafactory-worker.service']]
     : [['systemctl', '--user', 'disable', '--now', 'vegafactory-worker.service']]
 }
 
@@ -708,10 +700,7 @@ export type Outcome = 'done' | 'blocked' | 'failed' | 'killed' | 'limit' | 'stop
 export interface RunRecord { at: string; issue: number; action: Action; outcome: Outcome; ms: number; machine: string; note: string }
 export interface Acted { at: number; action: Action; outcome: Outcome; trigger: number | null; failures: number; retryAt: number | null }
 
-// The directory keeps the name the released version gave it. Renaming it would strand the run
-// records, the child list and the lock of a machine that upgrades mid-run, and nobody reads this
-// path by hand.
-export const workerDir = (root: string) => join(root, '.vegastack', '.tmp', 'dispatch')
+export const workerDir = (root: string) => join(root, '.vegastack', '.tmp', 'worker')
 export const childrenPath = (root: string) => join(workerDir(root), 'children.json')
 const runsPath = (root: string) => join(workerDir(root), 'runs.jsonl')
 const actedPath = (root: string) => join(workerDir(root), 'acted.json')
@@ -1460,7 +1449,7 @@ export const ownerFor = (machine: string, runId: string, number: number) => `${m
 export function reserve(ctx: { root: string; repo: string; number: number; runner: GhRunner }, machine: string, runId: string, action: Action, now = Date.now()): Reservation {
   const owner = ownerFor(machine, runId, ctx.number)
   try {
-    const outcome = claim(ctx, { owner, kind: 'dispatch', harness: 'worker', model: action }, now)
+    const outcome = claim(ctx, { owner, kind: 'worker', harness: 'worker', model: action }, now)
     return { ok: outcome.ok, owner, reason: outcome.message }
   } catch (error) {
     return { ok: false, owner, reason: `the claim could not be taken: ${(error as Error).message}` }

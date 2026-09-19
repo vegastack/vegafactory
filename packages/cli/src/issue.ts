@@ -430,12 +430,8 @@ export function runIssue(argv: string[], { runner = defaultRunner, cwd = process
       return 0
     }
     case 'claim': {
-      // `worker` is what the flag is called now. `dispatch` is the value already written on live
-      // claims and on the wire, so it is still accepted and still means the same thing — a script
-      // written against the released CLI keeps working, and its claims keep their own staleness.
-      const said = args.flags.kind ?? 'session'
-      if (said !== 'session' && said !== 'worker' && said !== 'dispatch') throw new Error('--kind must be session or worker')
-      const kind: ClaimKind = said === 'session' ? 'session' : 'dispatch'
+      const kind = (args.flags.kind ?? 'session') as ClaimKind
+      if (kind !== 'session' && kind !== 'worker') throw new Error('--kind must be session or worker')
       if (!args.flags.harness || !args.flags.model) throw new Error('--harness and --model are required')
       const outcome = claim(ctx, { owner, kind, harness: args.flags.harness, model: args.flags.model, takeBackBy: args.flags['take-back-by']?.replace(/^@/, '') })
       const wait = outcome.waitMs ? `\nwait up to ${outcome.waitMs / 60_000} min for the previous holder's last push, then pull the branch` : ''

@@ -4,10 +4,10 @@ The project's story, newest first: what got built, why, and how it went — for 
 
 ## 19-09-2026 — Dispatch becomes worker ([#255](https://github.com/vegastack/vegafactory/issues/255))
 
-- **What:** The verb, the module and the service are `worker`, matching the column in `nodes.md` that decides which machines may run unattended.
+- **What:** The verb, the module, the service, the claim kind and the paths are all `worker`, matching the column in `nodes.md` that decides which machines run unattended.
 - **Why:** Step 4 of [#251](https://github.com/vegastack/vegafactory/issues/251). "Dispatch" was a noun for a thing; it is now only the act of handing work over.
-- **How it went:** The renaming was the easy half. Two things would have broken quietly: the old launchd service, which `disable` could no longer find, would have restarted forever on a verb that no longer exists — or run beside the new one and hold its lock, so the rename looked successful while nothing ran. And `kind=dispatch` is written on claims that exist on issues now; an unrecognised kind falls back to `session`, which goes stale after four hours instead of thirty minutes. Both are covered by tests that fail when the fix is reverted.
-- **Changed:** the verb tree, `worker.ts`, the unit and its tombstones, the claim alias, the `--kind` flag, the `in-progress` label text and the prose.
+- **How it went:** The first pass carried two compatibility paths — a tombstone so `enable` could retire the old service, and an alias so claims written `kind=dispatch` kept their thirty-minute staleness. Both were then checked against the machine rather than assumed: no launchd unit is installed and no claim of that kind exists anywhere. The operator confirmed nothing is deployed, so both went. What is left is one spelling with nothing behind it.
+- **Changed:** the verb tree, `worker.ts`, the unit, the claim kind and its timeout, the `--kind` flag, the `in-progress` label text and the prose.
 - **Decisions:** none new.
 
 — approved by (kmanojkumar) · built by claude · branch feat/255-dispatch-becomes-worker

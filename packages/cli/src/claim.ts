@@ -8,8 +8,8 @@ import { permissionLookup, readBody, readState, syncIssue, WRITE_ROLES, type Cac
 import { stateOf, transition } from './labels.ts'
 import { recordStage } from './stages.ts'
 
-export type ClaimKind = 'session' | 'dispatch'
-export const TIMEOUT_MS: Record<ClaimKind, number> = { session: 4 * 60 * 60_000, dispatch: 30 * 60_000 }
+export type ClaimKind = 'session' | 'worker'
+export const TIMEOUT_MS: Record<ClaimKind, number> = { session: 4 * 60 * 60_000, worker: 30 * 60_000 }
 export const HEARTBEAT_EVERY_MS = 5 * 60_000
 
 export interface Claim {
@@ -135,11 +135,9 @@ export function claimsOf(state: CacheState, body: Body, trusted: Trusted): { cla
       const keys = markerKeys(body(entry))
       if (!keys.owner) continue
       const claim: Claim = {
-        // `worker` and `dispatch` are one kind. The released version wrote `dispatch` and those
-        // claims are on issues now; an unrecognised kind falls back to `session`, whose claim goes
-        // stale after four hours rather than thirty minutes, so renaming what is written without
-        // reading both would be a silent correctness change.
-        owner: keys.owner, kind: keys.kind === 'dispatch' || keys.kind === 'worker' ? 'dispatch' : 'session',
+        // Anything this file does not recognise is a session, which is the longer-lived and so
+        // the safer answer: a claim read as a worker's would be taken over after thirty minutes.
+        owner: keys.owner, kind: keys.kind === 'worker' ? 'worker' : 'session',
         harness: keys.harness ?? '', model: keys.model ?? '', claimedAt: entry.createdAt, commentId: entry.id,
       }
       history.push(claim)

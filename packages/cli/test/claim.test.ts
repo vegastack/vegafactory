@@ -106,8 +106,8 @@ describe('claim', () => {
     expect(holder().holder?.owner).toBe('b:2')
   })
 
-  test('a dispatched run goes stale after 30 minutes, a session only after 4 hours', () => {
-    claim(ctx, request('a:1', { kind: 'dispatch' }), now())
+  test('a worker run goes stale after 30 minutes, a session only after 4 hours', () => {
+    claim(ctx, request('a:1', { kind: 'worker' }), now())
     gh.clock += 31 * 60_000
     expect(holder().holder).toBeNull()
     expect(holder().stale[0]?.owner).toBe('a:1')
