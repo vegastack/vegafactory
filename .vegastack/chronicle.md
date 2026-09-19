@@ -2,6 +2,16 @@
 
 The project's story, newest first: what got built, why, and how it went — for the operator's future recall. Format home: the dev-chronicle skill.
 
+## 19-09-2026 — One home, and nothing to reach the old one ([#252](https://github.com/vegastack/vegafactory/issues/252))
+
+- **What:** Everything this product keeps about a machine moved to `~/.vegafactory/`, computed by one module instead of thirteen paths spread over seven files and two languages.
+- **Why:** `~/.vegastack/` is shared with other VegaStack tooling, so nothing here could safely prune it. Step 1 of [#251](https://github.com/vegastack/vegafactory/issues/251), and the step the rest is untestable without.
+- **How it went:** Most of the cost was a migration that should never have been written. Ten review rounds found a new way for it to lose something in every one, and it moved this machine's own files during a test. It went when the operator pointed out that one machine has anything to move and the rest is greenfield. The module went from 236 lines to 73.
+- **Changed:** `home.ts` with a `VEGAFACTORY_HOME` override · thirteen join sites, including a containment check written apart from the path it guarded · two renames · the App key under `worker/` · README and the App, control-room and onboarding references.
+- **Decisions:** none new.
+
+— approved by (kmanojkumar) · built by claude · branch chore/252-one-home-for-everything-vegafactory-stor
+
 ## 19-09-2026 — A node knows its own name ([#253](https://github.com/vegastack/vegafactory/issues/253))
 
 - **What:** `nodeId()` — `<os-user>@<hostname>`, derived and never configured.

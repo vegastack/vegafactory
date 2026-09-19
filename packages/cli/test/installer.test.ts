@@ -1,15 +1,18 @@
 import { afterAll, beforeAll, describe, expect, test } from 'bun:test'
-import { existsSync } from 'node:fs'
+import { existsSync, statSync } from 'node:fs'
 import { chmod, cp, mkdtemp, mkdir, readFile, realpath, rm, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
+import { refuseAmbientHome } from './no-ambient-home.ts'
+
+refuseAmbientHome()
 
 const packageRoot = resolve(import.meta.dir, '..')
 const cli = join(packageRoot, 'dist/index.js')
 let temporary = ''
 
 function run(home: string, args: string[]) {
-  return Bun.spawnSync(['node', cli, ...args], { cwd: packageRoot, env: { ...process.env, HOME: home } })
+  return Bun.spawnSync(['node', cli, ...args], { cwd: packageRoot, env: { ...process.env, HOME: home, VEGAFACTORY_HOME: join(home, '.vegafactory') } })
 }
 
 beforeAll(async () => {
@@ -237,7 +240,7 @@ describe('@vegastack/vegafactory installer', () => {
     await script('npm', 'echo "npm error 403 Forbidden" >&2; exit 1')
     const home = join(temporary, 'init-home')
     await mkdir(home, { recursive: true })
-    const result = Bun.spawnSync(['node', cli, 'init'], { cwd: home, env: { ...process.env, HOME: home, PATH: `${bin}:${process.env.PATH}` } })
+    const result = Bun.spawnSync(['node', cli, 'init'], { cwd: home, env: { ...process.env, HOME: home, VEGAFACTORY_HOME: join(home, '.vegafactory'), PATH: `${bin}:${process.env.PATH}` } })
     const out = result.stdout.toString()
     expect(result.exitCode).toBe(1)
     expect(out).toContain('FAIL  cli')
@@ -647,4 +650,27 @@ describe('selecting a family', () => {
     expect(manifest.repository.url).toContain('vegastack/vegafactory')
     expect(manifest.homepage).toContain('vegastack/vegafactory')
   })
+})
+
+// The product's own home holds the App key and the control-room clones, so it is owner-only. A
+// project's `.vegastack/` is a directory in somebody's repository and is none of this code's
+// business to tighten.
+test('a global install makes the home owner-only; a project install leaves the repo alone', async () => {
+  const temporary = await realpath(await mkdtemp(join(tmpdir(), 'install-modes-')))
+  const factory = join(temporary, '.vegafactory')
+  const project = join(temporary, 'a-project')
+  await mkdir(project, { recursive: true })
+
+  const global = run(temporary, ['skills', 'add', 'dev-architect', '--agent', 'claude', '--global', '--non-interactive'])
+  expect(global.exitCode, global.stderr.toString()).toBe(0)
+  expect(statSync(factory).mode & 0o777).toBe(0o700)
+
+  const local = run(temporary, ['skills', 'add', 'dev-architect', '--agent', 'claude', '--dir', project, '--non-interactive'])
+  expect(local.exitCode, local.stderr.toString()).toBe(0)
+  // Compared against a directory made the ordinary way rather than against a literal, because what
+  // an ordinary `mkdir` produces depends on the umask — under 077 it is 0700 anyway, and the point
+  // is that this code chose nothing, not that the answer came out permissive.
+  const ordinary = join(temporary, 'made-the-ordinary-way')
+  await mkdir(ordinary)
+  expect(statSync(join(project, '.vegastack')).mode & 0o777).toBe(statSync(ordinary).mode & 0o777)
 })

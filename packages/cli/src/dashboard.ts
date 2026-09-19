@@ -8,6 +8,7 @@ import {
   compact, duration, loadEvents, parseSince, summarize, totalTokens,
   type Bucket, type StatsEvent, type Summary, type Tokens,
 } from './stats.ts'
+import { makeFactoryHome, statsHtmlPath } from './home.ts'
 
 const escape = (text: string) => text.replace(/[&<>"']/g, (char) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[char]!))
 
@@ -107,7 +108,7 @@ Writes one self-contained HTML file from the collected and pushed turns — oper
 issues, models, days and stages. No server and no network.
 
 Options:
-  --out PATH        where to write it (default ~/.vegastack/stats.html)
+  --out PATH        where to write it (default ${statsHtmlPath()})
   --since 7d        only turns since then (7d, 12h, 30m or a date)
   --local           only this machine's own turns, not the control room
   --open            open the file afterwards
@@ -127,8 +128,11 @@ export function runDashboard(argv: string[], options: { home?: string; now?: () 
     return given
   }
   const since = value('--since') ? parseSince(value('--since')!, now()) : null
-  const target = expandHome(value('--out') ?? join(home, '.vegastack', 'stats.html'), home)
+  const target = expandHome(value('--out') ?? statsHtmlPath({ home }), home)
   const events = loadEvents(home, { since, shared: !argv.includes('--local') })
+  // Only when the page is going to its default place, which is inside the home this product owns.
+  // A `--out` somewhere else is the caller's directory and takes the caller's mode.
+  if (target === statsHtmlPath({ home })) makeFactoryHome({ home })
   mkdirSync(dirname(target), { recursive: true })
   writeFileSync(target, renderDashboard(events, { generatedAt: new Date(now()).toISOString() }))
   out(`${target} — ${events.length} turns`)

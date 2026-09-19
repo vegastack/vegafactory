@@ -2,6 +2,9 @@ import { afterAll, beforeAll, describe, expect, test } from 'bun:test'
 import { mkdir, mkdtemp, readFile, realpath, readdir, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
+import { refuseAmbientHome } from './no-ambient-home.ts'
+
+refuseAmbientHome()
 
 const packageRoot = resolve(import.meta.dir, '..')
 let temporary = ''
@@ -25,7 +28,7 @@ describe('publishable package', () => {
     const cli = join(installRoot, 'node_modules/.bin/vegafactory')
     const project = join(temporary, 'packed-project')
     await mkdir(project, { recursive: true })
-    const add = Bun.spawnSync([cli, 'skills', 'add', 'dev-architect', '--agent', 'both', '--dir', project, '--non-interactive'], { cwd: temporary, env: { ...process.env, HOME: temporary } })
+    const add = Bun.spawnSync([cli, 'skills', 'add', 'dev-architect', '--agent', 'both', '--dir', project, '--non-interactive'], { cwd: temporary, env: { ...process.env, HOME: temporary, VEGAFACTORY_HOME: join(temporary, '.vegafactory') } })
     expect(add.exitCode).toBe(0)
     expect(await readFile(join(project, '.agents/skills/dev-architect/SKILL.md'), 'utf8')).toContain('name: dev-architect')
     expect(await readFile(join(project, '.claude/skills/dev-architect/SKILL.md'), 'utf8')).toContain('name: dev-architect')

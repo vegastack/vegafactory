@@ -41,8 +41,8 @@ describe('control-room knob and machine state', () => {
   })
 
   test('one copy per org under the machine root, refreshed at five minutes', () => {
-    expect(defaultClonePath('vegastack', '/home/mk')).toBe('/home/mk/.vegastack/control-room/vegastack')
-    expect(factoryConfigPath('/home/mk')).toBe('/home/mk/.vegastack/factory.json')
+    expect(defaultClonePath('vegastack', '/home/mk')).toBe('/home/mk/.vegafactory/control-room/vegastack')
+    expect(factoryConfigPath('/home/mk')).toBe('/home/mk/.vegafactory/factory.json')
     expect(MAX_AGE_MINUTES).toBe(5)
   })
 
@@ -63,7 +63,7 @@ describe('control-room knob and machine state', () => {
   test('a copy outside the machine store is refused rather than read', () => {
     expect(safeClonePath('/home/mk', '/elsewhere/acme')).toMatch(/outside/)
     expect(safeClonePath('/home/mk', 'relative/acme')).toMatch(/absolute and canonical/)
-    expect(safeClonePath('/home/mk', '/home/mk/.vegastack/control-room/../../etc')).toMatch(/absolute and canonical/)
+    expect(safeClonePath('/home/mk', '/home/mk/.vegafactory/control-room/../../etc')).toMatch(/absolute and canonical/)
   })
 
   test('recording one org never drops another, and never mutates the input', () => {
@@ -73,7 +73,7 @@ describe('control-room knob and machine state', () => {
     }))
     const after = withSyncResult(before, 'vegastack', {
       repo: 'vegastack/vegafactory-control-room',
-      path: '/home/mk/.vegastack/control-room/vegastack',
+      path: '/home/mk/.vegafactory/control-room/vegastack',
       branch: 'main', lastSyncedAt: '2026-09-03T12:00:00Z', sha: 'a1b2c3d',
     })
     expect(Object.keys(after.controlRooms).sort()).toEqual(['acme', 'vegastack'])
@@ -105,6 +105,9 @@ import { rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { publishedAlready, updateSettings, updateSettingsAtPath } from '../src/control-room.ts'
+import { refuseAmbientHome } from './no-ambient-home.ts'
+
+refuseAmbientHome()
 
 function git(args: string[], cwd: string) {
   const result = Bun.spawnSync(['git', ...args], { cwd, env: { ...process.env, GIT_AUTHOR_NAME: 't', GIT_AUTHOR_EMAIL: 't@e', GIT_COMMITTER_NAME: 't', GIT_COMMITTER_EMAIL: 't@e' } })
@@ -115,7 +118,7 @@ function git(args: string[], cwd: string) {
 // A machine with one verified copy of acme's room, exactly as a successful sync leaves it.
 async function machine(name: string) {
   const home = await realpath(await mkdtemp(join(tmpdir(), `profile-221-${name}-`)))
-  const room = join(home, '.vegastack/control-room/acme')
+  const room = join(home, '.vegafactory/control-room/acme')
   const origin = join(home, 'origin.git')
   await mkdir(join(room, 'groups/dev'), { recursive: true })
   await writeFile(join(room, 'org.md'), 'tests: required   # locked\nstats-people: off\n')
@@ -126,7 +129,7 @@ async function machine(name: string) {
   const sha = git(['rev-parse', 'HEAD'], room)
   const record = { repo: 'acme/room', path: room, branch: 'main', remote: origin, sha, lastSyncedAt: new Date().toISOString() }
   const write = async (entry: Record<string, unknown>) =>
-    writeFile(join(home, '.vegastack/factory.json'), JSON.stringify({ schemaVersion: 1, controlRooms: { acme: entry } }))
+    writeFile(join(home, '.vegafactory/factory.json'), JSON.stringify({ schemaVersion: 1, controlRooms: { acme: entry } }))
   await write(record)
   return { home, room, origin, sha, record, write, devMd: 'control-room: acme/room#dev\n' }
 }

@@ -149,7 +149,7 @@
   },
   "controlRoom": {
     "available": false,
-    "reason": "no local control-room clone at /Users/kmanojkumar/.vegastack/control-room/vegastack \u2014 run `vegafactory sync`",
+    "reason": "no local control-room clone at /Users/kmanojkumar/.vegafactory/control-room/vegastack \u2014 run `vegafactory sync`",
     "recordedSha": "a1b2c3d",
     "lastSyncedAt": null
   }
