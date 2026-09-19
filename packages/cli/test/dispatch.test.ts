@@ -1926,3 +1926,25 @@ test('an unlisted machine on a gateless roster is told about the column, not giv
   expect(listing.reason).toContain('no `worker` column')
   expect(listing.reason).not.toMatch(/add the row/)
 })
+
+describe('a node name is exactly one name', () => {
+  // `mk@box@anything` cut down to `mk@box` would let a row nobody wrote authorise the real node.
+  test('more than one @, or an empty half, names nothing', () => {
+    for (const bad of ['mk@box@anything', '@box', 'mk@', '@', 'mk@@box']) expect(rosterName(bad), bad).toBe('')
+    expect(rosterName('mk@box')).toBe(nodeId('mk', 'box'))
+  })
+
+  test('a row naming one of those authorises nobody', () => {
+    const header = '| node | owner | worker | repos |\n|---|---|---|---|\n'
+    project(`${header}| ${NODE}@extra | mk | yes | o/r |\n`)
+    expect(listedHere(root, { repo: 'o/r', host: HOST, home }).ok).toBe(false)
+  })
+
+  // A row that vanishes is a machine that looks unlisted, rather than one whose notes column
+  // happens to hold a dash.
+  test('a dash in a notes cell does not delete the row', () => {
+    const header = '| node | owner | worker | repos | notes |\n|---|---|---|---|---|\n'
+    project(`${header}| ${NODE} | mk | yes | o/r | -- |\n`)
+    expect(listedHere(root, { repo: 'o/r', host: HOST, home }).ok).toBe(true)
+  })
+})

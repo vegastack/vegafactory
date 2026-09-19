@@ -206,8 +206,12 @@ const separator = (cell: string) => /^:?-{2,}:?$/.test(cell)
 export function rosterName(value: string): string {
   const text = String(value ?? '').trim()
   if (!text.includes('@')) return machineName(text)
-  const [user = '', host = ''] = text.split('@', 2)
-  return nodeId(user, host)
+  // Exactly one `@`, and something on both sides of it. `mk@box@anything` would otherwise be cut
+  // down to `mk@box` and authorise the real node, and an empty half would fall back to the
+  // stand-in names and let `@box` or `mk@` match a machine nobody wrote down.
+  const halves = text.split('@')
+  if (halves.length !== 2 || !halves[0]!.trim() || !halves[1]!.trim()) return ''
+  return nodeId(halves[0]!, halves[1]!)
 }
 
 // One row per machine. A table names its columns in a header row, and a bullet is
@@ -229,7 +233,10 @@ export function parseDispatchers(text: string): Dispatcher[] {
     let worker = false
     if (line.startsWith('|')) {
       const row = cells(line)
-      if (row.some(separator)) continue
+      // Only a row that is *entirely* separators is the line under a header. A notes cell holding
+      // `--` would otherwise drop the whole row, and a row that vanishes is a machine that looks
+      // unlisted rather than one whose notes column has a dash in it.
+      if (row.every(separator)) continue
       const header = layoutOf(row)
       if (header) { layout = header; continue }
       // A row the header does not reach is a shape nobody wrote on purpose. The roster is a gate,

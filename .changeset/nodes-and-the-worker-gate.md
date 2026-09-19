@@ -13,3 +13,5 @@ The control room's machine roster is `nodes.md`, and being in it no longer autho
 - A heading that is trying to be the gate and missing it — `workers`, `worker?` — grants nothing. Read as "no gate at all" it would have granted every row in the file.
 - The row an unlisted machine is told to add says `yes` in the gate, because a row pasted from a refusal is one somebody is adding so that machine can work a board.
 - The App's private key belongs only on a machine whose row says `worker: yes`. `nodes.md` now names every machine, most of which only report what they did, and possession of that key is by itself enough to mint installation tokens.
+- A node name is exactly one name: `mk@box@anything` and a name with an empty half authorise nobody, rather than being cut down to a real node's name and matching it.
+- A dash in a notes cell no longer deletes the row. Only a line that is entirely separators is the one under a header, and a row that vanishes is a machine that looks unlisted.
