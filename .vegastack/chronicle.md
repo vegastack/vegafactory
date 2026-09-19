@@ -2,6 +2,16 @@
 
 The project's story, newest first: what got built, why, and how it went — for the operator's future recall. Format home: the dev-chronicle skill.
 
+## 19-09-2026 — A row is not consent ([#254](https://github.com/vegastack/vegafactory/issues/254))
+
+- **What:** The machine roster is `nodes.md`, it lists every machine rather than only the always-on ones, and a new `worker` column is the only thing that grants unattended work.
+- **Why:** Step 3 of [#251](https://github.com/vegastack/vegafactory/issues/251). Once every machine has a row — which is what makes stats answerable per person and per box — being in the file stops meaning anything, so the authority had to move to a cell.
+- **How it went:** The dangerous part was the old default, not the new column. An empty `repos` cell meant "every repository in the org", and the commonest row on a roster of every machine is a laptop with that cell blank. Read the old way, the machine written down to say it is *not* a worker would have been handed the whole board. Empty now authorises nothing, and `*` or `all` has to be said out loud.
+- **Changed:** the `worker` gate and its refusals · the reversed `repos` default · `dispatchers.md` renamed to `nodes.md` through the CLI, templates, references, evals and the staged room.
+- **Decisions:** none new.
+
+— approved by (kmanojkumar) · built by claude · branch feat/254-nodes-md-read-by-header-and-gated-by-wor
+
 ## 19-09-2026 — A node knows its own name ([#253](https://github.com/vegastack/vegafactory/issues/253))
 
 - **What:** `nodeId()` — `<os-user>@<hostname>`, derived and never configured.

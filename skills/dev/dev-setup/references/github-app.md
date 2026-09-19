@@ -72,7 +72,7 @@ The operator's own browser flow. `gh` has no create-app command and the manifest
 | `VEGAFACTORY_APP_ID` | organization variable | the numeric App ID |
 | `VEGAFACTORY_APP_PRIVATE_KEY` | organization secret | the PEM, pasted whole |
 
-The private key lives in the organization secret, and — only on a machine listed in the control room's `dispatchers.md` — in one file on that machine. Never on a workstation, never in a control-room file, never in an issue, never printed. Only the key's holder can mint installation tokens.
+The private key lives in the organization secret, and — only on a machine listed in the control room's `nodes.md` — in one file on that machine. Never on a workstation, never in a control-room file, never in an issue, never printed. Only the key's holder can mint installation tokens.
 
 On a dispatcher machine the file is `~/.vegastack/vegafactory-app.pem`, owned by the dispatcher account and `chmod 600`, so a CI job running as the runner account cannot read it. `VEGAFACTORY_APP_PRIVATE_KEY_FILE` moves it; `VEGAFACTORY_APP_ID` names another org's App. `vegafactory dispatch` mints an hour-long installation token from it, narrowed to the one repository, keeps it in memory and passes it to `gh` in that child's environment only. A missing key refuses the run with the path to fix — it never falls back to a person's token.
 

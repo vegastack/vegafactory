@@ -37,7 +37,7 @@ function project(dispatchers: string | null = `| machine | operator | repos |\n|
   ].join('\n'))
   const clone = join(home, '.vegastack', 'control-room', 'o')
   mkdirSync(clone, { recursive: true })
-  if (dispatchers !== null) writeFileSync(join(clone, 'dispatchers.md'), dispatchers)
+  if (dispatchers !== null) writeFileSync(join(clone, 'nodes.md'), dispatchers)
 }
 
 // The roster refresh is real git. Most tests are not about it, so they hand the CLI a git that
@@ -56,7 +56,7 @@ function controlRoomClone(rows: string): (next: string) => void {
   run(seed, ['init', '-q', '-b', 'main'])
   run(seed, ['config', 'user.email', 't@example.com'])
   run(seed, ['config', 'user.name', 'T'])
-  writeFileSync(join(seed, 'dispatchers.md'), rows)
+  writeFileSync(join(seed, 'nodes.md'), rows)
   run(seed, ['add', '-A'])
   run(seed, ['commit', '-q', '-m', 'roster'])
   run(seed, ['remote', 'add', 'origin', origin])
@@ -64,7 +64,7 @@ function controlRoomClone(rows: string): (next: string) => void {
   rmSync(clone, { recursive: true, force: true })
   spawnSync('git', ['clone', '-q', origin, clone])
   return (next: string) => {
-    writeFileSync(join(seed, 'dispatchers.md'), next)
+    writeFileSync(join(seed, 'nodes.md'), next)
     run(seed, ['commit', '-qam', 'roster'])
     run(seed, ['push', '-q', 'origin', 'main'])
   }
@@ -95,9 +95,9 @@ describe('the roster', () => {
       '- `spare-box` — o/r',
     ].join('\n'))
     expect(rows).toEqual([
-      { machine: 'mac-mini', operator: 'mk', repos: ['o/r', 'o/other'], caps: DEFAULT_CAPS, problem: null },
-      { machine: 'builder', operator: null, repos: ['*'], caps: DEFAULT_CAPS, problem: null },
-      { machine: 'spare-box', operator: null, repos: ['o/r'], caps: DEFAULT_CAPS, problem: null },
+      { machine: 'mac-mini', operator: 'mk', repos: ['o/r', 'o/other'], caps: DEFAULT_CAPS, worker: true, every: true, problem: null },
+      { machine: 'builder', operator: null, repos: ['*'], caps: DEFAULT_CAPS, worker: true, every: true, problem: null },
+      { machine: 'spare-box', operator: null, repos: ['o/r'], caps: DEFAULT_CAPS, worker: true, every: true, problem: null },
     ])
   })
 
@@ -1251,7 +1251,7 @@ describe('the command', () => {
   test('a row removed upstream stands this machine down, without touching its own copy', async () => {
     const header = '| machine | operator | repos |\n|---|---|---|\n'
     const delist = controlRoomClone(`${header}| ${HOST} | mk | o/r |\n`)
-    const roster = join(home, '.vegastack', 'control-room', 'o', 'dispatchers.md')
+    const roster = join(home, '.vegastack', 'control-room', 'o', 'nodes.md')
     const before = readFileSync(roster, 'utf8')
     gh.addIssue({ number: 1, labels: ['queued', 'small'] })
     const lines: string[] = []
@@ -1501,12 +1501,12 @@ describe('the command', () => {
     const clone = join(home, '.vegastack', 'control-room', 'o')
     expect(verifiedListing(root, { repo: 'o/r', host: HOST, home }).ok).toBe(true)
     // Edited on the machine: the row is there, and it authorises nothing.
-    writeFileSync(join(clone, 'dispatchers.md'), `| machine | operator | repos |\n|---|---|---|\n| ${HOST} | mk | * |\n`)
+    writeFileSync(join(clone, 'nodes.md'), `| machine | operator | repos |\n|---|---|---|\n| ${HOST} | mk | * |\n`)
     const edited = verifiedListing(root, { repo: 'o/r', host: HOST, home })
     expect(edited.ok).toBe(false)
     expect(edited.reason).toContain('uncommitted local changes')
     // Unreachable remote: a gate that cannot be refreshed refuses rather than trusting its copy.
-    spawnSync('git', ['-C', clone, 'checkout', '-q', '--', 'dispatchers.md'])
+    spawnSync('git', ['-C', clone, 'checkout', '-q', '--', 'nodes.md'])
     spawnSync('git', ['-C', clone, 'remote', 'set-url', 'origin', join(home, 'gone.git')])
     const offline = verifiedListing(root, { repo: 'o/r', host: HOST, home })
     expect(offline.ok).toBe(false)
@@ -1584,7 +1584,7 @@ describe('caps on the roster row', () => {
       '|---|---|---|---|---|---|',
       '| patrick | dev | o/a | mk | runs 4 | the always-on box |',
     ].join('\n')
-    expect(parseDispatchers(roster)).toEqual([{ machine: 'patrick', operator: 'mk', repos: ['o/a'], caps: { ...DEFAULT_CAPS, runs: 4 }, problem: null }])
+    expect(parseDispatchers(roster)).toEqual([{ machine: 'patrick', operator: 'mk', repos: ['o/a'], caps: { ...DEFAULT_CAPS, runs: 4 }, worker: true, every: true, problem: null }])
   })
 
   test('prose in a notes column is never caps, whatever words it happens to contain', () => {
@@ -1610,7 +1610,7 @@ describe('caps on the roster row', () => {
   })
 
   test('a table with no header is read the way every roster was read before headers', () => {
-    expect(parseDispatchers('| a | mk | o/a |')).toEqual([{ machine: 'a', operator: 'mk', repos: ['o/a'], caps: DEFAULT_CAPS, problem: null }])
+    expect(parseDispatchers('| a | mk | o/a |')).toEqual([{ machine: 'a', operator: 'mk', repos: ['o/a'], caps: DEFAULT_CAPS, worker: true, every: true, problem: null }])
   })
 
   test('without a header there is no column caps are known to sit in, so a wider row refuses', () => {
@@ -1806,4 +1806,63 @@ test('a bold run that is not a machine name does not make a comment bookkeeping'
   gh.addComment(1, 'here are the details you asked for', 'mk')
   gh.addComment(1, '<!-- vsk:v1 type=handback -->\n**Note to self** stood down from #1: needs a decision on the base', 'mk')
   expect(verdict(1).action).toBe('none')
+})
+
+describe('the worker gate', () => {
+  const header = '| node | owner | worker | repos | caps |\n|---|---|---|---|---|\n'
+
+  // Once a control room lists every machine, being in the file says only that somebody wrote this
+  // machine down. That is what stats wants; it is not what unattended work may take from the
+  // same line.
+  test('a row is not consent — only `yes` in the worker cell is', () => {
+    project(`${header}| ${HOST} | mk | yes | o/r | |\n`)
+    expect(listedHere(root, { repo: 'o/r', host: HOST, home }).ok).toBe(true)
+
+    project(`${header}| ${HOST} | mk | no | o/r | |\n`)
+    const refused = listedHere(root, { repo: 'o/r', host: HOST, home })
+    expect(refused.ok).toBe(false)
+    expect(refused.reason).toContain('not as a worker')
+    // The row is still there to point at, so the operator is sent to the cell and not to the file.
+    expect(refused.entry?.machine).toBe(HOST)
+  })
+
+  test('anything that is not an answer is refused, never read as consent', () => {
+    for (const said of ['y', 'true', 'TODO confirm', 'YES please', '1']) {
+      project(`${header}| ${HOST} | mk | ${said} | o/r | |\n`)
+      const listing = listedHere(root, { repo: 'o/r', host: HOST, home })
+      expect(listing.ok, said).toBe(false)
+      expect(listing.reason, said).toContain('does not read as an answer')
+    }
+    // `yes` itself is not case-sensitive, and neither is the blank that means no.
+    project(`${header}| ${HOST} | mk | YES | o/r | |\n`)
+    expect(listedHere(root, { repo: 'o/r', host: HOST, home }).ok).toBe(true)
+    project(`${header}| ${HOST} | mk |  | o/r | |\n`)
+    expect(listedHere(root, { repo: 'o/r', host: HOST, home }).reason).toContain('not as a worker')
+  })
+
+  // The commonest row on a roster that names every machine is a laptop with an empty repos cell.
+  // Reading that as "every repository in the org" would hand the whole board to the machine that
+  // was written down precisely to say it is not a worker.
+  test('an empty repos cell authorises nothing when the roster has a worker column', () => {
+    project(`${header}| ${HOST} | mk | yes |  | |\n`)
+    const listing = listedHere(root, { repo: 'o/r', host: HOST, home })
+    expect(listing.ok).toBe(false)
+    expect(listing.reason).toContain('for no repository')
+  })
+
+  // A roster written before the column existed meant every row to be a machine that works a board.
+  test('a roster with no worker column is read the way it was written', () => {
+    project(`| machine | operator | repos |\n|---|---|---|\n| ${HOST} | mk | o/r |\n`)
+    expect(listedHere(root, { repo: 'o/r', host: HOST, home }).ok).toBe(true)
+    // Including the empty-repos meaning it had then.
+    project(`| machine | operator | repos |\n|---|---|---|\n| ${HOST} | mk |  |\n`)
+    expect(listedHere(root, { repo: 'o/anything', host: HOST, home }).ok).toBe(true)
+  })
+
+  test('`*` and `all` still mean every repository, on either shape', () => {
+    project(`${header}| ${HOST} | mk | yes | * | |\n`)
+    expect(listedHere(root, { repo: 'o/anything', host: HOST, home }).ok).toBe(true)
+    project(`${header}| ${HOST} | mk | yes | all | |\n`)
+    expect(listedHere(root, { repo: 'o/anything', host: HOST, home }).ok).toBe(true)
+  })
 })

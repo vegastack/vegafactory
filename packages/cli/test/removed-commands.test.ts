@@ -110,7 +110,7 @@ test('the tombstone is the only file the sweep skips wholesale', () => {
 test('the prepared control-room refresh is exactly the approved layout', () => {
   const room = join(root, 'control-room-refresh/room')
   const top = readdirSync(room).sort()
-  expect(top).toEqual(['boards.md', 'dispatchers.md', 'groups', 'onboarding', 'org.md', 'repos.md', 'stats'])
+  expect(top).toEqual(['boards.md', 'groups', 'nodes.md', 'onboarding', 'org.md', 'repos.md', 'stats'])
   expect(readdirSync(join(room, 'onboarding')).sort()).toEqual(['dispatcher-box.md', 'new-repo.md', 'new-teammate.md'])
   expect(readdirSync(join(room, 'groups/dev'))).toEqual(['group.md'])
   expect(readdirSync(join(room, 'stats'))).toEqual(['README.md'])
@@ -153,7 +153,7 @@ test('applying the documented patch leaves exactly the seven-entry layout', () =
     // cp -R room/. .
     cpSync(join(root, 'control-room-refresh/room'), applied, { recursive: true })
 
-    expect(readdirSync(applied).sort()).toEqual(['boards.md', 'dispatchers.md', 'groups', 'onboarding', 'org.md', 'repos.md', 'stats'])
+    expect(readdirSync(applied).sort()).toEqual(['boards.md', 'groups', 'nodes.md', 'onboarding', 'org.md', 'repos.md', 'stats'])
     // Nothing of the old model survives anywhere in the tree.
     const walk = (dir: string): string[] => readdirSync(dir, { withFileTypes: true })
       .flatMap((entry) => entry.isDirectory() ? walk(join(dir, entry.name)) : [join(dir, entry.name).slice(applied.length + 1)])
@@ -167,7 +167,7 @@ test('the control-room templates are the lean room and nothing else', () => {
   const files = execFileSync('git', ['ls-files', '--', assets], { cwd: root, encoding: 'utf8' })
     .split('\n').filter(Boolean).map((path) => path.slice(path.indexOf('assets/control-room/') + 'assets/control-room/'.length))
   expect(files.sort()).toEqual([
-    'boards.md.template', 'dispatchers.md.template', 'group.md.template',
+    'boards.md.template', 'group.md.template', 'nodes.md.template',
     'onboarding/dispatcher-box.md.template', 'onboarding/new-repo.md.template', 'onboarding/new-teammate.md.template',
     'org.md.template', 'repos.md.template', 'stats/README.md.template',
   ])

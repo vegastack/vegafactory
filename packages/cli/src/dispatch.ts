@@ -1,6 +1,6 @@
 // `vegafactory dispatch …` — the listed machine that works the board on its own.
 //
-// It refuses to run at all unless this machine is named in the control room's `dispatchers.md`,
+// It refuses to run at all unless this machine is named in the control room's `nodes.md`,
 // refreshed and verified before every pass: the roster is the enrolment, and removing a row is how
 // a machine is stood down.
 //
@@ -52,7 +52,7 @@ export const MAX_NOTE = 400
 export const SERVICE_NAME = 'com.vegastack.vegafactory.dispatch'
 
 // ---------------------------------------------------------------------------------------------
-// The roster: the control room's dispatchers.md
+// The roster: the control room's nodes.md
 
 // What one machine may do at once, and for how long. These belong to the machine — its processor,
 // its subscription — and not to any project it works, so they live on its roster row rather than in
@@ -122,7 +122,10 @@ export function parseCaps(cell: string): Caps | null {
 // survives so the machine it names is refused by name — a roster that silently dropped the row
 // would refuse it as "not listed", which sends the operator looking for a missing row rather than
 // at the thing that is actually wrong.
-export interface Dispatcher { machine: string; operator: string | null; repos: string[]; caps: Caps | null; problem: string | null }
+// `worker` is the gate. Every machine has a row once a control room lists its nodes, so being in
+// the file authorises nothing; only `worker: yes` does. A row from a roster with no worker column
+// at all is one written before the column existed, and is read the way it was written.
+export interface Dispatcher { machine: string; operator: string | null; repos: string[]; caps: Caps | null; worker: boolean; every: boolean; problem: string | null }
 
 // What a roster may call each column. A header maps a name to a position, so a row is read by what
 // its columns are called rather than by where they happen to sit: a room may add, drop or reorder
@@ -132,18 +135,20 @@ const COLUMN_NAMES = {
   operator: ['operator', 'owner'],
   repos: ['repos', 'repositories'],
   caps: ['caps'],
+  worker: ['worker'],
 } as const
 
-interface Layout { machine: number; operator: number | null; repos: number; caps: number | null }
+interface Layout { machine: number; operator: number | null; repos: number; caps: number | null; worker: number | null }
 
 // The shape every roster had before its columns were named: three cells, and no caps. A table with
 // no header is read this way, and a row with a fourth cell is refused rather than guessed at —
 // there is no position a caps cell is known to sit in, so either the columns are named or there
 // are none to name. Legacy three-cell rosters keep working untouched.
-const POSITIONAL: Layout = { machine: 0, operator: 1, repos: 2, caps: null }
+const POSITIONAL: Layout = { machine: 0, operator: 1, repos: 2, caps: null, worker: null }
 const UNNAMED_COLUMNS = 'the table names no columns, so nothing says which cell holds the caps — add a header row, `| machine | operator | repos | caps |`'
 const UNREADABLE_CAPS = 'the caps cell cannot be read — the shape is `runs 10 · step 72h · poll 1m · retry 15m · park 3`, every field optional'
 const MISSING_CAPS = 'the row does not reach its declared caps column — add an empty cell or `-` when the defaults are fine'
+const UNREADABLE_WORKER = "the worker cell says something this file does not read as an answer — it takes `yes` or `no`, and anything else is refused rather than guessed at"
 
 // A header is the row that names at least the machine column and the repos column. Anything less
 // is not a header, and reading it as one would silently move every column.
@@ -155,7 +160,7 @@ function layoutOf(row: string[]): Layout | null {
   const machine = at(COLUMN_NAMES.machine)
   const repos = at(COLUMN_NAMES.repos)
   if (machine === null || repos === null) return null
-  return { machine, operator: at(COLUMN_NAMES.operator), repos, caps: at(COLUMN_NAMES.caps) }
+  return { machine, operator: at(COLUMN_NAMES.operator), repos, caps: at(COLUMN_NAMES.caps), worker: at(COLUMN_NAMES.worker) }
 }
 
 const cells = (line: string) => line.replace(/^\|/, '').replace(/\|\s*$/, '').split('|').map((cell) => cell.trim())
@@ -196,6 +201,10 @@ export function parseDispatchers(text: string): Dispatcher[] {
     let capsCell = ''
     let named = false
     let problem: string | null = null
+    // A roster with no worker column predates the gate, and every row in it was written to mean a
+    // machine that works the board. One that has the column answers for itself.
+    let worker = true
+    let repoDefault: 'all' | 'none' = 'all'
     if (line.startsWith('|')) {
       const row = cells(line)
       if (row.some(separator)) continue
@@ -210,6 +219,16 @@ export function parseDispatchers(text: string): Dispatcher[] {
       capsCell = layout.caps === null ? '' : row[layout.caps] ?? ''
       named = layout.caps !== null
       if (layout.caps !== null && row.length <= layout.caps) problem = MISSING_CAPS
+      if (layout.worker !== null) {
+        repoDefault = 'none'
+        const said = (row[layout.worker] ?? '').trim().toLowerCase()
+        if (said === 'yes') worker = true
+        else if (said === 'no' || said === '' || said === '-') worker = false
+        // Not an answer: `y`, `true`, `TODO confirm`. A gate does not read a shape nobody wrote on
+        // purpose as consent, so the row is kept and its machine refused by name.
+        else { worker = false; problem ??= UNREADABLE_WORKER }
+        if (row.length <= layout.worker) { worker = false; problem ??= UNREADABLE_WORKER }
+      }
       // A wider table than the legacy three, with nothing naming its columns: the caps could be in
       // any of the extra cells or in none of them, and a gate does not guess. Refused by name.
       if (layout === POSITIONAL && row.length > 3) problem = UNNAMED_COLUMNS
@@ -234,13 +253,18 @@ export function parseDispatchers(text: string): Dispatcher[] {
       operator: operator && operator !== '-' ? operator.replace(/^@/, '') : null,
       repos: repos.split(/[,\s]+/).map((repo) => repo.replace(/`/g, '').trim()).filter((repo) => repo && repo !== '-'),
       caps,
+      worker,
+      // An empty repos cell used to mean every repository in the org. On a roster that names every
+      // machine, the commonest row is a laptop with nothing in that cell, and reading it as "all"
+      // would authorise the machine that was written down to say it is not a worker.
+      every: repoDefault === 'all',
       problem,
     })
   }
   return found
 }
 
-export const dispatchersPath = (clone: string) => join(clone, 'dispatchers.md')
+export const dispatchersPath = (clone: string) => join(clone, 'nodes.md')
 
 // Where this machine's copy of the org control room lives: the path the last sync recorded, else
 // the default clone path for the org this repository's dev.md names.
@@ -271,9 +295,9 @@ export interface Refresh { ok: boolean; reason: string; sha: string | null }
 // against its recorded commit. Use them here once they are on main and drop this local check.
 export function refreshRoster(clone: string, git: GitRun = gitIn(clone)): Refresh {
   if (git(['rev-parse', '--git-dir']).status !== 0) return { ok: false, reason: `${clone} is not a git clone of the control room — remove it and run \`vegafactory sync\``, sha: null }
-  if (git(['ls-files', '--error-unmatch', 'dispatchers.md']).status !== 0) return { ok: false, reason: 'dispatchers.md is not committed in the control room, so nothing vouches for it', sha: null }
-  const dirty = git(['status', '--porcelain', '--', 'dispatchers.md'])
-  if (dirty.status !== 0 || dirty.out) return { ok: false, reason: 'dispatchers.md has uncommitted local changes — a roster edited on the machine authorises nothing; reset it and enrol through a control-room PR', sha: null }
+  if (git(['ls-files', '--error-unmatch', 'nodes.md']).status !== 0) return { ok: false, reason: 'nodes.md is not committed in the control room, so nothing vouches for it', sha: null }
+  const dirty = git(['status', '--porcelain', '--', 'nodes.md'])
+  if (dirty.status !== 0 || dirty.out) return { ok: false, reason: 'nodes.md has uncommitted local changes — a roster edited on the machine authorises nothing; reset it and enrol through a control-room PR', sha: null }
   const fetched = git(['fetch', '--quiet', 'origin'])
   if (fetched.status !== 0) return { ok: false, reason: `the control room could not be refreshed (${fetched.out.split('\n')[0] || 'fetch failed'}), so this machine cannot prove it is still listed`, sha: null }
   const upstream = git(['rev-parse', '--verify', '--quiet', '@{u}'])
@@ -306,7 +330,7 @@ export function listedHere(root: string, options: { repo: string; host?: string;
   try {
     text = readFileSync(file, 'utf8')
   } catch {
-    return { ok: false, reason: `${file} is not on this machine — run \`vegafactory sync\` to refresh the ${room.org} control room, and add ${machine} to dispatchers.md in a control-room PR`, entry: null, file }
+    return { ok: false, reason: `${file} is not on this machine — run \`vegafactory sync\` to refresh the ${room.org} control room, and add ${machine} to nodes.md in a control-room PR`, entry: null, file }
   }
   const entry = parseDispatchers(text).find((row) => row.machine === machine) ?? null
   if (!entry) {
@@ -322,8 +346,19 @@ export function listedHere(root: string, options: { repo: string; host?: string;
   if (!entry.caps) {
     return { ok: false, entry, file, reason: `${machine}'s row in ${file} does not say what its limits are: ${entry.problem} — fix it in a control-room PR` }
   }
-  const every = entry.repos.length === 0 || entry.repos.some((repo) => repo === '*' || repo.toLowerCase() === 'all')
-  if (!every && !entry.repos.includes(options.repo)) return { ok: false, reason: `${machine} is listed in ${file} for ${entry.repos.join(', ')}, not ${options.repo}`, entry, file }
+  // The gate. Every machine has a row once a control room lists its nodes, so being in the file
+  // says only that somebody wrote this machine down — which is what stats wants and what work
+  // nobody is watching must not get from the same line.
+  if (!entry.worker) {
+    const why = entry.problem === UNREADABLE_WORKER ? entry.problem : 'its worker cell does not say `yes`'
+    return { ok: false, entry, file, reason: `${machine} is listed in ${file} but not as a worker: ${why} — change it in a control-room PR before this machine works a board on its own` }
+  }
+  const every = entry.every && entry.repos.length === 0 ? true
+    : entry.repos.some((repo) => repo === '*' || repo.toLowerCase() === 'all')
+  if (!every && !entry.repos.includes(options.repo)) {
+    const named = entry.repos.length ? `for ${entry.repos.join(', ')}` : 'for no repository — its repos cell is empty'
+    return { ok: false, reason: `${machine} is listed in ${file} ${named}, not ${options.repo}`, entry, file }
+  }
   return { ok: true, reason: `${machine} is listed in ${file}`, entry, file }
 }
 
@@ -1659,7 +1694,7 @@ export function standDown(ctx: StandDownContext, reason: string): string {
 export function dispatchUsage(): string {
   return `Usage: vegafactory dispatch <enable|disable|status|run> [options]
 
-  enable                 check this machine is ready — listed in the control room's dispatchers.md,
+  enable                 check this machine is ready — listed in the control room's nodes.md,
                          harness hooks wired, a real \`claude -p\` and \`codex exec\` answering, the
                          GitHub App key present — then install the launchd or systemd unit
   disable                remove the unit; the machine stops picking work up
@@ -1688,7 +1723,7 @@ in any order, extra columns ignored — so a cell is read by what its column is 
 with no header is read as the three columns every roster had before caps existed; a wider one
 without a header refuses, because no position is known to hold the caps.
 
-A machine the control room's dispatchers.md does not name refuses every verb but disable. Writes
+A machine the control room's nodes.md does not name refuses every verb but disable. Writes
 go out as the VegaFactory GitHub App, on an hour-long token minted here from its private key:
   ${appKeyPath()}
 (VEGAFACTORY_APP_PRIVATE_KEY_FILE moves it, VEGAFACTORY_APP_ID names another App.) Each run gets

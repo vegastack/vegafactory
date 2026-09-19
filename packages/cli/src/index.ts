@@ -70,7 +70,7 @@ Shipping and hooks:
   ship release <n> [--dry-run]           tag the merged release on issue n's "ship it" (never publishes)
   hook <event> --harness claude|codex    the harness hooks: guard, heartbeat, WIP checkpoints ("hook --help")
 
-Dispatcher (only on a machine the control room's dispatchers.md names):
+Dispatcher (only on a machine the control room's nodes.md names):
   dispatch enable|disable|status|run     work the board with no person at the keyboard ("dispatch --help")
 
 Learning (the Stop hook asks for these; a dev.md line lands only on the operator's yes):
