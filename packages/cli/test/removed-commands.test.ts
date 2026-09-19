@@ -172,3 +172,19 @@ test('the control-room templates are the lean room and nothing else', () => {
     'org.md.template', 'repos.md.template', 'stats/README.md.template',
   ])
 })
+
+// The staged room is a *rendering* of the shipped templates. Editing one and not the other is how
+// the checklist that provisions a machine came to disagree with the one that ships — so the drift
+// is checked rather than remembered.
+test('the staged worker checklist is the shipped template with its values filled in', () => {
+  const values: Record<string, string> = {
+    '{{org}}/{{repo}}': 'vegastack/vegafactory', '{{org}}': 'vegastack', '{{repo}}': 'vegafactory',
+    '{{node}}': 'mk@patrick-mac-mini', '{{operator}}': 'kmanojkumar', '{{owner}}': 'kmanojkumar',
+    '{{worker-user}}': 'vf-worker', '{{runner-user}}': 'vf-runner', '{{runner-group}}': 'vsk-runners',
+    '{{runner-name}}': 'patrick-mac-mini', '{{machine}}': 'mk@patrick-mac-mini',
+  }
+  const template = readFileSync(join(root, 'skills/factory/vegafactory-setup/assets/control-room/onboarding/worker-box.md.template'), 'utf8')
+  const rendered = Object.entries(values).reduce((text, [name, value]) => text.split(name).join(value), template)
+  expect(rendered).not.toMatch(/\{\{/)
+  expect(readFileSync(join(root, 'control-room-refresh/room/onboarding/worker-box.md'), 'utf8')).toBe(rendered)
+})

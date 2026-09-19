@@ -86,4 +86,4 @@ launchctl print gui/$(id -u vf-worker)/com.vegastack.vegafactory.worker | head -
 
 The first prints `patrick-mac-mini online` — the org endpoint is the one that lists a group's runners, while `repos/vegastack/vegafactory/actions/runners` lists repository-level runners. The second prints `vf-runner` and never `vf-worker`.
 
-Then the reboot drill: `sudo reboot`, wait for the box, and run both checks again **without logging anything in by hand**. A box that needs a human at the keyboard after a power cut is not always-on.
+Then the reboot drill: `sudo reboot`, wait for the box, and run every check above again **without logging anything in by hand**. A box that needs a human at the keyboard after a power cut is not always-on.
