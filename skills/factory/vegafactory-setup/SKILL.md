@@ -1,6 +1,6 @@
 ---
 name: vegafactory-setup
-description: Bootstrap and maintain the org control room — the org, group, repo, dispatcher and board files whose defaults every repo's dev profile layers on. Use when asked to "set up the control room", "bootstrap the org for the factory", "register this repo in the control room", "onboard a teammate", "add someone to the org", or "what are the org defaults here", and when a repo's control-room knob names a control room that does not exist yet. Not for a single repo's profile, labels, or knobs (dev-setup), not for architecture advice (dev-architect), not for writing or approving issues (dev-intake), and not for refreshing the local copy of the room (the `vegafactory sync` command).
+description: Bootstrap and maintain the org control room — the org, group, repo, worker and board files whose defaults every repo's dev profile layers on. Use when asked to "set up the control room", "bootstrap the org for the factory", "register this repo in the control room", "onboard a teammate", "add someone to the org", or "what are the org defaults here", and when a repo's control-room knob names a control room that does not exist yet. Not for a single repo's profile, labels, or knobs (dev-setup), not for architecture advice (dev-architect), not for writing or approving issues (dev-intake), and not for refreshing the local copy of the room (the `vegafactory sync` command).
 ---
 
 # vegafactory-setup
@@ -55,7 +55,7 @@ A knob whose value differs between two repos in the group is a question, not an 
 
 The full checklist ships as `onboarding/new-repo.md`, so the org can edit the procedure without editing this skill.
 
-A machine is the third onboarding path, in two shapes. Any machine gets a `nodes.md` row with `worker: no`, which makes statistics answerable per machine and grants nothing. One that works boards alone is provisioned by `onboarding/dispatcher-box.md` under two accounts, so a CI job cannot read its tokens; its row says `worker: yes`.
+A machine is the third onboarding path, in two shapes. Any machine gets a `nodes.md` row with `worker: no`, which makes statistics answerable per machine and grants nothing. One that works boards alone is provisioned by `onboarding/worker-box.md` under two accounts, so a CI job cannot read its tokens; its row says `worker: yes`.
 
 ## `onboard <login>`
 

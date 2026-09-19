@@ -27,10 +27,10 @@ export interface FactoryConfig {
   schemaVersion: 1 | 2
   revision?: number
   controlRooms: Record<string, ControlRoomEntry>
-  // Everything else the document carries — the dispatcher's `repos`, `interval`, `maxRuns` and
+  // Everything else the document carries — the worker's `repos`, `interval`, `maxRuns` and
   // `subagents` live in this same file and are hand-written by the operator. Sync reads none of
   // them and must give all of them back untouched: a rewrite that keeps only what it understands
-  // would silently delete the dispatcher's configuration on the next refresh.
+  // would silently delete the worker's configuration on the next refresh.
   settings: Record<string, unknown>
 }
 

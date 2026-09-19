@@ -30,7 +30,7 @@ let home: string
 const NODE = nodeId(undefined, HOST)
 const ROSTER = `| node | owner | worker | repos | caps |\n|---|---|---|---|---|\n| ${NODE} | mk | yes | o/r | |\n`
 
-function project(dispatchers: string | null = ROSTER): void {
+function project(workers: string | null = ROSTER): void {
   root = realpathSync(mkdtempSync(join(tmpdir(), 'dispatch-')))
   home = realpathSync(mkdtempSync(join(tmpdir(), 'dispatch-home-')))
   spawnSync('git', ['init', '-q'], { cwd: root })
@@ -43,7 +43,7 @@ function project(dispatchers: string | null = ROSTER): void {
   ].join('\n'))
   const clone = join(home, '.vegafactory', 'control-room', 'o')
   mkdirSync(clone, { recursive: true })
-  if (dispatchers !== null) writeFileSync(join(clone, 'nodes.md'), dispatchers)
+  if (workers !== null) writeFileSync(join(clone, 'nodes.md'), workers)
 }
 
 // The roster refresh is real git. Most tests are not about it, so they hand the CLI a git that
@@ -92,7 +92,7 @@ beforeEach(() => {
 describe('the roster', () => {
   test('a table row, a bullet row, the header and the separator', () => {
     const rows = parseNodes([
-      '# Dispatchers', '',
+      '# Workers', '',
       '| machine | operator | repos | note |',
       '|---|---|:---:|---|',
       '| Mac-Mini.local | @mk | o/r, o/other | the always-on box |',
@@ -256,7 +256,7 @@ describe('identity', () => {
     expect(called).toBe(0)
   })
 
-  test('the token is re-minted before it expires, so a month-old dispatcher still writes', async () => {
+  test('the token is re-minted before it expires, so a month-old worker still writes', async () => {
     let issued = 0
     const start = Date.parse('2026-09-18T10:00:00Z')
     const call: Fetch = async (url) => ({
@@ -297,7 +297,7 @@ describe('transitions', () => {
   })
 
   test('a comment the factory wrote is never a person\'s word', () => {
-    // A dispatched run posts as the App. Its comments are work, never consent — so a run that was
+    // A worker run posts as the App. Its comments are work, never consent — so a run that was
     // fed a hostile file cannot stop, correct or ship an issue by writing a sentence.
     for (const [state, text] of [['queued', 'stop'], ['ready-to-ship', 'ship it'], ['ready-to-ship', 'rename the flag']] as Array<[string, string]>) {
       const number = 20 + Math.floor(Math.random() * 1_000_000)
@@ -331,7 +331,7 @@ describe('transitions', () => {
     gh.addComment(1, '<!-- vsk:v1 type=evidence sha=abc1234 -->\nbuilt', 'outsider')
     gh.addComment(1, 'ship it', 'mk')
     expect(verdict(1)).toMatchObject({ action: 'none', reason: 'ready-to-ship with no evidence comment' })
-    // A dispatched run posts its work as the App, so the App's evidence opens the window — while
+    // A worker run posts its work as the App, so the App's evidence opens the window — while
     // the word that ships still has to come from a person.
     gh.addIssue({ number: 2, labels: ['ready-to-ship', 'small'] })
     gh.addComment(2, '<!-- vsk:v1 type=evidence sha=abc1234 -->\nbuilt', 'vegafactory[bot]', 'Bot')
@@ -373,7 +373,7 @@ describe('transitions', () => {
     const permission = permissionLookup('o/r', gh.runner)
     const confirmed = confirmShip(ctx, permission, { id: word.id, by: 'mk', quote: 'ship it' })
     expect(confirmed.ok).toBe(true)
-    // The dispatcher relays the ack by citing the person's own comment; it never writes the word.
+    // The worker relays the ack by citing the person's own comment; it never writes the word.
     const ack = gh.issues.get(1)!.comments.map((comment) => comment.body).find((body) => body.includes('type=ack'))!
     expect(ack).toContain('stage=ship')
     expect(ack).toContain('by=mk')
@@ -552,7 +552,7 @@ describe('what may run at once', () => {
     gh.addComment(13, real, 'mk')
     ackFor(13, real)
     expect(acknowledgedPlan(snapOf(13), permission).text).toBe(real)
-    gh.addComment(13, real.replace('`docs/dispatcher.md`', '`packages/cli/src/worker.ts`'), 'mk')
+    gh.addComment(13, real.replace('`docs/worker.md`', '`packages/cli/src/worker.ts`'), 'mk')
     expect(acknowledgedPlan(snapOf(13), permission)).toMatchObject({ text: null, reason: expect.stringContaining('changed after') })
 
     // Acked, but the plan does not pass its own lint.
@@ -646,7 +646,7 @@ describe('one poll over the board', () => {
     expect(gh.issues.get(1)!.comments.map((comment) => comment.body).join('\n')).toContain('handing the issue to the run this machine just started')
   })
 
-  test('two dispatchers on one host do not both start the same issue', async () => {
+  test('two workers on one host do not both start the same issue', async () => {
     gh.addIssue({ number: 1, labels: ['planning', 'medium'] })
     const ctx = { root, repo: 'o/r', number: 1, runner: gh.runner }
     // The service and an operator running a pass by hand: same machine, same issue, two processes.
@@ -677,7 +677,7 @@ describe('one poll over the board', () => {
 
   test('a claim another machine already holds is not started twice', async () => {
     gh.addIssue({ number: 1, labels: ['planning', 'medium'] })
-    // Another machine's dispatcher got there first, between this pass's read and its launch.
+    // Another machine's worker got there first, between this pass's read and its launch.
     const body = claimBody({ owner: 'builder:dispatch-1', kind: 'worker', harness: 'worker', model: 'plan' })
     const notes: string[] = []
     const steps: number[] = []
@@ -787,7 +787,7 @@ describe('one poll over the board', () => {
   })
 
   test('a run that crashed before settling is picked back up once its claim is gone', async () => {
-    // The dispatcher died mid-run: the issue is in-progress, nothing is in `acted`, and the claim
+    // The worker died mid-run: the issue is in-progress, nothing is in `acted`, and the claim
     // has gone stale. The next pass resumes it rather than walking past it forever.
     gh.addIssue({ number: 1, labels: ['in-progress', 'small'] })
     expect(readActed(root)['o/r#1']).toBeUndefined()
@@ -795,7 +795,7 @@ describe('one poll over the board', () => {
     expect(started.map((candidate) => candidate.action)).toEqual(['implement'])
   })
 
-  test('a step that throws is a failed run, not a dead dispatcher', async () => {
+  test('a step that throws is a failed run, not a dead worker', async () => {
     gh.addIssue({ number: 1, labels: ['queued', 'small'] })
     const throws: RunStep = async () => { throw new Error('claude is not on PATH') }
     const records = await pass({ runStep: throws })
@@ -803,7 +803,7 @@ describe('one poll over the board', () => {
     expect(readActed(root)['o/r#1']!.failures).toBe(1)
   })
 
-  test('a stop whose stand-down throws is a failed run, not a dead dispatcher', async () => {
+  test('a stop whose stand-down throws is a failed run, not a dead worker', async () => {
     gh.addIssue({ number: 1, labels: ['in-progress', 'small'] })
     gh.addComment(1, 'stop', 'mk')
     const records = await pass({ standDown: () => { throw new Error('git is missing') } })
@@ -1065,7 +1065,7 @@ describe('the step a run makes', () => {
     expect(agentArgs({ harness: 'codex', model: 'gpt-5', effort: 'xhigh' }, 'go')).toEqual({ tool: 'codex', args: ['exec', '--dangerously-bypass-approvals-and-sandbox', '-c', 'model=gpt-5', '-c', 'model_reasoning_effort=xhigh', 'go'] })
   })
 
-  // The first dispatched run read the repository, was denied every write, and handed the issue
+  // The first worker run read the repository, was denied every write, and handed the issue
   // back untouched. A run that cannot write is not unattended, it is stuck.
   test('both harnesses are told not to stop and ask, because nobody is there to answer', () => {
     expect(agentArgs({ harness: 'claude', model: null, effort: 'high' }, 'go').args).toContain('--dangerously-skip-permissions')
@@ -1117,7 +1117,7 @@ describe('the step a run makes', () => {
     expect(result.note).toContain('past the 20-minute step limit')
   })
 
-  test('a dispatched run writes as the App and is never told where the key is', async () => {
+  test('a worker run writes as the App and is never told where the key is', async () => {
     let given: NodeJS.ProcessEnv = {}
     const exec = async (_tool: string, _args: string[], options: { env: NodeJS.ProcessEnv }) => {
       given = options.env
@@ -1642,7 +1642,7 @@ describe('caps on the roster row', () => {
     expect(named[0]!.caps).toEqual({ ...DEFAULT_CAPS, runs: 4 })
   })
 
-  test("the shipped template's header is not a machine called dispatcher", () => {
+  test("the shipped template's header is not a machine called worker", () => {
     expect(parseNodes('| node | group | repos | owner | caps | notes |\n|---|---|---|---|---|---|')).toEqual([])
   })
 })
@@ -1763,7 +1763,7 @@ test('an agent asking a question is not bookkeeping, and is not answered by an o
   gh.addComment(2, '<!-- vsk:v1 type=standdown -->\n**box** stood down from #2: this machine is no longer listed', 'mk')
   expect(verdict(2).action).toBe('follow-up')
 
-  // Released dispatchers used `handback` for this exact machine notice. Those live comments have
+  // Released workers used `handback` for this exact machine notice. Those live comments have
   // the same meaning as the current marker and must not bury the answer they did not act on.
   gh.addIssue({ number: 3, labels: ['waiting-on-operator', 'medium'] })
   gh.addComment(3, 'here are the details you asked for', 'mk')

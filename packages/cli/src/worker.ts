@@ -692,7 +692,7 @@ export function serviceCommands(platform: NodeJS.Platform, path: string, verb: '
 }
 
 // ---------------------------------------------------------------------------------------------
-// What the dispatcher writes down: the runs it made and what it has already acted on
+// What the worker writes down: the runs it made and what it has already acted on
 
 export type Action = 'follow-up' | 'plan' | 'implement' | 'corrections' | 'ship' | 'stop' | 'none'
 export type Outcome = 'done' | 'blocked' | 'failed' | 'killed' | 'limit' | 'stopped'
@@ -804,7 +804,7 @@ export function stillTheChild(record: ChildRecord, start: ProcessStart = process
 }
 
 // Stops a run and everything it started. The group is signalled, not the one process: an agent
-// spawns its own tools, and leaving those behind is how a "stopped" dispatcher keeps working.
+// spawns its own tools, and leaving those behind is how a "stopped" worker keeps working.
 export function stopGroup(pid: number, signal: NodeJS.Signals = 'SIGTERM'): boolean {
   try {
     process.kill(-pid, signal)
@@ -837,9 +837,9 @@ export function updateActed(root: string, change: (acted: Record<string, Acted>)
   }, { what: 'the worker\'s record' })
 }
 
-// One dispatcher per machine. Two are not twice the work: they double every poll, race for every
+// One worker per machine. Two are not twice the work: they double every poll, race for every
 // claim and split the run budget in ways neither can see. The lock records the process that holds
-// it the same way a child record does, so a crashed dispatcher's lock is taken over rather than
+// it the same way a child record does, so a crashed worker's lock is taken over rather than
 // blocking the box for ever.
 export const runLockPath = (root: string) => join(workerDir(root), 'run.lock')
 
@@ -920,7 +920,7 @@ function operatorComments(snap: Snapshot, permission: PermissionLookup) {
 }
 
 // The newest work artifact of a type: written by a person with write access, or by the App on a
-// dispatched run's behalf. An outsider's comment is text on a page and never either.
+// worker run's behalf. An outsider's comment is text on a page and never either.
 export function latestArtifact(snap: Snapshot, type: string, permission: PermissionLookup): CommentEntry | null {
   return Object.values(snap.state.comments)
     .filter((entry) => entry.type === type && fromFactory(permission)(entry))
@@ -1166,7 +1166,7 @@ const STAGE_OF: Record<string, string> = { plan: 'plan', implement: 'implement',
 
 // A pinned model the account cannot serve fails the run, so `default` in the policy pins nothing.
 //
-// Both tools are told not to stop and ask. Nobody is at the keyboard, and the first dispatched run
+// Both tools are told not to stop and ask. Nobody is at the keyboard, and the first worker run
 // proved what the default costs: `claude -p` alone denied every write and handed the issue back
 // untouched, having read the repository and changed nothing. What still holds the run is not the
 // harness prompt — it is the worktree it is confined to, the branch it pushes, the step limit its
@@ -1181,13 +1181,13 @@ export function agentArgs(policy: { harness: string; model: string | null; effor
 
 interface Exec { code: number | null; stdout: string; stderr: string; timedOut: boolean; error?: string }
 
-// The limit is enforced inside the child's own process group, so it holds even if the dispatcher
+// The limit is enforced inside the child's own process group, so it holds even if the worker
 // dies: an agent orphaned by a crash or a `launchctl bootout` still stops on its own rather than
 // writing to GitHub unsupervised for hours.
 // The backstop sleeps with its own stdio, detached from the job's pipes, and is killed by name
 // rather than through the subshell that started it. Both halves are load-bearing: killing a
 // subshell leaves the `sleep` inside it running, and an orphan sleep holding the job's stdout means
-// the reader never sees end-of-file. The first dispatched run finished its work in twelve seconds
+// the reader never sees end-of-file. The first worker run finished its work in twelve seconds
 // and held its slot for the full twenty-minute limit, because of exactly that.
 const WATCHDOG = '"$@" & job=$!; { sleep "$VF_LIMIT" & dog=$!; wait "$dog"; kill -KILL 0; } </dev/null >/dev/null 2>&1 & guard=$!;'
   + ' wait "$job"; code=$?; pkill -P "$guard" 2>/dev/null; kill "$guard" 2>/dev/null; exit "$code"'
@@ -1239,7 +1239,7 @@ export function workingDir(root: string, number: number): string | null {
 //   person's stop, correction or "ship it";
 // - it is never told where the App's private key is. The token expires in an hour; the key does
 //   not. (A child running under the same account can still read that file through the filesystem —
-//   the separate dispatcher account in the dispatcher-box checklist is what closes that, not this.)
+//   the separate worker account in the worker-box checklist is what closes that, not this.)
 export function childRunEnvironment(env: NodeJS.ProcessEnv, token: string | null): NodeJS.ProcessEnv {
   const child: NodeJS.ProcessEnv = { ...childEnvironment(env), VSK_ASK_ROUTE: 'issue' }
   for (const name of Object.keys(child)) if (name.startsWith('VEGAFACTORY_')) delete child[name]
@@ -1254,7 +1254,7 @@ export function childRunEnvironment(env: NodeJS.ProcessEnv, token: string | null
     // person at the keyboard, and an SSH remote ignores all of this because SSH asks no helper.
     //
     // This is attribution, not isolation: a child under this account can read that login for
-    // itself whenever it likes. The separate dispatcher account closes that, and nothing here
+    // itself whenever it likes. The separate worker account closes that, and nothing here
     // pretends to (#239).
     for (const name of Object.keys(child)) if (/^GIT_CONFIG_(COUNT|KEY_|VALUE_)/.test(name)) delete child[name]
     child.GIT_CONFIG_COUNT = '2'
@@ -1306,7 +1306,7 @@ export interface PollDeps {
   root: string
   repo: string
   runner: GhRunner
-  // This dispatcher process, so its claims are its own and no other process reads them as such.
+  // This worker process, so its claims are its own and no other process reads them as such.
   runId: string
   // The machine's own limits, from its roster row, re-read every pass.
   caps?: Caps
@@ -1441,7 +1441,7 @@ export const HANDS_OVER: Action[] = ['implement', 'corrections']
 
 export interface Reservation { ok: boolean; owner: string; reason: string }
 
-// The owner carries the *process*, not just the machine and the issue. Two dispatchers on one host
+// The owner carries the *process*, not just the machine and the issue. Two workers on one host
 // — the service and an operator running a pass by hand — would otherwise compute the same owner,
 // each read it as its own claim, and both start the run.
 export const ownerFor = (machine: string, runId: string, number: number) => `${machine}:worker-${runId}-${number}`
@@ -1457,7 +1457,7 @@ export function reserve(ctx: { root: string; repo: string; number: number; runne
 }
 
 // One step and everything that follows it. Nothing here may reject: the loop does not await these
-// promises, so a rejection nobody handles would take the whole dispatcher down.
+// promises, so a rejection nobody handles would take the whole worker down.
 async function runOne(deps: PollDeps, candidate: Candidate, item: { key: string; decision: Decision }, at: number, held: string | null, run: Inflight): Promise<RunRecord> {
   const claimCtx = { root: deps.root, repo: deps.repo, number: candidate.number, runner: deps.runner }
   // What the step started, filled in from its own callback, so the finally can forget it.
@@ -1573,7 +1573,7 @@ function settle(deps: PollDeps, candidate: Candidate, item: { key: string; decis
   return record
 }
 
-// The operator's word, recorded and read back the way the ship gate reads it. The dispatcher
+// The operator's word, recorded and read back the way the ship gate reads it. The worker
 // relays the ack — an App may do that only by citing the person's own comment — and then asks
 // `findValidAck` the same question `vegafactory issue check --for ship` asks. A relayed ack that
 // does not validate ships nothing: the words on the page were never the gate, the ack is.
@@ -1746,7 +1746,7 @@ export function workerUsage(): string {
                          harness hooks wired, a real \`claude -p\` and \`codex exec\` answering, the
                          GitHub App key present — then install the launchd or systemd unit
   disable                remove the unit; the machine stops picking work up
-  status                 the board, plus this machine's recent dispatcher runs
+  status                 the board, plus this machine's recent worker runs
   run [--once]           the poll loop itself (the unit runs this); --once makes a single pass
                          and is the only form --json reports, because the document answers when
                          a pass ends
@@ -1953,7 +1953,7 @@ export async function runWorker(argv: string[], deps: CliDeps = {}): Promise<num
       const byState = new Map<string, number[]>()
       for (const row of rows) byState.set(row.state, [...(byState.get(row.state) ?? []), row.number])
       // An issue this machine has given up on is the one thing `status` must not leave out: it is
-      // off the board as far as the dispatcher is concerned until a person looks at it.
+      // off the board as far as the worker is concerned until a person looks at it.
       const parked = Object.entries(readActed(root))
         .filter(([key, entry]) => entry.failures >= (listing.entry?.caps ?? DEFAULT_CAPS).failures && key.startsWith(`${repo}#`))
         .map(([key, entry]) => ({ issue: Number(key.slice(key.indexOf('#') + 1)), action: entry.action, failures: entry.failures }))
@@ -2025,7 +2025,7 @@ export async function runWorker(argv: string[], deps: CliDeps = {}): Promise<num
       // still acts on the rest of the board — a twenty-minute build does not stop the poll.
       const inflight = new Map<number, Inflight>()
       // Stopping means stopping: the agents this machine started are ended, their work saved and
-      // their claims released. A dispatcher that walked away leaving three agents writing to
+      // their claims released. A worker that walked away leaving three agents writing to
       // GitHub would be worse than one that never started.
       const shutDown = async (why: string) => {
         for (const [number, run] of inflight) {

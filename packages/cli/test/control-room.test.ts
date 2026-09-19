@@ -81,7 +81,7 @@ describe('control-room knob and machine state', () => {
     expect(before.controlRooms.vegastack).toBeUndefined()
   })
 
-  test('the dispatcher settings sharing this file survive a sync write, never clobbered', () => {
+  test('the worker settings sharing this file survive a sync write, never clobbered', () => {
     const before = readFactoryConfig(JSON.stringify({
       schemaVersion: 1,
       repos: [{ path: '~/code/app', repo: 'acme/app', org: 'acme' }],

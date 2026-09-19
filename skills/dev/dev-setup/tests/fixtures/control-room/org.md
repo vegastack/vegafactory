@@ -6,7 +6,7 @@ org: vegastack
 
 ## Goals
 
-VegaStack builds agent-native developer tooling: the skills that run an issue-driven workflow, the VegaFactory CLI that installs them, and the runtime — worktrees, hooks, dispatchers, boards, and statistics — that turns an approved issue into finished, reviewed work with every gate that matters left in a human hand.
+VegaStack builds agent-native developer tooling: the skills that run an issue-driven workflow, the VegaFactory CLI that installs them, and the runtime — worktrees, hooks, workers, boards, and statistics — that turns an approved issue into finished, reviewed work with every gate that matters left in a human hand.
 
 ## What applies to everyone
 
@@ -37,4 +37,4 @@ app-permissions: Issues read/write · Projects (organization) read/write · Meta
 
 Lines the operator has not confirmed yet. Each is a question the next run asks again rather than an answer anyone may assume.
 
-- 18-09-2026 — the two macOS account names, the runner group and the runner name in `onboarding/dispatcher-box.md`: the checklist carries proposals, and the operator confirms them on the box.
+- 18-09-2026 — the two macOS account names, the runner group and the runner name in `onboarding/worker-box.md`: the checklist carries proposals, and the operator confirms them on the box.

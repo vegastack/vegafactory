@@ -50,7 +50,7 @@ One state label at a time (`issue label <n> --state …` swaps it):
 | `waiting-on-operator` | a person must ack or give input (brief, plan, handback) | the operator |
 | `planning` | brief acked; a plan is being written (medium / large) | the operator |
 | `queued` | approved; waiting to be built | nobody |
-| `in-progress` | held by a session or the dispatcher (see the status comment) | the holder |
+| `in-progress` | held by a session or the worker (see the status comment) | the holder |
 | `ready-to-ship` | built and reviewed; comment changes or say "ship it" | the operator |
 
 Size, one per issue: `small` (brief and plan together, one ack) · `medium` (brief ack, separate planning session, plan ack) · `large` (planning splits it into small/medium sub-issues; the parent becomes an `epic`). `research` replaces the size for an inquiry: code is throwaway and never merged, and the evidence comment holds findings and a recommendation. Flags: `risky`, `epic`. Boards mirror states one way.
@@ -60,7 +60,7 @@ Size, one per issue: `small` (brief and plan together, one ack) · `medium` (bri
 - Issue titles use dev.md's `branch:` types, plus `research:` for an inquiry. A branch uses those types and nothing else, so a `research:` issue that does write code takes a listed type — `worktree create` refuses rather than choosing one, and naming the list is the knob's job. The PR title is the issue title.
 - Native issue types: Feature (feat) · Bug (fix) · Task (docs/chore/refactor/research).
 - An epic is a map only (Destination · Decisions so far · Not clear yet · Out of scope) with native sub-issues. Tasks are checkboxes in the plan comment only. Blockers use GitHub dependencies.
-- Tasks inside one issue run in order, and so do sibling sub-issues. The plan records which siblings' files do not overlap and so may run at the same time; the dispatcher (#218) is what will run them.
+- Tasks inside one issue run in order, and so do sibling sub-issues. The plan records which siblings' files do not overlap and so may run at the same time; the worker (#218) is what will run them.
 
 ## Revisions
 

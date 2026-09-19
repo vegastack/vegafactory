@@ -33,7 +33,7 @@ Rounds go out by the ask route (`references/ask-route.md`); an issue-routed roun
 Give every task its stable `<issue>-T<n>` identity before approval. Post one comment per [plan-format](references/plan-format.md): Goal · Approach (alternatives named) · Constraints · ordered `- [ ]` tasks, each with exact Files, an Interfaces block (consumes/produces with exact signatures), and Steps that put the failing test before the code. Before posting:
 
 - Walk the brief section by section per plan-format's self-review — every requirement points at a task, names match across tasks, no banned placeholder.
-- Tasks inside one issue run in order. For a `large` issue, the plan splits the work into small/medium sub-issues instead; each sub-issue's brief lists the files it touches, so siblings with no overlap (and no generated files, migrations, lockfiles or `package.json`) can run in parallel. A dispatcher runs disjoint groups at the same time; without a declared group, siblings run one at a time.
+- Tasks inside one issue run in order. For a `large` issue, the plan splits the work into small/medium sub-issues instead; each sub-issue's brief lists the files it touches, so siblings with no overlap (and no generated files, migrations, lockfiles or `package.json`) can run in parallel. A worker runs disjoint groups at the same time; without a declared group, siblings run one at a time.
 - Run this skill's plan-lint: `node <path-to-this-skill>/scripts/plan-lint.mjs --file <draft> --json`; exit 2 = fix before posting (placeholders and structural gaps block).
 
 Checkboxes belong to the implement session and post empty, because dev-status reads a ticked box as progress.

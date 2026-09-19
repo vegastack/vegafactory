@@ -78,7 +78,7 @@ export function branchName(type, issue, slug) {
 }
 
 // The branch type and slug an issue title carries: a `<type>:` prefix from the
-// branch: knob's list is the type, the rest is the slug. The dispatcher
+// branch: knob's list is the type, the rest is the slug. The worker
 // predicts a run's worktree the same way, so a title names one path.
 const DEFAULT_BRANCH_TYPES = ['feat', 'fix', 'docs', 'chore', 'refactor'];
 
