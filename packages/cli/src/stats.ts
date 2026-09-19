@@ -72,8 +72,26 @@ const identityPath = (home: string) => join(statsDir(home), 'identity.json')
 const hash = (text: string) => createHash('sha256').update(text).digest('hex').slice(0, 16)
 const zero = (): Tokens => ({ input: 0, output: 0, cacheRead: 0, cacheWrite: 0 })
 const count = (value: unknown) => (typeof value === 'number' && Number.isFinite(value) && value > 0 ? Math.round(value) : 0)
+// Trimming happens *after* the cut, because cutting first can leave the dash that trimming was
+// meant to remove: 63 safe characters plus `-b` came back 64 characters long ending in `-`.
 const label = (value: unknown, fallback = 'unknown') =>
-  String(value ?? '').replace(/[^A-Za-z0-9._:/-]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 64) || fallback
+  String(value ?? '').replace(/[^A-Za-z0-9._:/-]+/g, '-').slice(0, 64).replace(/^-+|-+$/g, '') || fallback
+
+// An identity is read back out of a file other people write, and it reaches a terminal by way of
+// `stats show`. Only the characters that a terminal acts on are removed — C0, DEL and C1, which is
+// where ESC and every OSC and CSI introducer live — so a row written on another machine cannot
+// address this one. Everything a person might legitimately have in a login or a hostname survives,
+// accents included: flattening those would change whose turn a record says it is. The filename is
+// a separate question and `safe()` still answers it.
+//
+// The bound is 256 rather than 64 on purpose. A login and a hostname are both far shorter than
+// that in practice, so nothing real is cut — and cutting an identity is not a cosmetic loss: two
+// machines whose names agree for 64 characters would become the same recorded identity, which no
+// filename scheme downstream could tell apart again.
+const IDENTITY_LIMIT = 256
+const identityLabel = (value: unknown, fallback = 'unknown') =>
+  // eslint-disable-next-line no-control-regex
+  String(value ?? '').replace(/[\u0000-\u001F\u007F-\u009F]+/g, '').trim().slice(0, IDENTITY_LIMIT).trim() || fallback
 
 function atomicWrite(path: string, text: string) {
   mkdirSync(dirname(path), { recursive: true })
@@ -245,7 +263,7 @@ function readEvent(value: unknown): StatsEvent {
   const { operator, machine, ...current } = stored
   const owner = typeof current.owner === 'string' && current.owner ? current.owner : typeof operator === 'string' && operator ? operator : 'unknown'
   const node = typeof current.node === 'string' && current.node ? current.node : typeof machine === 'string' && machine ? machine : 'unknown'
-  return { ...current, owner, node, model: label(current.model), outcome: label(current.outcome) } as unknown as StatsEvent
+  return { ...current, owner: identityLabel(owner), node: identityLabel(node), model: label(current.model), outcome: label(current.outcome) } as unknown as StatsEvent
 }
 
 function opened(carry: Carry): Map<string, Known> {
@@ -874,7 +892,16 @@ export const defaultGit: GitRunner = (args) => {
   return { code: result.status ?? 1, out: `${result.stdout ?? ''}${result.stderr ?? ''}`.trim() }
 }
 
-const safe = (value: string) => String(value ?? '').replace(/[^A-Za-z0-9._-]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 64) || 'unknown'
+const safe = (value: string) => String(value ?? '').replace(/[^A-Za-z0-9._-]+/g, '-').slice(0, 64).replace(/^-+|-+$/g, '') || 'unknown'
+
+// The readable part is for a person scanning the tree; the digest is what actually keeps two
+// identities apart. `safe()` cannot: it rewrites `@` to `-` and truncates at 64, so `a-b@c` and
+// `a@b-c` both read as `a-b-c`, and two long nodes sharing a prefix read as each other. Either
+// collision puts two machines back on one file, which is the conflict this layout exists to
+// prevent. Twelve hex characters of the exact pair, joined by a separator neither half can
+// contain, so the pair that produced a name is the only pair that produces it.
+export const statsFileName = (owner: string, node: string) =>
+  `${safe(owner)}-${safe(node)}-${hash(`${owner}\u0000${node}`).slice(0, 12)}.jsonl`
 
 // The repository this session is in, with a worktree path folded back to its main checkout.
 export function repoRootFor(cwd: string): string | null {
@@ -1198,9 +1225,7 @@ function pushInsideLock(home: string, options: PushOptions, context: PushContext
     if (!event.repo || !allowed.has(event.repo)) continue
     const day = String(event.at ?? '').slice(0, 10).replace(/-/g, '/')
     if (!/^\d{4}\/\d{2}\/\d{2}$/.test(day)) continue
-    // Keeping both components makes an owner's files easy to scan while the node's `@` becomes a
-    // portable dash; bounding each separately keeps one identity from consuming the other's room.
-    const relative = `stats/${day}/${safe(event.owner)}-${safe(event.node)}.jsonl`
+    const relative = `stats/${day}/${statsFileName(event.owner, event.node)}`
     const group = groups.get(relative) ?? { relative, rows: [] }
     group.rows.push(JSON.stringify(event))
     groups.set(relative, group)

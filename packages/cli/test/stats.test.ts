@@ -8,8 +8,7 @@ import { nodeId } from '../src/claim.ts'
 import { recordStage, saveSpans, stageHistory, stageOn } from '../src/stages.ts'
 import {
   checkoutOf, collectStats, defaultSite, loadEvents, parseClaude, parseCodex, parseSince, pushStats, resolveOwner,
-  runStats, skillName, skillResolver, statsDir, summarize, type GitRunner, type ParseContext, type StatsEvent,
-} from '../src/stats.ts'
+  runStats, skillName, skillResolver, statsDir, summarize, type GitRunner, type ParseContext, type StatsEvent, statsFileName } from '../src/stats.ts'
 import { refuseAmbientHome } from './no-ambient-home.ts'
 
 refuseAmbientHome()
@@ -405,7 +404,7 @@ describe('reading events back', () => {
     const clone = join(home, '.vegafactory', 'control-room', 'acme')
     const dir = join(clone, 'stats', '2026', '09', '18')
     mkdirSync(dir, { recursive: true })
-    writeFileSync(join(dir, 'mk-mk-box.jsonl'), rows.map((row) => JSON.stringify(row)).join('\n') + '\n')
+    writeFileSync(join(dir, statsFileName('mk', 'mk@box')), rows.map((row) => JSON.stringify(row)).join('\n') + '\n')
     writeFileSync(join(home, '.vegafactory', 'factory.json'), JSON.stringify({
       schemaVersion: 2, revision: 0, controlRooms: { acme: { repo: 'acme/room', path: clone, branch: 'main', lastSyncedAt: null, sha: null } },
     }))
@@ -628,8 +627,8 @@ describe('stats push', () => {
     write(event('a', '2026-09-17T10:00:00.000Z'), event('b', '2026-09-18T11:00:00.000Z'))
     const result = push(Date.parse('2026-09-18T12:00:00Z'))
     expect(result).toMatchObject({ ok: true, action: 'pushed', events: 2 })
-    expect(readdirSync(stats('2026', '09', '17'))).toEqual(['mk-mk-box.jsonl'])
-    expect(readFileSync(stats('2026', '09', '18', 'mk-mk-box.jsonl'), 'utf8').trim().split('\n')).toHaveLength(1)
+    expect(readdirSync(stats('2026', '09', '17'))).toEqual([statsFileName('mk', 'mk@box')])
+    expect(readFileSync(stats('2026', '09', '18', statsFileName('mk', 'mk@box')), 'utf8').trim().split('\n')).toHaveLength(1)
     // The clone must stay clean, or the next `vegafactory sync` refuses to refresh it.
     expect(git(clone, 'status', '--porcelain', '--untracked-files=all')).toBe('')
     expect(git(clone, 'log', 'origin/main', '-1', '--format=%s')).toContain('stats: 2 turns')
@@ -647,9 +646,52 @@ describe('stats push', () => {
     )
     const result = push(Date.parse('2026-09-18T12:00:00Z'))
     expect(result.action).toBe('pushed')
-    expect(readdirSync(stats('2026', '09', '18')).sort()).toEqual(['mk-mk-box.jsonl', 'mk-mk-laptop.jsonl', 'sam-sam-box.jsonl', 'unknown-someone-box.jsonl'])
-    expect(JSON.parse(readFileSync(stats('2026', '09', '18', 'unknown-someone-box.jsonl'), 'utf8').trim()).id).toBe('a')
+    expect(readdirSync(stats('2026', '09', '18')).sort()).toEqual([statsFileName('mk', 'mk@box'), statsFileName('mk', 'mk@laptop'), statsFileName('sam', 'sam@box'), statsFileName('unknown', 'someone@box')].sort())
+    expect(JSON.parse(readFileSync(stats('2026', '09', '18', statsFileName('unknown', 'someone@box')), 'utf8').trim()).id).toBe('a')
     expect(result.paths).toHaveLength(4)
+  })
+
+  // Cutting to the bound can itself create the edge dash that trimming was there to remove, so the
+  // order matters: rewrite, cut, then trim. Trimming first leaves a label ending in `-`.
+  test('a label cut to its bound never ends in the separator', () => {
+    const model = `${'a'.repeat(63)}!b`
+    const row = { ...event('cut', '2026-09-18T10:00:00.000Z'), model }
+    appendFileSync(join(statsDir(home), 'events.jsonl'), JSON.stringify(row) + '\n')
+    const result = push(Date.parse('2026-09-18T12:00:00Z'))
+    const stored = JSON.parse(readFileSync(join(clone, ...result.paths[0]!.split('/')), 'utf8').trim())
+    expect(stored.model).toBe('a'.repeat(63))
+    expect(stored.model).not.toMatch(/-$/)
+    expect(stored.model.length).toBeLessThanOrEqual(64)
+  })
+
+  // The readable half of a filename is lossy in two ways, and both used to put two machines on one
+  // file — which is the rebase conflict this whole layout exists to avoid.
+  test('two identities never share a filename, however the readable half collapses', () => {
+    // `@` is rewritten to `-`, so these two nodes read the same.
+    expect(statsFileName('a', 'a-b@c')).not.toBe(statsFileName('a', 'a@b-c'))
+    expect(statsFileName('a', 'a-b@c').startsWith('a-a-b-c-')).toBe(true)
+    // The readable half is cut at 64, so these two agree for every character it keeps.
+    const long = (tail: string) => `person@${'n'.repeat(70)}${tail}`
+    expect(statsFileName('mk', long('one'))).not.toBe(statsFileName('mk', long('two')))
+    // The owner is bounded on its own, so a long owner cannot eat the node's room.
+    expect(statsFileName('o'.repeat(70), 'mk@box')).not.toBe(statsFileName('o'.repeat(71), 'mk@box'))
+    // Same pair, same name, every time — the readable part is a convenience, not the identity.
+    expect(statsFileName('mk', 'mk@box')).toBe(statsFileName('mk', 'mk@box'))
+  })
+
+  // A shared room is written by other people, and `stats show` prints what it reads to a terminal.
+  test('an identity from a shared row cannot address the terminal it is printed to', () => {
+    const nasty = 'mk\u001b]0;pwned\u0007\u001b[2J@box\u009d'
+    const row = { ...event('esc', '2026-09-18T10:00:00.000Z'), owner: undefined, node: undefined, operator: `ow\u001b[31mner`, machine: nasty }
+    appendFileSync(join(statsDir(home), 'events.jsonl'), JSON.stringify(row) + '\n')
+    const result = push(Date.parse('2026-09-18T12:00:00Z'))
+    const written = readFileSync(join(clone, ...result.paths[0]!.split('/')), 'utf8')
+    // The row's own bytes carry nothing a terminal acts on; the trailing newline is the file's.
+    expect(written.trim()).not.toMatch(/[\u0000-\u001F\u007F-\u009F]/)
+    const stored = JSON.parse(written.trim())
+    // The letters survive; only what a terminal acts on is gone.
+    expect(stored.node).toBe('mk]0;pwned[2J@box')
+    expect(stored.owner).toBe('ow[31mner')
   })
 
   test('filenames make the node readable, bound both identities, and rewrite legacy rows', () => {
@@ -660,10 +702,10 @@ describe('stats push', () => {
     appendFileSync(join(statsDir(home), 'events.jsonl'), JSON.stringify(legacy) + '\n')
     const result = push(Date.parse('2026-09-18T12:00:00Z'))
     expect(result.paths.sort()).toEqual([
-      'stats/2026/09/18/old-shared-box.jsonl',
-      `stats/2026/09/18/${'o'.repeat(64)}-person-${'n'.repeat(57)}.jsonl`,
-    ])
-    const row = JSON.parse(readFileSync(stats('2026', '09', '18', 'old-shared-box.jsonl'), 'utf8').trim())
+      `stats/2026/09/18/${statsFileName('old', 'shared-box')}`,
+      `stats/2026/09/18/${statsFileName(owner, node)}`,
+    ].sort())
+    const row = JSON.parse(readFileSync(stats('2026', '09', '18', statsFileName('old', 'shared-box')), 'utf8').trim())
     expect(row).toMatchObject({ owner: 'old', node: 'shared-box' })
     expect(row).not.toHaveProperty('operator')
     expect(row).not.toHaveProperty('machine')
@@ -676,7 +718,7 @@ describe('stats push', () => {
     expect(push(Date.parse('2026-09-18T12:30:00Z')).action).toBe('skipped')
     const later = push(Date.parse('2026-09-18T13:05:00Z'))
     expect(later).toMatchObject({ action: 'pushed', events: 1 })
-    expect(readFileSync(stats('2026', '09', '18', 'mk-mk-box.jsonl'), 'utf8').trim().split('\n')).toHaveLength(2)
+    expect(readFileSync(stats('2026', '09', '18', statsFileName('mk', 'mk@box')), 'utf8').trim().split('\n')).toHaveLength(2)
     expect(push(Date.parse('2026-09-18T14:10:00Z')).action).toBe('none')
   })
 
@@ -748,7 +790,7 @@ describe('stats push', () => {
     const failing: GitRunner = (args) => (args.includes('commit') ? { code: 1, out: 'no identity' } : defaultGitFor(args))
     const result = push(Date.parse('2026-09-18T12:00:00Z'), { git: failing })
     expect(result.action).toBe('refused')
-    expect(existsSync(stats('2026', '09', '18', 'mk-mk-box.jsonl'))).toBe(false)
+    expect(existsSync(stats('2026', '09', '18', statsFileName('mk', 'mk@box')))).toBe(false)
     expect(git(clone, 'status', '--porcelain', '--untracked-files=all')).toBe('')
     // Nothing was consumed, so a healthy run still sends it.
     expect(push(Date.parse('2026-09-18T12:00:00Z')).action).toBe('pushed')
@@ -796,7 +838,7 @@ describe('stats push', () => {
     expect(existsSync(journalFor('acme/room'))).toBe(false)
     // Exactly one stats commit, and the turn is in the file exactly once.
     expect(git(clone, 'log', 'origin/main', '--format=%s').split('\n').filter((line) => line.startsWith('stats:'))).toHaveLength(1)
-    expect(readFileSync(stats('2026', '09', '18', 'mk-mk-box.jsonl'), 'utf8').trim().split('\n')).toHaveLength(1)
+    expect(readFileSync(stats('2026', '09', '18', statsFileName('mk', 'mk@box')), 'utf8').trim().split('\n')).toHaveLength(1)
     // And the cursor really moved: there is nothing left to send.
     expect(push(Date.parse('2026-09-18T14:00:00Z')).action).toBe('none')
   })
@@ -813,7 +855,7 @@ describe('stats push', () => {
     expect(existsSync(journalFor('acme/room'))).toBe(true)
     const healthy = push(Date.parse('2026-09-18T12:10:00Z'))
     expect(healthy).toMatchObject({ ok: true, action: 'pushed', events: 1 })
-    expect(readFileSync(stats('2026', '09', '18', 'mk-mk-box.jsonl'), 'utf8').trim().split('\n')).toHaveLength(1)
+    expect(readFileSync(stats('2026', '09', '18', statsFileName('mk', 'mk@box')), 'utf8').trim().split('\n')).toHaveLength(1)
     expect(git(clone, 'status', '--porcelain', '--untracked-files=all')).toBe('')
   })
 
@@ -824,7 +866,7 @@ describe('stats push', () => {
     // Another machine writes to the very same file and pushes first.
     const other = join(base, 'other-clone')
     git(base, 'clone', '-q', origin, other)
-    appendFileSync(join(other, 'stats', '2026', '09', '18', 'mk-mk-box.jsonl'), JSON.stringify(event('z', '2026-09-18T10:30:00.000Z')) + '\n')
+    appendFileSync(join(other, 'stats', '2026', '09', '18', statsFileName('mk', 'mk@box')), JSON.stringify(event('z', '2026-09-18T10:30:00.000Z')) + '\n')
     git(other, 'commit', '-q', '-a', '-m', 'stats: someone else')
     git(other, 'push', '-q', 'origin', 'main')
 
@@ -837,7 +879,7 @@ describe('stats push', () => {
     expect(existsSync(join(clone, '.git', 'rebase-apply'))).toBe(false)
     expect(git(clone, 'status', '--porcelain', '--untracked-files=all')).toBe('')
     expect(git(clone, 'log', '-1', '--format=%s')).toContain('stats: 1 turn')
-    expect(readFileSync(stats('2026', '09', '18', 'mk-mk-box.jsonl'), 'utf8')).not.toContain('<<<<')
+    expect(readFileSync(stats('2026', '09', '18', statsFileName('mk', 'mk@box')), 'utf8')).not.toContain('<<<<')
   })
 
   // F15
@@ -845,12 +887,12 @@ describe('stats push', () => {
     write(event('a', '2026-09-18T10:00:00.000Z', { model: 'claude-opus-5-unicode', node: 'mk@büro-mac' }))
     const first = push(Date.parse('2026-09-18T12:00:00Z'))
     expect(first).toMatchObject({ action: 'pushed', events: 1 })
-    expect(first.paths).toEqual(['stats/2026/09/18/mk-mk-b-ro-mac.jsonl'])
+    expect(first.paths).toEqual([`stats/2026/09/18/${statsFileName('mk', 'mk@büro-mac')}`])
     write(event('b', '2026-09-18T12:30:00.000Z'))
     expect(push(Date.parse('2026-09-18T13:05:00Z'))).toMatchObject({ action: 'pushed', events: 1 })
     // The second push starts where the first stopped, counted in bytes, not characters.
-    expect(JSON.parse(readFileSync(stats('2026', '09', '18', 'mk-mk-b-ro-mac.jsonl'), 'utf8').trim()).model).toBe('claude-opus-5-unicode')
-    const rows = readFileSync(stats('2026', '09', '18', 'mk-mk-box.jsonl'), 'utf8').trim().split('\n')
+    expect(JSON.parse(readFileSync(stats('2026', '09', '18', statsFileName('mk', 'mk@büro-mac')), 'utf8').trim()).model).toBe('claude-opus-5-unicode')
+    const rows = readFileSync(stats('2026', '09', '18', statsFileName('mk', 'mk@box')), 'utf8').trim().split('\n')
     expect(rows).toHaveLength(1)
     expect(JSON.parse(rows[0]!).id).toBe('b')
     expect(push(Date.parse('2026-09-18T14:10:00Z')).action).toBe('none')
@@ -860,7 +902,7 @@ describe('stats push', () => {
   test('a journal naming a symlinked file is refused and kept', () => {
     const outside = join(base, 'target.jsonl')
     writeFileSync(outside, 'keep me\n')
-    const relative = 'stats/2026/09/18/mk-mk-box.jsonl'
+    const relative = `stats/2026/09/18/${statsFileName('mk', 'mk@box')}`
     mkdirSync(stats('2026', '09', '18'), { recursive: true })
     symlinkSync(outside, join(clone, ...relative.split('/')))
     const path = journalFor('acme/room')
@@ -886,7 +928,7 @@ describe('stats push', () => {
     const journal = {
       token: 'abc', at: Date.parse('2026-09-18T11:00:00Z'), offset: 0, head: git(clone, 'rev-parse', 'HEAD'),
       room: { repo: 'acme/room', remote: origin, branch: 'main', path: join(base, 'somewhere-else') },
-      files: [{ relative: 'stats/2026/09/18/mk-mk-box.jsonl', had: null, digest: 'x', wrote: 0, appended: 'x' }],
+      files: [{ relative: `stats/2026/09/18/${statsFileName('mk', 'mk@box')}`, had: null, digest: 'x', wrote: 0, appended: 'x' }],
     }
     writeFileSync(path, JSON.stringify(journal))
     write(event('a', '2026-09-18T10:00:00.000Z'))
@@ -912,12 +954,12 @@ describe('stats push', () => {
     expect(result.message).toContain('index could not be put back')
     expect(existsSync(journalFor('acme/room'))).toBe(true)
     // The rows themselves were still taken back out.
-    expect(existsSync(stats('2026', '09', '18', 'mk-mk-box.jsonl'))).toBe(false)
+    expect(existsSync(stats('2026', '09', '18', statsFileName('mk', 'mk@box')))).toBe(false)
   })
 
   // F21
   test('a rollback refuses when the file or the clone changed since the crash', () => {
-    const file = stats('2026', '09', '18', 'mk-mk-box.jsonl')
+    const file = stats('2026', '09', '18', statsFileName('mk', 'mk@box'))
     const crash = () => {
       const killed: GitRunner = (args) => {
         if (args.includes('add')) throw new Error('killed while staging')
@@ -960,7 +1002,7 @@ describe('stats push', () => {
     }
     expect(() => push(Date.parse('2026-09-18T12:00:00Z'), { git: killed })).toThrow('killed')
     // Someone replaced the tail with their own line of exactly the same length.
-    const file = stats('2026', '09', '18', 'mk-mk-box.jsonl')
+    const file = stats('2026', '09', '18', statsFileName('mk', 'mk@box'))
     const theirs = Buffer.alloc(readFileSync(file).length, 0x78)
     theirs[theirs.length - 1] = 0x0a
     writeFileSync(file, theirs)
@@ -1027,7 +1069,7 @@ describe('stats push with two control rooms', () => {
   const write = (...events: StatsEvent[]) =>
     appendFileSync(join(statsDir(home), 'events.jsonl'), events.map((row) => JSON.stringify(row)).join('\n') + '\n')
   const rows = (room: Room) => {
-    const path = join(room.clone, 'stats', '2026', '09', '18', 'mk-mk-box.jsonl')
+    const path = join(room.clone, 'stats', '2026', '09', '18', statsFileName('mk', 'mk@box'))
     return existsSync(path) ? readFileSync(path, 'utf8').trim().split('\n').map((line) => JSON.parse(line).id) : []
   }
   const push = (room: Room, now: number, extra: { git?: GitRunner } = {}) => pushStats({ home, cwd: room.repo, now: () => now, ...extra })
@@ -1048,7 +1090,7 @@ describe('stats push with two control rooms', () => {
     expect(rows(rooms[1]!)).toEqual(['b1', 'b2'])
     // The unbound repository went nowhere, and both rooms are clean.
     for (const room of rooms) {
-      expect(readFileSync(join(room.clone, 'stats', '2026', '09', '18', 'mk-mk-box.jsonl'), 'utf8')).not.toContain('someone/else')
+      expect(readFileSync(join(room.clone, 'stats', '2026', '09', '18', statsFileName('mk', 'mk@box')), 'utf8')).not.toContain('someone/else')
       expect(git(room.clone, 'status', '--porcelain', '--untracked-files=all')).toBe('')
     }
     const cursors = JSON.parse(readFileSync(join(statsDir(home), 'push.json'), 'utf8')).rooms

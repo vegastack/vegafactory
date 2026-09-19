@@ -101,8 +101,11 @@ vegafactory stats push              # append this machine's new turns to the org
 vegafactory dashboard --open        # one offline HTML page, built from what you have
 ```
 
-`push` appends each turn to `stats/YYYY/MM/DD/<operator>-<machine>.jsonl` — the operator and machine
-the turn was recorded on, not whoever is logged in now — in the control-room clone `sync` already
+`push` appends each turn to `stats/YYYY/MM/DD/<owner>-<node>-<digest>.jsonl` — the owner and node
+the turn was recorded on, not whoever is logged in now. The owner is the `gh` login that did the
+work and the node is `<os-user>@<hostname>`, so two people sharing one machine stay apart; the
+digest is twelve characters of the exact pair, because the readable part rewrites `@` to `-` and
+truncates, and two identities must never land on one file — in the control-room clone `sync` already
 keeps, then commits and pushes it with your own `gh` login, at most once an hour and never with
 credentials of its own. A room only ever receives turns from the repositories bound to it: the repo
 you are pushing from, the ones its `repos.md` registry lists, and other checkouts on this machine
