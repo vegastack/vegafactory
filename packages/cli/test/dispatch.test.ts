@@ -27,7 +27,10 @@ let root: string
 let home: string
 
 // A repository with a control room, and a home whose clone of it lists this machine.
-function project(dispatchers: string | null = `| machine | operator | repos |\n|---|---|---|\n| ${HOST} | mk | o/r |\n`): void {
+const NODE = nodeId(undefined, HOST)
+const ROSTER = `| node | owner | worker | repos | caps |\n|---|---|---|---|---|\n| ${NODE} | mk | yes | o/r | |\n`
+
+function project(dispatchers: string | null = ROSTER): void {
   root = realpathSync(mkdtempSync(join(tmpdir(), 'dispatch-')))
   home = realpathSync(mkdtempSync(join(tmpdir(), 'dispatch-home-')))
   spawnSync('git', ['init', '-q'], { cwd: root })
@@ -98,9 +101,9 @@ describe('the roster', () => {
       '- `spare-box` — o/r',
     ].join('\n'))
     expect(rows).toEqual([
-      { machine: 'mac-mini', operator: 'mk', repos: ['o/r', 'o/other'], caps: DEFAULT_CAPS, worker: true, every: true, problem: null },
-      { machine: 'builder', operator: null, repos: ['*'], caps: DEFAULT_CAPS, worker: true, every: true, problem: null },
-      { machine: 'spare-box', operator: null, repos: ['o/r'], caps: DEFAULT_CAPS, worker: true, every: true, problem: null },
+      { machine: 'mac-mini', operator: 'mk', repos: ['o/r', 'o/other'], caps: DEFAULT_CAPS, worker: false, problem: null },
+      { machine: 'builder', operator: null, repos: ['*'], caps: DEFAULT_CAPS, worker: false, problem: null },
+      { machine: 'spare-box', operator: null, repos: ['o/r'], caps: DEFAULT_CAPS, worker: false, problem: null },
     ])
   })
 
@@ -113,18 +116,18 @@ describe('the roster', () => {
   })
 
   test('a row that does not reach its declared caps column is refused by name', () => {
-    const roster = `| machine | operator | repos | notes | caps |\n|---|---|---|---|---|\n| ${HOST} | mk | o/r |\n`
+    const roster = `| node | owner | worker | repos | notes | caps |\n|---|---|---|---|---|---|\n| ${NODE} | mk | yes | o/r |\n`
     project(roster)
     const row = parseDispatchers(roster)[0]!
-    expect(row.machine).toBe(HOST)
+    expect(row.machine).toBe(NODE)
     expect(row.caps).toBeNull()
     expect(row.problem).toContain('does not reach its declared caps column')
     const listing = listedHere(root, { repo: 'o/r', host: HOST, home })
     expect(listing.ok).toBe(false)
-    expect(listing.reason).toContain(`${HOST}'s row`)
+    expect(listing.reason).toContain(`${NODE}'s row`)
     expect(listing.reason).toContain('does not reach its declared caps column')
     for (const cell of ['', '-']) {
-      const complete = parseDispatchers(`| machine | operator | repos | notes | caps |\n|---|---|---|---|---|\n| ${HOST} | mk | o/r | | ${cell} |\n`)[0]!
+      const complete = parseDispatchers(`| node | owner | worker | repos | notes | caps |\n|---|---|---|---|---|---|\n| ${NODE} | mk | yes | o/r | | ${cell} |\n`)[0]!
       expect(complete.caps).toEqual(DEFAULT_CAPS)
       expect(complete.problem).toBeNull()
     }
@@ -154,33 +157,32 @@ describe('the roster', () => {
   // A row whose caps cannot be read used to be dropped, and the machine then refused as "not
   // listed" — which sends the operator looking for a missing row instead of at the typo.
   test('a caps cell nobody can read refuses this machine by name, and says the shape', () => {
-    project(`| machine | operator | repos | caps |\n|---|---|---|---|\n| ${HOST} | mk | o/r | runs ten |\n`)
+    project(`| node | owner | worker | repos | caps |\n|---|---|---|---|---|\n| ${NODE} | mk | yes | o/r | runs ten |\n`)
     const listing = listedHere(root, { repo: 'o/r', host: HOST, home })
     expect(listing.ok).toBe(false)
-    expect(listing.reason).toContain(`${HOST}'s row`)
+    expect(listing.reason).toContain(`${NODE}'s row`)
     expect(listing.reason).toContain('runs 10 · step 72h')
     expect(listing.reason).not.toContain('is not listed')
     // The row is still there to point at — it was read, and refused, not skipped.
-    expect(listing.entry?.machine).toBe(HOST)
+    expect(listing.entry?.machine).toBe(NODE)
   })
 
   // Caps can only be read from a column that says it holds them. A wider table with nothing naming
   // its columns could be hiding caps in any cell, so the gate says so rather than running on
   // defaults the operator never chose — and rather than reading a notes cell as a limit.
-  test('a wider table with no header refuses, and asks for the columns to be named', () => {
-    project(`| ${HOST} | mk | o/r | runs 10 · step 72h |\n`)
-    const listing = listedHere(root, { repo: 'o/r', host: HOST, home })
-    expect(listing.ok).toBe(false)
-    expect(listing.reason).toContain('names no columns')
-    expect(listing.reason).toContain('add a header row')
-    expect(listing.entry?.machine).toBe(HOST)
+  test('a wider table with no header names no columns, so it holds no caps and no gate', () => {
+    const row = parseDispatchers(`| ${NODE} | mk | o/r | runs 10 · step 72h |\n`)[0]!
+    expect(row.problem).toContain('names no columns')
+    expect(row.caps).toBeNull()
+    expect(row.worker).toBe(false)
   })
 
-  test('a legacy three-cell roster with no header still works, and takes the defaults', () => {
-    project(`| ${HOST} | mk | o/r |\n`)
-    const listing = listedHere(root, { repo: 'o/r', host: HOST, home })
-    expect(listing.ok).toBe(true)
-    expect(listing.entry?.caps).toEqual(DEFAULT_CAPS)
+  test('a three-cell roster with no header parses, and grants nothing', () => {
+    const row = parseDispatchers(`| ${NODE} | mk | o/r |\n`)[0]!
+    expect(row.caps).toEqual(DEFAULT_CAPS)
+    expect(row.worker).toBe(false)
+    project(`| ${NODE} | mk | o/r |\n`)
+    expect(listedHere(root, { repo: 'o/r', host: HOST, home }).reason).toContain('no `worker` column')
   })
 })
 
@@ -1191,7 +1193,7 @@ describe('the command', () => {
   // which is how `poll 1s` came to be reported as "every 0 minutes" in the first place. These read
   // what the commands actually print.
   test('the caps a command reports can be pasted back into the cell they came from', async () => {
-    project(`| machine | operator | repos | caps |\n|---|---|---|---|\n| ${HOST} | mk | o/r | step 90m · poll 1s · retry 60m |\n`)
+    project(`| node | owner | worker | repos | caps |\n|---|---|---|---|---|\n| ${NODE} | mk | yes | o/r | step 90m · poll 1s · retry 60m |\n`)
     gh.addIssue({ number: 1, labels: ['queued', 'small'] })
     const result = await run(['status'])
     expect(result.code).toBe(0)
@@ -1214,7 +1216,7 @@ describe('the command', () => {
   })
 
   test('enable reports a seconds-valued poll cap as seconds', async () => {
-    project(`| machine | operator | repos | caps |\n|---|---|---|---|\n| ${HOST} | mk | o/r | poll 1s |\n`)
+    project(`| node | owner | worker | repos | caps |\n|---|---|---|---|---|\n| ${NODE} | mk | yes | o/r | poll 1s |\n`)
     mkdirSync(join(root, '.claude'), { recursive: true })
     mkdirSync(join(root, '.codex'), { recursive: true })
     writeFileSync(join(root, '.claude', 'settings.json'), 'vegafactory hook stop --harness claude')
@@ -1252,8 +1254,8 @@ describe('the command', () => {
   })
 
   test('a row removed upstream stands this machine down, without touching its own copy', async () => {
-    const header = '| machine | operator | repos |\n|---|---|---|\n'
-    const delist = controlRoomClone(`${header}| ${HOST} | mk | o/r |\n`)
+    const header = '| node | owner | worker | repos |\n|---|---|---|---|\n'
+    const delist = controlRoomClone(`${header}| ${NODE} | mk | yes | o/r |\n`)
     const roster = join(home, '.vegafactory', 'control-room', 'o', 'nodes.md')
     const before = readFileSync(roster, 'utf8')
     gh.addIssue({ number: 1, labels: ['queued', 'small'] })
@@ -1273,8 +1275,8 @@ describe('the command', () => {
   })
 
   test('a de-listed machine stops the runs it started and hands them back', async () => {
-    const header = '| machine | operator | repos |\n|---|---|---|\n'
-    const delist = controlRoomClone(`${header}| ${HOST} | mk | o/r |\n`)
+    const header = '| node | owner | worker | repos |\n|---|---|---|---|\n'
+    const delist = controlRoomClone(`${header}| ${NODE} | mk | yes | o/r |\n`)
     gh.addIssue({ number: 1, labels: ['planning', 'medium'] })
     const lines: string[] = []
     const given: string[] = []
@@ -1311,8 +1313,8 @@ describe('the command', () => {
   // back as `planning` while `acted` says the plan already ran for that state, and every machine
   // that ever looks at it, including this one after a restart, skips it forever.
   test('an administrative stop does not spend the trigger, so the work is picked up again', async () => {
-    const header = '| machine | operator | repos |\n|---|---|---|\n'
-    const listed = `${header}| ${HOST} | mk | o/r |\n`
+    const header = '| node | owner | worker | repos |\n|---|---|---|---|\n'
+    const listed = `${header}| ${NODE} | mk | yes | o/r |\n`
     const delist = controlRoomClone(listed)
     gh.addIssue({ number: 1, labels: ['planning', 'medium'] })
     let releaseChild = () => {}
@@ -1350,8 +1352,8 @@ describe('the command', () => {
   // later than anything an agent wrote. A hand-back that counted as work would bury the very reply
   // it was standing down without answering.
   test('a stood-down follow-up still sees the reply it never answered', async () => {
-    const header = '| machine | operator | repos |\n|---|---|---|\n'
-    const listed = `${header}| ${HOST} | mk | o/r |\n`
+    const header = '| node | owner | worker | repos |\n|---|---|---|---|\n'
+    const listed = `${header}| ${NODE} | mk | yes | o/r |\n`
     const delist = controlRoomClone(listed)
     gh.addIssue({ number: 1, labels: ['waiting-on-operator', 'medium'] })
     gh.addComment(1, 'here is the answer you asked for', 'mk')
@@ -1430,7 +1432,7 @@ describe('the command', () => {
   })
 
   test('a signal during a blocked run stops it now, not after the next sleep', async () => {
-    controlRoomClone(`| machine | operator | repos |\n|---|---|---|\n| ${HOST} | mk | o/r |\n`)
+    controlRoomClone(ROSTER)
     gh.addIssue({ number: 1, labels: ['planning', 'medium'] })
     const lines: string[] = []
     let stoppedPid = 0
@@ -1500,11 +1502,11 @@ describe('the command', () => {
   })
 
   test('a roster this machine cannot prove is not a roster', async () => {
-    controlRoomClone(`| machine | operator | repos |\n|---|---|---|\n| ${HOST} | mk | o/r |\n`)
+    controlRoomClone(ROSTER)
     const clone = join(home, '.vegafactory', 'control-room', 'o')
     expect(verifiedListing(root, { repo: 'o/r', host: HOST, home }).ok).toBe(true)
     // Edited on the machine: the row is there, and it authorises nothing.
-    writeFileSync(join(clone, 'nodes.md'), `| machine | operator | repos |\n|---|---|---|\n| ${HOST} | mk | * |\n`)
+    writeFileSync(join(clone, 'nodes.md'), `| node | owner | worker | repos |\n|---|---|---|---|\n| ${NODE} | mk | yes | * |\n`)
     const edited = verifiedListing(root, { repo: 'o/r', host: HOST, home })
     expect(edited.ok).toBe(false)
     expect(edited.reason).toContain('uncommitted local changes')
@@ -1587,7 +1589,7 @@ describe('caps on the roster row', () => {
       '|---|---|---|---|---|---|',
       '| patrick | dev | o/a | mk | runs 4 | the always-on box |',
     ].join('\n')
-    expect(parseDispatchers(roster)).toEqual([{ machine: 'patrick', operator: 'mk', repos: ['o/a'], caps: { ...DEFAULT_CAPS, runs: 4 }, worker: true, every: true, problem: null }])
+    expect(parseDispatchers(roster)).toEqual([{ machine: 'patrick', operator: 'mk', repos: ['o/a'], caps: { ...DEFAULT_CAPS, runs: 4 }, worker: false, problem: null }])
   })
 
   test('prose in a notes column is never caps, whatever words it happens to contain', () => {
@@ -1613,7 +1615,7 @@ describe('caps on the roster row', () => {
   })
 
   test('a table with no header is read the way every roster was read before headers', () => {
-    expect(parseDispatchers('| a | mk | o/a |')).toEqual([{ machine: 'a', operator: 'mk', repos: ['o/a'], caps: DEFAULT_CAPS, worker: true, every: true, problem: null }])
+    expect(parseDispatchers('| a | mk | o/a |')).toEqual([{ machine: 'a', operator: 'mk', repos: ['o/a'], caps: DEFAULT_CAPS, worker: false, problem: null }])
   })
 
   test('without a header there is no column caps are known to sit in, so a wider row refuses', () => {
@@ -1671,8 +1673,8 @@ describe('the caps reach what they limit', () => {
   // still pass if `runDispatch` stopped refreshing the roster or stopped forwarding what it read.
   // This one changes the caps upstream between two real passes and watches what the loop does.
   test('a caps change upstream reaches the next pass: how many start, how long they get, how long it waits', async () => {
-    const header = '| machine | operator | repos | caps |\n|---|---|---|---|\n'
-    const row = (caps: string) => `${header}| ${HOST} | mk | o/r | ${caps} |\n`
+    const header = '| node | owner | worker | repos | caps |\n|---|---|---|---|---|\n'
+    const row = (caps: string) => `${header}| ${NODE} | mk | yes | o/r | ${caps} |\n`
     const recap = controlRoomClone(row('runs 1 · step 72h · poll 1m'))
     for (const number of [1, 2, 3, 4]) gh.addIssue({ number, labels: ['planning', 'medium'] })
 
@@ -1722,7 +1724,7 @@ describe('the caps reach what they limit', () => {
 // operator to distrust the messages.
 test('a hand-back promises a retry only when there is a try left', async () => {
   gh.addIssue({ number: 1, labels: ['planning', 'medium'] })
-  controlRoomClone(`| machine | operator | repos | caps |\n|---|---|---|---|\n| ${HOST} | mk | o/r | park 1 |\n`)
+  controlRoomClone(`| node | owner | worker | repos | caps |\n|---|---|---|---|---|\n| ${NODE} | mk | yes | o/r | park 1 |\n`)
   await runDispatch(['run', '--once'], {
     cwd: root, home, host: HOST, env: {}, out: () => {}, runner: gh.runner, now: () => gh.clock,
     runStep: (async () => ({ outcome: 'failed' as const, note: 'boom', ms: 1 })) as RunStep,
@@ -1787,7 +1789,7 @@ test('a hand-back that repeats a stand-down is still a question', () => {
 // three-cell row under the shipped six-column header never reaches its declared caps column.
 test('the row it tells you to add is one the same parser accepts', () => {
   const header = '| dispatcher | group | repos | owner | caps | notes |\n|---|---|---|---|---|---|\n'
-  project(`${header}| someone-else | dev | o/r | mk | | |\n`)
+  project(`${header}| someone-else | dev | yes | o/r | |\n`)
   const listing = listedHere(root, { repo: 'o/r', host: HOST, home })
   expect(listing.ok).toBe(false)
   const row = /`(\| .*? \|)`/.exec(listing.reason)![1]!
@@ -1819,28 +1821,28 @@ describe('the worker gate', () => {
   // machine down. That is what stats wants; it is not what unattended work may take from the
   // same line.
   test('a row is not consent — only `yes` in the worker cell is', () => {
-    project(`${header}| ${HOST} | mk | yes | o/r | |\n`)
+    project(`${header}| ${NODE} | mk | yes | o/r | |\n`)
     expect(listedHere(root, { repo: 'o/r', host: HOST, home }).ok).toBe(true)
 
-    project(`${header}| ${HOST} | mk | no | o/r | |\n`)
+    project(`${header}| ${NODE} | mk | no | o/r | |\n`)
     const refused = listedHere(root, { repo: 'o/r', host: HOST, home })
     expect(refused.ok).toBe(false)
     expect(refused.reason).toContain('not as a worker')
     // The row is still there to point at, so the operator is sent to the cell and not to the file.
-    expect(refused.entry?.machine).toBe(HOST)
+    expect(refused.entry?.machine).toBe(NODE)
   })
 
   test('anything that is not an answer is refused, never read as consent', () => {
     for (const said of ['y', 'true', 'TODO confirm', 'YES please', '1']) {
-      project(`${header}| ${HOST} | mk | ${said} | o/r | |\n`)
+      project(`${header}| ${NODE} | mk | ${said} | o/r | |\n`)
       const listing = listedHere(root, { repo: 'o/r', host: HOST, home })
       expect(listing.ok, said).toBe(false)
       expect(listing.reason, said).toContain('does not read as an answer')
     }
     // `yes` itself is not case-sensitive, and neither is the blank that means no.
-    project(`${header}| ${HOST} | mk | YES | o/r | |\n`)
+    project(`${header}| ${NODE} | mk | YES | o/r | |\n`)
     expect(listedHere(root, { repo: 'o/r', host: HOST, home }).ok).toBe(true)
-    project(`${header}| ${HOST} | mk |  | o/r | |\n`)
+    project(`${header}| ${NODE} | mk |  | o/r | |\n`)
     expect(listedHere(root, { repo: 'o/r', host: HOST, home }).reason).toContain('not as a worker')
   })
 
@@ -1848,25 +1850,25 @@ describe('the worker gate', () => {
   // Reading that as "every repository in the org" would hand the whole board to the machine that
   // was written down precisely to say it is not a worker.
   test('an empty repos cell authorises nothing when the roster has a worker column', () => {
-    project(`${header}| ${HOST} | mk | yes |  | |\n`)
+    project(`${header}| ${NODE} | mk | yes |  | |\n`)
     const listing = listedHere(root, { repo: 'o/r', host: HOST, home })
     expect(listing.ok).toBe(false)
     expect(listing.reason).toContain('for no repository')
   })
 
-  // A roster written before the column existed meant every row to be a machine that works a board.
-  test('a roster with no worker column is read the way it was written', () => {
-    project(`| machine | operator | repos |\n|---|---|---|\n| ${HOST} | mk | o/r |\n`)
-    expect(listedHere(root, { repo: 'o/r', host: HOST, home }).ok).toBe(true)
-    // Including the empty-repos meaning it had then.
-    project(`| machine | operator | repos |\n|---|---|---|\n| ${HOST} | mk |  |\n`)
-    expect(listedHere(root, { repo: 'o/anything', host: HOST, home }).ok).toBe(true)
+  // There are no rosters written before the gate — the only control room that exists is being
+  // written now — so a file with no `worker` column grants nothing rather than everything.
+  test('a roster with no worker column grants nothing', () => {
+    project(`| machine | operator | repos |\n|---|---|---|\n| ${NODE} | mk | yes | o/r |\n`)
+    const listing = listedHere(root, { repo: 'o/r', host: HOST, home })
+    expect(listing.ok).toBe(false)
+    expect(listing.reason).toContain('no `worker` column')
   })
 
   test('`*` and `all` still mean every repository, on either shape', () => {
-    project(`${header}| ${HOST} | mk | yes | * | |\n`)
+    project(`${header}| ${NODE} | mk | yes | * | |\n`)
     expect(listedHere(root, { repo: 'o/anything', host: HOST, home }).ok).toBe(true)
-    project(`${header}| ${HOST} | mk | yes | all | |\n`)
+    project(`${header}| ${NODE} | mk | yes | all | |\n`)
     expect(listedHere(root, { repo: 'o/anything', host: HOST, home }).ok).toBe(true)
   })
 })
@@ -1881,10 +1883,14 @@ describe('a node answers to its own name', () => {
     expect(rosterName('mk@Patrick-Mac-Mini.local')).toBe(nodeId('mk', 'patrick-mac-mini'))
   })
 
-  // A roster written before node ids listed bare hostnames, and those machines are still listed.
-  test('a bare hostname still matches, so an older roster keeps working', () => {
-    project(`| machine | operator | repos |\n|---|---|---|\n| ${HOST} | mk | o/r |\n`)
-    expect(listedHere(root, { repo: 'o/r', host: HOST, home }).ok).toBe(true)
+  // One spelling, and only one: two rows could otherwise name this machine and a roster could
+  // grant through either.
+  test('a bare hostname is not this node', () => {
+    const header = '| node | owner | worker | repos |\n|---|---|---|---|\n'
+    project(`${header}| ${HOST} | mk | yes | o/r |\n`)
+    const listing = listedHere(root, { repo: 'o/r', host: HOST, home })
+    expect(listing.ok).toBe(false)
+    expect(listing.reason).toContain('is not listed')
   })
 
   // Somebody writing the gate and missing the name meant to gate something. Reading it as "no

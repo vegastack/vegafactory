@@ -126,7 +126,7 @@ export function parseCaps(cell: string): Caps | null {
 // `worker` is the gate. Every machine has a row once a control room lists its nodes, so being in
 // the file authorises nothing; only `worker: yes` does. A row from a roster with no worker column
 // at all is one written before the column existed, and is read the way it was written.
-export interface Dispatcher { machine: string; operator: string | null; repos: string[]; caps: Caps | null; worker: boolean; every: boolean; problem: string | null }
+export interface Dispatcher { machine: string; operator: string | null; repos: string[]; caps: Caps | null; worker: boolean; problem: string | null }
 
 // What a roster may call each column. A header maps a name to a position, so a row is read by what
 // its columns are called rather than by where they happen to sit: a room may add, drop or reorder
@@ -151,6 +151,7 @@ const UNREADABLE_CAPS = 'the caps cell cannot be read — the shape is `runs 10 
 const MISSING_CAPS = 'the row does not reach its declared caps column — add an empty cell or `-` when the defaults are fine'
 const UNREADABLE_WORKER = 'the worker cell says something this file does not read as an answer — it takes `yes` or `no`, and anything else is refused rather than guessed at'
 const MISNAMED_WORKER = 'the gate column is not named `worker`, so nothing here grants unattended work — rename the heading'
+const NO_GATE = 'the roster has no `worker` column, so nothing in it grants unattended work — add one, and `yes` on the rows that should have it'
 
 // A header is the row that names at least the machine column and the repos column. Anything less
 // is not a header, and reading it as one would silently move every column.
@@ -222,11 +223,10 @@ export function parseDispatchers(text: string): Dispatcher[] {
     let capsCell = ''
     let named = false
     let problem: string | null = null
-    // A roster with no worker column at all predates the gate, and every row in it was written to
-    // mean a machine that works the board. A header that *nearly* names one — `workers`, `Worker?`
-    // — is somebody trying to write the gate and missing, which must not read as every row granted.
-    let worker = true
-    let repoDefault: 'all' | 'none' = 'all'
+    // No worker column, no worker. There are no rosters in the wild written before the gate — the
+    // only control room that exists is being written now — so a file that does not say `yes`
+    // grants nothing, and there is no older shape to be compatible with and get wrong.
+    let worker = false
     if (line.startsWith('|')) {
       const row = cells(line)
       if (row.some(separator)) continue
@@ -242,7 +242,6 @@ export function parseDispatchers(text: string): Dispatcher[] {
       named = layout.caps !== null
       if (layout.caps !== null && row.length <= layout.caps) problem = MISSING_CAPS
       if (layout.worker !== null) {
-        repoDefault = 'none'
         const said = (row[layout.worker] ?? '').trim().toLowerCase()
         if (said === 'yes') worker = true
         else if (said === 'no' || said === '' || said === '-') worker = false
@@ -251,6 +250,9 @@ export function parseDispatchers(text: string): Dispatcher[] {
         else { worker = false; problem ??= UNREADABLE_WORKER }
         if (row.length <= layout.worker) { worker = false; problem ??= UNREADABLE_WORKER }
         if (layout.misnamed) { worker = false; problem ??= MISNAMED_WORKER }
+      } else {
+        // Nothing to say per row: a roster with no gate is a fault in the file, not in any of its
+        // rows, and `listedHere` reports it where the refusal is made.
       }
       // A wider table than the legacy three, with nothing naming its columns: the caps could be in
       // any of the extra cells or in none of them, and a gate does not guess. Refused by name.
@@ -280,10 +282,6 @@ export function parseDispatchers(text: string): Dispatcher[] {
       repos: repos.split(/[,\s]+/).map((repo) => repo.replace(/`/g, '').trim()).filter((repo) => repo && repo !== '-'),
       caps,
       worker,
-      // An empty repos cell used to mean every repository in the org. On a roster that names every
-      // machine, the commonest row is a laptop with nothing in that cell, and reading it as "all"
-      // would authorise the machine that was written down to say it is not a worker.
-      every: repoDefault === 'all',
       problem,
     })
   }
@@ -348,10 +346,9 @@ export function verifiedListing(root: string, options: { repo: string; host?: st
 // The gate every verb passes. A missing or unreadable roster refuses, never defaults: a machine
 // nobody listed must not start working the board because a file was late.
 export function listedHere(root: string, options: { repo: string; host?: string; home?: string }): Listing {
-  // This machine answers to its node id and, for a roster written before node ids, to the bare
-  // machine name it used to be listed under.
+  // One spelling, and only one: a node is `<os-user>@<hostname>`. Accepting a bare hostname as
+  // well would mean two rows could name this machine and a roster could grant through either.
   const machine = nodeId(undefined, options.host ?? hostname())
-  const knownAs = [machine, machineName(options.host ?? hostname())]
   const room = controlRoomClone(root, options.home ?? homedir())
   if (!room) return { ok: false, reason: `this repository names no control room (dev.md's control-room: knob), so no machine is listed to dispatch it`, entry: null, file: null }
   const file = dispatchersPath(room.clone)
@@ -361,7 +358,7 @@ export function listedHere(root: string, options: { repo: string; host?: string;
   } catch {
     return { ok: false, reason: `${file} is not on this machine — run \`vegafactory sync\` to refresh the ${room.org} control room, and add ${machine} to nodes.md in a control-room PR`, entry: null, file }
   }
-  const entry = parseDispatchers(text).find((row) => knownAs.includes(row.machine)) ?? null
+  const entry = parseDispatchers(text).find((row) => row.machine === machine) ?? null
   if (!entry) {
     // The row is spelled to fit the table that is actually there: a row shorter than the header
     // is refused for the cell it never reached, so advice that ignored the header would send the
@@ -379,11 +376,14 @@ export function listedHere(root: string, options: { repo: string; host?: string;
   // says only that somebody wrote this machine down — which is what stats wants and what work
   // nobody is watching must not get from the same line.
   if (!entry.worker) {
-    const why = entry.problem === UNREADABLE_WORKER ? entry.problem : 'its worker cell does not say `yes`'
+    const why = entry.problem ?? (headerOf(text)?.some((column) => COLUMN_NAMES.worker.includes(column.toLowerCase() as (typeof COLUMN_NAMES.worker)[number]))
+      ? 'its worker cell does not say `yes`'
+      : NO_GATE)
     return { ok: false, entry, file, reason: `${machine} is listed in ${file} but not as a worker: ${why} — change it in a control-room PR before this machine works a board on its own` }
   }
-  const every = entry.every && entry.repos.length === 0 ? true
-    : entry.repos.some((repo) => repo === '*' || repo.toLowerCase() === 'all')
+  // An empty cell authorises nothing. Everything has to be said out loud, because the commonest
+  // row on a roster of every machine is one with nothing in this cell.
+  const every = entry.repos.some((repo) => repo === '*' || repo.toLowerCase() === 'all')
   if (!every && !entry.repos.includes(options.repo)) {
     const named = entry.repos.length ? `for ${entry.repos.join(', ')}` : 'for no repository — its repos cell is empty'
     return { ok: false, reason: `${machine} is listed in ${file} ${named}, not ${options.repo}`, entry, file }
