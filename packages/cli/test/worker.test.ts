@@ -154,6 +154,15 @@ describe('the roster', () => {
     expect(listing.reason).toContain('vegafactory sync')
   })
 
+  // The operator reads this sentence and nothing else, so it has to parse as English: the rename
+  // left it reading "listed as a worker it", which says nothing about what to add where.
+  test('a repository with no control room says so in a sentence that reads', () => {
+    writeFileSync(join(root, '.vegastack/dev.md'), 'repo: o/r\n')
+    const listing = listedHere(root, { repo: 'o/r', host: HOST, home })
+    expect(listing.ok).toBe(false)
+    expect(listing.reason).toBe("this repository names no control room (dev.md's control-room: knob), so no machine is listed as a worker for it")
+  })
+
   // A row whose caps cannot be read used to be dropped, and the machine then refused as "not
   // listed" — which sends the operator looking for a missing row instead of at the typo.
   test('a caps cell nobody can read refuses this machine by name, and says the shape', () => {

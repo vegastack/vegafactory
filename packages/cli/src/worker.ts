@@ -360,7 +360,7 @@ export function listedHere(root: string, options: { repo: string; host?: string;
   // well would mean two rows could name this machine and a roster could grant through either.
   const machine = nodeId(undefined, options.host ?? hostname())
   const room = controlRoomClone(root, options.home ?? homedir())
-  if (!room) return { ok: false, reason: `this repository names no control room (dev.md's control-room: knob), so no machine is listed as a worker it`, entry: null, file: null }
+  if (!room) return { ok: false, reason: `this repository names no control room (dev.md's control-room: knob), so no machine is listed as a worker for it`, entry: null, file: null }
   const file = nodesPath(room.clone)
   let text: string
   try {
