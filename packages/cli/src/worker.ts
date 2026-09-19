@@ -360,7 +360,7 @@ export function listedHere(root: string, options: { repo: string; host?: string;
   // well would mean two rows could name this machine and a roster could grant through either.
   const machine = nodeId(undefined, options.host ?? hostname())
   const room = controlRoomClone(root, options.home ?? homedir())
-  if (!room) return { ok: false, reason: `this repository names no control room (dev.md's control-room: knob), so nothing says which machines may work it`, entry: null, file: null }
+  if (!room) return { ok: false, reason: `this repository names no control room (dev.md's control-room: knob), so no machine is listed as a worker it`, entry: null, file: null }
   const file = nodesPath(room.clone)
   let text: string
   try {
@@ -496,7 +496,7 @@ export async function mintToken(input: { repo: string; keyPath: string; appId: s
 
 // `gh` run as the App. The token reaches the child through its environment and nowhere else.
 // `token()` is asked for one on every call, so an expiring token is replaced rather than carried:
-// an installation token lives an hour and a worker lives for months.
+// an installation token lives an hour and the worker lives for months.
 export function tokenRunner(token: () => string, timeoutMs = 30_000): GhRunner {
   return (args, input): GhResult => {
     const result = spawnSync(process.env.VEGAFACTORY_GH || 'gh', args, {

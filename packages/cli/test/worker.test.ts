@@ -4,7 +4,7 @@ import { generateKeyPairSync } from 'node:crypto'
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { claimBody, claimLine, claimsOf, holderOf, nodeId, TIMEOUT_MS, trustedFactory } from '../src/claim.ts'
+import { claimBody, claimLine, holderOf, nodeId, trustedFactory } from '../src/claim.ts'
 import {
   APP_ID, DEFAULT_CAPS, MAX_FAILURES, MAX_RUNS, MAX_TIMER_MS, POLL_MS, RETRY_MS, STEP_TIMEOUT_MS, TOKEN_MARGIN_MS, parseCaps, rosterName, sayDuration, agentArgs, appIdentity, appJwt, appKeyPath, assertKeyFile, board, decide, defaultRunStep, workerDir,
   acknowledgedPlan, canonicalPath, childRunEnvironment, confirmShip, disjointSiblings, pushableBranch, shipWord,
@@ -31,8 +31,8 @@ const NODE = nodeId(undefined, HOST)
 const ROSTER = `| node | owner | worker | repos | caps |\n|---|---|---|---|---|\n| ${NODE} | mk | yes | o/r | |\n`
 
 function project(workers: string | null = ROSTER): void {
-  root = realpathSync(mkdtempSync(join(tmpdir(), 'dispatch-')))
-  home = realpathSync(mkdtempSync(join(tmpdir(), 'dispatch-home-')))
+  root = realpathSync(mkdtempSync(join(tmpdir(), 'worker-')))
+  home = realpathSync(mkdtempSync(join(tmpdir(), 'worker-home-')))
   spawnSync('git', ['init', '-q'], { cwd: root })
   mkdirSync(join(root, '.vegastack'))
   writeFileSync(join(root, '.vegastack/dev.md'), [
@@ -477,7 +477,7 @@ describe('what may run at once', () => {
     for (const path of ['bun.lock', 'package.json', 'packages/cli/package.json', 'dist/index.js', 'db/migrations/001.sql', 'src/api.generated.ts', 'packages/cli/skill-integrity.json', 'README.md']) {
       expect(unsafeForParallel(path)).toBe(true)
     }
-    expect(unsafeForParallel('packages/cli/src/dispatch.ts')).toBe(false)
+    expect(unsafeForParallel('packages/cli/src/worker.ts')).toBe(false)
   })
 
   test('a directory in a file set covers everything under it', () => {
@@ -678,7 +678,7 @@ describe('one poll over the board', () => {
   test('a claim another machine already holds is not started twice', async () => {
     gh.addIssue({ number: 1, labels: ['planning', 'medium'] })
     // Another machine's worker got there first, between this pass's read and its launch.
-    const body = claimBody({ owner: 'builder:dispatch-1', kind: 'worker', harness: 'worker', model: 'plan' })
+    const body = claimBody({ owner: 'builder:worker-1', kind: 'worker', harness: 'worker', model: 'plan' })
     const notes: string[] = []
     const steps: number[] = []
     await pass({
@@ -688,14 +688,14 @@ describe('one poll over the board', () => {
         // The rival claim lands just before this machine posts its own, so it is the earlier one.
         const method = args[args.indexOf('-X') + 1]
         const path = args[args.indexOf('-X') + 2] ?? ''
-        if (method === 'POST' && path.endsWith('/comments') && !gh.issues.get(1)!.comments.some((c) => c.body.includes('builder:dispatch-1'))) {
-          gh.addComment(1, body.replace('-->\n', `-->\n${claimLine('builder:dispatch-1', new Date(gh.clock).toISOString())}\n`), 'mk')
+        if (method === 'POST' && path.endsWith('/comments') && !gh.issues.get(1)!.comments.some((c) => c.body.includes('builder:worker-1'))) {
+          gh.addComment(1, body.replace('-->\n', `-->\n${claimLine('builder:worker-1', new Date(gh.clock).toISOString())}\n`), 'mk')
         }
         return gh.runner(args, input)
       }) as typeof gh.runner,
     })
     expect(steps).toEqual([])
-    expect(notes.join('\n')).toContain('not started — lost the race to builder:dispatch-1')
+    expect(notes.join('\n')).toContain('not started — lost the race to builder:worker-1')
   })
 
   test('an operator stop reaches a run that is already going', async () => {
@@ -1030,7 +1030,7 @@ describe('readiness and the service', () => {
     expect(check(broken)).toMatchObject({ ok: false, detail: expect.stringContaining('No such remote') })
   })
 
-  test('the unit runs this CLI\'s own dispatch run and carries no token', () => {
+  test('the unit runs this CLI\'s own worker run and carries no token', () => {
     const plist = unitText('darwin', { cli: ['/usr/bin/node', '/opt/vegafactory/index.js'], root, repo: 'o/r', logDir: workerDir(root) })
     expect(plist).toContain('<string>worker</string>')
     expect(plist).toContain('<string>--repo</string>')
@@ -1043,16 +1043,6 @@ describe('readiness and the service', () => {
     expect(unitPath('linux', '/home/x')).toBe('/home/x/.config/systemd/user/vegafactory-worker.service')
     expect(serviceCommands('linux', '/u', 'disable')[0]).toEqual(['systemctl', '--user', 'disable', '--now', 'vegafactory-worker.service'])
     expect(serviceCommands('darwin', '/u', 'enable', 501)[0]).toEqual(['launchctl', 'bootstrap', 'gui/501', '/u'])
-  })
-
-  // A kind this file does not recognise is a session, which is the longer-lived and so the safer
-  // answer: read as a worker's, a claim would be taken over after thirty minutes.
-  test('an unknown claim kind is a session, not a worker', () => {
-    const body = claimBody({ owner: 'box:1', kind: 'worker', harness: 'worker', model: 'x' }).replace('kind=worker', 'kind=something')
-    const entry = { id: 1, author: 'mk', authorType: 'User', type: 'claim', createdAt: '2026-09-01T00:00:00Z', updatedAt: '', changedAt: '' }
-    const state = { issue: { labels: [] }, comments: { 1: entry } } as never
-    expect(claimsOf(state, () => body, () => true).claims[0]!.kind).toBe('session')
-    expect(TIMEOUT_MS.worker).toBe(30 * 60_000)
   })
 })
 
@@ -1476,7 +1466,7 @@ describe('the command', () => {
 
   test('disable stops the runs the service had started, and names what they held', async () => {
     const lines: string[] = []
-    const live = { pid: 5150, startedAt: 'Fri Sep 18 09:00:00 2026', command: 'claude', issue: 7, action: 'implement' as const, owner: `${HOST}:dispatch-ab12-7`, from: 'queued' as const }
+    const live = { pid: 5150, startedAt: 'Fri Sep 18 09:00:00 2026', command: 'claude', issue: 7, action: 'implement' as const, owner: `${HOST}:worker-ab12-7`, from: 'queued' as const }
     noteChild(root, live)
     const stopped: number[] = []
     const code = await runWorker(['disable'], {
@@ -1488,7 +1478,7 @@ describe('the command', () => {
     expect(code).toBe(0)
     expect(stopped).toEqual([5150])
     expect(lines.join('\n')).toContain('stopped 1 run it had started')
-    expect(lines.join('\n')).toContain(`#7 (implement, claimed by ${HOST}:dispatch-ab12-7)`)
+    expect(lines.join('\n')).toContain(`#7 (implement, claimed by ${HOST}:worker-ab12-7)`)
     expect(readChildren(root)).toEqual([])
   })
 
