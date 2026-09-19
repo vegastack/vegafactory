@@ -367,10 +367,13 @@ export function listedHere(root: string, options: { repo: string; host?: string;
     const gated = header?.some((column) => COLUMN_NAMES.worker.includes(column.toLowerCase() as (typeof COLUMN_NAMES.worker)[number])) ?? false
     // A row pasted under a header with no gate would be refused by the very next check, so the
     // advice says what is actually missing: the column, before any row can grant anything.
-    if (header && !gated) {
-      return { ok: false, entry: null, file, reason: `${machine} is not listed in ${file}, and ${NO_GATE} — do both in one control-room PR` }
+    // Either there is no header or it has no gate. A row pasted under a headerless table is read
+    // as the legacy three cells, and a fourth would make it unreadable — so in both cases what is
+    // missing is the header itself, and saying "add this row" would send the operator in a circle.
+    if (!header || !gated) {
+      return { ok: false, entry: null, file, reason: `${machine} is not listed in ${file}, and ${NO_GATE} — do both in one control-room PR, with the header \`| node | owner | worker | repos | caps |\`` }
     }
-    const cells = header ? header.map((column) => suggestedCell(column, machine, options.repo)) : [machine, '<owner>', 'yes', options.repo]
+    const cells = header.map((column) => suggestedCell(column, machine, options.repo))
     return { ok: false, entry: null, file, reason: `${machine} is not listed in ${file} — add the row \`| ${cells.join(' | ')} |\` in a control-room PR before this machine works a board on its own` }
   }
   // A cap nobody can read is not a cap, and the machine it belongs to is named rather than left

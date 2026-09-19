@@ -1,8 +1,8 @@
 # Nodes
 
-The always-on machines that turn a label or a reaction into a headless run. One row per machine; a repo reaches a dispatcher only through the group it is registered in.
+Every machine that runs vegafactory, one row each. A node is `<os-user>@<hostname>`, derived and never configured. `owner` is who is responsible for the machine. `worker` is the gate and the only cell here that grants anything.
 
 | node | owner | worker | repos | caps | notes |
 |---|---|---|---|---|---|
 
-No dispatcher is registered yet. A repo with no row here runs only what an operator starts, and `dispatch:` stays `off` in its dev.md — `dispatch: local` is a machine-local opt-in a repo makes for itself, never something this file turns on.
+No dispatcher is registered yet. No node is registered yet. A row here records a machine; only `worker: yes` on that row lets it work a board with nobody watching, and an empty `repos` cell grants nothing.
