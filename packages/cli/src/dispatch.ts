@@ -146,7 +146,7 @@ interface Layout { machine: number; operator: number | null; repos: number; caps
 // there is no position a caps cell is known to sit in, so either the columns are named or there
 // are none to name. Legacy three-cell rosters keep working untouched.
 const POSITIONAL: Layout = { machine: 0, operator: 1, repos: 2, caps: null, worker: null, misnamed: false }
-const UNNAMED_COLUMNS = 'the table names no columns, so nothing says which cell holds the caps — add a header row, `| machine | operator | repos | caps |`'
+const UNNAMED_COLUMNS = 'the table names no columns, so nothing says which cell holds the caps or the gate — add a header row, `| node | owner | worker | repos | caps |`'
 const UNREADABLE_CAPS = 'the caps cell cannot be read — the shape is `runs 10 · step 72h · poll 1m · retry 15m · park 3`, every field optional'
 const MISSING_CAPS = 'the row does not reach its declared caps column — add an empty cell or `-` when the defaults are fine'
 const UNREADABLE_WORKER = 'the worker cell says something this file does not read as an answer — it takes `yes` or `no`, and anything else is refused rather than guessed at'
@@ -1747,10 +1747,12 @@ session it starts.
 
 Options: --repo OWNER/NAME · --json · --dry-run (enable and disable show what they would do)
 
-The roster's table names its columns in a header row — \`| machine | operator | repos | caps |\`,
-in any order, extra columns ignored — so a cell is read by what its column is called. A table
-with no header is read as the three columns every roster had before caps existed; a wider one
-without a header refuses, because no position is known to hold the caps.
+The roster's table names its columns in a header row — \`| node | owner | worker | repos | caps |\`,
+in any order, extra columns ignored — so a cell is read by what its column is called. A node is
+\`<os-user>@<hostname>\`, derived and never configured. \`worker\` is the gate and the only cell that
+grants anything: \`yes\` lets this machine work a board unattended, and anything else — including an
+empty cell, a heading that only nearly says \`worker\`, and a roster with no such column — grants
+nothing. An empty \`repos\` cell authorises nothing either; \`*\` or \`all\` must be said out loud.
 
 A machine the control room's nodes.md does not name refuses every verb but disable. Writes
 go out as the VegaFactory GitHub App, on an hour-long token minted here from its private key:
