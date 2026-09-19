@@ -10,6 +10,7 @@
 // repository references. A directory this product owns entirely is one it may also prune.
 
 
+import { mkdirSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { isAbsolute, join, resolve } from 'node:path'
 
@@ -70,4 +71,13 @@ export const workerDirectory = (options: HomeOptions = {}): string => join(facto
 export function appKeyPath(options: HomeOptions = {}): string {
   const named = (options.env ?? process.env).VEGAFACTORY_APP_PRIVATE_KEY_FILE?.trim()
   return named || join(workerDirectory(options), 'app.pem')
+}
+
+// Made owner-only, because this directory holds the App key and the control-room clones and a
+// umask of 022 would otherwise leave every one of them readable by anybody else on the machine.
+// Only what this creates is protected: a directory somebody already made is theirs to have set.
+export function makeFactoryHome(options: HomeOptions = {}): string {
+  const path = factoryHome(options)
+  mkdirSync(path, { recursive: true, mode: 0o700 })
+  return path
 }

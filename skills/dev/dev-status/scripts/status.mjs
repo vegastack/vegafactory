@@ -204,7 +204,7 @@ const factoryHome = (home) => {
   return resolve(named);
 };
 
-function controlRoomState(devMdText, home) {
+export function controlRoomState(devMdText, home) {
   const knob = controlRoomKnob(devMdText);
   if (!knob) return null;
   let path = join(factoryHome(home), 'control-room', knob.org);

@@ -9,3 +9,4 @@ Everything this product keeps about a machine now lives in one place it owns: `~
 - Two things are named differently from the release before: `worktree-roots.json` is `worktrees.json`, and the stats spool is no longer inside a hidden `.tmp/` — the directory anything tidying a machine empties first, which would have taken the read offsets and push cursors with it.
 - **Nothing migrates.** A machine that still has files under `~/.vegastack/` is moved by hand, once. There is one such machine, and this release ships no code to find or move them — which is what the register already said it would do.
 - `VEGAFACTORY_HOME` points the whole product somewhere else, and must be an absolute path: a relative one would name a different directory from every working directory.
+- The home is created owner-only where this product creates it, because it holds the App key and the control-room clones and a umask of 022 would leave them readable by anybody on the machine.

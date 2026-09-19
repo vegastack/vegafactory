@@ -4,6 +4,9 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { expandHome, renderDashboard, runDashboard } from '../src/dashboard.ts'
 import { statsDir, type StatsEvent } from '../src/stats.ts'
+import { refuseAmbientHome } from './no-ambient-home.ts'
+
+refuseAmbientHome()
 
 let home: string
 

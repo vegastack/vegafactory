@@ -108,7 +108,9 @@ export async function recordRepoRoot(registryPath: string, repoRoot: string): Pr
     if (Array.isArray(parsed)) existing = parsed.filter((entry): entry is string => typeof entry === 'string')
   } catch { existing = [] }
   const roots = [...new Set([...existing, resolve(repoRoot)])].filter(root => existsSync(root)).sort()
-  await mkdir(dirname(registryPath), { recursive: true })
+  // Owner-only, because the directory this lands in also holds the App key and the control-room
+  // clones, and a umask of 022 would leave every one of them readable by anybody on the machine.
+  await mkdir(dirname(registryPath), { recursive: true, mode: 0o700 })
   await writeFile(registryPath, `${JSON.stringify(roots, null, 2)}\n`)
   return roots
 }

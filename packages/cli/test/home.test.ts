@@ -1,4 +1,4 @@
-import { beforeAll, beforeEach, describe, expect, test } from 'bun:test'
+import { beforeEach, describe, expect, test } from 'bun:test'
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, sep } from 'node:path'
@@ -6,14 +6,11 @@ import {
   appKeyPath, controlRoomClonePath, controlRoomStore, factoryConfigPath, factoryHome,
   HOME_VARIABLE, statsDirectory, statsHtmlPath, workerDirectory, worktreesPath,
 } from '../src/home.ts'
+import { refuseAmbientHome } from './no-ambient-home.ts'
 
 let home: string
 
-beforeAll(() => {
-  if (process.env[HOME_VARIABLE]?.trim()) {
-    throw new Error(`Unset ${HOME_VARIABLE} before running the test suite; test helpers would write to that home.`)
-  }
-})
+refuseAmbientHome()
 
 beforeEach(() => {
   home = realpathSync(mkdtempSync(join(tmpdir(), 'home-')))

@@ -9,6 +9,9 @@ import {
   collectStats, defaultSite, loadEvents, parseClaude, parseCodex, parseSince, pushStats, resolveOperator,
   runStats, skillName, skillResolver, statsDir, summarize, type GitRunner, type ParseContext, type StatsEvent,
 } from '../src/stats.ts'
+import { refuseAmbientHome } from './no-ambient-home.ts'
+
+refuseAmbientHome()
 
 const fixture = (name: string) => readFileSync(join(import.meta.dir, 'fixtures/stats', name), 'utf8')
 const git = (cwd: string, ...args: string[]) => {
