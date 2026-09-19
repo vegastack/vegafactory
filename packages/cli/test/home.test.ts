@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, test } from 'bun:test'
+import { beforeAll, beforeEach, describe, expect, test } from 'bun:test'
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, sep } from 'node:path'
@@ -9,6 +9,12 @@ import {
 } from '../src/home.ts'
 
 let home: string
+
+beforeAll(() => {
+  if (process.env[HOME_VARIABLE]?.trim()) {
+    throw new Error(`Unset ${HOME_VARIABLE} before running the test suite; test helpers would write to that home.`)
+  }
+})
 
 beforeEach(() => {
   home = realpathSync(mkdtempSync(join(tmpdir(), 'home-')))
@@ -172,6 +178,7 @@ describe('a real run says what to do and does nothing', () => {
     const said = run.stderr.toString()
     expect(said).toContain('mv ')
     expect(said).toContain(AFTER_THE_MOVE)
+    expect(said).toContain('pending stats pushes recover against the moved clones')
     // And it did none of it.
     expect(readFileSync(join(legacy, 'factory.json'), 'utf8')).toBe('{"schemaVersion":2}')
     expect(existsSync(join(home, '.vegafactory'))).toBe(false)
@@ -310,10 +317,13 @@ describe('no test can settle a real machine', () => {
   })
 })
 
-// The push journals live inside the spool that has just moved, and each names the clone it was
-// written for. `recoverPush` refuses one whose room is not where it says it is.
-test('the suite runs with no ambient home named, because the helpers would obey it', () => {
-  expect(process.env[HOME_VARIABLE] ?? '').toBe('')
+test('an ambient home stops the file before its tests can run', () => {
+  if (process.env.VEGAFACTORY_HOME_PRECONDITION_PROBE) return
+  const run = Bun.spawnSync([process.execPath, 'test', import.meta.path], {
+    env: { ...process.env, [HOME_VARIABLE]: join(home, 'developer-home'), VEGAFACTORY_HOME_PRECONDITION_PROBE: '1' },
+  })
+  expect(run.exitCode).not.toBe(0)
+  expect(`${run.stdout.toString()}${run.stderr.toString()}`).toContain(`Unset ${HOME_VARIABLE} before running the test suite`)
 })
 
 // A named home is a caller saying where this product lives. Looking at the machine's real older

@@ -11,3 +11,5 @@ Everything this product keeps about a machine now lives in one place it owns: `~
 - The lines include `rm -rf` for `~/.vegastack/guard/`, which nothing has read since the guard started reading its policy from git, and `vegafactory sync --force` afterwards, because `factory.json` still records where each control room used to sit.
 - `VEGAFACTORY_HOME` points the whole product somewhere else, and must be an absolute path — a relative one would name a different directory from every working directory. Naming a home also stops the product looking at the machine's older one: a sandbox must not be refused because of a directory it was never asked about.
 - A path is read with `lstat` at every component, so a symlink anywhere along it is never followed, and "this account cannot read it" is never mistaken for "nothing is there".
+- The test suite now refuses an ambient `VEGAFACTORY_HOME` before its setup can write through helpers that obey the variable.
+- A pending stats push from the older home now recovers against the exact moved control-room clone, preserving the journal until its commit, bytes and cursor prove whether the batch was consumed or undone.

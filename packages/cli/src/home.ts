@@ -182,8 +182,9 @@ export function olderHome(deps: {
 
 // `factory.json` records where each control room was cloned, as an absolute path, so after the
 // move those records still name the old address. `vegafactory sync` already refuses a clone that
-// is not where it is recorded, and `--force` re-records it, which is the documented way back.
-export const AFTER_THE_MOVE = 'Then, once: vegafactory sync --force — the records still name where each control room used to sit.'
+// is not where it is recorded, and `--force` re-records it; stats recovery can then prove that an
+// interrupted push belongs to that exact clone at its one known predecessor.
+export const AFTER_THE_MOVE = 'Then, once: vegafactory sync --force — the records still name where each control room used to sit; pending stats pushes recover against the moved clones.'
 
 // The one chokepoint: every command passes through here before it reads or writes anything.
 export function settleHome(report: (line: string) => void = console.error): OlderHome {
