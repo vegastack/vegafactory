@@ -130,7 +130,9 @@ export function runDashboard(argv: string[], options: { home?: string; now?: () 
   const since = value('--since') ? parseSince(value('--since')!, now()) : null
   const target = expandHome(value('--out') ?? statsHtmlPath({ home }), home)
   const events = loadEvents(home, { since, shared: !argv.includes('--local') })
-  makeFactoryHome({ home })
+  // Only when the page is going to its default place, which is inside the home this product owns.
+  // A `--out` somewhere else is the caller's directory and takes the caller's mode.
+  if (target === statsHtmlPath({ home })) makeFactoryHome({ home })
   mkdirSync(dirname(target), { recursive: true })
   writeFileSync(target, renderDashboard(events, { generatedAt: new Date(now()).toISOString() }))
   out(`${target} — ${events.length} turns`)

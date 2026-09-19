@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os'
 import { join, sep } from 'node:path'
 import {
   appKeyPath, controlRoomClonePath, controlRoomStore, factoryConfigPath, factoryHome,
-  HOME_VARIABLE, statsDirectory, statsHtmlPath, workerDirectory, worktreesPath,
+  HOME_VARIABLE, makeFactoryHome, statsDirectory, statsHtmlPath, workerDirectory, worktreesPath,
 } from '../src/home.ts'
 import { refuseAmbientHome } from './no-ambient-home.ts'
 
@@ -156,4 +156,11 @@ describe('no test can settle a real machine', () => {
     // A path that merely contains the letters is not this CLI.
     expect(settles("expect(files).toEqual(['packages/cli/src/issue.ts', 'packages/cli/package.json'])")).toHaveLength(0)
   })
+})
+
+// The home holds the App key and the control-room clones. A umask of 022 would leave every one of
+// them readable by anybody else on the machine.
+test('the home this product creates is owner-only', () => {
+  const made = makeFactoryHome({ env: {}, home })
+  expect(require('node:fs').statSync(made).mode & 0o777).toBe(0o700)
 })
