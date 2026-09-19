@@ -24,7 +24,7 @@ import { issueFromBranch, issueFromWorktree } from './hook.ts'
 import { cacheDir, withLock } from './issue-cache.ts'
 import { stageHistory, stageOn, type StageChange } from './stages.ts'
 import { GIT_CREDENTIAL_ARGS } from './sync.ts'
-import { controlRoomClonePath, legacyHome, statsDirectory } from './home.ts'
+import { statsDirectory } from './home.ts'
 
 export type Harness = 'claude' | 'codex'
 
@@ -880,17 +880,6 @@ interface Clone { path: string; branch: string; remote: string; repo: string }
 const identityOf = (clone: Clone): RoomIdentity => ({ repo: clone.repo, remote: clone.remote, branch: clone.branch, path: clone.path })
 const sameRoom = (a: RoomIdentity, b: RoomIdentity) => a.repo === b.repo && a.remote === b.remote && a.branch === b.branch && a.path === b.path
 
-// Dropping or deleting a mismatched journal can repeat a committed batch or strand rows appended
-// before its commit. Rewriting stats recovery state during sync would also make sync own a journal
-// protocol it does not otherwise interpret. The one known home move instead preserves every other
-// identity field and leaves the commit token, HEAD, file bytes and cursor to prove the recovery.
-const sameRoomAfterHomeMove = (home: string, recorded: RoomIdentity, current: RoomIdentity): boolean => {
-  const org = current.repo.split('/')[0]!
-  return recorded.repo === current.repo && recorded.remote === current.remote && recorded.branch === current.branch
-    && recorded.path === join(legacyHome({ env: {}, home }), 'control-room', org)
-    && current.path === controlRoomClonePath(org, { env: {}, home })
-}
-
 // Puts generated rows back exactly as they were, through checks a journal cannot talk its way out
 // of: every path is re-validated against the clone, a truncation goes through a no-follow handle,
 // and the sizes and the clone's own cleanliness are read back afterwards. Returns why it could not.
@@ -1079,8 +1068,7 @@ function recoverPush(home: string, clone: Clone, git: GitRunner): { ok: boolean;
   if (!existsSync(path)) return { ok: true, message: '' }
   const journal = validJournal(readJson<unknown>(path, null))
   if (!journal) return { ok: false, message: `an unreadable push journal is in the way: ${path}` }
-  const room = identityOf(clone)
-  if (!sameRoom(journal.room, room) && !sameRoomAfterHomeMove(home, journal.room, room)) {
+  if (!sameRoom(journal.room, identityOf(clone))) {
     return { ok: false, message: `the push journal at ${path} was written for ${journal.room.repo} at ${journal.room.path} (${journal.room.branch}), which is not the clone this push found` }
   }
   const committed = git(['-C', clone.path, 'log', '--format=%H', '--grep', journal.token, `refs/remotes/origin/${clone.branch}..HEAD`]).out.trim()

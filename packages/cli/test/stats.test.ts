@@ -727,25 +727,6 @@ describe('stats push', () => {
     expect(push(Date.parse('2026-09-18T14:00:00Z')).action).toBe('none')
   })
 
-  test('a journal moved with the old home recovers against the moved clone exactly once', () => {
-    write(event('a', '2026-09-18T10:00:00.000Z'))
-    const killed: GitRunner = (args) => {
-      const result = defaultGitFor(args)
-      if (args.includes('commit')) throw new Error('killed right after the commit')
-      return result
-    }
-    expect(() => push(Date.parse('2026-09-18T12:00:00Z'), { git: killed })).toThrow('killed')
-    const path = journalFor('acme/room')
-    const journal = JSON.parse(readFileSync(path, 'utf8'))
-    journal.room.path = join(home, '.vegastack', 'control-room', 'acme')
-    writeFileSync(path, JSON.stringify(journal))
-
-    expect(push(Date.parse('2026-09-18T12:10:00Z'))).toMatchObject({ ok: true, action: 'pushed' })
-    expect(existsSync(path)).toBe(false)
-    expect(git(clone, 'log', 'origin/main', '--format=%s').split('\n').filter((line) => line.startsWith('stats:'))).toHaveLength(1)
-    expect(readFileSync(stats('2026', '09', '18', 'mk-box.jsonl'), 'utf8').trim().split('\n')).toHaveLength(1)
-    expect(push(Date.parse('2026-09-18T14:00:00Z')).action).toBe('none')
-  })
 
   // F13
   test('a death before the commit puts the rows back and keeps the turns for the next run', () => {

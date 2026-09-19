@@ -3,9 +3,8 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, writeFi
 import { tmpdir } from 'node:os'
 import { join, sep } from 'node:path'
 import {
-  AFTER_THE_MOVE, appKeyPath, controlRoomClonePath, controlRoomStore, DEAD_ENTRIES, factoryConfigPath,
-  factoryHome, FOREIGN_ENTRIES, HOME_VARIABLE, legacyHome, olderHome, pathKind, statsDirectory,
-  statsHtmlPath, workerDirectory, worktreesPath,
+  appKeyPath, controlRoomClonePath, controlRoomStore, factoryConfigPath, factoryHome,
+  HOME_VARIABLE, statsDirectory, statsHtmlPath, workerDirectory, worktreesPath,
 } from '../src/home.ts'
 
 let home: string
@@ -75,145 +74,6 @@ describe('where the home is', () => {
 })
 
 
-describe('the older home is found and described, never moved', () => {
-  const deps = () => ({
-    env: {} as NodeJS.ProcessEnv, home,
-    kind: pathKind,
-    list: (path: string) => { try { return require('node:fs').readdirSync(path) as string[] } catch { return [] } },
-  })
-  const old = () => legacyHome({ env: {}, home })
-  const seed = (relative: string, body = 'x') => {
-    const path = join(old(), relative)
-    mkdirSync(join(path, '..'), { recursive: true })
-    writeFileSync(path, body)
-  }
-
-  test('no older home is nothing to say', () => {
-    expect(olderHome(deps()).found).toBe(false)
-  })
-
-  test('an older home holding only other tooling is nothing to say either', () => {
-    for (const foreign of FOREIGN_ENTRIES) mkdirSync(join(old(), foreign), { recursive: true })
-    expect(olderHome(deps()).found).toBe(false)
-  })
-
-  // The whole point: it says what to run, and runs none of it.
-  test('it names every move, with the two that change name as well as address', () => {
-    seed('factory.json')
-    seed('worktree-roots.json')
-    seed(join('.tmp', 'stats', 'events.jsonl'))
-    seed('vegafactory-app.pem')
-    mkdirSync(join(old(), 'control-room', 'acme'), { recursive: true })
-    mkdirSync(join(old(), 'guard'), { recursive: true })
-
-    const found = olderHome(deps())
-    expect(found.found).toBe(true)
-    const script = found.commands.join('\n')
-    expect(script).toContain(`mv ${join(old(), 'worktree-roots.json')} ${join(home, '.vegafactory', 'worktrees.json')}`)
-    expect(script).toContain(`mv ${join(old(), '.tmp', 'stats')} ${join(home, '.vegafactory', 'stats')}`)
-    expect(script).toContain(`mv ${join(old(), 'vegafactory-app.pem')} ${join(home, '.vegafactory', 'worker', 'app.pem')}`)
-    expect(script).toContain(`rm -rf ${join(old(), 'guard')}`)
-    // The directory the App key lands in is created first, or the `mv` would rename onto a name.
-    expect(found.commands[0]).toContain(join(home, '.vegafactory', 'worker'))
-    // And nothing has happened: every file is exactly where it was.
-    expect(existsSync(join(old(), 'factory.json'))).toBe(true)
-    expect(existsSync(join(old(), 'guard'))).toBe(true)
-    expect(existsSync(join(home, '.vegafactory'))).toBe(false)
-  })
-
-  test('it says nothing about other tooling, by name and not by inference', () => {
-    seed('factory.json')
-    for (const foreign of FOREIGN_ENTRIES) mkdirSync(join(old(), foreign), { recursive: true })
-    const script = olderHome(deps()).commands.join('\n')
-    for (const foreign of FOREIGN_ENTRIES) expect(script).not.toContain(join(old(), foreign))
-  })
-
-  // Once this machine has moved, what is left behind is the operator's to tidy.
-  test('it goes quiet as soon as the new home holds anything', () => {
-    seed('factory.json')
-    mkdirSync(join(home, '.vegafactory'), { recursive: true })
-    writeFileSync(join(home, '.vegafactory', 'factory.json'), 'moved')
-    expect(olderHome(deps()).found).toBe(false)
-  })
-
-  test('a new home that cannot be listed is not read as an empty one', () => {
-    seed('factory.json')
-    mkdirSync(join(home, '.vegafactory'), { recursive: true })
-    const found = olderHome({ ...deps(), list: (path: string) => (path.endsWith('.vegafactory') ? null : []) })
-    expect(found.found).toBe(false)
-  })
-
-  test('a path with a space in it is quoted so the lines can be pasted as they are', () => {
-    const spaced = realpathSync(mkdtempSync(join(tmpdir(), 'home with space ')))
-    mkdirSync(join(spaced, '.vegastack'), { recursive: true })
-    writeFileSync(join(spaced, '.vegastack', 'factory.json'), 'x')
-    const script = olderHome({ env: {}, home: spaced, kind: pathKind, list: () => [] }).commands.join('\n')
-    expect(script).toContain("'")
-    expect(script).toContain('factory.json')
-  })
-})
-
-describe('a real run says what to do and does nothing', () => {
-  const cli = join(import.meta.dir, '..', 'src', 'index.ts')
-
-  test('a command with the home named touches neither home', () => {
-    const named = join(home, 'named-home')
-    const run = Bun.spawnSync([process.execPath, cli, 'version'], { cwd: home, env: { ...process.env, HOME: home, VEGAFACTORY_HOME: named } })
-    expect(run.exitCode).toBe(0)
-    expect(existsSync(join(home, '.vegastack'))).toBe(false)
-    expect(existsSync(join(home, '.vegafactory'))).toBe(false)
-  })
-
-  test('an older home stops the command, prints the lines, and moves nothing', () => {
-    const legacy = join(home, '.vegastack')
-    mkdirSync(join(legacy, 'control-room', 'acme'), { recursive: true })
-    mkdirSync(join(legacy, 'secrets'), { recursive: true })
-    writeFileSync(join(legacy, 'factory.json'), '{"schemaVersion":2}')
-    writeFileSync(join(legacy, 'secrets', 'keep.txt'), 'not ours')
-
-    const run = Bun.spawnSync([process.execPath, cli, 'version'], { cwd: home, env: { ...process.env, HOME: home, VEGAFACTORY_HOME: '' } })
-    expect(run.exitCode).toBe(2)
-    // Nothing on stdout: a `--json` caller must still get exactly one document.
-    expect(run.stdout.toString().trim()).toBe('')
-    const said = run.stderr.toString()
-    expect(said).toContain('mv ')
-    expect(said).toContain(AFTER_THE_MOVE)
-    expect(said).toContain('pending stats pushes recover against the moved clones')
-    // And it did none of it.
-    expect(readFileSync(join(legacy, 'factory.json'), 'utf8')).toBe('{"schemaVersion":2}')
-    expect(existsSync(join(home, '.vegafactory'))).toBe(false)
-    expect(readFileSync(join(legacy, 'secrets', 'keep.txt'), 'utf8')).toBe('not ours')
-  })
-
-  test('the lines it prints actually do the job', () => {
-    const legacy = join(home, '.vegastack')
-    mkdirSync(join(legacy, 'control-room', 'acme'), { recursive: true })
-    mkdirSync(join(legacy, '.tmp', 'stats'), { recursive: true })
-    writeFileSync(join(legacy, '.tmp', 'stats', 'events.jsonl'), '{}\n')
-    writeFileSync(join(legacy, 'factory.json'), '{}')
-    writeFileSync(join(legacy, 'vegafactory-app.pem'), 'KEY')
-    mkdirSync(join(legacy, 'guard'), { recursive: true })
-
-    const script = olderHome({ env: {}, home, kind: pathKind, list: () => [] }).commands.join('\n')
-    const ran = Bun.spawnSync(['sh', '-ec', script], { cwd: home })
-    expect(ran.exitCode, ran.stderr.toString()).toBe(0)
-
-    const now = join(home, '.vegafactory')
-    expect(readFileSync(join(now, 'worker', 'app.pem'), 'utf8')).toBe('KEY')
-    expect(readFileSync(join(now, 'stats', 'events.jsonl'), 'utf8')).toBe('{}\n')
-    expect(existsSync(join(now, 'control-room', 'acme'))).toBe(true)
-    expect(existsSync(join(legacy, 'guard'))).toBe(false)
-
-    // And afterwards the command runs, because the new home now holds something.
-    const run = Bun.spawnSync([process.execPath, cli, 'version'], { cwd: home, env: { ...process.env, HOME: home, VEGAFACTORY_HOME: '' } })
-    expect(run.exitCode).toBe(0)
-  })
-})
-
-// A blanket rename of `.vegastack` would have broken this product: about fifty of the strings in
-// `packages/cli/src` are repo-relative — `dev.md`, `.tmp/issues`, `.tmp/claims`, `.worktrees` —
-// and must not move. So this check is deliberately narrow: it looks only for a join whose first
-// argument is a home, which is exactly the shape every moved site had.
 describe('the older home stays moved', () => {
   const sources = () => {
     const roots = [join(import.meta.dir, '..', 'src'), join(import.meta.dir, '..', '..', '..', 'skills')]
@@ -254,22 +114,6 @@ describe('the older home stays moved', () => {
   })
 })
 
-
-describe('what a path is, told apart properly', () => {
-  test('absent, a directory, a file and a symlink are four different answers', () => {
-    expect(pathKind(join(home, 'nothing'))).toBe('absent')
-    mkdirSync(join(home, 'dir'), { recursive: true })
-    expect(pathKind(join(home, 'dir'))).toBe('directory')
-    writeFileSync(join(home, 'file'), 'x')
-    expect(pathKind(join(home, 'file'))).toBe('file')
-    require('node:fs').symlinkSync(join(home, 'dir'), join(home, 'link'))
-    // Never followed: either end of the move could otherwise land somewhere neither path names.
-    expect(pathKind(join(home, 'link'))).toBe('other')
-    // And a symlink pointing nowhere is still a symlink, not an absence.
-    require('node:fs').symlinkSync(join(home, 'nothing'), join(home, 'dangling'))
-    expect(pathKind(join(home, 'dangling'))).toBe('other')
-  })
-})
 
 describe('no test can settle a real machine', () => {
   // The call and whatever follows it, because the options object can run over several lines and
@@ -315,24 +159,4 @@ describe('no test can settle a real machine', () => {
     // A path that merely contains the letters is not this CLI.
     expect(settles("expect(files).toEqual(['packages/cli/src/issue.ts', 'packages/cli/package.json'])")).toHaveLength(0)
   })
-})
-
-test('an ambient home stops the file before its tests can run', () => {
-  if (process.env.VEGAFACTORY_HOME_PRECONDITION_PROBE) return
-  const run = Bun.spawnSync([process.execPath, 'test', import.meta.path], {
-    env: { ...process.env, [HOME_VARIABLE]: join(home, 'developer-home'), VEGAFACTORY_HOME_PRECONDITION_PROBE: '1' },
-  })
-  expect(run.exitCode).not.toBe(0)
-  expect(`${run.stdout.toString()}${run.stderr.toString()}`).toContain(`Unset ${HOME_VARIABLE} before running the test suite`)
-})
-
-// A named home is a caller saying where this product lives. Looking at the machine's real older
-// home from there would refuse a sandbox because of a directory it was never asked about — which
-// is what stopped two unrelated tests dead.
-test('a named home does not go looking at the real machine for an older one', () => {
-  const legacy = join(home, '.vegastack')
-  mkdirSync(legacy, { recursive: true })
-  writeFileSync(join(legacy, 'factory.json'), 'real')
-  const found = olderHome({ env: { [HOME_VARIABLE]: join(home, 'sandbox') }, home, kind: pathKind, list: () => [] })
-  expect(found.found).toBe(false)
 })

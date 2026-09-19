@@ -2,11 +2,11 @@
 
 The project's story, newest first: what got built, why, and how it went — for the operator's future recall. Format home: the dev-chronicle skill.
 
-## 19-09-2026 — One home, and a move it refuses to make ([#252](https://github.com/vegastack/vegafactory/issues/252))
+## 19-09-2026 — One home, and no machinery to reach the old one ([#252](https://github.com/vegastack/vegafactory/issues/252))
 
 - **What:** Everything this product keeps about a machine moved to `~/.vegafactory/`, computed by one module instead of thirteen paths spread over seven files and two languages.
 - **Why:** `~/.vegastack/` is shared with other VegaStack tooling, so nothing here could safely prune it. Step 1 of [#251](https://github.com/vegastack/vegafactory/issues/251), and the step the rest is untestable without.
-- **How it went:** The first build migrated the old home automatically, and ten review rounds found a new way for it to lose or clobber something in every one — an override that moved the destination but not the source, four lock protocols it does not own, symlinks, permissions, devices, interruption, and the absolute addresses inside the records. It migrated this machine's own home from a test, which proved the class rather than arguing it. So it stopped migrating: it finds the old home, prints the exact `mv` lines, and refuses. That is what the register already said this release would do, and it deleted half the module.
+- **How it went:** Most of the cost was a migration that should never have been written. Ten review rounds found a new way for it to lose or clobber something in every one, and it moved this machine's own files during a test. It was cut back to printing the commands, then cut entirely when the operator pointed out the obvious: one machine has anything to move, and everything else is greenfield. The module went from 236 lines to 73.
 - **Changed:** new `home.ts` with a `VEGAFACTORY_HOME` override · thirteen join sites, including a containment check written apart from the path it guarded · two renames · the App key under `worker/` · README, the App and control-room references, the onboarding template, the dev-status fixtures.
 - **Decisions:** none new — it follows the recorded clean-break line rather than adding to it.
 

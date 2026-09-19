@@ -7,7 +7,7 @@ import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'nod
 import { fileURLToPath } from 'node:url'
 import { createInterface } from 'node:readline/promises'
 import type { SkillEntry } from './selection.ts'
-import { factoryHome, settleHome } from './home.ts'
+import { factoryHome } from './home.ts'
 
 type Agent = 'codex' | 'claude'
 type AgentChoice = Agent | 'both'
@@ -917,9 +917,6 @@ async function init(options: Options) {
 async function main() {
   const { assertSupportedPlatform } = await import('./env.ts')
   assertSupportedPlatform()
-  // Before any verb reads or writes this machine's state: an older release kept it somewhere else,
-  // and a command that read one home while the other held the truth would act on half a machine.
-  if (settleHome().found) { process.exitCode = 2; return }
   const options = parse(process.argv.slice(2))
   if (options.command === 'hook') {
     const { hookUsage, runHook } = await import('./hook.ts')
