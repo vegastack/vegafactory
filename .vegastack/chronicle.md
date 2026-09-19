@@ -12,6 +12,16 @@ The project's story, newest first: what got built, why, and how it went — for 
 
 — approved by (kmanojkumar) · built by claude · branch feat/253-a-node-knows-its-own-name
 
+## 18-09-2026 — The machine's limits come from its row ([#248](https://github.com/vegastack/vegafactory/issues/248))
+
+- **What:** A dispatcher's run count, step limit, poll interval, retry delay and park threshold now come from its roster row and are re-read every pass. Named columns may be reordered without confusing notes for caps.
+- **Why:** The live drill found that changing a machine's capacity required editing source and cutting a release, even though those limits belong to its processor and subscription.
+- **How it went:** Caps were straightforward; bundled multi-repository work was not and returned to intake as [#259](https://github.com/vegastack/vegafactory/issues/259). Review then caught stops that spent an issue's trigger, stand-downs that buried unanswered replies, and labels moved under another machine's live run.
+- **Changed:** per-field caps and units · refusal of unreadable or incomplete rows · live cap refresh · scheduler, retry, park, poll and watchdog enforcement · token-lifetime warnings · safe stand-down restoration · roster and onboarding guidance.
+- **Decisions:** none new — the knob values were settled in the operator's interview and are recorded on the issue.
+
+— approved by (kmanojkumar) · built by claude · branch feat/248-caps-only
+
 ## 18-09-2026 — The drill found what the tests could not ([#224](https://github.com/vegastack/vegafactory/issues/224))
 
 - **What:** Two fixes for things the rebuild had built and nobody had ever run. `dispatch enable` could not pass its own readiness check on any machine, and enrolling a dispatcher demanded an SSH key the machine did not need.

@@ -54,28 +54,165 @@ export const SERVICE_NAME = 'com.vegastack.vegafactory.dispatch'
 // ---------------------------------------------------------------------------------------------
 // The roster: the control room's dispatchers.md
 
-export interface Dispatcher { machine: string; operator: string | null; repos: string[] }
+// What one machine may do at once, and for how long. These belong to the machine — its processor,
+// its subscription — and not to any project it works, so they live on its roster row rather than in
+// a repository's dev.md, and they are re-read from the refreshed roster every pass: changing one is
+// a control-room PR that takes effect on the next poll rather than a release.
+export interface Caps { runs: number; stepMs: number; pollMs: number; retryMs: number; failures: number }
+
+// Node's timers are a signed 32-bit count of milliseconds: a longer delay overflows and fires at
+// once, which would be the opposite of the limit asked for. About 24.8 days.
+export const MAX_TIMER_MS = 2 ** 31 - 1
+
+export const DEFAULT_CAPS: Caps = { runs: MAX_RUNS, stepMs: STEP_TIMEOUT_MS, pollMs: POLL_MS, retryMs: RETRY_MS, failures: MAX_FAILURES }
+
+// `runs 10 · step 72h · poll 1m · retry 15m · park 3`, in any order, separated by `·` or a comma.
+// Every field is optional and falls back to the shipped default. A field that is present and
+// unreadable returns null and the caller drops that machine: guessing a cap would be choosing a
+// number on the operator's behalf, and a cap nobody can read is not a cap.
+// A duration written the way that field accepts it, so what is printed can be pasted back into
+// the cell it came from. `poll 60m` must not read back as `poll 1h`, which `parseCaps` refuses.
+const FIELD_UNITS: Record<'step' | 'poll' | 'retry', ('h' | 'm' | 's')[]> = { step: ['h', 'm'], poll: ['m', 's'], retry: ['m'] }
+
+// The field is required rather than defaulted: a default is what makes a dropped argument silent,
+// and the two bugs this fixed were both a call site printing a duration in the wrong field's units.
+export function sayDuration(ms: number, field: 'step' | 'poll' | 'retry'): string {
+  const size = { h: 3_600_000, m: 60_000, s: 1000 }
+  for (const unit of FIELD_UNITS[field]) if (ms % size[unit] === 0) return `${ms / size[unit]}${unit}`
+  // Not a whole number of any unit the field takes — say the smallest one it does, rounded up, so
+  // the number stays a limit rather than becoming zero.
+  const smallest = FIELD_UNITS[field].at(-1)!
+  return `${Math.max(1, Math.ceil(ms / size[smallest]))}${smallest}`
+}
+
+export function parseCaps(cell: string): Caps | null {
+  const caps = { ...DEFAULT_CAPS }
+  const text = String(cell ?? '').trim()
+  if (!text) return caps
+  // What each field takes: a plain count, or a duration in the units that field is measured in.
+  // `poll 2h` and `step 10s` are refused because neither is a limit anybody means.
+  const UNITS: Record<string, string[]> = { runs: [], park: [], step: ['m', 'h'], poll: ['s', 'm'], retry: ['m'] }
+  // An empty segment is a separator with nothing beside it — `·`, `runs 10 ·`, `runs 10,,poll 1m`.
+  // Dropping those would read a half-typed cell as the defaults, and a gate does not do that.
+  for (const field of text.split(/[·,]/).map((part) => part.trim())) {
+    const match = /^(runs|step|poll|retry|park)\s+(\d+)\s*([hms]?)$/i.exec(field)
+    if (!match) return null
+    const name = match[1]!.toLowerCase()
+    const value = Number(match[2])
+    const unit = match[3]!.toLowerCase()
+    if (!Number.isFinite(value) || value <= 0) return null
+    const allowed = UNITS[name]!
+    if (allowed.length === 0) {
+      if (unit) return null
+      if (name === 'runs') caps.runs = value
+      else caps.failures = value
+      continue
+    }
+    if (!allowed.includes(unit)) return null
+    const ms = value * (unit === 'h' ? 3_600_000 : unit === 'm' ? 60_000 : 1000)
+    if (ms > MAX_TIMER_MS) return null
+    if (name === 'step') caps.stepMs = ms
+    else if (name === 'poll') caps.pollMs = ms
+    else caps.retryMs = ms
+  }
+  return caps
+}
+
+// `caps` is null when this row's limits cannot be established, and `problem` says why. The row
+// survives so the machine it names is refused by name — a roster that silently dropped the row
+// would refuse it as "not listed", which sends the operator looking for a missing row rather than
+// at the thing that is actually wrong.
+export interface Dispatcher { machine: string; operator: string | null; repos: string[]; caps: Caps | null; problem: string | null }
+
+// What a roster may call each column. A header maps a name to a position, so a row is read by what
+// its columns are called rather than by where they happen to sit: a room may add, drop or reorder
+// columns, and a notes column is never mistaken for caps.
+const COLUMN_NAMES = {
+  machine: ['machine', 'dispatcher', 'node'],
+  operator: ['operator', 'owner'],
+  repos: ['repos', 'repositories'],
+  caps: ['caps'],
+} as const
+
+interface Layout { machine: number; operator: number | null; repos: number; caps: number | null }
+
+// The shape every roster had before its columns were named: three cells, and no caps. A table with
+// no header is read this way, and a row with a fourth cell is refused rather than guessed at —
+// there is no position a caps cell is known to sit in, so either the columns are named or there
+// are none to name. Legacy three-cell rosters keep working untouched.
+const POSITIONAL: Layout = { machine: 0, operator: 1, repos: 2, caps: null }
+const UNNAMED_COLUMNS = 'the table names no columns, so nothing says which cell holds the caps — add a header row, `| machine | operator | repos | caps |`'
+const UNREADABLE_CAPS = 'the caps cell cannot be read — the shape is `runs 10 · step 72h · poll 1m · retry 15m · park 3`, every field optional'
+const MISSING_CAPS = 'the row does not reach its declared caps column — add an empty cell or `-` when the defaults are fine'
+
+// A header is the row that names at least the machine column and the repos column. Anything less
+// is not a header, and reading it as one would silently move every column.
+function layoutOf(row: string[]): Layout | null {
+  const at = (names: readonly string[]) => {
+    const found = row.findIndex((cell) => names.includes(cell.toLowerCase()))
+    return found === -1 ? null : found
+  }
+  const machine = at(COLUMN_NAMES.machine)
+  const repos = at(COLUMN_NAMES.repos)
+  if (machine === null || repos === null) return null
+  return { machine, operator: at(COLUMN_NAMES.operator), repos, caps: at(COLUMN_NAMES.caps) }
+}
 
 const cells = (line: string) => line.replace(/^\|/, '').replace(/\|\s*$/, '').split('|').map((cell) => cell.trim())
+
+// The header this roster actually has, so advice about adding a row can match the table rather
+// than the shape this code would have chosen.
+function headerOf(text: string): string[] | null {
+  for (const raw of String(text ?? '').split('\n')) {
+    const line = raw.trim()
+    if (!line.startsWith('|')) continue
+    const row = cells(line)
+    if (!row.some(separator) && layoutOf(row)) return row
+  }
+  return null
+}
+
+// What to put under each column of that header. A cap this code invented would be a number the
+// operator never chose, so the caps cell is left empty, which is how a row says the defaults are fine.
+function suggestedCell(column: string, machine: string, repo: string): string {
+  const name = column.toLowerCase()
+  if (COLUMN_NAMES.machine.includes(name as (typeof COLUMN_NAMES.machine)[number])) return machine
+  if (COLUMN_NAMES.repos.includes(name as (typeof COLUMN_NAMES.repos)[number])) return repo
+  if (COLUMN_NAMES.operator.includes(name as (typeof COLUMN_NAMES.operator)[number])) return '<operator>'
+  return ''
+}
 const separator = (cell: string) => /^:?-{2,}:?$/.test(cell)
 
-// One row per machine. A table row is `| machine | operator | repos | note |`, and a bullet is
+// One row per machine. A table names its columns in a header row, and a bullet is
 // `- machine — repos`; `*`, `all` or an empty repos cell means every repository of the org.
 export function parseDispatchers(text: string): Dispatcher[] {
   const found: Dispatcher[] = []
+  let layout = POSITIONAL
   for (const raw of String(text ?? '').split('\n')) {
     const line = raw.trim()
     let machine = ''
     let operator: string | null = null
     let repos = ''
+    let capsCell = ''
+    let named = false
+    let problem: string | null = null
     if (line.startsWith('|')) {
-      // Three cells or it is not a row. A truncated row must not read as "every repository": the
-      // roster is a gate, so a shape nobody wrote on purpose refuses rather than widens.
       const row = cells(line)
-      if (row.length < 3 || row.some(separator) || /^machine$/i.test(row[0] ?? '')) continue
-      machine = row[0] ?? ''
-      operator = row[1] ?? null
-      repos = row[2] ?? ''
+      if (row.some(separator)) continue
+      const header = layoutOf(row)
+      if (header) { layout = header; continue }
+      // A row the header does not reach is a shape nobody wrote on purpose. The roster is a gate,
+      // so it refuses rather than widens — a truncated row must not read as "every repository".
+      if (row.length <= Math.max(layout.machine, layout.repos)) continue
+      machine = row[layout.machine] ?? ''
+      operator = layout.operator === null ? null : row[layout.operator] ?? null
+      repos = row[layout.repos] ?? ''
+      capsCell = layout.caps === null ? '' : row[layout.caps] ?? ''
+      named = layout.caps !== null
+      if (layout.caps !== null && row.length <= layout.caps) problem = MISSING_CAPS
+      // A wider table than the legacy three, with nothing naming its columns: the caps could be in
+      // any of the extra cells or in none of them, and a gate does not guess. Refused by name.
+      if (layout === POSITIONAL && row.length > 3) problem = UNNAMED_COLUMNS
     } else {
       const match = /^-\s+`?([A-Za-z0-9][\w.-]*)`?\s*(?:—|--)\s*(.*)$/.exec(line)
       if (!match) continue
@@ -83,11 +220,21 @@ export function parseDispatchers(text: string): Dispatcher[] {
       repos = match[2] ?? ''
     }
     const name = machineName(machine.replace(/`/g, ''))
-    if (!machine.trim() || name === 'machine') continue
+    if (!machine.trim() || COLUMN_NAMES.machine.includes(name as (typeof COLUMN_NAMES.machine)[number])) continue
+    // A declared caps column is read whatever it holds: guessing a cap would be choosing a number
+    // on the operator's behalf. `-` and an empty cell are how a row says "the defaults are fine".
+    let caps: Caps | null = null
+    if (problem) caps = null
+    else if (named && capsCell !== '-' && capsCell !== '') {
+      caps = parseCaps(capsCell)
+      if (!caps) problem = UNREADABLE_CAPS
+    } else caps = { ...DEFAULT_CAPS }
     found.push({
       machine: name,
       operator: operator && operator !== '-' ? operator.replace(/^@/, '') : null,
       repos: repos.split(/[,\s]+/).map((repo) => repo.replace(/`/g, '').trim()).filter((repo) => repo && repo !== '-'),
+      caps,
+      problem,
     })
   }
   return found
@@ -163,7 +310,17 @@ export function listedHere(root: string, options: { repo: string; host?: string;
   }
   const entry = parseDispatchers(text).find((row) => row.machine === machine) ?? null
   if (!entry) {
-    return { ok: false, entry: null, file, reason: `${machine} is not listed in ${file} — add the row \`| ${machine} | <operator> | ${options.repo} |\` in a control-room PR before this machine dispatches anything` }
+    // The row is spelled to fit the table that is actually there: a row shorter than the header
+    // is refused for the cell it never reached, so advice that ignored the header would send the
+    // operator straight from one refusal into the next.
+    const header = headerOf(text)
+    const cells = header ? header.map((column) => suggestedCell(column, machine, options.repo)) : [machine, '<operator>', options.repo]
+    return { ok: false, entry: null, file, reason: `${machine} is not listed in ${file} — add the row \`| ${cells.join(' | ')} |\` in a control-room PR before this machine dispatches anything` }
+  }
+  // A cap nobody can read is not a cap, and the machine it belongs to is named rather than left
+  // to look like a missing row: the operator is sent to the thing that is wrong, not to the roster.
+  if (!entry.caps) {
+    return { ok: false, entry, file, reason: `${machine}'s row in ${file} does not say what its limits are: ${entry.problem} — fix it in a control-room PR` }
   }
   const every = entry.repos.length === 0 || entry.repos.some((repo) => repo === '*' || repo.toLowerCase() === 'all')
   if (!every && !entry.repos.includes(options.repo)) return { ok: false, reason: `${machine} is listed in ${file} for ${entry.repos.join(', ')}, not ${options.repo}`, entry, file }
@@ -273,6 +430,13 @@ export function tokenRunner(token: () => string, timeoutMs = 30_000): GhRunner {
 // Re-minted a few minutes before it expires. `gh` is spawned synchronously, so the token has to be
 // ready before the call: the refresh runs between passes, from `freshen`, and never mid-request.
 export const TOKEN_MARGIN_MS = 5 * 60_000
+
+// An installation token lives an hour and a child is handed one when it starts — nothing can put a
+// fresh one into a process already running. A run allowed to last longer keeps working and stops
+// being able to write to GitHub partway through, which is worse than being stopped: the work
+// exists and the evidence for it never lands. The caps may say so, and the dispatcher says it out
+// loud. Closing it properly is the credential broker in #239.
+export const TOKEN_LIFE_MS = 55 * 60_000
 
 export interface AppIdentity { runner: GhRunner; freshen: (now?: number) => Promise<void>; token: () => string | null }
 
@@ -682,12 +846,38 @@ export function latestArtifact(snap: Snapshot, type: string, permission: Permiss
 
 // Comments that are bookkeeping, not an answer or a piece of work: they must not move the line an
 // operator's reply has to beat, or a session claiming an issue would swallow the reply forever.
-const BOOKKEEPING = new Set(['claim', 'release', 'ledger', 'ack'])
+// Comments a machine writes about itself rather than about the work. They must not count as work
+// done on the issue: `waiting-on-operator` looks for the operator's reply to be *later* than
+// anything an agent wrote, so a machine that stood down and said so would otherwise bury the very
+// reply it was standing down without answering, and no machine would ever pick the issue up.
+// Comments a machine writes about itself rather than about the work, so they must not count as
+// work done on the issue: `waiting-on-operator` looks for the operator's reply to be *later* than
+// anything an agent wrote, and a machine that stood down and said so would otherwise bury the very
+// reply it was standing down without answering.
+//
+// A `handback` is emphatically not one of these. That is an agent stopping to *ask* something —
+// the smallest question, a missing artifact, a scope ratchet — and it is the thing the operator's
+// reply answers. Counting it as bookkeeping would let a comment written before the question was
+// asked read as the answer to it.
+const BOOKKEEPING = new Set(['claim', 'release', 'ledger', 'ack', 'standdown'])
+// A stand-down the released version wrote, which carried `type=handback` before stand-downs had
+// their own marker. It is matched as the *whole* body and not a line within one, because a genuine
+// hand-back may repeat a stand-down while asking something new — and reading that as bookkeeping
+// would let a comment written before the question be chosen as its answer.
+//
+// The name is held to the shape `machineName` produces rather than to any bold run, so a sentence
+// that merely begins with emphasis — `**Note** stood down from #5: …` — is still a question.
+const LEGACY_STANDDOWN = /^\*\*[a-z0-9][a-z0-9-]*\*\* stood down from #\d+: [^\n]+$/
+
+const withoutMarker = (body: string) => String(body ?? '').replace(/<!--[\s\S]*?-->/, '').trim()
+
+const isBookkeeping = (snap: Snapshot, entry: CommentEntry) =>
+  BOOKKEEPING.has(entry.type) || (entry.type === 'handback' && LEGACY_STANDDOWN.test(withoutMarker(snap.body(entry))))
 
 // The action this issue is waiting for, and the comment that asks for it. `trigger` is what makes
 // a run happen once: a comment already acted on asks for nothing more, and a state label already
 // worked is not worked again until the issue moves.
-export function decide(snap: Snapshot, permission: PermissionLookup, options: { acted?: Acted | null; now?: number; held?: boolean } = {}): Decision {
+export function decide(snap: Snapshot, permission: PermissionLookup, options: { acted?: Acted | null; now?: number; held?: boolean; failures?: number } = {}): Decision {
   const issue = snap.state.issue!
   const { acted = null, now = Date.now(), held = false } = options
   if (issue.state !== 'open') return nothing('the issue is closed')
@@ -701,8 +891,11 @@ export function decide(snap: Snapshot, permission: PermissionLookup, options: { 
   // A trigger is spent once a run of the same action has settled on it, whatever it settled as —
   // only a failure and a subscription limit come back, and each has its own wait.
   if (acted && acted.action === decided.action) {
+    // Parked before waiting: every failure sets a retry deadline, so asking about the wait first
+    // would report a run that has spent its last try as merely due again later, and `park 1` would
+    // never park anything.
+    if (acted.failures >= (options.failures ?? MAX_FAILURES) && acted.trigger === decided.trigger) return nothing(`${decided.action} failed ${acted.failures} times — this issue needs a person`)
     if (acted.retryAt !== null && now < acted.retryAt) return nothing(`${decided.action} is waiting until ${new Date(acted.retryAt).toISOString()}`)
-    if (acted.failures >= MAX_FAILURES && acted.trigger === decided.trigger) return nothing(`${decided.action} failed ${acted.failures} times — this issue needs a person`)
     if (acted.retryAt === null && acted.trigger === decided.trigger) {
       return nothing(`already ran ${decided.action} for this ${decided.trigger === null ? 'state' : 'comment'}`)
     }
@@ -728,7 +921,7 @@ function transitionOf(snap: Snapshot, issue: IssueFacts, state: State, comments:
     // The reply the issue was waiting for: an operator comment later than the last thing an agent
     // wrote and later than the brief's own last edit. Claims, releases, acks and the status
     // comment are bookkeeping and move nothing.
-    const work = Object.values(snap.state.comments).filter((entry) => entry.type !== 'human' && !BOOKKEEPING.has(entry.type)).map((entry) => entry.createdAt)
+    const work = Object.values(snap.state.comments).filter((entry) => entry.type !== 'human' && !isBookkeeping(snap, entry)).map((entry) => entry.createdAt)
     const after = [issue.bodyChangedAt, ...work].sort().at(-1) ?? ''
     const reply = comments.filter((entry) => entry.createdAt > after).at(-1)
     return reply
@@ -835,7 +1028,7 @@ export function filesFromParent(parentPlan: string | null, number: number): stri
 
 export interface Step { action: Action; number: number; repo: string; split: boolean; by: string | null }
 export interface StepResult { outcome: Outcome; note: string; ms: number }
-export type RunStep = (step: Step, context: { root: string; onStart?: (pid: number, command: string) => void }) => Promise<StepResult>
+export type RunStep = (step: Step, context: { root: string; timeoutMs?: number; onStart?: (pid: number, command: string) => void }) => Promise<StepResult>
 
 // A run that stopped because the subscription said "enough for now". Each tool words it its own
 // way, and each of these is a limit, not a failure of the work.
@@ -1000,10 +1193,13 @@ export function defaultRunStep(devMd: string, env: NodeJS.ProcessEnv, { exec = e
     const cwd = workingDir(context.root, step.number) ?? context.root
     // Nobody is at the keyboard, so a round of questions goes to the issue and waits there for the
     // operator — dev-setup's references/ask-route.md, where VSK_ASK_ROUTE is the first step.
-    const child = await exec(tool, args, { cwd, env: childRunEnvironment(env, token()), timeoutMs, onStart: context.onStart })
+    // The limit arrives with the run rather than with the step function, so a roster change lands
+    // on the next run instead of the next restart.
+    const limit = context.timeoutMs ?? timeoutMs
+    const child = await exec(tool, args, { cwd, env: childRunEnvironment(env, token()), timeoutMs: limit, onStart: context.onStart })
     const ms = Date.now() - started
     const text = `${child.stderr}\n${child.stdout}`
-    if (child.timedOut) return { outcome: 'killed', note: `${tool} ran past the ${timeoutMs / 60_000}-minute step limit and was stopped`, ms }
+    if (child.timedOut) return { outcome: 'killed', note: `${tool} ran past the ${limit / 60_000}-minute step limit and was stopped`, ms }
     if (child.error) return { outcome: 'failed', note: `could not start ${tool}: ${child.error}`, ms }
     // A limit is why a run stopped early, never a phrase in the work of a run that finished: the
     // diff of a retry helper says "rate limit" all day.
@@ -1029,6 +1225,8 @@ export interface PollDeps {
   runner: GhRunner
   // This dispatcher process, so its claims are its own and no other process reads them as such.
   runId: string
+  // The machine's own limits, from its roster row, re-read every pass.
+  caps?: Caps
   now: () => number
   runStep: RunStep
   out: (text: string) => void
@@ -1045,7 +1243,11 @@ export interface PollDeps {
 // The steps this machine has started. It lives across polls, so the next pass two minutes later
 // sees them, keeps their slots and can still act on the rest of the board. A finished run stays in
 // the map until the next pass sweeps it, so nothing can disappear between starting and being read.
-export interface Interrupt { reason: string; action: Action; trigger: number | null }
+// `consumes` says whether the stop spends the trigger the run was working on. An operator's stop
+// does: they asked for this, and it is their comment the record points at. An administrative stop
+// — the machine de-listed, the service told to stop, a signal — does not: nothing about the issue
+// changed, so the work has to look unstarted again or no machine ever picks it up.
+export interface Interrupt { reason: string; action: Action; trigger: number | null; consumes: boolean }
 
 export interface Inflight {
   candidate: Candidate
@@ -1077,7 +1279,7 @@ export async function poll(deps: PollDeps, inflight: Map<number, Inflight> = new
       const snap = snapshot(cacheDir(root, repo, issue.number))
       const key = `${repo}#${issue.number}`
       const held = !!holderOf(snap.state, snap.body, now(), trusted).holder
-      const decision = decide(snap, permission, { acted: acted[key] ?? null, now: now(), held })
+      const decision = decide(snap, permission, { acted: acted[key] ?? null, now: now(), held, failures: deps.caps?.failures })
       if (decision.action === 'none') continue
       // A fresh claim means someone — a person or another machine — is already on it.
       if (decision.action !== 'stop' && held) {
@@ -1112,7 +1314,7 @@ export async function poll(deps: PollDeps, inflight: Map<number, Inflight> = new
     const run = inflight.get(item.candidate.number)
     if (item.decision.action !== 'stop' || !run || run.settled) continue
     deps.out(`#${item.candidate.number}: ${item.decision.reason} — stopping the ${run.candidate.action} run`)
-    run.interrupt = { reason: item.decision.reason, action: 'stop', trigger: item.decision.trigger }
+    run.interrupt = { reason: item.decision.reason, action: 'stop', trigger: item.decision.trigger, consumes: true }
     run.stop()
     await run.done
     inflight.delete(item.candidate.number)
@@ -1121,7 +1323,7 @@ export async function poll(deps: PollDeps, inflight: Map<number, Inflight> = new
 
   const started: Candidate[] = []
   const queue = wanted.filter((item) => !interrupted.includes(item.candidate.number))
-  for (const candidate of schedule(queue.map((item) => item.candidate), [...inflight.values()].map((run) => run.candidate))) {
+  for (const candidate of schedule(queue.map((item) => item.candidate), [...inflight.values()].map((run) => run.candidate), deps.caps?.runs ?? MAX_RUNS)) {
     const item = queue.find((entry) => entry.candidate.number === candidate.number)!
     const at = now()
     // Taken before the slot, so a second machine on the same board sees the work is taken. Losing
@@ -1194,6 +1396,7 @@ async function runOne(deps: PollDeps, candidate: Candidate, item: { key: string;
       }
       result = await deps.runStep({ action: candidate.action, number: candidate.number, repo: deps.repo, split: item.decision.split, by: item.decision.by }, {
         root: deps.root,
+        timeoutMs: deps.caps?.stepMs ?? STEP_TIMEOUT_MS,
         onStart: (pid, command) => {
           const record: ChildRecord = {
             pid, command, startedAt: (deps.start ?? processStart)(pid) ?? '', issue: candidate.number,
@@ -1246,13 +1449,26 @@ function settle(deps: PollDeps, candidate: Candidate, item: { key: string; decis
   recordRun(deps.root, record)
   const ended = deps.now()
   let retryAt: number | null = null
+  let failuresNow = 0
+  // A stop that was nothing to do with the issue spends nothing. The run is still recorded and the
+  // issue still handed back, but `acted` is left exactly as the last real run left it — write a
+  // spent trigger here and the restored issue looks already-done to the next pass and to every
+  // other machine, which is how an administrative stop turns into an issue nobody ever picks up.
+  if (interrupt && !interrupt.consumes) {
+    deps.out(`#${record.issue} ${record.action} → ${record.outcome}${record.note ? ` (${record.note})` : ''}`)
+    if (result.outcome !== 'done' && !alreadyHandedBack) {
+      deps.standDown(candidate.number, `${interrupt.reason}; this machine has saved and released the issue`, candidate.from)
+    }
+    return record
+  }
   updateActed(deps.root, (acted) => {
     const previous = acted[item.key]
     const failed = result.outcome === 'failed' || result.outcome === 'killed'
     const failures = failed ? (previous && previous.action === action ? previous.failures : 0) + 1 : 0
     // The wait runs from the end of the run, not its start: a step that failed after twenty
     // minutes would otherwise be due again the moment it stopped.
-    retryAt = failed ? ended + RETRY_MS * 2 ** (failures - 1) : result.outcome === 'limit' ? resetAt(result.note, ended) : null
+    failuresNow = failures
+    retryAt = failed ? ended + (deps.caps?.retryMs ?? RETRY_MS) * 2 ** (failures - 1) : result.outcome === 'limit' ? resetAt(result.note, ended) : null
     acted[item.key] = { at, action, outcome: result.outcome, trigger, failures, retryAt }
   })
   // Every run that did not finish hands the issue back the same way: the work is committed and
@@ -1260,7 +1476,11 @@ function settle(deps: PollDeps, candidate: Candidate, item: { key: string; decis
   // found it — a failure that left the issue `in-progress` with nobody on it is a dead end. It
   // happens exactly once: a `stop` step has already done it, and an interrupted run does it here.
   if (result.outcome !== 'done' && !alreadyHandedBack) {
-    const when = retryAt ? `, and tries again after ${new Date(retryAt).toISOString()}` : ''
+    // Only when there is a try left. A run that has spent them is parked, and saying it will try
+    // again would be a promise the next poll refuses.
+    const spent = failuresNow >= (deps.caps?.failures ?? MAX_FAILURES)
+    const when = retryAt && !spent ? `, and tries again after ${new Date(retryAt).toISOString()}`
+      : spent ? `, and has now failed ${failuresNow} times — it needs a person` : ''
     const why = interrupt ? interrupt.reason
       : result.outcome === 'limit' ? 'the subscription limit was reached'
         : `the ${candidate.action} run ${result.outcome === 'killed' ? 'ran past its time limit' : 'failed'}`
@@ -1372,10 +1592,10 @@ export function standDown(ctx: StandDownContext, reason: string): string {
     const snap = snapshot(cacheDir(ctx.root, ctx.repo, ctx.number))
     const held = holderOf(snap.state, snap.body, ctx.now ?? Date.now(), trustedFactory(claimCtx)).holder
     if (!held) { whose = 'free'; notes.push('no live claim to release') }
-    else if (!held.owner.startsWith(`${ctx.machine}:`)) { whose = 'theirs'; notes.push(`the claim is held by ${held.owner}, so nothing here was touched`) }
+    else if (!held.owner.startsWith(`${ctx.machine}:`)) { whose = 'theirs'; notes.push(`the claim is held by ${held.owner}, so nothing here was touched and the state label was left alone`) }
     else { whose = 'ours'; owner = held.owner }
   } catch (error) {
-    notes.push(`the claim could not be read (${(error as Error).message}), so nothing here was touched`)
+    notes.push(`the claim could not be read (${(error as Error).message}), so nothing here was touched and the state label was left alone`)
   }
 
   // Only a claim this machine holds authorises writing to its worktree, and a claim that could not
@@ -1409,11 +1629,20 @@ export function standDown(ctx: StandDownContext, reason: string): string {
   // The issue says what happened and goes back to a state a later pass can pick up. Both are
   // best-effort: a stand-down that cannot reach GitHub still reports what it did locally.
   try {
-    postComment(claimCtx, `<!-- vsk:v1 type=handback -->\n**${ctx.machine}** stood down from #${ctx.number}: ${note}\n`)
+    postComment(claimCtx, `<!-- vsk:v1 type=standdown -->\n**${ctx.machine}** stood down from #${ctx.number}: ${note}\n`)
   } catch (error) { notes.push(`the hand-back comment failed: ${(error as Error).message}`) }
-  if (ctx.restoreTo) {
+  if (ctx.restoreTo && (whose === 'ours' || whose === 'free')) {
     try {
       syncIssue({ ...claimCtx })
+      // Read again, here. The check above happened before this run saved, pushed and released,
+      // which is long enough for another machine to have claimed the issue — and moving one out
+      // of `in-progress` while somebody is working it is worse than leaving it where it is.
+      const now = snapshot(cacheDir(ctx.root, ctx.repo, ctx.number))
+      const taken = holderOf(now.state, now.body, ctx.now ?? Date.now(), trustedFactory(claimCtx)).holder
+      if (taken && !taken.owner.startsWith(`${ctx.machine}:`)) {
+        notes.push(`${taken.owner} claimed it meanwhile, so the state label was left alone`)
+        return `${reason} — ${notes.join(', ')}`
+      }
       const labels = readState(cacheDir(ctx.root, ctx.repo, ctx.number))!.issue!.labels
       if (stateOf(labels).state === 'in-progress' && ctx.restoreTo !== 'in-progress') {
         setLabels(claimCtx, nextLabels(labels, { state: ctx.restoreTo }))
@@ -1436,13 +1665,28 @@ export function dispatchUsage(): string {
   disable                remove the unit; the machine stops picking work up
   status                 the board, plus this machine's recent dispatcher runs
   run [--once]           the poll loop itself (the unit runs this); --once makes a single pass
+                         and is the only form --json reports, because the document answers when
+                         a pass ends
 
-At most three runs at once and one merge at a time, per machine — two machines on one board
-each get their own three, and each keeps its own retry and subscription-reset deadlines. A run
-takes the issue's claim before it starts, so another machine's poll sees the work is taken, except
-in the seconds an implement run hands that claim to the session it starts.
+One merge at a time per machine, and as many runs at once as its roster row allows. The row's
+caps cell sets them — \`runs 10 · step 72h · poll 1m · retry 15m · park 3\`, in any order, every
+field optional and separated by \`·\` or a comma. \`runs\` and \`park\` take a count; \`step\` takes
+minutes or hours, \`poll\` seconds or minutes, \`retry\` minutes. A field that is present and
+unreadable refuses the machine rather than being guessed at. With no caps cell the defaults are
+${MAX_RUNS} runs, step ${STEP_TIMEOUT_MS / 60_000}m, poll ${POLL_MS / 60_000}m, retry ${RETRY_MS / 60_000}m, park ${MAX_FAILURES}. The caps are re-read from the refreshed roster
+every pass, so changing one is a control-room PR that lands on the next poll, not a release.
+
+Two machines on one board each get their own caps, and each keeps its own retry and
+subscription-reset deadlines. A run takes the issue's claim before it starts, so another machine's
+poll sees the work is taken, except in the seconds an implement run hands that claim to the
+session it starts.
 
 Options: --repo OWNER/NAME · --json · --dry-run (enable and disable show what they would do)
+
+The roster's table names its columns in a header row — \`| machine | operator | repos | caps |\`,
+in any order, extra columns ignored — so a cell is read by what its column is called. A table
+with no header is read as the three columns every roster had before caps existed; a wider one
+without a header refuses, because no position is known to hold the caps.
 
 A machine the control room's dispatchers.md does not name refuses every verb but disable. Writes
 go out as the VegaFactory GitHub App, on an hour-long token minted here from its private key:
@@ -1576,7 +1820,9 @@ export async function runDispatch(argv: string[], deps: CliDeps = {}): Promise<n
           return 1
         }
       }
-      print({ ok: true, checks, unit: path }, `${renderChecks(checks)}\n\nenabled — ${path} is loaded; this machine polls ${repo} every ${POLL_MS / 60_000} minutes`)
+      const enabledCaps = listing.entry?.caps ?? DEFAULT_CAPS
+      print({ ok: true, checks, unit: path, caps: enabledCaps },
+        `${renderChecks(checks)}\n\nenabled — ${path} is loaded; this machine polls ${repo} every ${sayDuration(enabledCaps.pollMs, 'poll')}, ${enabledCaps.runs} runs at once`)
       return 0
     }
     case 'disable': {
@@ -1624,10 +1870,15 @@ export async function runDispatch(argv: string[], deps: CliDeps = {}): Promise<n
       // An issue this machine has given up on is the one thing `status` must not leave out: it is
       // off the board as far as the dispatcher is concerned until a person looks at it.
       const parked = Object.entries(readActed(root))
-        .filter(([key, entry]) => entry.failures >= MAX_FAILURES && key.startsWith(`${repo}#`))
+        .filter(([key, entry]) => entry.failures >= (listing.entry?.caps ?? DEFAULT_CAPS).failures && key.startsWith(`${repo}#`))
         .map(([key, entry]) => ({ issue: Number(key.slice(key.indexOf('#') + 1)), action: entry.action, failures: entry.failures }))
-      print({ repo, machine, listed: listing.ok, board: rows, runs, parked }, [
+      // What this machine is allowed to do, in the words of the row that allows it, so "why is it
+      // doing that?" is answered without anyone opening the control room.
+      const statusCaps = listing.entry?.caps ?? DEFAULT_CAPS
+      const capsLine = `caps: ${statusCaps.runs} runs · step ${sayDuration(statusCaps.stepMs, 'step')} · poll ${sayDuration(statusCaps.pollMs, 'poll')} · retry ${sayDuration(statusCaps.retryMs, 'retry')} · park ${statusCaps.failures}`
+      print({ repo, machine, listed: listing.ok, caps: statusCaps, board: rows, runs, parked }, [
         `${repo} · ${machine} · ${listing.ok ? 'listed to dispatch' : listing.reason}`,
+        ...(listing.ok ? [capsLine] : []),
         ...[...byState].map(([state, numbers]) => `${state.padEnd(20)} ${numbers.map((number) => `#${number}`).join(' ')}`),
         ...(parked.length ? ['', `parked for a person: ${parked.map((row) => `#${row.issue} (${row.action} failed ${row.failures}×)`).join(', ')}`] : []),
         '',
@@ -1648,10 +1899,42 @@ export async function runDispatch(argv: string[], deps: CliDeps = {}): Promise<n
       try { devMd = readFileSync(join(root, '.vegastack', 'dev.md'), 'utf8') } catch { /* no profile, so the tools' own defaults */ }
       const identity = deps.runner ? null : appIdentity({ repo, keyPath, appId: appIdOf(env), fetch: deps.fetch })
       const runner = deps.runner ?? identity!.runner
+      // `--json` puts exactly one document on stdout and nothing else, so every line this loop
+      // would have printed is collected and leaves inside it. A caller that has to step over prose
+      // to find the JSON is a caller that will one day step over the wrong line.
+      //
+      // That only works for a run that ends: an always-on loop would hold every line it ever
+      // printed and emit them at shutdown, which is a leak and an answer nobody is waiting for.
+      // So the document belongs to `--once`, and the service, which runs without `--json`, prints.
+      if (args.json && !args.once) {
+        print({ ok: false, reason: '--json reports one pass; use it with --once' },
+          'refused: --json reports one pass and answers when that pass ends — add --once, or drop --json and read the lines the loop prints')
+        releaseRunLock(root, runId)
+        return 2
+      }
+      const notes: string[] = []
+      const note = (text: string) => { if (args.json) notes.push(text); else out(text) }
+      const finish = (code: number, runs: RunRecord[]) => {
+        if (args.json) out(JSON.stringify({ machine, repo, runs, notes }, null, 2))
+        releaseRunLock(root, runId)
+        return code
+      }
+      // The row that authorised this machine also says what it may do while working it.
+      const caps = listing.entry!.caps!
+      // Said once when it becomes true, not every pass: a roster edit that lengthens the step past
+      // the token's hour is worth a line, and the same line every two minutes is worth nothing.
+      let toldAboutStep = false
+      const stepOutlivesToken = (limit: Caps) => {
+        if (limit.stepMs <= TOKEN_LIFE_MS) { toldAboutStep = false; return }
+        if (toldAboutStep) return
+        toldAboutStep = true
+        note(`note: step ${sayDuration(limit.stepMs, 'step')} is longer than the hour an installation token lives, so a run past that point can still work but can no longer write to GitHub — see #239`)
+      }
+      stepOutlivesToken(caps)
       const pollDeps: PollDeps = {
-        root, repo, runner, machine, runId, out: args.json ? () => {} : out, now: deps.now ?? Date.now,
+        root, repo, runner, machine, runId, caps, out: note, now: deps.now ?? Date.now,
         runStep: deps.runStep ?? defaultRunStep(devMd, env, { token: () => identity?.token() ?? null }), stop: deps.stop, start: deps.start,
-        standDown: (number, reason) => standDown({ root, repo, number, runner, machine }, reason),
+        standDown: (number, reason, restoreTo) => standDown({ root, repo, number, runner, machine, restoreTo }, reason),
       }
       // Started steps outlive the pass that began them, so the next pass keeps their slots and
       // still acts on the rest of the board — a twenty-minute build does not stop the poll.
@@ -1662,13 +1945,13 @@ export async function runDispatch(argv: string[], deps: CliDeps = {}): Promise<n
       const shutDown = async (why: string) => {
         for (const [number, run] of inflight) {
           if (run.settled) continue
-          out(`#${number} ${run.candidate.action} stopped: ${why}`)
-          run.interrupt = { reason: why, action: run.candidate.action, trigger: null }
+          note(`#${number} ${run.candidate.action} stopped: ${why}`)
+          run.interrupt = { reason: why, action: run.candidate.action, trigger: null, consumes: false }
           run.stop()
         }
         // Every process group is ended and waited for before anything is written: each run's own
         // settle saves its work, releases its claim and puts its issue back, exactly once.
-        await drain(inflight)
+        return drain(inflight)
       }
       // A signal wakes the loop rather than waiting for the current sleep to run out: `launchctl
       // bootout` and Ctrl-C both mean now, and two minutes of agents writing to GitHub after the
@@ -1686,36 +1969,32 @@ export async function runDispatch(argv: string[], deps: CliDeps = {}): Promise<n
         // wait checks for it rather than starting and never being told.
         if (signalled) { resolve(); return }
         wake = () => { wake = null; resolve() }
-        void (deps.sleep ?? wait)(POLL_MS).then(() => { wake = null; resolve() })
+        void (deps.sleep ?? wait)(pollDeps.caps?.pollMs ?? POLL_MS).then(() => { wake = null; resolve() })
       })
       for (;;) {
         if (signalled) {
-          await shutDown(`this machine was asked to stop (${signalled})`)
-          releaseRunLock(root, runId)
-          return 0
+          return finish(0, await shutDown(`this machine was asked to stop (${signalled})`))
         }
         try {
-          // The roster is the enrolment, so it is refreshed and re-read every pass: a row removed
-          // in a control-room PR stands this machine down at the next poll, with nothing to log
-          // into, and a roster this machine cannot verify stops it just as firmly.
+          // The roster is the enrolment, so it is refreshed and re-read once per pass: a row
+          // removed in a control-room PR stands this machine down at the next poll, with nothing
+          // to log into, and a roster this machine cannot verify stops it just as firmly. One
+          // reading, because two would each fetch and merge, and a second answer nobody acts on is
+          // a gate that has been asked and ignored — the caps come off this same reading, so a
+          // control-room PR that changes one lands on the next poll rather than on a restart.
           const still = verifiedListing(root, { repo, host, home, git: deps.git })
-          if (!still.ok) {
-            out(`stopping: ${still.reason}`)
-            await shutDown('this machine is no longer listed')
-            releaseRunLock(root, runId)
-            return 2
+          if (!still.ok || !still.entry?.caps) {
+            note(`stopping: ${still.reason}`)
+            return finish(2, await shutDown('this machine is no longer listed'))
           }
+          pollDeps.caps = still.entry.caps
+          stepOutlivesToken(still.entry.caps)
           await identity?.freshen()
-          for (const candidate of await poll(pollDeps, inflight)) out(`#${candidate.number} ${candidate.action} started`)
+          for (const candidate of await poll(pollDeps, inflight)) note(`#${candidate.number} ${candidate.action} started`)
         } catch (error) {
-          out(`poll failed: ${(error as Error).message}`)
+          note(`poll failed: ${(error as Error).message}`)
         }
-        if (args.once) {
-          const records = await drain(inflight)
-          if (args.json) out(JSON.stringify(records))
-          releaseRunLock(root, runId)
-          return 0
-        }
+        if (args.once) return finish(0, await drain(inflight))
         await untilNextPass()
       }
     }
