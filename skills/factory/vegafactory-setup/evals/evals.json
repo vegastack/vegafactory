@@ -7,7 +7,7 @@
       "expected_output": "The questionnaire answers are written into a rendered `org.md`, every file in the lean control-room layout is rendered from its template into a directory the operator can read, the subscription rule is proposed as a locked line, and the run stops before creating the repository — naming the exact `gh repo create` command instead of running it.",
       "files": [],
       "assertions": [
-        "Every file in the layout is rendered, and only those: `org.md`, `groups/dev/group.md`, `repos.md`, `dispatchers.md`, `boards.md`, `onboarding/`, `stats/`",
+        "Every file in the layout is rendered, and only those: `org.md`, `groups/dev/group.md`, `repos.md`, `nodes.md`, `boards.md`, `onboarding/`, `stats/`",
         "`org.md` carries `stats: on`, `stats-people: off` and no department knob (`merge:`, `tests:`, `harness-policy:`)",
         "`provider-mode: subscription-only` carries a `# locked` comment, and the lock is explained as the one thing a group cannot answer differently",
         "No `people.csv`, `decisions.md`, `rules/` or `templates/` is created",

@@ -1,6 +1,6 @@
 # Refreshing vegastack/vegafactory-control-room
 
-The lean control room is seven things: `org.md`, `groups/<g>/group.md`, `repos.md`, `dispatchers.md`, `boards.md`, `onboarding/`, `stats/`. The live room still carries the old model. `room/` here is those seven, laid out exactly as they land at the repository root.
+The lean control room is seven things: `org.md`, `groups/<g>/group.md`, `repos.md`, `nodes.md`, `boards.md`, `onboarding/`, `stats/`. The live room still carries the old model. `room/` here is those seven, laid out exactly as they land at the repository root.
 
 Seven entries are the whole layout, so the live `README.md` goes with the rest of the old model: an eighth top-level entry is one more place for the room's shape to be described, and to drift. What the README said now lives in the skill's `references/control-room.md`, which is the file that has to be right anyway.
 
@@ -10,9 +10,9 @@ Seven entries are the whole layout, so the live `README.md` goes with the rest o
 
 Added
 
-- `dispatchers.md` — the dispatcher registry, empty, with the rule that a repo reaches a dispatcher only through its group.
+- `nodes.md` — every machine that runs vegafactory, one row each, with a `worker` column that is the only thing granting unattended work.
 - `stats/README.md` — creates `stats/`, the one tree automation writes, and says what a record may and may not carry.
-- `onboarding/dispatcher-box.md` — the third onboarding path, which `dispatchers.md` and the skill both route through: two macOS accounts so a CI job cannot read the dispatcher's tokens, the toolchain, the runner registration and the reboot drill. The account names, the runner group and the runner name in it are proposals; `org.md`'s `## Unconfirmed` says so until the operator confirms them on the box.
+- `onboarding/dispatcher-box.md` — the third onboarding path, which `nodes.md` and the skill both route through: two macOS accounts so a CI job cannot read the dispatcher's tokens, the toolchain, the runner registration and the reboot drill. The account names, the runner group and the runner name in it are proposals; `org.md`'s `## Unconfirmed` says so until the operator confirms them on the box.
 - `org.md`'s `## Automation identity` block — the App name, slug, installation id (`158664419`, from dev-setup's `references/github-app.md`), the two secret **names** and the granted permissions. The live `org.md` never carried this block although the skill and its template both require it; nothing in it is a secret.
 
 Changed
@@ -41,4 +41,4 @@ git add -A
 git commit -m "feat: lean control room"
 ```
 
-The tree that leaves is exactly `org.md`, `groups/`, `repos.md`, `dispatchers.md`, `boards.md`, `onboarding/` and `stats/`. Then open the pull request and read the diff before merging. `vegafactory sync` picks the change up on its next refresh.
+The tree that leaves is exactly `org.md`, `groups/`, `repos.md`, `nodes.md`, `boards.md`, `onboarding/` and `stats/`. Then open the pull request and read the diff before merging. `vegafactory sync` picks the change up on its next refresh.

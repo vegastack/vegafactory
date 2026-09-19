@@ -1,10 +1,14 @@
-# Dispatchers
+# Nodes
 
-The always-on machines that turn a label or a reaction into a headless run. One row per machine; a repo reaches a dispatcher only through the group it is registered in.
+Every machine that runs vegafactory, one row each. A node is `<os-user>@<hostname>`, derived and never configured, so two people on one box are two nodes and one person with three boxes is three nodes and one owner.
 
-| dispatcher | group | repos | owner | caps | notes |
+`owner` is who is responsible for the **machine**. It is not the same fact as the owner on a statistics record, which is whoever did that piece of work, read from that machine's own `gh` login — on a shared box the two differ.
+
+`worker` is the gate, and the only property here that grants anything: `yes` means this machine may work a board with nobody watching. Anything else, including an empty cell, means no. `repos` and `caps` say what a worker may touch and how hard it may go; on a row that is not a worker they mean nothing, and an empty `repos` cell authorises nothing at all.
+
+| node | owner | worker | repos | caps | notes |
 |---|---|---|---|---|---|
-| {{dispatcher}} | {{group}} | {{owner/repo}} | {{owner}} | {{blank, or e.g. runs 10 · step 72h · poll 1m · retry 15m · park 3}} | {{blank, or what this machine is for}} |
+| {{node}} | {{owner}} | {{yes, or no}} | {{owner/repo, or blank for none}} | {{blank, or e.g. runs 10 · step 72h · poll 1m · retry 15m · park 3}} | {{blank, or what this machine is for}} |
 
 The `caps` cell says what a machine may do: `runs <n>` at once, `step <n>h` or `<n>m` before a run is stopped, `poll <n>m` or `<n>s` between passes, `retry <n>m` after a failure and `park <n>` failures before a person is asked. Each field takes only the units that field is measured in, because `poll 2h` and `step 10s` are neither of them a limit anybody means. Every field is optional and falls back to the shipped default; the header names the columns, so a cell is read by what its column is called rather than where it sits, and a cell that cannot be read refuses that machine by name rather than running it on numbers nobody chose. The caps belong to the machine — its processor, its subscription — which is why they sit here and not in a repo's dev.md, and they are re-read every pass, so a change lands on the next poll without a restart.
 
