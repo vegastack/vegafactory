@@ -2,6 +2,16 @@
 
 The project's story, newest first: what got built, why, and how it went — for the operator's future recall. Format home: the dev-chronicle skill.
 
+## 19-09-2026 — Stats speak owner and node ([#256](https://github.com/vegastack/vegafactory/issues/256))
+
+- **What:** Stats records, summaries, filenames and the offline dashboard now name an owner and a node. The node is the existing `<os-user>@<hostname>` identity, and old `operator`/`machine` records still read cleanly.
+- **Why:** A bare hostname merged two people on one machine, while two OS users sharing that host and a GitHub login could append the same control-room file and create a real rebase conflict.
+- **How it went:** The compatibility boundary had to cover more than display: old local rows are normalised before a push, so the control room receives only the new shape. The portable filename keeps owner and node separately bounded and renders `@` as `-`. The privacy pass also capped harness labels and stopped unnamed local checkouts from publishing their folder names.
+- **Changed:** `owner` and `node` records · legacy read shim · node grouping and dashboard table · per-node filenames · bounded model and outcome labels · no repository folder fallback.
+- **Decisions:** none new.
+
+— approved by (kmanojkumar) · built by claude · branch feat/256-stats-speak-owner-and-node
+
 ## 19-09-2026 — A node knows its own name ([#253](https://github.com/vegastack/vegafactory/issues/253))
 
 - **What:** `nodeId()` — `<os-user>@<hostname>`, derived and never configured.
