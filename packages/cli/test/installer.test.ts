@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, describe, expect, test } from 'bun:test'
-import { existsSync } from 'node:fs'
+import { existsSync, statSync } from 'node:fs'
 import { chmod, cp, mkdtemp, mkdir, readFile, realpath, rm, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
@@ -650,4 +650,22 @@ describe('selecting a family', () => {
     expect(manifest.repository.url).toContain('vegastack/vegafactory')
     expect(manifest.homepage).toContain('vegastack/vegafactory')
   })
+})
+
+// The product's own home holds the App key and the control-room clones, so it is owner-only. A
+// project's `.vegastack/` is a directory in somebody's repository and is none of this code's
+// business to tighten.
+test('a global install makes the home owner-only; a project install leaves the repo alone', async () => {
+  const temporary = await realpath(await mkdtemp(join(tmpdir(), 'install-modes-')))
+  const factory = join(temporary, '.vegafactory')
+  const project = join(temporary, 'a-project')
+  await mkdir(project, { recursive: true })
+
+  const global = run(temporary, ['skills', 'add', 'dev-architect', '--agent', 'claude', '--global', '--non-interactive'])
+  expect(global.exitCode, global.stderr.toString()).toBe(0)
+  expect(statSync(factory).mode & 0o777).toBe(0o700)
+
+  const local = run(temporary, ['skills', 'add', 'dev-architect', '--agent', 'claude', '--dir', project, '--non-interactive'])
+  expect(local.exitCode, local.stderr.toString()).toBe(0)
+  expect(statSync(join(project, '.vegastack')).mode & 0o777).not.toBe(0o700)
 })

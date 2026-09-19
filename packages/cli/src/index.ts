@@ -323,11 +323,12 @@ async function withInstallLock<T>(state: string, callback: () => Promise<T>): Pr
   const directory = state
   const lockPath = join(directory, '.skills-install.lock')
   await assertNoSymlink(directory)
-  // Owner-only, because in global mode this directory is the product's home and holds the App key
-  // and the control-room clones beside this lock; a umask of 022 would leave them readable by
-  // anybody on the machine. A project's own `.vegastack/` is version-controlled and takes the same
-  // mode harmlessly.
-  await mkdir(directory, { recursive: true, mode: 0o700 })
+  // Owner-only only when this directory is the product's home, which in global mode it is: the App
+  // key and the control-room clones sit beside this lock, and a umask of 022 would leave them
+  // readable by anybody on the machine. A project's own `.vegastack/` is a directory in somebody's
+  // repository and takes that repository's modes.
+  const mine = directory === factoryHome()
+  await mkdir(directory, { recursive: true, ...(mine ? { mode: 0o700 } : {}) })
   await assertNoSymlink(directory, false)
   let handle
   try {
