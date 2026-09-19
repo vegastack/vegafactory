@@ -64,7 +64,7 @@ Agents read issues from `.vegastack/.tmp/issues/<owner>__<repo>/<n>/` — `issue
 
 ## Control-room sync
 
-An organisation keeps its shared defaults in a control-room repository. Each machine keeps one copy per org at `~/.vegastack/control-room/<org>/`, and skills read that copy instead of the network. A repo's profile layers on it: `org.md`, then `groups/<g>/group.md`, then the repo's own `.vegastack/dev.md`, nearest wins — except a line `org.md` marks `# locked`.
+An organisation keeps its shared defaults in a control-room repository. Each machine keeps one copy per org at `~/.vegafactory/control-room/<org>/`, and skills read that copy instead of the network. A repo's profile layers on it: `org.md`, then `groups/<g>/group.md`, then the repo's own `.vegastack/dev.md`, nearest wins — except a line `org.md` marks `# locked`.
 
 ```sh
 vegafactory sync              # refresh when the copy was last fetched more than 5 minutes ago
@@ -78,13 +78,13 @@ vegafactory sync profile --json   # the resolved profile: values, sources, locke
 - `sync` is one shallow `git fetch` through your existing `gh` login. It never commits and never pushes.
 - The copy mirrors the room's branch. A copy you have edited by hand refuses the refresh rather than being merged or discarded.
 - `sync profile` exits **0** when the profile resolved cleanly and **1** when it carries blocks; the blocks are in the output either way.
-- Exit codes: **0** fetched or already fresh · **2** a refusal (the fetch failed, a hand-edited copy, a wrong origin, a symlinked path, an unreadable `~/.vegastack/factory.json`). A refusal leaves the old copy standing.
+- Exit codes: **0** fetched or already fresh · **2** a refusal (the fetch failed, a hand-edited copy, a wrong origin, a symlinked path, an unreadable `~/.vegafactory/factory.json`). A refusal leaves the old copy standing.
 
 ## Usage numbers
 
 Both harnesses write a session log in your home directory. `stats collect` reads the new lines of
 each log — from a saved byte offset, so a killed session is counted once, at the next run — and
-keeps one record per assistant turn under `~/.vegastack/.tmp/stats/` — one collector at a time, so
+keeps one record per assistant turn under `~/.vegafactory/stats/` — one collector at a time, so
 two hooks never count the same turn twice: time, your `gh` login, the
 machine, the repository, the issue, the harness, the exact model id, the skill the turn used, the
 tokens, the duration, how the turn ended, and the workflow stage the issue was in **at that moment**

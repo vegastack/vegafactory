@@ -24,6 +24,7 @@ import { issueFromBranch, issueFromWorktree } from './hook.ts'
 import { cacheDir, withLock } from './issue-cache.ts'
 import { stageHistory, stageOn, type StageChange } from './stages.ts'
 import { GIT_CREDENTIAL_ARGS } from './sync.ts'
+import { makeFactoryHome, statsDirectory } from './home.ts'
 
 export type Harness = 'claude' | 'codex'
 
@@ -58,7 +59,7 @@ const MAX_RECORD_BYTES = 64 * 1024 * 1024
 const OPERATOR_TTL_MS = 12 * 60 * 60_000
 export const PUSH_EVERY_MS = 60 * 60_000
 
-export const statsDir = (home: string) => join(home, '.vegastack', '.tmp', 'stats')
+export const statsDir = (home: string) => statsDirectory({ home })
 const offsetsPath = (home: string) => join(statsDir(home), 'offsets.json')
 const eventsPath = (home: string) => join(statsDir(home), 'events.jsonl')
 const journalPath = (home: string) => join(statsDir(home), 'pending.json')
@@ -534,6 +535,7 @@ function commit(home: string, events: StatsEvent[], offsets: Offsets) {
 
 export function collectStats(options: CollectOptions = {}): CollectResult {
   const home = options.home ?? homedir()
+  makeFactoryHome({ home })
   mkdirSync(statsDir(home), { recursive: true })
   // One collector at a time on this machine: two hooks reading the same logs would append the same
   // turns twice and then overwrite each other's offsets.
@@ -965,6 +967,7 @@ export interface PushOptions {
 
 export function pushStats(options: PushOptions = {}): PushResult {
   const home = options.home ?? homedir()
+  makeFactoryHome({ home })
   mkdirSync(statsDir(home), { recursive: true })
   // One push at a time: two of them would file the same turns twice.
   return withLock(join(statsDir(home), 'push'), () => pushLocked(home, options))

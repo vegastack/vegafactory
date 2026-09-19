@@ -149,7 +149,7 @@
   },
   "controlRoom": {
     "available": true,
-    "path": "/Users/kmanojkumar/.vegastack/control-room/vegastack",
+    "path": "/Users/kmanojkumar/.vegafactory/control-room/vegastack",
     "lastSyncedAt": "2026-09-03T11:00:00Z",
     "recordedSha": "a1b2c3d",
     "cloneSha": "e4f5a6b",

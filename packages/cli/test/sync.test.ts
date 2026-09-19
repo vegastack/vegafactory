@@ -4,6 +4,9 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { loadProfile, readFactoryConfig, serializeFactoryConfig, updateSettings } from '../src/control-room.ts'
 import { planSync, resolveTarget, syncControlRoom } from '../src/sync.ts'
+import { refuseAmbientHome } from './no-ambient-home.ts'
+
+refuseAmbientHome()
 
 const exists = (path: string) => lstat(path).then(() => true).catch(() => false)
 
@@ -30,11 +33,11 @@ beforeAll(async () => {
 afterAll(async () => { await rm(root, { recursive: true, force: true }) })
 
 async function fixture(name: string) {
-  const home = join(root, name), settings = join(home, '.vegastack')
+  const home = join(root, name), settings = join(home, '.vegafactory')
   await mkdir(settings, { recursive: true })
   const config = readFactoryConfig(JSON.stringify({
     schemaVersion: 1, extension: 'kept',
-    controlRooms: { acme: { repo: 'acme/room', remote: origin, path: join(home, '.vegastack/control-room/acme'), branch: 'main', sha: null, lastSyncedAt: null } },
+    controlRooms: { acme: { repo: 'acme/room', remote: origin, path: join(home, '.vegafactory/control-room/acme'), branch: 'main', sha: null, lastSyncedAt: null } },
   }))
   await writeFile(join(settings, 'factory.json'), JSON.stringify(serializeFactoryConfig(config)))
   const target = resolveTarget({ devMdText: DEV_MD, config, home })!
@@ -43,7 +46,7 @@ async function fixture(name: string) {
 
 test('the copy lands where every skill reads it, and a repo with no lines gets the whole profile', async () => {
   const f = await fixture('first')
-  expect(f.target.clonePath).toBe(join(f.home, '.vegastack/control-room/acme'))
+  expect(f.target.clonePath).toBe(join(f.home, '.vegafactory/control-room/acme'))
   const first = await syncControlRoom({ ...f, now: NOW })
   expect(first.ok).toBe(true)
   expect(first.action).toBe('clone')
