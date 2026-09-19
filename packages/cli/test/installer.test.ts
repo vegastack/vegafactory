@@ -667,5 +667,10 @@ test('a global install makes the home owner-only; a project install leaves the r
 
   const local = run(temporary, ['skills', 'add', 'dev-architect', '--agent', 'claude', '--dir', project, '--non-interactive'])
   expect(local.exitCode, local.stderr.toString()).toBe(0)
-  expect(statSync(join(project, '.vegastack')).mode & 0o777).not.toBe(0o700)
+  // Compared against a directory made the ordinary way rather than against a literal, because what
+  // an ordinary `mkdir` produces depends on the umask — under 077 it is 0700 anyway, and the point
+  // is that this code chose nothing, not that the answer came out permissive.
+  const ordinary = join(temporary, 'made-the-ordinary-way')
+  await mkdir(ordinary)
+  expect(statSync(join(project, '.vegastack')).mode & 0o777).toBe(statSync(ordinary).mode & 0o777)
 })
