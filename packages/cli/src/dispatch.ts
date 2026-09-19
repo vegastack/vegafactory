@@ -159,6 +159,28 @@ function layoutOf(row: string[]): Layout | null {
 }
 
 const cells = (line: string) => line.replace(/^\|/, '').replace(/\|\s*$/, '').split('|').map((cell) => cell.trim())
+
+// The header this roster actually has, so advice about adding a row can match the table rather
+// than the shape this code would have chosen.
+function headerOf(text: string): string[] | null {
+  for (const raw of String(text ?? '').split('\n')) {
+    const line = raw.trim()
+    if (!line.startsWith('|')) continue
+    const row = cells(line)
+    if (!row.some(separator) && layoutOf(row)) return row
+  }
+  return null
+}
+
+// What to put under each column of that header. A cap this code invented would be a number the
+// operator never chose, so the caps cell is left empty, which is how a row says the defaults are fine.
+function suggestedCell(column: string, machine: string, repo: string): string {
+  const name = column.toLowerCase()
+  if (COLUMN_NAMES.machine.includes(name as (typeof COLUMN_NAMES.machine)[number])) return machine
+  if (COLUMN_NAMES.repos.includes(name as (typeof COLUMN_NAMES.repos)[number])) return repo
+  if (COLUMN_NAMES.operator.includes(name as (typeof COLUMN_NAMES.operator)[number])) return '<operator>'
+  return ''
+}
 const separator = (cell: string) => /^:?-{2,}:?$/.test(cell)
 
 // One row per machine. A table names its columns in a header row, and a bullet is
@@ -288,7 +310,12 @@ export function listedHere(root: string, options: { repo: string; host?: string;
   }
   const entry = parseDispatchers(text).find((row) => row.machine === machine) ?? null
   if (!entry) {
-    return { ok: false, entry: null, file, reason: `${machine} is not listed in ${file} — add the row \`| ${machine} | <operator> | ${options.repo} |\` in a control-room PR before this machine dispatches anything` }
+    // The row is spelled to fit the table that is actually there: a row shorter than the header
+    // is refused for the cell it never reached, so advice that ignored the header would send the
+    // operator straight from one refusal into the next.
+    const header = headerOf(text)
+    const cells = header ? header.map((column) => suggestedCell(column, machine, options.repo)) : [machine, '<operator>', options.repo]
+    return { ok: false, entry: null, file, reason: `${machine} is not listed in ${file} — add the row \`| ${cells.join(' | ')} |\` in a control-room PR before this machine dispatches anything` }
   }
   // A cap nobody can read is not a cap, and the machine it belongs to is named rather than left
   // to look like a missing row: the operator is sent to the thing that is wrong, not to the roster.

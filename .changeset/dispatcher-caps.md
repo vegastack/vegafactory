@@ -22,3 +22,4 @@ A dispatcher's limits now come from its roster row instead of being fixed in the
 - Legacy stand-down notices written with a `handback` marker no longer bury the operator reply they did not answer.
 - A stand-down re-reads the claim at the moment it moves the state label, not minutes earlier before the work was saved, pushed and the claim released — long enough for another machine to have taken the issue.
 - A stand-down notice written by the released version is still read as bookkeeping, matched as a whole comment so a hand-back that quotes one while asking something new stays a question.
+- The row an unlisted machine is told to add is spelled to fit the header the roster actually has, so pasting it in is not refused for a cell it never reached.

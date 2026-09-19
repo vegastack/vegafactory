@@ -1779,3 +1779,22 @@ test('a hand-back that repeats a stand-down is still a question', () => {
   gh.addComment(2, '<!-- vsk:v1 type=handback -->\n**box** stood down from #2: this machine is no longer listed', 'mk')
   expect(verdict(2).action).toBe('follow-up')
 })
+
+// Advice that ignores the header sends the operator from one refusal straight into the next: a
+// three-cell row under the shipped six-column header never reaches its declared caps column.
+test('the row it tells you to add is one the same parser accepts', () => {
+  const header = '| dispatcher | group | repos | owner | caps | notes |\n|---|---|---|---|---|---|\n'
+  project(`${header}| someone-else | dev | o/r | mk | | |\n`)
+  const listing = listedHere(root, { repo: 'o/r', host: HOST, home })
+  expect(listing.ok).toBe(false)
+  const row = /`(\| .*? \|)`/.exec(listing.reason)![1]!
+  expect(row).toContain(HOST)
+  expect(row).toContain('o/r')
+
+  // Paste it under that header and the machine is listed, with the shipped defaults.
+  const parsed = parseDispatchers(`${header}${row}\n`)[0]!
+  expect(parsed.machine).toBe(HOST)
+  expect(parsed.problem).toBeNull()
+  expect(parsed.caps).toEqual(DEFAULT_CAPS)
+  expect(parsed.repos).toEqual(['o/r'])
+})
