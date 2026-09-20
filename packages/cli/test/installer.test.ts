@@ -614,20 +614,28 @@ describe('selecting a family', () => {
     expect(bare.stderr.toString()).toContain('vegafactory skills add')
   })
 
-  // The plan's own list of readers. Each mints nothing, but each reads a board where an App
-  // writes, so a half-set pair must stop them by name rather than let them read that board wrong.
-  test('every command refuses by name when the App pair is half set', () => {
-    for (const half of [{ VEGAFACTORY_APP_ID: '12345' }, { VEGAFACTORY_APP_ACTOR: 'acmefactory[bot]' }]) {
-      for (const verb of [['hook', 'session-start'], ['review', '7'], ['issue', 'sync', '7'], ['ship', 'check', '7'], ['worker', 'status']]) {
-        const result = Bun.spawnSync(['node', cli, ...verb], {
-          cwd: packageRoot,
-          env: { ...process.env, HOME: temporary, VEGAFACTORY_HOME: join(temporary, '.vegafactory'), ...half },
-        })
+  // The plan's five readers, by the commands that actually run them: the ship guard (`hook`), the
+  // review, the holder lookup in `issue.ts`, the ship gate, and the status comment. None mints a
+  // token, and none of them should read a board through an identity that does not agree with
+  // itself — so the check sits at the entry and they never get that far.
+  test('every reader refuses by name when the App pair is half set', () => {
+    const verbs = [['hook', 'session-start'], ['review', '7'], ['issue', 'holder', '7'], ['ship', 'check', '7'], ['issue', 'status', '7']]
+    // The counterpart is cleared explicitly: spreading a developer's own environment would leave
+    // a complete pair behind and quietly test nothing.
+    const halves = [
+      { VEGAFACTORY_APP_ID: '12345', VEGAFACTORY_APP_ACTOR: undefined },
+      { VEGAFACTORY_APP_ID: undefined, VEGAFACTORY_APP_ACTOR: 'acmefactory[bot]' },
+    ]
+    for (const half of halves) {
+      for (const verb of verbs) {
+        const env: Record<string, string> = { ...process.env as Record<string, string>, HOME: temporary, VEGAFACTORY_HOME: join(temporary, '.vegafactory') }
+        for (const [name, value] of Object.entries(half)) { if (value === undefined) delete env[name]; else env[name] = value }
+        const result = Bun.spawnSync(['node', cli, ...verb], { cwd: packageRoot, env })
         expect(result.exitCode).toBe(2)
         expect(result.stderr.toString()).toContain('VEGAFACTORY_APP_ID and VEGAFACTORY_APP_ACTOR must be set together')
       }
     }
-    // Both set, and the pair is accepted — the refusal is about the pair, not about the verbs.
+    // A coherent pair is accepted, so the refusal is about the pair and not about the verbs.
     const both = Bun.spawnSync(['node', cli, '--help'], {
       cwd: packageRoot,
       env: { ...process.env, HOME: temporary, VEGAFACTORY_HOME: join(temporary, '.vegafactory'), VEGAFACTORY_APP_ID: '12345', VEGAFACTORY_APP_ACTOR: 'acmefactory[bot]' },

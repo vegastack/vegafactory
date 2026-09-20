@@ -38,16 +38,18 @@ The App is public, so any account may install it. That is the point: one App, in
 
 The slug is what GitHub derives from the name, and both the actor string and the install URL follow it — confirm it on the App's settings page rather than assuming it, because renaming the App changes the slug and every reference to it.
 
-**Those values are VegaStack's own.** A company running its own App reads its two from GitHub
-rather than copying them:
+**Those values are VegaStack's own.** A company running its own App reads its two off that App's
+own settings page — `https://github.com/organizations/<org>/settings/apps/<your-app-slug>`:
 
-```sh
-gh api /app --jq '"VEGAFACTORY_APP_ID=\(.id)\nVEGAFACTORY_APP_ACTOR=\(.slug)[bot]"'
-```
+- **App ID** is printed on that page. It is `VEGAFACTORY_APP_ID`.
+- **The slug** is the last part of that page's own URL. `VEGAFACTORY_APP_ACTOR` is that slug with
+  `[bot]` after it, and it is worth confirming against a comment the App has actually posted.
 
-`GET /app` answers as the App itself, so run it with that App's own JWT. Both variables are set
-together or neither is: setting one makes every command refuse by name, because a factory that
-mints as one identity and trusts another would distrust everything it just wrote.
+No API call is needed, and none is offered here: `GET /app` answers only to a JWT signed with the
+App's private key, which is a longer road to two values the settings page already shows.
+
+Both variables are set together or neither is. Setting one makes every command refuse by name,
+because a factory that mints as one identity and trusts another distrusts everything it writes.
 
 ## Permissions
 
