@@ -1928,15 +1928,17 @@ export async function runWorker(argv: string[], deps: CliDeps = {}): Promise<num
         print({ ok: false, checks }, `${renderChecks(checks)}\n\nnot ready — fix the FAIL lines above, then run this again`)
         return 2
       }
-      const commands = serviceCommands(platform, path, 'enable')
-      if (args.dryRun) {
-        print({ ok: true, checks, unit: path, dryRun: true }, `${renderChecks(checks)}\n\ndry run: would write ${path}, then ${commands.map((command) => command.join(' ')).join(' && ')}`)
-        return 0
-      }
+      // Before the dry run, not after it: a dry run exists to say what the real command would do,
+      // and the real command refuses this.
       const unwritable = unwritableForUnit(env)
       if (unwritable) {
         print({ ok: false, reason: unwritable }, `refused: ${unwritable}`)
         return 2
+      }
+      const commands = serviceCommands(platform, path, 'enable')
+      if (args.dryRun) {
+        print({ ok: true, checks, unit: path, dryRun: true }, `${renderChecks(checks)}\n\ndry run: would write ${path}, then ${commands.map((command) => command.join(' ')).join(' && ')}`)
+        return 0
       }
       mkdirSync(workerDir(root), { recursive: true })
       replaceFile(path, unitText(platform, { cli: deps.cli ?? cliPath(), root, repo, logDir: workerDir(root), env }))

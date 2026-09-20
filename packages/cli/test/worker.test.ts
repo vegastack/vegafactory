@@ -1372,6 +1372,34 @@ describe('the command', () => {
     // And the unit never carries one even if something else reached that far.
     const unit = unitText('linux', { cli: ['vegafactory'], root, repo: 'o/r', logDir: workerDir(root), env: { VEGAFACTORY_APP_ID: 'a\nb' } })
     expect(unit).not.toContain('VEGAFACTORY_APP_ID')
+
+    // Through the real command, because that is where the refusal has to happen — and through the
+    // dry run too, which exists to say what the real command would do.
+    project(`| node | owner | worker | repos |\n|---|---|---|---|\n| ${NODE} | mk | yes | o/r |\n`)
+    mkdirSync(join(root, '.claude'), { recursive: true })
+    mkdirSync(join(root, '.codex'), { recursive: true })
+    writeFileSync(join(root, '.claude', 'settings.json'), 'vegafactory hook stop --harness claude')
+    writeFileSync(join(root, '.codex', 'hooks.json'), 'vegafactory hook stop --harness codex')
+    mkdirSync(join(home, '.config', 'systemd', 'user'), { recursive: true })
+    const { privateKey } = generateKeyPairSync('rsa', { modulusLength: 2048, privateKeyEncoding: { type: 'pkcs8', format: 'pem' }, publicKeyEncoding: { type: 'spki', format: 'pem' } })
+    const twoLines = join(root, 'two\nlines.pem')
+    writeFileSync(twoLines, privateKey, { mode: 0o600 })
+    chmodSync(twoLines, 0o600)
+    const probe: Probe = (command) => {
+      if (command === 'git') return { code: 0, stdout: 'git@github.com:o/r.git', stderr: '' }
+      if (command === 'claude' || command === 'codex') return { code: 0, stdout: 'ok', stderr: '' }
+      return { code: 0, stdout: '', stderr: '' }
+    }
+    const fetch: Fetch = async (url) => ({
+      ok: true, status: 200,
+      json: async () => url.endsWith('/installation') ? { id: 42 } : { token: 'ghs_test', expires_at: '2026-09-18T11:00:00Z' },
+    })
+    for (const argv of [['enable'], ['enable', '--dry-run']]) {
+      const refused = await run(argv, { platform: 'linux', run: probe, fetch, env: { VEGAFACTORY_APP_PRIVATE_KEY_FILE: twoLines } })
+      expect(refused.code).toBe(2)
+      expect(refused.text).toContain('control character')
+      expect(existsSync(unitPath('linux', home))).toBe(false)
+    }
   })
 
   // A machine enabling for the first time has nothing to unload, and launchctl's wording for that
