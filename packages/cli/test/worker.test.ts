@@ -1147,11 +1147,25 @@ describe('readiness and the service', () => {
     const restored: string[][] = []
     const step = defaultRunStep('', {}, {
       exec: (async () => ({ code: 0, stdout: 'ok', stderr: '', timedOut: false })) as never,
-      putDepsBack: ((repoRoot: string, cwd: string) => { restored.push([repoRoot, cwd]); return true }) as never,
+      putDepsBack: ((repoRoot: string, cwd: string) => { restored.push([repoRoot, cwd]); return { state: 'nothing' } }) as never,
     })
-    await step({ number: 7, action: 'implement', repo: 'o/r', split: false, by: null }, { root, onStart: () => {} })
+    const result = await step({ number: 7, action: 'implement', repo: 'o/r', split: false, by: null }, { root, onStart: () => {} })
     expect(restored).toHaveLength(1)
     expect(restored[0]![0]).toBe(root)
+    expect(result.outcome).toBe('done')
+  })
+
+  // Starting anyway means the agent spends its whole step discovering the checkout cannot build.
+  test('a run that cannot get its dependencies back stops instead of starting', async () => {
+    let started = false
+    const step = defaultRunStep('', {}, {
+      exec: (async () => { started = true; return { code: 0, stdout: 'ok', stderr: '', timedOut: false } }) as never,
+      putDepsBack: (() => ({ state: 'failed', reason: 'no setup command' })) as never,
+    })
+    const result = await step({ number: 7, action: 'implement', repo: 'o/r', split: false, by: null }, { root, onStart: () => {} })
+    expect(started).toBe(false)
+    expect(result.outcome).toBe('blocked')
+    expect(result.note).toContain('no setup command')
   })
 
   test('the unit runs this CLI\'s own worker run and carries no token', () => {

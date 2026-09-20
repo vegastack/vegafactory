@@ -88,14 +88,22 @@ describe('the worker asks for the narrower pass, and the script hears it', () =>
   test('restoring a checkout\'s dependencies asks for exactly that, and says whether it happened', () => {
     const seen: string[][] = []
     const yes = restoreWorktreeDeps('/repo', '/repo/.vegastack/.worktrees/7-x', {
-      spawn: (args) => { seen.push(args); return { status: 0, stdout: JSON.stringify({ restored: true }) } },
+      spawn: (args) => { seen.push(args); return { status: 0, stdout: JSON.stringify({ restored: true, needed: true }) } },
     })
     expect(seen[0]).toEqual(['restore-deps', '--path', '/repo/.vegastack/.worktrees/7-x', '--write', '--json'])
-    expect(yes).toBe(true)
-    // Nothing was taken from this one, so nothing is put back.
-    expect(restoreWorktreeDeps('/repo', '/x', { spawn: () => ({ status: 0, stdout: JSON.stringify({ restored: false }) }) })).toBe(false)
-    // Housekeeping never fails a run: the build that follows says it more clearly.
-    expect(restoreWorktreeDeps('/repo', '/x', { spawn: () => { throw new Error('gone') } })).toBe(false)
+    expect(yes).toEqual({ state: 'restored' })
+
+    // Nothing was taken from this one, so nothing is put back — the ordinary case.
+    expect(restoreWorktreeDeps('/repo', '/x', { spawn: () => ({ status: 0, stdout: JSON.stringify({ needed: false }) }) }))
+      .toEqual({ state: 'nothing' })
+
+    // Something *was* taken and could not be put back. That is not the same as nothing to do:
+    // the agent would start in a checkout that cannot build and spend its whole step finding out.
+    expect(restoreWorktreeDeps('/repo', '/x', {
+      spawn: () => ({ status: 0, stdout: JSON.stringify({ needed: true, restored: false, warns: ['no setup command'] }) }),
+    })).toEqual({ state: 'failed', reason: 'no setup command' })
+    expect(restoreWorktreeDeps('/repo', '/x', { spawn: () => { throw new Error('gone') } }))
+      .toMatchObject({ state: 'failed' })
   })
 
   // The command the worker tells a person to run has to be one the CLI accepts, and it is only
@@ -104,7 +112,9 @@ describe('the worker asks for the narrower pass, and the script hears it', () =>
     // `prune` acts by default; `--dry-run` is what holds it back. `--write` is not an option.
     expect(() => parseWorktreeArgs(['prune'])).not.toThrow()
     expect(parseWorktreeArgs(['prune']).write).toBe(true)
-    expect(() => parseWorktreeArgs(['prune', '--write'])).toThrow(/Unknown option/)
+    // `--write` says what is already true, and is accepted because every reference names it.
+    expect(parseWorktreeArgs(['prune', '--write']).write).toBe(true)
+    expect(parseWorktreeArgs(['prune', '--write', '--dry-run']).write).toBe(false)
 
     // A pass whose only `action` is its own fetch has nothing to reclaim.
     const fetchOnly = tidyWorktrees('/repo', {
@@ -124,6 +134,12 @@ describe('the worker asks for the narrower pass, and the script hears it', () =>
       spawn: () => ({ status: 0, stdout: JSON.stringify({ actions: ['106-old: drop node_modules'], candidates: [], droppable: ['106-old'] }) }),
     })
     expect(depsOnly.reclaimable).toBe(1)
+
+    // One worktree past both windows is in both lists, and is still one worktree.
+    const both = tidyWorktrees('/repo', {
+      spawn: () => ({ status: 0, stdout: JSON.stringify({ candidates: [{ name: 'a', removable: true }], droppable: ['a'] }) }),
+    })
+    expect(both.reclaimable).toBe(1)
   })
 
   test('unreadable output is a warning, not a crash in the middle of a pass', () => {

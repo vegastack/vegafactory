@@ -310,6 +310,88 @@ describe('pruneWorktrees', () => {
   // `--paginate` prints one JSON document per page, back to back. A single parse fails the moment
   // a repository has more than a hundred open issues, and the closed-worktree check then silently
   // sees no issue states at all.
+  // A repository may legitimately track files under `node_modules` — a patched package, a vendored
+  // stub. `git status` is clean either way, so without a check the sweep deletes committed files.
+  test('dependencies git tracks are never deleted', () => {
+    const root = repoWithRemote()
+    const wt = createWorktree({ repoRoot: root, issue: 106, slug: 'old', type: 'feat', base: 'main', devMd, home: root, write: true })
+    mkdirSync(join(wt.path, 'node_modules', 'patched'), { recursive: true })
+    writeFileSync(join(wt.path, 'node_modules', 'patched', 'index.js'), 'module.exports = 1\n')
+    execFileSync('git', ['-C', wt.path, 'add', '-f', 'node_modules/patched/index.js'], { encoding: 'utf8' })
+    execFileSync('git', ['-C', wt.path, 'commit', '-m', 'vendor a patch'], { encoding: 'utf8' })
+    execFileSync('git', ['-C', wt.path, 'push', '-u', 'origin', 'HEAD'], { encoding: 'utf8' })
+
+    const r = pruneWorktrees({
+      repoRoot: root, base: 'main', olderThan: '999d', devMd: `${devMd}\nworktree-deps-retention: 1d\n`,
+      ledgerTimes: { '106-old': OLD_LEDGER }, now: FUTURE_NOW, write: true, automatic: true,
+    })
+    expect(r.freed).not.toContain('106-old')
+    expect(existsSync(join(wt.path, 'node_modules', 'patched', 'index.js'))).toBe(true)
+    expect(r.warns.join('\n')).toContain('git tracks files under node_modules')
+  })
+
+  // Eleven days of being skipped and never named is not reporting.
+  test('an unpushed worktree is named as soon as its dependencies could have gone', () => {
+    const root = repoWithRemote()
+    const wt = createWorktree({ repoRoot: root, issue: 106, slug: 'old', type: 'feat', base: 'main', devMd, home: root, write: true })
+    mkdirSync(join(wt.path, 'node_modules'), { recursive: true })
+    const r = pruneWorktrees({
+      repoRoot: root, base: 'main', olderThan: '999d', devMd: `${devMd}\nworktree-deps-retention: 1d\n`,
+      ledgerTimes: { '106-old': OLD_LEDGER }, now: FUTURE_NOW, write: true, automatic: true,
+    })
+    expect(r.warns.join('\n')).toContain('106-old')
+    expect(r.warns.join('\n')).toContain('kept its dependencies')
+  })
+
+  // Two passes touching different worktrees must not lose each other's record.
+  test('recording one worktree never erases another', () => {
+    const root = repoWithRemote()
+    for (const [issue, slug] of [[106, 'one'], [107, 'two']] as const) {
+      const wt = createWorktree({ repoRoot: root, issue, slug, type: 'feat', base: 'main', devMd, home: root, write: true })
+      writeFileSync(join(wt.path, 'work.txt'), 'real work\n')
+      execFileSync('git', ['-C', wt.path, 'add', '.'], { encoding: 'utf8' })
+      execFileSync('git', ['-C', wt.path, 'commit', '-m', 'work'], { encoding: 'utf8' })
+      execFileSync('git', ['-C', wt.path, 'push', '-u', 'origin', 'HEAD'], { encoding: 'utf8' })
+      mkdirSync(join(wt.path, 'node_modules'), { recursive: true })
+    }
+    pruneWorktrees({
+      repoRoot: root, base: 'main', olderThan: '999d', devMd: `${devMd}\nworktree-deps-retention: 1d\n`,
+      ledgerTimes: { '106-one': OLD_LEDGER, '107-two': OLD_LEDGER }, now: FUTURE_NOW, write: true, automatic: true,
+    })
+    expect(Object.keys(readDroppedDeps(root)).sort()).toEqual(['106-one', '107-two'])
+  })
+
+  // A closed issue is the clearest sign a worktree is finished, and it does not wait out a window
+  // meant for work that might still be wanted — but every refusal still applies to it.
+  test('a closed issue makes its worktree a candidate straight away, and still refuses dirty work', () => {
+    const root = repoWithRemote()
+    const wt = createWorktree({ repoRoot: root, issue: 106, slug: 'old', type: 'feat', base: 'main', devMd, home: root, write: true })
+    writeFileSync(join(wt.path, 'work.txt'), 'real work\n')
+    execFileSync('git', ['-C', wt.path, 'add', '.'], { encoding: 'utf8' })
+    execFileSync('git', ['-C', wt.path, 'commit', '-m', 'work'], { encoding: 'utf8' })
+    execFileSync('git', ['-C', wt.path, 'push', '-u', 'origin', 'HEAD'], { encoding: 'utf8' })
+    const soon = Date.now()
+
+    expect(pruneWorktrees({
+      repoRoot: root, base: 'main', olderThan: '14d', devMd, ledgerTimes: {}, issueStates: {}, now: soon, write: false, automatic: true,
+    }).candidates.find((c: { name: string }) => c.name === '106-old')).toBeUndefined()
+
+    const closed = pruneWorktrees({
+      repoRoot: root, base: 'main', olderThan: '14d', devMd, ledgerTimes: {},
+      issueStates: { '106-old': 'closed' }, now: soon, write: false, automatic: true,
+    })
+    expect(closed.candidates.find((c: { name: string; state: string }) => c.name === '106-old')?.state).toBe('abandoned')
+
+    // Uncommitted work outranks a closed issue every time.
+    writeFileSync(join(wt.path, 'notes.md'), 'half an idea\n')
+    const dirty = pruneWorktrees({
+      repoRoot: root, base: 'main', olderThan: '14d', devMd, ledgerTimes: {},
+      issueStates: { '106-old': 'closed' }, now: soon, write: true, automatic: true,
+    })
+    expect(existsSync(join(wt.path, 'notes.md'))).toBe(true)
+    expect(dirty.warns.join('\n')).toContain('106-old')
+  })
+
   test('a paginated gh answer reads as one list', () => {
     const bin = mkdtempSync(join(tmpdir(), 'vf-gh-'))
     const fakeGh = (stdout: string) => {
@@ -328,6 +410,16 @@ describe('pruneWorktrees', () => {
     expect(ghJson(['api', 'x'], { gh: fakeGh('{"id":7}') })).toEqual({ id: 7 })
     // Genuinely broken output is still broken, not half-read.
     expect(() => ghJson(['api', 'x'], { gh: fakeGh('[{"number":1},') })).toThrow(/unparseable/)
+    // Brackets inside strings are text, not structure.
+    expect(ghJson(['api', 'x'], { gh: fakeGh(JSON.stringify([{ body: '}}}] not json [[[{{{' }])) }))
+      .toEqual([{ body: '}}}] not json [[[{{{' }])
+
+    // This reads issue and comment bodies, which anybody with an account can write. Trying a parse
+    // at every bracket is quadratic, so a comment full of braces would cost seconds every poll.
+    const hostile = JSON.stringify([{ body: '}'.repeat(40_000) }])
+    const started = Date.now()
+    expect(ghJson(['api', 'x'], { gh: fakeGh(`${hostile}\n${hostile}`) })).toHaveLength(2)
+    expect(Date.now() - started).toBeLessThan(2_000)
   })
 
   test('a worktree a run is holding is left entirely alone', () => {

@@ -17,23 +17,42 @@ export class GhUnavailable extends Error {
 // is a string (a request body that must stay off argv); otherwise it is
 // closed. VSK_GH is a TEST SEAM only (points unit tests at a stub binary);
 // guards are enforcement infrastructure, so never set it in real runs.
-// Split a stream of back-to-back JSON documents. Returns null unless the whole text is consumed,
-// so a genuinely broken answer is still reported as one rather than half-read.
+// Split a stream of back-to-back JSON documents in one pass. Returns null unless the whole text
+// is consumed, so a genuinely broken answer is still reported as one rather than half-read.
+//
+// Single-pass on purpose. Trying `JSON.parse` on every prefix that ends in a bracket is quadratic,
+// and this reads issue and comment bodies — text anybody with an account can write. A few thousand
+// braces in one comment would turn each poll into seconds of parsing, every pass, for ever.
 function splitJsonDocuments(text) {
+  const source = String(text ?? '');
   const documents = [];
-  let rest = String(text ?? '').trim();
-  while (rest) {
-    let cut = rest.length;
-    let parsed = null;
-    // Each document ends where the next begins; the only reliable finder is to try.
-    for (; cut > 0; cut -= 1) {
-      if (!']}'.includes(rest[cut - 1])) continue;
-      try { parsed = JSON.parse(rest.slice(0, cut)); break; } catch { /* not a boundary */ }
+  let depth = 0;
+  let inString = false;
+  let escaped = false;
+  let start = -1;
+  for (let index = 0; index < source.length; index += 1) {
+    const character = source[index];
+    if (inString) {
+      if (escaped) escaped = false;
+      else if (character === '\\') escaped = true;
+      else if (character === '"') inString = false;
+      continue;
     }
-    if (parsed === null) return null;
-    documents.push(parsed);
-    rest = rest.slice(cut).trim();
+    if (character === '"') { inString = true; continue; }
+    if (character === '[' || character === '{') {
+      if (depth === 0) start = index;
+      depth += 1;
+      continue;
+    }
+    if (character !== ']' && character !== '}') continue;
+    depth -= 1;
+    if (depth < 0) return null;
+    if (depth > 0) continue;
+    try { documents.push(JSON.parse(source.slice(start, index + 1))); } catch { return null; }
+    start = -1;
   }
+  // Unbalanced, or trailing text that was not a document at all.
+  if (depth !== 0 || inString || source.slice(start === -1 ? source.length : start).trim()) return null;
   return documents.length ? documents : null;
 }
 

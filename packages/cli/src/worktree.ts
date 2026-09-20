@@ -41,7 +41,7 @@ export function worktreeUsage(): string {
                                         slug and type come off the issue title unless given
   restore <issue> [--slug S]            re-add the checkout of the branch that carries the issue number
   remove <issue> [--force]              remove the directory once it is clean, pushed and merged
-  prune [--older-than 14d]              remove worktrees idle past retention; uncommitted work is
+  prune [--older-than 14d] [--write]    remove worktrees idle past retention; uncommitted work is
                                         first committed as wip on the worktree's branch and pushed
 
 Every verb acts; --dry-run shows what it would do. Branches are never deleted, and
@@ -68,6 +68,11 @@ export function parseWorktreeArgs(argv: string[]): WorktreeArgs {
     }
     if (token === '--force') args.force = true
     else if (token === '--dry-run') args.write = false
+    // Acting is the default, so on `prune` this says what is already true. It is accepted there
+    // because every reference to reclaiming a worktree — the worker's own advice included — names
+    // it, and a command a person is told to run has to be one the parser takes. It stays unknown
+    // elsewhere: `remove --write` was never offered and nothing asks for it.
+    else if (token === '--write' && verb === 'prune') args.write = true
     else if (token === '--all-repos') args.allRepos = true
     else if (token === '--json') args.json = true
     else if (token === '--older-than') args.olderThan = requireValue(token, rest.shift())
@@ -193,8 +198,12 @@ export function tidyWorktrees(
     const result = parseScriptOutput(run.stdout) as ScriptResult & { freed?: string[]; droppable?: string[] }
     // Counted from the candidates, not from `actions`: every remote-backed prune puts its own
     // `git fetch` in there, so a pass with nothing to reclaim would still look like it had work.
-    const reclaimable = (result.candidates ?? []).filter((candidate) => candidate.removable).length
-      + (result.droppable ?? []).length
+    // The union, not the sum: one clean worktree past both windows is in `droppable` *and* a
+    // removable candidate, and counting twice reports "2 could be reclaimed" for one worktree.
+    const reclaimable = new Set([
+      ...(result.candidates ?? []).filter((candidate) => candidate.removable).map((candidate) => candidate.name),
+      ...(result.droppable ?? []),
+    ]).size
     return {
       actions: result.actions ?? [], warns: result.warns ?? [],
       blocks: result.blocks ?? [], freed: result.freed ?? [], reclaimable,
@@ -208,18 +217,25 @@ export function tidyWorktrees(
 // Puts back the dependencies a prune took from one checkout. The worker calls this before it
 // launches an agent: it starts straight in an existing worktree and so never passes through
 // `restore`, which is the only other place the record is read.
+// Three answers, not two. "Nothing was taken from this checkout" and "what was taken could not be
+// put back" look the same as a boolean and must not: the first is the ordinary case and the second
+// means the agent is about to start somewhere that cannot build.
+export type DepsRestore = { state: 'nothing' } | { state: 'restored' } | { state: 'failed'; reason: string }
+
 export function restoreWorktreeDeps(
   repoRoot: string,
   path: string,
   options: { spawn?: (args: string[], cwd?: string) => SpawnResult } = {},
-): boolean {
+): DepsRestore {
   const spawn = options.spawn ?? defaultSpawn
   try {
     const run = spawn(['restore-deps', '--path', path, '--write', '--json'], repoRoot)
-    return (parseScriptOutput(run.stdout) as ScriptResult & { restored?: boolean }).restored === true
-  } catch {
-    // Housekeeping. The build that follows says it far more clearly than this could.
-    return false
+    const result = parseScriptOutput(run.stdout) as ScriptResult & { restored?: boolean; needed?: boolean }
+    if (result.restored) return { state: 'restored' }
+    if (!result.needed) return { state: 'nothing' }
+    return { state: 'failed', reason: result.warns?.[0] ?? result.blocks?.[0] ?? 'the setup command did not finish' }
+  } catch (error) {
+    return { state: 'failed', reason: (error as Error).message }
   }
 }
 

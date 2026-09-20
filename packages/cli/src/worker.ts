@@ -39,7 +39,7 @@ import { defaultBranch } from './guard-rules.ts'
 import { stateOf, type State } from './labels.ts'
 import { lintPlan, normalizeGroupPath, parseIndependentGroups, sharedByEveryChild } from '../../../skills/dev/dev-plan/scripts/plan-lint.mjs'
 import { appKeyPath as workerAppKey } from './home.ts'
-import { restoreWorktreeDeps, tidyWorktrees } from './worktree.ts'
+import { restoreWorktreeDeps, tidyWorktrees, type DepsRestore } from './worktree.ts'
 
 // How often the board is read, how many steps run at once, and how long one step may take.
 export const POLL_MS = 2 * 60_000
@@ -1292,8 +1292,8 @@ export const tail = (text: string, max = MAX_NOTE) => text.trim().split('\n').sl
 // Puts back what a prune took, if it took anything. Delegates to the worktree script, which owns
 // both the record and dev.md's own `setup` command; a failure is a note in the log rather than a
 // refusal, because the build that follows will say so far more clearly.
-export function restoreDependencies(root: string, cwd: string, spawn?: (args: string[], cwd?: string) => { status: number; stdout: string }): boolean {
-  if (cwd === root) return false
+export function restoreDependencies(root: string, cwd: string, spawn?: (args: string[], cwd?: string) => { status: number; stdout: string }): DepsRestore {
+  if (cwd === root) return { state: 'nothing' }
   return restoreWorktreeDeps(root, cwd, { spawn })
 }
 
@@ -1357,7 +1357,13 @@ export function defaultRunStep(devMd: string, env: NodeJS.ProcessEnv, { exec = e
     // agent starts. The worker launches straight into an existing worktree — it never calls
     // `worktree restore`, which is the only other place this was checked — so without this the
     // next run begins in a checkout that cannot build and has nothing saying why.
-    putDepsBack(context.root, cwd)
+    // A checkout whose dependencies were reclaimed cannot build, and an agent started in one
+    // spends its whole step discovering that. When they cannot be put back, say so and stop —
+    // this is a step that failed, not a step that ran.
+    const deps = putDepsBack(context.root, cwd)
+    if (deps.state === 'failed') {
+      return { outcome: 'blocked', note: `dependencies could not be restored in ${cwd}: ${deps.reason}`, ms: Date.now() - started }
+    }
     const { tool, args } = agentArgs(policy, stepPrompt(step))
     // Nobody is at the keyboard, so a round of questions goes to the issue and waits there for the
     // operator — dev-setup's references/ask-route.md, where VSK_ASK_ROUTE is the first step.
@@ -2195,7 +2201,7 @@ export async function runWorker(argv: string[], deps: CliDeps = {}): Promise<num
           // `prune` acts by default and `--dry-run` is what holds it back, so the command to
           // give is the bare one. And only when there is something: a remote-backed pass always
           // reports its own fetch, so counting actions would recommend pruning every poll.
-          if (tidied.reclaimable) note(`worktrees: ${tidied.reclaimable} could be reclaimed — run \`vegafactory worktree prune\``)
+          if (tidied.reclaimable) note(`worktrees: ${tidied.reclaimable} could be reclaimed — run \`vegafactory worktree prune --write\``)
         } catch (error) {
           note(`poll failed: ${(error as Error).message}`)
         }

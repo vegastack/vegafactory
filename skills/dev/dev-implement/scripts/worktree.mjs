@@ -1166,8 +1166,10 @@ function runVerb(verb, flags) {
     const warns = [];
     const path = String(flags.path ?? '');
     if (!path) return { blocks: [at('restore-deps', 'needs --path')], warns, actions };
-    const put = restoreDroppedDependencies({ repoRoot, name: basename(path), path, devMd, write: shared.write, actions, warns });
-    return { blocks: [], warns, actions, restored: put };
+    const name = basename(path);
+    const needed = name in readDroppedDeps(repoRoot);
+    const put = restoreDroppedDependencies({ repoRoot, name, path, devMd, write: shared.write, actions, warns });
+    return { blocks: [], warns, actions, needed, restored: put };
   }
   if (verb === 'create' || verb === 'restore') {
     let named = { type: flags.type || null, slug };
