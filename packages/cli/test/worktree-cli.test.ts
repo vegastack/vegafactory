@@ -98,6 +98,27 @@ describe('the worker asks for the narrower pass, and the script hears it', () =>
     expect(restoreWorktreeDeps('/repo', '/x', { spawn: () => { throw new Error('gone') } })).toBe(false)
   })
 
+  // The command the worker tells a person to run has to be one the CLI accepts, and it is only
+  // worth saying when there is something to act on.
+  test('the reclaim advice parses, and only a real candidate triggers it', () => {
+    // `prune` acts by default; `--dry-run` is what holds it back. `--write` is not an option.
+    expect(() => parseWorktreeArgs(['prune'])).not.toThrow()
+    expect(parseWorktreeArgs(['prune']).write).toBe(true)
+    expect(() => parseWorktreeArgs(['prune', '--write'])).toThrow(/Unknown option/)
+
+    // A pass whose only `action` is its own fetch has nothing to reclaim.
+    const fetchOnly = tidyWorktrees('/repo', {
+      spawn: () => ({ status: 0, stdout: JSON.stringify({ actions: ['origin: git fetch origin main'], candidates: [] }) }),
+    })
+    expect(fetchOnly.reclaimable).toBe(0)
+
+    // Only a candidate the safe-to-remove test cleared counts.
+    const mixed = tidyWorktrees('/repo', {
+      spawn: () => ({ status: 0, stdout: JSON.stringify({ candidates: [{ name: 'a', removable: true }, { name: 'b', removable: false }] }) }),
+    })
+    expect(mixed.reclaimable).toBe(1)
+  })
+
   test('unreadable output is a warning, not a crash in the middle of a pass', () => {
     const result = tidyWorktrees('/repo', { spawn: () => { throw new Error('script missing') } })
     expect(result.warns.join('\n')).toContain('script missing')

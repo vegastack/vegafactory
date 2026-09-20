@@ -177,7 +177,7 @@ function parseScriptOutput(stdout: string): ScriptResult {
 export function tidyWorktrees(
   repoRoot: string,
   options: { write?: boolean; inUse?: string[]; spawn?: (args: string[], cwd?: string) => SpawnResult } = {},
-): { actions: string[]; warns: string[]; blocks: string[]; freed: string[] } {
+): { actions: string[]; warns: string[]; blocks: string[]; freed: string[]; reclaimable: number } {
   const spawn = options.spawn ?? defaultSpawn
   // `--automatic` is the narrower pass: it never pushes and never commits anything as `wip`, and
   // it reports whatever it will not touch. The worker calls it without `--write`, so it removes
@@ -191,13 +191,16 @@ export function tidyWorktrees(
   try {
     const run = spawn(args, repoRoot)
     const result = parseScriptOutput(run.stdout) as ScriptResult & { freed?: string[] }
+    // Counted from the candidates, not from `actions`: every remote-backed prune puts its own
+    // `git fetch` in there, so a pass with nothing to reclaim would still look like it had work.
+    const reclaimable = (result.candidates ?? []).filter((candidate) => candidate.removable).length
     return {
       actions: result.actions ?? [], warns: result.warns ?? [],
-      blocks: result.blocks ?? [], freed: result.freed ?? [],
+      blocks: result.blocks ?? [], freed: result.freed ?? [], reclaimable,
     }
   } catch (error) {
     // Tidying is housekeeping. A pass that could not do it still worked the board.
-    return { actions: [], warns: [`worktrees could not be tidied: ${(error as Error).message}`], blocks: [], freed: [] }
+    return { actions: [], warns: [`worktrees could not be tidied: ${(error as Error).message}`], blocks: [], freed: [], reclaimable: 0 }
   }
 }
 

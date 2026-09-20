@@ -2192,7 +2192,10 @@ export async function runWorker(argv: string[], deps: CliDeps = {}): Promise<num
           const busy = [...inflight.values()].filter((run) => !run.settled).map((run) => `${run.candidate.number}`)
           const tidied = tidyWorktrees(root, { inUse: busy, spawn: deps.worktreeScript })
           for (const line of [...tidied.actions, ...tidied.warns, ...tidied.blocks]) note(`worktrees: ${line}`)
-          if (tidied.actions.length) note('worktrees: run `vegafactory worktree prune --write` to reclaim these')
+          // `prune` acts by default and `--dry-run` is what holds it back, so the command to
+          // give is the bare one. And only when there is something: a remote-backed pass always
+          // reports its own fetch, so counting actions would recommend pruning every poll.
+          if (tidied.reclaimable) note(`worktrees: ${tidied.reclaimable} could be reclaimed — run \`vegafactory worktree prune\``)
         } catch (error) {
           note(`poll failed: ${(error as Error).message}`)
         }

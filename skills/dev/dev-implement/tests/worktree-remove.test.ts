@@ -364,6 +364,100 @@ describe('pruneWorktrees', () => {
     expect(readDroppedDeps(root)['106-old']).toBeUndefined()
   })
 
+  // A repository may legitimately track files under `node_modules` — a patched package, a vendored
+  // stub. `git status` is clean either way, so without a check the sweep deletes committed files.
+  test('dependencies git tracks are never deleted', () => {
+    const root = repoWithRemote()
+    const wt = createWorktree({ repoRoot: root, issue: 106, slug: 'old', type: 'feat', base: 'main', devMd, home: root, write: true })
+    mkdirSync(join(wt.path, 'node_modules', 'patched'), { recursive: true })
+    writeFileSync(join(wt.path, 'node_modules', 'patched', 'index.js'), 'module.exports = 1\n')
+    // Committed on purpose, past the ignore rule.
+    execFileSync('git', ['-C', wt.path, 'add', '-f', 'node_modules/patched/index.js'], { encoding: 'utf8' })
+    execFileSync('git', ['-C', wt.path, 'commit', '-m', 'vendor a patch'], { encoding: 'utf8' })
+    execFileSync('git', ['-C', wt.path, 'push', '-u', 'origin', 'HEAD'], { encoding: 'utf8' })
+
+    const r = pruneWorktrees({
+      repoRoot: root, base: 'main', olderThan: '999d', devMd: `${devMd}\nworktree-deps-retention: 1d\n`,
+      ledgerTimes: { '106-old': OLD_LEDGER }, now: FUTURE_NOW, write: true, automatic: true,
+    })
+    expect(r.freed).not.toContain('106-old')
+    expect(existsSync(join(wt.path, 'node_modules', 'patched', 'index.js'))).toBe(true)
+    expect(r.warns.join('\n')).toContain('git tracks files under node_modules')
+  })
+
+  // Eleven days of being skipped and never named is not reporting.
+  test('an unpushed worktree is named as soon as its dependencies could have gone', () => {
+    const root = repoWithRemote()
+    const wt = createWorktree({ repoRoot: root, issue: 106, slug: 'old', type: 'feat', base: 'main', devMd, home: root, write: true })
+    mkdirSync(join(wt.path, 'node_modules'), { recursive: true })
+
+    // Past the three-day dependency window, nowhere near the fourteen-day worktree one.
+    const r = pruneWorktrees({
+      repoRoot: root, base: 'main', olderThan: '999d', devMd: `${devMd}\nworktree-deps-retention: 1d\n`,
+      ledgerTimes: { '106-old': OLD_LEDGER }, now: FUTURE_NOW, write: true, automatic: true,
+    })
+    expect(r.warns.join('\n')).toContain('106-old')
+    expect(r.warns.join('\n')).toContain('kept its dependencies')
+  })
+
+  // Two passes touching different worktrees must not lose each other's record.
+  test('recording one worktree never erases another', () => {
+    const root = repoWithRemote()
+    for (const [issue, slug] of [[106, 'one'], [107, 'two']] as const) {
+      const wt = createWorktree({ repoRoot: root, issue, slug, type: 'feat', base: 'main', devMd, home: root, write: true })
+      writeFileSync(join(wt.path, 'work.txt'), 'real work\n')
+      execFileSync('git', ['-C', wt.path, 'add', '.'], { encoding: 'utf8' })
+      execFileSync('git', ['-C', wt.path, 'commit', '-m', 'work'], { encoding: 'utf8' })
+      execFileSync('git', ['-C', wt.path, 'push', '-u', 'origin', 'HEAD'], { encoding: 'utf8' })
+      mkdirSync(join(wt.path, 'node_modules'), { recursive: true })
+    }
+    pruneWorktrees({
+      repoRoot: root, base: 'main', olderThan: '999d', devMd: `${devMd}\nworktree-deps-retention: 1d\n`,
+      ledgerTimes: { '106-one': OLD_LEDGER, '107-two': OLD_LEDGER }, now: FUTURE_NOW, write: true, automatic: true,
+    })
+    const dropped = readDroppedDeps(root)
+    expect(Object.keys(dropped).sort()).toEqual(['106-one', '107-two'])
+  })
+
+  // A closed issue is the clearest sign a worktree is finished. It does not wait out a window
+  // meant for work that might still be wanted — but every refusal still applies to it.
+  test('a closed issue makes its worktree a candidate straight away', () => {
+    const root = repoWithRemote()
+    const wt = createWorktree({ repoRoot: root, issue: 106, slug: 'old', type: 'feat', base: 'main', devMd, home: root, write: true })
+    writeFileSync(join(wt.path, 'work.txt'), 'real work\n')
+    execFileSync('git', ['-C', wt.path, 'add', '.'], { encoding: 'utf8' })
+    execFileSync('git', ['-C', wt.path, 'commit', '-m', 'work'], { encoding: 'utf8' })
+    execFileSync('git', ['-C', wt.path, 'push', '-u', 'origin', 'HEAD'], { encoding: 'utf8' })
+
+    // Yesterday's commit, so nothing is past any window — and the issue is closed.
+    const soon = Date.now()
+    const open = pruneWorktrees({
+      repoRoot: root, base: 'main', olderThan: '14d', devMd, ledgerTimes: {}, issueStates: {}, now: soon, write: false, automatic: true,
+    })
+    expect(open.candidates.find((c: { name: string }) => c.name === '106-old')).toBeUndefined()
+
+    const closed = pruneWorktrees({
+      repoRoot: root, base: 'main', olderThan: '14d', devMd, ledgerTimes: {},
+      issueStates: { '106-old': 'closed' }, now: soon, write: false, automatic: true,
+    })
+    const candidate = closed.candidates.find((c: { name: string; state: string }) => c.name === '106-old')
+    expect(candidate?.state).toBe('abandoned')
+  })
+
+  test('a closed issue still cannot take uncommitted work with it', () => {
+    const root = repoWithRemote()
+    const wt = createWorktree({ repoRoot: root, issue: 106, slug: 'old', type: 'feat', base: 'main', devMd, home: root, write: true })
+    writeFileSync(join(wt.path, 'notes.md'), 'half an idea\n')
+
+    const r = pruneWorktrees({
+      repoRoot: root, base: 'main', olderThan: '14d', devMd, ledgerTimes: {},
+      issueStates: { '106-old': 'closed' }, now: Date.now(), write: true, automatic: true,
+    })
+    expect(existsSync(wt.path)).toBe(true)
+    expect(existsSync(join(wt.path, 'notes.md'))).toBe(true)
+    expect(r.warns.join('\n')).toContain('106-old')
+  })
+
   test('a worktree a run is holding is left entirely alone', () => {
     const root = repoWithRemote()
     const wt = createWorktree({ repoRoot: root, issue: 106, slug: 'old', type: 'feat', base: 'main', devMd, home: root, write: true })

@@ -284,22 +284,29 @@ export function parseSetupCommand(devMd) {
 // Kept beside the repository's own worker state rather than inside the worktree it describes:
 // a record living in the thing it is about disappears with it, and a deps-only prune leaves the
 // checkout in place, so `restore` never runs and nothing would put the dependencies back.
-const droppedRecordPath = (repoRoot) => join(repoRoot, '.vegastack', '.tmp', 'worker', 'deps-dropped.json');
+// One file per worktree, not one map of them all. A shared document is read, changed and written
+// back, so a pass clearing one worktree and a pass recording another can each read the old copy
+// and the second write loses the first — leaving a checkout with no dependencies and nothing
+// saying they were taken, which is a checkout that silently never builds again.
+const droppedDir = (repoRoot) => join(repoRoot, '.vegastack', '.tmp', 'worker', 'deps-dropped');
+const droppedFor = (repoRoot, name) => join(droppedDir(repoRoot), encodeURIComponent(name));
 
 export function readDroppedDeps(repoRoot) {
-  try { return JSON.parse(readFileSync(droppedRecordPath(repoRoot), 'utf8')); } catch { return {}; }
+  const found = {};
+  try {
+    for (const entry of readdirSync(droppedDir(repoRoot))) {
+      try { found[decodeURIComponent(entry)] = readFileSync(join(droppedDir(repoRoot), entry), 'utf8').trim(); } catch { /* raced with a clear */ }
+    }
+  } catch { /* nothing has been dropped here */ }
+  return found;
 }
 
 function noteDroppedDeps(repoRoot, name, at) {
-  const saved = readDroppedDeps(repoRoot);
-  writeMarker(droppedRecordPath(repoRoot), JSON.stringify({ ...saved, [name]: at }, null, 2) + '\n');
+  writeMarker(droppedFor(repoRoot, name), at + '\n');
 }
 
 function clearDroppedDeps(repoRoot, name) {
-  const saved = readDroppedDeps(repoRoot);
-  if (!(name in saved)) return;
-  delete saved[name];
-  writeMarker(droppedRecordPath(repoRoot), JSON.stringify(saved, null, 2) + '\n');
+  try { rmSync(droppedFor(repoRoot, name), { force: true }); } catch { /* already gone */ }
 }
 
 // Written without ever following a link. The path is predictable and inside an ignored directory,
@@ -771,7 +778,7 @@ export function rescueWork({ path, branch, name, remote = 'origin' }) {
 // worktree it had to rescue: anything dirty or unpushed is reported and left exactly as it is.
 // `inUse` names the worktrees a run currently holds; those are skipped whole, dependencies
 // included, because an agent is reading them right now.
-export function pruneWorktrees({ repoRoot, base, olderThan, devMd, ledgerTimes = {}, now = Date.now(), write = false, remote = 'origin', automatic = false, inUse = [] }) {
+export function pruneWorktrees({ repoRoot, base, olderThan, devMd, ledgerTimes = {}, issueStates = {}, now = Date.now(), write = false, remote = 'origin', automatic = false, inUse = [] }) {
   const blocks = [];
   const warns = [];
   const actions = [];
@@ -789,7 +796,9 @@ export function pruneWorktrees({ repoRoot, base, olderThan, devMd, ledgerTimes =
       dirExists: true,
       branchExists: branch !== null,
       locked: entry.locked,
-      issueState: null,
+      // A closed issue is the clearest sign a worktree is finished, and it is a fact the board
+      // already answers — `gatherGithubFacts` reads it for the same names in the same pass.
+      issueState: issueStates[entry.name] ?? null,
       mergedIntoDefault: facts.mergedIntoDefault,
     });
     // Touched recently is not idle, whatever the branch and the ledger say. Nothing outside this
@@ -820,9 +829,21 @@ export function pruneWorktrees({ repoRoot, base, olderThan, devMd, ledgerTimes =
     // Unpushed commits count as much here as uncommitted files: a worktree holding work nobody
     // else has is not one to take anything from, dependencies included.
     const unpushed = facts.unpushed || facts.remoteMissing;
-    if (!entry.locked && !facts.dirty && !unpushed && isPastRetention({ lastCommitAt, ledgerUpdatedAt: latestStamp, now, retentionMs: depsRetentionMs })) {
+    const depsWindowPassed = isPastRetention({ lastCommitAt, ledgerUpdatedAt: latestStamp, now, retentionMs: depsRetentionMs });
+    // Reported at the moment they could have gone. Saying nothing until the whole-worktree window
+    // elapses leaves eleven days in which a worktree is skipped and never named.
+    if (depsWindowPassed && (entry.locked || facts.dirty || unpushed) && existsSync(join(entry.path, 'node_modules'))) {
+      warns.push(at(entry.name, 'kept its dependencies: ' + (facts.dirty ? 'uncommitted work here' : entry.locked ? 'locked' : 'commits not on the remote')));
+    }
+    if (!entry.locked && !facts.dirty && !unpushed && depsWindowPassed) {
       const deps = join(entry.path, 'node_modules');
-      if (existsSync(deps)) {
+      // A repository may legitimately track files under `node_modules` — a patched package, a
+      // vendored stub. `git status` is clean either way, so without this the sweep would delete
+      // committed files and leave the checkout broken.
+      const tracked = existsSync(deps) ? git(entry.path, ['ls-files', '--', 'node_modules']).out.trim() : '';
+      if (tracked) {
+        warns.push(at(entry.name, 'kept its dependencies: git tracks files under node_modules here'));
+      } else if (existsSync(deps)) {
         actions.push(at(entry.name, 'drop node_modules, keeping the branch and its commits'));
         if (write) {
           try {
@@ -838,9 +859,10 @@ export function pruneWorktrees({ repoRoot, base, olderThan, devMd, ledgerTimes =
         }
       }
     }
-    // A merged worktree has nothing left in it that is not on the default branch, so it does not
-    // wait out a window meant for work that might still be wanted.
-    if (state !== 'merged' && !isPastRetention({ lastCommitAt, ledgerUpdatedAt: latestStamp, now, retentionMs })) continue;
+    // A merged worktree has nothing in it that is not on the default branch, and an abandoned one
+    // belongs to an issue somebody closed. Neither waits out a window meant for work that might
+    // still be wanted; every refusal below still applies to both.
+    if (!['merged', 'abandoned'].includes(state) && !isPastRetention({ lastCommitAt, ledgerUpdatedAt: latestStamp, now, retentionMs })) continue;
     const verdict = evaluateRemoval({ state, ...facts, locked: entry.locked, force: true });
     // "Prune pushes then removes, and never automatically for anything with
     // unpushed work": the push half protects the work and happens on --write
@@ -1119,8 +1141,11 @@ function runVerb(verb, flags) {
     const repo = flags.repo || knobLine(devMd, 'repo')?.split('·')[0].trim() || null;
     const names = inventory(repoRoot).map((entry) => entry.name);
     const ledgerTimes = repo ? gatherLedgerTimes({ repo, names, warns }) : {};
+    // The board already knows which issues are closed, and `list` reads it for these same names.
+    // A worktree whose issue is closed is finished, whatever its dates say.
+    const issueStates = repo ? gatherGithubFacts({ repo, names, warns }).issueStates : {};
     const pruned = pruneWorktrees({
-      repoRoot, base, olderThan: flags['older-than'], devMd, ledgerTimes, now: Date.now(), write: shared.write,
+      repoRoot, base, olderThan: flags['older-than'], devMd, ledgerTimes, issueStates, now: Date.now(), write: shared.write,
       automatic: flags.automatic === true,
       inUse: String(flags['in-use'] ?? '').split(',').map((name) => name.trim()).filter(Boolean),
     });
