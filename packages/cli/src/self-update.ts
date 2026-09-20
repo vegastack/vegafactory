@@ -212,9 +212,10 @@ export async function maintainSelfUpdate(options: {
   }
   let latest: string | null
   try { latest = await (options.latest ?? latestPublishedVersion)() } catch { latest = null }
-  // The attempt is stamped either way, so a registry that is down costs one call an hour and not
-  // one every pass. What it answered is remembered only when it answered.
-  if (options.home) writeUpdateNote({ ...readUpdateNote(options.home), checkedAt: now, ...(latest ? { latest } : {}) }, options.home)
+  // The attempt is stamped either way, so a registry that is down costs one call an hour. What it
+  // answered replaces what was there: keeping an older `latest` behind a fresh stamp would let a
+  // later session install from an answer nobody just checked.
+  if (options.home) writeUpdateNote({ ...readUpdateNote(options.home), checkedAt: now, latest }, options.home)
   if (!latest) return idle('unavailable', before, null, `could not check npm; continuing with vegafactory ${before}`)
   if (!semverLess(before, latest)) {
     const detail = semverLess(latest, before) ? ` (ahead of npm latest ${latest})` : ''

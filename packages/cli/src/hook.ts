@@ -623,7 +623,6 @@ async function attendedUpdate(cwd: string, deps: HookDeps): Promise<string | nul
     if (result.action !== 'available' || mode !== 'auto') return result.message
     // npm gets its own bound and executable. Calling this entry file again races the global
     // install replacing that file, and ordinary hook work has a deliberately shorter watchdog.
-    // The install is pinned to the registry and the version the check just approved.
     deps.detach(['npm', ...installArgs()], cwd, SELF_UPDATE_LIMIT_S)
     writeUpdateNote({ ...readUpdateNote({ home: deps.home }), startedFrom: result.before, startedTo: result.latest ?? undefined, startedAt: deps.now() }, { home: deps.home })
     return `updating vegafactory ${result.before} → ${result.latest} in the background; this session continues with ${result.before}`
