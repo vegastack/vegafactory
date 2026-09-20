@@ -336,6 +336,34 @@ describe('pruneWorktrees', () => {
     expect(existsSync(wt.path)).toBe(true)
   })
 
+  // Prune takes them; the worker's own preflight puts them back. End to end, because the pieces
+  // being right separately is what the earlier attempts already had.
+  test('a pruned checkout gets its dependencies back through the restore-deps verb', () => {
+    const root = repoWithRemote()
+    const wt = createWorktree({ repoRoot: root, issue: 106, slug: 'old', type: 'feat', base: 'main', devMd, home: root, write: true })
+    writeFileSync(join(wt.path, 'work.txt'), 'real work\n')
+    execFileSync('git', ['-C', wt.path, 'add', '.'], { encoding: 'utf8' })
+    execFileSync('git', ['-C', wt.path, 'commit', '-m', 'work'], { encoding: 'utf8' })
+    execFileSync('git', ['-C', wt.path, 'push', '-u', 'origin', 'HEAD'], { encoding: 'utf8' })
+    mkdirSync(join(wt.path, 'node_modules'), { recursive: true })
+
+    pruneWorktrees({
+      repoRoot: root, base: 'main', olderThan: '999d', devMd: `${devMd}\nworktree-deps-retention: 1d\n`,
+      ledgerTimes: { '106-old': OLD_LEDGER }, now: FUTURE_NOW, write: true, automatic: true,
+    })
+    expect(existsSync(join(wt.path, 'node_modules'))).toBe(false)
+    expect(readDroppedDeps(root)['106-old']).toBeTruthy()
+
+    // What the worker runs before it launches an agent, by the same route.
+    const ran: string[][] = []
+    const runner = ((file: string, args: string[]) => { ran.push([file, ...args]); return '' }) as never
+    const actions: string[] = []
+    const setup = 'commands: check `true` · setup `bun install --frozen-lockfile`\nworktree-retention: 14d\n'
+    expect(restoreDroppedDependencies({ repoRoot: root, name: '106-old', path: wt.path, devMd: setup, write: true, actions, warns: [], runner })).toBe(true)
+    expect(ran[0]).toEqual(['sh', '-c', 'bun install --frozen-lockfile'])
+    expect(readDroppedDeps(root)['106-old']).toBeUndefined()
+  })
+
   test('a worktree a run is holding is left entirely alone', () => {
     const root = repoWithRemote()
     const wt = createWorktree({ repoRoot: root, issue: 106, slug: 'old', type: 'feat', base: 'main', devMd, home: root, write: true })

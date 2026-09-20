@@ -39,7 +39,7 @@ import { defaultBranch } from './guard-rules.ts'
 import { stateOf, type State } from './labels.ts'
 import { lintPlan, normalizeGroupPath, parseIndependentGroups, sharedByEveryChild } from '../../../skills/dev/dev-plan/scripts/plan-lint.mjs'
 import { appKeyPath as workerAppKey } from './home.ts'
-import { tidyWorktrees } from './worktree.ts'
+import { restoreWorktreeDeps, tidyWorktrees } from './worktree.ts'
 
 // How often the board is read, how many steps run at once, and how long one step may take.
 export const POLL_MS = 2 * 60_000
@@ -1289,6 +1289,14 @@ function execTool(tool: string, args: string[], options: { cwd: string; env: Nod
 export const tail = (text: string, max = MAX_NOTE) => text.trim().split('\n').slice(-3).join(' ').slice(-max)
 
 // The issue's worktree when one exists; a step that needs a branch makes its own.
+// Puts back what a prune took, if it took anything. Delegates to the worktree script, which owns
+// both the record and dev.md's own `setup` command; a failure is a note in the log rather than a
+// refusal, because the build that follows will say so far more clearly.
+export function restoreDependencies(root: string, cwd: string, spawn?: (args: string[], cwd?: string) => { status: number; stdout: string }): boolean {
+  if (cwd === root) return false
+  return restoreWorktreeDeps(root, cwd, { spawn })
+}
+
 export function workingDir(root: string, number: number): string | null {
   const base = join(root, '.vegastack', '.worktrees')
   try {
@@ -1340,11 +1348,16 @@ export function childRunEnvironment(env: NodeJS.ProcessEnv, token: string | null
   return child
 }
 
-export function defaultRunStep(devMd: string, env: NodeJS.ProcessEnv, { exec = execTool, timeoutMs = STEP_TIMEOUT_MS, token = () => null as string | null } = {}): RunStep {
+export function defaultRunStep(devMd: string, env: NodeJS.ProcessEnv, { exec = execTool, timeoutMs = STEP_TIMEOUT_MS, token = () => null as string | null, putDepsBack = restoreDependencies } = {}): RunStep {
   return async (step, context) => {
     const started = Date.now()
     const policy = stagePolicy(devMd, STAGE_OF[step.action] ?? 'implement')
     const cwd = workingDir(context.root, step.number) ?? context.root
+    // A checkout whose dependencies were reclaimed while it was idle gets them back before the
+    // agent starts. The worker launches straight into an existing worktree — it never calls
+    // `worktree restore`, which is the only other place this was checked — so without this the
+    // next run begins in a checkout that cannot build and has nothing saying why.
+    putDepsBack(context.root, cwd)
     const { tool, args } = agentArgs(policy, stepPrompt(step))
     // Nobody is at the keyboard, so a round of questions goes to the issue and waits there for the
     // operator — dev-setup's references/ask-route.md, where VSK_ASK_ROUTE is the first step.
@@ -2168,15 +2181,18 @@ export async function runWorker(argv: string[], deps: CliDeps = {}): Promise<num
           stepOutlivesToken(still.entry.caps)
           await identity?.freshen()
           for (const candidate of await poll(pollDeps, inflight)) note(`#${candidate.number} ${candidate.action} started`)
-          // Housekeeping rides in the pass the worker already makes, so there is no second
-          // schedule to reason about. It is the same `prune` a person runs, through the same
-          // refusals — and what it keeps is reported here rather than silently skipped.
-          // Only what no run is holding. A worktree an agent is reading right now is not idle,
-          // whatever its branch or its dates say.
+          // Housekeeping rides in the pass the worker already makes, so there is no second schedule
+          // to reason about — but it only ever *reports*. Reclaiming on its own would need this
+          // pass to know which checkouts a person is sitting in, and nothing tells it: the run map
+          // below is blind to attended sessions, a file's mtime does not move for somebody reading
+          // and building, and git's worktree lock is not reference-counted, so two sessions in one
+          // checkout have the first to end release the other's hold. Naming what could go costs
+          // nothing and is wrong about nothing; `vegafactory worktree prune --write` is how a
+          // person reclaims it, and that call knows who asked.
           const busy = [...inflight.values()].filter((run) => !run.settled).map((run) => `${run.candidate.number}`)
-          const tidied = tidyWorktrees(root, { write: true, inUse: busy, spawn: deps.worktreeScript })
+          const tidied = tidyWorktrees(root, { inUse: busy, spawn: deps.worktreeScript })
           for (const line of [...tidied.actions, ...tidied.warns, ...tidied.blocks]) note(`worktrees: ${line}`)
-          if (tidied.freed.length) note(`worktrees: freed the dependencies of ${tidied.freed.join(', ')}`)
+          if (tidied.actions.length) note('worktrees: run `vegafactory worktree prune --write` to reclaim these')
         } catch (error) {
           note(`poll failed: ${(error as Error).message}`)
         }

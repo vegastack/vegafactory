@@ -179,9 +179,10 @@ export function tidyWorktrees(
   options: { write?: boolean; inUse?: string[]; spawn?: (args: string[], cwd?: string) => SpawnResult } = {},
 ): { actions: string[]; warns: string[]; blocks: string[]; freed: string[] } {
   const spawn = options.spawn ?? defaultSpawn
-  // `--automatic` is the narrower pass: it never pushes, never commits anything as `wip`, and
-  // reports whatever it will not touch. `--in-use` names the *issues* a run is holding right now;
-  // a worktree is `<issue>-<slug>`, and the script matches on the number in front.
+  // `--automatic` is the narrower pass: it never pushes and never commits anything as `wip`, and
+  // it reports whatever it will not touch. The worker calls it without `--write`, so it removes
+  // nothing at all — see the note at its call site. `--in-use` names the *issues* a run is holding
+  // right now; a worktree is `<issue>-<slug>`, and the script matches on the number in front.
   const args = [
     'prune', '--automatic', ...(options.write ? ['--write'] : []),
     ...((options.inUse ?? []).length ? ['--in-use', (options.inUse ?? []).join(',')] : []),
@@ -197,6 +198,24 @@ export function tidyWorktrees(
   } catch (error) {
     // Tidying is housekeeping. A pass that could not do it still worked the board.
     return { actions: [], warns: [`worktrees could not be tidied: ${(error as Error).message}`], blocks: [], freed: [] }
+  }
+}
+
+// Puts back the dependencies a prune took from one checkout. The worker calls this before it
+// launches an agent: it starts straight in an existing worktree and so never passes through
+// `restore`, which is the only other place the record is read.
+export function restoreWorktreeDeps(
+  repoRoot: string,
+  path: string,
+  options: { spawn?: (args: string[], cwd?: string) => SpawnResult } = {},
+): boolean {
+  const spawn = options.spawn ?? defaultSpawn
+  try {
+    const run = spawn(['restore-deps', '--path', path, '--write', '--json'], repoRoot)
+    return (parseScriptOutput(run.stdout) as ScriptResult & { restored?: boolean }).restored === true
+  } catch {
+    // Housekeeping. The build that follows says it far more clearly than this could.
+    return false
   }
 }
 

@@ -1126,6 +1126,17 @@ function runVerb(verb, flags) {
     });
     return { ...pruned, warns: [...warns, ...pruned.warns] };
   }
+  // Put back the dependencies a prune took from one checkout, and nothing else. The worker calls
+  // this before it launches an agent, because it starts straight in an existing worktree and so
+  // never passes through `restore`.
+  if (verb === 'restore-deps') {
+    const actions = [];
+    const warns = [];
+    const path = String(flags.path ?? '');
+    if (!path) return { blocks: [at('restore-deps', 'needs --path')], warns, actions };
+    const put = restoreDroppedDependencies({ repoRoot, name: basename(path), path, devMd, write: shared.write, actions, warns });
+    return { blocks: [], warns, actions, restored: put };
+  }
   if (verb === 'create' || verb === 'restore') {
     let named = { type: flags.type || null, slug };
     // Type and slug are resolved independently: --slug says what to call it and

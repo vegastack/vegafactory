@@ -1140,6 +1140,20 @@ describe('readiness and the service', () => {
   })
 
 
+  // The wiring the earlier attempts kept getting right in isolation and wrong in place: a
+  // checkout whose dependencies were reclaimed gets them back before the agent starts, because
+  // the worker launches straight into an existing worktree and never passes through `restore`.
+  test('a run puts back dependencies before it starts', async () => {
+    const restored: string[][] = []
+    const step = defaultRunStep('', {}, {
+      exec: (async () => ({ code: 0, stdout: 'ok', stderr: '', timedOut: false })) as never,
+      putDepsBack: ((repoRoot: string, cwd: string) => { restored.push([repoRoot, cwd]); return true }) as never,
+    })
+    await step({ number: 7, action: 'implement', repo: 'o/r', split: false, by: null }, { root, onStart: () => {} })
+    expect(restored).toHaveLength(1)
+    expect(restored[0]![0]).toBe(root)
+  })
+
   test('the unit runs this CLI\'s own worker run and carries no token', () => {
     const plist = unitText('darwin', { cli: ['/usr/bin/node', '/opt/vegafactory/index.js'], root, repo: 'o/r', logDir: workerDir(root) })
     expect(plist).toContain('<string>worker</string>')
@@ -1598,6 +1612,22 @@ describe('the command', () => {
     expect(unit).toContain(`Environment="VEGAFACTORY_APP_PRIVATE_KEY_FILE=${key}"`)
     // The path, never the key itself.
     expect(unit).not.toContain('BEGIN')
+  })
+
+  // Nothing tells this pass which checkouts a person is sitting in — the run map is blind to
+  // attended sessions, an mtime does not move for somebody reading, and git's worktree lock is not
+  // reference-counted. So it names what could go and removes nothing.
+  test('the pass names idle worktrees and never asks to remove them', async () => {
+    const asked: string[][] = []
+    await run(['run'], {
+      worktreeScript: (args: string[]) => { asked.push(args); return { status: 0, stdout: '{}' } },
+      sleep: async () => { process.emit('SIGTERM' as NodeJS.Signals) },
+    })
+    expect(asked.length).toBeGreaterThan(0)
+    for (const args of asked) {
+      expect(args).toContain('--automatic')
+      expect(args).not.toContain('--write')
+    }
   })
 
   test('run --once makes one pass with the injected step', async () => {
