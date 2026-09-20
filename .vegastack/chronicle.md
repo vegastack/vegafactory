@@ -6,11 +6,20 @@ The project's story, newest first: what got built, why, and how it went — for 
 
 - **What:** An idle worktree loses its dependencies and gets them back when work resumes, and the tidy-up happens inside the poll pass the worker already makes. A second run on an issue picks up the same agent thread, unless the branch has moved under it.
 - **Why:** Step 9 of [#251](https://github.com/vegastack/vegafactory/issues/251). Nothing cleaned up: 1.8 GB across fifteen worktrees on this machine, thirteen with no open issue — and 628 MB of one 638 MB worktree was `node_modules` while the checkout itself was 10 MB. The cost is duplicated dependencies, not code.
-- **How it went:** The existing safe-to-remove test did the hard part, so this extended it rather than adding a second idea of what is safe: dependencies go on their own shorter window, under exactly the checks that already protect a worktree. Putting them back needed a marker, so a resume reinstalls what was taken and a fresh worktree still installs nothing.
-- **Changed:** a `worktree-deps-retention` knob · dependencies dropped from idle worktrees and reinstalled on resume · prune run inside the worker's pass, reporting what it kept · one agent thread per issue, forked when the branch moves.
+- **How it went:** The existing safe-to-remove test did the hard part, so this extended it rather than adding a second idea of what is safe. The review then caught four ways it did not work: a flag missing from the parser's boolean list swallowed `--write` and made the whole pass a silent dry run; the pass could touch a worktree an agent was reading; it inherited the interactive prune's habit of committing and pushing to protect work, which a background pass has nobody to ask about; and the record of a dropped dependency lived inside the worktree it described, so nothing ever put them back. The agent-thread half went to [#274](https://github.com/vegastack/vegafactory/issues/274) on the operator's call — the deciding state is here, using it to resume is a larger piece of work than the disk problem it was sharing an issue with.
+- **Changed:** a `worktree-deps-retention` knob · dependencies dropped from idle worktrees and reinstalled on resume · prune run inside the worker's pass, reporting what it kept and never touching what a run is holding.
 - **Decisions:** none new.
 
 — approved by (kmanojkumar) · built by claude · branch feat/260-worktrees-that-clean-up-after-themselves
+## 20-09-2026 — A Linux worker survives the operator logging out ([#262](https://github.com/vegastack/vegafactory/issues/262))
+
+- **What:** `vegafactory worker enable` sets `loginctl enable-linger` before it loads anything, and refuses with the failing command if this account may not grant it. The systemd unit also writes the same two log files the macOS one does.
+- **Why:** Step 11 of [#251](https://github.com/vegastack/vegafactory/issues/251). A `--user` service lives inside a login session and systemd ends that session with the last login, so an always-on Linux worker died at the next logout — quietly, and hours later, with `enable` having reported success.
+- **How it went:** The brief's portability sweep came back clean, so the work was these two gaps rather than a hunt. The review then caught three things the first pass got wrong: the documented log path was the home directory when the unit is given the repository's own `.tmp/worker`; the claim that the journal still had everything was false, because `append:` redirects rather than copies; and the logout drill logged back in before checking, which starts the service again and hides the very failure it looks for.
+- **Changed:** linger at enable, checked not assumed · Linux log files at parity with macOS · the onboarding checklist's logout drill, its log paths and what the journal does and does not hold.
+- **Decisions:** none new. `disable` deliberately leaves linger alone — it is user-wide and other services on that account may rely on it.
+
+— approved by (kmanojkumar) · built by claude · branch fix/262-a-linux-worker-survives-logout
 
 ## 19-09-2026 — A self-hosted factory trusts its own App ([#263](https://github.com/vegastack/vegafactory/issues/263))
 

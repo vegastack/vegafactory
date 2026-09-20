@@ -86,4 +86,42 @@ launchctl print gui/$(id -u {{worker-user}})/com.vegastack.vegafactory.worker | 
 
 The first prints `{{runner-name}} online` — the org endpoint is the one that lists a group's runners, while `repos/{{org}}/{{repo}}/actions/runners` lists repository-level runners. The second prints `{{runner-user}}` and never `{{worker-user}}`.
 
+On Linux the third line is `systemctl --user status vegafactory-worker.service` instead, and one more check belongs beside it:
+
+```sh
+loginctl show-user {{worker-user}} --property=Linger
+```
+
+It must print `Linger=yes`. A `--user` service lives inside a login session and systemd ends that session with the last login, so without linger the worker dies the moment {{worker-user}} logs out — quietly, and hours later. `worker enable` sets it and stops with the failing command if the account may not grant it to itself, which on a locked-down box needs an administrator: `sudo loginctl enable-linger {{worker-user}}`.
+
+**Where the logs are.** Both platforms write `worker.log` and `worker.err.log` into the repository's own `.vegastack/.tmp/worker/` — beside the checkout the worker polls, not in the home directory. On Linux those two files are the whole of the worker's output: the unit redirects its streams, so `journalctl --user -u vegafactory-worker.service` shows systemd's own messages about the service starting and stopping, and nothing the worker itself printed.
+
 Then the reboot drill: `sudo reboot`, wait for the box, and run every check above again **without logging anything in by hand**. A box that needs a human at the keyboard after a power cut is not always-on.
+
+On Linux, the logout drill is separate and the order matters. Log out every session for {{worker-user}} and check from **another** account — logging back in first would start the service again and hide exactly the failure this is looking for:
+
+Log out every session for {{worker-user}}, then check from **another** account — logging back in
+would start the service again and hide the very failure this looks for:
+
+```sh
+loginctl list-sessions | grep {{worker-user}} || echo 'no sessions, which is the point'
+usec=$(busctl get-property org.freedesktop.login1 /org/freedesktop/login1 \
+  org.freedesktop.login1.Manager UserStopDelayUSec | awk '{print $2}')
+case "$usec" in ''|*[!0-9]*) echo 'cannot read UserStopDelayUSec — do not guess it'; exit 1;; esac
+sleep $(( usec / 1000000 + 30 ))
+sudo -u {{worker-user}} XDG_RUNTIME_DIR=/run/user/$(id -u {{worker-user}}) \
+  systemctl --user is-active vegafactory-worker.service
+```
+
+The wait is read from the box rather than guessed. logind keeps a user's manager alive for
+`UserStopDelayUSec` after the last session ends — ten seconds by default, settable, and named in
+microseconds — so a worker with no linger at all still answers `active` inside that window. The
+`busctl` line asks logind's own manager for the value and the `sleep` clears it with thirty seconds
+to spare. A value that cannot be read stops the drill rather than standing in for it: assuming the
+ten-second default on a box that had been given a longer one is how a worker with no linger passes
+this check inside its own grace period.
+
+After that wait it must print `active` while {{worker-user}} has no session. That holds for an idle
+worker as much as a busy one, which is why it is the thing to check rather than the log: a pass
+with nothing to do writes nothing, and a worker that is merely quiet is not a worker that is dead.
+Without linger it prints `inactive`, or cannot reach that user's systemd at all.
