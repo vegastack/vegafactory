@@ -86,4 +86,14 @@ launchctl print gui/$(id -u {{worker-user}})/com.vegastack.vegafactory.worker | 
 
 The first prints `{{runner-name}} online` — the org endpoint is the one that lists a group's runners, while `repos/{{org}}/{{repo}}/actions/runners` lists repository-level runners. The second prints `{{runner-user}}` and never `{{worker-user}}`.
 
-Then the reboot drill: `sudo reboot`, wait for the box, and run every check above again **without logging anything in by hand**. A box that needs a human at the keyboard after a power cut is not always-on.
+On Linux the third line is `systemctl --user status vegafactory-worker.service` instead, and one more check belongs beside it:
+
+```sh
+loginctl show-user {{worker-user}} --property=Linger
+```
+
+It must print `Linger=yes`. A `--user` service lives inside a login session and systemd ends that session with the last login, so without linger the worker dies the moment {{worker-user}} logs out — quietly, and hours later. `worker enable` sets it and stops with the failing command if the account may not grant it to itself, which on a locked-down box needs an administrator: `sudo loginctl enable-linger {{worker-user}}`.
+
+**Where the logs are.** Both platforms write `worker.log` and `worker.err.log` under `~/.vegafactory/worker/`. Linux keeps everything in the journal as well — `journalctl --user -u vegafactory-worker.service` — and the journal is the one that survives the files being cleaned up.
+
+Then the reboot drill: `sudo reboot`, wait for the box, and run every check above again **without logging anything in by hand**. On Linux, log out and back in once as well, and check the worker is still running: the reboot proves it starts, and only the logout proves linger. A box that needs a human at the keyboard after a power cut is not always-on.

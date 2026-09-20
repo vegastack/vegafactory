@@ -702,6 +702,13 @@ export function unitText(platform: NodeJS.Platform, input: { cli: string[]; root
     '[Unit]', 'Description=VegaFactory worker', '',
     '[Service]', 'Type=simple', `WorkingDirectory=${input.root}`,
     `ExecStart=${argv.map((arg) => JSON.stringify(arg)).join(' ')}`,
+    // The same two files the plist writes, so `worker status` and a person reading the logs find
+    // them in one place on either platform. `logDir` was already being passed here and dropped,
+    // so on Linux the log this product tells people to read never appeared at all. The journal
+    // still has everything as well; `append:` adds to the file rather than truncating it on each
+    // restart, which matters for a service whose whole job is to be restarted.
+    `StandardOutput=append:${join(input.logDir, 'worker.log')}`,
+    `StandardError=append:${join(input.logDir, 'worker.err.log')}`,
     // systemd quotes a whole item, so the quotes go around `NAME=value` and not around the value:
     // `Environment=NAME="a b"` puts an opening quote after non-whitespace, which is not the
     // documented form. `%` is doubled because specifiers expand, and a backslash or a quote is
@@ -725,10 +732,22 @@ export function serviceCommands(platform: NodeJS.Platform, path: string, verb: '
       ? [['launchctl', 'bootout', `${target}/${SERVICE_NAME}`], ['launchctl', 'bootstrap', target, path], ['launchctl', 'enable', `${target}/${SERVICE_NAME}`]]
       : [['launchctl', 'bootout', `${target}/${SERVICE_NAME}`]]
   }
-  // Same reason: `daemon-reload` reparses the unit but `enable --now` leaves an already-active
-  // service running the version it started with.
+  // Linger first, and checked rather than assumed. A `--user` service runs inside a login session
+  // and systemd ends that session when the last login closes, so without linger an always-on
+  // worker dies the moment the operator logs out — quietly, and hours later. It is a per-user
+  // setting gated by polkit, so the account may not be able to grant it to itself; the command
+  // loop stops at the first failure and names it, which is the whole point of doing it here
+  // instead of hoping.
+  //
+  // Same reason as darwin for the restart: `daemon-reload` reparses the unit but `enable --now`
+  // leaves an already-active service running the version it started with.
   return verb === 'enable'
-    ? [['systemctl', '--user', 'daemon-reload'], ['systemctl', '--user', 'enable', '--now', 'vegafactory-worker.service'], ['systemctl', '--user', 'restart', 'vegafactory-worker.service']]
+    ? [
+      ['loginctl', 'enable-linger', String(uid)],
+      ['systemctl', '--user', 'daemon-reload'],
+      ['systemctl', '--user', 'enable', '--now', 'vegafactory-worker.service'],
+      ['systemctl', '--user', 'restart', 'vegafactory-worker.service'],
+    ]
     : [['systemctl', '--user', 'disable', '--now', 'vegafactory-worker.service']]
 }
 
