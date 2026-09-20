@@ -100,23 +100,25 @@ Then the reboot drill: `sudo reboot`, wait for the box, and run every check abov
 
 On Linux, the logout drill is separate and the order matters. Log out every session for vf-worker and check from **another** account — logging back in first would start the service again and hide exactly the failure this is looking for:
 
-Note the size of the worker's log, log out every session for vf-worker, then watch that log
-from **another** account — logging back in would start the service again and hide the very failure
-this looks for:
+Log out every session for vf-worker, then check from **another** account — logging back in
+would start the service again and hide the very failure this looks for:
 
 ```sh
-log=/path/to/vegastack-vegafactory/.vegastack/.tmp/worker/worker.log
-before=$(wc -c < "$log")
 loginctl list-sessions | grep vf-worker || echo 'no sessions, which is the point'
-sleep 300
-[ "$(wc -c < "$log")" -gt "$before" ] && echo 'polled while logged out' || echo 'DEAD since logout'
+usec=$(busctl get-property org.freedesktop.login1 /org/freedesktop/login1 \
+  org.freedesktop.login1.Manager UserStopDelayUSec 2>/dev/null | awk '{print $2}')
+sleep $(( ${usec:-10000000} / 1000000 + 30 ))
+sudo -u vf-worker XDG_RUNTIME_DIR=/run/user/$(id -u vf-worker) \
+  systemctl --user is-active vegafactory-worker.service
 ```
 
-A new poll line written while vf-worker has no session is the proof, and it is the only one
-that does not depend on timing. Asking `systemctl --user is-active` instead is unreliable: logind
-keeps a user's manager alive for `UserStopDelayUSec` after the last session ends — ten seconds by
-default, settable, and in microseconds — so a worker with no linger at all can still answer
-`active` if you ask too soon. Five minutes is longer than any sane value for that, and a worker
-polls far more often.
+The wait is read from the box rather than guessed. logind keeps a user's manager alive for
+`UserStopDelayUSec` after the last session ends — ten seconds by default, settable, and named in
+microseconds — so a worker with no linger at all still answers `active` inside that window. The
+`busctl` line asks logind's own manager for the value, the `sleep` clears it with thirty seconds to
+spare, and the default is used when the property cannot be read.
 
-Without linger the log stops at the logout, and it has been dead since.
+After that wait it must print `active` while vf-worker has no session. That holds for an idle
+worker as much as a busy one, which is why it is the thing to check rather than the log: a pass
+with nothing to do writes nothing, and a worker that is merely quiet is not a worker that is dead.
+Without linger it prints `inactive`, or cannot reach that user's systemd at all.
