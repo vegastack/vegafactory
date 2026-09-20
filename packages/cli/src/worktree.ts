@@ -170,6 +170,29 @@ function parseScriptOutput(stdout: string): ScriptResult {
   }
 }
 
+// The tidy-up the worker does inside its own pass, rather than on a schedule of its own. It is the
+// same `prune` a person runs, through the same script and the same refusals: nothing dirty,
+// unpushed or locked is ever removed, and whatever is kept comes back as a line to report instead
+// of being silently skipped.
+export function tidyWorktrees(
+  repoRoot: string,
+  options: { write?: boolean; spawn?: (args: string[], cwd?: string) => SpawnResult } = {},
+): { actions: string[]; warns: string[]; blocks: string[]; freed: string[] } {
+  const spawn = options.spawn ?? defaultSpawn
+  const args = ['prune', ...(options.write ? ['--write'] : []), '--json']
+  try {
+    const run = spawn(args, repoRoot)
+    const result = parseScriptOutput(run.stdout) as ScriptResult & { freed?: string[] }
+    return {
+      actions: result.actions ?? [], warns: result.warns ?? [],
+      blocks: result.blocks ?? [], freed: result.freed ?? [],
+    }
+  } catch (error) {
+    // Tidying is housekeeping. A pass that could not do it still worked the board.
+    return { actions: [], warns: [`worktrees could not be tidied: ${(error as Error).message}`], blocks: [], freed: [] }
+  }
+}
+
 export async function runWorktree(argv: string[], deps?: Partial<WorktreeDeps>): Promise<number> {
   const spawn = deps?.spawn ?? defaultSpawn
   const registryPath = deps?.registryPath ?? defaultRegistryPath()

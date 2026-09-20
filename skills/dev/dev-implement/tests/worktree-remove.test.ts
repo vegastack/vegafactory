@@ -1,9 +1,9 @@
 import { describe, expect, test } from 'bun:test'
 import { execFileSync, spawnSync } from 'node:child_process'
-import { existsSync, mkdtempSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { createWorktree, pruneWorktrees, removeWorktree } from '../scripts/worktree.mjs'
+import { createWorktree, pruneWorktrees, removeWorktree, restoreDroppedDependencies } from '../scripts/worktree.mjs'
 
 // Relative to the real clock: the fixture commits carry today's date, so a fixed
 // 'now' turns these into time bombs once the calendar catches up.
@@ -25,6 +25,9 @@ function repoWithRemote(remote = bareRemote()) {
   git(root, 'config', 'user.email', 'a@b.c')
   git(root, 'config', 'user.name', 'a')
   writeFileSync(join(root, 'README.md'), '# r\n')
+  // Every real repository ignores its dependencies. Without this a worktree with `node_modules`
+  // in it reads as dirty, which is exactly the state that must keep them.
+  writeFileSync(join(root, '.gitignore'), 'node_modules/\n')
   git(root, 'add', '.')
   git(root, 'commit', '-m', 'init')
   git(root, 'remote', 'add', 'origin', remote)
@@ -179,6 +182,93 @@ describe('pruneWorktrees', () => {
     expect(candidate?.ageDays).toBeGreaterThanOrEqual(14)
     expect(candidate?.removable).toBe(false)
     expect(candidate?.reason).toContain('commits not on the remote')
+  })
+
+  // Dependencies are the cost, not the code: on the machine that prompted this, 628 MB of a 638 MB
+  // worktree was `node_modules` and the checkout itself was 10 MB. They go on a shorter window,
+  // and only on the conditions that already protect the worktree.
+  test('dependencies go before the worktree does, and only from a clean unlocked one', () => {
+    const root = repoWithRemote()
+    const wt = createWorktree({ repoRoot: root, issue: 106, slug: 'old', type: 'feat', base: 'main', devMd, home: root, write: true })
+    const deps = join(wt.path, 'node_modules')
+    mkdirSync(join(deps, 'left-pad'), { recursive: true })
+    writeFileSync(join(deps, 'left-pad', 'index.js'), 'module.exports = 1\n')
+    const tracked = join(wt.path, 'README.md')
+
+    // A dry run says what it would do and removes nothing.
+    const dry = pruneWorktrees({
+      repoRoot: root, base: 'main', olderThan: '14d', devMd: `${devMd}\nworktree-deps-retention: 1d\n`,
+      ledgerTimes: { '106-old': OLD_LEDGER }, now: FUTURE_NOW, write: false,
+    })
+    expect(dry.actions.join('\n')).toContain('drop node_modules')
+    expect(existsSync(deps)).toBe(true)
+
+    const wet = pruneWorktrees({
+      repoRoot: root, base: 'main', olderThan: '999d', devMd: `${devMd}\nworktree-deps-retention: 1d\n`,
+      ledgerTimes: { '106-old': OLD_LEDGER }, now: FUTURE_NOW, write: true,
+    })
+    expect(wet.freed).toContain('106-old')
+    expect(existsSync(deps)).toBe(false)
+    // The worktree itself is untouched: its own window had not elapsed.
+    expect(existsSync(wt.path)).toBe(true)
+    expect(existsSync(tracked)).toBe(true)
+    expect(execFileSync('git', ['-C', wt.path, 'rev-parse', '--abbrev-ref', 'HEAD'], { encoding: 'utf8' }).trim()).toBe('feat/106-old')
+  })
+
+  // Prune takes them, restore puts back exactly those — never installing speculatively into a
+  // worktree that never had them, which is what keeps a docs-only issue cheap.
+  test('a worktree whose dependencies were dropped reinstalls them, and only that one', () => {
+    const root = repoWithRemote()
+    const wt = createWorktree({ repoRoot: root, issue: 106, slug: 'old', type: 'feat', base: 'main', devMd, home: root, write: true })
+    mkdirSync(join(wt.path, 'node_modules'), { recursive: true })
+    pruneWorktrees({
+      repoRoot: root, base: 'main', olderThan: '999d', devMd: `${devMd}\nworktree-deps-retention: 1d\n`,
+      ledgerTimes: { '106-old': OLD_LEDGER }, now: FUTURE_NOW, write: true,
+    })
+    const marker = join(wt.path, '.vegastack', '.tmp', 'deps-dropped')
+    expect(existsSync(marker)).toBe(true)
+
+    const ran: string[][] = []
+    const runner = ((file: string, args: string[]) => { ran.push([file, ...args]); return '' }) as never
+    const actions: string[] = []
+    const warns: string[] = []
+    // One `commands:` line, as a real profile has: a second would make the profile ambiguous.
+    const setup = 'commands: check `true` · setup `bun install --frozen-lockfile`\nworktree-retention: 14d\n'
+    expect(restoreDroppedDependencies({ path: wt.path, devMd: setup, write: true, actions, warns, runner })).toBe(true)
+    expect(ran[0]).toEqual(['sh', '-c', 'bun install --frozen-lockfile'])
+    expect(actions.join('\n')).toContain('reinstall dependencies')
+    // Done once: the marker is gone, so the next restore installs nothing.
+    expect(existsSync(marker)).toBe(false)
+    ran.length = 0
+    expect(restoreDroppedDependencies({ path: wt.path, devMd: setup, write: true, actions, warns, runner })).toBe(false)
+    expect(ran).toEqual([])
+  })
+
+  test('a fresh worktree installs nothing, however the dev.md reads', () => {
+    const root = repoWithRemote()
+    const wt = createWorktree({ repoRoot: root, issue: 107, slug: 'fresh', type: 'docs', base: 'main', devMd, home: root, write: true })
+    const ran: string[][] = []
+    const runner = ((file: string, args: string[]) => { ran.push([file, ...args]); return '' }) as never
+    const setup = 'commands: setup `bun install --frozen-lockfile`\n'
+    expect(restoreDroppedDependencies({ path: wt.path, devMd: setup, write: true, actions: [], warns: [], runner })).toBe(false)
+    expect(ran).toEqual([])
+  })
+
+  test('a worktree with uncommitted work keeps its dependencies', () => {
+    const root = repoWithRemote()
+    const wt = createWorktree({ repoRoot: root, issue: 106, slug: 'old', type: 'feat', base: 'main', devMd, home: root, write: true })
+    const deps = join(wt.path, 'node_modules')
+    mkdirSync(deps, { recursive: true })
+    writeFileSync(join(deps, 'marker.txt'), 'keep me\n')
+    // Something the operator has not saved yet. A reinstall is cheap; this is not.
+    writeFileSync(join(wt.path, 'notes.md'), 'half an idea\n')
+
+    const wet = pruneWorktrees({
+      repoRoot: root, base: 'main', olderThan: '999d', devMd: `${devMd}\nworktree-deps-retention: 1d\n`,
+      ledgerTimes: { '106-old': OLD_LEDGER }, now: FUTURE_NOW, write: true,
+    })
+    expect(wet.freed).not.toContain('106-old')
+    expect(existsSync(join(deps, 'marker.txt'))).toBe(true)
   })
 
   test('--write pushes the unpushed candidate first, then removes it', () => {

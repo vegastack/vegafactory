@@ -15,7 +15,7 @@
 //
 // Usage: node worktree.mjs create|restore|remove|list|prune|status [flags] [--json]
 import { execFileSync } from 'node:child_process';
-import { copyFileSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, realpathSync, statSync, writeFileSync } from 'node:fs';
+import { copyFileSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, realpathSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { delimiter, dirname, join, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -185,6 +185,11 @@ export function symlinkBlock(path) {
 
 const DAY_MS = 86_400_000;
 const DEFAULT_RETENTION_MS = 14 * DAY_MS;
+// Dependencies go first and sooner, because they are the cost. On this machine 628 MB of a 638 MB
+// worktree was `node_modules` and the checkout itself was 10 MB — so dropping them reclaims almost
+// everything while leaving the code, the branch and the history exactly where they were, and
+// resuming only has to run setup again.
+const DEFAULT_DEPS_RETENTION_MS = 3 * DAY_MS;
 
 // All of these must hold before a worktree directory is removed. Each failure
 // gets its own sentence so the caller can print exactly why the work is being
@@ -231,6 +236,15 @@ export function parseRetentionKnob(devMd) {
   return parseDuration(knobLine(devMd, 'worktree-retention')) ?? DEFAULT_RETENTION_MS;
 }
 
+// worktree-deps-retention: how long a parked worktree keeps its dependencies. Shorter than the
+// worktree's own window by default, and never longer than it — a window that outlived the thing
+// it belongs to would never fire, so a value past retention is read as retention.
+export function parseDepsRetentionKnob(devMd) {
+  const named = parseDuration(knobLine(devMd, 'worktree-deps-retention'));
+  const retention = parseRetentionKnob(devMd);
+  return Math.min(named ?? DEFAULT_DEPS_RETENTION_MS, retention);
+}
+
 // branch: the type list, which lives in the comment on that knob's own line —
 // `branch: <type>/<slug>   # type: feat | fix | docs | chore | refactor — …`.
 // knobLine() cannot read it, because it drops everything after the `#`, and
@@ -257,6 +271,16 @@ export function parseIncludeKnob(devMd) {
 
 // The `setup \`...\`` field of dev.md's `commands:` line — what a fresh
 // checkout has to run before it can build (bun install, and friends).
+export function parseSetupCommand(devMd) {
+  const line = knobLine(devMd, 'commands');
+  const match = line === null ? null : /(?:^|·)\s*setup\s+`([^`]+)`/.exec(line);
+  return match ? match[1].trim() : null;
+}
+
+// Left behind when prune takes a worktree's dependencies, and removed when they are put back. A
+// fresh worktree has no marker and installs nothing — a docs-only issue should not pay for a full
+// install — so restoring reinstalls exactly what was taken and nothing else.
+const DROPPED_MARKER = join('.vegastack', '.tmp', 'deps-dropped');
 
 // Age is measured from the LATER of the last commit and the last ledger edit:
 // a branch that has not moved may still be an issue someone is actively
@@ -384,9 +408,35 @@ function prepareCheckout({ repoRoot, path, devMd, home, write, actions, warns, b
     mkdirSync(dirname(target), { recursive: true });
     copyFileSync(source, target);
   }
-  // Dependencies are not installed here: a step that needs them runs the setup command itself,
-  // so a docs-only issue costs a few megabytes instead of a full install.
+  // Dependencies are not installed for a fresh checkout: a step that needs them runs the setup
+  // command itself, so a docs-only issue costs a few megabytes instead of a full install. The one
+  // exception is a worktree whose dependencies *this tool* took — putting back exactly what was
+  // removed is not the same as installing speculatively.
+  restoreDroppedDependencies({ path, devMd, write, actions, warns });
   applyCodexTrust({ home, absPath: path, write, actions, warns, blocks });
+}
+
+// Put back what prune took, and only that. The marker says this worktree had its dependencies
+// dropped while it was idle; installing is a plain run of dev.md's own `setup` command. A failure
+// is a warning rather than a block: the checkout is fine, and the next build will say so itself.
+export function restoreDroppedDependencies({ path, devMd, write, actions, warns, runner = execFileSync }) {
+  const marker = join(path, DROPPED_MARKER);
+  if (!existsSync(marker)) return false;
+  const setup = parseSetupCommand(devMd);
+  if (!setup) {
+    warns.push(at(path, 'dependencies were dropped while idle, but dev.md names no `setup` command to put them back'));
+    return false;
+  }
+  actions.push(at(path, 'reinstall dependencies: ' + setup));
+  if (!write) return false;
+  try {
+    runner('sh', ['-c', setup], { cwd: path, stdio: 'ignore' });
+    rmSync(marker, { force: true });
+    return true;
+  } catch (error) {
+    warns.push(at(path, 'could not reinstall dependencies (' + (error?.message ?? 'failed') + ') — run `' + setup + '` here'));
+    return false;
+  }
 }
 
 // Create the checkout for a branch: a fresh worktree cut from origin/<base>. Every issue —
@@ -681,7 +731,9 @@ export function pruneWorktrees({ repoRoot, base, olderThan, devMd, ledgerTimes =
   const warns = [];
   const actions = [];
   const retentionMs = parseDuration(olderThan) ?? parseRetentionKnob(devMd);
+  const depsRetentionMs = parseDepsRetentionKnob(devMd);
   const candidates = [];
+  const freed = [];
   refreshBase({ repoRoot, base, remote, actions, warns });
   for (const entry of inventory(repoRoot)) {
     const branch = entry.branch;
@@ -698,6 +750,27 @@ export function pruneWorktrees({ repoRoot, base, olderThan, devMd, ledgerTimes =
     const stamps = [lastCommitAt, ledgerUpdatedAt].map((v) => (v ? Date.parse(v) : Number.NaN)).filter(Number.isFinite);
     const ageDays = stamps.length === 0 ? 0 : Math.floor((now - Math.max(...stamps)) / DAY_MS);
     if (state !== 'parked') continue;
+    // Dependencies go on the shorter window, and on exactly the conditions that protect the
+    // worktree itself: never while anything is uncommitted, never while it is locked. Only
+    // `node_modules` is touched, by name — nothing git tracks, and nothing else on disk. What is
+    // lost is a reinstall; the code, the branch and the history stay where they are.
+    if (!entry.locked && !facts.dirty && isPastRetention({ lastCommitAt, ledgerUpdatedAt, now, retentionMs: depsRetentionMs })) {
+      const deps = join(entry.path, 'node_modules');
+      if (existsSync(deps)) {
+        actions.push(at(entry.name, 'drop node_modules, keeping the branch and its commits'));
+        if (write) {
+          try {
+            rmSync(deps, { recursive: true, force: true });
+            const marker = join(entry.path, DROPPED_MARKER);
+            mkdirSync(dirname(marker), { recursive: true });
+            writeFileSync(marker, new Date(now).toISOString() + '\n');
+            freed.push(entry.name);
+          } catch (error) {
+            warns.push(at(entry.name, 'kept its dependencies: ' + (error?.message ?? 'could not be removed')));
+          }
+        }
+      }
+    }
     if (!isPastRetention({ lastCommitAt, ledgerUpdatedAt, now, retentionMs })) continue;
     const verdict = evaluateRemoval({ state, ...facts, locked: entry.locked, force: true });
     // "Prune pushes then removes, and never automatically for anything with
@@ -746,7 +819,7 @@ export function pruneWorktrees({ repoRoot, base, olderThan, devMd, ledgerTimes =
       candidate.reason = null;
     }
   }
-  return { blocks, warns, actions, candidates };
+  return { blocks, warns, actions, candidates, freed };
 }
 
 // --- list and status ------------------------------------------------------

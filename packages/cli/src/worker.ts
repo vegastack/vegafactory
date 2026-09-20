@@ -39,6 +39,7 @@ import { defaultBranch } from './guard-rules.ts'
 import { stateOf, type State } from './labels.ts'
 import { lintPlan, normalizeGroupPath, parseIndependentGroups, sharedByEveryChild } from '../../../skills/dev/dev-plan/scripts/plan-lint.mjs'
 import { appKeyPath as workerAppKey } from './home.ts'
+import { tidyWorktrees } from './worktree.ts'
 
 // How often the board is read, how many steps run at once, and how long one step may take.
 export const POLL_MS = 2 * 60_000
@@ -1859,6 +1860,8 @@ export interface CliDeps {
   start?: ProcessStart
   now?: () => number
   sleep?: (ms: number) => Promise<void>
+  // How the worktree script is run, so a test can watch the tidy-up without a real checkout.
+  worktreeScript?: (args: string[], cwd?: string) => { status: number; stdout: string }
   cli?: string[]
 }
 
@@ -2128,6 +2131,12 @@ export async function runWorker(argv: string[], deps: CliDeps = {}): Promise<num
           stepOutlivesToken(still.entry.caps)
           await identity?.freshen()
           for (const candidate of await poll(pollDeps, inflight)) note(`#${candidate.number} ${candidate.action} started`)
+          // Housekeeping rides in the pass the worker already makes, so there is no second
+          // schedule to reason about. It is the same `prune` a person runs, through the same
+          // refusals — and what it keeps is reported here rather than silently skipped.
+          const tidied = tidyWorktrees(root, { write: true, spawn: deps.worktreeScript })
+          for (const line of [...tidied.actions, ...tidied.warns, ...tidied.blocks]) note(`worktrees: ${line}`)
+          if (tidied.freed.length) note(`worktrees: freed the dependencies of ${tidied.freed.join(', ')}`)
         } catch (error) {
           note(`poll failed: ${(error as Error).message}`)
         }
