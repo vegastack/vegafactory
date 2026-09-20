@@ -4,13 +4,14 @@ The project's story, newest first: what got built, why, and how it went — for 
 
 ## 20-09-2026 — Worktrees that clean up after themselves ([#260](https://github.com/vegastack/vegafactory/issues/260))
 
-- **What:** The worker names the worktrees that could be reclaimed, every pass, and `vegafactory worktree prune --write` reclaims them. Dependencies go first and come back before the next run starts.
-- **Why:** Step 9 of [#251](https://github.com/vegastack/vegafactory/issues/251). Nothing cleaned up: 1.8 GB across fifteen worktrees on this machine, thirteen with no open issue — and 628 MB of one 638 MB worktree was `node_modules` while the checkout itself was 10 MB. The cost is duplicated dependencies, not code.
-- **How it went:** The existing safe-to-remove test did the hard part, so this extended it rather than adding a second idea of what is safe. The review caught four ways it did not work: a flag missing from the parser's boolean list swallowed `--write`, making the pass a silent dry run; it could touch a worktree an agent was reading; it inherited the interactive prune's habit of committing and pushing to protect work, which a background pass has nobody to ask about; and the record of a dropped dependency lived inside the worktree it described, so nothing put them back. The agent-thread half went whole to [#274](https://github.com/vegastack/vegafactory/issues/274) — a `--session-id` that starts a session is not a resume. And removing on its own turned out to need something nobody has: three ways to tell whether a person is sitting in a checkout were tried and each was wrong, the last one worse than nothing, so the pass reports and a person reclaims.
-- **Changed:** a `worktree-deps-retention` knob · dependencies dropped on `prune --write` and reinstalled before the next run · the worker's pass reporting, every pass, what could be reclaimed and what it would refuse.
-- **Decisions:** none new.
+- **What:** The worker names the worktrees that could be reclaimed, every pass; `vegafactory worktree prune --write` reclaims them. Dependencies go first, on a shorter window, and come back before the next run.
+- **Why:** Step 9 of [#251](https://github.com/vegastack/vegafactory/issues/251). Nothing cleaned up: 1.8 GB across fifteen worktrees, thirteen with no open issue — and 628 MB of one 638 MB worktree was `node_modules`. The cost is dependencies, not code.
+- **How it went:** The review found five ways it did not work, and the last changed the answer's shape: removing on its own needs to know whether a person is sitting in a checkout, and nothing tells you. The run map is blind to attended sessions, an mtime does not move for someone reading, and git's worktree lock is not reference-counted — two sessions in one checkout have the first to end release the other's hold. That was built and reverted, being worse than nothing. So the pass reports and a person reclaims. The threads half went to [#274](https://github.com/vegastack/vegafactory/issues/274): a `--session-id` that starts a session is not a resume.
+- **Changed:** a `worktree-deps-retention` knob · dependencies dropped on `prune --write`, reinstalled before the next run · the worker reporting what could go and what it would refuse.
+- **Decisions:** the worker reports, a person reclaims (21-09-2026).
 
 — approved by (kmanojkumar) · built by claude · branch feat/260-worktrees-that-clean-up-after-themselves
+
 ## 20-09-2026 — A Linux worker survives the operator logging out ([#262](https://github.com/vegastack/vegafactory/issues/262))
 
 - **What:** `vegafactory worker enable` sets `loginctl enable-linger` before it loads anything, and refuses with the failing command if this account may not grant it. The systemd unit also writes the same two log files the macOS one does.
