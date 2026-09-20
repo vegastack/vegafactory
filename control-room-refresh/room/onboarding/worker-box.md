@@ -102,7 +102,10 @@ On Linux, the logout drill is separate and the order matters. Log out every sess
 
 ```sh
 loginctl list-sessions | grep vf-worker || echo 'no sessions, which is the point'
+sleep 60
 sudo -u vf-worker XDG_RUNTIME_DIR=/run/user/$(id -u vf-worker) systemctl --user is-active vegafactory-worker.service
 ```
 
-The second must print `active` while vf-worker has no session at all. Without linger it prints `inactive` or fails to reach the user's systemd, and the worker has been dead since the logout.
+The `sleep` is the part that makes this a test. logind keeps a user's manager alive for `UserStopDelaySec` after the last session ends — ten seconds by default, and a box may set it higher, so check `loginctl show --property=UserStopDelaySec` if you want to be exact. Ask too soon and a worker with no linger at all answers `active`, and the drill passes while proving nothing.
+
+After the wait, it must print `active` while vf-worker has no session. Without linger it prints `inactive` or cannot reach that user's systemd, and the worker has been dead since the logout.

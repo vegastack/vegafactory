@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { claimBody, claimLine, holderOf, nodeId, trustedFactory } from '../src/claim.ts'
 import {
-  unwritableForUnit,
+  alreadyLingering, unwritableForUnit,
   SERVICE_NAME,
   APP_ID, DEFAULT_CAPS, MAX_FAILURES, MAX_RUNS, MAX_TIMER_MS, POLL_MS, RETRY_MS, STEP_TIMEOUT_MS, TOKEN_MARGIN_MS, parseCaps, rosterName, sayDuration, agentArgs, appIdentity, appJwt, appKeyPath, assertKeyFile, board, decide, defaultRunStep, workerDir,
   acknowledgedPlan, canonicalPath, childRunEnvironment, confirmShip, disjointSiblings, pushableBranch, shipWord,
@@ -1166,6 +1166,14 @@ describe('readiness and the service', () => {
     // session and systemd ends that session with the last login, so without this an always-on
     // worker dies at logout — quietly, and hours later.
     expect(serviceCommands('linux', '/u', 'enable', 501)[0]).toEqual(['loginctl', 'enable-linger', '501'])
+    // Already lingering: setting it is gated by polkit, and asking again would fail on exactly the
+    // box where an administrator had just done it — making the documented recovery no recovery.
+    expect(serviceCommands('linux', '/u', 'enable', 501, true).flat()).not.toContain('enable-linger')
+    expect(serviceCommands('linux', '/u', 'enable', 501, true)[0]).toEqual(['systemctl', '--user', 'daemon-reload'])
+    // Reading the property needs no privilege, so it is safe to ask before trying to set it.
+    expect(alreadyLingering((() => ({ code: 0, stdout: 'Linger=yes\n', stderr: '' })) as Probe, 501)).toBe(true)
+    expect(alreadyLingering((() => ({ code: 0, stdout: 'Linger=no\n', stderr: '' })) as Probe, 501)).toBe(false)
+    expect(alreadyLingering((() => ({ code: 1, stdout: '', stderr: 'no such user' })) as Probe, 501)).toBe(false)
     // Disabling leaves it alone: linger is user-wide and other services on this account may rely
     // on it. Recorded as a decision, not an oversight.
     expect(serviceCommands('linux', '/u', 'disable').flat()).not.toContain('linger')

@@ -652,6 +652,15 @@ export function unitPath(platform: NodeJS.Platform, home = homedir()): string {
 // service that starts without the setting the operator just proved.
 // eslint-disable-next-line no-control-regex
 const UNWRITABLE = /[\u0000-\u001f\u007f]/
+// Whether this account's services already outlive its logins. Reading the property needs no
+// privilege, so it is safe to ask before trying to set it.
+export function alreadyLingering(run: Probe, uid: number): boolean {
+  try {
+    const answer = run('loginctl', ['show-user', String(uid), '--property=Linger'])
+    return answer.code === 0 && /Linger=yes/i.test(answer.stdout)
+  } catch { return false }
+}
+
 export function unwritableForUnit(env: NodeJS.ProcessEnv): string | null {
   for (const name of ['VEGAFACTORY_APP_ID', 'VEGAFACTORY_APP_ACTOR', 'VEGAFACTORY_APP_PRIVATE_KEY_FILE']) {
     const value = env[name]?.trim()
@@ -724,7 +733,7 @@ export function unitText(platform: NodeJS.Platform, input: { cli: string[]; root
   ].join('\n')
 }
 
-export function serviceCommands(platform: NodeJS.Platform, path: string, verb: 'enable' | 'disable', uid = userInfo().uid): string[][] {
+export function serviceCommands(platform: NodeJS.Platform, path: string, verb: 'enable' | 'disable', uid = userInfo().uid, lingering = false): string[][] {
   if (platform === 'darwin') {
     const target = `gui/${uid}`
     // Unloading first is what makes a re-enable pick up the file that was just written. launchd
@@ -748,7 +757,11 @@ export function serviceCommands(platform: NodeJS.Platform, path: string, verb: '
   // leaves an already-active service running the version it started with.
   return verb === 'enable'
     ? [
-      ['loginctl', 'enable-linger', String(uid)],
+      // Setting it is gated by polkit; reading it is not. An administrator who has already run
+      // `loginctl enable-linger` for this account has done the one thing this needs, and asking
+      // again would fail on exactly the box where that recovery was required — which would make
+      // the documented way out of the refusal no way out at all.
+      ...(lingering ? [] : [['loginctl', 'enable-linger', String(uid)]]),
       ['systemctl', '--user', 'daemon-reload'],
       ['systemctl', '--user', 'enable', '--now', 'vegafactory-worker.service'],
       ['systemctl', '--user', 'restart', 'vegafactory-worker.service'],
@@ -1959,7 +1972,7 @@ export async function runWorker(argv: string[], deps: CliDeps = {}): Promise<num
         print({ ok: false, reason: unwritable }, `refused: ${unwritable}`)
         return 2
       }
-      const commands = serviceCommands(platform, path, 'enable')
+      const commands = serviceCommands(platform, path, 'enable', userInfo().uid, platform !== 'darwin' && alreadyLingering(deps.run ?? probe, userInfo().uid))
       if (args.dryRun) {
         print({ ok: true, checks, unit: path, dryRun: true }, `${renderChecks(checks)}\n\ndry run: would write ${path}, then ${commands.map((command) => command.join(' ')).join(' && ')}`)
         return 0
