@@ -1894,6 +1894,10 @@ export async function runWorker(argv: string[], deps: CliDeps = {}): Promise<num
   const listing = ['enable', 'run'].includes(args.verb)
     ? verifiedListing(root, { repo, host, home, git: deps.git })
     : listedHere(root, { repo, host, home })
+  // That listing may have fast-forwarded the clone, and every gate below it can return before the
+  // poll loop is ever reached. The record follows the clone here, once, so a run that stops for
+  // billing or a missing key does not leave the profile unreadable behind it.
+  if (listing.sha) await recordRoomSha(root, home, listing.sha)
   const keyPath = appKeyPath(env, home)
   const print = (value: unknown, text: string) => out(args.json ? JSON.stringify(value, null, 2) : text)
 
