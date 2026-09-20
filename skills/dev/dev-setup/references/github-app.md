@@ -45,8 +45,18 @@ own settings page — `https://github.com/organizations/<org>/settings/apps/<you
 - **The slug** is the last part of that page's own URL. `VEGAFACTORY_APP_ACTOR` is that slug with
   `[bot]` after it, and it is worth confirming against a comment the App has actually posted.
 
-No API call is needed, and none is offered here: `GET /app` answers only to a JWT signed with the
-App's private key, which is a longer road to two values the settings page already shows.
+Or read both at once, as an organization owner, from the installation the App already has:
+
+```sh
+gh api orgs/<org>/installations --jq '.installations[] | select(.app_slug == "<your-app-slug>")
+  | "VEGAFACTORY_APP_ID=\(.app_id)\nVEGAFACTORY_APP_ACTOR=\(.app_slug)[bot]"'
+```
+
+That is the same endpoint as `## Recording the installation` below, which is why it costs nothing
+extra: the one call answers the App id, the slug and the installation id together. It needs an
+owner's own `gh` login and no JWT — `GET /app` would answer these too, but only to a token signed
+with the App's private key, which is a longer road to two values the settings page already shows.
+A 403 means this account is not an owner; the settings page above still works.
 
 Both variables are set together or neither is. Setting one makes every command refuse by name,
 because a factory that mints as one identity and trusts another distrusts everything it writes.

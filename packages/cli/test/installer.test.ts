@@ -628,9 +628,12 @@ describe('selecting a family', () => {
     ]
     for (const half of halves) {
       for (const verb of verbs) {
-        const env: Record<string, string> = { ...process.env as Record<string, string>, HOME: temporary, VEGAFACTORY_HOME: join(temporary, '.vegafactory') }
-        for (const [name, value] of Object.entries(half)) { if (value === undefined) delete env[name]; else env[name] = value }
-        const result = Bun.spawnSync(['node', cli, ...verb], { cwd: packageRoot, env })
+        const base: Record<string, string> = { ...process.env as Record<string, string>, HOME: temporary }
+        for (const [name, value] of Object.entries(half)) { if (value === undefined) delete base[name]; else base[name] = value }
+        const result = Bun.spawnSync(['node', cli, ...verb], {
+          cwd: packageRoot,
+          env: { ...base, VEGAFACTORY_HOME: join(temporary, '.vegafactory') },
+        })
         expect(result.exitCode).toBe(2)
         expect(result.stderr.toString()).toContain('VEGAFACTORY_APP_ID and VEGAFACTORY_APP_ACTOR must be set together')
       }
