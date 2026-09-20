@@ -687,7 +687,11 @@ export function unitText(platform: NodeJS.Platform, input: { cli: string[]; root
     '[Unit]', 'Description=VegaFactory worker', '',
     '[Service]', 'Type=simple', `WorkingDirectory=${input.root}`,
     `ExecStart=${argv.map((arg) => JSON.stringify(arg)).join(' ')}`,
-    ...identity.map(([name, value]) => `Environment=${name}=${value}`),
+    // Quoted, and `%` doubled: systemd reads `Environment=` as a list of assignments split on
+    // whitespace, and expands `%` specifiers. A key at `/home/me/App Keys/key.pem` would
+    // otherwise arrive split in two, and `enable` would have validated the very path the started
+    // worker cannot find.
+    ...identity.map(([name, value]) => `Environment=${name}="${value.replace(/%/g, '%%').replace(/([\\"])/g, '\\$1')}"`),
     'Restart=always', 'RestartSec=30', '',
     '[Install]', 'WantedBy=default.target', '',
   ].join('\n')

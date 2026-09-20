@@ -1099,10 +1099,14 @@ describe('readiness and the service', () => {
     expect(plist).toContain('<key>VEGAFACTORY_APP_ID</key><string>12345</string>')
     expect(plist).toContain('<key>VEGAFACTORY_APP_ACTOR</key><string>acmefactory[bot]</string>')
     const unit = unitText('linux', { cli: ['vegafactory'], root, repo: 'o/r', logDir: workerDir(root), env })
-    expect(unit).toContain('Environment=VEGAFACTORY_APP_ID=12345')
-    expect(unit).toContain('Environment=VEGAFACTORY_APP_ACTOR=acmefactory[bot]')
+    expect(unit).toContain('Environment=VEGAFACTORY_APP_ID="12345"')
+    expect(unit).toContain('Environment=VEGAFACTORY_APP_ACTOR="acmefactory[bot]"')
+    // systemd splits `Environment=` on whitespace and expands `%`, so a path with a space in it
+    // has to survive quoting or the started worker looks for a key that is not there.
+    const spaced = unitText('linux', { cli: ['vegafactory'], root, repo: 'o/r', logDir: workerDir(root), env: { VEGAFACTORY_APP_PRIVATE_KEY_FILE: '/home/me/App Keys/100% mine.pem' } })
+    expect(spaced).toContain('Environment=VEGAFACTORY_APP_PRIVATE_KEY_FILE="/home/me/App Keys/100%% mine.pem"')
     expect(plist).toContain('<key>VEGAFACTORY_APP_PRIVATE_KEY_FILE</key><string>/keys/app.pem</string>')
-    expect(unit).toContain('Environment=VEGAFACTORY_APP_PRIVATE_KEY_FILE=/keys/app.pem')
+    expect(unit).toContain('Environment=VEGAFACTORY_APP_PRIVATE_KEY_FILE="/keys/app.pem"')
     // The path, never the key. Nothing that could be pasted into a token request appears here.
     for (const text of [plist, unit]) expect(text).not.toContain('BEGIN')
 
@@ -1379,6 +1383,17 @@ describe('the command', () => {
     const broken = await run(['enable'], { platform: 'darwin', run: answers(5), fetch, env: { VEGAFACTORY_APP_PRIVATE_KEY_FILE: key } })
     expect(broken.code).toBe(1)
     expect(broken.text).toContain('bootstrap')
+
+    // An unload that failed for any other reason left the old job loaded, so what is running is
+    // still the old identity. Reporting "enabled" there reports the wrong worker as the new one.
+    const denied: Probe = (command, cmdArgs) => {
+      if (command === 'launchctl' && cmdArgs[0] === 'bootout') return { code: 1, stdout: '', stderr: 'Boot-out failed: 1: Operation not permitted' }
+      return answers(0)(command, cmdArgs)
+    }
+    const refused = await run(['enable'], { platform: 'darwin', run: denied, fetch, env: { VEGAFACTORY_APP_PRIVATE_KEY_FILE: key } })
+    expect(refused.code).toBe(1)
+    expect(refused.text).toContain('bootout')
+    expect(refused.text).toContain('Operation not permitted')
   })
 
   // End to end, because the unit is only right if `enable` actually passes what it was run with
@@ -1410,10 +1425,10 @@ describe('the command', () => {
     })
     expect(result.code).toBe(0)
     const unit = readFileSync(unitPath('linux', home), 'utf8')
-    expect(unit).toContain('Environment=VEGAFACTORY_APP_ID=12345')
-    expect(unit).toContain('Environment=VEGAFACTORY_APP_ACTOR=acmefactory[bot]')
+    expect(unit).toContain('Environment=VEGAFACTORY_APP_ID="12345"')
+    expect(unit).toContain('Environment=VEGAFACTORY_APP_ACTOR="acmefactory[bot]"')
     // The path the run was given travels with it, or token refresh fails on the first poll.
-    expect(unit).toContain(`Environment=VEGAFACTORY_APP_PRIVATE_KEY_FILE=${key}`)
+    expect(unit).toContain(`Environment=VEGAFACTORY_APP_PRIVATE_KEY_FILE="${key}"`)
     // The path, never the key itself.
     expect(unit).not.toContain('BEGIN')
   })
