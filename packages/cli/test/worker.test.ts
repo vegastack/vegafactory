@@ -1285,16 +1285,29 @@ describe('the command', () => {
   // answers "cannot tell", which for the update knob means `off` until someone syncs by hand.
   test('a refreshed control room is recorded, so the profile stays readable', async () => {
     const clone = join(home, '.vegafactory', 'control-room', 'o')
-    const moved = spawnSync('git', ['-C', clone, 'rev-parse', 'HEAD'], { encoding: 'utf8' }).stdout.trim()
-    writeFileSync(join(home, '.vegafactory', 'factory.json'), JSON.stringify({
+    const before = '0'.repeat(40)
+    const moved = 'a'.repeat(39) + '9'
+    const write = () => writeFileSync(join(home, '.vegafactory', 'factory.json'), JSON.stringify({
       schemaVersion: 2, revision: 0,
-      controlRooms: { o: { repo: 'o/room', path: clone, branch: 'main', remote: 'https://example.invalid/o/room.git', sha: '0'.repeat(40), lastSyncedAt: null } },
+      controlRooms: { o: { repo: 'o/room', path: clone, branch: 'main', remote: 'https://example.invalid/o/room.git', sha: before, lastSyncedAt: null } },
     }))
+    const recorded = () => JSON.parse(readFileSync(join(home, '.vegafactory', 'factory.json'), 'utf8')).controlRooms.o
+
+    write()
     await recordRoomSha(root, home, moved)
-    const recorded = JSON.parse(readFileSync(join(home, '.vegafactory', 'factory.json'), 'utf8'))
-    expect(recorded.controlRooms.o.sha).toBe(moved)
-    expect(recorded.controlRooms.o.path).toBe(clone)
-    expect(recorded.controlRooms.o.repo).toBe('o/room')
+    expect(recorded().sha).toBe(moved)
+    // The rest of the record is the sync's, and is left exactly as it was.
+    expect(recorded().path).toBe(clone)
+    expect(recorded().repo).toBe('o/room')
+
+    // `git` answers a failure on the same channel the sha is read from, so anything that is not a
+    // commit is refused rather than written: a record holding error text would have every later
+    // profile read reject the clone for being somewhere it has never been.
+    for (const notASha of ['', 'fatal: not a git repository', 'HEAD', 'a'.repeat(39), 'A'.repeat(40)]) {
+      write()
+      await recordRoomSha(root, home, notASha)
+      expect(recorded().sha).toBe(before)
+    }
   })
 
   // Idle has to mean idle. A run that starts and settles inside the same pass leaves nothing

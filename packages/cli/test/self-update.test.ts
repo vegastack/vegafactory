@@ -161,6 +161,27 @@ describe('what one machine remembers between runs', () => {
     expect(asks).toBe(2)
   })
 
+  // Asking npm and installing are different costs with different hours. Sharing one stamp got
+  // both wrong: a `notify` session's cached answer stopped an `auto` worker installing it at all.
+  test('a notify session does not stop an auto worker installing what it found', async () => {
+    const home = realpathSync(mkdtempSync(join(tmpdir(), 'vf-update-modes-')))
+    const at = Date.parse('2026-09-20T09:00:00Z')
+    let installs = 0
+    const run: UpdateRunner = (command) => {
+      if (command === 'npm') { installs += 1; return { code: 0, stdout: '', stderr: '' } }
+      return { code: 0, stdout: '0.21.0\n', stderr: '' }
+    }
+    // A session only reporting: it caches what npm said and installs nothing.
+    const told = await maintainSelfUpdate({ mode: 'notify', before: '0.20.1', latest: async () => '0.21.0', run, home: { home }, now: at })
+    expect(told.action).toBe('available')
+    expect(installs).toBe(0)
+
+    // A worker a minute later, on the same cached answer, still installs it.
+    const did = await maintainSelfUpdate({ mode: 'auto', before: '0.20.1', latest: async () => '0.21.0', run, home: { home }, now: at + 60_000 })
+    expect(did.action).toBe('updated')
+    expect(installs).toBe(1)
+  })
+
   test('an install that failed is not retried on the next pass', async () => {
     const home = realpathSync(mkdtempSync(join(tmpdir(), 'vf-update-retry-')))
     let installs = 0

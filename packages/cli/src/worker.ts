@@ -337,7 +337,12 @@ export function refreshRoster(clone: string, git: GitRun = gitIn(clone)): Refres
   if (upstream.status !== 0) return { ok: false, reason: 'the control-room clone tracks no upstream branch, so there is nothing to refresh it from', sha: null }
   const merged = git(['merge', '--ff-only', '@{u}'])
   if (merged.status !== 0) return { ok: false, reason: `the control-room clone has diverged from its remote (${merged.out.split('\n')[0] || 'no fast-forward'}) — fix it by hand`, sha: null }
-  return { ok: true, reason: 'refreshed from the control room', sha: git(['rev-parse', 'HEAD']).out || null }
+  // Only a real commit is a commit. `git` answers a failure on the same channel this reads, so
+  // without the shape check an error string could be recorded as the clone's position — and every
+  // later profile read would reject the clone for being somewhere it never was.
+  const head = git(['rev-parse', 'HEAD'])
+  const sha = head.status === 0 && /^[0-9a-f]{40}$/.test(head.out.trim()) ? head.out.trim() : null
+  return { ok: true, reason: 'refreshed from the control room', sha }
 }
 
 export interface Listing { ok: boolean; reason: string; entry: Node | null; file: string | null; sha?: string | null }
@@ -350,6 +355,7 @@ export interface Listing { ok: boolean; reason: string; entry: Node | null; file
 // tell", which for the update knob means `off`. The record is a cache of a local fact, so a write
 // that fails changes nothing but the next pass's work.
 export async function recordRoomSha(root: string, home: string, sha: string): Promise<void> {
+  if (!/^[0-9a-f]{40}$/.test(sha)) return
   const room = controlRoomClone(root, home)
   if (!room) return
   // Nothing moved, so there is nothing to record. Writing anyway would take the settings lock and

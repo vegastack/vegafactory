@@ -34,7 +34,11 @@ export const UPDATE_CHECK_EVERY_MS = 60 * 60 * 1000
 // What one machine remembers between runs: when npm was last asked, and the version a background
 // install was working towards. The note is advisory — every read falls back to "nothing known",
 // because a machine that cannot read it must still run.
-export interface UpdateNote { checkedAt?: number; latest?: string | null; startedFrom?: string; startedTo?: string; startedAt?: number }
+// `checkedAt` throttles asking npm; `attemptedAt` throttles installing. They are different costs
+// and conflating them got both wrong: a `notify` session's cached answer stopped an `auto` worker
+// from ever installing it, and a failed install retried on the next pass because the lookup that
+// preceded it was still fresh.
+export interface UpdateNote { checkedAt?: number; latest?: string | null; attemptedAt?: number; startedFrom?: string; startedTo?: string; startedAt?: number }
 
 export function readUpdateNote(options: HomeOptions = {}): UpdateNote {
   try {
@@ -203,25 +207,30 @@ export async function maintainSelfUpdate(options: {
   // The hour covers the whole attempt, not just a successful lookup. Remembering only successes
   // meant an unreachable registry was retried every pass, and a failed install of a version
   // already remembered was retried every pass too — each one holding the loop for its own bound.
-  if (options.home && !dueForCheck(now, options.home)) {
-    const remembered = rememberedLatest(now, options.home)
-    if (!remembered) return idle('none', before, null, '')
-    if (!semverLess(before, remembered)) return idle('current', before, remembered, `vegafactory ${before} is already current`)
-    if (options.mode === 'notify') return idle('available', before, remembered, `vegafactory ${remembered} is available; installed ${before} — run: vegafactory update`)
-    return idle('none', before, remembered, '')
-  }
   let latest: string | null
-  try { latest = await (options.latest ?? latestPublishedVersion)() } catch { latest = null }
-  // The attempt is stamped either way, so a registry that is down costs one call an hour. What it
-  // answered replaces what was there: keeping an older `latest` behind a fresh stamp would let a
-  // later session install from an answer nobody just checked.
-  if (options.home) writeUpdateNote({ ...readUpdateNote(options.home), checkedAt: now, latest }, options.home)
+  if (options.home && !dueForCheck(now, options.home)) {
+    latest = rememberedLatest(now, options.home)
+  } else {
+    try { latest = await (options.latest ?? latestPublishedVersion)() } catch { latest = null }
+    if (options.home) writeUpdateNote({ ...readUpdateNote(options.home), checkedAt: now, latest }, options.home)
+  }
   if (!latest) return idle('unavailable', before, null, `could not check npm; continuing with vegafactory ${before}`)
   if (!semverLess(before, latest)) {
     const detail = semverLess(latest, before) ? ` (ahead of npm latest ${latest})` : ''
     return idle('current', before, latest, `vegafactory ${before} is already current${detail}`)
   }
   if (options.mode === 'notify') return idle('available', before, latest, `vegafactory ${latest} is available; installed ${before} — run: vegafactory update`)
+
+  // An install that just failed must not be tried again on the next pass two minutes later, each
+  // try holding the loop for its own five-minute bound. This is the install's own hour, kept apart
+  // from the lookup's: a `notify` session's cached answer never stops an `auto` worker installing.
+  if (options.home) {
+    const { attemptedAt } = readUpdateNote(options.home)
+    if (typeof attemptedAt === 'number' && now - attemptedAt < UPDATE_CHECK_EVERY_MS) {
+      return idle('none', before, latest, '')
+    }
+    writeUpdateNote({ ...readUpdateNote(options.home), attemptedAt: now }, options.home)
+  }
 
   const run = options.run ?? defaultUpdateRunner
   let installed: UpdateRunResult
