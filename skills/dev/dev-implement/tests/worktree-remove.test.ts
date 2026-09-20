@@ -306,36 +306,6 @@ describe('pruneWorktrees', () => {
     expect(existsSync(join(deps, 'marker.txt'))).toBe(true)
   })
 
-  // Nothing outside the worker registers a session anywhere, so an attended run on another
-  // terminal is invisible to the pass. Its files are not: a worktree touched recently is being
-  // worked on, whatever its last commit and its ledger say.
-  test('a worktree touched recently is not idle, however old its commits are', () => {
-    const root = repoWithRemote()
-    const wt = createWorktree({ repoRoot: root, issue: 106, slug: 'old', type: 'feat', base: 'main', devMd, home: root, write: true })
-    writeFileSync(join(wt.path, 'work.txt'), 'real work\n')
-    execFileSync('git', ['-C', wt.path, 'add', '.'], { encoding: 'utf8' })
-    // Committed a year ago, and pushed: by every git fact this worktree is long idle.
-    const old = '2025-09-01T00:00:00Z'
-    execFileSync('git', ['-C', wt.path, 'commit', '-m', 'work'], {
-      encoding: 'utf8', env: { ...process.env, GIT_AUTHOR_DATE: old, GIT_COMMITTER_DATE: old },
-    })
-    execFileSync('git', ['-C', wt.path, 'push', '-u', 'origin', 'HEAD'], { encoding: 'utf8' })
-    const deps = join(wt.path, 'node_modules')
-    mkdirSync(deps, { recursive: true })
-    writeFileSync(join(deps, 'marker.txt'), 'in use\n')
-    // Somebody is working here right now, and this is the only sign of it.
-    execFileSync('git', ['-C', wt.path, 'status'], { encoding: 'utf8' })
-
-    // Old commit, old ledger, fresh checkout: idle by every stamp except the one that counts.
-    const r = pruneWorktrees({
-      repoRoot: root, base: 'main', olderThan: '14d', devMd: `${devMd}\nworktree-deps-retention: 1d\n`,
-      ledgerTimes: { '106-old': OLD_LEDGER }, now: Date.now(), write: true, automatic: true,
-    })
-    expect(r.freed).not.toContain('106-old')
-    expect(existsSync(join(deps, 'marker.txt'))).toBe(true)
-    expect(existsSync(wt.path)).toBe(true)
-  })
-
   test('a worktree a run is holding is left entirely alone', () => {
     const root = repoWithRemote()
     const wt = createWorktree({ repoRoot: root, issue: 106, slug: 'old', type: 'feat', base: 'main', devMd, home: root, write: true })

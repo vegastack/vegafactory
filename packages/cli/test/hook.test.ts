@@ -6,7 +6,7 @@ import { dirname, join } from 'node:path'
 import { Readable } from 'node:stream'
 import { claim } from '../src/claim.ts'
 import type { GhRunner } from '../src/gh.ts'
-import { detachBounded, issueFromBranch, issueFromWorktree, readHookInput, runHook, type HookDeps } from '../src/hook.ts'
+import { detachBounded, holdWorktree, issueFromBranch, issueFromWorktree, readHookInput, releaseWorktree, runHook, type HookDeps } from '../src/hook.ts'
 import { ackBody, artifactHash } from '../src/issue.ts'
 import { addLesson, readLessons } from '../src/learning.ts'
 import { FakeGitHub } from './fake-github.ts'
@@ -19,6 +19,7 @@ const git = (cwd: string, ...args: string[]) => {
 
 let gh: FakeGitHub
 let root: string
+let gitCalls: string[][]
 let tree: string
 let plain: string
 let out: string[]
@@ -37,6 +38,9 @@ const runner: GhRunner = (args, input) => {
 
 const deps = (): HookDeps => ({
   runner, now: () => gh.clock, out: (text) => out.push(text), cli: ['vf'], host: 'box',
+  // Recorded rather than run: a session holding its worktree is a git lock, and the test watches
+  // for it instead of making one.
+  runGit: (cwd, args) => { gitCalls.push([cwd, ...args]) },
   // Usage collection rides on the same detached runner; every other assertion counts the rest.
   detach: (command) => { (command[1] === 'stats' ? stats : detached).push(command); return detachPid },
 })
@@ -76,6 +80,7 @@ beforeEach(() => {
   stats = []
   detachPid = undefined
   prHead = 'feat/7-export'
+  gitCalls = []
   const base = realpathSync(mkdtempSync(join(tmpdir(), 'hook-')))
   const origin = join(base, 'origin.git')
   root = join(base, 'repo')
@@ -663,6 +668,33 @@ describe('usage collection', () => {
     await hook('post-tool', { cwd: tree })
     await hook('prompt', { cwd: tree })
     expect(stats).toEqual([])
+  })
+
+  // The unattended pass cannot see an attended session: nothing registers one, and no timestamp
+  // finds it — a person reading and building all afternoon writes nothing git can see. Git's own
+  // worktree lock is the signal, and the safe-to-remove test already refuses a locked worktree.
+  test('a session holds its worktree while it works and gives it back at the end', async () => {
+    await hook('session-start', { cwd: tree })
+    const locked = gitCalls.filter((call) => call[1] === 'worktree' && call[2] === 'lock')
+    expect(locked).toHaveLength(1)
+    expect(locked[0]!.at(-1)).toBe(tree)
+    expect(locked[0]!.join(' ')).toContain('a session is working here')
+
+    gitCalls = []
+    await hook('session-end', { cwd: tree })
+    const unlocked = gitCalls.filter((call) => call[1] === 'worktree' && call[2] === 'unlock')
+    expect(unlocked).toHaveLength(1)
+    expect(unlocked[0]!.at(-1)).toBe(tree)
+  })
+
+  test('the main checkout is never locked — it is not a worktree anything reclaims', () => {
+    const inMain = { cwd: root, top: root, root, repo: 'o/r', number: 7, owner: 'box:repo', branch: 'feat/7-export' }
+    holdWorktree(inMain, deps())
+    releaseWorktree(inMain, deps())
+    expect(gitCalls.filter((call) => call[1] === 'worktree')).toEqual([])
+    // A real worktree is held, so the check is about where it is and not about doing nothing.
+    holdWorktree({ ...inMain, top: tree }, deps())
+    expect(gitCalls.filter((call) => call[2] === 'lock')).toHaveLength(1)
   })
 
   test('a checkout with no issue still collects', async () => {
