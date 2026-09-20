@@ -416,6 +416,8 @@ describe('pruneWorktrees', () => {
     expect(() => ghJson(['api', 'x'], { gh: fakeGh('[{"number":1},') })).toThrow(/unparseable/)
     // A valid page followed by a truncation message is not complete data.
     expect(() => ghJson(['api', 'x'], { gh: fakeGh(`${page(1)}\nerror: gateway timeout`) })).toThrow(/unparseable/)
+    // Including a suffix that begins with a quote, which would otherwise be read as a string.
+    expect(() => ghJson(['api', 'x'], { gh: fakeGh(`${page(1)}\n"gateway timeout"`) })).toThrow(/unparseable/)
     // Nor is anything before the first document.
     expect(() => ghJson(['api', 'x'], { gh: fakeGh(`warning: rate limited\n${page(1)}`) })).toThrow(/unparseable/)
     // Brackets inside strings are text, not structure.

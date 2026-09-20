@@ -1109,6 +1109,9 @@ describe('readiness and the service', () => {
     // `append:`, not truncate: a service whose whole job is to be restarted would otherwise lose
     // the log of whatever went wrong last time.
     expect(unit).not.toContain('StandardOutput=file:')
+    // These hold the tail of every agent's output, including the token a run was given, and
+    // systemd would otherwise create them against the inherited umask.
+    expect(unit).toContain('UMask=0077')
   })
 
   test('the unit carries everything enable was run with, and no secret', () => {

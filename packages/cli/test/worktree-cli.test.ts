@@ -88,10 +88,16 @@ describe('the worker asks for the narrower pass, and the script hears it', () =>
   test('restoring a checkout\'s dependencies asks for exactly that, and says whether it happened', () => {
     const seen: string[][] = []
     const yes = restoreWorktreeDeps('/repo', '/repo/.vegastack/.worktrees/7-x', {
-      spawn: (args) => { seen.push(args); return { status: 0, stdout: JSON.stringify({ restored: true, needed: true }) } },
+      spawn: (args) => { seen.push(args); return { status: 0, stdout: JSON.stringify({ needed: true, setup: 'bun install' }) } },
     })
-    expect(seen[0]).toEqual(['restore-deps', '--path', '/repo/.vegastack/.worktrees/7-x', '--write', '--json'])
-    expect(yes).toEqual({ state: 'restored' })
+    // It asks what would be needed and does not run it: the install belongs to the caller, which
+    // has a bounded runner that kills a whole process group.
+    expect(seen[0]).toEqual(['restore-deps', '--path', '/repo/.vegastack/.worktrees/7-x', '--plan', '--write', '--json'])
+    expect(yes).toEqual({ state: 'needed', setup: 'bun install' })
+
+    // Nothing to put back but no way to do it is still a failure, not a no-op.
+    expect(restoreWorktreeDeps('/repo', '/x', { spawn: () => ({ status: 0, stdout: JSON.stringify({ needed: true, setup: null }) }) }))
+      .toMatchObject({ state: 'failed' })
 
     // Nothing was taken from this one, so nothing is put back — the ordinary case.
     expect(restoreWorktreeDeps('/repo', '/x', { spawn: () => ({ status: 0, stdout: JSON.stringify({ needed: false }) }) }))
@@ -99,9 +105,6 @@ describe('the worker asks for the narrower pass, and the script hears it', () =>
 
     // Something *was* taken and could not be put back. That is not the same as nothing to do:
     // the agent would start in a checkout that cannot build and spend its whole step finding out.
-    expect(restoreWorktreeDeps('/repo', '/x', {
-      spawn: () => ({ status: 0, stdout: JSON.stringify({ needed: true, restored: false, warns: ['no setup command'] }) }),
-    })).toEqual({ state: 'failed', reason: 'no setup command' })
     expect(restoreWorktreeDeps('/repo', '/x', { spawn: () => { throw new Error('gone') } }))
       .toMatchObject({ state: 'failed' })
   })

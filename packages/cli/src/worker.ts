@@ -39,7 +39,7 @@ import { defaultBranch } from './guard-rules.ts'
 import { stateOf, type State } from './labels.ts'
 import { lintPlan, normalizeGroupPath, parseIndependentGroups, sharedByEveryChild } from '../../../skills/dev/dev-plan/scripts/plan-lint.mjs'
 import { appKeyPath as workerAppKey } from './home.ts'
-import { restoreWorktreeDeps, tidyWorktrees, type DepsRestore } from './worktree.ts'
+import { markDepsRestored, restoreWorktreeDeps, tidyWorktrees, type DepsRestore } from './worktree.ts'
 
 // How often the board is read, how many steps run at once, and how long one step may take.
 export const POLL_MS = 2 * 60_000
@@ -724,6 +724,10 @@ export function unitText(platform: NodeJS.Platform, input: { cli: string[]; root
     // restarted.
     `StandardOutput=append:${join(input.logDir, 'worker.log')}`,
     `StandardError=append:${join(input.logDir, 'worker.err.log')}`,
+    // systemd creates these 0666 against the inherited umask, and they hold the tail of every
+    // agent's output — private repository text, and the short-lived token a run was given. On a
+    // host with a permissive umask another local account could read them.
+    'UMask=0077',
     // systemd quotes a whole item, so the quotes go around `NAME=value` and not around the value:
     // `Environment=NAME="a b"` puts an opening quote after non-whitespace, which is not the
     // documented form. `%` is doubled because specifiers expand, and a backslash or a quote is
@@ -1357,6 +1361,12 @@ export function defaultRunStep(devMd: string, env: NodeJS.ProcessEnv, { exec = e
     // agent starts. The worker launches straight into an existing worktree — it never calls
     // `worktree restore`, which is the only other place this was checked — so without this the
     // next run begins in a checkout that cannot build and has nothing saying why.
+    const { tool, args } = agentArgs(policy, stepPrompt(step))
+    // Nobody is at the keyboard, so a round of questions goes to the issue and waits there for the
+    // operator — dev-setup's references/ask-route.md, where VSK_ASK_ROUTE is the first step.
+    // The limit arrives with the run rather than with the step function, so a roster change lands
+    // on the next run instead of the next restart.
+    const limit = context.timeoutMs ?? timeoutMs
     // A checkout whose dependencies were reclaimed cannot build, and an agent started in one
     // spends its whole step discovering that. When they cannot be put back, say so and stop —
     // this is a step that failed, not a step that ran.
@@ -1364,12 +1374,15 @@ export function defaultRunStep(devMd: string, env: NodeJS.ProcessEnv, { exec = e
     if (deps.state === 'failed') {
       return { outcome: 'blocked', note: `dependencies could not be restored in ${cwd}: ${deps.reason}`, ms: Date.now() - started }
     }
-    const { tool, args } = agentArgs(policy, stepPrompt(step))
-    // Nobody is at the keyboard, so a round of questions goes to the issue and waits there for the
-    // operator — dev-setup's references/ask-route.md, where VSK_ASK_ROUTE is the first step.
-    // The limit arrives with the run rather than with the step function, so a roster change lands
-    // on the next run instead of the next restart.
-    const limit = context.timeoutMs ?? timeoutMs
+    if (deps.state === 'needed') {
+      // Through the same runner the agent uses: asynchronous, bounded, and killed as a whole
+      // process group. A synchronous install here would hold the loop for as long as it took.
+      const install = await exec('sh', ['-c', deps.setup], { cwd, env: childRunEnvironment(env, token()), timeoutMs: limit })
+      if (install.code !== 0 || install.timedOut) {
+        return { outcome: 'blocked', note: `dependencies could not be restored in ${cwd}: \`${deps.setup}\` ${install.timedOut ? 'ran past the step limit' : `exited ${install.code}`}`, ms: Date.now() - started }
+      }
+      markDepsRestored(context.root, cwd)
+    }
     const child = await exec(tool, args, { cwd, env: childRunEnvironment(env, token()), timeoutMs: limit, onStart: context.onStart })
     const ms = Date.now() - started
     const text = `${child.stderr}\n${child.stdout}`
@@ -1999,7 +2012,8 @@ export async function runWorker(argv: string[], deps: CliDeps = {}): Promise<num
         print({ ok: true, checks, unit: path, dryRun: true }, `${renderChecks(checks)}\n\ndry run: would write ${path}, then ${commands.map((command) => command.join(' ')).join(' && ')}`)
         return 0
       }
-      mkdirSync(workerDir(root), { recursive: true })
+      // The same reason as the unit's UMask: this directory holds the logs and the run records.
+      mkdirSync(workerDir(root), { recursive: true, mode: 0o700 })
       replaceFile(path, unitText(platform, { cli: deps.cli ?? cliPath(), root, repo, logDir: workerDir(root), env }))
       const run = deps.run ?? probe
       for (const command of commands) {

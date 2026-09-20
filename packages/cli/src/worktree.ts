@@ -220,7 +220,17 @@ export function tidyWorktrees(
 // Three answers, not two. "Nothing was taken from this checkout" and "what was taken could not be
 // put back" look the same as a boolean and must not: the first is the ordinary case and the second
 // means the agent is about to start somewhere that cannot build.
-export type DepsRestore = { state: 'nothing' } | { state: 'restored' } | { state: 'failed'; reason: string }
+export type DepsRestore = { state: 'nothing' } | { state: 'needed'; setup: string } | { state: 'failed'; reason: string }
+
+// Told once the caller's own install has worked, so the record stops asking for it.
+export function markDepsRestored(
+  repoRoot: string,
+  path: string,
+  options: { spawn?: (args: string[], cwd?: string) => SpawnResult } = {},
+): void {
+  const spawn = options.spawn ?? defaultSpawn
+  try { spawn(['restore-deps', '--path', path, '--mark', '--write', '--json'], repoRoot) } catch { /* it asks again next run */ }
+}
 
 export function restoreWorktreeDeps(
   repoRoot: string,
@@ -229,11 +239,14 @@ export function restoreWorktreeDeps(
 ): DepsRestore {
   const spawn = options.spawn ?? defaultSpawn
   try {
-    const run = spawn(['restore-deps', '--path', path, '--write', '--json'], repoRoot)
-    const result = parseScriptOutput(run.stdout) as ScriptResult & { restored?: boolean; needed?: boolean }
-    if (result.restored) return { state: 'restored' }
+    // `--plan` asks what would be needed without running it. The install itself belongs to the
+    // caller, which has a bounded runner that kills a whole process group; doing it here would
+    // block the worker's loop for as long as the install takes.
+    const run = spawn(['restore-deps', '--path', path, '--plan', '--write', '--json'], repoRoot)
+    const result = parseScriptOutput(run.stdout) as ScriptResult & { needed?: boolean; setup?: string | null }
     if (!result.needed) return { state: 'nothing' }
-    return { state: 'failed', reason: result.warns?.[0] ?? result.blocks?.[0] ?? 'the setup command did not finish' }
+    if (!result.setup) return { state: 'failed', reason: 'dev.md names no `setup` command to put them back' }
+    return { state: 'needed', setup: result.setup }
   } catch (error) {
     return { state: 'failed', reason: (error as Error).message }
   }

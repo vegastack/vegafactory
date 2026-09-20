@@ -464,6 +464,11 @@ function prepareCheckout({ repoRoot, path, devMd, home, write, actions, warns, b
 // Put back what prune took, and only that. The marker says this worktree had its dependencies
 // dropped while it was idle; installing is a plain run of dev.md's own `setup` command. A failure
 // is a warning rather than a block: the checkout is fine, and the next build will say so itself.
+// Called by whoever ran the setup command themselves, once it worked.
+export function markDependenciesRestored(repoRoot, name) {
+  clearDroppedDeps(repoRoot, name);
+}
+
 export function restoreDroppedDependencies({ repoRoot, name, path, devMd, write, actions, warns, runner = execFileSync }) {
   if (!(name in readDroppedDeps(repoRoot))) return false;
   const setup = parseSetupCommand(devMd);
@@ -473,9 +478,12 @@ export function restoreDroppedDependencies({ repoRoot, name, path, devMd, write,
   }
   actions.push(at(path, 'reinstall dependencies: ' + setup));
   if (!write) return false;
+  // A caller that runs commands itself — the worker, with its own bound and its own process
+  // group — takes the command and reports back. Running it here would block whoever called us:
+  // this happens inside the worker's pass, before the step timer exists, so a hung install would
+  // hold the loop, stop the heartbeats and outlast a shutdown.
+  if (runner === null) return false;
   try {
-    // Bounded, because this runs inside the worker's own pass and before the step timer exists:
-    // a hung install would hold the loop, stop the heartbeats and outlast a shutdown.
     runner('sh', ['-c', setup], { cwd: path, stdio: 'ignore', timeout: SETUP_LIMIT_MS });
     clearDroppedDeps(repoRoot, name);
     return true;
@@ -1172,8 +1180,14 @@ function runVerb(verb, flags) {
     if (!path) return { blocks: [at('restore-deps', 'needs --path')], warns, actions };
     const name = basename(path);
     const needed = name in readDroppedDeps(repoRoot);
-    const put = restoreDroppedDependencies({ repoRoot, name, path, devMd, write: shared.write, actions, warns });
-    return { blocks: [], warns, actions, needed, restored: put };
+    // `runner: null` means "tell me what to run, do not run it": the worker has a bounded async
+    // runner that kills a whole process group, and this script does not.
+    if (flags.mark) {
+      markDependenciesRestored(repoRoot, name);
+      return { blocks: [], warns, actions, needed: false, restored: true, setup: null };
+    }
+    const put = restoreDroppedDependencies({ repoRoot, name, path, devMd, write: shared.write, actions, warns, runner: flags.plan ? null : execFileSync });
+    return { blocks: [], warns, actions, needed, restored: put, setup: needed ? parseSetupCommand(devMd) : null };
   }
   if (verb === 'create' || verb === 'restore') {
     let named = { type: flags.type || null, slug };
@@ -1214,7 +1228,7 @@ const invokedDirectly = process.argv[1] && resolve(process.argv[1]) === fileURLT
 if (invokedDirectly) {
   const argv = process.argv.slice(2);
   const verb = argv.find((arg) => !arg.startsWith('--')) ?? '';
-  const flags = parseFlags(argv, ['json', 'write', 'force', 'push', 'all', 'automatic']);
+  const flags = parseFlags(argv, ['json', 'write', 'force', 'push', 'all', 'automatic', 'plan', 'mark']);
   let outcome;
   try {
     outcome = runVerb(verb, flags);

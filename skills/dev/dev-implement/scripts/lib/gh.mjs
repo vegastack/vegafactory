@@ -38,12 +38,11 @@ function splitJsonDocuments(text) {
       else if (character === '"') inString = false;
       continue;
     }
+    // Checked before the quote, or a suffix like `"gateway timeout"` is read as a string nobody
+    // is tracking and the page before it is returned as complete data. Between documents only
+    // whitespace is allowed.
+    if (depth === 0 && start === -1 && character.trim() && character !== '[' && character !== '{') return null;
     if (character === '"') { inString = true; continue; }
-    // Between documents only whitespace is allowed. A valid first page followed by a truncation
-    // message would otherwise read as complete data with the error quietly dropped.
-    if (depth === 0 && start === -1 && character.trim()) {
-      if (character !== '[' && character !== '{') return null;
-    }
     if (character === '[' || character === '{') {
       if (depth === 0) start = index;
       depth += 1;
