@@ -648,14 +648,16 @@ export function unitPath(platform: NodeJS.Platform, home = homedir()): string {
 // stops. Nothing in it carries a token; the repository and the log path are all it knows.
 export function unitText(platform: NodeJS.Platform, input: { cli: string[]; root: string; repo: string; logDir: string; env?: NodeJS.ProcessEnv }): string {
   const argv = [...input.cli, 'worker', 'run', '--repo', input.repo]
-  // A user service does not inherit the shell that installed it, so the App identity has to be
-  // written into the unit or the worker restarts as VegaStack's own — minting with a self-hosted
-  // key against the wrong id, and distrusting everything that App then writes. Only these two go
-  // in: they are names, not secrets. The private key stays a file the account owns, and its path
-  // is never written here.
+  // A user service inherits nothing from the shell that installed it, so everything `enable` was
+  // run with has to be written into the unit — or the worker restarts as VegaStack's own App,
+  // against a key it then cannot find, while `enable` reported success.
+  //
+  // All three are *names*: two identifiers and a path. The secret is the key file itself, which
+  // stays owned by this account and mode 600; writing where it lives tells a reader of the unit
+  // nothing they could not get from `ls`.
   const from = input.env ?? process.env
   const identity: Array<[string, string]> = []
-  for (const name of ['VEGAFACTORY_APP_ID', 'VEGAFACTORY_APP_ACTOR']) {
+  for (const name of ['VEGAFACTORY_APP_ID', 'VEGAFACTORY_APP_ACTOR', 'VEGAFACTORY_APP_PRIVATE_KEY_FILE']) {
     const value = from[name]?.trim()
     if (value) identity.push([name, value])
   }
@@ -1918,12 +1920,12 @@ export async function runWorker(argv: string[], deps: CliDeps = {}): Promise<num
       for (const command of commands) {
         const result = run(command[0]!, command.slice(1))
         // The leading `bootout` unloads whatever was there so the new plist is read. A machine
-        // enabling for the first time has nothing to unload, and launchctl's answer for that is
-        // not one wording — so this one command is allowed to fail whatever it says, and the
-        // `bootstrap` that follows is the command that actually has to work.
-        const mayFail = command[1] === 'bootout' && commands.length > 1 && command !== commands.at(-1)
-        // launchctl answers non-zero for a label already loaded; the unit is installed either way.
-        if (!mayFail && result.code !== 0 && !/already/i.test(result.stderr)) {
+        // enabling for the first time has nothing to unload, and that is the only failure this
+        // step may have: a permission error or a busy job leaves the old definition loaded, and
+        // reporting "enabled" then would be reporting the old identity as the new one.
+        const unloading = command[1] === 'bootout' && commands.length > 1 && command !== commands.at(-1)
+        const nothingToUnload = /no such process|not (?:loaded|find|exist)/i.test(result.stderr)
+        if (result.code !== 0 && !(unloading && nothingToUnload)) {
           print({ ok: false, unit: path, failed: command.join(' '), detail: result.stderr },
             `wrote ${path}, but \`${command.join(' ')}\` failed: ${result.stderr.split('\n')[0] || `exit ${result.code}`}`)
           return 1

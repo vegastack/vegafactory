@@ -655,12 +655,16 @@ describe('one poll over the board', () => {
 
   test('a run takes the claim before it launches, and gives it back when it ends', async () => {
     gh.addIssue({ number: 1, labels: ['planning', 'medium'] })
+    // The worker writes with its App's token, so the claim it takes is authored by that App and
+    // not by the operator. Leaving this as `mk` — an admin — would have the claim trusted as a
+    // person's, and the configured actor would never be exercised at all.
+    gh.postAs = { login: 'acmefactory[bot]', type: 'Bot' }
     let heldDuringRun: string | null | undefined
     await pass({
       appActor: 'acmefactory[bot]',
       runStep: (async () => {
         const snap = snapOf(1)
-        heldDuringRun = holderOf(snap.state, snap.body, gh.clock, trustedFactory({ repo: 'o/r', runner: gh.runner, root })).holder?.owner ?? null
+        heldDuringRun = holderOf(snap.state, snap.body, gh.clock, trustedFactory({ repo: 'o/r', runner: gh.runner, root, appActor: 'acmefactory[bot]' })).holder?.owner ?? null
         return { outcome: 'done' as const, note: '', ms: 1 }
       }) as RunStep,
     })
@@ -668,7 +672,7 @@ describe('one poll over the board', () => {
     // same board while it runs sees the issue is taken.
     expect(heldDuringRun).toBe(`${HOST}:worker-test-1`)
     const after = snapOf(1)
-    expect(holderOf(after.state, after.body, gh.clock, trustedFactory({ repo: 'o/r', runner: gh.runner, root })).holder).toBeNull()
+    expect(holderOf(after.state, after.body, gh.clock, trustedFactory({ repo: 'o/r', runner: gh.runner, root, appActor: 'acmefactory[bot]' })).holder).toBeNull()
     expect(gh.issues.get(1)!.comments.map((comment) => comment.body).join('\n')).toContain('by=acmefactory[bot]')
   })
 
@@ -1085,10 +1089,10 @@ describe('readiness and the service', () => {
     expect(check(broken)).toMatchObject({ ok: false, detail: expect.stringContaining('No such remote') })
   })
 
-  // A user service does not inherit the shell that installed it. Without these two in the unit the
-  // worker restarts as VegaStack's own App — minting with a self-hosted key against the wrong id,
-  // then distrusting everything that App writes — and `enable` would have reported success.
-  test('the unit carries the self-hosted App identity, and never the key', () => {
+  // A user service inherits nothing from the shell that installed it. Without these in the unit the
+  // worker restarts as VegaStack's own App, against a key it cannot find — and `enable` would have
+  // reported success. All three are names; the secret is the key file, not where it lives.
+  test('the unit carries everything enable was run with, and no secret', () => {
     const env = { VEGAFACTORY_APP_ID: '12345', VEGAFACTORY_APP_ACTOR: 'acmefactory[bot]', VEGAFACTORY_APP_PRIVATE_KEY_FILE: '/keys/app.pem' }
     const plist = unitText('darwin', { cli: ['vegafactory'], root, repo: 'o/r', logDir: workerDir(root), env })
     expect(plist).toContain('<key>EnvironmentVariables</key>')
@@ -1097,8 +1101,10 @@ describe('readiness and the service', () => {
     const unit = unitText('linux', { cli: ['vegafactory'], root, repo: 'o/r', logDir: workerDir(root), env })
     expect(unit).toContain('Environment=VEGAFACTORY_APP_ID=12345')
     expect(unit).toContain('Environment=VEGAFACTORY_APP_ACTOR=acmefactory[bot]')
-    // The key is a file the account owns. Its path is not the service's business and never was.
-    for (const text of [plist, unit]) expect(text).not.toContain('PRIVATE_KEY')
+    expect(plist).toContain('<key>VEGAFACTORY_APP_PRIVATE_KEY_FILE</key><string>/keys/app.pem</string>')
+    expect(unit).toContain('Environment=VEGAFACTORY_APP_PRIVATE_KEY_FILE=/keys/app.pem')
+    // The path, never the key. Nothing that could be pasted into a token request appears here.
+    for (const text of [plist, unit]) expect(text).not.toContain('BEGIN')
 
     // Nothing configured, nothing written: VegaStack's own defaults need no unit entries.
     const plain = unitText('linux', { cli: ['vegafactory'], root, repo: 'o/r', logDir: workerDir(root), env: {} })
@@ -1406,9 +1412,10 @@ describe('the command', () => {
     const unit = readFileSync(unitPath('linux', home), 'utf8')
     expect(unit).toContain('Environment=VEGAFACTORY_APP_ID=12345')
     expect(unit).toContain('Environment=VEGAFACTORY_APP_ACTOR=acmefactory[bot]')
-    // The key is the account's own file; its path is never written into a unit.
-    expect(unit).not.toContain('PRIVATE_KEY')
-    expect(unit).not.toContain(key)
+    // The path the run was given travels with it, or token refresh fails on the first poll.
+    expect(unit).toContain(`Environment=VEGAFACTORY_APP_PRIVATE_KEY_FILE=${key}`)
+    // The path, never the key itself.
+    expect(unit).not.toContain('BEGIN')
   })
 
   test('run --once makes one pass with the injected step', async () => {
