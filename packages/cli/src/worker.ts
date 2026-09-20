@@ -694,12 +694,17 @@ export function unitText(platform: NodeJS.Platform, input: { cli: string[]; root
 export function serviceCommands(platform: NodeJS.Platform, path: string, verb: 'enable' | 'disable', uid = userInfo().uid): string[][] {
   if (platform === 'darwin') {
     const target = `gui/${uid}`
+    // `bootstrap` is a no-op once the label is loaded and `enable` does not re-read the plist, so
+    // a re-enable after an upgrade or an identity change would report success while the running
+    // worker kept the old unit. `kickstart -k` restarts it onto the file just written.
     return verb === 'enable'
-      ? [['launchctl', 'bootstrap', target, path], ['launchctl', 'enable', `${target}/${SERVICE_NAME}`]]
+      ? [['launchctl', 'bootstrap', target, path], ['launchctl', 'enable', `${target}/${SERVICE_NAME}`], ['launchctl', 'kickstart', '-k', `${target}/${SERVICE_NAME}`]]
       : [['launchctl', 'bootout', `${target}/${SERVICE_NAME}`]]
   }
+  // Same reason: `daemon-reload` reparses the unit but `enable --now` leaves an already-active
+  // service running the version it started with.
   return verb === 'enable'
-    ? [['systemctl', '--user', 'daemon-reload'], ['systemctl', '--user', 'enable', '--now', 'vegafactory-worker.service']]
+    ? [['systemctl', '--user', 'daemon-reload'], ['systemctl', '--user', 'enable', '--now', 'vegafactory-worker.service'], ['systemctl', '--user', 'restart', 'vegafactory-worker.service']]
     : [['systemctl', '--user', 'disable', '--now', 'vegafactory-worker.service']]
 }
 

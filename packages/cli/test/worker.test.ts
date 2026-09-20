@@ -6,6 +6,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { claimBody, claimLine, holderOf, nodeId, trustedFactory } from '../src/claim.ts'
 import {
+  SERVICE_NAME,
   APP_ID, DEFAULT_CAPS, MAX_FAILURES, MAX_RUNS, MAX_TIMER_MS, POLL_MS, RETRY_MS, STEP_TIMEOUT_MS, TOKEN_MARGIN_MS, parseCaps, rosterName, sayDuration, agentArgs, appIdentity, appJwt, appKeyPath, assertKeyFile, board, decide, defaultRunStep, workerDir,
   acknowledgedPlan, canonicalPath, childRunEnvironment, confirmShip, disjointSiblings, pushableBranch, shipWord,
   drain, filesFromParent, harnessAnswers, hitLimit, hooksWired, listedHere, mintToken, overlaps, parseWorkerArgs,
@@ -1117,6 +1118,11 @@ describe('readiness and the service', () => {
     expect(unitPath('linux', '/home/x')).toBe('/home/x/.config/systemd/user/vegafactory-worker.service')
     expect(serviceCommands('linux', '/u', 'disable')[0]).toEqual(['systemctl', '--user', 'disable', '--now', 'vegafactory-worker.service'])
     expect(serviceCommands('darwin', '/u', 'enable', 501)[0]).toEqual(['launchctl', 'bootstrap', 'gui/501', '/u'])
+    // Enabling ends by restarting, on both platforms. `bootstrap` is a no-op once the label is
+    // loaded and `enable --now` leaves an active service alone, so without this a re-enable after
+    // an upgrade or an identity change reports success while the running worker keeps the old unit.
+    expect(serviceCommands('darwin', '/u', 'enable', 501).at(-1)).toEqual(['launchctl', 'kickstart', '-k', `gui/501/${SERVICE_NAME}`])
+    expect(serviceCommands('linux', '/u', 'enable').at(-1)).toEqual(['systemctl', '--user', 'restart', 'vegafactory-worker.service'])
   })
 })
 
@@ -1328,6 +1334,42 @@ describe('the command', () => {
     expect(result.code).toBe(0)
     expect(result.text).toContain('enabled —')
     expect(result.text).toContain('polls o/r every 1s')
+  })
+
+  // End to end, because the unit is only right if `enable` actually passes what it was run with
+  // into it. Asserting on `unitText` alone left the wiring untested: the whole feature is that a
+  // self-hosted App survives the restart, and a user service inherits nothing from this shell.
+  test('enable writes the App identity it was run with into the installed unit', async () => {
+    project(`| node | owner | worker | repos |\n|---|---|---|---|\n| ${NODE} | mk | yes | o/r |\n`)
+    mkdirSync(join(root, '.claude'), { recursive: true })
+    mkdirSync(join(root, '.codex'), { recursive: true })
+    writeFileSync(join(root, '.claude', 'settings.json'), 'vegafactory hook stop --harness claude')
+    writeFileSync(join(root, '.codex', 'hooks.json'), 'vegafactory hook stop --harness codex')
+    mkdirSync(join(home, '.config', 'systemd', 'user'), { recursive: true })
+    const { privateKey } = generateKeyPairSync('rsa', { modulusLength: 2048, privateKeyEncoding: { type: 'pkcs8', format: 'pem' }, publicKeyEncoding: { type: 'spki', format: 'pem' } })
+    const key = join(root, 'identity.pem')
+    writeFileSync(key, privateKey, { mode: 0o600 })
+    chmodSync(key, 0o600)
+    const probe: Probe = (command) => {
+      if (command === 'git') return { code: 0, stdout: 'git@github.com:o/r.git', stderr: '' }
+      if (command === 'claude' || command === 'codex') return { code: 0, stdout: 'ok', stderr: '' }
+      return { code: 0, stdout: '', stderr: '' }
+    }
+    const fetch: Fetch = async (url) => ({
+      ok: true, status: 200,
+      json: async () => url.endsWith('/installation') ? { id: 42 } : { token: 'ghs_test', expires_at: '2026-09-18T11:00:00Z' },
+    })
+    const result = await run(['enable'], {
+      platform: 'linux', run: probe, fetch,
+      env: { VEGAFACTORY_APP_PRIVATE_KEY_FILE: key, VEGAFACTORY_APP_ID: '12345', VEGAFACTORY_APP_ACTOR: 'acmefactory[bot]' },
+    })
+    expect(result.code).toBe(0)
+    const unit = readFileSync(unitPath('linux', home), 'utf8')
+    expect(unit).toContain('Environment=VEGAFACTORY_APP_ID=12345')
+    expect(unit).toContain('Environment=VEGAFACTORY_APP_ACTOR=acmefactory[bot]')
+    // The key is the account's own file; its path is never written into a unit.
+    expect(unit).not.toContain('PRIVATE_KEY')
+    expect(unit).not.toContain(key)
   })
 
   test('run --once makes one pass with the injected step', async () => {
