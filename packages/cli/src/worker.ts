@@ -694,11 +694,14 @@ export function unitText(platform: NodeJS.Platform, input: { cli: string[]; root
 export function serviceCommands(platform: NodeJS.Platform, path: string, verb: 'enable' | 'disable', uid = userInfo().uid): string[][] {
   if (platform === 'darwin') {
     const target = `gui/${uid}`
-    // `bootstrap` is a no-op once the label is loaded and `enable` does not re-read the plist, so
-    // a re-enable after an upgrade or an identity change would report success while the running
-    // worker kept the old unit. `kickstart -k` restarts it onto the file just written.
+    // Unloading first is what makes a re-enable pick up the file that was just written. launchd
+    // keeps the job definition it was bootstrapped with: `bootstrap` is a no-op once the label is
+    // loaded, `enable` does not re-read the plist, and `kickstart` restarts the definition already
+    // in memory — so the worker would carry its old identity while `enable` reported success.
+    // The first command is expected to fail on a machine that has never enabled, and the caller
+    // tolerates that.
     return verb === 'enable'
-      ? [['launchctl', 'bootstrap', target, path], ['launchctl', 'enable', `${target}/${SERVICE_NAME}`], ['launchctl', 'kickstart', '-k', `${target}/${SERVICE_NAME}`]]
+      ? [['launchctl', 'bootout', `${target}/${SERVICE_NAME}`], ['launchctl', 'bootstrap', target, path], ['launchctl', 'enable', `${target}/${SERVICE_NAME}`]]
       : [['launchctl', 'bootout', `${target}/${SERVICE_NAME}`]]
   }
   // Same reason: `daemon-reload` reparses the unit but `enable --now` leaves an already-active
@@ -1914,8 +1917,13 @@ export async function runWorker(argv: string[], deps: CliDeps = {}): Promise<num
       const run = deps.run ?? probe
       for (const command of commands) {
         const result = run(command[0]!, command.slice(1))
+        // The leading `bootout` unloads whatever was there so the new plist is read. A machine
+        // enabling for the first time has nothing to unload, and launchctl's answer for that is
+        // not one wording — so this one command is allowed to fail whatever it says, and the
+        // `bootstrap` that follows is the command that actually has to work.
+        const mayFail = command[1] === 'bootout' && commands.length > 1 && command !== commands.at(-1)
         // launchctl answers non-zero for a label already loaded; the unit is installed either way.
-        if (result.code !== 0 && !/already/i.test(result.stderr)) {
+        if (!mayFail && result.code !== 0 && !/already/i.test(result.stderr)) {
           print({ ok: false, unit: path, failed: command.join(' '), detail: result.stderr },
             `wrote ${path}, but \`${command.join(' ')}\` failed: ${result.stderr.split('\n')[0] || `exit ${result.code}`}`)
           return 1

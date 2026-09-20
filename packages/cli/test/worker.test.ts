@@ -1117,11 +1117,16 @@ describe('readiness and the service', () => {
     expect(unitPath('darwin', '/home/x')).toBe('/home/x/Library/LaunchAgents/com.vegastack.vegafactory.worker.plist')
     expect(unitPath('linux', '/home/x')).toBe('/home/x/.config/systemd/user/vegafactory-worker.service')
     expect(serviceCommands('linux', '/u', 'disable')[0]).toEqual(['systemctl', '--user', 'disable', '--now', 'vegafactory-worker.service'])
-    expect(serviceCommands('darwin', '/u', 'enable', 501)[0]).toEqual(['launchctl', 'bootstrap', 'gui/501', '/u'])
+    expect(serviceCommands('darwin', '/u', 'enable', 501)[1]).toEqual(['launchctl', 'bootstrap', 'gui/501', '/u'])
     // Enabling ends by restarting, on both platforms. `bootstrap` is a no-op once the label is
     // loaded and `enable --now` leaves an active service alone, so without this a re-enable after
     // an upgrade or an identity change reports success while the running worker keeps the old unit.
-    expect(serviceCommands('darwin', '/u', 'enable', 501).at(-1)).toEqual(['launchctl', 'kickstart', '-k', `gui/501/${SERVICE_NAME}`])
+    // Enabling unloads first, so the plist just written is the one launchd reads.
+    expect(serviceCommands('darwin', '/u', 'enable', 501)).toEqual([
+      ['launchctl', 'bootout', `gui/501/${SERVICE_NAME}`],
+      ['launchctl', 'bootstrap', 'gui/501', '/u'],
+      ['launchctl', 'enable', `gui/501/${SERVICE_NAME}`],
+    ])
     expect(serviceCommands('linux', '/u', 'enable').at(-1)).toEqual(['systemctl', '--user', 'restart', 'vegafactory-worker.service'])
   })
 })
@@ -1334,6 +1339,40 @@ describe('the command', () => {
     expect(result.code).toBe(0)
     expect(result.text).toContain('enabled —')
     expect(result.text).toContain('polls o/r every 1s')
+  })
+
+  // A machine enabling for the first time has nothing to unload, and launchctl's wording for that
+  // is not one string. The unload is allowed to fail; the bootstrap after it is not.
+  test('a first enable tolerates the unload, and a real bootstrap failure still stops it', async () => {
+    project(`| node | owner | worker | repos |\n|---|---|---|---|\n| ${NODE} | mk | yes | o/r |\n`)
+    mkdirSync(join(root, '.claude'), { recursive: true })
+    mkdirSync(join(root, '.codex'), { recursive: true })
+    writeFileSync(join(root, '.claude', 'settings.json'), 'vegafactory hook stop --harness claude')
+    writeFileSync(join(root, '.codex', 'hooks.json'), 'vegafactory hook stop --harness codex')
+    mkdirSync(join(home, 'Library', 'LaunchAgents'), { recursive: true })
+    const { privateKey } = generateKeyPairSync('rsa', { modulusLength: 2048, privateKeyEncoding: { type: 'pkcs8', format: 'pem' }, publicKeyEncoding: { type: 'spki', format: 'pem' } })
+    const key = join(root, 'first.pem')
+    writeFileSync(key, privateKey, { mode: 0o600 })
+    chmodSync(key, 0o600)
+    const fetch: Fetch = async (url) => ({
+      ok: true, status: 200,
+      json: async () => url.endsWith('/installation') ? { id: 42 } : { token: 'ghs_test', expires_at: '2026-09-18T11:00:00Z' },
+    })
+    const answers = (bootstrapCode: number): Probe => (command, cmdArgs) => {
+      if (command === 'git') return { code: 0, stdout: 'git@github.com:o/r.git', stderr: '' }
+      if (command === 'claude' || command === 'codex') return { code: 0, stdout: 'ok', stderr: '' }
+      // Nothing loaded yet, and launchctl says so in its own words rather than "already".
+      if (command === 'launchctl' && cmdArgs[0] === 'bootout') return { code: 3, stdout: '', stderr: 'Boot-out failed: 3: No such process' }
+      if (command === 'launchctl' && cmdArgs[0] === 'bootstrap') return { code: bootstrapCode, stdout: '', stderr: bootstrapCode ? 'Load failed: 5: Input/output error' : '' }
+      return { code: 0, stdout: '', stderr: '' }
+    }
+    const first = await run(['enable'], { platform: 'darwin', run: answers(0), fetch, env: { VEGAFACTORY_APP_PRIVATE_KEY_FILE: key } })
+    expect(first.code).toBe(0)
+    expect(first.text).toContain('enabled —')
+
+    const broken = await run(['enable'], { platform: 'darwin', run: answers(5), fetch, env: { VEGAFACTORY_APP_PRIVATE_KEY_FILE: key } })
+    expect(broken.code).toBe(1)
+    expect(broken.text).toContain('bootstrap')
   })
 
   // End to end, because the unit is only right if `enable` actually passes what it was run with
