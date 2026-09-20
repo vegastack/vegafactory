@@ -26,7 +26,7 @@ import { appendFileSync, existsSync, lstatSync, mkdirSync, readFileSync, readdir
 import { homedir, hostname, userInfo } from 'node:os'
 import { join, posix } from 'node:path'
 import { APP_ACTOR, HEARTBEAT_EVERY_MS, claim, heartbeat, holderOf, machineName, nodeId, release, trustedFactory } from './claim.ts'
-import { defaultClonePath, factoryConfigPath, parseControlRoomKnob, readFactoryConfig } from './control-room.ts'
+import { defaultClonePath, factoryConfigPath, parseControlRoomKnob, readFactoryConfig, updateSettingsAtPath } from './control-room.ts'
 import { billingVariables, childEnvironment } from './env.ts'
 import { GhError, defaultRunner, ghList, type GhResult, type GhRunner } from './gh.ts'
 import { assertRepo, cacheDir, readState, replaceFile, syncIssue, withLock, type CommentEntry, type GhIssue, type IssueEntry } from './issue-cache.ts'
@@ -340,16 +340,34 @@ export function refreshRoster(clone: string, git: GitRun = gitIn(clone)): Refres
   return { ok: true, reason: 'refreshed from the control room', sha: git(['rev-parse', 'HEAD']).out || null }
 }
 
-export interface Listing { ok: boolean; reason: string; entry: Node | null; file: string | null }
+export interface Listing { ok: boolean; reason: string; entry: Node | null; file: string | null; sha?: string | null }
 
 // `listedHere`, but only after the roster has been refreshed and verified. This is what a run
 // asks each pass; a read-only view may ask `listedHere` alone and show what it has.
+// The refresh moves the clone forward; this records where it moved to. `loadProfile` verifies the
+// working tree against the commit `factory.json` remembers, so a clone that has moved on without
+// the record being updated is read as tampered-with — every policy question then answers "cannot
+// tell", which for the update knob means `off`. The record is a cache of a local fact, so a write
+// that fails changes nothing but the next pass's work.
+export async function recordRoomSha(root: string, home: string, sha: string): Promise<void> {
+  const room = controlRoomClone(root, home)
+  if (!room) return
+  try {
+    await updateSettingsAtPath(factoryConfigPath(home), (state) => {
+      const current = state.orgs[room.org]
+      if (!current || current.sha === sha) return state
+      state.orgs[room.org] = { ...current, sha, lastSyncedAt: new Date().toISOString() }
+      return state
+    })
+  } catch { /* a cache nobody could write is just a cache nobody could write */ }
+}
+
 export function verifiedListing(root: string, options: { repo: string; host?: string; home?: string; git?: (clone: string) => GitRun }): Listing {
   const room = controlRoomClone(root, options.home ?? homedir())
   if (!room) return listedHere(root, options)
   const refresh = refreshRoster(room.clone, (options.git ?? gitIn)(room.clone))
   if (!refresh.ok) return { ok: false, reason: refresh.reason, entry: null, file: nodesPath(room.clone) }
-  return listedHere(root, options)
+  return { ...listedHere(root, options), sha: refresh.sha }
 }
 
 // The gate every verb passes. A missing or unreadable roster refuses, never defaults: a machine
@@ -2071,10 +2089,9 @@ export async function runWorker(argv: string[], deps: CliDeps = {}): Promise<num
         if (signalled) {
           return finish(0, await shutDown(`this machine was asked to stop (${signalled})`))
         }
-        // Whether this pass actually finished reading the board. A pass that threw, or that could
-        // not read an issue, never learned whether work is waiting — so it is not the pass to
-        // spend five minutes installing in.
-        let boardRead = false
+        // Whether this pass saw an idle board. A pass that threw, could not read an issue, or
+        // started anything is not the pass to spend five minutes installing in.
+        let idle = false
         try {
           // The roster is the enrolment, so it is refreshed and re-read once per pass: a row
           // removed in a control-room PR stands this machine down at the next poll, with nothing
@@ -2083,6 +2100,9 @@ export async function runWorker(argv: string[], deps: CliDeps = {}): Promise<num
           // a gate that has been asked and ignored — the caps come off this same reading, so a
           // control-room PR that changes one lands on the next poll rather than on a restart.
           const still = verifiedListing(root, { repo, host, home, git: deps.git })
+          // The pass just fast-forwarded the clone; the record has to follow it or every later
+          // profile read is refused for a clone that is simply up to date.
+          if (still.ok && still.sha) await recordRoomSha(root, home, still.sha)
           if (!still.ok || !still.entry?.caps) {
             note(`stopping: ${still.reason}`)
             return finish(2, await shutDown('this machine is no longer listed'))
@@ -2093,9 +2113,11 @@ export async function runWorker(argv: string[], deps: CliDeps = {}): Promise<num
           unreadable = 0
           const picked = await poll(pollDeps, inflight)
           for (const candidate of picked) note(`#${candidate.number} ${candidate.action} started`)
-          // Idle means the whole board was read and nothing needed doing. An issue that could not
-          // be read might have been the one with work on it.
-          boardRead = unreadable === 0
+          // Idle is a high bar on purpose, because the thing it permits takes five minutes: the
+          // whole board was read, nothing was picked up, and nothing is still running. An issue
+          // that could not be read might have been the one with work on it, and an issue that was
+          // picked up may have settled again before this line.
+          idle = unreadable === 0 && picked.length === 0 && ![...inflight.values()].some(run => !run.settled)
         } catch (error) {
           note(`poll failed: ${(error as Error).message}`)
         }
@@ -2106,7 +2128,7 @@ export async function runWorker(argv: string[], deps: CliDeps = {}): Promise<num
         // runs, so a run picked up in this very pass still counts as alive here — which is what
         // keeps an update from starting while the board has work. The registry check above it is
         // asked at most once an hour, so an idle box is not calling npm every couple of minutes.
-        if (boardRead && ![...inflight.values()].some(run => !run.settled)) {
+        if (idle) {
           let result: UpdateResult
           try { result = await update() } catch { result = { action: 'failed', before: '', after: '', latest: null, message: 'vegafactory update failed; continuing with the installed copy' } }
           if (result.action === 'updated') {

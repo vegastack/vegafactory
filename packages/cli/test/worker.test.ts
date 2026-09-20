@@ -12,7 +12,7 @@ import {
   parseNodes, poll, readActed, readRuns, readiness, recordRun, resetAt, RUNS_KEPT, runWorker, schedule, serviceCommands, stagePolicy,
   standDown, stepPrompt, tail, unitPath, unitText, unsafeForParallel,
   noteChild, readChildren, refreshRoster, releaseRunLock, reserve, runLockPath, takeRunLock, verifiedListing,
-  updateModeFor,
+  recordRoomSha, updateModeFor,
   type Candidate, type Fetch, type GitRun, type Inflight, type PollDeps, type Probe, type RunStep, type StepResult,
 } from '../src/worker.ts'
 import type { GhRunner } from '../src/gh.ts'
@@ -1277,6 +1277,45 @@ describe('the command', () => {
     try {
       expect(updateModeFor(box, box)).toBe('off')
     } finally { chmodSync(join(box, '.vegastack', 'dev.md'), 0o644) }
+  })
+
+  // Every pass fast-forwards the control-room clone. `loadProfile` verifies the working tree
+  // against the commit `factory.json` remembers, so a record left behind reads a clone that is
+  // merely up to date as one that has been tampered with — and every policy question after that
+  // answers "cannot tell", which for the update knob means `off` until someone syncs by hand.
+  test('a refreshed control room is recorded, so the profile stays readable', async () => {
+    const clone = join(home, '.vegafactory', 'control-room', 'o')
+    const moved = spawnSync('git', ['-C', clone, 'rev-parse', 'HEAD'], { encoding: 'utf8' }).stdout.trim()
+    writeFileSync(join(home, '.vegafactory', 'factory.json'), JSON.stringify({
+      schemaVersion: 2, revision: 0,
+      controlRooms: { o: { repo: 'o/room', path: clone, branch: 'main', remote: 'https://example.invalid/o/room.git', sha: '0'.repeat(40), lastSyncedAt: null } },
+    }))
+    await recordRoomSha(root, home, moved)
+    const recorded = JSON.parse(readFileSync(join(home, '.vegafactory', 'factory.json'), 'utf8'))
+    expect(recorded.controlRooms.o.sha).toBe(moved)
+    expect(recorded.controlRooms.o.path).toBe(clone)
+    expect(recorded.controlRooms.o.repo).toBe('o/room')
+  })
+
+  // Idle has to mean idle. A run that starts and settles inside the same pass leaves nothing
+  // unsettled behind it, so counting only the run map called a working box idle and let a
+  // five-minute install begin while the board still had work.
+  test('a pass that started work is not idle, even once that work has settled', async () => {
+    project()
+    gh.addIssue({ number: 1, labels: ['planning', 'medium'] })
+    let updates = 0
+    const worked = await run(['run'], {
+      update: async () => {
+        updates += 1
+        return { action: 'current' as const, before: '0.21.0', after: '0.21.0', latest: '0.21.0', message: 'current' }
+      },
+      // Settles immediately, so the run map is empty again by the time the update is considered.
+      runStep: (async () => ({ outcome: 'done' as const, note: 'finished inside the pass', ms: 1 })) as RunStep,
+      sleep: async () => { process.emit('SIGTERM' as NodeJS.Signals) },
+    })
+    expect(worked.code).toBe(0)
+    expect(worked.text).toContain('#1')
+    expect(updates).toBe(0)
   })
 
   // An install takes its own five-minute bound and runs in the poll loop. A pass that could not

@@ -11,6 +11,7 @@ import { ackBody, artifactHash } from '../src/issue.ts'
 import { addLesson, readLessons } from '../src/learning.ts'
 import { installArgs, packageVersion, readUpdateNote, SELF_UPDATE_LIMIT_S, writeUpdateNote } from '../src/self-update.ts'
 import { FakeGitHub } from './fake-github.ts'
+import { refuseAmbientHome } from './no-ambient-home.ts'
 
 const git = (cwd: string, ...args: string[]) => {
   const result = spawnSync('git', ['-c', 'user.name=t', '-c', 'user.email=t@t', ...args], { cwd, encoding: 'utf8' })
@@ -19,6 +20,8 @@ const git = (cwd: string, ...args: string[]) => {
 }
 
 let gh: FakeGitHub
+refuseAmbientHome()
+
 let root: string
 let fakeHome: string
 let tree: string
@@ -794,10 +797,9 @@ describe('usage collection', () => {
     expect(code).toBe(0)
     // The version comes from the package, not a literal: a release would otherwise break this test.
     expect(JSON.parse(out.join('\n')).hookSpecificOutput.additionalContext).toContain(`updating vegafactory ${packageVersion} → 9.0.0 in the background`)
-    // The detached install is pinned the same way the foreground one is: the registry the check
-    // used and the exact version it returned, so npm's own configuration cannot redirect it.
+    // The detached install is the same plain npm command as the foreground one.
     expect(calls.filter(call => call.command[0] === 'npm')).toEqual([{
-      command: ['npm', ...installArgs('9.0.0')], cwd: plain, limit: 300,
+      command: ['npm', ...installArgs()], cwd: plain, limit: 300,
     }])
     expect(calls.some(call => call.command[0] === 'vf' && call.command.includes('update'))).toBe(false)
   })

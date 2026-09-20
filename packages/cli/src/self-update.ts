@@ -57,6 +57,13 @@ export function clearUpdateNote(options: HomeOptions = {}): void {
   try { rmSync(updateNotePath(options), { force: true }) } catch { /* see writeUpdateNote */ }
 }
 
+// Whether the hour since the last attempt has passed. An attempt counts whether or not it got an
+// answer, because the cost being spread is the asking and the installing, not the answer.
+export function dueForCheck(now: number, options: HomeOptions = {}): boolean {
+  const { checkedAt } = readUpdateNote(options)
+  return typeof checkedAt !== 'number' || now - checkedAt >= UPDATE_CHECK_EVERY_MS
+}
+
 // A registry answer remembered from less than an hour ago, or null to go and ask.
 export function rememberedLatest(now: number, options: HomeOptions = {}): string | null {
   const note = readUpdateNote(options)
@@ -104,21 +111,10 @@ export function semverLess(a: string, b: string): boolean {
   return false
 }
 
-// One registry, over TLS, and not configurable. This answer decides whether a global install of
-// executable code runs unattended, so a redirectable base — an environment variable, a mirror —
-// would let whoever set it choose what this machine installs and then runs as its own user.
+// One registry, over TLS. The *check* is fixed here because it is what decides that an update
+// should happen at all; the install that follows is plain npm and uses this machine's own config.
 const REGISTRY = 'https://registry.npmjs.org'
 export const PACKAGE = '@vegastack/vegafactory'
-
-// The install has to land the thing the check approved. `npm install -g <name>@latest` resolves
-// through whatever registry npm is configured with — `registry=` in any .npmrc, an `@vegastack:`
-// scope mapping, or an inherited environment variable — so an official registry saying "newer"
-// could install a different package entirely from somewhere else, and run it as this user. Both
-// flags are passed because the scope mapping wins over the plain one, and the version is the exact
-// one the check returned rather than a second, later `@latest`.
-export function installArgs(version: string): string[] {
-  return ['install', '-g', `--registry=${REGISTRY}`, `--${PACKAGE.split('/')[0]}:registry=${REGISTRY}`, `${PACKAGE}@${version}`]
-}
 
 export async function latestPublishedVersion(fetcher: typeof fetch = fetch): Promise<string | null> {
   try {
@@ -145,6 +141,30 @@ export function effectiveUpdateMode(input: { home: string; devMd: string | null;
   const value = profile.values['vegafactory-update']
   if (value === undefined || value === null) return selfUpdateMode('')
   return selfUpdateMode(`vegafactory-update: ${String(value)}`)
+}
+
+// Plain `npm install -g`, which is what the brief asked for and what a person would type. npm
+// resolves it through this machine's own configuration — a corporate mirror, a scope mapping —
+// and that configuration is the machine owner's to make: overriding it here would break the very
+// setups it exists for, to guard against an attacker who already controls the operator's npm.
+export function installArgs(): string[] {
+  return ['install', '-g', `${PACKAGE}@latest`]
+}
+
+// `vegafactory update`, the command a person types. No `home` is passed: the remembered answer
+// exists to stop an idle worker polling npm every couple of minutes, and reusing it here would
+// answer "already current" from a check made up to an hour ago. Nothing is written either, which
+// is what `--dry-run` promises.
+export async function runUpdateCommand(
+  dryRun: boolean,
+  options: { latest?: LatestVersion; run?: UpdateRunner; say?: (text: string) => void } = {},
+): Promise<void> {
+  const say = options.say ?? console.log
+  const result = await maintainSelfUpdate({ mode: dryRun ? 'notify' : 'auto', latest: options.latest, run: options.run })
+  if (!dryRun) { say(result.message); return }
+  say(result.action === 'available'
+    ? `dry run: would run npm ${installArgs().join(' ')} (${result.before} → ${result.latest})`
+    : result.message)
 }
 
 // An unreadable policy leaves the machine untouched. A missing line keeps existing projects on
@@ -180,14 +200,21 @@ export async function maintainSelfUpdate(options: {
   if (options.mode === 'off') return idle('none', before, null, '')
 
   const now = options.now ?? Date.now()
-  const remembered = options.home ? rememberedLatest(now, options.home) : null
-  let latest: string | null = remembered
-  if (!latest) {
-    try { latest = await (options.latest ?? latestPublishedVersion)() } catch { latest = null }
-    // Only a real answer is remembered. Remembering a failure would hold the machine on a stale
-    // version for an hour because npm was briefly unreachable.
-    if (latest && options.home) writeUpdateNote({ ...readUpdateNote(options.home), checkedAt: now, latest }, options.home)
+  // The hour covers the whole attempt, not just a successful lookup. Remembering only successes
+  // meant an unreachable registry was retried every pass, and a failed install of a version
+  // already remembered was retried every pass too — each one holding the loop for its own bound.
+  if (options.home && !dueForCheck(now, options.home)) {
+    const remembered = rememberedLatest(now, options.home)
+    if (!remembered) return idle('none', before, null, '')
+    if (!semverLess(before, remembered)) return idle('current', before, remembered, `vegafactory ${before} is already current`)
+    if (options.mode === 'notify') return idle('available', before, remembered, `vegafactory ${remembered} is available; installed ${before} — run: vegafactory update`)
+    return idle('none', before, remembered, '')
   }
+  let latest: string | null
+  try { latest = await (options.latest ?? latestPublishedVersion)() } catch { latest = null }
+  // The attempt is stamped either way, so a registry that is down costs one call an hour and not
+  // one every pass. What it answered is remembered only when it answered.
+  if (options.home) writeUpdateNote({ ...readUpdateNote(options.home), checkedAt: now, ...(latest ? { latest } : {}) }, options.home)
   if (!latest) return idle('unavailable', before, null, `could not check npm; continuing with vegafactory ${before}`)
   if (!semverLess(before, latest)) {
     const detail = semverLess(latest, before) ? ` (ahead of npm latest ${latest})` : ''
@@ -198,7 +225,7 @@ export async function maintainSelfUpdate(options: {
   const run = options.run ?? defaultUpdateRunner
   let installed: UpdateRunResult
   try {
-    installed = run('npm', installArgs(latest), SELF_UPDATE_LIMIT_S * 1000)
+    installed = run('npm', installArgs(), SELF_UPDATE_LIMIT_S * 1000)
   } catch (error) {
     return idle('failed', before, latest, `update failed; continuing with vegafactory ${before}: ${safe((error as Error).message)}`)
   }

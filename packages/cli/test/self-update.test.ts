@@ -1,9 +1,11 @@
 import { describe, expect, test } from 'bun:test'
 import { existsSync, mkdirSync, mkdtempSync, realpathSync, writeFileSync } from 'node:fs'
+import { refuseAmbientHome } from './no-ambient-home.ts'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { updateCli } from '../src/index.ts'
-import { effectiveUpdateMode, installArgs, maintainSelfUpdate, packageVersion, readUpdateNote, selfUpdateMode, semverLess, SELF_UPDATE_LIMIT_S, UPDATE_CHECK_EVERY_MS, writeUpdateNote, type UpdateRunner } from '../src/self-update.ts'
+import { effectiveUpdateMode, installArgs, maintainSelfUpdate, packageVersion, runUpdateCommand, readUpdateNote, selfUpdateMode, semverLess, SELF_UPDATE_LIMIT_S, UPDATE_CHECK_EVERY_MS, writeUpdateNote, type UpdateRunner } from '../src/self-update.ts'
+
+refuseAmbientHome()
 
 describe('the VegaFactory updater', () => {
   test('the explicit update is version-guarded, runs plain npm, and always returns a usable result', async () => {
@@ -17,13 +19,9 @@ describe('the VegaFactory updater', () => {
     const updated = await maintainSelfUpdate({ mode: 'auto', before: '0.20.1', latest: async () => '0.21.0', run })
     expect(updated).toMatchObject({ action: 'updated', before: '0.20.1', after: '0.21.0', latest: '0.21.0' })
     expect(updated.message).toBe('updated vegafactory 0.20.1 → 0.21.0')
-    // The install is pinned to the registry the check used and the exact version it returned, so a
-    // configured mirror or an `@vegastack:` scope mapping cannot decide what lands here.
-    expect(calls[0]).toEqual(['npm', installArgs('0.21.0'), SELF_UPDATE_LIMIT_S * 1000])
-    expect(installArgs('0.21.0')).toEqual([
-      'install', '-g', '--registry=https://registry.npmjs.org', '--@vegastack:registry=https://registry.npmjs.org',
-      '@vegastack/vegafactory@0.21.0',
-    ])
+    // Plain npm, as the brief asks: this machine's own npm configuration decides where it resolves.
+    expect(calls[0]).toEqual(['npm', installArgs(), SELF_UPDATE_LIMIT_S * 1000])
+    expect(installArgs()).toEqual(['install', '-g', '@vegastack/vegafactory@latest'])
 
     calls.length = 0
     const current = await maintainSelfUpdate({ mode: 'auto', before: '0.21.0', latest: async () => '0.21.0', run })
@@ -143,6 +141,42 @@ describe('what one machine remembers between runs', () => {
     expect(readUpdateNote({ home: down }).latest ?? null).toBeNull()
   })
 
+  // The hour covers the attempt, not the answer. Remembering only successes meant an unreachable
+  // registry was asked again on every pass — and, worse, a failed install of a version already
+  // remembered was retried every pass, each try holding the loop for its own five-minute bound.
+  test('a registry that is down costs one attempt an hour, not one a pass', async () => {
+    const home = realpathSync(mkdtempSync(join(tmpdir(), 'vf-update-down-')))
+    let asks = 0
+    const latest = async () => { asks += 1; return null }
+    const at = Date.parse('2026-09-20T09:00:00Z')
+
+    expect(await maintainSelfUpdate({ mode: 'auto', before: '0.21.0', latest, home: { home }, now: at })).toMatchObject({ action: 'unavailable' })
+    expect(asks).toBe(1)
+    // Every pass for the next hour asks nothing at all.
+    for (const minute of [2, 4, 30, 59]) {
+      await maintainSelfUpdate({ mode: 'auto', before: '0.21.0', latest, home: { home }, now: at + minute * 60_000 })
+    }
+    expect(asks).toBe(1)
+    await maintainSelfUpdate({ mode: 'auto', before: '0.21.0', latest, home: { home }, now: at + UPDATE_CHECK_EVERY_MS })
+    expect(asks).toBe(2)
+  })
+
+  test('an install that failed is not retried on the next pass', async () => {
+    const home = realpathSync(mkdtempSync(join(tmpdir(), 'vf-update-retry-')))
+    let installs = 0
+    const run: UpdateRunner = (command) => {
+      if (command === 'npm') { installs += 1; return { code: 1, stdout: '', stderr: 'EACCES' } }
+      return { code: 0, stdout: '0.20.1\n', stderr: '' }
+    }
+    const at = Date.parse('2026-09-20T09:00:00Z')
+    const first = await maintainSelfUpdate({ mode: 'auto', before: '0.20.1', latest: async () => '0.21.0', run, home: { home }, now: at })
+    expect(first.action).toBe('failed')
+    expect(installs).toBe(1)
+    // The next pass is two minutes later. It must not try again.
+    await maintainSelfUpdate({ mode: 'auto', before: '0.20.1', latest: async () => '0.21.0', run, home: { home }, now: at + 2 * 60_000 })
+    expect(installs).toBe(1)
+  })
+
   test('without a home nothing is remembered, so the registry is asked every time', async () => {
     let asks = 0
     const latest = async () => { asks += 1; return '9.0.0' }
@@ -167,32 +201,31 @@ describe('the update command a person types', () => {
   // The command itself, not the function under it: this is where `--dry-run` either holds or does
   // not, and where an explicit ask must reach npm rather than reuse an automatic hourly check.
   test('a dry run says what it would do, installs nothing and remembers nothing', async () => {
-    const home = realpathSync(mkdtempSync(join(tmpdir(), 'vf-update-cli-')))
     const ran: string[][] = []
     const said: string[] = []
     const run: UpdateRunner = (command, args) => { ran.push([command, ...args]); return { code: 0, stdout: '', stderr: '' } }
 
-    await updateCli(true, async () => '99.0.0', run, (text) => said.push(text))
+    await runUpdateCommand(true, { latest: async () => '99.0.0', run, say: (text: string) => said.push(text) })
     expect(said.join('\n')).toContain('dry run: would run npm install -g @vegastack/vegafactory@latest')
     expect(said.join('\n')).toContain('99.0.0')
     expect(ran).toEqual([])
-    // Nothing is remembered either: a dry run that wrote the hourly note would change what the
-    // next real check decides.
-    expect(existsSync(join(home, '.vegafactory', 'update.json'))).toBe(false)
+    // Nothing is remembered either, and that is structural rather than asserted: the command
+    // takes no home, so there is nowhere for it to write the hourly note.
 
     said.length = 0
-    await updateCli(false, async () => '99.0.0', run, (text) => said.push(text))
-    expect(ran[0]).toEqual(['npm', ...installArgs('99.0.0')])
+    await runUpdateCommand(false, { latest: async () => '99.0.0', run, say: (text: string) => said.push(text) })
+    expect(ran[0]).toEqual(['npm', ...installArgs()])
   })
 
   // Typing the command is asking for the current answer. Reusing a check made up to an hour ago
   // would answer "already current" about a release published since.
   test('an explicit update always asks npm, never the remembered answer', async () => {
+    // A remembered answer exists for the automatic paths; the explicit command must ignore it.
     const home = realpathSync(mkdtempSync(join(tmpdir(), 'vf-update-fresh-')))
     writeUpdateNote({ checkedAt: Date.now(), latest: packageVersion }, { home })
     let asked = 0
     const run: UpdateRunner = () => ({ code: 0, stdout: '', stderr: '' })
-    await updateCli(true, async () => { asked += 1; return '99.0.0' }, run, () => {})
+    await runUpdateCommand(true, { latest: async () => { asked += 1; return '99.0.0' }, run, say: () => {} })
     expect(asked).toBe(1)
   })
 })
