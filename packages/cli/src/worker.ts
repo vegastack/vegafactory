@@ -646,8 +646,19 @@ export function unitPath(platform: NodeJS.Platform, home = homedir()): string {
 
 // The unit runs one command: this CLI's own `worker run`, in the repository, restarted when it
 // stops. Nothing in it carries a token; the repository and the log path are all it knows.
-export function unitText(platform: NodeJS.Platform, input: { cli: string[]; root: string; repo: string; logDir: string }): string {
+export function unitText(platform: NodeJS.Platform, input: { cli: string[]; root: string; repo: string; logDir: string; env?: NodeJS.ProcessEnv }): string {
   const argv = [...input.cli, 'worker', 'run', '--repo', input.repo]
+  // A user service does not inherit the shell that installed it, so the App identity has to be
+  // written into the unit or the worker restarts as VegaStack's own — minting with a self-hosted
+  // key against the wrong id, and distrusting everything that App then writes. Only these two go
+  // in: they are names, not secrets. The private key stays a file the account owns, and its path
+  // is never written here.
+  const from = input.env ?? process.env
+  const identity: Array<[string, string]> = []
+  for (const name of ['VEGAFACTORY_APP_ID', 'VEGAFACTORY_APP_ACTOR']) {
+    const value = from[name]?.trim()
+    if (value) identity.push([name, value])
+  }
   if (platform === 'darwin') {
     const escaped = (value: string) => value.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
     return [
@@ -662,6 +673,11 @@ export function unitText(platform: NodeJS.Platform, input: { cli: string[]; root
       '  <key>RunAtLoad</key><true/>', '  <key>KeepAlive</key><true/>',
       `  <key>StandardOutPath</key><string>${escaped(join(input.logDir, 'worker.log'))}</string>`,
       `  <key>StandardErrorPath</key><string>${escaped(join(input.logDir, 'worker.err.log'))}</string>`,
+      ...(identity.length
+        ? ['  <key>EnvironmentVariables</key>', '  <dict>',
+          ...identity.map(([name, value]) => `    <key>${escaped(name)}</key><string>${escaped(value)}</string>`),
+          '  </dict>']
+        : []),
       '</dict>', '</plist>', '',
     ].join('\n')
   }
@@ -669,6 +685,7 @@ export function unitText(platform: NodeJS.Platform, input: { cli: string[]; root
     '[Unit]', 'Description=VegaFactory worker', '',
     '[Service]', 'Type=simple', `WorkingDirectory=${input.root}`,
     `ExecStart=${argv.map((arg) => JSON.stringify(arg)).join(' ')}`,
+    ...identity.map(([name, value]) => `Environment=${name}=${value}`),
     'Restart=always', 'RestartSec=30', '',
     '[Install]', 'WantedBy=default.target', '',
   ].join('\n')
@@ -1888,7 +1905,7 @@ export async function runWorker(argv: string[], deps: CliDeps = {}): Promise<num
         return 0
       }
       mkdirSync(workerDir(root), { recursive: true })
-      replaceFile(path, unitText(platform, { cli: deps.cli ?? cliPath(), root, repo, logDir: workerDir(root) }))
+      replaceFile(path, unitText(platform, { cli: deps.cli ?? cliPath(), root, repo, logDir: workerDir(root), env }))
       const run = deps.run ?? probe
       for (const command of commands) {
         const result = run(command[0]!, command.slice(1))

@@ -1084,6 +1084,26 @@ describe('readiness and the service', () => {
     expect(check(broken)).toMatchObject({ ok: false, detail: expect.stringContaining('No such remote') })
   })
 
+  // A user service does not inherit the shell that installed it. Without these two in the unit the
+  // worker restarts as VegaStack's own App — minting with a self-hosted key against the wrong id,
+  // then distrusting everything that App writes — and `enable` would have reported success.
+  test('the unit carries the self-hosted App identity, and never the key', () => {
+    const env = { VEGAFACTORY_APP_ID: '12345', VEGAFACTORY_APP_ACTOR: 'acmefactory[bot]', VEGAFACTORY_APP_PRIVATE_KEY_FILE: '/keys/app.pem' }
+    const plist = unitText('darwin', { cli: ['vegafactory'], root, repo: 'o/r', logDir: workerDir(root), env })
+    expect(plist).toContain('<key>EnvironmentVariables</key>')
+    expect(plist).toContain('<key>VEGAFACTORY_APP_ID</key><string>12345</string>')
+    expect(plist).toContain('<key>VEGAFACTORY_APP_ACTOR</key><string>acmefactory[bot]</string>')
+    const unit = unitText('linux', { cli: ['vegafactory'], root, repo: 'o/r', logDir: workerDir(root), env })
+    expect(unit).toContain('Environment=VEGAFACTORY_APP_ID=12345')
+    expect(unit).toContain('Environment=VEGAFACTORY_APP_ACTOR=acmefactory[bot]')
+    // The key is a file the account owns. Its path is not the service's business and never was.
+    for (const text of [plist, unit]) expect(text).not.toContain('PRIVATE_KEY')
+
+    // Nothing configured, nothing written: VegaStack's own defaults need no unit entries.
+    const plain = unitText('linux', { cli: ['vegafactory'], root, repo: 'o/r', logDir: workerDir(root), env: {} })
+    expect(plain).not.toContain('Environment=')
+  })
+
   test('the unit runs this CLI\'s own worker run and carries no token', () => {
     const plist = unitText('darwin', { cli: ['/usr/bin/node', '/opt/vegafactory/index.js'], root, repo: 'o/r', logDir: workerDir(root) })
     expect(plist).toContain('<string>worker</string>')
