@@ -557,7 +557,11 @@ export function restoreWorktree({ repoRoot, issue, slug, type, devMd, home, writ
   }
   const held = worktreeHoldingBranch(repoRoot, branch, gitRunner);
   if (held) {
-    warns.push(at(held, 'already holds ' + branch + ' — nothing to restore'));
+    // The checkout is already here, which is exactly what a dependency-only prune leaves behind.
+    // There is no worktree to add — but there may well be dependencies to put back, and this is
+    // the one place a resume passes through.
+    const put = restoreDroppedDependencies({ repoRoot, name: basename(held), path: held, devMd, write, actions, warns });
+    warns.push(at(held, 'already holds ' + branch + (put ? ' — dependencies reinstalled' : ' — nothing to restore')));
     return { blocks, warns, actions, path: held, branch };
   }
 
@@ -788,8 +792,16 @@ export function pruneWorktrees({ repoRoot, base, olderThan, devMd, ledgerTimes =
       issueState: null,
       mergedIntoDefault: facts.mergedIntoDefault,
     });
-    const stamps = [lastCommitAt, ledgerUpdatedAt].map((v) => (v ? Date.parse(v) : Number.NaN)).filter(Number.isFinite);
+    // Touched recently is not idle, whatever the branch and the ledger say. Nothing outside this
+    // process registers a session anywhere, so an attended run on another terminal is invisible
+    // here — its files are not. This is the difference between "nobody has committed" and
+    // "nobody is working".
+    let touchedAt = null;
+    try { touchedAt = new Date(statSync(join(entry.path, '.git')).mtimeMs).toISOString(); } catch { /* gone or unreadable */ }
+    const stamps = [lastCommitAt, ledgerUpdatedAt, touchedAt].map((v) => (v ? Date.parse(v) : Number.NaN)).filter(Number.isFinite);
     const ageDays = stamps.length === 0 ? 0 : Math.floor((now - Math.max(...stamps)) / DAY_MS);
+    // The most recent sign of life, whichever kind it was.
+    const latestStamp = stamps.length === 0 ? null : new Date(Math.max(...stamps)).toISOString();
     // A run is using it, so nothing here is idle and nothing here is touched. The caller names
     // issues, because that is what it holds; a worktree is `<issue>-<slug>`, so the issue number
     // is the part in front of the first dash.
@@ -808,7 +820,7 @@ export function pruneWorktrees({ repoRoot, base, olderThan, devMd, ledgerTimes =
     // Unpushed commits count as much here as uncommitted files: a worktree holding work nobody
     // else has is not one to take anything from, dependencies included.
     const unpushed = facts.unpushed || facts.remoteMissing;
-    if (!entry.locked && !facts.dirty && !unpushed && isPastRetention({ lastCommitAt, ledgerUpdatedAt, now, retentionMs: depsRetentionMs })) {
+    if (!entry.locked && !facts.dirty && !unpushed && isPastRetention({ lastCommitAt, ledgerUpdatedAt: latestStamp, now, retentionMs: depsRetentionMs })) {
       const deps = join(entry.path, 'node_modules');
       if (existsSync(deps)) {
         actions.push(at(entry.name, 'drop node_modules, keeping the branch and its commits'));
@@ -828,7 +840,7 @@ export function pruneWorktrees({ repoRoot, base, olderThan, devMd, ledgerTimes =
     }
     // A merged worktree has nothing left in it that is not on the default branch, so it does not
     // wait out a window meant for work that might still be wanted.
-    if (state !== 'merged' && !isPastRetention({ lastCommitAt, ledgerUpdatedAt, now, retentionMs })) continue;
+    if (state !== 'merged' && !isPastRetention({ lastCommitAt, ledgerUpdatedAt: latestStamp, now, retentionMs })) continue;
     const verdict = evaluateRemoval({ state, ...facts, locked: entry.locked, force: true });
     // "Prune pushes then removes, and never automatically for anything with
     // unpushed work": the push half protects the work and happens on --write

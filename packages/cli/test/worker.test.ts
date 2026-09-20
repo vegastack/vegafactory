@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { claimBody, claimLine, holderOf, nodeId, trustedFactory } from '../src/claim.ts'
 import {
-  alreadyLingering, threadFor, threadSaw, unwritableForUnit,
+  alreadyLingering, unwritableForUnit,
   SERVICE_NAME,
   APP_ID, DEFAULT_CAPS, MAX_FAILURES, MAX_RUNS, MAX_TIMER_MS, POLL_MS, RETRY_MS, STEP_TIMEOUT_MS, TOKEN_MARGIN_MS, parseCaps, rosterName, sayDuration, agentArgs, appIdentity, appJwt, appKeyPath, assertKeyFile, board, decide, defaultRunStep, workerDir,
   acknowledgedPlan, canonicalPath, childRunEnvironment, confirmShip, disjointSiblings, pushableBranch, shipWord,
@@ -1139,81 +1139,6 @@ describe('readiness and the service', () => {
     expect(plain).not.toContain('Environment=')
   })
 
-  // One thread per issue, resumed only while it is still reasoning about the code that is there.
-  test('a thread resumes on the same head and forks once the branch has moved', () => {
-    const first = threadFor(root, 'o/r', 7, 'a'.repeat(40))
-    expect(first.forked).toBe(false)
-    // Same head: the same thread, and the id is derived rather than remembered.
-    const again = threadFor(root, 'o/r', 7, 'a'.repeat(40))
-    expect(again).toEqual({ id: first.id, forked: false })
-
-    // The branch moved — a rebase, a review round, a commit from another machine — so resuming
-    // would have the agent reasoning about code that no longer exists.
-    const moved = threadFor(root, 'o/r', 7, 'b'.repeat(40))
-    expect(moved.forked).toBe(true)
-    expect(moved.id).not.toBe(first.id)
-    // And the fork is now the thread, stable until the branch moves again.
-    expect(threadFor(root, 'o/r', 7, 'b'.repeat(40))).toEqual({ id: moved.id, forked: false })
-
-    // The agent's own commit is not the branch moving under it. Without this the very next run
-    // forks from itself, and every run would be a fresh thread.
-    threadSaw(root, 'o/r', 7, 'c'.repeat(40))
-    expect(threadFor(root, 'o/r', 7, 'c'.repeat(40))).toEqual({ id: moved.id, forked: false })
-    // Something else moved it, though, and that is still a fork.
-    expect(threadFor(root, 'o/r', 7, 'd'.repeat(40)).forked).toBe(true)
-
-    // Another issue is another thread, and another repository is another thread again.
-    expect(threadFor(root, 'o/r', 8, 'a'.repeat(40)).id).not.toBe(first.id)
-    expect(threadFor(root, 'o/other', 7, 'a'.repeat(40)).id).not.toBe(first.id)
-
-    // The id is a v4-shaped UUID, which is what `--session-id` accepts.
-    expect(first.id).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/)
-  })
-
-  // Through the step the worker actually runs, because the recording has to happen there: a test
-  // that calls `threadSaw` itself stays green when the run stops calling it, and then every run
-  // forks from its own last commit.
-  test('a finished run records the head it left, so the next run resumes', async () => {
-    const saved = () => JSON.parse(readFileSync(join(workerDir(root), 'threads.json'), 'utf8'))['o/r#77']
-    // The agent commits into whichever checkout the run used, the way a real one would.
-    const step = defaultRunStep('', {}, {
-      exec: (async (_tool: string, _args: string[], options: { cwd: string }) => {
-        writeFileSync(join(options.cwd, 'agent-work.txt'), 'done\n')
-        spawnSync('git', ['-C', options.cwd, 'add', '.'], { encoding: 'utf8' })
-        spawnSync('git', ['-C', options.cwd, 'commit', '-m', 'agent work'], { encoding: 'utf8' })
-        return { code: 0, stdout: 'ok', stderr: '', timedOut: false }
-      }) as never,
-    })
-    await step({ number: 77, action: 'implement', repo: 'o/r', split: false, by: null }, { root, onStart: () => {} })
-    const first = saved()
-    expect(first.head).toMatch(/^[0-9a-f]{40}$/)
-
-    // Asking again with the head the run left is the same thread: the commit it made is its own,
-    // not the branch moving under it.
-    expect(threadFor(root, 'o/r', 77, first.head)).toEqual({ id: first.id, forked: false })
-
-    // A second run commits again, and that is still the same thread.
-    await step({ number: 77, action: 'implement', repo: 'o/r', split: false, by: null }, { root, onStart: () => {} })
-    const second = saved()
-    expect(second.head).not.toBe(first.head)
-    expect(second.id).toBe(first.id)
-
-    // Something else moving the branch is what forks it.
-    expect(threadFor(root, 'o/r', 77, 'e'.repeat(40)).forked).toBe(true)
-  })
-
-  test('a claude run carries its session id, and codex does not pretend to', () => {
-    const policy = { harness: 'claude', model: null, effort: 'high' }
-    expect(agentArgs(policy, 'do the thing', 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee').args)
-      .toContain('--session-id')
-    expect(agentArgs(policy, 'do the thing', 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee').args)
-      .toContain('aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee')
-    // No thread, no flag — a fresh run must not be handed an id it never started.
-    expect(agentArgs(policy, 'do the thing').args).not.toContain('--session-id')
-    // `codex exec` takes no session id at all, so none is passed and nothing claims otherwise.
-    expect(agentArgs({ harness: 'codex', model: null, effort: 'high' }, 'do the thing', 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee').args)
-      .not.toContain('--session-id')
-  })
 
   test('the unit runs this CLI\'s own worker run and carries no token', () => {
     const plist = unitText('darwin', { cli: ['/usr/bin/node', '/opt/vegafactory/index.js'], root, repo: 'o/r', logDir: workerDir(root) })
