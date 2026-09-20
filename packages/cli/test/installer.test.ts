@@ -614,6 +614,27 @@ describe('selecting a family', () => {
     expect(bare.stderr.toString()).toContain('vegafactory skills add')
   })
 
+  // The plan's own list of readers. Each mints nothing, but each reads a board where an App
+  // writes, so a half-set pair must stop them by name rather than let them read that board wrong.
+  test('every command refuses by name when the App pair is half set', () => {
+    for (const half of [{ VEGAFACTORY_APP_ID: '12345' }, { VEGAFACTORY_APP_ACTOR: 'acmefactory[bot]' }]) {
+      for (const verb of [['hook', 'session-start'], ['review', '7'], ['issue', 'sync', '7'], ['ship', 'check', '7'], ['worker', 'status']]) {
+        const result = Bun.spawnSync(['node', cli, ...verb], {
+          cwd: packageRoot,
+          env: { ...process.env, HOME: temporary, VEGAFACTORY_HOME: join(temporary, '.vegafactory'), ...half },
+        })
+        expect(result.exitCode).toBe(2)
+        expect(result.stderr.toString()).toContain('VEGAFACTORY_APP_ID and VEGAFACTORY_APP_ACTOR must be set together')
+      }
+    }
+    // Both set, and the pair is accepted — the refusal is about the pair, not about the verbs.
+    const both = Bun.spawnSync(['node', cli, '--help'], {
+      cwd: packageRoot,
+      env: { ...process.env, HOME: temporary, VEGAFACTORY_HOME: join(temporary, '.vegafactory'), VEGAFACTORY_APP_ID: '12345', VEGAFACTORY_APP_ACTOR: 'acmefactory[bot]' },
+    })
+    expect(both.exitCode).toBe(0)
+  })
+
   test('usage names the installer, worktree, sync, ship and hook verbs, and removed verbs are unknown', () => {
     const help = run(temporary, ['--help']).stdout.toString()
     expect(help).toContain('skills add <skill>')

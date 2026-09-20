@@ -113,13 +113,13 @@ export function appIdentityConfig(env: NodeJS.ProcessEnv = process.env): { appId
   return { appId: appId || APP_ID, appActor: appActor || APP_ACTOR }
 }
 
-// The same pair, for the many commands that only ever *read* what an App wrote. `worker enable`
-// and `worker run` mint tokens, so a half-set pair stops them by name and they call the throwing
-// form. A `hook`, a `review`, an `issue` or a `ship check` mints nothing — and one stray variable
-// left in a shell must not make them crash, least of all the hook, which carries the ship guard.
-// So a pair that does not agree trusts no App at all: strictly less is believed, never more.
-export function appActorForReading(env: NodeJS.ProcessEnv = process.env): string | null {
-  try { return appIdentityConfig(env).appActor } catch { return null }
+// The pair is either coherent or the command stops. Continuing with "no App configured" looked
+// safer and is not: an App-authored claim would read as absent, so `claim` would report a second
+// claim on an issue another machine is already working, and a status comment would write a second
+// ledger beside the first. Half-configured is not a lesser reading of the board, it is a wrong
+// one, and the only safe answer to a wrong reading is to say so and stop.
+export function appIdentityOrExplain(env: NodeJS.ProcessEnv = process.env): { ok: true; appActor: string } | { ok: false; reason: string } {
+  try { return { ok: true, appActor: appIdentityConfig(env).appActor } } catch (error) { return { ok: false, reason: (error as Error).message } }
 }
 
 // A person with write access. This is what judges a review or an ack: no bot stands in for one.
@@ -130,13 +130,12 @@ export const trustBy = (permission: PermissionLookup): Trusted => (entry) => ent
 // by its marker, a review by the fields that must agree with the findings it summarises. Judging
 // finished work is the other half and never comes here: an acknowledgement, an acceptance of what
 // a review left open and "ship it" go through `trustBy`, where a bot never counts.
-export const trustFactoryBy = (permission: PermissionLookup, appActor: string | null = appActorForReading()): Trusted =>
-  // `appActor` is null when the pair disagrees, and an entry with no author must not match it.
-  (entry) => (appActor !== null && entry.author === appActor) || trustBy(permission)(entry)
+export const trustFactoryBy = (permission: PermissionLookup, appActor = appIdentityConfig().appActor): Trusted =>
+  (entry) => entry.author === appActor || trustBy(permission)(entry)
 
 export const trustedAuthors = (ctx: { repo: string; runner: GhRunner; root?: string }): Trusted => trustBy(permissionLookup(ctx.repo, ctx.runner, { root: ctx.root }))
 export const trustedFactory = (ctx: { repo: string; runner: GhRunner; root?: string; env?: NodeJS.ProcessEnv; appActor?: string }): Trusted =>
-  trustFactoryBy(permissionLookup(ctx.repo, ctx.runner, { root: ctx.root }), ctx.appActor ?? appActorForReading(ctx.env))
+  trustFactoryBy(permissionLookup(ctx.repo, ctx.runner, { root: ctx.root }), ctx.appActor ?? appIdentityConfig(ctx.env).appActor)
 
 // Live claims (after the latest release of each owner), every claim ever made, and the one
 // status comment. All three count only from trusted authors.

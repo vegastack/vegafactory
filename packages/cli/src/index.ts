@@ -922,6 +922,16 @@ async function init(options: Options) {
 async function main() {
   const { assertSupportedPlatform } = await import('./env.ts')
   assertSupportedPlatform()
+  // One check, for every command, before any of them reads a board. A half-set App pair is a
+  // configuration error, not a lesser view of the world: an App-authored claim would read as
+  // absent, so a second machine would be told the issue is free. Every command refuses by name.
+  const { appIdentityOrExplain } = await import('./claim.ts')
+  const identity = appIdentityOrExplain()
+  if (!identity.ok) {
+    console.error(`error: ${identity.reason}`)
+    process.exitCode = 2
+    return
+  }
   const options = parse(process.argv.slice(2))
   if (options.command === 'hook') {
     const { hookUsage, runHook } = await import('./hook.ts')

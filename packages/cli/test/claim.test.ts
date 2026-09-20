@@ -3,7 +3,7 @@ import { spawnSync } from 'node:child_process'
 import { mkdirSync, mkdtempSync, realpathSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { APP_ACTOR, appActorForReading, appIdentityConfig, claim, claimBody, heartbeat, heartbeatOf, holderOf, machineName, nodeId, ownerId, release, releaseBody, trustedAuthors, trustedFactory, type ClaimContext } from '../src/claim.ts'
+import { APP_ACTOR, appIdentityOrExplain, appIdentityConfig, claim, claimBody, heartbeat, heartbeatOf, holderOf, machineName, nodeId, ownerId, release, releaseBody, trustedAuthors, trustedFactory, type ClaimContext } from '../src/claim.ts'
 import { cacheDir, readBody, readState, syncIssue } from '../src/issue-cache.ts'
 import { runIssue } from '../src/issue.ts'
 import { FakeGitHub } from './fake-github.ts'
@@ -209,30 +209,17 @@ describe('who may claim', () => {
     expect(() => appIdentityConfig({ VEGAFACTORY_APP_ACTOR: 'acmefactory[bot]' })).toThrow(/VEGAFACTORY_APP_ID.*VEGAFACTORY_APP_ACTOR.*set together/)
   })
 
-  // The verbs that mint a token stop by name on a half-set pair. Everything that only reads what
-  // an App wrote mints nothing, and one stray variable in a shell must not crash them — least of
-  // all `hook`, which carries the ship guard. So a pair that disagrees trusts no App at all.
-  test('a half-set pair trusts no App rather than throwing at a reader', () => {
+  // Every command refuses on a half-set pair, and refuses by *name*. Carrying on with "no App
+  // configured" looked safer and is not: an App-authored claim would read as absent, so `claim`
+  // would report a second claim on an issue another machine already holds.
+  test('a half-set pair is explained, not worked around', () => {
     for (const env of [{ VEGAFACTORY_APP_ID: '12345' }, { VEGAFACTORY_APP_ACTOR: 'acmefactory[bot]' }]) {
-      expect(appActorForReading(env)).toBeNull()
+      const answer = appIdentityOrExplain(env)
+      expect(answer.ok).toBe(false)
+      expect(answer.ok ? '' : answer.reason).toMatch(/VEGAFACTORY_APP_ID.*VEGAFACTORY_APP_ACTOR.*set together/)
     }
-    // Both set, and it is that App.
-    expect(appActorForReading({ VEGAFACTORY_APP_ID: '12345', VEGAFACTORY_APP_ACTOR: 'acmefactory[bot]' })).toBe('acmefactory[bot]')
-    // Neither set, and it is VegaStack's own.
-    expect(appActorForReading({})).toBe(APP_ACTOR)
-  })
-
-  test('with no App trusted, the App\'s own writes stop counting and nobody else starts', () => {
-    gh.addIssue({ number: 9, labels: ['planning', 'medium'] })
-    const half = { ...ctx, env: { VEGAFACTORY_APP_ID: '12345' } }
-    gh.addComment(9, claimBody({ owner: 'a:1', kind: 'worker', harness: 'worker', model: 'plan' }), APP_ACTOR, 'Bot')
-    const trusted = trustedFactory(half)
-    // The App's claim is no longer the factory's, because no App is configured coherently.
-    expect(trusted({ author: APP_ACTOR, authorType: 'Bot' } as never)).toBe(false)
-    // An entry with no author must not match the null actor either.
-    expect(trusted({ author: null, authorType: 'Bot' } as never)).toBe(false)
-    // A person with write access is unaffected: this fails closed, it does not fail open.
-    expect(trusted({ author: 'mk', authorType: 'User' } as never)).toBe(true)
+    expect(appIdentityOrExplain({ VEGAFACTORY_APP_ID: '12345', VEGAFACTORY_APP_ACTOR: 'acmefactory[bot]' })).toEqual({ ok: true, appActor: 'acmefactory[bot]' })
+    expect(appIdentityOrExplain({})).toEqual({ ok: true, appActor: APP_ACTOR })
   })
 
   test('claims and releases count only from people with write access, never from a bot', () => {

@@ -25,7 +25,7 @@ import { createSign, randomUUID } from 'node:crypto'
 import { appendFileSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync } from 'node:fs'
 import { homedir, hostname, userInfo } from 'node:os'
 import { join, posix } from 'node:path'
-import { APP_ACTOR, APP_ID, HEARTBEAT_EVERY_MS, appActorForReading, appIdentityConfig, claim, heartbeat, holderOf, machineName, nodeId, release, trustedFactory } from './claim.ts'
+import { APP_ACTOR, APP_ID, HEARTBEAT_EVERY_MS, appIdentityConfig, claim, heartbeat, holderOf, machineName, nodeId, release, trustedFactory } from './claim.ts'
 import { defaultClonePath, factoryConfigPath, parseControlRoomKnob, readFactoryConfig } from './control-room.ts'
 import { billingVariables, childEnvironment } from './env.ts'
 import { GhError, defaultRunner, ghList, type GhResult, type GhRunner } from './gh.ts'
@@ -904,9 +904,8 @@ const WRITE = new Set(['admin', 'maintain', 'write'])
 // artifacts are posted by the machine, not by a person sitting behind it.
 const fromPerson = (permission: PermissionLookup) => (entry: CommentEntry) =>
   entry.authorType !== 'Bot' && !!entry.author && WRITE.has(permission(entry.author))
-const fromFactory = (permission: PermissionLookup, appActor: string | null = appActorForReading()) => (entry: CommentEntry) =>
-  // Null when the pair disagrees, and an entry with no author must not match it.
-  (appActor !== null && entry.author === appActor) || fromPerson(permission)(entry)
+const fromFactory = (permission: PermissionLookup, appActor = appIdentityConfig().appActor) => (entry: CommentEntry) =>
+  entry.author === appActor || fromPerson(permission)(entry)
 
 // The operator's own comments: a person with write access, in the order they were written.
 function operatorComments(snap: Snapshot, permission: PermissionLookup) {

@@ -38,6 +38,17 @@ The App is public, so any account may install it. That is the point: one App, in
 
 The slug is what GitHub derives from the name, and both the actor string and the install URL follow it — confirm it on the App's settings page rather than assuming it, because renaming the App changes the slug and every reference to it.
 
+**Those values are VegaStack's own.** A company running its own App reads its two from GitHub
+rather than copying them:
+
+```sh
+gh api /app --jq '"VEGAFACTORY_APP_ID=\(.id)\nVEGAFACTORY_APP_ACTOR=\(.slug)[bot]"'
+```
+
+`GET /app` answers as the App itself, so run it with that App's own JWT. Both variables are set
+together or neither is: setting one makes every command refuse by name, because a factory that
+mints as one identity and trusts another would distrust everything it just wrote.
+
 ## Permissions
 
 Exactly this set, and no others.
@@ -112,7 +123,7 @@ Rate limits are not a design constraint here. An installation token starts at 5,
 ## Recording the installation
 
 ```sh
-gh api orgs/<org>/installations --jq '.installations[] | select(.app_slug == "vegafactory") | .id'
+gh api orgs/<org>/installations --jq '.installations[] | select(.app_slug == "<your-app-slug>") | .id'
 ```
 
 `GET /orgs/{org}/installations` answers organization owners only. A 403 is a fact to report — "this account is not an owner, so the installation could not be read" — not a failure and not evidence the App is missing.
