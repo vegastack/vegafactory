@@ -617,10 +617,19 @@ describe('selecting a family', () => {
   // `vegafactory update` routes to the self-update command and takes `--dry-run` like everything
   // else; that the flag reaches it is checked here, and what it then does is checked against the
   // command itself in self-update.test.ts.
-  test('update is a command of its own and accepts --dry-run', () => {
+  test('update is a command of its own, and --dry-run reaches it', () => {
     const help = run(temporary, ['--help']).stdout.toString()
     expect(help).toContain('\n  update ')
-    expect(run(temporary, ['update', '--help']).exitCode).toBe(0)
+    // `update --help` prints the general help, so passing it proves only that the process ran.
+    // What matters is that the verb routes to the self-update command rather than being refused
+    // as unknown, and that `--dry-run` survives the parse to reach it. What it then does is
+    // proved against the command itself in self-update.test.ts, without a network.
+    const dry = run(temporary, ['update', '--dry-run'])
+    expect(dry.stderr.toString()).not.toContain('Unknown command')
+    const said = `${dry.stdout.toString()}${dry.stderr.toString()}`
+    // Every branch of the command names the version it is deciding about; none of them installs.
+    expect(said).toMatch(/vegafactory \d+\.\d+\.\d+|could not check npm/)
+    expect(said).not.toContain('updated vegafactory')
   })
 
   // The plan's five readers, by the commands that actually run them: the ship guard (`hook`), the
