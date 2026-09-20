@@ -702,11 +702,16 @@ export function unitText(platform: NodeJS.Platform, input: { cli: string[]; root
     '[Unit]', 'Description=VegaFactory worker', '',
     '[Service]', 'Type=simple', `WorkingDirectory=${input.root}`,
     `ExecStart=${argv.map((arg) => JSON.stringify(arg)).join(' ')}`,
-    // The same two files the plist writes, so `worker status` and a person reading the logs find
-    // them in one place on either platform. `logDir` was already being passed here and dropped,
-    // so on Linux the log this product tells people to read never appeared at all. The journal
-    // still has everything as well; `append:` adds to the file rather than truncating it on each
-    // restart, which matters for a service whose whole job is to be restarted.
+    // The same two files the plist writes, so a person reading the logs finds them in one place on
+    // either platform. `logDir` was already being passed here and dropped, so on Linux the log
+    // this product tells people to read never appeared at all.
+    //
+    // `append:` redirects the streams rather than copying them, so these lines do *not* reach the
+    // journal — `journalctl -u vegafactory-worker.service` shows systemd's own messages about the
+    // unit and nothing the worker printed. That is the trade for parity, and the onboarding
+    // checklist says so rather than sending anyone to the journal for output that is not there.
+    // It appends rather than truncating, which matters for a service whose whole job is to be
+    // restarted.
     `StandardOutput=append:${join(input.logDir, 'worker.log')}`,
     `StandardError=append:${join(input.logDir, 'worker.err.log')}`,
     // systemd quotes a whole item, so the quotes go around `NAME=value` and not around the value:
