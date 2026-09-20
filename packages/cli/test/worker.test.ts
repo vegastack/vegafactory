@@ -51,7 +51,10 @@ function project(workers: string | null = ROSTER): void {
 
 // The roster refresh is real git. Most tests are not about it, so they hand the CLI a git that
 // always succeeds; `controlRoomClone()` below builds the real thing for the tests that are.
-const anyGit = () => (() => ({ status: 0, out: '' })) as GitRun
+// A git that agrees to everything, and answers `rev-parse HEAD` with a commit — a refresh that
+// cannot say where the clone landed is a refusal, so a stub with no HEAD is not "any git".
+const anyGit = () => (((args: string[]) =>
+  args[0] === 'rev-parse' && args[1] === 'HEAD' ? { status: 0, out: 'c'.repeat(40) } : { status: 0, out: '' })) as GitRun
 
 // A bare origin and a clone of it, in place of the plain directory `project()` makes: this is what
 // a real machine has, and the only way to change the roster is to change it upstream.
@@ -1279,6 +1282,21 @@ describe('the command', () => {
     } finally { chmodSync(join(box, '.vegastack', 'dev.md'), 0o644) }
   })
 
+  // A refresh that cannot say where the clone landed is not a refresh that worked: nothing can
+  // record the new position, and every later profile read would reject the clone as moved.
+  test('a refresh that cannot read its own commit refuses instead of reporting success', () => {
+    const answers = (rev: { status: number; out: string }): GitRun => (args) =>
+      args[0] === 'rev-parse' && args[1] === 'HEAD' ? rev : { status: 0, out: '' }
+    for (const bad of [{ status: 128, out: 'fatal: not a git repository' }, { status: 0, out: '' }, { status: 0, out: 'HEAD' }]) {
+      const refused = refreshRoster('/clone', answers(bad))
+      expect(refused.ok).toBe(false)
+      expect(refused.sha).toBeNull()
+      expect(refused.reason).toContain('could not be read')
+    }
+    const good = refreshRoster('/clone', answers({ status: 0, out: 'b'.repeat(40) }))
+    expect(good).toMatchObject({ ok: true, sha: 'b'.repeat(40) })
+  })
+
   // Every pass fast-forwards the control-room clone. `loadProfile` verifies the working tree
   // against the commit `factory.json` remembers, so a record left behind reads a clone that is
   // merely up to date as one that has been tampered with — and every policy question after that
@@ -1533,7 +1551,7 @@ describe('the command', () => {
     await runWorker(['run'], {
       cwd: root, home, host: HOST, env: {}, out: () => {}, runner: gh.runner, now: () => gh.clock,
       runStep: (async () => ({ outcome: 'done' as const, note: '', ms: 1 })) as RunStep,
-      git: () => { verifications++; return (() => ({ status: 0, out: '' })) as GitRun },
+      git: () => { verifications++; return anyGit() },
       sleep: async () => { if (++passes === 2) process.emit('SIGTERM' as NodeJS.Signals) },
     })
     // One for the gate the command passes before it starts, then exactly one for each pass.

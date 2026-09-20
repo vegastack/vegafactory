@@ -342,6 +342,10 @@ export function refreshRoster(clone: string, git: GitRun = gitIn(clone)): Refres
   // later profile read would reject the clone for being somewhere it never was.
   const head = git(['rev-parse', 'HEAD'])
   const sha = head.status === 0 && /^[0-9a-f]{40}$/.test(head.out.trim()) ? head.out.trim() : null
+  // The merge above may have moved the clone. If where it landed cannot be read, the refresh is
+  // not a success with a detail missing: nothing can record the new position, so every later
+  // profile read would reject the clone as moved while this said it was refreshed.
+  if (!sha) return { ok: false, reason: `the control-room clone was refreshed but its commit could not be read (${head.out.split('\n')[0] || `exit ${head.status}`})`, sha: null }
   return { ok: true, reason: 'refreshed from the control room', sha }
 }
 
