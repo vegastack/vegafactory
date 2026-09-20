@@ -242,13 +242,17 @@ describe('pruneWorktrees', () => {
     expect(readDroppedDeps(root)['106-old']).toBeTruthy()
 
     const ran: string[][] = []
-    const runner = ((file: string, args: string[]) => { ran.push([file, ...args]); return '' }) as never
+    const ranOptions: Array<{ timeout?: number }> = []
+    const runner = ((file: string, args: string[], options: { timeout?: number }) => { ran.push([file, ...args]); ranOptions.push(options ?? {}); return '' }) as never
     const actions: string[] = []
     const warns: string[] = []
     // One `commands:` line, as a real profile has: a second would make the profile ambiguous.
     const setup = 'commands: check `true` · setup `bun install --frozen-lockfile`\nworktree-retention: 14d\n'
     expect(restoreDroppedDependencies({ repoRoot: root, name: '106-old', path: wt.path, devMd: setup, write: true, actions, warns, runner })).toBe(true)
     expect(ran[0]).toEqual(['sh', '-c', 'bun install --frozen-lockfile'])
+    // Bounded: this runs inside the worker's pass, before the step timer exists, so a hung
+    // install would hold the loop, stop the heartbeats and outlast a shutdown.
+    expect(ranOptions[0]?.timeout).toBeGreaterThan(0)
     expect(actions.join('\n')).toContain('reinstall dependencies')
     // Done once: the record is cleared, so the next restore installs nothing.
     expect(readDroppedDeps(root)['106-old']).toBeUndefined()
@@ -410,6 +414,10 @@ describe('pruneWorktrees', () => {
     expect(ghJson(['api', 'x'], { gh: fakeGh('{"id":7}') })).toEqual({ id: 7 })
     // Genuinely broken output is still broken, not half-read.
     expect(() => ghJson(['api', 'x'], { gh: fakeGh('[{"number":1},') })).toThrow(/unparseable/)
+    // A valid page followed by a truncation message is not complete data.
+    expect(() => ghJson(['api', 'x'], { gh: fakeGh(`${page(1)}\nerror: gateway timeout`) })).toThrow(/unparseable/)
+    // Nor is anything before the first document.
+    expect(() => ghJson(['api', 'x'], { gh: fakeGh(`warning: rate limited\n${page(1)}`) })).toThrow(/unparseable/)
     // Brackets inside strings are text, not structure.
     expect(ghJson(['api', 'x'], { gh: fakeGh(JSON.stringify([{ body: '}}}] not json [[[{{{' }])) }))
       .toEqual([{ body: '}}}] not json [[[{{{' }])

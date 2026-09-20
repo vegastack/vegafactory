@@ -191,6 +191,8 @@ const DEFAULT_RETENTION_MS = 14 * DAY_MS;
 // everything while leaving the code, the branch and the history exactly where they were, and
 // resuming only has to run setup again.
 const DEFAULT_DEPS_RETENTION_MS = 3 * DAY_MS;
+// Long enough for a cold `bun install`, short enough that a hung one is not for ever.
+const SETUP_LIMIT_MS = 10 * 60 * 1000;
 
 // All of these must hold before a worktree directory is removed. Each failure
 // gets its own sentence so the caller can print exactly why the work is being
@@ -472,7 +474,9 @@ export function restoreDroppedDependencies({ repoRoot, name, path, devMd, write,
   actions.push(at(path, 'reinstall dependencies: ' + setup));
   if (!write) return false;
   try {
-    runner('sh', ['-c', setup], { cwd: path, stdio: 'ignore' });
+    // Bounded, because this runs inside the worker's own pass and before the step timer exists:
+    // a hung install would hold the loop, stop the heartbeats and outlast a shutdown.
+    runner('sh', ['-c', setup], { cwd: path, stdio: 'ignore', timeout: SETUP_LIMIT_MS });
     clearDroppedDeps(repoRoot, name);
     return true;
   } catch (error) {

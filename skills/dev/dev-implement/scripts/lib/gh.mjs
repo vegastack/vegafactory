@@ -39,6 +39,11 @@ function splitJsonDocuments(text) {
       continue;
     }
     if (character === '"') { inString = true; continue; }
+    // Between documents only whitespace is allowed. A valid first page followed by a truncation
+    // message would otherwise read as complete data with the error quietly dropped.
+    if (depth === 0 && start === -1 && character.trim()) {
+      if (character !== '[' && character !== '{') return null;
+    }
     if (character === '[' || character === '{') {
       if (depth === 0) start = index;
       depth += 1;
@@ -52,7 +57,7 @@ function splitJsonDocuments(text) {
     start = -1;
   }
   // Unbalanced, or trailing text that was not a document at all.
-  if (depth !== 0 || inString || source.slice(start === -1 ? source.length : start).trim()) return null;
+  if (depth !== 0 || inString || start !== -1) return null;
   return documents.length ? documents : null;
 }
 
