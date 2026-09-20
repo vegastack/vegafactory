@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { claimBody, claimLine, holderOf, nodeId, trustedFactory } from '../src/claim.ts'
 import {
-  unwritableForUnit,
+  alreadyLingering, unwritableForUnit,
   SERVICE_NAME,
   APP_ID, DEFAULT_CAPS, MAX_FAILURES, MAX_RUNS, MAX_TIMER_MS, POLL_MS, RETRY_MS, STEP_TIMEOUT_MS, TOKEN_MARGIN_MS, parseCaps, rosterName, sayDuration, agentArgs, appIdentity, appJwt, appKeyPath, assertKeyFile, board, decide, defaultRunStep, workerDir,
   acknowledgedPlan, canonicalPath, childRunEnvironment, confirmShip, disjointSiblings, pushableBranch, shipWord,
@@ -1093,6 +1093,24 @@ describe('readiness and the service', () => {
   // A user service inherits nothing from the shell that installed it. Without these in the unit the
   // worker restarts as VegaStack's own App, against a key it cannot find — and `enable` would have
   // reported success. All three are names; the secret is the key file, not where it lives.
+  // The plist writes these two files and the systemd unit did not, so `logDir` was passed to the
+  // Linux branch and silently dropped: the log this product tells people to read never appeared.
+  test('both platforms write the same two log files', () => {
+    const where = { cli: ['vegafactory'], root, repo: 'o/r', logDir: workerDir(root) }
+    const plist = unitText('darwin', where)
+    const unit = unitText('linux', where)
+    for (const [text, out, err] of [
+      [plist, `<string>${join(workerDir(root), 'worker.log')}</string>`, `<string>${join(workerDir(root), 'worker.err.log')}</string>`],
+      [unit, `StandardOutput=append:${join(workerDir(root), 'worker.log')}`, `StandardError=append:${join(workerDir(root), 'worker.err.log')}`],
+    ] as const) {
+      expect(text).toContain(out)
+      expect(text).toContain(err)
+    }
+    // `append:`, not truncate: a service whose whole job is to be restarted would otherwise lose
+    // the log of whatever went wrong last time.
+    expect(unit).not.toContain('StandardOutput=file:')
+  })
+
   test('the unit carries everything enable was run with, and no secret', () => {
     const env = { VEGAFACTORY_APP_ID: '12345', VEGAFACTORY_APP_ACTOR: 'acmefactory[bot]', VEGAFACTORY_APP_PRIVATE_KEY_FILE: '/keys/app.pem' }
     const plist = unitText('darwin', { cli: ['vegafactory'], root, repo: 'o/r', logDir: workerDir(root), env })
@@ -1144,6 +1162,22 @@ describe('readiness and the service', () => {
       ['launchctl', 'enable', `gui/501/${SERVICE_NAME}`],
     ])
     expect(serviceCommands('linux', '/u', 'enable').at(-1)).toEqual(['systemctl', '--user', 'restart', 'vegafactory-worker.service'])
+    // Linger comes first, before anything is loaded. A `--user` service lives inside a login
+    // session and systemd ends that session with the last login, so without this an always-on
+    // worker dies at logout — quietly, and hours later.
+    expect(serviceCommands('linux', '/u', 'enable', 501)[0]).toEqual(['loginctl', 'enable-linger', '501'])
+    // Already lingering: setting it is gated by polkit, and asking again would fail on exactly the
+    // box where an administrator had just done it — making the documented recovery no recovery.
+    expect(serviceCommands('linux', '/u', 'enable', 501, true).flat()).not.toContain('enable-linger')
+    expect(serviceCommands('linux', '/u', 'enable', 501, true)[0]).toEqual(['systemctl', '--user', 'daemon-reload'])
+    // Reading the property needs no privilege, so it is safe to ask before trying to set it.
+    expect(alreadyLingering((() => ({ code: 0, stdout: 'Linger=yes\n', stderr: '' })) as Probe, 501)).toBe(true)
+    expect(alreadyLingering((() => ({ code: 0, stdout: 'Linger=no\n', stderr: '' })) as Probe, 501)).toBe(false)
+    expect(alreadyLingering((() => ({ code: 1, stdout: '', stderr: 'no such user' })) as Probe, 501)).toBe(false)
+    // Disabling leaves it alone: linger is user-wide and other services on this account may rely
+    // on it. Recorded as a decision, not an oversight.
+    expect(serviceCommands('linux', '/u', 'disable').flat()).not.toContain('linger')
+    expect(serviceCommands('darwin', '/u', 'enable', 501).flat()).not.toContain('linger')
   })
 })
 
@@ -1400,6 +1434,77 @@ describe('the command', () => {
       expect(refused.text).toContain('control character')
       expect(existsSync(unitPath('linux', home))).toBe(false)
     }
+  })
+
+  // The documented recovery is `sudo loginctl enable-linger`. If `enable` then asked for it again
+  // it would be denied on exactly the box where an administrator had just done the one thing that
+  // was needed — so the way out of the refusal has to work at the command, not only in a helper.
+  test('an administrator having set linger is enough for enable to go through', async () => {
+    project(`| node | owner | worker | repos |\n|---|---|---|---|\n| ${NODE} | mk | yes | o/r |\n`)
+    mkdirSync(join(root, '.claude'), { recursive: true })
+    mkdirSync(join(root, '.codex'), { recursive: true })
+    writeFileSync(join(root, '.claude', 'settings.json'), 'vegafactory hook stop --harness claude')
+    writeFileSync(join(root, '.codex', 'hooks.json'), 'vegafactory hook stop --harness codex')
+    mkdirSync(join(home, '.config', 'systemd', 'user'), { recursive: true })
+    const { privateKey } = generateKeyPairSync('rsa', { modulusLength: 2048, privateKeyEncoding: { type: 'pkcs8', format: 'pem' }, publicKeyEncoding: { type: 'spki', format: 'pem' } })
+    const key = join(root, 'set-by-admin.pem')
+    writeFileSync(key, privateKey, { mode: 0o600 })
+    chmodSync(key, 0o600)
+    const fetch: Fetch = async (url) => ({
+      ok: true, status: 200,
+      json: async () => url.endsWith('/installation') ? { id: 42 } : { token: 'ghs_test', expires_at: '2026-09-18T11:00:00Z' },
+    })
+    const ran: string[][] = []
+    const probe: Probe = (command, cmdArgs) => {
+      if (command === 'git') return { code: 0, stdout: 'git@github.com:o/r.git', stderr: '' }
+      if (command === 'claude' || command === 'codex') return { code: 0, stdout: 'ok', stderr: '' }
+      ran.push([command, ...cmdArgs])
+      // Already on, because an administrator set it.
+      if (command === 'loginctl' && cmdArgs[0] === 'show-user') return { code: 0, stdout: 'Linger=yes\n', stderr: '' }
+      // And still refused to this account, which is why it was needed.
+      if (command === 'loginctl' && cmdArgs[0] === 'enable-linger') return { code: 1, stdout: '', stderr: 'Interactive authentication required.' }
+      return { code: 0, stdout: '', stderr: '' }
+    }
+    const result = await run(['enable'], { platform: 'linux', run: probe, fetch, env: { VEGAFACTORY_APP_PRIVATE_KEY_FILE: key } })
+    expect(result.code).toBe(0)
+    expect(result.text).toContain('enabled —')
+    // It never asked, so the denial never happened, and it went on to load the service.
+    expect(ran.some((command) => command[1] === 'enable-linger')).toBe(false)
+    expect(ran.some((command) => command[0] === 'systemctl' && command.includes('daemon-reload'))).toBe(true)
+  })
+
+  // The failure this exists to prevent: an account that cannot grant itself linger gets a unit
+  // that loads, works, and dies at the operator's next logout. `enable` has to say so at the
+  // moment it can still be fixed, not leave it to be discovered hours later.
+  test('a box that cannot grant linger fails loudly instead of dying at logout', async () => {
+    project(`| node | owner | worker | repos |\n|---|---|---|---|\n| ${NODE} | mk | yes | o/r |\n`)
+    mkdirSync(join(root, '.claude'), { recursive: true })
+    mkdirSync(join(root, '.codex'), { recursive: true })
+    writeFileSync(join(root, '.claude', 'settings.json'), 'vegafactory hook stop --harness claude')
+    writeFileSync(join(root, '.codex', 'hooks.json'), 'vegafactory hook stop --harness codex')
+    mkdirSync(join(home, '.config', 'systemd', 'user'), { recursive: true })
+    const { privateKey } = generateKeyPairSync('rsa', { modulusLength: 2048, privateKeyEncoding: { type: 'pkcs8', format: 'pem' }, publicKeyEncoding: { type: 'spki', format: 'pem' } })
+    const key = join(root, 'linger.pem')
+    writeFileSync(key, privateKey, { mode: 0o600 })
+    chmodSync(key, 0o600)
+    const fetch: Fetch = async (url) => ({
+      ok: true, status: 200,
+      json: async () => url.endsWith('/installation') ? { id: 42 } : { token: 'ghs_test', expires_at: '2026-09-18T11:00:00Z' },
+    })
+    const started: string[][] = []
+    const probe: Probe = (command, cmdArgs) => {
+      if (command === 'git') return { code: 0, stdout: 'git@github.com:o/r.git', stderr: '' }
+      if (command === 'claude' || command === 'codex') return { code: 0, stdout: 'ok', stderr: '' }
+      started.push([command, ...cmdArgs])
+      if (command === 'loginctl') return { code: 1, stdout: '', stderr: 'Could not enable linger: Interactive authentication required.' }
+      return { code: 0, stdout: '', stderr: '' }
+    }
+    const refused = await run(['enable'], { platform: 'linux', run: probe, fetch, env: { VEGAFACTORY_APP_PRIVATE_KEY_FILE: key } })
+    expect(refused.code).toBe(1)
+    expect(refused.text).toContain('loginctl enable-linger')
+    expect(refused.text).toContain('Interactive authentication required')
+    // It stopped there: nothing was loaded, so no unit is left running that would die at logout.
+    expect(started.some((command) => command[0] === 'systemctl')).toBe(false)
   })
 
   // A machine enabling for the first time has nothing to unload, and launchctl's wording for that

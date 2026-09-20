@@ -652,6 +652,15 @@ export function unitPath(platform: NodeJS.Platform, home = homedir()): string {
 // service that starts without the setting the operator just proved.
 // eslint-disable-next-line no-control-regex
 const UNWRITABLE = /[\u0000-\u001f\u007f]/
+// Whether this account's services already outlive its logins. Reading the property needs no
+// privilege, so it is safe to ask before trying to set it.
+export function alreadyLingering(run: Probe, uid: number): boolean {
+  try {
+    const answer = run('loginctl', ['show-user', String(uid), '--property=Linger'])
+    return answer.code === 0 && /Linger=yes/i.test(answer.stdout)
+  } catch { return false }
+}
+
 export function unwritableForUnit(env: NodeJS.ProcessEnv): string | null {
   for (const name of ['VEGAFACTORY_APP_ID', 'VEGAFACTORY_APP_ACTOR', 'VEGAFACTORY_APP_PRIVATE_KEY_FILE']) {
     const value = env[name]?.trim()
@@ -702,6 +711,18 @@ export function unitText(platform: NodeJS.Platform, input: { cli: string[]; root
     '[Unit]', 'Description=VegaFactory worker', '',
     '[Service]', 'Type=simple', `WorkingDirectory=${input.root}`,
     `ExecStart=${argv.map((arg) => JSON.stringify(arg)).join(' ')}`,
+    // The same two files the plist writes, so a person reading the logs finds them in one place on
+    // either platform. `logDir` was already being passed here and dropped, so on Linux the log
+    // this product tells people to read never appeared at all.
+    //
+    // `append:` redirects the streams rather than copying them, so these lines do *not* reach the
+    // journal — `journalctl -u vegafactory-worker.service` shows systemd's own messages about the
+    // unit and nothing the worker printed. That is the trade for parity, and the onboarding
+    // checklist says so rather than sending anyone to the journal for output that is not there.
+    // It appends rather than truncating, which matters for a service whose whole job is to be
+    // restarted.
+    `StandardOutput=append:${join(input.logDir, 'worker.log')}`,
+    `StandardError=append:${join(input.logDir, 'worker.err.log')}`,
     // systemd quotes a whole item, so the quotes go around `NAME=value` and not around the value:
     // `Environment=NAME="a b"` puts an opening quote after non-whitespace, which is not the
     // documented form. `%` is doubled because specifiers expand, and a backslash or a quote is
@@ -712,7 +733,7 @@ export function unitText(platform: NodeJS.Platform, input: { cli: string[]; root
   ].join('\n')
 }
 
-export function serviceCommands(platform: NodeJS.Platform, path: string, verb: 'enable' | 'disable', uid = userInfo().uid): string[][] {
+export function serviceCommands(platform: NodeJS.Platform, path: string, verb: 'enable' | 'disable', uid = userInfo().uid, lingering = false): string[][] {
   if (platform === 'darwin') {
     const target = `gui/${uid}`
     // Unloading first is what makes a re-enable pick up the file that was just written. launchd
@@ -725,10 +746,26 @@ export function serviceCommands(platform: NodeJS.Platform, path: string, verb: '
       ? [['launchctl', 'bootout', `${target}/${SERVICE_NAME}`], ['launchctl', 'bootstrap', target, path], ['launchctl', 'enable', `${target}/${SERVICE_NAME}`]]
       : [['launchctl', 'bootout', `${target}/${SERVICE_NAME}`]]
   }
-  // Same reason: `daemon-reload` reparses the unit but `enable --now` leaves an already-active
-  // service running the version it started with.
+  // Linger first, and checked rather than assumed. A `--user` service runs inside a login session
+  // and systemd ends that session when the last login closes, so without linger an always-on
+  // worker dies the moment the operator logs out — quietly, and hours later. It is a per-user
+  // setting gated by polkit, so the account may not be able to grant it to itself; the command
+  // loop stops at the first failure and names it, which is the whole point of doing it here
+  // instead of hoping.
+  //
+  // Same reason as darwin for the restart: `daemon-reload` reparses the unit but `enable --now`
+  // leaves an already-active service running the version it started with.
   return verb === 'enable'
-    ? [['systemctl', '--user', 'daemon-reload'], ['systemctl', '--user', 'enable', '--now', 'vegafactory-worker.service'], ['systemctl', '--user', 'restart', 'vegafactory-worker.service']]
+    ? [
+      // Setting it is gated by polkit; reading it is not. An administrator who has already run
+      // `loginctl enable-linger` for this account has done the one thing this needs, and asking
+      // again would fail on exactly the box where that recovery was required — which would make
+      // the documented way out of the refusal no way out at all.
+      ...(lingering ? [] : [['loginctl', 'enable-linger', String(uid)]]),
+      ['systemctl', '--user', 'daemon-reload'],
+      ['systemctl', '--user', 'enable', '--now', 'vegafactory-worker.service'],
+      ['systemctl', '--user', 'restart', 'vegafactory-worker.service'],
+    ]
     : [['systemctl', '--user', 'disable', '--now', 'vegafactory-worker.service']]
 }
 
@@ -1935,7 +1972,7 @@ export async function runWorker(argv: string[], deps: CliDeps = {}): Promise<num
         print({ ok: false, reason: unwritable }, `refused: ${unwritable}`)
         return 2
       }
-      const commands = serviceCommands(platform, path, 'enable')
+      const commands = serviceCommands(platform, path, 'enable', userInfo().uid, platform !== 'darwin' && alreadyLingering(deps.run ?? probe, userInfo().uid))
       if (args.dryRun) {
         print({ ok: true, checks, unit: path, dryRun: true }, `${renderChecks(checks)}\n\ndry run: would write ${path}, then ${commands.map((command) => command.join(' ')).join(' && ')}`)
         return 0
