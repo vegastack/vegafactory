@@ -103,7 +103,7 @@ export function shipCheck(input: { cwd: string; root: string; repo: string; numb
 
   // Review is never skipped: the commit that would merge carries a clean review covering the whole
   // candidate, or the operator's own written acceptance of what that review left open. The review
-  // may come from a reviewer with write access or from the App a dispatched run posts as; the
+  // may come from a reviewer with write access or from the App a worker run posts as; the
   // acceptance may not — that word is the operator's own.
   const reviewer = trustedFactory({ repo, runner, root })
   const person = trustedAuthors({ repo, runner, root })

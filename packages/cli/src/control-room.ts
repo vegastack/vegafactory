@@ -4,6 +4,7 @@ import { lstatSync, mkdirSync, readFileSync, realpathSync, renameSync, rmSync, w
 import { execFileSync } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
 import { parseControlRoomReference, resolvePolicy } from '../../../skills/dev/dev-setup/scripts/effective-policy.mjs'
+import { controlRoomClonePath, controlRoomStore, factoryConfigPath as configPath } from './home.ts'
 
 export interface ControlRoomKnob {
   org: string
@@ -23,13 +24,13 @@ export interface ControlRoomEntry {
 }
 
 export interface FactoryConfig {
-  schemaVersion: 1 | 2
-  revision?: number
+  schemaVersion: 2
+  revision: number
   controlRooms: Record<string, ControlRoomEntry>
-  // Everything else the document carries — the dispatcher's `repos`, `interval`, `maxRuns` and
+  // Everything else the document carries — the worker's `repos`, `interval`, `maxRuns` and
   // `subagents` live in this same file and are hand-written by the operator. Sync reads none of
   // them and must give all of them back untouched: a rewrite that keeps only what it understands
-  // would silently delete the dispatcher's configuration on the next refresh.
+  // would silently delete the worker's configuration on the next refresh.
   settings: Record<string, unknown>
 }
 
@@ -39,28 +40,34 @@ export function parseControlRoomKnob(devMdText: string): ControlRoomKnob | null 
   return parseControlRoomReference(devMdText)
 }
 
+// These three are one fact spelled three ways, so they come from one place: `safeClonePath`
+// contains what `defaultClonePath` produces, and a skew between them fails every control-room read
+// closed rather than loudly.
 export function defaultClonePath(org: string, home: string): string {
-  return join(home, '.vegastack', 'control-room', org)
+  return controlRoomClonePath(org, { home })
 }
 
 export function factoryConfigPath(home: string): string {
-  return join(home, '.vegastack', 'factory.json')
+  return configPath({ home })
 }
 
 // A missing state file is an empty config — the first sync writes it. An unreadable one throws:
 // silently resetting it would drop every other org's clone record and re-clone the world.
 export function readFactoryConfig(text: string | null): FactoryConfig {
-  if (text === null || text === undefined || text.trim() === '') return { schemaVersion: 1, controlRooms: {}, settings: {} }
+  if (text === null || text === undefined || text.trim() === '') return { schemaVersion: 2, revision: 0, controlRooms: {}, settings: {} }
   let parsed: unknown
   try {
     parsed = JSON.parse(text)
   } catch {
-    throw new Error('~/.vegastack/factory.json is not valid JSON — fix or delete it')
+    throw new Error(`${configPath()} is not valid JSON — fix or delete it`)
   }
   if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) throw new Error('factory.json must be an object')
   const document = parsed as Record<string, unknown>
-  if (![1, 2].includes(document.schemaVersion as number)) throw new Error('factory.json: unsupported settings schema')
-  if (document.schemaVersion === 2 && (!Number.isSafeInteger(document.revision) || Number(document.revision) < 0)) throw new Error('factory.json: invalid revision')
+  // One schema, and only one. A file written by anything else is not migrated and not guessed at:
+  // it is the operator's own settings, and rewriting them on a version number would lose whatever
+  // the newer or older writer meant by them.
+  if (document.schemaVersion !== 2) throw new Error(`factory.json: unsupported settings schema ${JSON.stringify(document.schemaVersion)} — this build reads schema 2`)
+  if (!Number.isSafeInteger(document.revision) || Number(document.revision) < 0) throw new Error('factory.json: invalid revision')
   if (document.controlRooms !== undefined && (!document.controlRooms || typeof document.controlRooms !== 'object' || Array.isArray(document.controlRooms))) throw new Error('factory.json: invalid controlRooms')
   const controlRooms: Record<string, ControlRoomEntry> = {}
   const raw = (parsed as { controlRooms?: unknown } | null)?.controlRooms
@@ -75,7 +82,7 @@ export function readFactoryConfig(text: string | null): FactoryConfig {
       if (key !== 'schemaVersion' && key !== 'controlRooms' && key !== 'revision') settings[key] = value
     }
   }
-  return { schemaVersion: document.schemaVersion as 1 | 2, ...(document.schemaVersion === 2 ? { revision: document.revision as number } : {}), controlRooms, settings }
+  return { schemaVersion: 2, revision: document.revision as number, controlRooms, settings }
 }
 
 export function withSyncResult(config: FactoryConfig, org: string, entry: ControlRoomEntry): FactoryConfig {
@@ -85,7 +92,7 @@ export function withSyncResult(config: FactoryConfig, org: string, entry: Contro
 // What actually lands on disk: the settings this file understood nothing about come back as
 // top-level keys, exactly where the operator wrote them.
 export function serializeFactoryConfig(config: FactoryConfig): Record<string, unknown> {
-  return { ...config.settings, schemaVersion: config.schemaVersion, ...(config.schemaVersion === 2 ? { revision: config.revision } : {}), controlRooms: config.controlRooms }
+  return { ...config.settings, schemaVersion: 2, revision: config.revision, controlRooms: config.controlRooms }
 }
 
 // How stale the local copy of the control room may be before a session refreshes it.
@@ -185,16 +192,11 @@ async function publishSettings(path: string, mutate: (settings: SettingsV2) => S
     await syncDirectory(guard); owned = true
     const beforeText = await readFile(path, 'utf8').catch(error => { if (error.code === 'ENOENT') return null; throw error })
     const before = readFactoryConfig(beforeText)
-    const next = await mutate(structuredClone({ schemaVersion: 2, revision: before.revision ?? 0, orgs: before.controlRooms, settings: before.settings }))
+    const next = await mutate(structuredClone({ schemaVersion: 2, revision: before.revision, orgs: before.controlRooms, settings: before.settings }))
     if (!next || next.schemaVersion !== 2 || !next.orgs || typeof next.orgs !== 'object' || Array.isArray(next.orgs) || !next.settings || typeof next.settings !== 'object' || Array.isArray(next.settings)) throw new Error('invalid settings mutation')
-    const committed: SettingsV2 = structuredClone({ ...next, revision: (before.revision ?? 0) + 1 })
+    const committed: SettingsV2 = structuredClone({ ...next, revision: before.revision + 1 })
     const wire = serializeFactoryConfig({ schemaVersion: 2, revision: committed.revision, controlRooms: committed.orgs, settings: committed.settings })
     readFactoryConfig(JSON.stringify(wire))
-    // Preserve the original schema1 bytes; failed semantic validation above never migrates.
-    if (beforeText !== null && before.schemaVersion === 1) {
-      const backup = await open(path + '.schema1.bak', 'wx', 0o600).catch(error => { if (error.code === 'EEXIST') return null; throw error })
-      if (backup) { try { await backup.writeFile(beforeText); await backup.sync() } finally { await backup.close() } }
-    }
     const file = await open(temporary, 'wx', 0o600)
     try { await file.writeFile(JSON.stringify(wire, null, 2) + '\n'); await file.sync() } finally { await file.close() }
     // Detect participating-independent manual edits made during the callback. A text editor
@@ -229,7 +231,7 @@ function realPathTo(path: string, from: string): string | null {
 // inside this machine's control-room store, with no symlink anywhere along it. Returns the reason
 // it is not usable, or null when it is.
 export function safeClonePath(home: string, path: unknown): string | null {
-  const store = join(home, '.vegastack', 'control-room')
+  const store = controlRoomStore({ home })
   if (typeof path !== 'string' || !path || !isAbsolute(path) || resolve(path) !== path) return 'the control-room path is not absolute and canonical'
   if (path !== store && !path.startsWith(store + sep)) return `the control-room clone is outside ${store}`
   const walked = realPathTo(path, parsePath(path).root)

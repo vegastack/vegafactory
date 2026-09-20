@@ -10,7 +10,7 @@ vegafactory review 42 --base origin/main                # a base other than orig
 vegafactory review 42 --reviewer codex                  # pick the reviewer instead of detecting it
 vegafactory review 42 --resume                          # refuse unless this machine's session can be resumed
 vegafactory review 42 --dry-run                         # print the packet and the exact command, run nothing
-vegafactory review 42 --json                            # the result as JSON, for a dispatcher
+vegafactory review 42 --json                            # the result as JSON, for a worker
 vegafactory review 42 --record <file>                   # post findings this session produced (only when the other tool cannot review)
 ```
 

@@ -106,9 +106,23 @@ describe('claim', () => {
     expect(holder().holder?.owner).toBe('b:2')
   })
 
-  test('a dispatched run goes stale after 30 minutes, a session only after 4 hours', () => {
-    claim(ctx, request('a:1', { kind: 'dispatch' }), now())
+  test('a worker run goes stale after 30 minutes, a session only after 4 hours', () => {
+    claim(ctx, request('a:1', { kind: 'worker' }), now())
     gh.clock += 31 * 60_000
+    expect(holder().holder).toBeNull()
+    expect(holder().stale[0]?.owner).toBe('a:1')
+  })
+
+  // A kind this build does not recognise — an older or newer spelling already written to GitHub —
+  // reads as a session, the longer of the two timeouts. Reading it as a worker would take a live
+  // claim away after thirty minutes and hand its issue to a second run.
+  test('a stored kind this build does not know is a session, not a worker', () => {
+    gh.addComment(7, claimBody(request('a:1')).replace('kind=session', 'kind=dispatch'))
+    heartbeat(ctx, 'a:1', 0, now())
+    gh.clock += 31 * 60_000
+    expect(holder().holder?.owner).toBe('a:1')
+    expect(holder().holder?.kind).toBe('session')
+    gh.clock += 4 * 60 * 60_000
     expect(holder().holder).toBeNull()
     expect(holder().stale[0]?.owner).toBe('a:1')
   })

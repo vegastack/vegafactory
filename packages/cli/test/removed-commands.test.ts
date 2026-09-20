@@ -110,8 +110,8 @@ test('the tombstone is the only file the sweep skips wholesale', () => {
 test('the prepared control-room refresh is exactly the approved layout', () => {
   const room = join(root, 'control-room-refresh/room')
   const top = readdirSync(room).sort()
-  expect(top).toEqual(['boards.md', 'dispatchers.md', 'groups', 'onboarding', 'org.md', 'repos.md', 'stats'])
-  expect(readdirSync(join(room, 'onboarding')).sort()).toEqual(['dispatcher-box.md', 'new-repo.md', 'new-teammate.md'])
+  expect(top).toEqual(['boards.md', 'groups', 'nodes.md', 'onboarding', 'org.md', 'repos.md', 'stats'])
+  expect(readdirSync(join(room, 'onboarding')).sort()).toEqual(['new-repo.md', 'new-teammate.md', 'worker-box.md'])
   expect(readdirSync(join(room, 'groups/dev'))).toEqual(['group.md'])
   expect(readdirSync(join(room, 'stats'))).toEqual(['README.md'])
   const files = execFileSync('git', ['ls-files', '-z', '--', 'control-room-refresh/room'], { cwd: root, encoding: 'utf8' }).split('\0').filter(Boolean)
@@ -154,7 +154,7 @@ test('applying the documented patch leaves exactly the seven-entry layout', () =
     // cp -R room/. .
     cpSync(join(root, 'control-room-refresh/room'), applied, { recursive: true })
 
-    expect(readdirSync(applied).sort()).toEqual(['boards.md', 'dispatchers.md', 'groups', 'onboarding', 'org.md', 'repos.md', 'stats'])
+    expect(readdirSync(applied).sort()).toEqual(['boards.md', 'groups', 'nodes.md', 'onboarding', 'org.md', 'repos.md', 'stats'])
     // Nothing of the old model survives anywhere in the tree.
     const walk = (dir: string): string[] => readdirSync(dir, { withFileTypes: true })
       .flatMap((entry) => entry.isDirectory() ? walk(join(dir, entry.name)) : [join(dir, entry.name).slice(applied.length + 1)])
@@ -168,8 +168,25 @@ test('the control-room templates are the lean room and nothing else', () => {
   const files = execFileSync('git', ['ls-files', '--', assets], { cwd: root, encoding: 'utf8' })
     .split('\n').filter(Boolean).map((path) => path.slice(path.indexOf('assets/control-room/') + 'assets/control-room/'.length))
   expect(files.sort()).toEqual([
-    'boards.md.template', 'dispatchers.md.template', 'group.md.template',
-    'onboarding/dispatcher-box.md.template', 'onboarding/new-repo.md.template', 'onboarding/new-teammate.md.template',
+    'boards.md.template', 'group.md.template', 'nodes.md.template',
+    'onboarding/new-repo.md.template', 'onboarding/new-teammate.md.template', 'onboarding/worker-box.md.template',
     'org.md.template', 'repos.md.template', 'stats/README.md.template',
   ])
+})
+
+// The staged room is a *rendering* of the shipped templates. Editing one and not the other is how
+// the checklist that provisions a machine came to disagree with the one that ships — so the drift
+// is checked rather than remembered.
+test('the staged worker checklist is the shipped template with its values filled in', () => {
+  const values: Record<string, string> = {
+    '{{org}}/{{repo}}': 'vegastack/vegafactory', '{{org}}': 'vegastack', '{{repo}}': 'vegafactory',
+    '{{node}}': 'mk@patrick-mac-mini', '{{worker-node}}': 'vf-worker@patrick-mac-mini',
+    '{{operator}}': 'kmanojkumar', '{{owner}}': 'kmanojkumar',
+    '{{worker-user}}': 'vf-worker', '{{runner-user}}': 'vf-runner', '{{runner-group}}': 'vsk-runners',
+    '{{runner-name}}': 'patrick-mac-mini', '{{machine}}': 'mk@patrick-mac-mini',
+  }
+  const template = readFileSync(join(root, 'skills/factory/vegafactory-setup/assets/control-room/onboarding/worker-box.md.template'), 'utf8')
+  const rendered = Object.entries(values).reduce((text, [name, value]) => text.split(name).join(value), template)
+  expect(rendered).not.toMatch(/\{\{/)
+  expect(readFileSync(join(root, 'control-room-refresh/room/onboarding/worker-box.md'), 'utf8')).toBe(rendered)
 })

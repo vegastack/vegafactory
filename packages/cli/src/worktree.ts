@@ -7,9 +7,9 @@
 import { spawnSync } from 'node:child_process'
 import { existsSync } from 'node:fs'
 import { mkdir, readFile, writeFile } from 'node:fs/promises'
-import { homedir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { worktreesPath, type HomeOptions } from './home.ts'
 
 const verbs = ['list', 'create', 'restore', 'remove', 'prune', 'status'] as const
 export type WorktreeVerb = (typeof verbs)[number]
@@ -108,13 +108,17 @@ export async function recordRepoRoot(registryPath: string, repoRoot: string): Pr
     if (Array.isArray(parsed)) existing = parsed.filter((entry): entry is string => typeof entry === 'string')
   } catch { existing = [] }
   const roots = [...new Set([...existing, resolve(repoRoot)])].filter(root => existsSync(root)).sort()
-  await mkdir(dirname(registryPath), { recursive: true })
+  // Owner-only, because the directory this lands in also holds the App key and the control-room
+  // clones, and a umask of 022 would leave every one of them readable by anybody on the machine.
+  await mkdir(dirname(registryPath), { recursive: true, mode: 0o700 })
   await writeFile(registryPath, `${JSON.stringify(roots, null, 2)}\n`)
   return roots
 }
 
-export function defaultRegistryPath(): string {
-  return join(homedir(), '.vegastack', 'worktree-roots.json')
+// Takes the home rather than reaching for `homedir()`, because this used to be the one path in
+// the product a test could not point somewhere harmless.
+export function defaultRegistryPath(options: HomeOptions = {}): string {
+  return worktreesPath(options)
 }
 
 function defaultSpawn(args: string[], cwd?: string): SpawnResult {
