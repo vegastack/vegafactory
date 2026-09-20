@@ -6,6 +6,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { claimBody, claimLine, holderOf, nodeId, trustedFactory } from '../src/claim.ts'
 import {
+  threadFor,
   unwritableForUnit,
   SERVICE_NAME,
   APP_ID, DEFAULT_CAPS, MAX_FAILURES, MAX_RUNS, MAX_TIMER_MS, POLL_MS, RETRY_MS, STEP_TIMEOUT_MS, TOKEN_MARGIN_MS, parseCaps, rosterName, sayDuration, agentArgs, appIdentity, appJwt, appKeyPath, assertKeyFile, board, decide, defaultRunStep, workerDir,
@@ -1119,6 +1120,43 @@ describe('readiness and the service', () => {
     // Nothing configured, nothing written: VegaStack's own defaults need no unit entries.
     const plain = unitText('linux', { cli: ['vegafactory'], root, repo: 'o/r', logDir: workerDir(root), env: {} })
     expect(plain).not.toContain('Environment=')
+  })
+
+  // One thread per issue, resumed only while it is still reasoning about the code that is there.
+  test('a thread resumes on the same head and forks once the branch has moved', () => {
+    const first = threadFor(root, 'o/r', 7, 'a'.repeat(40))
+    expect(first.forked).toBe(false)
+    // Same head: the same thread, and the id is derived rather than remembered.
+    const again = threadFor(root, 'o/r', 7, 'a'.repeat(40))
+    expect(again).toEqual({ id: first.id, forked: false })
+
+    // The branch moved — a rebase, a review round, a commit from another machine — so resuming
+    // would have the agent reasoning about code that no longer exists.
+    const moved = threadFor(root, 'o/r', 7, 'b'.repeat(40))
+    expect(moved.forked).toBe(true)
+    expect(moved.id).not.toBe(first.id)
+    // And the fork is now the thread, stable until the branch moves again.
+    expect(threadFor(root, 'o/r', 7, 'b'.repeat(40))).toEqual({ id: moved.id, forked: false })
+
+    // Another issue is another thread, and another repository is another thread again.
+    expect(threadFor(root, 'o/r', 8, 'a'.repeat(40)).id).not.toBe(first.id)
+    expect(threadFor(root, 'o/other', 7, 'a'.repeat(40)).id).not.toBe(first.id)
+
+    // The id is a v4-shaped UUID, which is what `--session-id` accepts.
+    expect(first.id).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/)
+  })
+
+  test('a claude run carries its session id, and codex does not pretend to', () => {
+    const policy = { harness: 'claude', model: null, effort: 'high' }
+    expect(agentArgs(policy, 'do the thing', 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee').args)
+      .toContain('--session-id')
+    expect(agentArgs(policy, 'do the thing', 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee').args)
+      .toContain('aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee')
+    // No thread, no flag — a fresh run must not be handed an id it never started.
+    expect(agentArgs(policy, 'do the thing').args).not.toContain('--session-id')
+    // `codex exec` takes no session id at all, so none is passed and nothing claims otherwise.
+    expect(agentArgs({ harness: 'codex', model: null, effort: 'high' }, 'do the thing', 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee').args)
+      .not.toContain('--session-id')
   })
 
   test('the unit runs this CLI\'s own worker run and carries no token', () => {

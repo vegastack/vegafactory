@@ -2,6 +2,16 @@
 
 The project's story, newest first: what got built, why, and how it went — for the operator's future recall. Format home: the dev-chronicle skill.
 
+## 20-09-2026 — Worktrees that clean up after themselves ([#260](https://github.com/vegastack/vegafactory/issues/260))
+
+- **What:** An idle worktree loses its dependencies and gets them back when work resumes, and the tidy-up happens inside the poll pass the worker already makes. A second run on an issue picks up the same agent thread, unless the branch has moved under it.
+- **Why:** Step 9 of [#251](https://github.com/vegastack/vegafactory/issues/251). Nothing cleaned up: 1.8 GB across fifteen worktrees on this machine, thirteen with no open issue — and 628 MB of one 638 MB worktree was `node_modules` while the checkout itself was 10 MB. The cost is duplicated dependencies, not code.
+- **How it went:** The existing safe-to-remove test did the hard part, so this extended it rather than adding a second idea of what is safe: dependencies go on their own shorter window, under exactly the checks that already protect a worktree. Putting them back needed a marker, so a resume reinstalls what was taken and a fresh worktree still installs nothing.
+- **Changed:** a `worktree-deps-retention` knob · dependencies dropped from idle worktrees and reinstalled on resume · prune run inside the worker's pass, reporting what it kept · one agent thread per issue, forked when the branch moves.
+- **Decisions:** none new.
+
+— approved by (kmanojkumar) · built by claude · branch feat/260-worktrees-that-clean-up-after-themselves
+
 ## 19-09-2026 — A self-hosted factory trusts its own App ([#263](https://github.com/vegastack/vegafactory/issues/263))
 
 - **What:** A company can now pair its own GitHub App id with the bot login that authors factory work. Claims, plans, evidence, reviews, and release markers from that App remain trusted, while its words still cannot count as a human approval.

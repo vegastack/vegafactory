@@ -21,8 +21,8 @@
 //   or a subscription-reset wait binds this machine only: another machine can start that work
 //   before the deadline this one is keeping.
 import { spawn, spawnSync } from 'node:child_process'
-import { createSign, randomUUID } from 'node:crypto'
-import { appendFileSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync } from 'node:fs'
+import { createHash, createSign, randomUUID } from 'node:crypto'
+import { appendFileSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { homedir, hostname, userInfo } from 'node:os'
 import { join, posix } from 'node:path'
 import { APP_ACTOR, APP_ID, HEARTBEAT_EVERY_MS, appIdentityConfig, claim, heartbeat, holderOf, machineName, nodeId, release, trustedFactory } from './claim.ts'
@@ -1203,11 +1203,46 @@ const STAGE_OF: Record<string, string> = { plan: 'plan', implement: 'implement',
 // harness prompt — it is the worktree it is confined to, the branch it pushes, the step limit its
 // own process group enforces, and the ship guard in the hook, which asks through the issue rather
 // than a terminal (VSK_ASK_ROUTE). A run that cannot write is not unattended, it is stuck.
-export function agentArgs(policy: { harness: string; model: string | null; effort: string } | null, prompt: string): { tool: string; args: string[] } {
+// One agent thread per issue, resumed while it is still reasoning about the code that is there.
+//
+// Claude Code takes `--session-id`, so the id is derived rather than remembered: the same repo and
+// issue always produce the same one, and nothing has to be recorded for a resume to find it. What
+// *is* recorded is the commit the thread last saw. When the branch has moved since — a rebase, a
+// review round that rewrote the work, a commit from another machine — resuming would have the
+// agent reasoning about code that no longer exists, so the generation is bumped and the next id is
+// a different thread. Forking is the safe answer and costs only the context it would have carried.
+const threadsPath = (root: string) => join(workerDir(root), 'threads.json')
+
+const uuidFrom = (seed: string): string => {
+  const digest = createHash('sha256').update(seed).digest('hex')
+  // Shaped as a v4 UUID, which is what `--session-id` accepts; the bytes are the digest's.
+  return [digest.slice(0, 8), digest.slice(8, 12), `4${digest.slice(13, 16)}`,
+    `${'89ab'[parseInt(digest[16]!, 16) % 4]}${digest.slice(17, 20)}`, digest.slice(20, 32)].join('-')
+}
+
+interface Thread { id: string; head: string; generation: number }
+
+export function threadFor(root: string, repo: string, issue: number, head: string): { id: string; forked: boolean } {
+  const key = `${repo}#${issue}`
+  let saved: Record<string, Thread> = {}
+  try { saved = JSON.parse(readFileSync(threadsPath(root), 'utf8')) as Record<string, Thread> } catch { saved = {} }
+  const previous = saved[key]
+  const forked = !!previous && previous.head !== head
+  const generation = previous ? (forked ? previous.generation + 1 : previous.generation) : 1
+  const id = uuidFrom(`${key}#${generation}`)
+  const next: Record<string, Thread> = { ...saved, [key]: { id, head, generation } }
+  try {
+    mkdirSync(workerDir(root), { recursive: true })
+    writeFileSync(threadsPath(root), JSON.stringify(next, null, 2) + '\n')
+  } catch { /* a thread nobody could record is a thread that forks next time, which is the safe way */ }
+  return { id, forked }
+}
+
+export function agentArgs(policy: { harness: string; model: string | null; effort: string } | null, prompt: string, session?: string | null): { tool: string; args: string[] } {
   if (policy?.harness === 'codex') {
     return { tool: 'codex', args: ['exec', '--dangerously-bypass-approvals-and-sandbox', ...(policy.model ? ['-c', `model=${policy.model}`] : []), '-c', `model_reasoning_effort=${policy.effort}`, prompt] }
   }
-  return { tool: 'claude', args: ['-p', '--dangerously-skip-permissions', ...(policy?.model ? ['--model', policy.model] : []), ...(policy ? ['--effort', policy.effort] : []), prompt] }
+  return { tool: 'claude', args: ['-p', '--dangerously-skip-permissions', ...(session ? ['--session-id', session] : []), ...(policy?.model ? ['--model', policy.model] : []), ...(policy ? ['--effort', policy.effort] : []), prompt] }
 }
 
 interface Exec { code: number | null; stdout: string; stderr: string; timedOut: boolean; error?: string }
@@ -1307,8 +1342,13 @@ export function defaultRunStep(devMd: string, env: NodeJS.ProcessEnv, { exec = e
   return async (step, context) => {
     const started = Date.now()
     const policy = stagePolicy(devMd, STAGE_OF[step.action] ?? 'implement')
-    const { tool, args } = agentArgs(policy, stepPrompt(step))
     const cwd = workingDir(context.root, step.number) ?? context.root
+    // The thread this issue already has, if the code it saw is still the code that is there. The
+    // head is read from the worktree the run will happen in, so a branch moved by anything — a
+    // rebase, a review round, another machine — forks instead of resuming.
+    const head = gitIn(cwd)(['rev-parse', 'HEAD']).out.trim() || 'unknown'
+    const thread = threadFor(context.root, step.repo ?? '', step.number, head)
+    const { tool, args } = agentArgs(policy, stepPrompt(step), thread.id)
     // Nobody is at the keyboard, so a round of questions goes to the issue and waits there for the
     // operator — dev-setup's references/ask-route.md, where VSK_ASK_ROUTE is the first step.
     // The limit arrives with the run rather than with the step function, so a roster change lands
