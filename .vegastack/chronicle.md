@@ -2,15 +2,6 @@
 
 The project's story, newest first: what got built, why, and how it went — for the operator's future recall. Format home: the dev-chronicle skill.
 
-## 19-09-2026 — The factory keeps its own tools sharp ([#258](https://github.com/vegastack/vegafactory/issues/258))
-
-- **What:** VegaFactory gained an explicit global update command, a session-start version check for attended work, and idle self-updates for unattended dispatchers.
-- **Why:** A long-running dispatcher and a person starting a session could both stay on an old CLI after npm had a newer release, leaving fixes installed nowhere until somebody remembered a manual command.
-- **How it went:** The dangerous edge was the updater itself: a global install may replace the entry file currently running, while the hook's normal 60-second watchdog is too short for a cold npm install. Attended hooks now launch npm directly with a five-minute bound and return the check through session context; dispatchers update only with no agent alive, then restart.
-- **Changed:** `vegafactory update` · shared never-throw version/update logic · session and dispatcher integration · the `vegafactory-update: off | notify | auto` profile knob and dev-setup defaults.
-- **Decisions:** none new.
-
-— approved by (kmanojkumar) · built by claude · branch feat/258-vegafactory-update-for-attended-sessions
 ## 20-09-2026 — A Linux worker survives the operator logging out ([#262](https://github.com/vegastack/vegafactory/issues/262))
 
 - **What:** `vegafactory worker enable` sets `loginctl enable-linger` before it loads anything, and refuses with the failing command if this account may not grant it. The systemd unit also writes the same two log files the macOS one does.
@@ -21,6 +12,15 @@ The project's story, newest first: what got built, why, and how it went — for 
 
 — approved by (kmanojkumar) · built by claude · branch fix/262-a-linux-worker-survives-logout
 
+## 19-09-2026 — The factory keeps its own tools sharp ([#258](https://github.com/vegastack/vegafactory/issues/258))
+
+- **What:** VegaFactory gained an explicit global update command, a session-start version check for attended work, and idle self-updates for unattended dispatchers.
+- **Why:** A long-running dispatcher and a person starting a session could both stay on an old CLI after npm had a newer release, leaving fixes installed nowhere until somebody remembered a manual command.
+- **How it went:** The dangerous edge was the updater itself: a global install may replace the entry file currently running, while the hook's normal 60-second watchdog is too short for a cold npm install. Attended hooks now launch npm directly with a five-minute bound and return the check through session context; dispatchers update only with no agent alive, then restart.
+- **Changed:** `vegafactory update` · shared never-throw version/update logic · session and dispatcher integration · the `vegafactory-update: off | notify | auto` profile knob and dev-setup defaults.
+- **Decisions:** none new.
+
+— approved by (kmanojkumar) · built by claude · branch feat/258-vegafactory-update-for-attended-sessions
 ## 19-09-2026 — A self-hosted factory trusts its own App ([#263](https://github.com/vegastack/vegafactory/issues/263))
 
 - **What:** A company can now pair its own GitHub App id with the bot login that authors factory work. Claims, plans, evidence, reviews, and release markers from that App remain trusted, while its words still cannot count as a human approval.

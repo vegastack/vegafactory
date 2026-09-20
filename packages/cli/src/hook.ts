@@ -582,7 +582,7 @@ function finishedUpdate(now: number, home: { home: string }): string | null {
   if (!note.startedFrom || typeof note.startedAt !== 'number') return null
   // Only the attempt is consumed. Clearing the whole note would drop `checkedAt` and `latest`
   // too, and the very next session would ask npm again inside the hour this note exists to hold.
-  const keep = () => writeUpdateNote({ checkedAt: note.checkedAt, latest: note.latest }, home)
+  const keep = () => writeUpdateNote({ checkedAt: note.checkedAt, latest: note.latest, attemptedAt: note.attemptedAt }, home)
   if (packageVersion !== note.startedFrom) {
     keep()
     return `vegafactory updated ${note.startedFrom} → ${packageVersion} in the background since the last session`
@@ -624,7 +624,10 @@ async function attendedUpdate(cwd: string, deps: HookDeps): Promise<string | nul
     // npm gets its own bound and executable. Calling this entry file again races the global
     // install replacing that file, and ordinary hook work has a deliberately shorter watchdog.
     deps.detach(['npm', ...installArgs()], cwd, SELF_UPDATE_LIMIT_S)
-    writeUpdateNote({ ...readUpdateNote({ home: deps.home }), startedFrom: result.before, startedTo: result.latest ?? undefined, startedAt: deps.now() }, { home: deps.home })
+    // Stamped as an attempt, like any other install. Without it the hour only covers what the
+    // worker installs, and a background install that failed could be started again on the very
+    // next session — each one holding its own five-minute bound.
+    writeUpdateNote({ ...readUpdateNote({ home: deps.home }), attemptedAt: deps.now(), startedFrom: result.before, startedTo: result.latest ?? undefined, startedAt: deps.now() }, { home: deps.home })
     return `updating vegafactory ${result.before} → ${result.latest} in the background; this session continues with ${result.before}`
   } catch {
     return `could not check npm; continuing with vegafactory ${packageVersion}`

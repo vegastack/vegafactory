@@ -696,7 +696,8 @@ describe('usage collection', () => {
     // finished install would have changed is changed here — the version this process reports —
     // because that is the difference the next session is supposed to notice.
     const written = readUpdateNote({ home: fakeHome })
-    expect(written).toMatchObject({ startedFrom: packageVersion, startedTo: '9.0.0' })
+    // A detached install is an attempt like any other, so the hour covers it too.
+    expect(written).toMatchObject({ startedFrom: packageVersion, startedTo: '9.0.0', attemptedAt: gh.clock })
     writeUpdateNote({ ...written, startedFrom: '0.0.1' }, { home: fakeHome })
     expect(await start()).toBe(`vegafactory updated 0.0.1 → ${packageVersion} in the background since the last session`)
     // Said once, then forgotten — not repeated at every session for the rest of time.
