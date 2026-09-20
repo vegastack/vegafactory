@@ -2,7 +2,7 @@ import { describe, expect, test } from 'bun:test'
 import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { parseWorktreeArgs, recordRepoRoot, runWorktree } from '../src/worktree.ts'
+import { parseWorktreeArgs, recordRepoRoot, runWorktree, tidyWorktrees } from '../src/worktree.ts'
 
 describe('parseWorktreeArgs', () => {
   test('every verb acts by default and --dry-run previews', () => {
@@ -52,5 +52,37 @@ describe('recordRepoRoot', () => {
     const roots = await recordRepoRoot(registryPath, dir)
     expect(roots).toEqual([dir])
     expect(JSON.parse(readFileSync(registryPath, 'utf8'))).toEqual([dir])
+  })
+})
+
+// The seam the unit tests could not reach: `tidyWorktrees` builds an argument list, and the script
+// parses it. A flag missing from the parser's boolean list swallows the next argument, which made
+// the worker's whole clean-up a silent no-op while every direct test of `pruneWorktrees` passed.
+describe('the worker asks for the narrower pass, and the script hears it', () => {
+  test('the arguments carry --automatic, --write and the issues in use', () => {
+    const seen: string[][] = []
+    tidyWorktrees('/repo', {
+      write: true, inUse: ['7', '12'],
+      spawn: (args) => { seen.push(args); return { status: 0, stdout: '{}' } },
+    })
+    expect(seen[0]).toEqual(['prune', '--automatic', '--write', '--in-use', '7,12', '--json'])
+    // `--automatic` must be a flag the script treats as a boolean. If it takes a value it eats
+    // `--write`, and the pass runs as a dry run that reclaims nothing.
+    const script = readFileSync(join(import.meta.dir, '../../../skills/dev/dev-implement/scripts/worktree.mjs'), 'utf8')
+    const booleans = /parseFlags\(argv, \[([^\]]*)\]\)/.exec(script)?.[1] ?? ''
+    expect(booleans).toContain("'automatic'")
+    expect(booleans).toContain("'write'")
+  })
+
+  test('nothing in use means no --in-use, and a dry run asks for no write', () => {
+    const seen: string[][] = []
+    tidyWorktrees('/repo', { spawn: (args) => { seen.push(args); return { status: 0, stdout: '{}' } } })
+    expect(seen[0]).toEqual(['prune', '--automatic', '--json'])
+  })
+
+  test('unreadable output is a warning, not a crash in the middle of a pass', () => {
+    const result = tidyWorktrees('/repo', { spawn: () => { throw new Error('script missing') } })
+    expect(result.warns.join('\n')).toContain('script missing')
+    expect(result.freed).toEqual([])
   })
 })

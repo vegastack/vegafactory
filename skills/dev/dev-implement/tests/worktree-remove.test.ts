@@ -190,6 +190,9 @@ describe('pruneWorktrees', () => {
   test('dependencies go before the worktree does, and only from a clean unlocked one', () => {
     const root = repoWithRemote()
     const wt = createWorktree({ repoRoot: root, issue: 106, slug: 'old', type: 'feat', base: 'main', devMd, home: root, write: true })
+    // Idle *and* saved: its branch is on the remote, which is the only state anything may be
+    // taken from.
+    execFileSync('git', ['-C', wt.path, 'push', '-u', 'origin', 'HEAD'], { encoding: 'utf8' })
     const deps = join(wt.path, 'node_modules')
     mkdirSync(join(deps, 'left-pad'), { recursive: true })
     writeFileSync(join(deps, 'left-pad', 'index.js'), 'module.exports = 1\n')
@@ -220,6 +223,7 @@ describe('pruneWorktrees', () => {
   test('a worktree whose dependencies were dropped reinstalls them, and only that one', () => {
     const root = repoWithRemote()
     const wt = createWorktree({ repoRoot: root, issue: 106, slug: 'old', type: 'feat', base: 'main', devMd, home: root, write: true })
+    execFileSync('git', ['-C', wt.path, 'push', '-u', 'origin', 'HEAD'], { encoding: 'utf8' })
     mkdirSync(join(wt.path, 'node_modules'), { recursive: true })
     pruneWorktrees({
       repoRoot: root, base: 'main', olderThan: '999d', devMd: `${devMd}\nworktree-deps-retention: 1d\n`,
@@ -275,6 +279,23 @@ describe('pruneWorktrees', () => {
     expect(r.warns.join('\n')).toContain('106-old')
     expect(r.warns.join('\n')).toContain('kept:')
     expect(r.actions.join('\n')).not.toContain('commit uncommitted work as wip')
+  })
+
+  // Unpushed commits are work too. A worktree holding something nobody else has is not one to
+  // take anything from, dependencies included.
+  test('an unpushed worktree keeps its dependencies', () => {
+    const root = repoWithRemote()
+    const wt = createWorktree({ repoRoot: root, issue: 106, slug: 'old', type: 'feat', base: 'main', devMd, home: root, write: true })
+    const deps = join(wt.path, 'node_modules')
+    mkdirSync(deps, { recursive: true })
+    writeFileSync(join(deps, 'marker.txt'), 'keep me\n')
+
+    const r = pruneWorktrees({
+      repoRoot: root, base: 'main', olderThan: '999d', devMd: `${devMd}\nworktree-deps-retention: 1d\n`,
+      ledgerTimes: { '106-old': OLD_LEDGER }, now: FUTURE_NOW, write: true, automatic: true,
+    })
+    expect(r.freed).not.toContain('106-old')
+    expect(existsSync(join(deps, 'marker.txt'))).toBe(true)
   })
 
   test('a worktree a run is holding is left entirely alone', () => {

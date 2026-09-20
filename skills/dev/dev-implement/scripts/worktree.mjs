@@ -777,13 +777,20 @@ export function pruneWorktrees({ repoRoot, base, olderThan, devMd, ledgerTimes =
     // is the part in front of the first dash.
     if (inUse.includes(String(entry.name).split('-')[0])) continue;
     // `parked` is a branch nobody is on; `merged` and `abandoned` are the other two ways a
-    // worktree stops being needed, and the brief asks for all three.
-    if (!['parked', 'merged', 'abandoned'].includes(state)) continue;
+    // worktree stops being needed. Anything else is kept — and in the unattended pass, said out
+    // loud, because "it was skipped" and "it was not there" look the same in a log otherwise.
+    if (!['parked', 'merged', 'abandoned'].includes(state)) {
+      if (automatic && entry.locked) warns.push(at(entry.name, 'kept: locked'));
+      continue;
+    }
     // Dependencies go on the shorter window, and on exactly the conditions that protect the
     // worktree itself: never while anything is uncommitted, never while it is locked. Only
     // `node_modules` is touched, by name — nothing git tracks, and nothing else on disk. What is
     // lost is a reinstall; the code, the branch and the history stay where they are.
-    if (!entry.locked && !facts.dirty && isPastRetention({ lastCommitAt, ledgerUpdatedAt, now, retentionMs: depsRetentionMs })) {
+    // Unpushed commits count as much here as uncommitted files: a worktree holding work nobody
+    // else has is not one to take anything from, dependencies included.
+    const unpushed = facts.unpushed || facts.remoteMissing;
+    if (!entry.locked && !facts.dirty && !unpushed && isPastRetention({ lastCommitAt, ledgerUpdatedAt, now, retentionMs: depsRetentionMs })) {
       const deps = join(entry.path, 'node_modules');
       if (existsSync(deps)) {
         actions.push(at(entry.name, 'drop node_modules, keeping the branch and its commits'));
@@ -798,7 +805,9 @@ export function pruneWorktrees({ repoRoot, base, olderThan, devMd, ledgerTimes =
         }
       }
     }
-    if (!isPastRetention({ lastCommitAt, ledgerUpdatedAt, now, retentionMs })) continue;
+    // A merged worktree has nothing left in it that is not on the default branch, so it does not
+    // wait out a window meant for work that might still be wanted.
+    if (state !== 'merged' && !isPastRetention({ lastCommitAt, ledgerUpdatedAt, now, retentionMs })) continue;
     const verdict = evaluateRemoval({ state, ...facts, locked: entry.locked, force: true });
     // "Prune pushes then removes, and never automatically for anything with
     // unpushed work": the push half protects the work and happens on --write
@@ -1079,7 +1088,7 @@ function runVerb(verb, flags) {
     const ledgerTimes = repo ? gatherLedgerTimes({ repo, names, warns }) : {};
     const pruned = pruneWorktrees({
       repoRoot, base, olderThan: flags['older-than'], devMd, ledgerTimes, now: Date.now(), write: shared.write,
-      automatic: flags.automatic === true || flags.automatic === '',
+      automatic: flags.automatic === true,
       inUse: String(flags['in-use'] ?? '').split(',').map((name) => name.trim()).filter(Boolean),
     });
     return { ...pruned, warns: [...warns, ...pruned.warns] };
@@ -1123,7 +1132,7 @@ const invokedDirectly = process.argv[1] && resolve(process.argv[1]) === fileURLT
 if (invokedDirectly) {
   const argv = process.argv.slice(2);
   const verb = argv.find((arg) => !arg.startsWith('--')) ?? '';
-  const flags = parseFlags(argv, ['json', 'write', 'force', 'push', 'all']);
+  const flags = parseFlags(argv, ['json', 'write', 'force', 'push', 'all', 'automatic']);
   let outcome;
   try {
     outcome = runVerb(verb, flags);
