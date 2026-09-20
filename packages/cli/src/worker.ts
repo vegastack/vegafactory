@@ -646,6 +646,20 @@ export function unitPath(platform: NodeJS.Platform, home = homedir()): string {
 
 // The unit runs one command: this CLI's own `worker run`, in the repository, restarted when it
 // stops. Nothing in it carries a token; the repository and the log path are all it knows.
+// A value a unit file cannot hold. A newline is legal in a Linux filename and passes every check
+// a run makes, then becomes a second physical line inside the unit — read by systemd as a
+// different directive, or as nothing. Refused at `enable` by name, because the alternative is a
+// service that starts without the setting the operator just proved.
+// eslint-disable-next-line no-control-regex
+const UNWRITABLE = /[\u0000-\u001f\u007f]/
+export function unwritableForUnit(env: NodeJS.ProcessEnv): string | null {
+  for (const name of ['VEGAFACTORY_APP_ID', 'VEGAFACTORY_APP_ACTOR', 'VEGAFACTORY_APP_PRIVATE_KEY_FILE']) {
+    const value = env[name]?.trim()
+    if (value && UNWRITABLE.test(value)) return `${name} contains a control character, so it cannot be written into a service unit — move the file or rename it`
+  }
+  return null
+}
+
 export function unitText(platform: NodeJS.Platform, input: { cli: string[]; root: string; repo: string; logDir: string; env?: NodeJS.ProcessEnv }): string {
   const argv = [...input.cli, 'worker', 'run', '--repo', input.repo]
   // A user service inherits nothing from the shell that installed it, so everything `enable` was
@@ -659,7 +673,8 @@ export function unitText(platform: NodeJS.Platform, input: { cli: string[]; root
   const identity: Array<[string, string]> = []
   for (const name of ['VEGAFACTORY_APP_ID', 'VEGAFACTORY_APP_ACTOR', 'VEGAFACTORY_APP_PRIVATE_KEY_FILE']) {
     const value = from[name]?.trim()
-    if (value) identity.push([name, value])
+    // `enable` has already refused these by name; this is the second line of that defence.
+    if (value && !UNWRITABLE.test(value)) identity.push([name, value])
   }
   if (platform === 'darwin') {
     const escaped = (value: string) => value.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
@@ -1917,6 +1932,11 @@ export async function runWorker(argv: string[], deps: CliDeps = {}): Promise<num
       if (args.dryRun) {
         print({ ok: true, checks, unit: path, dryRun: true }, `${renderChecks(checks)}\n\ndry run: would write ${path}, then ${commands.map((command) => command.join(' ')).join(' && ')}`)
         return 0
+      }
+      const unwritable = unwritableForUnit(env)
+      if (unwritable) {
+        print({ ok: false, reason: unwritable }, `refused: ${unwritable}`)
+        return 2
       }
       mkdirSync(workerDir(root), { recursive: true })
       replaceFile(path, unitText(platform, { cli: deps.cli ?? cliPath(), root, repo, logDir: workerDir(root), env }))

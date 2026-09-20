@@ -6,6 +6,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { claimBody, claimLine, holderOf, nodeId, trustedFactory } from '../src/claim.ts'
 import {
+  unwritableForUnit,
   SERVICE_NAME,
   APP_ID, DEFAULT_CAPS, MAX_FAILURES, MAX_RUNS, MAX_TIMER_MS, POLL_MS, RETRY_MS, STEP_TIMEOUT_MS, TOKEN_MARGIN_MS, parseCaps, rosterName, sayDuration, agentArgs, appIdentity, appJwt, appKeyPath, assertKeyFile, board, decide, defaultRunStep, workerDir,
   acknowledgedPlan, canonicalPath, childRunEnvironment, confirmShip, disjointSiblings, pushableBranch, shipWord,
@@ -1354,6 +1355,23 @@ describe('the command', () => {
     expect(result.code).toBe(0)
     expect(result.text).toContain('enabled —')
     expect(result.text).toContain('polls o/r every 1s')
+  })
+
+  // A newline is legal in a Linux filename and passes every check the run makes, then becomes a
+  // second physical line inside the unit. Enabling refuses by name rather than installing a
+  // service that starts without the setting the operator had just proved.
+  test('a value a unit file cannot hold refuses enable by name', async () => {
+    for (const bad of ['/keys/two\nlines.pem', '/keys/bell\u0007.pem']) {
+      expect(unwritableForUnit({ VEGAFACTORY_APP_PRIVATE_KEY_FILE: bad })).toContain('control character')
+    }
+    expect(unwritableForUnit({ VEGAFACTORY_APP_ID: '123\n456', VEGAFACTORY_APP_ACTOR: 'a[bot]' })).toContain('VEGAFACTORY_APP_ID')
+    // An ordinary path, however awkward, is fine: only control characters are refused.
+    expect(unwritableForUnit({ VEGAFACTORY_APP_PRIVATE_KEY_FILE: String.raw`/home/me/App "Keys"/100% mine.pem` })).toBeNull()
+    expect(unwritableForUnit({})).toBeNull()
+
+    // And the unit never carries one even if something else reached that far.
+    const unit = unitText('linux', { cli: ['vegafactory'], root, repo: 'o/r', logDir: workerDir(root), env: { VEGAFACTORY_APP_ID: 'a\nb' } })
+    expect(unit).not.toContain('VEGAFACTORY_APP_ID')
   })
 
   // A machine enabling for the first time has nothing to unload, and launchctl's wording for that
