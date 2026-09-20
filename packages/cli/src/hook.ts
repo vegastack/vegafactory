@@ -107,24 +107,6 @@ function headOf(cwd: string): string | null {
 
 export interface Where { cwd: string; top: string; root: string; repo: string; number: number; owner: string; branch: string }
 
-// A worktree somebody is sitting in. Git's own lock is the mechanism, because the safe-to-remove
-// test already refuses a locked worktree outright — so a session marks itself here and the
-// unattended cleanup cannot take the checkout, or its dependencies, out from under it. Nothing
-// else registers an attended session anywhere, and no timestamp substitutes: a person reading and
-// building all afternoon writes nothing git can see.
-export function holdWorktree(where: Where, deps: HookDeps): void {
-  if (where.top === where.root) return
-  deps.runGit(where.root, ['worktree', 'lock', '--reason', `a session is working here (${where.owner})`, where.top])
-}
-
-// Released when the session ends. A lock left behind would keep the worktree forever, so this runs
-// whatever the session did — and a lock this machine cannot remove is reported by `prune` rather
-// than worked around.
-export function releaseWorktree(where: Where, deps: HookDeps): void {
-  if (where.top === where.root) return
-  deps.runGit(where.root, ['worktree', 'unlock', where.top])
-}
-
 export function locate(cwd: string, host = hostname()): Where | null {
   const top = git(cwd, ['rev-parse', '--show-toplevel'])
   if (!top.ok) return null
@@ -347,8 +329,6 @@ export interface HookDeps {
   // How to run this CLI again: the runtime and the entry file.
   cli: string[]
   host: string
-  // How git is run, so a test can watch the worktree lock without a real checkout.
-  runGit: (cwd: string, args: string[]) => void
 }
 
 export const DETACHED_LIMIT_S = 60
@@ -367,7 +347,6 @@ export function detachBounded(command: string[], cwd: string, limitSeconds = DET
 export const defaultDeps = (): HookDeps => ({
   runner: defaultRunner, now: Date.now, out: (text) => process.stdout.write(text + '\n'), detach: (command, cwd) => detachBounded(command, cwd),
   cli: [process.execPath, process.argv[1]!], host: hostname(),
-  runGit: (cwd, args) => { git(cwd, args) },
 })
 
 // Secrets never leave the machine in an automatic commit: file names, then the added lines.
@@ -599,9 +578,6 @@ function advisory(event: HookEvent, harness: Harness, payload: Record<string, un
   const session = typeof payload.session_id === 'string' && payload.session_id ? payload.session_id : null
 
   if (event === 'session-start') {
-    // Before anything that can throw: an unattended pass must not be able to reclaim a checkout
-    // somebody is sitting in, and nothing else tells it they are.
-    holdWorktree(where, deps)
     // Before the refresh, which talks to GitHub and can throw.
     observe(where, session, deps.now())
     const { holder, state } = refresh(where, local, deps, true)
@@ -637,9 +613,6 @@ function advisory(event: HookEvent, harness: Harness, payload: Record<string, un
     recordActivity(local, deps.now())
     observe(where, session, deps.now())
     if (local.held) pushHeartbeat(where, local, deps)
-    // Given back at the end, whatever the session did. A lock left behind keeps the worktree for
-    // ever, and `prune` would report it as kept rather than reclaim it.
-    releaseWorktree(where, deps)
     return writeLocal(where, local)
   }
   if (event === 'stop') {

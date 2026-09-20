@@ -792,10 +792,13 @@ export function pruneWorktrees({ repoRoot, base, olderThan, devMd, ledgerTimes =
       issueState: null,
       mergedIntoDefault: facts.mergedIntoDefault,
     });
-    // A session working here holds git's own worktree lock, and `evaluateRemoval` refuses a locked
-    // worktree outright. That is the signal, not a timestamp: somebody reading and building all
-    // afternoon writes nothing git can see, so no mtime distinguishes them from an idle checkout.
-    const stamps = [lastCommitAt, ledgerUpdatedAt].map((v) => (v ? Date.parse(v) : Number.NaN)).filter(Number.isFinite);
+    // Touched recently is not idle, whatever the branch and the ledger say. Nothing outside this
+    // process registers a session anywhere, so an attended run on another terminal is invisible
+    // here — its files are not. This is the difference between "nobody has committed" and
+    // "nobody is working".
+    let touchedAt = null;
+    try { touchedAt = new Date(statSync(join(entry.path, '.git')).mtimeMs).toISOString(); } catch { /* gone or unreadable */ }
+    const stamps = [lastCommitAt, ledgerUpdatedAt, touchedAt].map((v) => (v ? Date.parse(v) : Number.NaN)).filter(Number.isFinite);
     const ageDays = stamps.length === 0 ? 0 : Math.floor((now - Math.max(...stamps)) / DAY_MS);
     // The most recent sign of life, whichever kind it was.
     const latestStamp = stamps.length === 0 ? null : new Date(Math.max(...stamps)).toISOString();
