@@ -1222,6 +1222,17 @@ const uuidFrom = (seed: string): string => {
 
 interface Thread { id: string; head: string; generation: number }
 
+// Called after a run, with the head that run left behind. Without it the agent's own commit looks
+// like the branch moving under the thread, and the very next run forks from itself.
+export function threadSaw(root: string, repo: string, issue: number, head: string): void {
+  const key = `${repo}#${issue}`
+  let saved: Record<string, Thread> = {}
+  try { saved = JSON.parse(readFileSync(threadsPath(root), 'utf8')) as Record<string, Thread> } catch { return }
+  const previous = saved[key]
+  if (!previous || previous.head === head) return
+  try { replaceFile(threadsPath(root), JSON.stringify({ ...saved, [key]: { ...previous, head } }, null, 2) + '\n') } catch { /* forks next time, which is the safe way */ }
+}
+
 export function threadFor(root: string, repo: string, issue: number, head: string): { id: string; forked: boolean } {
   const key = `${repo}#${issue}`
   let saved: Record<string, Thread> = {}
@@ -1349,6 +1360,10 @@ export function defaultRunStep(devMd: string, env: NodeJS.ProcessEnv, { exec = e
     // rebase, a review round, another machine — forks instead of resuming.
     const head = gitIn(cwd)(['rev-parse', 'HEAD']).out.trim() || 'unknown'
     const thread = threadFor(context.root, step.repo ?? '', step.number, head)
+    const rememberHead = () => {
+      const after = gitIn(cwd)(['rev-parse', 'HEAD']).out.trim()
+      if (after) threadSaw(context.root, step.repo ?? '', step.number, after)
+    }
     const { tool, args } = agentArgs(policy, stepPrompt(step), thread.id)
     // Nobody is at the keyboard, so a round of questions goes to the issue and waits there for the
     // operator — dev-setup's references/ask-route.md, where VSK_ASK_ROUTE is the first step.
@@ -1356,6 +1371,9 @@ export function defaultRunStep(devMd: string, env: NodeJS.ProcessEnv, { exec = e
     // on the next run instead of the next restart.
     const limit = context.timeoutMs ?? timeoutMs
     const child = await exec(tool, args, { cwd, env: childRunEnvironment(env, token()), timeoutMs: limit, onStart: context.onStart })
+    // Whatever the run did — finished, failed, was stopped — the branch is where it left it, and
+    // that is what this thread has now seen. Recording it anywhere later would miss the failures.
+    rememberHead()
     const ms = Date.now() - started
     const text = `${child.stderr}\n${child.stdout}`
     if (child.timedOut) return { outcome: 'killed', note: `${tool} ran past the ${limit / 60_000}-minute step limit and was stopped`, ms }

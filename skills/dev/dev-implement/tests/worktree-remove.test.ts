@@ -3,7 +3,7 @@ import { execFileSync, spawnSync } from 'node:child_process'
 import { existsSync, mkdirSync, mkdtempSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { createWorktree, pruneWorktrees, removeWorktree, restoreDroppedDependencies } from '../scripts/worktree.mjs'
+import { createWorktree, pruneWorktrees, readDroppedDeps, removeWorktree, restoreDroppedDependencies } from '../scripts/worktree.mjs'
 
 // Relative to the real clock: the fixture commits carry today's date, so a fixed
 // 'now' turns these into time bombs once the calendar catches up.
@@ -190,8 +190,12 @@ describe('pruneWorktrees', () => {
   test('dependencies go before the worktree does, and only from a clean unlocked one', () => {
     const root = repoWithRemote()
     const wt = createWorktree({ repoRoot: root, issue: 106, slug: 'old', type: 'feat', base: 'main', devMd, home: root, write: true })
-    // Idle *and* saved: its branch is on the remote, which is the only state anything may be
-    // taken from.
+    // Idle, saved, and still its own work: a commit that is not on the default branch, pushed so
+    // nothing is only here. A branch already in `main` is `merged` and goes entirely, which is a
+    // different case from this one.
+    writeFileSync(join(wt.path, 'work.txt'), 'real work\n')
+    execFileSync('git', ['-C', wt.path, 'add', '.'], { encoding: 'utf8' })
+    execFileSync('git', ['-C', wt.path, 'commit', '-m', 'work'], { encoding: 'utf8' })
     execFileSync('git', ['-C', wt.path, 'push', '-u', 'origin', 'HEAD'], { encoding: 'utf8' })
     const deps = join(wt.path, 'node_modules')
     mkdirSync(join(deps, 'left-pad'), { recursive: true })
@@ -223,14 +227,18 @@ describe('pruneWorktrees', () => {
   test('a worktree whose dependencies were dropped reinstalls them, and only that one', () => {
     const root = repoWithRemote()
     const wt = createWorktree({ repoRoot: root, issue: 106, slug: 'old', type: 'feat', base: 'main', devMd, home: root, write: true })
+    writeFileSync(join(wt.path, 'work.txt'), 'real work\n')
+    execFileSync('git', ['-C', wt.path, 'add', '.'], { encoding: 'utf8' })
+    execFileSync('git', ['-C', wt.path, 'commit', '-m', 'work'], { encoding: 'utf8' })
     execFileSync('git', ['-C', wt.path, 'push', '-u', 'origin', 'HEAD'], { encoding: 'utf8' })
     mkdirSync(join(wt.path, 'node_modules'), { recursive: true })
     pruneWorktrees({
       repoRoot: root, base: 'main', olderThan: '999d', devMd: `${devMd}\nworktree-deps-retention: 1d\n`,
       ledgerTimes: { '106-old': OLD_LEDGER }, now: FUTURE_NOW, write: true,
     })
-    const marker = join(wt.path, '.vegastack', '.tmp', 'deps-dropped')
-    expect(existsSync(marker)).toBe(true)
+    // The record lives beside the repository's worker state, not inside the worktree it is about:
+    // a deps-only prune leaves the checkout in place, and a record inside it would go with it.
+    expect(readDroppedDeps(root)['106-old']).toBeTruthy()
 
     const ran: string[][] = []
     const runner = ((file: string, args: string[]) => { ran.push([file, ...args]); return '' }) as never
@@ -238,13 +246,13 @@ describe('pruneWorktrees', () => {
     const warns: string[] = []
     // One `commands:` line, as a real profile has: a second would make the profile ambiguous.
     const setup = 'commands: check `true` · setup `bun install --frozen-lockfile`\nworktree-retention: 14d\n'
-    expect(restoreDroppedDependencies({ path: wt.path, devMd: setup, write: true, actions, warns, runner })).toBe(true)
+    expect(restoreDroppedDependencies({ repoRoot: root, name: '106-old', path: wt.path, devMd: setup, write: true, actions, warns, runner })).toBe(true)
     expect(ran[0]).toEqual(['sh', '-c', 'bun install --frozen-lockfile'])
     expect(actions.join('\n')).toContain('reinstall dependencies')
-    // Done once: the marker is gone, so the next restore installs nothing.
-    expect(existsSync(marker)).toBe(false)
+    // Done once: the record is cleared, so the next restore installs nothing.
+    expect(readDroppedDeps(root)['106-old']).toBeUndefined()
     ran.length = 0
-    expect(restoreDroppedDependencies({ path: wt.path, devMd: setup, write: true, actions, warns, runner })).toBe(false)
+    expect(restoreDroppedDependencies({ repoRoot: root, name: '106-old', path: wt.path, devMd: setup, write: true, actions, warns, runner })).toBe(false)
     expect(ran).toEqual([])
   })
 
@@ -254,7 +262,7 @@ describe('pruneWorktrees', () => {
     const ran: string[][] = []
     const runner = ((file: string, args: string[]) => { ran.push([file, ...args]); return '' }) as never
     const setup = 'commands: setup `bun install --frozen-lockfile`\n'
-    expect(restoreDroppedDependencies({ path: wt.path, devMd: setup, write: true, actions: [], warns: [], runner })).toBe(false)
+    expect(restoreDroppedDependencies({ repoRoot: root, name: '107-fresh', path: wt.path, devMd: setup, write: true, actions: [], warns: [], runner })).toBe(false)
     expect(ran).toEqual([])
   })
 

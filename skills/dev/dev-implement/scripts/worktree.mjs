@@ -18,7 +18,7 @@ import { execFileSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { copyFileSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { delimiter, dirname, join, resolve, sep } from 'node:path';
+import { basename, delimiter, dirname, join, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { findMarkerComment, ghJson, parseFlags, renderResult } from './lib/gh.mjs';
 
@@ -281,7 +281,26 @@ export function parseSetupCommand(devMd) {
 // Left behind when prune takes a worktree's dependencies, and removed when they are put back. A
 // fresh worktree has no marker and installs nothing — a docs-only issue should not pay for a full
 // install — so restoring reinstalls exactly what was taken and nothing else.
-const DROPPED_MARKER = join('.vegastack', '.tmp', 'deps-dropped');
+// Kept beside the repository's own worker state rather than inside the worktree it describes:
+// a record living in the thing it is about disappears with it, and a deps-only prune leaves the
+// checkout in place, so `restore` never runs and nothing would put the dependencies back.
+const droppedRecordPath = (repoRoot) => join(repoRoot, '.vegastack', '.tmp', 'worker', 'deps-dropped.json');
+
+export function readDroppedDeps(repoRoot) {
+  try { return JSON.parse(readFileSync(droppedRecordPath(repoRoot), 'utf8')); } catch { return {}; }
+}
+
+function noteDroppedDeps(repoRoot, name, at) {
+  const saved = readDroppedDeps(repoRoot);
+  writeMarker(droppedRecordPath(repoRoot), JSON.stringify({ ...saved, [name]: at }, null, 2) + '\n');
+}
+
+function clearDroppedDeps(repoRoot, name) {
+  const saved = readDroppedDeps(repoRoot);
+  if (!(name in saved)) return;
+  delete saved[name];
+  writeMarker(droppedRecordPath(repoRoot), JSON.stringify(saved, null, 2) + '\n');
+}
 
 // Written without ever following a link. The path is predictable and inside an ignored directory,
 // so a planted symlink would otherwise be followed and write through to whatever it names. `wx` is
@@ -429,16 +448,15 @@ function prepareCheckout({ repoRoot, path, devMd, home, write, actions, warns, b
   // command itself, so a docs-only issue costs a few megabytes instead of a full install. The one
   // exception is a worktree whose dependencies *this tool* took — putting back exactly what was
   // removed is not the same as installing speculatively.
-  restoreDroppedDependencies({ path, devMd, write, actions, warns });
+  restoreDroppedDependencies({ repoRoot, name: basename(path), path, devMd, write, actions, warns });
   applyCodexTrust({ home, absPath: path, write, actions, warns, blocks });
 }
 
 // Put back what prune took, and only that. The marker says this worktree had its dependencies
 // dropped while it was idle; installing is a plain run of dev.md's own `setup` command. A failure
 // is a warning rather than a block: the checkout is fine, and the next build will say so itself.
-export function restoreDroppedDependencies({ path, devMd, write, actions, warns, runner = execFileSync }) {
-  const marker = join(path, DROPPED_MARKER);
-  if (!existsSync(marker)) return false;
+export function restoreDroppedDependencies({ repoRoot, name, path, devMd, write, actions, warns, runner = execFileSync }) {
+  if (!(name in readDroppedDeps(repoRoot))) return false;
   const setup = parseSetupCommand(devMd);
   if (!setup) {
     warns.push(at(path, 'dependencies were dropped while idle, but dev.md names no `setup` command to put them back'));
@@ -448,7 +466,7 @@ export function restoreDroppedDependencies({ path, devMd, write, actions, warns,
   if (!write) return false;
   try {
     runner('sh', ['-c', setup], { cwd: path, stdio: 'ignore' });
-    rmSync(marker, { force: true });
+    clearDroppedDeps(repoRoot, name);
     return true;
   } catch (error) {
     warns.push(at(path, 'could not reinstall dependencies (' + (error?.message ?? 'failed') + ') — run `' + setup + '` here'));
@@ -796,8 +814,11 @@ export function pruneWorktrees({ repoRoot, base, olderThan, devMd, ledgerTimes =
         actions.push(at(entry.name, 'drop node_modules, keeping the branch and its commits'));
         if (write) {
           try {
+            // Recorded *before* anything is removed. The other order leaves a worktree with no
+            // dependencies and nothing saying they were ever taken, which is a worktree that
+            // silently never builds again.
+            noteDroppedDeps(repoRoot, entry.name, new Date(now).toISOString());
             rmSync(deps, { recursive: true, force: true });
-            writeMarker(join(entry.path, DROPPED_MARKER), new Date(now).toISOString() + '\n');
             freed.push(entry.name);
           } catch (error) {
             warns.push(at(entry.name, 'kept its dependencies: ' + (error?.message ?? 'could not be removed')));
