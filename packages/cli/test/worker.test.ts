@@ -6,6 +6,8 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { claimBody, claimLine, holderOf, nodeId, trustedFactory } from '../src/claim.ts'
 import {
+  alreadyLingering, unwritableForUnit,
+  SERVICE_NAME,
   APP_ID, DEFAULT_CAPS, MAX_FAILURES, MAX_RUNS, MAX_TIMER_MS, POLL_MS, RETRY_MS, STEP_TIMEOUT_MS, TOKEN_MARGIN_MS, parseCaps, rosterName, sayDuration, agentArgs, appIdentity, appJwt, appKeyPath, assertKeyFile, board, decide, defaultRunStep, workerDir,
   acknowledgedPlan, canonicalPath, childRunEnvironment, confirmShip, disjointSiblings, pushableBranch, shipWord,
   drain, filesFromParent, harnessAnswers, hitLimit, hooksWired, listedHere, mintToken, overlaps, parseWorkerArgs,
@@ -350,6 +352,14 @@ describe('transitions', () => {
     expect(verdict(2).action).toBe('none')
   })
 
+  test('evidence from a self-hosted App opens the operator approval window', () => {
+    gh.addIssue({ number: 1, labels: ['ready-to-ship', 'small'] })
+    gh.addComment(1, '<!-- vsk:v1 type=evidence sha=abc1234 -->\nbuilt', 'acmefactory[bot]', 'Bot')
+    expect(verdict(1, { appActor: 'acmefactory[bot]' })).toMatchObject({ action: 'none', reason: 'waiting for the operator to read the evidence' })
+    gh.addComment(1, 'ship it', 'mk')
+    expect(verdict(1, { appActor: 'acmefactory[bot]' }).action).toBe('ship')
+  })
+
   test('"ship it" after the evidence ships; anything else is corrections', () => {
     gh.addIssue({ number: 1, labels: ['ready-to-ship', 'small'] })
     evidence(1)
@@ -392,6 +402,15 @@ describe('transitions', () => {
     const acks = gh.issues.get(1)!.comments.filter((comment) => comment.body.includes('type=ack')).length
     expect(confirmShip(ctx, permission, { id: word.id, by: 'mk', quote: 'ship it' }).ok).toBe(true)
     expect(gh.issues.get(1)!.comments.filter((comment) => comment.body.includes('type=ack'))).toHaveLength(acks)
+  })
+
+  test('ship confirmation accepts evidence from a self-hosted App', () => {
+    gh.addIssue({ number: 1, labels: ['ready-to-ship', 'small'] })
+    gh.addComment(1, '<!-- vsk:v1 type=evidence sha=abc1234 -->\nbuilt', 'acmefactory[bot]', 'Bot')
+    const word = gh.addComment(1, 'ship it', 'mk')
+    const permission = permissionLookup('o/r', gh.runner)
+    const confirmed = confirmShip({ root, repo: 'o/r', number: 1, runner: gh.runner, appActor: 'acmefactory[bot]' }, permission, { id: word.id, by: 'mk', quote: 'ship it' })
+    expect(confirmed.ok).toBe(true)
   })
 
   test('a relayed ack that cannot validate ships nothing', () => {
@@ -571,6 +590,12 @@ describe('what may run at once', () => {
     gh.addComment(14, broken, 'mk')
     ackFor(14, broken)
     expect(acknowledgedPlan(snapOf(14), permission)).toMatchObject({ text: null, reason: expect.stringContaining('plan-lint') })
+
+    // A self-hosted App writes the plan under its own bot login, while the ack remains a person's.
+    gh.addIssue({ number: 15, labels: ['planning', 'large', 'epic'] })
+    gh.addComment(15, real, 'acmefactory[bot]', 'Bot')
+    ackFor(15, real)
+    expect(acknowledgedPlan(snapOf(15), permission, 'acmefactory[bot]').text).toBe(real)
   })
 })
 
@@ -603,6 +628,18 @@ describe('one poll over the board', () => {
     expect(await pass()).toEqual([])
   })
 
+  test('a claim from a self-hosted App keeps another dispatcher off the issue', async () => {
+    gh.addIssue({ number: 1, labels: ['planning', 'medium'] })
+    const owner = 'other:worker-abcd1234-1'
+    const body = claimBody({ owner, kind: 'worker', harness: 'worker', model: 'plan' })
+      .replace('-->\n', `-->\n${claimLine(owner, new Date(gh.clock).toISOString())}\n`)
+    gh.addComment(1, body, 'acmefactory[bot]', 'Bot')
+    const lines: string[] = []
+    expect(await pass({ appActor: 'acmefactory[bot]', out: (line) => lines.push(line) })).toEqual([])
+    expect(steps).toEqual([])
+    expect(lines).toEqual(['#1: skipped, a fresh claim holds it'])
+  })
+
   test('a step already running keeps its slot and its issue on the next pass', async () => {
     for (const number of [1, 2, 3, 4]) gh.addIssue({ number, labels: ['planning', 'medium'] })
     const inflight = new Map<number, Inflight>()
@@ -625,11 +662,16 @@ describe('one poll over the board', () => {
 
   test('a run takes the claim before it launches, and gives it back when it ends', async () => {
     gh.addIssue({ number: 1, labels: ['planning', 'medium'] })
+    // The worker writes with its App's token, so the claim it takes is authored by that App and
+    // not by the operator. Leaving this as `mk` — an admin — would have the claim trusted as a
+    // person's, and the configured actor would never be exercised at all.
+    gh.postAs = { login: 'acmefactory[bot]', type: 'Bot' }
     let heldDuringRun: string | null | undefined
     await pass({
+      appActor: 'acmefactory[bot]',
       runStep: (async () => {
         const snap = snapOf(1)
-        heldDuringRun = holderOf(snap.state, snap.body, gh.clock, trustedFactory({ repo: 'o/r', runner: gh.runner, root })).holder?.owner ?? null
+        heldDuringRun = holderOf(snap.state, snap.body, gh.clock, trustedFactory({ repo: 'o/r', runner: gh.runner, root, appActor: 'acmefactory[bot]' })).holder?.owner ?? null
         return { outcome: 'done' as const, note: '', ms: 1 }
       }) as RunStep,
     })
@@ -637,13 +679,15 @@ describe('one poll over the board', () => {
     // same board while it runs sees the issue is taken.
     expect(heldDuringRun).toBe(`${HOST}:worker-test-1`)
     const after = snapOf(1)
-    expect(holderOf(after.state, after.body, gh.clock, trustedFactory({ repo: 'o/r', runner: gh.runner, root })).holder).toBeNull()
+    expect(holderOf(after.state, after.body, gh.clock, trustedFactory({ repo: 'o/r', runner: gh.runner, root, appActor: 'acmefactory[bot]' })).holder).toBeNull()
+    expect(gh.issues.get(1)!.comments.map((comment) => comment.body).join('\n')).toContain('by=acmefactory[bot]')
   })
 
   test('an implement run hands its claim to the session it starts', async () => {
     gh.addIssue({ number: 1, labels: ['queued', 'small'] })
     let heldDuringRun: string | null | undefined
     await pass({
+      appActor: 'acmefactory[bot]',
       runStep: (async () => {
         const snap = snapOf(1)
         heldDuringRun = holderOf(snap.state, snap.body, gh.clock, trustedFactory({ repo: 'o/r', runner: gh.runner, root })).holder?.owner ?? null
@@ -653,7 +697,9 @@ describe('one poll over the board', () => {
     // dev-implement claims from inside its own worktree, so this machine's reservation steps aside
     // before the agent starts rather than blocking the claim the workflow actually reads.
     expect(heldDuringRun).toBeNull()
-    expect(gh.issues.get(1)!.comments.map((comment) => comment.body).join('\n')).toContain('handing the issue to the run this machine just started')
+    const bodies = gh.issues.get(1)!.comments.map((comment) => comment.body).join('\n')
+    expect(bodies).toContain('handing the issue to the run this machine just started')
+    expect(bodies).toContain('by=acmefactory[bot]')
   })
 
   test('two workers on one host do not both start the same issue', async () => {
@@ -873,6 +919,16 @@ describe('standing an issue down', () => {
     expect(verdict(1, { held: true }).action).toBe('none')
   })
 
+  test('a self-hosted dispatcher names its own actor when it stands down', () => {
+    gh.addIssue({ number: 1, labels: ['in-progress', 'small'] })
+    const owner = `${HOST}:1-work`
+    const body = claimBody({ owner, kind: 'session', harness: 'claude', model: 'opus' })
+      .replace('-->\n', `-->\n${claimLine(owner, new Date(gh.clock).toISOString())}\n`)
+    gh.addComment(1, body, 'acmefactory[bot]', 'Bot')
+    standDown({ root, repo: 'o/r', number: 1, runner: gh.runner, machine: HOST, appActor: 'acmefactory[bot]', now: gh.clock }, 'the run stopped')
+    expect(gh.issues.get(1)!.comments.map((comment) => comment.body).join('\n')).toContain(`type=release owner=${HOST}:1-work by=acmefactory[bot]`)
+  })
+
   test('another machine\'s claim is left alone', () => {
     gh.addIssue({ number: 1, labels: ['in-progress', 'small'] })
     held('laptop:1-work')
@@ -1040,6 +1096,55 @@ describe('readiness and the service', () => {
     expect(check(broken)).toMatchObject({ ok: false, detail: expect.stringContaining('No such remote') })
   })
 
+  // A user service inherits nothing from the shell that installed it. Without these in the unit the
+  // worker restarts as VegaStack's own App, against a key it cannot find — and `enable` would have
+  // reported success. All three are names; the secret is the key file, not where it lives.
+  // The plist writes these two files and the systemd unit did not, so `logDir` was passed to the
+  // Linux branch and silently dropped: the log this product tells people to read never appeared.
+  test('both platforms write the same two log files', () => {
+    const where = { cli: ['vegafactory'], root, repo: 'o/r', logDir: workerDir(root) }
+    const plist = unitText('darwin', where)
+    const unit = unitText('linux', where)
+    for (const [text, out, err] of [
+      [plist, `<string>${join(workerDir(root), 'worker.log')}</string>`, `<string>${join(workerDir(root), 'worker.err.log')}</string>`],
+      [unit, `StandardOutput=append:${join(workerDir(root), 'worker.log')}`, `StandardError=append:${join(workerDir(root), 'worker.err.log')}`],
+    ] as const) {
+      expect(text).toContain(out)
+      expect(text).toContain(err)
+    }
+    // `append:`, not truncate: a service whose whole job is to be restarted would otherwise lose
+    // the log of whatever went wrong last time.
+    expect(unit).not.toContain('StandardOutput=file:')
+  })
+
+  test('the unit carries everything enable was run with, and no secret', () => {
+    const env = { VEGAFACTORY_APP_ID: '12345', VEGAFACTORY_APP_ACTOR: 'acmefactory[bot]', VEGAFACTORY_APP_PRIVATE_KEY_FILE: '/keys/app.pem' }
+    const plist = unitText('darwin', { cli: ['vegafactory'], root, repo: 'o/r', logDir: workerDir(root), env })
+    expect(plist).toContain('<key>EnvironmentVariables</key>')
+    expect(plist).toContain('<key>VEGAFACTORY_APP_ID</key><string>12345</string>')
+    expect(plist).toContain('<key>VEGAFACTORY_APP_ACTOR</key><string>acmefactory[bot]</string>')
+    const unit = unitText('linux', { cli: ['vegafactory'], root, repo: 'o/r', logDir: workerDir(root), env })
+    expect(unit).toContain('Environment="VEGAFACTORY_APP_ID=12345"')
+    expect(unit).toContain('Environment="VEGAFACTORY_APP_ACTOR=acmefactory[bot]"')
+    // systemd splits `Environment=` on whitespace and expands `%`, so a path with a space in it
+    // has to survive quoting or the started worker looks for a key that is not there.
+    // The quotes wrap the whole `NAME=value` item, which is systemd's documented form; `%` is
+    // doubled because specifiers expand, and a quote or backslash is escaped.
+    const awkward = String.raw`/home/me/App "Keys"\100% mine.pem`
+    const spaced = unitText('linux', { cli: ['vegafactory'], root, repo: 'o/r', logDir: workerDir(root), env: { VEGAFACTORY_APP_PRIVATE_KEY_FILE: awkward } })
+    expect(spaced).toContain(String.raw`Environment="VEGAFACTORY_APP_PRIVATE_KEY_FILE=/home/me/App \"Keys\"\\100%% mine.pem"`)
+    // Never the unquoted form, whatever the value looks like.
+    expect(spaced).not.toMatch(/^Environment=[A-Z]/m)
+    expect(plist).toContain('<key>VEGAFACTORY_APP_PRIVATE_KEY_FILE</key><string>/keys/app.pem</string>')
+    expect(unit).toContain('Environment="VEGAFACTORY_APP_PRIVATE_KEY_FILE=/keys/app.pem"')
+    // The path, never the key. Nothing that could be pasted into a token request appears here.
+    for (const text of [plist, unit]) expect(text).not.toContain('BEGIN')
+
+    // Nothing configured, nothing written: VegaStack's own defaults need no unit entries.
+    const plain = unitText('linux', { cli: ['vegafactory'], root, repo: 'o/r', logDir: workerDir(root), env: {} })
+    expect(plain).not.toContain('Environment=')
+  })
+
   test('the unit runs this CLI\'s own worker run and carries no token', () => {
     const plist = unitText('darwin', { cli: ['/usr/bin/node', '/opt/vegafactory/index.js'], root, repo: 'o/r', logDir: workerDir(root) })
     expect(plist).toContain('<string>worker</string>')
@@ -1052,7 +1157,33 @@ describe('readiness and the service', () => {
     expect(unitPath('darwin', '/home/x')).toBe('/home/x/Library/LaunchAgents/com.vegastack.vegafactory.worker.plist')
     expect(unitPath('linux', '/home/x')).toBe('/home/x/.config/systemd/user/vegafactory-worker.service')
     expect(serviceCommands('linux', '/u', 'disable')[0]).toEqual(['systemctl', '--user', 'disable', '--now', 'vegafactory-worker.service'])
-    expect(serviceCommands('darwin', '/u', 'enable', 501)[0]).toEqual(['launchctl', 'bootstrap', 'gui/501', '/u'])
+    expect(serviceCommands('darwin', '/u', 'enable', 501)[1]).toEqual(['launchctl', 'bootstrap', 'gui/501', '/u'])
+    // Enabling ends by restarting, on both platforms. `bootstrap` is a no-op once the label is
+    // loaded and `enable --now` leaves an active service alone, so without this a re-enable after
+    // an upgrade or an identity change reports success while the running worker keeps the old unit.
+    // Enabling unloads first, so the plist just written is the one launchd reads.
+    expect(serviceCommands('darwin', '/u', 'enable', 501)).toEqual([
+      ['launchctl', 'bootout', `gui/501/${SERVICE_NAME}`],
+      ['launchctl', 'bootstrap', 'gui/501', '/u'],
+      ['launchctl', 'enable', `gui/501/${SERVICE_NAME}`],
+    ])
+    expect(serviceCommands('linux', '/u', 'enable').at(-1)).toEqual(['systemctl', '--user', 'restart', 'vegafactory-worker.service'])
+    // Linger comes first, before anything is loaded. A `--user` service lives inside a login
+    // session and systemd ends that session with the last login, so without this an always-on
+    // worker dies at logout — quietly, and hours later.
+    expect(serviceCommands('linux', '/u', 'enable', 501)[0]).toEqual(['loginctl', 'enable-linger', '501'])
+    // Already lingering: setting it is gated by polkit, and asking again would fail on exactly the
+    // box where an administrator had just done it — making the documented recovery no recovery.
+    expect(serviceCommands('linux', '/u', 'enable', 501, true).flat()).not.toContain('enable-linger')
+    expect(serviceCommands('linux', '/u', 'enable', 501, true)[0]).toEqual(['systemctl', '--user', 'daemon-reload'])
+    // Reading the property needs no privilege, so it is safe to ask before trying to set it.
+    expect(alreadyLingering((() => ({ code: 0, stdout: 'Linger=yes\n', stderr: '' })) as Probe, 501)).toBe(true)
+    expect(alreadyLingering((() => ({ code: 0, stdout: 'Linger=no\n', stderr: '' })) as Probe, 501)).toBe(false)
+    expect(alreadyLingering((() => ({ code: 1, stdout: '', stderr: 'no such user' })) as Probe, 501)).toBe(false)
+    // Disabling leaves it alone: linger is user-wide and other services on this account may rely
+    // on it. Recorded as a decision, not an oversight.
+    expect(serviceCommands('linux', '/u', 'disable').flat()).not.toContain('linger')
+    expect(serviceCommands('darwin', '/u', 'enable', 501).flat()).not.toContain('linger')
   })
 })
 
@@ -1123,14 +1254,15 @@ describe('the step a run makes', () => {
       given = options.env
       return { code: 0, stdout: 'done', stderr: '', timedOut: false }
     }
-    const env = { PATH: '/usr/bin', VEGAFACTORY_APP_PRIVATE_KEY_FILE: '/keys/app.pem', VEGAFACTORY_APP_ID: '4812956', HOME: '/home/x' }
+    const env = { PATH: '/usr/bin', VEGAFACTORY_APP_PRIVATE_KEY_FILE: '/keys/app.pem', VEGAFACTORY_APP_ID: '12345', VEGAFACTORY_APP_ACTOR: 'acmefactory[bot]', HOME: '/home/x' }
     await defaultRunStep('', env, { exec, token: () => 'ghs_from_the_app' })({ action: 'implement', number: 7, repo: 'o/r', split: false, by: null }, { root })
     // Its writes are the App's, so nothing it posts can pass as a person's word.
     expect(given.GH_TOKEN).toBe('ghs_from_the_app')
     expect(given.GITHUB_TOKEN).toBe('ghs_from_the_app')
     // And it cannot reach the key that mints them.
     expect(given.VEGAFACTORY_APP_PRIVATE_KEY_FILE).toBeUndefined()
-    expect(Object.keys(given).some((name) => name.startsWith('VEGAFACTORY_'))).toBe(false)
+    expect(given.VEGAFACTORY_APP_ID).toBe('12345')
+    expect(given.VEGAFACTORY_APP_ACTOR).toBe('acmefactory[bot]')
     expect(given.PATH).toBe('/usr/bin')
     // The token is for the API. Git is given a helper that scrubs it first, so it never pushes
     // with a token whose Contents permission is read-only — it gets the machine's own login back
@@ -1186,6 +1318,19 @@ describe('the command', () => {
       expect(result.text).toContain('subscriptions only')
     }
     // Both probes spend the operator's own quota and the mint touches GitHub: neither may happen.
+    expect([probes, fetches]).toEqual([0, 0])
+  })
+
+  test('a partial self-hosted App identity refuses before anything is probed or minted', async () => {
+    let probes = 0
+    let fetches = 0
+    const result = await run(['enable'], {
+      env: { VEGAFACTORY_APP_ID: '12345' },
+      run: (() => { probes++; return { code: 0, stdout: 'ok', stderr: '' } }) as Probe,
+      fetch: (async () => { fetches++; return { ok: true, status: 200, json: async () => ({ id: 1 }) } }) as Fetch,
+    })
+    expect(result.code).toBe(2)
+    expect(result.text).toMatch(/VEGAFACTORY_APP_ID.*VEGAFACTORY_APP_ACTOR.*set together/)
     expect([probes, fetches]).toEqual([0, 0])
   })
 
@@ -1250,6 +1395,214 @@ describe('the command', () => {
     expect(result.code).toBe(0)
     expect(result.text).toContain('enabled —')
     expect(result.text).toContain('polls o/r every 1s')
+  })
+
+  // A newline is legal in a Linux filename and passes every check the run makes, then becomes a
+  // second physical line inside the unit. Enabling refuses by name rather than installing a
+  // service that starts without the setting the operator had just proved.
+  test('a value a unit file cannot hold refuses enable by name', async () => {
+    for (const bad of ['/keys/two\nlines.pem', '/keys/bell\u0007.pem']) {
+      expect(unwritableForUnit({ VEGAFACTORY_APP_PRIVATE_KEY_FILE: bad })).toContain('control character')
+    }
+    expect(unwritableForUnit({ VEGAFACTORY_APP_ID: '123\n456', VEGAFACTORY_APP_ACTOR: 'a[bot]' })).toContain('VEGAFACTORY_APP_ID')
+    // An ordinary path, however awkward, is fine: only control characters are refused.
+    expect(unwritableForUnit({ VEGAFACTORY_APP_PRIVATE_KEY_FILE: String.raw`/home/me/App "Keys"/100% mine.pem` })).toBeNull()
+    expect(unwritableForUnit({})).toBeNull()
+
+    // And the unit never carries one even if something else reached that far.
+    const unit = unitText('linux', { cli: ['vegafactory'], root, repo: 'o/r', logDir: workerDir(root), env: { VEGAFACTORY_APP_ID: 'a\nb' } })
+    expect(unit).not.toContain('VEGAFACTORY_APP_ID')
+
+    // Through the real command, because that is where the refusal has to happen — and through the
+    // dry run too, which exists to say what the real command would do.
+    project(`| node | owner | worker | repos |\n|---|---|---|---|\n| ${NODE} | mk | yes | o/r |\n`)
+    mkdirSync(join(root, '.claude'), { recursive: true })
+    mkdirSync(join(root, '.codex'), { recursive: true })
+    writeFileSync(join(root, '.claude', 'settings.json'), 'vegafactory hook stop --harness claude')
+    writeFileSync(join(root, '.codex', 'hooks.json'), 'vegafactory hook stop --harness codex')
+    mkdirSync(join(home, '.config', 'systemd', 'user'), { recursive: true })
+    const { privateKey } = generateKeyPairSync('rsa', { modulusLength: 2048, privateKeyEncoding: { type: 'pkcs8', format: 'pem' }, publicKeyEncoding: { type: 'spki', format: 'pem' } })
+    const twoLines = join(root, 'two\nlines.pem')
+    writeFileSync(twoLines, privateKey, { mode: 0o600 })
+    chmodSync(twoLines, 0o600)
+    const probe: Probe = (command) => {
+      if (command === 'git') return { code: 0, stdout: 'git@github.com:o/r.git', stderr: '' }
+      if (command === 'claude' || command === 'codex') return { code: 0, stdout: 'ok', stderr: '' }
+      return { code: 0, stdout: '', stderr: '' }
+    }
+    const fetch: Fetch = async (url) => ({
+      ok: true, status: 200,
+      json: async () => url.endsWith('/installation') ? { id: 42 } : { token: 'ghs_test', expires_at: '2026-09-18T11:00:00Z' },
+    })
+    for (const argv of [['enable'], ['enable', '--dry-run']]) {
+      const refused = await run(argv, { platform: 'linux', run: probe, fetch, env: { VEGAFACTORY_APP_PRIVATE_KEY_FILE: twoLines } })
+      expect(refused.code).toBe(2)
+      expect(refused.text).toContain('control character')
+      expect(existsSync(unitPath('linux', home))).toBe(false)
+    }
+  })
+
+  // The documented recovery is `sudo loginctl enable-linger`. If `enable` then asked for it again
+  // it would be denied on exactly the box where an administrator had just done the one thing that
+  // was needed — so the way out of the refusal has to work at the command, not only in a helper.
+  test('an administrator having set linger is enough for enable to go through', async () => {
+    project(`| node | owner | worker | repos |\n|---|---|---|---|\n| ${NODE} | mk | yes | o/r |\n`)
+    mkdirSync(join(root, '.claude'), { recursive: true })
+    mkdirSync(join(root, '.codex'), { recursive: true })
+    writeFileSync(join(root, '.claude', 'settings.json'), 'vegafactory hook stop --harness claude')
+    writeFileSync(join(root, '.codex', 'hooks.json'), 'vegafactory hook stop --harness codex')
+    mkdirSync(join(home, '.config', 'systemd', 'user'), { recursive: true })
+    const { privateKey } = generateKeyPairSync('rsa', { modulusLength: 2048, privateKeyEncoding: { type: 'pkcs8', format: 'pem' }, publicKeyEncoding: { type: 'spki', format: 'pem' } })
+    const key = join(root, 'set-by-admin.pem')
+    writeFileSync(key, privateKey, { mode: 0o600 })
+    chmodSync(key, 0o600)
+    const fetch: Fetch = async (url) => ({
+      ok: true, status: 200,
+      json: async () => url.endsWith('/installation') ? { id: 42 } : { token: 'ghs_test', expires_at: '2026-09-18T11:00:00Z' },
+    })
+    const ran: string[][] = []
+    const probe: Probe = (command, cmdArgs) => {
+      if (command === 'git') return { code: 0, stdout: 'git@github.com:o/r.git', stderr: '' }
+      if (command === 'claude' || command === 'codex') return { code: 0, stdout: 'ok', stderr: '' }
+      ran.push([command, ...cmdArgs])
+      // Already on, because an administrator set it.
+      if (command === 'loginctl' && cmdArgs[0] === 'show-user') return { code: 0, stdout: 'Linger=yes\n', stderr: '' }
+      // And still refused to this account, which is why it was needed.
+      if (command === 'loginctl' && cmdArgs[0] === 'enable-linger') return { code: 1, stdout: '', stderr: 'Interactive authentication required.' }
+      return { code: 0, stdout: '', stderr: '' }
+    }
+    const result = await run(['enable'], { platform: 'linux', run: probe, fetch, env: { VEGAFACTORY_APP_PRIVATE_KEY_FILE: key } })
+    expect(result.code).toBe(0)
+    expect(result.text).toContain('enabled —')
+    // It never asked, so the denial never happened, and it went on to load the service.
+    expect(ran.some((command) => command[1] === 'enable-linger')).toBe(false)
+    expect(ran.some((command) => command[0] === 'systemctl' && command.includes('daemon-reload'))).toBe(true)
+  })
+
+  // The failure this exists to prevent: an account that cannot grant itself linger gets a unit
+  // that loads, works, and dies at the operator's next logout. `enable` has to say so at the
+  // moment it can still be fixed, not leave it to be discovered hours later.
+  test('a box that cannot grant linger fails loudly instead of dying at logout', async () => {
+    project(`| node | owner | worker | repos |\n|---|---|---|---|\n| ${NODE} | mk | yes | o/r |\n`)
+    mkdirSync(join(root, '.claude'), { recursive: true })
+    mkdirSync(join(root, '.codex'), { recursive: true })
+    writeFileSync(join(root, '.claude', 'settings.json'), 'vegafactory hook stop --harness claude')
+    writeFileSync(join(root, '.codex', 'hooks.json'), 'vegafactory hook stop --harness codex')
+    mkdirSync(join(home, '.config', 'systemd', 'user'), { recursive: true })
+    const { privateKey } = generateKeyPairSync('rsa', { modulusLength: 2048, privateKeyEncoding: { type: 'pkcs8', format: 'pem' }, publicKeyEncoding: { type: 'spki', format: 'pem' } })
+    const key = join(root, 'linger.pem')
+    writeFileSync(key, privateKey, { mode: 0o600 })
+    chmodSync(key, 0o600)
+    const fetch: Fetch = async (url) => ({
+      ok: true, status: 200,
+      json: async () => url.endsWith('/installation') ? { id: 42 } : { token: 'ghs_test', expires_at: '2026-09-18T11:00:00Z' },
+    })
+    const started: string[][] = []
+    const probe: Probe = (command, cmdArgs) => {
+      if (command === 'git') return { code: 0, stdout: 'git@github.com:o/r.git', stderr: '' }
+      if (command === 'claude' || command === 'codex') return { code: 0, stdout: 'ok', stderr: '' }
+      started.push([command, ...cmdArgs])
+      if (command === 'loginctl') return { code: 1, stdout: '', stderr: 'Could not enable linger: Interactive authentication required.' }
+      return { code: 0, stdout: '', stderr: '' }
+    }
+    const refused = await run(['enable'], { platform: 'linux', run: probe, fetch, env: { VEGAFACTORY_APP_PRIVATE_KEY_FILE: key } })
+    expect(refused.code).toBe(1)
+    expect(refused.text).toContain('loginctl enable-linger')
+    expect(refused.text).toContain('Interactive authentication required')
+    // It stopped there: nothing was loaded, so no unit is left running that would die at logout.
+    expect(started.some((command) => command[0] === 'systemctl')).toBe(false)
+  })
+
+  // A machine enabling for the first time has nothing to unload, and launchctl's wording for that
+  // is not one string. The unload is allowed to fail; the bootstrap after it is not.
+  test('a first enable tolerates the unload, and a real bootstrap failure still stops it', async () => {
+    project(`| node | owner | worker | repos |\n|---|---|---|---|\n| ${NODE} | mk | yes | o/r |\n`)
+    mkdirSync(join(root, '.claude'), { recursive: true })
+    mkdirSync(join(root, '.codex'), { recursive: true })
+    writeFileSync(join(root, '.claude', 'settings.json'), 'vegafactory hook stop --harness claude')
+    writeFileSync(join(root, '.codex', 'hooks.json'), 'vegafactory hook stop --harness codex')
+    mkdirSync(join(home, 'Library', 'LaunchAgents'), { recursive: true })
+    const { privateKey } = generateKeyPairSync('rsa', { modulusLength: 2048, privateKeyEncoding: { type: 'pkcs8', format: 'pem' }, publicKeyEncoding: { type: 'spki', format: 'pem' } })
+    const key = join(root, 'first.pem')
+    writeFileSync(key, privateKey, { mode: 0o600 })
+    chmodSync(key, 0o600)
+    const fetch: Fetch = async (url) => ({
+      ok: true, status: 200,
+      json: async () => url.endsWith('/installation') ? { id: 42 } : { token: 'ghs_test', expires_at: '2026-09-18T11:00:00Z' },
+    })
+    const answers = (bootstrapCode: number): Probe => (command, cmdArgs) => {
+      if (command === 'git') return { code: 0, stdout: 'git@github.com:o/r.git', stderr: '' }
+      if (command === 'claude' || command === 'codex') return { code: 0, stdout: 'ok', stderr: '' }
+      // Nothing loaded yet, and launchctl says so in its own words rather than "already".
+      if (command === 'launchctl' && cmdArgs[0] === 'bootout') return { code: 3, stdout: '', stderr: 'Boot-out failed: 3: No such process' }
+      if (command === 'launchctl' && cmdArgs[0] === 'bootstrap') return { code: bootstrapCode, stdout: '', stderr: bootstrapCode ? 'Load failed: 5: Input/output error' : '' }
+      return { code: 0, stdout: '', stderr: '' }
+    }
+    const first = await run(['enable'], { platform: 'darwin', run: answers(0), fetch, env: { VEGAFACTORY_APP_PRIVATE_KEY_FILE: key } })
+    expect(first.code).toBe(0)
+    expect(first.text).toContain('enabled —')
+
+    const broken = await run(['enable'], { platform: 'darwin', run: answers(5), fetch, env: { VEGAFACTORY_APP_PRIVATE_KEY_FILE: key } })
+    expect(broken.code).toBe(1)
+    expect(broken.text).toContain('bootstrap')
+
+    // An unload that failed for any other reason left the old job loaded, so what is running is
+    // still the old identity. Reporting "enabled" there reports the wrong worker as the new one.
+    const denied: Probe = (command, cmdArgs) => {
+      if (command === 'launchctl' && cmdArgs[0] === 'bootout') return { code: 1, stdout: '', stderr: 'Boot-out failed: 1: Operation not permitted' }
+      return answers(0)(command, cmdArgs)
+    }
+    const refused = await run(['enable'], { platform: 'darwin', run: denied, fetch, env: { VEGAFACTORY_APP_PRIVATE_KEY_FILE: key } })
+    expect(refused.code).toBe(1)
+    expect(refused.text).toContain('bootout')
+    expect(refused.text).toContain('Operation not permitted')
+
+    // "Already loaded" after a successful unload means the unload did not take. It used to be
+    // waved through as harmless, which reported the old job as the newly enabled one.
+    const stillLoaded: Probe = (command, cmdArgs) => {
+      if (command === 'launchctl' && cmdArgs[0] === 'bootstrap') return { code: 5, stdout: '', stderr: 'Load failed: 37: Service is already loaded' }
+      return answers(0)(command, cmdArgs)
+    }
+    const stuck = await run(['enable'], { platform: 'darwin', run: stillLoaded, fetch, env: { VEGAFACTORY_APP_PRIVATE_KEY_FILE: key } })
+    expect(stuck.code).toBe(1)
+    expect(stuck.text).toContain('already loaded')
+  })
+
+  // End to end, because the unit is only right if `enable` actually passes what it was run with
+  // into it. Asserting on `unitText` alone left the wiring untested: the whole feature is that a
+  // self-hosted App survives the restart, and a user service inherits nothing from this shell.
+  test('enable writes the App identity it was run with into the installed unit', async () => {
+    project(`| node | owner | worker | repos |\n|---|---|---|---|\n| ${NODE} | mk | yes | o/r |\n`)
+    mkdirSync(join(root, '.claude'), { recursive: true })
+    mkdirSync(join(root, '.codex'), { recursive: true })
+    writeFileSync(join(root, '.claude', 'settings.json'), 'vegafactory hook stop --harness claude')
+    writeFileSync(join(root, '.codex', 'hooks.json'), 'vegafactory hook stop --harness codex')
+    mkdirSync(join(home, '.config', 'systemd', 'user'), { recursive: true })
+    const { privateKey } = generateKeyPairSync('rsa', { modulusLength: 2048, privateKeyEncoding: { type: 'pkcs8', format: 'pem' }, publicKeyEncoding: { type: 'spki', format: 'pem' } })
+    const key = join(root, 'identity.pem')
+    writeFileSync(key, privateKey, { mode: 0o600 })
+    chmodSync(key, 0o600)
+    const probe: Probe = (command) => {
+      if (command === 'git') return { code: 0, stdout: 'git@github.com:o/r.git', stderr: '' }
+      if (command === 'claude' || command === 'codex') return { code: 0, stdout: 'ok', stderr: '' }
+      return { code: 0, stdout: '', stderr: '' }
+    }
+    const fetch: Fetch = async (url) => ({
+      ok: true, status: 200,
+      json: async () => url.endsWith('/installation') ? { id: 42 } : { token: 'ghs_test', expires_at: '2026-09-18T11:00:00Z' },
+    })
+    const result = await run(['enable'], {
+      platform: 'linux', run: probe, fetch,
+      env: { VEGAFACTORY_APP_PRIVATE_KEY_FILE: key, VEGAFACTORY_APP_ID: '12345', VEGAFACTORY_APP_ACTOR: 'acmefactory[bot]' },
+    })
+    expect(result.code).toBe(0)
+    const unit = readFileSync(unitPath('linux', home), 'utf8')
+    expect(unit).toContain('Environment="VEGAFACTORY_APP_ID=12345"')
+    expect(unit).toContain('Environment="VEGAFACTORY_APP_ACTOR=acmefactory[bot]"')
+    // The path the run was given travels with it, or token refresh fails on the first poll.
+    expect(unit).toContain(`Environment="VEGAFACTORY_APP_PRIVATE_KEY_FILE=${key}"`)
+    // The path, never the key itself.
+    expect(unit).not.toContain('BEGIN')
   })
 
   test('run --once makes one pass with the injected step', async () => {

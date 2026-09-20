@@ -29,6 +29,10 @@ export class FakeGitHub {
   calls: string[] = []
   // Runs after each posted comment, to stage a concurrent writer.
   afterPost?: (body: string) => void
+  // Who the token behind these writes belongs to. A worker writes as its App, and a test that
+  // leaves this at the operator's login proves nothing about App trust: `mk` has admin, so every
+  // write it makes is trusted as a person whatever the App actor is set to.
+  postAs: { login: string; type: string } = { login: 'mk', type: 'User' }
   // Runs before each request, to stage a writer that lands between two of the caller's calls.
   beforeCall?: (args: string[]) => void
   private nextId = 1000
@@ -138,7 +142,7 @@ export class FakeGitHub {
     if ((m = /^repos\/o\/r\/issues\/(\d+)\/comments$/.exec(route!))) {
       const issue = this.issues.get(Number(m[1]))!
       if (method === 'POST') {
-        const comment = this.addComment(issue.number, payload.body, 'mk')
+        const comment = this.addComment(issue.number, payload.body, this.postAs.login, this.postAs.type)
         this.afterPost?.(payload.body)
         return this.respond(201, this.commentJson(comment, issue.number))
       }

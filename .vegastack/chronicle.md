@@ -11,6 +11,25 @@ The project's story, newest first: what got built, why, and how it went — for 
 - **Decisions:** none new.
 
 — approved by (kmanojkumar) · built by claude · branch feat/258-vegafactory-update-for-attended-sessions
+## 20-09-2026 — A Linux worker survives the operator logging out ([#262](https://github.com/vegastack/vegafactory/issues/262))
+
+- **What:** `vegafactory worker enable` sets `loginctl enable-linger` before it loads anything, and refuses with the failing command if this account may not grant it. The systemd unit also writes the same two log files the macOS one does.
+- **Why:** Step 11 of [#251](https://github.com/vegastack/vegafactory/issues/251). A `--user` service lives inside a login session and systemd ends that session with the last login, so an always-on Linux worker died at the next logout — quietly, and hours later, with `enable` having reported success.
+- **How it went:** The brief's portability sweep came back clean, so the work was these two gaps rather than a hunt. The review then caught three things the first pass got wrong: the documented log path was the home directory when the unit is given the repository's own `.tmp/worker`; the claim that the journal still had everything was false, because `append:` redirects rather than copies; and the logout drill logged back in before checking, which starts the service again and hides the very failure it looks for.
+- **Changed:** linger at enable, checked not assumed · Linux log files at parity with macOS · the onboarding checklist's logout drill, its log paths and what the journal does and does not hold.
+- **Decisions:** none new. `disable` deliberately leaves linger alone — it is user-wide and other services on that account may rely on it.
+
+— approved by (kmanojkumar) · built by claude · branch fix/262-a-linux-worker-survives-logout
+
+## 19-09-2026 — A self-hosted factory trusts its own App ([#263](https://github.com/vegastack/vegafactory/issues/263))
+
+- **What:** A company can now pair its own GitHub App id with the bot login that authors factory work. Claims, plans, evidence, reviews, and release markers from that App remain trusted, while its words still cannot count as a human approval.
+- **Why:** The App id was configurable but the trusted actor was fixed to `vegafactory[bot]`, so a self-hosted App minted valid tokens and then silently rejected everything it wrote.
+- **How it went:** The identity became one fail-closed pair, and the worker's child keeps those two non-secret values while still losing the private-key path. The shipped guide and template-output test were narrowed to examples and shape rather than VegaStack-only numbers.
+- **Changed:** paired App id and actor overrides · refusal of partial identity configuration · self-hosted App trust across coordination paths · example-scoped setup guidance.
+- **Decisions:** none.
+
+— approved by (kmanojkumar) · built by claude · branch fix/263-a-self-hosted-app-s-own-writes-are-distr
 ## 19-09-2026 — Stats speak owner and node ([#256](https://github.com/vegastack/vegafactory/issues/256))
 
 - **What:** Stats records, summaries, filenames and the offline dashboard now name an owner and a node. The node is the existing `<os-user>@<hostname>` identity, and old `operator`/`machine` records still read cleanly.
