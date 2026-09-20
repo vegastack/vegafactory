@@ -1232,8 +1232,9 @@ export function threadFor(root: string, repo: string, issue: number, head: strin
   const id = uuidFrom(`${key}#${generation}`)
   const next: Record<string, Thread> = { ...saved, [key]: { id, head, generation } }
   try {
-    mkdirSync(workerDir(root), { recursive: true })
-    writeFileSync(threadsPath(root), JSON.stringify(next, null, 2) + '\n')
+    // Link-safe: the path is predictable and gitignored, so a planted symlink there would
+    // otherwise be followed and write through to whatever it names.
+    replaceFile(threadsPath(root), JSON.stringify(next, null, 2) + '\n')
   } catch { /* a thread nobody could record is a thread that forks next time, which is the safe way */ }
   return { id, forked }
 }
@@ -2174,7 +2175,10 @@ export async function runWorker(argv: string[], deps: CliDeps = {}): Promise<num
           // Housekeeping rides in the pass the worker already makes, so there is no second
           // schedule to reason about. It is the same `prune` a person runs, through the same
           // refusals — and what it keeps is reported here rather than silently skipped.
-          const tidied = tidyWorktrees(root, { write: true, spawn: deps.worktreeScript })
+          // Only what no run is holding. A worktree an agent is reading right now is not idle,
+          // whatever its branch or its dates say.
+          const busy = [...inflight.values()].filter((run) => !run.settled).map((run) => `${run.candidate.number}`)
+          const tidied = tidyWorktrees(root, { write: true, inUse: busy, spawn: deps.worktreeScript })
           for (const line of [...tidied.actions, ...tidied.warns, ...tidied.blocks]) note(`worktrees: ${line}`)
           if (tidied.freed.length) note(`worktrees: freed the dependencies of ${tidied.freed.join(', ')}`)
         } catch (error) {

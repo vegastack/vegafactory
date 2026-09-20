@@ -254,6 +254,48 @@ describe('pruneWorktrees', () => {
     expect(ran).toEqual([])
   })
 
+  // The unattended pass is narrower than the prune a person runs. A person asked and can be told
+  // "your work is on a branch"; a background pass has nobody to tell, so it leaves it alone.
+  test('the automatic pass never pushes, never commits, and says what it kept', () => {
+    const root = repoWithRemote()
+    const wt = createWorktree({ repoRoot: root, issue: 106, slug: 'old', type: 'feat', base: 'main', devMd, home: root, write: true })
+    // A commit nobody has pushed, and something uncommitted on top of it.
+    writeFileSync(join(wt.path, 'work.txt'), 'real work\n')
+    execFileSync('git', ['-C', wt.path, 'add', '.'], { encoding: 'utf8' })
+    execFileSync('git', ['-C', wt.path, 'commit', '-m', 'work'], { encoding: 'utf8' })
+    writeFileSync(join(wt.path, 'more.txt'), 'half an idea\n')
+
+    const r = pruneWorktrees({
+      repoRoot: root, base: 'main', olderThan: '14d', devMd,
+      ledgerTimes: { '106-old': OLD_LEDGER }, now: FUTURE_NOW, write: true, automatic: true,
+    })
+    // Still there, still dirty, still unpushed — and reported rather than silently skipped.
+    expect(existsSync(wt.path)).toBe(true)
+    expect(existsSync(join(wt.path, 'more.txt'))).toBe(true)
+    expect(r.warns.join('\n')).toContain('106-old')
+    expect(r.warns.join('\n')).toContain('kept:')
+    expect(r.actions.join('\n')).not.toContain('commit uncommitted work as wip')
+  })
+
+  test('a worktree a run is holding is left entirely alone', () => {
+    const root = repoWithRemote()
+    const wt = createWorktree({ repoRoot: root, issue: 106, slug: 'old', type: 'feat', base: 'main', devMd, home: root, write: true })
+    const deps = join(wt.path, 'node_modules')
+    mkdirSync(deps, { recursive: true })
+    writeFileSync(join(deps, 'marker.txt'), 'in use\n')
+
+    const r = pruneWorktrees({
+      repoRoot: root, base: 'main', olderThan: '1d', devMd: `${devMd}\nworktree-deps-retention: 1d\n`,
+      ledgerTimes: { '106-old': OLD_LEDGER }, now: FUTURE_NOW, write: true, automatic: true,
+      inUse: ['106'],
+    })
+    // An agent is reading it right now: not the worktree, not its dependencies, nothing.
+    expect(existsSync(wt.path)).toBe(true)
+    expect(existsSync(join(deps, 'marker.txt'))).toBe(true)
+    expect(r.freed).not.toContain('106-old')
+    expect(r.candidates.find((c: { name: string }) => c.name === '106-old')).toBeUndefined()
+  })
+
   test('a worktree with uncommitted work keeps its dependencies', () => {
     const root = repoWithRemote()
     const wt = createWorktree({ repoRoot: root, issue: 106, slug: 'old', type: 'feat', base: 'main', devMd, home: root, write: true })

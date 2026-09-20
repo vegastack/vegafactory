@@ -176,10 +176,17 @@ function parseScriptOutput(stdout: string): ScriptResult {
 // of being silently skipped.
 export function tidyWorktrees(
   repoRoot: string,
-  options: { write?: boolean; spawn?: (args: string[], cwd?: string) => SpawnResult } = {},
+  options: { write?: boolean; inUse?: string[]; spawn?: (args: string[], cwd?: string) => SpawnResult } = {},
 ): { actions: string[]; warns: string[]; blocks: string[]; freed: string[] } {
   const spawn = options.spawn ?? defaultSpawn
-  const args = ['prune', ...(options.write ? ['--write'] : []), '--json']
+  // `--automatic` is the narrower pass: it never pushes, never commits anything as `wip`, and
+  // reports whatever it will not touch. `--in-use` names the *issues* a run is holding right now;
+  // a worktree is `<issue>-<slug>`, and the script matches on the number in front.
+  const args = [
+    'prune', '--automatic', ...(options.write ? ['--write'] : []),
+    ...((options.inUse ?? []).length ? ['--in-use', (options.inUse ?? []).join(',')] : []),
+    '--json',
+  ]
   try {
     const run = spawn(args, repoRoot)
     const result = parseScriptOutput(run.stdout) as ScriptResult & { freed?: string[] }

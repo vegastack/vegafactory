@@ -15,7 +15,8 @@
 //
 // Usage: node worktree.mjs create|restore|remove|list|prune|status [flags] [--json]
 import { execFileSync } from 'node:child_process';
-import { copyFileSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, realpathSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { randomUUID } from 'node:crypto';
+import { copyFileSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { delimiter, dirname, join, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -281,6 +282,22 @@ export function parseSetupCommand(devMd) {
 // fresh worktree has no marker and installs nothing — a docs-only issue should not pay for a full
 // install — so restoring reinstalls exactly what was taken and nothing else.
 const DROPPED_MARKER = join('.vegastack', '.tmp', 'deps-dropped');
+
+// Written without ever following a link. The path is predictable and inside an ignored directory,
+// so a planted symlink would otherwise be followed and write through to whatever it names. `wx` is
+// O_CREAT|O_EXCL, which refuses any existing name — a link included — and the rename replaces the
+// target name itself rather than its destination.
+function writeMarker(path, text) {
+  mkdirSync(dirname(path), { recursive: true });
+  const temp = path + '.' + randomUUID() + '.tmp';
+  try {
+    writeFileSync(temp, text, { flag: 'wx' });
+    renameSync(temp, path);
+  } catch (error) {
+    rmSync(temp, { force: true });
+    throw error;
+  }
+}
 
 // Age is measured from the LATER of the last commit and the last ledger edit:
 // a branch that has not moved may still be an issue someone is actively
@@ -726,7 +743,13 @@ export function rescueWork({ path, branch, name, remote = 'origin' }) {
 // here the retention window is what lifts the not-merged rule: the pushed
 // branch keeps the work and `restore` brings the directory back. Uncommitted,
 // unpushed and locked still keep it.
-export function pruneWorktrees({ repoRoot, base, olderThan, devMd, ledgerTimes = {}, now = Date.now(), write = false, remote = 'origin' }) {
+// `automatic` is the unattended pass, and it is a narrower thing than the prune a person runs.
+// A person asked, and can be told "I saved your work on a branch first". A background pass has
+// nobody to tell, so it never pushes, never commits anything as `wip`, and never removes a
+// worktree it had to rescue: anything dirty or unpushed is reported and left exactly as it is.
+// `inUse` names the worktrees a run currently holds; those are skipped whole, dependencies
+// included, because an agent is reading them right now.
+export function pruneWorktrees({ repoRoot, base, olderThan, devMd, ledgerTimes = {}, now = Date.now(), write = false, remote = 'origin', automatic = false, inUse = [] }) {
   const blocks = [];
   const warns = [];
   const actions = [];
@@ -749,7 +772,13 @@ export function pruneWorktrees({ repoRoot, base, olderThan, devMd, ledgerTimes =
     });
     const stamps = [lastCommitAt, ledgerUpdatedAt].map((v) => (v ? Date.parse(v) : Number.NaN)).filter(Number.isFinite);
     const ageDays = stamps.length === 0 ? 0 : Math.floor((now - Math.max(...stamps)) / DAY_MS);
-    if (state !== 'parked') continue;
+    // A run is using it, so nothing here is idle and nothing here is touched. The caller names
+    // issues, because that is what it holds; a worktree is `<issue>-<slug>`, so the issue number
+    // is the part in front of the first dash.
+    if (inUse.includes(String(entry.name).split('-')[0])) continue;
+    // `parked` is a branch nobody is on; `merged` and `abandoned` are the other two ways a
+    // worktree stops being needed, and the brief asks for all three.
+    if (!['parked', 'merged', 'abandoned'].includes(state)) continue;
     // Dependencies go on the shorter window, and on exactly the conditions that protect the
     // worktree itself: never while anything is uncommitted, never while it is locked. Only
     // `node_modules` is touched, by name — nothing git tracks, and nothing else on disk. What is
@@ -761,9 +790,7 @@ export function pruneWorktrees({ repoRoot, base, olderThan, devMd, ledgerTimes =
         if (write) {
           try {
             rmSync(deps, { recursive: true, force: true });
-            const marker = join(entry.path, DROPPED_MARKER);
-            mkdirSync(dirname(marker), { recursive: true });
-            writeFileSync(marker, new Date(now).toISOString() + '\n');
+            writeMarker(join(entry.path, DROPPED_MARKER), new Date(now).toISOString() + '\n');
             freed.push(entry.name);
           } catch (error) {
             warns.push(at(entry.name, 'kept its dependencies: ' + (error?.message ?? 'could not be removed')));
@@ -793,6 +820,16 @@ export function pruneWorktrees({ repoRoot, base, olderThan, devMd, ledgerTimes =
     });
   }
   for (const candidate of candidates) {
+    // The unattended pass reports what it will not touch, rather than saving it somewhere and
+    // removing it. Work nobody has pushed is the operator's to decide about.
+    if (automatic && (candidate.rescuable || candidate.pushable)) {
+      warns.push(at(candidate.name, 'kept: ' + (candidate.rescuable ? 'uncommitted work here' : 'commits not on the remote')));
+      continue;
+    }
+    if (automatic && !candidate.removable) {
+      warns.push(at(candidate.name, 'kept: ' + (candidate.reason ?? 'not safe to remove')));
+      continue;
+    }
     if (!candidate.removable && !candidate.pushable && !candidate.rescuable) continue;
     if (candidate.rescuable) {
       actions.push(at(candidate.name, 'commit uncommitted work as wip on ' + candidate.branch + ' and push it'));
@@ -809,7 +846,7 @@ export function pruneWorktrees({ repoRoot, base, olderThan, devMd, ledgerTimes =
     }
     actions.push(at(candidate.name, (candidate.pushable ? 'push the branch, then re-check for removal after ' : 'remove after ') + candidate.ageDays + ' quiet days'));
     if (!write) continue;
-    const removed = removeWorktree({ repoRoot, name: candidate.name, base, force: true, push: true, write: true, remote });
+    const removed = removeWorktree({ repoRoot, name: candidate.name, base, force: true, push: !automatic, write: true, remote });
     if (removed.blocks.length > 0) {
       warns.push(at(candidate.name, 'kept after all: ' + removed.blocks[0]));
       candidate.removable = false;
@@ -1040,7 +1077,11 @@ function runVerb(verb, flags) {
     const repo = flags.repo || knobLine(devMd, 'repo')?.split('·')[0].trim() || null;
     const names = inventory(repoRoot).map((entry) => entry.name);
     const ledgerTimes = repo ? gatherLedgerTimes({ repo, names, warns }) : {};
-    const pruned = pruneWorktrees({ repoRoot, base, olderThan: flags['older-than'], devMd, ledgerTimes, now: Date.now(), write: shared.write });
+    const pruned = pruneWorktrees({
+      repoRoot, base, olderThan: flags['older-than'], devMd, ledgerTimes, now: Date.now(), write: shared.write,
+      automatic: flags.automatic === true || flags.automatic === '',
+      inUse: String(flags['in-use'] ?? '').split(',').map((name) => name.trim()).filter(Boolean),
+    });
     return { ...pruned, warns: [...warns, ...pruned.warns] };
   }
   if (verb === 'create' || verb === 'restore') {
