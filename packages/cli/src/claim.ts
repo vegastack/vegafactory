@@ -113,6 +113,15 @@ export function appIdentityConfig(env: NodeJS.ProcessEnv = process.env): { appId
   return { appId: appId || APP_ID, appActor: appActor || APP_ACTOR }
 }
 
+// The same pair, for the many commands that only ever *read* what an App wrote. `worker enable`
+// and `worker run` mint tokens, so a half-set pair stops them by name and they call the throwing
+// form. A `hook`, a `review`, an `issue` or a `ship check` mints nothing — and one stray variable
+// left in a shell must not make them crash, least of all the hook, which carries the ship guard.
+// So a pair that does not agree trusts no App at all: strictly less is believed, never more.
+export function appActorForReading(env: NodeJS.ProcessEnv = process.env): string | null {
+  try { return appIdentityConfig(env).appActor } catch { return null }
+}
+
 // A person with write access. This is what judges a review or an ack: no bot stands in for one.
 export const trustBy = (permission: PermissionLookup): Trusted => (entry) => entry.authorType !== 'Bot' && !!entry.author && WRITE_ROLES.has(permission(entry.author))
 
@@ -121,12 +130,13 @@ export const trustBy = (permission: PermissionLookup): Trusted => (entry) => ent
 // by its marker, a review by the fields that must agree with the findings it summarises. Judging
 // finished work is the other half and never comes here: an acknowledgement, an acceptance of what
 // a review left open and "ship it" go through `trustBy`, where a bot never counts.
-export const trustFactoryBy = (permission: PermissionLookup, appActor = appIdentityConfig().appActor): Trusted =>
-  (entry) => entry.author === appActor || trustBy(permission)(entry)
+export const trustFactoryBy = (permission: PermissionLookup, appActor: string | null = appActorForReading()): Trusted =>
+  // `appActor` is null when the pair disagrees, and an entry with no author must not match it.
+  (entry) => (appActor !== null && entry.author === appActor) || trustBy(permission)(entry)
 
 export const trustedAuthors = (ctx: { repo: string; runner: GhRunner; root?: string }): Trusted => trustBy(permissionLookup(ctx.repo, ctx.runner, { root: ctx.root }))
 export const trustedFactory = (ctx: { repo: string; runner: GhRunner; root?: string; env?: NodeJS.ProcessEnv; appActor?: string }): Trusted =>
-  trustFactoryBy(permissionLookup(ctx.repo, ctx.runner, { root: ctx.root }), ctx.appActor ?? appIdentityConfig(ctx.env).appActor)
+  trustFactoryBy(permissionLookup(ctx.repo, ctx.runner, { root: ctx.root }), ctx.appActor ?? appActorForReading(ctx.env))
 
 // Live claims (after the latest release of each owner), every claim ever made, and the one
 // status comment. All three count only from trusted authors.
