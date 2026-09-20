@@ -1436,6 +1436,43 @@ describe('the command', () => {
     }
   })
 
+  // The documented recovery is `sudo loginctl enable-linger`. If `enable` then asked for it again
+  // it would be denied on exactly the box where an administrator had just done the one thing that
+  // was needed — so the way out of the refusal has to work at the command, not only in a helper.
+  test('an administrator having set linger is enough for enable to go through', async () => {
+    project(`| node | owner | worker | repos |\n|---|---|---|---|\n| ${NODE} | mk | yes | o/r |\n`)
+    mkdirSync(join(root, '.claude'), { recursive: true })
+    mkdirSync(join(root, '.codex'), { recursive: true })
+    writeFileSync(join(root, '.claude', 'settings.json'), 'vegafactory hook stop --harness claude')
+    writeFileSync(join(root, '.codex', 'hooks.json'), 'vegafactory hook stop --harness codex')
+    mkdirSync(join(home, '.config', 'systemd', 'user'), { recursive: true })
+    const { privateKey } = generateKeyPairSync('rsa', { modulusLength: 2048, privateKeyEncoding: { type: 'pkcs8', format: 'pem' }, publicKeyEncoding: { type: 'spki', format: 'pem' } })
+    const key = join(root, 'set-by-admin.pem')
+    writeFileSync(key, privateKey, { mode: 0o600 })
+    chmodSync(key, 0o600)
+    const fetch: Fetch = async (url) => ({
+      ok: true, status: 200,
+      json: async () => url.endsWith('/installation') ? { id: 42 } : { token: 'ghs_test', expires_at: '2026-09-18T11:00:00Z' },
+    })
+    const ran: string[][] = []
+    const probe: Probe = (command, cmdArgs) => {
+      if (command === 'git') return { code: 0, stdout: 'git@github.com:o/r.git', stderr: '' }
+      if (command === 'claude' || command === 'codex') return { code: 0, stdout: 'ok', stderr: '' }
+      ran.push([command, ...cmdArgs])
+      // Already on, because an administrator set it.
+      if (command === 'loginctl' && cmdArgs[0] === 'show-user') return { code: 0, stdout: 'Linger=yes\n', stderr: '' }
+      // And still refused to this account, which is why it was needed.
+      if (command === 'loginctl' && cmdArgs[0] === 'enable-linger') return { code: 1, stdout: '', stderr: 'Interactive authentication required.' }
+      return { code: 0, stdout: '', stderr: '' }
+    }
+    const result = await run(['enable'], { platform: 'linux', run: probe, fetch, env: { VEGAFACTORY_APP_PRIVATE_KEY_FILE: key } })
+    expect(result.code).toBe(0)
+    expect(result.text).toContain('enabled —')
+    // It never asked, so the denial never happened, and it went on to load the service.
+    expect(ran.some((command) => command[1] === 'enable-linger')).toBe(false)
+    expect(ran.some((command) => command[0] === 'systemctl' && command.includes('daemon-reload'))).toBe(true)
+  })
+
   // The failure this exists to prevent: an account that cannot grant itself linger gets a unit
   // that loads, works, and dies at the operator's next logout. `enable` has to say so at the
   // moment it can still be fixed, not leave it to be discovered hours later.

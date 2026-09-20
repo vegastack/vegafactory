@@ -100,12 +100,23 @@ Then the reboot drill: `sudo reboot`, wait for the box, and run every check abov
 
 On Linux, the logout drill is separate and the order matters. Log out every session for vf-worker and check from **another** account — logging back in first would start the service again and hide exactly the failure this is looking for:
 
+Note the size of the worker's log, log out every session for vf-worker, then watch that log
+from **another** account — logging back in would start the service again and hide the very failure
+this looks for:
+
 ```sh
+log=/path/to/vegastack-vegafactory/.vegastack/.tmp/worker/worker.log
+before=$(wc -c < "$log")
 loginctl list-sessions | grep vf-worker || echo 'no sessions, which is the point'
-sleep 60
-sudo -u vf-worker XDG_RUNTIME_DIR=/run/user/$(id -u vf-worker) systemctl --user is-active vegafactory-worker.service
+sleep 300
+[ "$(wc -c < "$log")" -gt "$before" ] && echo 'polled while logged out' || echo 'DEAD since logout'
 ```
 
-The `sleep` is the part that makes this a test. logind keeps a user's manager alive for `UserStopDelaySec` after the last session ends — ten seconds by default, and a box may set it higher, so check `loginctl show --property=UserStopDelaySec` if you want to be exact. Ask too soon and a worker with no linger at all answers `active`, and the drill passes while proving nothing.
+A new poll line written while vf-worker has no session is the proof, and it is the only one
+that does not depend on timing. Asking `systemctl --user is-active` instead is unreliable: logind
+keeps a user's manager alive for `UserStopDelayUSec` after the last session ends — ten seconds by
+default, settable, and in microseconds — so a worker with no linger at all can still answer
+`active` if you ask too soon. Five minutes is longer than any sane value for that, and a worker
+polls far more often.
 
-After the wait, it must print `active` while vf-worker has no session. Without linger it prints `inactive` or cannot reach that user's systemd, and the worker has been dead since the logout.
+Without linger the log stops at the logout, and it has been dead since.
