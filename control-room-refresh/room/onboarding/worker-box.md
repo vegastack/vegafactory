@@ -106,8 +106,9 @@ would start the service again and hide the very failure this looks for:
 ```sh
 loginctl list-sessions | grep vf-worker || echo 'no sessions, which is the point'
 usec=$(busctl get-property org.freedesktop.login1 /org/freedesktop/login1 \
-  org.freedesktop.login1.Manager UserStopDelayUSec 2>/dev/null | awk '{print $2}')
-sleep $(( ${usec:-10000000} / 1000000 + 30 ))
+  org.freedesktop.login1.Manager UserStopDelayUSec | awk '{print $2}')
+case "$usec" in ''|*[!0-9]*) echo 'cannot read UserStopDelayUSec — do not guess it'; exit 1;; esac
+sleep $(( usec / 1000000 + 30 ))
 sudo -u vf-worker XDG_RUNTIME_DIR=/run/user/$(id -u vf-worker) \
   systemctl --user is-active vegafactory-worker.service
 ```
@@ -115,8 +116,10 @@ sudo -u vf-worker XDG_RUNTIME_DIR=/run/user/$(id -u vf-worker) \
 The wait is read from the box rather than guessed. logind keeps a user's manager alive for
 `UserStopDelayUSec` after the last session ends — ten seconds by default, settable, and named in
 microseconds — so a worker with no linger at all still answers `active` inside that window. The
-`busctl` line asks logind's own manager for the value, the `sleep` clears it with thirty seconds to
-spare, and the default is used when the property cannot be read.
+`busctl` line asks logind's own manager for the value and the `sleep` clears it with thirty seconds
+to spare. A value that cannot be read stops the drill rather than standing in for it: assuming the
+ten-second default on a box that had been given a longer one is how a worker with no linger passes
+this check inside its own grace period.
 
 After that wait it must print `active` while vf-worker has no session. That holds for an idle
 worker as much as a busy one, which is why it is the thing to check rather than the log: a pass
