@@ -190,10 +190,11 @@ export function tidyWorktrees(
   ]
   try {
     const run = spawn(args, repoRoot)
-    const result = parseScriptOutput(run.stdout) as ScriptResult & { freed?: string[] }
+    const result = parseScriptOutput(run.stdout) as ScriptResult & { freed?: string[]; droppable?: string[] }
     // Counted from the candidates, not from `actions`: every remote-backed prune puts its own
     // `git fetch` in there, so a pass with nothing to reclaim would still look like it had work.
     const reclaimable = (result.candidates ?? []).filter((candidate) => candidate.removable).length
+      + (result.droppable ?? []).length
     return {
       actions: result.actions ?? [], warns: result.warns ?? [],
       blocks: result.blocks ?? [], freed: result.freed ?? [], reclaimable,

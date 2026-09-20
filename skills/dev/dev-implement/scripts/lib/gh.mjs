@@ -17,6 +17,26 @@ export class GhUnavailable extends Error {
 // is a string (a request body that must stay off argv); otherwise it is
 // closed. VSK_GH is a TEST SEAM only (points unit tests at a stub binary);
 // guards are enforcement infrastructure, so never set it in real runs.
+// Split a stream of back-to-back JSON documents. Returns null unless the whole text is consumed,
+// so a genuinely broken answer is still reported as one rather than half-read.
+function splitJsonDocuments(text) {
+  const documents = [];
+  let rest = String(text ?? '').trim();
+  while (rest) {
+    let cut = rest.length;
+    let parsed = null;
+    // Each document ends where the next begins; the only reliable finder is to try.
+    for (; cut > 0; cut -= 1) {
+      if (!']}'.includes(rest[cut - 1])) continue;
+      try { parsed = JSON.parse(rest.slice(0, cut)); break; } catch { /* not a boundary */ }
+    }
+    if (parsed === null) return null;
+    documents.push(parsed);
+    rest = rest.slice(cut).trim();
+  }
+  return documents.length ? documents : null;
+}
+
 export function ghJson(args, { gh = process.env.VSK_GH || 'gh', input } = {}) {
   let out;
   try {
@@ -36,6 +56,11 @@ export function ghJson(args, { gh = process.env.VSK_GH || 'gh', input } = {}) {
   try {
     return JSON.parse(out);
   } catch {
+    // `--paginate` prints one JSON document per page, back to back, so a single parse fails the
+    // moment a repository has more than a hundred of whatever was asked for. Concatenating the
+    // arrays is what the caller wanted in the first place; anything else is genuinely unreadable.
+    const pages = splitJsonDocuments(out);
+    if (pages && pages.every(Array.isArray)) return pages.flat();
     throw new GhUnavailable(`gh ${args.join(' ')} returned unparseable JSON`);
   }
 }

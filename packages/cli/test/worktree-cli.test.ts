@@ -117,6 +117,13 @@ describe('the worker asks for the narrower pass, and the script hears it', () =>
       spawn: () => ({ status: 0, stdout: JSON.stringify({ candidates: [{ name: 'a', removable: true }, { name: 'b', removable: false }] }) }),
     })
     expect(mixed.reclaimable).toBe(1)
+
+    // And a worktree between the two windows has dependencies to reclaim and no removal candidate
+    // at all — reporting that and then offering nothing to do about it is the bug this guards.
+    const depsOnly = tidyWorktrees('/repo', {
+      spawn: () => ({ status: 0, stdout: JSON.stringify({ actions: ['106-old: drop node_modules'], candidates: [], droppable: ['106-old'] }) }),
+    })
+    expect(depsOnly.reclaimable).toBe(1)
   })
 
   test('unreadable output is a warning, not a crash in the middle of a pass', () => {

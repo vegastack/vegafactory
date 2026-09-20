@@ -786,6 +786,7 @@ export function pruneWorktrees({ repoRoot, base, olderThan, devMd, ledgerTimes =
   const depsRetentionMs = parseDepsRetentionKnob(devMd);
   const candidates = [];
   const freed = [];
+  const droppable = [];
   refreshBase({ repoRoot, base, remote, actions, warns });
   for (const entry of inventory(repoRoot)) {
     const branch = entry.branch;
@@ -805,9 +806,11 @@ export function pruneWorktrees({ repoRoot, base, olderThan, devMd, ledgerTimes =
     // process registers a session anywhere, so an attended run on another terminal is invisible
     // here — its files are not. This is the difference between "nobody has committed" and
     // "nobody is working".
-    let touchedAt = null;
-    try { touchedAt = new Date(statSync(join(entry.path, '.git')).mtimeMs).toISOString(); } catch { /* gone or unreadable */ }
-    const stamps = [lastCommitAt, ledgerUpdatedAt, touchedAt].map((v) => (v ? Date.parse(v) : Number.NaN)).filter(Number.isFinite);
+    // Only facts that actually move. A worktree's `.git` pointer is written when the worktree is
+    // created and never again, so its mtime says nothing about somebody working here — reading,
+    // building and `git status` all leave it alone. There is no filesystem signal for an attended
+    // session, which is why the worker's pass reports rather than removes.
+    const stamps = [lastCommitAt, ledgerUpdatedAt].map((v) => (v ? Date.parse(v) : Number.NaN)).filter(Number.isFinite);
     const ageDays = stamps.length === 0 ? 0 : Math.floor((now - Math.max(...stamps)) / DAY_MS);
     // The most recent sign of life, whichever kind it was.
     const latestStamp = stamps.length === 0 ? null : new Date(Math.max(...stamps)).toISOString();
@@ -845,6 +848,7 @@ export function pruneWorktrees({ repoRoot, base, olderThan, devMd, ledgerTimes =
         warns.push(at(entry.name, 'kept its dependencies: git tracks files under node_modules here'));
       } else if (existsSync(deps)) {
         actions.push(at(entry.name, 'drop node_modules, keeping the branch and its commits'));
+        droppable.push(entry.name);
         if (write) {
           try {
             // Recorded *before* anything is removed. The other order leaves a worktree with no
@@ -920,7 +924,10 @@ export function pruneWorktrees({ repoRoot, base, olderThan, devMd, ledgerTimes =
       candidate.reason = null;
     }
   }
-  return { blocks, warns, actions, candidates, freed };
+  // Named separately from the removals: a worktree between the two windows has dependencies that
+  // could go and no removal candidate at all, and a caller counting only candidates would report
+  // the drop and then offer nothing to do about it.
+  return { blocks, warns, actions, candidates, freed, droppable };
 }
 
 // --- list and status ------------------------------------------------------
