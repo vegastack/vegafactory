@@ -687,11 +687,11 @@ export function unitText(platform: NodeJS.Platform, input: { cli: string[]; root
     '[Unit]', 'Description=VegaFactory worker', '',
     '[Service]', 'Type=simple', `WorkingDirectory=${input.root}`,
     `ExecStart=${argv.map((arg) => JSON.stringify(arg)).join(' ')}`,
-    // Quoted, and `%` doubled: systemd reads `Environment=` as a list of assignments split on
-    // whitespace, and expands `%` specifiers. A key at `/home/me/App Keys/key.pem` would
-    // otherwise arrive split in two, and `enable` would have validated the very path the started
-    // worker cannot find.
-    ...identity.map(([name, value]) => `Environment=${name}="${value.replace(/%/g, '%%').replace(/([\\"])/g, '\\$1')}"`),
+    // systemd quotes a whole item, so the quotes go around `NAME=value` and not around the value:
+    // `Environment=NAME="a b"` puts an opening quote after non-whitespace, which is not the
+    // documented form. `%` is doubled because specifiers expand, and a backslash or a quote is
+    // escaped because the item is read as a C-style string.
+    ...identity.map(([name, value]) => `Environment="${name}=${value.replace(/([\\"])/g, '\\$1').replace(/%/g, '%%')}"`),
     'Restart=always', 'RestartSec=30', '',
     '[Install]', 'WantedBy=default.target', '',
   ].join('\n')
