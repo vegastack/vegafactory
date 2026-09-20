@@ -121,7 +121,8 @@ test('the prepared control-room refresh is exactly the approved layout', () => {
   expect(readdirSync(join(room, 'onboarding')).sort()).toEqual(templates)
   // org.md keeps the automation identity the skill and its template both require.
   const org = readFileSync(join(room, 'org.md'), 'utf8')
-  for (const line of ['app: VegaFactory', 'app-slug: vegafactory', 'app-install: 158664419', 'app-secrets: ', 'app-permissions: ']) expect(org).toContain(line)
+  for (const line of ['app: VegaFactory', 'app-slug: vegafactory', 'app-secrets: ', 'app-permissions: ']) expect(org).toContain(line)
+  expect(org).toMatch(/^app-install:\s+\d+\s+#/m)
   // No pinned model ids: `default` takes each tool's own.
   expect(readFileSync(join(room, 'groups/dev/group.md'), 'utf8')).not.toMatch(/harness-policy:.*\b(fable|sonnet|opus|gpt)-/)
 })

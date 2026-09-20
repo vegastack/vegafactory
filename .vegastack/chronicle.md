@@ -2,6 +2,15 @@
 
 The project's story, newest first: what got built, why, and how it went — for the operator's future recall. Format home: the dev-chronicle skill.
 
+## 19-09-2026 — A self-hosted factory trusts its own App ([#263](https://github.com/vegastack/vegafactory/issues/263))
+
+- **What:** A company can now pair its own GitHub App id with the bot login that authors factory work. Claims, plans, evidence, reviews, and release markers from that App remain trusted, while its words still cannot count as a human approval.
+- **Why:** The App id was configurable but the trusted actor was fixed to `vegafactory[bot]`, so a self-hosted App minted valid tokens and then silently rejected everything it wrote.
+- **How it went:** The identity became one fail-closed pair, and the worker's child keeps those two non-secret values while still losing the private-key path. The shipped guide and template-output test were narrowed to examples and shape rather than VegaStack-only numbers.
+- **Changed:** paired App id and actor overrides · refusal of partial identity configuration · self-hosted App trust across coordination paths · example-scoped setup guidance.
+- **Decisions:** none.
+
+— approved by (kmanojkumar) · built by claude · branch fix/263-a-self-hosted-app-s-own-writes-are-distr
 ## 19-09-2026 — Stats speak owner and node ([#256](https://github.com/vegastack/vegafactory/issues/256))
 
 - **What:** Stats records, summaries, filenames and the offline dashboard now name an owner and a node. The node is the existing `<os-user>@<hostname>` identity, and old `operator`/`machine` records still read cleanly.

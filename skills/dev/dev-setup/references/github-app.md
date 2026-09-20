@@ -24,9 +24,9 @@ What the App may never do is stand in for a person's own words. It authors the f
 
 The alternative worth naming is a credential belonging to a person: it stands for their whole account, outlives the job that used it, and dies when they leave the org. The App stands for a named permission set instead, its tokens live an hour, and uninstalling it revokes every one of them at once.
 
-The App is public, so any account may install it. That is the point: one App, installed by any org that wants the factory, with a permission set each of them can read before consenting.
+The App is public, so any account may install it. That is the point: one App, installed by any org that wants the factory, with a permission set each of them can read before consenting. The values below describe VegaStack's published App; they are examples for a company that runs its own.
 
-| Fact | Value |
+| Fact | VegaStack example |
 |---|---|
 | Name | VegaFactory |
 | Slug | `vegafactory` |
@@ -37,6 +37,29 @@ The App is public, so any account may install it. That is the point: one App, in
 | Webhook | off |
 
 The slug is what GitHub derives from the name, and both the actor string and the install URL follow it — confirm it on the App's settings page rather than assuming it, because renaming the App changes the slug and every reference to it.
+
+**Those values are VegaStack's own.** A company running its own App reads its two off that App's
+own settings page — `https://github.com/organizations/<org>/settings/apps/<your-app-slug>`:
+
+- **App ID** is printed on that page. It is `VEGAFACTORY_APP_ID`.
+- **The slug** is the last part of that page's own URL. `VEGAFACTORY_APP_ACTOR` is that slug with
+  `[bot]` after it, and it is worth confirming against a comment the App has actually posted.
+
+Or read both at once, as an organization owner, from the installation the App already has:
+
+```sh
+gh api orgs/<org>/installations --jq '.installations[] | select(.app_slug == "<your-app-slug>")
+  | "VEGAFACTORY_APP_ID=\(.app_id)\nVEGAFACTORY_APP_ACTOR=\(.app_slug)[bot]"'
+```
+
+That is the same endpoint as `## Recording the installation` below, which is why it costs nothing
+extra: the one call answers the App id, the slug and the installation id together. It needs an
+owner's own `gh` login and no JWT — `GET /app` would answer these too, but only to a token signed
+with the App's private key, which is a longer road to two values the settings page already shows.
+A 403 means this account is not an owner; the settings page above still works.
+
+Both variables are set together or neither is. Setting one makes every command refuse by name,
+because a factory that mints as one identity and trusts another distrusts everything it writes.
 
 ## Permissions
 
@@ -70,11 +93,12 @@ The operator's own browser flow. `gh` has no create-app command and the manifest
 | Name | Kind | Value |
 |---|---|---|
 | `VEGAFACTORY_APP_ID` | organization variable | the numeric App ID |
+| `VEGAFACTORY_APP_ACTOR` | dispatcher environment | the bot login GitHub derives from the App slug, including `[bot]` |
 | `VEGAFACTORY_APP_PRIVATE_KEY` | organization secret | the PEM, pasted whole |
 
 The private key lives in the organization secret, and — only on a machine whose `nodes.md` row says `worker: yes` — in one file on that machine. Being listed is not enough: `nodes.md` names every machine that runs vegafactory, most of which only report what they did, and possession of this key is by itself enough to mint installation tokens. Never on a workstation, never in a control-room file, never in an issue, never printed. Only the key's holder can mint installation tokens.
 
-On a worker machine the file is `~/.vegafactory/worker/app.pem`, owned by the worker account and `chmod 600`, so a CI job running as the runner account cannot read it. `VEGAFACTORY_APP_PRIVATE_KEY_FILE` moves it; `VEGAFACTORY_APP_ID` names another org's App. `vegafactory worker` mints an hour-long installation token from it, narrowed to the one repository, keeps it in memory and passes it to `gh` in that child's environment only. A missing key refuses the run with the path to fix — it never falls back to a person's token.
+On a worker machine the file is `~/.vegafactory/worker/app.pem`, owned by the worker account and `chmod 600`, so a CI job running as the runner account cannot read it. `VEGAFACTORY_APP_PRIVATE_KEY_FILE` moves it. A company running its own App must set both `VEGAFACTORY_APP_ID` to that App's numeric id and `VEGAFACTORY_APP_ACTOR` to its bot login, such as `acmefactory[bot]`; setting only one refuses the worker, because it would mint as one App and distrust that App's own writes. `vegafactory worker` mints an hour-long installation token from the key, narrowed to the one repository, keeps it in memory and passes it to `gh` in that child's environment only. A missing key refuses the run with the path to fix — it never falls back to a person's token.
 
 Control-room files record these **names**. The values live in GitHub organization settings and nowhere a repository can read them.
 
@@ -111,7 +135,7 @@ Rate limits are not a design constraint here. An installation token starts at 5,
 ## Recording the installation
 
 ```sh
-gh api orgs/<org>/installations --jq '.installations[] | select(.app_slug == "vegafactory") | .id'
+gh api orgs/<org>/installations --jq '.installations[] | select(.app_slug == "<your-app-slug>") | .id'
 ```
 
 `GET /orgs/{org}/installations` answers organization owners only. A 403 is a fact to report — "this account is not an owner, so the installation could not be read" — not a failure and not evidence the App is missing.

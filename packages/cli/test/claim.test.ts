@@ -3,7 +3,7 @@ import { spawnSync } from 'node:child_process'
 import { mkdirSync, mkdtempSync, realpathSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { claim, claimBody, heartbeat, heartbeatOf, holderOf, machineName, nodeId, ownerId, release, releaseBody, trustedAuthors, type ClaimContext } from '../src/claim.ts'
+import { APP_ACTOR, appIdentityOrExplain, appIdentityConfig, claim, claimBody, heartbeat, heartbeatOf, holderOf, machineName, nodeId, ownerId, release, releaseBody, trustedAuthors, trustedFactory, type ClaimContext } from '../src/claim.ts'
 import { cacheDir, readBody, readState, syncIssue } from '../src/issue-cache.ts'
 import { runIssue } from '../src/issue.ts'
 import { FakeGitHub } from './fake-github.ts'
@@ -195,6 +195,33 @@ describe('heartbeats', () => {
 })
 
 describe('who may claim', () => {
+  test('a self-hosted App is trusted when its id and actor move together', () => {
+    const entry = {
+      id: 1, author: 'acmefactory[bot]', authorType: 'Bot', createdAt: '', updatedAt: '', changedAt: '',
+      type: 'claim', file: '', url: '', sha: '', artifact: '', rev: 1,
+    }
+    const trusted = trustedFactory({ ...ctx, env: { VEGAFACTORY_APP_ID: '12345', VEGAFACTORY_APP_ACTOR: 'acmefactory[bot]' } })
+    expect(trusted(entry)).toBe(true)
+  })
+
+  test('a partial self-hosted App identity refuses instead of distrusting its own writes', () => {
+    expect(() => appIdentityConfig({ VEGAFACTORY_APP_ID: '12345' })).toThrow(/VEGAFACTORY_APP_ID.*VEGAFACTORY_APP_ACTOR.*set together/)
+    expect(() => appIdentityConfig({ VEGAFACTORY_APP_ACTOR: 'acmefactory[bot]' })).toThrow(/VEGAFACTORY_APP_ID.*VEGAFACTORY_APP_ACTOR.*set together/)
+  })
+
+  // Every command refuses on a half-set pair, and refuses by *name*. Carrying on with "no App
+  // configured" looked safer and is not: an App-authored claim would read as absent, so `claim`
+  // would report a second claim on an issue another machine already holds.
+  test('a half-set pair is explained, not worked around', () => {
+    for (const env of [{ VEGAFACTORY_APP_ID: '12345' }, { VEGAFACTORY_APP_ACTOR: 'acmefactory[bot]' }]) {
+      const answer = appIdentityOrExplain(env)
+      expect(answer.ok).toBe(false)
+      expect(answer.ok ? '' : answer.reason).toMatch(/VEGAFACTORY_APP_ID.*VEGAFACTORY_APP_ACTOR.*set together/)
+    }
+    expect(appIdentityOrExplain({ VEGAFACTORY_APP_ID: '12345', VEGAFACTORY_APP_ACTOR: 'acmefactory[bot]' })).toEqual({ ok: true, appActor: 'acmefactory[bot]' })
+    expect(appIdentityOrExplain({})).toEqual({ ok: true, appActor: APP_ACTOR })
+  })
+
   test('claims and releases count only from people with write access, never from a bot', () => {
     gh.permissions.set('visitor', 'read')
     gh.permissions.set('helper[bot]', 'write')
