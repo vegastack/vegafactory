@@ -6,6 +6,7 @@ const template = readFileSync(join(import.meta.dir, '../assets/control-room/onbo
 const newNode = readFileSync(join(import.meta.dir, '../assets/control-room/onboarding/new-node.md.template'), 'utf8')
 const reference = readFileSync(join(import.meta.dir, '../references/control-room.md'), 'utf8')
 const githubApp = readFileSync(join(import.meta.dir, '../../../dev/dev-setup/references/github-app.md'), 'utf8')
+const readme = readFileSync(join(import.meta.dir, '../../../../README.md'), 'utf8')
 
 test('nodes roster grants only explicit repositories', () => {
   expect(reference).toContain('comma-separated list of explicit `OWNER/NAME` repositories')
@@ -32,6 +33,11 @@ test('ordinary node onboarding grants nothing and leaves the PR to the operator'
   expect(newNode).toContain('operator adds it')
   expect(newNode).toContain('`init` never edits, commits, pushes, or opens that PR')
   expect(newNode).not.toMatch(/`(?:git push|gh pr create)/)
+})
+
+test('worker means the VegaFactory service, never the Actions runner', () => {
+  expect(readme).toContain('| **Worker** | The operator-side service that picks up queued issues')
+  expect(readme).not.toMatch(/\| \*\*Worker\*\* \|[^\n]*\brunner\b/i)
 })
 
 test('worker-box onboarding describes the multi-repository worker boundary', () => {

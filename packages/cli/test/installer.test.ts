@@ -248,6 +248,42 @@ describe('@vegastack/vegafactory installer', () => {
     expect(out).not.toContain('Next:')
   })
 
+  test('init dry-run proposes the node row without invoking a mutation command', async () => {
+    const bin = join(temporary, 'init-proposal-bin')
+    const home = join(temporary, 'init-proposal-home')
+    const calls = join(temporary, 'init-proposal-calls')
+    await mkdir(bin, { recursive: true })
+    await mkdir(home, { recursive: true })
+    const script = async (name: string, body: string) => {
+      await writeFile(join(bin, name), `#!/bin/sh\nprintf '%s %s\\n' '${name}' "$*" >> "$VSK_INIT_CALLS"\n${body}\n`)
+      await chmod(join(bin, name), 0o755)
+    }
+    await script('git', 'if [ "$1" = "--version" ]; then echo "git version 2.51.0"; exit 0; fi\nif [ "$1" = "rev-parse" ]; then exit 128; fi\nexit 97')
+    await script('gh', 'if [ "$1" = "--version" ]; then echo "gh version 2.101.0"; exit 0; fi\nif [ "$1 $2" = "auth status" ]; then exit 0; fi\nif [ "$1 $2 $3 $4" = "api user -q .login" ]; then echo "kmanojkumar"; exit 0; fi\nexit 97')
+    await script('claude', 'echo "2.1.263"')
+    await script('codex', 'echo "codex-cli 0.153.4"')
+    await script('bun', 'echo "1.2.22"')
+    const version = JSON.parse(await readFile(join(packageRoot, 'package.json'), 'utf8')).version as string
+    await script('vegafactory', `echo "${version}"`)
+    await script('npm', 'exit 97')
+
+    const result = Bun.spawnSync(['node', cli, 'init', '--dry-run'], {
+      cwd: home,
+      env: {
+        ...process.env,
+        HOME: home,
+        VEGAFACTORY_HOME: join(home, '.vegafactory'),
+        VSK_INIT_CALLS: calls,
+        PATH: `${bin}:${process.env.PATH}`,
+      },
+    })
+    expect(result.exitCode, result.stderr.toString()).toBe(0)
+    expect(result.stdout.toString()).toMatch(/proposed nodes\.md row .*\| [^|]+ \| kmanojkumar \| no \| \| \| \|/)
+    const invoked = await readFile(calls, 'utf8')
+    expect(invoked).toContain('gh api user -q .login')
+    expect(invoked).not.toMatch(/(?:git (?:config|commit|push)|gh (?:issue|pr|repo)|gh api -(?:X|f|F)|npm install)/)
+  })
+
   test('remove uninstalls a clean copy and refuses a drifted one without --force', async () => {
     const project = join(temporary, 'remove-flow')
     await mkdir(project, { recursive: true })
