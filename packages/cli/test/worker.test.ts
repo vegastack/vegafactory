@@ -14,7 +14,7 @@ import {
   parseNodes, poll, readActed, readRuns, readiness, recordRun, resetAt, runKey, RUNS_KEPT, runWorker, schedule, serviceCommands, stagePolicy,
   standDown, standDownStrict, stepPrompt, tail, unitPath, unitText, unsafeForParallel,
   workerUsage,
-  migrateLegacyWorkerState, noteChild, readChildren, refreshRoster, releaseRunLock, reserve, runLockPath, stopChild, takeRunLock, verifiedListing,
+  gitIn, migrateLegacyWorkerState, noteChild, readChildren, refreshRoster, releaseRunLock, reserve, runLockPath, stopChild, takeRunLock, verifiedListing,
   recordRoomSha, updateModeFor,
   normalizeWorkerRepos, readWorkerState, reconcileBoards, workerProblemReporter,
   type Candidate, type Fetch, type GitRun, type Inflight, type PollDeps, type Probe, type RunStep, type StepResult,
@@ -1714,6 +1714,31 @@ describe('standing an issue down', () => {
     expect(gh.issues.get(1)!.labels).not.toContain('in-progress')
   })
 
+  test('a recovery push uses only the selected board App token', () => {
+    gh.addIssue({ number: 1, labels: ['queued', 'small'] })
+    const worktree = join(root, '.vegastack', '.worktrees', '1-work')
+    mkdirSync(worktree, { recursive: true })
+    spawnSync('git', ['init', '-q', '-b', 'feat/1-work'], { cwd: worktree })
+    spawnSync('git', ['commit', '-q', '--allow-empty', '-m', 'first'], { cwd: worktree })
+    spawnSync('git', ['update-ref', 'refs/remotes/origin/main', 'HEAD'], { cwd: worktree })
+    spawnSync('git', ['symbolic-ref', 'refs/remotes/origin/HEAD', 'refs/remotes/origin/main'], { cwd: worktree })
+    const calls: Array<{ args: string[]; env?: NodeJS.ProcessEnv }> = []
+    const git = (args: string[], options?: { env?: NodeJS.ProcessEnv }) => {
+      calls.push({ args, env: options?.env })
+      if (args[0] === 'symbolic-ref') return { status: 0, out: 'feat/1-work' }
+      if (args[0] === 'status') return { status: 0, out: '' }
+      if (args[0] === 'push') return { status: 0, out: '' }
+      return { status: 1, out: 'unexpected git call' }
+    }
+    expect(standDownStrict({ root, repo: 'o/r', number: 1, runner: gh.runner, machine: HOST, now: gh.clock, token: 'token-r', git }, 'removed').ok).toBe(true)
+    const push = calls.find(call => call.args[0] === 'push')!
+    expect(push.env?.GH_TOKEN).toBe('token-r')
+    expect(push.env?.GITHUB_TOKEN).toBe('token-r')
+    expect(push.env?.GIT_CONFIG_VALUE_0).toBe('')
+    expect(push.env?.GIT_CONFIG_VALUE_1).toBe('!gh auth git-credential')
+    expect(push.args.join(' ')).not.toContain('token-r')
+  })
+
   // A worktree is a directory, and a directory proves nothing about what may be pushed from it.
   test('only the issue\'s own branch is committed to and pushed', () => {
     const worktree = join(root, '.vegastack', '.worktrees', '1-work')
@@ -2008,7 +2033,7 @@ describe('the step a run makes', () => {
       given = options.env
       return { code: 0, stdout: 'done', stderr: '', timedOut: false }
     }
-    const env = { PATH: '/usr/bin', VEGAFACTORY_APP_PRIVATE_KEY_FILE: '/keys/app.pem', VEGAFACTORY_APP_ID: '12345', VEGAFACTORY_APP_ACTOR: 'acmefactory[bot]', HOME: '/home/x', GH_TOKEN: 'human', SSH_AUTH_SOCK: '/tmp/human-agent', GIT_CONFIG_GLOBAL: '/home/human/.gitconfig', GIT_SSH_COMMAND: 'ssh -i /keys/human' }
+    const env = { PATH: '/usr/bin', VEGAFACTORY_APP_PRIVATE_KEY_FILE: '/keys/app.pem', VEGAFACTORY_APP_ID: '12345', VEGAFACTORY_APP_ACTOR: 'acmefactory[bot]', HOME: '/home/x', GH_TOKEN: 'human', SSH_AUTH_SOCK: '/tmp/human-agent', GIT_CONFIG_GLOBAL: '/home/human/.gitconfig', GIT_CONFIG_PARAMETERS: "'credential.helper'='!human-helper'", GIT_SSH_COMMAND: 'ssh -i /keys/human', GH_CONFIG_DIR: '/home/human/.config/gh', GH_ENTERPRISE_TOKEN: 'human-enterprise' }
     await defaultRunStep(env, { exec })({ action: 'implement', number: 7, repo: 'o/r', split: false, by: null }, { root, devMd: '', token: 'ghs_from_the_app' })
     // Its writes are the App's, so nothing it posts can pass as a person's word.
     expect(given.GH_TOKEN).toBe('ghs_from_the_app')
@@ -2027,9 +2052,10 @@ describe('the step a run makes', () => {
     expect(given.GIT_CONFIG_VALUE_1).toBe('!gh auth git-credential')
     expect(given.SSH_AUTH_SOCK).toBeUndefined()
     expect(given.GIT_SSH_COMMAND).toBeUndefined()
-    expect(given.GIT_CONFIG_NOSYSTEM).toBe('1')
-    expect(given.GIT_CONFIG_GLOBAL).toBe('/dev/null')
-    expect(given.GIT_CONFIG_SYSTEM).toBe('/dev/null')
+    expect(given.GIT_CONFIG_PARAMETERS).toBeUndefined()
+    expect(given.GIT_CONFIG_GLOBAL).toBeUndefined()
+    expect(given.GH_CONFIG_DIR).toBeUndefined()
+    expect(given.GH_ENTERPRISE_TOKEN).toBeUndefined()
     // With no token minted yet the child simply gets none; it never gets the key instead.
     expect(childRunEnvironment(env, null).GH_TOKEN).toBeUndefined()
     expect(childRunEnvironment(env, null).VEGAFACTORY_APP_PRIVATE_KEY_FILE).toBeUndefined()
@@ -2374,6 +2400,31 @@ describe('the command', () => {
     expect(existsSync(join(home, '.vegafactory'))).toBe(false)
   })
 
+  test('the control-room refresh uses only its App installation token', async () => {
+    controlRoomClone(ROSTER)
+    const { privateKey } = generateKeyPairSync('rsa', { modulusLength: 2048, privateKeyEncoding: { type: 'pkcs8', format: 'pem' }, publicKeyEncoding: { type: 'spki', format: 'pem' } })
+    const key = join(home, 'control-room-app.pem')
+    writeFileSync(key, privateKey, { mode: 0o600 })
+    let rosterEnv: NodeJS.ProcessEnv = {}
+    const fetched: string[] = []
+    const fetch: Fetch = async (url) => {
+      fetched.push(url)
+      return { ok: true, status: 200, json: async () => url.endsWith('/installation') ? { id: 7 } : { token: 'token-control-room', expires_at: '2099-01-01T00:00:00Z' } }
+    }
+    expect(await runWorker(['run', '--once'], {
+      cwd: root, home, host: HOST,
+      env: { VEGAFACTORY_APP_PRIVATE_KEY_FILE: key, GIT_CONFIG_PARAMETERS: "'credential.helper'='!human'", SSH_AUTH_SOCK: '/tmp/human-agent' },
+      out: () => {}, fetch,
+      rosterGit: (_clone, gitEnv) => { rosterEnv = gitEnv; return anyGit() },
+      provisionBoard: async repo => ({ key: repo, repo, root, runner: gh.runner, devMd: '', identity: { runner: gh.runner, freshen: async () => {}, token: () => 'token-board' } }),
+    })).toBe(0)
+    expect(fetched.some(url => url.includes('/repos/o/control-room/installation'))).toBe(true)
+    expect(rosterEnv.GH_TOKEN).toBe('token-control-room')
+    expect(rosterEnv.GITHUB_TOKEN).toBe('token-control-room')
+    expect(rosterEnv.GIT_CONFIG_PARAMETERS).toBeUndefined()
+    expect(rosterEnv.SSH_AUTH_SOCK).toBeUndefined()
+  })
+
   test('a fresh CLI run refuses a symlinked global-home ancestor without touching its target', async () => {
     const external = join(home, 'fresh-cli-external')
     const linked = join(home, 'fresh-cli-link')
@@ -2453,6 +2504,34 @@ describe('the command', () => {
     expect(document.boards.map((board) => [board.repo, board.ok])).toEqual([['o/r', true], ['o/old', false]])
     expect(document.runs).toContainEqual(expect.objectContaining({ repo: 'o/old', issue: 7 }))
     expect(document.unavailable).toContainEqual(expect.objectContaining({ repo: 'o/old' }))
+  })
+
+  test('production status mints one App identity per board and isolates a failed board read', async () => {
+    project(`| node | owner | worker | repos | caps |\n|---|---|---|---|---|\n| ${NODE} | mk | yes | o/a o/b | |\n`)
+    gh.addIssue({ number: 1, labels: ['queued', 'small'] })
+    const { privateKey } = generateKeyPairSync('rsa', { modulusLength: 2048, privateKeyEncoding: { type: 'pkcs8', format: 'pem' }, publicKeyEncoding: { type: 'spki', format: 'pem' } })
+    const key = join(home, 'status-app.pem')
+    writeFileSync(key, privateKey, { mode: 0o600 })
+    const tokens: Array<[string, string | null]> = []
+    const fetch: Fetch = async (url) => ({
+      ok: true, status: 200,
+      json: async () => url.endsWith('/installation')
+        ? { id: url.includes('/o/a/') ? 1 : 2 }
+        : { token: url.includes('/1/') ? 'token-a' : 'token-b', expires_at: '2099-01-01T00:00:00Z' },
+    })
+    const lines: string[] = []
+    expect(await runWorker(['status', '--json'], {
+      cwd: root, home, host: HOST, env: { VEGAFACTORY_APP_PRIVATE_KEY_FILE: key }, out: line => lines.push(line), fetch,
+      runnerForBoard: (repo, identity) => {
+        tokens.push([repo, identity.token()])
+        if (repo === 'o/b') return (() => { throw new Error('board b unavailable') }) as GhRunner
+        return ((args, input) => gh.runner(args.map(arg => arg.replaceAll('repos/o/a', 'repos/o/r')), input)) as GhRunner
+      },
+    })).toBe(0)
+    expect(tokens).toEqual([['o/a', 'token-a'], ['o/b', 'token-b']])
+    const document = JSON.parse(lines[0]!) as { boards: Array<{ repo: string; ok: boolean; reason?: string }> }
+    expect(document.boards).toContainEqual(expect.objectContaining({ repo: 'o/a', ok: true }))
+    expect(document.boards).toContainEqual(expect.objectContaining({ repo: 'o/b', ok: false, reason: 'board b unavailable' }))
   })
 
   test('status is read-only and malformed state is one JSON refusal', async () => {
@@ -2970,7 +3049,7 @@ describe('the command', () => {
     const lines: string[] = []
     let passes = 0
     const code = await runWorker(['run'], {
-      cwd: root, home, host: HOST, env: {}, out: (text) => lines.push(text), runner: gh.runner, now: () => gh.clock,
+      cwd: root, home, host: HOST, env: {}, out: (text) => lines.push(text), runner: gh.runner, now: () => gh.clock, git: clone => gitIn(clone),
       runStep: (async () => ({ outcome: 'done' as const, note: '', ms: 1 })) as RunStep,
       // Between the first pass and the second, the control-room PR that de-lists this machine lands
       // — upstream only. Nothing on this machine is edited.
@@ -2993,7 +3072,7 @@ describe('the command', () => {
     let releaseChild = () => {}
     const blocked = new Promise<void>((resolve) => { releaseChild = resolve })
     const code = await runWorker(['run'], {
-      cwd: root, home, host: HOST, env: {}, out: (text) => lines.push(text), runner: gh.runner, now: () => gh.clock,
+      cwd: root, home, host: HOST, env: {}, out: (text) => lines.push(text), runner: gh.runner, now: () => gh.clock, git: clone => gitIn(clone),
       // A child that never finishes on its own: only being stopped ends it.
       runStep: (async (_step, context) => {
         context.onStart?.(4242, 'claude')
@@ -3036,7 +3115,7 @@ describe('the command', () => {
       }
       const context = { key: 'o/r', repo: 'o/r', root, runner, devMd: '', identity: { runner, freshen: async () => {}, token: () => null } }
       const code = await runWorker(['run'], {
-        cwd: root, home, host: HOST, env: {}, out: () => {}, runner, now: () => gh.clock,
+        cwd: root, home, host: HOST, env: {}, out: () => {}, runner, now: () => gh.clock, git: clone => gitIn(clone),
         provisionBoard: async () => { provisions += 1; return context },
         runStep: (async (_step, call) => {
           call.onStart?.(7171, 'claude')
@@ -3075,7 +3154,7 @@ describe('the command', () => {
     let passes = 0
 
     const first = await runWorker(['run'], {
-      cwd: root, home, host: HOST, env: {}, out: () => {}, runner: gh.runner, now: () => gh.clock,
+      cwd: root, home, host: HOST, env: {}, out: () => {}, runner: gh.runner, now: () => gh.clock, git: clone => gitIn(clone),
       runStep: (async (_step, context) => {
         context.onStart?.(5151, 'claude')
         await blocked
@@ -3093,7 +3172,7 @@ describe('the command', () => {
     delist(listed)
     const second: string[] = []
     const code = await runWorker(['run', '--once'], {
-      cwd: root, home, host: HOST, env: {}, out: (text) => second.push(text), runner: gh.runner, now: () => gh.clock,
+      cwd: root, home, host: HOST, env: {}, out: (text) => second.push(text), runner: gh.runner, now: () => gh.clock, git: clone => gitIn(clone),
       runStep: (async () => ({ outcome: 'done' as const, note: '', ms: 1 })) as RunStep,
     })
     expect(code).toBe(0)
@@ -3115,7 +3194,7 @@ describe('the command', () => {
     let passes = 0
 
     const first = await runWorker(['run'], {
-      cwd: root, home, host: HOST, env: {}, out: () => {}, runner: gh.runner, now: () => gh.clock,
+      cwd: root, home, host: HOST, env: {}, out: () => {}, runner: gh.runner, now: () => gh.clock, git: clone => gitIn(clone),
       runStep: (async (_step, context) => {
         context.onStart?.(6161, 'claude')
         await blocked
@@ -3132,7 +3211,7 @@ describe('the command', () => {
     delist(listed)
     const second: string[] = []
     const code = await runWorker(['run', '--once'], {
-      cwd: root, home, host: HOST, env: {}, out: (text) => second.push(text), runner: gh.runner, now: () => gh.clock,
+      cwd: root, home, host: HOST, env: {}, out: (text) => second.push(text), runner: gh.runner, now: () => gh.clock, git: clone => gitIn(clone),
       runStep: (async () => ({ outcome: 'done' as const, note: '', ms: 1 })) as RunStep,
     })
     expect(code).toBe(0)
@@ -3443,7 +3522,7 @@ describe('the command', () => {
     const blocked = new Promise<void>((resolve) => { releaseChild = resolve })
     let sleepStarted = 0
     const code = await runWorker(['run'], {
-      cwd: root, home, host: HOST, env: {}, out: (text) => lines.push(text), runner: gh.runner, now: () => gh.clock,
+      cwd: root, home, host: HOST, env: {}, out: (text) => lines.push(text), runner: gh.runner, now: () => gh.clock, git: clone => gitIn(clone),
       runStep: (async (_step, context) => {
         context.onStart?.(8888, 'claude')
         // The signal arrives while the run is blocked and the loop is asleep.
@@ -3720,7 +3799,7 @@ describe('the caps reach what they limit', () => {
     let started = 0
 
     const code = await runWorker(['run'], {
-      cwd: root, home, host: HOST, env: {}, out: () => {}, runner: gh.runner, now: () => gh.clock,
+      cwd: root, home, host: HOST, env: {}, out: () => {}, runner: gh.runner, now: () => gh.clock, git: clone => gitIn(clone),
       runStep: (async (_step, context) => {
         started++
         timeouts.push(context.timeoutMs)
@@ -3761,7 +3840,7 @@ test('a hand-back promises a retry only when there is a try left', async () => {
   gh.addIssue({ number: 1, labels: ['planning', 'medium'] })
   controlRoomClone(`| node | owner | worker | repos | caps |\n|---|---|---|---|---|\n| ${NODE} | mk | yes | o/r | park 1 |\n`)
   await runWorker(['run', '--once'], {
-    cwd: root, home, host: HOST, env: {}, out: () => {}, runner: gh.runner, now: () => gh.clock,
+    cwd: root, home, host: HOST, env: {}, out: () => {}, runner: gh.runner, now: () => gh.clock, git: clone => gitIn(clone),
     runStep: (async () => ({ outcome: 'failed' as const, note: 'boom', ms: 1 })) as RunStep,
   })
   const handbacks = gh.issues.get(1)!.comments.filter((comment) => comment.body.includes('type=standdown'))

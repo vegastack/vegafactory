@@ -122,6 +122,9 @@ jobs:
           owner: "${{ github.repository_owner }}"
           repositories: "${{ github.event.repository.name }}"
           permission-contents: read
+          permission-issues: read
+          permission-metadata: read
+          permission-organization-projects: write
 
       - name: Write Status on the board
         id: mirror

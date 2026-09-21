@@ -49,7 +49,9 @@ const defaultRun: RepoCommand = (command, args, options) => {
 function safeEnvironment(token: string | null, source: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = {}
   for (const [name, value] of Object.entries(source)) {
-    if (name.startsWith('GIT_CONFIG_') || name.startsWith('GIT_TRACE') || name === 'GIT_CURL_VERBOSE' || name === 'GH_TOKEN' || name === 'GITHUB_TOKEN') continue
+    if (name.startsWith('GIT_CONFIG_') || name.startsWith('GIT_TRACE') || name === 'GIT_CURL_VERBOSE'
+      || ['GH_TOKEN', 'GITHUB_TOKEN', 'GH_CONFIG_DIR', 'GH_HOST', 'GH_ENTERPRISE_TOKEN', 'GITHUB_ENTERPRISE_TOKEN',
+        'GIT_ASKPASS', 'SSH_ASKPASS', 'GIT_SSH', 'GIT_SSH_COMMAND', 'SSH_AUTH_SOCK'].includes(name)) continue
     env[name] = value
   }
   Object.assign(env, {

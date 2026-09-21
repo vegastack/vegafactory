@@ -28,7 +28,7 @@ import { dirname, join, parse, posix, resolve, sep } from 'node:path'
 import { APP_ACTOR, APP_ID, HEARTBEAT_EVERY_MS, appIdentityConfig, claim, heartbeat, holderOf, machineName, nodeId, release, trustedFactory } from './claim.ts'
 import { defaultClonePath, factoryConfigPath, parseControlRoomKnob, readFactoryConfig, updateSettingsAtPath } from './control-room.ts'
 import { billingVariables, childEnvironment } from './env.ts'
-import { GhError, defaultRunner, ghList, type GhResult, type GhRunner } from './gh.ts'
+import { GhError, ghList, type GhResult, type GhRunner } from './gh.ts'
 import { assertRepo, cacheDir, readState, replaceFile, syncIssue, withLock, type CommentEntry, type GhIssue, type IssueEntry } from './issue-cache.ts'
 import {
   ackBody, artifactHash, currentHashes, detectRepo, evidenceChangedAt, findValidAck, locked, markerKeys, nextLabels, permissionLookup,
@@ -305,20 +305,20 @@ export const nodesPath = (clone: string) => join(clone, 'nodes.md')
 type WorkerHomeInput = string | HomeOptions
 const workerHomeOptions = (input: WorkerHomeInput = {}): HomeOptions => typeof input === 'string' ? { home: input } : input
 
-export function controlRoomClone(root: string, input: WorkerHomeInput = {}): { org: string; clone: string } | null {
+export function controlRoomClone(root: string, input: WorkerHomeInput = {}): { org: string; repo: string; clone: string } | null {
   const options = workerHomeOptions(input)
   const devMd = join(root, '.vegastack', 'dev.md')
   const knob = existsSync(devMd) ? parseControlRoomKnob(readFileSync(devMd, 'utf8')) : null
   if (!knob) return null
   let path: string | null = null
   try { path = readFactoryConfig(readFileSync(factoryConfigPath(options), 'utf8')).controlRooms[knob.org]?.path ?? null } catch { path = null }
-  return { org: knob.org, clone: path ?? defaultClonePath(knob.org, options) }
+  return { org: knob.org, repo: knob.repo, clone: path ?? defaultClonePath(knob.org, options) }
 }
 
 export type GitRun = (args: string[]) => { status: number | null; out: string }
 
-export const gitIn = (dir: string): GitRun => (args) => {
-  const result = spawnSync('git', ['-C', dir, ...args], { encoding: 'utf8', timeout: 60_000, env: { ...process.env, GIT_TERMINAL_PROMPT: '0' } })
+export const gitIn = (dir: string, env: NodeJS.ProcessEnv = process.env): GitRun => (args) => {
+  const result = spawnSync('git', ['-C', dir, ...args], { encoding: 'utf8', timeout: 60_000, env: { ...env, GIT_TERMINAL_PROMPT: '0' } })
   return { status: result.status, out: `${result.stdout ?? ''}${result.stderr ?? ''}`.trim() }
 }
 
@@ -658,7 +658,7 @@ export function harnessAnswers(run: Probe): Check[] {
   return checks
 }
 
-const AMBIENT_GIT_IDENTITY = /^(?:GIT_CONFIG_(?:COUNT|KEY_|VALUE_|GLOBAL$|SYSTEM$|NOSYSTEM$)|GIT_ASKPASS$|SSH_ASKPASS$|GIT_SSH$|GIT_SSH_COMMAND$|SSH_AUTH_SOCK$)/
+const AMBIENT_GIT_IDENTITY = /^(?:GIT_CONFIG_(?:COUNT|KEY_|VALUE_|GLOBAL$|SYSTEM$|NOSYSTEM$|PARAMETERS$)|GIT_ASKPASS$|SSH_ASKPASS$|GIT_SSH$|GIT_SSH_COMMAND$|SSH_AUTH_SOCK$|GH_CONFIG_DIR$|GH_HOST$|GH_ENTERPRISE_TOKEN$|GITHUB_ENTERPRISE_TOKEN$)/
 
 function appGitEnvironment(source: NodeJS.ProcessEnv, token: string | null): NodeJS.ProcessEnv {
   const env = { ...source }
@@ -666,9 +666,6 @@ function appGitEnvironment(source: NodeJS.ProcessEnv, token: string | null): Nod
   delete env.GH_TOKEN
   delete env.GITHUB_TOKEN
   Object.assign(env, {
-    GIT_CONFIG_NOSYSTEM: '1',
-    GIT_CONFIG_GLOBAL: '/dev/null',
-    GIT_CONFIG_SYSTEM: '/dev/null',
     GIT_CONFIG_COUNT: token ? '2' : '1',
     GIT_CONFIG_KEY_0: 'credential.helper',
     GIT_CONFIG_VALUE_0: '',
@@ -2467,6 +2464,10 @@ export interface StandDownContext {
   now?: number
   // Where the state label goes back to, when a run left the issue in-progress.
   restoreTo?: State
+  // The selected board's installation token is the dedicated worker account's only Git
+  // credential. Tests may inject Git itself; production never falls back to ambient auth.
+  token?: string | null
+  git?: Git
 }
 
 // The branch a stand-down may touch, or why it may not. The directory alone proves nothing: a
@@ -2484,7 +2485,7 @@ export function pushableBranch(dir: string, number: number, git: Git): { branch:
   return { branch, refusal: null }
 }
 
-type Git = (args: string[]) => { status: number | null; out: string }
+type Git = (args: string[], options?: { env?: NodeJS.ProcessEnv }) => { status: number | null; out: string }
 
 // Giving an issue up: release the claim this run took, save and push its branch, say why on the
 // issue, and put the state label back. The claim is checked *first* — a worktree this machine no
@@ -2514,10 +2515,10 @@ export function standDownStrict(ctx: StandDownContext, reason: string): HandBack
   // the run we just started that left it there.
   const dir = whose === 'ours' || whose === 'free' ? workingDir(ctx.root, ctx.number) : null
   if (dir) {
-    const git: Git = (args) => {
-      const result = spawnSync('git', args, { cwd: dir, encoding: 'utf8', timeout: 60_000 })
+    const git: Git = ctx.git ?? ((args, options) => {
+      const result = spawnSync('git', args, { cwd: dir, encoding: 'utf8', timeout: 60_000, env: options?.env })
       return { status: result.status, out: (result.stdout ?? '').trim() }
-    }
+    })
     const { branch, refusal } = pushableBranch(dir, ctx.number, git)
     if (refusal) { ok = false; notes.push(refusal) }
     else {
@@ -2534,7 +2535,7 @@ export function standDownStrict(ctx: StandDownContext, reason: string): HandBack
       }
       if (!ok) notes.push(`the push of ${branch} was not attempted because the open work was not saved`)
       else {
-        const pushed = git(['push', '--quiet', '-u', 'origin', `HEAD:refs/heads/${branch}`]).status === 0
+        const pushed = git(['push', '--quiet', '-u', 'origin', `HEAD:refs/heads/${branch}`], { env: appGitEnvironment(process.env, ctx.token ?? null) }).status === 0
         if (!pushed) ok = false
         notes.push(pushed ? `pushed ${branch}` : `the push of ${branch} was rejected, so the commit stays local`)
       }
@@ -2672,6 +2673,7 @@ export interface CliDeps {
   fetch?: Fetch
   runStep?: RunStep
   git?: (clone: string) => GitRun
+  rosterGit?: (clone: string, env: NodeJS.ProcessEnv) => GitRun
   stop?: (pid: number, signal: NodeJS.Signals) => boolean
   start?: ProcessStart
   alive?: ProcessAlive
@@ -2730,12 +2732,50 @@ export async function runWorker(argv: string[], deps: CliDeps = {}): Promise<num
     if (rawJson) { emitBootstrapRefusal((error as Error).message); return 2 }
     throw error
   }
+  const keyPath = appKeyPath(env, home)
+  const runDocument = (notes: string[], boards: Array<{ repo: string; ok: boolean; reason?: string }> = [], runs: RunRecord[] = []) => ({ machine, runs, boards, notes })
+  const print = (value: unknown, text: string) => {
+    if (runJson) out(JSON.stringify(runDocument([text]), null, 2))
+    else out(args.json ? JSON.stringify(value, null, 2) : text)
+  }
+
+  // Refuse paid API credentials before even the control-room fetch. Acting and status verbs use
+  // the App as their sole GitHub identity; injected runners remain the explicit unit-test seam.
+  const STARTS_AGENTS = ['enable', 'run']
+  if (STARTS_AGENTS.includes(args.verb)) {
+    const billing = billingVariables(env)
+    if (billing.length) {
+      const [is, them] = billing.length === 1 ? ['is', 'it'] : ['are', 'them']
+      print({ ok: false, billing }, `refused: ${billing.join(', ')} ${is} set — VegaFactory runs Claude Code and Codex on their subscriptions only; unset ${them} and retry`)
+      return 2
+    }
+  }
+  let app = { appId: APP_ID, appActor: APP_ACTOR }
+  if (STARTS_AGENTS.includes(args.verb) || (args.verb === 'status' && !deps.runner)) {
+    try { app = appIdentityConfig(env) } catch (error) {
+      print({ ok: false, reason: (error as Error).message }, `refused: ${(error as Error).message}`)
+      return 2
+    }
+  }
+  let rosterIdentity: AppIdentity | null = null
+  const freshListing = async (): Promise<Listing> => {
+    if (deps.git) return verifiedListing(root, { repo, host, home, env, git: deps.git })
+    const room = controlRoomClone(root, homeOptions)
+    if (!room) return listedHere(root, { repo, host, home, env })
+    rosterIdentity ??= appIdentity({ repo: room.repo, keyPath, appId: app.appId, fetch: deps.fetch })
+    await rosterIdentity.freshen(deps.now?.())
+    const token = rosterIdentity.token()
+    return verifiedListing(root, {
+      repo, host, home, env,
+      git: clone => (deps.rosterGit ?? gitIn)(clone, appGitEnvironment(env, token)),
+    })
+  }
   // A verb that will act asks for a roster it has just proved; a read-only view shows what the
   // machine already has, so `status` still answers while the network is down.
   let listing: Listing
   try {
     listing = ['enable', 'run'].includes(args.verb)
-      ? verifiedListing(root, { repo, host, home, env, git: deps.git })
+      ? await freshListing()
       : listedHere(root, { repo, host, home, env })
   } catch (error) {
     if (rawJson) { emitBootstrapRefusal((error as Error).message); return 2 }
@@ -2751,31 +2791,6 @@ export async function runWorker(argv: string[], deps: CliDeps = {}): Promise<num
   // poll loop is ever reached. The record follows the clone here, once, so a run that stops for
   // billing or a missing key does not leave the profile unreadable behind it.
   if (listing.sha) await recordRoomSha(root, homeOptions, listing.sha)
-  const keyPath = appKeyPath(env, home)
-  const runDocument = (notes: string[], boards: Array<{ repo: string; ok: boolean; reason?: string }> = [], runs: RunRecord[] = []) => ({ machine, runs, boards, notes })
-  const print = (value: unknown, text: string) => {
-    if (runJson) out(JSON.stringify(runDocument([text]), null, 2))
-    else out(args.json ? JSON.stringify(value, null, 2) : text)
-  }
-
-  // The first gate, before the roster and before anything is spawned or minted: a verb that can
-  // start or probe an agent refuses outright while a variable that would bill it is set. The check
-  // costs nothing, and running it later would already have spent paid credit on the probes.
-  const STARTS_AGENTS = ['enable', 'run']
-  let app = { appId: APP_ID, appActor: APP_ACTOR }
-  if (STARTS_AGENTS.includes(args.verb)) {
-    const billing = billingVariables(env)
-    if (billing.length) {
-      const [is, them] = billing.length === 1 ? ['is', 'it'] : ['are', 'them']
-      print({ ok: false, billing }, `refused: ${billing.join(', ')} ${is} set — VegaFactory runs Claude Code and Codex on their subscriptions only; unset ${them} and retry`)
-      return 2
-    }
-    try { app = appIdentityConfig(env) } catch (error) {
-      print({ ok: false, reason: (error as Error).message }, `refused: ${(error as Error).message}`)
-      return 2
-    }
-  }
-
   // The second gate: an unlisted machine does nothing but say so. `disable` is the exception, so a
   // machine taken off the roster can still take its own unit down.
   if (!workerListing.ok && args.verb !== 'disable') {
@@ -2955,7 +2970,6 @@ export async function runWorker(argv: string[], deps: CliDeps = {}): Promise<num
       return problems.length ? 1 : 0
     }
     case 'status': {
-      const runner = deps.runner ?? defaultRunner
       const runs = readRuns(stateRoot)
       let persisted: WorkerState
       try { persisted = readWorkerState(homeOptions) }
@@ -2970,6 +2984,12 @@ export async function runWorker(argv: string[], deps: CliDeps = {}): Promise<num
       for (const boardRepo of repos) {
         const lifecycle = persisted.boards[boardRepo]?.state ?? (configured.repos.includes(boardRepo) ? 'configured' : 'persisted')
         try {
+          let runner = deps.runner
+          if (!runner) {
+            const identity = appIdentity({ repo: boardRepo, keyPath, appId: app.appId, fetch: deps.fetch })
+            await identity.freshen(deps.now?.())
+            runner = deps.runnerForBoard?.(boardRepo, identity) ?? identity.runner
+          }
           const issues = board(boardRepo, runner).map((issue) => ({
             number: issue.number, title: issue.title, url: issue.html_url,
             state: stateOf(issue.labels.map((label) => (typeof label === 'string' ? label : label.name))).state!,
@@ -3054,7 +3074,7 @@ export async function runWorker(argv: string[], deps: CliDeps = {}): Promise<num
           const key = canonicalRepository(boardRepo)
           const context = contexts.get(key) ?? recoveryContexts.get(key)
           if (!context) return `${reason} — ${boardRepo} is unavailable for hand-back`
-          return standDown({ root: context.root, repo: context.repo, number, runner: context.runner, machine, appActor: app.appActor, restoreTo }, reason)
+          return standDown({ root: context.root, repo: context.repo, number, runner: context.runner, machine, appActor: app.appActor, restoreTo, token: context.identity.token() }, reason)
         },
         onWaiting: () => { waiting += 1 },
         onUnreadable: (boardRepo, _issue, reason) => unreadableFailures.set(canonicalRepository(boardRepo), reason),
@@ -3111,7 +3131,7 @@ export async function runWorker(argv: string[], deps: CliDeps = {}): Promise<num
           // reading, because two would each fetch and merge, and a second answer nobody acts on is
           // a gate that has been asked and ignored — the caps come off this same reading, so a
           // control-room PR that changes one lands on the next poll rather than on a restart.
-          const still = verifiedListing(root, { repo, host, home, env, git: deps.git })
+          const still = await freshListing()
           // The clone moved whether or not the roster still lists this machine, and the record has
           // to follow it either way: a de-listed machine that later gets its row back would
           // otherwise find every profile read refused for a clone that is simply up to date.
@@ -3141,7 +3161,7 @@ export async function runWorker(argv: string[], deps: CliDeps = {}): Promise<num
             handBack: async (boardRepo, number, reason, restoreTo) => {
               const context = contexts.get(canonicalRepository(boardRepo)) ?? await provisionBoard(boardRepo)
               contexts.set(context.key, context)
-              return standDownStrict({ root: context.root, repo: context.repo, number, runner: context.runner, machine, appActor: app.appActor, restoreTo }, reason)
+              return standDownStrict({ root: context.root, repo: context.repo, number, runner: context.runner, machine, appActor: app.appActor, restoreTo, token: context.identity.token() }, reason)
             },
             out: note, stop: deps.stop, start: deps.start, alive: deps.alive,
           })

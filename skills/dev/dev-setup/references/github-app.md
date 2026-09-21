@@ -120,6 +120,9 @@ steps:
       owner: ${{ github.repository_owner }}
       repositories: ${{ github.event.repository.name }}
       permission-contents: read
+      permission-issues: read
+      permission-metadata: read
+      permission-organization-projects: write
   - run: gh issue edit "$NUMBER" --add-label queued
     env:
       GH_TOKEN: ${{ steps.app-token.outputs.token }}
@@ -131,7 +134,7 @@ steps:
 - The minted installation token **expires after one hour**, and the action revokes it in its post step unless `skip-token-revoke` is set.
 - `permission-<name>` inputs narrow a token further — never wider than the installation already grants.
 - `repositories:` narrows the token to the named repositories. With `owner:` alone the action mints for **every** repository the installation covers — on an org installed "all repositories, current and future", that is the whole org — so a job that touches one repository always names it; `owner:` stays, because it is what resolves the organization installation behind the Projects surface.
-- The job's own `permissions:` block stays `contents: read`, and `permission-contents: read` narrows this job's App token too. The installed App may write Contents for worker Git without giving an issue-only workflow a push credential.
+- The job's own `permissions:` block stays `contents: read`; the four explicit `permission-*` inputs keep the App token at Contents read, Issues read, Metadata read and organization Projects write. Naming the complete set matters: once any permission input is present, omitted installation permissions are not inherited. The installed App may write Contents for worker Git without giving this issue-only workflow a push credential.
 
 Rate limits are not a design constraint here. An installation token starts at 5,000 requests per hour, gains 50 per hour for each repository beyond 20 and 50 per hour for each user beyond 20, caps at 12,500, and gets 15,000 on a GitHub Enterprise Cloud organization. A workflow's built-in `GITHUB_TOKEN` gets 1,000 per hour per repository and cannot touch Projects at all, which is why the board mirror needs the App rather than the built-in token.
 

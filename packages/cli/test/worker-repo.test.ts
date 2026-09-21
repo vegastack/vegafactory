@@ -205,7 +205,13 @@ test('clone is accepted atomically without disclosing its token and hooks are me
   const trace = join(home, 'git-trace.log')
   const result = await ensureWorkerCheckout({
     repo: 'O/R', home, token: 'ghs_secret', run: cloningRunner(calls),
-    env: { ...process.env, GIT_TRACE: trace, GIT_TRACE2_EVENT: trace, GIT_CURL_VERBOSE: '1' },
+    env: {
+      ...process.env,
+      GIT_TRACE: trace, GIT_TRACE2_EVENT: trace, GIT_CURL_VERBOSE: '1',
+      GIT_CONFIG_PARAMETERS: "'credential.helper'='!human-helper'", GIT_ASKPASS: '/tmp/human-askpass',
+      SSH_AUTH_SOCK: '/tmp/human-agent', GIT_SSH_COMMAND: 'ssh -i /keys/human',
+      GH_CONFIG_DIR: '/home/human/.config/gh', GH_ENTERPRISE_TOKEN: 'human-enterprise',
+    },
   })
 
   expect(result).toEqual({
@@ -219,6 +225,9 @@ test('clone is accepted atomically without disclosing its token and hooks are me
   expect(calls.filter(call => call.env.GH_TOKEN === 'ghs_secret')).toHaveLength(1)
   expect(calls.filter(call => call.env.GITHUB_TOKEN === 'ghs_secret')).toHaveLength(1)
   expect(calls.some(call => call.env.GIT_TRACE || call.env.GIT_TRACE2_EVENT || call.env.GIT_CURL_VERBOSE)).toBe(false)
+  for (const name of ['GIT_CONFIG_PARAMETERS', 'GIT_ASKPASS', 'SSH_AUTH_SOCK', 'GIT_SSH_COMMAND', 'GH_CONFIG_DIR', 'GH_ENTERPRISE_TOKEN']) {
+    expect(calls.some(call => call.env[name]), name).toBe(false)
+  }
   expect(existsSync(trace)).toBe(false)
   expect(readFileSync(join(result.root, '.git/config'), 'utf8')).not.toContain('ghs_secret')
   expect(readFileSync(join(result.root, '.claude/settings.json'), 'utf8')).not.toContain('ghs_secret')
