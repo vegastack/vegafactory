@@ -71,6 +71,7 @@ A control room that does not exist yet, or whose local copy is missing or stale,
 
 | Need | Read |
 |---|---|
-| the file tree, precedence, the lock, the read path | [control-room](references/control-room.md) |
+| the file tree, precedence, the lock, the read | [control-room](references/control-room.md) |
+| systemd facts a worker rests on | [worker-host](references/worker-host.md) |
 | comment markers, operator identity, register line format, labels | dev-setup's `references/conventions.md`, installed beside this file |
 | the seed text of any control-room file | `assets/control-room/<file>.template` |

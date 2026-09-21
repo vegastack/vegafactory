@@ -1637,6 +1637,23 @@ describe('the command', () => {
     expect(result.text).toContain('worktrees: 2 could be reclaimed — run `vegafactory worktree prune --write`')
   })
 
+  // A notice about a checkout that cannot build is only useful to somebody who has not started
+  // building in it. Reported after `poll`, it landed a pass behind the agent it was meant for.
+  test('housekeeping is reported before any agent is started', async () => {
+    gh.addIssue({ number: 1, labels: ['queued', 'small'] })
+    const answer = JSON.stringify({ warns: ['1-thing: dependencies were reclaimed while it was idle'] })
+    const result = await run(['run', '--once'], {
+      worktreeScript: () => ({ status: 0, stdout: answer }),
+      runStep: (async () => ({ outcome: 'done' as const, note: '', ms: 1 })) as RunStep,
+    })
+    const lines = result.text.split('\n')
+    const said = lines.findIndex((line) => line.includes('dependencies were reclaimed'))
+    const started = lines.findIndex((line) => line.includes('#1 implement started'))
+    expect(said).toBeGreaterThanOrEqual(0)
+    expect(started).toBeGreaterThanOrEqual(0)
+    expect(said).toBeLessThan(started)
+  })
+
   // Everything under here is agent output and the token a run was given, inside the repository
   // where any local account can reach it. One helper, so no writer can be the one that forgets.
   test('the worker\'s records live in an owner-only directory, however it got there', () => {
@@ -1659,6 +1676,28 @@ describe('the command', () => {
     symlinkSync(elsewhere, workerDir(linked))
     expect(() => ownerOnlyWorkerDir(linked)).toThrow('symlink')
     expect(statSync(elsewhere).mode & 0o777).toBe(0o755)
+  })
+
+  // Securing the parent is not enough: an account that could write the directory before it was
+  // tightened leaves a link behind, and append, read and replaceFile all follow one.
+  test('a record that was replaced by a symlink is not written through', () => {
+    const elsewhere = join(mkdtempSync(join(tmpdir(), 'bait-')), 'stolen.log')
+    writeFileSync(elsewhere, 'untouched\n')
+    mkdirSync(workerDir(root), { recursive: true })
+    rmSync(join(workerDir(root), 'runs.jsonl'), { force: true })
+    symlinkSync(elsewhere, join(workerDir(root), 'runs.jsonl'))
+
+    recordRun(root, { at: 1, number: 7, action: 'implement', outcome: 'done', note: 'secret output', ms: 1 } as never)
+    // The agent's output went to the worker's own file, not through the link.
+    expect(readFileSync(elsewhere, 'utf8')).toBe('untouched\n')
+    expect(readRuns(root).length).toBe(1)
+    expect(statSync(join(workerDir(root), 'runs.jsonl')).mode & 0o777).toBe(0o600)
+
+    // And an ordinary record already there under a loose mode is tightened rather than left.
+    chmodSync(join(workerDir(root), 'runs.jsonl'), 0o644)
+    recordRun(root, { at: 2, number: 7, action: 'implement', outcome: 'done', note: 'more', ms: 1 } as never)
+    expect(statSync(join(workerDir(root), 'runs.jsonl')).mode & 0o777).toBe(0o600)
+    expect(readRuns(root).length).toBe(2)
   })
 
   // A plain `worker run` never passes through `enable`, and it writes the same records.

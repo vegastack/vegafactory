@@ -126,6 +126,7 @@
     "agents/openai.yaml",
     "references/conventions.md@dev-setup",
     "references/control-room.md",
+      "references/worker-host.md",
     "assets/control-room/org.md.template",
     "assets/control-room/group.md.template",
     "assets/control-room/repos.md.template",

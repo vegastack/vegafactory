@@ -636,16 +636,48 @@ describe('pruneWorktrees', () => {
     expect(warns.join('\n')).toContain('could not be read')
   })
 
+  // The unattended pass runs inside the worker's poll, and the only slow things in a prune are
+  // the network ones: a fetch against an unreachable remote, a credential helper waiting on a
+  // prompt nobody will answer. So it asks this disk and nothing else.
+  test('the unattended pass never goes to the network', () => {
+    const root = repoWithRemote()
+    createWorktree({ repoRoot: root, issue: 113, slug: 'quiet', type: 'feat', base: 'main', devMd, home: root, write: true })
+    // The remote is made unreachable. A pass that fetches would say so; one that does not is
+    // silent about it and still reports what it can see here.
+    git(root, 'remote', 'set-url', 'origin', '/does/not/exist/at/all.git')
+
+    const automatic = pruneWorktrees({
+      repoRoot: root, base: 'main', olderThan: '999d', devMd,
+      ledgerTimes: {}, now: FUTURE_NOW, automatic: true,
+    })
+    expect(automatic.actions.join('\n')).not.toContain('git fetch')
+    expect(automatic.warns.join('\n')).not.toContain('fetch')
+
+    // A person's prune still refreshes the base, because a stale one calls a merged branch
+    // unmerged — and it reports the failure rather than judging on stale refs in silence.
+    const attended = pruneWorktrees({
+      repoRoot: root, base: 'main', olderThan: '999d', devMd,
+      ledgerTimes: {}, now: FUTURE_NOW,
+    })
+    expect(attended.actions.join('\n')).toContain('git fetch')
+  })
+
   // Locked is one of the three refusals that is never lifted, and it has to cover the
-  // dependencies as well as the directory — a fixture with no `node_modules` stays green while
-  // the deps sweep regresses straight through it.
+  // dependencies as well as the directory. The fixture differs from a removable worktree by the
+  // lock and nothing else — clean and pushed — because a dirty or unpushed one is held by two
+  // other guards and would stay green with the lock check deleted.
   test('a locked worktree keeps its directory, its work and its dependencies', () => {
     const root = repoWithRemote()
     const wt = createWorktree({ repoRoot: root, issue: 108, slug: 'held', type: 'feat', base: 'main', devMd, home: root, write: true })
-    writeFileSync(join(wt.path, 'scratch.txt'), 'wip\n')
+    writeFileSync(join(wt.path, 'work.txt'), 'real work\n')
+    git(wt.path, 'add', '.')
+    git(wt.path, 'commit', '-m', 'work')
+    git(wt.path, 'push', '-u', 'origin', 'HEAD')
     mkdirSync(join(wt.path, 'node_modules', 'left'), { recursive: true })
     writeFileSync(join(wt.path, 'node_modules', 'left', 'index.js'), 'module.exports = 1\n')
     const head = git(wt.path, 'rev-parse', 'HEAD').trim()
+    // Nothing uncommitted and nothing unpushed: the lock is the only thing holding it.
+    expect(git(wt.path, 'status', '--porcelain').trim()).toBe('')
     spawnSync('git', ['worktree', 'lock', wt.path], { cwd: root })
     const r = pruneWorktrees({
       repoRoot: root, base: 'main', olderThan: '14d',
@@ -664,5 +696,13 @@ describe('pruneWorktrees', () => {
     // And the unattended pass says it was kept, rather than skipping it silently.
     expect(r.warns.join('\n')).toContain('108-held')
     expect(r.warns.join('\n')).toContain('locked')
+
+    // The proof that the lock is what did it: unlocked, the same worktree is reclaimed.
+    spawnSync('git', ['worktree', 'unlock', wt.path], { cwd: root })
+    const after = pruneWorktrees({
+      repoRoot: root, base: 'main', olderThan: '14d', devMd: `${devMd}\nworktree-deps-retention: 1d\n`,
+      ledgerTimes: { '108-held': OLD_LEDGER }, now: FUTURE_NOW, write: true, automatic: true,
+    })
+    expect(after.freed).toContain('108-held')
   })
 })

@@ -113,11 +113,10 @@ sudo -u vf-worker XDG_RUNTIME_DIR=/run/user/$(id -u vf-worker) \
   systemctl --user is-active vegafactory-worker.service
 ```
 
-The wait is read from the box rather than guessed. logind keeps a user's manager alive for
-`UserStopDelayUSec` after the last session ends — ten seconds by default, settable, and named in
-microseconds (`logind.conf(5)`, systemd 257,
-<https://www.freedesktop.org/software/systemd/man/latest/logind.conf.html>, checked 21-09-2026) —
-so a worker with no linger at all still answers `active` inside that window. The
+The wait is read from the box rather than guessed. logind keeps a user's manager alive for a
+grace period after the last session ends, so a worker with no linger at all still answers `active`
+inside that window — the mechanism, the default and where it is documented are in the
+vegafactory-setup skill's `references/worker-host.md`. The
 `busctl` line asks logind's own manager for the value and the `sleep` clears it with thirty seconds
 to spare. A value that cannot be read stops the drill rather than standing in for it: assuming the
 ten-second default on a box that had been given a longer one is how a worker with no linger passes

@@ -803,17 +803,34 @@ export function ownerOnlyWorkerDir(root: string): string {
   chmodSync(path, 0o700)
   return path
 }
-export const childrenPath = (root: string) => join(workerDir(root), 'children.json')
-const runsPath = (root: string) => join(workerDir(root), 'runs.jsonl')
-const actedPath = (root: string) => join(workerDir(root), 'acted.json')
+// One record under the worker's directory, with the same guarantee the directory has. Securing
+// the parent is not enough on its own: a local account that could write the directory before it
+// was tightened can leave a symlink named `runs.jsonl` or `children.json` behind, and `append`,
+// `read` and `replaceFile` all follow one. So the leaf is checked too, and an existing regular
+// file is set owner-only — these hold agent output and the PIDs `worker disable` signals.
+//
+// A symlink is removed rather than refused. Nothing here is a file a person put there on purpose;
+// the record is the worker's own note, and the next write recreates it.
+function record(root: string, name: string): string {
+  const path = join(ownerOnlyWorkerDir(root), name)
+  try {
+    const found = lstatSync(path)
+    if (found.isSymbolicLink() || !found.isFile()) rmSync(path, { recursive: true, force: true })
+    else chmodSync(path, 0o600)
+  } catch { /* not there yet, which is the ordinary case */ }
+  return path
+}
+
+export const childrenPath = (root: string) => record(root, 'children.json')
+const runsPath = (root: string) => record(root, 'runs.jsonl')
+const actedPath = (root: string) => record(root, 'acted.json')
 
 // The record is a working note on an always-on machine, so it is trimmed to the last RUNS_KEPT
 // rather than grown forever; the control room's statistics are where runs are kept for good.
 export const RUNS_KEPT = 500
 
-export function recordRun(root: string, record: RunRecord) {
-  ownerOnlyWorkerDir(root)
-  appendFileSync(runsPath(root), JSON.stringify(record) + '\n')
+export function recordRun(root: string, entry: RunRecord) {
+  appendFileSync(runsPath(root), JSON.stringify(entry) + '\n')
   try {
     const lines = readFileSync(runsPath(root), 'utf8').split('\n').filter(Boolean)
     if (lines.length > RUNS_KEPT * 2) replaceFile(runsPath(root), lines.slice(-RUNS_KEPT).join('\n') + '\n')
@@ -943,7 +960,7 @@ export function updateActed(root: string, change: (acted: Record<string, Acted>)
 // claim and split the run budget in ways neither can see. The lock records the process that holds
 // it the same way a child record does, so a crashed worker's lock is taken over rather than
 // blocking the box for ever.
-export const runLockPath = (root: string) => join(workerDir(root), 'run.lock')
+export const runLockPath = (root: string) => record(root, 'run.lock')
 
 export interface RunLock { pid: number; startedAt: string; runId: string; at: string }
 
@@ -2198,22 +2215,26 @@ export async function runWorker(argv: string[], deps: CliDeps = {}): Promise<num
           pollDeps.caps = still.entry.caps
           stepOutlivesToken(still.entry.caps)
           await identity?.freshen()
-          for (const candidate of await poll(pollDeps, inflight)) note(`#${candidate.number} ${candidate.action} started`)
-          // Housekeeping rides in the pass the worker already makes, so there is no second schedule
-          // to reason about — but it only ever *reports*. Reclaiming on its own would need this
+          // Housekeeping runs before anything is started, not after. It only ever *reports*, and the
+          // thing it most needs to report — a checkout whose dependencies were reclaimed while it
+          // was idle — is only useful to somebody who has not begun building in it yet. After
+          // `poll`, the notice landed in the log one pass behind the agent it was meant for.
+          //
+          // It rides in the pass the worker already makes, so there is no second schedule to reason
+          // about, and it asks this disk and nothing else. Reclaiming on its own would need the
           // pass to know which checkouts a person is sitting in, and nothing tells it: the run map
-          // below is blind to attended sessions, a file's mtime does not move for somebody reading
-          // and building, and git's worktree lock is not reference-counted, so two sessions in one
+          // is blind to attended sessions, a file's mtime does not move for somebody reading and
+          // building, and git's worktree lock is not reference-counted, so two sessions in one
           // checkout have the first to end release the other's hold. Naming what could go costs
           // nothing and is wrong about nothing; `vegafactory worktree prune --write` is how a
           // person reclaims it, and that call knows who asked.
           const busy = [...inflight.values()].filter((run) => !run.settled).map((run) => `${run.candidate.number}`)
           const tidied = tidyWorktrees(root, { inUse: busy, spawn: deps.worktreeScript })
           for (const line of [...tidied.actions, ...tidied.warns, ...tidied.blocks]) note(`worktrees: ${line}`)
-          // `prune` acts by default and `--dry-run` is what holds it back, so the command to
-          // give is the bare one. And only when there is something: a remote-backed pass always
-          // reports its own fetch, so counting actions would recommend pruning every poll.
+          // `prune` acts by default and `--dry-run` is what holds it back, so the command to give
+          // is the bare one. And only when there is something to act on.
           if (tidied.reclaimable) note(`worktrees: ${tidied.reclaimable} could be reclaimed — run \`vegafactory worktree prune --write\``)
+          for (const candidate of await poll(pollDeps, inflight)) note(`#${candidate.number} ${candidate.action} started`)
         } catch (error) {
           note(`poll failed: ${(error as Error).message}`)
         }

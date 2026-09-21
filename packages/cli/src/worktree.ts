@@ -126,20 +126,26 @@ export function defaultRegistryPath(options: HomeOptions = {}): string {
   return worktreesPath(options)
 }
 
-// The script talks to git and to GitHub, both of which can stall — a fetch against an unreachable
-// remote, a credential helper waiting on a prompt that nobody will answer. This call is
-// synchronous and the worker makes it inside its own poll, so an unbounded one would hold the
-// loop, the step timers and a graceful shutdown for as long as the stall lasted. Long enough for
-// a real fetch on a slow link; short enough that a hung one is not for ever.
-export const WORKTREE_SCRIPT_TIMEOUT_MS = 2 * 60_000
+// A backstop on the worker's housekeeping call, and on nothing else.
+//
+// That pass asks this disk and nothing else — `--automatic` makes no fetch and no board read, for
+// exactly this reason — so it is local git commands on a few directories and there is nothing in
+// it that legitimately takes minutes. It is also read-only: `--write` is never passed, so a pass
+// cut short here has changed nothing and the next one simply asks again.
+//
+// It deliberately does *not* apply to the commands a person runs. `prune --write` on a large
+// checkout can honestly take longer than this, and it removes directories as it goes — killing
+// that halfway is worse than waiting for it.
+export const WORKTREE_SCRIPT_TIMEOUT_MS = 60_000
 
 // The bound is a parameter so a test can prove this exact code against a child that hangs,
-// rather than waiting out the real one or writing its own copy of the call.
+// rather than waiting out the real one or writing its own copy of the call. `0` means no bound,
+// which is what an attended command gets.
 export function worktreeScriptSpawn(timeoutMs: number) {
   return (args: string[], cwd?: string): SpawnResult => {
     const packageRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..')
     const script = process.env.VSK_WORKTREE_SCRIPT || join(packageRoot, 'skill', 'dev-implement', 'scripts', 'worktree.mjs')
-    const run = spawnSync(process.execPath, [script, ...args], { cwd, encoding: 'utf8', timeout: timeoutMs, killSignal: 'SIGKILL' })
+    const run = spawnSync(process.execPath, [script, ...args], { cwd, encoding: 'utf8', ...(timeoutMs > 0 ? { timeout: timeoutMs, killSignal: 'SIGKILL' as const } : {}) })
     // A killed run has no usable output, and its partial stdout would parse as "nothing to
     // report" — which is the one answer a stalled housekeeping pass must not give.
     if (run.error || run.signal) {
@@ -149,7 +155,9 @@ export function worktreeScriptSpawn(timeoutMs: number) {
   }
 }
 
-const defaultSpawn = worktreeScriptSpawn(WORKTREE_SCRIPT_TIMEOUT_MS)
+// Attended commands are unbounded; only the worker's own pass carries the backstop.
+const defaultSpawn = worktreeScriptSpawn(0)
+const housekeepingSpawn = worktreeScriptSpawn(WORKTREE_SCRIPT_TIMEOUT_MS)
 
 interface ScriptResult {
   ok?: boolean
@@ -201,7 +209,7 @@ export function tidyWorktrees(
   repoRoot: string,
   options: { write?: boolean; inUse?: string[]; spawn?: (args: string[], cwd?: string) => SpawnResult } = {},
 ): { actions: string[]; warns: string[]; blocks: string[]; freed: string[]; reclaimable: number } {
-  const spawn = options.spawn ?? defaultSpawn
+  const spawn = options.spawn ?? housekeepingSpawn
   // `--automatic` is the narrower pass: it never pushes and never commits anything as `wip`, and
   // it reports whatever it will not touch. The worker calls it without `--write`, so it removes
   // nothing at all — see the note at its call site. `--in-use` names the *issues* a run is holding

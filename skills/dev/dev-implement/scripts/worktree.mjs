@@ -304,9 +304,16 @@ export function readDroppedDeps(repoRoot) {
     return { '*': 'the record of dropped dependencies could not be read: ' + (error?.message ?? 'failed') };
   }
   for (const entry of names) {
-    const name = decodeURIComponent(entry);
-    try { found[name] = readFileSync(join(droppedDir(repoRoot), entry), 'utf8').trim(); }
-    catch (error) { found[name] = error?.code === 'ENOENT' ? null : 'unreadable'; }
+    // The name is decoded inside the guard too: these files sit in a directory any local process
+    // can write, and `decodeURIComponent` throws on a malformed escape — which would take `list`,
+    // `status` and every prune down with it rather than reporting one unreadable record.
+    try {
+      const name = decodeURIComponent(entry);
+      found[name] = readFileSync(join(droppedDir(repoRoot), entry), 'utf8').trim();
+    } catch (error) {
+      if (error?.code === 'ENOENT') continue;
+      found['*'] = 'a record of dropped dependencies could not be read: ' + (error?.message ?? 'failed');
+    }
   }
   return found;
 }
@@ -713,8 +720,10 @@ export function removeWorktree({ repoRoot, name, base, force = false, push = fal
     if (!removed.ok) blocks.push(at(path, 'git worktree remove failed: ' + removed.out));
     // The record outlives the checkout it describes, and the name comes back: the same issue
     // re-cut later would be told its dependencies were reclaimed when nothing was ever taken
-    // from it.
-    else clearDroppedDeps(repoRoot, name);
+    // from it. A clear that failed leaves exactly that, so it is said rather than assumed.
+    else if (!clearDroppedDeps(repoRoot, name)) {
+      warns.push(at(name, 'the record of its dropped dependencies could not be removed — a worktree of this name cut later will be told to reinstall them'));
+    }
   }
   return { blocks, warns, actions, path, branch, state };
 }
@@ -804,7 +813,13 @@ export function pruneWorktrees({ repoRoot, base, olderThan, devMd, ledgerTimes =
   const candidates = [];
   const freed = [];
   const droppable = [];
-  refreshBase({ repoRoot, base, remote, actions, warns });
+// The unattended pass never goes to the network. A fetch and the board reads are the only slow
+  // things here, and they are what a stall would be: an unreachable remote, a credential helper
+  // waiting on a prompt nobody will answer. This pass runs inside the worker's poll, so a stall
+  // holds the loop — and it only ever *reports*, so stale refs cost it nothing but candidates it
+  // declines to name. That is the direction this already fails in: a stale base calls a merged
+  // branch unmerged, which keeps a worktree rather than removing one.
+  if (!automatic) refreshBase({ repoRoot, base, remote, actions, warns });
   for (const entry of inventory(repoRoot)) {
     const branch = entry.branch;
     const lastCommitAt = branch ? (git(repoRoot, ['log', '-1', '--format=%cI', branch]).out || null) : null;
@@ -1178,13 +1193,18 @@ function runVerb(verb, flags) {
     const warns = [];
     const repo = flags.repo || knobLine(devMd, 'repo')?.split('·')[0].trim() || null;
     const names = inventory(repoRoot).map((entry) => entry.name);
-    const ledgerTimes = repo ? gatherLedgerTimes({ repo, names, warns }) : {};
+    // Same reason as the fetch: the unattended pass asks this disk and nothing else, because it
+    // runs inside the worker's poll and only ever reports. Without the ledger every worktree is
+    // aged by its last commit alone, and without the board a closed issue waits out the ordinary
+    // window — both of which name fewer candidates, never more.
+    const local = flags.automatic === true;
+    const ledgerTimes = repo && !local ? gatherLedgerTimes({ repo, names, warns }) : {};
     // The board already knows which issues are closed, and `list` reads it for these same names.
     // A worktree whose issue is closed is finished, whatever its dates say.
-    const issueStates = repo ? gatherGithubFacts({ repo, names, warns }).issueStates : {};
+    const issueStates = repo && !local ? gatherGithubFacts({ repo, names, warns }).issueStates : {};
     const pruned = pruneWorktrees({
       repoRoot, base, olderThan: flags['older-than'], devMd, ledgerTimes, issueStates, now: Date.now(), write: shared.write,
-      automatic: flags.automatic === true,
+      automatic: local,
       inUse: String(flags['in-use'] ?? '').split(',').map((name) => name.trim()).filter(Boolean),
     });
     return { ...pruned, warns: [...warns, ...pruned.warns] };
