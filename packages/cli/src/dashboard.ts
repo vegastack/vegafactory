@@ -12,6 +12,29 @@ import { makeFactoryHome, statsHtmlPath } from './home.ts'
 
 const escape = (text: string) => text.replace(/[&<>"']/g, (char) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[char]!))
 
+export type DashboardEvent = Pick<StatsEvent, 'id' | 'at' | 'owner' | 'node' | 'repo' | 'issue' | 'state' | 'harness' | 'model' | 'skill' | 'tokens' | 'durationMs'>
+export interface DashboardFilters { repo: string; owner: string; node: string; from: string; to: string }
+
+const dashboardEvents = (events: StatsEvent[]): DashboardEvent[] => events.map((event) => ({
+  id: event.id, at: event.at, owner: event.owner, node: event.node, repo: event.repo,
+  issue: event.issue, state: event.state, harness: event.harness, model: event.model,
+  skill: event.skill, tokens: event.tokens, durationMs: event.durationMs,
+}))
+
+export function filterDashboardEvents(events: DashboardEvent[], filters: DashboardFilters): DashboardEvent[] {
+  return events.filter((event) => {
+    const day = event.at.slice(0, 10)
+    return (!filters.repo || event.repo === filters.repo)
+      && (!filters.owner || event.owner === filters.owner)
+      && (!filters.node || event.node === filters.node)
+      && (!filters.from || day >= filters.from)
+      && (!filters.to || day <= filters.to)
+  })
+}
+
+export const dashboardData = (events: StatsEvent[]): string => JSON.stringify(dashboardEvents(events)).replace(/[<>&\u2028\u2029]/g, (character) =>
+  `\\u${character.charCodeAt(0).toString(16).padStart(4, '0')}`)
+
 export function expandHome(path: string, home = homedir()): string {
   if (path === '~') return home
   if (path.startsWith('~/')) return join(home, path.slice(2))
@@ -74,20 +97,26 @@ thead th{background:var(--head);color:var(--muted);font-weight:600;font-size:13p
 td.bar{width:40%}
 td.bar span{display:block;height:10px;background:var(--bar);border-radius:2px}
 a{color:inherit}
+.filters{display:grid;grid-template-columns:repeat(5,minmax(120px,1fr));gap:10px;margin:18px 0 8px}
+.filters label{color:var(--muted);font-size:13px}.filters select,.filters input{display:block;width:100%;margin-top:3px;padding:6px;border:1px solid var(--line);border-radius:4px;background:Canvas;color:CanvasText}
+@media (max-width:760px){.filters{grid-template-columns:repeat(2,minmax(120px,1fr))}}
 footer{margin-top:40px;color:var(--muted);font-size:13px}`
 
-export function renderDashboard(events: StatsEvent[], { generatedAt = new Date().toISOString() } = {}): string {
-  const summary: Summary = summarize(events)
-  const head = summary.turns
-    ? `${summary.turns} turns · ${compact(totalTokens(summary.tokens))} tokens · ${duration(summary.durationMs)} · ${summary.from?.slice(0, 10)} to ${summary.to?.slice(0, 10)} · ${summary.owners.length} owners · ${summary.nodes.length} nodes · ${summary.projects.length} projects`
-    : 'no turns collected yet'
-  return `<!doctype html>
-<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>VegaFactory stats</title><style>${STYLE}</style></head>
-<body>
-<h1>VegaFactory stats</h1>
-<p class="sub">${escape(head)}</p>
-${usageTable('Owners', 'owner', summary.owners, { header: 'projects', of: (bucket) => bucket.repos.join(', ') })}
+const select = (id: string, label: string, values: string[]) => `<label>${escape(label)}<select id="${id}"><option value="">all</option>${values.map((value) => `<option value="${escape(value)}">${escape(value)}</option>`).join('')}</select></label>`
+
+function controls(events: DashboardEvent[]): string {
+  const values = (of: (event: DashboardEvent) => string | null) => [...new Set(events.map(of).filter((value): value is string => !!value))].sort()
+  return `<div class="filters" aria-label="Dashboard filters">
+${select('filter-repo', 'repository', values((event) => event.repo))}
+${select('filter-owner', 'owner', values((event) => event.owner))}
+${select('filter-node', 'node', values((event) => event.node))}
+<label>from<input id="filter-from" type="date"></label>
+<label>to<input id="filter-to" type="date"></label>
+</div>`
+}
+
+function sections(summary: Summary): string {
+  return `${usageTable('Owners', 'owner', summary.owners, { header: 'projects', of: (bucket) => bucket.repos.join(', ') })}
 ${usageTable('Nodes', 'node', summary.nodes, { header: 'projects', of: (bucket) => bucket.repos.join(', ') })}
 ${usageTable('Projects', 'project', summary.projects, { header: 'owners', of: (bucket) => bucket.owners.join(', ') })}
 ${issuesTable(summary.issues)}
@@ -96,7 +125,24 @@ ${usageTable('Model use per owner', 'owner · model', summary.ownerModels)}
 ${usageTable('Model use per project', 'project · model', summary.projectModels)}
 ${bars('By day', summary.days)}
 ${usageTable('Time per stage', 'stage', summary.stages)}
-${usageTable('Skills', 'skill', summary.skills)}
+${usageTable('Skills', 'skill', summary.skills)}`
+}
+
+export function renderDashboard(events: StatsEvent[], { generatedAt = new Date().toISOString() } = {}): string {
+  const summary: Summary = summarize(events)
+  const embedded = dashboardEvents(events)
+  const head = summary.turns
+    ? `${summary.turns} turns · ${compact(totalTokens(summary.tokens))} tokens · ${duration(summary.durationMs)} · ${summary.from?.slice(0, 10)} to ${summary.to?.slice(0, 10)} · ${summary.owners.length} owners · ${summary.nodes.length} nodes · ${summary.projects.length} projects`
+    : 'no turns collected yet'
+  return `<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>VegaFactory stats</title><style>${STYLE}</style></head>
+<body>
+<h1>VegaFactory stats</h1>
+<p class="sub" id="dashboard-summary">${escape(head)}</p>
+${controls(embedded)}
+<div id="dashboard-sections">${sections(summary)}</div>
+<script>const dashboardEvents=${dashboardData(events)};</script>
 <footer>Generated ${escape(generatedAt)} by vegafactory dashboard — counts only, no prompts or code.</footer>
 </body></html>
 `

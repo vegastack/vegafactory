@@ -2,7 +2,7 @@ import { beforeEach, expect, test } from 'bun:test'
 import { mkdirSync, mkdtempSync, readFileSync, realpathSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { expandHome, renderDashboard, runDashboard } from '../src/dashboard.ts'
+import { expandHome, filterDashboardEvents, renderDashboard, runDashboard } from '../src/dashboard.ts'
 import { statsDir, type StatsEvent } from '../src/stats.ts'
 import { refuseAmbientHome } from './no-ambient-home.ts'
 
@@ -43,11 +43,15 @@ test('the page carries every section, links its issues and works offline', () =>
   expect(html).toContain('2026-09-17')
   expect(html).toContain('class="bar"')
   expect(html).toContain('planning')
-  // Nothing is fetched: no script, no stylesheet, no remote asset.
-  expect(html).not.toContain('<script')
+  // One inline script powers local filtering; nothing is fetched and no external asset exists.
+  expect((html.match(/<script\b/g) ?? [])).toHaveLength(1)
   expect(html).not.toContain('src="http')
   expect(html).not.toContain('cdn')
+  expect(html).not.toContain('fetch(')
+  expect(html).not.toContain('XMLHttpRequest')
+  expect(html).not.toContain('import(')
   expect(html.match(/https?:\/\/(?!github\.com\/)/g)).toBeNull()
+  for (const id of ['filter-repo', 'filter-owner', 'filter-node', 'filter-from', 'filter-to']) expect(html).toContain(`id="${id}"`)
 })
 
 test('an empty dataset still renders', () => {
@@ -60,6 +64,19 @@ test('a repository name can never inject markup', () => {
   const html = renderDashboard([event({ id: '1', repo: '<img src=x onerror=alert(1)>' })])
   expect(html).not.toContain('<img')
   expect(html).toContain('&lt;img')
+})
+
+test('embedded dashboard data cannot close its one script tag', () => {
+  const html = renderDashboard([event({ id: 'x', owner: '</script><script>alert(1)</script>', repo: 'x/y' })])
+  expect((html.match(/<script\b/g) ?? [])).toHaveLength(1)
+  expect(html).not.toContain('</script><script>alert(1)</script>')
+  expect(html).toContain('\\u003c/script\\u003e')
+})
+
+test('dashboard filters match repo, owner, node and inclusive days', () => {
+  expect(filterDashboardEvents(DATA, { repo: 'acme/app', owner: 'sam', node: '', from: '2026-09-18', to: '2026-09-18' }).map((row) => row.id)).toEqual(['2'])
+  expect(filterDashboardEvents(DATA, { repo: '', owner: '', node: '', from: '2026-09-18', to: '' })).toHaveLength(2)
+  expect(filterDashboardEvents([], { repo: '', owner: '', node: '', from: '', to: '' })).toEqual([])
 })
 
 test('dashboard writes one file, expands ~ and reports the turns', () => {
