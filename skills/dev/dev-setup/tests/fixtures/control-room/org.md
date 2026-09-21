@@ -31,7 +31,7 @@ app: VegaFactory   # the public GitHub App every automated write uses; humans st
 app-slug: vegafactory   # GitHub's slug for the App name — a bot edit shows the actor vegafactory[bot]
 app-install: 158664419   # the installation id, on all repositories, current and future
 app-secrets: variable VEGAFACTORY_APP_ID · secret VEGAFACTORY_APP_PRIVATE_KEY   # names only
-app-permissions: Issues read/write · Projects (organization) read/write · Metadata read · Pull requests read/write · Contents read   # widening any of these is a register line
+app-permissions: Issues read/write · Projects (organization) read/write · Metadata read · Pull requests read/write · Contents read/write · Workflows none   # widening any of these is a register line
 
 ## Unconfirmed
 

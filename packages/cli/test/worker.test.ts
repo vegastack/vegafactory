@@ -9,7 +9,7 @@ import {
   alreadyLingering, unwritableForUnit,
   SERVICE_NAME,
   APP_ID, DEFAULT_CAPS, MAX_FAILURES, MAX_RUNS, MAX_TIMER_MS, POLL_MS, RETRY_MS, STEP_TIMEOUT_MS, TOKEN_MARGIN_MS, parseCaps, rosterName, sayDuration, agentArgs, appIdentity, appJwt, appKeyPath, assertKeyFile, board, decide, defaultRunStep, workerDir,
-  acknowledgedPlan, canonicalPath, childRunEnvironment, confirmShip, disjointSiblings, pushableBranch, shipWord,
+  acknowledgedPlan, canonicalPath, childRunEnvironment, confirmShip, disjointSiblings, pushableBranch, pushPath, shipWord,
   drain, filesFromParent, harnessAnswers, hitLimit, hooksWired, listedHere, mintToken, overlaps, parseWorkerArgs,
   parseNodes, poll, readActed, readRuns, readiness, recordRun, resetAt, runKey, RUNS_KEPT, runWorker, schedule, serviceCommands, stagePolicy,
   standDown, standDownStrict, stepPrompt, tail, unitPath, unitText, unsafeForParallel,
@@ -1802,31 +1802,35 @@ describe('readiness and the service', () => {
   })
 
   test('an API key in the environment fails the readiness check', () => {
-    const checks = readiness({ root, listing: listedHere(root, { repo: 'o/r', host: HOST, home }), run: answers, keyOk: true, keyDetail: 'minted', env: { ANTHROPIC_API_KEY: 'sk-ant-x' } })
+    const checks = readiness({ root, listing: listedHere(root, { repo: 'o/r', host: HOST, home }), run: answers, token: 'ghs_board', keyOk: true, keyDetail: 'minted', env: { ANTHROPIC_API_KEY: 'sk-ant-x' } })
     expect(checks.find((check) => check.name === 'billing')).toMatchObject({ ok: false, detail: expect.stringContaining('ANTHROPIC_API_KEY') })
   })
 
-  test('a run must be able to push: SSH always, HTTPS only with a login of the machine\'s own', () => {
-    const answer = (url: string, loggedIn: boolean): Probe => (command, args) => {
-      if (command === 'git') return { code: 0, stdout: `${url}\n`, stderr: '' }
-      // Asked with the App's token scrubbed, which is how a run's Git asks.
-      if (command === 'env') {
-        expect(args.slice(0, 4)).toEqual(['-u', 'GH_TOKEN', '-u', 'GITHUB_TOKEN'])
-        return loggedIn
-          ? { code: 0, stdout: 'github.com\n  \u2713 Logged in to github.com account kmanojkumar (keyring)', stderr: '' }
-          : { code: 1, stdout: '', stderr: 'You are not logged into any GitHub hosts' }
-      }
-      return answers(command, args)
+  test('a run pushes only over HTTPS with its selected App token', () => {
+    const calls: Array<{ command: string; args: string[]; env?: NodeJS.ProcessEnv }> = []
+    const answer = (url: string, writable: boolean): Probe => (command, args, options) => {
+      calls.push({ command, args, env: options?.env })
+      if (command === 'git' && args.includes('get-url')) return { code: 0, stdout: `${url}\n`, stderr: '' }
+      if (command === 'git' && args.includes('push')) return writable
+        ? { code: 0, stdout: '', stderr: '' }
+        : { code: 1, stdout: '', stderr: 'remote: Write access to repository not granted.' }
+      return { code: 1, stdout: '', stderr: 'unexpected probe' }
     }
-    const check = (run: Probe) => readiness({ root, listing: listedHere(root, { repo: 'o/r', host: HOST, home }), run, keyOk: true, keyDetail: 'minted', env: {} }).find((one) => one.name === 'push')!
+    const check = (run: Probe, token: string | null = 'ghs_board') => pushPath(root, run, token)
 
-    // SSH answers no credential helper, so the App's token cannot reach it either way.
-    expect(check(answer('git@github.com:o/r.git', false))).toMatchObject({ ok: true })
-    expect(check(answer('ssh://git@github.com/o/r.git', false))).toMatchObject({ ok: true })
-    // HTTPS is fine when the machine has its own login — that is what a run's Git will get.
-    expect(check(answer('https://github.com/o/r.git', true))).toMatchObject({ ok: true, detail: expect.stringContaining('kmanojkumar') })
-    // HTTPS with only the App to go on would finish the work and fail at the push.
-    expect(check(answer('https://github.com/o/r.git', false))).toMatchObject({ ok: false, detail: expect.stringContaining('gh auth login') })
+    expect(check(answer('git@github.com:o/r.git', true))).toMatchObject({ ok: false, detail: expect.stringContaining('HTTPS') })
+    expect(check(answer('ssh://git@github.com/o/r.git', true))).toMatchObject({ ok: false, detail: expect.stringContaining('HTTPS') })
+    expect(check(answer('https://git.example.com/o/r.git', true))).toMatchObject({ ok: false, detail: expect.stringContaining('git.example.com') })
+    expect(check(answer('https://github.com/o/r.git', true))).toMatchObject({ ok: true, detail: expect.stringContaining('VegaFactory App') })
+    const push = calls.find(call => call.command === 'git' && call.args.includes('push'))!
+    expect(push.env?.GH_TOKEN).toBe('ghs_board')
+    expect(push.env?.GITHUB_TOKEN).toBe('ghs_board')
+    expect(push.args).toContain('--dry-run')
+    expect(push.args.join(' ')).toContain('refs/heads/vegafactory-readiness-')
+    expect(push.args.join(' ')).not.toContain('ghs_board')
+    expect(calls.some(call => call.command === 'env' || call.args.includes('auth'))).toBe(false)
+    expect(check(answer('https://github.com/o/r.git', false))).toMatchObject({ ok: false, detail: expect.stringContaining('Write access') })
+    expect(check(answer('https://github.com/o/r.git', true), null)).toMatchObject({ ok: false, detail: expect.stringContaining('installation token') })
 
     const broken: Probe = (command, args) => (command === 'git' ? { code: 128, stdout: '', stderr: 'No such remote' } : answers(command, args))
     expect(check(broken)).toMatchObject({ ok: false, detail: expect.stringContaining('No such remote') })
@@ -2004,7 +2008,7 @@ describe('the step a run makes', () => {
       given = options.env
       return { code: 0, stdout: 'done', stderr: '', timedOut: false }
     }
-    const env = { PATH: '/usr/bin', VEGAFACTORY_APP_PRIVATE_KEY_FILE: '/keys/app.pem', VEGAFACTORY_APP_ID: '12345', VEGAFACTORY_APP_ACTOR: 'acmefactory[bot]', HOME: '/home/x' }
+    const env = { PATH: '/usr/bin', VEGAFACTORY_APP_PRIVATE_KEY_FILE: '/keys/app.pem', VEGAFACTORY_APP_ID: '12345', VEGAFACTORY_APP_ACTOR: 'acmefactory[bot]', HOME: '/home/x', GH_TOKEN: 'human', SSH_AUTH_SOCK: '/tmp/human-agent', GIT_CONFIG_GLOBAL: '/home/human/.gitconfig', GIT_SSH_COMMAND: 'ssh -i /keys/human' }
     await defaultRunStep(env, { exec })({ action: 'implement', number: 7, repo: 'o/r', split: false, by: null }, { root, devMd: '', token: 'ghs_from_the_app' })
     // Its writes are the App's, so nothing it posts can pass as a person's word.
     expect(given.GH_TOKEN).toBe('ghs_from_the_app')
@@ -2014,19 +2018,24 @@ describe('the step a run makes', () => {
     expect(given.VEGAFACTORY_APP_ID).toBe('12345')
     expect(given.VEGAFACTORY_APP_ACTOR).toBe('acmefactory[bot]')
     expect(given.PATH).toBe('/usr/bin')
-    // The token is for the API. Git is given a helper that scrubs it first, so it never pushes
-    // with a token whose Contents permission is read-only — it gets the machine's own login back
-    // instead, and an https remote works exactly as it does for the person at the keyboard.
+    // The dedicated worker account has no human Git identity. API and HTTPS Git both use this
+    // board's App token; inherited helpers and SSH agents cannot become an alternate principal.
     expect(given.GIT_CONFIG_COUNT).toBe('2')
-    expect(given.GIT_CONFIG_KEY_0).toBe('credential.https://github.com.helper')
+    expect(given.GIT_CONFIG_KEY_0).toBe('credential.helper')
     expect(given.GIT_CONFIG_VALUE_0).toBe('')
     expect(given.GIT_CONFIG_KEY_1).toBe('credential.https://github.com.helper')
-    expect(given.GIT_CONFIG_VALUE_1).toBe('!env -u GH_TOKEN -u GITHUB_TOKEN gh auth git-credential')
+    expect(given.GIT_CONFIG_VALUE_1).toBe('!gh auth git-credential')
+    expect(given.SSH_AUTH_SOCK).toBeUndefined()
+    expect(given.GIT_SSH_COMMAND).toBeUndefined()
+    expect(given.GIT_CONFIG_NOSYSTEM).toBe('1')
+    expect(given.GIT_CONFIG_GLOBAL).toBe('/dev/null')
+    expect(given.GIT_CONFIG_SYSTEM).toBe('/dev/null')
     // With no token minted yet the child simply gets none; it never gets the key instead.
     expect(childRunEnvironment(env, null).GH_TOKEN).toBeUndefined()
     expect(childRunEnvironment(env, null).VEGAFACTORY_APP_PRIVATE_KEY_FILE).toBeUndefined()
+    expect(childRunEnvironment(env, null).GIT_CONFIG_COUNT).toBe('1')
     // A GIT_CONFIG_* pair already in the environment cannot survive to outrank that reset.
-    const smuggled = childRunEnvironment({ ...env, GIT_CONFIG_COUNT: '1', GIT_CONFIG_KEY_0: 'credential.helper', GIT_CONFIG_VALUE_0: '!gh auth git-credential' }, 'ghs_x')
+    const smuggled = childRunEnvironment({ ...env, GIT_CONFIG_COUNT: '1', GIT_CONFIG_KEY_0: 'credential.helper', GIT_CONFIG_VALUE_0: '!human-helper' }, 'ghs_x')
     expect(smuggled.GIT_CONFIG_VALUE_0).toBe('')
     expect(smuggled.GIT_CONFIG_COUNT).toBe('2')
   })
@@ -2285,6 +2294,12 @@ describe('legacy worker state migration', () => {
 })
 
 describe('the command', () => {
+  const healthyAppGit = (command: string, args: string[]) => command !== 'git' ? null
+    : args.includes('get-url')
+      ? { code: 0, stdout: 'https://github.com/o/r.git', stderr: '' }
+      : args.includes('push')
+        ? { code: 0, stdout: '', stderr: '' }
+        : { code: 1, stdout: '', stderr: 'unexpected git probe' }
   const run = (argv: string[], over = {}) => {
     const lines: string[] = []
     return runWorker(argv, { cwd: root, home, host: HOST, env: {}, out: (text) => lines.push(text), runner: gh.runner, now: () => gh.clock, git: anyGit, ...over })
@@ -2504,9 +2519,7 @@ describe('the command', () => {
     mkdirSync(join(checkout, '.vegastack'), { recursive: true })
     writeFileSync(join(checkout, '.vegastack/dev.md'), 'repo: o/good\n')
     const fetch: Fetch = async (url) => ({ ok: true, status: 200, json: async () => url.endsWith('/installation') ? { id: url.includes('/good/') ? 1 : 2 } : { token: 'token', expires_at: '2099-01-01T00:00:00Z' } })
-    const probe: Probe = (command) => command === 'git'
-      ? { code: 0, stdout: 'git@github.com:o/good.git', stderr: '' }
-      : { code: 0, stdout: 'ok', stderr: '' }
+    const probe: Probe = (command, args) => healthyAppGit(command, args) ?? { code: 0, stdout: 'ok', stderr: '' }
     const result = await run(['enable'], {
       platform: 'linux', env: { VEGAFACTORY_APP_PRIVATE_KEY_FILE: key }, fetch, run: probe, runner: undefined,
       ensureCheckout: async ({ repo }: { repo: string }) => repo === 'o/good'
@@ -2561,7 +2574,8 @@ describe('the command', () => {
     writeFileSync(key, privateKey, { mode: 0o600 })
     chmodSync(key, 0o600)
     const probe: Probe = (command, args) => {
-      if (command === 'git') return { code: 0, stdout: 'git@github.com:o/r.git', stderr: '' }
+      const git = healthyAppGit(command, args)
+      if (git) return git
       if (command === 'claude' || command === 'codex') return { code: 0, stdout: 'ok', stderr: '' }
       return { code: 0, stdout: '', stderr: '' }
     }
@@ -2604,8 +2618,9 @@ describe('the command', () => {
     const twoLines = join(root, 'two\nlines.pem')
     writeFileSync(twoLines, privateKey, { mode: 0o600 })
     chmodSync(twoLines, 0o600)
-    const probe: Probe = (command) => {
-      if (command === 'git') return { code: 0, stdout: 'git@github.com:o/r.git', stderr: '' }
+    const probe: Probe = (command, args) => {
+      const git = healthyAppGit(command, args)
+      if (git) return git
       if (command === 'claude' || command === 'codex') return { code: 0, stdout: 'ok', stderr: '' }
       return { code: 0, stdout: '', stderr: '' }
     }
@@ -2641,7 +2656,8 @@ describe('the command', () => {
     })
     const ran: string[][] = []
     const probe: Probe = (command, cmdArgs) => {
-      if (command === 'git') return { code: 0, stdout: 'git@github.com:o/r.git', stderr: '' }
+      const git = healthyAppGit(command, cmdArgs)
+      if (git) return git
       if (command === 'claude' || command === 'codex') return { code: 0, stdout: 'ok', stderr: '' }
       ran.push([command, ...cmdArgs])
       // Already on, because an administrator set it.
@@ -2678,7 +2694,8 @@ describe('the command', () => {
     })
     const started: string[][] = []
     const probe: Probe = (command, cmdArgs) => {
-      if (command === 'git') return { code: 0, stdout: 'git@github.com:o/r.git', stderr: '' }
+      const git = healthyAppGit(command, cmdArgs)
+      if (git) return git
       if (command === 'claude' || command === 'codex') return { code: 0, stdout: 'ok', stderr: '' }
       started.push([command, ...cmdArgs])
       if (command === 'loginctl') return { code: 1, stdout: '', stderr: 'Could not enable linger: Interactive authentication required.' }
@@ -2710,7 +2727,8 @@ describe('the command', () => {
       json: async () => url.endsWith('/installation') ? { id: 42 } : { token: 'ghs_test', expires_at: '2026-09-18T11:00:00Z' },
     })
     const answers = (bootstrapCode: number): Probe => (command, cmdArgs) => {
-      if (command === 'git') return { code: 0, stdout: 'git@github.com:o/r.git', stderr: '' }
+      const git = healthyAppGit(command, cmdArgs)
+      if (git) return git
       if (command === 'claude' || command === 'codex') return { code: 0, stdout: 'ok', stderr: '' }
       // Nothing loaded yet, and launchctl says so in its own words rather than "already".
       if (command === 'launchctl' && cmdArgs[0] === 'bootout') return { code: 3, stdout: '', stderr: 'Boot-out failed: 3: No such process' }
@@ -2761,8 +2779,9 @@ describe('the command', () => {
     const key = join(root, 'identity.pem')
     writeFileSync(key, privateKey, { mode: 0o600 })
     chmodSync(key, 0o600)
-    const probe: Probe = (command) => {
-      if (command === 'git') return { code: 0, stdout: 'git@github.com:o/r.git', stderr: '' }
+    const probe: Probe = (command, args) => {
+      const git = healthyAppGit(command, args)
+      if (git) return git
       if (command === 'claude' || command === 'codex') return { code: 0, stdout: 'ok', stderr: '' }
       return { code: 0, stdout: '', stderr: '' }
     }
@@ -3185,9 +3204,7 @@ describe('the command', () => {
         return { ok: true as const, repo, root: roots.get(repo)!, created: true }
       },
       runnerForBoard: () => gh.runner,
-      run: ((command) => command === 'git'
-        ? { code: 0, stdout: 'git@github.com:o/r.git', stderr: '' }
-        : { code: 0, stdout: 'ok', stderr: '' }) as Probe,
+      run: ((command, args) => healthyAppGit(command, args) ?? { code: 0, stdout: 'ok', stderr: '' }) as Probe,
       runStep: (async () => ({ outcome: 'done' as const, note: '', ms: 1 })) as RunStep,
     })
     expect(code).toBe(0)
@@ -3232,9 +3249,9 @@ describe('the command', () => {
           return { ok: true as const, repo, root: repo === 'o/good' ? goodRoot : badRoot, created: true }
         },
         runnerForBoard: (repo) => ((args, input) => gh.runner(args.map(arg => arg.replaceAll(`repos/${repo}`, 'repos/o/r')), input)),
-        run: ((command, args) => command === 'git'
-          ? (failure === 'push' && args.includes(badRoot) ? { code: 1, stdout: '', stderr: 'push unavailable' } : { code: 0, stdout: 'git@github.com:o/good.git', stderr: '' })
-          : { code: 0, stdout: 'ok', stderr: '' }) as Probe,
+        run: ((command, args) => command === 'git' && args.includes('push') && failure === 'push' && args.includes(badRoot)
+          ? { code: 1, stdout: '', stderr: 'push unavailable' }
+          : healthyAppGit(command, args) ?? { code: 0, stdout: 'ok', stderr: '' }) as Probe,
         runStep: (async (step) => { started.push(step.repo); return { outcome: 'done' as const, note: '', ms: 1 } }) as RunStep,
       })
       expect(code, failure).toBe(0)

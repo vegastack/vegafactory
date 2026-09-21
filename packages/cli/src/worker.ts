@@ -521,8 +521,9 @@ export type KeyStat = (path: string) => KeyFacts
 // What this does not cover: a worker run is a child of this process and runs as the same user,
 // so the filesystem lets it read this file however tight the mode is. The child is never told
 // where the key is and is given an hour-long token instead, but that is a smaller door, not a shut
-// one. The separate worker account in the control room's worker-box checklist is what
-// closes it — the key belongs to an account that runs nothing else.
+// one. The dedicated worker account is the deployment boundary from every human identity; agent
+// children sharing that account can still read the App key, which is an accepted property of that
+// App-only account and the reason nothing else runs under it.
 export function assertKeyFile(path: string, { stat = lstatSync as unknown as KeyStat, uid = process.getuid?.() ?? -1 } = {}) {
   let facts: KeyFacts
   try { facts = stat(path) } catch { throw new Error(missingKeyMessage(path)) }
@@ -611,12 +612,12 @@ export function appIdentity(input: { repo: string; keyPath: string; appId: strin
 // Readiness and the service unit
 
 export interface Check { name: string; ok: boolean; detail: string }
-export type Probe = (command: string, args: string[]) => { code: number; stdout: string; stderr: string }
+export type Probe = (command: string, args: string[], options?: { env?: NodeJS.ProcessEnv }) => { code: number; stdout: string; stderr: string }
 
-export const probe: Probe = (command, args) => {
+export const probe: Probe = (command, args, options) => {
   // stdin is closed, not inherited. Both harnesses read a prompt from stdin when one is open, so
   // an inherited terminal turns a readiness probe into a wait for input nobody is there to give.
-  const result = spawnSync(command, args, { encoding: 'utf8', timeout: 120_000, stdio: ['ignore', 'pipe', 'pipe'] })
+  const result = spawnSync(command, args, { encoding: 'utf8', timeout: 120_000, stdio: ['ignore', 'pipe', 'pipe'], env: options?.env })
   if (result.error) return { code: 127, stdout: '', stderr: result.error.message }
   return { code: result.status ?? 1, stdout: (result.stdout ?? '').trim(), stderr: (result.stderr ?? '').trim() }
 }
@@ -657,44 +658,69 @@ export function harnessAnswers(run: Probe): Check[] {
   return checks
 }
 
-// Where a worker run's work would go. A run must be able to push code, and the App's token
-// cannot: its Contents is read-only. SSH answers no credential helper at all, so an SSH remote is
-// always fine. An HTTPS remote has to prove that a credential comes back which is not the App's —
-// the run asks for one with the App's token scrubbed from the environment, and this asks the same
-// way, so a machine that is only logged in as the App finds out now rather than after a run's work.
-export function pushPath(root: string, run: Probe): Check {
+const AMBIENT_GIT_IDENTITY = /^(?:GIT_CONFIG_(?:COUNT|KEY_|VALUE_|GLOBAL$|SYSTEM$|NOSYSTEM$)|GIT_ASKPASS$|SSH_ASKPASS$|GIT_SSH$|GIT_SSH_COMMAND$|SSH_AUTH_SOCK$)/
+
+function appGitEnvironment(source: NodeJS.ProcessEnv, token: string | null): NodeJS.ProcessEnv {
+  const env = { ...source }
+  for (const name of Object.keys(env)) if (AMBIENT_GIT_IDENTITY.test(name)) delete env[name]
+  delete env.GH_TOKEN
+  delete env.GITHUB_TOKEN
+  Object.assign(env, {
+    GIT_CONFIG_NOSYSTEM: '1',
+    GIT_CONFIG_GLOBAL: '/dev/null',
+    GIT_CONFIG_SYSTEM: '/dev/null',
+    GIT_CONFIG_COUNT: token ? '2' : '1',
+    GIT_CONFIG_KEY_0: 'credential.helper',
+    GIT_CONFIG_VALUE_0: '',
+  })
+  if (token) Object.assign(env, {
+    GH_TOKEN: token,
+    GITHUB_TOKEN: token,
+    GIT_CONFIG_KEY_1: 'credential.https://github.com.helper',
+    GIT_CONFIG_VALUE_1: '!gh auth git-credential',
+  })
+  return env
+}
+
+const gitDiagnostic = (result: { stdout: string; stderr: string }, token: string) =>
+  (result.stderr || result.stdout || 'the remote refused the dry-run push').replaceAll(token, '[redacted]').split('\n').at(-1)!.slice(0, 160)
+
+// The dedicated worker account has no human Git or SSH identity. Its selected repository's
+// installation token is therefore both the API principal and the HTTPS Git principal. A dry-run
+// push to a nonce ref proves write authority without creating the ref; a login/status check would
+// prove only that some credential exists, not that this App token can push.
+export function pushPath(root: string, run: Probe, token: string | null): Check {
   const result = run('git', ['-C', root, 'remote', 'get-url', '--push', 'origin'])
   const url = result.stdout.trim().split('\n').at(-1)?.trim() ?? ''
   if (result.code !== 0 || !url) return { name: 'push', ok: false, detail: `cannot read the push URL of origin in ${root}: ${(result.stderr || result.stdout).split('\n').at(-1)?.slice(0, 160) ?? `exit ${result.code}`}` }
-  if (/^(git@|ssh:\/\/)/.test(url)) return { name: 'push', ok: true, detail: `origin pushes over SSH (${url})` }
+  if (/^(git@|ssh:\/\/)/.test(url)) return { name: 'push', ok: false, detail: `origin pushes over SSH (${url}), but this dedicated worker has no human or SSH identity — use HTTPS: https://github.com/OWNER/REPO.git` }
 
   // Only an https remote uses the credential helper a run's Git is given. Anything else — http,
   // git://, a local path, a host alias — would not, so proving a credential proves nothing about
   // it, and a readiness check that passed would be a check that lied.
   const https = /^https:\/\/([^/]+)\//.exec(url)
   if (!https) {
-    return { name: 'push', ok: false, detail: `origin pushes over ${url.split(':')[0] || 'an unknown transport'} (${url}), which a run's Git has no credential path for — give origin an SSH or https push URL` }
+    return { name: 'push', ok: false, detail: `origin pushes over ${url.split(':')[0] || 'an unknown transport'} (${url}), which this App-only worker has no credential path for — use an https://github.com/OWNER/REPO.git push URL` }
   }
-  // The override a run's Git gets names github.com, so that is the only https host whose credential
-  // path this check can vouch for. Another host would be asked about here and never used there.
+  // The App token and helper are intentionally GitHub-only. Another host would be a second
+  // credential model, which this dedicated account does not have.
   const host = https[1]!
   if (host !== 'github.com') {
-    return { name: 'push', ok: false, detail: `origin pushes to ${host} over https, and a run's Git is only given a credential for github.com — give origin an SSH push URL: git remote set-url --push origin git@${host}:<owner>/<repo>.git` }
+    return { name: 'push', ok: false, detail: `origin pushes to ${host} over HTTPS, but a worker run is only given the VegaFactory App credential for github.com` }
   }
-  // Asked the way a run's Git will ask: with the App's token out of the environment, so what comes
-  // back is the machine's own login rather than the credential that cannot push.
-  const asked = run('env', ['-u', 'GH_TOKEN', '-u', 'GITHUB_TOKEN', 'gh', 'auth', 'status', '--hostname', host])
-  const account = /Logged in to \S+ account (\S+)/.exec(`${asked.stdout}\n${asked.stderr}`)?.[1] ?? ''
-  if (asked.code === 0 && account) {
-    return { name: 'push', ok: true, detail: `origin pushes over HTTPS as ${account}, which is what a run's Git gets once the App's token is scrubbed` }
-  }
-  return {
-    name: 'push', ok: false,
-    detail: `origin pushes over HTTPS (${url}) and this machine has no ${host} login of its own — the App's token cannot write code, so a run would finish its work and fail to push it. Log in with \`gh auth login\`, or give origin an SSH push URL: git remote set-url --push origin git@${host}:<owner>/<repo>.git`,
-  }
+  if (!token) return { name: 'push', ok: false, detail: `origin pushes over HTTPS (${url}), but no repository installation token was minted` }
+  const ref = `HEAD:refs/heads/vegafactory-readiness-${randomUUID()}`
+  const pushed = run('git', [
+    '-C', root,
+    '-c', 'credential.helper=',
+    '-c', 'credential.https://github.com.helper=!gh auth git-credential',
+    'push', '--dry-run', 'origin', ref,
+  ], { env: appGitEnvironment(process.env, token) })
+  if (pushed.code === 0) return { name: 'push', ok: true, detail: 'origin accepts a dry-run HTTPS push from the VegaFactory App installation token' }
+  return { name: 'push', ok: false, detail: `the VegaFactory App installation token cannot push to ${url}: ${gitDiagnostic(pushed, token)}` }
 }
 
-export interface ReadyInput { root: string; listing: Listing; run: Probe; keyOk: boolean; keyDetail: string; env: NodeJS.ProcessEnv }
+export interface ReadyInput { root: string; listing: Listing; run: Probe; token: string | null; keyOk: boolean; keyDetail: string; env: NodeJS.ProcessEnv }
 
 export function readiness(input: ReadyInput): Check[] {
   const billing = billingVariables(input.env)
@@ -702,7 +728,7 @@ export function readiness(input: ReadyInput): Check[] {
     { name: 'listed', ok: input.listing.ok, detail: input.listing.reason },
     { name: 'billing', ok: billing.length === 0, detail: billing.length ? `${billing.join(', ')} set — a worker runs on subscriptions only; unset them` : 'no API-key variable is set' },
     hooksWired(input.root),
-    pushPath(input.root, input.run),
+    pushPath(input.root, input.run, input.token),
     ...harnessAnswers(input.run),
     { name: 'app-key', ok: input.keyOk, detail: input.keyDetail },
   ]
@@ -1624,38 +1650,20 @@ export function workingDir(root: string, number: number): string | null {
 // - it writes to GitHub as the configured App, on the short-lived installation token this machine
 //   minted, so nothing it writes can pass as a person's stop, correction or "ship it";
 // - it is never told where the App's private key is. The token expires in an hour; the key does
-//   not. (A child running under the same account can still read that file through the filesystem —
-//   the separate worker account in the worker-box checklist is what closes that, not this.)
+//   not. A child under this dedicated App-only account can still read the key through the
+//   filesystem; that is an accepted deployment property, not a claimed same-user boundary.
 export function childRunEnvironment(env: NodeJS.ProcessEnv, token: string | null): NodeJS.ProcessEnv {
-  const child: NodeJS.ProcessEnv = { ...childEnvironment(env), VSK_ASK_ROUTE: 'issue' }
+  let child: NodeJS.ProcessEnv = { ...childEnvironment(env), VSK_ASK_ROUTE: 'issue' }
   for (const name of Object.keys(child)) if (name.startsWith('VEGAFACTORY_')) delete child[name]
   if (env.VEGAFACTORY_APP_ID?.trim() || env.VEGAFACTORY_APP_ACTOR?.trim()) {
     const identity = appIdentityConfig(env)
     child.VEGAFACTORY_APP_ID = identity.appId
     child.VEGAFACTORY_APP_ACTOR = identity.appActor
   }
-  if (token) {
-    child.GH_TOKEN = token
-    child.GITHUB_TOKEN = token
-    // GH_TOKEN is for the API and nothing else. `gh auth git-credential` prefers it over the
-    // credential the machine is logged in with, and the App's Contents is read-only, so a push
-    // carrying it fails — after the work, which is the worst moment to find out. Git therefore
-    // asks for a credential with the App's token scrubbed out of the environment first, which
-    // hands back the machine's own login instead. HTTPS keeps working exactly as it does for the
-    // person at the keyboard, and an SSH remote ignores all of this because SSH asks no helper.
-    //
-    // This is attribution, not isolation: a child under this account can read that login for
-    // itself whenever it likes. The separate worker account closes that, and nothing here
-    // pretends to (#239).
-    for (const name of Object.keys(child)) if (/^GIT_CONFIG_(COUNT|KEY_|VALUE_)/.test(name)) delete child[name]
-    child.GIT_CONFIG_COUNT = '2'
-    // An empty value resets the helper list, so the machine's own github.com helper cannot answer
-    // first with the token we are trying to keep away from Git.
-    child.GIT_CONFIG_KEY_0 = 'credential.https://github.com.helper'
-    child.GIT_CONFIG_VALUE_0 = ''
-    child.GIT_CONFIG_KEY_1 = 'credential.https://github.com.helper'
-    child.GIT_CONFIG_VALUE_1 = '!env -u GH_TOKEN -u GITHUB_TOKEN gh auth git-credential'
-  }
+  // This OS account deliberately has no person's GitHub or SSH identity. Reset every inherited
+  // Git/SSH credential path, then install exactly the selected repository's App token. The same
+  // token backs API calls and HTTPS Git through gh's credential helper; there is no fallback.
+  child = appGitEnvironment(child, token)
   return child
 }
 
@@ -2803,7 +2811,7 @@ export async function runWorker(argv: string[], deps: CliDeps = {}): Promise<num
     let devMd: string
     try { devMd = readFileSync(join(checkout.root, '.vegastack', 'dev.md'), 'utf8') }
     catch { throw new Error('dev.md is unreadable') }
-    const push = pushPath(checkout.root, deps.run ?? probe)
+    const push = pushPath(checkout.root, deps.run ?? probe, identity.token())
     if (!push.ok) throw new Error(push.detail)
     const runner = deps.runnerForBoard?.(canonical, identity) ?? identity.runner
     return { key: canonical, repo: canonical, root: checkout.root, identity: { ...identity, runner }, runner, devMd }
@@ -2818,7 +2826,7 @@ export async function runWorker(argv: string[], deps: CliDeps = {}): Promise<num
     if (checkout.created) return `${checkout.root} would be provisioned with isolated App identity, policy, hooks, and push path`
     try { readFileSync(join(checkout.root, '.vegastack', 'dev.md'), 'utf8') }
     catch { throw new Error('dev.md is unreadable') }
-    const push = pushPath(checkout.root, deps.run ?? probe)
+    const push = pushPath(checkout.root, deps.run ?? probe, identity.token())
     if (!push.ok) throw new Error(push.detail)
     return checkout.plannedHooks?.length
       ? `${checkout.root} passed read-only checks; ${checkout.plannedHooks.join(', ')} would be merged only by the real enable`
@@ -2841,13 +2849,14 @@ export async function runWorker(argv: string[], deps: CliDeps = {}): Promise<num
         // The injected single-board boundary preserves the focused CLI tests without teaching a
         // fake GitHub runner how to clone repositories. Real enablement takes the branch below.
         let keyOk = false
+        let token: string | null = null
         let keyDetail = ''
         try {
-          await mintToken({ repo, keyPath, appId: app.appId, fetch: deps.fetch })
+          token = (await mintToken({ repo, keyPath, appId: app.appId, fetch: deps.fetch })).token
           keyOk = true
           keyDetail = `the App key at ${keyPath} mints an installation token for ${repo}`
         } catch (error) { keyDetail = (error as Error).message }
-        checks = readiness({ root, listing: workerListing, run: deps.run ?? probe, keyOk, keyDetail, env })
+        checks = readiness({ root, listing: workerListing, run: deps.run ?? probe, token, keyOk, keyDetail, env })
         boardChecks = [{ name: `repo:${canonicalRepository(repo)}`, ok: checks.every((check) => check.ok), detail: keyDetail }]
       } else {
         const billing = billingVariables(env)

@@ -6,9 +6,9 @@ The project's story, newest first: what got built, why, and how it went — for 
 
 - **What:** One machine service now provisions and serves every explicit repository in its roster. Each board keeps its own checkout, App token, policy, issue cache, readiness and push path, while machine state and capacity stay genuinely global.
 - **Why:** A worker row could name several repositories, but the runtime still operated from one startup checkout, so it could neither serve that roster nor isolate two repositories carrying the same issue number.
-- **How it went:** The first plan's single-root assumptions were replaced before implementation. Five checkpointed slices then separated provisioning, scheduling, reconciliation and the CLI; task-level adversarial reviews drove fixes around hook publication, crash-safe hand-back and legacy state, while the final whole-branch review remains the hand-back gate rather than a claim in this entry.
-- **Changed:** atomic first-use clones under `~/.vegafactory/worker/repos/` · repository-scoped tokens and board contexts · one global run cap with per-repository ship slots · isolated board failures and non-consuming delisting · machine-global state, logs and `repo#issue` status · multi-repository onboarding.
-- **Decisions:** none.
+- **How it went:** The first plan's single-root assumptions were replaced before implementation. Checkpointed slices then separated provisioning, scheduling, reconciliation and the CLI; adversarial reviews drove fixes around hook publication, crash-safe hand-back, legacy state and refreshed roster gates. A late security detour proposed a second local identity and broker, but the deployment model was simpler: this is a dedicated App-only account, so the correction removed human Git fallback instead of adding local privilege machinery.
+- **Changed:** atomic first-use clones under `~/.vegafactory/worker/repos/` · repository-scoped App tokens for API and HTTPS Git · one global run cap with per-repository ship slots · isolated board failures and non-consuming delisting · machine-global state, logs and `repo#issue` status · multi-repository onboarding.
+- **Decisions:** the dedicated macOS worker user has no human GitHub or SSH identity; the VegaFactory App is its sole principal for issue, pull-request and repository operations, with Contents read/write and Workflows denied.
 
 — approved by (kmanojkumar) · built by codex · branch feat/259-one-worker-many-repositories
 
