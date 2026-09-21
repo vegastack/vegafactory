@@ -214,44 +214,6 @@ export function tidyWorktrees(
   }
 }
 
-// Puts back the dependencies a prune took from one checkout. The worker calls this before it
-// launches an agent: it starts straight in an existing worktree and so never passes through
-// `restore`, which is the only other place the record is read.
-// Three answers, not two. "Nothing was taken from this checkout" and "what was taken could not be
-// put back" look the same as a boolean and must not: the first is the ordinary case and the second
-// means the agent is about to start somewhere that cannot build.
-export type DepsRestore = { state: 'nothing' } | { state: 'needed'; setup: string } | { state: 'failed'; reason: string }
-
-// Told once the caller's own install has worked, so the record stops asking for it.
-export function markDepsRestored(
-  repoRoot: string,
-  path: string,
-  options: { spawn?: (args: string[], cwd?: string) => SpawnResult } = {},
-): void {
-  const spawn = options.spawn ?? defaultSpawn
-  try { spawn(['restore-deps', '--path', path, '--mark', '--write', '--json'], repoRoot) } catch { /* it asks again next run */ }
-}
-
-export function restoreWorktreeDeps(
-  repoRoot: string,
-  path: string,
-  options: { spawn?: (args: string[], cwd?: string) => SpawnResult } = {},
-): DepsRestore {
-  const spawn = options.spawn ?? defaultSpawn
-  try {
-    // `--plan` asks what would be needed without running it. The install itself belongs to the
-    // caller, which has a bounded runner that kills a whole process group; doing it here would
-    // block the worker's loop for as long as the install takes.
-    const run = spawn(['restore-deps', '--path', path, '--plan', '--write', '--json'], repoRoot)
-    const result = parseScriptOutput(run.stdout) as ScriptResult & { needed?: boolean; setup?: string | null }
-    if (!result.needed) return { state: 'nothing' }
-    if (!result.setup) return { state: 'failed', reason: 'dev.md names no `setup` command to put them back' }
-    return { state: 'needed', setup: result.setup }
-  } catch (error) {
-    return { state: 'failed', reason: (error as Error).message }
-  }
-}
-
 export async function runWorktree(argv: string[], deps?: Partial<WorktreeDeps>): Promise<number> {
   const spawn = deps?.spawn ?? defaultSpawn
   const registryPath = deps?.registryPath ?? defaultRegistryPath()

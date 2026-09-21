@@ -4,7 +4,7 @@ import { existsSync, mkdirSync, mkdtempSync, writeFileSync } from 'node:fs'
 import { ghJson } from '../scripts/lib/gh.mjs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { createWorktree, pruneWorktrees, readDroppedDeps, removeWorktree, restoreDroppedDependencies } from '../scripts/worktree.mjs'
+import { createWorktree, noteMissingDependencies, pruneWorktrees, readDroppedDeps, removeWorktree } from '../scripts/worktree.mjs'
 
 // Relative to the real clock: the fixture commits carry today's date, so a fixed
 // 'now' turns these into time bombs once the calendar catches up.
@@ -223,9 +223,9 @@ describe('pruneWorktrees', () => {
     expect(execFileSync('git', ['-C', wt.path, 'rev-parse', '--abbrev-ref', 'HEAD'], { encoding: 'utf8' }).trim()).toBe('feat/106-old')
   })
 
-  // Prune takes them, restore puts back exactly those — never installing speculatively into a
-  // worktree that never had them, which is what keeps a docs-only issue cheap.
-  test('a worktree whose dependencies were dropped reinstalls them, and only that one', () => {
+  // Prune takes them and leaves one record saying so. Putting them back is the build's own
+  // business (#275); what this side owes is a checkout that says out loud it cannot build.
+  test('a reclaimed worktree says what to run, and only that one does', () => {
     const root = repoWithRemote()
     const wt = createWorktree({ repoRoot: root, issue: 106, slug: 'old', type: 'feat', base: 'main', devMd, home: root, write: true })
     writeFileSync(join(wt.path, 'work.txt'), 'real work\n')
@@ -241,34 +241,39 @@ describe('pruneWorktrees', () => {
     // a deps-only prune leaves the checkout in place, and a record inside it would go with it.
     expect(readDroppedDeps(root)['106-old']).toBeTruthy()
 
-    const ran: string[][] = []
-    const ranOptions: Array<{ timeout?: number }> = []
-    const runner = ((file: string, args: string[], options: { timeout?: number }) => { ran.push([file, ...args]); ranOptions.push(options ?? {}); return '' }) as never
-    const actions: string[] = []
-    const warns: string[] = []
     // One `commands:` line, as a real profile has: a second would make the profile ambiguous.
     const setup = 'commands: check `true` · setup `bun install --frozen-lockfile`\nworktree-retention: 14d\n'
-    expect(restoreDroppedDependencies({ repoRoot: root, name: '106-old', path: wt.path, devMd: setup, write: true, actions, warns, runner })).toBe(true)
-    expect(ran[0]).toEqual(['sh', '-c', 'bun install --frozen-lockfile'])
-    // Bounded: this runs inside the worker's pass, before the step timer exists, so a hung
-    // install would hold the loop, stop the heartbeats and outlast a shutdown.
-    expect(ranOptions[0]?.timeout).toBeGreaterThan(0)
-    expect(actions.join('\n')).toContain('reinstall dependencies')
-    // Done once: the record is cleared, so the next restore installs nothing.
-    expect(readDroppedDeps(root)['106-old']).toBeUndefined()
-    ran.length = 0
-    expect(restoreDroppedDependencies({ repoRoot: root, name: '106-old', path: wt.path, devMd: setup, write: true, actions, warns, runner })).toBe(false)
-    expect(ran).toEqual([])
+    const warns: string[] = []
+    expect(noteMissingDependencies({ repoRoot: root, name: '106-old', path: wt.path, devMd: setup, warns })).toBe(true)
+    expect(warns.join('\n')).toContain('bun install --frozen-lockfile')
+
+    // Nothing was ever taken from a fresh checkout, so nothing is said about it — a docs-only
+    // issue pays for no install and reads no warning.
+    const fresh = createWorktree({ repoRoot: root, issue: 107, slug: 'fresh', type: 'docs', base: 'main', devMd, home: root, write: true })
+    const quiet: string[] = []
+    expect(noteMissingDependencies({ repoRoot: root, name: '107-fresh', path: fresh.path, devMd: setup, warns: quiet })).toBe(false)
+    expect(quiet).toEqual([])
   })
 
-  test('a fresh worktree installs nothing, however the dev.md reads', () => {
+  // A record outlives the checkout it describes unless removal clears it, and worktree names
+  // come back: the same issue re-cut later would be told its dependencies were reclaimed.
+  test('removing a worktree forgets that its dependencies were taken', () => {
     const root = repoWithRemote()
-    const wt = createWorktree({ repoRoot: root, issue: 107, slug: 'fresh', type: 'docs', base: 'main', devMd, home: root, write: true })
-    const ran: string[][] = []
-    const runner = ((file: string, args: string[]) => { ran.push([file, ...args]); return '' }) as never
-    const setup = 'commands: setup `bun install --frozen-lockfile`\n'
-    expect(restoreDroppedDependencies({ repoRoot: root, name: '107-fresh', path: wt.path, devMd: setup, write: true, actions: [], warns: [], runner })).toBe(false)
-    expect(ran).toEqual([])
+    const wt = createWorktree({ repoRoot: root, issue: 106, slug: 'old', type: 'feat', base: 'main', devMd, home: root, write: true })
+    writeFileSync(join(wt.path, 'work.txt'), 'real work\n')
+    execFileSync('git', ['-C', wt.path, 'add', '.'], { encoding: 'utf8' })
+    execFileSync('git', ['-C', wt.path, 'commit', '-m', 'work'], { encoding: 'utf8' })
+    execFileSync('git', ['-C', wt.path, 'push', '-u', 'origin', 'HEAD'], { encoding: 'utf8' })
+    mkdirSync(join(wt.path, 'node_modules'), { recursive: true })
+    pruneWorktrees({
+      repoRoot: root, base: 'main', olderThan: '999d', devMd: `${devMd}\nworktree-deps-retention: 1d\n`,
+      ledgerTimes: { '106-old': OLD_LEDGER }, now: FUTURE_NOW, write: true,
+    })
+    expect(readDroppedDeps(root)['106-old']).toBeTruthy()
+
+    const gone = removeWorktree({ repoRoot: root, name: '106-old', base: 'main', force: true, write: true })
+    expect(gone.blocks).toEqual([])
+    expect(readDroppedDeps(root)['106-old']).toBeUndefined()
   })
 
   // The unattended pass is narrower than the prune a person runs. A person asked and can be told

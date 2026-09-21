@@ -2,7 +2,7 @@ import { describe, expect, test } from 'bun:test'
 import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { parseWorktreeArgs, recordRepoRoot, restoreWorktreeDeps, runWorktree, tidyWorktrees } from '../src/worktree.ts'
+import { parseWorktreeArgs, recordRepoRoot, runWorktree, tidyWorktrees } from '../src/worktree.ts'
 
 describe('parseWorktreeArgs', () => {
   test('every verb acts by default and --dry-run previews', () => {
@@ -83,30 +83,6 @@ describe('the worker asks for the narrower pass, and the script hears it', () =>
     const seen: string[][] = []
     tidyWorktrees('/repo', { spawn: (args) => { seen.push(args); return { status: 0, stdout: '{}' } } })
     expect(seen[0]).toEqual(['prune', '--automatic', '--json'])
-  })
-
-  test('restoring a checkout\'s dependencies asks for exactly that, and says whether it happened', () => {
-    const seen: string[][] = []
-    const yes = restoreWorktreeDeps('/repo', '/repo/.vegastack/.worktrees/7-x', {
-      spawn: (args) => { seen.push(args); return { status: 0, stdout: JSON.stringify({ needed: true, setup: 'bun install' }) } },
-    })
-    // It asks what would be needed and does not run it: the install belongs to the caller, which
-    // has a bounded runner that kills a whole process group.
-    expect(seen[0]).toEqual(['restore-deps', '--path', '/repo/.vegastack/.worktrees/7-x', '--plan', '--write', '--json'])
-    expect(yes).toEqual({ state: 'needed', setup: 'bun install' })
-
-    // Nothing to put back but no way to do it is still a failure, not a no-op.
-    expect(restoreWorktreeDeps('/repo', '/x', { spawn: () => ({ status: 0, stdout: JSON.stringify({ needed: true, setup: null }) }) }))
-      .toMatchObject({ state: 'failed' })
-
-    // Nothing was taken from this one, so nothing is put back — the ordinary case.
-    expect(restoreWorktreeDeps('/repo', '/x', { spawn: () => ({ status: 0, stdout: JSON.stringify({ needed: false }) }) }))
-      .toEqual({ state: 'nothing' })
-
-    // Something *was* taken and could not be put back. That is not the same as nothing to do:
-    // the agent would start in a checkout that cannot build and spend its whole step finding out.
-    expect(restoreWorktreeDeps('/repo', '/x', { spawn: () => { throw new Error('gone') } }))
-      .toMatchObject({ state: 'failed' })
   })
 
   // The command the worker tells a person to run has to be one the CLI accepts, and it is only

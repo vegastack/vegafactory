@@ -1143,34 +1143,6 @@ describe('readiness and the service', () => {
   })
 
 
-  // The wiring the earlier attempts kept getting right in isolation and wrong in place: a
-  // checkout whose dependencies were reclaimed gets them back before the agent starts, because
-  // the worker launches straight into an existing worktree and never passes through `restore`.
-  test('a run puts back dependencies before it starts', async () => {
-    const restored: string[][] = []
-    const step = defaultRunStep('', {}, {
-      exec: (async () => ({ code: 0, stdout: 'ok', stderr: '', timedOut: false })) as never,
-      putDepsBack: ((repoRoot: string, cwd: string) => { restored.push([repoRoot, cwd]); return { state: 'nothing' } }) as never,
-    })
-    const result = await step({ number: 7, action: 'implement', repo: 'o/r', split: false, by: null }, { root, onStart: () => {} })
-    expect(restored).toHaveLength(1)
-    expect(restored[0]![0]).toBe(root)
-    expect(result.outcome).toBe('done')
-  })
-
-  // Starting anyway means the agent spends its whole step discovering the checkout cannot build.
-  test('a run that cannot get its dependencies back stops instead of starting', async () => {
-    let started = false
-    const step = defaultRunStep('', {}, {
-      exec: (async () => { started = true; return { code: 0, stdout: 'ok', stderr: '', timedOut: false } }) as never,
-      putDepsBack: (() => ({ state: 'failed', reason: 'no setup command' })) as never,
-    })
-    const result = await step({ number: 7, action: 'implement', repo: 'o/r', split: false, by: null }, { root, onStart: () => {} })
-    expect(started).toBe(false)
-    expect(result.outcome).toBe('blocked')
-    expect(result.note).toContain('no setup command')
-  })
-
   test('the unit runs this CLI\'s own worker run and carries no token', () => {
     const plist = unitText('darwin', { cli: ['/usr/bin/node', '/opt/vegafactory/index.js'], root, repo: 'o/r', logDir: workerDir(root) })
     expect(plist).toContain('<string>worker</string>')
@@ -1636,8 +1608,17 @@ describe('the command', () => {
   // reference-counted. So it names what could go and removes nothing.
   test('the pass names idle worktrees and never asks to remove them', async () => {
     const asked: string[][] = []
-    await run(['run'], {
-      worktreeScript: (args: string[]) => { asked.push(args); return { status: 0, stdout: '{}' } },
+    // A real prune's answer, not an empty one: a stub that says nothing lets the names, the
+    // refusals and the advice all disappear while the test stays green.
+    const answer = JSON.stringify({
+      actions: ['9-done: git worktree remove'],
+      warns: ['8-wip: uncommitted work — kept'],
+      blocks: ['7-locked: locked — kept'],
+      candidates: [{ name: '9-done', removable: true }, { name: '8-wip', removable: false }],
+      droppable: ['9-done', '6-idle'],
+    })
+    const result = await run(['run'], {
+      worktreeScript: (args: string[]) => { asked.push(args); return { status: 0, stdout: answer } },
       sleep: async () => { process.emit('SIGTERM' as NodeJS.Signals) },
     })
     expect(asked.length).toBeGreaterThan(0)
@@ -1645,6 +1626,15 @@ describe('the command', () => {
       expect(args).toContain('--automatic')
       expect(args).not.toContain('--write')
     }
+    // Every line the script gave back reaches the log — what would go, and what it refused to
+    // touch. A pass that reported only its actions would hide exactly the checkouts a person
+    // needs to hear about.
+    expect(result.text).toContain('worktrees: 9-done: git worktree remove')
+    expect(result.text).toContain('worktrees: 8-wip: uncommitted work — kept')
+    expect(result.text).toContain('worktrees: 7-locked: locked — kept')
+    // Two distinct worktrees, not three: 9-done is both a removable candidate and droppable.
+    // And the advice is a command the CLI accepts.
+    expect(result.text).toContain('worktrees: 2 could be reclaimed — run `vegafactory worktree prune --write`')
   })
 
   test('run --once makes one pass with the injected step', async () => {

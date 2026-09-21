@@ -22,7 +22,7 @@
 //   before the deadline this one is keeping.
 import { spawn, spawnSync } from 'node:child_process'
 import { createHash, createSign, randomUUID } from 'node:crypto'
-import { appendFileSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import { appendFileSync, chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { homedir, hostname, userInfo } from 'node:os'
 import { join, posix } from 'node:path'
 import { APP_ACTOR, APP_ID, HEARTBEAT_EVERY_MS, appIdentityConfig, claim, heartbeat, holderOf, machineName, nodeId, release, trustedFactory } from './claim.ts'
@@ -39,7 +39,7 @@ import { defaultBranch } from './guard-rules.ts'
 import { stateOf, type State } from './labels.ts'
 import { lintPlan, normalizeGroupPath, parseIndependentGroups, sharedByEveryChild } from '../../../skills/dev/dev-plan/scripts/plan-lint.mjs'
 import { appKeyPath as workerAppKey } from './home.ts'
-import { markDepsRestored, restoreWorktreeDeps, tidyWorktrees, type DepsRestore } from './worktree.ts'
+import { tidyWorktrees } from './worktree.ts'
 
 // How often the board is read, how many steps run at once, and how long one step may take.
 export const POLL_MS = 2 * 60_000
@@ -1293,14 +1293,6 @@ function execTool(tool: string, args: string[], options: { cwd: string; env: Nod
 export const tail = (text: string, max = MAX_NOTE) => text.trim().split('\n').slice(-3).join(' ').slice(-max)
 
 // The issue's worktree when one exists; a step that needs a branch makes its own.
-// Puts back what a prune took, if it took anything. Delegates to the worktree script, which owns
-// both the record and dev.md's own `setup` command; a failure is a note in the log rather than a
-// refusal, because the build that follows will say so far more clearly.
-export function restoreDependencies(root: string, cwd: string, spawn?: (args: string[], cwd?: string) => { status: number; stdout: string }): DepsRestore {
-  if (cwd === root) return { state: 'nothing' }
-  return restoreWorktreeDeps(root, cwd, { spawn })
-}
-
 export function workingDir(root: string, number: number): string | null {
   const base = join(root, '.vegastack', '.worktrees')
   try {
@@ -1352,37 +1344,17 @@ export function childRunEnvironment(env: NodeJS.ProcessEnv, token: string | null
   return child
 }
 
-export function defaultRunStep(devMd: string, env: NodeJS.ProcessEnv, { exec = execTool, timeoutMs = STEP_TIMEOUT_MS, token = () => null as string | null, putDepsBack = restoreDependencies } = {}): RunStep {
+export function defaultRunStep(devMd: string, env: NodeJS.ProcessEnv, { exec = execTool, timeoutMs = STEP_TIMEOUT_MS, token = () => null as string | null } = {}): RunStep {
   return async (step, context) => {
     const started = Date.now()
     const policy = stagePolicy(devMd, STAGE_OF[step.action] ?? 'implement')
-    const cwd = workingDir(context.root, step.number) ?? context.root
-    // A checkout whose dependencies were reclaimed while it was idle gets them back before the
-    // agent starts. The worker launches straight into an existing worktree — it never calls
-    // `worktree restore`, which is the only other place this was checked — so without this the
-    // next run begins in a checkout that cannot build and has nothing saying why.
     const { tool, args } = agentArgs(policy, stepPrompt(step))
+    const cwd = workingDir(context.root, step.number) ?? context.root
     // Nobody is at the keyboard, so a round of questions goes to the issue and waits there for the
     // operator — dev-setup's references/ask-route.md, where VSK_ASK_ROUTE is the first step.
     // The limit arrives with the run rather than with the step function, so a roster change lands
     // on the next run instead of the next restart.
     const limit = context.timeoutMs ?? timeoutMs
-    // A checkout whose dependencies were reclaimed cannot build, and an agent started in one
-    // spends its whole step discovering that. When they cannot be put back, say so and stop —
-    // this is a step that failed, not a step that ran.
-    const deps = putDepsBack(context.root, cwd)
-    if (deps.state === 'failed') {
-      return { outcome: 'blocked', note: `dependencies could not be restored in ${cwd}: ${deps.reason}`, ms: Date.now() - started }
-    }
-    if (deps.state === 'needed') {
-      // Through the same runner the agent uses: asynchronous, bounded, and killed as a whole
-      // process group. A synchronous install here would hold the loop for as long as it took.
-      const install = await exec('sh', ['-c', deps.setup], { cwd, env: childRunEnvironment(env, token()), timeoutMs: limit })
-      if (install.code !== 0 || install.timedOut) {
-        return { outcome: 'blocked', note: `dependencies could not be restored in ${cwd}: \`${deps.setup}\` ${install.timedOut ? 'ran past the step limit' : `exited ${install.code}`}`, ms: Date.now() - started }
-      }
-      markDepsRestored(context.root, cwd)
-    }
     const child = await exec(tool, args, { cwd, env: childRunEnvironment(env, token()), timeoutMs: limit, onStart: context.onStart })
     const ms = Date.now() - started
     const text = `${child.stderr}\n${child.stdout}`
@@ -2013,7 +1985,11 @@ export async function runWorker(argv: string[], deps: CliDeps = {}): Promise<num
         return 0
       }
       // The same reason as the unit's UMask: this directory holds the logs and the run records.
+      // `mode:` only applies to a directory this call creates, and the common case is a machine
+      // that already has one from an earlier version — so it is also set outright, or every
+      // upgrade would keep whatever permissions the old umask happened to give it.
       mkdirSync(workerDir(root), { recursive: true, mode: 0o700 })
+      try { chmodSync(workerDir(root), 0o700) } catch { /* not ours to tighten */ }
       replaceFile(path, unitText(platform, { cli: deps.cli ?? cliPath(), root, repo, logDir: workerDir(root), env }))
       const run = deps.run ?? probe
       for (const command of commands) {

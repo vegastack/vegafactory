@@ -20,7 +20,7 @@ merge: squash
 branch: <type>/<issue>-<slug>   # type: feat | fix | docs | chore | refactor — the only place this list lives
 worktree-include: {{files}}   # space-separated gitignored files a fresh checkout needs (local env and secret files) | none — copied into every new worktree
 worktree-retention: 14d     # how long a parked worktree survives with no session, measured from the later of its last commit and its last ledger edit; prune pushes first and never removes uncommitted or unpushed work
-worktree-deps-retention: 3d # how long an idle worktree keeps its dependencies — shorter than the line above, never longer; they are reinstalled with `setup` when work resumes
+worktree-deps-retention: 3d # how long an idle worktree keeps its dependencies — shorter than the line above, never longer; the checkout then names its `setup` command until they are back
 labels: waiting-on-operator planning queued in-progress ready-to-ship small medium large research risky epic   # the fixed set: one state at a time, one size (or research); epic marks map parents only where the org has no native Epic issue type
 board: none                 # project board number the five state labels mirror into, one way, or none — .github/workflows/factory-board.yml reads this line and a card dragged on the board is cosmetic until the next label change
 issue-types: {{Feature=feat · Bug=fix · Task=docs,chore,refactor,research | none}}   # native org issue types dev-setup detected; dev-intake sets one at creation. none = personal repo, or an org that defines none

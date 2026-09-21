@@ -192,7 +192,6 @@ const DEFAULT_RETENTION_MS = 14 * DAY_MS;
 // resuming only has to run setup again.
 const DEFAULT_DEPS_RETENTION_MS = 3 * DAY_MS;
 // Long enough for a cold `bun install`, short enough that a hung one is not for ever.
-const SETUP_LIMIT_MS = 10 * 60 * 1000;
 
 // All of these must hold before a worktree directory is removed. Each failure
 // gets its own sentence so the caller can print exactly why the work is being
@@ -454,43 +453,22 @@ function prepareCheckout({ repoRoot, path, devMd, home, write, actions, warns, b
     copyFileSync(source, target);
   }
   // Dependencies are not installed for a fresh checkout: a step that needs them runs the setup
-  // command itself, so a docs-only issue costs a few megabytes instead of a full install. The one
-  // exception is a worktree whose dependencies *this tool* took — putting back exactly what was
-  // removed is not the same as installing speculatively.
-  restoreDroppedDependencies({ repoRoot, name: basename(path), path, devMd, write, actions, warns });
+  // command itself, so a docs-only issue costs a few megabytes instead of a full install.
+  noteMissingDependencies({ repoRoot, name: basename(path), path, devMd, warns });
   applyCodexTrust({ home, absPath: path, write, actions, warns, blocks });
 }
 
-// Put back what prune took, and only that. The marker says this worktree had its dependencies
-// dropped while it was idle; installing is a plain run of dev.md's own `setup` command. A failure
-// is a warning rather than a block: the checkout is fine, and the next build will say so itself.
-// Called by whoever ran the setup command themselves, once it worked.
-export function markDependenciesRestored(repoRoot, name) {
-  clearDroppedDeps(repoRoot, name);
-}
-
-export function restoreDroppedDependencies({ repoRoot, name, path, devMd, write, actions, warns, runner = execFileSync }) {
+// Say so when this checkout's dependencies were taken while it was idle. Putting them back is a
+// run of dev.md's own `setup` command by whoever is about to build, inside that build's own
+// budget — #275. Nothing here starts a process: this runs inside the worker's pass, before a step
+// timer exists, so an install begun here would hold the loop and outlast a shutdown.
+export function noteMissingDependencies({ repoRoot, name, path, devMd, warns }) {
   if (!(name in readDroppedDeps(repoRoot))) return false;
   const setup = parseSetupCommand(devMd);
-  if (!setup) {
-    warns.push(at(path, 'dependencies were dropped while idle, but dev.md names no `setup` command to put them back'));
-    return false;
-  }
-  actions.push(at(path, 'reinstall dependencies: ' + setup));
-  if (!write) return false;
-  // A caller that runs commands itself — the worker, with its own bound and its own process
-  // group — takes the command and reports back. Running it here would block whoever called us:
-  // this happens inside the worker's pass, before the step timer exists, so a hung install would
-  // hold the loop, stop the heartbeats and outlast a shutdown.
-  if (runner === null) return false;
-  try {
-    runner('sh', ['-c', setup], { cwd: path, stdio: 'ignore', timeout: SETUP_LIMIT_MS });
-    clearDroppedDeps(repoRoot, name);
-    return true;
-  } catch (error) {
-    warns.push(at(path, 'could not reinstall dependencies (' + (error?.message ?? 'failed') + ') — run `' + setup + '` here'));
-    return false;
-  }
+  warns.push(at(path, setup
+    ? 'dependencies were reclaimed while it was idle — run `' + setup + '` here before building'
+    : 'dependencies were reclaimed while it was idle, and dev.md names no `setup` command to put them back'));
+  return true;
 }
 
 // Create the checkout for a branch: a fresh worktree cut from origin/<base>. Every issue —
@@ -577,10 +555,10 @@ export function restoreWorktree({ repoRoot, issue, slug, type, devMd, home, writ
   const held = worktreeHoldingBranch(repoRoot, branch, gitRunner);
   if (held) {
     // The checkout is already here, which is exactly what a dependency-only prune leaves behind.
-    // There is no worktree to add — but there may well be dependencies to put back, and this is
-    // the one place a resume passes through.
-    const put = restoreDroppedDependencies({ repoRoot, name: basename(held), path: held, devMd, write, actions, warns });
-    warns.push(at(held, 'already holds ' + branch + (put ? ' — dependencies reinstalled' : ' — nothing to restore')));
+    // There is no worktree to add — but its dependencies may be gone, and this is the one place a
+    // resume passes through.
+    warns.push(at(held, 'already holds ' + branch + ' — nothing to restore'));
+    noteMissingDependencies({ repoRoot, name: basename(held), path: held, devMd, warns });
     return { blocks, warns, actions, path: held, branch };
   }
 
@@ -712,6 +690,10 @@ export function removeWorktree({ repoRoot, name, base, force = false, push = fal
   if (write) {
     const removed = git(repoRoot, ['worktree', 'remove', path]);
     if (!removed.ok) blocks.push(at(path, 'git worktree remove failed: ' + removed.out));
+    // The record outlives the checkout it describes, and the name comes back: the same issue
+    // re-cut later would be told its dependencies were reclaimed when nothing was ever taken
+    // from it.
+    else clearDroppedDeps(repoRoot, name);
   }
   return { blocks, warns, actions, path, branch, state };
 }
@@ -1169,25 +1151,6 @@ function runVerb(verb, flags) {
       inUse: String(flags['in-use'] ?? '').split(',').map((name) => name.trim()).filter(Boolean),
     });
     return { ...pruned, warns: [...warns, ...pruned.warns] };
-  }
-  // Put back the dependencies a prune took from one checkout, and nothing else. The worker calls
-  // this before it launches an agent, because it starts straight in an existing worktree and so
-  // never passes through `restore`.
-  if (verb === 'restore-deps') {
-    const actions = [];
-    const warns = [];
-    const path = String(flags.path ?? '');
-    if (!path) return { blocks: [at('restore-deps', 'needs --path')], warns, actions };
-    const name = basename(path);
-    const needed = name in readDroppedDeps(repoRoot);
-    // `runner: null` means "tell me what to run, do not run it": the worker has a bounded async
-    // runner that kills a whole process group, and this script does not.
-    if (flags.mark) {
-      markDependenciesRestored(repoRoot, name);
-      return { blocks: [], warns, actions, needed: false, restored: true, setup: null };
-    }
-    const put = restoreDroppedDependencies({ repoRoot, name, path, devMd, write: shared.write, actions, warns, runner: flags.plan ? null : execFileSync });
-    return { blocks: [], warns, actions, needed, restored: put, setup: needed ? parseSetupCommand(devMd) : null };
   }
   if (verb === 'create' || verb === 'restore') {
     let named = { type: flags.type || null, slug };
