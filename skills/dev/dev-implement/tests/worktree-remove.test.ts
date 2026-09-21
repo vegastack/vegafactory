@@ -276,28 +276,6 @@ describe('pruneWorktrees', () => {
     expect(readDroppedDeps(root)['106-old']).toBeUndefined()
   })
 
-  // The unattended pass is narrower than the prune a person runs. A person asked and can be told
-  // "your work is on a branch"; a background pass has nobody to tell, so it leaves it alone.
-  test('the automatic pass never pushes, never commits, and says what it kept', () => {
-    const root = repoWithRemote()
-    const wt = createWorktree({ repoRoot: root, issue: 106, slug: 'old', type: 'feat', base: 'main', devMd, home: root, write: true })
-    // A commit nobody has pushed, and something uncommitted on top of it.
-    writeFileSync(join(wt.path, 'work.txt'), 'real work\n')
-    execFileSync('git', ['-C', wt.path, 'add', '.'], { encoding: 'utf8' })
-    execFileSync('git', ['-C', wt.path, 'commit', '-m', 'work'], { encoding: 'utf8' })
-    writeFileSync(join(wt.path, 'more.txt'), 'half an idea\n')
-
-    const r = pruneWorktrees({
-      repoRoot: root, base: 'main', olderThan: '14d', devMd,
-      ledgerTimes: { '106-old': OLD_LEDGER }, now: FUTURE_NOW, write: true, automatic: true,
-    })
-    // Still there, still dirty, still unpushed — and reported rather than silently skipped.
-    expect(existsSync(wt.path)).toBe(true)
-    expect(existsSync(join(wt.path, 'more.txt'))).toBe(true)
-    expect(r.warns.join('\n')).toContain('106-old')
-    expect(r.warns.join('\n')).toContain('kept:')
-    expect(r.actions.join('\n')).not.toContain('commit uncommitted work as wip')
-  })
 
   // Unpushed commits are work too. A worktree holding something nobody else has is not one to
   // take anything from, dependencies included.
@@ -310,7 +288,7 @@ describe('pruneWorktrees', () => {
 
     const r = pruneWorktrees({
       repoRoot: root, base: 'main', olderThan: '999d', devMd: `${devMd}\nworktree-deps-retention: 1d\n`,
-      ledgerTimes: { '106-old': OLD_LEDGER }, now: FUTURE_NOW, write: true, automatic: true,
+      ledgerTimes: { '106-old': OLD_LEDGER }, now: FUTURE_NOW, write: true,
     })
     expect(r.freed).not.toContain('106-old')
     expect(existsSync(join(deps, 'marker.txt'))).toBe(true)
@@ -329,7 +307,7 @@ describe('pruneWorktrees', () => {
 
     const r = pruneWorktrees({
       repoRoot: root, base: 'main', olderThan: '999d', devMd: `${devMd}\nworktree-deps-retention: 1d\n`,
-      ledgerTimes: { '106-old': OLD_LEDGER }, now: FUTURE_NOW, write: true, automatic: true,
+      ledgerTimes: { '106-old': OLD_LEDGER }, now: FUTURE_NOW, write: true,
     })
     expect(r.freed).not.toContain('106-old')
     expect(existsSync(join(wt.path, 'node_modules', 'patched', 'index.js'))).toBe(true)
@@ -343,7 +321,7 @@ describe('pruneWorktrees', () => {
     mkdirSync(join(wt.path, 'node_modules'), { recursive: true })
     const r = pruneWorktrees({
       repoRoot: root, base: 'main', olderThan: '999d', devMd: `${devMd}\nworktree-deps-retention: 1d\n`,
-      ledgerTimes: { '106-old': OLD_LEDGER }, now: FUTURE_NOW, write: true, automatic: true,
+      ledgerTimes: { '106-old': OLD_LEDGER }, now: FUTURE_NOW, write: true,
     })
     expect(r.warns.join('\n')).toContain('106-old')
     expect(r.warns.join('\n')).toContain('kept its dependencies')
@@ -362,97 +340,12 @@ describe('pruneWorktrees', () => {
     }
     pruneWorktrees({
       repoRoot: root, base: 'main', olderThan: '999d', devMd: `${devMd}\nworktree-deps-retention: 1d\n`,
-      ledgerTimes: { '106-one': OLD_LEDGER, '107-two': OLD_LEDGER }, now: FUTURE_NOW, write: true, automatic: true,
+      ledgerTimes: { '106-one': OLD_LEDGER, '107-two': OLD_LEDGER }, now: FUTURE_NOW, write: true,
     })
     expect(Object.keys(readDroppedDeps(root)).sort()).toEqual(['106-one', '107-two'])
   })
 
   // A closed issue is the clearest sign a worktree is finished, and it does not wait out a window
-  // meant for work that might still be wanted — but every refusal still applies to it.
-  test('a closed issue makes its worktree a candidate straight away, and still refuses dirty work', () => {
-    const root = repoWithRemote()
-    const wt = createWorktree({ repoRoot: root, issue: 106, slug: 'old', type: 'feat', base: 'main', devMd, home: root, write: true })
-    writeFileSync(join(wt.path, 'work.txt'), 'real work\n')
-    execFileSync('git', ['-C', wt.path, 'add', '.'], { encoding: 'utf8' })
-    execFileSync('git', ['-C', wt.path, 'commit', '-m', 'work'], { encoding: 'utf8' })
-    execFileSync('git', ['-C', wt.path, 'push', '-u', 'origin', 'HEAD'], { encoding: 'utf8' })
-    const soon = Date.now()
-
-    expect(pruneWorktrees({
-      repoRoot: root, base: 'main', olderThan: '14d', devMd, ledgerTimes: {}, issueStates: {}, now: soon, write: false, automatic: true,
-    }).candidates.find((c: { name: string }) => c.name === '106-old')).toBeUndefined()
-
-    const closed = pruneWorktrees({
-      repoRoot: root, base: 'main', olderThan: '14d', devMd, ledgerTimes: {},
-      issueStates: { '106-old': 'closed' }, now: soon, write: false, automatic: true,
-    })
-    expect(closed.candidates.find((c: { name: string; state: string }) => c.name === '106-old')?.state).toBe('abandoned')
-
-    // Uncommitted work outranks a closed issue every time.
-    writeFileSync(join(wt.path, 'notes.md'), 'half an idea\n')
-    const dirty = pruneWorktrees({
-      repoRoot: root, base: 'main', olderThan: '14d', devMd, ledgerTimes: {},
-      issueStates: { '106-old': 'closed' }, now: soon, write: true, automatic: true,
-    })
-    expect(existsSync(join(wt.path, 'notes.md'))).toBe(true)
-    expect(dirty.warns.join('\n')).toContain('106-old')
-  })
-
-  test('a paginated gh answer reads as one list', () => {
-    const bin = mkdtempSync(join(tmpdir(), 'vf-gh-'))
-    const fakeGh = (stdout: string) => {
-      const path = join(bin, 'gh')
-      writeFileSync(path, `#!/bin/sh\ncat <<'JSON'\n${stdout}\nJSON\n`, { mode: 0o755 })
-      return path
-    }
-    const page = (from: number) => JSON.stringify([{ number: from }, { number: from + 1 }])
-
-    // Two pages, printed back to back, are the one list the caller asked for.
-    expect(ghJson(['api', 'x'], { gh: fakeGh(`${page(1)}\n${page(3)}`) }))
-      .toEqual([{ number: 1 }, { number: 2 }, { number: 3 }, { number: 4 }])
-    // One page is still one page.
-    expect(ghJson(['api', 'x'], { gh: fakeGh(page(1)) })).toEqual([{ number: 1 }, { number: 2 }])
-    // A single object is untouched.
-    expect(ghJson(['api', 'x'], { gh: fakeGh('{"id":7}') })).toEqual({ id: 7 })
-    // Genuinely broken output is still broken, not half-read.
-    expect(() => ghJson(['api', 'x'], { gh: fakeGh('[{"number":1},') })).toThrow(/unparseable/)
-    // A valid page followed by a truncation message is not complete data.
-    expect(() => ghJson(['api', 'x'], { gh: fakeGh(`${page(1)}\nerror: gateway timeout`) })).toThrow(/unparseable/)
-    // Including a suffix that begins with a quote, which would otherwise be read as a string.
-    expect(() => ghJson(['api', 'x'], { gh: fakeGh(`${page(1)}\n"gateway timeout"`) })).toThrow(/unparseable/)
-    // Nor is anything before the first document.
-    expect(() => ghJson(['api', 'x'], { gh: fakeGh(`warning: rate limited\n${page(1)}`) })).toThrow(/unparseable/)
-    // Brackets inside strings are text, not structure.
-    expect(ghJson(['api', 'x'], { gh: fakeGh(JSON.stringify([{ body: '}}}] not json [[[{{{' }])) }))
-      .toEqual([{ body: '}}}] not json [[[{{{' }])
-
-    // This reads issue and comment bodies, which anybody with an account can write. Trying a parse
-    // at every bracket is quadratic, so a comment full of braces would cost seconds every poll.
-    const hostile = JSON.stringify([{ body: '}'.repeat(40_000) }])
-    const started = Date.now()
-    expect(ghJson(['api', 'x'], { gh: fakeGh(`${hostile}\n${hostile}`) })).toHaveLength(2)
-    expect(Date.now() - started).toBeLessThan(2_000)
-  })
-
-  test('a worktree a run is holding is left entirely alone', () => {
-    const root = repoWithRemote()
-    const wt = createWorktree({ repoRoot: root, issue: 106, slug: 'old', type: 'feat', base: 'main', devMd, home: root, write: true })
-    const deps = join(wt.path, 'node_modules')
-    mkdirSync(deps, { recursive: true })
-    writeFileSync(join(deps, 'marker.txt'), 'in use\n')
-
-    const r = pruneWorktrees({
-      repoRoot: root, base: 'main', olderThan: '1d', devMd: `${devMd}\nworktree-deps-retention: 1d\n`,
-      ledgerTimes: { '106-old': OLD_LEDGER }, now: FUTURE_NOW, write: true, automatic: true,
-      inUse: ['106'],
-    })
-    // An agent is reading it right now: not the worktree, not its dependencies, nothing.
-    expect(existsSync(wt.path)).toBe(true)
-    expect(existsSync(join(deps, 'marker.txt'))).toBe(true)
-    expect(r.freed).not.toContain('106-old')
-    expect(r.candidates.find((c: { name: string }) => c.name === '106-old')).toBeUndefined()
-  })
-
   test('a worktree with uncommitted work keeps its dependencies', () => {
     const root = repoWithRemote()
     const wt = createWorktree({ repoRoot: root, issue: 106, slug: 'old', type: 'feat', base: 'main', devMd, home: root, write: true })
@@ -618,7 +511,7 @@ describe('pruneWorktrees', () => {
     // And the pass the worker makes anyway says it every time, naming the command to run.
     const again = pruneWorktrees({
       repoRoot: root, base: 'main', olderThan: '999d', devMd: setup,
-      ledgerTimes: { '112-idle': OLD_LEDGER }, now: FUTURE_NOW, automatic: true,
+      ledgerTimes: { '112-idle': OLD_LEDGER }, now: FUTURE_NOW,
     })
     expect(again.warns.join('\n')).toContain('bun install --frozen-lockfile')
   })
@@ -636,30 +529,70 @@ describe('pruneWorktrees', () => {
     expect(warns.join('\n')).toContain('could not be read')
   })
 
-  // The unattended pass runs inside the worker's poll, and the only slow things in a prune are
-  // the network ones: a fetch against an unreachable remote, a credential helper waiting on a
-  // prompt nobody will answer. So it asks this disk and nothing else.
-  test('the unattended pass never goes to the network', () => {
+  // A squash merge lands the work and deletes the feature branch. Pushing on "no remote branch"
+  // alone would put that branch back — on a prune whose reported action says only "remove".
+  test('a prune never recreates a branch somebody deleted after a squash merge', () => {
     const root = repoWithRemote()
-    createWorktree({ repoRoot: root, issue: 113, slug: 'quiet', type: 'feat', base: 'main', devMd, home: root, write: true })
-    // The remote is made unreachable. A pass that fetches would say so; one that does not is
-    // silent about it and still reports what it can see here.
-    git(root, 'remote', 'set-url', 'origin', '/does/not/exist/at/all.git')
+    const wt = createWorktree({ repoRoot: root, issue: 111, slug: 'landed', type: 'feat', base: 'main', devMd, home: root, write: true })
+    writeFileSync(join(wt.path, 'feature.txt'), 'landed\n')
+    git(wt.path, 'add', '.')
+    git(wt.path, 'commit', '-m', 'feat: the work')
+    // Squashed onto main: the same content under a different commit, which is what a merge queue
+    // leaves behind. The feature branch is then gone from the remote — here it was never pushed
+    // at all, which reads exactly the same way.
+    writeFileSync(join(root, 'feature.txt'), 'landed\n')
+    // By name: `add .` in the main checkout would sweep in the worktree directory itself.
+    git(root, 'add', 'feature.txt')
+    git(root, 'commit', '-m', 'feat: the work (#111)')
+    git(root, 'push', 'origin', 'main')
 
-    const automatic = pruneWorktrees({
-      repoRoot: root, base: 'main', olderThan: '999d', devMd,
-      ledgerTimes: {}, now: FUTURE_NOW, automatic: true,
-    })
-    expect(automatic.actions.join('\n')).not.toContain('git fetch')
-    expect(automatic.warns.join('\n')).not.toContain('fetch')
+    const before = git(root, 'ls-remote', '--heads', 'origin')
+    expect(before).not.toContain('feat/111-landed')
+    const r = removeWorktree({ repoRoot: root, name: '111-landed', base: 'main', push: true, write: true })
+    expect(r.blocks).toEqual([])
+    expect(r.actions.join('\n')).not.toContain('git push')
+    // The one thing this is about: the deleted branch stays deleted.
+    expect(git(root, 'ls-remote', '--heads', 'origin')).not.toContain('feat/111-landed')
+  })
 
-    // A person's prune still refreshes the base, because a stale one calls a merged branch
-    // unmerged — and it reports the failure rather than judging on stale refs in silence.
-    const attended = pruneWorktrees({
-      repoRoot: root, base: 'main', olderThan: '999d', devMd,
-      ledgerTimes: {}, now: FUTURE_NOW,
+  // A deps-only prune leaves the checkout in place, so nothing ever routes through `restore`.
+  // The fact has to travel with the worktree instead, or a resumed checkout never names it.
+  test('a reclaimed worktree is marked as such wherever it is described', () => {
+    const root = repoWithRemote()
+    const wt = createWorktree({ repoRoot: root, issue: 112, slug: 'idle', type: 'feat', base: 'main', devMd, home: root, write: true })
+    writeFileSync(join(wt.path, 'work.txt'), 'work\n')
+    git(wt.path, 'add', '.')
+    git(wt.path, 'commit', '-m', 'work')
+    git(wt.path, 'push', '-u', 'origin', 'HEAD')
+    mkdirSync(join(wt.path, 'node_modules'), { recursive: true })
+    const setup = 'commands: check `true` · setup `bun install --frozen-lockfile`\nworktree-retention: 14d\nworktree-deps-retention: 1d\n'
+    pruneWorktrees({
+      repoRoot: root, base: 'main', olderThan: '999d', devMd: setup,
+      ledgerTimes: { '112-idle': OLD_LEDGER }, now: FUTURE_NOW, write: true,
     })
-    expect(attended.actions.join('\n')).toContain('git fetch')
+
+    // `list` is what a person and the CLI read.
+    const entry = listWorktrees({ repoRoot: root, base: 'main', withSize: false }).find((e: { name: string }) => e.name === '112-idle')
+    expect(entry?.depsDropped).toBe(true)
+    // And the pass the worker makes anyway says it every time, naming the command to run.
+    const again = pruneWorktrees({
+      repoRoot: root, base: 'main', olderThan: '999d', devMd: setup,
+      ledgerTimes: { '112-idle': OLD_LEDGER }, now: FUTURE_NOW,
+    })
+    expect(again.warns.join('\n')).toContain('bun install --frozen-lockfile')
+  })
+
+  // "The record could not be read" and "nothing was taken" are the same answer as a missing key,
+  // and must not be: the first leaves a checkout that cannot build looking untouched.
+  test('an unreadable record is reported, not read as nothing to do', () => {
+    const root = repoWithRemote()
+    // The directory the records live in, made a file: readdir fails with something other than
+    // ENOENT, which is the only code that means "nothing has been dropped here".
+    mkdirSync(join(root, '.vegastack', '.tmp', 'worker'), { recursive: true })
+    writeFileSync(join(root, '.vegastack', '.tmp', 'worker', 'deps-dropped'), 'not a directory\n')
+    const warns: string[] = []
+    expect(noteMissingDependencies({ repoRoot: root, name: 'anything', path: '/w', devMd, warns })).toBe(true)
+    expect(warns.join('\n')).toContain('could not be read')
   })
 
   // Locked is one of the three refusals that is never lifted, and it has to cover the
@@ -683,7 +616,7 @@ describe('pruneWorktrees', () => {
       repoRoot: root, base: 'main', olderThan: '14d',
       // Both windows well past, so nothing here is spared by a clock.
       devMd: `${devMd}\nworktree-deps-retention: 1d\n`,
-      ledgerTimes: { '108-held': OLD_LEDGER }, now: FUTURE_NOW, write: true, automatic: true,
+      ledgerTimes: { '108-held': OLD_LEDGER }, now: FUTURE_NOW, write: true,
     })
     expect(r.candidates.find((c: { name: string }) => c.name === '108-held')).toBeUndefined()
     expect(existsSync(wt.path)).toBe(true)
@@ -701,7 +634,7 @@ describe('pruneWorktrees', () => {
     spawnSync('git', ['worktree', 'unlock', wt.path], { cwd: root })
     const after = pruneWorktrees({
       repoRoot: root, base: 'main', olderThan: '14d', devMd: `${devMd}\nworktree-deps-retention: 1d\n`,
-      ledgerTimes: { '108-held': OLD_LEDGER }, now: FUTURE_NOW, write: true, automatic: true,
+      ledgerTimes: { '108-held': OLD_LEDGER }, now: FUTURE_NOW, write: true,
     })
     expect(after.freed).toContain('108-held')
   })

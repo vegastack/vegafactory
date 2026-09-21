@@ -1603,57 +1603,6 @@ describe('the command', () => {
     expect(unit).not.toContain('BEGIN')
   })
 
-  // Nothing tells this pass which checkouts a person is sitting in — the run map is blind to
-  // attended sessions, an mtime does not move for somebody reading, and git's worktree lock is not
-  // reference-counted. So it names what could go and removes nothing.
-  test('the pass names idle worktrees and never asks to remove them', async () => {
-    const asked: string[][] = []
-    // A real prune's answer, not an empty one: a stub that says nothing lets the names, the
-    // refusals and the advice all disappear while the test stays green.
-    const answer = JSON.stringify({
-      actions: ['9-done: git worktree remove'],
-      warns: ['8-wip: uncommitted work — kept'],
-      blocks: ['7-locked: locked — kept'],
-      candidates: [{ name: '9-done', removable: true }, { name: '8-wip', removable: false }],
-      droppable: ['9-done', '6-idle'],
-    })
-    const result = await run(['run'], {
-      worktreeScript: (args: string[]) => { asked.push(args); return { status: 0, stdout: answer } },
-      sleep: async () => { process.emit('SIGTERM' as NodeJS.Signals) },
-    })
-    expect(asked.length).toBeGreaterThan(0)
-    for (const args of asked) {
-      expect(args).toContain('--automatic')
-      expect(args).not.toContain('--write')
-    }
-    // Every line the script gave back reaches the log — what would go, and what it refused to
-    // touch. A pass that reported only its actions would hide exactly the checkouts a person
-    // needs to hear about.
-    expect(result.text).toContain('worktrees: 9-done: git worktree remove')
-    expect(result.text).toContain('worktrees: 8-wip: uncommitted work — kept')
-    expect(result.text).toContain('worktrees: 7-locked: locked — kept')
-    // Two distinct worktrees, not three: 9-done is both a removable candidate and droppable.
-    // And the advice is a command the CLI accepts.
-    expect(result.text).toContain('worktrees: 2 could be reclaimed — run `vegafactory worktree prune --write`')
-  })
-
-  // A notice about a checkout that cannot build is only useful to somebody who has not started
-  // building in it. Reported after `poll`, it landed a pass behind the agent it was meant for.
-  test('housekeeping is reported before any agent is started', async () => {
-    gh.addIssue({ number: 1, labels: ['queued', 'small'] })
-    const answer = JSON.stringify({ warns: ['1-thing: dependencies were reclaimed while it was idle'] })
-    const result = await run(['run', '--once'], {
-      worktreeScript: () => ({ status: 0, stdout: answer }),
-      runStep: (async () => ({ outcome: 'done' as const, note: '', ms: 1 })) as RunStep,
-    })
-    const lines = result.text.split('\n')
-    const said = lines.findIndex((line) => line.includes('dependencies were reclaimed'))
-    const started = lines.findIndex((line) => line.includes('#1 implement started'))
-    expect(said).toBeGreaterThanOrEqual(0)
-    expect(started).toBeGreaterThanOrEqual(0)
-    expect(said).toBeLessThan(started)
-  })
-
   // Everything under here is agent output and the token a run was given, inside the repository
   // where any local account can reach it. One helper, so no writer can be the one that forgets.
   test('the worker\'s records live in an owner-only directory, however it got there', () => {

@@ -1,9 +1,8 @@
 import { describe, expect, test } from 'bun:test'
-import { spawnSync } from 'node:child_process'
 import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { WORKTREE_SCRIPT_TIMEOUT_MS, worktreeScriptSpawn, parseWorktreeArgs, recordRepoRoot, runWorktree, tidyWorktrees } from '../src/worktree.ts'
+import { parseWorktreeArgs, recordRepoRoot, runWorktree } from '../src/worktree.ts'
 
 describe('parseWorktreeArgs', () => {
   test('every verb acts by default and --dry-run previews', () => {
@@ -56,103 +55,20 @@ describe('recordRepoRoot', () => {
   })
 })
 
-// The seam the unit tests could not reach: `tidyWorktrees` builds an argument list, and the script
-// parses it. A flag missing from the parser's boolean list swallows the next argument, which made
-// the worker's whole clean-up a silent no-op while every direct test of `pruneWorktrees` passed.
-describe('the worker asks for the narrower pass, and the script hears it', () => {
-  test('the arguments carry --automatic, --write and the issues in use', () => {
-    const seen: string[][] = []
-    tidyWorktrees('/repo', {
-      write: true, inUse: ['7', '12'],
-      spawn: (args) => { seen.push(args); return { status: 0, stdout: '{}' } },
-    })
-    expect(seen[0]).toEqual(['prune', '--automatic', '--write', '--in-use', '7,12', '--json'])
-    // And the worker asks without `--write`, so its pass names what could go and removes nothing.
-    // Nothing tells it which checkouts a person is sitting in, so it does not act on a guess.
-    const passed: string[][] = []
-    tidyWorktrees('/repo', { inUse: ['7'], spawn: (args) => { passed.push(args); return { status: 0, stdout: '{}' } } })
-    expect(passed[0]).not.toContain('--write')
-    // `--automatic` must be a flag the script treats as a boolean. If it takes a value it eats
-    // `--write`, and the pass runs as a dry run that reclaims nothing.
-    const script = readFileSync(join(import.meta.dir, '../../../skills/dev/dev-implement/scripts/worktree.mjs'), 'utf8')
-    const booleans = /parseFlags\(argv, \[([^\]]*)\]\)/.exec(script)?.[1] ?? ''
-    expect(booleans).toContain("'automatic'")
-    expect(booleans).toContain("'write'")
-  })
-
-  test('nothing in use means no --in-use, and a dry run asks for no write', () => {
-    const seen: string[][] = []
-    tidyWorktrees('/repo', { spawn: (args) => { seen.push(args); return { status: 0, stdout: '{}' } } })
-    expect(seen[0]).toEqual(['prune', '--automatic', '--json'])
-  })
-
-  // The worker makes this call synchronously inside its own poll, and the script talks to git and
-  // to GitHub — a fetch against an unreachable remote, a credential helper waiting on a prompt
-  // nobody will answer. Unbounded, one stall holds the loop, the step timers and a shutdown.
-  test('a worktree script that never finishes is killed and reported, not waited on', () => {
-    const script = join(mkdtempSync(join(tmpdir(), 'hang-')), 'hang.mjs')
-    // No output and no exit: exactly the shape of a stalled child.
-    writeFileSync(script, 'setTimeout(() => {}, 60_000)\n')
-    const before = process.env.VSK_WORKTREE_SCRIPT
-    process.env.VSK_WORKTREE_SCRIPT = script
-    try {
-      // A directory that exists, so the child really starts and really hangs — pointing this at a
-      // path that is not there makes spawnSync fail before the script runs, and the test would
-      // then pass with no timeout in the product at all.
-      const started = Date.now()
-      const result = tidyWorktrees(mkdtempSync(join(tmpdir(), 'repo-')), { spawn: worktreeScriptSpawn(300) })
-      expect(Date.now() - started).toBeLessThan(30_000)
-      // And it says so rather than parsing an empty answer as "nothing to report".
-      expect(result.blocks.join('\n')).toContain('did not finish')
-      expect(result.actions).toEqual([])
-    } finally {
-      if (before === undefined) delete process.env.VSK_WORKTREE_SCRIPT
-      else process.env.VSK_WORKTREE_SCRIPT = before
-    }
-    // The bound the product itself uses: long enough for a real fetch on a slow link.
-    expect(WORKTREE_SCRIPT_TIMEOUT_MS).toBeGreaterThanOrEqual(30_000)
-    expect(WORKTREE_SCRIPT_TIMEOUT_MS).toBeLessThanOrEqual(5 * 60_000)
-  })
-
-  // The command the worker tells a person to run has to be one the CLI accepts, and it is only
-  // worth saying when there is something to act on.
-  test('the reclaim advice parses, and only a real candidate triggers it', () => {
-    // `prune` acts by default; `--dry-run` is what holds it back. `--write` is not an option.
+// `prune` acts by default and `--dry-run` is what holds it back — the reverse of every other
+// write verb, and the reason the reference and the advice both name the bare command.
+describe('prune acts, and --dry-run is what holds it back', () => {
+  test('the flags mean what the references say they mean', () => {
     expect(() => parseWorktreeArgs(['prune'])).not.toThrow()
     expect(parseWorktreeArgs(['prune']).write).toBe(true)
     // `--write` says what is already true, and is accepted because every reference names it.
     expect(parseWorktreeArgs(['prune', '--write']).write).toBe(true)
     expect(parseWorktreeArgs(['prune', '--write', '--dry-run']).write).toBe(false)
-
-    // A pass whose only `action` is its own fetch has nothing to reclaim.
-    const fetchOnly = tidyWorktrees('/repo', {
-      spawn: () => ({ status: 0, stdout: JSON.stringify({ actions: ['origin: git fetch origin main'], candidates: [] }) }),
-    })
-    expect(fetchOnly.reclaimable).toBe(0)
-
-    // Only a candidate the safe-to-remove test cleared counts.
-    const mixed = tidyWorktrees('/repo', {
-      spawn: () => ({ status: 0, stdout: JSON.stringify({ candidates: [{ name: 'a', removable: true }, { name: 'b', removable: false }] }) }),
-    })
-    expect(mixed.reclaimable).toBe(1)
-
-    // And a worktree between the two windows has dependencies to reclaim and no removal candidate
-    // at all — reporting that and then offering nothing to do about it is the bug this guards.
-    const depsOnly = tidyWorktrees('/repo', {
-      spawn: () => ({ status: 0, stdout: JSON.stringify({ actions: ['106-old: drop node_modules'], candidates: [], droppable: ['106-old'] }) }),
-    })
-    expect(depsOnly.reclaimable).toBe(1)
-
-    // One worktree past both windows is in both lists, and is still one worktree.
-    const both = tidyWorktrees('/repo', {
-      spawn: () => ({ status: 0, stdout: JSON.stringify({ candidates: [{ name: 'a', removable: true }], droppable: ['a'] }) }),
-    })
-    expect(both.reclaimable).toBe(1)
-  })
-
-  test('unreadable output is a warning, not a crash in the middle of a pass', () => {
-    const result = tidyWorktrees('/repo', { spawn: () => { throw new Error('script missing') } })
-    expect(result.warns.join('\n')).toContain('script missing')
-    expect(result.freed).toEqual([])
+    // A flag the parser does not know is a boolean swallows the next argument. `--write` is in
+    // that list, and a prune whose `--write` was eaten silently reclaims nothing.
+    const script = readFileSync(join(import.meta.dir, '../../../skills/dev/dev-implement/scripts/worktree.mjs'), 'utf8')
+    const booleans = /parseFlags\(argv, \[([^\]]*)\]\)/.exec(script)?.[1] ?? ''
+    expect(booleans).toContain("'write'")
+    expect(booleans).toContain("'force'")
   })
 })

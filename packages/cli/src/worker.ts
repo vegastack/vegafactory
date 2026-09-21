@@ -39,7 +39,6 @@ import { defaultBranch } from './guard-rules.ts'
 import { stateOf, type State } from './labels.ts'
 import { lintPlan, normalizeGroupPath, parseIndependentGroups, sharedByEveryChild } from '../../../skills/dev/dev-plan/scripts/plan-lint.mjs'
 import { appKeyPath as workerAppKey } from './home.ts'
-import { tidyWorktrees } from './worktree.ts'
 
 // How often the board is read, how many steps run at once, and how long one step may take.
 export const POLL_MS = 2 * 60_000
@@ -1937,8 +1936,6 @@ export interface CliDeps {
   start?: ProcessStart
   now?: () => number
   sleep?: (ms: number) => Promise<void>
-  // How the worktree script is run, so a test can watch the tidy-up without a real checkout.
-  worktreeScript?: (args: string[], cwd?: string) => { status: number; stdout: string }
   cli?: string[]
 }
 
@@ -2215,25 +2212,6 @@ export async function runWorker(argv: string[], deps: CliDeps = {}): Promise<num
           pollDeps.caps = still.entry.caps
           stepOutlivesToken(still.entry.caps)
           await identity?.freshen()
-          // Housekeeping runs before anything is started, not after. It only ever *reports*, and the
-          // thing it most needs to report — a checkout whose dependencies were reclaimed while it
-          // was idle — is only useful to somebody who has not begun building in it yet. After
-          // `poll`, the notice landed in the log one pass behind the agent it was meant for.
-          //
-          // It rides in the pass the worker already makes, so there is no second schedule to reason
-          // about, and it asks this disk and nothing else. Reclaiming on its own would need the
-          // pass to know which checkouts a person is sitting in, and nothing tells it: the run map
-          // is blind to attended sessions, a file's mtime does not move for somebody reading and
-          // building, and git's worktree lock is not reference-counted, so two sessions in one
-          // checkout have the first to end release the other's hold. Naming what could go costs
-          // nothing and is wrong about nothing; `vegafactory worktree prune --write` is how a
-          // person reclaims it, and that call knows who asked.
-          const busy = [...inflight.values()].filter((run) => !run.settled).map((run) => `${run.candidate.number}`)
-          const tidied = tidyWorktrees(root, { inUse: busy, spawn: deps.worktreeScript })
-          for (const line of [...tidied.actions, ...tidied.warns, ...tidied.blocks]) note(`worktrees: ${line}`)
-          // `prune` acts by default and `--dry-run` is what holds it back, so the command to give
-          // is the bare one. And only when there is something to act on.
-          if (tidied.reclaimable) note(`worktrees: ${tidied.reclaimable} could be reclaimed — run \`vegafactory worktree prune --write\``)
           for (const candidate of await poll(pollDeps, inflight)) note(`#${candidate.number} ${candidate.action} started`)
         } catch (error) {
           note(`poll failed: ${(error as Error).message}`)

@@ -796,13 +796,9 @@ export function rescueWork({ path, branch, name, remote = 'origin' }) {
 // here the retention window is what lifts the not-merged rule: the pushed
 // branch keeps the work and `restore` brings the directory back. Uncommitted,
 // unpushed and locked still keep it.
-// `automatic` is the unattended pass, and it is a narrower thing than the prune a person runs.
-// A person asked, and can be told "I saved your work on a branch first". A background pass has
-// nobody to tell, so it never pushes, never commits anything as `wip`, and never removes a
-// worktree it had to rescue: anything dirty or unpushed is reported and left exactly as it is.
-// `inUse` names the worktrees a run currently holds; those are skipped whole, dependencies
-// included, because an agent is reading them right now.
-export function pruneWorktrees({ repoRoot, base, olderThan, devMd, ledgerTimes = {}, issueStates = {}, now = Date.now(), write = false, remote = 'origin', automatic = false, inUse = [] }) {
+// Whatever is kept is said out loud rather than silently passed over: "it was skipped" and "it
+// was not there" read the same in a list otherwise.
+export function pruneWorktrees({ repoRoot, base, olderThan, devMd, ledgerTimes = {}, issueStates = {}, now = Date.now(), write = false, remote = 'origin' }) {
   const blocks = [];
   const warns = [];
   const actions = [];
@@ -813,13 +809,7 @@ export function pruneWorktrees({ repoRoot, base, olderThan, devMd, ledgerTimes =
   const candidates = [];
   const freed = [];
   const droppable = [];
-// The unattended pass never goes to the network. A fetch and the board reads are the only slow
-  // things here, and they are what a stall would be: an unreachable remote, a credential helper
-  // waiting on a prompt nobody will answer. This pass runs inside the worker's poll, so a stall
-  // holds the loop — and it only ever *reports*, so stale refs cost it nothing but candidates it
-  // declines to name. That is the direction this already fails in: a stale base calls a merged
-  // branch unmerged, which keeps a worktree rather than removing one.
-  if (!automatic) refreshBase({ repoRoot, base, remote, actions, warns });
+  refreshBase({ repoRoot, base, remote, actions, warns });
   for (const entry of inventory(repoRoot)) {
     const branch = entry.branch;
     const lastCommitAt = branch ? (git(repoRoot, ['log', '-1', '--format=%cI', branch]).out || null) : null;
@@ -847,15 +837,11 @@ export function pruneWorktrees({ repoRoot, base, olderThan, devMd, ledgerTimes =
     // prune leaves the checkout in place, so nothing routes through `restore` to say it there.
     const waiting = dependencyNotice(entry.name, droppedAlready, devMd);
     if (waiting) warns.push(at(entry.name, waiting));
-    // A run is using it, so nothing here is idle and nothing here is touched. The caller names
-    // issues, because that is what it holds; a worktree is `<issue>-<slug>`, so the issue number
-    // is the part in front of the first dash.
-    if (inUse.includes(String(entry.name).split('-')[0])) continue;
     // `parked` is a branch nobody is on; `merged` and `abandoned` are the other two ways a
-    // worktree stops being needed. Anything else is kept — and in the unattended pass, said out
-    // loud, because "it was skipped" and "it was not there" look the same in a log otherwise.
+    // worktree stops being needed. Anything else is kept, and a lock is said out loud: it is the
+    // one refusal that looks like nothing at all from the outside.
     if (!['parked', 'merged', 'abandoned'].includes(state)) {
-      if (automatic && entry.locked) warns.push(at(entry.name, 'kept: locked'));
+      if (entry.locked) warns.push(at(entry.name, 'kept: locked'));
       continue;
     }
     // Dependencies go on the shorter window, and on exactly the conditions that protect the
@@ -921,16 +907,6 @@ export function pruneWorktrees({ repoRoot, base, olderThan, devMd, ledgerTimes =
     });
   }
   for (const candidate of candidates) {
-    // The unattended pass reports what it will not touch, rather than saving it somewhere and
-    // removing it. Work nobody has pushed is the operator's to decide about.
-    if (automatic && (candidate.rescuable || candidate.pushable)) {
-      warns.push(at(candidate.name, 'kept: ' + (candidate.rescuable ? 'uncommitted work here' : 'commits not on the remote')));
-      continue;
-    }
-    if (automatic && !candidate.removable) {
-      warns.push(at(candidate.name, 'kept: ' + (candidate.reason ?? 'not safe to remove')));
-      continue;
-    }
     if (!candidate.removable && !candidate.pushable && !candidate.rescuable) continue;
     if (candidate.rescuable) {
       actions.push(at(candidate.name, 'commit uncommitted work as wip on ' + candidate.branch + ' and push it'));
@@ -947,7 +923,7 @@ export function pruneWorktrees({ repoRoot, base, olderThan, devMd, ledgerTimes =
     }
     actions.push(at(candidate.name, (candidate.pushable ? 'push the branch, then re-check for removal after ' : 'remove after ') + candidate.ageDays + ' quiet days'));
     if (!write) continue;
-    const removed = removeWorktree({ repoRoot, name: candidate.name, base, force: true, push: !automatic, write: true, remote });
+    const removed = removeWorktree({ repoRoot, name: candidate.name, base, force: true, push: true, write: true, remote });
     if (removed.blocks.length > 0) {
       warns.push(at(candidate.name, 'kept after all: ' + removed.blocks[0]));
       candidate.removable = false;
@@ -1193,19 +1169,12 @@ function runVerb(verb, flags) {
     const warns = [];
     const repo = flags.repo || knobLine(devMd, 'repo')?.split('·')[0].trim() || null;
     const names = inventory(repoRoot).map((entry) => entry.name);
-    // Same reason as the fetch: the unattended pass asks this disk and nothing else, because it
-    // runs inside the worker's poll and only ever reports. Without the ledger every worktree is
-    // aged by its last commit alone, and without the board a closed issue waits out the ordinary
-    // window — both of which name fewer candidates, never more.
-    const local = flags.automatic === true;
-    const ledgerTimes = repo && !local ? gatherLedgerTimes({ repo, names, warns }) : {};
+    const ledgerTimes = repo ? gatherLedgerTimes({ repo, names, warns }) : {};
     // The board already knows which issues are closed, and `list` reads it for these same names.
     // A worktree whose issue is closed is finished, whatever its dates say.
-    const issueStates = repo && !local ? gatherGithubFacts({ repo, names, warns }).issueStates : {};
+    const issueStates = repo ? gatherGithubFacts({ repo, names, warns }).issueStates : {};
     const pruned = pruneWorktrees({
       repoRoot, base, olderThan: flags['older-than'], devMd, ledgerTimes, issueStates, now: Date.now(), write: shared.write,
-      automatic: local,
-      inUse: String(flags['in-use'] ?? '').split(',').map((name) => name.trim()).filter(Boolean),
     });
     return { ...pruned, warns: [...warns, ...pruned.warns] };
   }
@@ -1248,7 +1217,7 @@ const invokedDirectly = process.argv[1] && resolve(process.argv[1]) === fileURLT
 if (invokedDirectly) {
   const argv = process.argv.slice(2);
   const verb = argv.find((arg) => !arg.startsWith('--')) ?? '';
-  const flags = parseFlags(argv, ['json', 'write', 'force', 'push', 'all', 'automatic', 'plan', 'mark']);
+  const flags = parseFlags(argv, ['json', 'write', 'force', 'push', 'all']);
   let outcome;
   try {
     outcome = runVerb(verb, flags);

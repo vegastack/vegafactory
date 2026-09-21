@@ -126,38 +126,12 @@ export function defaultRegistryPath(options: HomeOptions = {}): string {
   return worktreesPath(options)
 }
 
-// A backstop on the worker's housekeeping call, and on nothing else.
-//
-// That pass asks this disk and nothing else — `--automatic` makes no fetch and no board read, for
-// exactly this reason — so it is local git commands on a few directories and there is nothing in
-// it that legitimately takes minutes. It is also read-only: `--write` is never passed, so a pass
-// cut short here has changed nothing and the next one simply asks again.
-//
-// It deliberately does *not* apply to the commands a person runs. `prune --write` on a large
-// checkout can honestly take longer than this, and it removes directories as it goes — killing
-// that halfway is worse than waiting for it.
-export const WORKTREE_SCRIPT_TIMEOUT_MS = 60_000
-
-// The bound is a parameter so a test can prove this exact code against a child that hangs,
-// rather than waiting out the real one or writing its own copy of the call. `0` means no bound,
-// which is what an attended command gets.
-export function worktreeScriptSpawn(timeoutMs: number) {
-  return (args: string[], cwd?: string): SpawnResult => {
-    const packageRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..')
-    const script = process.env.VSK_WORKTREE_SCRIPT || join(packageRoot, 'skill', 'dev-implement', 'scripts', 'worktree.mjs')
-    const run = spawnSync(process.execPath, [script, ...args], { cwd, encoding: 'utf8', ...(timeoutMs > 0 ? { timeout: timeoutMs, killSignal: 'SIGKILL' as const } : {}) })
-    // A killed run has no usable output, and its partial stdout would parse as "nothing to
-    // report" — which is the one answer a stalled housekeeping pass must not give.
-    if (run.error || run.signal) {
-      return { status: 2, stdout: JSON.stringify({ blocks: [`the worktree script did not finish: ${run.error?.message ?? run.signal}`] }) }
-    }
-    return { status: run.status ?? 2, stdout: `${run.stdout ?? ''}${run.stderr ?? ''}` }
-  }
+function defaultSpawn(args: string[], cwd?: string): SpawnResult {
+  const packageRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..')
+  const script = process.env.VSK_WORKTREE_SCRIPT || join(packageRoot, 'skill', 'dev-implement', 'scripts', 'worktree.mjs')
+  const run = spawnSync(process.execPath, [script, ...args], { cwd, encoding: 'utf8' })
+  return { status: run.status ?? 2, stdout: `${run.stdout ?? ''}${run.stderr ?? ''}` }
 }
-
-// Attended commands are unbounded; only the worker's own pass carries the backstop.
-const defaultSpawn = worktreeScriptSpawn(0)
-const housekeepingSpawn = worktreeScriptSpawn(WORKTREE_SCRIPT_TIMEOUT_MS)
 
 interface ScriptResult {
   ok?: boolean
@@ -198,45 +172,6 @@ function parseScriptOutput(stdout: string): ScriptResult {
     return JSON.parse(stdout) as ScriptResult
   } catch {
     return { blocks: [`the worktree script returned unreadable output: ${stdout.trim().slice(0, 400)}`] }
-  }
-}
-
-// The tidy-up the worker does inside its own pass, rather than on a schedule of its own. It is the
-// same `prune` a person runs, through the same script and the same refusals: nothing dirty,
-// unpushed or locked is ever removed, and whatever is kept comes back as a line to report instead
-// of being silently skipped.
-export function tidyWorktrees(
-  repoRoot: string,
-  options: { write?: boolean; inUse?: string[]; spawn?: (args: string[], cwd?: string) => SpawnResult } = {},
-): { actions: string[]; warns: string[]; blocks: string[]; freed: string[]; reclaimable: number } {
-  const spawn = options.spawn ?? housekeepingSpawn
-  // `--automatic` is the narrower pass: it never pushes and never commits anything as `wip`, and
-  // it reports whatever it will not touch. The worker calls it without `--write`, so it removes
-  // nothing at all — see the note at its call site. `--in-use` names the *issues* a run is holding
-  // right now; a worktree is `<issue>-<slug>`, and the script matches on the number in front.
-  const args = [
-    'prune', '--automatic', ...(options.write ? ['--write'] : []),
-    ...((options.inUse ?? []).length ? ['--in-use', (options.inUse ?? []).join(',')] : []),
-    '--json',
-  ]
-  try {
-    const run = spawn(args, repoRoot)
-    const result = parseScriptOutput(run.stdout) as ScriptResult & { freed?: string[]; droppable?: string[] }
-    // Counted from the candidates, not from `actions`: every remote-backed prune puts its own
-    // `git fetch` in there, so a pass with nothing to reclaim would still look like it had work.
-    // The union, not the sum: one clean worktree past both windows is in `droppable` *and* a
-    // removable candidate, and counting twice reports "2 could be reclaimed" for one worktree.
-    const reclaimable = new Set([
-      ...(result.candidates ?? []).filter((candidate) => candidate.removable).map((candidate) => candidate.name),
-      ...(result.droppable ?? []),
-    ]).size
-    return {
-      actions: result.actions ?? [], warns: result.warns ?? [],
-      blocks: result.blocks ?? [], freed: result.freed ?? [], reclaimable,
-    }
-  } catch (error) {
-    // Tidying is housekeeping. A pass that could not do it still worked the board.
-    return { actions: [], warns: [`worktrees could not be tidied: ${(error as Error).message}`], blocks: [], freed: [], reclaimable: 0 }
   }
 }
 

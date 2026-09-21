@@ -46,8 +46,6 @@ Derived from git plus GitHub on every read, never stored — a second source of 
 
 **Dependencies go first.** `worktree-deps-retention:` (default `3d`, and never read as longer than `worktree-retention:`) drops a worktree's `node_modules` while it is idle, on the same conditions that protect the worktree itself: never while anything is uncommitted, never while it is locked, never while a run is holding it. Only `node_modules` is removed, by name — the code, the branch and the history stay where they are, and a record of the drop lives beside the repository's worker state, so a `restore` or a fresh checkout of that worktree says which `setup` command puts them back. A worktree that never had dependencies installs nothing, which is what keeps a docs-only issue cheap.
 
-**The worker's own pass is narrower than a person's prune.** It runs with `--automatic`, which never pushes a branch and never commits anything as `wip`: a person asked and can be told "your work is on a branch", while a background pass has nobody to tell. Anything dirty, unpushed or locked is reported through the worker's notes and left exactly as it is, and `--in-use` names the issues whose worktrees a run is holding so they are skipped whole.
-
 ## Harness facts that bear on a worktree run
 
 - **Claude Code hooks:** the `CLAUDE_PROJECT_DIR` variable (written with the usual shell-expansion sigils, omitted here because they trip SkillSpector's bounded parser) stays at the launch root, while the hook input's `cwd` follows the worktree — hooks that need to know where the work is read `cwd`.
