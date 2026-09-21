@@ -21,6 +21,7 @@ npx @vegastack/vegafactory skills list
 | Command | What it does |
 |---|---|
 | `init [--org ORG]` | Set up this machine and repository; exits 1 when a step fails |
+| `update [--dry-run]` | Install the latest published CLI globally with npm; `--dry-run` reports what it would do and installs nothing |
 | `skills list` | Show the bundled skills, by group |
 | `skills update [selection]` | Bring installed skills up to date; keeps locally edited copies unless `--force` |
 | `skills add <selection>` | Install skills into the agent directories |
@@ -141,7 +142,7 @@ Install each skill globally or per project, not both: in Claude Code a personal 
 
 ## Integrity and network
 
-The package ships a checksum manifest, checked at install and by `verify`. `add`, `verify` and `remove` work offline. Network calls: `doctor`'s version check and `init`'s `npm install -g` reach the npm registry; `issue` commands call the GitHub API through your `gh` login (conditional requests, so an unchanged issue costs almost nothing); `sync` fetches your own control room with git, and `stats push` commits usage counts to that same repository with your `gh` login. VegaFactory sends nothing anywhere else.
+The package ships a checksum manifest, checked at install and by `verify`. `add`, `verify` and `remove` work offline. Network calls: `doctor`'s version check, `init`'s `npm install -g` and `update` reach the npm registry; an attended session start and an idle worker ask the registry for the published version, at most once an hour per machine, and under `vegafactory-update: auto` run `npm install -g` when it is newer; `issue` commands call the GitHub API through your `gh` login (conditional requests, so an unchanged issue costs almost nothing); `sync` fetches your own control room with git, and `stats push` commits usage counts to that same repository with your `gh` login. The version *check* goes to npm's own registry over TLS. The install that follows is a plain `npm install -g`, so it resolves through this machine's own npm configuration — a corporate mirror or a scope mapping is honoured, exactly as it would be for any other global install. `vegafactory-update: off` stops the automatic checks — the session start and the worker — and nothing installs itself; `update`, `doctor` and `init` are commands a person runs, and they still reach npm when asked. VegaFactory sends nothing anywhere else.
 
 ## Requirements
 

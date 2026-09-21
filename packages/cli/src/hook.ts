@@ -5,7 +5,7 @@
 // exit 0 on any error; only pre-tool can deny, and its guard fails closed.
 import { spawn, spawnSync } from 'node:child_process'
 import { existsSync, readFileSync, rmSync } from 'node:fs'
-import { hostname } from 'node:os'
+import { homedir, hostname } from 'node:os'
 import { basename, dirname, join } from 'node:path'
 import { claimsOf, holderOf, ownerId, trustedFactory, HEARTBEAT_EVERY_MS, type Holder } from './claim.ts'
 import { defaultRunner, type GhRunner } from './gh.ts'
@@ -14,6 +14,7 @@ import { cacheDir, readBody, readState, replaceFile, syncIssue, withLock } from 
 import { askText, learningsPath, pendingNote } from './learning.ts'
 import { detectRepo, evidenceChangedAt, findValidAck, latestOfType, permissionLookup, repoRoot, snapshot } from './issue.ts'
 import { stateOf } from './labels.ts'
+import { effectiveUpdateMode, installArgs, latestPublishedVersion, maintainSelfUpdate, packageVersion, readUpdateNote, SELF_UPDATE_LIMIT_S, writeUpdateNote, type LatestVersion } from './self-update.ts'
 
 export const HOOK_EVENTS = ['session-start', 'prompt', 'pre-tool', 'post-tool', 'stop', 'session-end'] as const
 export type HookEvent = typeof HOOK_EVENTS[number]
@@ -325,10 +326,15 @@ export interface HookDeps {
   now: () => number
   out: (text: string) => void
   // Starts a process that outlives the hook; returns its pid when known.
-  detach: (command: string[], cwd: string) => number | undefined | void
+  detach: (command: string[], cwd: string, limitSeconds?: number) => number | undefined | void
   // How to run this CLI again: the runtime and the entry file.
   cli: string[]
   host: string
+  latest: LatestVersion
+  // Where this machine keeps its own files. Injected so a test can point it somewhere harmless:
+  // the update note lives here, and a test that reached the real home would rewrite what the
+  // operator's own machine believes about the last registry check.
+  home: string
 }
 
 export const DETACHED_LIMIT_S = 60
@@ -345,8 +351,8 @@ export function detachBounded(command: string[], cwd: string, limitSeconds = DET
 }
 
 export const defaultDeps = (): HookDeps => ({
-  runner: defaultRunner, now: Date.now, out: (text) => process.stdout.write(text + '\n'), detach: (command, cwd) => detachBounded(command, cwd),
-  cli: [process.execPath, process.argv[1]!], host: hostname(),
+  runner: defaultRunner, now: Date.now, out: (text) => process.stdout.write(text + '\n'), detach: (command, cwd, limit) => detachBounded(command, cwd, limit),
+  cli: [process.execPath, process.argv[1]!], host: hostname(), latest: latestPublishedVersion, home: homedir(),
 })
 
 // Secrets never leave the machine in an automatic commit: file names, then the added lines.
@@ -568,11 +574,74 @@ function collectStats(event: HookEvent, cwd: string, deps: HookDeps) {
   if (event === 'session-start') deps.detach([...deps.cli, 'stats', 'push'], cwd)
 }
 
-function advisory(event: HookEvent, harness: Harness, payload: Record<string, unknown>, deps: HookDeps): void {
+// A background install finishes after the session that started it has moved on, so the session
+// that comes next is the one that can say whether it worked. The note records what was being
+// attempted; this reads it back against the version actually running now.
+function finishedUpdate(now: number, home: { home: string }): string | null {
+  const note = readUpdateNote(home)
+  if (!note.startedFrom || typeof note.startedAt !== 'number') return null
+  // Only the attempt is consumed. Clearing the whole note would drop `checkedAt` and `latest`
+  // too, and the very next session would ask npm again inside the hour this note exists to hold.
+  const keep = () => writeUpdateNote({ checkedAt: note.checkedAt, latest: note.latest, attemptedAt: note.attemptedAt }, home)
+  if (packageVersion !== note.startedFrom) {
+    keep()
+    return `vegafactory updated ${note.startedFrom} → ${packageVersion} in the background since the last session`
+  }
+  // Still on the old version well past npm's own bound: the install did not land. Say so once
+  // rather than every session forever, and let the next check start again from scratch.
+  if (now - note.startedAt > SELF_UPDATE_LIMIT_S * 2 * 1000) {
+    keep()
+    return `a background update to vegafactory ${note.startedTo ?? 'a newer version'} did not finish; still on ${packageVersion} — run: vegafactory update`
+  }
+  return null
+}
+
+async function attendedUpdate(cwd: string, deps: HookDeps): Promise<string | null> {
+  try {
+    const root = repoRoot(cwd)
+    let devMd: string | null = null
+    try {
+      devMd = readFileSync(join(root, '.vegastack', 'dev.md'), 'utf8')
+    } catch (error) {
+      // No profile at all is a project that predates the knob, and it gets the shipped default.
+      // A profile that exists and cannot be read is different: it may be the one saying `off`,
+      // and reading it as "auto" would start a networked global install the operator refused.
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') return null
+    }
+    const mode = effectiveUpdateMode({ home: deps.home, devMd })
+    if (mode === 'off') return null
+    const settled = finishedUpdate(deps.now(), { home: deps.home })
+    if (settled) return settled
+    // One attempt at a time. Two sessions opened a minute apart would otherwise each start their
+    // own global install of the same package, over each other, and each reset the clock the
+    // failure report is measured from — so the second is told what the first is doing instead.
+    const claim = readUpdateNote({ home: deps.home })
+    if (claim.startedFrom && typeof claim.startedAt === 'number') {
+      return `vegafactory ${claim.startedTo ?? 'a newer version'} is already installing in the background; this session continues with ${packageVersion}`
+    }
+    const result = await maintainSelfUpdate({ mode: 'notify', latest: deps.latest, home: { home: deps.home }, now: deps.now() })
+    if (result.action !== 'available' || mode !== 'auto') return result.message
+    // npm gets its own bound and executable. Calling this entry file again races the global
+    // install replacing that file, and ordinary hook work has a deliberately shorter watchdog.
+    deps.detach(['npm', ...installArgs()], cwd, SELF_UPDATE_LIMIT_S)
+    // Stamped as an attempt, like any other install. Without it the hour only covers what the
+    // worker installs, and a background install that failed could be started again on the very
+    // next session — each one holding its own five-minute bound.
+    writeUpdateNote({ ...readUpdateNote({ home: deps.home }), attemptedAt: deps.now(), startedFrom: result.before, startedTo: result.latest ?? undefined, startedAt: deps.now() }, { home: deps.home })
+    return `updating vegafactory ${result.before} → ${result.latest} in the background; this session continues with ${result.before}`
+  } catch {
+    return `could not check npm; continuing with vegafactory ${packageVersion}`
+  }
+}
+
+async function advisory(event: HookEvent, harness: Harness, payload: Record<string, unknown>, deps: HookDeps, update: string | null): Promise<void> {
   const cwd = typeof payload.cwd === 'string' ? payload.cwd : process.cwd()
   try { collectStats(event, cwd, deps) } catch { /* stats never affect a session */ }
   const where = locate(cwd, deps.host)
-  if (!where) return
+  if (!where) {
+    if (update) deps.out(context('SessionStart', update))
+    return
+  }
   const local = readLocal(where)
   const model = typeof payload.model === 'string' && payload.model ? payload.model : '<model>'
   const session = typeof payload.session_id === 'string' && payload.session_id ? payload.session_id : null
@@ -583,6 +652,7 @@ function advisory(event: HookEvent, harness: Harness, payload: Record<string, un
     const { holder, state } = refresh(where, local, deps, true)
     writeLocal(where, local)
     const lines = [
+      ...(update ? [update] : []),
       `This worktree works issue #${where.number} (${where.repo}), state ${state ?? 'unknown'}, held by ${holder ? `${label(holder)}${local.held ? ' — this worktree' : ''}` : 'nobody'}.`,
       `Its local copy is ${cacheDir(where.root, where.repo, where.number)}; read it with \`vegafactory issue sync ${where.number}\` first.`,
     ]
@@ -671,6 +741,17 @@ export async function runHook(argv: string[], deps: HookDeps = defaultDeps(), st
     return 0
   }
   if (!harness || !input.payload) return 0
-  try { advisory(event, harness, input.payload, deps) } catch { /* advisory only */ }
+  // The update runs first and its line is held right here, because the rest of the advisory talks
+  // to GitHub and can throw. Re-deriving the line after a failure was not enough: the update may
+  // already have cleared the note it would have been read from, and the session would be told
+  // nothing about an install that had started.
+  const update = event === 'session-start'
+    ? await attendedUpdate(typeof input.payload.cwd === 'string' ? input.payload.cwd : process.cwd(), deps).catch(() => null)
+    : null
+  try {
+    await advisory(event, harness, input.payload, deps, update)
+  } catch {
+    if (update) deps.out(context('SessionStart', update))
+  }
   return 0
 }

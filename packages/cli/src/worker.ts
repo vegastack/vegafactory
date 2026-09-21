@@ -26,7 +26,7 @@ import { appendFileSync, existsSync, lstatSync, mkdirSync, readFileSync, readdir
 import { homedir, hostname, userInfo } from 'node:os'
 import { join, posix } from 'node:path'
 import { APP_ACTOR, APP_ID, HEARTBEAT_EVERY_MS, appIdentityConfig, claim, heartbeat, holderOf, machineName, nodeId, release, trustedFactory } from './claim.ts'
-import { defaultClonePath, factoryConfigPath, parseControlRoomKnob, readFactoryConfig } from './control-room.ts'
+import { defaultClonePath, factoryConfigPath, parseControlRoomKnob, readFactoryConfig, updateSettingsAtPath } from './control-room.ts'
 import { billingVariables, childEnvironment } from './env.ts'
 import { GhError, defaultRunner, ghList, type GhResult, type GhRunner } from './gh.ts'
 import { assertRepo, cacheDir, readState, replaceFile, syncIssue, withLock, type CommentEntry, type GhIssue, type IssueEntry } from './issue-cache.ts'
@@ -37,6 +37,7 @@ import {
 import { issueFromBranch } from './hook.ts'
 import { defaultBranch } from './guard-rules.ts'
 import { stateOf, type State } from './labels.ts'
+import { effectiveUpdateMode, maintainSelfUpdate, type UpdateMode, type UpdateResult } from './self-update.ts'
 import { lintPlan, normalizeGroupPath, parseIndependentGroups, sharedByEveryChild } from '../../../skills/dev/dev-plan/scripts/plan-lint.mjs'
 import { appKeyPath as workerAppKey } from './home.ts'
 
@@ -336,23 +337,73 @@ export function refreshRoster(clone: string, git: GitRun = gitIn(clone)): Refres
   if (upstream.status !== 0) return { ok: false, reason: 'the control-room clone tracks no upstream branch, so there is nothing to refresh it from', sha: null }
   const merged = git(['merge', '--ff-only', '@{u}'])
   if (merged.status !== 0) return { ok: false, reason: `the control-room clone has diverged from its remote (${merged.out.split('\n')[0] || 'no fast-forward'}) — fix it by hand`, sha: null }
-  return { ok: true, reason: 'refreshed from the control room', sha: git(['rev-parse', 'HEAD']).out || null }
+  // Only a real commit is a commit. `git` answers a failure on the same channel this reads, so
+  // without the shape check an error string could be recorded as the clone's position — and every
+  // later profile read would reject the clone for being somewhere it never was.
+  const head = git(['rev-parse', 'HEAD'])
+  const sha = head.status === 0 && /^[0-9a-f]{40}$/.test(head.out.trim()) ? head.out.trim() : null
+  // The merge above may have moved the clone. If where it landed cannot be read, the refresh is
+  // not a success with a detail missing: nothing can record the new position, so every later
+  // profile read would reject the clone as moved while this said it was refreshed.
+  if (!sha) return { ok: false, reason: `the control-room clone was refreshed but its commit could not be read (${head.out.split('\n')[0] || `exit ${head.status}`})`, sha: null }
+  return { ok: true, reason: 'refreshed from the control room', sha }
 }
 
-export interface Listing { ok: boolean; reason: string; entry: Node | null; file: string | null }
+export interface Listing { ok: boolean; reason: string; entry: Node | null; file: string | null; sha?: string | null }
 
 // `listedHere`, but only after the roster has been refreshed and verified. This is what a run
 // asks each pass; a read-only view may ask `listedHere` alone and show what it has.
+// The refresh moves the clone forward; this records where it moved to. `loadProfile` verifies the
+// working tree against the commit `factory.json` remembers, so a clone that has moved on without
+// the record being updated is read as tampered-with — every policy question then answers "cannot
+// tell", which for the update knob means `off`. The record is a cache of a local fact, so a write
+// that fails changes nothing but the next pass's work.
+export async function recordRoomSha(root: string, home: string, sha: string): Promise<void> {
+  if (!/^[0-9a-f]{40}$/.test(sha)) return
+  const room = controlRoomClone(root, home)
+  if (!room) return
+  // Nothing moved, so there is nothing to record. Writing anyway would take the settings lock and
+  // bump the file's revision on every poll, which is a transaction bought for no fact.
+  try {
+    const recorded = readFactoryConfig(readFileSync(factoryConfigPath(home), 'utf8')).controlRooms[room.org]
+    if (!recorded || recorded.sha === sha) return
+  } catch { return }
+  try {
+    await updateSettingsAtPath(factoryConfigPath(home), (state) => {
+      const current = state.orgs[room.org]
+      if (!current || current.sha === sha) return state
+      state.orgs[room.org] = { ...current, sha, lastSyncedAt: new Date().toISOString() }
+      return state
+    })
+  } catch { /* a cache nobody could write is just a cache nobody could write */ }
+}
+
 export function verifiedListing(root: string, options: { repo: string; host?: string; home?: string; git?: (clone: string) => GitRun }): Listing {
   const room = controlRoomClone(root, options.home ?? homedir())
   if (!room) return listedHere(root, options)
   const refresh = refreshRoster(room.clone, (options.git ?? gitIn)(room.clone))
-  if (!refresh.ok) return { ok: false, reason: refresh.reason, entry: null, file: nodesPath(room.clone) }
-  return listedHere(root, options)
+  if (!refresh.ok) return { ok: false, reason: refresh.reason, entry: null, file: nodesPath(room.clone), sha: null }
+  // The sha rides along on the refusal too: the clone moved, and the record has to follow it
+  // whatever the roster then says about this machine.
+  return { ...listedHere(root, options), sha: refresh.sha }
 }
 
 // The gate every verb passes. A missing or unreadable roster refuses, never defaults: a machine
 // nobody listed must not start working the board because a file was late.
+// The update policy for this checkout. No profile at all is a project older than the knob and
+// gets the shipped default. A profile that exists and cannot be read is not the same thing: it
+// may be the one saying `off`, and reading it as `auto` would start a networked global install
+// of executable code that the operator had refused.
+export function updateModeFor(root: string, home: string): UpdateMode {
+  let devMd: string | null = null
+  try {
+    devMd = readFileSync(join(root, '.vegastack', 'dev.md'), 'utf8')
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') return 'off'
+  }
+  return effectiveUpdateMode({ home, devMd })
+}
+
 export function listedHere(root: string, options: { repo: string; host?: string; home?: string }): Listing {
   // One spelling, and only one: a node is `<os-user>@<hostname>`. Accepting a bare hostname as
   // well would mean two rows could name this machine and a roster could grant through either.
@@ -1393,6 +1444,11 @@ export interface PollDeps {
   stop?: (pid: number, signal: NodeJS.Signals) => boolean
   // What the operating system says about a pid, which is half of a child's identity.
   start?: ProcessStart
+  // An issue this pass knew had work and did not start: unreadable, or wanted but not reserved.
+  // Those are deliberately swallowed so one bad issue does not cost the board its pass — but a
+  // pass that left work behind has not shown the board is idle, and idle is the only state a
+  // five-minute install may run in.
+  onWaiting?: (number: number, reason: string) => void
 }
 
 // The steps this machine has started. It lives across polls, so the next pass two minutes later
@@ -1458,6 +1514,7 @@ export async function poll(deps: PollDeps, inflight: Map<number, Inflight> = new
       wanted.push({ key, decision, candidate: { number: issue.number, action: decision.action, parent, files, from: stateOf(snap.state.issue!.labels).state! } })
     } catch (error) {
       deps.out(`#${issue.number}: could not be read (${(error as Error).message})`)
+      deps.onWaiting?.(issue.number, (error as Error).message)
     }
   }
 
@@ -1490,12 +1547,22 @@ export async function poll(deps: PollDeps, inflight: Map<number, Inflight> = new
       : reserve({ root, repo, number: candidate.number, runner, appActor: deps.appActor }, deps.machine, deps.runId, candidate.action, at)
     if (!taken.ok) {
       deps.out(`#${candidate.number}: not started — ${taken.reason}`)
+      // Known work this pass did not start. Another machine may have it, or the claim may have
+      // failed — either way this board is not idle, and an idle board is what lets a five-minute
+      // install begin.
+      deps.onWaiting?.(candidate.number, taken.reason)
       continue
     }
     const run: Inflight = { candidate, started: at, settled: false, stop: () => {}, interrupt: null, done: Promise.resolve() as unknown as Promise<RunRecord> }
     run.done = runOne(deps, candidate, item, at, taken.owner, run).then((record) => { run.settled = true; return record })
     inflight.set(candidate.number, run)
     started.push(candidate)
+  }
+  // Wanted, but there was no slot for it this pass.
+  for (const item of queue) {
+    if (started.some((candidate) => candidate.number === item.candidate.number)) continue
+    if (interrupted.includes(item.candidate.number)) continue
+    deps.onWaiting?.(item.candidate.number, 'no free slot this pass')
   }
   return started
 }
@@ -1897,6 +1964,7 @@ export interface CliDeps {
   now?: () => number
   sleep?: (ms: number) => Promise<void>
   cli?: string[]
+  update?: () => Promise<UpdateResult>
 }
 
 const wait = (ms: number) => new Promise<void>((resolve) => {
@@ -1922,6 +1990,10 @@ export async function runWorker(argv: string[], deps: CliDeps = {}): Promise<num
   const listing = ['enable', 'run'].includes(args.verb)
     ? verifiedListing(root, { repo, host, home, git: deps.git })
     : listedHere(root, { repo, host, home })
+  // That listing may have fast-forwarded the clone, and every gate below it can return before the
+  // poll loop is ever reached. The record follows the clone here, once, so a run that stops for
+  // billing or a missing key does not leave the profile unreadable behind it.
+  if (listing.sha) await recordRoomSha(root, home, listing.sha)
   const keyPath = appKeyPath(env, home)
   const print = (value: unknown, text: string) => out(args.json ? JSON.stringify(value, null, 2) : text)
 
@@ -2070,7 +2142,8 @@ export async function runWorker(argv: string[], deps: CliDeps = {}): Promise<num
         return 2
       }
       let devMd = ''
-      try { devMd = readFileSync(join(root, '.vegastack', 'dev.md'), 'utf8') } catch { /* no profile, so the tools' own defaults */ }
+      try { devMd = readFileSync(join(root, '.vegastack', 'dev.md'), 'utf8') } catch { /* see updateModeFor */ }
+      const update = deps.update ?? (() => maintainSelfUpdate({ mode: updateModeFor(root, home), home: { home }, now: Date.now() }))
       const identity = deps.runner ? null : appIdentity({ repo, keyPath, appId: app.appId, fetch: deps.fetch })
       const runner = deps.runner ?? identity!.runner
       // `--json` puts exactly one document on stdout and nothing else, so every line this loop
@@ -2105,10 +2178,13 @@ export async function runWorker(argv: string[], deps: CliDeps = {}): Promise<num
         note(`note: step ${sayDuration(limit.stepMs, 'step')} is longer than the hour an installation token lives, so a run past that point can still work but can no longer write to GitHub — see #239`)
       }
       stepOutlivesToken(caps)
+      // Counted per pass by `onWaiting`, which `poll` calls for every issue it left behind.
+      let waiting = 0
       const pollDeps: PollDeps = {
         root, repo, runner, machine, runId, caps, appActor: app.appActor, out: note, now: deps.now ?? Date.now,
         runStep: deps.runStep ?? defaultRunStep(devMd, env, { token: () => identity?.token() ?? null }), stop: deps.stop, start: deps.start,
         standDown: (number, reason, restoreTo) => standDown({ root, repo, number, runner, machine, appActor: app.appActor, restoreTo }, reason),
+        onWaiting: () => { waiting += 1 },
       }
       // Started steps outlive the pass that began them, so the next pass keeps their slots and
       // still acts on the rest of the board — a twenty-minute build does not stop the poll.
@@ -2149,6 +2225,9 @@ export async function runWorker(argv: string[], deps: CliDeps = {}): Promise<num
         if (signalled) {
           return finish(0, await shutDown(`this machine was asked to stop (${signalled})`))
         }
+        // Whether this pass saw an idle board. A pass that threw, could not read an issue, or
+        // started anything is not the pass to spend five minutes installing in.
+        let idle = false
         try {
           // The roster is the enrolment, so it is refreshed and re-read once per pass: a row
           // removed in a control-room PR stands this machine down at the next poll, with nothing
@@ -2157,6 +2236,10 @@ export async function runWorker(argv: string[], deps: CliDeps = {}): Promise<num
           // a gate that has been asked and ignored — the caps come off this same reading, so a
           // control-room PR that changes one lands on the next poll rather than on a restart.
           const still = verifiedListing(root, { repo, host, home, git: deps.git })
+          // The clone moved whether or not the roster still lists this machine, and the record has
+          // to follow it either way: a de-listed machine that later gets its row back would
+          // otherwise find every profile read refused for a clone that is simply up to date.
+          if (still.sha) await recordRoomSha(root, home, still.sha)
           if (!still.ok || !still.entry?.caps) {
             note(`stopping: ${still.reason}`)
             return finish(2, await shutDown('this machine is no longer listed'))
@@ -2164,11 +2247,33 @@ export async function runWorker(argv: string[], deps: CliDeps = {}): Promise<num
           pollDeps.caps = still.entry.caps
           stepOutlivesToken(still.entry.caps)
           await identity?.freshen()
-          for (const candidate of await poll(pollDeps, inflight)) note(`#${candidate.number} ${candidate.action} started`)
+          waiting = 0
+          const picked = await poll(pollDeps, inflight)
+          for (const candidate of picked) note(`#${candidate.number} ${candidate.action} started`)
+          // Idle is a high bar on purpose, because the thing it permits takes five minutes: the
+          // whole board was read, nothing was picked up, and nothing is still running. An issue
+          // that could not be read might have been the one with work on it, and an issue that was
+          // picked up may have settled again before this line.
+          idle = waiting === 0 && picked.length === 0 && ![...inflight.values()].some(run => !run.settled)
         } catch (error) {
           note(`poll failed: ${(error as Error).message}`)
         }
         if (args.once) return finish(0, await drain(inflight))
+        // A global install can replace this process's entry file, so it runs only with no agent
+        // alive. A successful update ends the old process; the service starts the new copy.
+        // A run is unsettled from the moment it is started until its own completion handler
+        // runs, so a run picked up in this very pass still counts as alive here — which is what
+        // keeps an update from starting while the board has work. The registry check above it is
+        // asked at most once an hour, so an idle box is not calling npm every couple of minutes.
+        if (idle) {
+          let result: UpdateResult
+          try { result = await update() } catch { result = { action: 'failed', before: '', after: '', latest: null, message: 'vegafactory update failed; continuing with the installed copy' } }
+          if (result.action === 'updated') {
+            note(`${result.message}; restarting the worker`)
+            return finish(0, await drain(inflight))
+          }
+          if (result.action === 'available' || result.action === 'failed') note(result.message)
+        }
         await untilNextPass()
       }
     }

@@ -96,6 +96,18 @@
         "Names changing or removing the lock in `org.md` as the only remedy",
         "Does not invent a delegation, an exception list or a per-machine opt-out — none exists"
       ]
+    },
+    {
+      "id": 9,
+      "prompt": "Set up the control room for org `vegastack`. Our boxes sit behind a proxy that does not reach the npm registry, so nothing on them may install itself — make that the default for every repo in the dev group, and I will override it on the two machines that can.",
+      "expected_output": "`groups/dev/group.md` is rendered with `vegafactory-update: off` as the group default, and the answer says plainly that a repo's own `.vegastack/dev.md` can still set a different value because the line is not locked — locking is `org.md`'s alone and was not asked for.",
+      "files": [],
+      "assertions": [
+        "`groups/dev/group.md` carries a `vegafactory-update:` line, rendered from the template rather than added by hand",
+        "Its value is `off`, because the operator said these machines cannot reach the registry",
+        "The answer says a repo may override the group default in its own `.vegastack/dev.md`, since the line is not locked",
+        "No `# locked` marker is added, and locking is described as something only `org.md` can do"
+      ]
     }
   ]
 }

@@ -8,11 +8,12 @@ import { fileURLToPath } from 'node:url'
 import { createInterface } from 'node:readline/promises'
 import type { SkillEntry } from './selection.ts'
 import { factoryHome } from './home.ts'
+import { latestPublishedVersion, packageVersion, runUpdateCommand, semverLess } from './self-update.ts'
 
 type Agent = 'codex' | 'claude'
 type AgentChoice = Agent | 'both'
 type Mode = 'project' | 'global'
-type Command = 'add' | 'update' | 'verify' | 'doctor' | 'remove' | 'list' | 'version' | 'help' | 'worktree' | 'sync' | 'hook' | 'ship' | 'issue' | 'init' | 'agent' | 'stats' | 'dashboard' | 'learning' | 'review' | 'worker'
+type Command = 'add' | 'update' | 'self-update' | 'verify' | 'doctor' | 'remove' | 'list' | 'version' | 'help' | 'worktree' | 'sync' | 'hook' | 'ship' | 'issue' | 'init' | 'agent' | 'stats' | 'dashboard' | 'learning' | 'review' | 'worker'
 const installerVerbs: readonly string[] = ['add', 'update', 'verify', 'doctor', 'remove', 'list'] as const
 interface Options {
   command: Command
@@ -39,15 +40,13 @@ const packageRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const bundleRoot = join(packageRoot, 'skill')
 const surfaces: Record<Agent, string> = { codex: '.agents/skills', claude: '.claude/skills' }
 const projectAgents: Agent[] = ['codex', 'claude']
-// Single version source: package.json ships in every npm install alongside dist/.
-const packageVersion = (JSON.parse(await readFile(join(packageRoot, 'package.json'), 'utf8')) as { version: string }).version
-
 function usage() {
   return `Usage: vegafactory <command> [options]
 
 Get started:
   init [--org ORG]                       check your tools, install the CLI and every skill for Claude Code and Codex,
                                          enable this repo's git hooks, and link your org's control room
+  update                                 install the latest VegaFactory CLI globally with npm
 
 Skills:
   skills list                            the bundled skills, by group
@@ -123,6 +122,7 @@ function parse(argv: string[]): Options {
       command = verb as Command
     }
     else if (head === 'worktree' || head === 'hook' || head === 'ship' || head === 'issue' || head === 'agent' || head === 'stats' || head === 'dashboard' || head === 'learning' || head === 'review' || head === 'worker') return { command: head, all: false, dryRun: false, force: false, nonInteractive: false, json: false, rest: argv.splice(0) }
+    else if (head === 'update') command = 'self-update'
     else if (installerVerbs.includes(head)) throw new Error(`Unknown command: ${head} — installer verbs moved under the skills namespace: run "vegafactory skills ${head} …"`)
     else if (head === 'sync' || head === 'help' || head === 'version' || head === 'init') command = head
     else throw new Error(`Unknown command: ${head}`)
@@ -655,26 +655,6 @@ async function sweepRetired(options: Options, agents: Agent[], base: string): Pr
   return { removed: options.dryRun ? 0 : doomed.length, kept }
 }
 
-function semverLess(a: string, b: string): boolean {
-  const parse = (value: string) => value.split('-')[0]!.split('.').map(part => Number.parseInt(part, 10) || 0)
-  const [aMajor = 0, aMinor = 0, aPatch = 0] = parse(a)
-  const [bMajor = 0, bMinor = 0, bPatch = 0] = parse(b)
-  if (aMajor !== bMajor) return aMajor < bMajor
-  if (aMinor !== bMinor) return aMinor < bMinor
-  return aPatch < bPatch
-}
-
-async function latestPublishedVersion(): Promise<string | null> {
-  try {
-    const response = await fetch('https://registry.npmjs.org/@vegastack%2fvegafactory/latest', { signal: AbortSignal.timeout(3000) })
-    if (!response.ok) return null
-    const version = ((await response.json()) as { version?: unknown }).version
-    return typeof version === 'string' && /^\d+\.\d+\.\d+/.test(version) ? version : null
-  } catch {
-    return null
-  }
-}
-
 async function confirm(question: string, options: Options): Promise<boolean> {
   if (options.nonInteractive || options.dryRun) return true
   if (!process.stdin.isTTY) throw new Error(`${question.replace(/\?$/, '')} needs confirmation — pass --yes when no one can answer`)
@@ -941,6 +921,7 @@ async function main() {
     return
   }
   if (options.command === 'init') return init(options)
+  if (options.command === 'self-update') return runUpdateCommand(options.dryRun)
   if (options.command === 'update') { await update(options); return }
   if (options.command === 'worktree') {
     const {runWorktree, worktreeUsage}=await import('./worktree.ts')

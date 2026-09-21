@@ -14,8 +14,10 @@ import {
   parseNodes, poll, readActed, readRuns, readiness, recordRun, resetAt, RUNS_KEPT, runWorker, schedule, serviceCommands, stagePolicy,
   standDown, stepPrompt, tail, unitPath, unitText, unsafeForParallel,
   noteChild, readChildren, refreshRoster, releaseRunLock, reserve, runLockPath, takeRunLock, verifiedListing,
+  recordRoomSha, updateModeFor,
   type Candidate, type Fetch, type GitRun, type Inflight, type PollDeps, type Probe, type RunStep, type StepResult,
 } from '../src/worker.ts'
+import type { GhRunner } from '../src/gh.ts'
 import { ackBody, artifactHash, permissionLookup, snapshot } from '../src/issue.ts'
 import { cacheDir, syncIssue } from '../src/issue-cache.ts'
 import { FakeGitHub } from './fake-github.ts'
@@ -40,6 +42,7 @@ function project(workers: string | null = ROSTER): void {
   writeFileSync(join(root, '.vegastack/dev.md'), [
     'repo: o/r',
     'control-room: o/control-room#dev@0000000',
+    'vegafactory-update: off',
     'harness-policy: intake claude default high · plan claude default high · implement claude default high · review codex default xhigh',
     '',
   ].join('\n'))
@@ -50,7 +53,10 @@ function project(workers: string | null = ROSTER): void {
 
 // The roster refresh is real git. Most tests are not about it, so they hand the CLI a git that
 // always succeeds; `controlRoomClone()` below builds the real thing for the tests that are.
-const anyGit = () => (() => ({ status: 0, out: '' })) as GitRun
+// A git that agrees to everything, and answers `rev-parse HEAD` with a commit — a refresh that
+// cannot say where the clone landed is a refusal, so a stub with no HEAD is not "any git".
+const anyGit = () => (((args: string[]) =>
+  args[0] === 'rev-parse' && args[1] === 'HEAD' ? { status: 0, out: 'c'.repeat(40) } : { status: 0, out: '' })) as GitRun
 
 // A bare origin and a clone of it, in place of the plain directory `project()` makes: this is what
 // a real machine has, and the only way to change the roster is to change it upstream.
@@ -1610,6 +1616,152 @@ describe('the command', () => {
     expect(result.text).toContain('#1 implement → done')
   })
 
+  // A profile that exists and cannot be read may be the one saying `off`. Reading it as the
+  // shipped `auto` would have this machine fetch and install executable code the operator refused,
+  // on the strength of a permission error.
+  test('an unreadable profile stops the worker updating itself', () => {
+    const box = realpathSync(mkdtempSync(join(tmpdir(), 'worker-policy-')))
+    mkdirSync(join(box, '.vegastack'), { recursive: true })
+
+    // No profile at all: a project older than the knob, so the shipped default stands.
+    expect(updateModeFor(box, box)).toBe('auto')
+
+    writeFileSync(join(box, '.vegastack', 'dev.md'), 'repo: o/r\nvegafactory-update: notify\n')
+    expect(updateModeFor(box, box)).toBe('notify')
+
+    chmodSync(join(box, '.vegastack', 'dev.md'), 0)
+    try {
+      expect(updateModeFor(box, box)).toBe('off')
+    } finally { chmodSync(join(box, '.vegastack', 'dev.md'), 0o644) }
+  })
+
+  // A refresh that cannot say where the clone landed is not a refresh that worked: nothing can
+  // record the new position, and every later profile read would reject the clone as moved.
+  test('a refresh that cannot read its own commit refuses instead of reporting success', () => {
+    const answers = (rev: { status: number; out: string }): GitRun => (args) =>
+      args[0] === 'rev-parse' && args[1] === 'HEAD' ? rev : { status: 0, out: '' }
+    for (const bad of [{ status: 128, out: 'fatal: not a git repository' }, { status: 0, out: '' }, { status: 0, out: 'HEAD' }]) {
+      const refused = refreshRoster('/clone', answers(bad))
+      expect(refused.ok).toBe(false)
+      expect(refused.sha).toBeNull()
+      expect(refused.reason).toContain('could not be read')
+    }
+    const good = refreshRoster('/clone', answers({ status: 0, out: 'b'.repeat(40) }))
+    expect(good).toMatchObject({ ok: true, sha: 'b'.repeat(40) })
+  })
+
+  // Every pass fast-forwards the control-room clone. `loadProfile` verifies the working tree
+  // against the commit `factory.json` remembers, so a record left behind reads a clone that is
+  // merely up to date as one that has been tampered with — and every policy question after that
+  // answers "cannot tell", which for the update knob means `off` until someone syncs by hand.
+  test('a refreshed control room is recorded, so the profile stays readable', async () => {
+    const clone = join(home, '.vegafactory', 'control-room', 'o')
+    const before = '0'.repeat(40)
+    const moved = 'a'.repeat(39) + '9'
+    const write = () => writeFileSync(join(home, '.vegafactory', 'factory.json'), JSON.stringify({
+      schemaVersion: 2, revision: 0,
+      controlRooms: { o: { repo: 'o/room', path: clone, branch: 'main', remote: 'https://example.invalid/o/room.git', sha: before, lastSyncedAt: null } },
+    }))
+    const recorded = () => JSON.parse(readFileSync(join(home, '.vegafactory', 'factory.json'), 'utf8')).controlRooms.o
+
+    write()
+    await recordRoomSha(root, home, moved)
+    expect(recorded().sha).toBe(moved)
+    // The rest of the record is the sync's, and is left exactly as it was.
+    expect(recorded().path).toBe(clone)
+    expect(recorded().repo).toBe('o/room')
+
+    // `git` answers a failure on the same channel the sha is read from, so anything that is not a
+    // commit is refused rather than written: a record holding error text would have every later
+    // profile read reject the clone for being somewhere it has never been.
+    for (const notASha of ['', 'fatal: not a git repository', 'HEAD', 'a'.repeat(39), 'A'.repeat(40)]) {
+      write()
+      await recordRoomSha(root, home, notASha)
+      expect(recorded().sha).toBe(before)
+    }
+  })
+
+  // Idle has to mean idle. A run that starts and settles inside the same pass leaves nothing
+  // unsettled behind it, so counting only the run map called a working box idle and let a
+  // five-minute install begin while the board still had work.
+  test('a pass that started work is not idle, even once that work has settled', async () => {
+    project()
+    gh.addIssue({ number: 1, labels: ['planning', 'medium'] })
+    let updates = 0
+    const worked = await run(['run'], {
+      update: async () => {
+        updates += 1
+        return { action: 'current' as const, before: '0.21.0', after: '0.21.0', latest: '0.21.0', message: 'current' }
+      },
+      // Settles immediately, so the run map is empty again by the time the update is considered.
+      runStep: (async () => ({ outcome: 'done' as const, note: 'finished inside the pass', ms: 1 })) as RunStep,
+      sleep: async () => { process.emit('SIGTERM' as NodeJS.Signals) },
+    })
+    expect(worked.code).toBe(0)
+    expect(worked.text).toContain('#1')
+    expect(updates).toBe(0)
+  })
+
+  // An install takes its own five-minute bound and runs in the poll loop. A pass that could not
+  // read the whole board has not shown the box is idle — the issue it failed to read may have been
+  // the one with work on it — so that is not the pass to spend five minutes in.
+  test('a pass that could not read the board does not stop to update', async () => {
+    project()
+    gh.addIssue({ number: 1, labels: ['planning', 'medium'] })
+    let updates = 0
+    const counting = async () => {
+      updates += 1
+      return { action: 'current' as const, before: '0.21.0', after: '0.21.0', latest: '0.21.0', message: 'current' }
+    }
+    // Every issue read throws, so the pass finishes but knows nothing about the board.
+    const broken = await run(['run'], {
+      update: counting,
+      runner: ((args: string[], input?: string) => (args.some((arg) => String(arg).includes('issues/1')) ? { code: 1, stdout: '', stderr: 'the issue could not be fetched' } : gh.runner(args, input))) as GhRunner,
+      sleep: async () => { process.emit('SIGTERM' as NodeJS.Signals) },
+    })
+    expect(broken.code).toBe(0)
+    expect(broken.text).toContain('could not be read')
+    expect(updates).toBe(0)
+    // The idle pass that *does* update is the test above this one; this is only about the pass
+    // that could not see the board.
+  })
+
+  test('the worker updates between passes only when no agent is running', async () => {
+    let updates = 0
+    const idle = await run(['run'], {
+      update: async () => {
+        updates++
+        return { action: 'updated', before: '0.20.1', after: '0.21.0', latest: '0.21.0', message: 'updated vegafactory 0.20.1 → 0.21.0' }
+      },
+      sleep: async () => { process.emit('SIGTERM' as NodeJS.Signals) },
+    })
+    expect(idle.code).toBe(0)
+    expect(updates).toBe(1)
+    expect(idle.text).toContain('updated vegafactory 0.20.1 → 0.21.0; restarting the worker')
+
+    project()
+    gh.addIssue({ number: 1, labels: ['planning', 'medium'] })
+    updates = 0
+    let releaseChild = () => {}
+    const blocked = new Promise<void>((resolve) => { releaseChild = resolve })
+    const busy = await run(['run'], {
+      update: async () => {
+        updates++
+        return { action: 'current', before: '0.20.1', after: '0.20.1', latest: '0.20.1', message: 'current' }
+      },
+      runStep: (async (_step, context) => {
+        context.onStart?.(7373, 'claude')
+        await blocked
+        return { outcome: 'killed' as const, note: 'stopped', ms: 1 }
+      }) as RunStep,
+      stop: () => { releaseChild(); return true },
+      start: () => 'Fri Sep 18 09:00:00 2026',
+      sleep: async () => { process.emit('SIGTERM' as NodeJS.Signals) },
+    })
+    expect(busy.code).toBe(0)
+    expect(updates).toBe(0)
+  })
+
   test('a row removed upstream stands this machine down, without touching its own copy', async () => {
     const header = '| node | owner | worker | repos |\n|---|---|---|---|\n'
     const delist = controlRoomClone(`${header}| ${NODE} | mk | yes | o/r |\n`)
@@ -1752,7 +1904,7 @@ describe('the command', () => {
     await runWorker(['run'], {
       cwd: root, home, host: HOST, env: {}, out: () => {}, runner: gh.runner, now: () => gh.clock,
       runStep: (async () => ({ outcome: 'done' as const, note: '', ms: 1 })) as RunStep,
-      git: () => { verifications++; return (() => ({ status: 0, out: '' })) as GitRun },
+      git: () => { verifications++; return anyGit() },
       sleep: async () => { if (++passes === 2) process.emit('SIGTERM' as NodeJS.Signals) },
     })
     // One for the gate the command passes before it starts, then exactly one for each pass.

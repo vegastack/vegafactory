@@ -50,6 +50,7 @@ const enums = {
   changelog: ['changesets', 'keep-a-changelog', 'pubspec+changelog', 'none'],
   merge: ['rebase', 'squash', 'merge'], dispatch: ['off', 'local'], 'provider-mode': ['subscription-only'],
   learning: ['normal-work', 'off'], 'learning-adoption': ['scoped-reversible', 'propose-only'],
+  'vegafactory-update': ['off', 'notify', 'auto'],
 }
 const known = new Set([...Object.keys(enums), 'operators', 'harness-policy', 'branch', 'labels',
   'control-room', 'stats-local-retention-days', 'stats-shared-retention-months', 'stats-spool-warning-mib'])

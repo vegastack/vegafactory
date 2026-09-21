@@ -14,6 +14,7 @@ harness-policy: intake claude default high · plan claude default high · implem
 ui-evidence: none           # no UI in this repo
 tests: required             # scripts' deterministic branches; prose quality bar is the behavioral eval
 skillspector-update: auto   # off | notify | auto — the CLI self-installs and self-upgrades through whatever channel holds it (uv here); a failed update falls back to the installed copy
+vegafactory-update: auto    # off | notify | auto — session starts check npm; auto updates attended sessions in the background and idle dispatchers between passes, notify only reports, off makes no check
 skill-scan: packages/cli/skill   # the BUILT bundle — authored skills/ carries unpackaged tests/ fixtures that are deliberately adversarial and score higher than anything shipped; suppressions in .vegastack/skillspector-baseline.json
 merge: squash               # one commit per issue on main, matching the branch protection
 branch: <type>/<slug>       # type: feat | fix | docs | chore | refactor — the only place this list lives

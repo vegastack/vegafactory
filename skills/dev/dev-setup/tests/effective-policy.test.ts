@@ -6,6 +6,13 @@ import { parsePolicy, parseControlRoomReference, resolvePolicy } from '../script
 // A copy of the vegastack control room, so the shipped rules are tested against real authored
 // Markdown rather than a hand-made sample. Refreshed by hand when the live room changes.
 const room = (path: string) => readFileSync(join(import.meta.dir, 'fixtures/control-room', path), 'utf8')
+const profileTemplate = readFileSync(join(import.meta.dir, '..', 'assets', 'dev-profile.md.template'), 'utf8')
+
+test('new profiles carry the three-state VegaFactory update policy', () => {
+  expect(profileTemplate).toContain('vegafactory-update: auto')
+  for (const value of ['off', 'notify', 'auto']) expect(parsePolicy(`vegafactory-update: ${value}`).blocks).toEqual([])
+  expect(parsePolicy('vegafactory-update: yes').blocks).toContain('invalid vegafactory-update value')
+})
 
 test('a repo with no lines of its own still resolves to a complete profile', () => {
   const result = resolvePolicy({ org: room('org.md'), group: room('groups/dev/group.md'), repo: '' })

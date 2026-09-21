@@ -12,6 +12,7 @@ changelog: changesets       # changesets | keep-a-changelog | pubspec+changelog 
 chronicle: on               # on | off
 learning: normal-work       # normal-work | off
 learning-adoption: scoped-reversible   # scoped-reversible | propose-only
+vegafactory-update: auto    # off | notify | auto
 operators: {{operators}}    # the logins who own issues in this group
 
 ## Harness policy
