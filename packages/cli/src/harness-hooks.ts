@@ -10,7 +10,7 @@ import {
   rmSync,
   writeFileSync,
 } from 'node:fs'
-import { dirname, join, relative } from 'node:path'
+import { basename, dirname, join, relative } from 'node:path'
 import { randomUUID } from 'node:crypto'
 
 type JsonObject = Record<string, unknown>
@@ -91,11 +91,18 @@ function topLevelProperty(source: string, wanted: string): { start: number; end:
   }
 }
 
-function commandMatches(command: unknown, event: string, harness: Harness): boolean {
+function commandMatches(command: unknown, event: string, harness: Harness, cli: string): boolean {
   if (typeof command !== 'string') return false
-  const words = command.trim().split(/\s+/)
-  const hook = words.lastIndexOf('hook')
-  return hook !== -1 && words[hook + 1] === event && words[hook + 2] === '--harness' && words[hook + 3] === harness && hook + 4 === words.length
+  const text = command.trim()
+  if (text === `${cli} hook ${event} --harness ${harness}`) return true
+  const words = text.split(/\s+/)
+  const suffix = ['hook', event, '--harness', harness]
+  if (words.length < suffix.length + 1 || !suffix.every((word, index) => words[words.length - suffix.length + index] === word)) return false
+  const prefix = words.slice(0, -suffix.length)
+  if (prefix.length === 1 && basename(prefix[0]!) === 'vegafactory') return true
+  return prefix.length === 2
+    && ['bun', 'node'].includes(basename(prefix[0]!))
+    && /(?:^|\/)packages\/cli\/src\/index\.ts$/.test(prefix[1]!.replaceAll('\\', '/'))
 }
 
 function requiredHook(cli: string, event: string, harness: Harness, timeout: number): JsonObject {
@@ -110,7 +117,7 @@ function mergedHooks(value: unknown, harness: Harness, cli: string): JsonObject 
     if (!Array.isArray(groups)) throw new Error(`hooks.${name} must be an array`)
     const kept = groups.flatMap(group => {
       if (!isObject(group) || !Array.isArray(group.hooks)) return [group]
-      const hooks = group.hooks.filter(hook => !isObject(hook) || !commandMatches(hook.command, event, harness))
+      const hooks = group.hooks.filter(hook => !isObject(hook) || !commandMatches(hook.command, event, harness, cli))
       if (hooks.length === 0 && Object.keys(group).length === 1) return []
       return [{ ...group, hooks }]
     })
@@ -208,7 +215,7 @@ function publish(plan: FilePlan): void {
   }
 }
 
-function fileHasHooks(path: string, harness: Harness): boolean {
+function fileHasHooks(path: string, harness: Harness, cli: string): boolean {
   try {
     const root = JSON.parse(readFileSync(path, 'utf8')) as unknown
     if (!isObject(root) || !isObject(root.hooks)) return false
@@ -216,14 +223,14 @@ function fileHasHooks(path: string, harness: Harness): boolean {
     return EVENTS.every(([name, event, timeout]) => {
       const groups = hooks[name]
       return Array.isArray(groups) && groups.some(group => isObject(group) && Array.isArray(group.hooks) && group.hooks.some(hook =>
-        isObject(hook) && hook.type === 'command' && hook.timeout === timeout && commandMatches(hook.command, event, harness)))
+        isObject(hook) && hook.type === 'command' && hook.timeout === timeout && commandMatches(hook.command, event, harness, cli)))
     })
   } catch { return false }
 }
 
-export function verifyHarnessHooks(root: string): { ok: true } | { ok: false; reason: string } {
-  if (!fileHasHooks(join(root, '.claude', 'settings.json'), 'claude')) return { ok: false, reason: 'Claude hooks are incomplete' }
-  if (!fileHasHooks(join(root, '.codex', 'hooks.json'), 'codex')) return { ok: false, reason: 'Codex hooks are incomplete' }
+export function verifyHarnessHooks(root: string, cli = 'vegafactory'): { ok: true } | { ok: false; reason: string } {
+  if (!fileHasHooks(join(root, '.claude', 'settings.json'), 'claude', cli)) return { ok: false, reason: 'Claude hooks are incomplete' }
+  if (!fileHasHooks(join(root, '.codex', 'hooks.json'), 'codex', cli)) return { ok: false, reason: 'Codex hooks are incomplete' }
   return { ok: true }
 }
 
@@ -254,7 +261,7 @@ export function ensureHarnessHooks(
     testing.beforePublish?.(relative(root, plan.path))
     publish(plan)
   }
-  const verified = verifyHarnessHooks(root)
+  const verified = verifyHarnessHooks(root, cli)
   if (!verified.ok) throw new Error(verified.reason)
   return { changed: plans.map(plan => relative(root, plan.path)) }
 }

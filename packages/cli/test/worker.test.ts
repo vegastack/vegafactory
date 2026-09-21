@@ -13,6 +13,7 @@ import {
   drain, filesFromParent, harnessAnswers, hitLimit, hooksWired, listedHere, mintToken, overlaps, parseWorkerArgs,
   parseNodes, poll, readActed, readRuns, readiness, recordRun, resetAt, runKey, RUNS_KEPT, runWorker, schedule, serviceCommands, stagePolicy,
   standDown, standDownStrict, stepPrompt, tail, unitPath, unitText, unsafeForParallel,
+  workerUsage,
   migrateLegacyWorkerState, noteChild, readChildren, refreshRoster, releaseRunLock, reserve, runLockPath, stopChild, takeRunLock, verifiedListing,
   recordRoomSha, updateModeFor,
   normalizeWorkerRepos, readWorkerState, reconcileBoards, workerProblemReporter,
@@ -461,6 +462,30 @@ describe('multi-repository board reconciliation', () => {
     })
     expect(readdirSync(checkout)).toEqual(['sentinel'])
     expect(readFileSync(join(checkout, 'sentinel'), 'utf8')).toBe('keep me')
+  })
+
+  test('a dropping board refreshes its identity before hand-back and retains pending work on refresh failure', async () => {
+    const stateHome = realpathSync(mkdtempSync(join(tmpdir(), 'worker-drop-token-')))
+    let expired = true
+    let handBacks = 0
+    const runner = (() => ({ code: 0, stdout: '', stderr: '' })) as GhRunner
+    const selected = {
+      key: 'o/a', repo: 'o/a', root: '/worker/o__a/repo', runner, devMd: '',
+      identity: { runner, token: () => 'token', freshen: async () => { if (expired) throw new Error('token refresh failed') } },
+    }
+    const input = (previous: ReturnType<typeof readWorkerState>) => ({
+      home: stateHome, env: {}, listed: [], previous, contexts: new Map([['o/a', selected]]), inflight: new Map<string, Inflight>(),
+      provision: async () => selected,
+      handBack: async () => { handBacks++; return { ok: true, note: 'done' } }, out: () => {},
+    })
+    const previous = { schema: 1 as const, revision: 0, boards: { 'o/a': { repo: 'o/a', state: 'dropping' as const, pending: [{ issue: 3, from: 'queued' as const, reason: 'removed' }] } } }
+    expect((await reconcileBoards(input(previous))).unavailable).toEqual([{ repo: 'o/a', reason: 'token refresh failed' }])
+    expect(handBacks).toBe(0)
+    expect(readWorkerState({ home: stateHome, env: {} }).boards['o/a']?.pending).toHaveLength(1)
+    expired = false
+    await reconcileBoards(input(readWorkerState({ home: stateHome, env: {} })))
+    expect(handBacks).toBe(1)
+    expect(readWorkerState({ home: stateHome, env: {} }).boards['o/a']).toBeUndefined()
   })
 
   test('a removed and re-added board runs the original trigger because administrative stop consumes nothing', async () => {
@@ -2274,9 +2299,9 @@ describe('the command', () => {
       run: (() => ({ code: 0, stdout: '', stderr: '' })) as Probe,
       start: (pid) => pid === child.pid ? child.startedAt : null,
       stop: (pid) => { stopped.push(pid); return true },
-    })).toBe(0)
+    })).toBe(1)
     expect(stopped).toEqual([5150])
-    expect(readChildren(stateRoot)).toEqual([])
+    expect(readChildren(stateRoot)).toEqual([child])
     expect(existsSync(defaultRoot)).toBe(false)
   })
 
@@ -3095,6 +3120,80 @@ describe('the command', () => {
     expect(provisioned).toEqual(['o/r', 'o/bad'])
   })
 
+  test('production board boundaries isolate each external provisioning failure from a healthy sibling', async () => {
+    for (const failure of ['app-404', 'mint', 'clone', 'dev-md', 'hooks', 'push'] as const) {
+      gh = new FakeGitHub()
+      gh.permissions.set('mk', 'admin')
+      project(`| node | owner | worker | repos | caps |\n|---|---|---|---|---|\n| ${NODE} | mk | yes | o/good o/bad | runs 2 |\n`)
+      gh.addIssue({ number: 1, labels: ['planning', 'medium'] })
+      const { privateKey } = generateKeyPairSync('rsa', { modulusLength: 2048, privateKeyEncoding: { type: 'pkcs8', format: 'pem' }, publicKeyEncoding: { type: 'spki', format: 'pem' } })
+      const key = join(home, `${failure}.pem`)
+      writeFileSync(key, privateKey, { mode: 0o600 })
+      const goodRoot = join(home, 'good')
+      const badRoot = join(home, 'bad')
+      for (const [repo, checkout] of [['o/good', goodRoot], ['o/bad', badRoot]] as const) {
+        mkdirSync(join(checkout, '.vegastack'), { recursive: true })
+        if (!(repo === 'o/bad' && failure === 'dev-md')) writeFileSync(join(checkout, '.vegastack/dev.md'), `repo: ${repo}\n`)
+      }
+      const fetch: Fetch = async (url) => {
+        const bad = url.includes('/o/bad/') || url.includes('/2/')
+        if (bad && failure === 'app-404' && url.endsWith('/installation')) return { ok: false, status: 404, json: async () => ({}) }
+        if (bad && failure === 'mint' && url.includes('/access_tokens')) return { ok: false, status: 500, json: async () => ({}) }
+        return { ok: true, status: 200, json: async () => url.endsWith('/installation') ? { id: bad ? 2 : 1 } : { token: bad ? 'bad-token' : 'good-token', expires_at: '2099-01-01T00:00:00Z' } }
+      }
+      const started: string[] = []
+      const lines: string[] = []
+      const code = await runWorker(['run', '--once', '--json'], {
+        cwd: root, home, host: HOST, env: { VEGAFACTORY_APP_PRIVATE_KEY_FILE: key }, out: (line) => lines.push(line), git: anyGit, fetch, now: () => gh.clock,
+        ensureCheckout: async ({ repo }) => {
+          if (repo === 'o/bad' && ['clone', 'hooks'].includes(failure)) return { ok: false as const, repo, reason: failure === 'clone' ? 'clone failed' : 'required harness hooks are unsafe' }
+          return { ok: true as const, repo, root: repo === 'o/good' ? goodRoot : badRoot, created: true }
+        },
+        runnerForBoard: (repo) => ((args, input) => gh.runner(args.map(arg => arg.replaceAll(`repos/${repo}`, 'repos/o/r')), input)),
+        run: ((command, args) => command === 'git'
+          ? (failure === 'push' && args.includes(badRoot) ? { code: 1, stdout: '', stderr: 'push unavailable' } : { code: 0, stdout: 'git@github.com:o/good.git', stderr: '' })
+          : { code: 0, stdout: 'ok', stderr: '' }) as Probe,
+        runStep: (async (step) => { started.push(step.repo); return { outcome: 'done' as const, note: '', ms: 1 } }) as RunStep,
+      })
+      expect(code, failure).toBe(0)
+      expect(started, `${failure}: ${lines[0]}`).toEqual(['o/good'])
+      expect(JSON.parse(lines[0]!).boards, failure).toContainEqual(expect.objectContaining({ repo: 'o/bad', ok: false }))
+    }
+  })
+
+  test('two boards with the same issue fail and hand back through their own roots and runners', async () => {
+    project(`| node | owner | worker | repos | caps |\n|---|---|---|---|---|\n| ${NODE} | mk | yes | o/a o/b | runs 2 |\n`)
+    const transports = new Map<string, FakeGitHub>()
+    const roots = new Map<string, string>()
+    for (const repo of ['o/a', 'o/b']) {
+      const transport = new FakeGitHub()
+      transport.permissions.set('mk', 'admin')
+      transport.addIssue({ number: 1, labels: ['planning', 'medium'] })
+      transports.set(repo, transport)
+      const checkout = realpathSync(mkdtempSync(join(tmpdir(), `worker-${repo.replace('/', '-')}-`)))
+      spawnSync('git', ['init', '-q'], { cwd: checkout })
+      mkdirSync(join(checkout, '.vegastack'))
+      writeFileSync(join(checkout, '.vegastack/dev.md'), `repo: ${repo}\n`)
+      roots.set(repo, checkout)
+    }
+    const contextFor = (repo: string) => {
+      const transport = transports.get(repo)!
+      const runner: GhRunner = (args, input) => transport.runner(args.map(arg => arg.replaceAll(`repos/${repo}`, 'repos/o/r')), input)
+      return { key: repo, repo, root: roots.get(repo)!, runner, devMd: '', identity: { runner, freshen: async () => {}, token: () => null } }
+    }
+    expect(await runWorker(['run', '--once'], {
+      cwd: root, home, host: HOST, env: {}, out: () => {}, runner: gh.runner, git: anyGit, now: () => transports.get('o/a')!.clock,
+      provisionBoard: async repo => contextFor(repo),
+      runStep: (async () => ({ outcome: 'failed' as const, note: 'boom', ms: 1 })) as RunStep,
+    })).toBe(0)
+    for (const repo of ['o/a', 'o/b']) {
+      expect(transports.get(repo)!.issues.get(1)!.labels).toContain('planning')
+      expect(transports.get(repo)!.issues.get(1)!.comments.some(comment => comment.body.includes('type=standdown'))).toBe(true)
+      expect(existsSync(cacheDir(roots.get(repo)!, repo, 1))).toBe(true)
+    }
+    expect(readRuns(join(home, '.vegafactory', 'worker')).map(run => `${run.repo}#${run.issue}`).sort()).toEqual(['o/a#1', 'o/b#1'])
+  })
+
   test('an actual issue-read failure marks its board unavailable in once JSON', async () => {
     gh.addIssue({ number: 1, labels: ['queued', 'small'] })
     const broken: GhRunner = (args, input) => args.some((arg) => String(arg).includes('issues/1'))
@@ -3139,6 +3238,28 @@ describe('the command', () => {
     expect(code).toBe(0)
     expect(provisions).toBeGreaterThanOrEqual(3)
     expect(lines.filter((line) => line.includes('origin changed'))).toHaveLength(1)
+  })
+
+  test('a long run keeps its original hand-back context when next-pass revalidation fails', async () => {
+    gh.addIssue({ number: 1, labels: ['planning', 'medium'] })
+    let provisions = 0
+    let sleeps = 0
+    let finish = () => {}
+    const blocked = new Promise<void>(resolve => { finish = resolve })
+    const context = { key: 'o/r', repo: 'o/r', root, runner: gh.runner, devMd: '', identity: { runner: gh.runner, freshen: async () => {}, token: () => null } }
+    expect(await runWorker(['run'], {
+      cwd: root, home, host: HOST, env: {}, out: () => {}, runner: gh.runner, git: anyGit, now: () => gh.clock,
+      provisionBoard: async () => { if (++provisions === 2) throw new Error('origin changed'); return context },
+      runStep: (async () => { await blocked; return { outcome: 'failed' as const, note: 'boom', ms: 1 } }) as RunStep,
+      update: async () => ({ action: 'current', before: 'x', after: 'x', latest: 'x', message: 'current' }),
+      sleep: async () => {
+        sleeps += 1
+        if (sleeps === 2) { finish(); await Bun.sleep(0) }
+        if (sleeps === 3) process.emit('SIGTERM' as NodeJS.Signals)
+      },
+    })).toBe(0)
+    expect(gh.issues.get(1)!.comments.some(comment => comment.body.includes('type=standdown'))).toBe(true)
+    expect(readRuns(join(home, '.vegafactory', 'worker'))).toContainEqual(expect.objectContaining({ repo: 'o/r', issue: 1, outcome: 'failed' }))
   })
 
   test('once JSON refusal keeps the same single-document envelope', async () => {
@@ -3259,11 +3380,12 @@ describe('the command', () => {
       stop: (pid: number) => { stopped.push(pid); return true },
       start: () => live.startedAt,
     })
-    expect(code).toBe(0)
+    expect(code).toBe(1)
     expect(stopped).toEqual([5150])
     expect(lines.join('\n')).toContain('stopped 1 run it had started')
-    expect(lines.join('\n')).toContain(`o/r#7 (implement, claimed by ${HOST}:worker-ab12-7)`)
-    expect(readChildren(stateRoot)).toEqual([])
+    expect(lines.join('\n')).toContain(`o/r#7 (implement, claimed by ${HOST}:worker-ab12-7`)
+    expect(readChildren(stateRoot)).toEqual([live])
+    expect(lines.join('\n')).toContain('process could not be stopped safely')
   })
 
   test('a record whose process is gone is dropped, never signalled', async () => {
@@ -3284,6 +3406,16 @@ describe('the command', () => {
     expect(stopped).toEqual([])
     expect(readChildren(stateRoot)).toEqual([])
     expect(lines.join('\n')).not.toContain('stopped 1 run')
+  })
+
+  test('a signalled child stays recoverable until a restart proves it exited', () => {
+    const stateRoot = join(home, '.vegafactory', 'worker')
+    const child = { repo: 'o/r', pid: 6161, startedAt: 'started', command: 'claude', issue: 6, action: 'plan' as const, owner: null, from: 'planning' as const }
+    noteChild(stateRoot, child)
+    expect(stopChild(stateRoot, child, { start: () => 'started', stop: () => true })).toBe(true)
+    expect(readChildren(stateRoot)).toEqual([child])
+    expect(stopChild(stateRoot, child, { start: () => 'different', stop: () => { throw new Error('must not signal reused pid') } })).toBe(false)
+    expect(readChildren(stateRoot)).toEqual([])
   })
 
   test('disable retains a child whose process identity is unknown and never signals it', async () => {
@@ -3329,6 +3461,13 @@ describe('the command', () => {
     expect(parseWorkerArgs(['run', '--once', '--repo', 'o/r', '--json'])).toEqual({ verb: 'run', flags: { repo: 'o/r' }, json: true, dryRun: false, once: true })
     expect(() => parseWorkerArgs(['run', '--repo'])).toThrow('--repo needs a value')
     expect(runWorker(['frobnicate'], { cwd: root, home, host: HOST, env: {}, out: () => {} })).rejects.toThrow('unknown worker verb')
+    expect(workerUsage()).toContain('One ship at a time per repository')
+    expect(workerUsage()).toContain('across the whole machine')
+    expect(workerUsage()).toContain('separate repository-scoped hour-long tokens')
+    expect(workerUsage()).toContain('every configured explicit board')
+    expect(workerUsage()).toContain('every configured or persisted board')
+    expect(workerUsage()).toContain("Each run gets only its board's token")
+    expect(workerUsage()).not.toContain('One merge at a time per machine')
   })
 })
 

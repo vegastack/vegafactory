@@ -3,6 +3,14 @@ import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 
 const template = readFileSync(join(import.meta.dir, '../assets/control-room/onboarding/worker-box.md.template'), 'utf8')
+const reference = readFileSync(join(import.meta.dir, '../references/control-room.md'), 'utf8')
+
+test('nodes roster grants only explicit repositories', () => {
+  expect(reference).toContain('comma-separated list of explicit `OWNER/NAME` repositories')
+  expect(reference).toContain('an empty cell authorises nothing')
+  expect(reference).toContain('`*` or `all` is refused rather than expanded')
+  expect(reference).not.toContain('`*` or `all` has to be said out loud')
+})
 
 test('worker-box onboarding describes the multi-repository worker boundary', () => {
   for (const text of [

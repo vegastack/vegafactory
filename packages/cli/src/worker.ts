@@ -981,7 +981,8 @@ export function stopChild(stateRoot: string, record: ChildRecord, deps: { stop?:
     return false
   }
   const stopped = (deps.stop ?? stopGroup)(record.pid, 'SIGTERM')
-  if (stopped) forgetChild(stateRoot, record.pid)
+  // A successful signal is not a process exit. The child record is the restart recovery handle
+  // and stays until runOne observes close, or a later process proves the pid identity is gone.
   return stopped
 }
 
@@ -1985,6 +1986,7 @@ export async function reconcileBoards(input: {
     // failure retains both the board and its pending rows; it never costs a healthy board a pass.
     try {
       if (!input.contexts.has(repo)) input.contexts.set(repo, await input.provision(repo))
+      await input.contexts.get(repo)!.identity.freshen()
     } catch (error) {
       const reason = (error as Error).message
       unavailable.push({ repo, reason })
@@ -2567,16 +2569,17 @@ export function standDown(ctx: StandDownContext, reason: string): string {
 export function workerUsage(): string {
   return `Usage: vegafactory worker <enable|disable|status|run> [options]
 
-  enable                 check this machine is ready — listed in the control room's nodes.md,
-                         harness hooks wired, a real \`claude -p\` and \`codex exec\` answering, the
-                         GitHub App key present — then install the launchd or systemd unit
+  enable                 check this machine and every configured explicit board are ready — the
+                         node listed, harnesses answering, and each board's App identity, checkout,
+                         hooks, policy and push path usable — then install the one machine unit
   disable                remove the unit; the machine stops picking work up
-  status                 the board, plus this machine's recent worker runs
+  status                 every configured or persisted board, plus this machine's recent runs
   run [--once]           the poll loop itself (the unit runs this); --once makes a single pass
                          and is the only form --json reports, because the document answers when
                          a pass ends
 
-One merge at a time per machine, and as many runs at once as its roster row allows. The row's
+One ship at a time per repository (different repositories may ship together), and as many runs
+across the whole machine as its roster row allows. The row's
 caps cell sets them — \`runs 10 · step 72h · poll 1m · retry 15m · park 3\`, in any order, every
 field optional and separated by \`·\` or a comma. \`runs\` and \`park\` take a count; \`step\` takes
 minutes or hours, \`poll\` seconds or minutes, \`retry\` minutes. A field that is present and
@@ -2584,7 +2587,7 @@ unreadable refuses the machine rather than being guessed at. With no caps cell t
 ${MAX_RUNS} runs, step ${STEP_TIMEOUT_MS / 60_000}m, poll ${POLL_MS / 60_000}m, retry ${RETRY_MS / 60_000}m, park ${MAX_FAILURES}. The caps are re-read from the refreshed roster
 every pass, so changing one is a control-room PR that lands on the next poll, not a release.
 
-Two machines on one board each get their own caps, and each keeps its own retry and
+Two machines on one board each get their own machine-wide caps, and each keeps its own retry and
 subscription-reset deadlines. A run takes the issue's claim before it starts, so another machine's
 poll sees the work is taken, except in the seconds an implement run hands that claim to the
 session it starts.
@@ -2600,11 +2603,11 @@ nothing. The \`repos\` cell accepts explicit \`OWNER/NAME\` entries only; an emp
 \`all\` authorise no unattended repository and are reported as refusals.
 
 A machine the control room's nodes.md does not name refuses every verb but disable. Writes
-go out as the VegaFactory GitHub App, on an hour-long token minted here from its private key:
+go out as the VegaFactory GitHub App, on separate repository-scoped hour-long tokens minted here from its private key:
   ${appKeyPath()}
 (VEGAFACTORY_APP_PRIVATE_KEY_FILE moves it; VEGAFACTORY_APP_ID and VEGAFACTORY_APP_ACTOR name
-another App and must be set together.) Each run gets
-that token too, so everything it posts is the App's and none of it can pass as a person's word; it
+another App and must be set together.) Each run gets only its board's token, so everything it
+posts is the App's and none of it can pass as a person's word; it
 is never given the key itself. The runs think on the operator's own subscription, so an API-key
 variable in the environment refuses the command.
 `
@@ -2922,7 +2925,7 @@ export async function runWorker(argv: string[], deps: CliDeps = {}): Promise<num
       // The stopped runs held claims and left their issues in-progress. This process has no App
       // token of its own — `disable` has to work on a machine that has just been de-listed — so it
       // names them instead of pretending to have cleaned up.
-      const unresolved = [...stopped.filter((record) => record.owner), ...remaining]
+      const unresolved = remaining
       const left = unresolved.length
         ? `\nThese issues need attention after disable:\n${unresolved.map((record) => `  ${record.repo}#${record.issue} (${record.action}${record.owner ? `, claimed by ${record.owner}` : ''}${remaining.includes(record) ? ', process could not be stopped safely' : ''})`).join('\n')}`
         : ''
@@ -3020,13 +3023,15 @@ export async function runWorker(argv: string[], deps: CliDeps = {}): Promise<num
       let waiting = 0
       const unreadableFailures = new Map<string, string>()
       const contexts = new Map<string, BoardContext>()
+      const recoveryContexts = new Map<string, BoardContext>()
       const reporter = workerProblemReporter(homeOptions, note)
       const pollDeps: PollDeps = {
         stateRoot, boards: [],
         machine, runId, caps, appActor: app.appActor, out: note, now: deps.now ?? Date.now,
         runStep: deps.runStep ?? defaultRunStep(env), stop: deps.stop, start: deps.start, alive: deps.alive,
         standDown: (boardRepo, number, reason, restoreTo) => {
-          const context = contexts.get(canonicalRepository(boardRepo))
+          const key = canonicalRepository(boardRepo)
+          const context = contexts.get(key) ?? recoveryContexts.get(key)
           if (!context) return `${reason} — ${boardRepo} is unavailable for hand-back`
           return standDown({ root: context.root, repo: context.repo, number, runner: context.runner, machine, appActor: app.appActor, restoreTo }, reason)
         },
@@ -3103,7 +3108,11 @@ export async function runWorker(argv: string[], deps: CliDeps = {}): Promise<num
           // push-path, and credential drift before that board runs again. Dropping contexts stay
           // alive because they are the recovery capability for pending hand-backs.
           for (const boardRepo of contexts.keys()) {
-            if (previous.boards[boardRepo]?.state !== 'dropping') contexts.delete(boardRepo)
+            if (previous.boards[boardRepo]?.state !== 'dropping') {
+              const context = contexts.get(boardRepo)!
+              if ([...inflight.values()].some(run => !run.settled && canonicalRepository(run.candidate.repo) === boardRepo)) recoveryContexts.set(boardRepo, context)
+              contexts.delete(boardRepo)
+            }
           }
           const reconciled = await reconcileBoards({
             home, env, listed: still.entry.repos, previous, contexts, inflight,
@@ -3139,6 +3148,9 @@ export async function runWorker(argv: string[], deps: CliDeps = {}): Promise<num
           waiting = 0
           unreadableFailures.clear()
           const picked = await poll(pollDeps, inflight)
+          for (const boardRepo of recoveryContexts.keys()) {
+            if (![...inflight.values()].some(run => !run.settled && canonicalRepository(run.candidate.repo) === boardRepo)) recoveryContexts.delete(boardRepo)
+          }
           if (unreadableFailures.size) visibleBoards = visibleBoards.map((board) => {
             const reason = unreadableFailures.get(board.repo)
             return reason ? { repo: board.repo, ok: false, reason } : board

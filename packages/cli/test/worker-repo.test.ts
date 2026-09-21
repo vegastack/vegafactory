@@ -114,6 +114,25 @@ test('hook wiring merges all seven events while preserving every byte outside ho
   expect(ensureHarnessHooks(root).changed).toEqual([])
 })
 
+test('hook merge replaces source and binary invocations while preserving prefix lookalikes', () => {
+  const root = temporaryHome()
+  mkdirSync(join(root, '.claude'))
+  mkdirSync(join(root, '.codex'))
+  const lookalike = 'echo vegafactory hook stop --harness claude'
+  const source = 'bun /repo/packages/cli/src/index.ts hook stop --harness claude'
+  const absolute = '/usr/local/bin/vegafactory hook stop --harness claude'
+  writeFileSync(join(root, '.claude/settings.json'), JSON.stringify({ hooks: { Stop: [{ hooks: [
+    { type: 'command', command: lookalike }, { type: 'command', command: source }, { type: 'command', command: absolute },
+  ] }] } }))
+  writeFileSync(join(root, '.codex/hooks.json'), '{}')
+  ensureHarnessHooks(root)
+  const serialized = JSON.stringify(JSON.parse(readFileSync(join(root, '.claude/settings.json'), 'utf8')).hooks.Stop)
+  expect(serialized).toContain(lookalike)
+  expect(serialized).not.toContain(source)
+  expect(serialized).not.toContain(absolute)
+  expect(serialized.match(/vegafactory hook stop --harness claude/g)).toHaveLength(2) // echo lookalike + one managed command
+})
+
 test('escaped hooks spelling is preserved and duplicate semantic keys are refused without a write', () => {
   const escaped = temporaryHome()
   mkdirSync(join(escaped, '.claude'))
@@ -183,7 +202,11 @@ test('an interrupted two-file hook merge stays monotonic and retry preserves a c
 test('clone is accepted atomically without disclosing its token and hooks are merged', async () => {
   const home = temporaryHome()
   const calls: Array<{ command: string; args: string[]; env: NodeJS.ProcessEnv }> = []
-  const result = await ensureWorkerCheckout({ repo: 'O/R', home, token: 'ghs_secret', run: cloningRunner(calls) })
+  const trace = join(home, 'git-trace.log')
+  const result = await ensureWorkerCheckout({
+    repo: 'O/R', home, token: 'ghs_secret', run: cloningRunner(calls),
+    env: { ...process.env, GIT_TRACE: trace, GIT_TRACE2_EVENT: trace, GIT_CURL_VERBOSE: '1' },
+  })
 
   expect(result).toEqual({
     ok: true,
@@ -195,6 +218,8 @@ test('clone is accepted atomically without disclosing its token and hooks are me
   expect(calls.flatMap(call => call.args).join(' ')).not.toContain('ghs_secret')
   expect(calls.filter(call => call.env.GH_TOKEN === 'ghs_secret')).toHaveLength(1)
   expect(calls.filter(call => call.env.GITHUB_TOKEN === 'ghs_secret')).toHaveLength(1)
+  expect(calls.some(call => call.env.GIT_TRACE || call.env.GIT_TRACE2_EVENT || call.env.GIT_CURL_VERBOSE)).toBe(false)
+  expect(existsSync(trace)).toBe(false)
   expect(readFileSync(join(result.root, '.git/config'), 'utf8')).not.toContain('ghs_secret')
   expect(readFileSync(join(result.root, '.claude/settings.json'), 'utf8')).not.toContain('ghs_secret')
   expect(JSON.parse(readFileSync(join(result.root, '.claude/settings.json'), 'utf8')).unrelated).toEqual({ spacing: true })
