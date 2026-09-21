@@ -330,8 +330,19 @@ function noteDroppedDeps(repoRoot, name, at) {
 
 // Returns whether the record is gone. A clear that failed leaves it asking again next time,
 // which is the harmless direction — but the caller is told rather than assuming it worked.
+//
+// The directory is checked here too. `readDroppedDeps` refuses to follow a symlinked
+// `deps-dropped`, and a removal that did not would delete a file of that name wherever the link
+// pointed — the one write in this pair that leaves the repository.
 function clearDroppedDeps(repoRoot, name) {
-  try { rmSync(droppedFor(repoRoot, name), { force: true }); return true; } catch { return false; }
+  try {
+    const dir = droppedDir(repoRoot);
+    if (lstatSync(dir).isSymbolicLink()) return false;
+    rmSync(join(dir, encodeURIComponent(name)), { force: true });
+    return true;
+  } catch (error) {
+    return error?.code === 'ENOENT';
+  }
 }
 
 // Written without ever following a link. The path is predictable and inside an ignored directory,
@@ -622,7 +633,7 @@ function gatherRemovalFacts({ repoRoot, path, branch, base, remote, locked }) {
       const status = git(path, ['status', '--porcelain']);
       return !status.ok || status.out !== '';
     })();
-  if (branch === null) return { dirty, unpushed: false, remoteMissing: false, mergedIntoDefault: false, landedInBase: false };
+  if (branch === null) return { dirty, unpushed: false, remoteMissing: false, mergedIntoDefault: false, deletedAfterPush: false };
   const remoteRef = remote + '/' + branch;
   const remoteMissing = !git(repoRoot, ['rev-parse', '--verify', '--quiet', 'refs/remotes/' + remoteRef]).ok;
   const ahead = remoteMissing ? null : git(repoRoot, ['rev-list', remoteRef + '..' + branch]);
@@ -634,21 +645,26 @@ function gatherRemovalFacts({ repoRoot, path, branch, base, remote, locked }) {
   // reached through a PR, so "ancestor of the default branch" alone would call a
   // brand-new branch cut from origin/main 'merged' and prune it on day one.
   const isAncestor = git(repoRoot, ['merge-base', '--is-ancestor', branch, baseRef]).ok;
-  // Whether this branch's work is already in the base, by whichever test can see it.
+  // `remoteMissing` says the remote-tracking ref is gone. It cannot say *why*, and the two
+  // reasons are opposites: a branch nobody ever pushed, and a branch pushed and then deleted by
+  // delete-on-merge. Git does keep that answer — `git push -u` writes an upstream into the
+  // config, and deleting the remote branch leaves it behind.
   //
-  // Ancestry alone would call a branch cut this morning merged: it has no commits of its own, so
-  // it is trivially an ancestor. Requiring the base to have moved past it is the precise version
-  // of the same idea — a branch contained in a base that carries commits it does not is a branch
-  // whose work was taken in. That case matters because delete-on-merge removes the remote branch,
-  // and the ancestry test used to be skipped entirely whenever the remote ref was gone.
-  const baseAhead = isAncestor && (git(repoRoot, ['rev-list', '--count', branch + '..' + baseRef]).out || '0').trim() !== '0';
+  // This matters twice. Ancestry is meaningless for a branch nobody pushed: one cut this morning
+  // has no commits of its own and is trivially an ancestor of the base, so counting it would call
+  // an open worktree merged and prune it. For a branch that *was* pushed, ancestry is exactly the
+  // right test, and skipping it is why a merged worktree used to read as unmerged for ever.
+  // Its *own* name on the remote, which is what `push -u` writes. A worktree cut from
+  // `origin/<base>` also gets an upstream — of the base — so merely having one proves nothing.
+  const everPushed = git(repoRoot, ['config', '--get', 'branch.' + branch + '.merge']).out.trim() === 'refs/heads/' + branch;
   // A squash merge rewrites the commits, so ancestry cannot see it and content decides.
-  const landedInBase = baseAhead || mergedByContent(repoRoot, branch, baseRef);
-  // A fast-forward merge can leave the base at the branch's own tip, with nothing ahead and no
-  // rewritten commits to match. The remote ref still being there is what separates that from a
-  // branch nobody has pushed.
-  const mergedIntoDefault = landedInBase || (!remoteMissing && isAncestor);
-  return { dirty, unpushed, remoteMissing, mergedIntoDefault, landedInBase, locked };
+  const mergedIntoDefault = ((!remoteMissing || everPushed) && isAncestor) || mergedByContent(repoRoot, branch, baseRef);
+  // Whether there is anything here left to protect. A branch whose remote was deleted after it
+  // was pushed has nothing: pushing it back would recreate what somebody removed on purpose, on
+  // a call whose reported action says "remove". A branch nobody ever pushed is the opposite case
+  // and does need its push before the checkout can go.
+  const deletedAfterPush = remoteMissing && everPushed;
+  return { dirty, unpushed, remoteMissing, mergedIntoDefault, deletedAfterPush, locked };
 }
 
 // Squash and rebase merges rewrite the commits, so by ancestry a merged branch
@@ -711,13 +727,11 @@ export function removeWorktree({ repoRoot, name, base, force = false, push = fal
   const branch = entry.branch;
   refreshBase({ repoRoot, base, remote, actions, warns });
   let facts = gatherRemovalFacts({ repoRoot, path, branch, base, remote, locked: entry.locked });
-  // Push only what is actually at risk. A branch with no remote is at risk when the base does not
-  // already contain it; when it does, the remote branch is missing because a merge deleted it on
-  // purpose, and pushing would put back what somebody removed — on a call whose reported action
-  // says "remove". This asks containment rather than merged-ness, because a fast-forward or an
-  // ordinary merge leaves the branch an ancestor of the base with its remote ref pruned, which
-  // the merged-ness test declines to call merged and the content test cannot see either.
-  if (push && branch && (facts.unpushed || (facts.remoteMissing && !facts.landedInBase))) {
+  // Push only what is actually at risk. A branch whose remote was deleted after it was pushed has
+  // nothing here that is not already on the server; putting it back would recreate what somebody
+  // removed on purpose, on a call whose reported action says "remove". A branch nobody has ever
+  // pushed is the opposite: its push is what makes the checkout safe to reclaim.
+  if (push && branch && (facts.unpushed || (facts.remoteMissing && !facts.deletedAfterPush))) {
     actions.push(at(branch, 'git push -u ' + remote + ' ' + branch + ' before removing'));
     if (write) {
       const pushed = git(path, ['push', '-u', remote, branch]);
@@ -950,6 +964,10 @@ export function pruneWorktrees({ repoRoot, base, olderThan, devMd, ledgerTimes =
     actions.push(at(candidate.name, (candidate.pushable ? 'push the branch, then re-check for removal after ' : 'remove after ') + candidate.ageDays + ' quiet days'));
     if (!write) continue;
     const removed = removeWorktree({ repoRoot, name: candidate.name, base, force: true, push: true, write: true, remote });
+    // Everything removal had to say, said. A record of dropped dependencies that could not be
+    // cleared is the one that matters: worktree names come back, and the next checkout of this
+    // one would be told to reinstall something nobody ever took.
+    warns.push(...removed.warns);
     if (removed.blocks.length > 0) {
       warns.push(at(candidate.name, 'kept after all: ' + removed.blocks[0]));
       candidate.removable = false;

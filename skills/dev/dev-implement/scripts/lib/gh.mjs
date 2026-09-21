@@ -23,7 +23,7 @@ export class GhUnavailable extends Error {
 // Single-pass on purpose. Trying `JSON.parse` on every prefix that ends in a bracket is quadratic,
 // and this reads issue and comment bodies — text anybody with an account can write. A few thousand
 // braces in one comment would turn each poll into seconds of parsing, every pass, for ever.
-function splitJsonDocuments(text) {
+export function splitJsonDocuments(text) {
   const source = String(text ?? '');
   const documents = [];
   let depth = 0;

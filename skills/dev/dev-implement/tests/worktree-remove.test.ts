@@ -471,14 +471,18 @@ describe('pruneWorktrees', () => {
     writeFileSync(join(wt.path, 'feature.txt'), 'landed\n')
     git(wt.path, 'add', '.')
     git(wt.path, 'commit', '-m', 'feat: the work')
+    // Pushed, the way a PR is — this is what makes the later deletion mean "delete-on-merge"
+    // rather than "never pushed", and the two must not be treated alike.
+    git(wt.path, 'push', '-u', 'origin', 'HEAD')
     // Squashed onto main: the same content under a different commit, which is what a merge queue
-    // leaves behind. The feature branch is then gone from the remote — here it was never pushed
-    // at all, which reads exactly the same way.
+    // leaves behind, then the feature branch deleted and the tracking ref pruned.
     writeFileSync(join(root, 'feature.txt'), 'landed\n')
     // By name: `add .` in the main checkout would sweep in the worktree directory itself.
     git(root, 'add', 'feature.txt')
     git(root, 'commit', '-m', 'feat: the work (#111)')
     git(root, 'push', 'origin', 'main')
+    git(root, 'push', 'origin', '--delete', 'feat/111-landed')
+    git(root, 'fetch', '--prune', 'origin')
 
     const before = git(root, 'ls-remote', '--heads', 'origin')
     expect(before).not.toContain('feat/111-landed')
@@ -492,6 +496,54 @@ describe('pruneWorktrees', () => {
   // The squash case is not the only one. An ordinary merge leaves the branch an ancestor of the
   // base; delete the remote branch afterwards and the merged-ness test declines to call it merged
   // while content cannot see it either, so "no remote branch" alone would push it back.
+  // The one that must never happen: an open worktree removed because the default branch moved.
+  // A branch cut this morning has no commits of its own, so it is trivially an ancestor of the
+  // base — counting that as merged prunes work somebody is in the middle of.
+  test('a branch nobody pushed is not merged, however far the base moves ahead', () => {
+    const root = repoWithRemote()
+    const wt = createWorktree({ repoRoot: root, issue: 118, slug: 'open', type: 'feat', base: 'main', devMd, home: root, write: true })
+    // Unrelated work lands on main. The worktree is untouched and was never pushed.
+    writeFileSync(join(root, 'other.txt'), 'someone else\n')
+    git(root, 'add', 'other.txt')
+    git(root, 'commit', '-m', 'chore: elsewhere')
+    git(root, 'push', 'origin', 'main')
+
+    // Inside the window: nothing about it is a candidate at all.
+    const soon = pruneWorktrees({
+      repoRoot: root, base: 'main', olderThan: '14d', devMd, ledgerTimes: {}, now: Date.now(), write: true,
+    })
+    expect(soon.candidates.find((c: { name: string }) => c.name === '118-open')).toBeUndefined()
+    expect(existsSync(wt.path)).toBe(true)
+
+    // And past it, it is `parked` — not `merged`, which would bypass retention entirely.
+    const later = pruneWorktrees({
+      repoRoot: root, base: 'main', olderThan: '14d', devMd,
+      ledgerTimes: { '118-open': OLD_LEDGER }, now: FUTURE_NOW, write: false,
+    })
+    expect(later.candidates.find((c: { name: string; state: string }) => c.name === '118-open')?.state).toBe('parked')
+  })
+
+  test('a prune never recreates a branch deleted after a fast-forward merge', () => {
+    const root = repoWithRemote()
+    const wt = createWorktree({ repoRoot: root, issue: 119, slug: 'ffwd', type: 'feat', base: 'main', devMd, home: root, write: true })
+    writeFileSync(join(wt.path, 'feature.txt'), 'landed\n')
+    git(wt.path, 'add', '.')
+    git(wt.path, 'commit', '-m', 'feat: work')
+    git(wt.path, 'push', '-u', 'origin', 'HEAD')
+    // A true fast-forward: main ends up at the branch's own tip, so nothing is ahead of it and
+    // there are no rewritten commits for content to match.
+    git(root, 'merge', '--ff-only', 'feat/119-ffwd')
+    git(root, 'push', 'origin', 'main')
+    expect(git(root, 'rev-parse', 'main').trim()).toBe(git(wt.path, 'rev-parse', 'HEAD').trim())
+    git(root, 'push', 'origin', '--delete', 'feat/119-ffwd')
+    git(root, 'fetch', '--prune', 'origin')
+
+    const r = removeWorktree({ repoRoot: root, name: '119-ffwd', base: 'main', push: true, write: true })
+    expect(r.blocks).toEqual([])
+    expect(r.actions.join('\n')).not.toContain('git push')
+    expect(git(root, 'ls-remote', '--heads', 'origin')).not.toContain('feat/119-ffwd')
+  })
+
   test('a prune never recreates a branch deleted after an ordinary merge', () => {
     const root = repoWithRemote()
     const wt = createWorktree({ repoRoot: root, issue: 117, slug: 'ff', type: 'feat', base: 'main', devMd, home: root, write: true })

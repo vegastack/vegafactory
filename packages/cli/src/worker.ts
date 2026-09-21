@@ -859,9 +859,30 @@ export function recordRun(root: string, entry: RunRecord) {
   } catch { /* the record is a note; failing to trim it is not worth a failed run */ }
 }
 
+// Reading a record: "it is not there" is an empty answer, and everything else is not.
+//
+// These readers used to catch everything, which made a record the worker could not validate look
+// exactly like a record that had never been written. That is the one wrong answer they can give:
+// `worker disable` reads `children.json` to decide what to stop, so an empty answer there tears
+// down the service and reports success while detached agents keep running, and an empty `acted`
+// forgets every trigger and backoff the poll was keeping.
+function readRecord(root: string, name: string): string | null {
+  let path: string
+  try {
+    path = record(root, name)
+  } catch (error) {
+    throw new Error(`the worker's ${name} could not be made safe to read: ${(error as Error).message}`)
+  }
+  try {
+    return readFileSync(path, 'utf8')
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null
+    throw error
+  }
+}
+
 export function readRuns(root: string, limit = 20): RunRecord[] {
-  let text = ''
-  try { text = readFileSync(runsPath(root), 'utf8') } catch { return [] }
+  const text = readRecord(root, 'runs.jsonl') ?? ''
   const rows: RunRecord[] = []
   for (const line of text.split('\n')) {
     if (!line.trim()) continue
@@ -871,8 +892,12 @@ export function readRuns(root: string, limit = 20): RunRecord[] {
 }
 
 export function readActed(root: string): Record<string, Acted> {
+  const text = readRecord(root, 'acted.json')
+  if (text === null) return {}
+  // A file that is there but not valid JSON is a corrupt record, not an attacker-shaped one:
+  // it is the worker's own note, and starting over is the right answer.
   try {
-    const saved: unknown = JSON.parse(readFileSync(actedPath(root), 'utf8'))
+    const saved: unknown = JSON.parse(text)
     return saved && typeof saved === 'object' && !Array.isArray(saved) ? saved as Record<string, Acted> : {}
   } catch { return {} }
 }
@@ -916,8 +941,10 @@ const isRecord = (value: unknown): value is ChildRecord => {
 }
 
 export function readChildren(root: string): ChildRecord[] {
+  const text = readRecord(root, 'children.json')
+  if (text === null) return []
   try {
-    const saved: unknown = JSON.parse(readFileSync(childrenPath(root), 'utf8'))
+    const saved: unknown = JSON.parse(text)
     return Array.isArray(saved) ? saved.filter(isRecord) : []
   } catch { return [] }
 }

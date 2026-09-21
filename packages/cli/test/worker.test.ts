@@ -1669,6 +1669,28 @@ describe('the command', () => {
     expect(readRuns(root).length).toBe(2)
   })
 
+  // The one wrong answer these readers can give. `worker disable` reads the children to decide
+  // what to stop, so "I could not validate this file" arriving as "there are no children" tears
+  // the service down and reports success while detached agents keep running.
+  test('a record that cannot be made safe to read is an error, not an empty answer', () => {
+    // A worker directory that is a symlink: the guard refuses it rather than chmodding whatever
+    // it names, and that refusal has to reach the caller.
+    const elsewhere = mkdtempSync(join(tmpdir(), 'bait-'))
+    const planted = mkdtempSync(join(tmpdir(), 'root-'))
+    mkdirSync(join(planted, '.vegastack', '.tmp'), { recursive: true })
+    symlinkSync(elsewhere, workerDir(planted))
+
+    expect(() => readChildren(planted)).toThrow('children.json')
+    expect(() => readActed(planted)).toThrow('acted.json')
+    expect(() => readRuns(planted)).toThrow('runs.jsonl')
+
+    // And a worker directory with nothing in it is still the ordinary empty answer.
+    const empty = mkdtempSync(join(tmpdir(), 'root-'))
+    expect(readChildren(empty)).toEqual([])
+    expect(readActed(empty)).toEqual({})
+    expect(readRuns(empty)).toEqual([])
+  })
+
   // A plain `worker run` never passes through `enable`, and it writes the same records.
   test('a direct run gets the same owner-only directory as an enabled service', async () => {
     rmSync(workerDir(root), { recursive: true, force: true })
