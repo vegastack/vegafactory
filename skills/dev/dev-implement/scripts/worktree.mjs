@@ -189,9 +189,8 @@ const DEFAULT_RETENTION_MS = 14 * DAY_MS;
 // Dependencies go first and sooner, because they are the cost. On this machine 628 MB of a 638 MB
 // worktree was `node_modules` and the checkout itself was 10 MB — so dropping them reclaims almost
 // everything while leaving the code, the branch and the history exactly where they were, and
-// resuming only has to run setup again.
+// resuming only has to run setup again (#275).
 const DEFAULT_DEPS_RETENTION_MS = 3 * DAY_MS;
-// Long enough for a cold `bun install`, short enough that a hung one is not for ever.
 
 // All of these must hold before a worktree directory is removed. Each failure
 // gets its own sentence so the caller can print exactly why the work is being
@@ -292,13 +291,23 @@ export function parseSetupCommand(devMd) {
 const droppedDir = (repoRoot) => join(repoRoot, '.vegastack', '.tmp', 'worker', 'deps-dropped');
 const droppedFor = (repoRoot, name) => join(droppedDir(repoRoot), encodeURIComponent(name));
 
+// Only "this directory does not exist" means nothing was dropped. Any other failure is a record
+// we could not read, and reading it as absence would let a checkout with no dependencies look
+// untouched — so it comes back as an entry that says it could not be read.
 export function readDroppedDeps(repoRoot) {
   const found = {};
+  let names;
   try {
-    for (const entry of readdirSync(droppedDir(repoRoot))) {
-      try { found[decodeURIComponent(entry)] = readFileSync(join(droppedDir(repoRoot), entry), 'utf8').trim(); } catch { /* raced with a clear */ }
-    }
-  } catch { /* nothing has been dropped here */ }
+    names = readdirSync(droppedDir(repoRoot));
+  } catch (error) {
+    if (error?.code === 'ENOENT') return found;
+    return { '*': 'the record of dropped dependencies could not be read: ' + (error?.message ?? 'failed') };
+  }
+  for (const entry of names) {
+    const name = decodeURIComponent(entry);
+    try { found[name] = readFileSync(join(droppedDir(repoRoot), entry), 'utf8').trim(); }
+    catch (error) { found[name] = error?.code === 'ENOENT' ? null : 'unreadable'; }
+  }
   return found;
 }
 
@@ -306,8 +315,10 @@ function noteDroppedDeps(repoRoot, name, at) {
   writeMarker(droppedFor(repoRoot, name), at + '\n');
 }
 
+// Returns whether the record is gone. A clear that failed leaves it asking again next time,
+// which is the harmless direction — but the caller is told rather than assuming it worked.
 function clearDroppedDeps(repoRoot, name) {
-  try { rmSync(droppedFor(repoRoot, name), { force: true }); } catch { /* already gone */ }
+  try { rmSync(droppedFor(repoRoot, name), { force: true }); return true; } catch { return false; }
 }
 
 // Written without ever following a link. The path is predictable and inside an ignored directory,
@@ -462,12 +473,18 @@ function prepareCheckout({ repoRoot, path, devMd, home, write, actions, warns, b
 // run of dev.md's own `setup` command by whoever is about to build, inside that build's own
 // budget — #275. Nothing here starts a process: this runs inside the worker's pass, before a step
 // timer exists, so an install begun here would hold the loop and outlast a shutdown.
-export function noteMissingDependencies({ repoRoot, name, path, devMd, warns }) {
-  if (!(name in readDroppedDeps(repoRoot))) return false;
+export function dependencyNotice(name, dropped, devMd) {
+  if (dropped['*']) return dropped['*'];
+  if (!(name in dropped)) return null;
   const setup = parseSetupCommand(devMd);
-  warns.push(at(path, setup
-    ? 'dependencies were reclaimed while it was idle — run `' + setup + '` here before building'
-    : 'dependencies were reclaimed while it was idle, and dev.md names no `setup` command to put them back'));
+  if (!setup) return 'dependencies were reclaimed while it was idle, and dev.md names no `setup` command to put them back';
+  return 'dependencies were reclaimed while it was idle — run `' + setup + '` here before building';
+}
+
+export function noteMissingDependencies({ repoRoot, name, path, devMd, warns }) {
+  const notice = dependencyNotice(name, readDroppedDeps(repoRoot), devMd);
+  if (!notice) return false;
+  warns.push(at(path, notice));
   return true;
 }
 
@@ -663,7 +680,11 @@ export function removeWorktree({ repoRoot, name, base, force = false, push = fal
   const branch = entry.branch;
   refreshBase({ repoRoot, base, remote, actions, warns });
   let facts = gatherRemovalFacts({ repoRoot, path, branch, base, remote, locked: entry.locked });
-  if (push && branch && (facts.remoteMissing || facts.unpushed)) {
+  // Exactly the condition `evaluateRemoval` blocks on, and for the same reason: a branch with no
+  // remote is only at risk when its work is not already in the base. A squash merge deletes the
+  // feature branch on purpose, so pushing on `remoteMissing` alone would recreate the branch
+  // somebody deleted — and the action line says "remove", not "push".
+  if (push && branch && (facts.unpushed || (facts.remoteMissing && !facts.mergedIntoDefault))) {
     actions.push(at(branch, 'git push -u ' + remote + ' ' + branch + ' before removing'));
     if (write) {
       const pushed = git(path, ['push', '-u', remote, branch]);
@@ -776,6 +797,8 @@ export function pruneWorktrees({ repoRoot, base, olderThan, devMd, ledgerTimes =
   const blocks = [];
   const warns = [];
   const actions = [];
+  // Read once for the whole pass: what was already taken before this one started.
+  const droppedAlready = readDroppedDeps(repoRoot);
   const retentionMs = parseDuration(olderThan) ?? parseRetentionKnob(devMd);
   const depsRetentionMs = parseDepsRetentionKnob(devMd);
   const candidates = [];
@@ -796,10 +819,6 @@ export function pruneWorktrees({ repoRoot, base, olderThan, devMd, ledgerTimes =
       issueState: issueStates[entry.name] ?? null,
       mergedIntoDefault: facts.mergedIntoDefault,
     });
-    // Touched recently is not idle, whatever the branch and the ledger say. Nothing outside this
-    // process registers a session anywhere, so an attended run on another terminal is invisible
-    // here — its files are not. This is the difference between "nobody has committed" and
-    // "nobody is working".
     // Only facts that actually move. A worktree's `.git` pointer is written when the worktree is
     // created and never again, so its mtime says nothing about somebody working here — reading,
     // building and `git status` all leave it alone. There is no filesystem signal for an attended
@@ -808,6 +827,11 @@ export function pruneWorktrees({ repoRoot, base, olderThan, devMd, ledgerTimes =
     const ageDays = stamps.length === 0 ? 0 : Math.floor((now - Math.max(...stamps)) / DAY_MS);
     // The most recent sign of life, whichever kind it was.
     const latestStamp = stamps.length === 0 ? null : new Date(Math.max(...stamps)).toISOString();
+    // Every pass says which checkouts are waiting on an install, whoever is going to run it. This
+    // is the pass the worker makes anyway, and its notes are where an operator looks — a deps-only
+    // prune leaves the checkout in place, so nothing routes through `restore` to say it there.
+    const waiting = dependencyNotice(entry.name, droppedAlready, devMd);
+    if (waiting) warns.push(at(entry.name, waiting));
     // A run is using it, so nothing here is idle and nothing here is touched. The caller names
     // issues, because that is what it holds; a worktree is `<issue>-<slug>`, so the issue number
     // is the part in front of the first dash.
@@ -971,6 +995,7 @@ export function directorySize(path, { maxEntries = SIZE_BUDGET } = {}) {
 // issueStates maps a worktree name to the GitHub state of its issue; without it
 // (offline, or no gh) nothing is ever classified 'abandoned'.
 export function listWorktrees({ repoRoot, base, issueStates = {}, remote = 'origin', withSize = true }) {
+  const dropped = new Set(Object.keys(readDroppedDeps(repoRoot)));
   return inventory(repoRoot).map((entry) => {
     const facts = gatherRemovalFacts({ repoRoot, path: entry.path, branch: entry.branch, base, remote, locked: entry.locked });
     const state = classifyWorktree({
@@ -981,7 +1006,13 @@ export function listWorktrees({ repoRoot, base, issueStates = {}, remote = 'orig
       mergedIntoDefault: facts.mergedIntoDefault,
     });
     const size = withSize ? directorySize(entry.path) : { bytes: 0, approx: true };
-    return { name: entry.name, path: entry.path, branch: entry.branch, state, bytes: size.bytes, approx: size.approx };
+    // Carried on the entry rather than checked in one code path: a deps-only prune leaves the
+    // checkout in place, so nothing routes through `restore`, and every caller that describes
+    // this worktree — `list`, `status`, the worker's own pass — has to be able to say it.
+    return {
+      name: entry.name, path: entry.path, branch: entry.branch, state,
+      bytes: size.bytes, approx: size.approx, depsDropped: dropped.has(entry.name),
+    };
   });
 }
 
@@ -1119,6 +1150,12 @@ function runVerb(verb, flags) {
     const names = inventory(repoRoot).map((entry) => entry.name);
     const github = repo ? gatherGithubFacts({ repo, names, warns }) : { openIssues: [], issueStates: {} };
     const entries = listWorktrees({ repoRoot, base, issueStates: github.issueStates });
+    // A checkout whose dependencies were taken cannot build, and this is where a person looks.
+    const dropped = readDroppedDeps(repoRoot);
+    for (const entry of entries) {
+      const notice = dependencyNotice(entry.name, dropped, devMd);
+      if (notice) warns.push(at(entry.name, notice));
+    }
     if (verb === 'list') return { blocks: [], warns, entries };
     return { blocks: [], warns, entries, reconciled: reconcileWorktrees({ entries, openIssues: github.openIssues }) };
   }

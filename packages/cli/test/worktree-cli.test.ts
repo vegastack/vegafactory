@@ -1,8 +1,9 @@
 import { describe, expect, test } from 'bun:test'
+import { spawnSync } from 'node:child_process'
 import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { parseWorktreeArgs, recordRepoRoot, runWorktree, tidyWorktrees } from '../src/worktree.ts'
+import { WORKTREE_SCRIPT_TIMEOUT_MS, worktreeScriptSpawn, parseWorktreeArgs, recordRepoRoot, runWorktree, tidyWorktrees } from '../src/worktree.ts'
 
 describe('parseWorktreeArgs', () => {
   test('every verb acts by default and --dry-run previews', () => {
@@ -83,6 +84,34 @@ describe('the worker asks for the narrower pass, and the script hears it', () =>
     const seen: string[][] = []
     tidyWorktrees('/repo', { spawn: (args) => { seen.push(args); return { status: 0, stdout: '{}' } } })
     expect(seen[0]).toEqual(['prune', '--automatic', '--json'])
+  })
+
+  // The worker makes this call synchronously inside its own poll, and the script talks to git and
+  // to GitHub — a fetch against an unreachable remote, a credential helper waiting on a prompt
+  // nobody will answer. Unbounded, one stall holds the loop, the step timers and a shutdown.
+  test('a worktree script that never finishes is killed and reported, not waited on', () => {
+    const script = join(mkdtempSync(join(tmpdir(), 'hang-')), 'hang.mjs')
+    // No output and no exit: exactly the shape of a stalled child.
+    writeFileSync(script, 'setTimeout(() => {}, 60_000)\n')
+    const before = process.env.VSK_WORKTREE_SCRIPT
+    process.env.VSK_WORKTREE_SCRIPT = script
+    try {
+      // A directory that exists, so the child really starts and really hangs — pointing this at a
+      // path that is not there makes spawnSync fail before the script runs, and the test would
+      // then pass with no timeout in the product at all.
+      const started = Date.now()
+      const result = tidyWorktrees(mkdtempSync(join(tmpdir(), 'repo-')), { spawn: worktreeScriptSpawn(300) })
+      expect(Date.now() - started).toBeLessThan(30_000)
+      // And it says so rather than parsing an empty answer as "nothing to report".
+      expect(result.blocks.join('\n')).toContain('did not finish')
+      expect(result.actions).toEqual([])
+    } finally {
+      if (before === undefined) delete process.env.VSK_WORKTREE_SCRIPT
+      else process.env.VSK_WORKTREE_SCRIPT = before
+    }
+    // The bound the product itself uses: long enough for a real fetch on a slow link.
+    expect(WORKTREE_SCRIPT_TIMEOUT_MS).toBeGreaterThanOrEqual(30_000)
+    expect(WORKTREE_SCRIPT_TIMEOUT_MS).toBeLessThanOrEqual(5 * 60_000)
   })
 
   // The command the worker tells a person to run has to be one the CLI accepts, and it is only

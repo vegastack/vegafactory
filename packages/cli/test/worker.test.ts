@@ -1,14 +1,14 @@
 import { beforeEach, describe, expect, test } from 'bun:test'
 import { spawnSync } from 'node:child_process'
 import { generateKeyPairSync } from 'node:crypto'
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { claimBody, claimLine, holderOf, nodeId, trustedFactory } from '../src/claim.ts'
 import {
   alreadyLingering, unwritableForUnit,
   SERVICE_NAME,
-  APP_ID, DEFAULT_CAPS, MAX_FAILURES, MAX_RUNS, MAX_TIMER_MS, POLL_MS, RETRY_MS, STEP_TIMEOUT_MS, TOKEN_MARGIN_MS, parseCaps, rosterName, sayDuration, agentArgs, appIdentity, appJwt, appKeyPath, assertKeyFile, board, decide, defaultRunStep, workerDir,
+  APP_ID, DEFAULT_CAPS, MAX_FAILURES, MAX_RUNS, MAX_TIMER_MS, POLL_MS, RETRY_MS, STEP_TIMEOUT_MS, TOKEN_MARGIN_MS, parseCaps, rosterName, sayDuration, agentArgs, appIdentity, appJwt, appKeyPath, assertKeyFile, board, decide, defaultRunStep, ownerOnlyWorkerDir, workerDir,
   acknowledgedPlan, canonicalPath, childRunEnvironment, confirmShip, disjointSiblings, pushableBranch, shipWord,
   drain, filesFromParent, harnessAnswers, hitLimit, hooksWired, listedHere, mintToken, overlaps, parseWorkerArgs,
   parseNodes, poll, readActed, readRuns, readiness, recordRun, resetAt, RUNS_KEPT, runWorker, schedule, serviceCommands, stagePolicy,
@@ -1635,6 +1635,40 @@ describe('the command', () => {
     // Two distinct worktrees, not three: 9-done is both a removable candidate and droppable.
     // And the advice is a command the CLI accepts.
     expect(result.text).toContain('worktrees: 2 could be reclaimed — run `vegafactory worktree prune --write`')
+  })
+
+  // Everything under here is agent output and the token a run was given, inside the repository
+  // where any local account can reach it. One helper, so no writer can be the one that forgets.
+  test('the worker\'s records live in an owner-only directory, however it got there', () => {
+    const fresh = mkdtempSync(join(tmpdir(), 'wd-'))
+    expect(statSync(ownerOnlyWorkerDir(fresh)).mode & 0o777).toBe(0o700)
+
+    // The far more common case: a directory an earlier version already made under whatever umask
+    // was in force. `mkdirSync`'s `mode:` leaves that alone, so it is set outright as well.
+    const upgraded = mkdtempSync(join(tmpdir(), 'wd-'))
+    mkdirSync(workerDir(upgraded), { recursive: true })
+    chmodSync(workerDir(upgraded), 0o755)
+    expect(statSync(ownerOnlyWorkerDir(upgraded)).mode & 0o777).toBe(0o700)
+
+    // A planted link: `chmod` follows one, so without the check this would change the permissions
+    // of whatever it names. Refusing is right — records this private do not go through a link.
+    const linked = mkdtempSync(join(tmpdir(), 'wd-'))
+    const elsewhere = mkdtempSync(join(tmpdir(), 'other-'))
+    chmodSync(elsewhere, 0o755)
+    mkdirSync(join(linked, '.vegastack', '.tmp'), { recursive: true })
+    symlinkSync(elsewhere, workerDir(linked))
+    expect(() => ownerOnlyWorkerDir(linked)).toThrow('symlink')
+    expect(statSync(elsewhere).mode & 0o777).toBe(0o755)
+  })
+
+  // A plain `worker run` never passes through `enable`, and it writes the same records.
+  test('a direct run gets the same owner-only directory as an enabled service', async () => {
+    rmSync(workerDir(root), { recursive: true, force: true })
+    mkdirSync(workerDir(root), { recursive: true })
+    chmodSync(workerDir(root), 0o777)
+    gh.addIssue({ number: 1, labels: ['queued', 'small'] })
+    await run(['run', '--once'], { runStep: (async () => ({ outcome: 'done' as const, note: '', ms: 1 })) as RunStep })
+    expect(statSync(workerDir(root)).mode & 0o777).toBe(0o700)
   })
 
   test('run --once makes one pass with the injected step', async () => {

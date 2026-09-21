@@ -126,12 +126,30 @@ export function defaultRegistryPath(options: HomeOptions = {}): string {
   return worktreesPath(options)
 }
 
-function defaultSpawn(args: string[], cwd?: string): SpawnResult {
-  const packageRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..')
-  const script = process.env.VSK_WORKTREE_SCRIPT || join(packageRoot, 'skill', 'dev-implement', 'scripts', 'worktree.mjs')
-  const run = spawnSync(process.execPath, [script, ...args], { cwd, encoding: 'utf8' })
-  return { status: run.status ?? 2, stdout: `${run.stdout ?? ''}${run.stderr ?? ''}` }
+// The script talks to git and to GitHub, both of which can stall — a fetch against an unreachable
+// remote, a credential helper waiting on a prompt that nobody will answer. This call is
+// synchronous and the worker makes it inside its own poll, so an unbounded one would hold the
+// loop, the step timers and a graceful shutdown for as long as the stall lasted. Long enough for
+// a real fetch on a slow link; short enough that a hung one is not for ever.
+export const WORKTREE_SCRIPT_TIMEOUT_MS = 2 * 60_000
+
+// The bound is a parameter so a test can prove this exact code against a child that hangs,
+// rather than waiting out the real one or writing its own copy of the call.
+export function worktreeScriptSpawn(timeoutMs: number) {
+  return (args: string[], cwd?: string): SpawnResult => {
+    const packageRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..')
+    const script = process.env.VSK_WORKTREE_SCRIPT || join(packageRoot, 'skill', 'dev-implement', 'scripts', 'worktree.mjs')
+    const run = spawnSync(process.execPath, [script, ...args], { cwd, encoding: 'utf8', timeout: timeoutMs, killSignal: 'SIGKILL' })
+    // A killed run has no usable output, and its partial stdout would parse as "nothing to
+    // report" — which is the one answer a stalled housekeeping pass must not give.
+    if (run.error || run.signal) {
+      return { status: 2, stdout: JSON.stringify({ blocks: [`the worktree script did not finish: ${run.error?.message ?? run.signal}`] }) }
+    }
+    return { status: run.status ?? 2, stdout: `${run.stdout ?? ''}${run.stderr ?? ''}` }
+  }
 }
+
+const defaultSpawn = worktreeScriptSpawn(WORKTREE_SCRIPT_TIMEOUT_MS)
 
 interface ScriptResult {
   ok?: boolean

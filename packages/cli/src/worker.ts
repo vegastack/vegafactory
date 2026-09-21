@@ -784,6 +784,25 @@ export interface RunRecord { at: string; issue: number; action: Action; outcome:
 export interface Acted { at: number; action: Action; outcome: Outcome; trigger: number | null; failures: number; retryAt: number | null }
 
 export const workerDir = (root: string) => join(root, '.vegastack', '.tmp', 'worker')
+
+// Every path that writes here goes through this, because these files hold the tail of every
+// agent's output — private repository text, and the short-lived token a run was given — and the
+// directory is inside the repository, where any local account can reach it.
+//
+// Three things, and each one is needed on its own. `mode:` covers the directory this call
+// creates. `chmod` covers the far more common case of one an earlier version already made under
+// whatever umask was in force, which `mode:` silently leaves alone. And the symlink check comes
+// first because `chmod` follows links: without it, a planted link would have us change the
+// permissions of whatever it names instead. Throwing is right — a caller that cannot make this
+// directory private should not write agent output into it.
+export function ownerOnlyWorkerDir(root: string): string {
+  const path = workerDir(root)
+  mkdirSync(path, { recursive: true, mode: 0o700 })
+  const found = lstatSync(path)
+  if (found.isSymbolicLink()) throw new Error(`${path} is a symlink — refusing to write the worker's records through it`)
+  chmodSync(path, 0o700)
+  return path
+}
 export const childrenPath = (root: string) => join(workerDir(root), 'children.json')
 const runsPath = (root: string) => join(workerDir(root), 'runs.jsonl')
 const actedPath = (root: string) => join(workerDir(root), 'acted.json')
@@ -793,7 +812,7 @@ const actedPath = (root: string) => join(workerDir(root), 'acted.json')
 export const RUNS_KEPT = 500
 
 export function recordRun(root: string, record: RunRecord) {
-  mkdirSync(workerDir(root), { recursive: true })
+  ownerOnlyWorkerDir(root)
   appendFileSync(runsPath(root), JSON.stringify(record) + '\n')
   try {
     const lines = readFileSync(runsPath(root), 'utf8').split('\n').filter(Boolean)
@@ -820,7 +839,7 @@ export function readActed(root: string): Record<string, Acted> {
 }
 
 export function writeActed(root: string, acted: Record<string, Acted>) {
-  mkdirSync(workerDir(root), { recursive: true })
+  ownerOnlyWorkerDir(root)
   replaceFile(actedPath(root), JSON.stringify(acted, null, 2) + '\n')
 }
 
@@ -865,7 +884,7 @@ export function readChildren(root: string): ChildRecord[] {
 }
 
 function writeChildren(root: string, change: (rows: ChildRecord[]) => ChildRecord[]) {
-  mkdirSync(workerDir(root), { recursive: true })
+  ownerOnlyWorkerDir(root)
   withLock(workerDir(root), () => {
     replaceFile(childrenPath(root), JSON.stringify(change(readChildren(root)), null, 2) + '\n')
   }, { what: 'the worker\'s children' })
@@ -912,7 +931,7 @@ export function stopChild(root: string, record: ChildRecord, deps: { stop?: (pid
 // Two steps finish at once, and an operator may run a pass by hand beside the service: the
 // read-modify-write takes the same lock the issue cache uses, so neither loses the other's entry.
 export function updateActed(root: string, change: (acted: Record<string, Acted>) => void) {
-  mkdirSync(workerDir(root), { recursive: true })
+  ownerOnlyWorkerDir(root)
   withLock(workerDir(root), () => {
     const acted = readActed(root)
     change(acted)
@@ -929,7 +948,7 @@ export const runLockPath = (root: string) => join(workerDir(root), 'run.lock')
 export interface RunLock { pid: number; startedAt: string; runId: string; at: string }
 
 export function takeRunLock(root: string, runId: string, start: ProcessStart = processStart): { ok: boolean; reason: string; held: RunLock | null } {
-  mkdirSync(workerDir(root), { recursive: true })
+  ownerOnlyWorkerDir(root)
   return withLock(workerDir(root), () => {
     let held: RunLock | null = null
     try { held = JSON.parse(readFileSync(runLockPath(root), 'utf8')) as RunLock } catch { held = null }
@@ -1985,11 +2004,14 @@ export async function runWorker(argv: string[], deps: CliDeps = {}): Promise<num
         return 0
       }
       // The same reason as the unit's UMask: this directory holds the logs and the run records.
-      // `mode:` only applies to a directory this call creates, and the common case is a machine
-      // that already has one from an earlier version — so it is also set outright, or every
-      // upgrade would keep whatever permissions the old umask happened to give it.
-      mkdirSync(workerDir(root), { recursive: true, mode: 0o700 })
-      try { chmodSync(workerDir(root), 0o700) } catch { /* not ours to tighten */ }
+      // A failure here stops the enable rather than being swallowed — a service that cannot keep
+      // its own logs private is not one to start.
+      try {
+        ownerOnlyWorkerDir(root)
+      } catch (error) {
+        print({ ok: false, checks, error: (error as Error).message }, `${renderChecks(checks)}\n\n${(error as Error).message}`)
+        return 2
+      }
       replaceFile(path, unitText(platform, { cli: deps.cli ?? cliPath(), root, repo, logDir: workerDir(root), env }))
       const run = deps.run ?? probe
       for (const command of commands) {
