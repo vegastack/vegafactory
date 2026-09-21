@@ -57,6 +57,11 @@ export function parseWorktreeArgs(argv: string[]): WorktreeArgs {
   }
   const verb = head as WorktreeVerb
   const rest = argv.slice(1)
+  // `--dry-run` wins wherever it appears. Assigning `write` as each flag is read makes the answer
+  // depend on the order they were typed, and the guard that decides whether to ask only looks for
+  // `--dry-run` anywhere in the line — so `prune --dry-run --write` would act while being waved
+  // through as a preview.
+  let dryRun = false
   const args: WorktreeArgs = { verb, force: false, write: true, allRepos: false, json: false }
   while (rest.length) {
     const token = rest.shift()!
@@ -67,12 +72,12 @@ export function parseWorktreeArgs(argv: string[]): WorktreeArgs {
       continue
     }
     if (token === '--force') args.force = true
-    else if (token === '--dry-run') args.write = false
+    else if (token === '--dry-run') dryRun = true
     // Acting is the default, so on `prune` this says what is already true. It is accepted there
     // because every reference to reclaiming a worktree — the worker's own advice included — names
     // it, and a command a person is told to run has to be one the parser takes. It stays unknown
     // elsewhere: `remove --write` was never offered and nothing asks for it.
-    else if (token === '--write' && verb === 'prune') args.write = true
+    else if (token === '--write' && verb === 'prune') { /* says what is already true */ }
     else if (token === '--all-repos') args.allRepos = true
     else if (token === '--json') args.json = true
     else if (token === '--older-than') args.olderThan = requireValue(token, rest.shift())
@@ -80,6 +85,7 @@ export function parseWorktreeArgs(argv: string[]): WorktreeArgs {
     else if (token === '--type') args.type = requireValue(token, rest.shift())
     else throw new Error(`Unknown option: ${token}`)
   }
+  if (dryRun) args.write = false
   if ((verb === 'create' || verb === 'restore' || verb === 'remove') && args.issue === undefined) {
     throw new Error(`worktree ${verb} needs an issue number`)
   }

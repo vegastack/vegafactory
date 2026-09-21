@@ -1,5 +1,5 @@
 ---
-"@vegastack/vegafactory": patch
+"@vegastack/vegafactory": minor
 ---
 
 A Linux worker survives the operator logging out, and says so at the moment it can still be fixed.

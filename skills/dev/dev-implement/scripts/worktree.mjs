@@ -16,7 +16,7 @@
 // Usage: node worktree.mjs create|restore|remove|list|prune|status [flags] [--json]
 import { execFileSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { copyFileSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { chmodSync, copyFileSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { basename, delimiter, dirname, join, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -291,31 +291,37 @@ export function parseSetupCommand(devMd) {
 const droppedDir = (repoRoot) => join(repoRoot, '.vegastack', '.tmp', 'worker', 'deps-dropped');
 const droppedFor = (repoRoot, name) => join(droppedDir(repoRoot), encodeURIComponent(name));
 
-// Only "this directory does not exist" means nothing was dropped. Any other failure is a record
-// we could not read, and reading it as absence would let a checkout with no dependencies look
-// untouched — so it comes back as an entry that says it could not be read.
+// The set of worktrees whose dependencies were taken, and whether that set could be read at all.
+//
+// A name and nothing more. The file's contents are never read: presence is the entire fact, and a
+// reader that opened these files would be a way to print the contents of whatever a planted
+// symlink named — this directory is ignored by git and any local process can write in it.
+//
+// A `Set`, not an object keyed by name. A worktree may legitimately be called `constructor` or
+// `toString`, and `name in {}` answers yes for both without any record existing.
+//
+// Only "this directory is not there" means nothing was dropped. Every other failure comes back as
+// `unreadable`, because reading it as absence leaves a checkout with no dependencies looking
+// untouched — the one wrong answer this can give.
 export function readDroppedDeps(repoRoot) {
-  const found = {};
-  let names;
+  const names = new Set();
+  let entries;
   try {
-    names = readdirSync(droppedDir(repoRoot));
+    const dir = droppedDir(repoRoot);
+    // `lstat` first: everything below follows links, and this path is predictable.
+    if (lstatSync(dir).isSymbolicLink()) return { names, unreadable: 'the record directory is a symlink' };
+    entries = readdirSync(dir);
   } catch (error) {
-    if (error?.code === 'ENOENT') return found;
-    return { '*': 'the record of dropped dependencies could not be read: ' + (error?.message ?? 'failed') };
+    if (error?.code === 'ENOENT') return { names, unreadable: null };
+    return { names, unreadable: 'the record of dropped dependencies could not be read: ' + (error?.message ?? 'failed') };
   }
-  for (const entry of names) {
-    // The name is decoded inside the guard too: these files sit in a directory any local process
-    // can write, and `decodeURIComponent` throws on a malformed escape — which would take `list`,
-    // `status` and every prune down with it rather than reporting one unreadable record.
-    try {
-      const name = decodeURIComponent(entry);
-      found[name] = readFileSync(join(droppedDir(repoRoot), entry), 'utf8').trim();
-    } catch (error) {
-      if (error?.code === 'ENOENT') continue;
-      found['*'] = 'a record of dropped dependencies could not be read: ' + (error?.message ?? 'failed');
-    }
+  for (const entry of entries) {
+    // Decoded inside the guard: `decodeURIComponent` throws on a malformed escape, and a name
+    // nobody vouched for would otherwise take `list`, `status` and every prune down with it.
+    try { names.add(decodeURIComponent(entry)); }
+    catch { return { names, unreadable: 'a record of dropped dependencies has an unreadable name' }; }
   }
-  return found;
+  return { names, unreadable: null };
 }
 
 function noteDroppedDeps(repoRoot, name, at) {
@@ -333,10 +339,16 @@ function clearDroppedDeps(repoRoot, name) {
 // O_CREAT|O_EXCL, which refuses any existing name — a link included — and the rename replaces the
 // target name itself rather than its destination.
 function writeMarker(path, text) {
-  mkdirSync(dirname(path), { recursive: true });
+  // Owner-only, and never through a link. The directory sits under an ignored tree that any local
+  // process can write, so a planted directory symlink would otherwise have the rename below
+  // replace a name outside the repository entirely.
+  const dir = dirname(path);
+  mkdirSync(dir, { recursive: true, mode: 0o700 });
+  if (lstatSync(dir).isSymbolicLink()) throw new Error(dir + ' is a symlink — refusing to write a record through it');
+  chmodSync(dir, 0o700);
   const temp = path + '.' + randomUUID() + '.tmp';
   try {
-    writeFileSync(temp, text, { flag: 'wx' });
+    writeFileSync(temp, text, { flag: 'wx', mode: 0o600 });
     renameSync(temp, path);
   } catch (error) {
     rmSync(temp, { force: true });
@@ -481,8 +493,8 @@ function prepareCheckout({ repoRoot, path, devMd, home, write, actions, warns, b
 // budget — #275. Nothing here starts a process: this runs inside the worker's pass, before a step
 // timer exists, so an install begun here would hold the loop and outlast a shutdown.
 export function dependencyNotice(name, dropped, devMd) {
-  if (dropped['*']) return dropped['*'];
-  if (!(name in dropped)) return null;
+  if (dropped.unreadable) return dropped.unreadable;
+  if (!dropped.names.has(name)) return null;
   const setup = parseSetupCommand(devMd);
   if (!setup) return 'dependencies were reclaimed while it was idle, and dev.md names no `setup` command to put them back';
   return 'dependencies were reclaimed while it was idle — run `' + setup + '` here before building';
@@ -610,7 +622,7 @@ function gatherRemovalFacts({ repoRoot, path, branch, base, remote, locked }) {
       const status = git(path, ['status', '--porcelain']);
       return !status.ok || status.out !== '';
     })();
-  if (branch === null) return { dirty, unpushed: false, remoteMissing: false, mergedIntoDefault: false };
+  if (branch === null) return { dirty, unpushed: false, remoteMissing: false, mergedIntoDefault: false, landedInBase: false };
   const remoteRef = remote + '/' + branch;
   const remoteMissing = !git(repoRoot, ['rev-parse', '--verify', '--quiet', 'refs/remotes/' + remoteRef]).ok;
   const ahead = remoteMissing ? null : git(repoRoot, ['rev-list', remoteRef + '..' + branch]);
@@ -622,9 +634,21 @@ function gatherRemovalFacts({ repoRoot, path, branch, base, remote, locked }) {
   // reached through a PR, so "ancestor of the default branch" alone would call a
   // brand-new branch cut from origin/main 'merged' and prune it on day one.
   const isAncestor = git(repoRoot, ['merge-base', '--is-ancestor', branch, baseRef]).ok;
-  // A squash merge deletes the remote branch (delete-on-merge), so content decides then.
-  const mergedIntoDefault = (!remoteMissing && isAncestor) || mergedByContent(repoRoot, branch, baseRef);
-  return { dirty, unpushed, remoteMissing, mergedIntoDefault, locked };
+  // Whether this branch's work is already in the base, by whichever test can see it.
+  //
+  // Ancestry alone would call a branch cut this morning merged: it has no commits of its own, so
+  // it is trivially an ancestor. Requiring the base to have moved past it is the precise version
+  // of the same idea — a branch contained in a base that carries commits it does not is a branch
+  // whose work was taken in. That case matters because delete-on-merge removes the remote branch,
+  // and the ancestry test used to be skipped entirely whenever the remote ref was gone.
+  const baseAhead = isAncestor && (git(repoRoot, ['rev-list', '--count', branch + '..' + baseRef]).out || '0').trim() !== '0';
+  // A squash merge rewrites the commits, so ancestry cannot see it and content decides.
+  const landedInBase = baseAhead || mergedByContent(repoRoot, branch, baseRef);
+  // A fast-forward merge can leave the base at the branch's own tip, with nothing ahead and no
+  // rewritten commits to match. The remote ref still being there is what separates that from a
+  // branch nobody has pushed.
+  const mergedIntoDefault = landedInBase || (!remoteMissing && isAncestor);
+  return { dirty, unpushed, remoteMissing, mergedIntoDefault, landedInBase, locked };
 }
 
 // Squash and rebase merges rewrite the commits, so by ancestry a merged branch
@@ -687,11 +711,13 @@ export function removeWorktree({ repoRoot, name, base, force = false, push = fal
   const branch = entry.branch;
   refreshBase({ repoRoot, base, remote, actions, warns });
   let facts = gatherRemovalFacts({ repoRoot, path, branch, base, remote, locked: entry.locked });
-  // Exactly the condition `evaluateRemoval` blocks on, and for the same reason: a branch with no
-  // remote is only at risk when its work is not already in the base. A squash merge deletes the
-  // feature branch on purpose, so pushing on `remoteMissing` alone would recreate the branch
-  // somebody deleted — and the action line says "remove", not "push".
-  if (push && branch && (facts.unpushed || (facts.remoteMissing && !facts.mergedIntoDefault))) {
+  // Push only what is actually at risk. A branch with no remote is at risk when the base does not
+  // already contain it; when it does, the remote branch is missing because a merge deleted it on
+  // purpose, and pushing would put back what somebody removed — on a call whose reported action
+  // says "remove". This asks containment rather than merged-ness, because a fast-forward or an
+  // ordinary merge leaves the branch an ancestor of the base with its remote ref pruned, which
+  // the merged-ness test declines to call merged and the content test cannot see either.
+  if (push && branch && (facts.unpushed || (facts.remoteMissing && !facts.landedInBase))) {
     actions.push(at(branch, 'git push -u ' + remote + ' ' + branch + ' before removing'));
     if (write) {
       const pushed = git(path, ['push', '-u', remote, branch]);
@@ -986,7 +1012,7 @@ export function directorySize(path, { maxEntries = SIZE_BUDGET } = {}) {
 // issueStates maps a worktree name to the GitHub state of its issue; without it
 // (offline, or no gh) nothing is ever classified 'abandoned'.
 export function listWorktrees({ repoRoot, base, issueStates = {}, remote = 'origin', withSize = true }) {
-  const dropped = new Set(Object.keys(readDroppedDeps(repoRoot)));
+  const dropped = readDroppedDeps(repoRoot);
   return inventory(repoRoot).map((entry) => {
     const facts = gatherRemovalFacts({ repoRoot, path: entry.path, branch: entry.branch, base, remote, locked: entry.locked });
     const state = classifyWorktree({
@@ -1002,7 +1028,7 @@ export function listWorktrees({ repoRoot, base, issueStates = {}, remote = 'orig
     // this worktree — `list`, `status`, the worker's own pass — has to be able to say it.
     return {
       name: entry.name, path: entry.path, branch: entry.branch, state,
-      bytes: size.bytes, approx: size.approx, depsDropped: dropped.has(entry.name),
+      bytes: size.bytes, approx: size.approx, depsDropped: dropped.names.has(entry.name),
     };
   });
 }

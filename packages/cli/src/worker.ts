@@ -22,7 +22,7 @@
 //   before the deadline this one is keeping.
 import { spawn, spawnSync } from 'node:child_process'
 import { createHash, createSign, randomUUID } from 'node:crypto'
-import { appendFileSync, chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import { appendFileSync, chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { homedir, hostname, userInfo } from 'node:os'
 import { join, posix } from 'node:path'
 import { APP_ACTOR, APP_ID, HEARTBEAT_EVERY_MS, appIdentityConfig, claim, heartbeat, holderOf, machineName, nodeId, release, trustedFactory } from './claim.ts'
@@ -804,20 +804,42 @@ export function ownerOnlyWorkerDir(root: string): string {
 }
 // One record under the worker's directory, with the same guarantee the directory has. Securing
 // the parent is not enough on its own: a local account that could write the directory before it
-// was tightened can leave a symlink named `runs.jsonl` or `children.json` behind, and `append`,
-// `read` and `replaceFile` all follow one. So the leaf is checked too, and an existing regular
-// file is set owner-only — these hold agent output and the PIDs `worker disable` signals.
+// was tightened can leave a symlink or a file of its own named `runs.jsonl` or `children.json`,
+// and append, read and replace all follow one. These hold agent output and the PIDs `worker
+// disable` signals, so the leaf is checked too.
 //
-// A symlink is removed rather than refused. Nothing here is a file a person put there on purpose;
-// the record is the worker's own note, and the next write recreates it.
+// It fails closed. Only "not there" is an ordinary answer; a stat, a removal or a chmod that
+// failed means the record could not be made private, and the caller must not write into it or
+// trust what it reads back. A symlink or a directory is removed rather than refused — nothing
+// here is a file a person put there on purpose, and the next write recreates it.
 function record(root: string, name: string): string {
   const path = join(ownerOnlyWorkerDir(root), name)
+  let found
   try {
-    const found = lstatSync(path)
-    if (found.isSymbolicLink() || !found.isFile()) rmSync(path, { recursive: true, force: true })
-    else chmodSync(path, 0o600)
-  } catch { /* not there yet, which is the ordinary case */ }
+    found = lstatSync(path)
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return path
+    throw error
+  }
+  if (!found.isFile()) { rmSync(path, { recursive: true, force: true }); return path }
+  // Someone else's file cannot be made private by chmod — only its owner may — so it goes.
+  if (found.uid !== userInfo().uid) { rmSync(path, { force: true }); return path }
+  chmodSync(path, 0o600)
   return path
+}
+
+// `replaceFile` writes its temporary file under the caller's umask and renames it into place, so
+// the mode it lands with is whatever the umask allowed — 0644 on an ordinary machine. These
+// records are owner-only, so they are written owner-only from the start.
+function replaceRecord(path: string, text: string) {
+  const temp = `${path}.${randomUUID()}.tmp`
+  try {
+    writeFileSync(temp, text, { flag: 'wx', mode: 0o600 })
+    renameSync(temp, path)
+  } catch (error) {
+    rmSync(temp, { force: true })
+    throw error
+  }
 }
 
 export const childrenPath = (root: string) => record(root, 'children.json')
@@ -829,10 +851,11 @@ const actedPath = (root: string) => record(root, 'acted.json')
 export const RUNS_KEPT = 500
 
 export function recordRun(root: string, entry: RunRecord) {
-  appendFileSync(runsPath(root), JSON.stringify(entry) + '\n')
+  // `mode` applies when this call creates the file, which is the one moment it could land 0644.
+  appendFileSync(runsPath(root), JSON.stringify(entry) + '\n', { mode: 0o600 })
   try {
     const lines = readFileSync(runsPath(root), 'utf8').split('\n').filter(Boolean)
-    if (lines.length > RUNS_KEPT * 2) replaceFile(runsPath(root), lines.slice(-RUNS_KEPT).join('\n') + '\n')
+    if (lines.length > RUNS_KEPT * 2) replaceRecord(runsPath(root), lines.slice(-RUNS_KEPT).join('\n') + '\n')
   } catch { /* the record is a note; failing to trim it is not worth a failed run */ }
 }
 
@@ -856,7 +879,7 @@ export function readActed(root: string): Record<string, Acted> {
 
 export function writeActed(root: string, acted: Record<string, Acted>) {
   ownerOnlyWorkerDir(root)
-  replaceFile(actedPath(root), JSON.stringify(acted, null, 2) + '\n')
+  replaceRecord(actedPath(root), JSON.stringify(acted, null, 2) + '\n')
 }
 
 // A pid on its own is not an identity: pids are reused, and a record left behind by a crash would
@@ -902,7 +925,7 @@ export function readChildren(root: string): ChildRecord[] {
 function writeChildren(root: string, change: (rows: ChildRecord[]) => ChildRecord[]) {
   ownerOnlyWorkerDir(root)
   withLock(workerDir(root), () => {
-    replaceFile(childrenPath(root), JSON.stringify(change(readChildren(root)), null, 2) + '\n')
+    replaceRecord(childrenPath(root), JSON.stringify(change(readChildren(root)), null, 2) + '\n')
   }, { what: 'the worker\'s children' })
 }
 
@@ -972,7 +995,7 @@ export function takeRunLock(root: string, runId: string, start: ProcessStart = p
       return { ok: false, held, reason: `another worker is already running on this machine (pid ${held.pid}, since ${held.at}) — stop it, or let it work` }
     }
     const mine: RunLock = { pid: process.pid, startedAt: start(process.pid) ?? '', runId, at: new Date().toISOString() }
-    replaceFile(runLockPath(root), JSON.stringify(mine, null, 2) + '\n')
+    replaceRecord(runLockPath(root), JSON.stringify(mine, null, 2) + '\n')
     return { ok: true, held: mine, reason: 'this machine\'s worker' }
   }, { what: 'the worker lock' })
 }
@@ -2019,9 +2042,13 @@ export async function runWorker(argv: string[], deps: CliDeps = {}): Promise<num
       }
       // The same reason as the unit's UMask: this directory holds the logs and the run records.
       // A failure here stops the enable rather than being swallowed — a service that cannot keep
-      // its own logs private is not one to start.
+      // its own logs private is not one to start. The two log files are named in the unit and are
+      // opened by launchd and systemd, not by this process, so they get the same check now: a
+      // symlink left where `worker.log` goes is an append target the service would use happily.
       try {
         ownerOnlyWorkerDir(root)
+        record(root, 'worker.log')
+        record(root, 'worker.err.log')
       } catch (error) {
         print({ ok: false, checks, error: (error as Error).message }, `${renderChecks(checks)}\n\n${(error as Error).message}`)
         return 2

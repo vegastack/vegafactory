@@ -119,7 +119,7 @@ inside that window — the mechanism, the default and where it is documented are
 vegafactory-setup skill's `references/worker-host.md`. The
 `busctl` line asks logind's own manager for the value and the `sleep` clears it with thirty seconds
 to spare. A value that cannot be read stops the drill rather than standing in for it: assuming the
-ten-second default on a box that had been given a longer one is how a worker with no linger passes
+documented default on a box that had been given a longer one is how a worker with no linger passes
 this check inside its own grace period.
 
 After that wait it must print `active` while {{worker-user}} has no session. That holds for an idle

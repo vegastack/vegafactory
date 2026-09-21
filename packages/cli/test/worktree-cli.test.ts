@@ -64,6 +64,11 @@ describe('prune acts, and --dry-run is what holds it back', () => {
     // `--write` says what is already true, and is accepted because every reference names it.
     expect(parseWorktreeArgs(['prune', '--write']).write).toBe(true)
     expect(parseWorktreeArgs(['prune', '--write', '--dry-run']).write).toBe(false)
+    // And in the other order. Applying each flag as it is read makes the answer depend on the
+    // order somebody typed them, while the guard that decides whether to ask only looks for
+    // `--dry-run` anywhere in the line — so this exact command acted while being let through
+    // as a preview.
+    expect(parseWorktreeArgs(['prune', '--dry-run', '--write']).write).toBe(false)
     // A flag the parser does not know is a boolean swallows the next argument. `--write` is in
     // that list, and a prune whose `--write` was eaten silently reclaims nothing.
     const script = readFileSync(join(import.meta.dir, '../../../skills/dev/dev-implement/scripts/worktree.mjs'), 'utf8')

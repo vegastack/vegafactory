@@ -4,7 +4,20 @@ import { existsSync, mkdirSync, mkdtempSync, writeFileSync } from 'node:fs'
 import { ghJson } from '../scripts/lib/gh.mjs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { createWorktree, listWorktrees, noteMissingDependencies, pruneWorktrees, readDroppedDeps, removeWorktree } from '../scripts/worktree.mjs'
+import { createWorktree, listWorktrees, pruneWorktrees, readDroppedDeps, removeWorktree } from '../scripts/worktree.mjs'
+
+// The whole verb, the way the CLI runs it. The notice a reclaimed checkout carries has to reach a
+// person through a command they actually type, not only through the helper that composes it.
+const script = join(import.meta.dir, '..', 'scripts', 'worktree.mjs')
+const runScript = (root: string, ...args: string[]) => {
+  const argv = [script, ...args, '--repo-root', root, '--home', root, '--json']
+  try {
+    return { code: 0, out: execFileSync('node', argv, { cwd: root, encoding: 'utf8' }) }
+  } catch (error) {
+    const failure = error as { status: number; stdout: string }
+    return { code: failure.status, out: failure.stdout }
+  }
+}
 
 // Relative to the real clock: the fixture commits carry today's date, so a fixed
 // 'now' turns these into time bombs once the calendar catches up.
@@ -223,36 +236,24 @@ describe('pruneWorktrees', () => {
     expect(execFileSync('git', ['-C', wt.path, 'rev-parse', '--abbrev-ref', 'HEAD'], { encoding: 'utf8' }).trim()).toBe('feat/106-old')
   })
 
-  // Prune takes them and leaves one record saying so. Putting them back is the build's own
-  // business (#275); what this side owes is a checkout that says out loud it cannot build.
-  test('a reclaimed worktree says what to run, and only that one does', () => {
+  // Prune takes them and leaves one record saying so — outside the checkout it describes, because
+  // a deps-only prune leaves that checkout in place and a record inside it would go with it.
+  test('the drop is recorded beside the repository, not inside the worktree', () => {
     const root = repoWithRemote()
     const wt = createWorktree({ repoRoot: root, issue: 106, slug: 'old', type: 'feat', base: 'main', devMd, home: root, write: true })
     writeFileSync(join(wt.path, 'work.txt'), 'real work\n')
-    execFileSync('git', ['-C', wt.path, 'add', '.'], { encoding: 'utf8' })
-    execFileSync('git', ['-C', wt.path, 'commit', '-m', 'work'], { encoding: 'utf8' })
-    execFileSync('git', ['-C', wt.path, 'push', '-u', 'origin', 'HEAD'], { encoding: 'utf8' })
+    git(wt.path, 'add', '.')
+    git(wt.path, 'commit', '-m', 'work')
+    git(wt.path, 'push', '-u', 'origin', 'HEAD')
     mkdirSync(join(wt.path, 'node_modules'), { recursive: true })
     pruneWorktrees({
       repoRoot: root, base: 'main', olderThan: '999d', devMd: `${devMd}\nworktree-deps-retention: 1d\n`,
       ledgerTimes: { '106-old': OLD_LEDGER }, now: FUTURE_NOW, write: true,
     })
-    // The record lives beside the repository's worker state, not inside the worktree it is about:
-    // a deps-only prune leaves the checkout in place, and a record inside it would go with it.
-    expect(readDroppedDeps(root)['106-old']).toBeTruthy()
-
-    // One `commands:` line, as a real profile has: a second would make the profile ambiguous.
-    const setup = 'commands: check `true` · setup `bun install --frozen-lockfile`\nworktree-retention: 14d\n'
-    const warns: string[] = []
-    expect(noteMissingDependencies({ repoRoot: root, name: '106-old', path: wt.path, devMd: setup, warns })).toBe(true)
-    expect(warns.join('\n')).toContain('bun install --frozen-lockfile')
-
-    // Nothing was ever taken from a fresh checkout, so nothing is said about it — a docs-only
-    // issue pays for no install and reads no warning.
-    const fresh = createWorktree({ repoRoot: root, issue: 107, slug: 'fresh', type: 'docs', base: 'main', devMd, home: root, write: true })
-    const quiet: string[] = []
-    expect(noteMissingDependencies({ repoRoot: root, name: '107-fresh', path: fresh.path, devMd: setup, warns: quiet })).toBe(false)
-    expect(quiet).toEqual([])
+    expect(readDroppedDeps(root).names.has('106-old')).toBe(true)
+    // The checkout is still here, which is the whole point of taking only the dependencies.
+    expect(existsSync(wt.path)).toBe(true)
+    expect(existsSync(join(wt.path, 'node_modules'))).toBe(false)
   })
 
   // A record outlives the checkout it describes unless removal clears it, and worktree names
@@ -269,11 +270,11 @@ describe('pruneWorktrees', () => {
       repoRoot: root, base: 'main', olderThan: '999d', devMd: `${devMd}\nworktree-deps-retention: 1d\n`,
       ledgerTimes: { '106-old': OLD_LEDGER }, now: FUTURE_NOW, write: true,
     })
-    expect(readDroppedDeps(root)['106-old']).toBeTruthy()
+    expect(readDroppedDeps(root).names.has('106-old')).toBe(true)
 
     const gone = removeWorktree({ repoRoot: root, name: '106-old', base: 'main', force: true, write: true })
     expect(gone.blocks).toEqual([])
-    expect(readDroppedDeps(root)['106-old']).toBeUndefined()
+    expect(readDroppedDeps(root).names.has('106-old')).toBe(false)
   })
 
 
@@ -342,10 +343,9 @@ describe('pruneWorktrees', () => {
       repoRoot: root, base: 'main', olderThan: '999d', devMd: `${devMd}\nworktree-deps-retention: 1d\n`,
       ledgerTimes: { '106-one': OLD_LEDGER, '107-two': OLD_LEDGER }, now: FUTURE_NOW, write: true,
     })
-    expect(Object.keys(readDroppedDeps(root)).sort()).toEqual(['106-one', '107-two'])
+    expect([...readDroppedDeps(root).names].sort()).toEqual(['106-one', '107-two'])
   })
 
-  // A closed issue is the clearest sign a worktree is finished, and it does not wait out a window
   test('a worktree with uncommitted work keeps its dependencies', () => {
     const root = repoWithRemote()
     const wt = createWorktree({ repoRoot: root, issue: 106, slug: 'old', type: 'feat', base: 'main', devMd, home: root, write: true })
@@ -489,110 +489,140 @@ describe('pruneWorktrees', () => {
     expect(git(root, 'ls-remote', '--heads', 'origin')).not.toContain('feat/111-landed')
   })
 
-  // A deps-only prune leaves the checkout in place, so nothing ever routes through `restore`.
-  // The fact has to travel with the worktree instead, or a resumed checkout never names it.
-  test('a reclaimed worktree is marked as such wherever it is described', () => {
+  // The squash case is not the only one. An ordinary merge leaves the branch an ancestor of the
+  // base; delete the remote branch afterwards and the merged-ness test declines to call it merged
+  // while content cannot see it either, so "no remote branch" alone would push it back.
+  test('a prune never recreates a branch deleted after an ordinary merge', () => {
     const root = repoWithRemote()
-    const wt = createWorktree({ repoRoot: root, issue: 112, slug: 'idle', type: 'feat', base: 'main', devMd, home: root, write: true })
-    writeFileSync(join(wt.path, 'work.txt'), 'work\n')
-    git(wt.path, 'add', '.')
-    git(wt.path, 'commit', '-m', 'work')
-    git(wt.path, 'push', '-u', 'origin', 'HEAD')
-    mkdirSync(join(wt.path, 'node_modules'), { recursive: true })
-    const setup = 'commands: check `true` · setup `bun install --frozen-lockfile`\nworktree-retention: 14d\nworktree-deps-retention: 1d\n'
-    pruneWorktrees({
-      repoRoot: root, base: 'main', olderThan: '999d', devMd: setup,
-      ledgerTimes: { '112-idle': OLD_LEDGER }, now: FUTURE_NOW, write: true,
-    })
-
-    // `list` is what a person and the CLI read.
-    const entry = listWorktrees({ repoRoot: root, base: 'main', withSize: false }).find((e: { name: string }) => e.name === '112-idle')
-    expect(entry?.depsDropped).toBe(true)
-    // And the pass the worker makes anyway says it every time, naming the command to run.
-    const again = pruneWorktrees({
-      repoRoot: root, base: 'main', olderThan: '999d', devMd: setup,
-      ledgerTimes: { '112-idle': OLD_LEDGER }, now: FUTURE_NOW,
-    })
-    expect(again.warns.join('\n')).toContain('bun install --frozen-lockfile')
-  })
-
-  // "The record could not be read" and "nothing was taken" are the same answer as a missing key,
-  // and must not be: the first leaves a checkout that cannot build looking untouched.
-  test('an unreadable record is reported, not read as nothing to do', () => {
-    const root = repoWithRemote()
-    // The directory the records live in, made a file: readdir fails with something other than
-    // ENOENT, which is the only code that means "nothing has been dropped here".
-    mkdirSync(join(root, '.vegastack', '.tmp', 'worker'), { recursive: true })
-    writeFileSync(join(root, '.vegastack', '.tmp', 'worker', 'deps-dropped'), 'not a directory\n')
-    const warns: string[] = []
-    expect(noteMissingDependencies({ repoRoot: root, name: 'anything', path: '/w', devMd, warns })).toBe(true)
-    expect(warns.join('\n')).toContain('could not be read')
-  })
-
-  // A squash merge lands the work and deletes the feature branch. Pushing on "no remote branch"
-  // alone would put that branch back — on a prune whose reported action says only "remove".
-  test('a prune never recreates a branch somebody deleted after a squash merge', () => {
-    const root = repoWithRemote()
-    const wt = createWorktree({ repoRoot: root, issue: 111, slug: 'landed', type: 'feat', base: 'main', devMd, home: root, write: true })
+    const wt = createWorktree({ repoRoot: root, issue: 117, slug: 'ff', type: 'feat', base: 'main', devMd, home: root, write: true })
     writeFileSync(join(wt.path, 'feature.txt'), 'landed\n')
     git(wt.path, 'add', '.')
-    git(wt.path, 'commit', '-m', 'feat: the work')
-    // Squashed onto main: the same content under a different commit, which is what a merge queue
-    // leaves behind. The feature branch is then gone from the remote — here it was never pushed
-    // at all, which reads exactly the same way.
-    writeFileSync(join(root, 'feature.txt'), 'landed\n')
-    // By name: `add .` in the main checkout would sweep in the worktree directory itself.
-    git(root, 'add', 'feature.txt')
-    git(root, 'commit', '-m', 'feat: the work (#111)')
+    git(wt.path, 'commit', '-m', 'feat: work')
+    git(wt.path, 'push', '-u', 'origin', 'HEAD')
+    git(root, 'merge', '--no-ff', '-m', 'merge', 'feat/117-ff')
     git(root, 'push', 'origin', 'main')
+    // Delete-on-merge, then the local tracking ref goes with a prune — exactly what a fetch does.
+    git(root, 'push', 'origin', '--delete', 'feat/117-ff')
+    git(root, 'fetch', '--prune', 'origin')
+    expect(git(root, 'ls-remote', '--heads', 'origin')).not.toContain('feat/117-ff')
 
-    const before = git(root, 'ls-remote', '--heads', 'origin')
-    expect(before).not.toContain('feat/111-landed')
-    const r = removeWorktree({ repoRoot: root, name: '111-landed', base: 'main', push: true, write: true })
+    const r = removeWorktree({ repoRoot: root, name: '117-ff', base: 'main', push: true, write: true })
     expect(r.blocks).toEqual([])
     expect(r.actions.join('\n')).not.toContain('git push')
-    // The one thing this is about: the deleted branch stays deleted.
-    expect(git(root, 'ls-remote', '--heads', 'origin')).not.toContain('feat/111-landed')
+    expect(git(root, 'ls-remote', '--heads', 'origin')).not.toContain('feat/117-ff')
+  })
+
+  // A closed issue is the clearest sign a worktree is finished: it does not wait out a window
+  // meant for work that might still be wanted. Every refusal still applies to it.
+  test('a closed issue makes its worktree a candidate straight away, and dirty still refuses', () => {
+    const root = repoWithRemote()
+    const wt = createWorktree({ repoRoot: root, issue: 114, slug: 'shut', type: 'feat', base: 'main', devMd, home: root, write: true })
+    writeFileSync(join(wt.path, 'work.txt'), 'real work\n')
+    git(wt.path, 'add', '.')
+    git(wt.path, 'commit', '-m', 'work')
+    git(wt.path, 'push', '-u', 'origin', 'HEAD')
+    // Committed a moment ago and the ledger untouched: nothing about its age makes it a candidate.
+    const soon = Date.now()
+
+    const waiting = pruneWorktrees({
+      repoRoot: root, base: 'main', olderThan: '14d', devMd, ledgerTimes: {}, issueStates: {}, now: soon, write: false,
+    })
+    expect(waiting.candidates.find((c: { name: string }) => c.name === '114-shut')).toBeUndefined()
+
+    const closed = pruneWorktrees({
+      repoRoot: root, base: 'main', olderThan: '14d', devMd, ledgerTimes: {},
+      issueStates: { '114-shut': 'closed' }, now: soon, write: false,
+    })
+    expect(closed.candidates.find((c: { name: string; state: string }) => c.name === '114-shut')?.state).toBe('abandoned')
+
+    // A closed issue never costs anybody work. What was not saved is committed on the worktree's
+    // own branch and pushed before the directory goes — the checkout is reproducible, the work is
+    // not, and `worktree restore` brings the first one back.
+    writeFileSync(join(wt.path, 'notes.md'), 'half an idea\n')
+    pruneWorktrees({
+      repoRoot: root, base: 'main', olderThan: '14d', devMd, ledgerTimes: {},
+      issueStates: { '114-shut': 'closed' }, now: soon, write: true,
+    })
+    expect(git(root, 'log', '-1', '--format=%s', 'origin/feat/114-shut').trim()).toBe('wip: rescued uncommitted work from 114-shut')
+    expect(git(root, 'show', 'origin/feat/114-shut:notes.md')).toBe('half an idea\n')
+  })
+
+  // The same for a merged branch, through the prune rather than `removeWorktree` directly —
+  // the acceptance line is about what a prune names, and the two have different gates.
+  test('a merged worktree is a candidate straight away, and the prune removes it', () => {
+    const root = repoWithRemote()
+    const wt = createWorktree({ repoRoot: root, issue: 115, slug: 'done', type: 'feat', base: 'main', devMd, home: root, write: true })
+    writeFileSync(join(wt.path, 'feature.txt'), 'landed\n')
+    git(wt.path, 'add', '.')
+    git(wt.path, 'commit', '-m', 'feat: work')
+    git(wt.path, 'push', '-u', 'origin', 'HEAD')
+    // Merged into main and pushed, the way a merge queue leaves it.
+    git(root, 'merge', '--no-ff', '-m', 'merge', 'feat/115-done')
+    git(root, 'push', 'origin', 'main')
+    const soon = Date.now()
+
+    const merged = pruneWorktrees({
+      repoRoot: root, base: 'main', olderThan: '14d', devMd, ledgerTimes: {}, issueStates: {}, now: soon, write: false,
+    })
+    expect(merged.candidates.find((c: { name: string; state: string }) => c.name === '115-done')?.state).toBe('merged')
+
+    pruneWorktrees({
+      repoRoot: root, base: 'main', olderThan: '14d', devMd, ledgerTimes: {}, issueStates: {}, now: soon, write: true,
+    })
+    expect(existsSync(wt.path)).toBe(false)
+    // The branch itself outlives the prune — only the directory goes.
+    expect(git(root, 'branch', '--list', 'feat/115-done').trim()).toContain('feat/115-done')
   })
 
   // A deps-only prune leaves the checkout in place, so nothing ever routes through `restore`.
-  // The fact has to travel with the worktree instead, or a resumed checkout never names it.
-  test('a reclaimed worktree is marked as such wherever it is described', () => {
+  // The fact has to travel with the worktree instead, and reach a person through the commands
+  // they type — a test of the helper alone passes with the whole wiring deleted.
+  test('a reclaimed worktree says what to run, in list and in status', () => {
     const root = repoWithRemote()
-    const wt = createWorktree({ repoRoot: root, issue: 112, slug: 'idle', type: 'feat', base: 'main', devMd, home: root, write: true })
+    mkdirSync(join(root, '.vegastack'), { recursive: true })
+    const setup = 'commands: check `true` · setup `bun install --frozen-lockfile`\nworktree-include: none\nworktree-retention: 14d\nworktree-deps-retention: 1d\n'
+    writeFileSync(join(root, '.vegastack', 'dev.md'), setup)
+
+    const wt = createWorktree({ repoRoot: root, issue: 112, slug: 'idle', type: 'feat', base: 'main', devMd: setup, home: root, write: true })
     writeFileSync(join(wt.path, 'work.txt'), 'work\n')
     git(wt.path, 'add', '.')
     git(wt.path, 'commit', '-m', 'work')
     git(wt.path, 'push', '-u', 'origin', 'HEAD')
     mkdirSync(join(wt.path, 'node_modules'), { recursive: true })
-    const setup = 'commands: check `true` · setup `bun install --frozen-lockfile`\nworktree-retention: 14d\nworktree-deps-retention: 1d\n'
     pruneWorktrees({
       repoRoot: root, base: 'main', olderThan: '999d', devMd: setup,
       ledgerTimes: { '112-idle': OLD_LEDGER }, now: FUTURE_NOW, write: true,
     })
 
-    // `list` is what a person and the CLI read.
-    const entry = listWorktrees({ repoRoot: root, base: 'main', withSize: false }).find((e: { name: string }) => e.name === '112-idle')
-    expect(entry?.depsDropped).toBe(true)
-    // And the pass the worker makes anyway says it every time, naming the command to run.
-    const again = pruneWorktrees({
-      repoRoot: root, base: 'main', olderThan: '999d', devMd: setup,
-      ledgerTimes: { '112-idle': OLD_LEDGER }, now: FUTURE_NOW,
-    })
-    expect(again.warns.join('\n')).toContain('bun install --frozen-lockfile')
+    // Both verbs a person reads, run as the CLI runs them.
+    for (const verb of ['list', 'status']) {
+      const answer = JSON.parse(runScript(root, verb).out)
+      expect(answer.warns.join('\n')).toContain('bun install --frozen-lockfile')
+      expect(answer.entries.find((e: { name: string }) => e.name === '112-idle')?.depsDropped).toBe(true)
+    }
+
+    // And a worktree nothing was ever taken from says nothing at all — a warning on every fresh
+    // checkout is the failure mode, not a missing one.
+    createWorktree({ repoRoot: root, issue: 113, slug: 'fresh', type: 'docs', base: 'main', devMd: setup, home: root, write: true })
+    const listed = JSON.parse(runScript(root, 'list').out)
+    expect(listed.warns.join('\n')).not.toContain('113-fresh')
+    expect(listed.entries.find((e: { name: string }) => e.name === '113-fresh')?.depsDropped).toBe(false)
   })
 
-  // "The record could not be read" and "nothing was taken" are the same answer as a missing key,
-  // and must not be: the first leaves a checkout that cannot build looking untouched.
+  // "The record could not be read" and "nothing was taken" must not be the same answer: the first
+  // leaves a checkout that cannot build looking untouched.
   test('an unreadable record is reported, not read as nothing to do', () => {
     const root = repoWithRemote()
+    mkdirSync(join(root, '.vegastack'), { recursive: true })
+    writeFileSync(join(root, '.vegastack', 'dev.md'), devMd)
+    createWorktree({ repoRoot: root, issue: 116, slug: 'any', type: 'feat', base: 'main', devMd, home: root, write: true })
     // The directory the records live in, made a file: readdir fails with something other than
     // ENOENT, which is the only code that means "nothing has been dropped here".
     mkdirSync(join(root, '.vegastack', '.tmp', 'worker'), { recursive: true })
     writeFileSync(join(root, '.vegastack', '.tmp', 'worker', 'deps-dropped'), 'not a directory\n')
-    const warns: string[] = []
-    expect(noteMissingDependencies({ repoRoot: root, name: 'anything', path: '/w', devMd, warns })).toBe(true)
-    expect(warns.join('\n')).toContain('could not be read')
+
+    const answer = JSON.parse(runScript(root, 'list').out)
+    expect(answer.warns.join('\n')).toContain('could not be read')
   })
 
   // Locked is one of the three refusals that is never lifted, and it has to cover the
@@ -622,7 +652,7 @@ describe('pruneWorktrees', () => {
     expect(existsSync(wt.path)).toBe(true)
     expect(existsSync(join(wt.path, 'node_modules', 'left', 'index.js'))).toBe(true)
     expect(r.freed).not.toContain('108-held')
-    expect(readDroppedDeps(root)['108-held']).toBeUndefined()
+    expect(readDroppedDeps(root).names.has('108-held')).toBe(false)
     // The branch and the commit it was on are exactly where they were.
     expect(git(wt.path, 'rev-parse', 'HEAD').trim()).toBe(head)
     expect(git(wt.path, 'rev-parse', '--abbrev-ref', 'HEAD').trim()).toBe('feat/108-held')

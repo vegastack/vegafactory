@@ -1642,6 +1642,26 @@ describe('the command', () => {
     expect(readRuns(root).length).toBe(1)
     expect(statSync(join(workerDir(root), 'runs.jsonl')).mode & 0o777).toBe(0o600)
 
+    // A record this process created must land owner-only at the moment it is created, not only
+    // when a later call tightens it. Under an ordinary umask `appendFileSync` makes it 0644 and
+    // `replaceFile` renames a 0644 temporary file over it — so the umask is set to that ordinary
+    // value here, or this passes on a machine whose own umask was already doing the work.
+    const umask = process.umask(0o022)
+    try {
+      const runs = join(workerDir(root), 'runs.jsonl')
+      rmSync(runs, { force: true })
+      recordRun(root, { at: 3, number: 7, action: 'implement', outcome: 'done', note: 'first', ms: 1 } as never)
+      expect(statSync(runs).mode & 0o777).toBe(0o600)
+      // The same for a record written whole rather than appended. Stat the raw path: asking for
+      // it through `childrenPath` runs the guard, which would tighten the file this is measuring.
+      const children = join(workerDir(root), 'children.json')
+      rmSync(children, { force: true })
+      noteChild(root, { pid: 1, command: 'x', startedAt: 1, runId: 'r' } as never)
+      expect(statSync(children).mode & 0o777).toBe(0o600)
+    } finally {
+      process.umask(umask)
+    }
+
     // And an ordinary record already there under a loose mode is tightened rather than left.
     chmodSync(join(workerDir(root), 'runs.jsonl'), 0o644)
     recordRun(root, { at: 2, number: 7, action: 'implement', outcome: 'done', note: 'more', ms: 1 } as never)
