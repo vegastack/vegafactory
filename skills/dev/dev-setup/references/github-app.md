@@ -28,6 +28,8 @@ The alternative worth naming is a credential belonging to a person: it stands fo
 
 The App is public, so any account may install it. That is the point: one App, installed by any org that wants the factory, with a permission set each of them can read before consenting. The values below describe VegaStack's published App; they are examples for a company that runs its own.
 
+VegaStack's installation is org-wide: `GET /orgs/vegastack/installations` reported `repository_selection: "all"` for installation `158664419` on 22-09-2026. A new repository therefore needs no App installation step — only the normal control-room `repos.md`, `nodes.md`, and board/workflow bookkeeping. If the organization ever changes the installation to **Only select repositories**, an organization owner must add each new repository to the existing App installation before its automation or worker can mint a repository token; a control-room row cannot grant GitHub access the installation does not have.
+
 | Fact | VegaStack example |
 |---|---|
 | Name | VegaFactory |

@@ -2,6 +2,16 @@
 
 The project's story, newest first: what got built, why, and how it went — for the operator's future recall. Format home: the dev-chronicle skill.
 
+## 22-09-2026 — Every machine has a cheap node-enrolment path ([#261](https://github.com/vegastack/vegafactory/issues/261))
+
+- **What:** `vegafactory init` now prints the ordinary machine's canonical `worker: no` row, and a short checklist carries that row through an operator-owned control-room PR. Teammate onboarding links the same path, while unattended machines keep their separate worker-box procedure.
+- **Why:** Statistics identify work by node, but a normal person's machine had no enrolment flow; the only documented machine path provisioned an always-on worker.
+- **How it went:** The original plan tried to make init edit and push the control room, contradicting the product's credential boundary. Re-grounding cut it back to one read-only login lookup and one copyable row, then locked the authored and staged checklists together.
+- **Changed:** init node proposal · ordinary-node checklist · teammate node step · explicit ordinary-node versus worker-box routing · org-wide App installation guidance.
+- **Decisions:** none.
+
+— approved by (kmanojkumar) · built by codex · branch docs/261-onboarding-any-machine-not-just-a-worker
+
 ## 22-09-2026 — The stats page answers narrower questions without rebuilding ([#257](https://github.com/vegastack/vegafactory/issues/257))
 
 - **What:** The one-file offline dashboard now filters the events it already loaded by repository, owner, node, and inclusive date range. Every table and headline updates in place without a server, network request, or external asset.

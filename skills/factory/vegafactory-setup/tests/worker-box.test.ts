@@ -3,6 +3,7 @@ import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 
 const template = readFileSync(join(import.meta.dir, '../assets/control-room/onboarding/worker-box.md.template'), 'utf8')
+const newNode = readFileSync(join(import.meta.dir, '../assets/control-room/onboarding/new-node.md.template'), 'utf8')
 const reference = readFileSync(join(import.meta.dir, '../references/control-room.md'), 'utf8')
 const githubApp = readFileSync(join(import.meta.dir, '../../../dev/dev-setup/references/github-app.md'), 'utf8')
 
@@ -22,6 +23,15 @@ test('the App is the dedicated worker account own GitHub and Git identity', () =
     'nonce-ref `git push --dry-run`',
   ]) expect(githubApp).toContain(text)
   expect(githubApp).not.toContain("pushes with the machine's own login")
+  expect(githubApp).toContain('repository_selection: "all"')
+  expect(githubApp).toContain('Only select repositories')
+})
+
+test('ordinary node onboarding grants nothing and leaves the PR to the operator', () => {
+  expect(newNode).toContain('`worker: no`')
+  expect(newNode).toContain('operator adds it')
+  expect(newNode).toContain('`init` never edits, commits, pushes, or opens that PR')
+  expect(newNode).not.toMatch(/`(?:git push|gh pr create)/)
 })
 
 test('worker-box onboarding describes the multi-repository worker boundary', () => {
