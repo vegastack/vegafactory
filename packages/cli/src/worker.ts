@@ -458,11 +458,14 @@ export function listedHere(root: string, options: { repo: string; host?: string;
   // An empty cell authorises nothing. Everything has to be said out loud, because the commonest
   // row on a roster of every machine is one with nothing in this cell.
   const every = entry.repos.some((repo) => repo === '*' || repo.toLowerCase() === 'all')
+  if (every) {
+    return { ok: false, reason: `${machine}'s row in ${file} contains * or all — unattended workers require explicit OWNER/NAME repositories only`, entry, file }
+  }
   const requested = canonicalRepository(options.repo)
   const namedRepos = entry.repos.flatMap((repo) => {
     try { return [canonicalRepository(repo)] } catch { return [] }
   })
-  if (!every && !namedRepos.includes(requested)) {
+  if (!namedRepos.includes(requested)) {
     const named = entry.repos.length ? `for ${entry.repos.join(', ')}` : 'for no repository — its repos cell is empty'
     return { ok: false, reason: `${machine} is listed in ${file} ${named}, not ${options.repo}`, entry, file }
   }
@@ -1982,8 +1985,24 @@ export async function reconcileBoards(input: {
       continue
     }
 
-    // Recreate the removed board's isolated credentials/policy before touching its issues. A
-    // failure retains both the board and its pending rows; it never costs a healthy board a pass.
+    // Process identity is local evidence and needs no repository credential. Signal every child
+    // that is still provably ours before provisioning: a removed board whose token or checkout is
+    // broken must not leave its agent running simply because hand-back cannot start yet.
+    const ready: PendingHandBack[] = []
+    for (const pending of [...(record.pending ?? [])]) {
+      if (matching.some((run) => run.candidate.number === pending.issue)) continue
+      let processPending = false
+      for (const child of children.filter((row) => canonicalRepository(row.repo) === repo && row.issue === pending.issue)) {
+        const identity = processIdentity(child, input.start ?? processStart, input.alive ?? processAlive)
+        if (identity === 'matching') { (input.stop ?? stopGroup)(child.pid, 'SIGTERM'); processPending = true }
+        else if (identity === 'unknown') processPending = true
+      }
+      if (!processPending) ready.push(pending)
+    }
+    if (ready.length === 0) continue
+
+    // Recreate the removed board's isolated credentials/policy only for rows now safe to hand
+    // back. A failure retains both the board and its pending rows; healthy boards still proceed.
     try {
       if (!input.contexts.has(repo)) input.contexts.set(repo, await input.provision(repo))
       await input.contexts.get(repo)!.identity.freshen()
@@ -1994,22 +2013,7 @@ export async function reconcileBoards(input: {
       continue
     }
 
-    for (const pending of [...(record.pending ?? [])]) {
-      // After a worker crash there is no in-memory promise to await. Signal only a process whose
-      // full identity still matches, then retain the pending row until a later pass proves it is
-      // gone. Unknown identity is also retained: a pid alone never authorises a signal.
-      const stillRunning = matching.some((run) => run.candidate.number === pending.issue)
-      const persisted = children.filter((child) => canonicalRepository(child.repo) === repo && child.issue === pending.issue)
-      if (stillRunning) continue
-      if (!stillRunning) {
-        let processPending = false
-        for (const child of persisted) {
-          const identity = processIdentity(child, input.start ?? processStart, input.alive ?? processAlive)
-          if (identity === 'matching') { (input.stop ?? stopGroup)(child.pid, 'SIGTERM'); processPending = true }
-          else if (identity === 'unknown') processPending = true
-        }
-        if (processPending) continue
-      }
+    for (const pending of ready) {
       const interrupt: Interrupt = { reason: pending.reason, action: 'stop', trigger: null, consumes: false, deferHandBack: true }
       let result: HandBackResult
       try { result = await input.handBack(repo, pending.issue, pending.reason, pending.from, interrupt) }
@@ -2724,7 +2728,7 @@ export async function runWorker(argv: string[], deps: CliDeps = {}): Promise<num
   // `--repo` locates the control room; it is not the sole board anymore. Once the row itself is
   // a valid worker row, its explicit repos cell is the authority and may legitimately no longer
   // contain the bootstrap repository used by an already-installed service.
-  const workerListing = listing.ok || (listing.entry?.worker === true && listing.entry.caps !== null)
+  const workerListing = listing.ok || (listing.entry?.worker === true && listing.entry.caps !== null && listing.reason.endsWith(`, not ${repo}`))
     ? { ...listing, ok: true, reason: `${machineName(host)} is listed in ${listing.file}` }
     : listing
   // That listing may have fast-forwarded the clone, and every gate below it can return before the

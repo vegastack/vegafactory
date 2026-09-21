@@ -450,6 +450,44 @@ describe('multi-repository board reconciliation', () => {
     expect(readChildren(stateRoot).map((row) => `${row.repo}#${row.issue}`)).toEqual(['o/b#73'])
   })
 
+  test('restart children are signalled before failing provision or refresh while a healthy sibling stays active', async () => {
+    for (const failure of ['provision', 'freshen'] as const) {
+      const stateHome = realpathSync(mkdtempSync(join(tmpdir(), 'worker-drop-order-')))
+      const stateRoot = join(stateHome, '.vegafactory', 'worker')
+      const child = { repo: 'o/a', pid: 71, startedAt: 'start-71', command: 'codex', issue: 71, action: 'implement' as const, owner: null, from: 'queued' as const }
+      noteChild(stateRoot, child)
+      const runner = (() => ({ code: 0, stdout: '', stderr: '' })) as GhRunner
+      const healthy = { key: 'o/b', repo: 'o/b', root: '/b', runner, devMd: '', identity: { runner, token: () => null, freshen: async () => {} } }
+      const broken = { key: 'o/a', repo: 'o/a', root: '/a', runner, devMd: '', identity: { runner, token: () => null, freshen: async () => { throw new Error('refresh failed') } } }
+      const previous = {
+        schema: 1 as const, revision: 0, reports: {},
+        boards: {
+          'o/a': { repo: 'o/a', state: 'dropping' as const, pending: [
+            { issue: 71, from: 'queued' as const, reason: 'removed' },
+            { issue: 72, from: 'queued' as const, reason: 'removed' },
+          ] },
+          'o/b': { repo: 'o/b', state: 'active' as const },
+        },
+      }
+      const stopped: number[] = []
+      const result = await reconcileBoards({
+        home: stateHome, env: {}, listed: ['o/b'], previous, contexts: new Map([['o/b', healthy]]), inflight: new Map(),
+        provision: async repo => {
+          if (repo === 'o/a' && failure === 'provision') throw new Error('provision failed')
+          return repo === 'o/a' ? broken : healthy
+        },
+        handBack: async () => ({ ok: true, note: 'done' }), out: () => {},
+        start: pid => pid === 71 ? 'start-71' : null, alive: () => false,
+        stop: pid => { stopped.push(pid); return true },
+      })
+      expect(stopped, failure).toEqual([71])
+      expect(result.active.map(board => board.repo)).toEqual(['o/b'])
+      expect(result.unavailable[0]!.reason).toContain(failure === 'provision' ? 'provision failed' : 'refresh failed')
+      expect(readChildren(stateRoot)).toEqual([child])
+      expect(readWorkerState({ home: stateHome, env: {} }).boards['o/a']?.pending).toHaveLength(2)
+    }
+  })
+
   test('dropping a board leaves its checkout byte-for-byte in place', async () => {
     const stateHome = realpathSync(mkdtempSync(join(tmpdir(), 'worker-reconcile-')))
     const checkout = join(stateHome, 'checkout')
@@ -2456,8 +2494,8 @@ describe('the command', () => {
     expect(existsSync(unitPath(process.platform, home))).toBe(false)
   })
 
-  test('enable installs for one healthy explicit board while reporting broken and refused siblings', async () => {
-    project(`| node | owner | worker | repos | caps |\n|---|---|---|---|---|\n| ${NODE} | mk | yes | o/good o/bad * | |\n`)
+  test('enable installs for one healthy explicit board while reporting a broken sibling', async () => {
+    project(`| node | owner | worker | repos | caps |\n|---|---|---|---|---|\n| ${NODE} | mk | yes | o/good o/bad | |\n`)
     mkdirSync(join(home, '.config', 'systemd', 'user'), { recursive: true })
     const { privateKey } = generateKeyPairSync('rsa', { modulusLength: 2048, privateKeyEncoding: { type: 'pkcs8', format: 'pem' }, publicKeyEncoding: { type: 'spki', format: 'pem' } })
     const key = join(home, 'partial.pem')
@@ -2479,7 +2517,6 @@ describe('the command', () => {
     expect(result.code).toBe(0)
     expect(result.text).toContain('repo:o/bad')
     expect(result.text).toContain('clone failed')
-    expect(result.text).toContain('repo:*')
     expect(existsSync(unitPath('linux', home))).toBe(true)
     const none = await run(['enable'], {
       platform: 'linux', env: { VEGAFACTORY_APP_PRIVATE_KEY_FILE: key }, fetch, run: probe, runner: undefined,
@@ -3808,11 +3845,21 @@ describe('the worker gate', () => {
     expect(listing.reason).toContain('no `worker` column')
   })
 
-  test('`*` and `all` still mean every repository, on either shape', () => {
-    project(`${header}| ${NODE} | mk | yes | * | |\n`)
-    expect(listedHere(root, { repo: 'o/anything', host: HOST, home }).ok).toBe(true)
-    project(`${header}| ${NODE} | mk | yes | all | |\n`)
-    expect(listedHere(root, { repo: 'o/anything', host: HOST, home }).ok).toBe(true)
+  test('wildcards fail the public gate and provision nothing; explicit case variants match canonically', async () => {
+    for (const wildcard of ['*', 'all']) {
+      project(`${header}| ${NODE} | mk | yes | o/r ${wildcard} | |\n`)
+      const listing = listedHere(root, { repo: 'o/r', host: HOST, home })
+      expect(listing.ok).toBe(false)
+      expect(listing.reason).toContain('explicit OWNER/NAME')
+      let provisions = 0
+      expect(await runWorker(['run', '--once'], {
+        cwd: root, home, host: HOST, env: {}, out: () => {}, runner: gh.runner, git: anyGit,
+        provisionBoard: async () => { provisions++; throw new Error('must not provision') },
+      })).toBe(2)
+      expect(provisions).toBe(0)
+    }
+    project(`${header}| ${NODE} | mk | yes | O/R | |\n`)
+    expect(listedHere(root, { repo: 'o/r', host: HOST, home }).ok).toBe(true)
   })
 })
 
