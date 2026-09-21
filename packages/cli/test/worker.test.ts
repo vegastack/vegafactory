@@ -12,9 +12,10 @@ import {
   acknowledgedPlan, canonicalPath, childRunEnvironment, confirmShip, disjointSiblings, pushableBranch, shipWord,
   drain, filesFromParent, harnessAnswers, hitLimit, hooksWired, listedHere, mintToken, overlaps, parseWorkerArgs,
   parseNodes, poll, readActed, readRuns, readiness, recordRun, resetAt, runKey, RUNS_KEPT, runWorker, schedule, serviceCommands, stagePolicy,
-  standDown, stepPrompt, tail, unitPath, unitText, unsafeForParallel,
+  standDown, standDownStrict, stepPrompt, tail, unitPath, unitText, unsafeForParallel,
   migrateLegacyWorkerState, noteChild, readChildren, refreshRoster, releaseRunLock, reserve, runLockPath, stopChild, takeRunLock, verifiedListing,
   recordRoomSha, updateModeFor,
+  normalizeWorkerRepos, readWorkerState, reconcileBoards, workerProblemReporter,
   type Candidate, type Fetch, type GitRun, type Inflight, type PollDeps, type Probe, type RunStep, type StepResult,
 } from '../src/worker.ts'
 import type { GhRunner } from '../src/gh.ts'
@@ -195,6 +196,451 @@ describe('the roster', () => {
     const reason = listedHere(root, { repo: 'o/r', host: HOST, home }).reason
     expect(reason).toContain('no `worker` column')
     expect(reason).toContain('| node | owner | worker | repos | caps |')
+  })
+})
+
+describe('multi-repository board reconciliation', () => {
+  const workerState = (repos: string[]) => ({
+    schema: 1 as const,
+    revision: 0,
+    boards: Object.fromEntries(repos.map((repo) => [repo, { repo, state: 'active' as const }])),
+  })
+
+  const context = (repo: string) => ({
+    key: repo,
+    repo,
+    root: `/worker/${repo.replace('/', '__')}/repo`,
+    identity: {
+      token: () => `token-${repo}`,
+      freshen: async () => {},
+      runner: (() => ({ code: 0, stdout: '', stderr: '' })) as GhRunner,
+    },
+    runner: (() => ({ code: 0, stdout: '', stderr: '' })) as GhRunner,
+    devMd: `repo: ${repo}\n`,
+  })
+
+  test('normalization accepts only explicit repositories and stable-deduplicates canonical identity', () => {
+    expect(normalizeWorkerRepos(['Org/Repo', 'org/repo', '*', 'all', 'not-a-repo', 'O/Other'])).toEqual({
+      repos: ['org/repo', 'o/other'],
+      refused: ['*', 'all', 'not-a-repo'],
+    })
+  })
+
+  test('refused wildcard cells provision nothing beyond a healthy explicit sibling', async () => {
+    const stateHome = realpathSync(mkdtempSync(join(tmpdir(), 'worker-reconcile-')))
+    const provisioned: string[] = []
+    const result = await reconcileBoards({
+      home: stateHome,
+      listed: ['o/good', '*', 'all'],
+      previous: workerState([]),
+      contexts: new Map(),
+      inflight: new Map(),
+      provision: async (repo) => { provisioned.push(repo); return context(repo) },
+      handBack: async () => ({ ok: true, note: 'done' }),
+      out: () => {},
+    })
+    expect(provisioned).toEqual(['o/good'])
+    expect(result.active.map((board) => board.key)).toEqual(['o/good'])
+  })
+
+  test.each([
+    'App installation lookup answered 404', 'token mint failed', 'atomic clone failed', 'dev.md is unreadable',
+    'required harness hooks are not wired', 'origin push path is not verified', 'board could not be read', 'issue could not be read',
+  ])('a production-shaped %s failure does not stop a healthy repository', async (reason) => {
+    const stateHome = realpathSync(mkdtempSync(join(tmpdir(), 'worker-reconcile-')))
+    const result = await reconcileBoards({
+      home: stateHome, env: {}, listed: ['o/bad', 'o/good'], previous: workerState([]), contexts: new Map(), inflight: new Map(),
+      provision: async (repo) => { if (repo === 'o/bad') throw new Error(reason); return context(repo) },
+      handBack: async () => ({ ok: true, note: 'done' }), out: () => {},
+    })
+    expect(result.active.map((board) => board.key)).toEqual(['o/good'])
+    expect(result.unavailable).toEqual([{ repo: 'o/bad', reason }])
+  })
+
+  test('one broken repository is isolated and an identical report becomes reportable after recovery', async () => {
+    const stateHome = realpathSync(mkdtempSync(join(tmpdir(), 'worker-reconcile-')))
+    const output: string[] = []
+    let broken = true
+    const provision = async (repo: string) => {
+      if (repo === 'o/bad' && broken) throw new Error('App is not installed')
+      return context(repo)
+    }
+    const run = (previous: ReturnType<typeof readWorkerState>) => reconcileBoards({
+      home: stateHome,
+      listed: ['o/good', 'o/bad'],
+      previous,
+      contexts: new Map(),
+      inflight: new Map(),
+      provision,
+      handBack: async () => ({ ok: true, note: 'done' }),
+      out: (line) => output.push(line),
+    })
+
+    const first = await run(workerState([]))
+    expect(first.active.map((board) => board.key)).toEqual(['o/good'])
+    expect(first.unavailable).toEqual([{ repo: 'o/bad', reason: 'App is not installed' }])
+    expect(output).toEqual(['o/bad: unavailable (App is not installed)'])
+
+    await run(readWorkerState({ home: stateHome, env: {} }))
+    expect(output).toHaveLength(1)
+    broken = false
+    expect((await run(readWorkerState({ home: stateHome, env: {} }))).active.map((board) => board.key)).toEqual(['o/good', 'o/bad'])
+    broken = true
+    await run(readWorkerState({ home: stateHome, env: {} }))
+    expect(output).toEqual(['o/bad: unavailable (App is not installed)', 'o/bad: unavailable (App is not installed)'])
+  })
+
+  test('removing one board persists a non-consuming hand-back before stopping and never drains its sibling', async () => {
+    const stateHome = realpathSync(mkdtempSync(join(tmpdir(), 'worker-reconcile-')))
+    const contexts = new Map([['o/a', context('o/a')], ['o/b', context('o/b')]])
+    const stopped: string[] = []
+    let stateAtStop: ReturnType<typeof readWorkerState> | null = null
+    const handedBack: Array<{ repo: string; issue: number; consumes: boolean }> = []
+    const makeRun = (repo: string): Inflight => {
+      const candidate = { repo, number: 1, action: 'implement' as const, parent: null, files: [], from: 'queued' as const }
+      const run = { candidate, started: 1, settled: false, interrupt: null, stop: () => { stateAtStop = readWorkerState({ home: stateHome, env: {} }); stopped.push(`${repo}#1`); run.settled = true }, done: Promise.resolve({}) } as unknown as Inflight
+      return run
+    }
+    const inflight = new Map<string, Inflight>([['o/a#1', makeRun('o/a')], ['o/b#1', makeRun('o/b')]])
+
+    const result = await reconcileBoards({
+      home: stateHome,
+      listed: ['o/b'],
+      previous: workerState(['o/a', 'o/b']),
+      contexts,
+      inflight,
+      provision: async (repo) => contexts.get(repo)!,
+      handBack: async (repo, issue, _reason, _from, interrupt) => {
+        handedBack.push({ repo, issue, consumes: interrupt.consumes })
+        return { ok: true, note: 'restored' }
+      },
+      out: () => {},
+    })
+
+    expect(stopped).toEqual(['o/a#1'])
+    expect(stateAtStop!.boards['o/a']).toMatchObject({ state: 'dropping', pending: [{ issue: 1, from: 'queued' }] })
+    expect(inflight.has('o/b#1')).toBe(true)
+    expect(handedBack).toEqual([])
+    expect(result.removed).toEqual([])
+    expect(result.active.map((board) => board.key)).toEqual(['o/b'])
+    const settled = await reconcileBoards({
+      home: stateHome,
+      listed: ['o/b'],
+      previous: readWorkerState({ home: stateHome, env: {} }),
+      contexts,
+      inflight,
+      provision: async (repo) => contexts.get(repo)!,
+      handBack: async (repo, issue, _reason, _from, interrupt) => {
+        handedBack.push({ repo, issue, consumes: interrupt.consumes })
+        return { ok: true, note: 'restored' }
+      },
+      out: () => {},
+    })
+    expect(handedBack).toEqual([{ repo: 'o/a', issue: 1, consumes: false }])
+    expect(settled.removed).toEqual(['o/a'])
+    expect(readWorkerState({ home: stateHome, env: {} }).boards['o/a']).toBeUndefined()
+  })
+
+  test('an unresolved removed run never holds the healthy board reconciliation open', async () => {
+    const stateHome = realpathSync(mkdtempSync(join(tmpdir(), 'worker-reconcile-')))
+    const contexts = new Map([['o/a', context('o/a')], ['o/b', context('o/b')]])
+    const candidate = { repo: 'o/a', number: 1, action: 'implement' as const, parent: null, files: [], from: 'queued' as const }
+    const run = { candidate, started: 1, settled: false, interrupt: null, stop: () => {}, done: new Promise(() => {}) } as Inflight
+    const result = await reconcileBoards({
+      home: stateHome, env: {}, listed: ['o/b'], previous: workerState(['o/a', 'o/b']), contexts,
+      inflight: new Map([['o/a#1', run]]), provision: async (repo) => contexts.get(repo)!,
+      handBack: async () => ({ ok: true, note: 'done' }), out: () => {},
+    })
+    expect(result.active.map((board) => board.key)).toEqual(['o/b'])
+    expect(readWorkerState({ home: stateHome, env: {} }).boards['o/a']).toMatchObject({ state: 'dropping' })
+  })
+
+  test('failed hand-back survives restart with board context until a strict retry succeeds', async () => {
+    const stateHome = realpathSync(mkdtempSync(join(tmpdir(), 'worker-reconcile-')))
+    const contexts = new Map([['o/a', context('o/a')], ['o/b', context('o/b')]])
+    const candidate = { repo: 'o/a', number: 7, action: 'implement' as const, parent: null, files: [], from: 'queued' as const }
+    const run = { candidate, started: 1, settled: false, interrupt: null, stop: () => {}, done: Promise.resolve({}) } as unknown as Inflight
+    let attempts = 0
+    const input = (previous: ReturnType<typeof readWorkerState>, inflight: Map<string, Inflight>) => ({
+      home: stateHome,
+      listed: ['o/b'],
+      previous,
+      contexts,
+      inflight,
+      provision: async (repo: string) => contexts.get(repo)!,
+      handBack: async () => ++attempts === 1 ? { ok: false, note: 'network down' } : { ok: true, note: 'restored' },
+      out: () => {},
+    })
+
+    await reconcileBoards(input(workerState(['o/a', 'o/b']), new Map([['o/a#7', run]])))
+    const crashed = readWorkerState({ home: stateHome, env: {} })
+    expect(crashed.boards['o/a']).toMatchObject({ state: 'dropping', pending: [{ issue: 7, from: 'queued' }] })
+
+    const failed = await reconcileBoards(input(crashed, new Map()))
+    expect(failed.removed).toEqual([])
+    const recovered = await reconcileBoards(input(readWorkerState({ home: stateHome, env: {} }), new Map()))
+    expect(recovered.removed).toEqual(['o/a'])
+    expect(readWorkerState({ home: stateHome, env: {} }).boards['o/a']).toBeUndefined()
+    expect(recovered.active.map((board) => board.key)).toEqual(['o/b'])
+  })
+
+  test('a removed idle board needs no credentials and a dead restart child retains enough metadata to hand back', async () => {
+    const stateHome = realpathSync(mkdtempSync(join(tmpdir(), 'worker-reconcile-')))
+    let provisioned = 0
+    const idle = await reconcileBoards({
+      home: stateHome,
+      listed: [],
+      previous: workerState(['o/idle']),
+      contexts: new Map(),
+      inflight: new Map(),
+      provision: async () => { provisioned++; throw new Error('must not provision') },
+      handBack: async () => { throw new Error('must not hand back') },
+      out: () => {},
+    })
+    expect(idle.removed).toEqual(['o/idle'])
+    expect(provisioned).toBe(0)
+
+    const restartHome = realpathSync(mkdtempSync(join(tmpdir(), 'worker-reconcile-')))
+    const stateRoot = join(restartHome, '.vegafactory', 'worker')
+    noteChild(stateRoot, { repo: 'o/a', pid: 987654321, startedAt: 'gone', command: 'codex', issue: 9, action: 'implement', owner: null, from: 'queued' })
+    const handedBack: string[] = []
+    await reconcileBoards({
+      home: restartHome,
+      listed: [],
+      previous: workerState(['o/a']),
+      contexts: new Map([['o/a', context('o/a')]]),
+      inflight: new Map(),
+      provision: async (repo) => context(repo),
+      handBack: async (repo, issue) => { handedBack.push(`${repo}#${issue}`); return { ok: true, note: 'restored' } },
+      out: () => {},
+    })
+    expect(handedBack).toEqual(['o/a#9'])
+    expect(readChildren(stateRoot)).toEqual([])
+  })
+
+  test('matching restart children are signalled and unknown children remain untouched and pending', async () => {
+    const stateHome = realpathSync(mkdtempSync(join(tmpdir(), 'worker-reconcile-')))
+    const stateRoot = join(stateHome, '.vegafactory', 'worker')
+    const child = (repo: string, pid: number) => ({ repo, pid, startedAt: `start-${pid}`, command: 'codex', issue: pid, action: 'implement' as const, owner: null, from: 'queued' as const })
+    noteChild(stateRoot, child('o/a', 71))
+    noteChild(stateRoot, child('o/a', 72))
+    noteChild(stateRoot, child('o/b', 73))
+    const stopped: number[] = []
+    const contexts = new Map([['o/a', context('o/a')], ['o/b', context('o/b')]])
+    await reconcileBoards({
+      home: stateHome, env: {}, listed: ['o/b'], previous: workerState(['o/a', 'o/b']), contexts, inflight: new Map(),
+      provision: async (repo) => contexts.get(repo)!, handBack: async () => ({ ok: true, note: 'done' }), out: () => {},
+      start: (pid) => pid === 71 ? 'start-71' : null,
+      alive: (pid) => pid === 72 ? null : false,
+      stop: (pid) => { stopped.push(pid); return true },
+    })
+    expect(stopped).toEqual([71])
+    expect(readChildren(stateRoot).map((row) => `${row.repo}#${row.issue}`).sort()).toEqual(['o/a#71', 'o/a#72', 'o/b#73'])
+    expect(readWorkerState({ home: stateHome, env: {} }).boards['o/a']).toMatchObject({ state: 'dropping' })
+    const handedBack: string[] = []
+    const recovered = await reconcileBoards({
+      home: stateHome, env: {}, listed: ['o/b'], previous: readWorkerState({ home: stateHome, env: {} }), contexts, inflight: new Map(),
+      provision: async (repo) => contexts.get(repo)!,
+      handBack: async (repo, issue) => { handedBack.push(`${repo}#${issue}`); return { ok: true, note: 'restored' } }, out: () => {},
+      start: () => null, alive: () => false,
+    })
+    expect(handedBack).toEqual(['o/a#71', 'o/a#72'])
+    expect(recovered.removed).toEqual(['o/a'])
+    expect(readChildren(stateRoot).map((row) => `${row.repo}#${row.issue}`)).toEqual(['o/b#73'])
+  })
+
+  test('dropping a board leaves its checkout byte-for-byte in place', async () => {
+    const stateHome = realpathSync(mkdtempSync(join(tmpdir(), 'worker-reconcile-')))
+    const checkout = join(stateHome, 'checkout')
+    mkdirSync(checkout)
+    writeFileSync(join(checkout, 'sentinel'), 'keep me')
+    const board = { ...context('o/a'), root: checkout }
+    await reconcileBoards({
+      home: stateHome, env: {}, listed: [], previous: workerState(['o/a']), contexts: new Map([['o/a', board]]), inflight: new Map(),
+      provision: async () => board, handBack: async () => ({ ok: true, note: 'done' }), out: () => {},
+    })
+    expect(readdirSync(checkout)).toEqual(['sentinel'])
+    expect(readFileSync(join(checkout, 'sentinel'), 'utf8')).toBe('keep me')
+  })
+
+  test('a removed and re-added board runs the original trigger because administrative stop consumes nothing', async () => {
+    const stateHome = realpathSync(mkdtempSync(join(tmpdir(), 'worker-reconcile-')))
+    const stateRoot = join(stateHome, '.vegafactory', 'worker')
+    gh.addIssue({ number: 81, labels: ['queued', 'small'] })
+    const runner = ((args: string[], input?: string) => gh.runner(args.map((arg) => arg.replaceAll('repos/o/a', 'repos/o/r')), input)) as GhRunner
+    const selected = {
+      key: 'o/a', repo: 'o/a', root, runner, devMd: 'repo: o/a\n',
+      identity: { runner, freshen: async () => {}, token: () => null },
+    }
+    let releaseStep = () => {}
+    const blocked = new Promise<void>((resolve) => { releaseStep = resolve })
+    let calls = 0
+    const inflight = new Map<string, Inflight>()
+    const pollDeps: PollDeps = {
+      stateRoot, boards: [selected], runId: 'f18', now: () => gh.clock, machine: HOST, out: () => {},
+      start: () => 'matching', stop: () => { releaseStep(); return true },
+      standDown: (_repo, _number, reason) => reason,
+      runStep: async (_step, runContext) => {
+        calls++
+        if (calls === 1) { runContext.onStart?.(8181, 'codex'); await blocked; return { outcome: 'failed', note: 'stopped', ms: 1 } }
+        return { outcome: 'done', note: 'resumed', ms: 1 }
+      },
+    }
+    expect((await poll(pollDeps, inflight)).map(runKey)).toEqual(['o/a#81'])
+    await reconcileBoards({
+      home: stateHome, env: {}, listed: [], previous: workerState(['o/a']), contexts: new Map([['o/a', selected]]), inflight,
+      provision: async () => selected, handBack: async () => ({ ok: true, note: 'restored' }), out: () => {},
+    })
+    await inflight.get('o/a#81')!.done
+    await reconcileBoards({
+      home: stateHome, env: {}, listed: [], previous: readWorkerState({ home: stateHome, env: {} }), contexts: new Map([['o/a', selected]]), inflight,
+      provision: async () => selected, handBack: async () => ({ ok: true, note: 'restored' }), out: () => {},
+    })
+    await reconcileBoards({
+      home: stateHome, env: {}, listed: ['o/a'], previous: readWorkerState({ home: stateHome, env: {} }), contexts: new Map(), inflight,
+      provision: async () => selected, handBack: async () => ({ ok: true, note: 'restored' }), out: () => {},
+    })
+    expect(readActed(stateRoot)['o/a#81']).toBeUndefined()
+    expect((await poll(pollDeps, inflight)).map(runKey)).toEqual(['o/a#81'])
+    await drain(inflight)
+  })
+})
+
+describe('persisted worker board state', () => {
+  const pathAt = (base: string) => join(base, '.vegafactory', 'worker', 'boards.json')
+
+  test('an absent default file is empty and VEGAFACTORY_HOME is authoritative', async () => {
+    const base = realpathSync(mkdtempSync(join(tmpdir(), 'worker-state-')))
+    expect(readWorkerState({ home: base, env: {} })).toEqual({ schema: 1, revision: 0, boards: {}, reports: {} })
+    const override = join(base, 'override')
+    await reconcileBoards({
+      home: join(base, 'ignored'), env: { VEGAFACTORY_HOME: override }, listed: ['o/r'],
+      previous: { schema: 1, revision: 0, boards: {} }, contexts: new Map(), inflight: new Map(),
+      provision: async (repo) => ({
+        key: repo, repo, root: '/repo', devMd: `repo: ${repo}\n`,
+        runner: (() => ({ code: 0, stdout: '', stderr: '' })) as GhRunner,
+        identity: { token: () => null, freshen: async () => {}, runner: (() => ({ code: 0, stdout: '', stderr: '' })) as GhRunner },
+      }),
+      handBack: async () => ({ ok: true, note: 'done' }), out: () => {},
+    })
+    expect(existsSync(join(override, 'worker', 'boards.json'))).toBe(true)
+    expect(existsSync(pathAt(join(base, 'ignored')))).toBe(false)
+    expect(readWorkerState({ home: join(base, 'ignored'), env: { VEGAFACTORY_HOME: override } }).boards['o/r']?.state).toBe('active')
+  })
+
+  test.each([
+    ['top level', '{}'],
+    ['schema', '{"schema":2,"revision":0,"boards":{}}'],
+    ['revision', '{"schema":1,"revision":-1,"boards":{}}'],
+    ['boards', '{"schema":1,"revision":0,"boards":[]}'],
+    ['canonical key', '{"schema":1,"revision":0,"boards":{"O/R":{"repo":"O/R","state":"active"}}}'],
+    ['matching repo', '{"schema":1,"revision":0,"boards":{"o/r":{"repo":"o/x","state":"active"}}}'],
+    ['state', '{"schema":1,"revision":0,"boards":{"o/r":{"repo":"o/r","state":"gone"}}}'],
+    ['pending shape', '{"schema":1,"revision":0,"boards":{"o/r":{"repo":"o/r","state":"dropping","pending":{}}}}'],
+    ['pending issue', '{"schema":1,"revision":0,"boards":{"o/r":{"repo":"o/r","state":"dropping","pending":[{"issue":0,"from":"queued","reason":"drop"}]}}}'],
+    ['pending from', '{"schema":1,"revision":0,"boards":{"o/r":{"repo":"o/r","state":"dropping","pending":[{"issue":1,"from":"gone","reason":"drop"}]}}}'],
+    ['pending reason', '{"schema":1,"revision":0,"boards":{"o/r":{"repo":"o/r","state":"dropping","pending":[{"issue":1,"from":"queued","reason":7}]}}}'],
+    ['reports', '{"schema":1,"revision":0,"boards":{},"reports":{"o/r":7}}'],
+  ])('malformed %s is refused without changing its bytes', (_name, bytes) => {
+    const base = realpathSync(mkdtempSync(join(tmpdir(), 'worker-state-')))
+    const path = pathAt(base)
+    mkdirSync(join(base, '.vegafactory', 'worker'), { recursive: true })
+    writeFileSync(path, bytes)
+    expect(() => readWorkerState({ home: base, env: {} })).toThrow('is malformed')
+    expect(readFileSync(path, 'utf8')).toBe(bytes)
+  })
+
+  test('unsafe ancestor, worker root, leaf, and unreadable leaf are refused without touching targets', () => {
+    const external = realpathSync(mkdtempSync(join(tmpdir(), 'worker-state-target-')))
+    const ancestorBase = realpathSync(mkdtempSync(join(tmpdir(), 'worker-state-')))
+    symlinkSync(external, join(ancestorBase, '.vegafactory'))
+    expect(() => readWorkerState({ home: ancestorBase, env: {} })).toThrow('unsafe global worker directory')
+    expect(readdirSync(external)).toEqual([])
+
+    const rootBase = realpathSync(mkdtempSync(join(tmpdir(), 'worker-state-')))
+    mkdirSync(join(rootBase, '.vegafactory'))
+    symlinkSync(external, join(rootBase, '.vegafactory', 'worker'))
+    expect(() => readWorkerState({ home: rootBase, env: {} })).toThrow('unsafe global worker directory')
+    expect(readdirSync(external)).toEqual([])
+
+    const leafBase = realpathSync(mkdtempSync(join(tmpdir(), 'worker-state-')))
+    mkdirSync(join(leafBase, '.vegafactory', 'worker'), { recursive: true })
+    const target = join(external, 'target.json')
+    writeFileSync(target, 'do not touch')
+    symlinkSync(target, pathAt(leafBase))
+    expect(() => readWorkerState({ home: leafBase, env: {} })).toThrow('not a regular file')
+    expect(readFileSync(target, 'utf8')).toBe('do not touch')
+
+    const unreadableBase = realpathSync(mkdtempSync(join(tmpdir(), 'worker-state-')))
+    mkdirSync(join(unreadableBase, '.vegafactory', 'worker'), { recursive: true })
+    const unreadable = pathAt(unreadableBase)
+    writeFileSync(unreadable, '{"schema":1,"revision":0,"boards":{}}')
+    chmodSync(unreadable, 0o000)
+    try {
+      if (process.getuid?.() !== 0) expect(() => readWorkerState({ home: unreadableBase, env: {} })).toThrow()
+    } finally { chmodSync(unreadable, 0o600) }
+  })
+
+  test('a malformed persisted file blocks reconciliation unchanged, then a repaired retry succeeds', async () => {
+    const base = realpathSync(mkdtempSync(join(tmpdir(), 'worker-state-')))
+    const path = pathAt(base)
+    mkdirSync(join(base, '.vegafactory', 'worker'), { recursive: true })
+    writeFileSync(path, '{broken')
+    const reconcile = () => reconcileBoards({
+      home: base, env: {}, listed: [], previous: readWorkerState({ home: base, env: {} }), contexts: new Map(), inflight: new Map(),
+      provision: async () => { throw new Error('unused') }, handBack: async () => ({ ok: true, note: 'done' }), out: () => {},
+    })
+    expect(() => reconcile()).toThrow('is malformed')
+    expect(readFileSync(path, 'utf8')).toBe('{broken')
+    writeFileSync(path, '{"schema":1,"revision":0,"boards":{},"reports":{}}\n')
+    await expect(reconcile()).resolves.toMatchObject({ active: [], removed: [], unavailable: [] })
+    expect(readWorkerState({ home: base, env: {} })).toMatchObject({ schema: 1, boards: {}, reports: {} })
+  })
+
+  test('concurrent equivalent reconciliations leave one complete parseable atomic state', async () => {
+    const base = realpathSync(mkdtempSync(join(tmpdir(), 'worker-state-')))
+    const previous = { schema: 1 as const, revision: 0, boards: {} }
+    const makeContext = (repo: string) => ({
+      key: repo, repo, root: '/repo', devMd: `repo: ${repo}\n`,
+      runner: (() => ({ code: 0, stdout: '', stderr: '' })) as GhRunner,
+      identity: { token: () => null, freshen: async () => {}, runner: (() => ({ code: 0, stdout: '', stderr: '' })) as GhRunner },
+    })
+    const outcomes = await Promise.allSettled(Array.from({ length: 4 }, () => reconcileBoards({
+      home: base, env: {}, listed: ['o/r'], previous, contexts: new Map(), inflight: new Map(),
+      provision: async (repo) => { await Promise.resolve(); return makeContext(repo) },
+      handBack: async () => ({ ok: true, note: 'done' }), out: () => {},
+    })))
+    expect(outcomes.some((result) => result.status === 'rejected' && String(result.reason).includes('changed concurrently'))).toBe(true)
+    expect(readWorkerState({ home: base, env: {} })).toMatchObject({ schema: 1, boards: { 'o/r': { repo: 'o/r', state: 'active' } }, reports: {} })
+    expect(readdirSync(join(base, '.vegafactory', 'worker')).filter((name) => name.startsWith('.boards.json.'))).toEqual([])
+  })
+
+  test('a stale divergent writer cannot erase a newer dropping board or its pending hand-back', async () => {
+    const base = realpathSync(mkdtempSync(join(tmpdir(), 'worker-state-')))
+    const board = {
+      key: 'o/a', repo: 'o/a', root: '/repo', devMd: 'repo: o/a\n',
+      runner: (() => ({ code: 0, stdout: '', stderr: '' })) as GhRunner,
+      identity: { token: () => null, freshen: async () => {}, runner: (() => ({ code: 0, stdout: '', stderr: '' })) as GhRunner },
+    }
+    await reconcileBoards({
+      home: base, env: {}, listed: ['o/a'], previous: { schema: 1, revision: 0, boards: {} }, contexts: new Map(), inflight: new Map(),
+      provision: async () => board, handBack: async () => ({ ok: true, note: 'done' }), out: () => {},
+    })
+    const stale = readWorkerState({ home: base, env: {} })
+    const candidate = { repo: 'o/a', number: 7, action: 'implement' as const, parent: null, files: [], from: 'queued' as const }
+    const run = { candidate, started: 1, settled: false, interrupt: null, stop: () => {}, done: new Promise(() => {}) } as Inflight
+    await reconcileBoards({
+      home: base, env: {}, listed: [], previous: stale, contexts: new Map([['o/a', board]]), inflight: new Map([['o/a#7', run]]),
+      provision: async () => board, handBack: async () => ({ ok: true, note: 'done' }), out: () => {},
+    })
+    await expect(reconcileBoards({
+      home: base, env: {}, listed: ['o/a', 'o/b'], previous: stale, contexts: new Map([['o/a', board]]), inflight: new Map(),
+      provision: async (repo) => ({ ...board, key: repo, repo }), handBack: async () => ({ ok: true, note: 'done' }), out: () => {},
+    })).rejects.toThrow('changed concurrently')
+    expect(readWorkerState({ home: base, env: {} }).boards['o/a']).toMatchObject({
+      state: 'dropping', pending: [{ issue: 7, from: 'queued' }],
+    })
+    expect(readWorkerState({ home: base, env: {} }).boards['o/b']).toBeUndefined()
   })
 })
 
@@ -738,6 +1184,62 @@ describe('one poll over the board', () => {
     await drain(inflight)
   })
 
+  test('real board failures suppress across passes and restart, clear on recovery, and recur once', async () => {
+    const stateHome = realpathSync(mkdtempSync(join(tmpdir(), 'worker-problems-')))
+    const output: string[] = []
+    let broken = true
+    const runner = ((args: string[], input?: string) => {
+      if (broken && args.some((arg) => arg.includes('issues?state=open'))) throw new Error('board transport failed')
+      return gh.runner(args, input)
+    }) as GhRunner
+    const selected = { key: 'o/r', repo: 'o/r', root, runner, devMd: '', identity: { runner, freshen: async () => {}, token: () => null } }
+    const passWith = async (reporter = workerProblemReporter({ home: stateHome, env: {} }, (line) => output.push(line))) => {
+      await poll(deps({ boards: [selected], reportProblem: reporter.report, clearProblem: reporter.clear }), new Map())
+    }
+    await passWith()
+    await reconcileBoards({
+      home: stateHome, env: {}, listed: [], previous: readWorkerState({ home: stateHome, env: {} }), contexts: new Map(), inflight: new Map(),
+      provision: async () => { throw new Error('unused') }, handBack: async () => ({ ok: true, note: 'done' }), out: () => {},
+    })
+    await passWith()
+    expect(output).toEqual(['o/r: board could not be read (board transport failed)'])
+    expect(readWorkerState({ home: stateHome, env: {} }).reports).toEqual({ 'board:o/r': 'board transport failed' })
+    broken = false
+    await passWith()
+    expect(readWorkerState({ home: stateHome, env: {} }).reports).toEqual({})
+    broken = true
+    await passWith(workerProblemReporter({ home: stateHome, env: {} }, (line) => output.push(line)))
+    expect(output).toEqual([
+      'o/r: board could not be read (board transport failed)',
+      'o/r: board could not be read (board transport failed)',
+    ])
+  })
+
+  test('real issue failures suppress across passes and restart, clear on recovery, and recur once', async () => {
+    const stateHome = realpathSync(mkdtempSync(join(tmpdir(), 'worker-problems-')))
+    const output: string[] = []
+    gh.addIssue({ number: 96, labels: ['waiting-on-operator', 'small'] })
+    let broken = true
+    const runner = ((args: string[], input?: string) => {
+      if (broken && args.includes('repos/o/r/issues/96')) throw new Error('issue transport failed')
+      return gh.runner(args, input)
+    }) as GhRunner
+    const selected = { key: 'o/r', repo: 'o/r', root, runner, devMd: '', identity: { runner, freshen: async () => {}, token: () => null } }
+    const passWith = async (reporter = workerProblemReporter({ home: stateHome, env: {} }, (line) => output.push(line))) => {
+      await poll(deps({ boards: [selected], reportProblem: reporter.report, clearProblem: reporter.clear }), new Map())
+    }
+    await passWith()
+    await passWith(workerProblemReporter({ home: stateHome, env: {} }, (line) => output.push(line)))
+    expect(output).toEqual(['o/r#96: could not be read (issue transport failed)'])
+    expect(readWorkerState({ home: stateHome, env: {} }).reports).toEqual({ 'issue:o/r#96': 'issue transport failed' })
+    broken = false
+    await passWith()
+    expect(readWorkerState({ home: stateHome, env: {} }).reports).toEqual({})
+    broken = true
+    await passWith()
+    expect(output).toHaveLength(2)
+  })
+
   test('every wanted transition runs once and is written down', async () => {
     gh.addIssue({ number: 1, labels: ['planning', 'medium'] })
     gh.addIssue({ number: 2, labels: ['queued', 'small'] })
@@ -1080,6 +1582,47 @@ describe('standing an issue down', () => {
     expect(result).toContain('the state label was left alone')
     expect(gh.issues.get(1)!.labels).toContain('in-progress')
     expect(gh.issues.get(1)!.labels).not.toContain('queued')
+  })
+
+  test('the strict adapter exposes a swallowed hand-back failure without changing human output', () => {
+    gh.addIssue({ number: 1, labels: ['in-progress', 'small'] })
+    const runner = ((args: string[], input?: string) => {
+      if (args.includes('POST') && args.some((arg) => arg.includes('/comments'))) throw new Error('GitHub is unavailable')
+      return gh.runner(args, input)
+    }) as typeof gh.runner
+    const ctx = { root, repo: 'o/r', number: 1, runner, machine: HOST, now: gh.clock, restoreTo: 'queued' as const }
+    const strict = standDownStrict(ctx, 'the run stopped')
+    expect(strict.ok).toBe(false)
+    expect(strict.note).toContain('hand-back comment failed')
+    expect(standDown(ctx, 'the run stopped')).toContain('hand-back comment failed')
+  })
+
+  test('a failing git add is a strict failure and reconciliation keeps the hand-back pending', async () => {
+    gh.addIssue({ number: 91, labels: ['queued', 'small'] })
+    const worktree = join(root, '.vegastack', '.worktrees', '91-save')
+    mkdirSync(worktree, { recursive: true })
+    spawnSync('git', ['init', '-q', '-b', 'feat/91-save'], { cwd: worktree })
+    spawnSync('git', ['config', 'user.email', 't@example.com'], { cwd: worktree })
+    spawnSync('git', ['config', 'user.name', 'T'], { cwd: worktree })
+    spawnSync('git', ['commit', '-q', '--allow-empty', '-m', 'first'], { cwd: worktree })
+    writeFileSync(join(worktree, 'open.txt'), 'unsaved')
+    writeFileSync(join(worktree, '.git', 'index.lock'), 'locked')
+    const stateHome = realpathSync(mkdtempSync(join(tmpdir(), 'worker-reconcile-')))
+    const ctx = { root, repo: 'o/r', number: 91, runner: gh.runner, machine: HOST, now: gh.clock, restoreTo: 'queued' as const }
+    const previous = {
+      schema: 1 as const,
+      revision: 0,
+      boards: { 'o/r': { repo: 'o/r', state: 'dropping' as const, pending: [{ issue: 91, from: 'queued' as const, reason: 'removed' }] } },
+    }
+    let strict: ReturnType<typeof standDownStrict> | null = null
+    await reconcileBoards({
+      home: stateHome, env: {}, listed: [], previous,
+      contexts: new Map([['o/r', { key: 'o/r', repo: 'o/r', root, runner: gh.runner, devMd: 'repo: o/r\n', identity: { runner: gh.runner, freshen: async () => {}, token: () => null } }]]),
+      inflight: new Map(), provision: async () => { throw new Error('unused') },
+      handBack: async (_repo, _issue, reason) => { strict = standDownStrict(ctx, reason); return strict }, out: () => {},
+    })
+    expect(strict).toMatchObject({ ok: false, note: expect.stringContaining('could not be staged') })
+    expect(readWorkerState({ home: stateHome, env: {} }).boards['o/r']).toMatchObject({ state: 'dropping', pending: [{ issue: 91 }] })
   })
 
   test('a claim taken while this machine stands down leaves the state label alone', () => {

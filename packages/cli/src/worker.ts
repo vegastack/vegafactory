@@ -39,7 +39,7 @@ import { defaultBranch } from './guard-rules.ts'
 import { stateOf, type State } from './labels.ts'
 import { effectiveUpdateMode, maintainSelfUpdate, type UpdateMode, type UpdateResult } from './self-update.ts'
 import { lintPlan, normalizeGroupPath, parseIndependentGroups, sharedByEveryChild } from '../../../skills/dev/dev-plan/scripts/plan-lint.mjs'
-import { appKeyPath as workerAppKey, factoryHome, workerDirectory } from './home.ts'
+import { appKeyPath as workerAppKey, factoryHome, workerBoardsPath, workerDirectory, type HomeOptions } from './home.ts'
 import { canonicalRepository } from './worker-repo.ts'
 
 // How often the board is read, how many steps run at once, and how long one step may take.
@@ -1680,8 +1680,360 @@ export interface BoardContext {
   devMd: string
 }
 
-export interface BoardRecord { repo: string; state: 'active' | 'dropping' }
-export interface WorkerState { schema: 1; boards: Record<string, BoardRecord> }
+export interface PendingHandBack { issue: number; from: State; reason: string }
+export interface BoardRecord {
+  repo: string
+  state: 'active' | 'dropping'
+  pending?: PendingHandBack[]
+}
+export interface WorkerState {
+  schema: 1
+  revision: number
+  boards: Record<string, BoardRecord>
+  // Error fingerprints survive service restarts. A successful pass removes its fingerprint, so
+  // the same failure is reported again if it returns after a recovery.
+  reports?: Record<string, string>
+}
+
+export interface HandBackResult { ok: boolean; note: string }
+export type StrictHandBack = (
+  repo: string,
+  number: number,
+  reason: string,
+  restoreTo: State,
+  interrupt: Interrupt,
+) => Promise<HandBackResult> | HandBackResult
+
+export interface ReconcileResult {
+  active: BoardContext[]
+  removed: string[]
+  unavailable: Array<{ repo: string; reason: string }>
+}
+
+const emptyWorkerState = (): WorkerState => ({ schema: 1, revision: 0, boards: {}, reports: {} })
+
+const workerStates = new Set<State>(['waiting-on-operator', 'planning', 'queued', 'in-progress', 'ready-to-ship'])
+
+function parseWorkerState(text: string, path: string): WorkerState {
+  try {
+    const value: unknown = JSON.parse(text)
+    if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('top level is not an object')
+    const raw = value as Record<string, unknown>
+    if (Object.keys(raw).some((key) => !['schema', 'revision', 'boards', 'reports'].includes(key))) throw new Error('top level has an unknown field')
+    if (raw.schema !== 1) throw new Error('schema is not 1')
+    if (!Number.isSafeInteger(raw.revision) || Number(raw.revision) < 0) throw new Error('revision is not a non-negative integer')
+    if (!raw.boards || typeof raw.boards !== 'object' || Array.isArray(raw.boards)) throw new Error('boards is not an object')
+    if (!(raw.reports === undefined || (raw.reports && typeof raw.reports === 'object' && !Array.isArray(raw.reports)))) throw new Error('reports is not an object')
+    for (const [key, value] of Object.entries(raw.boards as Record<string, unknown>)) {
+      if (canonicalRepository(key) !== key) throw new Error(`board key is not canonical: ${JSON.stringify(key)}`)
+      if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error(`board ${key} is not an object`)
+      const board = value as Partial<BoardRecord>
+      if (Object.keys(value).some((field) => !['repo', 'state', 'pending'].includes(field))) throw new Error(`board ${key} has an unknown field`)
+      if (board.repo !== key) throw new Error(`board ${key} has a different repository`)
+      if (board.state !== 'active' && board.state !== 'dropping') throw new Error(`board ${key} has an invalid state`)
+      if (!(board.pending === undefined || Array.isArray(board.pending))) throw new Error(`board ${key} pending is not an array`)
+      const issues = new Set<number>()
+      for (const pending of board.pending ?? []) {
+        if (!pending || typeof pending !== 'object' || !Number.isSafeInteger(pending.issue) || pending.issue < 1
+          || !workerStates.has(pending.from) || typeof pending.reason !== 'string' || !pending.reason.trim()) {
+          throw new Error(`board ${key} has an invalid pending hand-back`)
+        }
+        if (Object.keys(pending).some((field) => !['issue', 'from', 'reason'].includes(field))) throw new Error(`board ${key} has an invalid pending hand-back field`)
+        if (issues.has(pending.issue)) throw new Error(`board ${key} repeats pending issue ${pending.issue}`)
+        issues.add(pending.issue)
+      }
+    }
+    for (const [key, report] of Object.entries((raw.reports ?? {}) as Record<string, unknown>)) {
+      if (!key || typeof report !== 'string') throw new Error(`report ${JSON.stringify(key)} is not a string`)
+    }
+    return raw as unknown as WorkerState
+  } catch (error) {
+    throw new Error(`${path} is malformed: ${(error as Error).message}`)
+  }
+}
+
+function boardStatePaths(options: HomeOptions, create: boolean): { stateRoot: string; path: string } {
+  const factoryRoot = factoryHome(options)
+  const stateRoot = workerDirectory(options)
+  const safe = safeGlobalStateRoot(factoryRoot, stateRoot, create)
+  if (!safe.ok) throw new Error(safe.reason)
+  return { stateRoot, path: workerBoardsPath(options) }
+}
+
+function readBoardStateFile(path: string): WorkerState {
+  try {
+    const info = lstatSync(path)
+    const uid = process.getuid?.()
+    if (!info.isFile() || info.isSymbolicLink()) throw new Error(`${path} is not a regular file`)
+    if (uid !== undefined && info.uid !== uid) throw new Error(`${path} is owned by uid ${info.uid}`)
+    return parseWorkerState(readFileSync(path, 'utf8'), path)
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return emptyWorkerState()
+    throw error
+  }
+}
+
+export function readWorkerState(options: HomeOptions = {}): WorkerState {
+  const paths = boardStatePaths(options, true)
+  return withLock(paths.stateRoot, () => {
+    boardStatePaths(options, false)
+    return readBoardStateFile(paths.path)
+  }, { what: 'the worker board state' })
+}
+
+function writeWorkerState(options: HomeOptions, state: WorkerState, expectedRevision: number): WorkerState {
+  // Validate the value before opening the state directory for mutation. This catches programming
+  // errors with the same strict parser used on disk.
+  parseWorkerState(JSON.stringify(state), workerBoardsPath(options))
+  const paths = boardStatePaths(options, true)
+  return withLock(paths.stateRoot, () => {
+    boardStatePaths(options, false)
+    try {
+      const leaf = lstatSync(paths.path)
+      const uid = process.getuid?.()
+      if (!leaf.isFile() || leaf.isSymbolicLink()) throw new Error(`${paths.path} is not a regular file`)
+      if (uid !== undefined && leaf.uid !== uid) throw new Error(`${paths.path} is owned by uid ${leaf.uid}`)
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
+    }
+    const current = readBoardStateFile(paths.path)
+    if (current.revision !== expectedRevision) {
+      throw new Error(`the worker board state changed concurrently (expected revision ${expectedRevision}, found ${current.revision})`)
+    }
+    const next = { ...state, revision: expectedRevision + 1 }
+    replaceFile(paths.path, JSON.stringify(next, null, 2) + '\n')
+    return next
+  }, { what: 'the worker board state' })
+}
+
+export interface WorkerProblemReporter {
+  report: (key: string, fingerprint: string, line: string) => void
+  clear: (key: string) => void
+}
+
+// Polling is independent of roster reconciliation, but both mutate one machine record. Each
+// report update therefore reads and writes under the shared lock and advances the same revision;
+// a reconciliation holding a stale snapshot fails its CAS instead of erasing the newer report.
+export function workerProblemReporter(options: HomeOptions, out: (text: string) => void): WorkerProblemReporter {
+  const mutate = (change: (state: WorkerState) => boolean) => {
+    const paths = boardStatePaths(options, true)
+    withLock(paths.stateRoot, () => {
+      boardStatePaths(options, false)
+      const state = readBoardStateFile(paths.path)
+      state.reports ??= {}
+      if (!change(state)) return
+      const next = { ...state, revision: state.revision + 1 }
+      replaceFile(paths.path, JSON.stringify(next, null, 2) + '\n')
+    }, { what: 'the worker board state' })
+  }
+  return {
+    report: (key, fingerprint, line) => mutate((state) => {
+      if (state.reports![key] === fingerprint) return false
+      state.reports![key] = fingerprint
+      out(line)
+      return true
+    }),
+    clear: (key) => mutate((state) => {
+      if (!(key in state.reports!)) return false
+      delete state.reports![key]
+      return true
+    }),
+  }
+}
+
+// Unattended work accepts repository identities, never organization-wide expansion. Canonical
+// identity is also the stable-deduplication key, so case-only roster edits do not create a board.
+export function normalizeWorkerRepos(values: string[]): { repos: string[]; refused: string[] } {
+  const repos: string[] = []
+  const refused: string[] = []
+  const seen = new Set<string>()
+  for (const value of values) {
+    const display = String(value ?? '').trim()
+    let repo: string
+    try {
+      if (display === '*' || display.toLowerCase() === 'all') throw new Error('wildcards are not repositories')
+      repo = canonicalRepository(display)
+    } catch {
+      refused.push(display)
+      continue
+    }
+    if (seen.has(repo)) continue
+    seen.add(repo)
+    repos.push(repo)
+  }
+  return { repos, refused }
+}
+
+function pendingFor(record: BoardRecord, repo: string, inflight: Map<string, Inflight>, children: ChildRecord[]): PendingHandBack[] {
+  const pending = new Map<number, PendingHandBack>()
+  for (const item of record.pending ?? []) pending.set(item.issue, item)
+  for (const run of inflight.values()) {
+    if (canonicalRepository(run.candidate.repo) !== repo || run.settled) continue
+    pending.set(run.candidate.number, {
+      issue: run.candidate.number,
+      from: run.candidate.from,
+      reason: 'this repository was removed from the worker roster',
+    })
+  }
+  for (const child of children) {
+    if (canonicalRepository(child.repo) !== repo) continue
+    pending.set(child.issue, {
+      issue: child.issue,
+      from: child.from,
+      reason: 'this repository was removed from the worker roster',
+    })
+  }
+  return [...pending.values()].sort((a, b) => a.issue - b.issue)
+}
+
+function forgetIssueChildren(stateRoot: string, repo: string, issue: number): void {
+  writeChildren(stateRoot, (rows) => rows.filter((row) => canonicalRepository(row.repo) !== repo || row.issue !== issue))
+}
+
+// Refresh one roster without coupling board lifecycles. The state transition to `dropping`, and
+// all pending issue metadata, land atomically before any child is signalled. That is the recovery
+// boundary: after a crash the next process can retry the exact non-consuming hand-back.
+export async function reconcileBoards(input: {
+  home?: string
+  env?: NodeJS.ProcessEnv
+  listed: string[]
+  previous: WorkerState
+  contexts: Map<string, BoardContext>
+  inflight: Map<string, Inflight>
+  provision: (repo: string) => Promise<BoardContext>
+  handBack: StrictHandBack
+  out: (text: string) => void
+  stop?: (pid: number, signal: NodeJS.Signals) => boolean
+  start?: ProcessStart
+  alive?: ProcessAlive
+}): Promise<ReconcileResult> {
+  const homeOptions: HomeOptions = { home: input.home, env: input.env }
+  // Refuse an unsafe global root before even reading children. Reconciliation may eventually
+  // signal a child or remove its durable row, so a symlinked/foreign root cannot be observational.
+  boardStatePaths(homeOptions, true)
+  const normalized = normalizeWorkerRepos(input.listed)
+  const wanted = new Set(normalized.repos)
+  let state: WorkerState = JSON.parse(JSON.stringify(input.previous?.schema === 1 ? input.previous : emptyWorkerState()))
+  state.boards ??= {}
+  state.reports ??= {}
+  const active: BoardContext[] = []
+  const removed: string[] = []
+  const unavailable: Array<{ repo: string; reason: string }> = []
+  const stateRoot = workerDirectory(homeOptions)
+  const children = readChildren(stateRoot)
+  const currentReports = new Set<string>()
+  const persist = () => { state = writeWorkerState(homeOptions, state, state.revision) }
+  const report = (key: string, fingerprint: string, line: string) => {
+    currentReports.add(key)
+    if (state.reports![key] !== fingerprint) input.out(line)
+    state.reports![key] = fingerprint
+  }
+
+  for (const refused of normalized.refused) {
+    const key = `refused:${refused.toLowerCase()}`
+    report(key, refused, `${refused}: refused (unattended workers require an explicit OWNER/NAME repository)`)
+  }
+
+  for (const repo of normalized.repos) {
+    const existing = state.boards[repo]
+    if (!existing) state.boards[repo] = { repo, state: 'active' }
+  }
+  for (const [repo, record] of Object.entries(state.boards)) {
+    if (!wanted.has(repo) && record.state === 'active') {
+      record.state = 'dropping'
+      record.pending = pendingFor(record, repo, input.inflight, children)
+    } else if (record.state === 'dropping') {
+      record.pending = pendingFor(record, repo, input.inflight, children)
+    }
+  }
+  // This write is deliberately before `stop()`: no signal may make the only hand-back metadata
+  // transient.
+  persist()
+
+  for (const [repo, record] of Object.entries(state.boards)) {
+    if (record.state !== 'dropping') continue
+    const matching = [...input.inflight.values()].filter((run) => canonicalRepository(run.candidate.repo) === repo && !run.settled)
+    for (const run of matching) {
+      run.interrupt = {
+        reason: 'this repository was removed from the worker roster', action: 'stop', trigger: null, consumes: false, deferHandBack: true,
+      }
+      run.stop()
+    }
+
+    if ((record.pending ?? []).length === 0) {
+      if (wanted.has(repo)) state.boards[repo] = { repo, state: 'active' }
+      else { delete state.boards[repo]; removed.push(repo) }
+      continue
+    }
+
+    // Recreate the removed board's isolated credentials/policy before touching its issues. A
+    // failure retains both the board and its pending rows; it never costs a healthy board a pass.
+    try {
+      if (!input.contexts.has(repo)) input.contexts.set(repo, await input.provision(repo))
+    } catch (error) {
+      const reason = (error as Error).message
+      unavailable.push({ repo, reason })
+      report(`repo:${repo}`, reason, `${repo}: unavailable (${reason})`)
+      continue
+    }
+
+    for (const pending of [...(record.pending ?? [])]) {
+      // After a worker crash there is no in-memory promise to await. Signal only a process whose
+      // full identity still matches, then retain the pending row until a later pass proves it is
+      // gone. Unknown identity is also retained: a pid alone never authorises a signal.
+      const stillRunning = matching.some((run) => run.candidate.number === pending.issue)
+      const persisted = children.filter((child) => canonicalRepository(child.repo) === repo && child.issue === pending.issue)
+      if (stillRunning) continue
+      if (!stillRunning) {
+        let processPending = false
+        for (const child of persisted) {
+          const identity = processIdentity(child, input.start ?? processStart, input.alive ?? processAlive)
+          if (identity === 'matching') { (input.stop ?? stopGroup)(child.pid, 'SIGTERM'); processPending = true }
+          else if (identity === 'unknown') processPending = true
+        }
+        if (processPending) continue
+      }
+      const interrupt: Interrupt = { reason: pending.reason, action: 'stop', trigger: null, consumes: false, deferHandBack: true }
+      let result: HandBackResult
+      try { result = await input.handBack(repo, pending.issue, pending.reason, pending.from, interrupt) }
+      catch (error) { result = { ok: false, note: (error as Error).message } }
+      if (!result.ok) {
+        report(`handback:${repo}#${pending.issue}`, result.note, `${repo}#${pending.issue}: hand-back failed (${result.note})`)
+        continue
+      }
+      record.pending = (record.pending ?? []).filter((item) => item.issue !== pending.issue)
+      forgetIssueChildren(stateRoot, repo, pending.issue)
+      delete state.reports![`handback:${repo}#${pending.issue}`]
+      persist()
+    }
+    if ((record.pending ?? []).length) continue
+    if (wanted.has(repo)) state.boards[repo] = { repo, state: 'active' }
+    else {
+      delete state.boards[repo]
+      removed.push(repo)
+    }
+  }
+
+  for (const repo of normalized.repos) {
+    const record = state.boards[repo]
+    if (!record || record.state !== 'active') continue
+    try {
+      const board = input.contexts.get(repo) ?? await input.provision(repo)
+      input.contexts.set(repo, board)
+      active.push(board)
+      delete state.reports![`repo:${repo}`]
+    } catch (error) {
+      const reason = (error as Error).message
+      unavailable.push({ repo, reason })
+      report(`repo:${repo}`, reason, `${repo}: unavailable (${reason})`)
+    }
+  }
+  for (const key of Object.keys(state.reports)) {
+    if ((key.startsWith('repo:') || key.startsWith('refused:')) && !currentReports.has(key)) delete state.reports[key]
+  }
+  persist()
+  return { active, removed, unavailable }
+}
 
 export interface PollDeps {
   stateRoot: string
@@ -1709,6 +2061,10 @@ export interface PollDeps {
   // pass that left work behind has not shown the board is idle, and idle is the only state a
   // five-minute install may run in.
   onWaiting?: (repo: string, number: number, reason: string) => void
+  // Persisted problem suppression. Task 5 wires this to `workerProblemReporter`; tests may inject
+  // the same seam directly. Recovery clears the fingerprint so a later recurrence is reportable.
+  reportProblem?: WorkerProblemReporter['report']
+  clearProblem?: WorkerProblemReporter['clear']
 }
 
 // The steps this machine has started. It lives across polls, so the next pass two minutes later
@@ -1718,7 +2074,7 @@ export interface PollDeps {
 // does: they asked for this, and it is their comment the record points at. An administrative stop
 // — the machine de-listed, the service told to stop, a signal — does not: nothing about the issue
 // changed, so the work has to look unstarted again or no machine ever picks it up.
-export interface Interrupt { reason: string; action: Action; trigger: number | null; consumes: boolean }
+export interface Interrupt { reason: string; action: Action; trigger: number | null; consumes: boolean; deferHandBack?: boolean }
 
 export interface Inflight {
   candidate: Candidate
@@ -1754,8 +2110,12 @@ export async function poll(deps: PollDeps, inflight: Map<string, Inflight> = new
     let issues: GhIssue[]
     try {
       issues = board(repo, runner)
+      deps.clearProblem?.(`board:${repo}`)
     } catch (error) {
-      deps.out(`${repo}: board could not be read (${(error as Error).message})`)
+      const reason = (error as Error).message
+      const line = `${repo}: board could not be read (${reason})`
+      if (deps.reportProblem) deps.reportProblem(`board:${repo}`, reason, line)
+      else deps.out(line)
       deps.onWaiting?.(repo, 0, (error as Error).message)
       continue
     }
@@ -1764,6 +2124,7 @@ export async function poll(deps: PollDeps, inflight: Map<string, Inflight> = new
       try {
         syncIssue({ root, repo, number: issue.number, runner })
         const snap = snapshot(cacheDir(root, repo, issue.number))
+        deps.clearProblem?.(`issue:${repo}#${issue.number}`)
         const key = runKey({ repo, number: issue.number })
         const held = !!holderOf(snap.state, snap.body, now(), trusted).holder
         const decision = decide(snap, permission, { acted: acted[key] ?? null, now: now(), held, failures: deps.caps?.failures, appActor: deps.appActor })
@@ -1786,8 +2147,11 @@ export async function poll(deps: PollDeps, inflight: Map<string, Inflight> = new
         const files = parent === null ? [] : filesFromParent(plans.get(parent) ?? null, issue.number)
         wanted.push({ board: selected, key, decision, candidate: { repo, number: issue.number, action: decision.action, parent, files, from: stateOf(snap.state.issue!.labels).state! } })
       } catch (error) {
-        deps.out(`${repo}#${issue.number}: could not be read (${(error as Error).message})`)
-        deps.onWaiting?.(repo, issue.number, (error as Error).message)
+        const reason = (error as Error).message
+        const line = `${repo}#${issue.number}: could not be read (${reason})`
+        if (deps.reportProblem) deps.reportProblem(`issue:${repo}#${issue.number}`, reason, line)
+        else deps.out(line)
+        deps.onWaiting?.(repo, issue.number, reason)
       }
     }
   }
@@ -1957,7 +2321,7 @@ function settle(deps: PollDeps, candidate: Candidate, item: { key: string; decis
   // other machine, which is how an administrative stop turns into an issue nobody ever picks up.
   if (interrupt && !interrupt.consumes) {
     deps.out(`${runKey({ repo: record.repo, number: record.issue })} ${record.action} → ${record.outcome}${record.note ? ` (${record.note})` : ''}`)
-    if (result.outcome !== 'done' && !alreadyHandedBack) {
+    if (result.outcome !== 'done' && !alreadyHandedBack && !interrupt.deferHandBack) {
       deps.standDown(candidate.repo, candidate.number, `${interrupt.reason}; this machine has saved and released the issue`, candidate.from)
     }
     return record
@@ -2082,9 +2446,10 @@ type Git = (args: string[]) => { status: number | null; out: string }
 // Giving an issue up: release the claim this run took, save and push its branch, say why on the
 // issue, and put the state label back. The claim is checked *first* — a worktree this machine no
 // longer owns is not ours to commit in — and the branch is checked before any write.
-export function standDown(ctx: StandDownContext, reason: string): string {
+export function standDownStrict(ctx: StandDownContext, reason: string): HandBackResult {
   const claimCtx = { root: ctx.root, repo: ctx.repo, number: ctx.number, runner: ctx.runner, appActor: ctx.appActor }
   const notes: string[] = []
+  let ok = true
   // Who holds the issue, as three answers and not two: ours to finish, somebody else's to leave
   // alone, or unknown. Only the first two are safe, and they are safe for different reasons.
   let whose: 'ours' | 'free' | 'theirs' | 'unreadable' = 'unreadable'
@@ -2094,9 +2459,10 @@ export function standDown(ctx: StandDownContext, reason: string): string {
     const snap = snapshot(cacheDir(ctx.root, ctx.repo, ctx.number))
     const held = holderOf(snap.state, snap.body, ctx.now ?? Date.now(), trustedFactory(claimCtx)).holder
     if (!held) { whose = 'free'; notes.push('no live claim to release') }
-    else if (!held.owner.startsWith(`${ctx.machine}:`)) { whose = 'theirs'; notes.push(`the claim is held by ${held.owner}, so nothing here was touched and the state label was left alone`) }
+    else if (!held.owner.startsWith(`${ctx.machine}:`)) { whose = 'theirs'; ok = false; notes.push(`the claim is held by ${held.owner}, so nothing here was touched and the state label was left alone`) }
     else { whose = 'ours'; owner = held.owner }
   } catch (error) {
+    ok = false
     notes.push(`the claim could not be read (${(error as Error).message}), so nothing here was touched and the state label was left alone`)
   }
 
@@ -2110,13 +2476,25 @@ export function standDown(ctx: StandDownContext, reason: string): string {
       return { status: result.status, out: (result.stdout ?? '').trim() }
     }
     const { branch, refusal } = pushableBranch(dir, ctx.number, git)
-    if (refusal) notes.push(refusal)
+    if (refusal) { ok = false; notes.push(refusal) }
     else {
       if (git(['status', '--porcelain']).out) {
-        git(['add', '--all'])
-        notes.push(git(['commit', '--quiet', '-m', `wip: #${ctx.number} saved before standing down`]).status === 0 ? 'committed the open work' : 'the open work could not be committed')
+        const staged = git(['add', '--all']).status === 0
+        if (!staged) {
+          ok = false
+          notes.push('the open work could not be staged')
+        } else {
+          const committed = git(['commit', '--quiet', '-m', `wip: #${ctx.number} saved before standing down`]).status === 0
+          if (!committed) ok = false
+          notes.push(committed ? 'committed the open work' : 'the open work could not be committed')
+        }
       }
-      notes.push(git(['push', '--quiet', '-u', 'origin', `HEAD:refs/heads/${branch}`]).status === 0 ? `pushed ${branch}` : `the push of ${branch} was rejected, so the commit stays local`)
+      if (!ok) notes.push(`the push of ${branch} was not attempted because the open work was not saved`)
+      else {
+        const pushed = git(['push', '--quiet', '-u', 'origin', `HEAD:refs/heads/${branch}`]).status === 0
+        if (!pushed) ok = false
+        notes.push(pushed ? `pushed ${branch}` : `the push of ${branch} was rejected, so the commit stays local`)
+      }
     }
   }
 
@@ -2124,7 +2502,7 @@ export function standDown(ctx: StandDownContext, reason: string): string {
     try {
       release(claimCtx, owner, ctx.appActor ?? APP_ACTOR, reason)
       notes.push(`released ${owner}`)
-    } catch (error) { notes.push(`the claim could not be released: ${(error as Error).message}`) }
+    } catch (error) { ok = false; notes.push(`the claim could not be released: ${(error as Error).message}`) }
   }
 
   const note = `${reason} — ${notes.join(', ')}`
@@ -2132,7 +2510,7 @@ export function standDown(ctx: StandDownContext, reason: string): string {
   // best-effort: a stand-down that cannot reach GitHub still reports what it did locally.
   try {
     postComment(claimCtx, `<!-- vsk:v1 type=standdown -->\n**${ctx.machine}** stood down from #${ctx.number}: ${note}\n`)
-  } catch (error) { notes.push(`the hand-back comment failed: ${(error as Error).message}`) }
+  } catch (error) { ok = false; notes.push(`the hand-back comment failed: ${(error as Error).message}`) }
   if (ctx.restoreTo && (whose === 'ours' || whose === 'free')) {
     try {
       syncIssue({ ...claimCtx })
@@ -2142,17 +2520,24 @@ export function standDown(ctx: StandDownContext, reason: string): string {
       const now = snapshot(cacheDir(ctx.root, ctx.repo, ctx.number))
       const taken = holderOf(now.state, now.body, ctx.now ?? Date.now(), trustedFactory(claimCtx)).holder
       if (taken && !taken.owner.startsWith(`${ctx.machine}:`)) {
+        ok = false
         notes.push(`${taken.owner} claimed it meanwhile, so the state label was left alone`)
-        return `${reason} — ${notes.join(', ')}`
+        return { ok, note: `${reason} — ${notes.join(', ')}` }
       }
       const labels = readState(cacheDir(ctx.root, ctx.repo, ctx.number))!.issue!.labels
       if (stateOf(labels).state === 'in-progress' && ctx.restoreTo !== 'in-progress') {
         setLabels(claimCtx, nextLabels(labels, { state: ctx.restoreTo }))
         notes.push(`put it back to ${ctx.restoreTo}`)
       }
-    } catch (error) { notes.push(`the state label could not be put back: ${(error as Error).message}`) }
+    } catch (error) { ok = false; notes.push(`the state label could not be put back: ${(error as Error).message}`) }
   }
-  return `${reason} — ${notes.join(', ')}`
+  return { ok, note: `${reason} — ${notes.join(', ')}` }
+}
+
+// Existing attended/step output stays a string. Lifecycle reconciliation uses the structured
+// form above so an incomplete release/comment/restore can never be mistaken for success.
+export function standDown(ctx: StandDownContext, reason: string): string {
+  return standDownStrict(ctx, reason).note
 }
 
 // ---------------------------------------------------------------------------------------------
