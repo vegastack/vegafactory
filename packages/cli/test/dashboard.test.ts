@@ -54,6 +54,12 @@ function runDashboardScript(html: string) {
   return { nodes, change: (id: string, value: string) => { const node = nodes.get(id)!; node.value = value; node.dispatch('change') } }
 }
 
+const nodeText = (node: FakeNode): string => [node.textContent, ...node.children.map(nodeText)].join(' ')
+const plainText = (text: string): string => text
+  .replace(/<[^>]+>/g, ' ')
+  .replaceAll('&amp;', '&').replaceAll('&lt;', '<').replaceAll('&gt;', '>').replaceAll('&quot;', '"').replaceAll('&#39;', "'")
+  .replace(/\s+/g, ' ').trim()
+
 beforeEach(() => {
   home = realpathSync(mkdtempSync(join(tmpdir(), 'dash-')))
 })
@@ -116,30 +122,51 @@ test('dashboard filters match repo, owner, node and inclusive days', () => {
 })
 
 test('the actual inline runtime rebuilds every section as filters change', () => {
-  const { nodes, change } = runDashboardScript(renderDashboard(DATA))
-  change('filter-repo', 'acme/app')
-  change('filter-owner', 'sam')
-  change('filter-node', 'sam@box')
-  change('filter-from', '2026-09-18')
-  change('filter-to', '2026-09-18')
+  const html = renderDashboard(DATA)
+  const { nodes, change } = runDashboardScript(html)
+  const headings = ['Owners', 'Nodes', 'Projects', 'Issues', 'Models', 'Model use per owner', 'Model use per project', 'By day', 'Time per stage', 'Skills']
+  const initialSummary = plainText(html.match(/id="dashboard-summary">([\s\S]*?)<\/p>/)![1]!)
+  const initialSections = plainText(html.match(/id="dashboard-sections">([\s\S]*?)<\/div>\n<script>/)![1]!)
 
-  expect(nodes.get('dashboard-summary')!.textContent).toContain('1 turns')
-  const sections = nodes.get('dashboard-sections')!.children
-  expect(sections.map((section) => section.children[0]?.textContent)).toEqual([
+  // Render once with no filters, then use this complete DOM state as the reset oracle.
+  change('filter-repo', '')
+  const baselineSections = plainText(nodeText(nodes.get('dashboard-sections')!))
+  expect(nodes.get('dashboard-summary')!.textContent).toBe(initialSummary)
+  expect(baselineSections).toBe(initialSections)
+
+  const verify = (id: string, value: string, turns: number, visible: string) => {
+    change(id, value)
+    expect(nodes.get('dashboard-summary')!.textContent).toContain(`${turns} turns`)
+    const sections = nodes.get('dashboard-sections')!.children
+    expect(sections.map((section) => section.children[0]?.textContent)).toEqual(headings)
+    expect(sections).toHaveLength(10)
+    expect(plainText(nodeText(nodes.get('dashboard-sections')!))).toContain(visible)
+    change(id, '')
+    expect(nodes.get('dashboard-summary')!.textContent).toBe(initialSummary)
+    expect(plainText(nodeText(nodes.get('dashboard-sections')!))).toBe(initialSections)
+  }
+
+  verify('filter-repo', 'acme/other', 1, 'acme/other')
+  verify('filter-owner', 'sam', 1, 'sam')
+  verify('filter-node', 'sam@box', 1, 'sam@box')
+  verify('filter-from', '2026-09-18', 2, '2026-09-18') // inclusive lower boundary
+  verify('filter-to', '2026-09-17', 1, '2026-09-17') // inclusive upper boundary
+
+  expect(nodes.get('dashboard-sections')!.children.map((section) => section.children[0]?.textContent)).toEqual([
     'Owners', 'Nodes', 'Projects', 'Issues', 'Models', 'Model use per owner', 'Model use per project', 'By day', 'Time per stage', 'Skills',
   ])
-  expect(sections).toHaveLength(10)
 
   // A valid combination with no rows keeps all ten sections and their empty state.
   change('filter-repo', 'acme/other')
+  change('filter-owner', 'sam')
   expect(nodes.get('dashboard-summary')!.textContent).toBe('no turns collected yet')
   expect(nodes.get('dashboard-sections')!.children).toHaveLength(10)
   for (const section of nodes.get('dashboard-sections')!.children) expect(section.children[1]?.textContent).toBe('nothing collected yet')
 
-  // Clearing every control restores parity with the initial three-turn summary.
+  // Clearing every control restores full parity with the initial server-rendered state.
   for (const id of ['filter-repo', 'filter-owner', 'filter-node', 'filter-from', 'filter-to']) change(id, '')
-  expect(nodes.get('dashboard-summary')!.textContent).toContain('3 turns')
-  expect(nodes.get('dashboard-summary')!.textContent).toContain('2 projects')
+  expect(nodes.get('dashboard-summary')!.textContent).toBe(initialSummary)
+  expect(plainText(nodeText(nodes.get('dashboard-sections')!))).toBe(initialSections)
 })
 
 test('dashboard writes one file, expands ~ and reports the turns', () => {
