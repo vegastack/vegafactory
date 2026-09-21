@@ -2,6 +2,7 @@ import { beforeEach, expect, test } from 'bun:test'
 import { mkdirSync, mkdtempSync, readFileSync, realpathSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { runInNewContext } from 'node:vm'
 import { expandHome, filterDashboardEvents, renderDashboard, runDashboard } from '../src/dashboard.ts'
 import { statsDir, type StatsEvent } from '../src/stats.ts'
 import { refuseAmbientHome } from './no-ambient-home.ts'
@@ -21,6 +22,37 @@ const DATA: StatsEvent[] = [
   event({ id: '2', at: '2026-09-18T09:00:00.000Z', owner: 'sam', node: 'sam@box', harness: 'codex', model: 'gpt-5.6-sol', issue: 43, state: 'ready-to-ship' }),
   event({ id: '3', at: '2026-09-18T10:00:00.000Z', repo: 'acme/other', issue: 7, state: 'planning' }),
 ]
+
+class FakeNode {
+  children: FakeNode[] = []
+  className = ''
+  dataset: Record<string, string> = {}
+  href = ''
+  listeners: Record<string, Array<() => void>> = {}
+  scope = ''
+  style: Record<string, string> = {}
+  textContent = ''
+  value = ''
+
+  constructor(readonly tagName: string) {}
+  append(...children: FakeNode[]) { this.children.push(...children) }
+  replaceChildren(...children: FakeNode[]) { this.children = children }
+  addEventListener(type: string, listener: () => void) { (this.listeners[type] ??= []).push(listener) }
+  dispatch(type: string) { for (const listener of this.listeners[type] ?? []) listener() }
+}
+
+function runDashboardScript(html: string) {
+  const ids = ['filter-repo', 'filter-owner', 'filter-node', 'filter-from', 'filter-to', 'dashboard-summary', 'dashboard-sections']
+  const nodes = new Map(ids.map((id) => [id, new FakeNode(id.includes('filter-') ? 'input' : 'div')]))
+  const document = {
+    createElement: (tag: string) => new FakeNode(tag),
+    getElementById: (id: string) => nodes.get(id) ?? null,
+  }
+  const script = html.match(/<script>([\s\S]*?)<\/script>/)?.[1]
+  if (!script) throw new Error('dashboard script not found')
+  runInNewContext(script, { document, Node: FakeNode })
+  return { nodes, change: (id: string, value: string) => { const node = nodes.get(id)!; node.value = value; node.dispatch('change') } }
+}
 
 beforeEach(() => {
   home = realpathSync(mkdtempSync(join(tmpdir(), 'dash-')))
@@ -81,6 +113,33 @@ test('dashboard filters match repo, owner, node and inclusive days', () => {
   expect(filterDashboardEvents(DATA, { repo: 'acme/app', owner: 'sam', node: '', from: '2026-09-18', to: '2026-09-18' }).map((row) => row.id)).toEqual(['2'])
   expect(filterDashboardEvents(DATA, { repo: '', owner: '', node: '', from: '2026-09-18', to: '' })).toHaveLength(2)
   expect(filterDashboardEvents([], { repo: '', owner: '', node: '', from: '', to: '' })).toEqual([])
+})
+
+test('the actual inline runtime rebuilds every section as filters change', () => {
+  const { nodes, change } = runDashboardScript(renderDashboard(DATA))
+  change('filter-repo', 'acme/app')
+  change('filter-owner', 'sam')
+  change('filter-node', 'sam@box')
+  change('filter-from', '2026-09-18')
+  change('filter-to', '2026-09-18')
+
+  expect(nodes.get('dashboard-summary')!.textContent).toContain('1 turns')
+  const sections = nodes.get('dashboard-sections')!.children
+  expect(sections.map((section) => section.children[0]?.textContent)).toEqual([
+    'Owners', 'Nodes', 'Projects', 'Issues', 'Models', 'Model use per owner', 'Model use per project', 'By day', 'Time per stage', 'Skills',
+  ])
+  expect(sections).toHaveLength(10)
+
+  // A valid combination with no rows keeps all ten sections and their empty state.
+  change('filter-repo', 'acme/other')
+  expect(nodes.get('dashboard-summary')!.textContent).toBe('no turns collected yet')
+  expect(nodes.get('dashboard-sections')!.children).toHaveLength(10)
+  for (const section of nodes.get('dashboard-sections')!.children) expect(section.children[1]?.textContent).toBe('nothing collected yet')
+
+  // Clearing every control restores parity with the initial three-turn summary.
+  for (const id of ['filter-repo', 'filter-owner', 'filter-node', 'filter-from', 'filter-to']) change(id, '')
+  expect(nodes.get('dashboard-summary')!.textContent).toContain('3 turns')
+  expect(nodes.get('dashboard-summary')!.textContent).toContain('2 projects')
 })
 
 test('dashboard writes one file, expands ~ and reports the turns', () => {
