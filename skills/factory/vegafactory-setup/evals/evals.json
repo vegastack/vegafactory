@@ -76,13 +76,17 @@
     {
       "id": 7,
       "prompt": "We're putting the always-on Mac mini into service — it'll run CI and the worker. What do I need to do on it?",
-      "expected_output": "The reply walks onboarding/worker-box.md: two macOS accounts so a CI job cannot read the worker's tokens, the pinned toolchain, sleep and auto-login, the runner registration block run as the runner account, the org-admin group grant, and the reboot drill — handing every org-admin and on-box command to the operator rather than running it.",
+      "expected_output": "The reply walks onboarding/worker-box.md: two macOS accounts so CI cannot read worker credentials, operator-run machine setup, and one worker serving an explicit multi-repository list through isolated board contexts under one machine-global service and run cap.",
       "files": [],
       "assertions": [
         "The two-account split is stated with its reason: a CI job runs as the runner user and so cannot read the worker user's gh, Claude and Codex credentials",
         "The runner registration and the org runner-group grant are presented as the operator's own commands, and no registration token is minted by the agent",
         "The reply says an ungranted runner group queues jobs forever with runner: null rather than failing",
-        "The GitHub App private key is stated as living on the worker box at ~/.vegafactory/worker/app.pem, chmod 600, readable only by the worker account"
+        "The GitHub App private key is stated as living on the worker box at ~/.vegafactory/worker/app.pem, chmod 600, readable only by the worker account",
+        "The repos cell lists multiple explicit OWNER/NAME values and says that * and all are refused rather than expanded",
+        "First use clones each repository into ~/.vegafactory/worker/repos/<owner>__<repo>/repo and gives it a separate repository-scoped App token, policy, readiness and push check",
+        "The runs cap is one machine-global budget while ship slots are per repository, and one board failure does not stop healthy boards",
+        "Status uses owner/repo#issue; removing a repository hands back only its runs and keeps its checkout; logs and worker state stay under ~/.vegafactory/worker"
       ]
     },
     {

@@ -141,6 +141,14 @@ describe('factory-board template — token and mirror steps', () => {
     expect(step('token').uses).toBe(`actions/create-github-app-token@${docMajor}`)
   })
 
+  test('the worker App contract isolates every board token and failure', () => {
+    const reference = readFileSync(join(skillRoot, 'references/github-app.md'), 'utf8')
+    expect(reference).toContain('never a token shared between repositories')
+    expect(reference).toContain('separately mints an hour-long installation token for each explicit `OWNER/NAME`')
+    expect(reference).toContain('Only runs from that board receive its token as `GH_TOKEN`')
+    expect(reference).toContain('skips that repository without borrowing another board\'s identity or stopping a healthy board')
+  })
+
   test('the mirror step uses the gh 2.97 name-based field form', () => {
     expect(step('mirror').run).toContain('gh project item-edit "$BOARD" --owner "$OWNER" --url "$ISSUE_URL" --field Status --value "$STATUS"')
   })
