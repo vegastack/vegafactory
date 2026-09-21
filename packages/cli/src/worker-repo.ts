@@ -3,7 +3,7 @@ import { spawnSync } from 'node:child_process'
 import { chmodSync, existsSync, lstatSync, mkdirSync, renameSync, rmSync } from 'node:fs'
 import { isAbsolute, join, parse, resolve, sep } from 'node:path'
 import { repositoryReason } from './control-room.ts'
-import { ensureHarnessHooks, verifyHarnessHooks } from './harness-hooks.ts'
+import { ensureHarnessHooks, inspectHarnessHooks, verifyHarnessHooks } from './harness-hooks.ts'
 import type { HomeOptions } from './home.ts'
 import { factoryHome, workerRepositoriesDirectory } from './home.ts'
 import { assertRepo } from './issue-cache.ts'
@@ -16,7 +16,7 @@ export type RepoCommand = (
 ) => { code: number; stdout: string; stderr: string }
 
 export type CheckoutResult =
-  | { ok: true; repo: string; root: string; created: boolean }
+  | { ok: true; repo: string; root: string; created: boolean; plannedHooks?: string[] }
   | { ok: false; repo: string; reason: string }
 
 // GitHub repository identity is case-insensitive. Validate before canonicalizing so wildcard and
@@ -106,6 +106,25 @@ function ensureOwnedDirectories(stateRoot: string, repositoryDirectory: string):
   }
 }
 
+function inspectOwnedDirectories(stateRoot: string, repositoryDirectory: string): void {
+  if (!isAbsolute(stateRoot) || resolve(stateRoot) !== stateRoot) throw new Error('the worker state path must be absolute and canonical')
+  if (!repositoryDirectory.startsWith(stateRoot + sep)) throw new Error('the worker repository path is outside the worker state directory')
+  const uid = process.getuid?.()
+  let cursor = parse(stateRoot).root
+  let productOwned = false
+  for (const part of repositoryDirectory.slice(cursor.length).split(sep).filter(Boolean)) {
+    cursor = join(cursor, part)
+    if (!existsSync(cursor)) continue
+    const info = lstatSync(cursor)
+    if (!info.isDirectory() || info.isSymbolicLink()) throw new Error(`refusing an unsafe worker path at ${cursor}`)
+    productOwned ||= cursor === stateRoot
+    if (productOwned && uid !== undefined && info.uid !== uid) throw new Error(`refusing a worker path owned by uid ${info.uid}: ${cursor}`)
+    if (cursor === stateRoot && (info.mode & 0o777) !== 0o700) {
+      throw new Error(`refusing a pre-existing worker state path that is not owner-only: ${stateRoot}`)
+    }
+  }
+}
+
 function pathReason(stateRoot: string, path: string): string | null {
   let cursor = stateRoot
   if (!existsSync(cursor)) return `nothing at ${cursor}`
@@ -153,6 +172,7 @@ export async function ensureWorkerCheckout(input: {
   env?: NodeJS.ProcessEnv
   run?: RepoCommand
   lock?: { timeoutMs?: number; staleMs?: number }
+  dryRun?: boolean
 }): Promise<CheckoutResult> {
   let repo: string
   try { repo = canonicalRepository(input.repo) }
@@ -167,6 +187,15 @@ export async function ensureWorkerCheckout(input: {
     const root = workerCheckoutDirectory(repo, homeOptions)
     const expectedRemote = `https://github.com/${repo}.git`
     if (!input.token) throw new Error('repository provisioning requires an installation token')
+    // A service preview may prove credentials and inspect an existing checkout, but it must not
+    // create the worker store, clone, wire hooks, acquire a filesystem lock, or rewrite anything.
+    if (input.dryRun) {
+      inspectOwnedDirectories(stateRoot, repositoryDirectory)
+      if (!existsSync(root)) return { ok: true, repo, root, created: true, plannedHooks: ['.claude/settings.json', '.codex/hooks.json'] }
+      const reason = exactCheckout(stateRoot, root, expectedRemote, run, env)
+      if (reason) throw new Error(reason)
+      return { ok: true, repo, root, created: false, plannedHooks: inspectHarnessHooks(root).changed }
+    }
     ensureOwnedDirectories(stateRoot, repositoryDirectory)
     return withLock(repositoryDirectory, () => {
       if (existsSync(root)) {

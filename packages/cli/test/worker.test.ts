@@ -512,6 +512,7 @@ describe('persisted worker board state', () => {
   test('an absent default file is empty and VEGAFACTORY_HOME is authoritative', async () => {
     const base = realpathSync(mkdtempSync(join(tmpdir(), 'worker-state-')))
     expect(readWorkerState({ home: base, env: {} })).toEqual({ schema: 1, revision: 0, boards: {}, reports: {} })
+    expect(existsSync(join(base, '.vegafactory'))).toBe(false)
     const override = join(base, 'override')
     await reconcileBoards({
       home: join(base, 'ignored'), env: { VEGAFACTORY_HOME: override }, listed: ['o/r'],
@@ -1774,12 +1775,13 @@ describe('readiness and the service', () => {
   // The plist writes these two files and the systemd unit did not, so `logDir` was passed to the
   // Linux branch and silently dropped: the log this product tells people to read never appeared.
   test('both platforms write the same two log files', () => {
-    const where = { cli: ['vegafactory'], root, repo: 'o/r', logDir: workerDir(root) }
+    const globalLogs = join(home, '.vegafactory', 'worker')
+    const where = { cli: ['vegafactory'], root, repo: 'o/r', logDir: globalLogs }
     const plist = unitText('darwin', where)
     const unit = unitText('linux', where)
     for (const [text, out, err] of [
-      [plist, `<string>${join(workerDir(root), 'worker.log')}</string>`, `<string>${join(workerDir(root), 'worker.err.log')}</string>`],
-      [unit, `StandardOutput=append:${join(workerDir(root), 'worker.log')}`, `StandardError=append:${join(workerDir(root), 'worker.err.log')}`],
+      [plist, `<string>${join(globalLogs, 'worker.log')}</string>`, `<string>${join(globalLogs, 'worker.err.log')}</string>`],
+      [unit, `StandardOutput=append:${join(globalLogs, 'worker.log')}`, `StandardError=append:${join(globalLogs, 'worker.err.log')}`],
     ] as const) {
       expect(text).toContain(out)
       expect(text).toContain(err)
@@ -1791,11 +1793,14 @@ describe('readiness and the service', () => {
 
   test('the unit carries everything enable was run with, and no secret', () => {
     const env = { VEGAFACTORY_APP_ID: '12345', VEGAFACTORY_APP_ACTOR: 'acmefactory[bot]', VEGAFACTORY_APP_PRIVATE_KEY_FILE: '/keys/app.pem' }
-    const plist = unitText('darwin', { cli: ['vegafactory'], root, repo: 'o/r', logDir: workerDir(root), env })
+    const factoryRoot = '/state/factory'
+    const plist = unitText('darwin', { cli: ['vegafactory'], root, repo: 'o/r', logDir: workerDir(root), factoryHome: factoryRoot, env })
     expect(plist).toContain('<key>EnvironmentVariables</key>')
     expect(plist).toContain('<key>VEGAFACTORY_APP_ID</key><string>12345</string>')
     expect(plist).toContain('<key>VEGAFACTORY_APP_ACTOR</key><string>acmefactory[bot]</string>')
-    const unit = unitText('linux', { cli: ['vegafactory'], root, repo: 'o/r', logDir: workerDir(root), env })
+    expect(plist).toContain('<key>VEGAFACTORY_HOME</key><string>/state/factory</string>')
+    const unit = unitText('linux', { cli: ['vegafactory'], root, repo: 'o/r', logDir: workerDir(root), factoryHome: factoryRoot, env })
+    expect(unit).toContain('Environment="VEGAFACTORY_HOME=/state/factory"')
     expect(unit).toContain('Environment="VEGAFACTORY_APP_ID=12345"')
     expect(unit).toContain('Environment="VEGAFACTORY_APP_ACTOR=acmefactory[bot]"')
     // systemd splits `Environment=` on whitespace and expands `%`, so a path with a space in it
@@ -2225,7 +2230,7 @@ describe('the command', () => {
 
   test('an unlisted machine refuses every verb but disable', async () => {
     for (const verb of ['enable', 'status', 'run']) {
-      const result = await run([verb, '--once'], { host: 'laptop' })
+      const result = await run(verb === 'run' ? [verb, '--once'] : [verb], { host: 'laptop' })
       expect(result.code).toBe(2)
       expect(result.text).toContain('laptop is not listed')
     }
@@ -2241,6 +2246,8 @@ describe('the command', () => {
     spawnSync('git', ['init', '-q'], { cwd: otherRoot })
     mkdirSync(join(otherRoot, '.vegastack'))
     writeFileSync(join(otherRoot, '.vegastack/dev.md'), readFileSync(join(root, '.vegastack/dev.md'), 'utf8'))
+    mkdirSync(join(namedHome, 'control-room', 'o'), { recursive: true })
+    writeFileSync(join(namedHome, 'control-room', 'o', 'nodes.md'), ROSTER)
 
     expect((await run(['run', '--once'], { env })).code).toBe(0)
     expect(existsSync(stateRoot)).toBe(true)
@@ -2273,11 +2280,29 @@ describe('the command', () => {
     expect(existsSync(defaultRoot)).toBe(false)
   })
 
+  test('the service finds its control-room config and clone only through VEGAFACTORY_HOME', async () => {
+    rmSync(join(home, '.vegafactory'), { recursive: true, force: true })
+    const alternate = join(home, 'authoritative-factory')
+    const clone = join(alternate, 'control-room', 'o')
+    mkdirSync(clone, { recursive: true })
+    writeFileSync(join(clone, 'nodes.md'), ROSTER)
+    writeFileSync(join(alternate, 'factory.json'), JSON.stringify({
+      schemaVersion: 2, revision: 0,
+      controlRooms: { o: { repo: 'o/control-room', path: clone, branch: 'main', lastSyncedAt: null, sha: null } },
+    }))
+    const env = { VEGAFACTORY_HOME: alternate }
+    expect(await runWorker(['run', '--once'], { cwd: root, home, host: HOST, env, out: () => {}, runner: gh.runner, git: anyGit })).toBe(0)
+    expect(existsSync(join(alternate, 'worker', 'boards.json'))).toBe(true)
+    expect(existsSync(join(home, '.vegafactory'))).toBe(false)
+  })
+
   test('a fresh CLI run refuses a symlinked global-home ancestor without touching its target', async () => {
     const external = join(home, 'fresh-cli-external')
     const linked = join(home, 'fresh-cli-link')
     mkdirSync(external)
     writeFileSync(join(external, 'sentinel'), 'kept')
+    mkdirSync(join(external, 'factory', 'control-room', 'o'), { recursive: true })
+    writeFileSync(join(external, 'factory', 'control-room', 'o', 'nodes.md'), ROSTER)
     symlinkSync(external, linked)
     const lines: string[] = []
     const code = await runWorker(['run', '--once'], {
@@ -2287,8 +2312,8 @@ describe('the command', () => {
     expect(code).toBe(2)
     expect(lines.join('\n')).toContain('unsafe global worker directory')
     expect(readFileSync(join(external, 'sentinel'), 'utf8')).toBe('kept')
-    expect(existsSync(join(external, 'factory'))).toBe(false)
-    expect(existsSync(join(external, '.lock'))).toBe(false)
+    expect(existsSync(join(external, 'factory', 'worker'))).toBe(false)
+    expect(existsSync(join(external, 'factory', '.lock'))).toBe(false)
   })
 
   test('an API key in the environment refuses before anything is probed or minted', async () => {
@@ -2326,9 +2351,58 @@ describe('the command', () => {
     gh.addIssue({ number: 2, labels: ['ready-to-ship', 'medium'] })
     const result = await run(['status'])
     expect(result.code).toBe(0)
-    expect(result.text).toContain(`${'queued'.padEnd(20)} #1`)
-    expect(result.text).toContain(`${'ready-to-ship'.padEnd(20)} #2`)
+    expect(result.text).toContain(`${'queued'.padEnd(18)} o/r#1`)
+    expect(result.text).toContain(`${'ready-to-ship'.padEnd(18)} o/r#2`)
     expect(result.text).toContain('no worker runs on this machine yet')
+  })
+
+  test('status JSON covers configured and persisted boards with repository-qualified history', async () => {
+    const stateHome = home
+    await reconcileBoards({
+      home: stateHome, env: {}, listed: ['o/old'], previous: { schema: 1, revision: 0, boards: {} }, contexts: new Map(), inflight: new Map(),
+      provision: async (repo) => ({ key: repo, repo, root, runner: gh.runner, devMd: '', identity: { runner: gh.runner, freshen: async () => {}, token: () => null } }),
+      handBack: () => ({ ok: true, note: 'done' }), out: () => {},
+    })
+    recordRun(join(home, '.vegafactory', 'worker'), { at: '2026-09-21T00:00:00.000Z', repo: 'o/old', issue: 7, action: 'plan', outcome: 'done', ms: 5, machine: HOST, note: 'done' })
+    const runner: GhRunner = (args, input) => args.join(' ').includes('repos/o/old/issues')
+      ? (() => { throw new Error('board unavailable') })()
+      : gh.runner(args, input)
+    const lines: string[] = []
+    expect(await runWorker(['status', '--json'], { cwd: root, home, host: HOST, env: {}, out: (line) => lines.push(line), runner, git: anyGit })).toBe(0)
+    expect(lines).toHaveLength(1)
+    const document = JSON.parse(lines[0]!) as { machine: string; boards: Array<{ repo: string; ok: boolean }>; runs: Array<{ repo: string; issue: number }>; parked: unknown[]; unavailable: Array<{ repo: string }> }
+    expect(Object.keys(document).sort()).toEqual(['boards', 'caps', 'machine', 'parked', 'runs', 'unavailable'])
+    expect(document.boards.map((board) => [board.repo, board.ok])).toEqual([['o/r', true], ['o/old', false]])
+    expect(document.runs).toContainEqual(expect.objectContaining({ repo: 'o/old', issue: 7 }))
+    expect(document.unavailable).toContainEqual(expect.objectContaining({ repo: 'o/old' }))
+  })
+
+  test('status is read-only and malformed state is one JSON refusal', async () => {
+    const stateRoot = join(home, '.vegafactory', 'worker')
+    const clean: string[] = []
+    expect(await runWorker(['status', '--json'], { cwd: root, home, host: HOST, env: {}, out: (line) => clean.push(line), runner: gh.runner })).toBe(0)
+    expect(existsSync(stateRoot)).toBe(false)
+
+    mkdirSync(stateRoot, { recursive: true })
+    const path = join(stateRoot, 'boards.json')
+    writeFileSync(path, '{broken')
+    const before = readFileSync(path, 'utf8')
+    const lines: string[] = []
+    expect(await runWorker(['status', '--json'], { cwd: root, home, host: HOST, env: {}, out: (line) => lines.push(line), runner: gh.runner })).toBe(2)
+    expect(lines).toHaveLength(1)
+    expect(JSON.parse(lines[0]!)).toMatchObject({ ok: false, machine: HOST, reason: expect.stringContaining('is malformed') })
+    expect(readFileSync(path, 'utf8')).toBe(before)
+    expect(existsSync(join(stateRoot, '.lock'))).toBe(false)
+
+    rmSync(path)
+    const outside = join(home, 'outside-boards.json')
+    writeFileSync(outside, '{"sentinel":true}')
+    symlinkSync(outside, path)
+    const linked: string[] = []
+    expect(await runWorker(['status', '--json'], { cwd: root, home, host: HOST, env: {}, out: (line) => linked.push(line), runner: gh.runner })).toBe(2)
+    expect(linked).toHaveLength(1)
+    expect(JSON.parse(linked[0]!).reason).toContain('not a regular file')
+    expect(readFileSync(outside, 'utf8')).toBe('{"sentinel":true}')
   })
 
   // The unit tests for the formatter would stay green if a call site dropped its field argument,
@@ -2355,6 +2429,62 @@ describe('the command', () => {
     expect(result.code).toBe(2)
     expect(result.text).toContain('not ready')
     expect(existsSync(unitPath(process.platform, home))).toBe(false)
+  })
+
+  test('enable installs for one healthy explicit board while reporting broken and refused siblings', async () => {
+    project(`| node | owner | worker | repos | caps |\n|---|---|---|---|---|\n| ${NODE} | mk | yes | o/good o/bad * | |\n`)
+    mkdirSync(join(home, '.config', 'systemd', 'user'), { recursive: true })
+    const { privateKey } = generateKeyPairSync('rsa', { modulusLength: 2048, privateKeyEncoding: { type: 'pkcs8', format: 'pem' }, publicKeyEncoding: { type: 'spki', format: 'pem' } })
+    const key = join(home, 'partial.pem')
+    writeFileSync(key, privateKey, { mode: 0o600 })
+    const checkout = join(home, 'good')
+    mkdirSync(join(checkout, '.vegastack'), { recursive: true })
+    writeFileSync(join(checkout, '.vegastack/dev.md'), 'repo: o/good\n')
+    const fetch: Fetch = async (url) => ({ ok: true, status: 200, json: async () => url.endsWith('/installation') ? { id: url.includes('/good/') ? 1 : 2 } : { token: 'token', expires_at: '2099-01-01T00:00:00Z' } })
+    const probe: Probe = (command) => command === 'git'
+      ? { code: 0, stdout: 'git@github.com:o/good.git', stderr: '' }
+      : { code: 0, stdout: 'ok', stderr: '' }
+    const result = await run(['enable'], {
+      platform: 'linux', env: { VEGAFACTORY_APP_PRIVATE_KEY_FILE: key }, fetch, run: probe, runner: undefined,
+      ensureCheckout: async ({ repo }: { repo: string }) => repo === 'o/good'
+        ? { ok: true as const, repo, root: checkout, created: true }
+        : { ok: false as const, repo, reason: 'clone failed' },
+      runnerForBoard: () => gh.runner,
+    })
+    expect(result.code).toBe(0)
+    expect(result.text).toContain('repo:o/bad')
+    expect(result.text).toContain('clone failed')
+    expect(result.text).toContain('repo:*')
+    expect(existsSync(unitPath('linux', home))).toBe(true)
+    const none = await run(['enable'], {
+      platform: 'linux', env: { VEGAFACTORY_APP_PRIVATE_KEY_FILE: key }, fetch, run: probe, runner: undefined,
+      ensureCheckout: async ({ repo }: { repo: string }) => ({ ok: false as const, repo, reason: 'all boards failed' }),
+    })
+    expect(none.code).toBe(2)
+    expect(none.text).toContain('make at least one explicit repository healthy')
+  })
+
+  test('production enable dry-run mints and previews without creating state, checkout, hooks, or unit', async () => {
+    project(`| node | owner | worker | repos | caps |\n|---|---|---|---|---|\n| ${NODE} | mk | yes | o/new | |\n`)
+    const { privateKey } = generateKeyPairSync('rsa', { modulusLength: 2048, privateKeyEncoding: { type: 'pkcs8', format: 'pem' }, publicKeyEncoding: { type: 'spki', format: 'pem' } })
+    const key = join(home, 'preview.pem')
+    writeFileSync(key, privateKey, { mode: 0o600 })
+    let previewed = false
+    const fetch: Fetch = async (url) => ({ ok: true, status: 200, json: async () => url.endsWith('/installation') ? { id: 1 } : { token: 'token', expires_at: '2099-01-01T00:00:00Z' } })
+    const result = await run(['enable', '--dry-run'], {
+      platform: 'linux', env: { VEGAFACTORY_APP_PRIVATE_KEY_FILE: key }, fetch, runner: undefined,
+      run: ((command) => command === 'git' ? { code: 0, stdout: 'git@github.com:o/new.git', stderr: '' } : { code: 0, stdout: 'ok', stderr: '' }) as Probe,
+      ensureCheckout: async ({ repo, dryRun }: { repo: string; dryRun?: boolean }) => {
+        previewed = true
+        expect(dryRun).toBe(true)
+        return { ok: true as const, repo, root: join(home, '.vegafactory/worker/repos/o__new/repo'), created: true }
+      },
+    })
+    expect(result.code).toBe(0)
+    expect(previewed).toBe(true)
+    expect(result.text).toContain('would be provisioned')
+    expect(existsSync(join(home, '.vegafactory', 'worker'))).toBe(false)
+    expect(existsSync(unitPath('linux', home))).toBe(false)
   })
 
   test('enable reports a seconds-valued poll cap as seconds', async () => {
@@ -2588,6 +2718,7 @@ describe('the command', () => {
     expect(unit).toContain('Environment="VEGAFACTORY_APP_ACTOR=acmefactory[bot]"')
     // The path the run was given travels with it, or token refresh fails on the first poll.
     expect(unit).toContain(`Environment="VEGAFACTORY_APP_PRIVATE_KEY_FILE=${key}"`)
+    expect(unit).toContain(`Environment="VEGAFACTORY_HOME=${join(home, '.vegafactory')}"`)
     // The path, never the key itself.
     expect(unit).not.toContain('BEGIN')
   })
@@ -2908,12 +3039,165 @@ describe('the command', () => {
     })
     expect(code).toBe(0)
     expect(lines).toHaveLength(1)
-    const document = JSON.parse(lines[0]!) as { machine: string; repo: string; runs: { issue: number }[]; notes: string[] }
+    const document = JSON.parse(lines[0]!) as { machine: string; runs: { repo: string; issue: number }[]; boards: { repo: string; ok: boolean }[]; notes: string[] }
     expect(document.machine).toBe(HOST)
-    expect(document.repo).toBe('o/r')
-    expect(document.runs.map((run) => run.issue)).toEqual([1])
+    expect(Object.keys(document).sort()).toEqual(['boards', 'machine', 'notes', 'runs'])
+    expect(document.boards).toEqual([{ repo: 'o/r', ok: true }])
+    expect(document.runs.map((run) => [run.repo, run.issue])).toEqual([['o/r', 1]])
     // The lines a human would have read are inside the document, not printed beside it.
     expect(document.notes.join('\n')).toContain('#1 implement')
+  })
+
+  test('once JSON is one document for mixed board outcomes', async () => {
+    project(`| node | owner | worker | repos | caps |\n|---|---|---|---|---|\n| ${NODE} | mk | yes | O/R o/r o/bad | runs 2 |\n`)
+    gh.addIssue({ number: 1, labels: ['queued', 'small'] })
+    const lines: string[] = []
+    const provisioned: string[] = []
+    const { privateKey } = generateKeyPairSync('rsa', { modulusLength: 2048, privateKeyEncoding: { type: 'pkcs8', format: 'pem' }, publicKeyEncoding: { type: 'spki', format: 'pem' } })
+    const key = join(home, 'app.pem')
+    writeFileSync(key, privateKey, { mode: 0o600 })
+    const roots = new Map<string, string>()
+    for (const repo of ['o/r', 'o/bad']) {
+      const checkout = join(home, repo.replace('/', '__'))
+      mkdirSync(join(checkout, '.vegastack'), { recursive: true })
+      writeFileSync(join(checkout, '.vegastack/dev.md'), `repo: ${repo}\n`)
+      roots.set(repo, checkout)
+    }
+    const fetch: Fetch = async (url) => ({
+      ok: true, status: 200,
+      json: async () => url.endsWith('/installation')
+        ? { id: url.includes('/o/r/') ? 1 : 2 }
+        : { token: url.includes('/1/') ? 'token-r' : 'token-bad', expires_at: '2099-01-01T00:00:00Z' },
+    })
+    const code = await runWorker(['run', '--once', '--json'], {
+      cwd: root, home, host: HOST, env: { VEGAFACTORY_APP_PRIVATE_KEY_FILE: key }, out: (text) => lines.push(text), now: () => gh.clock, git: anyGit, fetch,
+      ensureCheckout: async ({ repo, token }) => {
+        provisioned.push(repo)
+        expect(token).toBe(repo === 'o/r' ? 'token-r' : 'token-bad')
+        if (repo === 'o/bad') return { ok: false as const, repo, reason: 'App installation missing' }
+        return { ok: true as const, repo, root: roots.get(repo)!, created: true }
+      },
+      runnerForBoard: () => gh.runner,
+      run: ((command) => command === 'git'
+        ? { code: 0, stdout: 'git@github.com:o/r.git', stderr: '' }
+        : { code: 0, stdout: 'ok', stderr: '' }) as Probe,
+      runStep: (async () => ({ outcome: 'done' as const, note: '', ms: 1 })) as RunStep,
+    })
+    expect(code).toBe(0)
+    expect(lines).toHaveLength(1)
+    const document = JSON.parse(lines[0]!) as { machine: string; runs: { repo: string; issue: number }[]; boards: { repo: string; ok: boolean; reason?: string }[]; notes: string[] }
+    expect(Object.keys(document).sort()).toEqual(['boards', 'machine', 'notes', 'runs'])
+    expect(document.boards).toEqual([
+      { repo: 'o/r', ok: true },
+      { repo: 'o/bad', ok: false, reason: 'App installation missing' },
+    ])
+    expect(document.runs.map((run) => [run.repo, run.issue])).toEqual([['o/r', 1]])
+    expect(provisioned).toEqual(['o/r', 'o/bad'])
+  })
+
+  test('an actual issue-read failure marks its board unavailable in once JSON', async () => {
+    gh.addIssue({ number: 1, labels: ['queued', 'small'] })
+    const broken: GhRunner = (args, input) => args.some((arg) => String(arg).includes('issues/1'))
+      ? (() => { throw new Error('issue transport failed') })()
+      : gh.runner(args, input)
+    const lines: string[] = []
+    expect(await runWorker(['run', '--once', '--json'], {
+      cwd: root, home, host: HOST, env: {}, out: (line) => lines.push(line), runner: broken, git: anyGit,
+      provisionBoard: async (repo) => ({ key: repo, repo, root, runner: broken, devMd: '', identity: { runner: broken, freshen: async () => {}, token: () => null } }),
+    })).toBe(0)
+    expect(JSON.parse(lines[0]!).boards).toEqual([{ repo: 'o/r', ok: false, reason: 'issue transport failed' }])
+  })
+
+  test('the service bootstrap repository may leave the roster while its remaining board still runs', async () => {
+    project(`| node | owner | worker | repos | caps |\n|---|---|---|---|---|\n| ${NODE} | mk | yes | o/other | |\n`)
+    gh.addIssue({ number: 4, labels: ['queued', 'small'] })
+    const started: string[] = []
+    const otherRunner: GhRunner = (args, input) => gh.runner(args.map((arg) => arg.replaceAll('o/other', 'o/r')), input)
+    const code = await runWorker(['run', '--once'], {
+      cwd: root, home, host: HOST, env: {}, out: () => {}, runner: otherRunner, now: () => gh.clock, git: anyGit,
+      provisionBoard: async (repo) => ({ key: repo, repo, root, runner: otherRunner, devMd: '', identity: { runner: otherRunner, freshen: async () => {}, token: () => null } }),
+      runStep: (async (step) => { started.push(step.repo); return { outcome: 'done' as const, note: '', ms: 1 } }) as RunStep,
+    })
+    expect(code).toBe(0)
+    expect(started).toEqual(['o/other'])
+  })
+
+  test('active checkout readiness is revalidated each pass and recovers after one altered pass', async () => {
+    let provisions = 0
+    let sleeps = 0
+    const lines: string[] = []
+    const code = await runWorker(['run'], {
+      cwd: root, home, host: HOST, env: {}, out: (line) => lines.push(line), runner: gh.runner, git: anyGit,
+      provisionBoard: async (repo) => {
+        provisions += 1
+        if (provisions === 2) throw new Error('origin changed')
+        return { key: repo, repo, root, runner: gh.runner, devMd: '', identity: { runner: gh.runner, freshen: async () => {}, token: () => null } }
+      },
+      update: async () => ({ action: 'current', before: 'x', after: 'x', latest: 'x', message: 'current' }),
+      sleep: async () => { if (++sleeps === 3) process.emit('SIGTERM' as NodeJS.Signals) },
+    })
+    expect(code).toBe(0)
+    expect(provisions).toBeGreaterThanOrEqual(3)
+    expect(lines.filter((line) => line.includes('origin changed'))).toHaveLength(1)
+  })
+
+  test('once JSON refusal keeps the same single-document envelope', async () => {
+    const lines: string[] = []
+    const code = await runWorker(['run', '--once', '--json'], {
+      cwd: root, home, host: 'unlisted', env: {}, out: (text) => lines.push(text), runner: gh.runner, git: anyGit,
+    })
+    expect(code).toBe(2)
+    expect(lines).toHaveLength(1)
+    const document = JSON.parse(lines[0]!) as Record<string, unknown>
+    expect(Object.keys(document).sort()).toEqual(['boards', 'machine', 'notes', 'runs'])
+    expect(document).toMatchObject({ machine: 'unlisted', runs: [], boards: [] })
+    expect(document.notes).toEqual([expect.stringContaining('is not listed')])
+  })
+
+  test('every run JSON refusal uses the exact envelope, including parse and lock failures', async () => {
+    const cases: Array<{ argv: string[]; over?: Record<string, unknown> }> = [
+      { argv: ['run', '--once', '--json'], over: { env: { ANTHROPIC_API_KEY: 'paid' } } },
+      { argv: ['run', '--once', '--json'], over: { env: { VEGAFACTORY_APP_ID: 'partial' } } },
+      { argv: ['run', '--once', '--json'], over: { host: 'unlisted' } },
+      { argv: ['run', '--repo', '--json'] },
+      { argv: ['run', '--unknown', 'x', '--json'] },
+      { argv: ['frobnicate', '--json'] },
+    ]
+    for (const item of cases) {
+      const lines: string[] = []
+      expect(await runWorker(item.argv, { cwd: root, home, host: HOST, env: {}, out: (line) => lines.push(line), runner: gh.runner, git: anyGit, ...item.over })).toBe(2)
+      expect(lines).toHaveLength(1)
+      expect(Object.keys(JSON.parse(lines[0]!)).sort()).toEqual(['boards', 'machine', 'notes', 'runs'])
+    }
+
+    const stateRoot = join(home, '.vegafactory', 'worker')
+    mkdirSync(stateRoot, { recursive: true })
+    writeFileSync(runLockPath(stateRoot), JSON.stringify({ pid: 4242, startedAt: 'live', runId: 'other', at: 'then' }))
+    const lines: string[] = []
+    expect(await runWorker(['run', '--once', '--json'], {
+      cwd: root, home, host: HOST, env: {}, out: (line) => lines.push(line), runner: gh.runner, git: anyGit,
+      start: (pid) => pid === 4242 ? 'live' : 'self',
+    })).toBe(2)
+    expect(Object.keys(JSON.parse(lines[0]!)).sort()).toEqual(['boards', 'machine', 'notes', 'runs'])
+  })
+
+  test('every JSON verb returns one document for bad flags and bootstrap outside a repository', async () => {
+    const outside = realpathSync(mkdtempSync(join(tmpdir(), 'worker-json-outside-')))
+    for (const verb of ['enable', 'disable', 'status', 'run']) {
+      for (const argv of [[verb, '--json'], [verb, '--unknown', 'x', '--json']]) {
+        const lines: string[] = []
+        expect(await runWorker(argv, { cwd: outside, home, host: HOST, env: {}, out: (line) => lines.push(line) })).toBe(2)
+        expect(lines).toHaveLength(1)
+        const document = JSON.parse(lines[0]!) as Record<string, unknown>
+        expect(Object.keys(document).sort()).toEqual(verb === 'run'
+          ? ['boards', 'machine', 'notes', 'runs']
+          : ['machine', 'ok', 'reason'])
+      }
+    }
+    const unknown: string[] = []
+    expect(await runWorker(['frobnicate', '--json'], { cwd: outside, home, host: HOST, env: {}, out: (line) => unknown.push(line) })).toBe(2)
+    expect(unknown).toHaveLength(1)
+    expect(Object.keys(JSON.parse(unknown[0]!)).sort()).toEqual(['boards', 'machine', 'notes', 'runs'])
   })
 
   // The document answers when a pass ends. An always-on loop has no such moment, so collecting
@@ -2924,7 +3208,10 @@ describe('the command', () => {
       cwd: root, home, host: HOST, env: {}, out: (text) => lines.push(text), runner: gh.runner, now: () => gh.clock, git: anyGit,
     })
     expect(code).toBe(2)
-    expect(JSON.parse(lines[0]!)).toEqual({ ok: false, reason: '--json reports one pass; use it with --once' })
+    expect(JSON.parse(lines[0]!)).toEqual({
+      machine: HOST, runs: [], boards: [],
+      notes: ['refused: --json reports one pass and answers when that pass ends — add --once, or drop --json and read the lines the loop prints'],
+    })
   })
 
   test('a signal during a blocked run stops it now, not after the next sleep', async () => {
@@ -2975,7 +3262,7 @@ describe('the command', () => {
     expect(code).toBe(0)
     expect(stopped).toEqual([5150])
     expect(lines.join('\n')).toContain('stopped 1 run it had started')
-    expect(lines.join('\n')).toContain(`#7 (implement, claimed by ${HOST}:worker-ab12-7)`)
+    expect(lines.join('\n')).toContain(`o/r#7 (implement, claimed by ${HOST}:worker-ab12-7)`)
     expect(readChildren(stateRoot)).toEqual([])
   })
 
@@ -3011,10 +3298,12 @@ describe('the command', () => {
       start: () => null, alive: () => null,
       stop: (pid) => { stopped.push(pid); return true },
     })
-    expect(code).toBe(0)
+    expect(code).toBe(1)
     expect(stopped).toEqual([])
     expect(readChildren(stateRoot)).toEqual([uncertain])
     expect(lines.join('\n')).not.toContain('stopped 1 run')
+    expect(lines.join('\n')).toContain('o/r#9')
+    expect(lines.join('\n')).toContain('could not be stopped safely')
   })
 
   test('a roster this machine cannot prove is not a roster', async () => {

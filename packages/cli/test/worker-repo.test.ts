@@ -216,6 +216,59 @@ test('an existing exact checkout is verified, wired, and never recloned', async 
   expect(verifyHarnessHooks(root)).toEqual({ ok: true })
 })
 
+test('dry-run previews missing and existing checkouts without creating or wiring anything', async () => {
+  const missingHome = temporaryHome()
+  expect(await ensureWorkerCheckout({ repo: 'o/r', home: missingHome, token: 'secret', run: cloningRunner(), dryRun: true })).toMatchObject({ ok: true, created: true })
+  expect(existsSync(join(missingHome, '.vegafactory'))).toBe(false)
+
+  const home = temporaryHome()
+  safeDefaultState(home)
+  const root = workerCheckoutDirectory('o/r', { home, env: {} })
+  repositoryAt(root)
+  const before = {
+    config: readFileSync(join(root, '.git/config'), 'utf8'),
+    readme: readFileSync(join(root, 'README.md'), 'utf8'),
+    names: readdirSync(root).sort(),
+  }
+  expect(await ensureWorkerCheckout({ repo: 'o/r', home, token: 'secret', run: cloningRunner(), dryRun: true })).toEqual({
+    ok: true, repo: 'o/r', root, created: false, plannedHooks: ['.claude/settings.json', '.codex/hooks.json'],
+  })
+  expect(readFileSync(join(root, '.git/config'), 'utf8')).toBe(before.config)
+  expect(readFileSync(join(root, 'README.md'), 'utf8')).toBe(before.readme)
+  expect(readdirSync(root).sort()).toEqual(before.names)
+  expect(existsSync(join(root, '.claude'))).toBe(false)
+  expect(existsSync(join(root, '.codex'))).toBe(false)
+})
+
+test('dry-run and real provisioning refuse malformed and symlinked hook files without changing bytes', async () => {
+  for (const dryRun of [true, false]) {
+    const home = temporaryHome()
+    safeDefaultState(home)
+    const root = workerCheckoutDirectory('o/r', { home, env: {} })
+    repositoryAt(root)
+    mkdirSync(join(root, '.claude'))
+    writeFileSync(join(root, '.claude/settings.json'), '{broken')
+    const before = readFileSync(join(root, '.claude/settings.json'), 'utf8')
+    const malformed = await ensureWorkerCheckout({ repo: 'o/r', home, token: 'secret', run: cloningRunner(), dryRun })
+    expect(malformed.ok).toBe(false)
+    expect(readFileSync(join(root, '.claude/settings.json'), 'utf8')).toBe(before)
+  }
+
+  for (const dryRun of [true, false]) {
+    const home = temporaryHome()
+    safeDefaultState(home)
+    const root = workerCheckoutDirectory('o/r', { home, env: {} })
+    repositoryAt(root)
+    mkdirSync(join(root, '.claude'))
+    const outside = join(home, `outside-${dryRun}.json`)
+    writeFileSync(outside, '{"kept":true}')
+    symlinkSync(outside, join(root, '.claude/settings.json'))
+    const linked = await ensureWorkerCheckout({ repo: 'o/r', home, token: 'secret', run: cloningRunner(), dryRun })
+    expect(linked.ok).toBe(false)
+    expect(readFileSync(outside, 'utf8')).toBe('{"kept":true}')
+  }
+})
+
 test('an extra origin push URL is refused without mutating the checkout', async () => {
   const home = temporaryHome()
   safeDefaultState(home)
@@ -389,6 +442,12 @@ test('an unsafe pre-existing custom state root is refused without changing its m
   expect(result.ok).toBe(false)
   expect(lstatSync(stateRoot).mode & 0o777).toBe(0o755)
   expect(existsSync(join(stateRoot, 'worker'))).toBe(false)
+
+  const preview = await ensureWorkerCheckout({
+    repo: 'o/r', home, env: { ...process.env, VEGAFACTORY_HOME: stateRoot }, token: 'secret', run: cloningRunner(), dryRun: true,
+  })
+  expect(preview.ok).toBe(false)
+  expect(lstatSync(stateRoot).mode & 0o777).toBe(0o755)
 })
 
 test('concurrent provisioning accepts one created checkout and independently verifies the winner', async () => {

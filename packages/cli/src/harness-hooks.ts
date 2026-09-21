@@ -227,16 +227,26 @@ export function verifyHarnessHooks(root: string): { ok: true } | { ok: false; re
   return { ok: true }
 }
 
+function harnessHookPlans(root: string, cli: string): FilePlan[] {
+  checkDirectory(root, false)
+  return [
+    planFile(root, '.claude/settings.json', 'claude', cli),
+    planFile(root, '.codex/hooks.json', 'codex', cli),
+  ].filter(plan => plan.before !== plan.after)
+}
+
+// Plans the same strict merge as `ensureHarnessHooks` without creating a directory, temporary
+// file, lock, or hook file. Malformed JSON and unsafe files/directories are refusals in both modes.
+export function inspectHarnessHooks(root: string, cli = 'vegafactory'): { changed: string[] } {
+  return { changed: harnessHookPlans(root, cli).map(plan => relative(root, plan.path)) }
+}
+
 export function ensureHarnessHooks(
   root: string,
   cli = 'vegafactory',
   testing: { beforePublish?: (path: string) => void } = {},
 ): { changed: string[] } {
-  checkDirectory(root, false)
-  const plans = [
-    planFile(root, '.claude/settings.json', 'claude', cli),
-    planFile(root, '.codex/hooks.json', 'codex', cli),
-  ].filter(plan => plan.before !== plan.after)
+  const plans = harnessHookPlans(root, cli)
   // Publication is deliberately monotonic rather than transactional across two files. If this
   // process stops after the first rename, that valid file stays in place and the next call merges
   // the second from its then-current bytes. No rollback can overwrite an independent edit.

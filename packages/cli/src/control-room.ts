@@ -4,7 +4,7 @@ import { lstatSync, mkdirSync, readFileSync, realpathSync, renameSync, rmSync, w
 import { execFileSync } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
 import { parseControlRoomReference, resolvePolicy } from '../../../skills/dev/dev-setup/scripts/effective-policy.mjs'
-import { controlRoomClonePath, controlRoomStore, factoryConfigPath as configPath } from './home.ts'
+import { controlRoomClonePath, controlRoomStore, factoryConfigPath as configPath, type HomeOptions } from './home.ts'
 
 export interface ControlRoomKnob {
   org: string
@@ -43,12 +43,15 @@ export function parseControlRoomKnob(devMdText: string): ControlRoomKnob | null 
 // These three are one fact spelled three ways, so they come from one place: `safeClonePath`
 // contains what `defaultClonePath` produces, and a skew between them fails every control-room read
 // closed rather than loudly.
-export function defaultClonePath(org: string, home: string): string {
-  return controlRoomClonePath(org, { home })
+type HomeInput = string | HomeOptions
+const homeOptions = (input: HomeInput): HomeOptions => typeof input === 'string' ? { home: input } : input
+
+export function defaultClonePath(org: string, home: HomeInput): string {
+  return controlRoomClonePath(org, homeOptions(home))
 }
 
-export function factoryConfigPath(home: string): string {
-  return configPath({ home })
+export function factoryConfigPath(home: HomeInput): string {
+  return configPath(homeOptions(home))
 }
 
 // A missing state file is an empty config — the first sync writes it. An unreadable one throws:

@@ -40,7 +40,7 @@ import { stateOf, type State } from './labels.ts'
 import { effectiveUpdateMode, maintainSelfUpdate, type UpdateMode, type UpdateResult } from './self-update.ts'
 import { lintPlan, normalizeGroupPath, parseIndependentGroups, sharedByEveryChild } from '../../../skills/dev/dev-plan/scripts/plan-lint.mjs'
 import { appKeyPath as workerAppKey, factoryHome, workerBoardsPath, workerDirectory, type HomeOptions } from './home.ts'
-import { canonicalRepository } from './worker-repo.ts'
+import { canonicalRepository, ensureWorkerCheckout } from './worker-repo.ts'
 
 // How often the board is read, how many steps run at once, and how long one step may take.
 export const POLL_MS = 2 * 60_000
@@ -302,13 +302,17 @@ export const nodesPath = (clone: string) => join(clone, 'nodes.md')
 
 // Where this machine's copy of the org control room lives: the path the last sync recorded, else
 // the default clone path for the org this repository's dev.md names.
-export function controlRoomClone(root: string, home = homedir()): { org: string; clone: string } | null {
+type WorkerHomeInput = string | HomeOptions
+const workerHomeOptions = (input: WorkerHomeInput = {}): HomeOptions => typeof input === 'string' ? { home: input } : input
+
+export function controlRoomClone(root: string, input: WorkerHomeInput = {}): { org: string; clone: string } | null {
+  const options = workerHomeOptions(input)
   const devMd = join(root, '.vegastack', 'dev.md')
   const knob = existsSync(devMd) ? parseControlRoomKnob(readFileSync(devMd, 'utf8')) : null
   if (!knob) return null
   let path: string | null = null
-  try { path = readFactoryConfig(readFileSync(factoryConfigPath(home), 'utf8')).controlRooms[knob.org]?.path ?? null } catch { path = null }
-  return { org: knob.org, clone: path ?? defaultClonePath(knob.org, home) }
+  try { path = readFactoryConfig(readFileSync(factoryConfigPath(options), 'utf8')).controlRooms[knob.org]?.path ?? null } catch { path = null }
+  return { org: knob.org, clone: path ?? defaultClonePath(knob.org, options) }
 }
 
 export type GitRun = (args: string[]) => { status: number | null; out: string }
@@ -359,18 +363,19 @@ export interface Listing { ok: boolean; reason: string; entry: Node | null; file
 // the record being updated is read as tampered-with — every policy question then answers "cannot
 // tell", which for the update knob means `off`. The record is a cache of a local fact, so a write
 // that fails changes nothing but the next pass's work.
-export async function recordRoomSha(root: string, home: string, sha: string): Promise<void> {
+export async function recordRoomSha(root: string, input: WorkerHomeInput, sha: string): Promise<void> {
+  const options = workerHomeOptions(input)
   if (!/^[0-9a-f]{40}$/.test(sha)) return
-  const room = controlRoomClone(root, home)
+  const room = controlRoomClone(root, options)
   if (!room) return
   // Nothing moved, so there is nothing to record. Writing anyway would take the settings lock and
   // bump the file's revision on every poll, which is a transaction bought for no fact.
   try {
-    const recorded = readFactoryConfig(readFileSync(factoryConfigPath(home), 'utf8')).controlRooms[room.org]
+    const recorded = readFactoryConfig(readFileSync(factoryConfigPath(options), 'utf8')).controlRooms[room.org]
     if (!recorded || recorded.sha === sha) return
   } catch { return }
   try {
-    await updateSettingsAtPath(factoryConfigPath(home), (state) => {
+    await updateSettingsAtPath(factoryConfigPath(options), (state) => {
       const current = state.orgs[room.org]
       if (!current || current.sha === sha) return state
       state.orgs[room.org] = { ...current, sha, lastSyncedAt: new Date().toISOString() }
@@ -379,8 +384,8 @@ export async function recordRoomSha(root: string, home: string, sha: string): Pr
   } catch { /* a cache nobody could write is just a cache nobody could write */ }
 }
 
-export function verifiedListing(root: string, options: { repo: string; host?: string; home?: string; git?: (clone: string) => GitRun }): Listing {
-  const room = controlRoomClone(root, options.home ?? homedir())
+export function verifiedListing(root: string, options: { repo: string; host?: string; home?: string; env?: NodeJS.ProcessEnv; git?: (clone: string) => GitRun }): Listing {
+  const room = controlRoomClone(root, options)
   if (!room) return listedHere(root, options)
   const refresh = refreshRoster(room.clone, (options.git ?? gitIn)(room.clone))
   if (!refresh.ok) return { ok: false, reason: refresh.reason, entry: null, file: nodesPath(room.clone), sha: null }
@@ -405,11 +410,11 @@ export function updateModeFor(root: string, home: string): UpdateMode {
   return effectiveUpdateMode({ home, devMd })
 }
 
-export function listedHere(root: string, options: { repo: string; host?: string; home?: string }): Listing {
+export function listedHere(root: string, options: { repo: string; host?: string; home?: string; env?: NodeJS.ProcessEnv }): Listing {
   // One spelling, and only one: a node is `<os-user>@<hostname>`. Accepting a bare hostname as
   // well would mean two rows could name this machine and a roster could grant through either.
   const machine = nodeId(undefined, options.host ?? hostname())
-  const room = controlRoomClone(root, options.home ?? homedir())
+  const room = controlRoomClone(root, options)
   if (!room) return { ok: false, reason: `this repository names no control room (dev.md's control-room: knob), so no machine is listed as a worker for it`, entry: null, file: null }
   const file = nodesPath(room.clone)
   let text: string
@@ -453,7 +458,11 @@ export function listedHere(root: string, options: { repo: string; host?: string;
   // An empty cell authorises nothing. Everything has to be said out loud, because the commonest
   // row on a roster of every machine is one with nothing in this cell.
   const every = entry.repos.some((repo) => repo === '*' || repo.toLowerCase() === 'all')
-  if (!every && !entry.repos.includes(options.repo)) {
+  const requested = canonicalRepository(options.repo)
+  const namedRepos = entry.repos.flatMap((repo) => {
+    try { return [canonicalRepository(repo)] } catch { return [] }
+  })
+  if (!every && !namedRepos.includes(requested)) {
     const named = entry.repos.length ? `for ${entry.repos.join(', ')}` : 'for no repository — its repos cell is empty'
     return { ok: false, reason: `${machine} is listed in ${file} ${named}, not ${options.repo}`, entry, file }
   }
@@ -714,14 +723,14 @@ export function alreadyLingering(run: Probe, uid: number): boolean {
 }
 
 export function unwritableForUnit(env: NodeJS.ProcessEnv): string | null {
-  for (const name of ['VEGAFACTORY_APP_ID', 'VEGAFACTORY_APP_ACTOR', 'VEGAFACTORY_APP_PRIVATE_KEY_FILE']) {
+  for (const name of ['VEGAFACTORY_HOME', 'VEGAFACTORY_APP_ID', 'VEGAFACTORY_APP_ACTOR', 'VEGAFACTORY_APP_PRIVATE_KEY_FILE']) {
     const value = env[name]?.trim()
     if (value && UNWRITABLE.test(value)) return `${name} contains a control character, so it cannot be written into a service unit — move the file or rename it`
   }
   return null
 }
 
-export function unitText(platform: NodeJS.Platform, input: { cli: string[]; root: string; repo: string; logDir: string; env?: NodeJS.ProcessEnv }): string {
+export function unitText(platform: NodeJS.Platform, input: { cli: string[]; root: string; repo: string; logDir: string; factoryHome?: string; env?: NodeJS.ProcessEnv }): string {
   const argv = [...input.cli, 'worker', 'run', '--repo', input.repo]
   // A user service inherits nothing from the shell that installed it, so everything `enable` was
   // run with has to be written into the unit — or the worker restarts as VegaStack's own App,
@@ -732,6 +741,7 @@ export function unitText(platform: NodeJS.Platform, input: { cli: string[]; root
   // nothing they could not get from `ls`.
   const from = input.env ?? process.env
   const identity: Array<[string, string]> = []
+  if (input.factoryHome && !UNWRITABLE.test(input.factoryHome)) identity.push(['VEGAFACTORY_HOME', input.factoryHome])
   for (const name of ['VEGAFACTORY_APP_ID', 'VEGAFACTORY_APP_ACTOR', 'VEGAFACTORY_APP_PRIVATE_KEY_FILE']) {
     const value = from[name]?.trim()
     // `enable` has already refused these by name; this is the second line of that defence.
@@ -971,7 +981,7 @@ export function stopChild(stateRoot: string, record: ChildRecord, deps: { stop?:
     return false
   }
   const stopped = (deps.stop ?? stopGroup)(record.pid, 'SIGTERM')
-  forgetChild(stateRoot, record.pid)
+  if (stopped) forgetChild(stateRoot, record.pid)
   return stopped
 }
 
@@ -1774,11 +1784,16 @@ function readBoardStateFile(path: string): WorkerState {
 }
 
 export function readWorkerState(options: HomeOptions = {}): WorkerState {
-  const paths = boardStatePaths(options, true)
-  return withLock(paths.stateRoot, () => {
-    boardStatePaths(options, false)
-    return readBoardStateFile(paths.path)
-  }, { what: 'the worker board state' })
+  const factoryRoot = factoryHome(options)
+  const stateRoot = workerDirectory(options)
+  const safe = safeGlobalStateRoot(factoryRoot, stateRoot, false)
+  if (!safe.ok) {
+    // An absent store is an empty state, and observing it must not create either the store or a
+    // lock. Unsafe existing ancestors remain refusals.
+    if (safe.reason.includes('disappeared during migration')) return emptyWorkerState()
+    throw new Error(safe.reason)
+  }
+  return readBoardStateFile(workerBoardsPath(options))
 }
 
 function writeWorkerState(options: HomeOptions, state: WorkerState, expectedRevision: number): WorkerState {
@@ -2061,6 +2076,9 @@ export interface PollDeps {
   // pass that left work behind has not shown the board is idle, and idle is the only state a
   // five-minute install may run in.
   onWaiting?: (repo: string, number: number, reason: string) => void
+  // A board or issue could not be read. Kept separate from ordinary waiting (claim/no slot), so
+  // JSON can report a degraded board without calling healthy scheduling pressure a failure.
+  onUnreadable?: (repo: string, number: number, reason: string) => void
   // Persisted problem suppression. Task 5 wires this to `workerProblemReporter`; tests may inject
   // the same seam directly. Recovery clears the fingerprint so a later recurrence is reportable.
   reportProblem?: WorkerProblemReporter['report']
@@ -2102,6 +2120,7 @@ export async function poll(deps: PollDeps, inflight: Map<string, Inflight> = new
     if (canonicalRepository(selected.repo) !== repo) {
       deps.out(`${repo}: board context repository does not match its canonical key`)
       deps.onWaiting?.(repo, 0, 'board context repository does not match its canonical key')
+      deps.onUnreadable?.(repo, 0, 'board context repository does not match its canonical key')
       continue
     }
     const permission = permissionLookup(repo, runner, { root })
@@ -2117,6 +2136,7 @@ export async function poll(deps: PollDeps, inflight: Map<string, Inflight> = new
       if (deps.reportProblem) deps.reportProblem(`board:${repo}`, reason, line)
       else deps.out(line)
       deps.onWaiting?.(repo, 0, (error as Error).message)
+      deps.onUnreadable?.(repo, 0, reason)
       continue
     }
     // One issue nobody can read must not cost its board or any sibling board the pass.
@@ -2152,6 +2172,7 @@ export async function poll(deps: PollDeps, inflight: Map<string, Inflight> = new
         if (deps.reportProblem) deps.reportProblem(`issue:${repo}#${issue.number}`, reason, line)
         else deps.out(line)
         deps.onWaiting?.(repo, issue.number, reason)
+        deps.onUnreadable?.(repo, issue.number, reason)
       }
     }
   }
@@ -2575,7 +2596,8 @@ in any order, extra columns ignored — so a cell is read by what its column is 
 \`<os-user>@<hostname>\`, derived and never configured. \`worker\` is the gate and the only cell that
 grants anything: \`yes\` lets this machine work a board unattended, and anything else — including an
 empty cell, a heading that only nearly says \`worker\`, and a roster with no such column — grants
-nothing. An empty \`repos\` cell authorises nothing either; \`*\` or \`all\` must be said out loud.
+nothing. The \`repos\` cell accepts explicit \`OWNER/NAME\` entries only; an empty cell, \`*\`, and
+\`all\` authorise no unattended repository and are reported as refusals.
 
 A machine the control room's nodes.md does not name refuses every verb but disable. Writes
 go out as the VegaFactory GitHub App, on an hour-long token minted here from its private key:
@@ -2593,6 +2615,7 @@ interface Args { verb: string; flags: Record<string, string>; json: boolean; dry
 export function parseWorkerArgs(argv: string[]): Args {
   const [verb, ...rest] = argv
   if (!verb) throw new Error('missing verb — run vegafactory worker --help')
+  if (!['enable', 'disable', 'status', 'run'].includes(verb)) throw new Error(`unknown worker verb: ${verb} — run vegafactory worker --help`)
   const flags: Record<string, string> = {}
   let json = false
   let dryRun = false
@@ -2603,11 +2626,14 @@ export function parseWorkerArgs(argv: string[]): Args {
     if (arg === '--dry-run') { dryRun = true; continue }
     if (arg === '--once') { once = true; continue }
     if (!arg.startsWith('--')) throw new Error(`unexpected argument: ${arg}`)
+    if (arg !== '--repo') throw new Error(`unknown worker option: ${arg}`)
     const value = rest[i + 1]
     if (value === undefined || value.startsWith('--')) throw new Error(`${arg} needs a value`)
     flags[arg.slice(2)] = value
     i++
   }
+  if (once && verb !== 'run') throw new Error('--once is only valid with worker run')
+  if (dryRun && !['enable', 'disable'].includes(verb)) throw new Error('--dry-run is only valid with worker enable or disable')
   return { verb, flags, json, dryRun, once }
 }
 
@@ -2630,6 +2656,11 @@ export interface CliDeps {
   sleep?: (ms: number) => Promise<void>
   cli?: string[]
   update?: () => Promise<UpdateResult>
+  // Test seam for the repository boundary. Production always provisions a repository-scoped
+  // App identity and worker-owned checkout through `ensureWorkerCheckout`.
+  provisionBoard?: (repo: string) => Promise<BoardContext>
+  ensureCheckout?: typeof ensureWorkerCheckout
+  runnerForBoard?: (repo: string, identity: AppIdentity) => GhRunner
 }
 
 const wait = (ms: number) => new Promise<void>((resolve) => {
@@ -2641,29 +2672,68 @@ const wait = (ms: number) => new Promise<void>((resolve) => {
 export async function runWorker(argv: string[], deps: CliDeps = {}): Promise<number> {
   const out = deps.out ?? console.log
   if (!argv.length || ['help', '--help', '-h'].includes(argv[0]!)) { out(workerUsage()); return 0 }
-  const args = parseWorkerArgs(argv)
+  const host = deps.host ?? hostname()
+  const machine = machineName(host)
+  const rawJson = argv.includes('--json')
+  const runJson = rawJson && !['enable', 'disable', 'status'].includes(argv[0]!)
+  const emitRunJson = (notes: string[], boards: Array<{ repo: string; ok: boolean; reason?: string }> = [], runs: RunRecord[] = []) => {
+    out(JSON.stringify({ machine, runs, boards, notes }, null, 2))
+  }
+  const emitBootstrapRefusal = (reason: string) => {
+    if (runJson) emitRunJson([`refused: ${reason}`])
+    else out(JSON.stringify({ ok: false, machine, reason }, null, 2))
+  }
+  let args: Args
+  try { args = parseWorkerArgs(argv) }
+  catch (error) {
+    if (rawJson) { emitBootstrapRefusal((error as Error).message); return 2 }
+    throw error
+  }
   const cwd = deps.cwd ?? process.cwd()
   const env = deps.env ?? process.env
   const home = deps.home ?? homedir()
   const homeOptions = { home, env }
-  const factoryRoot = factoryHome(homeOptions)
-  const stateRoot = workerDirectory(homeOptions)
-  const host = deps.host ?? hostname()
+  let factoryRoot: string
+  let stateRoot: string
   const platform = deps.platform ?? process.platform
-  const root = repoRoot(cwd)
-  const repo = assertRepo(args.flags.repo ?? detectRepo(root))
-  const machine = machineName(host)
+  let root: string
+  let repo: string
+  try {
+    factoryRoot = factoryHome(homeOptions)
+    stateRoot = workerDirectory(homeOptions)
+    root = repoRoot(cwd)
+    repo = assertRepo(args.flags.repo ?? detectRepo(root))
+  } catch (error) {
+    if (rawJson) { emitBootstrapRefusal((error as Error).message); return 2 }
+    throw error
+  }
   // A verb that will act asks for a roster it has just proved; a read-only view shows what the
   // machine already has, so `status` still answers while the network is down.
-  const listing = ['enable', 'run'].includes(args.verb)
-    ? verifiedListing(root, { repo, host, home, git: deps.git })
-    : listedHere(root, { repo, host, home })
+  let listing: Listing
+  try {
+    listing = ['enable', 'run'].includes(args.verb)
+      ? verifiedListing(root, { repo, host, home, env, git: deps.git })
+      : listedHere(root, { repo, host, home, env })
+  } catch (error) {
+    if (rawJson) { emitBootstrapRefusal((error as Error).message); return 2 }
+    throw error
+  }
+  // `--repo` locates the control room; it is not the sole board anymore. Once the row itself is
+  // a valid worker row, its explicit repos cell is the authority and may legitimately no longer
+  // contain the bootstrap repository used by an already-installed service.
+  const workerListing = listing.ok || (listing.entry?.worker === true && listing.entry.caps !== null)
+    ? { ...listing, ok: true, reason: `${machineName(host)} is listed in ${listing.file}` }
+    : listing
   // That listing may have fast-forwarded the clone, and every gate below it can return before the
   // poll loop is ever reached. The record follows the clone here, once, so a run that stops for
   // billing or a missing key does not leave the profile unreadable behind it.
-  if (listing.sha) await recordRoomSha(root, home, listing.sha)
+  if (listing.sha) await recordRoomSha(root, homeOptions, listing.sha)
   const keyPath = appKeyPath(env, home)
-  const print = (value: unknown, text: string) => out(args.json ? JSON.stringify(value, null, 2) : text)
+  const runDocument = (notes: string[], boards: Array<{ repo: string; ok: boolean; reason?: string }> = [], runs: RunRecord[] = []) => ({ machine, runs, boards, notes })
+  const print = (value: unknown, text: string) => {
+    if (runJson) out(JSON.stringify(runDocument([text]), null, 2))
+    else out(args.json ? JSON.stringify(value, null, 2) : text)
+  }
 
   // The first gate, before the roster and before anything is spawned or minted: a verb that can
   // start or probe an agent refuses outright while a variable that would bill it is set. The check
@@ -2685,12 +2755,62 @@ export async function runWorker(argv: string[], deps: CliDeps = {}): Promise<num
 
   // The second gate: an unlisted machine does nothing but say so. `disable` is the exception, so a
   // machine taken off the roster can still take its own unit down.
-  if (!listing.ok && args.verb !== 'disable') {
-    print({ ok: false, machine, reason: listing.reason }, `refused: ${listing.reason}`)
+  if (!workerListing.ok && args.verb !== 'disable') {
+    print({ ok: false, machine, reason: workerListing.reason }, `refused: ${workerListing.reason}`)
     return 2
   }
 
-  if (args.verb === 'run' || args.verb === 'status') {
+  const configured = normalizeWorkerRepos(workerListing.entry?.repos ?? [])
+
+  if (args.verb === 'run' && args.json && !args.once) {
+    print({ ok: false, reason: '--json reports one pass; use it with --once' },
+      'refused: --json reports one pass and answers when that pass ends — add --once, or drop --json and read the lines the loop prints')
+    return 2
+  }
+
+  const provisionBoard = async (selectedRepo: string): Promise<BoardContext> => {
+    const canonical = canonicalRepository(selectedRepo)
+    if (deps.provisionBoard) return deps.provisionBoard(canonical)
+    // Injected runners are the public test boundary used by the existing single-repository CLI
+    // suite. Production never takes this branch; it owns and provisions every checkout below.
+    if (deps.runner) {
+      if (canonical !== canonicalRepository(repo)) throw new Error(`${canonical} has no injected board context`)
+      let devMd = ''
+      try { devMd = readFileSync(join(root, '.vegastack', 'dev.md'), 'utf8') }
+      catch { throw new Error('dev.md is unreadable') }
+      const identity: AppIdentity = { runner: deps.runner, freshen: async () => {}, token: () => null }
+      return { key: canonical, repo: canonical, root, identity, runner: deps.runner, devMd }
+    }
+    const identity = appIdentity({ repo: canonical, keyPath, appId: app.appId, fetch: deps.fetch })
+    await identity.freshen(deps.now?.())
+    const checkout = await (deps.ensureCheckout ?? ensureWorkerCheckout)({ repo: canonical, home, token: identity.token()!, env })
+    if (!checkout.ok) throw new Error(checkout.reason)
+    let devMd: string
+    try { devMd = readFileSync(join(checkout.root, '.vegastack', 'dev.md'), 'utf8') }
+    catch { throw new Error('dev.md is unreadable') }
+    const push = pushPath(checkout.root, deps.run ?? probe)
+    if (!push.ok) throw new Error(push.detail)
+    const runner = deps.runnerForBoard?.(canonical, identity) ?? identity.runner
+    return { key: canonical, repo: canonical, root: checkout.root, identity: { ...identity, runner }, runner, devMd }
+  }
+
+  const previewBoard = async (selectedRepo: string): Promise<string> => {
+    const canonical = canonicalRepository(selectedRepo)
+    const identity = appIdentity({ repo: canonical, keyPath, appId: app.appId, fetch: deps.fetch })
+    await identity.freshen(deps.now?.())
+    const checkout = await (deps.ensureCheckout ?? ensureWorkerCheckout)({ repo: canonical, home, token: identity.token()!, env, dryRun: true })
+    if (!checkout.ok) throw new Error(checkout.reason)
+    if (checkout.created) return `${checkout.root} would be provisioned with isolated App identity, policy, hooks, and push path`
+    try { readFileSync(join(checkout.root, '.vegastack', 'dev.md'), 'utf8') }
+    catch { throw new Error('dev.md is unreadable') }
+    const push = pushPath(checkout.root, deps.run ?? probe)
+    if (!push.ok) throw new Error(push.detail)
+    return checkout.plannedHooks?.length
+      ? `${checkout.root} passed read-only checks; ${checkout.plannedHooks.join(', ')} would be merged only by the real enable`
+      : `${checkout.root} passed read-only checks; hook wiring is already complete`
+  }
+
+  if (args.verb === 'run') {
     const migration = migrateLegacyWorkerState({ root, stateRoot, factoryRoot, repo, start: deps.start, alive: deps.alive })
     if (!migration.ok) {
       print({ ok: false, reason: migration.reason }, `refused: ${migration.reason}`)
@@ -2700,33 +2820,61 @@ export async function runWorker(argv: string[], deps: CliDeps = {}): Promise<num
 
   switch (args.verb) {
     case 'enable': {
-      let keyOk = false
-      let keyDetail = ''
-      try {
-        await mintToken({ repo, keyPath, appId: app.appId, fetch: deps.fetch })
-        keyOk = true
-        keyDetail = `the App key at ${keyPath} mints an installation token for ${repo}`
-      } catch (error) { keyDetail = (error as Error).message }
-      const checks = readiness({ root, listing, run: deps.run ?? probe, keyOk, keyDetail, env })
+      let checks: Check[]
+      let boardChecks: Check[] = []
+      if (deps.runner) {
+        // The injected single-board boundary preserves the focused CLI tests without teaching a
+        // fake GitHub runner how to clone repositories. Real enablement takes the branch below.
+        let keyOk = false
+        let keyDetail = ''
+        try {
+          await mintToken({ repo, keyPath, appId: app.appId, fetch: deps.fetch })
+          keyOk = true
+          keyDetail = `the App key at ${keyPath} mints an installation token for ${repo}`
+        } catch (error) { keyDetail = (error as Error).message }
+        checks = readiness({ root, listing: workerListing, run: deps.run ?? probe, keyOk, keyDetail, env })
+        boardChecks = [{ name: `repo:${canonicalRepository(repo)}`, ok: checks.every((check) => check.ok), detail: keyDetail }]
+      } else {
+        const billing = billingVariables(env)
+        checks = [
+          { name: 'listed', ok: workerListing.ok, detail: workerListing.reason },
+          { name: 'billing', ok: billing.length === 0, detail: billing.length ? `${billing.join(', ')} set — a worker runs on subscriptions only; unset them` : 'no API-key variable is set' },
+          ...harnessAnswers(deps.run ?? probe),
+        ]
+        for (const refused of configured.refused) boardChecks.push({ name: `repo:${refused}`, ok: false, detail: 'unattended workers require an explicit OWNER/NAME repository' })
+        for (const boardRepo of configured.repos) {
+          try {
+            const detail = args.dryRun
+              ? await previewBoard(boardRepo)
+              : `${(await provisionBoard(boardRepo)).root} is provisioned with isolated App identity, policy, hooks, and push path`
+            boardChecks.push({ name: `repo:${boardRepo}`, ok: true, detail })
+          } catch (error) {
+            boardChecks.push({ name: `repo:${boardRepo}`, ok: false, detail: (error as Error).message })
+          }
+        }
+      }
       const path = unitPath(platform, home)
-      if (!checks.every((check) => check.ok)) {
-        print({ ok: false, checks }, `${renderChecks(checks)}\n\nnot ready — fix the FAIL lines above, then run this again`)
+      const allChecks = [...checks, ...boardChecks]
+      const globallyReady = checks.every((check) => check.ok)
+      const healthyBoards = boardChecks.filter((check) => check.ok).length
+      if (!globallyReady || healthyBoards === 0) {
+        print({ ok: false, checks: allChecks, boards: boardChecks }, `${renderChecks(allChecks)}\n\nnot ready — fix the global FAIL lines and make at least one explicit repository healthy, then run this again`)
         return 2
       }
       // Before the dry run, not after it: a dry run exists to say what the real command would do,
       // and the real command refuses this.
-      const unwritable = unwritableForUnit(env)
+      const unwritable = unwritableForUnit({ ...env, VEGAFACTORY_HOME: factoryRoot })
       if (unwritable) {
         print({ ok: false, reason: unwritable }, `refused: ${unwritable}`)
         return 2
       }
       const commands = serviceCommands(platform, path, 'enable', userInfo().uid, platform !== 'darwin' && alreadyLingering(deps.run ?? probe, userInfo().uid))
       if (args.dryRun) {
-        print({ ok: true, checks, unit: path, dryRun: true }, `${renderChecks(checks)}\n\ndry run: would write ${path}, then ${commands.map((command) => command.join(' ')).join(' && ')}`)
+        print({ ok: true, checks: allChecks, boards: boardChecks, unit: path, dryRun: true }, `${renderChecks(allChecks)}\n\ndry run: would write ${path}, then ${commands.map((command) => command.join(' ')).join(' && ')}`)
         return 0
       }
-      mkdirSync(workerDir(root), { recursive: true })
-      replaceFile(path, unitText(platform, { cli: deps.cli ?? cliPath(), root, repo, logDir: workerDir(root), env }))
+      mkdirSync(stateRoot, { recursive: true })
+      replaceFile(path, unitText(platform, { cli: deps.cli ?? cliPath(), root, repo, logDir: stateRoot, factoryHome: factoryRoot, env }))
       const run = deps.run ?? probe
       for (const command of commands) {
         const result = run(command[0]!, command.slice(1))
@@ -2742,9 +2890,9 @@ export async function runWorker(argv: string[], deps: CliDeps = {}): Promise<num
           return 1
         }
       }
-      const enabledCaps = listing.entry?.caps ?? DEFAULT_CAPS
-      print({ ok: true, checks, unit: path, caps: enabledCaps },
-        `${renderChecks(checks)}\n\nenabled — ${path} is loaded; this machine polls ${repo} every ${sayDuration(enabledCaps.pollMs, 'poll')}, ${enabledCaps.runs} runs at once`)
+      const enabledCaps = workerListing.entry?.caps ?? DEFAULT_CAPS
+      print({ ok: true, checks: allChecks, boards: boardChecks, unit: path, caps: enabledCaps },
+        `${renderChecks(allChecks)}\n\nenabled — ${path} is loaded; this machine polls ${configured.repos.join(', ') || 'no accepted repository'} every ${sayDuration(enabledCaps.pollMs, 'poll')}, ${enabledCaps.runs} runs at once across them`)
       return 0
     }
     case 'disable': {
@@ -2767,47 +2915,68 @@ export async function runWorker(argv: string[], deps: CliDeps = {}): Promise<num
       // Each record is proved to still be its own process before anything is signalled.
       const children = readChildren(stateRoot)
       const stopped = children.filter((record) => stopChild(stateRoot, record, { stop: deps.stop, start: deps.start, alive: deps.alive }))
+      const remaining = readChildren(stateRoot)
+      if (remaining.length) problems.push(`${remaining.length} child run${remaining.length === 1 ? '' : 's'} could not be stopped safely`)
       rmSync(path, { force: true })
       const ended = stopped.length ? ` and stopped ${stopped.length} run${stopped.length === 1 ? '' : 's'} it had started` : ''
       // The stopped runs held claims and left their issues in-progress. This process has no App
       // token of its own — `disable` has to work on a machine that has just been de-listed — so it
       // names them instead of pretending to have cleaned up.
-      const orphans = stopped.filter((record) => record.owner)
-      const left = orphans.length
-        ? `\nThese issues were left claimed by the runs that stopped; hand them back from a machine that can write:\n${orphans.map((record) => `  #${record.issue} (${record.action}, claimed by ${record.owner})`).join('\n')}`
+      const unresolved = [...stopped.filter((record) => record.owner), ...remaining]
+      const left = unresolved.length
+        ? `\nThese issues need attention after disable:\n${unresolved.map((record) => `  ${record.repo}#${record.issue} (${record.action}${record.owner ? `, claimed by ${record.owner}` : ''}${remaining.includes(record) ? ', process could not be stopped safely' : ''})`).join('\n')}`
         : ''
-      print({ ok: problems.length === 0, unit: path, problems, stopped },
+      print({ ok: problems.length === 0, unit: path, problems, stopped, unresolved: remaining },
         (problems.length ? `removed ${path}${ended}, with: ${problems.join('; ')}` : `disabled — ${path} is unloaded and deleted${ended}`) + left)
       return problems.length ? 1 : 0
     }
     case 'status': {
-      // Reading the board changes nothing, so it does not need the App: whoever runs this reads
-      // with their own `gh`, and the key is only needed once the machine starts writing.
       const runner = deps.runner ?? defaultRunner
-      const rows = board(repo, runner).map((issue) => ({
-        number: issue.number, title: issue.title, url: issue.html_url,
-        state: stateOf(issue.labels.map((label) => (typeof label === 'string' ? label : label.name))).state!,
-      }))
       const runs = readRuns(stateRoot)
-      const byState = new Map<string, number[]>()
-      for (const row of rows) byState.set(row.state, [...(byState.get(row.state) ?? []), row.number])
-      // An issue this machine has given up on is the one thing `status` must not leave out: it is
-      // off the board as far as the worker is concerned until a person looks at it.
+      let persisted: WorkerState
+      try { persisted = readWorkerState(homeOptions) }
+      catch (error) {
+        const reason = (error as Error).message
+        print({ ok: false, machine, reason }, `refused: ${reason}`)
+        return 2
+      }
+      const repos = [...new Set([...configured.repos, ...Object.keys(persisted.boards)])]
+      const boards: Array<{ repo: string; ok: boolean; state: string; issues: Array<{ number: number; title: string; url: string; state: State }>; reason?: string }> = []
+      const unavailable: Array<{ repo: string; reason: string }> = configured.refused.map((name) => ({ repo: name, reason: 'unattended workers require an explicit OWNER/NAME repository' }))
+      for (const boardRepo of repos) {
+        const lifecycle = persisted.boards[boardRepo]?.state ?? (configured.repos.includes(boardRepo) ? 'configured' : 'persisted')
+        try {
+          const issues = board(boardRepo, runner).map((issue) => ({
+            number: issue.number, title: issue.title, url: issue.html_url,
+            state: stateOf(issue.labels.map((label) => (typeof label === 'string' ? label : label.name))).state!,
+          }))
+          boards.push({ repo: boardRepo, ok: true, state: lifecycle, issues })
+        } catch (error) {
+          const reason = (error as Error).message
+          boards.push({ repo: boardRepo, ok: false, state: lifecycle, issues: [], reason })
+          unavailable.push({ repo: boardRepo, reason })
+        }
+      }
       const parked = Object.entries(readActed(stateRoot))
-        .filter(([key, entry]) => entry.failures >= (listing.entry?.caps ?? DEFAULT_CAPS).failures && key.startsWith(`${repo}#`))
-        .map(([key, entry]) => ({ issue: Number(key.slice(key.indexOf('#') + 1)), action: entry.action, failures: entry.failures }))
-      // What this machine is allowed to do, in the words of the row that allows it, so "why is it
-      // doing that?" is answered without anyone opening the control room.
-      const statusCaps = listing.entry?.caps ?? DEFAULT_CAPS
+        .filter(([, entry]) => entry.failures >= (workerListing.entry?.caps ?? DEFAULT_CAPS).failures)
+        .map(([key, entry]) => ({ repo: key.slice(0, key.indexOf('#')), issue: Number(key.slice(key.indexOf('#') + 1)), action: entry.action, failures: entry.failures }))
+      const statusCaps = workerListing.entry?.caps ?? DEFAULT_CAPS
       const capsLine = `caps: ${statusCaps.runs} runs · step ${sayDuration(statusCaps.stepMs, 'step')} · poll ${sayDuration(statusCaps.pollMs, 'poll')} · retry ${sayDuration(statusCaps.retryMs, 'retry')} · park ${statusCaps.failures}`
-      print({ repo, machine, listed: listing.ok, caps: statusCaps, board: rows, runs, parked }, [
-        `${repo} · ${machine} · ${listing.ok ? 'listed as a worker' : listing.reason}`,
-        ...(listing.ok ? [capsLine] : []),
-        ...[...byState].map(([state, numbers]) => `${state.padEnd(20)} ${numbers.map((number) => `#${number}`).join(' ')}`),
-        ...(parked.length ? ['', `parked for a person: ${parked.map((row) => `#${row.issue} (${row.action} failed ${row.failures}×)`).join(', ')}`] : []),
+      const boardLines = boards.flatMap((one) => {
+        if (!one.ok) return [`${one.repo} · unavailable: ${one.reason}`]
+        const byState = new Map<State, number[]>()
+        for (const issue of one.issues) byState.set(issue.state, [...(byState.get(issue.state) ?? []), issue.number])
+        return [`${one.repo} · ${one.state}`, ...[...byState].map(([state, issues]) => `  ${state.padEnd(18)} ${issues.map((issue) => `${one.repo}#${issue}`).join(' ')}`)]
+      })
+      print({ machine, caps: statusCaps, boards, runs, parked, unavailable }, [
+        `${machine} · ${workerListing.ok ? 'listed as a worker' : workerListing.reason}`,
+        ...(workerListing.ok ? [capsLine] : []),
+        ...boardLines,
+        ...unavailable.filter((one) => !boards.some((board) => board.repo === one.repo)).map((one) => `${one.repo} · refused: ${one.reason}`),
+        ...(parked.length ? ['', `parked for a person: ${parked.map((row) => `${row.repo}#${row.issue} (${row.action} failed ${row.failures}×)`).join(', ')}`] : []),
         '',
         runs.length ? 'recent runs on this machine:' : 'no worker runs on this machine yet',
-        ...runs.map((run) => `${run.at}  #${run.issue} ${run.action.padEnd(12)} ${run.outcome.padEnd(8)} ${Math.round(run.ms / 1000)}s  ${run.note}`),
+        ...runs.map((run) => `${run.at}  ${run.repo}#${run.issue} ${run.action.padEnd(12)} ${run.outcome.padEnd(8)} ${Math.round(run.ms / 1000)}s  ${run.note}`),
       ].join('\n'))
       return 0
     }
@@ -2819,11 +2988,7 @@ export async function runWorker(argv: string[], deps: CliDeps = {}): Promise<num
         print({ ok: false, reason: lock.reason }, `refused: ${lock.reason}`)
         return 2
       }
-      let devMd = ''
-      try { devMd = readFileSync(join(root, '.vegastack', 'dev.md'), 'utf8') } catch { /* see updateModeFor */ }
       const update = deps.update ?? (() => maintainSelfUpdate({ mode: updateModeFor(root, home), home: { home }, now: Date.now() }))
-      const identity = deps.runner ? null : appIdentity({ repo, keyPath, appId: app.appId, fetch: deps.fetch })
-      const runner = deps.runner ?? identity!.runner
       // `--json` puts exactly one document on stdout and nothing else, so every line this loop
       // would have printed is collected and leaves inside it. A caller that has to step over prose
       // to find the JSON is a caller that will one day step over the wrong line.
@@ -2831,21 +2996,16 @@ export async function runWorker(argv: string[], deps: CliDeps = {}): Promise<num
       // That only works for a run that ends: an always-on loop would hold every line it ever
       // printed and emit them at shutdown, which is a leak and an answer nobody is waiting for.
       // So the document belongs to `--once`, and the service, which runs without `--json`, prints.
-      if (args.json && !args.once) {
-        print({ ok: false, reason: '--json reports one pass; use it with --once' },
-          'refused: --json reports one pass and answers when that pass ends — add --once, or drop --json and read the lines the loop prints')
-        releaseRunLock(stateRoot, runId)
-        return 2
-      }
       const notes: string[] = []
       const note = (text: string) => { if (args.json) notes.push(text); else out(text) }
+      let visibleBoards: Array<{ repo: string; ok: boolean; reason?: string }> = []
       const finish = (code: number, runs: RunRecord[]) => {
-        if (args.json) out(JSON.stringify({ machine, repo, runs, notes }, null, 2))
+        if (args.json) out(JSON.stringify(runDocument(notes, visibleBoards, runs), null, 2))
         releaseRunLock(stateRoot, runId)
         return code
       }
       // The row that authorised this machine also says what it may do while working it.
-      const caps = listing.entry!.caps!
+      const caps = workerListing.entry!.caps!
       // Said once when it becomes true, not every pass: a roster edit that lengthens the step past
       // the token's hour is worth a line, and the same line every two minutes is worth nothing.
       let toldAboutStep = false
@@ -2858,13 +3018,22 @@ export async function runWorker(argv: string[], deps: CliDeps = {}): Promise<num
       stepOutlivesToken(caps)
       // Counted per pass by `onWaiting`, which `poll` calls for every issue it left behind.
       let waiting = 0
-      const selectedIdentity: AppIdentity = identity ?? { runner, freshen: async () => {}, token: () => null }
+      const unreadableFailures = new Map<string, string>()
+      const contexts = new Map<string, BoardContext>()
+      const reporter = workerProblemReporter(homeOptions, note)
       const pollDeps: PollDeps = {
-        stateRoot, boards: [{ key: canonicalRepository(repo), repo: canonicalRepository(repo), root, identity: selectedIdentity, runner, devMd }],
+        stateRoot, boards: [],
         machine, runId, caps, appActor: app.appActor, out: note, now: deps.now ?? Date.now,
         runStep: deps.runStep ?? defaultRunStep(env), stop: deps.stop, start: deps.start, alive: deps.alive,
-        standDown: (_repo, number, reason, restoreTo) => standDown({ root, repo, number, runner, machine, appActor: app.appActor, restoreTo }, reason),
+        standDown: (boardRepo, number, reason, restoreTo) => {
+          const context = contexts.get(canonicalRepository(boardRepo))
+          if (!context) return `${reason} — ${boardRepo} is unavailable for hand-back`
+          return standDown({ root: context.root, repo: context.repo, number, runner: context.runner, machine, appActor: app.appActor, restoreTo }, reason)
+        },
         onWaiting: () => { waiting += 1 },
+        onUnreadable: (boardRepo, _issue, reason) => unreadableFailures.set(canonicalRepository(boardRepo), reason),
+        reportProblem: reporter.report,
+        clearProblem: reporter.clear,
       }
       // Started steps outlive the pass that began them, so the next pass keeps their slots and
       // still acts on the rest of the board — a twenty-minute build does not stop the poll.
@@ -2908,6 +3077,7 @@ export async function runWorker(argv: string[], deps: CliDeps = {}): Promise<num
         // Whether this pass saw an idle board. A pass that threw, could not read an issue, or
         // started anything is not the pass to spend five minutes installing in.
         let idle = false
+        let passFailed = false
         try {
           // The roster is the enrolment, so it is refreshed and re-read once per pass: a row
           // removed in a control-room PR stands this machine down at the next poll, with nothing
@@ -2915,30 +3085,75 @@ export async function runWorker(argv: string[], deps: CliDeps = {}): Promise<num
           // reading, because two would each fetch and merge, and a second answer nobody acts on is
           // a gate that has been asked and ignored — the caps come off this same reading, so a
           // control-room PR that changes one lands on the next poll rather than on a restart.
-          const still = verifiedListing(root, { repo, host, home, git: deps.git })
+          const still = verifiedListing(root, { repo, host, home, env, git: deps.git })
           // The clone moved whether or not the roster still lists this machine, and the record has
           // to follow it either way: a de-listed machine that later gets its row back would
           // otherwise find every profile read refused for a clone that is simply up to date.
-          if (still.sha) await recordRoomSha(root, home, still.sha)
-          if (!still.ok || !still.entry?.caps) {
+          if (still.sha) await recordRoomSha(root, homeOptions, still.sha)
+          const stillAllowed = still.ok || (still.entry?.worker === true && still.entry.caps !== null)
+          if (!stillAllowed || !still.entry?.caps) {
             note(`stopping: ${still.reason}`)
             return finish(2, await shutDown('this machine is no longer listed'))
           }
           pollDeps.caps = still.entry.caps
           stepOutlivesToken(still.entry.caps)
-          await identity?.freshen()
+          const previous = readWorkerState(homeOptions)
+          // Active readiness is evidence for one pass only. Re-provisioning an existing checkout
+          // is observational except for repairing hook wiring, and catches origin, hook, dev.md,
+          // push-path, and credential drift before that board runs again. Dropping contexts stay
+          // alive because they are the recovery capability for pending hand-backs.
+          for (const boardRepo of contexts.keys()) {
+            if (previous.boards[boardRepo]?.state !== 'dropping') contexts.delete(boardRepo)
+          }
+          const reconciled = await reconcileBoards({
+            home, env, listed: still.entry.repos, previous, contexts, inflight,
+            provision: provisionBoard,
+            handBack: async (boardRepo, number, reason, restoreTo) => {
+              const context = contexts.get(canonicalRepository(boardRepo)) ?? await provisionBoard(boardRepo)
+              contexts.set(context.key, context)
+              return standDownStrict({ root: context.root, repo: context.repo, number, runner: context.runner, machine, appActor: app.appActor, restoreTo }, reason)
+            },
+            out: note, stop: deps.stop, start: deps.start, alive: deps.alive,
+          })
+          const normalized = normalizeWorkerRepos(still.entry.repos)
+          const unavailable = new Map(reconciled.unavailable.map((one) => [one.repo, one.reason]))
+          const ready: BoardContext[] = []
+          for (const context of reconciled.active) {
+            try {
+              await context.identity.freshen(deps.now?.())
+              ready.push(context)
+              reporter.clear(`repo:${context.repo}`)
+            } catch (error) {
+              const reason = (error as Error).message
+              unavailable.set(context.repo, reason)
+              reporter.report(`repo:${context.repo}`, reason, `${context.repo}: unavailable (${reason})`)
+            }
+          }
+          pollDeps.boards = ready
+          visibleBoards = [
+            ...normalized.repos.map((boardRepo) => unavailable.has(boardRepo)
+              ? { repo: boardRepo, ok: false, reason: unavailable.get(boardRepo)! }
+              : { repo: boardRepo, ok: true }),
+            ...normalized.refused.map((boardRepo) => ({ repo: boardRepo, ok: false, reason: 'unattended workers require an explicit OWNER/NAME repository' })),
+          ]
           waiting = 0
+          unreadableFailures.clear()
           const picked = await poll(pollDeps, inflight)
-          for (const candidate of picked) note(`#${candidate.number} ${candidate.action} started`)
+          if (unreadableFailures.size) visibleBoards = visibleBoards.map((board) => {
+            const reason = unreadableFailures.get(board.repo)
+            return reason ? { repo: board.repo, ok: false, reason } : board
+          })
+          for (const candidate of picked) note(`${canonicalRepository(candidate.repo)}#${candidate.number} ${candidate.action} started`)
           // Idle is a high bar on purpose, because the thing it permits takes five minutes: the
           // whole board was read, nothing was picked up, and nothing is still running. An issue
           // that could not be read might have been the one with work on it, and an issue that was
           // picked up may have settled again before this line.
           idle = waiting === 0 && picked.length === 0 && ![...inflight.values()].some(run => !run.settled)
         } catch (error) {
+          passFailed = true
           note(`poll failed: ${(error as Error).message}`)
         }
-        if (args.once) return finish(0, await drain(inflight))
+        if (args.once) return finish(passFailed ? 2 : 0, await drain(inflight))
         // A global install can replace this process's entry file, so it runs only with no agent
         // alive. A successful update ends the old process; the service starts the new copy.
         // A run is unsettled from the moment it is started until its own completion handler
