@@ -872,7 +872,7 @@ function report(options: Options, payload: SyncReport, code: number) {
 }
 
 async function init(options: Options) {
-  const { NEXT_STEP, checkTools, enableRepoHooks, ensureGlobalCli, probe, renderSteps } = await import('./init.ts')
+  const { NEXT_STEP, checkTools, enableRepoHooks, ensureGlobalCli, probe, proposeNodeRow, renderSteps } = await import('./init.ts')
   const top = probe('git', ['rev-parse', '--show-toplevel'], process.cwd())
   const tools = checkTools(probe, process.versions.node, top.code === 0 ? top.stdout : process.cwd())
   console.log(renderSteps(tools))
@@ -896,6 +896,7 @@ async function init(options: Options) {
     return
   }
   if (options.org) await sync({ ...options, force: true })
+  console.log(renderSteps([proposeNodeRow(probe)]))
   console.log(`\n${NEXT_STEP}`)
 }
 
