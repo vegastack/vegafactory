@@ -126,6 +126,16 @@ describe('sync', () => {
     expect(() => withLock(dir, () => 1, { timeoutMs: 100, staleMs: 1 })).toThrow('is locked by pid')
   })
 
+  test('a reused pid with a different process start is taken over', () => {
+    const dir = cacheDir(root, 'o/r', 9)
+    mkdirSync(join(dir, '.lock'), { recursive: true })
+    writeFileSync(join(dir, '.lock/owner.json'), JSON.stringify({
+      token: 'former-process', pid: process.pid, host: hostname(), at: Date.now(), start: 'not-this-process-start',
+    }))
+    expect(withLock(dir, () => 42, { timeoutMs: 1000 })).toBe(42)
+    expect(existsSync(join(dir, '.lock'))).toBe(false)
+  })
+
   test('a lock left by a dead process is taken over', () => {
     const dir = cacheDir(root, 'o/r', 9)
     const dead = spawnSync('true').pid!

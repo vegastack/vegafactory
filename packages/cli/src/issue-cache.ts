@@ -8,6 +8,7 @@ import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, s
 import { hostname } from 'node:os'
 import { dirname, join } from 'node:path'
 import { GhError, ghList, ghRequest, type GhRunner, defaultRunner } from './gh.ts'
+import { currentProcessStart, processStart } from './process-identity.ts'
 
 export interface GhUser { login: string; type?: string }
 export interface GhIssue {
@@ -191,7 +192,7 @@ export function readState(dir: string): CacheState | null {
 // process takes it over only when that owner is provably gone, and only the owner removes it.
 // Re-entrant inside one process, so a write can sync while it holds the lock.
 const held = new Map<string, string>()
-interface LockOwner { token: string; pid: number; host: string; at: number }
+interface LockOwner { token: string; pid: number; host: string; at: number; start?: string }
 
 function ownerGone(owner: LockOwner | null, lockDir: string, staleMs: number): boolean {
   if (!owner) {
@@ -201,6 +202,12 @@ function ownerGone(owner: LockOwner | null, lockDir: string, staleMs: number): b
   if (owner.host !== hostname()) return Date.now() - owner.at > staleMs
   try {
     process.kill(owner.pid, 0)
+    // Old records have no start evidence. A live matching PID keeps those locks conservative;
+    // only new records can prove that the operating system reused the number.
+    if (owner.start) {
+      const liveStart = processStart(owner.pid)
+      if (liveStart && liveStart !== owner.start) return true
+    }
     return false
   } catch (error) {
     return (error as NodeJS.ErrnoException).code === 'ESRCH'
@@ -219,7 +226,9 @@ function acquire(dir: string, token: string): boolean {
     if ((error as NodeJS.ErrnoException).code === 'EEXIST') return false
     throw error
   }
-  writeFileSync(join(dir, 'owner.json'), JSON.stringify({ token, pid: process.pid, host: hostname(), at: Date.now() }))
+  writeFileSync(join(dir, 'owner.json'), JSON.stringify({
+    token, pid: process.pid, host: hostname(), at: Date.now(), ...(currentProcessStart ? { start: currentProcessStart } : {}),
+  }))
   return true
 }
 
