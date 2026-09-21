@@ -2997,6 +2997,51 @@ describe('the command', () => {
     void given
   })
 
+  test('a live refresh keeps explicit siblings but stops non-consumingly on wildcard-only rows', async () => {
+    const header = '| node | owner | worker | repos |\n|---|---|---|---|\n'
+    for (const [wildcard, mixed] of [['*', true], ['all', false]] as const) {
+      gh = new FakeGitHub()
+      gh.permissions.set('mk', 'admin')
+      project()
+      const changeRoster = controlRoomClone(`${header}| ${NODE} | mk | yes | o/r |\n`)
+      gh.addIssue({ number: 1, labels: ['planning', 'medium'] })
+      let provisions = 0
+      let boardReads = 0
+      let stopped = 0
+      let sleeps = 0
+      let releaseChild = () => {}
+      const blocked = new Promise<void>(resolve => { releaseChild = resolve })
+      const runner: GhRunner = (args, input) => {
+        if (args.some(arg => String(arg).includes('issues?state=open'))) boardReads += 1
+        return gh.runner(args, input)
+      }
+      const context = { key: 'o/r', repo: 'o/r', root, runner, devMd: '', identity: { runner, freshen: async () => {}, token: () => null } }
+      const code = await runWorker(['run'], {
+        cwd: root, home, host: HOST, env: {}, out: () => {}, runner, now: () => gh.clock,
+        provisionBoard: async () => { provisions += 1; return context },
+        runStep: (async (_step, call) => {
+          call.onStart?.(7171, 'claude')
+          await blocked
+          return { outcome: 'killed' as const, note: 'stopped', ms: 1 }
+        }) as RunStep,
+        start: () => 'start-7171',
+        stop: pid => { stopped = pid; releaseChild(); return true },
+        sleep: async () => {
+          sleeps += 1
+          if (sleeps === 1) changeRoster(`${header}| ${NODE} | mk | yes | ${mixed ? `o/r ${wildcard}` : wildcard} |\n`)
+          else process.emit('SIGTERM' as NodeJS.Signals)
+        },
+      })
+      expect(code, wildcard).toBe(mixed ? 0 : 2)
+      expect(provisions, wildcard).toBe(mixed ? 2 : 1)
+      expect(boardReads, wildcard).toBe(mixed ? 2 : 1)
+      expect(stopped, wildcard).toBe(7171)
+      expect(gh.issues.get(1)!.labels).toContain('planning')
+      expect(gh.issues.get(1)!.comments.some(comment => comment.body.includes('type=standdown'))).toBe(true)
+      expect(readActed(join(home, '.vegafactory', 'worker'))['o/r#1']).toBeUndefined()
+    }
+  })
+
   // A stop nobody asked the issue for must leave the issue exactly as it found it. The run is
   // recorded and handed back, but the trigger stays unspent — otherwise `standDown` puts the issue
   // back as `planning` while `acted` says the plan already ran for that state, and every machine
@@ -3845,13 +3890,23 @@ describe('the worker gate', () => {
     expect(listing.reason).toContain('no `worker` column')
   })
 
-  test('wildcards fail the public gate and provision nothing; explicit case variants match canonically', async () => {
+  test('mixed wildcard rows serve only explicit repos; wildcard-only rows grant nothing', async () => {
     for (const wildcard of ['*', 'all']) {
       project(`${header}| ${NODE} | mk | yes | o/r ${wildcard} | |\n`)
       const listing = listedHere(root, { repo: 'o/r', host: HOST, home })
-      expect(listing.ok).toBe(false)
-      expect(listing.reason).toContain('explicit OWNER/NAME')
+      expect(listing.ok).toBe(true)
       let provisions = 0
+      const lines: string[] = []
+      expect(await runWorker(['run', '--once'], {
+        cwd: root, home, host: HOST, env: {}, out: line => lines.push(line), runner: gh.runner, git: anyGit,
+        provisionBoard: async repo => { provisions++; return { key: repo, repo, root, runner: gh.runner, devMd: '', identity: { runner: gh.runner, freshen: async () => {}, token: () => null } } },
+      })).toBe(0)
+      expect(provisions).toBe(1)
+      expect(lines.join('\n')).toContain(`${wildcard}: refused`)
+
+      project(`${header}| ${NODE} | mk | yes | ${wildcard} | |\n`)
+      expect(listedHere(root, { repo: 'o/r', host: HOST, home }).ok).toBe(false)
+      provisions = 0
       expect(await runWorker(['run', '--once'], {
         cwd: root, home, host: HOST, env: {}, out: () => {}, runner: gh.runner, git: anyGit,
         provisionBoard: async () => { provisions++; throw new Error('must not provision') },

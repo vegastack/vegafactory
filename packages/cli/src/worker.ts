@@ -356,6 +356,14 @@ export function refreshRoster(clone: string, git: GitRun = gitIn(clone)): Refres
 
 export interface Listing { ok: boolean; reason: string; entry: Node | null; file: string | null; sha?: string | null }
 
+// `--repo` locates the control room and may later disappear from an otherwise valid explicit
+// board list. That one mismatch is tolerated; wildcard rows and every other refusal remain a
+// refusal at startup and on every refreshed pass.
+const workerListingAllowed = (listing: Listing, bootstrapRepo: string): boolean => listing.ok
+  || (listing.entry?.worker === true && listing.entry.caps !== null
+    && normalizeWorkerRepos(listing.entry.repos).repos.length > 0
+    && listing.reason.endsWith(`, not ${bootstrapRepo}`))
+
 // `listedHere`, but only after the roster has been refreshed and verified. This is what a run
 // asks each pass; a read-only view may ask `listedHere` alone and show what it has.
 // The refresh moves the clone forward; this records where it moved to. `loadProfile` verifies the
@@ -458,14 +466,14 @@ export function listedHere(root: string, options: { repo: string; host?: string;
   // An empty cell authorises nothing. Everything has to be said out loud, because the commonest
   // row on a roster of every machine is one with nothing in this cell.
   const every = entry.repos.some((repo) => repo === '*' || repo.toLowerCase() === 'all')
-  if (every) {
-    return { ok: false, reason: `${machine}'s row in ${file} contains * or all — unattended workers require explicit OWNER/NAME repositories only`, entry, file }
-  }
   const requested = canonicalRepository(options.repo)
   const namedRepos = entry.repos.flatMap((repo) => {
     try { return [canonicalRepository(repo)] } catch { return [] }
   })
   if (!namedRepos.includes(requested)) {
+    if (every && namedRepos.length === 0) {
+      return { ok: false, reason: `${machine}'s row in ${file} contains only * or all — unattended workers require at least one explicit OWNER/NAME repository`, entry, file }
+    }
     const named = entry.repos.length ? `for ${entry.repos.join(', ')}` : 'for no repository — its repos cell is empty'
     return { ok: false, reason: `${machine} is listed in ${file} ${named}, not ${options.repo}`, entry, file }
   }
@@ -2728,7 +2736,7 @@ export async function runWorker(argv: string[], deps: CliDeps = {}): Promise<num
   // `--repo` locates the control room; it is not the sole board anymore. Once the row itself is
   // a valid worker row, its explicit repos cell is the authority and may legitimately no longer
   // contain the bootstrap repository used by an already-installed service.
-  const workerListing = listing.ok || (listing.entry?.worker === true && listing.entry.caps !== null && listing.reason.endsWith(`, not ${repo}`))
+  const workerListing = workerListingAllowed(listing, repo)
     ? { ...listing, ok: true, reason: `${machineName(host)} is listed in ${listing.file}` }
     : listing
   // That listing may have fast-forwarded the clone, and every gate below it can return before the
@@ -3099,7 +3107,7 @@ export async function runWorker(argv: string[], deps: CliDeps = {}): Promise<num
           // to follow it either way: a de-listed machine that later gets its row back would
           // otherwise find every profile read refused for a clone that is simply up to date.
           if (still.sha) await recordRoomSha(root, homeOptions, still.sha)
-          const stillAllowed = still.ok || (still.entry?.worker === true && still.entry.caps !== null)
+          const stillAllowed = workerListingAllowed(still, repo)
           if (!stillAllowed || !still.entry?.caps) {
             note(`stopping: ${still.reason}`)
             return finish(2, await shutDown('this machine is no longer listed'))
