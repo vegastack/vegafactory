@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, test } from 'bun:test'
 import { spawnSync } from 'node:child_process'
 import { generateKeyPairSync } from 'node:crypto'
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { claimBody, claimLine, holderOf, nodeId, trustedFactory } from '../src/claim.ts'
@@ -11,9 +11,9 @@ import {
   APP_ID, DEFAULT_CAPS, MAX_FAILURES, MAX_RUNS, MAX_TIMER_MS, POLL_MS, RETRY_MS, STEP_TIMEOUT_MS, TOKEN_MARGIN_MS, parseCaps, rosterName, sayDuration, agentArgs, appIdentity, appJwt, appKeyPath, assertKeyFile, board, decide, defaultRunStep, workerDir,
   acknowledgedPlan, canonicalPath, childRunEnvironment, confirmShip, disjointSiblings, pushableBranch, shipWord,
   drain, filesFromParent, harnessAnswers, hitLimit, hooksWired, listedHere, mintToken, overlaps, parseWorkerArgs,
-  parseNodes, poll, readActed, readRuns, readiness, recordRun, resetAt, RUNS_KEPT, runWorker, schedule, serviceCommands, stagePolicy,
+  parseNodes, poll, readActed, readRuns, readiness, recordRun, resetAt, runKey, RUNS_KEPT, runWorker, schedule, serviceCommands, stagePolicy,
   standDown, stepPrompt, tail, unitPath, unitText, unsafeForParallel,
-  noteChild, readChildren, refreshRoster, releaseRunLock, reserve, runLockPath, takeRunLock, verifiedListing,
+  migrateLegacyWorkerState, noteChild, readChildren, refreshRoster, releaseRunLock, reserve, runLockPath, stopChild, takeRunLock, verifiedListing,
   recordRoomSha, updateModeFor,
   type Candidate, type Fetch, type GitRun, type Inflight, type PollDeps, type Probe, type RunStep, type StepResult,
 } from '../src/worker.ts'
@@ -476,16 +476,36 @@ describe('transitions', () => {
 })
 
 describe('what may run at once', () => {
-  const candidate = (number: number, extra: Partial<Candidate> = {}): Candidate => ({ number, action: 'implement', parent: null, files: [], from: 'queued', ...extra })
+  const candidate = (number: number, extra: Partial<Candidate> = {}): Candidate => ({ repo: 'o/a', number, action: 'implement', parent: null, files: [], from: 'queued', ...extra })
+
+  test('run identity is canonical and repository-qualified', () => {
+    expect(runKey({ repo: 'Org/Repo', number: 1 })).toBe('org/repo#1')
+    expect(runKey({ repo: 'org/repo', number: 1 })).toBe('org/repo#1')
+    expect(runKey({ repo: 'o/a', number: 1 })).not.toBe(runKey({ repo: 'o/b', number: 1 }))
+  })
 
   test('one run per issue, and never more than three', () => {
     const wanted = [1, 2, 3, 4].map((number) => candidate(number, { action: 'plan' }))
     expect(schedule([...wanted, candidate(1, { action: 'plan' })]).map((item) => item.number)).toEqual([1, 2, 3])
   })
 
-  test('merges go one at a time', () => {
-    const picked = schedule([candidate(1, { action: 'ship' }), candidate(2, { action: 'ship' }), candidate(3, { action: 'plan' })])
-    expect(picked.map((item) => item.action)).toEqual(['ship', 'plan'])
+  test('one cap spans repositories while ship exclusion stays repository-local', () => {
+    const picked = schedule([
+      candidate(1, { repo: 'o/a', action: 'ship' }),
+      candidate(2, { repo: 'o/a', action: 'ship' }),
+      candidate(1, { repo: 'o/b', action: 'ship' }),
+    ], [], 2)
+    expect(picked.map(runKey)).toEqual(['o/a#1', 'o/b#1'])
+    expect(schedule([
+      candidate(3, { repo: 'o/a', action: 'implement' }),
+      candidate(3, { repo: 'o/b', action: 'implement' }),
+    ], [], 1)).toHaveLength(1)
+  })
+
+  test('code overlap is repository-local', () => {
+    const a = candidate(1, { repo: 'o/a', parent: 9, files: ['src/index.ts'] })
+    const b = candidate(1, { repo: 'o/b', parent: 9, files: ['src/index.ts'] })
+    expect(schedule([a, b], [], 2).map(runKey)).toEqual(['o/a#1', 'o/b#1'])
   })
 
   test('two code runs only as siblings with disjoint, safe file sets', () => {
@@ -514,8 +534,8 @@ describe('what may run at once', () => {
     expect(overlaps('a/b.ts', 'a/b.ts')).toBe(true)
     expect(overlaps('a/b.ts', 'a/c.ts')).toBe(false)
     expect(disjointSiblings(
-      { number: 1, action: 'implement', parent: 4, files: ['skills/'], from: 'queued' },
-      { number: 2, action: 'implement', parent: 4, files: ['skills/dev/x.md'], from: 'queued' },
+      { repo: 'o/a', number: 1, action: 'implement', parent: 4, files: ['skills/'], from: 'queued' },
+      { repo: 'o/a', number: 2, action: 'implement', parent: 4, files: ['skills/dev/x.md'], from: 'queued' },
     )).toBe(false)
   })
 
@@ -536,8 +556,8 @@ describe('what may run at once', () => {
     const aliased = ['**Independent groups:**', '- `a` — #1 · Files: `src/../src/x.ts`', '- `b` — #2 · Files: `src/x.ts`', ''].join('\n')
     expect(filesFromParent(aliased, 1)).toEqual(['src/x.ts'])
     expect(disjointSiblings(
-      { number: 1, action: 'implement', parent: 9, files: filesFromParent(aliased, 1), from: 'queued' },
-      { number: 2, action: 'implement', parent: 9, files: filesFromParent(aliased, 2), from: 'queued' },
+      { repo: 'o/a', number: 1, action: 'implement', parent: 9, files: filesFromParent(aliased, 1), from: 'queued' },
+      { repo: 'o/a', number: 2, action: 'implement', parent: 9, files: filesFromParent(aliased, 2), from: 'queued' },
     )).toBe(false)
     // One path nobody can check makes the whole set uncheckable, so the siblings run one at a time.
     const traversal = ['**Independent groups:**', '- `a` — #1 · Files: `src/x.ts`, `../elsewhere.ts`', ''].join('\n')
@@ -606,16 +626,117 @@ describe('one poll over the board', () => {
     return { outcome: 'done', note: 'finished', ms: 10, ...result }
   }
   const deps = (over: Partial<PollDeps> = {}): PollDeps => ({
-    root, repo: 'o/r', runner: gh.runner, now: () => gh.clock, machine: HOST, runId: 'test',
-    out: () => {}, runStep: runStep(), standDown: () => 'stood down', ...over,
+    stateRoot: root,
+    boards: [{ key: 'o/r', repo: 'o/r', root, runner: gh.runner, devMd: '', identity: { runner: gh.runner, freshen: async () => {}, token: () => 'token-r' } }],
+    now: () => gh.clock, machine: HOST, runId: 'test', out: () => {}, runStep: runStep(), standDown: () => 'stood down', ...over,
   })
   // One pass, then everything it started.
-  const pass = async (over: Partial<PollDeps> = {}, inflight = new Map<number, Inflight>()) => {
+  const pass = async (over: Partial<PollDeps> = {}, inflight = new Map<string, Inflight>()) => {
     await poll(deps(over), inflight)
     return drain(inflight)
   }
 
   beforeEach(() => { steps.length = 0 })
+
+  const context = (repo: string, boardRoot: string, fake: FakeGitHub, token: string, devMd: string) => {
+    // FakeGitHub deliberately models one fixed repository; adapt only its test transport while
+    // leaving the worker-facing repository identity untouched.
+    const runner = ((args: string[], input?: string) => fake.runner(args.map((arg) => arg.replaceAll(`repos/${repo}`, 'repos/o/r')), input)) as GhRunner
+    return { key: repo, repo, root: boardRoot, runner, devMd, identity: { runner, freshen: async () => {}, token: () => token } }
+  }
+
+  test('the same issue number uses each board own root, token, policy, cache, and record', async () => {
+    const other = new FakeGitHub()
+    other.permissions.set('mk', 'admin')
+    gh.addIssue({ number: 1, labels: ['planning', 'medium'] })
+    other.addIssue({ number: 1, labels: ['planning', 'medium'] })
+    const otherRoot = realpathSync(mkdtempSync(join(tmpdir(), 'worker-other-')))
+    const seen: Array<{ repo: string; root: string; token: string | null; devMd: string }> = []
+    const inflight = new Map<string, Inflight>()
+    const multi = deps({
+      boards: [context('o/a', root, gh, 'token-a', 'policy-a'), context('o/b', otherRoot, other, 'token-b', 'policy-b')],
+      caps: { ...DEFAULT_CAPS, runs: 2 },
+      runStep: async (step, call) => {
+        seen.push({ repo: step.repo, root: call.root, token: call.token, devMd: call.devMd })
+        return { outcome: 'done', note: '', ms: 1 }
+      },
+    })
+    expect((await poll(multi, inflight)).map(runKey)).toEqual(['o/a#1', 'o/b#1'])
+    expect([...inflight.keys()]).toEqual(['o/a#1', 'o/b#1'])
+    expect(seen).toEqual([
+      { repo: 'o/a', root, token: 'token-a', devMd: 'policy-a' },
+      { repo: 'o/b', root: otherRoot, token: 'token-b', devMd: 'policy-b' },
+    ])
+    expect(existsSync(cacheDir(root, 'o/a', 1))).toBe(true)
+    expect(existsSync(cacheDir(otherRoot, 'o/b', 1))).toBe(true)
+    const records = await drain(inflight)
+    expect(records.map((record) => `${record.repo}#${record.issue}`).sort()).toEqual(['o/a#1', 'o/b#1'])
+    expect(readRuns(root).map((record) => `${record.repo}#${record.issue}`).sort()).toEqual(['o/a#1', 'o/b#1'])
+  })
+
+  test('a mixed-case board context uses only canonical API, cache, claim, and step identity', async () => {
+    gh.addIssue({ number: 1, labels: ['planning', 'medium'] })
+    const calls: string[] = []
+    const runner = ((args: string[], input?: string) => {
+      calls.push(args.join(' '))
+      return gh.runner(args.map((arg) => arg.replaceAll('repos/o/a', 'repos/o/r')), input)
+    }) as GhRunner
+    const inflight = new Map<string, Inflight>()
+    const started = await poll(deps({
+      boards: [{ key: 'o/a', repo: 'O/A', root, runner, devMd: 'policy-a', identity: { runner, freshen: async () => {}, token: () => 'token-a' } }],
+    }), inflight)
+    expect(started.map(runKey)).toEqual(['o/a#1'])
+    expect(calls.join('\n')).not.toContain('repos/O/A')
+    expect(existsSync(cacheDir(root, 'o/a', 1))).toBe(true)
+    expect(readdirSync(join(root, '.vegastack', '.tmp', 'issues'))).toContain('o__a')
+    expect(readdirSync(join(root, '.vegastack', '.tmp', 'issues'))).not.toContain('O__A')
+    await drain(inflight)
+  })
+
+  test('one unreadable board does not prevent another board from starting', async () => {
+    const healthy = new FakeGitHub()
+    healthy.permissions.set('mk', 'admin')
+    healthy.addIssue({ number: 1, labels: ['planning', 'medium'] })
+    const bad = context('o/a', root, gh, 'token-a', 'policy-a')
+    bad.runner = (() => { throw new Error('board unavailable') }) as GhRunner
+    bad.identity = { ...bad.identity, runner: bad.runner }
+    const healthyRoot = realpathSync(mkdtempSync(join(tmpdir(), 'worker-healthy-')))
+    const notes: string[] = []
+    const inflight = new Map<string, Inflight>()
+    const started = await poll(deps({
+      boards: [bad, context('o/b', healthyRoot, healthy, 'token-b', 'policy-b')],
+      out: (line) => notes.push(line),
+    }), inflight)
+    expect(started.map(runKey)).toEqual(['o/b#1'])
+    expect(notes.join('\n')).toContain('o/a: board could not be read')
+    await drain(inflight)
+  })
+
+  test('one unreadable issue does not prevent its siblings or another board from starting', async () => {
+    const other = new FakeGitHub()
+    other.permissions.set('mk', 'admin')
+    gh.addIssue({ number: 1, labels: ['planning', 'medium'] })
+    gh.addIssue({ number: 2, labels: ['planning', 'medium'] })
+    other.addIssue({ number: 1, labels: ['planning', 'medium'] })
+    const a = context('o/a', root, gh, 'token-a', 'policy-a')
+    const baseRunner = a.runner
+    const aRunner = ((args: string[], input?: string) => {
+      if (args.includes('repos/o/a/issues/1')) throw new Error('issue unavailable')
+      return baseRunner(args, input)
+    }) as GhRunner
+    a.runner = aRunner
+    a.identity = { ...a.identity, runner: aRunner }
+    const otherRoot = realpathSync(mkdtempSync(join(tmpdir(), 'worker-other-')))
+    const notes: string[] = []
+    const inflight = new Map<string, Inflight>()
+    const started = await poll(deps({
+      boards: [a, context('o/b', otherRoot, other, 'token-b', 'policy-b')],
+      caps: { ...DEFAULT_CAPS, runs: 3 }, out: (line) => notes.push(line),
+    }), inflight)
+    expect(started.map(runKey)).toEqual(['o/a#2', 'o/b#1'])
+    expect(notes.join('\n')).toContain('o/a#1: could not be read')
+    await drain(inflight)
+  })
 
   test('every wanted transition runs once and is written down', async () => {
     gh.addIssue({ number: 1, labels: ['planning', 'medium'] })
@@ -637,12 +758,12 @@ describe('one poll over the board', () => {
     const lines: string[] = []
     expect(await pass({ appActor: 'acmefactory[bot]', out: (line) => lines.push(line) })).toEqual([])
     expect(steps).toEqual([])
-    expect(lines).toEqual(['#1: skipped, a fresh claim holds it'])
+    expect(lines).toEqual(['o/r#1: skipped, a fresh claim holds it'])
   })
 
   test('a step already running keeps its slot and its issue on the next pass', async () => {
     for (const number of [1, 2, 3, 4]) gh.addIssue({ number, labels: ['planning', 'medium'] })
-    const inflight = new Map<number, Inflight>()
+    const inflight = new Map<string, Inflight>()
     let release = () => {}
     const held = new Promise<void>((resolve) => { release = resolve })
     const slow: RunStep = async (step) => {
@@ -725,10 +846,17 @@ describe('one poll over the board', () => {
     expect(blocked.ok).toBe(false)
     expect(blocked.reason).toContain('another worker is already running on this machine')
     // The same record, but that pid is now somebody else (or nobody): the lock is taken over.
-    const taken = takeRunLock(root, 'eeee5555', () => null)
+    const taken = takeRunLock(root, 'eeee5555', () => null, () => false)
     expect(taken.ok).toBe(true)
     releaseRunLock(root, 'eeee5555')
     expect(existsSync(runLockPath(root))).toBe(false)
+
+    writeFileSync(runLockPath(root), JSON.stringify({ pid: 999_998, startedAt: 'unknown', runId: 'ffff6666', at: 'x' }))
+    const unknown = takeRunLock(root, 'gggg7777', () => null, () => null)
+    expect(unknown.ok).toBe(false)
+    expect(unknown.reason).toContain('identity cannot be proved')
+    expect(existsSync(runLockPath(root))).toBe(true)
+    rmSync(runLockPath(root), { force: true })
   })
 
   test('a claim another machine already holds is not started twice', async () => {
@@ -737,18 +865,19 @@ describe('one poll over the board', () => {
     const body = claimBody({ owner: 'builder:worker-1', kind: 'worker', harness: 'worker', model: 'plan' })
     const notes: string[] = []
     const steps: number[] = []
+    const racingRunner = ((args: string[], input?: string) => {
+      // The rival claim lands just before this machine posts its own, so it is the earlier one.
+      const method = args[args.indexOf('-X') + 1]
+      const path = args[args.indexOf('-X') + 2] ?? ''
+      if (method === 'POST' && path.endsWith('/comments') && !gh.issues.get(1)!.comments.some((c) => c.body.includes('builder:worker-1'))) {
+        gh.addComment(1, body.replace('-->\n', `-->\n${claimLine('builder:worker-1', new Date(gh.clock).toISOString())}\n`), 'mk')
+      }
+      return gh.runner(args, input)
+    }) as typeof gh.runner
     await pass({
       out: (text: string) => notes.push(text),
       runStep: (async (step) => { steps.push(step.number); return { outcome: 'done' as const, note: '', ms: 1 } }) as RunStep,
-      runner: ((args: string[], input?: string) => {
-        // The rival claim lands just before this machine posts its own, so it is the earlier one.
-        const method = args[args.indexOf('-X') + 1]
-        const path = args[args.indexOf('-X') + 2] ?? ''
-        if (method === 'POST' && path.endsWith('/comments') && !gh.issues.get(1)!.comments.some((c) => c.body.includes('builder:worker-1'))) {
-          gh.addComment(1, body.replace('-->\n', `-->\n${claimLine('builder:worker-1', new Date(gh.clock).toISOString())}\n`), 'mk')
-        }
-        return gh.runner(args, input)
-      }) as typeof gh.runner,
+      boards: [{ key: 'o/r', repo: 'o/r', root, runner: racingRunner, devMd: '', identity: { runner: racingRunner, freshen: async () => {}, token: () => 'token-r' } }],
     })
     expect(steps).toEqual([])
     expect(notes.join('\n')).toContain('not started — lost the race to builder:worker-1')
@@ -756,7 +885,7 @@ describe('one poll over the board', () => {
 
   test('an operator stop reaches a run that is already going', async () => {
     gh.addIssue({ number: 1, labels: ['queued', 'small'] })
-    const inflight = new Map<number, Inflight>()
+    const inflight = new Map<string, Inflight>()
     let releaseChild = () => {}
     const blocked = new Promise<void>((resolve) => { releaseChild = resolve })
     let stoppedPid = 0
@@ -770,7 +899,7 @@ describe('one poll over the board', () => {
       runStep: slow,
       stop: (pid: number) => { stoppedPid = pid; releaseChild(); return true },
       start: () => 'Fri Sep 18 09:00:00 2026',
-      standDown: (number: number, reason: string) => { given.push(`${number}:${reason}`); return reason },
+      standDown: (_repo: string, number: number, reason: string) => { given.push(`${number}:${reason}`); return reason },
     }
     // The run is going, and the operator says stop.
     expect(await poll(deps(shared), inflight)).toHaveLength(1)
@@ -806,7 +935,7 @@ describe('one poll over the board', () => {
       .replace('-->\n', `-->\n${claimLine(`${HOST}:1-work`, new Date(gh.clock).toISOString())}\n`), 'mk')
     gh.addComment(1, 'stop', 'mk')
     const given: string[] = []
-    const records = await pass({ standDown: (number: number, reason: string) => { given.push(`${number}:${reason}`); return 'saved, pushed, released' } })
+    const records = await pass({ standDown: (_repo: string, number: number, reason: string) => { given.push(`${number}:${reason}`); return 'saved, pushed, released' } })
     expect(steps).toEqual([])
     expect(given[0]).toContain('1:@mk said stop')
     expect(records[0]).toMatchObject({ action: 'stop', outcome: 'stopped', note: 'saved, pushed, released' })
@@ -817,7 +946,7 @@ describe('one poll over the board', () => {
     const given: Array<{ reason: string; restoreTo?: string }> = []
     await pass({
       runStep: runStep({ outcome: 'limit', note: 'usage limit reached; try again after 2026-09-17T15:00:00Z' }),
-      standDown: (number: number, reason: string, restoreTo?: string) => { given.push({ reason, restoreTo }); return reason },
+      standDown: (_repo: string, _number: number, reason: string, restoreTo?: string) => { given.push({ reason, restoreTo }); return reason },
     })
     expect(given[0]!.reason).toContain('subscription limit')
     expect(given[0]!.restoreTo).toBe('queued')
@@ -830,7 +959,7 @@ describe('one poll over the board', () => {
   // stopped at `in-progress` with nobody on it would otherwise never move again.
   test('a timeout and a crash both hand the issue back, not leave it in-progress', async () => {
     const given: Array<{ number: number; reason: string; restoreTo?: string }> = []
-    const record = (number: number, reason: string, restoreTo?: string) => { given.push({ number, reason, restoreTo }); return reason }
+    const record = (_repo: string, number: number, reason: string, restoreTo?: string) => { given.push({ number, reason, restoreTo }); return reason }
     gh.addIssue({ number: 1, labels: ['queued', 'small'] })
     await pass({ runStep: runStep({ outcome: 'killed', note: 'past the limit' }), standDown: record })
     expect(given[0]).toMatchObject({ number: 1, restoreTo: 'queued' })
@@ -1224,7 +1353,7 @@ describe('the step a run makes', () => {
   test('a run\'s output is bounded, and so is the record of runs', () => {
     expect(tail('a\n'.repeat(1000) + 'last').length).toBeLessThanOrEqual(400)
     for (let i = 0; i < RUNS_KEPT * 2 + 5; i++) {
-      recordRun(root, { at: new Date(i).toISOString(), issue: i, action: 'plan', outcome: 'done', ms: 1, machine: HOST, note: '' })
+      recordRun(root, { at: new Date(i).toISOString(), repo: 'o/r', issue: i, action: 'plan', outcome: 'done', ms: 1, machine: HOST, note: '' })
     }
     // Trimmed back to the last RUNS_KEPT each time it doubles, so the file never grows unbounded
     // and the newest run is always there.
@@ -1233,13 +1362,23 @@ describe('the step a run makes', () => {
     expect(kept.at(-1)!.issue).toBe(RUNS_KEPT * 2 + 4)
   })
 
+  test('global run and child records preserve repository identity across a read', () => {
+    const stateRoot = join(root, 'machine-state')
+    recordRun(stateRoot, { at: '2026-09-21T00:00:00Z', repo: 'o/a', issue: 1, action: 'plan', outcome: 'done', ms: 1, machine: HOST, note: '' })
+    recordRun(stateRoot, { at: '2026-09-21T00:00:01Z', repo: 'o/b', issue: 1, action: 'plan', outcome: 'done', ms: 1, machine: HOST, note: '' })
+    noteChild(stateRoot, { repo: 'o/a', pid: 7001, startedAt: 'a', command: 'claude', issue: 1, action: 'plan', owner: null, from: 'planning' })
+    noteChild(stateRoot, { repo: 'o/b', pid: 7002, startedAt: 'b', command: 'codex', issue: 1, action: 'plan', owner: null, from: 'planning' })
+    expect(readRuns(stateRoot).map((row) => `${row.repo}#${row.issue}`)).toEqual(['o/a#1', 'o/b#1'])
+    expect(readChildren(stateRoot).map((row) => `${row.repo}#${row.issue}`)).toEqual(['o/a#1', 'o/b#1'])
+  })
+
   test('a step past the limit is killed, and its own output is never the whole record', async () => {
     const seen: Array<{ timeoutMs: number; cwd: string; env: NodeJS.ProcessEnv }> = []
     const exec = async (_tool: string, _args: string[], options: { cwd: string; env: NodeJS.ProcessEnv; timeoutMs: number }) => {
       seen.push({ timeoutMs: options.timeoutMs, cwd: options.cwd, env: options.env })
       return { code: null, stdout: 'x'.repeat(9000), stderr: '', timedOut: true }
     }
-    const result = await defaultRunStep('', {}, { exec })({ action: 'implement', number: 7, repo: 'o/r', split: false, by: null }, { root })
+    const result = await defaultRunStep({}, { exec })({ action: 'implement', number: 7, repo: 'o/r', split: false, by: null }, { root, devMd: '', token: null })
     expect(seen[0]!.timeoutMs).toBe(STEP_TIMEOUT_MS)
     // Nobody is watching, so a round of questions goes to the issue rather than a question tool.
     expect(seen[0]!.env.VSK_ASK_ROUTE).toBe('issue')
@@ -1255,7 +1394,7 @@ describe('the step a run makes', () => {
       return { code: 0, stdout: 'done', stderr: '', timedOut: false }
     }
     const env = { PATH: '/usr/bin', VEGAFACTORY_APP_PRIVATE_KEY_FILE: '/keys/app.pem', VEGAFACTORY_APP_ID: '12345', VEGAFACTORY_APP_ACTOR: 'acmefactory[bot]', HOME: '/home/x' }
-    await defaultRunStep('', env, { exec, token: () => 'ghs_from_the_app' })({ action: 'implement', number: 7, repo: 'o/r', split: false, by: null }, { root })
+    await defaultRunStep(env, { exec })({ action: 'implement', number: 7, repo: 'o/r', split: false, by: null }, { root, devMd: '', token: 'ghs_from_the_app' })
     // Its writes are the App's, so nothing it posts can pass as a person's word.
     expect(given.GH_TOKEN).toBe('ghs_from_the_app')
     expect(given.GITHUB_TOKEN).toBe('ghs_from_the_app')
@@ -1281,10 +1420,256 @@ describe('the step a run makes', () => {
     expect(smuggled.GIT_CONFIG_COUNT).toBe('2')
   })
 
+  test('one board-neutral step receives policy and token per call', async () => {
+    const seen: Array<{ tool: string; env: NodeJS.ProcessEnv }> = []
+    const exec = async (tool: string, _args: string[], options: { env: NodeJS.ProcessEnv }) => {
+      seen.push({ tool, env: options.env })
+      return { code: 0, stdout: 'done', stderr: '', timedOut: false }
+    }
+    const step = defaultRunStep({}, { exec })
+    await step({ action: 'implement', number: 1, repo: 'o/a', split: false, by: null }, { root, devMd: 'harness-policy: implement claude default high', token: 'token-a' })
+    await step({ action: 'implement', number: 1, repo: 'o/b', split: false, by: null }, { root, devMd: 'harness-policy: implement codex default xhigh', token: 'token-b' })
+    expect(seen.map((row) => [row.tool, row.env.GH_TOKEN])).toEqual([['claude', 'token-a'], ['codex', 'token-b']])
+  })
+
   test('a step refuses to start while an API key is in the environment', async () => {
     const exec = async () => ({ code: 0, stdout: 'done', stderr: '', timedOut: false })
-    const step = defaultRunStep('', { ANTHROPIC_API_KEY: 'sk-ant-x' }, { exec })
-    await expect(step({ action: 'implement', number: 7, repo: 'o/r', split: false, by: null }, { root })).rejects.toThrow(/ANTHROPIC_API_KEY.*subscriptions only/s)
+    const step = defaultRunStep({ ANTHROPIC_API_KEY: 'sk-ant-x' }, { exec })
+    await expect(step({ action: 'implement', number: 7, repo: 'o/r', split: false, by: null }, { root, devMd: '', token: null })).rejects.toThrow(/ANTHROPIC_API_KEY.*subscriptions only/s)
+  })
+})
+
+describe('legacy worker state migration', () => {
+  const names = ['acted.json', 'runs.jsonl', 'children.json', 'run.lock'] as const
+  const seed = (legacy: string) => {
+    mkdirSync(legacy, { recursive: true })
+    writeFileSync(join(legacy, 'acted.json'), JSON.stringify({
+      'O/R#1': { at: 10, action: 'plan', outcome: 'done', trigger: null, failures: 0, retryAt: null },
+      'o/r#2': { at: 5, action: 'plan', outcome: 'failed', trigger: null, failures: 1, retryAt: 20 },
+    }))
+    writeFileSync(join(legacy, 'runs.jsonl'), `${JSON.stringify({ at: '2026-09-20T00:00:00Z', issue: 1, action: 'plan', outcome: 'done', ms: 1, machine: HOST, note: 'old' })}\n`)
+    writeFileSync(join(legacy, 'children.json'), JSON.stringify([
+      { pid: 5150, startedAt: 'Fri Sep 18 09:00:00 2026', command: 'claude', issue: 1, action: 'plan', owner: null, from: 'planning' },
+    ]))
+  }
+  const seedGlobal = (stateRoot: string) => {
+    mkdirSync(stateRoot, { recursive: true })
+    writeFileSync(join(stateRoot, 'acted.json'), JSON.stringify({ 'o/r#9': { at: 1, action: 'plan', outcome: 'done', trigger: null, failures: 0, retryAt: null } }))
+    writeFileSync(join(stateRoot, 'runs.jsonl'), `${JSON.stringify({ at: '2026-09-19T00:00:00Z', repo: 'o/r', issue: 9, action: 'plan', outcome: 'done', ms: 1, machine: HOST, note: 'global' })}\n`)
+    writeFileSync(join(stateRoot, 'children.json'), JSON.stringify([{ repo: 'o/r', pid: 5159, startedAt: 'old', command: 'claude', issue: 9, action: 'plan', owner: null, from: 'planning' }]))
+    writeFileSync(join(stateRoot, 'run.lock'), JSON.stringify({ pid: 999998, startedAt: 'gone', runId: 'global', at: 'old' }))
+  }
+  const bytes = (legacy: string, stateRoot: string) => Object.fromEntries(
+    [legacy, stateRoot].flatMap((dir) => names.map((name) => {
+      const path = join(dir, name)
+      return [`${dir}:${name}`, existsSync(path) ? readFileSync(path, 'utf8') : null]
+    })),
+  )
+
+  test('a fresh install refuses a symlinked global root before any legacy early return', () => {
+    const factoryRoot = join(home, '.vegafactory')
+    const stateRoot = join(factoryRoot, 'worker')
+    const external = join(home, 'fresh-external-global')
+    mkdirSync(factoryRoot, { recursive: true })
+    mkdirSync(external)
+    writeFileSync(join(external, 'sentinel'), 'kept')
+    symlinkSync(external, stateRoot)
+    const result = migrateLegacyWorkerState({ root, stateRoot, factoryRoot, repo: 'o/r', alive: () => false })
+    expect(result).toMatchObject({ ok: false, migrated: false })
+    expect(readFileSync(join(external, 'sentinel'), 'utf8')).toBe('kept')
+    expect(existsSync(join(external, '.lock'))).toBe(false)
+    expect(existsSync(join(external, 'run.lock'))).toBe(false)
+  })
+
+  test.each(['root', 'ancestor'] as const)('an equal legacy/global path refuses a symlinked %s without touching its target', (kind) => {
+    const factoryRoot = join(root, '.vegastack', '.tmp')
+    const stateRoot = join(factoryRoot, 'worker')
+    const external = join(home, `equal-path-${kind}`)
+    mkdirSync(external)
+    let target = external
+    if (kind === 'root') {
+      mkdirSync(factoryRoot, { recursive: true })
+      symlinkSync(external, stateRoot)
+    } else {
+      target = join(external, 'worker')
+      mkdirSync(target)
+      symlinkSync(external, factoryRoot)
+    }
+    writeFileSync(join(target, 'sentinel'), 'kept')
+    const result = migrateLegacyWorkerState({ root, stateRoot, factoryRoot, repo: 'o/r', alive: () => false })
+    expect(result).toMatchObject({ ok: false, migrated: false })
+    expect(readFileSync(join(target, 'sentinel'), 'utf8')).toBe('kept')
+    expect(existsSync(join(target, '.lock'))).toBe(false)
+    expect(existsSync(join(target, 'run.lock'))).toBe(false)
+  })
+
+  test('legacy records migrate once with canonical repository identity and remain stoppable', () => {
+    const legacy = workerDir(root)
+    const stateRoot = join(home, '.vegafactory', 'worker')
+    seed(legacy)
+    writeFileSync(runLockPath(legacy), JSON.stringify({ pid: 999999, startedAt: 'old', runId: 'old', at: 'old' }))
+    expect(migrateLegacyWorkerState({ root, stateRoot, repo: 'O/R', start: () => null, alive: () => false })).toMatchObject({ ok: true, migrated: true })
+    expect(Object.keys(readActed(stateRoot)).sort()).toEqual(['o/r#1', 'o/r#2'])
+    expect(readRuns(stateRoot)).toEqual([expect.objectContaining({ repo: 'o/r', issue: 1, note: 'old' })])
+    const child = readChildren(stateRoot)[0]!
+    expect(child).toMatchObject({ repo: 'o/r', issue: 1, pid: 5150 })
+    const stopped: number[] = []
+    expect(stopChild(stateRoot, child, { start: () => child.startedAt, stop: (pid) => { stopped.push(pid); return true } })).toBe(true)
+    expect(stopped).toEqual([5150])
+    for (const name of ['acted.json', 'runs.jsonl', 'children.json', 'run.lock']) expect(existsSync(join(legacy, name))).toBe(false)
+    expect(migrateLegacyWorkerState({ root, stateRoot, repo: 'o/r', start: () => null, alive: () => false })).toMatchObject({ ok: true, migrated: false })
+  })
+
+  test('a live legacy worker blocks migration and a second worker', () => {
+    const legacy = workerDir(root)
+    const stateRoot = join(home, '.vegafactory', 'worker')
+    seed(legacy)
+    writeFileSync(runLockPath(legacy), JSON.stringify({ pid: 4242, startedAt: 'live', runId: 'old', at: 'then' }))
+    const result = migrateLegacyWorkerState({ root, stateRoot, repo: 'o/r', start: (pid) => pid === 4242 ? 'live' : null })
+    expect(result).toMatchObject({ ok: false, migrated: false })
+    expect(result.reason).toContain('legacy worker is still running')
+    expect(existsSync(join(legacy, 'acted.json'))).toBe(true)
+    expect(readRuns(stateRoot)).toEqual([])
+  })
+
+  test('an unknown legacy worker identity blocks migration and preserves its lock', () => {
+    const legacy = workerDir(root)
+    const stateRoot = join(home, '.vegafactory', 'worker')
+    seed(legacy)
+    const lock = JSON.stringify({ pid: 4243, startedAt: 'unreadable', runId: 'old', at: 'then' })
+    writeFileSync(runLockPath(legacy), lock)
+    const result = migrateLegacyWorkerState({ root, stateRoot, repo: 'o/r', start: () => null, alive: () => null })
+    expect(result).toMatchObject({ ok: false, migrated: false })
+    expect(result.reason).toContain('identity cannot be proved')
+    expect(readFileSync(runLockPath(legacy), 'utf8')).toBe(lock)
+    expect(existsSync(join(legacy, 'acted.json'))).toBe(true)
+  })
+
+  test('a crash after global writes retries without replaying records', () => {
+    const legacy = workerDir(root)
+    const stateRoot = join(home, '.vegafactory', 'worker')
+    seed(legacy)
+    expect(() => migrateLegacyWorkerState({ root, stateRoot, repo: 'o/r', start: () => null, alive: () => false, afterWrite: () => { throw new Error('crash') } })).toThrow('crash')
+    expect(readRuns(stateRoot)).toHaveLength(1)
+    expect(migrateLegacyWorkerState({ root, stateRoot, repo: 'o/r', start: () => null, alive: () => false })).toMatchObject({ ok: true, migrated: true })
+    expect(readRuns(stateRoot)).toHaveLength(1)
+    expect(readChildren(stateRoot)).toHaveLength(1)
+  })
+
+  test.each([
+    ['legacy', 'acted.json', JSON.stringify({ 'o/r#1': { at: 'wrong' } })],
+    ['global', 'acted.json', '[]'],
+    ['legacy', 'runs.jsonl', '{not-json}\n'],
+    ['global', 'runs.jsonl', `${JSON.stringify({ repo: 'o/r', issue: 1 })}\n`],
+    ['legacy', 'children.json', '{}'],
+    ['global', 'children.json', JSON.stringify([{ repo: 'o/r', pid: 1 }])],
+    ['legacy', 'run.lock', '{not-json'],
+    ['global', 'run.lock', JSON.stringify({ pid: 44 })],
+  ] as const)('malformed %s %s refuses without changing source or destination bytes', (side, name, content) => {
+    const legacy = workerDir(root)
+    const stateRoot = join(home, '.vegafactory', 'worker')
+    seed(legacy)
+    seedGlobal(stateRoot)
+    writeFileSync(join(side === 'legacy' ? legacy : stateRoot, name), content)
+    const before = bytes(legacy, stateRoot)
+    const result = migrateLegacyWorkerState({ root, stateRoot, repo: 'o/r', start: () => null, alive: () => false })
+    expect(result).toMatchObject({ ok: false, migrated: false })
+    expect(bytes(legacy, stateRoot)).toEqual(before)
+  })
+
+  test('a symlinked record refuses without changing either side', () => {
+    const legacy = workerDir(root)
+    const stateRoot = join(home, '.vegafactory', 'worker')
+    seed(legacy)
+    seedGlobal(stateRoot)
+    const target = join(home, 'outside-acted.json')
+    writeFileSync(target, '{}')
+    rmSync(join(legacy, 'acted.json'))
+    symlinkSync(target, join(legacy, 'acted.json'))
+    const globalBefore = bytes(stateRoot, stateRoot)
+    const result = migrateLegacyWorkerState({ root, stateRoot, repo: 'o/r', start: () => null, alive: () => false })
+    expect(result).toMatchObject({ ok: false, migrated: false })
+    expect(readFileSync(target, 'utf8')).toBe('{}')
+    expect(bytes(stateRoot, stateRoot)).toEqual(globalBefore)
+  })
+
+  test('a symlinked legacy worker root is refused before the external target is locked', () => {
+    const legacy = workerDir(root)
+    const external = join(home, 'external-legacy-root')
+    seed(external)
+    mkdirSync(join(root, '.vegastack', '.tmp'), { recursive: true })
+    symlinkSync(external, legacy)
+    const before = bytes(external, external)
+    const result = migrateLegacyWorkerState({ root, stateRoot: join(home, '.vegafactory', 'worker'), repo: 'o/r', alive: () => false })
+    expect(result).toMatchObject({ ok: false, migrated: false })
+    expect(bytes(external, external)).toEqual(before)
+    expect(existsSync(join(external, '.lock'))).toBe(false)
+  })
+
+  test('a symlinked legacy intermediate is refused before the external target is locked', () => {
+    const external = join(home, 'external-legacy-tmp')
+    const externalWorker = join(external, 'worker')
+    seed(externalWorker)
+    symlinkSync(external, join(root, '.vegastack', '.tmp'))
+    const before = bytes(externalWorker, externalWorker)
+    const result = migrateLegacyWorkerState({ root, stateRoot: join(home, '.vegafactory', 'worker'), repo: 'o/r', alive: () => false })
+    expect(result).toMatchObject({ ok: false, migrated: false })
+    expect(bytes(externalWorker, externalWorker)).toEqual(before)
+    expect(existsSync(join(externalWorker, '.lock'))).toBe(false)
+  })
+
+  test('a symlinked global worker root is refused before the external target is locked or written', () => {
+    const legacy = workerDir(root)
+    seed(legacy)
+    const factoryRoot = join(home, '.vegafactory')
+    const stateRoot = join(factoryRoot, 'worker')
+    const external = join(home, 'external-global-root')
+    mkdirSync(factoryRoot, { recursive: true })
+    mkdirSync(external)
+    writeFileSync(join(external, 'sentinel'), 'kept')
+    symlinkSync(external, stateRoot)
+    const before = bytes(legacy, legacy)
+    const result = migrateLegacyWorkerState({ root, stateRoot, factoryRoot, repo: 'o/r', alive: () => false })
+    expect(result).toMatchObject({ ok: false, migrated: false })
+    expect(bytes(legacy, legacy)).toEqual(before)
+    expect(readFileSync(join(external, 'sentinel'), 'utf8')).toBe('kept')
+    expect(existsSync(join(external, '.lock'))).toBe(false)
+  })
+
+  test('a symlinked global override intermediate is refused without creating anything outside it', () => {
+    const legacy = workerDir(root)
+    seed(legacy)
+    const external = join(home, 'external-override')
+    const linked = join(home, 'override-link')
+    mkdirSync(external)
+    writeFileSync(join(external, 'sentinel'), 'kept')
+    symlinkSync(external, linked)
+    const factoryRoot = join(linked, 'factory')
+    const stateRoot = join(factoryRoot, 'worker')
+    const before = bytes(legacy, legacy)
+    const result = migrateLegacyWorkerState({ root, stateRoot, factoryRoot, repo: 'o/r', alive: () => false })
+    expect(result).toMatchObject({ ok: false, migrated: false })
+    expect(bytes(legacy, legacy)).toEqual(before)
+    expect(readFileSync(join(external, 'sentinel'), 'utf8')).toBe('kept')
+    expect(existsSync(join(external, 'factory'))).toBe(false)
+    expect(existsSync(join(external, '.lock'))).toBe(false)
+  })
+
+  test('an unreadable record refuses where file permissions are enforced', () => {
+    const legacy = workerDir(root)
+    const stateRoot = join(home, '.vegafactory', 'worker')
+    seed(legacy)
+    const path = join(legacy, 'acted.json')
+    const before = readFileSync(path, 'utf8')
+    chmodSync(path, 0)
+    let enforced = false
+    try { readFileSync(path, 'utf8') } catch { enforced = true }
+    const result = migrateLegacyWorkerState({ root, stateRoot, repo: 'o/r', start: () => null, alive: () => false })
+    chmodSync(path, 0o600)
+    if (!enforced) return
+    expect(result).toMatchObject({ ok: false, migrated: false })
+    expect(readFileSync(path, 'utf8')).toBe(before)
+    expect(existsSync(join(stateRoot, 'acted.json'))).toBe(false)
   })
 })
 
@@ -1302,6 +1687,65 @@ describe('the command', () => {
       expect(result.text).toContain('laptop is not listed')
     }
     expect((await run(['disable', '--dry-run'], { host: 'laptop' })).code).toBe(0)
+  })
+
+  test('VEGAFACTORY_HOME gives run, status, disable, and every checkout one global state root', async () => {
+    const namedHome = join(home, 'named-factory-home')
+    const env = { VEGAFACTORY_HOME: namedHome }
+    const stateRoot = join(namedHome, 'worker')
+    const defaultRoot = join(home, '.vegafactory', 'worker')
+    const otherRoot = realpathSync(mkdtempSync(join(tmpdir(), 'worker-other-cwd-')))
+    spawnSync('git', ['init', '-q'], { cwd: otherRoot })
+    mkdirSync(join(otherRoot, '.vegastack'))
+    writeFileSync(join(otherRoot, '.vegastack/dev.md'), readFileSync(join(root, '.vegastack/dev.md'), 'utf8'))
+
+    expect((await run(['run', '--once'], { env })).code).toBe(0)
+    expect(existsSync(stateRoot)).toBe(true)
+    expect(existsSync(defaultRoot)).toBe(false)
+
+    const statusLines: string[] = []
+    expect(await runWorker(['status'], { cwd: otherRoot, home, host: HOST, env, out: (line) => statusLines.push(line), runner: gh.runner, git: anyGit })).toBe(0)
+    expect(statusLines.join('\n')).toContain('no worker runs on this machine yet')
+
+    writeFileSync(runLockPath(stateRoot), JSON.stringify({ pid: 4242, startedAt: 'live', runId: 'first-cwd', at: 'then' }))
+    const blocked: string[] = []
+    expect(await runWorker(['run', '--once'], {
+      cwd: otherRoot, home, host: HOST, env, out: (line) => blocked.push(line), runner: gh.runner, git: anyGit,
+      start: (pid) => pid === 4242 ? 'live' : 'current',
+    })).toBe(2)
+    expect(blocked.join('\n')).toContain('another worker is already running on this machine')
+    rmSync(runLockPath(stateRoot), { force: true })
+
+    const child = { repo: 'o/r', pid: 5150, startedAt: 'child', command: 'claude', issue: 7, action: 'implement' as const, owner: null, from: 'queued' as const }
+    noteChild(stateRoot, child)
+    const stopped: number[] = []
+    expect(await runWorker(['disable'], {
+      cwd: otherRoot, home, host: HOST, env, out: () => {}, runner: gh.runner, git: anyGit,
+      run: (() => ({ code: 0, stdout: '', stderr: '' })) as Probe,
+      start: (pid) => pid === child.pid ? child.startedAt : null,
+      stop: (pid) => { stopped.push(pid); return true },
+    })).toBe(0)
+    expect(stopped).toEqual([5150])
+    expect(readChildren(stateRoot)).toEqual([])
+    expect(existsSync(defaultRoot)).toBe(false)
+  })
+
+  test('a fresh CLI run refuses a symlinked global-home ancestor without touching its target', async () => {
+    const external = join(home, 'fresh-cli-external')
+    const linked = join(home, 'fresh-cli-link')
+    mkdirSync(external)
+    writeFileSync(join(external, 'sentinel'), 'kept')
+    symlinkSync(external, linked)
+    const lines: string[] = []
+    const code = await runWorker(['run', '--once'], {
+      cwd: root, home, host: HOST, env: { VEGAFACTORY_HOME: join(linked, 'factory') },
+      out: (line) => lines.push(line), runner: gh.runner, git: anyGit,
+    })
+    expect(code).toBe(2)
+    expect(lines.join('\n')).toContain('unsafe global worker directory')
+    expect(readFileSync(join(external, 'sentinel'), 'utf8')).toBe('kept')
+    expect(existsSync(join(external, 'factory'))).toBe(false)
+    expect(existsSync(join(external, '.lock'))).toBe(false)
   })
 
   test('an API key in the environment refuses before anything is probed or minted', async () => {
@@ -1975,8 +2419,9 @@ describe('the command', () => {
 
   test('disable stops the runs the service had started, and names what they held', async () => {
     const lines: string[] = []
-    const live = { pid: 5150, startedAt: 'Fri Sep 18 09:00:00 2026', command: 'claude', issue: 7, action: 'implement' as const, owner: `${HOST}:worker-ab12-7`, from: 'queued' as const }
-    noteChild(root, live)
+    const stateRoot = join(home, '.vegafactory', 'worker')
+    const live = { repo: 'o/r', pid: 5150, startedAt: 'Fri Sep 18 09:00:00 2026', command: 'claude', issue: 7, action: 'implement' as const, owner: `${HOST}:worker-ab12-7`, from: 'queued' as const }
+    noteChild(stateRoot, live)
     const stopped: number[] = []
     const code = await runWorker(['disable'], {
       cwd: root, home, host: HOST, env: {}, out: (text) => lines.push(text), runner: gh.runner,
@@ -1988,13 +2433,14 @@ describe('the command', () => {
     expect(stopped).toEqual([5150])
     expect(lines.join('\n')).toContain('stopped 1 run it had started')
     expect(lines.join('\n')).toContain(`#7 (implement, claimed by ${HOST}:worker-ab12-7)`)
-    expect(readChildren(root)).toEqual([])
+    expect(readChildren(stateRoot)).toEqual([])
   })
 
   test('a record whose process is gone is dropped, never signalled', async () => {
     const lines: string[] = []
-    const stale = { pid: 5151, startedAt: 'Fri Sep 18 09:00:00 2026', command: 'claude', issue: 8, action: 'plan' as const, owner: null, from: 'planning' as const }
-    noteChild(root, stale)
+    const stateRoot = join(home, '.vegafactory', 'worker')
+    const stale = { repo: 'o/r', pid: 5151, startedAt: 'Fri Sep 18 09:00:00 2026', command: 'claude', issue: 8, action: 'plan' as const, owner: null, from: 'planning' as const }
+    noteChild(stateRoot, stale)
     const stopped: number[] = []
     const code = await runWorker(['disable'], {
       cwd: root, home, host: HOST, env: {}, out: (text) => lines.push(text), runner: gh.runner,
@@ -2006,7 +2452,25 @@ describe('the command', () => {
     expect(code).toBe(0)
     // Signalling it would have hit somebody else's process.
     expect(stopped).toEqual([])
-    expect(readChildren(root)).toEqual([])
+    expect(readChildren(stateRoot)).toEqual([])
+    expect(lines.join('\n')).not.toContain('stopped 1 run')
+  })
+
+  test('disable retains a child whose process identity is unknown and never signals it', async () => {
+    const stateRoot = join(home, '.vegafactory', 'worker')
+    const uncertain = { repo: 'o/r', pid: 5152, startedAt: 'unknown', command: 'claude', issue: 9, action: 'plan' as const, owner: null, from: 'planning' as const }
+    noteChild(stateRoot, uncertain)
+    const stopped: number[] = []
+    const lines: string[] = []
+    const code = await runWorker(['disable'], {
+      cwd: root, home, host: HOST, env: {}, out: (line) => lines.push(line), runner: gh.runner,
+      run: (() => ({ code: 0, stdout: '', stderr: '' })) as Probe,
+      start: () => null, alive: () => null,
+      stop: (pid) => { stopped.push(pid); return true },
+    })
+    expect(code).toBe(0)
+    expect(stopped).toEqual([])
+    expect(readChildren(stateRoot)).toEqual([uncertain])
     expect(lines.join('\n')).not.toContain('stopped 1 run')
   })
 
@@ -2147,9 +2611,9 @@ describe('the caps reach what they limit', () => {
     }
     const scratch = mkdtempSync(join(tmpdir(), 'vf-limit-'))
     // Built with the shipped default, then handed runs that carry the roster's own limit.
-    const step = defaultRunStep('', { PATH: '/usr/bin' }, { exec })
-    await step({ action: 'implement', number: 1, repo: 'o/r', split: false, by: null }, { root: scratch, timeoutMs: 72 * 3_600_000 })
-    await step({ action: 'implement', number: 2, repo: 'o/r', split: false, by: null }, { root: scratch, timeoutMs: 4 * 3_600_000 })
+    const step = defaultRunStep({ PATH: '/usr/bin' }, { exec })
+    await step({ action: 'implement', number: 1, repo: 'o/r', split: false, by: null }, { root: scratch, devMd: '', token: null, timeoutMs: 72 * 3_600_000 })
+    await step({ action: 'implement', number: 2, repo: 'o/r', split: false, by: null }, { root: scratch, devMd: '', token: null, timeoutMs: 4 * 3_600_000 })
     expect(seen).toEqual([72 * 3_600_000, 4 * 3_600_000])
   })
 

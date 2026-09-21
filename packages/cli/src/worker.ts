@@ -24,7 +24,7 @@ import { spawn, spawnSync } from 'node:child_process'
 import { createSign, randomUUID } from 'node:crypto'
 import { appendFileSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync } from 'node:fs'
 import { homedir, hostname, userInfo } from 'node:os'
-import { join, posix } from 'node:path'
+import { dirname, join, parse, posix, resolve, sep } from 'node:path'
 import { APP_ACTOR, APP_ID, HEARTBEAT_EVERY_MS, appIdentityConfig, claim, heartbeat, holderOf, machineName, nodeId, release, trustedFactory } from './claim.ts'
 import { defaultClonePath, factoryConfigPath, parseControlRoomKnob, readFactoryConfig, updateSettingsAtPath } from './control-room.ts'
 import { billingVariables, childEnvironment } from './env.ts'
@@ -39,7 +39,8 @@ import { defaultBranch } from './guard-rules.ts'
 import { stateOf, type State } from './labels.ts'
 import { effectiveUpdateMode, maintainSelfUpdate, type UpdateMode, type UpdateResult } from './self-update.ts'
 import { lintPlan, normalizeGroupPath, parseIndependentGroups, sharedByEveryChild } from '../../../skills/dev/dev-plan/scripts/plan-lint.mjs'
-import { appKeyPath as workerAppKey } from './home.ts'
+import { appKeyPath as workerAppKey, factoryHome, workerDirectory } from './home.ts'
+import { canonicalRepository } from './worker-repo.ts'
 
 // How often the board is read, how many steps run at once, and how long one step may take.
 export const POLL_MS = 2 * 60_000
@@ -826,30 +827,30 @@ export function serviceCommands(platform: NodeJS.Platform, path: string, verb: '
 export type Action = 'follow-up' | 'plan' | 'implement' | 'corrections' | 'ship' | 'stop' | 'none'
 export type Outcome = 'done' | 'blocked' | 'failed' | 'killed' | 'limit' | 'stopped'
 
-export interface RunRecord { at: string; issue: number; action: Action; outcome: Outcome; ms: number; machine: string; note: string }
+export interface RunRecord { at: string; repo: string; issue: number; action: Action; outcome: Outcome; ms: number; machine: string; note: string }
 export interface Acted { at: number; action: Action; outcome: Outcome; trigger: number | null; failures: number; retryAt: number | null }
 
 export const workerDir = (root: string) => join(root, '.vegastack', '.tmp', 'worker')
-export const childrenPath = (root: string) => join(workerDir(root), 'children.json')
-const runsPath = (root: string) => join(workerDir(root), 'runs.jsonl')
-const actedPath = (root: string) => join(workerDir(root), 'acted.json')
+export const childrenPath = (stateRoot: string) => join(stateRoot, 'children.json')
+const runsPath = (stateRoot: string) => join(stateRoot, 'runs.jsonl')
+const actedPath = (stateRoot: string) => join(stateRoot, 'acted.json')
 
 // The record is a working note on an always-on machine, so it is trimmed to the last RUNS_KEPT
 // rather than grown forever; the control room's statistics are where runs are kept for good.
 export const RUNS_KEPT = 500
 
-export function recordRun(root: string, record: RunRecord) {
-  mkdirSync(workerDir(root), { recursive: true })
-  appendFileSync(runsPath(root), JSON.stringify(record) + '\n')
+export function recordRun(stateRoot: string, record: RunRecord) {
+  mkdirSync(stateRoot, { recursive: true })
+  appendFileSync(runsPath(stateRoot), JSON.stringify(record) + '\n')
   try {
-    const lines = readFileSync(runsPath(root), 'utf8').split('\n').filter(Boolean)
-    if (lines.length > RUNS_KEPT * 2) replaceFile(runsPath(root), lines.slice(-RUNS_KEPT).join('\n') + '\n')
+    const lines = readFileSync(runsPath(stateRoot), 'utf8').split('\n').filter(Boolean)
+    if (lines.length > RUNS_KEPT * 2) replaceFile(runsPath(stateRoot), lines.slice(-RUNS_KEPT).join('\n') + '\n')
   } catch { /* the record is a note; failing to trim it is not worth a failed run */ }
 }
 
-export function readRuns(root: string, limit = 20): RunRecord[] {
+export function readRuns(stateRoot: string, limit = 20): RunRecord[] {
   let text = ''
-  try { text = readFileSync(runsPath(root), 'utf8') } catch { return [] }
+  try { text = readFileSync(runsPath(stateRoot), 'utf8') } catch { return [] }
   const rows: RunRecord[] = []
   for (const line of text.split('\n')) {
     if (!line.trim()) continue
@@ -858,22 +859,24 @@ export function readRuns(root: string, limit = 20): RunRecord[] {
   return rows.slice(-limit)
 }
 
-export function readActed(root: string): Record<string, Acted> {
+export function readActed(stateRoot: string): Record<string, Acted> {
   try {
-    const saved: unknown = JSON.parse(readFileSync(actedPath(root), 'utf8'))
+    const saved: unknown = JSON.parse(readFileSync(actedPath(stateRoot), 'utf8'))
     return saved && typeof saved === 'object' && !Array.isArray(saved) ? saved as Record<string, Acted> : {}
   } catch { return {} }
 }
 
-export function writeActed(root: string, acted: Record<string, Acted>) {
-  mkdirSync(workerDir(root), { recursive: true })
-  replaceFile(actedPath(root), JSON.stringify(acted, null, 2) + '\n')
+export function writeActed(stateRoot: string, acted: Record<string, Acted>) {
+  mkdirSync(stateRoot, { recursive: true })
+  replaceFile(actedPath(stateRoot), JSON.stringify(acted, null, 2) + '\n')
 }
 
 // A pid on its own is not an identity: pids are reused, and a record left behind by a crash would
 // have a later, unrelated process signalled in its place. The pair (pid, start time) is an
 // identity, and the start time is what the operating system says, not what we remember.
 export type ProcessStart = (pid: number) => string | null
+export type ProcessAlive = (pid: number) => boolean | null
+export type ProcessIdentity = 'matching' | 'gone' | 'unknown'
 
 export const processStart: ProcessStart = (pid) => {
   const result = spawnSync('ps', ['-p', String(pid), '-o', 'lstart='], { encoding: 'utf8', timeout: 10_000 })
@@ -881,11 +884,27 @@ export const processStart: ProcessStart = (pid) => {
   return result.status === 0 && line ? line : null
 }
 
+export const processAlive: ProcessAlive = (pid) => {
+  try { process.kill(pid, 0); return true } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code
+    if (code === 'ESRCH') return false
+    if (code === 'EPERM') return true
+    return null
+  }
+}
+
+export function processIdentity(record: { pid: number; startedAt: string }, start: ProcessStart = processStart, alive: ProcessAlive = processAlive): ProcessIdentity {
+  const observed = start(record.pid)
+  if (observed !== null) return observed === record.startedAt ? 'matching' : 'gone'
+  return alive(record.pid) === false ? 'gone' : 'unknown'
+}
+
 // The runs this machine has started, and enough about each to prove it is still that run and to
 // clean up after it. It is on disk because `worker disable` is a different process from the
 // service it takes down: without this, the service's agents would keep running and keep writing to
 // GitHub after the unit is gone.
 export interface ChildRecord {
+  repo: string
   pid: number
   // What `ps` said when the child started. Together with the pid this is the child's identity.
   startedAt: string
@@ -900,36 +919,35 @@ export interface ChildRecord {
 const isRecord = (value: unknown): value is ChildRecord => {
   const row = value as ChildRecord | null
   return !!row && typeof row === 'object' && Number.isSafeInteger(row.pid) && row.pid > 1
-    && typeof row.startedAt === 'string' && typeof row.command === 'string' && Number.isSafeInteger(row.issue)
+    && typeof row.repo === 'string' && typeof row.startedAt === 'string' && typeof row.command === 'string' && Number.isSafeInteger(row.issue)
 }
 
-export function readChildren(root: string): ChildRecord[] {
+export function readChildren(stateRoot: string): ChildRecord[] {
   try {
-    const saved: unknown = JSON.parse(readFileSync(childrenPath(root), 'utf8'))
+    const saved: unknown = JSON.parse(readFileSync(childrenPath(stateRoot), 'utf8'))
     return Array.isArray(saved) ? saved.filter(isRecord) : []
   } catch { return [] }
 }
 
-function writeChildren(root: string, change: (rows: ChildRecord[]) => ChildRecord[]) {
-  mkdirSync(workerDir(root), { recursive: true })
-  withLock(workerDir(root), () => {
-    replaceFile(childrenPath(root), JSON.stringify(change(readChildren(root)), null, 2) + '\n')
+function writeChildren(stateRoot: string, change: (rows: ChildRecord[]) => ChildRecord[]) {
+  mkdirSync(stateRoot, { recursive: true })
+  withLock(stateRoot, () => {
+    replaceFile(childrenPath(stateRoot), JSON.stringify(change(readChildren(stateRoot)), null, 2) + '\n')
   }, { what: 'the worker\'s children' })
 }
 
-export function noteChild(root: string, record: ChildRecord) {
-  writeChildren(root, (rows) => [...rows.filter((row) => row.pid !== record.pid), record])
+export function noteChild(stateRoot: string, record: ChildRecord) {
+  writeChildren(stateRoot, (rows) => [...rows.filter((row) => row.pid !== record.pid), record])
 }
 
 // Removed when the run ends, so the file is the live set and not a history.
-export function forgetChild(root: string, pid: number) {
-  writeChildren(root, (rows) => rows.filter((row) => row.pid !== pid))
+export function forgetChild(stateRoot: string, pid: number) {
+  writeChildren(stateRoot, (rows) => rows.filter((row) => row.pid !== pid))
 }
 
 // Whether the process this record named is still that process.
-export function stillTheChild(record: ChildRecord, start: ProcessStart = processStart): boolean {
-  const now = start(record.pid)
-  return now !== null && now === record.startedAt
+export function stillTheChild(record: ChildRecord, start: ProcessStart = processStart, alive: ProcessAlive = processAlive): boolean {
+  return processIdentity(record, start, alive) === 'matching'
 }
 
 // Stops a run and everything it started. The group is signalled, not the one process: an agent
@@ -945,24 +963,26 @@ export function stopGroup(pid: number, signal: NodeJS.Signals = 'SIGTERM'): bool
 
 // Signals a recorded run only while it is provably still that run. A stale record is dropped, not
 // signalled: after a pid is reused, the number alone would name somebody else's process.
-export function stopChild(root: string, record: ChildRecord, deps: { stop?: (pid: number, signal: NodeJS.Signals) => boolean; start?: ProcessStart } = {}): boolean {
-  if (!stillTheChild(record, deps.start ?? processStart)) {
-    forgetChild(root, record.pid)
+export function stopChild(stateRoot: string, record: ChildRecord, deps: { stop?: (pid: number, signal: NodeJS.Signals) => boolean; start?: ProcessStart; alive?: ProcessAlive } = {}): boolean {
+  const identity = processIdentity(record, deps.start ?? processStart, deps.alive ?? processAlive)
+  if (identity === 'unknown') return false
+  if (identity === 'gone') {
+    forgetChild(stateRoot, record.pid)
     return false
   }
   const stopped = (deps.stop ?? stopGroup)(record.pid, 'SIGTERM')
-  forgetChild(root, record.pid)
+  forgetChild(stateRoot, record.pid)
   return stopped
 }
 
 // Two steps finish at once, and an operator may run a pass by hand beside the service: the
 // read-modify-write takes the same lock the issue cache uses, so neither loses the other's entry.
-export function updateActed(root: string, change: (acted: Record<string, Acted>) => void) {
-  mkdirSync(workerDir(root), { recursive: true })
-  withLock(workerDir(root), () => {
-    const acted = readActed(root)
+export function updateActed(stateRoot: string, change: (acted: Record<string, Acted>) => void) {
+  mkdirSync(stateRoot, { recursive: true })
+  withLock(stateRoot, () => {
+    const acted = readActed(stateRoot)
     change(acted)
-    writeActed(root, acted)
+    writeActed(stateRoot, acted)
   }, { what: 'the worker\'s record' })
 }
 
@@ -970,29 +990,251 @@ export function updateActed(root: string, change: (acted: Record<string, Acted>)
 // claim and split the run budget in ways neither can see. The lock records the process that holds
 // it the same way a child record does, so a crashed worker's lock is taken over rather than
 // blocking the box for ever.
-export const runLockPath = (root: string) => join(workerDir(root), 'run.lock')
+export const runLockPath = (stateRoot: string) => join(stateRoot, 'run.lock')
 
 export interface RunLock { pid: number; startedAt: string; runId: string; at: string }
 
-export function takeRunLock(root: string, runId: string, start: ProcessStart = processStart): { ok: boolean; reason: string; held: RunLock | null } {
-  mkdirSync(workerDir(root), { recursive: true })
-  return withLock(workerDir(root), () => {
+export function takeRunLock(stateRoot: string, runId: string, start: ProcessStart = processStart, alive: ProcessAlive = processAlive): { ok: boolean; reason: string; held: RunLock | null } {
+  mkdirSync(stateRoot, { recursive: true })
+  return withLock(stateRoot, () => {
     let held: RunLock | null = null
-    try { held = JSON.parse(readFileSync(runLockPath(root), 'utf8')) as RunLock } catch { held = null }
-    if (held && Number.isSafeInteger(held.pid) && held.pid !== process.pid && start(held.pid) === held.startedAt) {
-      return { ok: false, held, reason: `another worker is already running on this machine (pid ${held.pid}, since ${held.at}) — stop it, or let it work` }
+    const path = runLockPath(stateRoot)
+    try { held = JSON.parse(readFileSync(path, 'utf8')) as RunLock } catch {
+      if (existsSync(path)) return { ok: false, held: null, reason: `the existing worker lock cannot be identified safely: ${path}` }
+      held = null
     }
+    if (held && Number.isSafeInteger(held.pid) && typeof held.startedAt === 'string') {
+      const identity = processIdentity(held, start, alive)
+      if (identity === 'unknown') return { ok: false, held, reason: `the worker lock belongs to pid ${held.pid}, whose identity cannot be proved — leave it in place and check that process` }
+      if (identity === 'matching' && held.pid !== process.pid) {
+        return { ok: false, held, reason: `another worker is already running on this machine (pid ${held.pid}, since ${held.at}) — stop it, or let it work` }
+      }
+    } else if (held) return { ok: false, held, reason: `the existing worker lock cannot be identified safely: ${path}` }
     const mine: RunLock = { pid: process.pid, startedAt: start(process.pid) ?? '', runId, at: new Date().toISOString() }
-    replaceFile(runLockPath(root), JSON.stringify(mine, null, 2) + '\n')
+    replaceFile(runLockPath(stateRoot), JSON.stringify(mine, null, 2) + '\n')
     return { ok: true, held: mine, reason: 'this machine\'s worker' }
   }, { what: 'the worker lock' })
 }
 
-export function releaseRunLock(root: string, runId: string) {
+export function releaseRunLock(stateRoot: string, runId: string) {
   try {
-    const held = JSON.parse(readFileSync(runLockPath(root), 'utf8')) as RunLock
-    if (held.runId === runId) rmSync(runLockPath(root), { force: true })
+    const held = JSON.parse(readFileSync(runLockPath(stateRoot), 'utf8')) as RunLock
+    if (held.runId === runId) rmSync(runLockPath(stateRoot), { force: true })
   } catch { /* nothing to give back */ }
+}
+
+export interface LegacyMigrationResult { ok: boolean; migrated: boolean; reason: string }
+
+function safeLegacyStateRoot(root: string, stateRoot: string): { ok: boolean; exists: boolean; reason: string } {
+  const expected = join(root, '.vegastack', '.tmp', 'worker')
+  if (resolve(root) !== root || stateRoot !== expected) return { ok: false, exists: false, reason: `the legacy worker path is not canonical: ${stateRoot}` }
+  const uid = process.getuid?.()
+  for (const path of [root, join(root, '.vegastack'), join(root, '.vegastack', '.tmp'), expected]) {
+    try {
+      const info = lstatSync(path)
+      if (!info.isDirectory() || info.isSymbolicLink()) return { ok: false, exists: true, reason: `refusing an unsafe legacy worker directory at ${path}` }
+      if (uid !== undefined && info.uid !== uid) return { ok: false, exists: true, reason: `refusing a legacy worker directory owned by uid ${info.uid}: ${path}` }
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return { ok: true, exists: false, reason: 'no legacy worker state' }
+      return { ok: false, exists: true, reason: `the legacy worker directory cannot be inspected at ${path}: ${(error as Error).message}` }
+    }
+  }
+  return { ok: true, exists: true, reason: 'safe legacy worker directory' }
+}
+
+function safeGlobalStateRoot(factoryRoot: string, stateRoot: string, create: boolean): { ok: boolean; reason: string } {
+  if (resolve(factoryRoot) !== factoryRoot || resolve(stateRoot) !== stateRoot || stateRoot !== join(factoryRoot, 'worker')) {
+    return { ok: false, reason: `the global worker path is outside its canonical factory home: ${stateRoot}` }
+  }
+  const uid = process.getuid?.()
+  const root = parse(stateRoot).root
+  let cursor = root
+  let productOwned = false
+  for (const part of stateRoot.slice(root.length).split(sep).filter(Boolean)) {
+    cursor = join(cursor, part)
+    productOwned ||= cursor === factoryRoot
+    try {
+      const info = lstatSync(cursor)
+      if (!info.isDirectory() || info.isSymbolicLink()) return { ok: false, reason: `refusing an unsafe global worker directory at ${cursor}` }
+      if (productOwned && uid !== undefined && info.uid !== uid) return { ok: false, reason: `refusing a global worker directory owned by uid ${info.uid}: ${cursor}` }
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') return { ok: false, reason: `the global worker directory cannot be inspected at ${cursor}: ${(error as Error).message}` }
+      if (!create) return { ok: false, reason: `the global worker directory disappeared during migration: ${cursor}` }
+      try { mkdirSync(cursor, { mode: 0o700 }) } catch (failure) { return { ok: false, reason: `the global worker directory cannot be created at ${cursor}: ${(failure as Error).message}` } }
+      productOwned = true
+      const made = lstatSync(cursor)
+      if (!made.isDirectory() || made.isSymbolicLink() || (uid !== undefined && made.uid !== uid)) return { ok: false, reason: `the created global worker directory is unsafe: ${cursor}` }
+    }
+  }
+  return { ok: true, reason: 'safe global worker directory' }
+}
+
+// Task 3 moved worker state from each checkout to one machine directory. Move only the four old
+// state files; logs deliberately stay where the old service wrote them. The merge is repeatable:
+// every global file lands atomically before any legacy source is removed, and a retry deduplicates
+// anything a crash already copied.
+export function migrateLegacyWorkerState(input: {
+  root: string
+  stateRoot: string
+  factoryRoot?: string
+  repo: string
+  start?: ProcessStart
+  alive?: ProcessAlive
+  afterWrite?: () => void
+}): LegacyMigrationResult {
+  const legacyRoot = workerDir(input.root)
+  const factoryRoot = input.factoryRoot ?? dirname(input.stateRoot)
+  const globalPreflight = safeGlobalStateRoot(factoryRoot, input.stateRoot, true)
+  if (!globalPreflight.ok) return { ok: false, migrated: false, reason: globalPreflight.reason }
+  const legacyPreflight = safeLegacyStateRoot(input.root, legacyRoot)
+  if (!legacyPreflight.ok) return { ok: false, migrated: false, reason: legacyPreflight.reason }
+  if (legacyRoot === input.stateRoot) return { ok: true, migrated: false, reason: 'worker state is already global' }
+  if (!legacyPreflight.exists) return { ok: true, migrated: false, reason: legacyPreflight.reason }
+  const names = ['acted.json', 'runs.jsonl', 'children.json', 'run.lock'] as const
+  const namedExists = (path: string) => {
+    try { lstatSync(path); return true } catch (error) { return (error as NodeJS.ErrnoException).code !== 'ENOENT' }
+  }
+  if (!names.some((name) => namedExists(join(legacyRoot, name)))) return { ok: true, migrated: false, reason: 'no legacy worker state' }
+  const repo = canonicalRepository(input.repo)
+  const start = input.start ?? processStart
+  const alive = input.alive ?? processAlive
+  const ordered = [legacyRoot, input.stateRoot].sort()
+
+  return withLock(ordered[0]!, () => withLock(ordered[1]!, () => {
+    const legacyLocked = safeLegacyStateRoot(input.root, legacyRoot)
+    if (!legacyLocked.ok || !legacyLocked.exists) return { ok: false, migrated: false, reason: legacyLocked.reason }
+    const globalLocked = safeGlobalStateRoot(factoryRoot, input.stateRoot, false)
+    if (!globalLocked.ok) return { ok: false, migrated: false, reason: globalLocked.reason }
+    type Read<T> = { exists: boolean; value: T | null; error: string | null }
+    const regularText = (path: string): Read<string> => {
+      try {
+        const info = lstatSync(path)
+        if (!info.isFile() || info.isSymbolicLink()) return { exists: true, value: null, error: `${path} is not a regular file` }
+        return { exists: true, value: readFileSync(path, 'utf8'), error: null }
+      } catch (error) {
+        return (error as NodeJS.ErrnoException).code === 'ENOENT'
+          ? { exists: false, value: null, error: null }
+          : { exists: true, value: null, error: `${path} cannot be read: ${(error as Error).message}` }
+      }
+    }
+    const actions = new Set<Action>(['follow-up', 'plan', 'implement', 'corrections', 'ship', 'stop', 'none'])
+    const outcomes = new Set<Outcome>(['done', 'blocked', 'failed', 'killed', 'limit', 'stopped'])
+    const states = new Set<State>(['waiting-on-operator', 'planning', 'queued', 'in-progress', 'ready-to-ship'])
+    const actedFile = (path: string): Read<Record<string, Acted>> => {
+      const file = regularText(path)
+      if (!file.exists || file.error) return { exists: file.exists, value: null, error: file.error }
+      try {
+        const raw: unknown = JSON.parse(file.value!)
+        if (!raw || typeof raw !== 'object' || Array.isArray(raw)) throw new Error('top level is not an object')
+        for (const [key, value] of Object.entries(raw)) {
+          const row = value as Partial<Acted> | null
+          const match = /^(.*)#(\d+)$/.exec(key)
+          if (!match || !Number.isSafeInteger(Number(match[2])) || Number(match[2]) < 1 || !row || typeof row !== 'object' || !Number.isFinite(row.at)
+            || !actions.has(row.action as Action) || !outcomes.has(row.outcome as Outcome)
+            || !(row.trigger === null || Number.isSafeInteger(row.trigger)) || !Number.isSafeInteger(row.failures) || Number(row.failures) < 0
+            || !(row.retryAt === null || Number.isFinite(row.retryAt))) throw new Error(`invalid acted row ${JSON.stringify(key)}`)
+          canonicalRepository(match[1]!)
+        }
+        return { exists: true, value: raw as Record<string, Acted>, error: null }
+      } catch (error) { return { exists: true, value: null, error: `${path} is malformed: ${(error as Error).message}` } }
+    }
+    const runsFile = (path: string, fallback: string | null): Read<RunRecord[]> => {
+      const file = regularText(path)
+      if (!file.exists || file.error) return { exists: file.exists, value: null, error: file.error }
+      const rows: RunRecord[] = []
+      try {
+        for (const [index, line] of file.value!.split('\n').entries()) {
+          if (!line.trim()) continue
+          const raw = JSON.parse(line) as Partial<RunRecord>
+          const recordRepo = canonicalRepository(typeof raw.repo === 'string' ? raw.repo : fallback ?? '')
+          if (typeof raw.at !== 'string' || !Number.isSafeInteger(raw.issue) || Number(raw.issue) < 1
+            || !actions.has(raw.action as Action) || !outcomes.has(raw.outcome as Outcome) || !Number.isFinite(raw.ms)
+            || typeof raw.machine !== 'string' || typeof raw.note !== 'string') throw new Error(`invalid run row ${index + 1}`)
+          rows.push({ ...raw, repo: recordRepo } as RunRecord)
+        }
+        return { exists: true, value: rows, error: null }
+      } catch (error) { return { exists: true, value: null, error: `${path} is malformed: ${(error as Error).message}` } }
+    }
+    const childrenFile = (path: string, fallback: string | null): Read<ChildRecord[]> => {
+      const file = regularText(path)
+      if (!file.exists || file.error) return { exists: file.exists, value: null, error: file.error }
+      try {
+        const raw: unknown = JSON.parse(file.value!)
+        if (!Array.isArray(raw)) throw new Error('top level is not an array')
+        const rows = raw.map((value, index) => {
+          const row = value as Partial<ChildRecord>
+          if (!row || typeof row !== 'object' || !Number.isSafeInteger(row.pid) || Number(row.pid) <= 1
+            || typeof row.startedAt !== 'string' || typeof row.command !== 'string' || !Number.isSafeInteger(row.issue) || Number(row.issue) < 1
+            || !actions.has(row.action as Action) || !(row.owner === null || typeof row.owner === 'string') || !states.has(row.from as State)) {
+            throw new Error(`invalid child row ${index + 1}`)
+          }
+          return { ...row, repo: canonicalRepository(typeof row.repo === 'string' ? row.repo : fallback ?? '') } as ChildRecord
+        })
+        return { exists: true, value: rows, error: null }
+      } catch (error) { return { exists: true, value: null, error: `${path} is malformed: ${(error as Error).message}` } }
+    }
+    const lockFile = (path: string): Read<RunLock> => {
+      const file = regularText(path)
+      if (!file.exists || file.error) return { exists: file.exists, value: null, error: file.error }
+      try {
+        const row = JSON.parse(file.value!) as Partial<RunLock>
+        if (!row || typeof row !== 'object' || !Number.isSafeInteger(row.pid) || Number(row.pid) <= 1
+          || typeof row.startedAt !== 'string' || typeof row.runId !== 'string' || typeof row.at !== 'string') throw new Error('invalid lock row')
+        return { exists: true, value: row as RunLock, error: null }
+      } catch (error) { return { exists: true, value: null, error: `${path} is malformed: ${(error as Error).message}` } }
+    }
+
+    const legacy = {
+      acted: actedFile(actedPath(legacyRoot)), runs: runsFile(runsPath(legacyRoot), repo),
+      children: childrenFile(childrenPath(legacyRoot), repo), lock: lockFile(runLockPath(legacyRoot)),
+    }
+    const global = {
+      acted: actedFile(actedPath(input.stateRoot)), runs: runsFile(runsPath(input.stateRoot), null),
+      children: childrenFile(childrenPath(input.stateRoot), null), lock: lockFile(runLockPath(input.stateRoot)),
+    }
+    const failed = [...Object.values(legacy), ...Object.values(global)].find((read) => read.error)
+    if (failed) return { ok: false, migrated: false, reason: failed.error! }
+
+    if (legacy.lock.value) {
+      const identity = processIdentity(legacy.lock.value, start, alive)
+      if (identity !== 'gone') return {
+        ok: false, migrated: false,
+        reason: identity === 'matching'
+          ? `a legacy worker is still running (pid ${legacy.lock.value.pid}, since ${legacy.lock.value.at}) — stop it before moving worker state`
+          : `the legacy worker lock belongs to pid ${legacy.lock.value.pid}, whose identity cannot be proved — leave it in place and check that process`,
+      }
+    }
+    if (global.lock.value && global.lock.value.pid !== process.pid) {
+      const identity = processIdentity(global.lock.value, start, alive)
+      if (identity !== 'gone') return { ok: false, migrated: false, reason: `the global worker lock belongs to pid ${global.lock.value.pid}, whose identity cannot be proved safe for migration` }
+    }
+
+    const canonicalActed = (saved: Record<string, Acted>): Record<string, Acted> => {
+      const result: Record<string, Acted> = {}
+      for (const [key, value] of Object.entries(saved)) {
+        const match = /^(.*)#(\d+)$/.exec(key)!
+        const normalized = runKey({ repo: match[1]!, number: Number(match[2]) })
+        if (!result[normalized] || value.at > result[normalized]!.at) result[normalized] = value
+      }
+      return result
+    }
+    const globalActed = canonicalActed(global.acted.value ?? {})
+    for (const [key, value] of Object.entries(canonicalActed(legacy.acted.value ?? {}))) {
+      if (!globalActed[key] || value.at > globalActed[key]!.at) globalActed[key] = value
+    }
+    const runRows = [...(global.runs.value ?? []), ...(legacy.runs.value ?? [])]
+    const uniqueRuns = [...new Map(runRows.map((row) => [JSON.stringify(row), row])).values()].slice(-RUNS_KEPT)
+    const childRows = [...(global.children.value ?? []), ...(legacy.children.value ?? [])]
+    const uniqueChildren = [...new Map(childRows.map((row) => [`${row.repo}#${row.issue}:${row.pid}:${row.startedAt}`, row])).values()]
+
+    mkdirSync(input.stateRoot, { recursive: true })
+    if (legacy.acted.exists) replaceFile(actedPath(input.stateRoot), JSON.stringify(globalActed, null, 2) + '\n')
+    if (legacy.runs.exists) replaceFile(runsPath(input.stateRoot), uniqueRuns.map((row) => JSON.stringify(row)).join('\n') + (uniqueRuns.length ? '\n' : ''))
+    if (legacy.children.exists) replaceFile(childrenPath(input.stateRoot), JSON.stringify(uniqueChildren, null, 2) + '\n')
+    input.afterWrite?.()
+    for (const name of names) if (existsSync(join(legacyRoot, name))) rmSync(join(legacyRoot, name), { force: true })
+    return { ok: true, migrated: true, reason: `migrated legacy worker state for ${repo}` }
+  }, { what: 'the global worker state migration' }), { what: 'the legacy worker state migration' })
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -1173,9 +1415,14 @@ export function overlaps(a: string, b: string): boolean {
   return b.endsWith('/') && a.startsWith(b)
 }
 
-export interface Candidate { number: number; action: Action; parent: number | null; files: string[]; from: State }
+export interface Candidate { repo: string; number: number; action: Action; parent: number | null; files: string[]; from: State }
+
+export function runKey(value: { repo: string; number: number }): string {
+  return `${canonicalRepository(value.repo)}#${value.number}`
+}
 
 const CODE: Action[] = ['implement', 'corrections']
+const sameRepository = (a: Candidate, b: Candidate) => canonicalRepository(a.repo) === canonicalRepository(b.repo)
 
 // The steps that may start now, in board order. One run per issue; at most `max` at once; one
 // merge at a time, because merges go through the queue one by one; and two code runs together
@@ -1185,9 +1432,9 @@ export function schedule(candidates: Candidate[], running: Candidate[] = [], max
   const chosen: Candidate[] = []
   for (const candidate of candidates) {
     if (picked.length >= max) break
-    if (picked.some((other) => other.number === candidate.number)) continue
-    if (candidate.action === 'ship' && picked.some((other) => other.action === 'ship')) continue
-    if (CODE.includes(candidate.action) && !picked.filter((other) => CODE.includes(other.action)).every((other) => disjointSiblings(candidate, other))) continue
+    if (picked.some((other) => runKey(other) === runKey(candidate))) continue
+    if (candidate.action === 'ship' && picked.some((other) => sameRepository(other, candidate) && other.action === 'ship')) continue
+    if (CODE.includes(candidate.action) && !picked.filter((other) => sameRepository(other, candidate) && CODE.includes(other.action)).every((other) => disjointSiblings(candidate, other))) continue
     picked.push(candidate)
     chosen.push(candidate)
   }
@@ -1229,7 +1476,7 @@ export function filesFromParent(parentPlan: string | null, number: number): stri
 
 export interface Step { action: Action; number: number; repo: string; split: boolean; by: string | null }
 export interface StepResult { outcome: Outcome; note: string; ms: number }
-export type RunStep = (step: Step, context: { root: string; timeoutMs?: number; onStart?: (pid: number, command: string) => void }) => Promise<StepResult>
+export type RunStep = (step: Step, context: { root: string; devMd: string; token: string | null; timeoutMs?: number; onStart?: (pid: number, command: string) => void }) => Promise<StepResult>
 
 // A run that stopped because the subscription said "enough for now". Each tool words it its own
 // way, and each of these is a limit, not a failure of the work.
@@ -1390,10 +1637,10 @@ export function childRunEnvironment(env: NodeJS.ProcessEnv, token: string | null
   return child
 }
 
-export function defaultRunStep(devMd: string, env: NodeJS.ProcessEnv, { exec = execTool, timeoutMs = STEP_TIMEOUT_MS, token = () => null as string | null } = {}): RunStep {
+export function defaultRunStep(env: NodeJS.ProcessEnv, { exec = execTool, timeoutMs = STEP_TIMEOUT_MS } = {}): RunStep {
   return async (step, context) => {
     const started = Date.now()
-    const policy = stagePolicy(devMd, STAGE_OF[step.action] ?? 'implement')
+    const policy = stagePolicy(context.devMd, STAGE_OF[step.action] ?? 'implement')
     const { tool, args } = agentArgs(policy, stepPrompt(step))
     const cwd = workingDir(context.root, step.number) ?? context.root
     // Nobody is at the keyboard, so a round of questions goes to the issue and waits there for the
@@ -1401,7 +1648,7 @@ export function defaultRunStep(devMd: string, env: NodeJS.ProcessEnv, { exec = e
     // The limit arrives with the run rather than with the step function, so a roster change lands
     // on the next run instead of the next restart.
     const limit = context.timeoutMs ?? timeoutMs
-    const child = await exec(tool, args, { cwd, env: childRunEnvironment(env, token()), timeoutMs: limit, onStart: context.onStart })
+    const child = await exec(tool, args, { cwd, env: childRunEnvironment(env, context.token), timeoutMs: limit, onStart: context.onStart })
     const ms = Date.now() - started
     const text = `${child.stderr}\n${child.stdout}`
     if (child.timedOut) return { outcome: 'killed', note: `${tool} ran past the ${limit / 60_000}-minute step limit and was stopped`, ms }
@@ -1424,10 +1671,21 @@ export function board(repo: string, runner: GhRunner): GhIssue[] {
   return issues.filter((issue) => !issue.pull_request && stateOf(issue.labels.map((label) => (typeof label === 'string' ? label : label.name))).state !== null)
 }
 
-export interface PollDeps {
-  root: string
+export interface BoardContext {
+  key: string
   repo: string
+  root: string
+  identity: AppIdentity
   runner: GhRunner
+  devMd: string
+}
+
+export interface BoardRecord { repo: string; state: 'active' | 'dropping' }
+export interface WorkerState { schema: 1; boards: Record<string, BoardRecord> }
+
+export interface PollDeps {
+  stateRoot: string
+  boards: BoardContext[]
   // This worker process, so its claims are its own and no other process reads them as such.
   runId: string
   // The machine's own limits, from its roster row, re-read every pass.
@@ -1439,16 +1697,18 @@ export interface PollDeps {
   appActor?: string
   // Saves, pushes, releases and hands an issue back: the reason goes on the issue, and the state
   // label goes back to where the run picked it up.
-  standDown: (number: number, reason: string, restoreTo?: State) => string
+  standDown: (repo: string, number: number, reason: string, restoreTo?: State) => string
   // How a started run is ended: its whole process group, so the tools it spawned go with it.
   stop?: (pid: number, signal: NodeJS.Signals) => boolean
   // What the operating system says about a pid, which is half of a child's identity.
   start?: ProcessStart
+  // Whether a pid exists when its start time cannot be read; null means the identity is unknown.
+  alive?: ProcessAlive
   // An issue this pass knew had work and did not start: unreadable, or wanted but not reserved.
   // Those are deliberately swallowed so one bad issue does not cost the board its pass — but a
   // pass that left work behind has not shown the board is idle, and idle is the only state a
   // five-minute install may run in.
-  onWaiting?: (number: number, reason: string) => void
+  onWaiting?: (repo: string, number: number, reason: string) => void
 }
 
 // The steps this machine has started. It lives across polls, so the next pass two minutes later
@@ -1470,73 +1730,90 @@ export interface Inflight {
   // reporting the kill as a failure of the work.
   interrupt: Interrupt | null
 }
-export const drain = (inflight: Map<number, Inflight>) => Promise.all([...inflight.values()].map((run) => run.done))
+export const drain = (inflight: Map<string, Inflight>) => Promise.all([...inflight.values()].map((run) => run.done))
 
 // One pass over the board: read what changed, decide, and start what is safe to start now. The
 // steps run to their own end; this returns as soon as they are under way.
-export async function poll(deps: PollDeps, inflight: Map<number, Inflight> = new Map()): Promise<Candidate[]> {
-  const { root, repo, runner, now } = deps
+export async function poll(deps: PollDeps, inflight: Map<string, Inflight> = new Map()): Promise<Candidate[]> {
+  const { now } = deps
   // Last pass's finished runs, whose outcomes are now in `acted`: their slots and issues are free.
-  for (const [number, run] of inflight) if (run.settled) inflight.delete(number)
-  const permission = permissionLookup(repo, runner, { root })
-  const trusted = trustedFactory({ repo, runner, root, appActor: deps.appActor })
-  const acted = readActed(root)
-  const wanted: Array<{ candidate: Candidate; decision: Decision; key: string }> = []
-  const plans = new Map<number, string | null>()
-  // One issue nobody can read must not cost the board its pass, so everything per-issue is guarded.
-  for (const issue of board(repo, runner)) {
+  for (const [key, run] of inflight) if (run.settled) inflight.delete(key)
+  const acted = readActed(deps.stateRoot)
+  const wanted: Array<{ board: BoardContext; candidate: Candidate; decision: Decision; key: string }> = []
+  for (const selected of deps.boards) {
+    const { root, runner } = selected
+    const repo = canonicalRepository(selected.key)
+    if (canonicalRepository(selected.repo) !== repo) {
+      deps.out(`${repo}: board context repository does not match its canonical key`)
+      deps.onWaiting?.(repo, 0, 'board context repository does not match its canonical key')
+      continue
+    }
+    const permission = permissionLookup(repo, runner, { root })
+    const trusted = trustedFactory({ repo, runner, root, appActor: deps.appActor })
+    const plans = new Map<number, string | null>()
+    let issues: GhIssue[]
     try {
-      syncIssue({ root, repo, number: issue.number, runner })
-      const snap = snapshot(cacheDir(root, repo, issue.number))
-      const key = `${repo}#${issue.number}`
-      const held = !!holderOf(snap.state, snap.body, now(), trusted).holder
-      const decision = decide(snap, permission, { acted: acted[key] ?? null, now: now(), held, failures: deps.caps?.failures, appActor: deps.appActor })
-      if (decision.action === 'none') continue
-      // A fresh claim means someone — a person or another machine — is already on it.
-      if (decision.action !== 'stop' && held) {
-        deps.out(`#${issue.number}: skipped, a fresh claim holds it`)
-        continue
-      }
-      // The operator's word becomes a recorded ack, read back by the ship gate's own check. A word
-      // that does not survive that is spent here rather than re-relayed on every pass.
-      if (decision.action === 'ship') {
-        const confirmed = confirmShip({ root, repo, number: issue.number, runner, appActor: deps.appActor }, permission, { id: decision.trigger!, by: decision.by!, quote: decision.quote! })
-        if (!confirmed.ok) {
-          deps.out(`#${issue.number}: not shipping — ${confirmed.reason}`)
-          recordRun(root, { at: new Date(now()).toISOString(), issue: issue.number, action: 'ship', outcome: 'blocked', ms: 0, machine: deps.machine, note: tail(confirmed.reason) })
-          updateActed(root, (saved) => { saved[key] = { at: now(), action: 'ship', outcome: 'blocked', trigger: decision.trigger, failures: 0, retryAt: null } })
+      issues = board(repo, runner)
+    } catch (error) {
+      deps.out(`${repo}: board could not be read (${(error as Error).message})`)
+      deps.onWaiting?.(repo, 0, (error as Error).message)
+      continue
+    }
+    // One issue nobody can read must not cost its board or any sibling board the pass.
+    for (const issue of issues) {
+      try {
+        syncIssue({ root, repo, number: issue.number, runner })
+        const snap = snapshot(cacheDir(root, repo, issue.number))
+        const key = runKey({ repo, number: issue.number })
+        const held = !!holderOf(snap.state, snap.body, now(), trusted).holder
+        const decision = decide(snap, permission, { acted: acted[key] ?? null, now: now(), held, failures: deps.caps?.failures, appActor: deps.appActor })
+        if (decision.action === 'none') continue
+        if (decision.action !== 'stop' && held) {
+          deps.out(`${key}: skipped, a fresh claim holds it`)
           continue
         }
+        if (decision.action === 'ship') {
+          const confirmed = confirmShip({ root, repo, number: issue.number, runner, appActor: deps.appActor }, permission, { id: decision.trigger!, by: decision.by!, quote: decision.quote! })
+          if (!confirmed.ok) {
+            deps.out(`${key}: not shipping — ${confirmed.reason}`)
+            recordRun(deps.stateRoot, { at: new Date(now()).toISOString(), repo, issue: issue.number, action: 'ship', outcome: 'blocked', ms: 0, machine: deps.machine, note: tail(confirmed.reason) })
+            updateActed(deps.stateRoot, (saved) => { saved[key] = { at: now(), action: 'ship', outcome: 'blocked', trigger: decision.trigger, failures: 0, retryAt: null } })
+            continue
+          }
+        }
+        const parent = snap.state.issue!.parent
+        if (parent !== null && !plans.has(parent)) plans.set(parent, parentPlan(root, repo, parent, runner, permission, deps.appActor))
+        const files = parent === null ? [] : filesFromParent(plans.get(parent) ?? null, issue.number)
+        wanted.push({ board: selected, key, decision, candidate: { repo, number: issue.number, action: decision.action, parent, files, from: stateOf(snap.state.issue!.labels).state! } })
+      } catch (error) {
+        deps.out(`${repo}#${issue.number}: could not be read (${(error as Error).message})`)
+        deps.onWaiting?.(repo, issue.number, (error as Error).message)
       }
-      const parent = snap.state.issue!.parent
-      if (parent !== null && !plans.has(parent)) plans.set(parent, parentPlan(root, repo, parent, runner, permission, deps.appActor))
-      const files = parent === null ? [] : filesFromParent(plans.get(parent) ?? null, issue.number)
-      wanted.push({ key, decision, candidate: { number: issue.number, action: decision.action, parent, files, from: stateOf(snap.state.issue!.labels).state! } })
-    } catch (error) {
-      deps.out(`#${issue.number}: could not be read (${(error as Error).message})`)
-      deps.onWaiting?.(issue.number, (error as Error).message)
     }
   }
 
   // An operator's stop for a run that is already going cannot wait for a slot: scheduling would
   // skip the issue because it is running, and no other machine may release the claim this one
   // holds. So it is handled first — the run is ended, and its own settle hands the issue back.
-  const interrupted: number[] = []
+  const interrupted = new Set<string>()
   for (const item of wanted) {
-    const run = inflight.get(item.candidate.number)
+    const key = runKey(item.candidate)
+    const run = inflight.get(key)
     if (item.decision.action !== 'stop' || !run || run.settled) continue
-    deps.out(`#${item.candidate.number}: ${item.decision.reason} — stopping the ${run.candidate.action} run`)
+    deps.out(`${key}: ${item.decision.reason} — stopping the ${run.candidate.action} run`)
     run.interrupt = { reason: item.decision.reason, action: 'stop', trigger: item.decision.trigger, consumes: true }
     run.stop()
     await run.done
-    inflight.delete(item.candidate.number)
-    interrupted.push(item.candidate.number)
+    inflight.delete(key)
+    interrupted.add(key)
   }
 
   const started: Candidate[] = []
-  const queue = wanted.filter((item) => !interrupted.includes(item.candidate.number))
+  const queue = wanted.filter((item) => !interrupted.has(runKey(item.candidate)))
   for (const candidate of schedule(queue.map((item) => item.candidate), [...inflight.values()].map((run) => run.candidate), deps.caps?.runs ?? MAX_RUNS)) {
-    const item = queue.find((entry) => entry.candidate.number === candidate.number)!
+    const key = runKey(candidate)
+    const item = queue.find((entry) => runKey(entry.candidate) === key)!
+    const selected = item.board
     const at = now()
     // Taken before the slot, so a second machine on the same board sees the work is taken. Losing
     // the race is not a failure: the issue is simply someone else's this pass. A stop takes no
@@ -1544,25 +1821,25 @@ export async function poll(deps: PollDeps, inflight: Map<number, Inflight> = new
     // refuse, and standing down is what releases that holder.
     const taken = candidate.action === 'stop'
       ? { ok: true, owner: '', reason: 'a stop takes no claim' }
-      : reserve({ root, repo, number: candidate.number, runner, appActor: deps.appActor }, deps.machine, deps.runId, candidate.action, at)
+      : reserve({ root: selected.root, repo: candidate.repo, number: candidate.number, runner: selected.runner, appActor: deps.appActor }, deps.machine, deps.runId, candidate.action, at)
     if (!taken.ok) {
-      deps.out(`#${candidate.number}: not started — ${taken.reason}`)
+      deps.out(`${key}: not started — ${taken.reason}`)
       // Known work this pass did not start. Another machine may have it, or the claim may have
       // failed — either way this board is not idle, and an idle board is what lets a five-minute
       // install begin.
-      deps.onWaiting?.(candidate.number, taken.reason)
+      deps.onWaiting?.(candidate.repo, candidate.number, taken.reason)
       continue
     }
     const run: Inflight = { candidate, started: at, settled: false, stop: () => {}, interrupt: null, done: Promise.resolve() as unknown as Promise<RunRecord> }
-    run.done = runOne(deps, candidate, item, at, taken.owner, run).then((record) => { run.settled = true; return record })
-    inflight.set(candidate.number, run)
+    run.done = runOne(deps, selected, candidate, item, at, taken.owner, run).then((record) => { run.settled = true; return record })
+    inflight.set(key, run)
     started.push(candidate)
   }
   // Wanted, but there was no slot for it this pass.
   for (const item of queue) {
-    if (started.some((candidate) => candidate.number === item.candidate.number)) continue
-    if (interrupted.includes(item.candidate.number)) continue
-    deps.onWaiting?.(item.candidate.number, 'no free slot this pass')
+    if (started.some((candidate) => runKey(candidate) === runKey(item.candidate))) continue
+    if (interrupted.has(runKey(item.candidate))) continue
+    deps.onWaiting?.(item.candidate.repo, item.candidate.number, 'no free slot this pass')
   }
   return started
 }
@@ -1597,8 +1874,8 @@ export function reserve(ctx: { root: string; repo: string; number: number; runne
 
 // One step and everything that follows it. Nothing here may reject: the loop does not await these
 // promises, so a rejection nobody handles would take the whole worker down.
-async function runOne(deps: PollDeps, candidate: Candidate, item: { key: string; decision: Decision }, at: number, held: string | null, run: Inflight): Promise<RunRecord> {
-  const claimCtx = { root: deps.root, repo: deps.repo, number: candidate.number, runner: deps.runner, appActor: deps.appActor }
+async function runOne(deps: PollDeps, selected: BoardContext, candidate: Candidate, item: { key: string; decision: Decision }, at: number, held: string | null, run: Inflight): Promise<RunRecord> {
+  const claimCtx = { root: selected.root, repo: candidate.repo, number: candidate.number, runner: selected.runner, appActor: deps.appActor }
   // What the step started, filled in from its own callback, so the finally can forget it.
   const started: ChildRecord[] = []
   // While this machine holds the claim it says so, on the same schedule a session's hooks use.
@@ -1608,7 +1885,7 @@ async function runOne(deps: PollDeps, candidate: Candidate, item: { key: string;
   try {
     if (candidate.action === 'stop') {
       // A stop needs no agent: it is this machine giving the issue back.
-      result = { outcome: 'stopped', note: deps.standDown(candidate.number, item.decision.reason, candidate.from), ms: 0 }
+      result = { outcome: 'stopped', note: deps.standDown(candidate.repo, candidate.number, item.decision.reason, candidate.from), ms: 0 }
     } else {
       // The agent claims for itself from inside its own worktree, so this machine's reservation
       // steps aside first — holding both would stop the run it just started.
@@ -1616,17 +1893,19 @@ async function runOne(deps: PollDeps, candidate: Candidate, item: { key: string;
         if (beat) clearInterval(beat)
         try { release(claimCtx, held, deps.appActor ?? APP_ACTOR, 'handing the issue to the run this machine just started') } catch { /* the run still starts */ }
       }
-      result = await deps.runStep({ action: candidate.action, number: candidate.number, repo: deps.repo, split: item.decision.split, by: item.decision.by }, {
-        root: deps.root,
+      result = await deps.runStep({ action: candidate.action, number: candidate.number, repo: candidate.repo, split: item.decision.split, by: item.decision.by }, {
+        root: selected.root,
+        devMd: selected.devMd,
+        token: selected.identity.token(),
         timeoutMs: deps.caps?.stepMs ?? STEP_TIMEOUT_MS,
         onStart: (pid, command) => {
           const record: ChildRecord = {
-            pid, command, startedAt: (deps.start ?? processStart)(pid) ?? '', issue: candidate.number,
+            repo: candidate.repo, pid, command, startedAt: (deps.start ?? processStart)(pid) ?? '', issue: candidate.number,
             action: candidate.action, owner: held, from: candidate.from,
           }
           started.push(record)
-          run.stop = () => { stopChild(deps.root, record, { stop: deps.stop, start: deps.start }) }
-          try { noteChild(deps.root, record) } catch { /* the run still stops from here */ }
+          run.stop = () => { stopChild(deps.stateRoot, record, { stop: deps.stop, start: deps.start, alive: deps.alive }) }
+          try { noteChild(deps.stateRoot, record) } catch { /* the run still stops from here */ }
         },
       })
     }
@@ -1636,7 +1915,7 @@ async function runOne(deps: PollDeps, candidate: Candidate, item: { key: string;
     if (beat) clearInterval(beat)
     run.stop = () => {}
     // The record is the live set, so it goes the moment the run does.
-    for (const record of started) { try { forgetChild(deps.root, record.pid) } catch { /* the next sweep drops it */ } }
+    for (const record of started) { try { forgetChild(deps.stateRoot, record.pid) } catch { /* the next sweep drops it */ } }
   }
   // Whatever happened, this machine's own reservation goes back. A step that stood the issue down
   // has already released the session's claim; this releases the one taken before the launch.
@@ -1651,8 +1930,8 @@ async function runOne(deps: PollDeps, candidate: Candidate, item: { key: string;
   } catch (error) {
     // The record could not be written down. Say so rather than dying, and let the next pass decide
     // again: without a saved outcome this trigger simply looks unacted-on.
-    deps.out(`#${candidate.number} ${candidate.action} → ${result.outcome}, but the run could not be recorded: ${(error as Error).message}`)
-    return { at: new Date(at).toISOString(), issue: candidate.number, action: candidate.action, outcome: result.outcome, ms: result.ms, machine: deps.machine, note: tail(result.note) }
+    deps.out(`${runKey(candidate)} ${candidate.action} → ${result.outcome}, but the run could not be recorded: ${(error as Error).message}`)
+    return { at: new Date(at).toISOString(), repo: candidate.repo, issue: candidate.number, action: candidate.action, outcome: result.outcome, ms: result.ms, machine: deps.machine, note: tail(result.note) }
   }
 }
 
@@ -1665,10 +1944,10 @@ function settle(deps: PollDeps, candidate: Candidate, item: { key: string; decis
   const action = interrupt?.action ?? candidate.action
   const trigger = interrupt ? interrupt.trigger : item.decision.trigger
   const record: RunRecord = {
-    at: new Date(at).toISOString(), issue: candidate.number, action,
+    at: new Date(at).toISOString(), repo: candidate.repo, issue: candidate.number, action,
     outcome: result.outcome, ms: result.ms, machine: deps.machine, note: tail(result.note),
   }
-  recordRun(deps.root, record)
+  recordRun(deps.stateRoot, record)
   const ended = deps.now()
   let retryAt: number | null = null
   let failuresNow = 0
@@ -1677,13 +1956,13 @@ function settle(deps: PollDeps, candidate: Candidate, item: { key: string; decis
   // spent trigger here and the restored issue looks already-done to the next pass and to every
   // other machine, which is how an administrative stop turns into an issue nobody ever picks up.
   if (interrupt && !interrupt.consumes) {
-    deps.out(`#${record.issue} ${record.action} → ${record.outcome}${record.note ? ` (${record.note})` : ''}`)
+    deps.out(`${runKey({ repo: record.repo, number: record.issue })} ${record.action} → ${record.outcome}${record.note ? ` (${record.note})` : ''}`)
     if (result.outcome !== 'done' && !alreadyHandedBack) {
-      deps.standDown(candidate.number, `${interrupt.reason}; this machine has saved and released the issue`, candidate.from)
+      deps.standDown(candidate.repo, candidate.number, `${interrupt.reason}; this machine has saved and released the issue`, candidate.from)
     }
     return record
   }
-  updateActed(deps.root, (acted) => {
+  updateActed(deps.stateRoot, (acted) => {
     const previous = acted[item.key]
     const failed = result.outcome === 'failed' || result.outcome === 'killed'
     const failures = failed ? (previous && previous.action === action ? previous.failures : 0) + 1 : 0
@@ -1706,9 +1985,9 @@ function settle(deps: PollDeps, candidate: Candidate, item: { key: string; decis
     const why = interrupt ? interrupt.reason
       : result.outcome === 'limit' ? 'the subscription limit was reached'
         : `the ${candidate.action} run ${result.outcome === 'killed' ? 'ran past its time limit' : 'failed'}`
-    deps.standDown(candidate.number, `${why}; this machine has saved and released the issue${when}`, candidate.from)
+    deps.standDown(candidate.repo, candidate.number, `${why}; this machine has saved and released the issue${when}`, candidate.from)
   }
-  deps.out(`#${record.issue} ${record.action} → ${record.outcome}${record.note ? ` (${record.note})` : ''}`)
+  deps.out(`${runKey({ repo: record.repo, number: record.issue })} ${record.action} → ${record.outcome}${record.note ? ` (${record.note})` : ''}`)
   return record
 }
 
@@ -1961,6 +2240,7 @@ export interface CliDeps {
   git?: (clone: string) => GitRun
   stop?: (pid: number, signal: NodeJS.Signals) => boolean
   start?: ProcessStart
+  alive?: ProcessAlive
   now?: () => number
   sleep?: (ms: number) => Promise<void>
   cli?: string[]
@@ -1980,6 +2260,9 @@ export async function runWorker(argv: string[], deps: CliDeps = {}): Promise<num
   const cwd = deps.cwd ?? process.cwd()
   const env = deps.env ?? process.env
   const home = deps.home ?? homedir()
+  const homeOptions = { home, env }
+  const factoryRoot = factoryHome(homeOptions)
+  const stateRoot = workerDirectory(homeOptions)
   const host = deps.host ?? hostname()
   const platform = deps.platform ?? process.platform
   const root = repoRoot(cwd)
@@ -2020,6 +2303,14 @@ export async function runWorker(argv: string[], deps: CliDeps = {}): Promise<num
   if (!listing.ok && args.verb !== 'disable') {
     print({ ok: false, machine, reason: listing.reason }, `refused: ${listing.reason}`)
     return 2
+  }
+
+  if (args.verb === 'run' || args.verb === 'status') {
+    const migration = migrateLegacyWorkerState({ root, stateRoot, factoryRoot, repo, start: deps.start, alive: deps.alive })
+    if (!migration.ok) {
+      print({ ok: false, reason: migration.reason }, `refused: ${migration.reason}`)
+      return 2
+    }
   }
 
   switch (args.verb) {
@@ -2084,11 +2375,13 @@ export async function runWorker(argv: string[], deps: CliDeps = {}): Promise<num
         const result = run(command[0]!, command.slice(1))
         if (result.code !== 0 && !/no such|not (?:find|loaded|exist)/i.test(result.stderr)) problems.push(`${command.join(' ')}: ${result.stderr.split('\n')[0] || `exit ${result.code}`}`)
       }
+      const migration = migrateLegacyWorkerState({ root, stateRoot, factoryRoot, repo, start: deps.start, alive: deps.alive })
+      if (!migration.ok) problems.push(migration.reason)
       // Taking the unit away does not reach the agents it started: they were detached on purpose,
       // so the service could be restarted without killing a build. Disabling is not a restart.
       // Each record is proved to still be its own process before anything is signalled.
-      const children = readChildren(root)
-      const stopped = children.filter((record) => stopChild(root, record, { stop: deps.stop, start: deps.start }))
+      const children = readChildren(stateRoot)
+      const stopped = children.filter((record) => stopChild(stateRoot, record, { stop: deps.stop, start: deps.start, alive: deps.alive }))
       rmSync(path, { force: true })
       const ended = stopped.length ? ` and stopped ${stopped.length} run${stopped.length === 1 ? '' : 's'} it had started` : ''
       // The stopped runs held claims and left their issues in-progress. This process has no App
@@ -2110,12 +2403,12 @@ export async function runWorker(argv: string[], deps: CliDeps = {}): Promise<num
         number: issue.number, title: issue.title, url: issue.html_url,
         state: stateOf(issue.labels.map((label) => (typeof label === 'string' ? label : label.name))).state!,
       }))
-      const runs = readRuns(root)
+      const runs = readRuns(stateRoot)
       const byState = new Map<string, number[]>()
       for (const row of rows) byState.set(row.state, [...(byState.get(row.state) ?? []), row.number])
       // An issue this machine has given up on is the one thing `status` must not leave out: it is
       // off the board as far as the worker is concerned until a person looks at it.
-      const parked = Object.entries(readActed(root))
+      const parked = Object.entries(readActed(stateRoot))
         .filter(([key, entry]) => entry.failures >= (listing.entry?.caps ?? DEFAULT_CAPS).failures && key.startsWith(`${repo}#`))
         .map(([key, entry]) => ({ issue: Number(key.slice(key.indexOf('#') + 1)), action: entry.action, failures: entry.failures }))
       // What this machine is allowed to do, in the words of the row that allows it, so "why is it
@@ -2136,7 +2429,7 @@ export async function runWorker(argv: string[], deps: CliDeps = {}): Promise<num
     case 'run': {
       // This process, named once: its claims carry it, and the lock below keeps it the only one.
       const runId = randomUUID().slice(0, 8)
-      const lock = takeRunLock(root, runId, deps.start ?? processStart)
+      const lock = takeRunLock(stateRoot, runId, deps.start ?? processStart, deps.alive ?? processAlive)
       if (!lock.ok) {
         print({ ok: false, reason: lock.reason }, `refused: ${lock.reason}`)
         return 2
@@ -2156,14 +2449,14 @@ export async function runWorker(argv: string[], deps: CliDeps = {}): Promise<num
       if (args.json && !args.once) {
         print({ ok: false, reason: '--json reports one pass; use it with --once' },
           'refused: --json reports one pass and answers when that pass ends — add --once, or drop --json and read the lines the loop prints')
-        releaseRunLock(root, runId)
+        releaseRunLock(stateRoot, runId)
         return 2
       }
       const notes: string[] = []
       const note = (text: string) => { if (args.json) notes.push(text); else out(text) }
       const finish = (code: number, runs: RunRecord[]) => {
         if (args.json) out(JSON.stringify({ machine, repo, runs, notes }, null, 2))
-        releaseRunLock(root, runId)
+        releaseRunLock(stateRoot, runId)
         return code
       }
       // The row that authorised this machine also says what it may do while working it.
@@ -2180,22 +2473,24 @@ export async function runWorker(argv: string[], deps: CliDeps = {}): Promise<num
       stepOutlivesToken(caps)
       // Counted per pass by `onWaiting`, which `poll` calls for every issue it left behind.
       let waiting = 0
+      const selectedIdentity: AppIdentity = identity ?? { runner, freshen: async () => {}, token: () => null }
       const pollDeps: PollDeps = {
-        root, repo, runner, machine, runId, caps, appActor: app.appActor, out: note, now: deps.now ?? Date.now,
-        runStep: deps.runStep ?? defaultRunStep(devMd, env, { token: () => identity?.token() ?? null }), stop: deps.stop, start: deps.start,
-        standDown: (number, reason, restoreTo) => standDown({ root, repo, number, runner, machine, appActor: app.appActor, restoreTo }, reason),
+        stateRoot, boards: [{ key: canonicalRepository(repo), repo: canonicalRepository(repo), root, identity: selectedIdentity, runner, devMd }],
+        machine, runId, caps, appActor: app.appActor, out: note, now: deps.now ?? Date.now,
+        runStep: deps.runStep ?? defaultRunStep(env), stop: deps.stop, start: deps.start, alive: deps.alive,
+        standDown: (_repo, number, reason, restoreTo) => standDown({ root, repo, number, runner, machine, appActor: app.appActor, restoreTo }, reason),
         onWaiting: () => { waiting += 1 },
       }
       // Started steps outlive the pass that began them, so the next pass keeps their slots and
       // still acts on the rest of the board — a twenty-minute build does not stop the poll.
-      const inflight = new Map<number, Inflight>()
+      const inflight = new Map<string, Inflight>()
       // Stopping means stopping: the agents this machine started are ended, their work saved and
       // their claims released. A worker that walked away leaving three agents writing to
       // GitHub would be worse than one that never started.
       const shutDown = async (why: string) => {
-        for (const [number, run] of inflight) {
+        for (const [key, run] of inflight) {
           if (run.settled) continue
-          note(`#${number} ${run.candidate.action} stopped: ${why}`)
+          note(`${key} ${run.candidate.action} stopped: ${why}`)
           run.interrupt = { reason: why, action: run.candidate.action, trigger: null, consumes: false }
           run.stop()
         }
