@@ -631,26 +631,41 @@ async function update(options: Options, quietWhenCurrent = false, includeMissing
 async function sweepRetired(options: Options, agents: Agent[], base: string): Promise<{ removed: number; kept: string[] }> {
   const { retiredIn } = await import('./selection.ts')
   const catalog = await skillCatalog()
-  const names = retiredIn({ skill: options.skill, group: options.group, all: options.all }, catalog)
+  const names = new Set(retiredIn({ skill: options.skill, group: options.group, all: options.all }, catalog))
+  const live = new Set(catalog.filter(entry => !entry.retired).map(entry => entry.name))
   const kept: string[] = []
-  const doomed: { name: string; agent: Agent; destination: string }[] = []
-  for (const name of names) {
-    for (const agent of agents) {
+  const doomed: { name: string; agent: Agent; destination: string; replacedBy?: string }[] = []
+  for (const agent of agents) {
+    // A group/all upgrade also sweeps installer-owned directories that no longer exist in the
+    // catalog. The receipt is the authority: hand-placed directories with no receipt are ignored,
+    // and locally edited installed copies are preserved unless --force is explicit.
+    if (!options.skill) {
+      const surface = join(base, surfaces[agent])
+      let entries: string[] = []
+      try { entries = (await readdir(surface, { withFileTypes: true })).filter(entry => entry.isDirectory()).map(entry => entry.name) }
+      catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error }
+      for (const name of entries) {
+        if (live.has(name) || names.has(name)) continue
+        const destination = join(surface, name)
+        const receipt = await readReceipt(destination)
+        if (receipt?.files) names.add(name)
+      }
+    }
+    for (const name of names) {
       const destination = join(base, surfaces[agent], name)
       if (!await exists(destination)) continue
       await assertNoSymlink(destination, false)
       const receipt = await readReceipt(destination)
+      if (!receipt?.files) continue
       const untouched = receipt?.files ? (await compare(destination, receipt.files)).status === 'verified' : false
-      if (untouched || options.force) doomed.push({ name, agent, destination })
+      if (untouched || options.force) doomed.push({ name, agent, destination, replacedBy: catalog.find(entry => entry.name === name)?.replacedBy })
       else kept.push(destination)
     }
   }
-  const replacement = (name: string) => catalog.find(entry => entry.name === name)?.replacedBy
   for (const target of doomed) {
-    const instead = replacement(target.name)
     if (options.dryRun) { console.log(`would remove retired ${target.agent}: ${target.destination}`); continue }
     await rm(target.destination, { recursive: true, force: true })
-    console.log(`removed retired ${target.agent}: ${target.destination}${instead ? ` (replaced by ${instead})` : ''}`)
+    console.log(`removed retired ${target.agent}: ${target.destination}${target.replacedBy ? ` (replaced by ${target.replacedBy})` : ''}`)
   }
   return { removed: options.dryRun ? 0 : doomed.length, kept }
 }

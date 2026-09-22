@@ -166,7 +166,7 @@ bun run check          # everything (the merge queue runs this)
 bun run build
 ```
 
-[CONTRIBUTING.md](CONTRIBUTING.md) has the repo layout, how to add a skill, the content-versioning rules, the no-generated-files policy and the scan's suppression discipline.
+[CONTRIBUTING.md](CONTRIBUTING.md) has the repo layout, how to add a skill, the content-versioning rules, and the no-generated-files policy.
 
 ## Contributing and support
 

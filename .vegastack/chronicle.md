@@ -424,7 +424,7 @@ The project's story, newest first: what got built, why, and how it went — for 
 - **What:** Session approval now requires a publisher in current operator policy. Another recorder can relay only an independently verified identical scoped grant, inheriting its authority and revocation history. Launch, preparation and research results retain the original source comment and body identity.
 - **Why:** An untrusted recorder could previously claim a configured operator’s words or reuse a quotation for changed scope. Missing source evidence must not become permission through a correction.
 - **How it went:** Eleven new regressions failed before the correction. Approval/preflight/CLI tests and focused provenance/cancellation checks now pass; actual managed-launch integration, broad checks, scan, evaluation and independent review remain pending at the shared checkpoint.
-- **Changed:** Trusted session attestations · exact grant relays · canonical source provenance · unavailable-source refusal · four approved scanner fingerprints.
+- **Changed:** Trusted session attestations · exact grant relays · canonical source provenance · unavailable-source refusal.
 - **Decisions:** none.
 
 — approved by (kmanojkumar) · built by codex · branch codex/productionization-133
@@ -483,8 +483,8 @@ The project's story, newest first: what got built, why, and how it went — for 
 
 - **What:** Release preparation now packs the dashboard first, embeds its exact identity in the CLI, verifies the retained pair in isolation and resumes partial publication through registry readback instead of rebuilding or guessing that an outage means a version is absent. Installed-runtime evidence binds every packaged CLI file and mode to the pair and its trusted source/tree.
 - **Why:** Publishing the CLI before its dashboard or rebuilding during recovery can strand first use and erase the byte identity that review approved; registry uncertainty must never become permission to republish or move `latest` backward.
-- **How it went:** Real process fixtures exercise preparation, retained-state recovery, a loopback registry, installed CLI/server smoke and per-package promotion readback. Review then caught a stale release-only scanner pin and lossy comparison of very large numeric prerelease identifiers; both now have focused regressions. The finalized pair is retained before publication and every required SBOM is bound, while exact current-pair generation, complete behavioral evaluation, platform qualification and actual publication remain separate gates.
-- **Changed:** Dashboard-first immutable packing · noncircular installed descriptor · full installed-file/mode verification · bounded registry readback and partial-publication recovery · serialized promotion · scanner/baseline pin binding · exact prerelease ordering.
+- **How it went:** Real process fixtures exercise preparation, retained-state recovery, a loopback registry, installed CLI/server smoke and per-package promotion readback. Review caught lossy comparison of very large numeric prerelease identifiers, which now has a focused regression. The finalized pair is retained before publication and every required SBOM is bound, while exact current-pair generation, complete behavioral evaluation, platform qualification and actual publication remain separate gates.
+- **Changed:** Dashboard-first immutable packing · noncircular installed descriptor · full installed-file/mode verification · bounded registry readback and partial-publication recovery · serialized promotion · exact prerelease ordering.
 - **Decisions:** none.
 
 — approved by (kmanojkumar) · built by codex · branch codex/productionization-133

@@ -66,9 +66,9 @@ const unknownRepoOnly = repoOnly.filter(name => !skillPaths.has(name))
 if (unknownRepoOnly.length) throw new Error(`repo-only.json names skills that do not exist: ${unknownRepoOnly.join(', ')}`)
 const repoOnlySet = new Set(repoOnly)
 
-// Skills this bundle used to ship. Dropping a name from packaging.json stops shipping it but
-// never removes the copy already on someone's machine, so each retirement leaves a tombstone:
-// enough for `update` to sweep an installer-owned copy and for `remove <name>` to still work.
+// Named tombstones preserve replacement guidance and allow explicit removal by the old name.
+// Group/all upgrades also sweep receipt-owned directories absent from the live catalog, so a
+// removed capability does not need a permanent compatibility entry merely to clean old installs.
 // A name that is both retired and still packaged is a contradiction the build refuses.
 const retiredPath = join(packageRoot, 'retired.json')
 let retired = {}
