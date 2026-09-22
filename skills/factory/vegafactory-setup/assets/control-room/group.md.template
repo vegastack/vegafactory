@@ -1,6 +1,6 @@
 # {{group}} — group defaults
 
-One default for every knob a group can decide for a repo's `.vegastack/dev.md` — the per-repo facts (`repo:`, `skill-scan:`, `board:`, `control-room:`) stay in the repo — so a repo that answers nothing else still gets a complete profile. A repo's own line beats every line here; this file beats `org.md`, except a line `org.md` marks `# locked`. Precedence and the read path: the vegafactory-setup skill's `references/control-room.md`.
+One default for every knob a group can decide for a repo's `.vegastack/dev.md` — the per-repo facts (`repo:`, `board:`, `control-room:`) stay in the repo — so a repo that answers nothing else still gets a complete profile. A repo's own line beats every line here; this file beats `org.md`, except a line `org.md` marks `# locked`. Precedence and the read path: the vegafactory-setup skill's `references/control-room.md`.
 
 ## Knobs
 

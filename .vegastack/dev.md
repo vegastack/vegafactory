@@ -13,9 +13,7 @@ harnesses: claude 2.1.263 · codex 0.153.4   # detected 18-09-2026; a dev-setup 
 harness-policy: intake claude default high · plan claude default high · implement claude default high · review codex default xhigh · status claude default medium · chronicle claude default medium   # `<stage> <agent> default|<model id> <effort>`; `default` pins no model (the tool's own); a pinned id must be one this account can actually use, or the run fails. Raise planning to xhigh for a risky medium issue. Edit this line, never a skill; the flags each value becomes are in dev-setup's references/harness-facts.md
 ui-evidence: none           # no UI in this repo
 tests: required             # scripts' deterministic branches; prose quality bar is the behavioral eval
-skillspector-update: auto   # off | notify | auto — the CLI self-installs and self-upgrades through whatever channel holds it (uv here); a failed update falls back to the installed copy
 vegafactory-update: auto    # off | notify | auto — session starts check npm; auto updates attended sessions in the background and idle dispatchers between passes, notify only reports, off makes no check
-skill-scan: packages/cli/skill   # the BUILT bundle — authored skills/ carries unpackaged tests/ fixtures that are deliberately adversarial and score higher than anything shipped; suppressions in .vegastack/skillspector-baseline.json
 merge: squash               # one commit per issue on main, matching the branch protection
 branch: <type>/<slug>       # type: feat | fix | docs | chore | refactor — the only place this list lives
 worktree-include: .claude/settings.json      # the Claude hook wiring is gitignored, so each worktree needs its own copy; .codex/hooks.json is tracked and needs none
@@ -53,13 +51,12 @@ Line prefixes: `auto:` (agent just does it) · `ask:` (operator's word first) ·
 
 ## Verify — how to see it working (pre-merge)
 
-- Checks run once each: the commit-msg hook runs `bun run check:fast` (skipped for `wip:` checkpoints) (validators + lint + typecheck, ~5 s); while building run `bun run test:affected` (only tests the change can reach); the merge queue runs the full `bun run check` plus build, pack smoke and skill scan. Use `./` paths with `bun test` — a bare word is a path filter
+- Checks run once each: the commit-msg hook runs `bun run check:fast` (skipped for `wip:` checkpoints) (validators + lint + typecheck, ~5 s); while building run `bun run test:affected` (only tests the change can reach); the merge queue runs the full `bun run check` plus build and pack smoke. Use `./` paths with `bun test` — a bare word is a path filter
 - `vegafactory worktree status` reconciles the worktrees against open issues before a hand-back: orphan directories, worktrees with no open issue, open issues with no checkout
-- The skill scan runs in the merge queue on the built bundle. To investigate a finding locally (needs Python 3.12 + SkillSpector): `bun run build && node skills/skills-tooling/skill-scan/scripts/skill-scan.mjs --json`; `.vegastack/skillspector-baseline.json` is picked up by convention, and a new suppression needs the operator's word, never a widened rule
 
 ## Environments
 
-- Pull-request and merge-queue CI is one GitHub-hosted `ubuntu-latest` job, `check (node 24)`: fast checks and affected tests on a PR, and on the queue the full suite, the build, the pack smoke and the skill scan — everything once, on main plus the PR. Fork workflows need a maintainer's approval
+- Pull-request and merge-queue CI is one GitHub-hosted `ubuntu-latest` job, `check (node 24)`: fast checks and affected tests on a PR, and on the queue the full suite, the build and the pack smoke — everything once, on main plus the PR. Fork workflows need a maintainer's approval
 - main is protected: PRs only, squash merges only, no force-push or deletion, linear history, conversation resolution, admins included; `check (node 24)` is the one required check, not strict, because the queue tests main + the PR instead
 - The tag-triggered Release workflow is GitHub-hosted too: it packs, smokes the tarball, publishes to npm with trusted publishing and provenance — no token anywhere — waits for the registry, smokes the published version and writes the GitHub release. `vegafactory ship release <n>` creates the tag that starts it; raw `git tag` and tag pushes still ask
 - The Mac mini org runners (`vsk-runners-mac-mini`) serve only trusted jobs — today the board mirror. Self-hosted runners reuse one work directory, so a workflow that sparse-checks-out must check out into its own `path:`

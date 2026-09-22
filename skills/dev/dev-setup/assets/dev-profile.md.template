@@ -14,8 +14,6 @@ harness-policy: intake {{intake-harness}} {{intake-model}} {{intake-effort}} · 
 ui-evidence: playwright     # playwright | none
 evidence-repo: {{owner}}/dev-review-evidence   # shared across projects; this project's folder = repo name; delete the line when ui-evidence is none
 tests: required             # required | logic-only | best-effort | none; a line the org marks locked cannot be answered differently here
-skill-scan: none            # one line only — directory holding the agent skills to scan (the BUILT one where a bundle is generated) | none. the skill-scan skill's guard reads this and refuses if a second line gives a different value
-skillspector-update: auto   # off | notify | auto — how the SkillSpector CLI itself is kept current. auto installs it when absent and upgrades it before each scan, falling back to the installed copy on any failure; notify only reports what upstream has published; off never touches the network. one line only, same as above
 vegafactory-update: auto    # off | notify | auto — session starts check npm; auto updates attended sessions in the background and idle workers between passes, notify only reports, off makes no check
 merge: squash
 branch: <type>/<issue>-<slug>   # type: feat | fix | docs | chore | refactor — the only place this list lives
