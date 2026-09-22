@@ -42,10 +42,11 @@ export function worktreeUsage(): string {
                                         slug and type come off the issue title unless given
   restore <issue> [--slug S]            re-add the checkout of the branch that carries the issue number
   remove <issue> [--force]              remove the directory once it is clean, pushed and merged
-  prune [--older-than 14d]              remove worktrees idle past retention; uncommitted work is
-                                        first committed as wip on the worktree's branch and pushed
+  prune [--older-than 14d] [--write]    preview reclaimable worktrees and dependencies; --write
+                                        performs the reported removals after every safety check
 
-Every verb acts; --dry-run shows what it would do. Branches are never deleted, and
+Create, restore and remove act; bare prune previews and only prune --write acts.
+--dry-run always previews. Branches are never deleted, and
 --force lifts only the "not merged" block — use it only on the operator's word.
 `
 }
@@ -58,7 +59,8 @@ export function parseWorktreeArgs(argv: string[], env: NodeJS.ProcessEnv = proce
   }
   const verb = head as WorktreeVerb
   const rest = argv.slice(1)
-  const args: WorktreeArgs = { verb, force: false, write: true, allRepos: false, json: false, workerLayout: env.VSK_WORKTREE_LAYOUT === 'worker' }
+  const args: WorktreeArgs = { verb, force: false, write: verb !== 'prune', allRepos: false, json: false, workerLayout: env.VSK_WORKTREE_LAYOUT === 'worker' }
+  let dryRun = false
   while (rest.length) {
     const token = rest.shift()!
     if (!token.startsWith('-')) {
@@ -68,7 +70,11 @@ export function parseWorktreeArgs(argv: string[], env: NodeJS.ProcessEnv = proce
       continue
     }
     if (token === '--force') args.force = true
-    else if (token === '--dry-run') args.write = false
+    else if (token === '--dry-run') { dryRun = true; args.write = false }
+    else if (token === '--write') {
+      if (verb !== 'prune') throw new Error('--write only applies to worktree prune')
+      args.write = true
+    }
     else if (token === '--all-repos') args.allRepos = true
     else if (token === '--json') args.json = true
     else if (token === '--older-than') args.olderThan = requireValue(token, rest.shift())
@@ -76,6 +82,7 @@ export function parseWorktreeArgs(argv: string[], env: NodeJS.ProcessEnv = proce
     else if (token === '--type') args.type = requireValue(token, rest.shift())
     else throw new Error(`Unknown option: ${token}`)
   }
+  if (dryRun) args.write = false
   if ((verb === 'create' || verb === 'restore' || verb === 'remove') && args.issue === undefined) {
     throw new Error(`worktree ${verb} needs an issue number`)
   }

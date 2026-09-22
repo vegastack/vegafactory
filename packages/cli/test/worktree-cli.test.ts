@@ -2,15 +2,20 @@ import { describe, expect, test } from 'bun:test'
 import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { parseWorktreeArgs, recordRepoRoot, runWorktree } from '../src/worktree.ts'
+import { parseWorktreeArgs, recordRepoRoot, runWorktree, scriptArgs } from '../src/worktree.ts'
 
 describe('parseWorktreeArgs', () => {
-  test('every verb acts by default and --dry-run previews', () => {
+  test('prune previews until --write, and --dry-run always wins', () => {
     expect(parseWorktreeArgs(['create', '106'])).toMatchObject({ verb: 'create', issue: 106, write: true })
     expect(parseWorktreeArgs(['remove', '106'])).toMatchObject({ verb: 'remove', issue: 106, write: true, force: false })
     expect(parseWorktreeArgs(['remove', '106', '--force', '--dry-run'])).toMatchObject({ force: true, write: false })
-    expect(parseWorktreeArgs(['prune', '--older-than', '7d'])).toMatchObject({ verb: 'prune', olderThan: '7d', write: true })
-    expect(() => parseWorktreeArgs(['remove', '106', '--write'])).toThrow('Unknown option: --write')
+    expect(parseWorktreeArgs(['prune', '--older-than', '7d'])).toMatchObject({ verb: 'prune', olderThan: '7d', write: false })
+    expect(parseWorktreeArgs(['prune', '--write'])).toMatchObject({ verb: 'prune', write: true })
+    expect(parseWorktreeArgs(['prune', '--write', '--dry-run'])).toMatchObject({ verb: 'prune', write: false })
+    expect(parseWorktreeArgs(['prune', '--dry-run', '--write'])).toMatchObject({ verb: 'prune', write: false })
+    expect(scriptArgs(parseWorktreeArgs(['prune']))).not.toContain('--write')
+    expect(scriptArgs(parseWorktreeArgs(['prune', '--write']))).toContain('--write')
+    expect(() => parseWorktreeArgs(['remove', '106', '--write'])).toThrow('--write only applies to worktree prune')
     expect(parseWorktreeArgs(['list', '--all-repos'])).toMatchObject({ verb: 'list', allRepos: true })
     expect(parseWorktreeArgs(['create', '106'], { VSK_WORKTREE_LAYOUT: 'worker' })).toMatchObject({ workerLayout: true })
   })
@@ -42,6 +47,18 @@ describe('runWorktree', () => {
     expect(calls[0]).toEqual(['create', '--json', '--issue', '106', '--write'])
     expect(await runWorktree(['restore', '106'], { spawn, registryPath })).toBe(0)
     expect(calls[1]).toEqual(['restore', '--json', '--issue', '106', '--write'])
+  })
+  test('bare prune reaches the script as a preview and explicit write reaches it as a mutation', async () => {
+    const calls: string[][] = []
+    const spawn = (args: string[]) => {
+      calls.push(args)
+      return { status: 0, stdout: JSON.stringify({ guard: 'worktree', ok: true, blocks: [], warns: [], candidates: [] }) }
+    }
+    const registryPath = join(mkdtempSync(join(tmpdir(), 'vf-reg-')), 'worktree-roots.json')
+    expect(await runWorktree(['prune'], { spawn, registryPath })).toBe(0)
+    expect(calls[0]).not.toContain('--write')
+    expect(await runWorktree(['prune', '--write'], { spawn, registryPath })).toBe(0)
+    expect(calls[1]).toContain('--write')
   })
 })
 

@@ -313,11 +313,11 @@ describe('decisions', () => {
     }
   })
 
-  test('vegafactory worktree remove passes, remove --force and prune ask, git worktree remove asks', () => {
-    for (const command of ['vegafactory worktree remove 12 --force', 'vegafactory worktree remove --force=1 12', 'vegafactory worktree prune', 'vegafactory worktree prune --older-than 1d', 'bunx @vegastack/vegafactory worktree prune', 'vegafactory worktree remove $N --force', 'git worktree remove x', 'vegafactory worktree $VERB 12']) {
+  test('worktree prune asks only for an effective --write', () => {
+    for (const command of ['vegafactory worktree remove 12 --force', 'vegafactory worktree remove --force=1 12', 'vegafactory worktree prune --write', 'bunx @vegastack/vegafactory worktree prune --write', 'vegafactory worktree prune $FLAGS', 'vegafactory worktree remove $N --force', 'git worktree remove x', 'vegafactory worktree $VERB 12']) {
       expect(decide(command).decision, command).toBe('ask')
     }
-    for (const command of ['vegafactory worktree remove 12', 'vegafactory worktree prune --dry-run', 'vegafactory worktree list', 'vegafactory worktree create 12']) {
+    for (const command of ['vegafactory worktree remove 12', 'vegafactory worktree prune', 'vegafactory worktree prune --older-than 1d', 'vegafactory worktree prune --dry-run', 'vegafactory worktree prune --write --dry-run', 'vegafactory worktree prune --dry-run --write', 'vegafactory worktree list', 'vegafactory worktree create 12']) {
       expect(decide(command).decision, command).toBe('allow')
     }
   })
