@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, test } from 'bun:test'
-import { spawnSync } from 'node:child_process'
+import { spawn, spawnSync } from 'node:child_process'
 import { generateKeyPairSync } from 'node:crypto'
 import { appendFileSync, chmodSync, closeSync, existsSync, lstatSync, mkdirSync, mkdtempSync, openSync, readFileSync, readdirSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -17,12 +17,12 @@ import {
   forgetChild, gitIn, migrateLegacyWorkerState, noteChild, prepareWorkerStorage, readChildren, refreshRoster, releaseRunLock, reserve, runLockPath, stopChild, takeRunLock, updateActed, verifiedListing,
   recordRoomSha, updateModeFor,
   normalizeWorkerRepos, readWorkerState, reconcileBoards, workerProblemReporter,
-  WorkerRecordError,
+  trustedRecordOwner, WorkerRecordError,
   type Candidate, type Fetch, type GitRun, type Inflight, type PollDeps, type Probe, type RunStep, type StepResult,
 } from '../src/worker.ts'
 import type { GhRunner } from '../src/gh.ts'
 import { ackBody, artifactHash, permissionLookup, snapshot } from '../src/issue.ts'
-import { cacheDir, syncIssue } from '../src/issue-cache.ts'
+import { cacheDir, syncIssue, withLock } from '../src/issue-cache.ts'
 import { FakeGitHub } from './fake-github.ts'
 import { refuseAmbientHome } from './no-ambient-home.ts'
 
@@ -2171,6 +2171,93 @@ describe('machine-global runtime records fail closed', () => {
     for (const name of ['children.json', 'runs.jsonl', 'acted.json']) expect(lstatSync(join(stateRoot, name)).mode & 0o777).toBe(0o600)
     expect(lstatSync(stateRoot).mode & 0o777).toBe(0o700)
   })
+
+  test('fresh acted state creates its own private root and leaf', () => {
+    const base = realpathSync(mkdtempSync(join(tmpdir(), 'worker-fresh-acted-')))
+    const stateRoot = join(base, '.vegafactory', 'worker')
+    updateActed(stateRoot, rows => { rows['o/r#1'] = { at: 1, action: 'plan', outcome: 'done', trigger: null, failures: 0, retryAt: null } })
+    expect(readActed(stateRoot)['o/r#1']).toMatchObject({ action: 'plan', outcome: 'done' })
+    expect(lstatSync(stateRoot).mode & 0o777).toBe(0o700)
+    expect(lstatSync(join(stateRoot, 'acted.json')).mode & 0o777).toBe(0o600)
+  })
+
+  test('directory leaves, unsafe ancestors, writable leaves, and unreadable leaves fail by kind', () => {
+    {
+      const { stateRoot } = privateRoot()
+      mkdirSync(join(stateRoot, 'acted.json'))
+      try { readActed(stateRoot); throw new Error('expected directory refusal') }
+      catch (error) { expect(error).toBeInstanceOf(WorkerRecordError); expect((error as WorkerRecordError).kind).toBe('unsafe') }
+    }
+    {
+      const home = realpathSync(mkdtempSync(join(tmpdir(), 'worker-unsafe-ancestor-')))
+      const outside = realpathSync(mkdtempSync(join(tmpdir(), 'worker-outside-')))
+      mkdirSync(join(outside, 'worker'), { mode: 0o700 })
+      symlinkSync(outside, join(home, '.vegafactory'))
+      try { readChildren(join(home, '.vegafactory', 'worker')); throw new Error('expected ancestor refusal') }
+      catch (error) { expect(error).toBeInstanceOf(WorkerRecordError); expect((error as WorkerRecordError).kind).toBe('unsafe') }
+    }
+    {
+      const { stateRoot } = privateRoot()
+      privateFile(join(stateRoot, 'acted.json'), '{}')
+      chmodSync(join(stateRoot, 'acted.json'), 0o622)
+      try { readActed(stateRoot); throw new Error('expected mode refusal') }
+      catch (error) { expect(error).toBeInstanceOf(WorkerRecordError); expect((error as WorkerRecordError).kind).toBe('unsafe') }
+    }
+    {
+      const { stateRoot } = privateRoot()
+      privateFile(join(stateRoot, 'acted.json'), '{}')
+      chmodSync(join(stateRoot, 'acted.json'), 0)
+      try {
+        if (process.getuid?.() !== 0) {
+          try { readActed(stateRoot); throw new Error('expected unreadable refusal') }
+          catch (error) { expect(error).toBeInstanceOf(WorkerRecordError); expect((error as WorkerRecordError).kind).toBe('unreadable') }
+        }
+      } finally { chmodSync(join(stateRoot, 'acted.json'), 0o600) }
+    }
+    expect(trustedRecordOwner(501, 501)).toBe(true)
+    expect(trustedRecordOwner(502, 501)).toBe(false)
+  })
+
+  test('competing processes serialize run trimming and acted/child mutations', async () => {
+    const { stateRoot } = privateRoot()
+    const workerModule = join(import.meta.dir, '../src/worker.ts')
+    const runFile = join(stateRoot, 'runs.jsonl')
+    const seeded = Array.from({ length: RUNS_KEPT * 2 }, (_, index) => JSON.stringify({
+      at: new Date(index + 1).toISOString(), repo: 'o/r', issue: index + 1,
+      action: 'plan', outcome: 'done', ms: 1, machine: HOST, note: 'seed',
+    })).join('\n') + '\n'
+    privateFile(runFile, seeded)
+    const processes: ReturnType<typeof spawn>[] = []
+    const completions: Array<Promise<void>> = []
+    const launch = (script: string) => {
+      const child = spawn(process.execPath, ['-e', script], { stdio: ['ignore', 'ignore', 'pipe'] })
+      let stderr = ''
+      child.stderr.on('data', chunk => { stderr += String(chunk) })
+      processes.push(child)
+      completions.push(new Promise<void>((resolve, reject) => child.once('exit', code => code === 0 ? resolve() : reject(new Error(stderr || `child exited ${code}`)))))
+    }
+    const done = [join(stateRoot, 'done-1'), join(stateRoot, 'done-2')]
+    withLock(stateRoot, () => {
+      for (let index = 0; index < 2; index++) {
+        const issue = 9001 + index
+        launch(`import { recordRun } from ${JSON.stringify(workerModule)}; import { writeFileSync } from 'node:fs'; recordRun(${JSON.stringify(stateRoot)}, ${JSON.stringify({ at: '2026-09-22T00:00:00.000Z', repo: 'o/r', issue, action: 'plan', outcome: 'done', ms: 1, machine: HOST, note: 'concurrent' })}); writeFileSync(${JSON.stringify(done[index])}, 'done')`)
+      }
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 250)
+      expect(done.some(path => existsSync(path))).toBe(false)
+    }, { what: 'the concurrency-test barrier' })
+    await Promise.all(completions.splice(0))
+    expect(readRuns(stateRoot, RUNS_KEPT * 3).filter(row => row.issue >= 9001).map(row => row.issue).sort()).toEqual([9001, 9002])
+
+    for (let index = 0; index < 2; index++) {
+      const pid = 9101 + index
+      const issue = 9201 + index
+      launch(`import { noteChild, updateActed } from ${JSON.stringify(workerModule)}; noteChild(${JSON.stringify(stateRoot)}, ${JSON.stringify({ repo: 'o/r', pid, startedAt: `start-${pid}`, command: 'codex', issue, action: 'plan', owner: null, from: 'planning' })}); updateActed(${JSON.stringify(stateRoot)}, rows => { rows[${JSON.stringify(`o/r#${issue}`)}] = ${JSON.stringify({ at: 1, action: 'plan', outcome: 'done', trigger: null, failures: 0, retryAt: null })} })`)
+    }
+    await Promise.all(completions)
+    expect(readChildren(stateRoot).filter(row => row.pid >= 9101).map(row => row.pid).sort()).toEqual([9101, 9102])
+    expect(Object.keys(readActed(stateRoot)).filter(key => key.startsWith('o/r#92')).sort()).toEqual(['o/r#9201', 'o/r#9202'])
+    for (const child of processes) expect(child.exitCode).toBe(0)
+  })
 })
 
 describe('legacy worker state migration', () => {
@@ -2471,7 +2558,7 @@ describe('stopped-service worker storage preparation', () => {
     writeFileSync(join(legacy, 'worker.log'), 'one copy\n')
     const interrupted = prepareWorkerStorage({
       root, stateRoot, repo: 'o/r', serviceStopped: true,
-      afterPublish: name => { if (name === 'worker.log') throw new Error('crash after publish') },
+      afterBoundary: boundary => { if (boundary === 'publish:worker.log') throw new Error('crash after publish') },
     })
     expect(interrupted).toMatchObject({ ok: false, reason: 'crash after publish' })
     expect(readFileSync(join(stateRoot, 'worker.log'), 'utf8')).toBe('one copy\n')
@@ -2482,6 +2569,50 @@ describe('stopped-service worker storage preparation', () => {
     expect(readFileSync(join(stateRoot, 'worker.log'), 'utf8')).toBe('one copy\n')
     expect(existsSync(join(legacy, 'worker.log'))).toBe(false)
     expect(readdirSync(stateRoot)).not.toContain('.migrate-worker.log.json')
+  })
+
+  test('every record and append publish/remove boundary retries without loss or duplication', () => {
+    const boundaries = [
+      'publish:acted.json', 'publish:runs.jsonl', 'publish:children.json',
+      'remove:acted.json', 'remove:runs.jsonl', 'remove:children.json', 'remove:run.lock',
+      'privatize:acted.json', 'privatize:children.json', 'privatize:runs.jsonl',
+      'journal:worker.log', 'publish:worker.log', 'remove:worker.log', 'clear-journal:worker.log',
+      'journal:worker.err.log', 'publish:worker.err.log', 'remove:worker.err.log', 'clear-journal:worker.err.log',
+    ]
+    for (const boundary of boundaries) {
+      const caseRoot = realpathSync(mkdtempSync(join(tmpdir(), 'worker-boundary-root-')))
+      const caseHome = realpathSync(mkdtempSync(join(tmpdir(), 'worker-boundary-home-')))
+      const legacy = workerDir(caseRoot)
+      const stateRoot = join(caseHome, '.vegafactory', 'worker')
+      mkdirSync(legacy, { recursive: true })
+      writeFileSync(join(legacy, 'acted.json'), JSON.stringify({ 'o/r#1': { at: 1, action: 'plan', outcome: 'done', trigger: null, failures: 0, retryAt: null } }))
+      writeFileSync(join(legacy, 'runs.jsonl'), run(1, 'once'))
+      writeFileSync(join(legacy, 'children.json'), JSON.stringify([{ pid: 5150, startedAt: 'old', command: 'codex', issue: 1, action: 'plan', owner: null, from: 'planning' }]))
+      writeFileSync(join(legacy, 'run.lock'), JSON.stringify({ pid: 999999, startedAt: 'old', runId: 'old', at: 'old' }))
+      writeFileSync(join(legacy, 'worker.log'), 'one out\n')
+      writeFileSync(join(legacy, 'worker.err.log'), 'one err\n')
+      let reached = false
+      const interrupted = prepareWorkerStorage({
+        root: caseRoot, stateRoot, repo: 'o/r', serviceStopped: true, start: () => null, alive: () => false,
+        afterBoundary: current => {
+          if (!reached && current === boundary) { reached = true; throw new Error(`crash at ${boundary}`) }
+        },
+      })
+      expect(reached, boundary).toBe(true)
+      expect(interrupted.ok, boundary).toBe(false)
+      expect(prepareWorkerStorage({ root: caseRoot, stateRoot, repo: 'o/r', serviceStopped: true, start: () => null, alive: () => false }), boundary).toMatchObject({ ok: true })
+      expect(readRuns(stateRoot, 10).map(row => row.note), boundary).toEqual(['once'])
+      expect(Object.keys(readActed(stateRoot)), boundary).toEqual(['o/r#1'])
+      expect(readChildren(stateRoot), boundary).toHaveLength(1)
+      expect(readFileSync(join(stateRoot, 'worker.log'), 'utf8'), boundary).toBe('one out\n')
+      expect(readFileSync(join(stateRoot, 'worker.err.log'), 'utf8'), boundary).toBe('one err\n')
+      for (const name of ['acted.json', 'runs.jsonl', 'children.json', 'worker.log', 'worker.err.log']) {
+        expect(lstatSync(join(stateRoot, name)).mode & 0o777, `${boundary}:${name}`).toBe(0o600)
+      }
+      for (const name of ['acted.json', 'runs.jsonl', 'children.json', 'run.lock', 'worker.log', 'worker.err.log']) {
+        expect(existsSync(join(legacy, name)), `${boundary}:${name}`).toBe(false)
+      }
+    }
   })
 
   test('malformed legacy evidence is quarantined privately and requires an explicit retry', () => {
@@ -2498,6 +2629,56 @@ describe('stopped-service worker storage preparation', () => {
     expect(preserved).toHaveLength(1)
     expect(readFileSync(join(quarantine, preserved[0]!), 'utf8')).toBe('{bad json\n')
     expect(prepareWorkerStorage({ root, stateRoot, repo: 'o/r', serviceStopped: true })).toMatchObject({ ok: true })
+  })
+
+  test('runtime-invalid legacy rows are quarantined before any source deletion and then retry cleanly', () => {
+    for (const [name, bytes] of [
+      ['runs.jsonl', `${JSON.stringify({ at: 'not-a-date', issue: 1, action: 'plan', outcome: 'done', ms: 1, machine: HOST, note: 'bad' })}\n`],
+      ['children.json', `${JSON.stringify([{ pid: 5150, startedAt: '', command: '', issue: 1, action: 'plan', owner: null, from: 'planning' }])}\n`],
+    ] as const) {
+      const caseRoot = realpathSync(mkdtempSync(join(tmpdir(), 'worker-invalid-legacy-')))
+      const caseHome = realpathSync(mkdtempSync(join(tmpdir(), 'worker-invalid-home-')))
+      const legacy = workerDir(caseRoot)
+      const stateRoot = join(caseHome, '.vegafactory', 'worker')
+      mkdirSync(legacy, { recursive: true })
+      writeFileSync(join(legacy, name), bytes)
+      const first = prepareWorkerStorage({ root: caseRoot, stateRoot, repo: 'o/r', serviceStopped: true })
+      expect(first, name).toMatchObject({ ok: false, migrated: false, reason: expect.stringContaining('preserved at') })
+      expect(existsSync(join(legacy, name)), name).toBe(false)
+      expect(existsSync(join(stateRoot, name)), name).toBe(false)
+      const quarantine = join(stateRoot, 'quarantine')
+      expect(readdirSync(quarantine), name).toHaveLength(1)
+      expect(readFileSync(join(quarantine, readdirSync(quarantine)[0]!), 'utf8'), name).toBe(bytes)
+      expect(prepareWorkerStorage({ root: caseRoot, stateRoot, repo: 'o/r', serviceStopped: true }), name).toMatchObject({ ok: true })
+    }
+  })
+
+  test('noncanonical global rows fail unchanged instead of being normalized after publication', () => {
+    const stateRoot = join(home, '.vegafactory', 'worker')
+    mkdirSync(stateRoot, { recursive: true, mode: 0o700 })
+    chmodSync(stateRoot, 0o700)
+    const path = join(stateRoot, 'children.json')
+    const bytes = `${JSON.stringify([{ repo: 'O/R', pid: 5150, startedAt: 'start', command: 'codex', issue: 1, action: 'plan', owner: null, from: 'planning' }])}\n`
+    writeFileSync(path, bytes, { mode: 0o600 })
+    chmodSync(path, 0o600)
+    expect(prepareWorkerStorage({ root, stateRoot, repo: 'o/r', serviceStopped: true })).toMatchObject({ ok: false, migrated: false })
+    expect(readFileSync(path, 'utf8')).toBe(bytes)
+  })
+
+  test('other-user-writable legacy authority is quarantined before it can be migrated', () => {
+    const legacy = workerDir(root)
+    const stateRoot = join(home, '.vegafactory', 'worker')
+    mkdirSync(legacy, { recursive: true })
+    const child = { pid: 5150, startedAt: 'start', command: 'codex', issue: 1, action: 'plan', owner: null, from: 'planning' }
+    const path = join(legacy, 'children.json')
+    writeFileSync(path, JSON.stringify([child]), { mode: 0o666 })
+    chmodSync(path, 0o666)
+    const first = prepareWorkerStorage({ root, stateRoot, repo: 'o/r', serviceStopped: true })
+    expect(first).toMatchObject({ ok: false, migrated: false, reason: expect.stringContaining('writable by another user') })
+    expect(existsSync(path)).toBe(false)
+    const quarantined = join(stateRoot, 'quarantine', readdirSync(join(stateRoot, 'quarantine'))[0]!)
+    expect(lstatSync(quarantined).mode & 0o777).toBe(0o600)
+    expect(readFileSync(quarantined, 'utf8')).toBe(JSON.stringify([child]))
   })
 
   test('an unsafe legacy log link is quarantined without touching its target', () => {
@@ -3823,6 +4004,55 @@ describe('the command', () => {
     expect(readFileSync(unit, 'utf8')).toBe('keep this unit')
     expect(readChildren(stateRoot)).toEqual([live])
     expect(lines.join('\n')).toContain('could not be unloaded')
+  })
+
+  test('disable refuses writable legacy child authority before unload or signal', async () => {
+    const legacy = workerDir(root)
+    mkdirSync(legacy, { recursive: true })
+    const path = join(legacy, 'children.json')
+    const bytes = JSON.stringify([{ pid: 5350, startedAt: 'start', command: 'codex', issue: 7, action: 'implement', owner: null, from: 'queued' }])
+    writeFileSync(path, bytes, { mode: 0o666 })
+    chmodSync(path, 0o666)
+    const unit = unitPath('darwin', home)
+    mkdirSync(join(home, 'Library', 'LaunchAgents'), { recursive: true })
+    writeFileSync(unit, 'keep this unit')
+    const calls: string[] = []
+    expect(await runWorker(['disable'], {
+      cwd: root, home, host: HOST, env: {}, platform: 'darwin', out: () => {}, runner: gh.runner,
+      run: ((command) => { calls.push(command); return { code: 0, stdout: '', stderr: '' } }) as Probe,
+      stop: () => { calls.push('signal'); return true },
+    })).toBe(2)
+    expect(calls).toEqual([])
+    expect(readFileSync(unit, 'utf8')).toBe('keep this unit')
+    expect(readFileSync(path, 'utf8')).toBe(bytes)
+  })
+
+  test('disable migrates a validated legacy child after unload and before signal or unit removal', async () => {
+    const legacy = workerDir(root)
+    const stateRoot = join(home, '.vegafactory', 'worker')
+    mkdirSync(legacy, { recursive: true })
+    const child = { pid: 5450, startedAt: 'start', command: 'codex', issue: 8, action: 'implement', owner: null, from: 'queued' }
+    writeFileSync(join(legacy, 'children.json'), JSON.stringify([child]))
+    const unit = unitPath('darwin', home)
+    mkdirSync(join(home, 'Library', 'LaunchAgents'), { recursive: true })
+    writeFileSync(unit, 'loaded')
+    const events: string[] = []
+    const code = await runWorker(['disable'], {
+      cwd: root, home, host: HOST, env: {}, platform: 'darwin', out: () => {}, runner: gh.runner,
+      run: (() => { events.push('unload'); return { code: 0, stdout: '', stderr: '' } }) as Probe,
+      start: () => 'start',
+      stop: () => {
+        expect(events).toEqual(['unload'])
+        expect(existsSync(join(legacy, 'children.json'))).toBe(false)
+        expect(readChildren(stateRoot)).toHaveLength(1)
+        expect(existsSync(unit)).toBe(true)
+        events.push('signal')
+        return true
+      },
+    })
+    expect(code).toBe(1)
+    expect(events).toEqual(['unload', 'signal'])
+    expect(existsSync(unit)).toBe(false)
   })
 
   test('a record whose process is gone is dropped, never signalled', async () => {

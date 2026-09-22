@@ -928,6 +928,7 @@ function readPrivateRecord(stateRoot: string, path: string): string | null {
     const uid = process.getuid?.()
     if (!info.isFile() || info.isSymbolicLink()) throw new WorkerRecordError('unsafe', `${path} is not an ordinary record file`)
     if (uid !== undefined && info.uid !== uid) throw new WorkerRecordError('unsafe', `${path} is owned by uid ${info.uid}`)
+    if ((info.mode & 0o400) === 0) throw new WorkerRecordError('unreadable', `${path} is not readable by its owner`)
     if ((info.mode & 0o777) !== 0o600) throw new WorkerRecordError('unsafe', `${path} is not private 0600`)
     return readFileSync(path, 'utf8')
   } catch (error) {
@@ -973,12 +974,14 @@ function validRun(raw: unknown, fallback: string | null = null): raw is RunRecor
 export function recordRun(stateRoot: string, record: RunRecord) {
   if (!validRun(record)) throw new WorkerRecordError('malformed', 'the run record is invalid')
   ensurePrivateRecordRoot(stateRoot, true)
-  const path = runsPath(stateRoot)
-  if (existsSync(path)) readRuns(stateRoot, Number.MAX_SAFE_INTEGER)
-  appendFileSync(path, JSON.stringify(record) + '\n', { mode: 0o600 })
-  chmodSync(path, 0o600)
-  const lines = readFileSync(path, 'utf8').split('\n').filter(Boolean)
-  if (lines.length > RUNS_KEPT * 2) replacePrivateRecord(stateRoot, path, lines.slice(-RUNS_KEPT).join('\n') + '\n')
+  withLock(stateRoot, () => {
+    const path = runsPath(stateRoot)
+    if (existsSync(path)) readRuns(stateRoot, Number.MAX_SAFE_INTEGER)
+    appendFileSync(path, JSON.stringify(record) + '\n', { mode: 0o600 })
+    chmodSync(path, 0o600)
+    const lines = readFileSync(path, 'utf8').split('\n').filter(Boolean)
+    if (lines.length > RUNS_KEPT * 2) replacePrivateRecord(stateRoot, path, lines.slice(-RUNS_KEPT).join('\n') + '\n')
+  }, { what: 'the worker\'s run history' })
 }
 
 export function readRuns(stateRoot: string, limit = 20): RunRecord[] {
@@ -1124,7 +1127,7 @@ export function stopChild(stateRoot: string, record: ChildRecord, deps: { stop?:
 // Two steps finish at once, and an operator may run a pass by hand beside the service: the
 // read-modify-write takes the same lock the issue cache uses, so neither loses the other's entry.
 export function updateActed(stateRoot: string, change: (acted: Record<string, Acted>) => void) {
-  mkdirSync(stateRoot, { recursive: true })
+  ensurePrivateRecordRoot(stateRoot, true)
   withLock(stateRoot, () => {
     const acted = readActed(stateRoot)
     change(acted)
@@ -1193,6 +1196,7 @@ function safeLegacyStateRoot(root: string, stateRoot: string): { ok: boolean; ex
       const info = lstatSync(path)
       if (!info.isDirectory() || info.isSymbolicLink()) return { ok: false, exists: true, reason: `refusing an unsafe legacy worker directory at ${path}` }
       if (uid !== undefined && info.uid !== uid) return { ok: false, exists: true, reason: `refusing a legacy worker directory owned by uid ${info.uid}: ${path}` }
+      if ((info.mode & 0o022) !== 0) return { ok: false, exists: true, reason: `refusing a legacy worker directory writable by another user: ${path}` }
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === 'ENOENT') return { ok: true, exists: false, reason: 'no legacy worker state' }
       return { ok: false, exists: true, reason: `the legacy worker directory cannot be inspected at ${path}: ${(error as Error).message}` }
@@ -1230,10 +1234,16 @@ function safeGlobalStateRoot(factoryRoot: string, stateRoot: string, create: boo
 
 type InspectedRecord<T> = { exists: boolean; value: T | null; error: string | null }
 
+export function trustedRecordOwner(owner: number, uid: number | undefined = process.getuid?.()): boolean {
+  return uid === undefined || owner === uid
+}
+
 function inspectRegularRecord(path: string): InspectedRecord<string> {
   try {
     const info = lstatSync(path)
     if (!info.isFile() || info.isSymbolicLink()) return { exists: true, value: null, error: `${path} is not a regular file` }
+    if (!trustedRecordOwner(info.uid)) return { exists: true, value: null, error: `${path} is owned by untrusted uid ${info.uid}` }
+    if ((info.mode & 0o022) !== 0) return { exists: true, value: null, error: `${path} is writable by another user` }
     return { exists: true, value: readFileSync(path, 'utf8'), error: null }
   } catch (error) {
     return (error as NodeJS.ErrnoException).code === 'ENOENT'
@@ -1242,7 +1252,7 @@ function inspectRegularRecord(path: string): InspectedRecord<string> {
   }
 }
 
-function inspectLegacyActed(path: string): InspectedRecord<Record<string, Acted>> {
+function inspectLegacyActed(path: string, fallback: string | null): InspectedRecord<Record<string, Acted>> {
   const file = inspectRegularRecord(path)
   if (!file.exists || file.error) return { exists: file.exists, value: null, error: file.error }
   try {
@@ -1255,7 +1265,8 @@ function inspectLegacyActed(path: string): InspectedRecord<Record<string, Acted>
         || !RECORD_ACTIONS.has(row.action as Action) || !RECORD_OUTCOMES.has(row.outcome as Outcome)
         || !(row.trigger === null || Number.isSafeInteger(row.trigger)) || !Number.isSafeInteger(row.failures) || Number(row.failures) < 0
         || !(row.retryAt === null || Number.isFinite(row.retryAt))) throw new Error(`invalid acted row ${JSON.stringify(key)}`)
-      canonicalRepository(match[1]!)
+      const repo = canonicalRepository(match[1]!)
+      if (fallback === null && repo !== match[1]) throw new Error(`noncanonical acted row ${JSON.stringify(key)}`)
     }
     return { exists: true, value: raw as Record<string, Acted>, error: null }
   } catch (error) { return { exists: true, value: null, error: `${path} is malformed: ${(error as Error).message}` } }
@@ -1273,6 +1284,7 @@ function inspectLegacyRuns(path: string, fallback: string | null): InspectedReco
       if (typeof raw.at !== 'string' || !Number.isFinite(Date.parse(raw.at)) || !Number.isSafeInteger(raw.issue) || Number(raw.issue) < 1
         || !RECORD_ACTIONS.has(raw.action as Action) || !RECORD_OUTCOMES.has(raw.outcome as Outcome) || !Number.isFinite(raw.ms)
         || typeof raw.machine !== 'string' || typeof raw.note !== 'string') throw new Error(`invalid run row ${index + 1}`)
+      if (fallback === null && raw.repo !== recordRepo) throw new Error(`noncanonical run row ${index + 1}`)
       rows.push({ ...raw, repo: recordRepo } as RunRecord)
     }
     return { exists: true, value: rows, error: null }
@@ -1294,6 +1306,7 @@ function inspectLegacyChildren(path: string, fallback: string | null): Inspected
         || !(row.owner === null || typeof row.owner === 'string') || !RECORD_STATES.has(row.from as State)) {
         throw new Error(`invalid child row ${index + 1}`)
       }
+      if (fallback === null && row.repo !== repo) throw new Error(`noncanonical child row ${index + 1}`)
       return { ...row, repo } as ChildRecord
     })
     return { exists: true, value: rows, error: null }
@@ -1313,7 +1326,7 @@ function inspectLegacyLock(path: string): InspectedRecord<RunLock> {
 
 function inspectLegacyFiles(root: string, fallback: string | null) {
   return {
-    acted: inspectLegacyActed(actedPath(root)),
+    acted: inspectLegacyActed(actedPath(root), fallback),
     runs: inspectLegacyRuns(runsPath(root), fallback),
     children: inspectLegacyChildren(childrenPath(root), fallback),
     lock: inspectLegacyLock(runLockPath(root)),
@@ -1368,6 +1381,7 @@ export function migrateLegacyWorkerState(input: {
   start?: ProcessStart
   alive?: ProcessAlive
   afterWrite?: () => void
+  afterBoundary?: (boundary: string) => void
 }): LegacyMigrationResult {
   const legacyRoot = workerDir(input.root)
   const factoryRoot = input.factoryRoot ?? dirname(input.stateRoot)
@@ -1392,93 +1406,8 @@ export function migrateLegacyWorkerState(input: {
     if (!legacyLocked.ok || !legacyLocked.exists) return { ok: false, migrated: false, reason: legacyLocked.reason }
     const globalLocked = safeGlobalStateRoot(factoryRoot, input.stateRoot, false)
     if (!globalLocked.ok) return { ok: false, migrated: false, reason: globalLocked.reason }
-    type Read<T> = { exists: boolean; value: T | null; error: string | null }
-    const regularText = (path: string): Read<string> => {
-      try {
-        const info = lstatSync(path)
-        if (!info.isFile() || info.isSymbolicLink()) return { exists: true, value: null, error: `${path} is not a regular file` }
-        return { exists: true, value: readFileSync(path, 'utf8'), error: null }
-      } catch (error) {
-        return (error as NodeJS.ErrnoException).code === 'ENOENT'
-          ? { exists: false, value: null, error: null }
-          : { exists: true, value: null, error: `${path} cannot be read: ${(error as Error).message}` }
-      }
-    }
-    const actions = new Set<Action>(['follow-up', 'plan', 'implement', 'corrections', 'ship', 'stop', 'none'])
-    const outcomes = new Set<Outcome>(['done', 'blocked', 'failed', 'killed', 'limit', 'stopped'])
-    const states = new Set<State>(['waiting-on-operator', 'planning', 'queued', 'in-progress', 'ready-to-ship'])
-    const actedFile = (path: string): Read<Record<string, Acted>> => {
-      const file = regularText(path)
-      if (!file.exists || file.error) return { exists: file.exists, value: null, error: file.error }
-      try {
-        const raw: unknown = JSON.parse(file.value!)
-        if (!raw || typeof raw !== 'object' || Array.isArray(raw)) throw new Error('top level is not an object')
-        for (const [key, value] of Object.entries(raw)) {
-          const row = value as Partial<Acted> | null
-          const match = /^(.*)#(\d+)$/.exec(key)
-          if (!match || !Number.isSafeInteger(Number(match[2])) || Number(match[2]) < 1 || !row || typeof row !== 'object' || !Number.isFinite(row.at)
-            || !actions.has(row.action as Action) || !outcomes.has(row.outcome as Outcome)
-            || !(row.trigger === null || Number.isSafeInteger(row.trigger)) || !Number.isSafeInteger(row.failures) || Number(row.failures) < 0
-            || !(row.retryAt === null || Number.isFinite(row.retryAt))) throw new Error(`invalid acted row ${JSON.stringify(key)}`)
-          canonicalRepository(match[1]!)
-        }
-        return { exists: true, value: raw as Record<string, Acted>, error: null }
-      } catch (error) { return { exists: true, value: null, error: `${path} is malformed: ${(error as Error).message}` } }
-    }
-    const runsFile = (path: string, fallback: string | null): Read<RunRecord[]> => {
-      const file = regularText(path)
-      if (!file.exists || file.error) return { exists: file.exists, value: null, error: file.error }
-      const rows: RunRecord[] = []
-      try {
-        for (const [index, line] of file.value!.split('\n').entries()) {
-          if (!line.trim()) continue
-          const raw = JSON.parse(line) as Partial<RunRecord>
-          const recordRepo = canonicalRepository(typeof raw.repo === 'string' ? raw.repo : fallback ?? '')
-          if (typeof raw.at !== 'string' || !Number.isSafeInteger(raw.issue) || Number(raw.issue) < 1
-            || !actions.has(raw.action as Action) || !outcomes.has(raw.outcome as Outcome) || !Number.isFinite(raw.ms)
-            || typeof raw.machine !== 'string' || typeof raw.note !== 'string') throw new Error(`invalid run row ${index + 1}`)
-          rows.push({ ...raw, repo: recordRepo } as RunRecord)
-        }
-        return { exists: true, value: rows, error: null }
-      } catch (error) { return { exists: true, value: null, error: `${path} is malformed: ${(error as Error).message}` } }
-    }
-    const childrenFile = (path: string, fallback: string | null): Read<ChildRecord[]> => {
-      const file = regularText(path)
-      if (!file.exists || file.error) return { exists: file.exists, value: null, error: file.error }
-      try {
-        const raw: unknown = JSON.parse(file.value!)
-        if (!Array.isArray(raw)) throw new Error('top level is not an array')
-        const rows = raw.map((value, index) => {
-          const row = value as Partial<ChildRecord>
-          if (!row || typeof row !== 'object' || !Number.isSafeInteger(row.pid) || Number(row.pid) <= 1
-            || typeof row.startedAt !== 'string' || typeof row.command !== 'string' || !Number.isSafeInteger(row.issue) || Number(row.issue) < 1
-            || !actions.has(row.action as Action) || !(row.owner === null || typeof row.owner === 'string') || !states.has(row.from as State)) {
-            throw new Error(`invalid child row ${index + 1}`)
-          }
-          return { ...row, repo: canonicalRepository(typeof row.repo === 'string' ? row.repo : fallback ?? '') } as ChildRecord
-        })
-        return { exists: true, value: rows, error: null }
-      } catch (error) { return { exists: true, value: null, error: `${path} is malformed: ${(error as Error).message}` } }
-    }
-    const lockFile = (path: string): Read<RunLock> => {
-      const file = regularText(path)
-      if (!file.exists || file.error) return { exists: file.exists, value: null, error: file.error }
-      try {
-        const row = JSON.parse(file.value!) as Partial<RunLock>
-        if (!row || typeof row !== 'object' || !Number.isSafeInteger(row.pid) || Number(row.pid) <= 1
-          || typeof row.startedAt !== 'string' || typeof row.runId !== 'string' || typeof row.at !== 'string') throw new Error('invalid lock row')
-        return { exists: true, value: row as RunLock, error: null }
-      } catch (error) { return { exists: true, value: null, error: `${path} is malformed: ${(error as Error).message}` } }
-    }
-
-    const legacy = {
-      acted: actedFile(actedPath(legacyRoot)), runs: runsFile(runsPath(legacyRoot), repo),
-      children: childrenFile(childrenPath(legacyRoot), repo), lock: lockFile(runLockPath(legacyRoot)),
-    }
-    const global = {
-      acted: actedFile(actedPath(input.stateRoot)), runs: runsFile(runsPath(input.stateRoot), null),
-      children: childrenFile(childrenPath(input.stateRoot), null), lock: lockFile(runLockPath(input.stateRoot)),
-    }
+    const legacy = inspectLegacyFiles(legacyRoot, repo)
+    const global = inspectLegacyFiles(input.stateRoot, null)
     const failed = [...Object.values(legacy), ...Object.values(global)].find((read) => read.error)
     if (failed) return { ok: false, migrated: false, reason: failed.error! }
 
@@ -1515,11 +1444,11 @@ export function migrateLegacyWorkerState(input: {
     const uniqueChildren = [...new Map(childRows.map((row) => [`${row.repo}#${row.issue}:${row.pid}:${row.startedAt}`, row])).values()]
 
     mkdirSync(input.stateRoot, { recursive: true })
-    if (legacy.acted.exists) { replaceFile(actedPath(input.stateRoot), JSON.stringify(globalActed, null, 2) + '\n'); chmodSync(actedPath(input.stateRoot), 0o600) }
-    if (legacy.runs.exists) { replaceFile(runsPath(input.stateRoot), uniqueRuns.map((row) => JSON.stringify(row)).join('\n') + (uniqueRuns.length ? '\n' : '')); chmodSync(runsPath(input.stateRoot), 0o600) }
-    if (legacy.children.exists) { replaceFile(childrenPath(input.stateRoot), JSON.stringify(uniqueChildren, null, 2) + '\n'); chmodSync(childrenPath(input.stateRoot), 0o600) }
+    if (legacy.acted.exists) { replaceFile(actedPath(input.stateRoot), JSON.stringify(globalActed, null, 2) + '\n'); chmodSync(actedPath(input.stateRoot), 0o600); input.afterBoundary?.('publish:acted.json') }
+    if (legacy.runs.exists) { replaceFile(runsPath(input.stateRoot), uniqueRuns.map((row) => JSON.stringify(row)).join('\n') + (uniqueRuns.length ? '\n' : '')); chmodSync(runsPath(input.stateRoot), 0o600); input.afterBoundary?.('publish:runs.jsonl') }
+    if (legacy.children.exists) { replaceFile(childrenPath(input.stateRoot), JSON.stringify(uniqueChildren, null, 2) + '\n'); chmodSync(childrenPath(input.stateRoot), 0o600); input.afterBoundary?.('publish:children.json') }
     input.afterWrite?.()
-    for (const name of names) if (existsSync(join(legacyRoot, name))) rmSync(join(legacyRoot, name), { force: true })
+    for (const name of names) if (existsSync(join(legacyRoot, name))) { rmSync(join(legacyRoot, name), { force: true }); input.afterBoundary?.(`remove:${name}`) }
     return { ok: true, migrated: true, reason: `migrated legacy worker state for ${repo}` }
   }, { what: 'the global worker state migration' }), { what: 'the legacy worker state migration' })
 }
@@ -1534,6 +1463,7 @@ function readAppendArtifact(path: string): { exists: boolean; text: string; erro
     const uid = process.getuid?.()
     if (!info.isFile() || info.isSymbolicLink()) return { exists: true, text: '', error: `${path} is not a regular append file` }
     if (uid !== undefined && info.uid !== uid) return { exists: true, text: '', error: `${path} is owned by uid ${info.uid}` }
+    if ((info.mode & 0o022) !== 0) return { exists: true, text: '', error: `${path} is writable by another user` }
     return { exists: true, text: readFileSync(path, 'utf8'), error: null }
   } catch (error) {
     return (error as NodeJS.ErrnoException).code === 'ENOENT'
@@ -1591,7 +1521,7 @@ function migrateAppendTarget(input: {
   stateRoot: string
   legacyRoot: string
   name: string
-  afterPublish?: (name: string) => void
+  afterBoundary?: (boundary: string) => void
 }): void {
   const target = join(input.stateRoot, input.name)
   const source = join(input.legacyRoot, input.name)
@@ -1610,6 +1540,7 @@ function migrateAppendTarget(input: {
       sourceDigest: digest(legacy.text), beforeDigest: digest(current.text), mergedDigest: digest(merged),
     }
     replacePrivateRecord(input.stateRoot, journalPath, JSON.stringify(journal, null, 2) + '\n')
+    input.afterBoundary?.(`journal:${input.name}`)
   }
   if (journal.source !== source) throw new WorkerRecordError('malformed', `${journalPath} names an unexpected source`)
   const latestTarget = readAppendArtifact(target)
@@ -1621,7 +1552,7 @@ function migrateAppendTarget(input: {
     const merged = latestTarget.text + latestSource.text
     if (digest(merged) !== journal.mergedDigest) throw new WorkerRecordError('malformed', `${journalPath} does not describe the append migration`)
     rotatePrivateAppend(target, merged)
-    input.afterPublish?.(input.name)
+    input.afterBoundary?.(`publish:${input.name}`)
   } else if (targetDigest !== journal.mergedDigest) {
     throw new WorkerRecordError('malformed', `${target} changed during append migration`)
   }
@@ -1630,8 +1561,10 @@ function migrateAppendTarget(input: {
   if (sourceAfter.exists) {
     if (digest(sourceAfter.text) !== journal.sourceDigest) throw new WorkerRecordError('malformed', `${source} changed before removal`)
     rmSync(source)
+    input.afterBoundary?.(`remove:${input.name}`)
   }
   rmSync(journalPath, { force: true })
+  input.afterBoundary?.(`clear-journal:${input.name}`)
 }
 
 function quarantineMalformedLegacy(input: { root: string; stateRoot: string; repo: string }): string | null {
@@ -1656,11 +1589,22 @@ function quarantineMalformedLegacy(input: { root: string; stateRoot: string; rep
   try { renameSync(source, target) }
   catch (error) { throw new WorkerRecordError('unreadable', `${result.error}; it could not be quarantined: ${(error as Error).message}`) }
   const quarantined = lstatSync(target)
-  if (quarantined.isFile() && !quarantined.isSymbolicLink()) chmodSync(target, 0o600)
+  if (quarantined.isFile() && !quarantined.isSymbolicLink()) {
+    const bytes = readFileSync(target)
+    const privateCopy = join(quarantine, `.${name}.${randomUUID()}.private`)
+    try {
+      writeFileSync(privateCopy, bytes, { flag: 'wx', mode: 0o600 })
+      chmodSync(privateCopy, 0o600)
+      renameSync(privateCopy, target)
+    } catch (error) {
+      rmSync(privateCopy, { force: true })
+      throw new WorkerRecordError('unreadable', `${result.error}; evidence moved to ${target}, but its private snapshot failed: ${(error as Error).message}`)
+    }
+  }
   return `${result.error}; preserved at ${target}`
 }
 
-function privatizeGlobalRecords(input: { stateRoot: string; start?: ProcessStart; alive?: ProcessAlive }): void {
+function privatizeGlobalRecords(input: { stateRoot: string; start?: ProcessStart; alive?: ProcessAlive; afterBoundary?: (boundary: string) => void }): void {
   const records = inspectLegacyFiles(input.stateRoot, null)
   const failed = Object.values(records).find((record) => record.error)
   if (failed) throw new WorkerRecordError('malformed', failed.error!)
@@ -1678,9 +1622,10 @@ function privatizeGlobalRecords(input: { stateRoot: string; start?: ProcessStart
       if (!normalized[canonical] || value.at > normalized[canonical]!.at) normalized[canonical] = value
     }
     rotatePrivateAppend(actedPath(input.stateRoot), JSON.stringify(normalized, null, 2) + '\n')
+    input.afterBoundary?.('privatize:acted.json')
   }
-  if (records.children.exists) rotatePrivateAppend(childrenPath(input.stateRoot), JSON.stringify(records.children.value ?? [], null, 2) + '\n')
-  if (records.lock.exists) rotatePrivateAppend(runLockPath(input.stateRoot), JSON.stringify(records.lock.value, null, 2) + '\n')
+  if (records.children.exists) { rotatePrivateAppend(childrenPath(input.stateRoot), JSON.stringify(records.children.value ?? [], null, 2) + '\n'); input.afterBoundary?.('privatize:children.json') }
+  if (records.lock.exists) { rotatePrivateAppend(runLockPath(input.stateRoot), JSON.stringify(records.lock.value, null, 2) + '\n'); input.afterBoundary?.('privatize:run.lock') }
 }
 
 export function prepareWorkerStorage(input: {
@@ -1691,7 +1636,7 @@ export function prepareWorkerStorage(input: {
   serviceStopped: boolean
   start?: ProcessStart
   alive?: ProcessAlive
-  afterPublish?: (name: string) => void
+  afterBoundary?: (boundary: string) => void
 }): LegacyMigrationResult {
   if (!input.serviceStopped) return { ok: false, migrated: false, reason: 'worker storage cannot rotate until the service is confirmed stopped' }
   const factoryRoot = input.factoryRoot ?? dirname(input.stateRoot)
@@ -1699,7 +1644,7 @@ export function prepareWorkerStorage(input: {
   catch (error) { return { ok: false, migrated: false, reason: (error as Error).message } }
   try {
     return withLock(join(input.stateRoot, '.storage-preparation'), () => {
-      const migration = migrateLegacyWorkerState({ ...input, factoryRoot })
+      const migration = migrateLegacyWorkerState({ ...input, factoryRoot, afterBoundary: input.afterBoundary })
       if (!migration.ok) {
         try {
           const quarantined = quarantineMalformedLegacy(input)
@@ -1714,8 +1659,9 @@ export function prepareWorkerStorage(input: {
         const runBytes = inspectRegularRecord(runsPath(input.stateRoot))
         if (runBytes.error) throw new WorkerRecordError('unsafe', runBytes.error)
         rotatePrivateAppend(runsPath(input.stateRoot), runBytes.value ?? '')
+        input.afterBoundary?.('privatize:runs.jsonl')
         const legacyRoot = workerDir(input.root)
-        for (const name of ['worker.log', 'worker.err.log']) migrateAppendTarget({ stateRoot: input.stateRoot, legacyRoot, name, afterPublish: input.afterPublish })
+        for (const name of ['worker.log', 'worker.err.log']) migrateAppendTarget({ stateRoot: input.stateRoot, legacyRoot, name, afterBoundary: input.afterBoundary })
         return { ok: true, migrated: migration.migrated, reason: migration.migrated ? migration.reason : 'worker storage is private and append targets use fresh inodes' }
       } catch (error) {
         try {
