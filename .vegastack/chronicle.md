@@ -2,6 +2,16 @@
 
 The project's story, newest first: what got built, why, and how it went — for the operator's future recall. Format home: the dev-chronicle skill.
 
+## 22-09-2026 — A new review cycle really starts a new range ([#283](https://github.com/vegastack/vegafactory/issues/283))
+
+- **What:** Round one of a new review cycle can choose the current diff base; every later round remains pinned to that choice.
+- **Why:** The CLI opened a new cycle after changed work but still inherited the spent cycle's base, contradicting its own recovery message and blocking #260's clean replacement review.
+- **How it went:** One public-command regression reproduced three spent rounds, changed the head, selected a new base, then proved the next round could not move it again.
+- **Changed:** new-cycle base selection and its regression matrix.
+- **Decisions:** none.
+
+— approved by (kmanojkumar) · built by codex · branch fix/283-a-new-review-cycle-can-choose-a-new-base
+
 ## 21-09-2026 — One worker serves every board without mixing them ([#259](https://github.com/vegastack/vegafactory/issues/259))
 
 - **What:** One machine service now provisions and serves every explicit repository in its roster. Each board keeps its own checkout, App token, policy, issue cache, readiness and push path, while machine state and capacity stay genuinely global.

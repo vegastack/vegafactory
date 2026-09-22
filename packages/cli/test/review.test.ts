@@ -632,6 +632,30 @@ describe('the base is fixed and always a commit', () => {
     expect(resolveCommit(root, 'origin/main')).toBe(git(root, 'rev-parse', 'origin/main'))
     expect(calls()).toEqual([])
   })
+
+  test('round one of a new cycle chooses a fresh base, then pins it', async () => {
+    queue('codex', [
+      codexReply(verdict([finding('F1')])),
+      codexReply(verdict([finding('F1')])),
+      codexReply(verdict([finding('F1')])),
+      codexReply(verdict([])),
+    ])
+    const first = git(root, 'rev-parse', 'origin/main')
+    expect((await review(['--reviewer', 'codex', '--base', first])).code).toBe(2)
+    commit('fix-1.ts', 'one\n')
+    expect((await review(['--reviewer', 'codex'])).code).toBe(2)
+    commit('fix-2.ts', 'two\n')
+    expect((await review(['--reviewer', 'codex'])).code).toBe(2)
+
+    commit('fix-3.ts', 'three\n')
+    const second = git(root, 'rev-parse', 'HEAD~1')
+    expect(second).not.toBe(first)
+    expect((await review(['--reviewer', 'codex', '--base', second])).code).toBe(0)
+    expect(readState()).toMatchObject({ cycle: 2, round: 1, base: second })
+
+    commit('fix-4.ts', 'four\n')
+    await expect(review(['--reviewer', 'codex', '--base', first])).rejects.toThrow('base is fixed')
+  })
 })
 
 describe('untrusted payloads cannot speak to the reviewer', () => {

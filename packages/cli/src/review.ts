@@ -758,9 +758,9 @@ export async function runReview(argv: string[], deps: ReviewDeps = {}): Promise<
   const outPath = (group: Group) => join(dir, `${number}-${group.key}.out.json`)
   const nonce = reviewNonce()
 
-  // The base is chosen once, in round 1, and every later round reads the commit that round fixed —
-  // a moving base would silently change what "reviewed" means between rounds.
-  const fixed = prior?.base && isCommit(prior.base) ? prior.base : null
+  // The base is chosen once in round 1 of each cycle. Later rounds read that commit; a genuinely
+  // new cycle chooses again because its changed head/brief/plan is a new review range.
+  const fixed = !newCycle && prior?.base && isCommit(prior.base) ? prior.base : null
   if (args.base && fixed && resolveCommit(top, args.base) !== fixed) {
     throw new Error(`the base is fixed at ${fixed.slice(0, 7)} for this review — drop --base, or start a fresh cycle to change it`)
   }
