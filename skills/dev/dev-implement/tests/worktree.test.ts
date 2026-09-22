@@ -1,4 +1,7 @@
 import { describe, expect, test } from 'bun:test'
+import { existsSync, mkdirSync, mkdtempSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { branchName, classifyWorktree, issueOfWorktree, parseWorktreeList, slugify, titleParts, worktreeName, worktreePath } from '../scripts/worktree.mjs'
 
 const base = { dirExists: true, branchExists: true, locked: false, issueState: 'open' as const, mergedIntoDefault: false }
@@ -70,7 +73,7 @@ describe('classifyWorktree', () => {
   })
 })
 
-import { evaluateRemoval, isPastRetention, parseBranchTypes, parseDuration, parseIncludeKnob, parseRetentionKnob } from '../scripts/worktree.mjs'
+import { clearDroppedDeps, evaluateRemoval, isPastRetention, noteDroppedDeps, parseBranchTypes, parseDepsRetentionKnob, parseDuration, parseIncludeKnob, parseRetentionKnob, readDroppedDeps } from '../scripts/worktree.mjs'
 
 const devMd = [
   'commands: test `bun test` · check `bun run check` · build `bun run build` · setup `bun install --frozen-lockfile`',
@@ -107,6 +110,9 @@ describe('knobs and retention', () => {
     expect(parseDuration('soon')).toBeNull()
     expect(parseRetentionKnob(devMd)).toBe(7 * 86_400_000)
     expect(parseRetentionKnob('repo: o/r')).toBe(14 * 86_400_000)
+    expect(parseDepsRetentionKnob('worktree-retention: 14d')).toBe(3 * 86_400_000)
+    expect(parseDepsRetentionKnob('worktree-retention: 2d\nworktree-deps-retention: 9d')).toBe(2 * 86_400_000)
+    expect(parseDepsRetentionKnob('worktree-retention: 14d\nworktree-deps-retention: nope')).toBe(3 * 86_400_000)
   })
   test('the branch: knob is the one home for the type list', () => {
     expect(parseBranchTypes('branch: <type>/<slug>   # type: feat | fix | spike — the only place this list lives'))
@@ -135,5 +141,20 @@ describe('knobs and retention', () => {
     expect(isPastRetention({ lastCommitAt: old, ledgerUpdatedAt: fresh, now, retentionMs })).toBe(false)
     expect(isPastRetention({ lastCommitAt: fresh, ledgerUpdatedAt: old, now, retentionMs })).toBe(false)
     expect(isPastRetention({ lastCommitAt: null, ledgerUpdatedAt: null, now, retentionMs })).toBe(false)
+  })
+})
+
+describe('worker dependency marker root', () => {
+  test('the marker is owner-only beside repo and issues, never inside the checkout', () => {
+    const holder = mkdtempSync(join(tmpdir(), 'vf-worker-holder-'))
+    const repoRoot = join(holder, 'repo')
+    const path = join(holder, 'issues', '260')
+    mkdirSync(repoRoot, { mode: 0o700 })
+    mkdirSync(path, { recursive: true, mode: 0o700 })
+    noteDroppedDeps({ repoRoot, workerLayout: true, name: '260', path, droppedAt: '2026-09-22T00:00:00.000Z' })
+    expect(readDroppedDeps({ repoRoot, workerLayout: true }).records.get('260')).toMatchObject({ path, deps: ['node_modules'] })
+    expect(existsSync(join(holder, 'deps-dropped', '260.json'))).toBe(true)
+    expect(clearDroppedDeps({ repoRoot, workerLayout: true, name: '260', path })).toBe(true)
+    expect(existsSync(join(holder, 'deps-dropped', '260.json'))).toBe(false)
   })
 })

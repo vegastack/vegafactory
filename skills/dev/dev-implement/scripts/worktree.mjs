@@ -15,9 +15,10 @@
 //
 // Usage: node worktree.mjs create|restore|remove|list|prune|status [flags] [--json]
 import { execFileSync } from 'node:child_process';
-import { copyFileSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, realpathSync, statSync, writeFileSync } from 'node:fs';
+import { randomUUID } from 'node:crypto';
+import { chmodSync, copyFileSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { basename, delimiter, dirname, isAbsolute, join, resolve, sep } from 'node:path';
+import { basename, delimiter, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { findMarkerComment, ghJson, parseFlags, renderResult } from './lib/gh.mjs';
 
@@ -193,6 +194,7 @@ export function symlinkBlock(path) {
 
 const DAY_MS = 86_400_000;
 const DEFAULT_RETENTION_MS = 14 * DAY_MS;
+const DEFAULT_DEPS_RETENTION_MS = 3 * DAY_MS;
 
 // All of these must hold before a worktree directory is removed. Each failure
 // gets its own sentence so the caller can print exactly why the work is being
@@ -238,6 +240,150 @@ const knobLine = (devMd, knob) => {
 // shorter window than the documented default.
 export function parseRetentionKnob(devMd) {
   return parseDuration(knobLine(devMd, 'worktree-retention')) ?? DEFAULT_RETENTION_MS;
+}
+
+export function parseDepsRetentionKnob(devMd) {
+  const named = parseDuration(knobLine(devMd, 'worktree-deps-retention'));
+  return Math.min(named ?? DEFAULT_DEPS_RETENTION_MS, parseRetentionKnob(devMd));
+}
+
+// The owner-controlled root is the repository for an attended checkout and the
+// per-repository holder for a worker checkout. Nothing below it is trusted by
+// name: every existing component is checked before a destructive operation.
+function managedRoot(repoRoot, workerLayout) {
+  return workerLayout ? dirname(repoRoot) : repoRoot;
+}
+
+function markerRoot(repoRoot, workerLayout) {
+  return workerLayout
+    ? join(dirname(repoRoot), 'deps-dropped')
+    : join(repoRoot, '.vegastack', '.tmp', 'deps-dropped');
+}
+
+export function verifyOwnedPath(root, target, { allowMissingLeaf = false } = {}) {
+  const owned = resolve(root);
+  const wanted = resolve(target);
+  const rel = relative(owned, wanted);
+  if (rel === '..' || rel.startsWith('..' + sep) || isAbsolute(rel)) return { ok: false, reason: wanted + ' is outside ' + owned };
+  const uid = process.getuid?.();
+  let cursor = owned;
+  const parts = rel ? rel.split(sep).filter(Boolean) : [];
+  for (let index = -1; index < parts.length; index += 1) {
+    if (index >= 0) cursor = join(cursor, parts[index]);
+    if (!existsSync(cursor)) {
+      if (allowMissingLeaf) return { ok: true, reason: null };
+      return { ok: false, reason: cursor + ' does not exist' };
+    }
+    let info;
+    try { info = lstatSync(cursor); }
+    catch (error) { return { ok: false, reason: cursor + ' could not be inspected: ' + error.message }; }
+    if (info.isSymbolicLink() || !info.isDirectory()) return { ok: false, reason: cursor + ' is not an ordinary directory (symlinks are refused)' };
+    if (uid !== undefined && info.uid !== uid) return { ok: false, reason: cursor + ' is owned by uid ' + info.uid + ', not the current user' };
+    if ((info.mode & 0o022) !== 0) return { ok: false, reason: cursor + ' is unsafe because other users can write it' };
+  }
+  return { ok: true, reason: null };
+}
+
+function ensureMarkerRoot(repoRoot, workerLayout) {
+  const owner = managedRoot(repoRoot, workerLayout);
+  const root = markerRoot(repoRoot, workerLayout);
+  const ownerSafety = verifyOwnedPath(owner, owner);
+  if (!ownerSafety.ok) throw new Error(ownerSafety.reason);
+  let cursor = owner;
+  for (const part of relative(owner, root).split(sep).filter(Boolean)) {
+    cursor = join(cursor, part);
+    if (!existsSync(cursor)) mkdirSync(cursor, { mode: 0o700 });
+    const safety = verifyOwnedPath(owner, cursor);
+    if (!safety.ok) throw new Error(safety.reason);
+  }
+  chmodSync(root, 0o700);
+  return root;
+}
+
+const markerFile = (repoRoot, workerLayout, name) => join(markerRoot(repoRoot, workerLayout), encodeURIComponent(name) + '.json');
+
+function validMarkerRecord(value, { repoRoot, workerLayout, name }) {
+  if (!value || value.schema !== 1 || value.name !== name || value.repoRoot !== resolve(repoRoot)) return false;
+  if (value.path !== worktreePath(repoRoot, name, workerLayout)) return false;
+  if (!Array.isArray(value.deps) || value.deps.length !== 1 || value.deps[0] !== 'node_modules') return false;
+  return typeof value.droppedAt === 'string' && Number.isFinite(Date.parse(value.droppedAt));
+}
+
+export function readDroppedDeps({ repoRoot, workerLayout = false }) {
+  const records = new Map();
+  const owner = managedRoot(repoRoot, workerLayout);
+  const root = markerRoot(repoRoot, workerLayout);
+  const safety = verifyOwnedPath(owner, root, { allowMissingLeaf: true });
+  if (!safety.ok) return { records, unreadable: safety.reason };
+  if (!existsSync(root)) return { records, unreadable: null };
+  const rootInfo = lstatSync(root);
+  if ((rootInfo.mode & 0o777) !== 0o700) return { records, unreadable: root + ' is not owner-only 0700' };
+  let entries;
+  try { entries = readdirSync(root); }
+  catch (error) { return { records, unreadable: 'the dependency marker root could not be read: ' + error.message }; }
+  for (const entry of entries) {
+    if (!entry.endsWith('.json')) return { records, unreadable: 'a record of dropped dependencies has an unreadable name' };
+    let name;
+    try {
+      name = decodeURIComponent(entry.slice(0, -5));
+      if (encodeURIComponent(name) + '.json' !== entry || issueOfWorktree(name) === null && !/^[a-z0-9][a-z0-9-]{0,80}$/.test(name)) throw new Error('invalid name');
+    } catch { return { records, unreadable: 'a record of dropped dependencies has an unreadable name' }; }
+    const path = join(root, entry);
+    let info;
+    try { info = lstatSync(path); }
+    catch (error) { return { records, unreadable: path + ' could not be inspected: ' + error.message }; }
+    if (info.isSymbolicLink() || !info.isFile()) return { records, unreadable: path + ' is not an ordinary marker file' };
+    if (process.getuid && info.uid !== process.getuid()) return { records, unreadable: path + ' is owned by another user' };
+    if ((info.mode & 0o777) !== 0o600) return { records, unreadable: path + ' is not owner-only 0600' };
+    if (info.size > 16_384) return { records, unreadable: path + ' is too large to be a dependency marker' };
+    let record;
+    try { record = JSON.parse(readFileSync(path, 'utf8')); }
+    catch { return { records, unreadable: path + ' is not valid JSON' }; }
+    if (!validMarkerRecord(record, { repoRoot, workerLayout, name })) return { records, unreadable: path + ' does not match this worktree' };
+    records.set(name, record);
+  }
+  return { records, unreadable: null };
+}
+
+export function noteDroppedDeps({ repoRoot, workerLayout = false, name, path, deps = ['node_modules'], droppedAt }) {
+  if (path !== worktreePath(repoRoot, name, workerLayout) || deps.length !== 1 || deps[0] !== 'node_modules') throw new Error('the dependency marker does not match the managed worktree');
+  const existing = readDroppedDeps({ repoRoot, workerLayout });
+  if (existing.unreadable) throw new Error(existing.unreadable);
+  const checkout = verifyOwnedPath(managedRoot(repoRoot, workerLayout), path);
+  if (!checkout.ok) throw new Error(checkout.reason);
+  const root = ensureMarkerRoot(repoRoot, workerLayout);
+  const target = markerFile(repoRoot, workerLayout, name);
+  if (existsSync(target)) {
+    const info = lstatSync(target);
+    if (info.isSymbolicLink() || !info.isFile() || (process.getuid && info.uid !== process.getuid()) || (info.mode & 0o777) !== 0o600) {
+      throw new Error(target + ' is not a safe existing marker');
+    }
+  }
+  const record = { schema: 1, name, repoRoot: resolve(repoRoot), path, deps: ['node_modules'], droppedAt };
+  const temporary = join(root, '.' + encodeURIComponent(name) + '.' + randomUUID() + '.tmp');
+  try {
+    writeFileSync(temporary, JSON.stringify(record) + '\n', { flag: 'wx', mode: 0o600 });
+    renameSync(temporary, target);
+    chmodSync(target, 0o600);
+  } catch (error) {
+    try { rmSync(temporary, { force: true }); } catch { /* retain the original failure */ }
+    throw error;
+  }
+}
+
+export function clearDroppedDeps({ repoRoot, workerLayout = false, name, path }) {
+  const state = readDroppedDeps({ repoRoot, workerLayout });
+  if (state.unreadable) return false;
+  const record = state.records.get(name);
+  if (!record) return true;
+  if (record.path !== path) return false;
+  const target = markerFile(repoRoot, workerLayout, name);
+  try {
+    const info = lstatSync(target);
+    if (info.isSymbolicLink() || !info.isFile() || (process.getuid && info.uid !== process.getuid()) || (info.mode & 0o777) !== 0o600) return false;
+    rmSync(target);
+    return true;
+  } catch (error) { return error.code === 'ENOENT'; }
 }
 
 // branch: the type list, which lives in the comment on that knob's own line —
@@ -457,6 +603,7 @@ export function createWorktree({ repoRoot, issue, slug, type, title, base, devMd
       return { blocks, warns, actions, path, branch };
     }
     prepareCheckout({ repoRoot, path, devMd, home, write, actions, warns, blocks });
+    if (!clearDroppedDeps({ repoRoot, workerLayout, name, path })) blocks.push(at(name, 'the stale dependency marker could not be cleared'));
   } else {
     prepareCheckout({ repoRoot, path, devMd, home, write: false, actions, warns, blocks });
   }
@@ -501,6 +648,7 @@ export function restoreWorktree({ repoRoot, issue, slug, type, devMd, home, writ
     }
   }
   prepareCheckout({ repoRoot, path, devMd, home, write, actions, warns, blocks });
+  if (write && !clearDroppedDeps({ repoRoot, workerLayout, name, path })) blocks.push(at(name, 'the stale dependency marker could not be cleared'));
   return { blocks, warns, actions, path, branch };
 }
 
@@ -625,10 +773,24 @@ export function removeWorktree({ repoRoot, name, base, force = false, push = fal
   warns.push(...verdict.warns);
   if (blocks.length > 0) return { blocks, warns, actions, path, branch, state };
 
+  if (write) {
+    const markers = readDroppedDeps({ repoRoot, workerLayout });
+    if (markers.unreadable) {
+      blocks.push(at(name, 'the dependency marker state is unreadable: ' + markers.unreadable));
+      return { blocks, warns, actions, path, branch, state };
+    }
+    const marker = markers.records.get(name);
+    if (marker && marker.path !== path) {
+      blocks.push(at(name, 'the dependency marker names a different checkout'));
+      return { blocks, warns, actions, path, branch, state };
+    }
+  }
+
   actions.push(at(path, 'git worktree remove (the branch and its remote are left alone)'));
   if (write) {
     const removed = git(repoRoot, ['worktree', 'remove', path]);
     if (!removed.ok) blocks.push(at(path, 'git worktree remove failed: ' + removed.out));
+    else if (!clearDroppedDeps({ repoRoot, workerLayout, name, path })) warns.push(at(name, 'the dependency marker could not be cleared after removal'));
   }
   return { blocks, warns, actions, path, branch, state };
 }
@@ -719,7 +881,11 @@ export function pruneWorktrees({ repoRoot, base, olderThan, devMd, ledgerTimes =
   const warns = [];
   const actions = [];
   const retentionMs = parseDuration(olderThan) ?? parseRetentionKnob(devMd);
+  const depsRetentionMs = parseDepsRetentionKnob(devMd);
   const candidates = [];
+  const freed = [];
+  const droppable = [];
+  const dropped = readDroppedDeps({ repoRoot, workerLayout });
   refreshBase({ repoRoot, base, remote, actions, warns });
   for (const entry of inventory(repoRoot, workerLayout)) {
     const branch = entry.branch;
@@ -737,6 +903,36 @@ export function pruneWorktrees({ repoRoot, base, olderThan, devMd, ledgerTimes =
     const ageDays = stamps.length === 0 ? 0 : Math.floor((now - Math.max(...stamps)) / DAY_MS);
     const idle = isPastRetention({ lastCommitAt, ledgerUpdatedAt, now, retentionMs });
     const reasonCode = facts.mergedIntoDefault ? 'merged' : issueStates[entry.name] === 'closed' ? 'closed' : idle ? 'idle' : null;
+    const depsWindowPassed = isPastRetention({ lastCommitAt, ledgerUpdatedAt, now, retentionMs: depsRetentionMs });
+    const deps = join(entry.path, 'node_modules');
+    // A whole-worktree candidate does not first delete one of its children. Dependency-only
+    // reclamation is the shorter-window path for a checkout that is otherwise staying.
+    if (reasonCode === null && depsWindowPassed && existsSync(deps)) {
+      let keep = null;
+      if (dropped.unreadable) keep = dropped.unreadable;
+      const pathSafety = keep ? null : verifyOwnedPath(managedRoot(repoRoot, workerLayout), deps);
+      if (!keep && !pathSafety.ok) keep = pathSafety.reason;
+      if (!keep && entry.locked) keep = 'the worktree is locked';
+      else if (!keep && facts.dirty) keep = 'uncommitted work here';
+      else if (!keep && facts.unpushed) keep = 'commits not on the remote';
+      else if (!keep && branch === null && !facts.headReachable) keep = 'the detached HEAD contains a unique commit';
+      const tracked = keep ? '' : git(entry.path, ['ls-files', '--', 'node_modules']);
+      if (!keep && (!tracked.ok || tracked.out)) keep = tracked.ok ? 'git tracks files under node_modules here' : 'git could not prove node_modules is untracked';
+      if (keep) warns.push(at(entry.name, 'kept its dependencies: ' + keep));
+      else {
+        droppable.push(entry.name);
+        actions.push(at(entry.name, 'drop untracked node_modules and keep the checkout'));
+        if (write) {
+          try {
+            noteDroppedDeps({ repoRoot, workerLayout, name: entry.name, path: entry.path, deps: ['node_modules'], droppedAt: new Date(now).toISOString() });
+            rmSync(deps, { recursive: true });
+            freed.push(entry.name);
+          } catch (error) {
+            warns.push(at(entry.name, 'kept its dependencies: ' + error.message));
+          }
+        }
+      }
+    }
     if (reasonCode === null) continue;
     const verdict = evaluateRemoval({ state, ...facts, locked: entry.locked, force: reasonCode !== 'merged' });
     // Reclamation never creates a remote branch. Dirty work can be rescued only when its named
@@ -783,7 +979,7 @@ export function pruneWorktrees({ repoRoot, base, olderThan, devMd, ledgerTimes =
       candidate.reason = null;
     }
   }
-  return { blocks, warns, actions, candidates };
+  return { blocks, warns, actions, candidates, freed, droppable };
 }
 
 // --- list and status ------------------------------------------------------

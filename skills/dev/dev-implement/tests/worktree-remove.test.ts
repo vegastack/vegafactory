@@ -1,9 +1,9 @@
 import { describe, expect, test } from 'bun:test'
 import { execFileSync, spawnSync } from 'node:child_process'
-import { chmodSync, existsSync, mkdtempSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { createWorktree, pruneWorktrees, removeWorktree } from '../scripts/worktree.mjs'
+import { createWorktree, pruneWorktrees, readDroppedDeps, removeWorktree } from '../scripts/worktree.mjs'
 
 // Relative to the real clock: the fixture commits carry today's date, so a fixed
 // 'now' turns these into time bombs once the calendar catches up.
@@ -25,6 +25,7 @@ function repoWithRemote(remote = bareRemote()) {
   git(root, 'config', 'user.email', 'a@b.c')
   git(root, 'config', 'user.name', 'a')
   writeFileSync(join(root, 'README.md'), '# r\n')
+  writeFileSync(join(root, '.gitignore'), 'node_modules/\n')
   git(root, 'add', '.')
   git(root, 'commit', '-m', 'init')
   git(root, 'remote', 'add', 'origin', remote)
@@ -162,6 +163,125 @@ describe('removeWorktree', () => {
     const r = removeWorktree({ repoRoot: root, name: '106', base: 'main', force: false, push: false, write: true })
     expect(r.blocks.some((b: string) => b.includes('not merged into the default branch'))).toBe(true)
     expect(existsSync(wt.path)).toBe(true)
+  })
+})
+
+describe('dependency reclamation', () => {
+  const depsDevMd = `${devMd}worktree-deps-retention: 3d\n`
+  const DEPS_NOW = Date.now() + 4 * 86_400_000
+  const DEPS_LEDGER = new Date(Date.now() - 4 * 86_400_000).toISOString()
+
+  function pushedWithDeps(issue = 120) {
+    const root = repoWithRemote()
+    const wt = createWorktree({ repoRoot: root, issue, slug: 'deps', type: 'feat', base: 'main', devMd: depsDevMd, home: root, write: true })
+    writeFileSync(join(wt.path, 'feature.txt'), 'feature\n')
+    git(wt.path, 'add', 'feature.txt')
+    git(wt.path, 'commit', '-qm', 'feature')
+    git(wt.path, 'push', '-q', '-u', 'origin', `feat/${issue}-deps`)
+    mkdirSync(join(wt.path, 'node_modules', 'pkg'), { recursive: true })
+    writeFileSync(join(wt.path, 'node_modules', 'pkg', 'index.js'), 'module.exports = 1\n')
+    return { root, wt }
+  }
+
+  test('preview changes no bytes; write records then removes only node_modules', () => {
+    const { root, wt } = pushedWithDeps()
+    const input = { repoRoot: root, base: 'main', devMd: depsDevMd, ledgerTimes: { '120': DEPS_LEDGER }, now: DEPS_NOW }
+    const preview = pruneWorktrees({ ...input, write: false })
+    expect(preview.droppable).toEqual(['120'])
+    expect(existsSync(join(wt.path, 'node_modules/pkg/index.js'))).toBe(true)
+    expect(readDroppedDeps({ repoRoot: root, workerLayout: false }).records.size).toBe(0)
+
+    const written = pruneWorktrees({ ...input, write: true })
+    expect(written.freed).toEqual(['120'])
+    expect(existsSync(join(wt.path, 'node_modules'))).toBe(false)
+    const marker = join(root, '.vegastack', '.tmp', 'deps-dropped', '120.json')
+    expect(JSON.parse(readFileSync(marker, 'utf8'))).toMatchObject({ schema: 1, name: '120', path: wt.path, deps: ['node_modules'] })
+    expect(lstatSync(marker).mode & 0o777).toBe(0o600)
+  })
+
+  test('tracked, dirty, unpushed, and locked checkouts keep dependencies', () => {
+    const tracked = pushedWithDeps(121)
+    writeFileSync(join(tracked.wt.path, 'node_modules', 'tracked.js'), 'tracked\n')
+    git(tracked.wt.path, 'add', '-f', 'node_modules/tracked.js')
+    git(tracked.wt.path, 'commit', '-qm', 'track dependency')
+    git(tracked.wt.path, 'push', '-q')
+    const trackedResult = pruneWorktrees({ repoRoot: tracked.root, base: 'main', devMd: depsDevMd, ledgerTimes: { '121': DEPS_LEDGER }, now: DEPS_NOW, write: true })
+    expect(trackedResult.warns.join(' ')).toContain('git tracks')
+    expect(existsSync(join(tracked.wt.path, 'node_modules/tracked.js'))).toBe(true)
+
+    const dirty = pushedWithDeps(122)
+    writeFileSync(join(dirty.wt.path, 'dirty.txt'), 'dirty\n')
+    const dirtyResult = pruneWorktrees({ repoRoot: dirty.root, base: 'main', devMd: depsDevMd, ledgerTimes: { '122': DEPS_LEDGER }, now: DEPS_NOW, write: true })
+    expect(dirtyResult.warns.join(' ')).toContain('uncommitted')
+    expect(existsSync(join(dirty.wt.path, 'node_modules'))).toBe(true)
+
+    const unpushed = pushedWithDeps(123)
+    writeFileSync(join(unpushed.wt.path, 'local.txt'), 'local\n')
+    git(unpushed.wt.path, 'add', 'local.txt')
+    git(unpushed.wt.path, 'commit', '-qm', 'local only')
+    const unpushedResult = pruneWorktrees({ repoRoot: unpushed.root, base: 'main', devMd: depsDevMd, ledgerTimes: { '123': DEPS_LEDGER }, now: DEPS_NOW, write: true })
+    expect(unpushedResult.warns.join(' ')).toContain('commits not on the remote')
+    expect(existsSync(join(unpushed.wt.path, 'node_modules'))).toBe(true)
+
+    const locked = pushedWithDeps(124)
+    git(locked.root, 'worktree', 'lock', locked.wt.path)
+    const lockedResult = pruneWorktrees({ repoRoot: locked.root, base: 'main', devMd: depsDevMd, ledgerTimes: { '124': DEPS_LEDGER }, now: DEPS_NOW, write: true })
+    expect(lockedResult.warns.join(' ')).toContain('locked')
+    expect(existsSync(join(locked.wt.path, 'node_modules'))).toBe(true)
+  })
+
+  test('malformed markers and unsafe ancestors leave external and dependency bytes untouched', () => {
+    const malformed = pushedWithDeps(125)
+    const markerRoot = join(malformed.root, '.vegastack', '.tmp', 'deps-dropped')
+    mkdirSync(markerRoot, { recursive: true })
+    chmodSync(markerRoot, 0o700)
+    writeFileSync(join(markerRoot, '%ZZ.json'), '{}\n')
+    const malformedResult = pruneWorktrees({ repoRoot: malformed.root, base: 'main', devMd: depsDevMd, ledgerTimes: { '125': DEPS_LEDGER }, now: DEPS_NOW, write: true })
+    expect(malformedResult.warns.join(' ')).toContain('unreadable')
+    expect(existsSync(join(malformed.wt.path, 'node_modules'))).toBe(true)
+
+    const linked = pushedWithDeps(126)
+    const external = mkdtempSync(join(tmpdir(), 'vf-external-deps-'))
+    writeFileSync(join(external, 'keep.txt'), 'keep\n')
+    const ownDeps = join(linked.wt.path, 'node_modules')
+    execFileSync('rm', ['-rf', ownDeps])
+    symlinkSync(external, ownDeps)
+    const linkedResult = pruneWorktrees({ repoRoot: linked.root, base: 'main', devMd: depsDevMd, ledgerTimes: { '126': DEPS_LEDGER }, now: DEPS_NOW, write: true })
+    expect(linkedResult.warns.join(' ')).toContain('symlink')
+    expect(readFileSync(join(external, 'keep.txt'), 'utf8')).toBe('keep\n')
+
+    const writable = pushedWithDeps(127)
+    const tmp = join(writable.root, '.vegastack', '.tmp')
+    mkdirSync(tmp, { recursive: true })
+    chmodSync(tmp, 0o777)
+    const writableResult = pruneWorktrees({ repoRoot: writable.root, base: 'main', devMd: depsDevMd, ledgerTimes: { '127': DEPS_LEDGER }, now: DEPS_NOW, write: true })
+    expect(writableResult.warns.join(' ')).toContain('other users can write')
+    expect(existsSync(join(writable.wt.path, 'node_modules'))).toBe(true)
+  })
+
+  test('removing the checkout clears only its matching marker', () => {
+    const { root, wt } = pushedWithDeps(128)
+    const input = { repoRoot: root, base: 'main', devMd: depsDevMd, ledgerTimes: { '128': DEPS_LEDGER }, now: DEPS_NOW }
+    pruneWorktrees({ ...input, write: true })
+    const marker = join(root, '.vegastack', '.tmp', 'deps-dropped', '128.json')
+    expect(existsSync(marker)).toBe(true)
+    const removed = removeWorktree({ repoRoot: root, name: '128', base: 'main', force: true, write: true })
+    expect(removed.blocks).toEqual([])
+    expect(existsSync(wt.path)).toBe(false)
+    expect(existsSync(marker)).toBe(false)
+  })
+
+  test('a freshly recreated issue checkout clears a stale matching marker', () => {
+    const { root, wt } = pushedWithDeps(129)
+    const input = { repoRoot: root, base: 'main', devMd: depsDevMd, ledgerTimes: { '129': DEPS_LEDGER }, now: DEPS_NOW }
+    pruneWorktrees({ ...input, write: true })
+    const marker = join(root, '.vegastack', '.tmp', 'deps-dropped', '129.json')
+    expect(existsSync(marker)).toBe(true)
+    git(root, 'worktree', 'remove', '--force', wt.path)
+    const fresh = createWorktree({ repoRoot: root, issue: 129, slug: 'fresh', type: 'feat', base: 'main', devMd: depsDevMd, home: root, write: true })
+    expect(fresh.blocks).toEqual([])
+    expect(existsSync(marker)).toBe(false)
+    expect(existsSync(fresh.path)).toBe(true)
   })
 })
 
