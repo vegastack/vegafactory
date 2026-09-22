@@ -55,7 +55,7 @@ A knob whose value differs between two repos in the group is a question, not an 
 
 The full checklist ships as `onboarding/new-repo.md`, so the org can edit the procedure without editing this skill.
 
-A machine is the third onboarding path, in two shapes. Any machine gets a `nodes.md` row with `worker: no`, which makes statistics answerable per machine and grants nothing. One that works boards alone is provisioned by `onboarding/worker-box.md` under two accounts, so a CI job cannot read its tokens; its row says `worker: yes`.
+A machine is the third onboarding path, in two shapes. Any ordinary machine follows `onboarding/new-node.md` and gets one `nodes.md` row with `worker: no`, which makes statistics answerable per machine and grants nothing. A machine that works boards unattended follows `onboarding/worker-box.md` under two accounts, so a CI job cannot read its tokens; its row says `worker: yes`.
 
 ## `onboard <login>`
 

@@ -3,7 +3,7 @@ import { mkdirSync, mkdtempSync, realpathSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { assertSupportedPlatform, billingVariables, childEnvironment } from '../src/env.ts'
-import { checkTools, enableRepoHooks, ensureGlobalCli, nodeMajor, usesBun, type Probe } from '../src/init.ts'
+import { checkTools, enableRepoHooks, ensureGlobalCli, nodeMajor, proposeNodeRow, usesBun, type Probe } from '../src/init.ts'
 
 describe('subscription-only child environment', () => {
   test('parent Claude Code variables are dropped, including the desktop proxy URL', () => {
@@ -112,6 +112,19 @@ describe('init', () => {
     expect(calls).toContain('git config core.hooksPath .githooks')
     const outside = fakeProbe({ 'git rev-parse --show-toplevel': { code: 128 } })
     expect(enableRepoHooks(outside.probe, repo, false).status).toBe('skipped')
+  })
+
+  test('proposes one canonical non-worker row and mutates nothing', () => {
+    const { probe, calls } = fakeProbe({ 'gh api user -q .login': { code: 0, stdout: 'kmanojkumar' } })
+    expect(proposeNodeRow(probe, 'MK', 'Desk.local')).toMatchObject({
+      status: 'warn',
+      detail: expect.stringContaining('| mk@desk | kmanojkumar | no | | | |'),
+    })
+    expect(calls).toEqual(['gh api user -q .login'])
+
+    const unavailable = fakeProbe({ 'gh api user -q .login': { code: 1, stderr: 'offline' } })
+    expect(proposeNodeRow(unavailable.probe, 'mk', 'desk').detail).toContain('could not read the GitHub login')
+    expect(unavailable.calls).toEqual(['gh api user -q .login'])
   })
 })
 

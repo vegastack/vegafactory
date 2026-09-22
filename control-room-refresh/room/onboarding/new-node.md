@@ -1,0 +1,10 @@
+# Enrolling an ordinary node in vegastack
+
+An ordinary node is any person's macOS or Linux machine that runs VegaFactory. Its one `nodes.md` row makes statistics attributable to the machine and grants no unattended work.
+
+1. On the machine, sign in with `gh auth login`, install Claude Code or Codex, then run `vegafactory init`.
+2. Copy the proposed `nodes.md` row from the final `node` line. It must name `<os-user>@<hostname>`, the signed-in GitHub login as owner, `worker: no`, and blank `repos`/`caps` cells.
+3. Send that row to an operator. The operator adds it to `vegastack/vegafactory-control-room` through a normal PR; `init` never edits, commits, pushes, or opens that PR.
+4. After merge, pull or sync the control room and confirm the row is unchanged. `worker: no` is the whole permission model for this path: the node reports attended work and cannot poll or run a board.
+
+Use `onboarding/worker-box.md` instead only when the machine will work boards unattended.

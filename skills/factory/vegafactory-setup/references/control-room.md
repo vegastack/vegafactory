@@ -10,9 +10,9 @@ Seven things, and nothing else.
 org.md                       what applies to everyone: the org name, the goals, the org-wide knobs
 groups/<g>/group.md          department defaults: one line per knob a repo's dev.md can hold
 repos.md                     registry: repo, group, board, owner
-nodes.md               registry: the always-on machines, and which group's repos they serve
+nodes.md                     registry: every machine that runs VegaFactory; worker rows also name the repos they serve
 boards.md                    registry: project boards and the repos that mirror onto them
-onboarding/                  the new-repo, new-teammate and worker-box checklists
+onboarding/                  the new-repo, new-teammate, new-node and worker-box checklists
 stats/YYYY/MM/DD/<owner>-<node>-<digest>.jsonl  one record per assistant turn, appended by the CLI
 ```
 
