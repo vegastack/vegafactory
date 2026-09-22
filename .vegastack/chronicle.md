@@ -423,7 +423,7 @@ The project's story, newest first: what got built, why, and how it went — for 
 
 - **What:** Session approval now requires a publisher in current operator policy. Another recorder can relay only an independently verified identical scoped grant, inheriting its authority and revocation history. Launch, preparation and research results retain the original source comment and body identity.
 - **Why:** An untrusted recorder could previously claim a configured operator’s words or reuse a quotation for changed scope. Missing source evidence must not become permission through a correction.
-- **How it went:** Eleven new regressions failed before the correction. Approval/preflight/CLI tests and focused provenance/cancellation checks now pass; actual managed-launch integration, broad checks, scan, evaluation and independent review remain pending at the shared checkpoint.
+- **How it went:** Eleven new regressions failed before the correction. Approval/preflight/CLI tests and focused provenance/cancellation checks now pass; actual managed-launch integration, broad verification, evaluation and independent review remain pending at the shared checkpoint.
 - **Changed:** Trusted session attestations · exact grant relays · canonical source provenance · unavailable-source refusal.
 - **Decisions:** none.
 
