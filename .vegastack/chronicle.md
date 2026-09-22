@@ -12,6 +12,36 @@ The project's story, newest first: what got built, why, and how it went — for 
 
 — approved by (kmanojkumar) · built by codex · branch feat/260-attended-worktree-reclamation
 
+## 22-09-2026 — A new review cycle really starts a new range ([#283](https://github.com/vegastack/vegafactory/issues/283))
+
+- **What:** Round one of a new review cycle can choose the current diff base; every later round remains pinned to that choice.
+- **Why:** The CLI opened a new cycle after changed work but still inherited the spent cycle's base, contradicting its own recovery message and blocking #260's clean replacement review.
+- **How it went:** One public-command regression reproduced three spent rounds, changed the head, selected a new base, then proved the next round could not move it again.
+- **Changed:** new-cycle base selection and its regression matrix.
+- **Decisions:** none.
+
+— approved by (kmanojkumar) · built by codex · branch fix/283-a-new-review-cycle-can-choose-a-new-base
+
+## 22-09-2026 — Every machine has a cheap node-enrolment path ([#261](https://github.com/vegastack/vegafactory/issues/261))
+
+- **What:** `vegafactory init` now prints the ordinary machine's canonical `worker: no` row, and a short checklist carries that row through an operator-owned control-room PR. Teammate onboarding links the same path, while unattended machines keep their separate worker-box procedure.
+- **Why:** Statistics identify work by node, but a normal person's machine had no enrolment flow; the only documented machine path provisioned an always-on worker.
+- **How it went:** The original plan tried to make init edit and push the control room, contradicting the product's credential boundary. Re-grounding cut it back to one read-only login lookup and one copyable row, then locked the authored and staged checklists together.
+- **Changed:** init node proposal · ordinary-node checklist · teammate node step · explicit ordinary-node versus worker-box routing · org-wide App installation guidance.
+- **Decisions:** none.
+
+— approved by (kmanojkumar) · built by codex · branch docs/261-onboarding-any-machine-not-just-a-worker
+
+## 22-09-2026 — The stats page answers narrower questions without rebuilding ([#257](https://github.com/vegastack/vegafactory/issues/257))
+
+- **What:** The one-file offline dashboard now filters the events it already loaded by repository, owner, node, and inclusive date range. Every table and headline updates in place without a server, network request, or external asset.
+- **Why:** The dashboard could summarize the whole history but could not answer ordinary questions about one project, person, machine, or period without generating another file.
+- **How it went:** The old plan left browser behavior to a visual check. The implementation kept the page dependency-free but added a deterministic pure filter seam, syntax/data-safety tests, and one small DOM runtime that rebuilds cells with `textContent` rather than markup.
+- **Changed:** five in-page filters · live aggregate/table rebuilding · script-safe embedded events · preserved offline/XSS guarantees.
+- **Decisions:** none.
+
+— approved by (kmanojkumar) · built by codex · branch feat/257-a-stats-page-you-can-filter
+
 ## 21-09-2026 — One worker serves every board without mixing them ([#259](https://github.com/vegastack/vegafactory/issues/259))
 
 - **What:** One machine service now provisions and serves every explicit repository in its roster. Each board keeps its own checkout, App token, policy, issue cache, readiness and push path, while machine state and capacity stay genuinely global.

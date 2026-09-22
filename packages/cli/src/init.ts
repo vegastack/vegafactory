@@ -1,7 +1,9 @@
 // `vegafactory init` — one command from a fresh machine to a working setup.
 import { spawnSync } from 'node:child_process'
 import { existsSync, readFileSync } from 'node:fs'
+import { hostname, userInfo } from 'node:os'
 import { join } from 'node:path'
+import { nodeId } from './claim.ts'
 
 export interface InitStep { name: string; status: 'ok' | 'warn' | 'fail' | 'done' | 'skipped'; detail: string }
 export type Probe = (cmd: string, args: string[], cwd?: string) => { code: number; stdout: string; stderr: string }
@@ -75,6 +77,19 @@ export function enableRepoHooks(run: Probe, cwd: string, dryRun: boolean): InitS
   if (dryRun) return { name: 'hooks', status: 'skipped', detail: 'would run: git config core.hooksPath .githooks' }
   const set = run('git', ['config', 'core.hooksPath', '.githooks'], top.stdout)
   return set.code === 0 ? { name: 'hooks', status: 'done', detail: 'enabled the commit hook' } : { name: 'hooks', status: 'fail', detail: set.stderr }
+}
+
+// Enrolment stays an operator-owned control-room PR. Init contributes the two facts this machine
+// can prove — its derived node id and the signed-in GitHub login — and grants nothing (`worker:
+// no`). It prints the row and has no write path of its own.
+export function proposeNodeRow(run: Probe, user = userInfo().username, host = hostname()): InitStep {
+  const node = nodeId(user, host)
+  const login = run('gh', ['api', 'user', '-q', '.login'])
+  if (login.code !== 0 || !/^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})$/.test(login.stdout.trim())) {
+    return { name: 'node', status: 'warn', detail: `could not read the GitHub login for ${node} — rerun after \`gh auth login\`, then add its worker: no row through an operator-owned control-room PR` }
+  }
+  const row = `| ${node} | ${login.stdout.trim()} | no | | | |`
+  return { name: 'node', status: 'warn', detail: `proposed nodes.md row (copy into an operator-owned control-room PR): ${row}` }
 }
 
 export function renderSteps(steps: InitStep[]): string {
