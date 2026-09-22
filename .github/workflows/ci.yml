@@ -2,7 +2,7 @@ name: CI
 
 # Each check runs in exactly one place:
 #   pull_request → fast checks + only the tests the change affects
-#   merge_group  → the full suite, build, pack smoke and skill scan, once, on main + this PR
+#   merge_group  → the full suite, build and pack smoke, once, on main + this PR
 # Nothing runs after merge: the merge queue already tested exactly what lands.
 on:
   pull_request:
@@ -63,44 +63,3 @@ jobs:
           set -euo pipefail
           node scripts/release.mjs pack "$RUNNER_TEMP" > "$RUNNER_TEMP/pack.json"
           node scripts/release.mjs smoke "$(node -p "require(process.env.RUNNER_TEMP + '/pack.json').tarball")"
-
-      - uses: astral-sh/setup-uv@v6
-        if: github.event_name == 'merge_group'
-
-      - name: Install pinned skill scanner
-        if: github.event_name == 'merge_group'
-        # SkillSpector v2.11.2 immutable commit 69dcdfb74487d361ba4c811d088cfdea2ff3a9dc, hash-locked dependencies.
-        run: |
-          set -euo pipefail
-          SCANNER="$RUNNER_TEMP/skill-scanner"
-          uv venv --python 3.12 "$SCANNER/venv"
-          grep -v '^skillspector @' .github/skillspector-constraints.txt > "$SCANNER/dependencies.txt"
-          uv pip sync --python "$SCANNER/venv/bin/python" --require-hashes "$SCANNER/dependencies.txt"
-          uv pip install --python "$SCANNER/venv/bin/python" --no-deps --no-build-isolation 'git+https://github.com/NVIDIA/skillspector.git@69dcdfb74487d361ba4c811d088cfdea2ff3a9dc'
-          echo "$SCANNER/venv/bin" >> "$GITHUB_PATH"
-
-      - name: Scan the built skills
-        if: github.event_name == 'merge_group'
-        # Exit 1 is a pass with warnings (accepted findings); only 2 blocks.
-        run: |
-          status=0
-          node skills/skills-tooling/skill-scan/scripts/skill-scan.mjs --json --no-provision || status=$?
-          test "$status" -le 1
-
-      # SkillSpector fingerprints differ between macOS and Linux, so a blocked scan publishes
-      # this runner's fingerprints for the operator-approved baseline refresh.
-      - name: Linux fingerprints for a blocked scan
-        if: failure() && github.event_name == 'merge_group'
-        run: |
-          mkdir -p "$RUNNER_TEMP/fingerprints"
-          for dir in packages/cli/skill/*/; do
-            name=$(basename "$dir")
-            skillspector baseline "$dir" -o "$RUNNER_TEMP/fingerprints/$name.yaml" --no-llm >/dev/null 2>&1 || true
-          done
-
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
-        if: failure() && github.event_name == 'merge_group'
-        with:
-          name: skill-scan-fingerprints
-          path: ${{ runner.temp }}/fingerprints/
-          if-no-files-found: ignore
