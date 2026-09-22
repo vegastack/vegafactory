@@ -3,6 +3,7 @@ import { chmodSync, mkdtempSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { GhUnavailable, ghJson, splitJsonDocuments } from '../scripts/lib/gh.mjs'
+import { gatherLedgerTimes } from '../scripts/worktree.mjs'
 
 const ghPrinting = (text: string) => {
   const path = join(mkdtempSync(join(tmpdir(), 'gh-pages-')), 'gh')
@@ -56,5 +57,15 @@ describe('ghJson pagination integration', () => {
     for (const text of ['[1]{"bad":2}', '[1] trailing', '[1']) {
       expect(() => ghJson(['api', 'x', '--paginate'], { gh: ghPrinting(text) }), text).toThrow(GhUnavailable)
     }
+  })
+})
+
+describe('GitHub fact failures stay unknown', () => {
+  test('a failed ledger read is not an absent ledger', () => {
+    const warns: string[] = []
+    const result = gatherLedgerTimes({ repo: 'o/r', names: ['260'], warns, read: () => { throw new GhUnavailable('truncated') } })
+    expect(result.times).toEqual({})
+    expect([...result.unknown]).toEqual(['260'])
+    expect(warns.join(' ')).toContain('truncated')
   })
 })

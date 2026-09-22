@@ -6,7 +6,7 @@ import { dirname, join } from 'node:path'
 import { Readable } from 'node:stream'
 import { claim } from '../src/claim.ts'
 import type { GhRunner } from '../src/gh.ts'
-import { detachBounded, issueFromBranch, issueFromWorktree, readHookInput, runHook, type HookDeps } from '../src/hook.ts'
+import { detachBounded, issueFromBranch, issueFromWorktree, locate, readHookInput, runHook, type HookDeps } from '../src/hook.ts'
 import { ackBody, artifactHash } from '../src/issue.ts'
 import { addLesson, readLessons } from '../src/learning.ts'
 import { installArgs, packageVersion, readUpdateNote, SELF_UPDATE_LIMIT_S, writeUpdateNote } from '../src/self-update.ts'
@@ -108,9 +108,26 @@ beforeEach(() => {
 describe('finding the issue', () => {
   test('from the worktree folder or the branch name', () => {
     expect(issueFromWorktree('/r/.vegastack/.worktrees/216-coordination')).toBe(216)
+    expect(issueFromWorktree('/r/.vegastack/.worktrees/216')).toBe(216)
+    expect(issueFromWorktree('/home/x/.vegafactory/worker/repos/o__r/issues/216')).toBe(216)
     expect(issueFromWorktree('/r/.vegastack/.worktrees/x')).toBe(null)
+    expect(issueFromWorktree('/r/issues/216')).toBe(null)
     expect(issueFromBranch('feat/216-coordination')).toBe(216)
     expect(issueFromBranch('main')).toBe(null)
+  })
+
+  test('detached attended and worker number-only checkouts retain issue identity', () => {
+    const attended = join(root, '.vegastack', '.worktrees', '8')
+    git(root, 'worktree', 'add', '-q', '-b', 'feat/8-attended', attended)
+    git(attended, 'switch', '-q', '--detach')
+    expect(locate(attended)?.number).toBe(8)
+
+    const holder = join(dirname(root), '.vegafactory', 'worker', 'repos', 'o__r')
+    const worker = join(holder, 'issues', '9')
+    mkdirSync(join(holder, 'issues'), { recursive: true })
+    git(root, 'worktree', 'add', '-q', '-b', 'feat/9-worker', worker)
+    git(worker, 'switch', '-q', '--detach')
+    expect(locate(worker)?.number).toBe(9)
   })
 
   test('input is bounded: an oversized payload is null but keeps its head', async () => {

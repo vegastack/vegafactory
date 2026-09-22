@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test'
 import { execFileSync, spawnSync } from 'node:child_process'
-import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, symlinkSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, renameSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { createWorktree, pruneWorktrees, readDroppedDeps, removeWorktree } from '../scripts/worktree.mjs'
@@ -164,6 +164,28 @@ describe('removeWorktree', () => {
     expect(r.blocks.some((b: string) => b.includes('not merged into the default branch'))).toBe(true)
     expect(existsSync(wt.path)).toBe(true)
   })
+
+  test('full removal refuses a symlinked or other-UID-writable managed ancestor', () => {
+    const linkedRoot = repoWithRemote()
+    const linked = pushedFeature(linkedRoot)
+    const parent = join(linkedRoot, '.vegastack')
+    const managed = join(parent, '.worktrees')
+    const externalParent = mkdtempSync(join(tmpdir(), 'vf-external-worktrees-'))
+    const external = join(externalParent, 'redirected')
+    renameSync(managed, external)
+    symlinkSync(external, managed)
+    const linkedResult = removeWorktree({ repoRoot: linkedRoot, name: '106', base: 'main', force: true, write: true })
+    expect(linkedResult.blocks.join(' ')).toContain('symlink')
+    expect(existsSync(join(external, '106'))).toBe(true)
+    expect(existsSync(join(linked.path, 'one.txt'))).toBe(true)
+
+    const writableRoot = repoWithRemote()
+    const writable = pushedFeature(writableRoot)
+    chmodSync(join(writableRoot, '.vegastack', '.worktrees'), 0o777)
+    const writableResult = removeWorktree({ repoRoot: writableRoot, name: '106', base: 'main', force: true, write: true })
+    expect(writableResult.blocks.join(' ')).toContain('other users can write')
+    expect(existsSync(writable.path)).toBe(true)
+  })
 })
 
 describe('dependency reclamation', () => {
@@ -259,6 +281,31 @@ describe('dependency reclamation', () => {
     expect(existsSync(join(writable.wt.path, 'node_modules'))).toBe(true)
   })
 
+  test('traversal-shaped names and non-ISO timestamps make the marker set unreadable', () => {
+    const traversal = pushedWithDeps(130)
+    const traversalRoot = join(traversal.root, '.vegastack', '.tmp', 'deps-dropped')
+    mkdirSync(traversalRoot, { recursive: true, mode: 0o700 })
+    chmodSync(traversalRoot, 0o700)
+    const badName = '260-../../outside'
+    const badPath = join(traversalRoot, `${encodeURIComponent(badName)}.json`)
+    writeFileSync(badPath, `${JSON.stringify({ schema: 1, name: badName, repoRoot: traversal.root, path: join(traversal.root, '.vegastack', 'outside'), deps: ['node_modules'], droppedAt: '2026-09-22T00:00:00.000Z' })}\n`, { mode: 0o600 })
+    chmodSync(badPath, 0o600)
+    const traversalResult = pruneWorktrees({ repoRoot: traversal.root, base: 'main', devMd: depsDevMd, ledgerTimes: { '130': DEPS_LEDGER }, now: DEPS_NOW, write: true })
+    expect(traversalResult.warns.join(' ')).toContain('unreadable')
+    expect(existsSync(join(traversal.wt.path, 'node_modules'))).toBe(true)
+
+    const dated = pushedWithDeps(131)
+    const datedRoot = join(dated.root, '.vegastack', '.tmp', 'deps-dropped')
+    mkdirSync(datedRoot, { recursive: true, mode: 0o700 })
+    chmodSync(datedRoot, 0o700)
+    const datedPath = join(datedRoot, '131.json')
+    writeFileSync(datedPath, `${JSON.stringify({ schema: 1, name: '131', repoRoot: dated.root, path: dated.wt.path, deps: ['node_modules'], droppedAt: '1' })}\n`, { mode: 0o600 })
+    chmodSync(datedPath, 0o600)
+    const datedResult = pruneWorktrees({ repoRoot: dated.root, base: 'main', devMd: depsDevMd, ledgerTimes: { '131': DEPS_LEDGER }, now: DEPS_NOW, write: true })
+    expect(datedResult.warns.join(' ')).toContain('does not match')
+    expect(existsSync(join(dated.wt.path, 'node_modules'))).toBe(true)
+  })
+
   test('removing the checkout clears only its matching marker', () => {
     const { root, wt } = pushedWithDeps(128)
     const input = { repoRoot: root, base: 'main', devMd: depsDevMd, ledgerTimes: { '128': DEPS_LEDGER }, now: DEPS_NOW }
@@ -286,6 +333,27 @@ describe('dependency reclamation', () => {
 })
 
 describe('pruneWorktrees', () => {
+  test('preview changes no refs, FETCH_HEAD, objects, or worktree bytes', () => {
+    const remote = bareRemote()
+    const root = repoWithRemote(remote)
+    const wt = pushedFeature(root)
+    const other = cloneOf(remote)
+    writeFileSync(join(other, 'main-new.txt'), 'new remote main\n')
+    git(other, 'add', 'main-new.txt')
+    git(other, 'commit', '-qm', 'new remote main')
+    git(other, 'push', '-q', 'origin', 'main')
+    const refsBefore = git(root, 'show-ref')
+    const objectsBefore = git(root, 'count-objects', '-v')
+    const fetchHead = join(root, '.git', 'FETCH_HEAD')
+    const fetchBefore = existsSync(fetchHead) ? readFileSync(fetchHead) : null
+    const bytesBefore = readFileSync(join(wt.path, 'one.txt'))
+    pruneWorktrees({ repoRoot: root, base: 'main', devMd, ledgerTimes: { '106': OLD_LEDGER }, now: FUTURE_NOW, write: false })
+    expect(git(root, 'show-ref')).toBe(refsBefore)
+    expect(git(root, 'count-objects', '-v')).toBe(objectsBefore)
+    expect(existsSync(fetchHead) ? readFileSync(fetchHead) : null).toEqual(fetchBefore)
+    expect(readFileSync(join(wt.path, 'one.txt'))).toEqual(bytesBefore)
+  })
+
   test('names a parked worktree past retention and refuses one with unpushed commits', () => {
     const root = repoWithRemote()
     createWorktree({ repoRoot: root, issue: 106, slug: 'old', type: 'feat', base: 'main', devMd, home: root, write: true })
@@ -430,6 +498,7 @@ describe('pruneWorktrees', () => {
     const other = cloneOf(remote)
     git(other, 'merge', '-q', '--no-ff', '-m', 'merge', 'origin/feat/106-x')
     git(other, 'push', '-q', 'origin', 'main')
+    git(mergedRoot, 'fetch', '-q', 'origin', 'main')
     const mergedResult = pruneWorktrees({ repoRoot: mergedRoot, base: 'main', devMd, now: Date.now(), write: false })
     expect(mergedResult.candidates.find((c: { name: string }) => c.name === '106')?.reasonCode).toBe('merged')
     expect(existsSync(merged.path)).toBe(true)
@@ -451,6 +520,23 @@ describe('pruneWorktrees', () => {
     expect(git(root, 'ls-remote', '--heads', 'origin', 'feat/106-x').trim()).toBe('')
   })
 
+  test('a stale tracking ref cannot recreate a deleted remote branch during rescue', () => {
+    const remote = bareRemote()
+    const root = repoWithRemote(remote)
+    const wt = pushedFeature(root)
+    const other = cloneOf(remote)
+    git(other, 'merge', '-q', '--squash', 'origin/feat/106-x')
+    git(other, 'commit', '-qm', 'feat: x (#106)')
+    git(other, 'push', '-q', 'origin', 'main')
+    git(other, 'push', '-q', 'origin', '--delete', 'feat/106-x')
+    // Deliberately retain root's stale refs/remotes/origin/feat/106-x.
+    writeFileSync(join(wt.path, 'after-merge.txt'), 'must stay local\n')
+    const result = pruneWorktrees({ repoRoot: root, base: 'main', devMd, issueStates: { '106': 'closed' }, write: true })
+    expect(result.candidates.find((c: { name: string }) => c.name === '106')?.removable).toBe(false)
+    expect(existsSync(wt.path)).toBe(true)
+    expect(git(root, 'ls-remote', '--heads', 'origin', 'feat/106-x').trim()).toBe('')
+  })
+
   test('a staged selection is preserved byte-for-byte and blocks rescue', () => {
     const root = repoWithRemote()
     const wt = createWorktree({ repoRoot: root, issue: 111, slug: 'staged', type: 'feat', base: 'main', devMd, home: root, write: true })
@@ -464,6 +550,57 @@ describe('pruneWorktrees', () => {
     expect(candidate?.removable).toBe(false)
     expect(candidate?.reason).toContain('staged selection')
     expect(git(wt.path, 'diff', '--cached', '--binary')).toBe(indexBefore)
+    expect(existsSync(wt.path)).toBe(true)
+  })
+
+  test('staged deletion and intent-to-add are non-empty index selections and remain byte-identical', () => {
+    const deletedRoot = repoWithRemote()
+    const deleted = pushedFeature(deletedRoot)
+    writeFileSync(join(deleted.path, 'delete-me.txt'), 'tracked\n')
+    git(deleted.path, 'add', 'delete-me.txt')
+    git(deleted.path, 'commit', '-qm', 'tracked deletion fixture')
+    git(deleted.path, 'push', '-q')
+    execFileSync('rm', [join(deleted.path, 'delete-me.txt')])
+    git(deleted.path, 'add', '-u')
+    const deletedIndex = git(deleted.path, 'rev-parse', '--path-format=absolute', '--git-path', 'index').trim()
+    const deletedBefore = readFileSync(deletedIndex)
+    const deletedResult = pruneWorktrees({ repoRoot: deletedRoot, base: 'main', olderThan: '14d', devMd, ledgerTimes: { '106': OLD_LEDGER }, now: FUTURE_NOW, write: true })
+    expect(deletedResult.candidates.find((c: { name: string }) => c.name === '106')?.reason).toContain('staged selection')
+    expect(readFileSync(deletedIndex)).toEqual(deletedBefore)
+    expect(existsSync(deleted.path)).toBe(true)
+
+    const intentRoot = repoWithRemote()
+    const intent = createWorktree({ repoRoot: intentRoot, issue: 117, slug: 'intent', type: 'feat', base: 'main', devMd, home: intentRoot, write: true })
+    git(intent.path, 'push', '-q', '-u', 'origin', 'feat/117-intent')
+    writeFileSync(join(intent.path, 'intent.txt'), 'intent\n')
+    git(intent.path, 'add', '-N', 'intent.txt')
+    const intentIndex = git(intent.path, 'rev-parse', '--path-format=absolute', '--git-path', 'index').trim()
+    const intentBefore = readFileSync(intentIndex)
+    const intentResult = pruneWorktrees({ repoRoot: intentRoot, base: 'main', olderThan: '14d', devMd, ledgerTimes: { '117': OLD_LEDGER }, now: FUTURE_NOW, write: true })
+    expect(intentResult.candidates.find((c: { name: string }) => c.name === '117')?.reason).toContain('staged selection')
+    expect(readFileSync(intentIndex)).toEqual(intentBefore)
+    expect(existsSync(intent.path)).toBe(true)
+  })
+
+  test('unknown issue or ledger facts disqualify idle and dependency reclamation', () => {
+    const { root, wt } = (() => {
+      const root = repoWithRemote()
+      const wt = createWorktree({ repoRoot: root, issue: 118, slug: 'unknown', type: 'feat', base: 'main', devMd, home: root, write: true })
+      writeFileSync(join(wt.path, 'feature.txt'), 'feature\n')
+      git(wt.path, 'add', 'feature.txt')
+      git(wt.path, 'commit', '-qm', 'feature')
+      git(wt.path, 'push', '-q', '-u', 'origin', 'feat/118-unknown')
+      mkdirSync(join(wt.path, 'node_modules'), { recursive: true })
+      writeFileSync(join(wt.path, 'node_modules', 'keep'), 'keep\n')
+      return { root, wt }
+    })()
+    const result = pruneWorktrees({
+      repoRoot: root, base: 'main', olderThan: '1d', devMd: `${devMd}worktree-deps-retention: 1d\n`,
+      ledgerTimes: {}, ledgerUnknown: new Set(['118']), issueUnknown: new Set(['118']), now: FUTURE_NOW, write: true,
+    })
+    expect(result.candidates).toEqual([])
+    expect(result.freed).toEqual([])
+    expect(existsSync(join(wt.path, 'node_modules', 'keep'))).toBe(true)
     expect(existsSync(wt.path)).toBe(true)
   })
 

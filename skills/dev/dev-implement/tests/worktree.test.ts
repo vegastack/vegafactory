@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test'
-import { existsSync, mkdirSync, mkdtempSync } from 'node:fs'
+import { chmodSync, existsSync, mkdirSync, mkdtempSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { branchName, classifyWorktree, issueOfWorktree, parseWorktreeList, slugify, titleParts, worktreeName, worktreePath } from '../scripts/worktree.mjs'
@@ -156,5 +156,19 @@ describe('worker dependency marker root', () => {
     expect(existsSync(join(holder, 'deps-dropped', '260.json'))).toBe(true)
     expect(clearDroppedDeps({ repoRoot, workerLayout: true, name: '260', path })).toBe(true)
     expect(existsSync(join(holder, 'deps-dropped', '260.json'))).toBe(false)
+  })
+  test('a non-sticky other-UID-writable parent cannot anchor marker operations', () => {
+    const outer = mkdtempSync(join(tmpdir(), 'vf-unsafe-parent-'))
+    const unsafe = join(outer, 'shared')
+    const holder = join(unsafe, 'holder')
+    const repoRoot = join(holder, 'repo')
+    const path = join(holder, 'issues', '260')
+    mkdirSync(unsafe, { mode: 0o777 })
+    chmodSync(unsafe, 0o777)
+    mkdirSync(repoRoot, { recursive: true, mode: 0o700 })
+    mkdirSync(path, { recursive: true, mode: 0o700 })
+    expect(() => noteDroppedDeps({ repoRoot, workerLayout: true, name: '260', path, droppedAt: '2026-09-22T00:00:00.000Z' }))
+      .toThrow('other users can rename entries')
+    expect(existsSync(join(holder, 'deps-dropped'))).toBe(false)
   })
 })

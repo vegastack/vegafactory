@@ -83,7 +83,7 @@ Resume: the status comment and `git log` on the issue branch recover the positio
 
 ## Workspaces
 
-Drafts and reports: `.vegastack/.tmp/<issue>-<slug>/` (pre-issue: `intake-<slug>`). Branch checkouts: `.vegastack/.worktrees/<issue>-<slug>/`; the main checkout stays on the default branch. `.vegastack/.tmp/` and `.vegastack/.worktrees/` are git-ignored. Subagents save full reports and return a short status. `<path-to-this-skill>` means SKILL.md's directory.
+Drafts and reports: `.vegastack/.tmp/<issue>-<slug>/` (pre-issue: `intake-<slug>`). Issue branches keep `<type>/<issue>-<slug>` names, while checkout directories use the stable number: `.vegastack/.worktrees/<issue>/` for attended work and the repository holder's `issues/<issue>/` for worker work. Direct/release checkouts without an issue use their slug. The main checkout stays on the default branch; `.vegastack/.tmp/` and `.vegastack/.worktrees/` are git-ignored. Subagents save full reports and return a short status. `<path-to-this-skill>` means SKILL.md's directory.
 
 ## Verification
 

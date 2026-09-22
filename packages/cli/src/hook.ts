@@ -92,7 +92,10 @@ function git(cwd: string, args: string[]): { ok: boolean; out: string } {
 }
 
 export function issueFromWorktree(top: string): number | null {
-  const match = /[/\\]\.vegastack[/\\]\.worktrees[/\\](\d+)-[^/\\]*$/.exec(top)
+  const attended = /[/\\]\.vegastack[/\\]\.worktrees[/\\](\d+)(?:-[^/\\]+)?$/.exec(top)
+  if (attended) return Number(attended[1])
+  const worker = /[/\\]worker[/\\]repos[/\\][a-z0-9_.-]+__[a-z0-9_.-]+[/\\]issues[/\\](\d+)$/.exec(top)
+  const match = worker
   return match ? Number(match[1]) : null
 }
 

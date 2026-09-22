@@ -80,6 +80,16 @@ describe('createWorktree', () => {
     expect(renamed.path).toBe(first.path)
     expect(renamed.blocks.join(' ')).toContain('worktree')
   })
+  test('a legacy slugged checkout blocks a second numeric checkout for the issue', () => {
+    const root = repo()
+    const legacy = join(root, '.vegastack', '.worktrees', '106-old-title')
+    mkdirSync(join(root, '.vegastack', '.worktrees'), { recursive: true })
+    git(root, 'worktree', 'add', '-q', '-b', 'feat/106-old-title', legacy)
+    const next = createWorktree({ repoRoot: root, issue: 106, slug: 'new-title', type: 'feat', base: 'main', devMd, home: root, write: true })
+    expect(next.blocks.join(' ')).toContain('already has a worktree')
+    expect(existsSync(join(root, '.vegastack', '.worktrees', '106'))).toBe(false)
+    expect(existsSync(legacy)).toBe(true)
+  })
   test('a symlinked .worktrees parent is refused', () => {
     const root = repo()
     const elsewhere = mkdtempSync(join(tmpdir(), 'vf-elsewhere-'))

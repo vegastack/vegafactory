@@ -19,7 +19,7 @@ import { execFileSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { chmodSync, copyFileSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { basename, delimiter, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
+import { basename, delimiter, dirname, isAbsolute, join, parse, relative, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { findMarkerComment, ghJson, parseFlags, renderResult } from './lib/gh.mjs';
 
@@ -202,12 +202,13 @@ const DEFAULT_DEPS_RETENTION_MS = 3 * DAY_MS;
 // kept. `force` is the operator's word and lifts ONE thing — the not-merged
 // block. Uncommitted, unpushed and locked are never lifted: those are the
 // three ways real work disappears.
-export function evaluateRemoval({ state, dirty, unpushed, remoteMissing, mergedIntoDefault, locked, headReachable = true, force = false }) {
+export function evaluateRemoval({ state, dirty, unpushed, remoteKnown = true, remoteMissing, mergedIntoDefault, locked, headReachable = true, force = false }) {
   const blocks = [];
   const warns = [];
   const branchGone = state === 'orphan-dir';
   if (dirty) blocks.push('uncommitted changes in the worktree — commit or discard them first');
   if (branchGone && !headReachable) blocks.push('the detached HEAD contains a unique commit — attach it to a branch before removing this worktree');
+  if (!branchGone && !remoteKnown) blocks.push('the remote branch state could not be verified — keeping the worktree');
   if (!branchGone && (unpushed || (remoteMissing && !mergedIntoDefault))) {
     blocks.push('commits not on the remote — push the branch first, then re-check');
   }
@@ -263,11 +264,31 @@ function markerRoot(repoRoot, workerLayout) {
 
 export function verifyOwnedPath(root, target, { allowMissingLeaf = false } = {}) {
   const owned = resolve(root);
-  const wanted = resolve(target);
-  const rel = relative(owned, wanted);
-  if (rel === '..' || rel.startsWith('..' + sep) || isAbsolute(rel)) return { ok: false, reason: wanted + ' is outside ' + owned };
+  const lexicalTarget = resolve(target);
+  const rel = relative(owned, lexicalTarget);
+  if (rel === '..' || rel.startsWith('..' + sep) || isAbsolute(rel)) return { ok: false, reason: lexicalTarget + ' is outside ' + owned };
+  let canonical;
+  try {
+    const leaf = lstatSync(owned);
+    if (leaf.isSymbolicLink() || !leaf.isDirectory()) return { ok: false, reason: owned + ' is not an ordinary managed root' };
+    canonical = realpathSync(owned);
+  } catch (error) { return { ok: false, reason: owned + ' could not be anchored: ' + error.message }; }
+  // A checked root can still be renamed by somebody who controls its parent. Canonicalize away
+  // trusted system aliases (macOS /var -> /private/var), then require every ancestor to be an
+  // ordinary directory that is not group/other writable. A sticky directory such as /tmp is
+  // safe for an entry owned by this uid: another uid cannot rename that entry.
+  let anchor = parse(canonical).root;
+  for (const part of canonical.slice(anchor.length).split(sep).filter(Boolean)) {
+    anchor = join(anchor, part);
+    let info;
+    try { info = lstatSync(anchor); }
+    catch (error) { return { ok: false, reason: anchor + ' could not be inspected: ' + error.message }; }
+    if (info.isSymbolicLink() || !info.isDirectory()) return { ok: false, reason: anchor + ' is not an ordinary directory' };
+    if ((info.mode & 0o022) !== 0 && (info.mode & 0o1000) === 0) return { ok: false, reason: anchor + ' is unsafe because other users can rename entries in it' };
+  }
+  const wanted = join(canonical, rel);
   const uid = process.getuid?.();
-  let cursor = owned;
+  let cursor = canonical;
   const parts = rel ? rel.split(sep).filter(Boolean) : [];
   for (let index = -1; index < parts.length; index += 1) {
     if (index >= 0) cursor = join(cursor, parts[index]);
@@ -307,8 +328,14 @@ function validMarkerRecord(value, { repoRoot, workerLayout, name }) {
   if (!value || value.schema !== 1 || value.name !== name || value.repoRoot !== resolve(repoRoot)) return false;
   if (value.path !== worktreePath(repoRoot, name, workerLayout)) return false;
   if (!Array.isArray(value.deps) || value.deps.length !== 1 || value.deps[0] !== 'node_modules') return false;
-  return typeof value.droppedAt === 'string' && Number.isFinite(Date.parse(value.droppedAt));
+  if (typeof value.droppedAt !== 'string') return false;
+  try { return new Date(value.droppedAt).toISOString() === value.droppedAt; }
+  catch { return false; }
 }
+
+const validWorktreeIdentity = (name) => /^[1-9]\d*$/.test(name)
+  || /^[1-9]\d*-[a-z0-9](?:[a-z0-9-]{0,39})$/.test(name)
+  || /^[a-z][a-z0-9-]{0,39}$/.test(name);
 
 export function readDroppedDeps({ repoRoot, workerLayout = false }) {
   const records = new Map();
@@ -327,7 +354,7 @@ export function readDroppedDeps({ repoRoot, workerLayout = false }) {
     let name;
     try {
       name = decodeURIComponent(entry.slice(0, -5));
-      if (encodeURIComponent(name) + '.json' !== entry || issueOfWorktree(name) === null && !/^[a-z0-9][a-z0-9-]{0,80}$/.test(name)) throw new Error('invalid name');
+      if (encodeURIComponent(name) + '.json' !== entry || !validWorktreeIdentity(name)) throw new Error('invalid name');
     } catch { return { records, unreadable: 'a record of dropped dependencies has an unreadable name' }; }
     const path = join(root, entry);
     let info;
@@ -340,7 +367,7 @@ export function readDroppedDeps({ repoRoot, workerLayout = false }) {
     let record;
     try { record = JSON.parse(readFileSync(path, 'utf8')); }
     catch { return { records, unreadable: path + ' is not valid JSON' }; }
-    if (!validMarkerRecord(record, { repoRoot, workerLayout, name })) return { records, unreadable: path + ' does not match this worktree' };
+    if (!validMarkerRecord(record, { repoRoot, workerLayout, name })) return { records, unreadable: 'unreadable marker ' + path + ' does not match this worktree' };
     records.set(name, record);
   }
   return { records, unreadable: null };
@@ -573,6 +600,14 @@ export function createWorktree({ repoRoot, issue, slug, type, title, base, devMd
   }
   if (blocks.length > 0) return { blocks, warns, actions, path, branch };
 
+  if (issue !== null && issue !== undefined) {
+    const existing = inventory(repoRoot, workerLayout).find((entry) => issueOfWorktree(entry.name) === issue);
+    if (existing) {
+      blocks.push(at('#' + issue, 'already has a worktree at ' + existing.path + ' — reuse or remove it before creating another'));
+      return { blocks, warns, actions, path, branch };
+    }
+  }
+
   if (branchExistsIn(repoRoot, branch)) {
     blocks.push(at(branch, 'the branch already exists — use restore to re-add its worktree'));
     return { blocks, warns, actions, path, branch };
@@ -658,7 +693,20 @@ export function restoreWorktree({ repoRoot, issue, slug, type, devMd, home, writ
 // Read the git facts the safe-to-remove test needs. Every unverifiable fact
 // fails closed: a status call that errors reports dirty, a merge check that
 // errors reports not-merged.
-export function gatherRemovalFacts({ repoRoot, path, branch, base, remote, locked }) {
+function remoteHead(repoRoot, remote, branch) {
+  if (!hasRemote(repoRoot, remote)) return { known: true, sha: null };
+  const answer = git(repoRoot, ['ls-remote', '--heads', remote, 'refs/heads/' + branch]);
+  if (!answer.ok) return { known: false, sha: null };
+  if (!answer.out) return { known: true, sha: null };
+  const rows = answer.out.split('\n').filter(Boolean);
+  if (rows.length !== 1) return { known: false, sha: null };
+  const [sha, ref, extra] = rows[0].split(/\s+/);
+  return !extra && ref === 'refs/heads/' + branch && /^[0-9a-f]{40}$/i.test(sha)
+    ? { known: true, sha }
+    : { known: false, sha: null };
+}
+
+export function gatherRemovalFacts({ repoRoot, path, branch, base, remote, locked, baseReady = true }) {
   const status = git(path, ['status', '--porcelain']);
   const dirty = !status.ok || status.out !== '';
   const headResult = git(path, ['rev-parse', '--verify', 'HEAD']);
@@ -670,14 +718,15 @@ export function gatherRemovalFacts({ repoRoot, path, branch, base, remote, locke
     const headReachable = containing.ok && containing.out.split('\n').some(Boolean);
     return {
       dirty, head, headReachable, everPushed: false, unpushed: false,
-      remoteMissing: false, deletedAfterPush: false, mergedIntoDefault: false, locked,
+      remoteKnown: true, remoteMissing: false, deletedAfterPush: false, mergedIntoDefault: false, locked,
     };
   }
-  const remoteRef = remote + '/' + branch;
-  const remoteMissing = !git(repoRoot, ['rev-parse', '--verify', '--quiet', 'refs/remotes/' + remoteRef]).ok;
-  const ahead = remoteMissing ? null : git(repoRoot, ['rev-list', remoteRef + '..' + branch]);
+  const authoritative = remoteHead(repoRoot, remote, branch);
+  const remoteKnown = authoritative.known;
+  const remoteMissing = remoteKnown && authoritative.sha === null;
+  const ahead = !remoteKnown || remoteMissing ? null : git(repoRoot, ['rev-list', authoritative.sha + '..' + branch]);
   const everPushed = git(repoRoot, ['config', '--get', 'branch.' + branch + '.merge']).out.trim() === 'refs/heads/' + branch;
-  const unpushed = remoteMissing ? !everPushed : !ahead.ok || ahead.out !== '';
+  const unpushed = !remoteKnown || (remoteMissing ? !everPushed : !ahead.ok || ahead.out !== '');
   const baseRef = git(repoRoot, ['rev-parse', '--verify', '--quiet', 'refs/remotes/' + remote + '/' + base]).ok
     ? remote + '/' + base
     : base;
@@ -686,9 +735,9 @@ export function gatherRemovalFacts({ repoRoot, path, branch, base, remote, locke
   // brand-new branch cut from origin/main 'merged' and prune it on day one.
   const isAncestor = git(repoRoot, ['merge-base', '--is-ancestor', branch, baseRef]).ok;
   // A squash merge deletes the remote branch (delete-on-merge), so content decides then.
-  const mergedIntoDefault = ((!remoteMissing || everPushed) && isAncestor) || mergedByContent(repoRoot, branch, baseRef);
+  const mergedIntoDefault = baseReady && remoteKnown && (((!remoteMissing || everPushed) && isAncestor) || mergedByContent(repoRoot, branch, baseRef));
   const deletedAfterPush = remoteMissing && everPushed;
-  return { dirty, head, headReachable: true, everPushed, unpushed, remoteMissing, deletedAfterPush, mergedIntoDefault, locked };
+  return { dirty, head, headReachable: true, everPushed, unpushed, remoteKnown, remoteMissing, deletedAfterPush, mergedIntoDefault, locked };
 }
 
 // Squash and rebase merges rewrite the commits, so by ancestry a merged branch
@@ -722,14 +771,31 @@ export function mergedByContent(repoRoot, branch, baseRef) {
 }
 
 // The merge lands on the server, so the local origin/<base> is only as fresh as
-// the last fetch and a stale one calls every merge unmerged. A fetch touches
-// nothing but remote-tracking refs, so it runs on a dry run too; a failure
-// warns, and the stale refs then judge — fail closed, never open.
-function refreshBase({ repoRoot, base, remote, actions, warns }) {
-  if (!hasRemote(repoRoot, remote)) return;
+// the last fetch. Preview compares it with read-only ls-remote and refuses stale
+// facts without writing; an explicit write may fetch before it judges.
+function refreshBase({ repoRoot, base, remote, actions, warns, write }) {
+  if (!hasRemote(repoRoot, remote)) return true;
+  const authoritative = remoteHead(repoRoot, remote, base);
+  if (!authoritative.known || !authoritative.sha) {
+    warns.push(at(remote, 'could not verify the remote ' + base + ' ref — remote merge facts are unavailable'));
+    return false;
+  }
+  if (!write) {
+    const local = git(repoRoot, ['rev-parse', '--verify', '--quiet', 'refs/remotes/' + remote + '/' + base]);
+    if (!local.ok || local.out !== authoritative.sha) {
+      warns.push(at(remote, 'preview did not fetch; local ' + remote + '/' + base + ' is not current, so merge facts are unavailable'));
+      return false;
+    }
+    return true;
+  }
   actions.push(at(remote, 'git fetch ' + remote + ' ' + base));
   const fetched = git(repoRoot, ['fetch', remote, base]);
-  if (!fetched.ok) warns.push(at(remote, 'fetch of ' + base + ' failed, judging against the last-fetched ref: ' + fetched.out));
+  if (!fetched.ok) {
+    warns.push(at(remote, 'fetch of ' + base + ' failed, so merge facts are unavailable: ' + fetched.out));
+    return false;
+  }
+  const local = git(repoRoot, ['rev-parse', '--verify', '--quiet', 'refs/remotes/' + remote + '/' + base]);
+  return local.ok && local.out === authoritative.sha;
 }
 
 // Remove one worktree directory — and only the directory. The local branch and
@@ -740,8 +806,8 @@ export function removeWorktree({ repoRoot, name, base, force = false, push = fal
   const warns = [];
   const actions = [];
   const path = worktreePath(repoRoot, name, workerLayout);
-  const symlink = symlinkBlock(path);
-  if (symlink) return { blocks: [symlink], warns, actions };
+  const safety = verifyOwnedPath(managedRoot(repoRoot, workerLayout), path);
+  if (!safety.ok) return { blocks: [safety.reason], warns, actions };
 
   const listed = git(repoRoot, ['worktree', 'list', '--porcelain']);
   if (!listed.ok) return { blocks: [at(repoRoot, 'cannot read the worktree list: ' + listed.out)], warns, actions };
@@ -749,14 +815,14 @@ export function removeWorktree({ repoRoot, name, base, force = false, push = fal
   if (!entry) return { blocks: [at(name, 'no worktree at ' + path + ' — nothing to remove')], warns, actions };
 
   const branch = entry.branch;
-  refreshBase({ repoRoot, base, remote, actions, warns });
-  let facts = gatherRemovalFacts({ repoRoot, path, branch, base, remote, locked: entry.locked });
+  const baseReady = refreshBase({ repoRoot, base, remote, actions, warns, write });
+  let facts = gatherRemovalFacts({ repoRoot, path, branch, base, remote, locked: entry.locked, baseReady });
   if (push && branch && (facts.unpushed || (facts.remoteMissing && !facts.deletedAfterPush))) {
     actions.push(at(branch, 'git push -u ' + remote + ' ' + branch + ' before removing'));
     if (write) {
       const pushed = git(path, ['push', '-u', remote, branch]);
       if (!pushed.ok) warns.push(at(branch, 'push failed: ' + pushed.out));
-      facts = gatherRemovalFacts({ repoRoot, path, branch, base, remote, locked: entry.locked });
+      facts = gatherRemovalFacts({ repoRoot, path, branch, base, remote, locked: entry.locked, baseReady });
     } else {
       facts = { ...facts, remoteMissing: false, unpushed: false };
     }
@@ -842,7 +908,9 @@ export function stagedSecrets(path) {
 // worktree's own branch, pushed normally. A rejected push (the remote moved)
 // keeps the commit local; staged secrets keep the work uncommitted.
 export function rescueWork({ path, branch, name, remote = 'origin' }) {
-  const staged = git(path, ['diff', '--cached', '--name-only', '--diff-filter=ACMR']);
+  // diff-index sees every index state, including deletions and intent-to-add entries that an
+  // ACMR-filtered `git diff --cached` omits. Any selection belongs to the user and is left alone.
+  const staged = git(path, ['diff-index', '--cached', '--name-only', 'HEAD', '--']);
   if (!staged.ok) return { ok: false, committed: false, reason: 'the staged selection could not be read: ' + staged.out };
   if (staged.out) return { ok: false, committed: false, reason: 'the staged selection is not empty — preserving it unchanged' };
   const index = git(path, ['rev-parse', '--git-path', 'index']);
@@ -874,7 +942,7 @@ export function rescueWork({ path, branch, name, remote = 'origin' }) {
 // kept; prune never creates a remote branch. Dirty work is rescued only when
 // the remote branch already exists and the user's staged selection is empty.
 // Every candidate then re-runs the same safe-to-remove test as explicit remove.
-export function pruneWorktrees({ repoRoot, base, olderThan, devMd, ledgerTimes = {}, issueStates = {}, now = Date.now(), write = false, remote = 'origin', workerLayout = false }) {
+export function pruneWorktrees({ repoRoot, base, olderThan, devMd, ledgerTimes = {}, ledgerUnknown = new Set(), issueStates = {}, issueUnknown = new Set(), now = Date.now(), write = false, remote = 'origin', workerLayout = false }) {
   const blocks = [];
   const warns = [];
   const actions = [];
@@ -884,12 +952,12 @@ export function pruneWorktrees({ repoRoot, base, olderThan, devMd, ledgerTimes =
   const freed = [];
   const droppable = [];
   const dropped = readDroppedDeps({ repoRoot, workerLayout });
-  refreshBase({ repoRoot, base, remote, actions, warns });
+  const baseReady = refreshBase({ repoRoot, base, remote, actions, warns, write });
   for (const entry of inventory(repoRoot, workerLayout)) {
     const branch = entry.branch;
     const lastCommitAt = git(entry.path, ['log', '-1', '--format=%cI', 'HEAD']).out || null;
     const ledgerUpdatedAt = ledgerTimes[entry.name] ?? null;
-    const facts = gatherRemovalFacts({ repoRoot, path: entry.path, branch, base, remote, locked: entry.locked });
+    const facts = gatherRemovalFacts({ repoRoot, path: entry.path, branch, base, remote, locked: entry.locked, baseReady });
     const state = classifyWorktree({
       dirExists: true,
       branchExists: branch !== null,
@@ -899,9 +967,10 @@ export function pruneWorktrees({ repoRoot, base, olderThan, devMd, ledgerTimes =
     });
     const stamps = [lastCommitAt, ledgerUpdatedAt].map((v) => (v ? Date.parse(v) : Number.NaN)).filter(Number.isFinite);
     const ageDays = stamps.length === 0 ? 0 : Math.floor((now - Math.max(...stamps)) / DAY_MS);
-    const idle = isPastRetention({ lastCommitAt, ledgerUpdatedAt, now, retentionMs });
-    const reasonCode = facts.mergedIntoDefault ? 'merged' : issueStates[entry.name] === 'closed' ? 'closed' : idle ? 'idle' : null;
-    const depsWindowPassed = isPastRetention({ lastCommitAt, ledgerUpdatedAt, now, retentionMs: depsRetentionMs });
+    const githubKnown = !ledgerUnknown.has(entry.name) && !issueUnknown.has(entry.name);
+    const idle = githubKnown && isPastRetention({ lastCommitAt, ledgerUpdatedAt, now, retentionMs });
+    const reasonCode = facts.mergedIntoDefault ? 'merged' : !issueUnknown.has(entry.name) && issueStates[entry.name] === 'closed' ? 'closed' : idle ? 'idle' : null;
+    const depsWindowPassed = githubKnown && isPastRetention({ lastCommitAt, ledgerUpdatedAt, now, retentionMs: depsRetentionMs });
     const deps = join(entry.path, 'node_modules');
     // A whole-worktree candidate does not first delete one of its children. Dependency-only
     // reclamation is the shorter-window path for a checkout that is otherwise staying.
@@ -933,9 +1002,11 @@ export function pruneWorktrees({ repoRoot, base, olderThan, devMd, ledgerTimes =
     }
     if (reasonCode === null) continue;
     const verdict = evaluateRemoval({ state, ...facts, locked: entry.locked, force: reasonCode !== 'merged' });
+    const checkoutSafety = verifyOwnedPath(managedRoot(repoRoot, workerLayout), entry.path);
+    if (!checkoutSafety.ok) verdict.blocks.unshift(checkoutSafety.reason);
     // Reclamation never creates a remote branch. Dirty work can be rescued only when its named
     // remote branch still exists; never-pushed and delete-on-merge branches stay put.
-    const rescuable = facts.dirty && branch !== null && !entry.locked && !facts.remoteMissing;
+    const rescuable = checkoutSafety.ok && facts.dirty && branch !== null && !entry.locked && facts.remoteKnown && !facts.remoteMissing;
     candidates.push({
       name: entry.name,
       path: entry.path,
@@ -1074,16 +1145,18 @@ export function reconcileWorktrees({ entries, openIssues }) {
 // Open issues for the repo, and the last edit time of each issue's ledger
 // comment (what retention measures against). gh being unreachable is a WARN,
 // not a block: `list` has to work on a plane.
-export function gatherGithubFacts({ repo, names = [], warns }) {
+export function gatherGithubFacts({ repo, names = [], warns, read = ghJson }) {
   const issueStates = {};
+  const unknown = new Set();
   let openIssues = [];
   try {
-    openIssues = ghJson(['api', 'repos/' + repo + '/issues', '--paginate', '-X', 'GET', '-f', 'state=open'])
+    openIssues = read(['api', 'repos/' + repo + '/issues', '--paginate', '-X', 'GET', '-f', 'state=open'])
       .filter((issue) => !issue.pull_request)
       .map((issue) => ({ number: issue.number, state: issue.state }));
   } catch (error) {
     warns.push(at('github', 'could not read open issues, reporting from git alone: ' + error.message));
-    return { openIssues, issueStates };
+    for (const name of names) unknown.add(name);
+    return { openIssues, issueStates, unknown };
   }
   const open = new Set(openIssues.map((issue) => issue.number));
   for (const name of names) {
@@ -1094,29 +1167,32 @@ export function gatherGithubFacts({ repo, names = [], warns }) {
       continue;
     }
     try {
-      issueStates[name] = ghJson(['api', 'repos/' + repo + '/issues/' + issue]).state;
+      issueStates[name] = read(['api', 'repos/' + repo + '/issues/' + issue]).state;
     } catch (error) {
       warns.push(at('github', 'could not read the state of #' + issue + ': ' + error.message));
+      unknown.add(name);
     }
   }
-  return { openIssues, issueStates };
+  return { openIssues, issueStates, unknown };
 }
 
 // Ledger edit times for the named issues, one call each. Failures warn.
-export function gatherLedgerTimes({ repo, names, warns }) {
+export function gatherLedgerTimes({ repo, names, warns, read = ghJson }) {
   const times = {};
+  const unknown = new Set();
   for (const name of names) {
     const issue = issueOfWorktree(name);
     if (issue === null) continue;
     try {
-      const comments = ghJson(['api', 'repos/' + repo + '/issues/' + issue + '/comments', '--paginate']);
+      const comments = read(['api', 'repos/' + repo + '/issues/' + issue + '/comments', '--paginate']);
       const ledger = findMarkerComment(comments, 'ledger');
       if (ledger) times[name] = ledger.comment.updated_at;
     } catch (error) {
       warns.push(at('github', 'could not read the ledger of #' + issue + ': ' + error.message));
+      unknown.add(name);
     }
   }
-  return times;
+  return { times, unknown };
 }
 
 // --- dev.md defaults ------------------------------------------------------
@@ -1174,7 +1250,7 @@ function runVerb(verb, flags) {
     const warns = [];
     const repo = repoOf();
     const names = inventory(repoRoot, workerLayout).map((entry) => entry.name);
-    const github = repo ? gatherGithubFacts({ repo, names, warns }) : { openIssues: [], issueStates: {} };
+    const github = repo ? gatherGithubFacts({ repo, names, warns }) : { openIssues: [], issueStates: {}, unknown: new Set(names) };
     const entries = listWorktrees({ repoRoot, base, issueStates: github.issueStates, workerLayout });
     if (verb === 'list') return { blocks: [], warns, entries };
     return { blocks: [], warns, entries, reconciled: reconcileWorktrees({ entries, openIssues: github.openIssues }) };
@@ -1198,9 +1274,14 @@ function runVerb(verb, flags) {
     const warns = [];
     const repo = flags.repo || knobLine(devMd, 'repo')?.split('·')[0].trim() || null;
     const names = inventory(repoRoot, workerLayout).map((entry) => entry.name);
-    const github = repo ? gatherGithubFacts({ repo, names, warns }) : { openIssues: [], issueStates: {} };
-    const ledgerTimes = repo ? gatherLedgerTimes({ repo, names, warns }) : {};
-    const pruned = pruneWorktrees({ repoRoot, base, olderThan: flags['older-than'], devMd, ledgerTimes, issueStates: github.issueStates, now: Date.now(), write: shared.write, workerLayout });
+    const github = repo ? gatherGithubFacts({ repo, names, warns }) : { openIssues: [], issueStates: {}, unknown: new Set(names) };
+    const ledger = repo ? gatherLedgerTimes({ repo, names, warns }) : { times: {}, unknown: new Set(names) };
+    const pruned = pruneWorktrees({
+      repoRoot, base, olderThan: flags['older-than'], devMd,
+      ledgerTimes: ledger.times, ledgerUnknown: ledger.unknown,
+      issueStates: github.issueStates, issueUnknown: github.unknown,
+      now: Date.now(), write: shared.write, workerLayout,
+    });
     return { ...pruned, warns: [...warns, ...pruned.warns] };
   }
   if (verb === 'create' || verb === 'restore') {

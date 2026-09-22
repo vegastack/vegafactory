@@ -172,7 +172,7 @@ The flags each value turns into are facts about one vendor's CLI, so each lives 
 
 ## The hooks (optional, offered in Round C)
 
-One command handles every event: `vegafactory hook`, taking the event name and the harness. It reads the hook payload on stdin (at most 64 KiB, waited for 350 ms) and finds the issue from the worktree folder (`.vegastack/.worktrees/<n>-…`) or the branch (`<type>/<n>-…`). Outside an issue only the ship guard runs.
+One command handles every event: `vegafactory hook`, taking the event name and the harness. It reads the hook payload on stdin (at most 64 KiB, waited for 350 ms) and finds the issue from a legacy slugged leaf, an attended `.vegastack/.worktrees/<n>` leaf, a worker `repos/<owner>__<repo>/issues/<n>` leaf, or the branch (`<type>/<n>-…`). Outside an issue only the ship guard runs.
 
 | Harness event | `hook` event | What it does |
 |---|---|---|
