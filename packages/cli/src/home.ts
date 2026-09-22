@@ -70,6 +70,12 @@ export const updateNotePath = (options: HomeOptions = {}): string => join(factor
 
 export const workerDirectory = (options: HomeOptions = {}): string => join(factoryHome(options), 'worker')
 
+// Worker state is machine-global. Repository checkouts live below it, but their Git operations
+// never use this directory as a repository root.
+export const workerRepositoriesDirectory = (options: HomeOptions = {}): string => join(workerDirectory(options), 'repos')
+
+export const workerBoardsPath = (options: HomeOptions = {}): string => join(workerDirectory(options), 'boards.json')
+
 // The App key. `VEGAFACTORY_APP_PRIVATE_KEY_FILE` still moves it, because a machine may keep its
 // keys somewhere this product does not own.
 export function appKeyPath(options: HomeOptions = {}): string {

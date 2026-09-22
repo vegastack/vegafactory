@@ -43,6 +43,8 @@ describe('control-room knob and machine state', () => {
   test('one copy per org under the machine root, refreshed at five minutes', () => {
     expect(defaultClonePath('vegastack', '/home/mk')).toBe('/home/mk/.vegafactory/control-room/vegastack')
     expect(factoryConfigPath('/home/mk')).toBe('/home/mk/.vegafactory/factory.json')
+    expect(defaultClonePath('vegastack', { home: '/ignored', env: { VEGAFACTORY_HOME: '/state/factory' } })).toBe('/state/factory/control-room/vegastack')
+    expect(factoryConfigPath({ home: '/ignored', env: { VEGAFACTORY_HOME: '/state/factory' } })).toBe('/state/factory/factory.json')
     expect(MAX_AGE_MINUTES).toBe(5)
   })
 

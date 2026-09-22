@@ -107,9 +107,14 @@ jobs:
           app-id: "${{ vars.VEGAFACTORY_APP_ID }}"
           private-key: "${{ secrets.VEGAFACTORY_APP_PRIVATE_KEY }}"
           # owner resolves the org installation; repositories narrows the token to this one
-          # repository — without it the token reaches every repository the installation covers.
+          # repository, and permission-contents keeps this issue-only job unable to push even
+          # though the worker installation uses the App's Contents write permission for Git.
           owner: "${{ github.repository_owner }}"
           repositories: "${{ github.event.repository.name }}"
+          permission-contents: read
+          permission-issues: read
+          permission-metadata: read
+          permission-organization-projects: write
 
       - name: Write Status on the board
         id: mirror

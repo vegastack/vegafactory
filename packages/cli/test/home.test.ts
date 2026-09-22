@@ -4,7 +4,8 @@ import { tmpdir } from 'node:os'
 import { join, sep } from 'node:path'
 import {
   appKeyPath, controlRoomClonePath, controlRoomStore, factoryConfigPath, factoryHome,
-  HOME_VARIABLE, makeFactoryHome, statsDirectory, statsHtmlPath, workerDirectory, worktreesPath,
+  HOME_VARIABLE, makeFactoryHome, statsDirectory, statsHtmlPath, workerBoardsPath, workerDirectory,
+  workerRepositoriesDirectory, worktreesPath,
 } from '../src/home.ts'
 import { refuseAmbientHome } from './no-ambient-home.ts'
 
@@ -54,8 +55,14 @@ describe('where the home is', () => {
     for (const path of [
       factoryConfigPath({ env, home }), controlRoomStore({ env, home }), worktreesPath({ env, home }),
       statsDirectory({ env, home }), statsHtmlPath({ env, home }), workerDirectory({ env, home }),
-      appKeyPath({ env, home }),
+      workerRepositoriesDirectory({ env, home }), workerBoardsPath({ env, home }), appKeyPath({ env, home }),
     ]) expect(path.startsWith(root + sep)).toBe(true)
+  })
+
+  test('worker repositories and board state share the machine worker directory', () => {
+    const options = { env: {}, home }
+    expect(workerRepositoriesDirectory(options)).toBe(join(home, '.vegafactory', 'worker', 'repos'))
+    expect(workerBoardsPath(options)).toBe(join(home, '.vegafactory', 'worker', 'boards.json'))
   })
 
   test('the stats spool is no longer inside a directory called tmp', () => {

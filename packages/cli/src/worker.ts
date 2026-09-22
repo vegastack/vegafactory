@@ -24,11 +24,11 @@ import { spawn, spawnSync } from 'node:child_process'
 import { createSign, randomUUID } from 'node:crypto'
 import { appendFileSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync } from 'node:fs'
 import { homedir, hostname, userInfo } from 'node:os'
-import { join, posix } from 'node:path'
+import { dirname, join, parse, posix, resolve, sep } from 'node:path'
 import { APP_ACTOR, APP_ID, HEARTBEAT_EVERY_MS, appIdentityConfig, claim, heartbeat, holderOf, machineName, nodeId, release, trustedFactory } from './claim.ts'
 import { defaultClonePath, factoryConfigPath, parseControlRoomKnob, readFactoryConfig, updateSettingsAtPath } from './control-room.ts'
 import { billingVariables, childEnvironment } from './env.ts'
-import { GhError, defaultRunner, ghList, type GhResult, type GhRunner } from './gh.ts'
+import { GhError, ghList, type GhResult, type GhRunner } from './gh.ts'
 import { assertRepo, cacheDir, readState, replaceFile, syncIssue, withLock, type CommentEntry, type GhIssue, type IssueEntry } from './issue-cache.ts'
 import {
   ackBody, artifactHash, currentHashes, detectRepo, evidenceChangedAt, findValidAck, locked, markerKeys, nextLabels, permissionLookup,
@@ -39,7 +39,8 @@ import { defaultBranch } from './guard-rules.ts'
 import { stateOf, type State } from './labels.ts'
 import { effectiveUpdateMode, maintainSelfUpdate, type UpdateMode, type UpdateResult } from './self-update.ts'
 import { lintPlan, normalizeGroupPath, parseIndependentGroups, sharedByEveryChild } from '../../../skills/dev/dev-plan/scripts/plan-lint.mjs'
-import { appKeyPath as workerAppKey } from './home.ts'
+import { appKeyPath as workerAppKey, factoryHome, workerBoardsPath, workerDirectory, type HomeOptions } from './home.ts'
+import { canonicalRepository, ensureWorkerCheckout } from './worker-repo.ts'
 
 // How often the board is read, how many steps run at once, and how long one step may take.
 export const POLL_MS = 2 * 60_000
@@ -301,19 +302,23 @@ export const nodesPath = (clone: string) => join(clone, 'nodes.md')
 
 // Where this machine's copy of the org control room lives: the path the last sync recorded, else
 // the default clone path for the org this repository's dev.md names.
-export function controlRoomClone(root: string, home = homedir()): { org: string; clone: string } | null {
+type WorkerHomeInput = string | HomeOptions
+const workerHomeOptions = (input: WorkerHomeInput = {}): HomeOptions => typeof input === 'string' ? { home: input } : input
+
+export function controlRoomClone(root: string, input: WorkerHomeInput = {}): { org: string; repo: string; clone: string } | null {
+  const options = workerHomeOptions(input)
   const devMd = join(root, '.vegastack', 'dev.md')
   const knob = existsSync(devMd) ? parseControlRoomKnob(readFileSync(devMd, 'utf8')) : null
   if (!knob) return null
   let path: string | null = null
-  try { path = readFactoryConfig(readFileSync(factoryConfigPath(home), 'utf8')).controlRooms[knob.org]?.path ?? null } catch { path = null }
-  return { org: knob.org, clone: path ?? defaultClonePath(knob.org, home) }
+  try { path = readFactoryConfig(readFileSync(factoryConfigPath(options), 'utf8')).controlRooms[knob.org]?.path ?? null } catch { path = null }
+  return { org: knob.org, repo: knob.repo, clone: path ?? defaultClonePath(knob.org, options) }
 }
 
 export type GitRun = (args: string[]) => { status: number | null; out: string }
 
-export const gitIn = (dir: string): GitRun => (args) => {
-  const result = spawnSync('git', ['-C', dir, ...args], { encoding: 'utf8', timeout: 60_000, env: { ...process.env, GIT_TERMINAL_PROMPT: '0' } })
+export const gitIn = (dir: string, env: NodeJS.ProcessEnv = process.env): GitRun => (args) => {
+  const result = spawnSync('git', ['-C', dir, ...args], { encoding: 'utf8', timeout: 60_000, env: { ...env, GIT_TERMINAL_PROMPT: '0' } })
   return { status: result.status, out: `${result.stdout ?? ''}${result.stderr ?? ''}`.trim() }
 }
 
@@ -351,6 +356,14 @@ export function refreshRoster(clone: string, git: GitRun = gitIn(clone)): Refres
 
 export interface Listing { ok: boolean; reason: string; entry: Node | null; file: string | null; sha?: string | null }
 
+// `--repo` locates the control room and may later disappear from an otherwise valid explicit
+// board list. That one mismatch is tolerated; wildcard rows and every other refusal remain a
+// refusal at startup and on every refreshed pass.
+const workerListingAllowed = (listing: Listing, bootstrapRepo: string): boolean => listing.ok
+  || (listing.entry?.worker === true && listing.entry.caps !== null
+    && normalizeWorkerRepos(listing.entry.repos).repos.length > 0
+    && listing.reason.endsWith(`, not ${bootstrapRepo}`))
+
 // `listedHere`, but only after the roster has been refreshed and verified. This is what a run
 // asks each pass; a read-only view may ask `listedHere` alone and show what it has.
 // The refresh moves the clone forward; this records where it moved to. `loadProfile` verifies the
@@ -358,18 +371,19 @@ export interface Listing { ok: boolean; reason: string; entry: Node | null; file
 // the record being updated is read as tampered-with — every policy question then answers "cannot
 // tell", which for the update knob means `off`. The record is a cache of a local fact, so a write
 // that fails changes nothing but the next pass's work.
-export async function recordRoomSha(root: string, home: string, sha: string): Promise<void> {
+export async function recordRoomSha(root: string, input: WorkerHomeInput, sha: string): Promise<void> {
+  const options = workerHomeOptions(input)
   if (!/^[0-9a-f]{40}$/.test(sha)) return
-  const room = controlRoomClone(root, home)
+  const room = controlRoomClone(root, options)
   if (!room) return
   // Nothing moved, so there is nothing to record. Writing anyway would take the settings lock and
   // bump the file's revision on every poll, which is a transaction bought for no fact.
   try {
-    const recorded = readFactoryConfig(readFileSync(factoryConfigPath(home), 'utf8')).controlRooms[room.org]
+    const recorded = readFactoryConfig(readFileSync(factoryConfigPath(options), 'utf8')).controlRooms[room.org]
     if (!recorded || recorded.sha === sha) return
   } catch { return }
   try {
-    await updateSettingsAtPath(factoryConfigPath(home), (state) => {
+    await updateSettingsAtPath(factoryConfigPath(options), (state) => {
       const current = state.orgs[room.org]
       if (!current || current.sha === sha) return state
       state.orgs[room.org] = { ...current, sha, lastSyncedAt: new Date().toISOString() }
@@ -378,8 +392,8 @@ export async function recordRoomSha(root: string, home: string, sha: string): Pr
   } catch { /* a cache nobody could write is just a cache nobody could write */ }
 }
 
-export function verifiedListing(root: string, options: { repo: string; host?: string; home?: string; git?: (clone: string) => GitRun }): Listing {
-  const room = controlRoomClone(root, options.home ?? homedir())
+export function verifiedListing(root: string, options: { repo: string; host?: string; home?: string; env?: NodeJS.ProcessEnv; git?: (clone: string) => GitRun }): Listing {
+  const room = controlRoomClone(root, options)
   if (!room) return listedHere(root, options)
   const refresh = refreshRoster(room.clone, (options.git ?? gitIn)(room.clone))
   if (!refresh.ok) return { ok: false, reason: refresh.reason, entry: null, file: nodesPath(room.clone), sha: null }
@@ -404,11 +418,11 @@ export function updateModeFor(root: string, home: string): UpdateMode {
   return effectiveUpdateMode({ home, devMd })
 }
 
-export function listedHere(root: string, options: { repo: string; host?: string; home?: string }): Listing {
+export function listedHere(root: string, options: { repo: string; host?: string; home?: string; env?: NodeJS.ProcessEnv }): Listing {
   // One spelling, and only one: a node is `<os-user>@<hostname>`. Accepting a bare hostname as
   // well would mean two rows could name this machine and a roster could grant through either.
   const machine = nodeId(undefined, options.host ?? hostname())
-  const room = controlRoomClone(root, options.home ?? homedir())
+  const room = controlRoomClone(root, options)
   if (!room) return { ok: false, reason: `this repository names no control room (dev.md's control-room: knob), so no machine is listed as a worker for it`, entry: null, file: null }
   const file = nodesPath(room.clone)
   let text: string
@@ -452,7 +466,14 @@ export function listedHere(root: string, options: { repo: string; host?: string;
   // An empty cell authorises nothing. Everything has to be said out loud, because the commonest
   // row on a roster of every machine is one with nothing in this cell.
   const every = entry.repos.some((repo) => repo === '*' || repo.toLowerCase() === 'all')
-  if (!every && !entry.repos.includes(options.repo)) {
+  const requested = canonicalRepository(options.repo)
+  const namedRepos = entry.repos.flatMap((repo) => {
+    try { return [canonicalRepository(repo)] } catch { return [] }
+  })
+  if (!namedRepos.includes(requested)) {
+    if (every && namedRepos.length === 0) {
+      return { ok: false, reason: `${machine}'s row in ${file} contains only * or all — unattended workers require at least one explicit OWNER/NAME repository`, entry, file }
+    }
     const named = entry.repos.length ? `for ${entry.repos.join(', ')}` : 'for no repository — its repos cell is empty'
     return { ok: false, reason: `${machine} is listed in ${file} ${named}, not ${options.repo}`, entry, file }
   }
@@ -500,8 +521,9 @@ export type KeyStat = (path: string) => KeyFacts
 // What this does not cover: a worker run is a child of this process and runs as the same user,
 // so the filesystem lets it read this file however tight the mode is. The child is never told
 // where the key is and is given an hour-long token instead, but that is a smaller door, not a shut
-// one. The separate worker account in the control room's worker-box checklist is what
-// closes it — the key belongs to an account that runs nothing else.
+// one. The dedicated worker account is the deployment boundary from every human identity; agent
+// children sharing that account can still read the App key, which is an accepted property of that
+// App-only account and the reason nothing else runs under it.
 export function assertKeyFile(path: string, { stat = lstatSync as unknown as KeyStat, uid = process.getuid?.() ?? -1 } = {}) {
   let facts: KeyFacts
   try { facts = stat(path) } catch { throw new Error(missingKeyMessage(path)) }
@@ -590,12 +612,12 @@ export function appIdentity(input: { repo: string; keyPath: string; appId: strin
 // Readiness and the service unit
 
 export interface Check { name: string; ok: boolean; detail: string }
-export type Probe = (command: string, args: string[]) => { code: number; stdout: string; stderr: string }
+export type Probe = (command: string, args: string[], options?: { env?: NodeJS.ProcessEnv }) => { code: number; stdout: string; stderr: string }
 
-export const probe: Probe = (command, args) => {
+export const probe: Probe = (command, args, options) => {
   // stdin is closed, not inherited. Both harnesses read a prompt from stdin when one is open, so
   // an inherited terminal turns a readiness probe into a wait for input nobody is there to give.
-  const result = spawnSync(command, args, { encoding: 'utf8', timeout: 120_000, stdio: ['ignore', 'pipe', 'pipe'] })
+  const result = spawnSync(command, args, { encoding: 'utf8', timeout: 120_000, stdio: ['ignore', 'pipe', 'pipe'], env: options?.env })
   if (result.error) return { code: 127, stdout: '', stderr: result.error.message }
   return { code: result.status ?? 1, stdout: (result.stdout ?? '').trim(), stderr: (result.stderr ?? '').trim() }
 }
@@ -636,44 +658,66 @@ export function harnessAnswers(run: Probe): Check[] {
   return checks
 }
 
-// Where a worker run's work would go. A run must be able to push code, and the App's token
-// cannot: its Contents is read-only. SSH answers no credential helper at all, so an SSH remote is
-// always fine. An HTTPS remote has to prove that a credential comes back which is not the App's —
-// the run asks for one with the App's token scrubbed from the environment, and this asks the same
-// way, so a machine that is only logged in as the App finds out now rather than after a run's work.
-export function pushPath(root: string, run: Probe): Check {
+const AMBIENT_GIT_IDENTITY = /^(?:GIT_CONFIG_(?:COUNT|KEY_|VALUE_|GLOBAL$|SYSTEM$|NOSYSTEM$|PARAMETERS$)|GIT_ASKPASS$|SSH_ASKPASS$|GIT_SSH$|GIT_SSH_COMMAND$|SSH_AUTH_SOCK$|GH_CONFIG_DIR$|GH_HOST$|GH_ENTERPRISE_TOKEN$|GITHUB_ENTERPRISE_TOKEN$)/
+
+function appGitEnvironment(source: NodeJS.ProcessEnv, token: string | null): NodeJS.ProcessEnv {
+  const env = { ...source }
+  for (const name of Object.keys(env)) if (AMBIENT_GIT_IDENTITY.test(name)) delete env[name]
+  delete env.GH_TOKEN
+  delete env.GITHUB_TOKEN
+  Object.assign(env, {
+    GIT_CONFIG_COUNT: token ? '2' : '1',
+    GIT_CONFIG_KEY_0: 'credential.helper',
+    GIT_CONFIG_VALUE_0: '',
+  })
+  if (token) Object.assign(env, {
+    GH_TOKEN: token,
+    GITHUB_TOKEN: token,
+    GIT_CONFIG_KEY_1: 'credential.https://github.com.helper',
+    GIT_CONFIG_VALUE_1: '!gh auth git-credential',
+  })
+  return env
+}
+
+const gitDiagnostic = (result: { stdout: string; stderr: string }, token: string) =>
+  (result.stderr || result.stdout || 'the remote refused the dry-run push').replaceAll(token, '[redacted]').split('\n').at(-1)!.slice(0, 160)
+
+// The dedicated worker account has no human Git or SSH identity. Its selected repository's
+// installation token is therefore both the API principal and the HTTPS Git principal. A dry-run
+// push to a nonce ref proves write authority without creating the ref; a login/status check would
+// prove only that some credential exists, not that this App token can push.
+export function pushPath(root: string, run: Probe, token: string | null): Check {
   const result = run('git', ['-C', root, 'remote', 'get-url', '--push', 'origin'])
   const url = result.stdout.trim().split('\n').at(-1)?.trim() ?? ''
   if (result.code !== 0 || !url) return { name: 'push', ok: false, detail: `cannot read the push URL of origin in ${root}: ${(result.stderr || result.stdout).split('\n').at(-1)?.slice(0, 160) ?? `exit ${result.code}`}` }
-  if (/^(git@|ssh:\/\/)/.test(url)) return { name: 'push', ok: true, detail: `origin pushes over SSH (${url})` }
+  if (/^(git@|ssh:\/\/)/.test(url)) return { name: 'push', ok: false, detail: `origin pushes over SSH (${url}), but this dedicated worker has no human or SSH identity — use HTTPS: https://github.com/OWNER/REPO.git` }
 
   // Only an https remote uses the credential helper a run's Git is given. Anything else — http,
   // git://, a local path, a host alias — would not, so proving a credential proves nothing about
   // it, and a readiness check that passed would be a check that lied.
   const https = /^https:\/\/([^/]+)\//.exec(url)
   if (!https) {
-    return { name: 'push', ok: false, detail: `origin pushes over ${url.split(':')[0] || 'an unknown transport'} (${url}), which a run's Git has no credential path for — give origin an SSH or https push URL` }
+    return { name: 'push', ok: false, detail: `origin pushes over ${url.split(':')[0] || 'an unknown transport'} (${url}), which this App-only worker has no credential path for — use an https://github.com/OWNER/REPO.git push URL` }
   }
-  // The override a run's Git gets names github.com, so that is the only https host whose credential
-  // path this check can vouch for. Another host would be asked about here and never used there.
+  // The App token and helper are intentionally GitHub-only. Another host would be a second
+  // credential model, which this dedicated account does not have.
   const host = https[1]!
   if (host !== 'github.com') {
-    return { name: 'push', ok: false, detail: `origin pushes to ${host} over https, and a run's Git is only given a credential for github.com — give origin an SSH push URL: git remote set-url --push origin git@${host}:<owner>/<repo>.git` }
+    return { name: 'push', ok: false, detail: `origin pushes to ${host} over HTTPS, but a worker run is only given the VegaFactory App credential for github.com` }
   }
-  // Asked the way a run's Git will ask: with the App's token out of the environment, so what comes
-  // back is the machine's own login rather than the credential that cannot push.
-  const asked = run('env', ['-u', 'GH_TOKEN', '-u', 'GITHUB_TOKEN', 'gh', 'auth', 'status', '--hostname', host])
-  const account = /Logged in to \S+ account (\S+)/.exec(`${asked.stdout}\n${asked.stderr}`)?.[1] ?? ''
-  if (asked.code === 0 && account) {
-    return { name: 'push', ok: true, detail: `origin pushes over HTTPS as ${account}, which is what a run's Git gets once the App's token is scrubbed` }
-  }
-  return {
-    name: 'push', ok: false,
-    detail: `origin pushes over HTTPS (${url}) and this machine has no ${host} login of its own — the App's token cannot write code, so a run would finish its work and fail to push it. Log in with \`gh auth login\`, or give origin an SSH push URL: git remote set-url --push origin git@${host}:<owner>/<repo>.git`,
-  }
+  if (!token) return { name: 'push', ok: false, detail: `origin pushes over HTTPS (${url}), but no repository installation token was minted` }
+  const ref = `HEAD:refs/heads/vegafactory-readiness-${randomUUID()}`
+  const pushed = run('git', [
+    '-C', root,
+    '-c', 'credential.helper=',
+    '-c', 'credential.https://github.com.helper=!gh auth git-credential',
+    'push', '--dry-run', 'origin', ref,
+  ], { env: appGitEnvironment(process.env, token) })
+  if (pushed.code === 0) return { name: 'push', ok: true, detail: 'origin accepts a dry-run HTTPS push from the VegaFactory App installation token' }
+  return { name: 'push', ok: false, detail: `the VegaFactory App installation token cannot push to ${url}: ${gitDiagnostic(pushed, token)}` }
 }
 
-export interface ReadyInput { root: string; listing: Listing; run: Probe; keyOk: boolean; keyDetail: string; env: NodeJS.ProcessEnv }
+export interface ReadyInput { root: string; listing: Listing; run: Probe; token: string | null; keyOk: boolean; keyDetail: string; env: NodeJS.ProcessEnv }
 
 export function readiness(input: ReadyInput): Check[] {
   const billing = billingVariables(input.env)
@@ -681,7 +725,7 @@ export function readiness(input: ReadyInput): Check[] {
     { name: 'listed', ok: input.listing.ok, detail: input.listing.reason },
     { name: 'billing', ok: billing.length === 0, detail: billing.length ? `${billing.join(', ')} set — a worker runs on subscriptions only; unset them` : 'no API-key variable is set' },
     hooksWired(input.root),
-    pushPath(input.root, input.run),
+    pushPath(input.root, input.run, input.token),
     ...harnessAnswers(input.run),
     { name: 'app-key', ok: input.keyOk, detail: input.keyDetail },
   ]
@@ -713,14 +757,14 @@ export function alreadyLingering(run: Probe, uid: number): boolean {
 }
 
 export function unwritableForUnit(env: NodeJS.ProcessEnv): string | null {
-  for (const name of ['VEGAFACTORY_APP_ID', 'VEGAFACTORY_APP_ACTOR', 'VEGAFACTORY_APP_PRIVATE_KEY_FILE']) {
+  for (const name of ['VEGAFACTORY_HOME', 'VEGAFACTORY_APP_ID', 'VEGAFACTORY_APP_ACTOR', 'VEGAFACTORY_APP_PRIVATE_KEY_FILE']) {
     const value = env[name]?.trim()
     if (value && UNWRITABLE.test(value)) return `${name} contains a control character, so it cannot be written into a service unit — move the file or rename it`
   }
   return null
 }
 
-export function unitText(platform: NodeJS.Platform, input: { cli: string[]; root: string; repo: string; logDir: string; env?: NodeJS.ProcessEnv }): string {
+export function unitText(platform: NodeJS.Platform, input: { cli: string[]; root: string; repo: string; logDir: string; factoryHome?: string; env?: NodeJS.ProcessEnv }): string {
   const argv = [...input.cli, 'worker', 'run', '--repo', input.repo]
   // A user service inherits nothing from the shell that installed it, so everything `enable` was
   // run with has to be written into the unit — or the worker restarts as VegaStack's own App,
@@ -731,6 +775,7 @@ export function unitText(platform: NodeJS.Platform, input: { cli: string[]; root
   // nothing they could not get from `ls`.
   const from = input.env ?? process.env
   const identity: Array<[string, string]> = []
+  if (input.factoryHome && !UNWRITABLE.test(input.factoryHome)) identity.push(['VEGAFACTORY_HOME', input.factoryHome])
   for (const name of ['VEGAFACTORY_APP_ID', 'VEGAFACTORY_APP_ACTOR', 'VEGAFACTORY_APP_PRIVATE_KEY_FILE']) {
     const value = from[name]?.trim()
     // `enable` has already refused these by name; this is the second line of that defence.
@@ -826,30 +871,30 @@ export function serviceCommands(platform: NodeJS.Platform, path: string, verb: '
 export type Action = 'follow-up' | 'plan' | 'implement' | 'corrections' | 'ship' | 'stop' | 'none'
 export type Outcome = 'done' | 'blocked' | 'failed' | 'killed' | 'limit' | 'stopped'
 
-export interface RunRecord { at: string; issue: number; action: Action; outcome: Outcome; ms: number; machine: string; note: string }
+export interface RunRecord { at: string; repo: string; issue: number; action: Action; outcome: Outcome; ms: number; machine: string; note: string }
 export interface Acted { at: number; action: Action; outcome: Outcome; trigger: number | null; failures: number; retryAt: number | null }
 
 export const workerDir = (root: string) => join(root, '.vegastack', '.tmp', 'worker')
-export const childrenPath = (root: string) => join(workerDir(root), 'children.json')
-const runsPath = (root: string) => join(workerDir(root), 'runs.jsonl')
-const actedPath = (root: string) => join(workerDir(root), 'acted.json')
+export const childrenPath = (stateRoot: string) => join(stateRoot, 'children.json')
+const runsPath = (stateRoot: string) => join(stateRoot, 'runs.jsonl')
+const actedPath = (stateRoot: string) => join(stateRoot, 'acted.json')
 
 // The record is a working note on an always-on machine, so it is trimmed to the last RUNS_KEPT
 // rather than grown forever; the control room's statistics are where runs are kept for good.
 export const RUNS_KEPT = 500
 
-export function recordRun(root: string, record: RunRecord) {
-  mkdirSync(workerDir(root), { recursive: true })
-  appendFileSync(runsPath(root), JSON.stringify(record) + '\n')
+export function recordRun(stateRoot: string, record: RunRecord) {
+  mkdirSync(stateRoot, { recursive: true })
+  appendFileSync(runsPath(stateRoot), JSON.stringify(record) + '\n')
   try {
-    const lines = readFileSync(runsPath(root), 'utf8').split('\n').filter(Boolean)
-    if (lines.length > RUNS_KEPT * 2) replaceFile(runsPath(root), lines.slice(-RUNS_KEPT).join('\n') + '\n')
+    const lines = readFileSync(runsPath(stateRoot), 'utf8').split('\n').filter(Boolean)
+    if (lines.length > RUNS_KEPT * 2) replaceFile(runsPath(stateRoot), lines.slice(-RUNS_KEPT).join('\n') + '\n')
   } catch { /* the record is a note; failing to trim it is not worth a failed run */ }
 }
 
-export function readRuns(root: string, limit = 20): RunRecord[] {
+export function readRuns(stateRoot: string, limit = 20): RunRecord[] {
   let text = ''
-  try { text = readFileSync(runsPath(root), 'utf8') } catch { return [] }
+  try { text = readFileSync(runsPath(stateRoot), 'utf8') } catch { return [] }
   const rows: RunRecord[] = []
   for (const line of text.split('\n')) {
     if (!line.trim()) continue
@@ -858,22 +903,24 @@ export function readRuns(root: string, limit = 20): RunRecord[] {
   return rows.slice(-limit)
 }
 
-export function readActed(root: string): Record<string, Acted> {
+export function readActed(stateRoot: string): Record<string, Acted> {
   try {
-    const saved: unknown = JSON.parse(readFileSync(actedPath(root), 'utf8'))
+    const saved: unknown = JSON.parse(readFileSync(actedPath(stateRoot), 'utf8'))
     return saved && typeof saved === 'object' && !Array.isArray(saved) ? saved as Record<string, Acted> : {}
   } catch { return {} }
 }
 
-export function writeActed(root: string, acted: Record<string, Acted>) {
-  mkdirSync(workerDir(root), { recursive: true })
-  replaceFile(actedPath(root), JSON.stringify(acted, null, 2) + '\n')
+export function writeActed(stateRoot: string, acted: Record<string, Acted>) {
+  mkdirSync(stateRoot, { recursive: true })
+  replaceFile(actedPath(stateRoot), JSON.stringify(acted, null, 2) + '\n')
 }
 
 // A pid on its own is not an identity: pids are reused, and a record left behind by a crash would
 // have a later, unrelated process signalled in its place. The pair (pid, start time) is an
 // identity, and the start time is what the operating system says, not what we remember.
 export type ProcessStart = (pid: number) => string | null
+export type ProcessAlive = (pid: number) => boolean | null
+export type ProcessIdentity = 'matching' | 'gone' | 'unknown'
 
 export const processStart: ProcessStart = (pid) => {
   const result = spawnSync('ps', ['-p', String(pid), '-o', 'lstart='], { encoding: 'utf8', timeout: 10_000 })
@@ -881,11 +928,27 @@ export const processStart: ProcessStart = (pid) => {
   return result.status === 0 && line ? line : null
 }
 
+export const processAlive: ProcessAlive = (pid) => {
+  try { process.kill(pid, 0); return true } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code
+    if (code === 'ESRCH') return false
+    if (code === 'EPERM') return true
+    return null
+  }
+}
+
+export function processIdentity(record: { pid: number; startedAt: string }, start: ProcessStart = processStart, alive: ProcessAlive = processAlive): ProcessIdentity {
+  const observed = start(record.pid)
+  if (observed !== null) return observed === record.startedAt ? 'matching' : 'gone'
+  return alive(record.pid) === false ? 'gone' : 'unknown'
+}
+
 // The runs this machine has started, and enough about each to prove it is still that run and to
 // clean up after it. It is on disk because `worker disable` is a different process from the
 // service it takes down: without this, the service's agents would keep running and keep writing to
 // GitHub after the unit is gone.
 export interface ChildRecord {
+  repo: string
   pid: number
   // What `ps` said when the child started. Together with the pid this is the child's identity.
   startedAt: string
@@ -900,36 +963,35 @@ export interface ChildRecord {
 const isRecord = (value: unknown): value is ChildRecord => {
   const row = value as ChildRecord | null
   return !!row && typeof row === 'object' && Number.isSafeInteger(row.pid) && row.pid > 1
-    && typeof row.startedAt === 'string' && typeof row.command === 'string' && Number.isSafeInteger(row.issue)
+    && typeof row.repo === 'string' && typeof row.startedAt === 'string' && typeof row.command === 'string' && Number.isSafeInteger(row.issue)
 }
 
-export function readChildren(root: string): ChildRecord[] {
+export function readChildren(stateRoot: string): ChildRecord[] {
   try {
-    const saved: unknown = JSON.parse(readFileSync(childrenPath(root), 'utf8'))
+    const saved: unknown = JSON.parse(readFileSync(childrenPath(stateRoot), 'utf8'))
     return Array.isArray(saved) ? saved.filter(isRecord) : []
   } catch { return [] }
 }
 
-function writeChildren(root: string, change: (rows: ChildRecord[]) => ChildRecord[]) {
-  mkdirSync(workerDir(root), { recursive: true })
-  withLock(workerDir(root), () => {
-    replaceFile(childrenPath(root), JSON.stringify(change(readChildren(root)), null, 2) + '\n')
+function writeChildren(stateRoot: string, change: (rows: ChildRecord[]) => ChildRecord[]) {
+  mkdirSync(stateRoot, { recursive: true })
+  withLock(stateRoot, () => {
+    replaceFile(childrenPath(stateRoot), JSON.stringify(change(readChildren(stateRoot)), null, 2) + '\n')
   }, { what: 'the worker\'s children' })
 }
 
-export function noteChild(root: string, record: ChildRecord) {
-  writeChildren(root, (rows) => [...rows.filter((row) => row.pid !== record.pid), record])
+export function noteChild(stateRoot: string, record: ChildRecord) {
+  writeChildren(stateRoot, (rows) => [...rows.filter((row) => row.pid !== record.pid), record])
 }
 
 // Removed when the run ends, so the file is the live set and not a history.
-export function forgetChild(root: string, pid: number) {
-  writeChildren(root, (rows) => rows.filter((row) => row.pid !== pid))
+export function forgetChild(stateRoot: string, pid: number) {
+  writeChildren(stateRoot, (rows) => rows.filter((row) => row.pid !== pid))
 }
 
 // Whether the process this record named is still that process.
-export function stillTheChild(record: ChildRecord, start: ProcessStart = processStart): boolean {
-  const now = start(record.pid)
-  return now !== null && now === record.startedAt
+export function stillTheChild(record: ChildRecord, start: ProcessStart = processStart, alive: ProcessAlive = processAlive): boolean {
+  return processIdentity(record, start, alive) === 'matching'
 }
 
 // Stops a run and everything it started. The group is signalled, not the one process: an agent
@@ -945,24 +1007,27 @@ export function stopGroup(pid: number, signal: NodeJS.Signals = 'SIGTERM'): bool
 
 // Signals a recorded run only while it is provably still that run. A stale record is dropped, not
 // signalled: after a pid is reused, the number alone would name somebody else's process.
-export function stopChild(root: string, record: ChildRecord, deps: { stop?: (pid: number, signal: NodeJS.Signals) => boolean; start?: ProcessStart } = {}): boolean {
-  if (!stillTheChild(record, deps.start ?? processStart)) {
-    forgetChild(root, record.pid)
+export function stopChild(stateRoot: string, record: ChildRecord, deps: { stop?: (pid: number, signal: NodeJS.Signals) => boolean; start?: ProcessStart; alive?: ProcessAlive } = {}): boolean {
+  const identity = processIdentity(record, deps.start ?? processStart, deps.alive ?? processAlive)
+  if (identity === 'unknown') return false
+  if (identity === 'gone') {
+    forgetChild(stateRoot, record.pid)
     return false
   }
   const stopped = (deps.stop ?? stopGroup)(record.pid, 'SIGTERM')
-  forgetChild(root, record.pid)
+  // A successful signal is not a process exit. The child record is the restart recovery handle
+  // and stays until runOne observes close, or a later process proves the pid identity is gone.
   return stopped
 }
 
 // Two steps finish at once, and an operator may run a pass by hand beside the service: the
 // read-modify-write takes the same lock the issue cache uses, so neither loses the other's entry.
-export function updateActed(root: string, change: (acted: Record<string, Acted>) => void) {
-  mkdirSync(workerDir(root), { recursive: true })
-  withLock(workerDir(root), () => {
-    const acted = readActed(root)
+export function updateActed(stateRoot: string, change: (acted: Record<string, Acted>) => void) {
+  mkdirSync(stateRoot, { recursive: true })
+  withLock(stateRoot, () => {
+    const acted = readActed(stateRoot)
     change(acted)
-    writeActed(root, acted)
+    writeActed(stateRoot, acted)
   }, { what: 'the worker\'s record' })
 }
 
@@ -970,29 +1035,251 @@ export function updateActed(root: string, change: (acted: Record<string, Acted>)
 // claim and split the run budget in ways neither can see. The lock records the process that holds
 // it the same way a child record does, so a crashed worker's lock is taken over rather than
 // blocking the box for ever.
-export const runLockPath = (root: string) => join(workerDir(root), 'run.lock')
+export const runLockPath = (stateRoot: string) => join(stateRoot, 'run.lock')
 
 export interface RunLock { pid: number; startedAt: string; runId: string; at: string }
 
-export function takeRunLock(root: string, runId: string, start: ProcessStart = processStart): { ok: boolean; reason: string; held: RunLock | null } {
-  mkdirSync(workerDir(root), { recursive: true })
-  return withLock(workerDir(root), () => {
+export function takeRunLock(stateRoot: string, runId: string, start: ProcessStart = processStart, alive: ProcessAlive = processAlive): { ok: boolean; reason: string; held: RunLock | null } {
+  mkdirSync(stateRoot, { recursive: true })
+  return withLock(stateRoot, () => {
     let held: RunLock | null = null
-    try { held = JSON.parse(readFileSync(runLockPath(root), 'utf8')) as RunLock } catch { held = null }
-    if (held && Number.isSafeInteger(held.pid) && held.pid !== process.pid && start(held.pid) === held.startedAt) {
-      return { ok: false, held, reason: `another worker is already running on this machine (pid ${held.pid}, since ${held.at}) — stop it, or let it work` }
+    const path = runLockPath(stateRoot)
+    try { held = JSON.parse(readFileSync(path, 'utf8')) as RunLock } catch {
+      if (existsSync(path)) return { ok: false, held: null, reason: `the existing worker lock cannot be identified safely: ${path}` }
+      held = null
     }
+    if (held && Number.isSafeInteger(held.pid) && typeof held.startedAt === 'string') {
+      const identity = processIdentity(held, start, alive)
+      if (identity === 'unknown') return { ok: false, held, reason: `the worker lock belongs to pid ${held.pid}, whose identity cannot be proved — leave it in place and check that process` }
+      if (identity === 'matching' && held.pid !== process.pid) {
+        return { ok: false, held, reason: `another worker is already running on this machine (pid ${held.pid}, since ${held.at}) — stop it, or let it work` }
+      }
+    } else if (held) return { ok: false, held, reason: `the existing worker lock cannot be identified safely: ${path}` }
     const mine: RunLock = { pid: process.pid, startedAt: start(process.pid) ?? '', runId, at: new Date().toISOString() }
-    replaceFile(runLockPath(root), JSON.stringify(mine, null, 2) + '\n')
+    replaceFile(runLockPath(stateRoot), JSON.stringify(mine, null, 2) + '\n')
     return { ok: true, held: mine, reason: 'this machine\'s worker' }
   }, { what: 'the worker lock' })
 }
 
-export function releaseRunLock(root: string, runId: string) {
+export function releaseRunLock(stateRoot: string, runId: string) {
   try {
-    const held = JSON.parse(readFileSync(runLockPath(root), 'utf8')) as RunLock
-    if (held.runId === runId) rmSync(runLockPath(root), { force: true })
+    const held = JSON.parse(readFileSync(runLockPath(stateRoot), 'utf8')) as RunLock
+    if (held.runId === runId) rmSync(runLockPath(stateRoot), { force: true })
   } catch { /* nothing to give back */ }
+}
+
+export interface LegacyMigrationResult { ok: boolean; migrated: boolean; reason: string }
+
+function safeLegacyStateRoot(root: string, stateRoot: string): { ok: boolean; exists: boolean; reason: string } {
+  const expected = join(root, '.vegastack', '.tmp', 'worker')
+  if (resolve(root) !== root || stateRoot !== expected) return { ok: false, exists: false, reason: `the legacy worker path is not canonical: ${stateRoot}` }
+  const uid = process.getuid?.()
+  for (const path of [root, join(root, '.vegastack'), join(root, '.vegastack', '.tmp'), expected]) {
+    try {
+      const info = lstatSync(path)
+      if (!info.isDirectory() || info.isSymbolicLink()) return { ok: false, exists: true, reason: `refusing an unsafe legacy worker directory at ${path}` }
+      if (uid !== undefined && info.uid !== uid) return { ok: false, exists: true, reason: `refusing a legacy worker directory owned by uid ${info.uid}: ${path}` }
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return { ok: true, exists: false, reason: 'no legacy worker state' }
+      return { ok: false, exists: true, reason: `the legacy worker directory cannot be inspected at ${path}: ${(error as Error).message}` }
+    }
+  }
+  return { ok: true, exists: true, reason: 'safe legacy worker directory' }
+}
+
+function safeGlobalStateRoot(factoryRoot: string, stateRoot: string, create: boolean): { ok: boolean; reason: string } {
+  if (resolve(factoryRoot) !== factoryRoot || resolve(stateRoot) !== stateRoot || stateRoot !== join(factoryRoot, 'worker')) {
+    return { ok: false, reason: `the global worker path is outside its canonical factory home: ${stateRoot}` }
+  }
+  const uid = process.getuid?.()
+  const root = parse(stateRoot).root
+  let cursor = root
+  let productOwned = false
+  for (const part of stateRoot.slice(root.length).split(sep).filter(Boolean)) {
+    cursor = join(cursor, part)
+    productOwned ||= cursor === factoryRoot
+    try {
+      const info = lstatSync(cursor)
+      if (!info.isDirectory() || info.isSymbolicLink()) return { ok: false, reason: `refusing an unsafe global worker directory at ${cursor}` }
+      if (productOwned && uid !== undefined && info.uid !== uid) return { ok: false, reason: `refusing a global worker directory owned by uid ${info.uid}: ${cursor}` }
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') return { ok: false, reason: `the global worker directory cannot be inspected at ${cursor}: ${(error as Error).message}` }
+      if (!create) return { ok: false, reason: `the global worker directory disappeared during migration: ${cursor}` }
+      try { mkdirSync(cursor, { mode: 0o700 }) } catch (failure) { return { ok: false, reason: `the global worker directory cannot be created at ${cursor}: ${(failure as Error).message}` } }
+      productOwned = true
+      const made = lstatSync(cursor)
+      if (!made.isDirectory() || made.isSymbolicLink() || (uid !== undefined && made.uid !== uid)) return { ok: false, reason: `the created global worker directory is unsafe: ${cursor}` }
+    }
+  }
+  return { ok: true, reason: 'safe global worker directory' }
+}
+
+// Task 3 moved worker state from each checkout to one machine directory. Move only the four old
+// state files; logs deliberately stay where the old service wrote them. The merge is repeatable:
+// every global file lands atomically before any legacy source is removed, and a retry deduplicates
+// anything a crash already copied.
+export function migrateLegacyWorkerState(input: {
+  root: string
+  stateRoot: string
+  factoryRoot?: string
+  repo: string
+  start?: ProcessStart
+  alive?: ProcessAlive
+  afterWrite?: () => void
+}): LegacyMigrationResult {
+  const legacyRoot = workerDir(input.root)
+  const factoryRoot = input.factoryRoot ?? dirname(input.stateRoot)
+  const globalPreflight = safeGlobalStateRoot(factoryRoot, input.stateRoot, true)
+  if (!globalPreflight.ok) return { ok: false, migrated: false, reason: globalPreflight.reason }
+  const legacyPreflight = safeLegacyStateRoot(input.root, legacyRoot)
+  if (!legacyPreflight.ok) return { ok: false, migrated: false, reason: legacyPreflight.reason }
+  if (legacyRoot === input.stateRoot) return { ok: true, migrated: false, reason: 'worker state is already global' }
+  if (!legacyPreflight.exists) return { ok: true, migrated: false, reason: legacyPreflight.reason }
+  const names = ['acted.json', 'runs.jsonl', 'children.json', 'run.lock'] as const
+  const namedExists = (path: string) => {
+    try { lstatSync(path); return true } catch (error) { return (error as NodeJS.ErrnoException).code !== 'ENOENT' }
+  }
+  if (!names.some((name) => namedExists(join(legacyRoot, name)))) return { ok: true, migrated: false, reason: 'no legacy worker state' }
+  const repo = canonicalRepository(input.repo)
+  const start = input.start ?? processStart
+  const alive = input.alive ?? processAlive
+  const ordered = [legacyRoot, input.stateRoot].sort()
+
+  return withLock(ordered[0]!, () => withLock(ordered[1]!, () => {
+    const legacyLocked = safeLegacyStateRoot(input.root, legacyRoot)
+    if (!legacyLocked.ok || !legacyLocked.exists) return { ok: false, migrated: false, reason: legacyLocked.reason }
+    const globalLocked = safeGlobalStateRoot(factoryRoot, input.stateRoot, false)
+    if (!globalLocked.ok) return { ok: false, migrated: false, reason: globalLocked.reason }
+    type Read<T> = { exists: boolean; value: T | null; error: string | null }
+    const regularText = (path: string): Read<string> => {
+      try {
+        const info = lstatSync(path)
+        if (!info.isFile() || info.isSymbolicLink()) return { exists: true, value: null, error: `${path} is not a regular file` }
+        return { exists: true, value: readFileSync(path, 'utf8'), error: null }
+      } catch (error) {
+        return (error as NodeJS.ErrnoException).code === 'ENOENT'
+          ? { exists: false, value: null, error: null }
+          : { exists: true, value: null, error: `${path} cannot be read: ${(error as Error).message}` }
+      }
+    }
+    const actions = new Set<Action>(['follow-up', 'plan', 'implement', 'corrections', 'ship', 'stop', 'none'])
+    const outcomes = new Set<Outcome>(['done', 'blocked', 'failed', 'killed', 'limit', 'stopped'])
+    const states = new Set<State>(['waiting-on-operator', 'planning', 'queued', 'in-progress', 'ready-to-ship'])
+    const actedFile = (path: string): Read<Record<string, Acted>> => {
+      const file = regularText(path)
+      if (!file.exists || file.error) return { exists: file.exists, value: null, error: file.error }
+      try {
+        const raw: unknown = JSON.parse(file.value!)
+        if (!raw || typeof raw !== 'object' || Array.isArray(raw)) throw new Error('top level is not an object')
+        for (const [key, value] of Object.entries(raw)) {
+          const row = value as Partial<Acted> | null
+          const match = /^(.*)#(\d+)$/.exec(key)
+          if (!match || !Number.isSafeInteger(Number(match[2])) || Number(match[2]) < 1 || !row || typeof row !== 'object' || !Number.isFinite(row.at)
+            || !actions.has(row.action as Action) || !outcomes.has(row.outcome as Outcome)
+            || !(row.trigger === null || Number.isSafeInteger(row.trigger)) || !Number.isSafeInteger(row.failures) || Number(row.failures) < 0
+            || !(row.retryAt === null || Number.isFinite(row.retryAt))) throw new Error(`invalid acted row ${JSON.stringify(key)}`)
+          canonicalRepository(match[1]!)
+        }
+        return { exists: true, value: raw as Record<string, Acted>, error: null }
+      } catch (error) { return { exists: true, value: null, error: `${path} is malformed: ${(error as Error).message}` } }
+    }
+    const runsFile = (path: string, fallback: string | null): Read<RunRecord[]> => {
+      const file = regularText(path)
+      if (!file.exists || file.error) return { exists: file.exists, value: null, error: file.error }
+      const rows: RunRecord[] = []
+      try {
+        for (const [index, line] of file.value!.split('\n').entries()) {
+          if (!line.trim()) continue
+          const raw = JSON.parse(line) as Partial<RunRecord>
+          const recordRepo = canonicalRepository(typeof raw.repo === 'string' ? raw.repo : fallback ?? '')
+          if (typeof raw.at !== 'string' || !Number.isSafeInteger(raw.issue) || Number(raw.issue) < 1
+            || !actions.has(raw.action as Action) || !outcomes.has(raw.outcome as Outcome) || !Number.isFinite(raw.ms)
+            || typeof raw.machine !== 'string' || typeof raw.note !== 'string') throw new Error(`invalid run row ${index + 1}`)
+          rows.push({ ...raw, repo: recordRepo } as RunRecord)
+        }
+        return { exists: true, value: rows, error: null }
+      } catch (error) { return { exists: true, value: null, error: `${path} is malformed: ${(error as Error).message}` } }
+    }
+    const childrenFile = (path: string, fallback: string | null): Read<ChildRecord[]> => {
+      const file = regularText(path)
+      if (!file.exists || file.error) return { exists: file.exists, value: null, error: file.error }
+      try {
+        const raw: unknown = JSON.parse(file.value!)
+        if (!Array.isArray(raw)) throw new Error('top level is not an array')
+        const rows = raw.map((value, index) => {
+          const row = value as Partial<ChildRecord>
+          if (!row || typeof row !== 'object' || !Number.isSafeInteger(row.pid) || Number(row.pid) <= 1
+            || typeof row.startedAt !== 'string' || typeof row.command !== 'string' || !Number.isSafeInteger(row.issue) || Number(row.issue) < 1
+            || !actions.has(row.action as Action) || !(row.owner === null || typeof row.owner === 'string') || !states.has(row.from as State)) {
+            throw new Error(`invalid child row ${index + 1}`)
+          }
+          return { ...row, repo: canonicalRepository(typeof row.repo === 'string' ? row.repo : fallback ?? '') } as ChildRecord
+        })
+        return { exists: true, value: rows, error: null }
+      } catch (error) { return { exists: true, value: null, error: `${path} is malformed: ${(error as Error).message}` } }
+    }
+    const lockFile = (path: string): Read<RunLock> => {
+      const file = regularText(path)
+      if (!file.exists || file.error) return { exists: file.exists, value: null, error: file.error }
+      try {
+        const row = JSON.parse(file.value!) as Partial<RunLock>
+        if (!row || typeof row !== 'object' || !Number.isSafeInteger(row.pid) || Number(row.pid) <= 1
+          || typeof row.startedAt !== 'string' || typeof row.runId !== 'string' || typeof row.at !== 'string') throw new Error('invalid lock row')
+        return { exists: true, value: row as RunLock, error: null }
+      } catch (error) { return { exists: true, value: null, error: `${path} is malformed: ${(error as Error).message}` } }
+    }
+
+    const legacy = {
+      acted: actedFile(actedPath(legacyRoot)), runs: runsFile(runsPath(legacyRoot), repo),
+      children: childrenFile(childrenPath(legacyRoot), repo), lock: lockFile(runLockPath(legacyRoot)),
+    }
+    const global = {
+      acted: actedFile(actedPath(input.stateRoot)), runs: runsFile(runsPath(input.stateRoot), null),
+      children: childrenFile(childrenPath(input.stateRoot), null), lock: lockFile(runLockPath(input.stateRoot)),
+    }
+    const failed = [...Object.values(legacy), ...Object.values(global)].find((read) => read.error)
+    if (failed) return { ok: false, migrated: false, reason: failed.error! }
+
+    if (legacy.lock.value) {
+      const identity = processIdentity(legacy.lock.value, start, alive)
+      if (identity !== 'gone') return {
+        ok: false, migrated: false,
+        reason: identity === 'matching'
+          ? `a legacy worker is still running (pid ${legacy.lock.value.pid}, since ${legacy.lock.value.at}) — stop it before moving worker state`
+          : `the legacy worker lock belongs to pid ${legacy.lock.value.pid}, whose identity cannot be proved — leave it in place and check that process`,
+      }
+    }
+    if (global.lock.value && global.lock.value.pid !== process.pid) {
+      const identity = processIdentity(global.lock.value, start, alive)
+      if (identity !== 'gone') return { ok: false, migrated: false, reason: `the global worker lock belongs to pid ${global.lock.value.pid}, whose identity cannot be proved safe for migration` }
+    }
+
+    const canonicalActed = (saved: Record<string, Acted>): Record<string, Acted> => {
+      const result: Record<string, Acted> = {}
+      for (const [key, value] of Object.entries(saved)) {
+        const match = /^(.*)#(\d+)$/.exec(key)!
+        const normalized = runKey({ repo: match[1]!, number: Number(match[2]) })
+        if (!result[normalized] || value.at > result[normalized]!.at) result[normalized] = value
+      }
+      return result
+    }
+    const globalActed = canonicalActed(global.acted.value ?? {})
+    for (const [key, value] of Object.entries(canonicalActed(legacy.acted.value ?? {}))) {
+      if (!globalActed[key] || value.at > globalActed[key]!.at) globalActed[key] = value
+    }
+    const runRows = [...(global.runs.value ?? []), ...(legacy.runs.value ?? [])]
+    const uniqueRuns = [...new Map(runRows.map((row) => [JSON.stringify(row), row])).values()].slice(-RUNS_KEPT)
+    const childRows = [...(global.children.value ?? []), ...(legacy.children.value ?? [])]
+    const uniqueChildren = [...new Map(childRows.map((row) => [`${row.repo}#${row.issue}:${row.pid}:${row.startedAt}`, row])).values()]
+
+    mkdirSync(input.stateRoot, { recursive: true })
+    if (legacy.acted.exists) replaceFile(actedPath(input.stateRoot), JSON.stringify(globalActed, null, 2) + '\n')
+    if (legacy.runs.exists) replaceFile(runsPath(input.stateRoot), uniqueRuns.map((row) => JSON.stringify(row)).join('\n') + (uniqueRuns.length ? '\n' : ''))
+    if (legacy.children.exists) replaceFile(childrenPath(input.stateRoot), JSON.stringify(uniqueChildren, null, 2) + '\n')
+    input.afterWrite?.()
+    for (const name of names) if (existsSync(join(legacyRoot, name))) rmSync(join(legacyRoot, name), { force: true })
+    return { ok: true, migrated: true, reason: `migrated legacy worker state for ${repo}` }
+  }, { what: 'the global worker state migration' }), { what: 'the legacy worker state migration' })
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -1173,9 +1460,14 @@ export function overlaps(a: string, b: string): boolean {
   return b.endsWith('/') && a.startsWith(b)
 }
 
-export interface Candidate { number: number; action: Action; parent: number | null; files: string[]; from: State }
+export interface Candidate { repo: string; number: number; action: Action; parent: number | null; files: string[]; from: State }
+
+export function runKey(value: { repo: string; number: number }): string {
+  return `${canonicalRepository(value.repo)}#${value.number}`
+}
 
 const CODE: Action[] = ['implement', 'corrections']
+const sameRepository = (a: Candidate, b: Candidate) => canonicalRepository(a.repo) === canonicalRepository(b.repo)
 
 // The steps that may start now, in board order. One run per issue; at most `max` at once; one
 // merge at a time, because merges go through the queue one by one; and two code runs together
@@ -1185,9 +1477,9 @@ export function schedule(candidates: Candidate[], running: Candidate[] = [], max
   const chosen: Candidate[] = []
   for (const candidate of candidates) {
     if (picked.length >= max) break
-    if (picked.some((other) => other.number === candidate.number)) continue
-    if (candidate.action === 'ship' && picked.some((other) => other.action === 'ship')) continue
-    if (CODE.includes(candidate.action) && !picked.filter((other) => CODE.includes(other.action)).every((other) => disjointSiblings(candidate, other))) continue
+    if (picked.some((other) => runKey(other) === runKey(candidate))) continue
+    if (candidate.action === 'ship' && picked.some((other) => sameRepository(other, candidate) && other.action === 'ship')) continue
+    if (CODE.includes(candidate.action) && !picked.filter((other) => sameRepository(other, candidate) && CODE.includes(other.action)).every((other) => disjointSiblings(candidate, other))) continue
     picked.push(candidate)
     chosen.push(candidate)
   }
@@ -1229,7 +1521,7 @@ export function filesFromParent(parentPlan: string | null, number: number): stri
 
 export interface Step { action: Action; number: number; repo: string; split: boolean; by: string | null }
 export interface StepResult { outcome: Outcome; note: string; ms: number }
-export type RunStep = (step: Step, context: { root: string; timeoutMs?: number; onStart?: (pid: number, command: string) => void }) => Promise<StepResult>
+export type RunStep = (step: Step, context: { root: string; devMd: string; token: string | null; timeoutMs?: number; onStart?: (pid: number, command: string) => void }) => Promise<StepResult>
 
 // A run that stopped because the subscription said "enough for now". Each tool words it its own
 // way, and each of these is a limit, not a failure of the work.
@@ -1355,45 +1647,27 @@ export function workingDir(root: string, number: number): string | null {
 // - it writes to GitHub as the configured App, on the short-lived installation token this machine
 //   minted, so nothing it writes can pass as a person's stop, correction or "ship it";
 // - it is never told where the App's private key is. The token expires in an hour; the key does
-//   not. (A child running under the same account can still read that file through the filesystem —
-//   the separate worker account in the worker-box checklist is what closes that, not this.)
+//   not. A child under this dedicated App-only account can still read the key through the
+//   filesystem; that is an accepted deployment property, not a claimed same-user boundary.
 export function childRunEnvironment(env: NodeJS.ProcessEnv, token: string | null): NodeJS.ProcessEnv {
-  const child: NodeJS.ProcessEnv = { ...childEnvironment(env), VSK_ASK_ROUTE: 'issue' }
+  let child: NodeJS.ProcessEnv = { ...childEnvironment(env), VSK_ASK_ROUTE: 'issue' }
   for (const name of Object.keys(child)) if (name.startsWith('VEGAFACTORY_')) delete child[name]
   if (env.VEGAFACTORY_APP_ID?.trim() || env.VEGAFACTORY_APP_ACTOR?.trim()) {
     const identity = appIdentityConfig(env)
     child.VEGAFACTORY_APP_ID = identity.appId
     child.VEGAFACTORY_APP_ACTOR = identity.appActor
   }
-  if (token) {
-    child.GH_TOKEN = token
-    child.GITHUB_TOKEN = token
-    // GH_TOKEN is for the API and nothing else. `gh auth git-credential` prefers it over the
-    // credential the machine is logged in with, and the App's Contents is read-only, so a push
-    // carrying it fails — after the work, which is the worst moment to find out. Git therefore
-    // asks for a credential with the App's token scrubbed out of the environment first, which
-    // hands back the machine's own login instead. HTTPS keeps working exactly as it does for the
-    // person at the keyboard, and an SSH remote ignores all of this because SSH asks no helper.
-    //
-    // This is attribution, not isolation: a child under this account can read that login for
-    // itself whenever it likes. The separate worker account closes that, and nothing here
-    // pretends to (#239).
-    for (const name of Object.keys(child)) if (/^GIT_CONFIG_(COUNT|KEY_|VALUE_)/.test(name)) delete child[name]
-    child.GIT_CONFIG_COUNT = '2'
-    // An empty value resets the helper list, so the machine's own github.com helper cannot answer
-    // first with the token we are trying to keep away from Git.
-    child.GIT_CONFIG_KEY_0 = 'credential.https://github.com.helper'
-    child.GIT_CONFIG_VALUE_0 = ''
-    child.GIT_CONFIG_KEY_1 = 'credential.https://github.com.helper'
-    child.GIT_CONFIG_VALUE_1 = '!env -u GH_TOKEN -u GITHUB_TOKEN gh auth git-credential'
-  }
+  // This OS account deliberately has no person's GitHub or SSH identity. Reset every inherited
+  // Git/SSH credential path, then install exactly the selected repository's App token. The same
+  // token backs API calls and HTTPS Git through gh's credential helper; there is no fallback.
+  child = appGitEnvironment(child, token)
   return child
 }
 
-export function defaultRunStep(devMd: string, env: NodeJS.ProcessEnv, { exec = execTool, timeoutMs = STEP_TIMEOUT_MS, token = () => null as string | null } = {}): RunStep {
+export function defaultRunStep(env: NodeJS.ProcessEnv, { exec = execTool, timeoutMs = STEP_TIMEOUT_MS } = {}): RunStep {
   return async (step, context) => {
     const started = Date.now()
-    const policy = stagePolicy(devMd, STAGE_OF[step.action] ?? 'implement')
+    const policy = stagePolicy(context.devMd, STAGE_OF[step.action] ?? 'implement')
     const { tool, args } = agentArgs(policy, stepPrompt(step))
     const cwd = workingDir(context.root, step.number) ?? context.root
     // Nobody is at the keyboard, so a round of questions goes to the issue and waits there for the
@@ -1401,7 +1675,7 @@ export function defaultRunStep(devMd: string, env: NodeJS.ProcessEnv, { exec = e
     // The limit arrives with the run rather than with the step function, so a roster change lands
     // on the next run instead of the next restart.
     const limit = context.timeoutMs ?? timeoutMs
-    const child = await exec(tool, args, { cwd, env: childRunEnvironment(env, token()), timeoutMs: limit, onStart: context.onStart })
+    const child = await exec(tool, args, { cwd, env: childRunEnvironment(env, context.token), timeoutMs: limit, onStart: context.onStart })
     const ms = Date.now() - started
     const text = `${child.stderr}\n${child.stdout}`
     if (child.timedOut) return { outcome: 'killed', note: `${tool} ran past the ${limit / 60_000}-minute step limit and was stopped`, ms }
@@ -1424,10 +1698,380 @@ export function board(repo: string, runner: GhRunner): GhIssue[] {
   return issues.filter((issue) => !issue.pull_request && stateOf(issue.labels.map((label) => (typeof label === 'string' ? label : label.name))).state !== null)
 }
 
-export interface PollDeps {
-  root: string
+export interface BoardContext {
+  key: string
   repo: string
+  root: string
+  identity: AppIdentity
   runner: GhRunner
+  devMd: string
+}
+
+export interface PendingHandBack { issue: number; from: State; reason: string }
+export interface BoardRecord {
+  repo: string
+  state: 'active' | 'dropping'
+  pending?: PendingHandBack[]
+}
+export interface WorkerState {
+  schema: 1
+  revision: number
+  boards: Record<string, BoardRecord>
+  // Error fingerprints survive service restarts. A successful pass removes its fingerprint, so
+  // the same failure is reported again if it returns after a recovery.
+  reports?: Record<string, string>
+}
+
+export interface HandBackResult { ok: boolean; note: string }
+export type StrictHandBack = (
+  repo: string,
+  number: number,
+  reason: string,
+  restoreTo: State,
+  interrupt: Interrupt,
+) => Promise<HandBackResult> | HandBackResult
+
+export interface ReconcileResult {
+  active: BoardContext[]
+  removed: string[]
+  unavailable: Array<{ repo: string; reason: string }>
+}
+
+const emptyWorkerState = (): WorkerState => ({ schema: 1, revision: 0, boards: {}, reports: {} })
+
+const workerStates = new Set<State>(['waiting-on-operator', 'planning', 'queued', 'in-progress', 'ready-to-ship'])
+
+function parseWorkerState(text: string, path: string): WorkerState {
+  try {
+    const value: unknown = JSON.parse(text)
+    if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('top level is not an object')
+    const raw = value as Record<string, unknown>
+    if (Object.keys(raw).some((key) => !['schema', 'revision', 'boards', 'reports'].includes(key))) throw new Error('top level has an unknown field')
+    if (raw.schema !== 1) throw new Error('schema is not 1')
+    if (!Number.isSafeInteger(raw.revision) || Number(raw.revision) < 0) throw new Error('revision is not a non-negative integer')
+    if (!raw.boards || typeof raw.boards !== 'object' || Array.isArray(raw.boards)) throw new Error('boards is not an object')
+    if (!(raw.reports === undefined || (raw.reports && typeof raw.reports === 'object' && !Array.isArray(raw.reports)))) throw new Error('reports is not an object')
+    for (const [key, value] of Object.entries(raw.boards as Record<string, unknown>)) {
+      if (canonicalRepository(key) !== key) throw new Error(`board key is not canonical: ${JSON.stringify(key)}`)
+      if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error(`board ${key} is not an object`)
+      const board = value as Partial<BoardRecord>
+      if (Object.keys(value).some((field) => !['repo', 'state', 'pending'].includes(field))) throw new Error(`board ${key} has an unknown field`)
+      if (board.repo !== key) throw new Error(`board ${key} has a different repository`)
+      if (board.state !== 'active' && board.state !== 'dropping') throw new Error(`board ${key} has an invalid state`)
+      if (!(board.pending === undefined || Array.isArray(board.pending))) throw new Error(`board ${key} pending is not an array`)
+      const issues = new Set<number>()
+      for (const pending of board.pending ?? []) {
+        if (!pending || typeof pending !== 'object' || !Number.isSafeInteger(pending.issue) || pending.issue < 1
+          || !workerStates.has(pending.from) || typeof pending.reason !== 'string' || !pending.reason.trim()) {
+          throw new Error(`board ${key} has an invalid pending hand-back`)
+        }
+        if (Object.keys(pending).some((field) => !['issue', 'from', 'reason'].includes(field))) throw new Error(`board ${key} has an invalid pending hand-back field`)
+        if (issues.has(pending.issue)) throw new Error(`board ${key} repeats pending issue ${pending.issue}`)
+        issues.add(pending.issue)
+      }
+    }
+    for (const [key, report] of Object.entries((raw.reports ?? {}) as Record<string, unknown>)) {
+      if (!key || typeof report !== 'string') throw new Error(`report ${JSON.stringify(key)} is not a string`)
+    }
+    return raw as unknown as WorkerState
+  } catch (error) {
+    throw new Error(`${path} is malformed: ${(error as Error).message}`)
+  }
+}
+
+function boardStatePaths(options: HomeOptions, create: boolean): { stateRoot: string; path: string } {
+  const factoryRoot = factoryHome(options)
+  const stateRoot = workerDirectory(options)
+  const safe = safeGlobalStateRoot(factoryRoot, stateRoot, create)
+  if (!safe.ok) throw new Error(safe.reason)
+  return { stateRoot, path: workerBoardsPath(options) }
+}
+
+function readBoardStateFile(path: string): WorkerState {
+  try {
+    const info = lstatSync(path)
+    const uid = process.getuid?.()
+    if (!info.isFile() || info.isSymbolicLink()) throw new Error(`${path} is not a regular file`)
+    if (uid !== undefined && info.uid !== uid) throw new Error(`${path} is owned by uid ${info.uid}`)
+    return parseWorkerState(readFileSync(path, 'utf8'), path)
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return emptyWorkerState()
+    throw error
+  }
+}
+
+export function readWorkerState(options: HomeOptions = {}): WorkerState {
+  const factoryRoot = factoryHome(options)
+  const stateRoot = workerDirectory(options)
+  const safe = safeGlobalStateRoot(factoryRoot, stateRoot, false)
+  if (!safe.ok) {
+    // An absent store is an empty state, and observing it must not create either the store or a
+    // lock. Unsafe existing ancestors remain refusals.
+    if (safe.reason.includes('disappeared during migration')) return emptyWorkerState()
+    throw new Error(safe.reason)
+  }
+  return readBoardStateFile(workerBoardsPath(options))
+}
+
+function writeWorkerState(options: HomeOptions, state: WorkerState, expectedRevision: number): WorkerState {
+  // Validate the value before opening the state directory for mutation. This catches programming
+  // errors with the same strict parser used on disk.
+  parseWorkerState(JSON.stringify(state), workerBoardsPath(options))
+  const paths = boardStatePaths(options, true)
+  return withLock(paths.stateRoot, () => {
+    boardStatePaths(options, false)
+    try {
+      const leaf = lstatSync(paths.path)
+      const uid = process.getuid?.()
+      if (!leaf.isFile() || leaf.isSymbolicLink()) throw new Error(`${paths.path} is not a regular file`)
+      if (uid !== undefined && leaf.uid !== uid) throw new Error(`${paths.path} is owned by uid ${leaf.uid}`)
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
+    }
+    const current = readBoardStateFile(paths.path)
+    if (current.revision !== expectedRevision) {
+      throw new Error(`the worker board state changed concurrently (expected revision ${expectedRevision}, found ${current.revision})`)
+    }
+    const next = { ...state, revision: expectedRevision + 1 }
+    replaceFile(paths.path, JSON.stringify(next, null, 2) + '\n')
+    return next
+  }, { what: 'the worker board state' })
+}
+
+export interface WorkerProblemReporter {
+  report: (key: string, fingerprint: string, line: string) => void
+  clear: (key: string) => void
+}
+
+// Polling is independent of roster reconciliation, but both mutate one machine record. Each
+// report update therefore reads and writes under the shared lock and advances the same revision;
+// a reconciliation holding a stale snapshot fails its CAS instead of erasing the newer report.
+export function workerProblemReporter(options: HomeOptions, out: (text: string) => void): WorkerProblemReporter {
+  const mutate = (change: (state: WorkerState) => boolean) => {
+    const paths = boardStatePaths(options, true)
+    withLock(paths.stateRoot, () => {
+      boardStatePaths(options, false)
+      const state = readBoardStateFile(paths.path)
+      state.reports ??= {}
+      if (!change(state)) return
+      const next = { ...state, revision: state.revision + 1 }
+      replaceFile(paths.path, JSON.stringify(next, null, 2) + '\n')
+    }, { what: 'the worker board state' })
+  }
+  return {
+    report: (key, fingerprint, line) => mutate((state) => {
+      if (state.reports![key] === fingerprint) return false
+      state.reports![key] = fingerprint
+      out(line)
+      return true
+    }),
+    clear: (key) => mutate((state) => {
+      if (!(key in state.reports!)) return false
+      delete state.reports![key]
+      return true
+    }),
+  }
+}
+
+// Unattended work accepts repository identities, never organization-wide expansion. Canonical
+// identity is also the stable-deduplication key, so case-only roster edits do not create a board.
+export function normalizeWorkerRepos(values: string[]): { repos: string[]; refused: string[] } {
+  const repos: string[] = []
+  const refused: string[] = []
+  const seen = new Set<string>()
+  for (const value of values) {
+    const display = String(value ?? '').trim()
+    let repo: string
+    try {
+      if (display === '*' || display.toLowerCase() === 'all') throw new Error('wildcards are not repositories')
+      repo = canonicalRepository(display)
+    } catch {
+      refused.push(display)
+      continue
+    }
+    if (seen.has(repo)) continue
+    seen.add(repo)
+    repos.push(repo)
+  }
+  return { repos, refused }
+}
+
+function pendingFor(record: BoardRecord, repo: string, inflight: Map<string, Inflight>, children: ChildRecord[]): PendingHandBack[] {
+  const pending = new Map<number, PendingHandBack>()
+  for (const item of record.pending ?? []) pending.set(item.issue, item)
+  for (const run of inflight.values()) {
+    if (canonicalRepository(run.candidate.repo) !== repo || run.settled) continue
+    pending.set(run.candidate.number, {
+      issue: run.candidate.number,
+      from: run.candidate.from,
+      reason: 'this repository was removed from the worker roster',
+    })
+  }
+  for (const child of children) {
+    if (canonicalRepository(child.repo) !== repo) continue
+    pending.set(child.issue, {
+      issue: child.issue,
+      from: child.from,
+      reason: 'this repository was removed from the worker roster',
+    })
+  }
+  return [...pending.values()].sort((a, b) => a.issue - b.issue)
+}
+
+function forgetIssueChildren(stateRoot: string, repo: string, issue: number): void {
+  writeChildren(stateRoot, (rows) => rows.filter((row) => canonicalRepository(row.repo) !== repo || row.issue !== issue))
+}
+
+// Refresh one roster without coupling board lifecycles. The state transition to `dropping`, and
+// all pending issue metadata, land atomically before any child is signalled. That is the recovery
+// boundary: after a crash the next process can retry the exact non-consuming hand-back.
+export async function reconcileBoards(input: {
+  home?: string
+  env?: NodeJS.ProcessEnv
+  listed: string[]
+  previous: WorkerState
+  contexts: Map<string, BoardContext>
+  inflight: Map<string, Inflight>
+  provision: (repo: string) => Promise<BoardContext>
+  handBack: StrictHandBack
+  out: (text: string) => void
+  stop?: (pid: number, signal: NodeJS.Signals) => boolean
+  start?: ProcessStart
+  alive?: ProcessAlive
+}): Promise<ReconcileResult> {
+  const homeOptions: HomeOptions = { home: input.home, env: input.env }
+  // Refuse an unsafe global root before even reading children. Reconciliation may eventually
+  // signal a child or remove its durable row, so a symlinked/foreign root cannot be observational.
+  boardStatePaths(homeOptions, true)
+  const normalized = normalizeWorkerRepos(input.listed)
+  const wanted = new Set(normalized.repos)
+  let state: WorkerState = JSON.parse(JSON.stringify(input.previous?.schema === 1 ? input.previous : emptyWorkerState()))
+  state.boards ??= {}
+  state.reports ??= {}
+  const active: BoardContext[] = []
+  const removed: string[] = []
+  const unavailable: Array<{ repo: string; reason: string }> = []
+  const stateRoot = workerDirectory(homeOptions)
+  const children = readChildren(stateRoot)
+  const currentReports = new Set<string>()
+  const persist = () => { state = writeWorkerState(homeOptions, state, state.revision) }
+  const report = (key: string, fingerprint: string, line: string) => {
+    currentReports.add(key)
+    if (state.reports![key] !== fingerprint) input.out(line)
+    state.reports![key] = fingerprint
+  }
+
+  for (const refused of normalized.refused) {
+    const key = `refused:${refused.toLowerCase()}`
+    report(key, refused, `${refused}: refused (unattended workers require an explicit OWNER/NAME repository)`)
+  }
+
+  for (const repo of normalized.repos) {
+    const existing = state.boards[repo]
+    if (!existing) state.boards[repo] = { repo, state: 'active' }
+  }
+  for (const [repo, record] of Object.entries(state.boards)) {
+    if (!wanted.has(repo) && record.state === 'active') {
+      record.state = 'dropping'
+      record.pending = pendingFor(record, repo, input.inflight, children)
+    } else if (record.state === 'dropping') {
+      record.pending = pendingFor(record, repo, input.inflight, children)
+    }
+  }
+  // This write is deliberately before `stop()`: no signal may make the only hand-back metadata
+  // transient.
+  persist()
+
+  for (const [repo, record] of Object.entries(state.boards)) {
+    if (record.state !== 'dropping') continue
+    const matching = [...input.inflight.values()].filter((run) => canonicalRepository(run.candidate.repo) === repo && !run.settled)
+    for (const run of matching) {
+      run.interrupt = {
+        reason: 'this repository was removed from the worker roster', action: 'stop', trigger: null, consumes: false, deferHandBack: true,
+      }
+      run.stop()
+    }
+
+    if ((record.pending ?? []).length === 0) {
+      if (wanted.has(repo)) state.boards[repo] = { repo, state: 'active' }
+      else { delete state.boards[repo]; removed.push(repo) }
+      continue
+    }
+
+    // Process identity is local evidence and needs no repository credential. Signal every child
+    // that is still provably ours before provisioning: a removed board whose token or checkout is
+    // broken must not leave its agent running simply because hand-back cannot start yet.
+    const ready: PendingHandBack[] = []
+    for (const pending of [...(record.pending ?? [])]) {
+      if (matching.some((run) => run.candidate.number === pending.issue)) continue
+      let processPending = false
+      for (const child of children.filter((row) => canonicalRepository(row.repo) === repo && row.issue === pending.issue)) {
+        const identity = processIdentity(child, input.start ?? processStart, input.alive ?? processAlive)
+        if (identity === 'matching') { (input.stop ?? stopGroup)(child.pid, 'SIGTERM'); processPending = true }
+        else if (identity === 'unknown') processPending = true
+      }
+      if (!processPending) ready.push(pending)
+    }
+    if (ready.length === 0) continue
+
+    // Recreate the removed board's isolated credentials/policy only for rows now safe to hand
+    // back. A failure retains both the board and its pending rows; healthy boards still proceed.
+    try {
+      if (!input.contexts.has(repo)) input.contexts.set(repo, await input.provision(repo))
+      await input.contexts.get(repo)!.identity.freshen()
+    } catch (error) {
+      const reason = (error as Error).message
+      unavailable.push({ repo, reason })
+      report(`repo:${repo}`, reason, `${repo}: unavailable (${reason})`)
+      continue
+    }
+
+    for (const pending of ready) {
+      const interrupt: Interrupt = { reason: pending.reason, action: 'stop', trigger: null, consumes: false, deferHandBack: true }
+      let result: HandBackResult
+      try { result = await input.handBack(repo, pending.issue, pending.reason, pending.from, interrupt) }
+      catch (error) { result = { ok: false, note: (error as Error).message } }
+      if (!result.ok) {
+        report(`handback:${repo}#${pending.issue}`, result.note, `${repo}#${pending.issue}: hand-back failed (${result.note})`)
+        continue
+      }
+      record.pending = (record.pending ?? []).filter((item) => item.issue !== pending.issue)
+      forgetIssueChildren(stateRoot, repo, pending.issue)
+      delete state.reports![`handback:${repo}#${pending.issue}`]
+      persist()
+    }
+    if ((record.pending ?? []).length) continue
+    if (wanted.has(repo)) state.boards[repo] = { repo, state: 'active' }
+    else {
+      delete state.boards[repo]
+      removed.push(repo)
+    }
+  }
+
+  for (const repo of normalized.repos) {
+    const record = state.boards[repo]
+    if (!record || record.state !== 'active') continue
+    try {
+      const board = input.contexts.get(repo) ?? await input.provision(repo)
+      input.contexts.set(repo, board)
+      active.push(board)
+      delete state.reports![`repo:${repo}`]
+    } catch (error) {
+      const reason = (error as Error).message
+      unavailable.push({ repo, reason })
+      report(`repo:${repo}`, reason, `${repo}: unavailable (${reason})`)
+    }
+  }
+  for (const key of Object.keys(state.reports)) {
+    if ((key.startsWith('repo:') || key.startsWith('refused:')) && !currentReports.has(key)) delete state.reports[key]
+  }
+  persist()
+  return { active, removed, unavailable }
+}
+
+export interface PollDeps {
+  stateRoot: string
+  boards: BoardContext[]
   // This worker process, so its claims are its own and no other process reads them as such.
   runId: string
   // The machine's own limits, from its roster row, re-read every pass.
@@ -1439,16 +2083,25 @@ export interface PollDeps {
   appActor?: string
   // Saves, pushes, releases and hands an issue back: the reason goes on the issue, and the state
   // label goes back to where the run picked it up.
-  standDown: (number: number, reason: string, restoreTo?: State) => string
+  standDown: (repo: string, number: number, reason: string, restoreTo?: State) => string
   // How a started run is ended: its whole process group, so the tools it spawned go with it.
   stop?: (pid: number, signal: NodeJS.Signals) => boolean
   // What the operating system says about a pid, which is half of a child's identity.
   start?: ProcessStart
+  // Whether a pid exists when its start time cannot be read; null means the identity is unknown.
+  alive?: ProcessAlive
   // An issue this pass knew had work and did not start: unreadable, or wanted but not reserved.
   // Those are deliberately swallowed so one bad issue does not cost the board its pass — but a
   // pass that left work behind has not shown the board is idle, and idle is the only state a
   // five-minute install may run in.
-  onWaiting?: (number: number, reason: string) => void
+  onWaiting?: (repo: string, number: number, reason: string) => void
+  // A board or issue could not be read. Kept separate from ordinary waiting (claim/no slot), so
+  // JSON can report a degraded board without calling healthy scheduling pressure a failure.
+  onUnreadable?: (repo: string, number: number, reason: string) => void
+  // Persisted problem suppression. Task 5 wires this to `workerProblemReporter`; tests may inject
+  // the same seam directly. Recovery clears the fingerprint so a later recurrence is reportable.
+  reportProblem?: WorkerProblemReporter['report']
+  clearProblem?: WorkerProblemReporter['clear']
 }
 
 // The steps this machine has started. It lives across polls, so the next pass two minutes later
@@ -1458,7 +2111,7 @@ export interface PollDeps {
 // does: they asked for this, and it is their comment the record points at. An administrative stop
 // — the machine de-listed, the service told to stop, a signal — does not: nothing about the issue
 // changed, so the work has to look unstarted again or no machine ever picks it up.
-export interface Interrupt { reason: string; action: Action; trigger: number | null; consumes: boolean }
+export interface Interrupt { reason: string; action: Action; trigger: number | null; consumes: boolean; deferHandBack?: boolean }
 
 export interface Inflight {
   candidate: Candidate
@@ -1470,73 +2123,101 @@ export interface Inflight {
   // reporting the kill as a failure of the work.
   interrupt: Interrupt | null
 }
-export const drain = (inflight: Map<number, Inflight>) => Promise.all([...inflight.values()].map((run) => run.done))
+export const drain = (inflight: Map<string, Inflight>) => Promise.all([...inflight.values()].map((run) => run.done))
 
 // One pass over the board: read what changed, decide, and start what is safe to start now. The
 // steps run to their own end; this returns as soon as they are under way.
-export async function poll(deps: PollDeps, inflight: Map<number, Inflight> = new Map()): Promise<Candidate[]> {
-  const { root, repo, runner, now } = deps
+export async function poll(deps: PollDeps, inflight: Map<string, Inflight> = new Map()): Promise<Candidate[]> {
+  const { now } = deps
   // Last pass's finished runs, whose outcomes are now in `acted`: their slots and issues are free.
-  for (const [number, run] of inflight) if (run.settled) inflight.delete(number)
-  const permission = permissionLookup(repo, runner, { root })
-  const trusted = trustedFactory({ repo, runner, root, appActor: deps.appActor })
-  const acted = readActed(root)
-  const wanted: Array<{ candidate: Candidate; decision: Decision; key: string }> = []
-  const plans = new Map<number, string | null>()
-  // One issue nobody can read must not cost the board its pass, so everything per-issue is guarded.
-  for (const issue of board(repo, runner)) {
+  for (const [key, run] of inflight) if (run.settled) inflight.delete(key)
+  const acted = readActed(deps.stateRoot)
+  const wanted: Array<{ board: BoardContext; candidate: Candidate; decision: Decision; key: string }> = []
+  for (const selected of deps.boards) {
+    const { root, runner } = selected
+    const repo = canonicalRepository(selected.key)
+    if (canonicalRepository(selected.repo) !== repo) {
+      deps.out(`${repo}: board context repository does not match its canonical key`)
+      deps.onWaiting?.(repo, 0, 'board context repository does not match its canonical key')
+      deps.onUnreadable?.(repo, 0, 'board context repository does not match its canonical key')
+      continue
+    }
+    const permission = permissionLookup(repo, runner, { root })
+    const trusted = trustedFactory({ repo, runner, root, appActor: deps.appActor })
+    const plans = new Map<number, string | null>()
+    let issues: GhIssue[]
     try {
-      syncIssue({ root, repo, number: issue.number, runner })
-      const snap = snapshot(cacheDir(root, repo, issue.number))
-      const key = `${repo}#${issue.number}`
-      const held = !!holderOf(snap.state, snap.body, now(), trusted).holder
-      const decision = decide(snap, permission, { acted: acted[key] ?? null, now: now(), held, failures: deps.caps?.failures, appActor: deps.appActor })
-      if (decision.action === 'none') continue
-      // A fresh claim means someone — a person or another machine — is already on it.
-      if (decision.action !== 'stop' && held) {
-        deps.out(`#${issue.number}: skipped, a fresh claim holds it`)
-        continue
-      }
-      // The operator's word becomes a recorded ack, read back by the ship gate's own check. A word
-      // that does not survive that is spent here rather than re-relayed on every pass.
-      if (decision.action === 'ship') {
-        const confirmed = confirmShip({ root, repo, number: issue.number, runner, appActor: deps.appActor }, permission, { id: decision.trigger!, by: decision.by!, quote: decision.quote! })
-        if (!confirmed.ok) {
-          deps.out(`#${issue.number}: not shipping — ${confirmed.reason}`)
-          recordRun(root, { at: new Date(now()).toISOString(), issue: issue.number, action: 'ship', outcome: 'blocked', ms: 0, machine: deps.machine, note: tail(confirmed.reason) })
-          updateActed(root, (saved) => { saved[key] = { at: now(), action: 'ship', outcome: 'blocked', trigger: decision.trigger, failures: 0, retryAt: null } })
+      issues = board(repo, runner)
+      deps.clearProblem?.(`board:${repo}`)
+    } catch (error) {
+      const reason = (error as Error).message
+      const line = `${repo}: board could not be read (${reason})`
+      if (deps.reportProblem) deps.reportProblem(`board:${repo}`, reason, line)
+      else deps.out(line)
+      deps.onWaiting?.(repo, 0, (error as Error).message)
+      deps.onUnreadable?.(repo, 0, reason)
+      continue
+    }
+    // One issue nobody can read must not cost its board or any sibling board the pass.
+    for (const issue of issues) {
+      try {
+        syncIssue({ root, repo, number: issue.number, runner })
+        const snap = snapshot(cacheDir(root, repo, issue.number))
+        deps.clearProblem?.(`issue:${repo}#${issue.number}`)
+        const key = runKey({ repo, number: issue.number })
+        const held = !!holderOf(snap.state, snap.body, now(), trusted).holder
+        const decision = decide(snap, permission, { acted: acted[key] ?? null, now: now(), held, failures: deps.caps?.failures, appActor: deps.appActor })
+        if (decision.action === 'none') continue
+        if (decision.action !== 'stop' && held) {
+          deps.out(`${key}: skipped, a fresh claim holds it`)
           continue
         }
+        if (decision.action === 'ship') {
+          const confirmed = confirmShip({ root, repo, number: issue.number, runner, appActor: deps.appActor }, permission, { id: decision.trigger!, by: decision.by!, quote: decision.quote! })
+          if (!confirmed.ok) {
+            deps.out(`${key}: not shipping — ${confirmed.reason}`)
+            recordRun(deps.stateRoot, { at: new Date(now()).toISOString(), repo, issue: issue.number, action: 'ship', outcome: 'blocked', ms: 0, machine: deps.machine, note: tail(confirmed.reason) })
+            updateActed(deps.stateRoot, (saved) => { saved[key] = { at: now(), action: 'ship', outcome: 'blocked', trigger: decision.trigger, failures: 0, retryAt: null } })
+            continue
+          }
+        }
+        const parent = snap.state.issue!.parent
+        if (parent !== null && !plans.has(parent)) plans.set(parent, parentPlan(root, repo, parent, runner, permission, deps.appActor))
+        const files = parent === null ? [] : filesFromParent(plans.get(parent) ?? null, issue.number)
+        wanted.push({ board: selected, key, decision, candidate: { repo, number: issue.number, action: decision.action, parent, files, from: stateOf(snap.state.issue!.labels).state! } })
+      } catch (error) {
+        const reason = (error as Error).message
+        const line = `${repo}#${issue.number}: could not be read (${reason})`
+        if (deps.reportProblem) deps.reportProblem(`issue:${repo}#${issue.number}`, reason, line)
+        else deps.out(line)
+        deps.onWaiting?.(repo, issue.number, reason)
+        deps.onUnreadable?.(repo, issue.number, reason)
       }
-      const parent = snap.state.issue!.parent
-      if (parent !== null && !plans.has(parent)) plans.set(parent, parentPlan(root, repo, parent, runner, permission, deps.appActor))
-      const files = parent === null ? [] : filesFromParent(plans.get(parent) ?? null, issue.number)
-      wanted.push({ key, decision, candidate: { number: issue.number, action: decision.action, parent, files, from: stateOf(snap.state.issue!.labels).state! } })
-    } catch (error) {
-      deps.out(`#${issue.number}: could not be read (${(error as Error).message})`)
-      deps.onWaiting?.(issue.number, (error as Error).message)
     }
   }
 
   // An operator's stop for a run that is already going cannot wait for a slot: scheduling would
   // skip the issue because it is running, and no other machine may release the claim this one
   // holds. So it is handled first — the run is ended, and its own settle hands the issue back.
-  const interrupted: number[] = []
+  const interrupted = new Set<string>()
   for (const item of wanted) {
-    const run = inflight.get(item.candidate.number)
+    const key = runKey(item.candidate)
+    const run = inflight.get(key)
     if (item.decision.action !== 'stop' || !run || run.settled) continue
-    deps.out(`#${item.candidate.number}: ${item.decision.reason} — stopping the ${run.candidate.action} run`)
+    deps.out(`${key}: ${item.decision.reason} — stopping the ${run.candidate.action} run`)
     run.interrupt = { reason: item.decision.reason, action: 'stop', trigger: item.decision.trigger, consumes: true }
     run.stop()
     await run.done
-    inflight.delete(item.candidate.number)
-    interrupted.push(item.candidate.number)
+    inflight.delete(key)
+    interrupted.add(key)
   }
 
   const started: Candidate[] = []
-  const queue = wanted.filter((item) => !interrupted.includes(item.candidate.number))
+  const queue = wanted.filter((item) => !interrupted.has(runKey(item.candidate)))
   for (const candidate of schedule(queue.map((item) => item.candidate), [...inflight.values()].map((run) => run.candidate), deps.caps?.runs ?? MAX_RUNS)) {
-    const item = queue.find((entry) => entry.candidate.number === candidate.number)!
+    const key = runKey(candidate)
+    const item = queue.find((entry) => runKey(entry.candidate) === key)!
+    const selected = item.board
     const at = now()
     // Taken before the slot, so a second machine on the same board sees the work is taken. Losing
     // the race is not a failure: the issue is simply someone else's this pass. A stop takes no
@@ -1544,25 +2225,25 @@ export async function poll(deps: PollDeps, inflight: Map<number, Inflight> = new
     // refuse, and standing down is what releases that holder.
     const taken = candidate.action === 'stop'
       ? { ok: true, owner: '', reason: 'a stop takes no claim' }
-      : reserve({ root, repo, number: candidate.number, runner, appActor: deps.appActor }, deps.machine, deps.runId, candidate.action, at)
+      : reserve({ root: selected.root, repo: candidate.repo, number: candidate.number, runner: selected.runner, appActor: deps.appActor }, deps.machine, deps.runId, candidate.action, at)
     if (!taken.ok) {
-      deps.out(`#${candidate.number}: not started — ${taken.reason}`)
+      deps.out(`${key}: not started — ${taken.reason}`)
       // Known work this pass did not start. Another machine may have it, or the claim may have
       // failed — either way this board is not idle, and an idle board is what lets a five-minute
       // install begin.
-      deps.onWaiting?.(candidate.number, taken.reason)
+      deps.onWaiting?.(candidate.repo, candidate.number, taken.reason)
       continue
     }
     const run: Inflight = { candidate, started: at, settled: false, stop: () => {}, interrupt: null, done: Promise.resolve() as unknown as Promise<RunRecord> }
-    run.done = runOne(deps, candidate, item, at, taken.owner, run).then((record) => { run.settled = true; return record })
-    inflight.set(candidate.number, run)
+    run.done = runOne(deps, selected, candidate, item, at, taken.owner, run).then((record) => { run.settled = true; return record })
+    inflight.set(key, run)
     started.push(candidate)
   }
   // Wanted, but there was no slot for it this pass.
   for (const item of queue) {
-    if (started.some((candidate) => candidate.number === item.candidate.number)) continue
-    if (interrupted.includes(item.candidate.number)) continue
-    deps.onWaiting?.(item.candidate.number, 'no free slot this pass')
+    if (started.some((candidate) => runKey(candidate) === runKey(item.candidate))) continue
+    if (interrupted.has(runKey(item.candidate))) continue
+    deps.onWaiting?.(item.candidate.repo, item.candidate.number, 'no free slot this pass')
   }
   return started
 }
@@ -1597,8 +2278,8 @@ export function reserve(ctx: { root: string; repo: string; number: number; runne
 
 // One step and everything that follows it. Nothing here may reject: the loop does not await these
 // promises, so a rejection nobody handles would take the whole worker down.
-async function runOne(deps: PollDeps, candidate: Candidate, item: { key: string; decision: Decision }, at: number, held: string | null, run: Inflight): Promise<RunRecord> {
-  const claimCtx = { root: deps.root, repo: deps.repo, number: candidate.number, runner: deps.runner, appActor: deps.appActor }
+async function runOne(deps: PollDeps, selected: BoardContext, candidate: Candidate, item: { key: string; decision: Decision }, at: number, held: string | null, run: Inflight): Promise<RunRecord> {
+  const claimCtx = { root: selected.root, repo: candidate.repo, number: candidate.number, runner: selected.runner, appActor: deps.appActor }
   // What the step started, filled in from its own callback, so the finally can forget it.
   const started: ChildRecord[] = []
   // While this machine holds the claim it says so, on the same schedule a session's hooks use.
@@ -1608,7 +2289,7 @@ async function runOne(deps: PollDeps, candidate: Candidate, item: { key: string;
   try {
     if (candidate.action === 'stop') {
       // A stop needs no agent: it is this machine giving the issue back.
-      result = { outcome: 'stopped', note: deps.standDown(candidate.number, item.decision.reason, candidate.from), ms: 0 }
+      result = { outcome: 'stopped', note: deps.standDown(candidate.repo, candidate.number, item.decision.reason, candidate.from), ms: 0 }
     } else {
       // The agent claims for itself from inside its own worktree, so this machine's reservation
       // steps aside first — holding both would stop the run it just started.
@@ -1616,17 +2297,19 @@ async function runOne(deps: PollDeps, candidate: Candidate, item: { key: string;
         if (beat) clearInterval(beat)
         try { release(claimCtx, held, deps.appActor ?? APP_ACTOR, 'handing the issue to the run this machine just started') } catch { /* the run still starts */ }
       }
-      result = await deps.runStep({ action: candidate.action, number: candidate.number, repo: deps.repo, split: item.decision.split, by: item.decision.by }, {
-        root: deps.root,
+      result = await deps.runStep({ action: candidate.action, number: candidate.number, repo: candidate.repo, split: item.decision.split, by: item.decision.by }, {
+        root: selected.root,
+        devMd: selected.devMd,
+        token: selected.identity.token(),
         timeoutMs: deps.caps?.stepMs ?? STEP_TIMEOUT_MS,
         onStart: (pid, command) => {
           const record: ChildRecord = {
-            pid, command, startedAt: (deps.start ?? processStart)(pid) ?? '', issue: candidate.number,
+            repo: candidate.repo, pid, command, startedAt: (deps.start ?? processStart)(pid) ?? '', issue: candidate.number,
             action: candidate.action, owner: held, from: candidate.from,
           }
           started.push(record)
-          run.stop = () => { stopChild(deps.root, record, { stop: deps.stop, start: deps.start }) }
-          try { noteChild(deps.root, record) } catch { /* the run still stops from here */ }
+          run.stop = () => { stopChild(deps.stateRoot, record, { stop: deps.stop, start: deps.start, alive: deps.alive }) }
+          try { noteChild(deps.stateRoot, record) } catch { /* the run still stops from here */ }
         },
       })
     }
@@ -1636,7 +2319,7 @@ async function runOne(deps: PollDeps, candidate: Candidate, item: { key: string;
     if (beat) clearInterval(beat)
     run.stop = () => {}
     // The record is the live set, so it goes the moment the run does.
-    for (const record of started) { try { forgetChild(deps.root, record.pid) } catch { /* the next sweep drops it */ } }
+    for (const record of started) { try { forgetChild(deps.stateRoot, record.pid) } catch { /* the next sweep drops it */ } }
   }
   // Whatever happened, this machine's own reservation goes back. A step that stood the issue down
   // has already released the session's claim; this releases the one taken before the launch.
@@ -1651,8 +2334,8 @@ async function runOne(deps: PollDeps, candidate: Candidate, item: { key: string;
   } catch (error) {
     // The record could not be written down. Say so rather than dying, and let the next pass decide
     // again: without a saved outcome this trigger simply looks unacted-on.
-    deps.out(`#${candidate.number} ${candidate.action} → ${result.outcome}, but the run could not be recorded: ${(error as Error).message}`)
-    return { at: new Date(at).toISOString(), issue: candidate.number, action: candidate.action, outcome: result.outcome, ms: result.ms, machine: deps.machine, note: tail(result.note) }
+    deps.out(`${runKey(candidate)} ${candidate.action} → ${result.outcome}, but the run could not be recorded: ${(error as Error).message}`)
+    return { at: new Date(at).toISOString(), repo: candidate.repo, issue: candidate.number, action: candidate.action, outcome: result.outcome, ms: result.ms, machine: deps.machine, note: tail(result.note) }
   }
 }
 
@@ -1665,10 +2348,10 @@ function settle(deps: PollDeps, candidate: Candidate, item: { key: string; decis
   const action = interrupt?.action ?? candidate.action
   const trigger = interrupt ? interrupt.trigger : item.decision.trigger
   const record: RunRecord = {
-    at: new Date(at).toISOString(), issue: candidate.number, action,
+    at: new Date(at).toISOString(), repo: candidate.repo, issue: candidate.number, action,
     outcome: result.outcome, ms: result.ms, machine: deps.machine, note: tail(result.note),
   }
-  recordRun(deps.root, record)
+  recordRun(deps.stateRoot, record)
   const ended = deps.now()
   let retryAt: number | null = null
   let failuresNow = 0
@@ -1677,13 +2360,13 @@ function settle(deps: PollDeps, candidate: Candidate, item: { key: string; decis
   // spent trigger here and the restored issue looks already-done to the next pass and to every
   // other machine, which is how an administrative stop turns into an issue nobody ever picks up.
   if (interrupt && !interrupt.consumes) {
-    deps.out(`#${record.issue} ${record.action} → ${record.outcome}${record.note ? ` (${record.note})` : ''}`)
-    if (result.outcome !== 'done' && !alreadyHandedBack) {
-      deps.standDown(candidate.number, `${interrupt.reason}; this machine has saved and released the issue`, candidate.from)
+    deps.out(`${runKey({ repo: record.repo, number: record.issue })} ${record.action} → ${record.outcome}${record.note ? ` (${record.note})` : ''}`)
+    if (result.outcome !== 'done' && !alreadyHandedBack && !interrupt.deferHandBack) {
+      deps.standDown(candidate.repo, candidate.number, `${interrupt.reason}; this machine has saved and released the issue`, candidate.from)
     }
     return record
   }
-  updateActed(deps.root, (acted) => {
+  updateActed(deps.stateRoot, (acted) => {
     const previous = acted[item.key]
     const failed = result.outcome === 'failed' || result.outcome === 'killed'
     const failures = failed ? (previous && previous.action === action ? previous.failures : 0) + 1 : 0
@@ -1706,9 +2389,9 @@ function settle(deps: PollDeps, candidate: Candidate, item: { key: string; decis
     const why = interrupt ? interrupt.reason
       : result.outcome === 'limit' ? 'the subscription limit was reached'
         : `the ${candidate.action} run ${result.outcome === 'killed' ? 'ran past its time limit' : 'failed'}`
-    deps.standDown(candidate.number, `${why}; this machine has saved and released the issue${when}`, candidate.from)
+    deps.standDown(candidate.repo, candidate.number, `${why}; this machine has saved and released the issue${when}`, candidate.from)
   }
-  deps.out(`#${record.issue} ${record.action} → ${record.outcome}${record.note ? ` (${record.note})` : ''}`)
+  deps.out(`${runKey({ repo: record.repo, number: record.issue })} ${record.action} → ${record.outcome}${record.note ? ` (${record.note})` : ''}`)
   return record
 }
 
@@ -1781,6 +2464,10 @@ export interface StandDownContext {
   now?: number
   // Where the state label goes back to, when a run left the issue in-progress.
   restoreTo?: State
+  // The selected board's installation token is the dedicated worker account's only Git
+  // credential. Tests may inject Git itself; production never falls back to ambient auth.
+  token?: string | null
+  git?: Git
 }
 
 // The branch a stand-down may touch, or why it may not. The directory alone proves nothing: a
@@ -1798,14 +2485,15 @@ export function pushableBranch(dir: string, number: number, git: Git): { branch:
   return { branch, refusal: null }
 }
 
-type Git = (args: string[]) => { status: number | null; out: string }
+type Git = (args: string[], options?: { env?: NodeJS.ProcessEnv }) => { status: number | null; out: string }
 
 // Giving an issue up: release the claim this run took, save and push its branch, say why on the
 // issue, and put the state label back. The claim is checked *first* — a worktree this machine no
 // longer owns is not ours to commit in — and the branch is checked before any write.
-export function standDown(ctx: StandDownContext, reason: string): string {
+export function standDownStrict(ctx: StandDownContext, reason: string): HandBackResult {
   const claimCtx = { root: ctx.root, repo: ctx.repo, number: ctx.number, runner: ctx.runner, appActor: ctx.appActor }
   const notes: string[] = []
+  let ok = true
   // Who holds the issue, as three answers and not two: ours to finish, somebody else's to leave
   // alone, or unknown. Only the first two are safe, and they are safe for different reasons.
   let whose: 'ours' | 'free' | 'theirs' | 'unreadable' = 'unreadable'
@@ -1815,9 +2503,10 @@ export function standDown(ctx: StandDownContext, reason: string): string {
     const snap = snapshot(cacheDir(ctx.root, ctx.repo, ctx.number))
     const held = holderOf(snap.state, snap.body, ctx.now ?? Date.now(), trustedFactory(claimCtx)).holder
     if (!held) { whose = 'free'; notes.push('no live claim to release') }
-    else if (!held.owner.startsWith(`${ctx.machine}:`)) { whose = 'theirs'; notes.push(`the claim is held by ${held.owner}, so nothing here was touched and the state label was left alone`) }
+    else if (!held.owner.startsWith(`${ctx.machine}:`)) { whose = 'theirs'; ok = false; notes.push(`the claim is held by ${held.owner}, so nothing here was touched and the state label was left alone`) }
     else { whose = 'ours'; owner = held.owner }
   } catch (error) {
+    ok = false
     notes.push(`the claim could not be read (${(error as Error).message}), so nothing here was touched and the state label was left alone`)
   }
 
@@ -1826,18 +2515,30 @@ export function standDown(ctx: StandDownContext, reason: string): string {
   // the run we just started that left it there.
   const dir = whose === 'ours' || whose === 'free' ? workingDir(ctx.root, ctx.number) : null
   if (dir) {
-    const git: Git = (args) => {
-      const result = spawnSync('git', args, { cwd: dir, encoding: 'utf8', timeout: 60_000 })
+    const git: Git = ctx.git ?? ((args, options) => {
+      const result = spawnSync('git', args, { cwd: dir, encoding: 'utf8', timeout: 60_000, env: options?.env })
       return { status: result.status, out: (result.stdout ?? '').trim() }
-    }
+    })
     const { branch, refusal } = pushableBranch(dir, ctx.number, git)
-    if (refusal) notes.push(refusal)
+    if (refusal) { ok = false; notes.push(refusal) }
     else {
       if (git(['status', '--porcelain']).out) {
-        git(['add', '--all'])
-        notes.push(git(['commit', '--quiet', '-m', `wip: #${ctx.number} saved before standing down`]).status === 0 ? 'committed the open work' : 'the open work could not be committed')
+        const staged = git(['add', '--all']).status === 0
+        if (!staged) {
+          ok = false
+          notes.push('the open work could not be staged')
+        } else {
+          const committed = git(['commit', '--quiet', '-m', `wip: #${ctx.number} saved before standing down`]).status === 0
+          if (!committed) ok = false
+          notes.push(committed ? 'committed the open work' : 'the open work could not be committed')
+        }
       }
-      notes.push(git(['push', '--quiet', '-u', 'origin', `HEAD:refs/heads/${branch}`]).status === 0 ? `pushed ${branch}` : `the push of ${branch} was rejected, so the commit stays local`)
+      if (!ok) notes.push(`the push of ${branch} was not attempted because the open work was not saved`)
+      else {
+        const pushed = git(['push', '--quiet', '-u', 'origin', `HEAD:refs/heads/${branch}`], { env: appGitEnvironment(process.env, ctx.token ?? null) }).status === 0
+        if (!pushed) ok = false
+        notes.push(pushed ? `pushed ${branch}` : `the push of ${branch} was rejected, so the commit stays local`)
+      }
     }
   }
 
@@ -1845,7 +2546,7 @@ export function standDown(ctx: StandDownContext, reason: string): string {
     try {
       release(claimCtx, owner, ctx.appActor ?? APP_ACTOR, reason)
       notes.push(`released ${owner}`)
-    } catch (error) { notes.push(`the claim could not be released: ${(error as Error).message}`) }
+    } catch (error) { ok = false; notes.push(`the claim could not be released: ${(error as Error).message}`) }
   }
 
   const note = `${reason} — ${notes.join(', ')}`
@@ -1853,7 +2554,7 @@ export function standDown(ctx: StandDownContext, reason: string): string {
   // best-effort: a stand-down that cannot reach GitHub still reports what it did locally.
   try {
     postComment(claimCtx, `<!-- vsk:v1 type=standdown -->\n**${ctx.machine}** stood down from #${ctx.number}: ${note}\n`)
-  } catch (error) { notes.push(`the hand-back comment failed: ${(error as Error).message}`) }
+  } catch (error) { ok = false; notes.push(`the hand-back comment failed: ${(error as Error).message}`) }
   if (ctx.restoreTo && (whose === 'ours' || whose === 'free')) {
     try {
       syncIssue({ ...claimCtx })
@@ -1863,17 +2564,24 @@ export function standDown(ctx: StandDownContext, reason: string): string {
       const now = snapshot(cacheDir(ctx.root, ctx.repo, ctx.number))
       const taken = holderOf(now.state, now.body, ctx.now ?? Date.now(), trustedFactory(claimCtx)).holder
       if (taken && !taken.owner.startsWith(`${ctx.machine}:`)) {
+        ok = false
         notes.push(`${taken.owner} claimed it meanwhile, so the state label was left alone`)
-        return `${reason} — ${notes.join(', ')}`
+        return { ok, note: `${reason} — ${notes.join(', ')}` }
       }
       const labels = readState(cacheDir(ctx.root, ctx.repo, ctx.number))!.issue!.labels
       if (stateOf(labels).state === 'in-progress' && ctx.restoreTo !== 'in-progress') {
         setLabels(claimCtx, nextLabels(labels, { state: ctx.restoreTo }))
         notes.push(`put it back to ${ctx.restoreTo}`)
       }
-    } catch (error) { notes.push(`the state label could not be put back: ${(error as Error).message}`) }
+    } catch (error) { ok = false; notes.push(`the state label could not be put back: ${(error as Error).message}`) }
   }
-  return `${reason} — ${notes.join(', ')}`
+  return { ok, note: `${reason} — ${notes.join(', ')}` }
+}
+
+// Existing attended/step output stays a string. Lifecycle reconciliation uses the structured
+// form above so an incomplete release/comment/restore can never be mistaken for success.
+export function standDown(ctx: StandDownContext, reason: string): string {
+  return standDownStrict(ctx, reason).note
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -1882,16 +2590,17 @@ export function standDown(ctx: StandDownContext, reason: string): string {
 export function workerUsage(): string {
   return `Usage: vegafactory worker <enable|disable|status|run> [options]
 
-  enable                 check this machine is ready — listed in the control room's nodes.md,
-                         harness hooks wired, a real \`claude -p\` and \`codex exec\` answering, the
-                         GitHub App key present — then install the launchd or systemd unit
+  enable                 check this machine and every configured explicit board are ready — the
+                         node listed, harnesses answering, and each board's App identity, checkout,
+                         hooks, policy and push path usable — then install the one machine unit
   disable                remove the unit; the machine stops picking work up
-  status                 the board, plus this machine's recent worker runs
+  status                 every configured or persisted board, plus this machine's recent runs
   run [--once]           the poll loop itself (the unit runs this); --once makes a single pass
                          and is the only form --json reports, because the document answers when
                          a pass ends
 
-One merge at a time per machine, and as many runs at once as its roster row allows. The row's
+One ship at a time per repository (different repositories may ship together), and as many runs
+across the whole machine as its roster row allows. The row's
 caps cell sets them — \`runs 10 · step 72h · poll 1m · retry 15m · park 3\`, in any order, every
 field optional and separated by \`·\` or a comma. \`runs\` and \`park\` take a count; \`step\` takes
 minutes or hours, \`poll\` seconds or minutes, \`retry\` minutes. A field that is present and
@@ -1899,7 +2608,7 @@ unreadable refuses the machine rather than being guessed at. With no caps cell t
 ${MAX_RUNS} runs, step ${STEP_TIMEOUT_MS / 60_000}m, poll ${POLL_MS / 60_000}m, retry ${RETRY_MS / 60_000}m, park ${MAX_FAILURES}. The caps are re-read from the refreshed roster
 every pass, so changing one is a control-room PR that lands on the next poll, not a release.
 
-Two machines on one board each get their own caps, and each keeps its own retry and
+Two machines on one board each get their own machine-wide caps, and each keeps its own retry and
 subscription-reset deadlines. A run takes the issue's claim before it starts, so another machine's
 poll sees the work is taken, except in the seconds an implement run hands that claim to the
 session it starts.
@@ -1911,14 +2620,15 @@ in any order, extra columns ignored — so a cell is read by what its column is 
 \`<os-user>@<hostname>\`, derived and never configured. \`worker\` is the gate and the only cell that
 grants anything: \`yes\` lets this machine work a board unattended, and anything else — including an
 empty cell, a heading that only nearly says \`worker\`, and a roster with no such column — grants
-nothing. An empty \`repos\` cell authorises nothing either; \`*\` or \`all\` must be said out loud.
+nothing. The \`repos\` cell accepts explicit \`OWNER/NAME\` entries only; an empty cell, \`*\`, and
+\`all\` authorise no unattended repository and are reported as refusals.
 
 A machine the control room's nodes.md does not name refuses every verb but disable. Writes
-go out as the VegaFactory GitHub App, on an hour-long token minted here from its private key:
+go out as the VegaFactory GitHub App, on separate repository-scoped hour-long tokens minted here from its private key:
   ${appKeyPath()}
 (VEGAFACTORY_APP_PRIVATE_KEY_FILE moves it; VEGAFACTORY_APP_ID and VEGAFACTORY_APP_ACTOR name
-another App and must be set together.) Each run gets
-that token too, so everything it posts is the App's and none of it can pass as a person's word; it
+another App and must be set together.) Each run gets only its board's token, so everything it
+posts is the App's and none of it can pass as a person's word; it
 is never given the key itself. The runs think on the operator's own subscription, so an API-key
 variable in the environment refuses the command.
 `
@@ -1929,6 +2639,7 @@ interface Args { verb: string; flags: Record<string, string>; json: boolean; dry
 export function parseWorkerArgs(argv: string[]): Args {
   const [verb, ...rest] = argv
   if (!verb) throw new Error('missing verb — run vegafactory worker --help')
+  if (!['enable', 'disable', 'status', 'run'].includes(verb)) throw new Error(`unknown worker verb: ${verb} — run vegafactory worker --help`)
   const flags: Record<string, string> = {}
   let json = false
   let dryRun = false
@@ -1939,11 +2650,14 @@ export function parseWorkerArgs(argv: string[]): Args {
     if (arg === '--dry-run') { dryRun = true; continue }
     if (arg === '--once') { once = true; continue }
     if (!arg.startsWith('--')) throw new Error(`unexpected argument: ${arg}`)
+    if (arg !== '--repo') throw new Error(`unknown worker option: ${arg}`)
     const value = rest[i + 1]
     if (value === undefined || value.startsWith('--')) throw new Error(`${arg} needs a value`)
     flags[arg.slice(2)] = value
     i++
   }
+  if (once && verb !== 'run') throw new Error('--once is only valid with worker run')
+  if (dryRun && !['enable', 'disable'].includes(verb)) throw new Error('--dry-run is only valid with worker enable or disable')
   return { verb, flags, json, dryRun, once }
 }
 
@@ -1959,12 +2673,19 @@ export interface CliDeps {
   fetch?: Fetch
   runStep?: RunStep
   git?: (clone: string) => GitRun
+  rosterGit?: (clone: string, env: NodeJS.ProcessEnv) => GitRun
   stop?: (pid: number, signal: NodeJS.Signals) => boolean
   start?: ProcessStart
+  alive?: ProcessAlive
   now?: () => number
   sleep?: (ms: number) => Promise<void>
   cli?: string[]
   update?: () => Promise<UpdateResult>
+  // Test seam for the repository boundary. Production always provisions a repository-scoped
+  // App identity and worker-owned checkout through `ensureWorkerCheckout`.
+  provisionBoard?: (repo: string) => Promise<BoardContext>
+  ensureCheckout?: typeof ensureWorkerCheckout
+  runnerForBoard?: (repo: string, identity: AppIdentity) => GhRunner
 }
 
 const wait = (ms: number) => new Promise<void>((resolve) => {
@@ -1976,32 +2697,51 @@ const wait = (ms: number) => new Promise<void>((resolve) => {
 export async function runWorker(argv: string[], deps: CliDeps = {}): Promise<number> {
   const out = deps.out ?? console.log
   if (!argv.length || ['help', '--help', '-h'].includes(argv[0]!)) { out(workerUsage()); return 0 }
-  const args = parseWorkerArgs(argv)
+  const host = deps.host ?? hostname()
+  const machine = machineName(host)
+  const rawJson = argv.includes('--json')
+  const runJson = rawJson && !['enable', 'disable', 'status'].includes(argv[0]!)
+  const emitRunJson = (notes: string[], boards: Array<{ repo: string; ok: boolean; reason?: string }> = [], runs: RunRecord[] = []) => {
+    out(JSON.stringify({ machine, runs, boards, notes }, null, 2))
+  }
+  const emitBootstrapRefusal = (reason: string) => {
+    if (runJson) emitRunJson([`refused: ${reason}`])
+    else out(JSON.stringify({ ok: false, machine, reason }, null, 2))
+  }
+  let args: Args
+  try { args = parseWorkerArgs(argv) }
+  catch (error) {
+    if (rawJson) { emitBootstrapRefusal((error as Error).message); return 2 }
+    throw error
+  }
   const cwd = deps.cwd ?? process.cwd()
   const env = deps.env ?? process.env
   const home = deps.home ?? homedir()
-  const host = deps.host ?? hostname()
+  const homeOptions = { home, env }
+  let factoryRoot: string
+  let stateRoot: string
   const platform = deps.platform ?? process.platform
-  const root = repoRoot(cwd)
-  const repo = assertRepo(args.flags.repo ?? detectRepo(root))
-  const machine = machineName(host)
-  // A verb that will act asks for a roster it has just proved; a read-only view shows what the
-  // machine already has, so `status` still answers while the network is down.
-  const listing = ['enable', 'run'].includes(args.verb)
-    ? verifiedListing(root, { repo, host, home, git: deps.git })
-    : listedHere(root, { repo, host, home })
-  // That listing may have fast-forwarded the clone, and every gate below it can return before the
-  // poll loop is ever reached. The record follows the clone here, once, so a run that stops for
-  // billing or a missing key does not leave the profile unreadable behind it.
-  if (listing.sha) await recordRoomSha(root, home, listing.sha)
+  let root: string
+  let repo: string
+  try {
+    factoryRoot = factoryHome(homeOptions)
+    stateRoot = workerDirectory(homeOptions)
+    root = repoRoot(cwd)
+    repo = assertRepo(args.flags.repo ?? detectRepo(root))
+  } catch (error) {
+    if (rawJson) { emitBootstrapRefusal((error as Error).message); return 2 }
+    throw error
+  }
   const keyPath = appKeyPath(env, home)
-  const print = (value: unknown, text: string) => out(args.json ? JSON.stringify(value, null, 2) : text)
+  const runDocument = (notes: string[], boards: Array<{ repo: string; ok: boolean; reason?: string }> = [], runs: RunRecord[] = []) => ({ machine, runs, boards, notes })
+  const print = (value: unknown, text: string) => {
+    if (runJson) out(JSON.stringify(runDocument([text]), null, 2))
+    else out(args.json ? JSON.stringify(value, null, 2) : text)
+  }
 
-  // The first gate, before the roster and before anything is spawned or minted: a verb that can
-  // start or probe an agent refuses outright while a variable that would bill it is set. The check
-  // costs nothing, and running it later would already have spent paid credit on the probes.
+  // Refuse paid API credentials before even the control-room fetch. Acting and status verbs use
+  // the App as their sole GitHub identity; injected runners remain the explicit unit-test seam.
   const STARTS_AGENTS = ['enable', 'run']
-  let app = { appId: APP_ID, appActor: APP_ACTOR }
   if (STARTS_AGENTS.includes(args.verb)) {
     const billing = billingVariables(env)
     if (billing.length) {
@@ -2009,48 +2749,171 @@ export async function runWorker(argv: string[], deps: CliDeps = {}): Promise<num
       print({ ok: false, billing }, `refused: ${billing.join(', ')} ${is} set — VegaFactory runs Claude Code and Codex on their subscriptions only; unset ${them} and retry`)
       return 2
     }
+  }
+  let app = { appId: APP_ID, appActor: APP_ACTOR }
+  if (STARTS_AGENTS.includes(args.verb) || (args.verb === 'status' && !deps.runner)) {
     try { app = appIdentityConfig(env) } catch (error) {
       print({ ok: false, reason: (error as Error).message }, `refused: ${(error as Error).message}`)
       return 2
     }
   }
-
+  let rosterIdentity: AppIdentity | null = null
+  const freshListing = async (): Promise<Listing> => {
+    if (deps.git) return verifiedListing(root, { repo, host, home, env, git: deps.git })
+    const room = controlRoomClone(root, homeOptions)
+    if (!room) return listedHere(root, { repo, host, home, env })
+    rosterIdentity ??= appIdentity({ repo: room.repo, keyPath, appId: app.appId, fetch: deps.fetch })
+    await rosterIdentity.freshen(deps.now?.())
+    const token = rosterIdentity.token()
+    return verifiedListing(root, {
+      repo, host, home, env,
+      git: clone => (deps.rosterGit ?? gitIn)(clone, appGitEnvironment(env, token)),
+    })
+  }
+  // A verb that will act asks for a roster it has just proved; a read-only view shows what the
+  // machine already has, so `status` still answers while the network is down.
+  let listing: Listing
+  try {
+    listing = ['enable', 'run'].includes(args.verb)
+      ? await freshListing()
+      : listedHere(root, { repo, host, home, env })
+  } catch (error) {
+    if (rawJson) { emitBootstrapRefusal((error as Error).message); return 2 }
+    throw error
+  }
+  // `--repo` locates the control room; it is not the sole board anymore. Once the row itself is
+  // a valid worker row, its explicit repos cell is the authority and may legitimately no longer
+  // contain the bootstrap repository used by an already-installed service.
+  const workerListing = workerListingAllowed(listing, repo)
+    ? { ...listing, ok: true, reason: `${machineName(host)} is listed in ${listing.file}` }
+    : listing
+  // That listing may have fast-forwarded the clone, and every gate below it can return before the
+  // poll loop is ever reached. The record follows the clone here, once, so a run that stops for
+  // billing or a missing key does not leave the profile unreadable behind it.
+  if (listing.sha) await recordRoomSha(root, homeOptions, listing.sha)
   // The second gate: an unlisted machine does nothing but say so. `disable` is the exception, so a
   // machine taken off the roster can still take its own unit down.
-  if (!listing.ok && args.verb !== 'disable') {
-    print({ ok: false, machine, reason: listing.reason }, `refused: ${listing.reason}`)
+  if (!workerListing.ok && args.verb !== 'disable') {
+    print({ ok: false, machine, reason: workerListing.reason }, `refused: ${workerListing.reason}`)
     return 2
+  }
+
+  const configured = normalizeWorkerRepos(workerListing.entry?.repos ?? [])
+
+  if (args.verb === 'run' && args.json && !args.once) {
+    print({ ok: false, reason: '--json reports one pass; use it with --once' },
+      'refused: --json reports one pass and answers when that pass ends — add --once, or drop --json and read the lines the loop prints')
+    return 2
+  }
+
+  const provisionBoard = async (selectedRepo: string): Promise<BoardContext> => {
+    const canonical = canonicalRepository(selectedRepo)
+    if (deps.provisionBoard) return deps.provisionBoard(canonical)
+    // Injected runners are the public test boundary used by the existing single-repository CLI
+    // suite. Production never takes this branch; it owns and provisions every checkout below.
+    if (deps.runner) {
+      if (canonical !== canonicalRepository(repo)) throw new Error(`${canonical} has no injected board context`)
+      let devMd = ''
+      try { devMd = readFileSync(join(root, '.vegastack', 'dev.md'), 'utf8') }
+      catch { throw new Error('dev.md is unreadable') }
+      const identity: AppIdentity = { runner: deps.runner, freshen: async () => {}, token: () => null }
+      return { key: canonical, repo: canonical, root, identity, runner: deps.runner, devMd }
+    }
+    const identity = appIdentity({ repo: canonical, keyPath, appId: app.appId, fetch: deps.fetch })
+    await identity.freshen(deps.now?.())
+    const checkout = await (deps.ensureCheckout ?? ensureWorkerCheckout)({ repo: canonical, home, token: identity.token()!, env })
+    if (!checkout.ok) throw new Error(checkout.reason)
+    let devMd: string
+    try { devMd = readFileSync(join(checkout.root, '.vegastack', 'dev.md'), 'utf8') }
+    catch { throw new Error('dev.md is unreadable') }
+    const push = pushPath(checkout.root, deps.run ?? probe, identity.token())
+    if (!push.ok) throw new Error(push.detail)
+    const runner = deps.runnerForBoard?.(canonical, identity) ?? identity.runner
+    return { key: canonical, repo: canonical, root: checkout.root, identity: { ...identity, runner }, runner, devMd }
+  }
+
+  const previewBoard = async (selectedRepo: string): Promise<string> => {
+    const canonical = canonicalRepository(selectedRepo)
+    const identity = appIdentity({ repo: canonical, keyPath, appId: app.appId, fetch: deps.fetch })
+    await identity.freshen(deps.now?.())
+    const checkout = await (deps.ensureCheckout ?? ensureWorkerCheckout)({ repo: canonical, home, token: identity.token()!, env, dryRun: true })
+    if (!checkout.ok) throw new Error(checkout.reason)
+    if (checkout.created) return `${checkout.root} would be provisioned with isolated App identity, policy, hooks, and push path`
+    try { readFileSync(join(checkout.root, '.vegastack', 'dev.md'), 'utf8') }
+    catch { throw new Error('dev.md is unreadable') }
+    const push = pushPath(checkout.root, deps.run ?? probe, identity.token())
+    if (!push.ok) throw new Error(push.detail)
+    return checkout.plannedHooks?.length
+      ? `${checkout.root} passed read-only checks; ${checkout.plannedHooks.join(', ')} would be merged only by the real enable`
+      : `${checkout.root} passed read-only checks; hook wiring is already complete`
+  }
+
+  if (args.verb === 'run') {
+    const migration = migrateLegacyWorkerState({ root, stateRoot, factoryRoot, repo, start: deps.start, alive: deps.alive })
+    if (!migration.ok) {
+      print({ ok: false, reason: migration.reason }, `refused: ${migration.reason}`)
+      return 2
+    }
   }
 
   switch (args.verb) {
     case 'enable': {
-      let keyOk = false
-      let keyDetail = ''
-      try {
-        await mintToken({ repo, keyPath, appId: app.appId, fetch: deps.fetch })
-        keyOk = true
-        keyDetail = `the App key at ${keyPath} mints an installation token for ${repo}`
-      } catch (error) { keyDetail = (error as Error).message }
-      const checks = readiness({ root, listing, run: deps.run ?? probe, keyOk, keyDetail, env })
+      let checks: Check[]
+      let boardChecks: Check[] = []
+      if (deps.runner) {
+        // The injected single-board boundary preserves the focused CLI tests without teaching a
+        // fake GitHub runner how to clone repositories. Real enablement takes the branch below.
+        let keyOk = false
+        let token: string | null = null
+        let keyDetail = ''
+        try {
+          token = (await mintToken({ repo, keyPath, appId: app.appId, fetch: deps.fetch })).token
+          keyOk = true
+          keyDetail = `the App key at ${keyPath} mints an installation token for ${repo}`
+        } catch (error) { keyDetail = (error as Error).message }
+        checks = readiness({ root, listing: workerListing, run: deps.run ?? probe, token, keyOk, keyDetail, env })
+        boardChecks = [{ name: `repo:${canonicalRepository(repo)}`, ok: checks.every((check) => check.ok), detail: keyDetail }]
+      } else {
+        const billing = billingVariables(env)
+        checks = [
+          { name: 'listed', ok: workerListing.ok, detail: workerListing.reason },
+          { name: 'billing', ok: billing.length === 0, detail: billing.length ? `${billing.join(', ')} set — a worker runs on subscriptions only; unset them` : 'no API-key variable is set' },
+          ...harnessAnswers(deps.run ?? probe),
+        ]
+        for (const refused of configured.refused) boardChecks.push({ name: `repo:${refused}`, ok: false, detail: 'unattended workers require an explicit OWNER/NAME repository' })
+        for (const boardRepo of configured.repos) {
+          try {
+            const detail = args.dryRun
+              ? await previewBoard(boardRepo)
+              : `${(await provisionBoard(boardRepo)).root} is provisioned with isolated App identity, policy, hooks, and push path`
+            boardChecks.push({ name: `repo:${boardRepo}`, ok: true, detail })
+          } catch (error) {
+            boardChecks.push({ name: `repo:${boardRepo}`, ok: false, detail: (error as Error).message })
+          }
+        }
+      }
       const path = unitPath(platform, home)
-      if (!checks.every((check) => check.ok)) {
-        print({ ok: false, checks }, `${renderChecks(checks)}\n\nnot ready — fix the FAIL lines above, then run this again`)
+      const allChecks = [...checks, ...boardChecks]
+      const globallyReady = checks.every((check) => check.ok)
+      const healthyBoards = boardChecks.filter((check) => check.ok).length
+      if (!globallyReady || healthyBoards === 0) {
+        print({ ok: false, checks: allChecks, boards: boardChecks }, `${renderChecks(allChecks)}\n\nnot ready — fix the global FAIL lines and make at least one explicit repository healthy, then run this again`)
         return 2
       }
       // Before the dry run, not after it: a dry run exists to say what the real command would do,
       // and the real command refuses this.
-      const unwritable = unwritableForUnit(env)
+      const unwritable = unwritableForUnit({ ...env, VEGAFACTORY_HOME: factoryRoot })
       if (unwritable) {
         print({ ok: false, reason: unwritable }, `refused: ${unwritable}`)
         return 2
       }
       const commands = serviceCommands(platform, path, 'enable', userInfo().uid, platform !== 'darwin' && alreadyLingering(deps.run ?? probe, userInfo().uid))
       if (args.dryRun) {
-        print({ ok: true, checks, unit: path, dryRun: true }, `${renderChecks(checks)}\n\ndry run: would write ${path}, then ${commands.map((command) => command.join(' ')).join(' && ')}`)
+        print({ ok: true, checks: allChecks, boards: boardChecks, unit: path, dryRun: true }, `${renderChecks(allChecks)}\n\ndry run: would write ${path}, then ${commands.map((command) => command.join(' ')).join(' && ')}`)
         return 0
       }
-      mkdirSync(workerDir(root), { recursive: true })
-      replaceFile(path, unitText(platform, { cli: deps.cli ?? cliPath(), root, repo, logDir: workerDir(root), env }))
+      mkdirSync(stateRoot, { recursive: true })
+      replaceFile(path, unitText(platform, { cli: deps.cli ?? cliPath(), root, repo, logDir: stateRoot, factoryHome: factoryRoot, env }))
       const run = deps.run ?? probe
       for (const command of commands) {
         const result = run(command[0]!, command.slice(1))
@@ -2066,9 +2929,9 @@ export async function runWorker(argv: string[], deps: CliDeps = {}): Promise<num
           return 1
         }
       }
-      const enabledCaps = listing.entry?.caps ?? DEFAULT_CAPS
-      print({ ok: true, checks, unit: path, caps: enabledCaps },
-        `${renderChecks(checks)}\n\nenabled — ${path} is loaded; this machine polls ${repo} every ${sayDuration(enabledCaps.pollMs, 'poll')}, ${enabledCaps.runs} runs at once`)
+      const enabledCaps = workerListing.entry?.caps ?? DEFAULT_CAPS
+      print({ ok: true, checks: allChecks, boards: boardChecks, unit: path, caps: enabledCaps },
+        `${renderChecks(allChecks)}\n\nenabled — ${path} is loaded; this machine polls ${configured.repos.join(', ') || 'no accepted repository'} every ${sayDuration(enabledCaps.pollMs, 'poll')}, ${enabledCaps.runs} runs at once across them`)
       return 0
     }
     case 'disable': {
@@ -2084,68 +2947,92 @@ export async function runWorker(argv: string[], deps: CliDeps = {}): Promise<num
         const result = run(command[0]!, command.slice(1))
         if (result.code !== 0 && !/no such|not (?:find|loaded|exist)/i.test(result.stderr)) problems.push(`${command.join(' ')}: ${result.stderr.split('\n')[0] || `exit ${result.code}`}`)
       }
+      const migration = migrateLegacyWorkerState({ root, stateRoot, factoryRoot, repo, start: deps.start, alive: deps.alive })
+      if (!migration.ok) problems.push(migration.reason)
       // Taking the unit away does not reach the agents it started: they were detached on purpose,
       // so the service could be restarted without killing a build. Disabling is not a restart.
       // Each record is proved to still be its own process before anything is signalled.
-      const children = readChildren(root)
-      const stopped = children.filter((record) => stopChild(root, record, { stop: deps.stop, start: deps.start }))
+      const children = readChildren(stateRoot)
+      const stopped = children.filter((record) => stopChild(stateRoot, record, { stop: deps.stop, start: deps.start, alive: deps.alive }))
+      const remaining = readChildren(stateRoot)
+      if (remaining.length) problems.push(`${remaining.length} child run${remaining.length === 1 ? '' : 's'} could not be stopped safely`)
       rmSync(path, { force: true })
       const ended = stopped.length ? ` and stopped ${stopped.length} run${stopped.length === 1 ? '' : 's'} it had started` : ''
       // The stopped runs held claims and left their issues in-progress. This process has no App
       // token of its own — `disable` has to work on a machine that has just been de-listed — so it
       // names them instead of pretending to have cleaned up.
-      const orphans = stopped.filter((record) => record.owner)
-      const left = orphans.length
-        ? `\nThese issues were left claimed by the runs that stopped; hand them back from a machine that can write:\n${orphans.map((record) => `  #${record.issue} (${record.action}, claimed by ${record.owner})`).join('\n')}`
+      const unresolved = remaining
+      const left = unresolved.length
+        ? `\nThese issues need attention after disable:\n${unresolved.map((record) => `  ${record.repo}#${record.issue} (${record.action}${record.owner ? `, claimed by ${record.owner}` : ''}${remaining.includes(record) ? ', process could not be stopped safely' : ''})`).join('\n')}`
         : ''
-      print({ ok: problems.length === 0, unit: path, problems, stopped },
+      print({ ok: problems.length === 0, unit: path, problems, stopped, unresolved: remaining },
         (problems.length ? `removed ${path}${ended}, with: ${problems.join('; ')}` : `disabled — ${path} is unloaded and deleted${ended}`) + left)
       return problems.length ? 1 : 0
     }
     case 'status': {
-      // Reading the board changes nothing, so it does not need the App: whoever runs this reads
-      // with their own `gh`, and the key is only needed once the machine starts writing.
-      const runner = deps.runner ?? defaultRunner
-      const rows = board(repo, runner).map((issue) => ({
-        number: issue.number, title: issue.title, url: issue.html_url,
-        state: stateOf(issue.labels.map((label) => (typeof label === 'string' ? label : label.name))).state!,
-      }))
-      const runs = readRuns(root)
-      const byState = new Map<string, number[]>()
-      for (const row of rows) byState.set(row.state, [...(byState.get(row.state) ?? []), row.number])
-      // An issue this machine has given up on is the one thing `status` must not leave out: it is
-      // off the board as far as the worker is concerned until a person looks at it.
-      const parked = Object.entries(readActed(root))
-        .filter(([key, entry]) => entry.failures >= (listing.entry?.caps ?? DEFAULT_CAPS).failures && key.startsWith(`${repo}#`))
-        .map(([key, entry]) => ({ issue: Number(key.slice(key.indexOf('#') + 1)), action: entry.action, failures: entry.failures }))
-      // What this machine is allowed to do, in the words of the row that allows it, so "why is it
-      // doing that?" is answered without anyone opening the control room.
-      const statusCaps = listing.entry?.caps ?? DEFAULT_CAPS
+      const runs = readRuns(stateRoot)
+      let persisted: WorkerState
+      try { persisted = readWorkerState(homeOptions) }
+      catch (error) {
+        const reason = (error as Error).message
+        print({ ok: false, machine, reason }, `refused: ${reason}`)
+        return 2
+      }
+      const repos = [...new Set([...configured.repos, ...Object.keys(persisted.boards)])]
+      const boards: Array<{ repo: string; ok: boolean; state: string; issues: Array<{ number: number; title: string; url: string; state: State }>; reason?: string }> = []
+      const unavailable: Array<{ repo: string; reason: string }> = configured.refused.map((name) => ({ repo: name, reason: 'unattended workers require an explicit OWNER/NAME repository' }))
+      for (const boardRepo of repos) {
+        const lifecycle = persisted.boards[boardRepo]?.state ?? (configured.repos.includes(boardRepo) ? 'configured' : 'persisted')
+        try {
+          let runner = deps.runner
+          if (!runner) {
+            const identity = appIdentity({ repo: boardRepo, keyPath, appId: app.appId, fetch: deps.fetch })
+            await identity.freshen(deps.now?.())
+            runner = deps.runnerForBoard?.(boardRepo, identity) ?? identity.runner
+          }
+          const issues = board(boardRepo, runner).map((issue) => ({
+            number: issue.number, title: issue.title, url: issue.html_url,
+            state: stateOf(issue.labels.map((label) => (typeof label === 'string' ? label : label.name))).state!,
+          }))
+          boards.push({ repo: boardRepo, ok: true, state: lifecycle, issues })
+        } catch (error) {
+          const reason = (error as Error).message
+          boards.push({ repo: boardRepo, ok: false, state: lifecycle, issues: [], reason })
+          unavailable.push({ repo: boardRepo, reason })
+        }
+      }
+      const parked = Object.entries(readActed(stateRoot))
+        .filter(([, entry]) => entry.failures >= (workerListing.entry?.caps ?? DEFAULT_CAPS).failures)
+        .map(([key, entry]) => ({ repo: key.slice(0, key.indexOf('#')), issue: Number(key.slice(key.indexOf('#') + 1)), action: entry.action, failures: entry.failures }))
+      const statusCaps = workerListing.entry?.caps ?? DEFAULT_CAPS
       const capsLine = `caps: ${statusCaps.runs} runs · step ${sayDuration(statusCaps.stepMs, 'step')} · poll ${sayDuration(statusCaps.pollMs, 'poll')} · retry ${sayDuration(statusCaps.retryMs, 'retry')} · park ${statusCaps.failures}`
-      print({ repo, machine, listed: listing.ok, caps: statusCaps, board: rows, runs, parked }, [
-        `${repo} · ${machine} · ${listing.ok ? 'listed as a worker' : listing.reason}`,
-        ...(listing.ok ? [capsLine] : []),
-        ...[...byState].map(([state, numbers]) => `${state.padEnd(20)} ${numbers.map((number) => `#${number}`).join(' ')}`),
-        ...(parked.length ? ['', `parked for a person: ${parked.map((row) => `#${row.issue} (${row.action} failed ${row.failures}×)`).join(', ')}`] : []),
+      const boardLines = boards.flatMap((one) => {
+        if (!one.ok) return [`${one.repo} · unavailable: ${one.reason}`]
+        const byState = new Map<State, number[]>()
+        for (const issue of one.issues) byState.set(issue.state, [...(byState.get(issue.state) ?? []), issue.number])
+        return [`${one.repo} · ${one.state}`, ...[...byState].map(([state, issues]) => `  ${state.padEnd(18)} ${issues.map((issue) => `${one.repo}#${issue}`).join(' ')}`)]
+      })
+      print({ machine, caps: statusCaps, boards, runs, parked, unavailable }, [
+        `${machine} · ${workerListing.ok ? 'listed as a worker' : workerListing.reason}`,
+        ...(workerListing.ok ? [capsLine] : []),
+        ...boardLines,
+        ...unavailable.filter((one) => !boards.some((board) => board.repo === one.repo)).map((one) => `${one.repo} · refused: ${one.reason}`),
+        ...(parked.length ? ['', `parked for a person: ${parked.map((row) => `${row.repo}#${row.issue} (${row.action} failed ${row.failures}×)`).join(', ')}`] : []),
         '',
         runs.length ? 'recent runs on this machine:' : 'no worker runs on this machine yet',
-        ...runs.map((run) => `${run.at}  #${run.issue} ${run.action.padEnd(12)} ${run.outcome.padEnd(8)} ${Math.round(run.ms / 1000)}s  ${run.note}`),
+        ...runs.map((run) => `${run.at}  ${run.repo}#${run.issue} ${run.action.padEnd(12)} ${run.outcome.padEnd(8)} ${Math.round(run.ms / 1000)}s  ${run.note}`),
       ].join('\n'))
       return 0
     }
     case 'run': {
       // This process, named once: its claims carry it, and the lock below keeps it the only one.
       const runId = randomUUID().slice(0, 8)
-      const lock = takeRunLock(root, runId, deps.start ?? processStart)
+      const lock = takeRunLock(stateRoot, runId, deps.start ?? processStart, deps.alive ?? processAlive)
       if (!lock.ok) {
         print({ ok: false, reason: lock.reason }, `refused: ${lock.reason}`)
         return 2
       }
-      let devMd = ''
-      try { devMd = readFileSync(join(root, '.vegastack', 'dev.md'), 'utf8') } catch { /* see updateModeFor */ }
       const update = deps.update ?? (() => maintainSelfUpdate({ mode: updateModeFor(root, home), home: { home }, now: Date.now() }))
-      const identity = deps.runner ? null : appIdentity({ repo, keyPath, appId: app.appId, fetch: deps.fetch })
-      const runner = deps.runner ?? identity!.runner
       // `--json` puts exactly one document on stdout and nothing else, so every line this loop
       // would have printed is collected and leaves inside it. A caller that has to step over prose
       // to find the JSON is a caller that will one day step over the wrong line.
@@ -2153,21 +3040,16 @@ export async function runWorker(argv: string[], deps: CliDeps = {}): Promise<num
       // That only works for a run that ends: an always-on loop would hold every line it ever
       // printed and emit them at shutdown, which is a leak and an answer nobody is waiting for.
       // So the document belongs to `--once`, and the service, which runs without `--json`, prints.
-      if (args.json && !args.once) {
-        print({ ok: false, reason: '--json reports one pass; use it with --once' },
-          'refused: --json reports one pass and answers when that pass ends — add --once, or drop --json and read the lines the loop prints')
-        releaseRunLock(root, runId)
-        return 2
-      }
       const notes: string[] = []
       const note = (text: string) => { if (args.json) notes.push(text); else out(text) }
+      let visibleBoards: Array<{ repo: string; ok: boolean; reason?: string }> = []
       const finish = (code: number, runs: RunRecord[]) => {
-        if (args.json) out(JSON.stringify({ machine, repo, runs, notes }, null, 2))
-        releaseRunLock(root, runId)
+        if (args.json) out(JSON.stringify(runDocument(notes, visibleBoards, runs), null, 2))
+        releaseRunLock(stateRoot, runId)
         return code
       }
       // The row that authorised this machine also says what it may do while working it.
-      const caps = listing.entry!.caps!
+      const caps = workerListing.entry!.caps!
       // Said once when it becomes true, not every pass: a roster edit that lengthens the step past
       // the token's hour is worth a line, and the same line every two minutes is worth nothing.
       let toldAboutStep = false
@@ -2180,22 +3062,35 @@ export async function runWorker(argv: string[], deps: CliDeps = {}): Promise<num
       stepOutlivesToken(caps)
       // Counted per pass by `onWaiting`, which `poll` calls for every issue it left behind.
       let waiting = 0
+      const unreadableFailures = new Map<string, string>()
+      const contexts = new Map<string, BoardContext>()
+      const recoveryContexts = new Map<string, BoardContext>()
+      const reporter = workerProblemReporter(homeOptions, note)
       const pollDeps: PollDeps = {
-        root, repo, runner, machine, runId, caps, appActor: app.appActor, out: note, now: deps.now ?? Date.now,
-        runStep: deps.runStep ?? defaultRunStep(devMd, env, { token: () => identity?.token() ?? null }), stop: deps.stop, start: deps.start,
-        standDown: (number, reason, restoreTo) => standDown({ root, repo, number, runner, machine, appActor: app.appActor, restoreTo }, reason),
+        stateRoot, boards: [],
+        machine, runId, caps, appActor: app.appActor, out: note, now: deps.now ?? Date.now,
+        runStep: deps.runStep ?? defaultRunStep(env), stop: deps.stop, start: deps.start, alive: deps.alive,
+        standDown: (boardRepo, number, reason, restoreTo) => {
+          const key = canonicalRepository(boardRepo)
+          const context = contexts.get(key) ?? recoveryContexts.get(key)
+          if (!context) return `${reason} — ${boardRepo} is unavailable for hand-back`
+          return standDown({ root: context.root, repo: context.repo, number, runner: context.runner, machine, appActor: app.appActor, restoreTo, token: context.identity.token() }, reason)
+        },
         onWaiting: () => { waiting += 1 },
+        onUnreadable: (boardRepo, _issue, reason) => unreadableFailures.set(canonicalRepository(boardRepo), reason),
+        reportProblem: reporter.report,
+        clearProblem: reporter.clear,
       }
       // Started steps outlive the pass that began them, so the next pass keeps their slots and
       // still acts on the rest of the board — a twenty-minute build does not stop the poll.
-      const inflight = new Map<number, Inflight>()
+      const inflight = new Map<string, Inflight>()
       // Stopping means stopping: the agents this machine started are ended, their work saved and
       // their claims released. A worker that walked away leaving three agents writing to
       // GitHub would be worse than one that never started.
       const shutDown = async (why: string) => {
-        for (const [number, run] of inflight) {
+        for (const [key, run] of inflight) {
           if (run.settled) continue
-          note(`#${number} ${run.candidate.action} stopped: ${why}`)
+          note(`${key} ${run.candidate.action} stopped: ${why}`)
           run.interrupt = { reason: why, action: run.candidate.action, trigger: null, consumes: false }
           run.stop()
         }
@@ -2228,6 +3123,7 @@ export async function runWorker(argv: string[], deps: CliDeps = {}): Promise<num
         // Whether this pass saw an idle board. A pass that threw, could not read an issue, or
         // started anything is not the pass to spend five minutes installing in.
         let idle = false
+        let passFailed = false
         try {
           // The roster is the enrolment, so it is refreshed and re-read once per pass: a row
           // removed in a control-room PR stands this machine down at the next poll, with nothing
@@ -2235,30 +3131,82 @@ export async function runWorker(argv: string[], deps: CliDeps = {}): Promise<num
           // reading, because two would each fetch and merge, and a second answer nobody acts on is
           // a gate that has been asked and ignored — the caps come off this same reading, so a
           // control-room PR that changes one lands on the next poll rather than on a restart.
-          const still = verifiedListing(root, { repo, host, home, git: deps.git })
+          const still = await freshListing()
           // The clone moved whether or not the roster still lists this machine, and the record has
           // to follow it either way: a de-listed machine that later gets its row back would
           // otherwise find every profile read refused for a clone that is simply up to date.
-          if (still.sha) await recordRoomSha(root, home, still.sha)
-          if (!still.ok || !still.entry?.caps) {
+          if (still.sha) await recordRoomSha(root, homeOptions, still.sha)
+          const stillAllowed = workerListingAllowed(still, repo)
+          if (!stillAllowed || !still.entry?.caps) {
             note(`stopping: ${still.reason}`)
             return finish(2, await shutDown('this machine is no longer listed'))
           }
           pollDeps.caps = still.entry.caps
           stepOutlivesToken(still.entry.caps)
-          await identity?.freshen()
+          const previous = readWorkerState(homeOptions)
+          // Active readiness is evidence for one pass only. Re-provisioning an existing checkout
+          // is observational except for repairing hook wiring, and catches origin, hook, dev.md,
+          // push-path, and credential drift before that board runs again. Dropping contexts stay
+          // alive because they are the recovery capability for pending hand-backs.
+          for (const boardRepo of contexts.keys()) {
+            if (previous.boards[boardRepo]?.state !== 'dropping') {
+              const context = contexts.get(boardRepo)!
+              if ([...inflight.values()].some(run => !run.settled && canonicalRepository(run.candidate.repo) === boardRepo)) recoveryContexts.set(boardRepo, context)
+              contexts.delete(boardRepo)
+            }
+          }
+          const reconciled = await reconcileBoards({
+            home, env, listed: still.entry.repos, previous, contexts, inflight,
+            provision: provisionBoard,
+            handBack: async (boardRepo, number, reason, restoreTo) => {
+              const context = contexts.get(canonicalRepository(boardRepo)) ?? await provisionBoard(boardRepo)
+              contexts.set(context.key, context)
+              return standDownStrict({ root: context.root, repo: context.repo, number, runner: context.runner, machine, appActor: app.appActor, restoreTo, token: context.identity.token() }, reason)
+            },
+            out: note, stop: deps.stop, start: deps.start, alive: deps.alive,
+          })
+          const normalized = normalizeWorkerRepos(still.entry.repos)
+          const unavailable = new Map(reconciled.unavailable.map((one) => [one.repo, one.reason]))
+          const ready: BoardContext[] = []
+          for (const context of reconciled.active) {
+            try {
+              await context.identity.freshen(deps.now?.())
+              ready.push(context)
+              reporter.clear(`repo:${context.repo}`)
+            } catch (error) {
+              const reason = (error as Error).message
+              unavailable.set(context.repo, reason)
+              reporter.report(`repo:${context.repo}`, reason, `${context.repo}: unavailable (${reason})`)
+            }
+          }
+          pollDeps.boards = ready
+          visibleBoards = [
+            ...normalized.repos.map((boardRepo) => unavailable.has(boardRepo)
+              ? { repo: boardRepo, ok: false, reason: unavailable.get(boardRepo)! }
+              : { repo: boardRepo, ok: true }),
+            ...normalized.refused.map((boardRepo) => ({ repo: boardRepo, ok: false, reason: 'unattended workers require an explicit OWNER/NAME repository' })),
+          ]
           waiting = 0
+          unreadableFailures.clear()
           const picked = await poll(pollDeps, inflight)
-          for (const candidate of picked) note(`#${candidate.number} ${candidate.action} started`)
+          for (const boardRepo of recoveryContexts.keys()) {
+            if (![...inflight.values()].some(run => !run.settled && canonicalRepository(run.candidate.repo) === boardRepo)) recoveryContexts.delete(boardRepo)
+          }
+          if (unreadableFailures.size) visibleBoards = visibleBoards.map((board) => {
+            const reason = unreadableFailures.get(board.repo)
+            return reason ? { repo: board.repo, ok: false, reason } : board
+          })
+          for (const candidate of picked) note(`${canonicalRepository(candidate.repo)}#${candidate.number} ${candidate.action} started`)
           // Idle is a high bar on purpose, because the thing it permits takes five minutes: the
           // whole board was read, nothing was picked up, and nothing is still running. An issue
           // that could not be read might have been the one with work on it, and an issue that was
           // picked up may have settled again before this line.
           idle = waiting === 0 && picked.length === 0 && ![...inflight.values()].some(run => !run.settled)
         } catch (error) {
+          passFailed = true
           note(`poll failed: ${(error as Error).message}`)
         }
-        if (args.once) return finish(0, await drain(inflight))
+        if (args.once) return finish(passFailed ? 2 : 0, await drain(inflight))
         // A global install can replace this process's entry file, so it runs only with no agent
         // alive. A successful update ends the old process; the service starts the new copy.
         // A run is unsettled from the moment it is started until its own completion handler

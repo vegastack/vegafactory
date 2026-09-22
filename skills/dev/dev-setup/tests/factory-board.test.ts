@@ -134,11 +134,24 @@ describe('factory-board template — token and mirror steps', () => {
     // `owner:` without `repositories:` mints for every repository the installation covers.
     expect(step('token').with.owner).toBe('${{ github.repository_owner }}')
     expect(step('token').with.repositories).toBe('${{ github.event.repository.name }}')
+    expect(step('token').with['permission-contents']).toBe('read')
+    expect(step('token').with['permission-issues']).toBe('read')
+    expect(step('token').with['permission-metadata']).toBe('read')
+    expect(step('token').with['permission-organization-projects']).toBe('write')
     const reference = readFileSync(join(skillRoot, 'references/github-app.md'), 'utf8')
     expect(reference).toContain('repositories: ${{ github.event.repository.name }}')
+    expect(reference).toContain('permission-contents: read')
     // One major for the action, in the recipe and in the workflow that implements it.
     const docMajor = /actions\/create-github-app-token@(v\d+)/.exec(reference)![1]
     expect(step('token').uses).toBe(`actions/create-github-app-token@${docMajor}`)
+  })
+
+  test('the worker App contract isolates every board token and failure', () => {
+    const reference = readFileSync(join(skillRoot, 'references/github-app.md'), 'utf8')
+    expect(reference).toContain('never a token shared between repositories')
+    expect(reference).toContain('separately mints an hour-long installation token for each explicit `OWNER/NAME`')
+    expect(reference).toContain('Only runs from that board receive its token as `GH_TOKEN`')
+    expect(reference).toContain('skips that repository without borrowing another board\'s identity or stopping a healthy board')
   })
 
   test('the mirror step uses the gh 2.97 name-based field form', () => {
