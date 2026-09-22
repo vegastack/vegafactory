@@ -3,8 +3,9 @@
 // matrix for a VegaFactory project: naming, lifecycle classification, the
 // safe-to-remove test, retention, and the git-calling verbs the skills and
 // `vegafactory worktree ...` both drive. The main checkout never leaves the
-// default branch; every branch is checked out at
-// .vegastack/.worktrees/<n>-<slug>/ on <type>/<n>-<slug>.
+// default branch; issue branches keep their descriptive <type>/<n>-<slug>
+// names while their directories use the stable issue number only. Attended
+// roots use .vegastack/.worktrees/<n>; worker roots use sibling issues/<n>.
 //
 // State is DERIVED from git plus GitHub on every read and never stored — a
 // second source of truth is exactly what drifts.
@@ -60,8 +61,8 @@ export function slugify(title) {
   return collapsed.slice(0, SLUG_MAX).replace(/-+$/g, '');
 }
 
-// The worktree directory name. An issue number leads it so `ls` sorts by issue
-// and reconciliation against open issues is a parse, not a lookup table.
+// The worktree directory name. An issue number is its stable identity; title
+// slugs remain branch presentation and cannot move the checkout after rename.
 export function worktreeName(issue, slug) {
   return issue === null || issue === undefined ? String(slug) : String(issue);
 }
@@ -464,9 +465,9 @@ export function rebaseUnderRoot(repoRoot, absPath, workerLayout = false) {
   }
 }
 
-// The MAIN checkout of the repository the cwd belongs to. Inside a worktree,
+// The MAIN checkout of the repository the cwd belongs to. Inside either layout,
 // `rev-parse --show-toplevel` answers with the worktree; the common git dir is
-// what points back at the one checkout that owns .vegastack/.worktrees/.
+// what points back at the checkout that owns the worktree relationship.
 export function mainCheckout(cwd) {
   const common = git(cwd, ['rev-parse', '--path-format=absolute', '--git-common-dir']);
   if (common.ok && common.out) return dirname(common.out);
@@ -795,8 +796,8 @@ export function removeWorktree({ repoRoot, name, base, force = false, push = fal
   return { blocks, warns, actions, path, branch, state };
 }
 
-// Every worktree directory under .vegastack/.worktrees, with its branch and
-// lock flag straight off porcelain. The main checkout is never one of them.
+// Every worktree directory under the selected attended/worker root, with its
+// branch and lock flag straight off porcelain. The main checkout is never one.
 export function inventory(repoRoot, workerLayout = false) {
   const listed = git(repoRoot, ['worktree', 'list', '--porcelain']);
   if (!listed.ok) return [];
@@ -868,14 +869,11 @@ export function rescueWork({ path, branch, name, remote = 'origin' }) {
   return { ok: true, committed: true, reason: null };
 }
 
-// Retention prune: propose (and with --write, perform) the removal of parked
-// worktrees whose branch and ledger have both gone quiet past the window. It
-// pushes an unpushed candidate first so nothing local-only is ever discarded,
-// then re-runs the same safe-to-remove test every other caller uses. Nothing
-// but a `parked` worktree is ever a candidate — and parked means unmerged, so
-// here the retention window is what lifts the not-merged rule: the pushed
-// branch keeps the work and `restore` brings the directory back. Uncommitted,
-// unpushed and locked still keep it.
+// Retention prune: propose (and only with --write, perform) removal for merged,
+// closed, or retained-idle checkouts. A never-pushed or locally-ahead branch is
+// kept; prune never creates a remote branch. Dirty work is rescued only when
+// the remote branch already exists and the user's staged selection is empty.
+// Every candidate then re-runs the same safe-to-remove test as explicit remove.
 export function pruneWorktrees({ repoRoot, base, olderThan, devMd, ledgerTimes = {}, issueStates = {}, now = Date.now(), write = false, remote = 'origin', workerLayout = false }) {
   const blocks = [];
   const warns = [];
@@ -1193,7 +1191,7 @@ function runVerb(verb, flags) {
       }
       name = matches[0].name;
     }
-    if (!name) return { blocks: ['--name <n>-<slug> or --issue <n> is required for remove'], warns: [] };
+    if (!name) return { blocks: ['--name <issue-or-slug> or --issue <n> is required for remove'], warns: [] };
     return removeWorktree({ repoRoot, name, base, force: Boolean(flags.force), push: Boolean(flags.push), write: shared.write, workerLayout });
   }
   if (verb === 'prune') {

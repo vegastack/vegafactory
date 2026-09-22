@@ -51,7 +51,8 @@ Create, restore and remove act; bare prune previews and only prune --write acts.
 `
 }
 
-// Every verb acts by default; --dry-run previews. The safety rules live in the script.
+// Lifecycle verbs act by default. Prune is the exception: it previews until --write, and
+// --dry-run wins in either flag order. The safety rules live in the script.
 export function parseWorktreeArgs(argv: string[], env: NodeJS.ProcessEnv = process.env): WorktreeArgs {
   const head = argv[0]
   if (!head || !verbs.includes(head as WorktreeVerb)) {
