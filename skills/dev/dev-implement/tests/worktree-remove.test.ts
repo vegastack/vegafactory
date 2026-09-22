@@ -304,6 +304,18 @@ describe('dependency reclamation', () => {
     const datedResult = pruneWorktrees({ repoRoot: dated.root, base: 'main', devMd: depsDevMd, ledgerTimes: { '131': DEPS_LEDGER }, now: DEPS_NOW, write: true })
     expect(datedResult.warns.join(' ')).toContain('does not match')
     expect(existsSync(join(dated.wt.path, 'node_modules'))).toBe(true)
+
+    const repeated = pushedWithDeps(132)
+    const repeatedRoot = join(repeated.root, '.vegastack', '.tmp', 'deps-dropped')
+    mkdirSync(repeatedRoot, { recursive: true, mode: 0o700 })
+    chmodSync(repeatedRoot, 0o700)
+    const repeatedName = '132-bad--slug'
+    const repeatedPath = join(repeatedRoot, `${repeatedName}.json`)
+    writeFileSync(repeatedPath, `${JSON.stringify({ schema: 1, name: repeatedName, repoRoot: repeated.root, path: join(repeated.root, '.vegastack', '.worktrees', repeatedName), deps: ['node_modules'], droppedAt: '2026-09-22T00:00:00.000Z' })}\n`, { mode: 0o600 })
+    chmodSync(repeatedPath, 0o600)
+    const repeatedResult = pruneWorktrees({ repoRoot: repeated.root, base: 'main', devMd: depsDevMd, ledgerTimes: { '132': DEPS_LEDGER }, now: DEPS_NOW, write: true })
+    expect(repeatedResult.warns.join(' ')).toContain('unreadable name')
+    expect(existsSync(join(repeated.wt.path, 'node_modules'))).toBe(true)
   })
 
   test('removing the checkout clears only its matching marker', () => {
@@ -346,11 +358,14 @@ describe('pruneWorktrees', () => {
     const objectsBefore = git(root, 'count-objects', '-v')
     const fetchHead = join(root, '.git', 'FETCH_HEAD')
     const fetchBefore = existsSync(fetchHead) ? readFileSync(fetchHead) : null
+    const index = git(wt.path, 'rev-parse', '--path-format=absolute', '--git-path', 'index').trim()
+    const indexBefore = readFileSync(index)
     const bytesBefore = readFileSync(join(wt.path, 'one.txt'))
     pruneWorktrees({ repoRoot: root, base: 'main', devMd, ledgerTimes: { '106': OLD_LEDGER }, now: FUTURE_NOW, write: false })
     expect(git(root, 'show-ref')).toBe(refsBefore)
     expect(git(root, 'count-objects', '-v')).toBe(objectsBefore)
     expect(existsSync(fetchHead) ? readFileSync(fetchHead) : null).toEqual(fetchBefore)
+    expect(readFileSync(index)).toEqual(indexBefore)
     expect(readFileSync(join(wt.path, 'one.txt'))).toEqual(bytesBefore)
   })
 

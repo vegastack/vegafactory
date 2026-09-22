@@ -262,6 +262,8 @@ function markerRoot(repoRoot, workerLayout) {
     : join(repoRoot, '.vegastack', '.tmp', 'deps-dropped');
 }
 
+export const trustedAncestorOwner = (ownerUid, currentUid = process.getuid?.()) => currentUid === undefined || ownerUid === 0 || ownerUid === currentUid;
+
 export function verifyOwnedPath(root, target, { allowMissingLeaf = false } = {}) {
   const owned = resolve(root);
   const lexicalTarget = resolve(target);
@@ -284,6 +286,8 @@ export function verifyOwnedPath(root, target, { allowMissingLeaf = false } = {})
     try { info = lstatSync(anchor); }
     catch (error) { return { ok: false, reason: anchor + ' could not be inspected: ' + error.message }; }
     if (info.isSymbolicLink() || !info.isDirectory()) return { ok: false, reason: anchor + ' is not an ordinary directory' };
+    const currentUid = process.getuid?.();
+    if (!trustedAncestorOwner(info.uid, currentUid)) return { ok: false, reason: anchor + ' is controlled by untrusted uid ' + info.uid };
     if ((info.mode & 0o022) !== 0 && (info.mode & 0o1000) === 0) return { ok: false, reason: anchor + ' is unsafe because other users can rename entries in it' };
   }
   const wanted = join(canonical, rel);
@@ -333,9 +337,12 @@ function validMarkerRecord(value, { repoRoot, workerLayout, name }) {
   catch { return false; }
 }
 
-const validWorktreeIdentity = (name) => /^[1-9]\d*$/.test(name)
-  || /^[1-9]\d*-[a-z0-9](?:[a-z0-9-]{0,39})$/.test(name)
-  || /^[a-z][a-z0-9-]{0,39}$/.test(name);
+const validSlug = (name) => name.length <= SLUG_MAX && /^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(name);
+const validWorktreeIdentity = (name) => {
+  if (/^[1-9]\d*$/.test(name)) return true;
+  const legacy = /^([1-9]\d*)-(.+)$/.exec(name);
+  return legacy ? validSlug(legacy[2]) : validSlug(name);
+};
 
 export function readDroppedDeps({ repoRoot, workerLayout = false }) {
   const records = new Map();
@@ -707,7 +714,9 @@ function remoteHead(repoRoot, remote, branch) {
 }
 
 export function gatherRemovalFacts({ repoRoot, path, branch, base, remote, locked, baseReady = true }) {
-  const status = git(path, ['status', '--porcelain']);
+  // Status normally refreshes index stat data. Preview is byte-pure, so disable Git's optional
+  // locks/writes while still reading every tracked, staged, unstaged and untracked change.
+  const status = git(path, ['--no-optional-locks', 'status', '--porcelain']);
   const dirty = !status.ok || status.out !== '';
   const headResult = git(path, ['rev-parse', '--verify', 'HEAD']);
   const head = headResult.ok && /^[0-9a-f]{40}$/i.test(headResult.out) ? headResult.out : null;

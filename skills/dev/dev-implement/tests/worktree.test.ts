@@ -73,7 +73,7 @@ describe('classifyWorktree', () => {
   })
 })
 
-import { clearDroppedDeps, evaluateRemoval, isPastRetention, noteDroppedDeps, parseBranchTypes, parseDepsRetentionKnob, parseDuration, parseIncludeKnob, parseRetentionKnob, readDroppedDeps } from '../scripts/worktree.mjs'
+import { clearDroppedDeps, evaluateRemoval, isPastRetention, noteDroppedDeps, parseBranchTypes, parseDepsRetentionKnob, parseDuration, parseIncludeKnob, parseRetentionKnob, readDroppedDeps, trustedAncestorOwner } from '../scripts/worktree.mjs'
 
 const devMd = [
   'commands: test `bun test` · check `bun run check` · build `bun run build` · setup `bun install --frozen-lockfile`',
@@ -145,6 +145,11 @@ describe('knobs and retention', () => {
 })
 
 describe('worker dependency marker root', () => {
+  test('only root or the current uid can own an ancestor anchor', () => {
+    expect(trustedAncestorOwner(0, 501)).toBe(true)
+    expect(trustedAncestorOwner(501, 501)).toBe(true)
+    expect(trustedAncestorOwner(502, 501)).toBe(false)
+  })
   test('the marker is owner-only beside repo and issues, never inside the checkout', () => {
     const holder = mkdtempSync(join(tmpdir(), 'vf-worker-holder-'))
     const repoRoot = join(holder, 'repo')
