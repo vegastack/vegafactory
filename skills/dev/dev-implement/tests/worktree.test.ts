@@ -2,7 +2,7 @@ import { describe, expect, test } from 'bun:test'
 import { chmodSync, existsSync, mkdirSync, mkdtempSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { branchName, classifyWorktree, issueOfWorktree, parseWorktreeList, slugify, titleParts, worktreeName, worktreePath } from '../scripts/worktree.mjs'
+import { branchName, canonicalIssueOfWorktree, classifyWorktree, issueOfWorktree, parseWorktreeList, slugify, titleParts, worktreeName, worktreePath } from '../scripts/worktree.mjs'
 
 const base = { dirExists: true, branchExists: true, locked: false, issueState: 'open' as const, mergedIntoDefault: false }
 
@@ -22,6 +22,8 @@ describe('naming', () => {
     expect(() => worktreeName(null, '106')).toThrow('cannot start with an issue number')
     expect(issueOfWorktree('106')).toBe(106)
     expect(issueOfWorktree('106-legacy-title')).toBe(106)
+    expect(canonicalIssueOfWorktree('106')).toBe(106)
+    expect(canonicalIssueOfWorktree('106-legacy-title')).toBe(null)
   })
 })
 

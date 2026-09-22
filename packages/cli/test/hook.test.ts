@@ -31,12 +31,15 @@ let detached: string[][]
 let stats: string[][]
 let prHead: string
 let detachPid: number | undefined
-const OWNER = 'box:7-export'
+const OWNER = 'box:7'
 const ctx = () => ({ root, repo: 'o/r', number: 7, runner: gh.runner })
 
 // The fake answers `gh api`; the hook also asks `gh pr view` for a merge's head branch.
 const runner: GhRunner = (args, input) => {
-  if (args[0] === 'pr' && args[1] === 'view') return { code: 0, stdout: JSON.stringify({ headRefName: prHead }), stderr: '' }
+  if (args[0] === 'pr' && args[1] === 'view') {
+    const number = /^[\w.-]+\/(\d+)-/.exec(prHead)?.[1]
+    return { code: 0, stdout: JSON.stringify({ closingIssuesReferences: number ? [{ number: Number(number) }] : [] }), stderr: '' }
+  }
   return gh.runner(args, input)
 }
 
@@ -99,7 +102,7 @@ beforeEach(() => {
   git(root, 'commit', '-q', '-m', 'init')
   git(root, 'push', '-q', 'origin', 'main')
   git(root, 'remote', 'set-head', 'origin', '--auto')
-  tree = join(root, '.vegastack/.worktrees/7-export')
+  tree = join(root, '.vegastack/.worktrees/7')
   git(root, 'worktree', 'add', '-q', '-b', 'feat/7-export', tree)
   plain = join(base, 'plain')
   git(base, 'clone', '-q', origin, plain)
@@ -107,13 +110,22 @@ beforeEach(() => {
 
 describe('finding the issue', () => {
   test('from the worktree folder or the branch name', () => {
-    expect(issueFromWorktree('/r/.vegastack/.worktrees/216-coordination')).toBe(216)
+    expect(issueFromWorktree('/r/.vegastack/.worktrees/216-coordination')).toBe(null)
     expect(issueFromWorktree('/r/.vegastack/.worktrees/216')).toBe(216)
     expect(issueFromWorktree('/home/x/.vegafactory/worker/repos/o__r/issues/216')).toBe(216)
     expect(issueFromWorktree('/r/.vegastack/.worktrees/x')).toBe(null)
     expect(issueFromWorktree('/r/issues/216')).toBe(null)
-    expect(issueFromBranch('feat/216-coordination')).toBe(216)
+    expect(issueFromBranch('feat/216-coordination')).toBe(null)
+    expect(issueFromBranch('feat/216-coordination', 216)).toBe(216)
     expect(issueFromBranch('main')).toBe(null)
+  })
+
+  test('an existing digit-led direct checkout is not issue-bound', () => {
+    const direct = join(root, '.vegastack', '.worktrees', '42-emergency')
+    git(root, 'worktree', 'add', '-q', '-b', 'fix/42-emergency', direct)
+    expect(issueFromWorktree(direct)).toBe(null)
+    expect(issueFromBranch('fix/42-emergency')).toBe(null)
+    expect(locate(direct)).toBe(null)
   })
 
   test('detached attended and worker number-only checkouts retain issue identity', () => {
@@ -246,7 +258,7 @@ describe('ownership', () => {
     expect(denied.permissionDecisionReason).toContain('committed and pushed to feat/7-export')
     // The work stays on the issue branch; no other branch is made.
     expect(git(tree, 'branch', '--show-current')).toBe('feat/7-export')
-    expect(git(tree, 'log', '-1', '--format=%s')).toBe('wip: #7 rescued uncommitted work from 7-export')
+    expect(git(tree, 'log', '-1', '--format=%s')).toBe('wip: #7 rescued uncommitted work from 7')
     expect(git(tree, 'ls-remote', 'origin', 'feat/7-export')).toContain(git(tree, 'rev-parse', 'HEAD'))
     expect(git(tree, 'ls-remote', '--heads', 'origin')).not.toContain('rescue/')
     expect(git(tree, 'status', '--porcelain')).toBe('')

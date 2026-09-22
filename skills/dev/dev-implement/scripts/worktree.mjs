@@ -113,7 +113,12 @@ export function branchPartsForIssue(repoRoot, issue, slug = null) {
   const lead = issue === null || issue === undefined ? '' : String(issue) + '-';
   const what = lead ? '#' + issue : lead + slug;
   const tail = (name) => name.slice(name.indexOf('/') + 1);
-  const named = listed.out.split('\n').filter((name) => name.includes('/') && tail(name).startsWith(lead));
+  const named = listed.out.split('\n').filter((name) => {
+    if (!name.includes('/') || !tail(name).startsWith(lead)) return false;
+    if (issue === null || issue === undefined) return true;
+    const recorded = git(repoRoot, ['config', '--get', 'branch.' + name + '.vegafactoryIssue']);
+    return recorded.ok && recorded.out === String(issue);
+  });
   // --slug is how the caller picks among several, so it narrows before the
   // ambiguity is declared rather than after it.
   const matches = slug ? named.filter((name) => tail(name) === lead + slug) : named;
@@ -647,6 +652,13 @@ export function createWorktree({ repoRoot, issue, slug, type, title, base, devMd
       blocks.push(at(path, 'git worktree add failed: ' + added.out));
       return { blocks, warns, actions, path, branch };
     }
+    if (issue !== null && issue !== undefined) {
+      const recorded = git(repoRoot, ['config', 'branch.' + branch + '.vegafactoryIssue', String(issue)]);
+      if (!recorded.ok) {
+        blocks.push(at(branch, 'could not record its issue identity: ' + recorded.out));
+        return { blocks, warns, actions, path, branch };
+      }
+    }
     prepareCheckout({ repoRoot, path, devMd, home, write, actions, warns, blocks });
     if (!clearDroppedDeps({ repoRoot, workerLayout, name, path })) blocks.push(at(name, 'the stale dependency marker could not be cleared'));
   } else {
@@ -1133,6 +1145,14 @@ export function issueOfWorktree(name) {
   return match ? Number(match[1]) : null;
 }
 
+// Only the new numeric leaf is authoritative for issue-bound operations. A
+// legacy `<number>-<slug>` leaf remains inventory/removal input, but is
+// indistinguishable from a digit-led no-issue slug and is therefore never
+// allowed to select GitHub state, a ledger, a hook session, or `--issue`.
+export function canonicalIssueOfWorktree(name) {
+  return /^[1-9]\d*$/.test(String(name ?? '')) ? Number(name) : null;
+}
+
 // The pure reconciliation behind `vegafactory worktree status`: which
 // worktrees answer to an open issue, which do not, which open issues have no
 // checkout, and which directories lost their branch.
@@ -1144,7 +1164,7 @@ export function reconcileWorktrees({ entries, openIssues }) {
   const claimed = new Set();
   for (const entry of entries ?? []) {
     if (entry.state === 'orphan-dir') orphans.push(entry.name);
-    const issue = issueOfWorktree(entry.name);
+    const issue = canonicalIssueOfWorktree(entry.name);
     if (issue !== null && open.has(issue) && entry.state !== 'orphan-dir') {
       matched.push({ name: entry.name, issue });
       claimed.add(issue);
@@ -1174,8 +1194,11 @@ export function gatherGithubFacts({ repo, names = [], warns, read = ghJson }) {
   }
   const open = new Set(openIssues.map((issue) => issue.number));
   for (const name of names) {
-    const issue = issueOfWorktree(name);
-    if (issue === null) continue;
+    const issue = canonicalIssueOfWorktree(name);
+    if (issue === null) {
+      if (issueOfWorktree(name) !== null) unknown.add(name);
+      continue;
+    }
     if (open.has(issue)) {
       issueStates[name] = 'open';
       continue;
@@ -1195,8 +1218,11 @@ export function gatherLedgerTimes({ repo, names, warns, read = ghJson }) {
   const times = {};
   const unknown = new Set();
   for (const name of names) {
-    const issue = issueOfWorktree(name);
-    if (issue === null) continue;
+    const issue = canonicalIssueOfWorktree(name);
+    if (issue === null) {
+      if (issueOfWorktree(name) !== null) unknown.add(name);
+      continue;
+    }
     try {
       const comments = read(['api', 'repos/' + repo + '/issues/' + issue + '/comments', '--paginate']);
       const ledger = findMarkerComment(comments, 'ledger');
@@ -1274,7 +1300,7 @@ function runVerb(verb, flags) {
     // caller that only knows the issue number (the CLI, dev-ship) has.
     let name = flags.name;
     if (!name && issue !== null) {
-      const matches = inventory(repoRoot, workerLayout).filter((entry) => issueOfWorktree(entry.name) === issue);
+      const matches = inventory(repoRoot, workerLayout).filter((entry) => canonicalIssueOfWorktree(entry.name) === issue);
       if (matches.length === 0) return { blocks: [at('#' + issue, 'no worktree for that issue')], warns: [] };
       if (matches.length > 1) {
         return { blocks: [at('#' + issue, 'several worktrees match (' + matches.map((m) => m.name).join(', ') + ') — pass --name')], warns: [] };

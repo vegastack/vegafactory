@@ -3,7 +3,7 @@ import { execFileSync } from 'node:child_process'
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { codexTrustToml, createWorktree, restoreWorktree } from '../scripts/worktree.mjs'
+import { branchPartsForIssue, codexTrustToml, createWorktree, restoreWorktree } from '../scripts/worktree.mjs'
 
 const git = (cwd: string, ...args: string[]) => execFileSync('git', args, { cwd, encoding: 'utf8' })
 
@@ -59,6 +59,7 @@ describe('createWorktree', () => {
     const r = createWorktree({ repoRoot: root, issue: 106, slug: 'x', type: 'feat', base: 'main', devMd, home: root, write: true })
     expect(r.blocks).toEqual([])
     expect(git(r.path, 'rev-parse', '--abbrev-ref', 'HEAD').trim()).toBe('feat/106-x')
+    expect(git(root, 'config', '--get', 'branch.feat/106-x.vegafactoryIssue').trim()).toBe('106')
     expect(readFileSync(join(r.path, '.env'), 'utf8')).toBe('SECRET=1\n')
     expect(existsSync(join(r.path, 'setup.log'))).toBe(false)
     expect(git(root, 'rev-parse', '--abbrev-ref', 'HEAD').trim()).toBe('main')
@@ -89,6 +90,19 @@ describe('createWorktree', () => {
     const issue = createWorktree({ repoRoot: root, issue: 106, slug: 'real-issue', type: 'fix', base: 'main', devMd, home: root, write: true })
     expect(issue.blocks).toEqual([])
     expect(issue.path).toBe(join(root, '.vegastack', '.worktrees', '106'))
+  })
+  test('a pre-existing digit-led direct branch is never discovered as an issue branch', () => {
+    const root = repo()
+    git(root, 'branch', 'fix/106-emergency')
+    expect(branchPartsForIssue(root, 106)).toEqual({ error: 'no branch for #106 — nothing to restore; create it instead' })
+
+    const directPath = join(root, '.vegastack', '.worktrees', '106-emergency')
+    mkdirSync(join(root, '.vegastack', '.worktrees'), { recursive: true })
+    git(root, 'worktree', 'add', '-q', directPath, 'fix/106-emergency')
+    const removeByIssue = runScript(root, 'remove', '--issue', '106', '--write')
+    expect(removeByIssue.code).toBe(2)
+    expect(JSON.parse(removeByIssue.out).blocks.join(' ')).toContain('no worktree for that issue')
+    expect(existsSync(directPath)).toBe(true)
   })
   test('a legacy slugged checkout blocks a second numeric checkout for the issue', () => {
     const root = repo()

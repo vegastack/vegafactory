@@ -92,16 +92,17 @@ function git(cwd: string, args: string[]): { ok: boolean; out: string } {
 }
 
 export function issueFromWorktree(top: string): number | null {
-  const attended = /[/\\]\.vegastack[/\\]\.worktrees[/\\](\d+)(?:-[^/\\]+)?$/.exec(top)
+  const attended = /[/\\]\.vegastack[/\\]\.worktrees[/\\](\d+)$/.exec(top)
   if (attended) return Number(attended[1])
   const worker = /[/\\]worker[/\\]repos[/\\][a-z0-9_.-]+__[a-z0-9_.-]+[/\\]issues[/\\](\d+)$/.exec(top)
   const match = worker
   return match ? Number(match[1]) : null
 }
 
-export function issueFromBranch(branch: string): number | null {
+export function issueFromBranch(branch: string, confirmedIssue: number | null = null): number | null {
   const match = /^[\w.-]+\/(\d+)-/.exec(branch)
-  return match ? Number(match[1]) : null
+  const candidate = match ? Number(match[1]) : null
+  return candidate !== null && candidate === confirmedIssue ? candidate : null
 }
 
 function headOf(cwd: string): string | null {
@@ -115,7 +116,7 @@ export function locate(cwd: string, host = hostname()): Where | null {
   const top = git(cwd, ['rev-parse', '--show-toplevel'])
   if (!top.ok) return null
   const branch = git(cwd, ['branch', '--show-current']).out
-  const number = issueFromWorktree(top.out) ?? issueFromBranch(branch)
+  const number = issueFromWorktree(top.out)
   if (!number) return null
   const root = repoRoot(cwd)
   return { cwd, top: top.out, root, repo: detectRepo(root), number, owner: ownerId(basename(top.out), host), branch }
@@ -415,7 +416,7 @@ export function commitWork(cwd: string, message: string): Checkpoint {
 // After the claim is lost: commit the work on the issue branch and push it, never forced.
 // A rejected push (the remote moved) keeps the commit local.
 export function rescueWork(where: Where): string {
-  if (!where.branch || issueFromBranch(where.branch) !== where.number) return ' Uncommitted work (if any) was not saved: this checkout is not on the issue branch.'
+  if (!where.branch || issueFromBranch(where.branch, where.number) !== where.number) return ' Uncommitted work (if any) was not saved: this checkout is not on the issue branch.'
   const saved = commitWork(where.top, `wip: #${where.number} rescued uncommitted work from ${basename(where.top)}`)
   if (saved.reason) return ` Uncommitted work was not saved: ${saved.reason}.`
   if (!saved.committed) return ''
@@ -471,9 +472,11 @@ function mergeCheck(cwd: string, root: string, repo: string, deps: HookDeps): Me
     // With no argument gh merges the current branch's PR.
     const target = mergeTarget(words) ?? git(cwd, ['branch', '--show-current']).out
     if (!target) return false
-    const view = deps.runner(['pr', 'view', target, '--repo', repo, '--json', 'headRefName'])
+    const view = deps.runner(['pr', 'view', target, '--repo', repo, '--json', 'closingIssuesReferences'])
     if (view.code !== 0) return false
-    const number = issueFromBranch((JSON.parse(view.stdout) as { headRefName?: string }).headRefName ?? '')
+    const closing = (JSON.parse(view.stdout) as { closingIssuesReferences?: Array<{ number?: number }> }).closingIssuesReferences ?? []
+    const numbers = [...new Set(closing.map((issue) => issue.number).filter((number): number is number => Number.isInteger(number) && number! > 0))]
+    const number = numbers.length === 1 ? numbers[0] : null
     if (!number) return false
     syncIssue({ root, repo, number, runner: deps.runner })
     const snap = snapshot(cacheDir(root, repo, number))
@@ -692,7 +695,7 @@ async function advisory(event: HookEvent, harness: Harness, payload: Record<stri
     recordActivity(local, deps.now())
     observe(where, session, deps.now())
     writeLocal(where, local)
-    if (local.lostTo || !where.branch || issueFromBranch(where.branch) !== where.number) return
+    if (local.lostTo || !where.branch || issueFromBranch(where.branch, where.number) !== where.number) return
     const notes: string[] = []
     const rejected = pushFailure(where)
     if (rejected) notes.push(rejected)
