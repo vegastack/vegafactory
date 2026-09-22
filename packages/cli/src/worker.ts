@@ -891,7 +891,7 @@ const actedPath = (stateRoot: string) => join(stateRoot, 'acted.json')
 // rather than grown forever; the control room's statistics are where runs are kept for good.
 export const RUNS_KEPT = 500
 
-function ensurePrivateRecordRoot(stateRoot: string, create: boolean): void {
+function ensurePrivateRecordRoot(stateRoot: string, create: boolean): boolean {
   if (resolve(stateRoot) !== stateRoot) throw new WorkerRecordError('unsafe', `the worker record root is not absolute and canonical: ${stateRoot}`)
   const uid = process.getuid?.()
   const root = parse(stateRoot).root
@@ -912,17 +912,18 @@ function ensurePrivateRecordRoot(stateRoot: string, create: boolean): void {
     } catch (error) {
       if (error instanceof WorkerRecordError) throw error
       if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw new WorkerRecordError('unreadable', `${cursor} cannot be inspected: ${(error as Error).message}`)
-      if (!create) throw new WorkerRecordError('unreadable', `${cursor} does not exist`)
+      if (!create) return false
       mkdirSync(cursor, { mode: 0o700 })
       owned = true
     }
   }
+  return true
 }
 
 function readPrivateRecord(stateRoot: string, path: string): string | null {
+  if (!ensurePrivateRecordRoot(stateRoot, false)) return null
   try {
     const info = lstatSync(path)
-    ensurePrivateRecordRoot(stateRoot, false)
     const uid = process.getuid?.()
     if (!info.isFile() || info.isSymbolicLink()) throw new WorkerRecordError('unsafe', `${path} is not an ordinary record file`)
     if (uid !== undefined && info.uid !== uid) throw new WorkerRecordError('unsafe', `${path} is owned by uid ${info.uid}`)
@@ -1138,15 +1139,26 @@ export const runLockPath = (stateRoot: string) => join(stateRoot, 'run.lock')
 
 export interface RunLock { pid: number; startedAt: string; runId: string; at: string }
 
+function readRunLock(stateRoot: string): RunLock | null {
+  const text = readPrivateRecord(stateRoot, runLockPath(stateRoot))
+  if (text === null) return null
+  let row: Partial<RunLock>
+  try { row = JSON.parse(text) as Partial<RunLock> }
+  catch { throw new WorkerRecordError('malformed', `${runLockPath(stateRoot)} is not valid JSON`) }
+  if (!row || typeof row !== 'object' || !Number.isSafeInteger(row.pid) || Number(row.pid) <= 1
+    || typeof row.startedAt !== 'string' || typeof row.runId !== 'string' || typeof row.at !== 'string') {
+    throw new WorkerRecordError('malformed', `${runLockPath(stateRoot)} has an invalid lock schema`)
+  }
+  return row as RunLock
+}
+
 export function takeRunLock(stateRoot: string, runId: string, start: ProcessStart = processStart, alive: ProcessAlive = processAlive): { ok: boolean; reason: string; held: RunLock | null } {
-  mkdirSync(stateRoot, { recursive: true })
+  ensurePrivateRecordRoot(stateRoot, true)
   return withLock(stateRoot, () => {
     let held: RunLock | null = null
     const path = runLockPath(stateRoot)
-    try { held = JSON.parse(readFileSync(path, 'utf8')) as RunLock } catch {
-      if (existsSync(path)) return { ok: false, held: null, reason: `the existing worker lock cannot be identified safely: ${path}` }
-      held = null
-    }
+    try { held = readRunLock(stateRoot) }
+    catch { return { ok: false, held: null, reason: `the existing worker lock cannot be identified safely: ${path}` } }
     if (held && Number.isSafeInteger(held.pid) && typeof held.startedAt === 'string') {
       const identity = processIdentity(held, start, alive)
       if (identity === 'unknown') return { ok: false, held, reason: `the worker lock belongs to pid ${held.pid}, whose identity cannot be proved — leave it in place and check that process` }
@@ -1155,16 +1167,18 @@ export function takeRunLock(stateRoot: string, runId: string, start: ProcessStar
       }
     } else if (held) return { ok: false, held, reason: `the existing worker lock cannot be identified safely: ${path}` }
     const mine: RunLock = { pid: process.pid, startedAt: start(process.pid) ?? '', runId, at: new Date().toISOString() }
-    replaceFile(runLockPath(stateRoot), JSON.stringify(mine, null, 2) + '\n')
+    replacePrivateRecord(stateRoot, runLockPath(stateRoot), JSON.stringify(mine, null, 2) + '\n')
     return { ok: true, held: mine, reason: 'this machine\'s worker' }
   }, { what: 'the worker lock' })
 }
 
 export function releaseRunLock(stateRoot: string, runId: string) {
   try {
-    const held = JSON.parse(readFileSync(runLockPath(stateRoot), 'utf8')) as RunLock
-    if (held.runId === runId) rmSync(runLockPath(stateRoot), { force: true })
-  } catch { /* nothing to give back */ }
+    const held = readRunLock(stateRoot)
+    if (held?.runId === runId) rmSync(runLockPath(stateRoot), { force: true })
+  } catch (error) {
+    if (error instanceof WorkerRecordError) throw error
+  }
 }
 
 export interface LegacyMigrationResult { ok: boolean; migrated: boolean; reason: string }
@@ -1211,6 +1225,127 @@ function safeGlobalStateRoot(factoryRoot: string, stateRoot: string, create: boo
     }
   }
   return { ok: true, reason: 'safe global worker directory' }
+}
+
+type InspectedRecord<T> = { exists: boolean; value: T | null; error: string | null }
+
+function inspectRegularRecord(path: string): InspectedRecord<string> {
+  try {
+    const info = lstatSync(path)
+    if (!info.isFile() || info.isSymbolicLink()) return { exists: true, value: null, error: `${path} is not a regular file` }
+    return { exists: true, value: readFileSync(path, 'utf8'), error: null }
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === 'ENOENT'
+      ? { exists: false, value: null, error: null }
+      : { exists: true, value: null, error: `${path} cannot be read: ${(error as Error).message}` }
+  }
+}
+
+function inspectLegacyActed(path: string): InspectedRecord<Record<string, Acted>> {
+  const file = inspectRegularRecord(path)
+  if (!file.exists || file.error) return { exists: file.exists, value: null, error: file.error }
+  try {
+    const raw: unknown = JSON.parse(file.value!)
+    if (!raw || typeof raw !== 'object' || Array.isArray(raw)) throw new Error('top level is not an object')
+    for (const [key, value] of Object.entries(raw)) {
+      const row = value as Partial<Acted> | null
+      const match = /^(.*)#([1-9]\d*)$/.exec(key)
+      if (!match || !row || typeof row !== 'object' || !Number.isFinite(row.at)
+        || !RECORD_ACTIONS.has(row.action as Action) || !RECORD_OUTCOMES.has(row.outcome as Outcome)
+        || !(row.trigger === null || Number.isSafeInteger(row.trigger)) || !Number.isSafeInteger(row.failures) || Number(row.failures) < 0
+        || !(row.retryAt === null || Number.isFinite(row.retryAt))) throw new Error(`invalid acted row ${JSON.stringify(key)}`)
+      canonicalRepository(match[1]!)
+    }
+    return { exists: true, value: raw as Record<string, Acted>, error: null }
+  } catch (error) { return { exists: true, value: null, error: `${path} is malformed: ${(error as Error).message}` } }
+}
+
+function inspectLegacyRuns(path: string, fallback: string | null): InspectedRecord<RunRecord[]> {
+  const file = inspectRegularRecord(path)
+  if (!file.exists || file.error) return { exists: file.exists, value: null, error: file.error }
+  const rows: RunRecord[] = []
+  try {
+    for (const [index, line] of file.value!.split('\n').entries()) {
+      if (!line.trim()) continue
+      const raw = JSON.parse(line) as Partial<RunRecord>
+      const recordRepo = canonicalRepository(typeof raw.repo === 'string' ? raw.repo : fallback ?? '')
+      if (typeof raw.at !== 'string' || !Number.isFinite(Date.parse(raw.at)) || !Number.isSafeInteger(raw.issue) || Number(raw.issue) < 1
+        || !RECORD_ACTIONS.has(raw.action as Action) || !RECORD_OUTCOMES.has(raw.outcome as Outcome) || !Number.isFinite(raw.ms)
+        || typeof raw.machine !== 'string' || typeof raw.note !== 'string') throw new Error(`invalid run row ${index + 1}`)
+      rows.push({ ...raw, repo: recordRepo } as RunRecord)
+    }
+    return { exists: true, value: rows, error: null }
+  } catch (error) { return { exists: true, value: null, error: `${path} is malformed: ${(error as Error).message}` } }
+}
+
+function inspectLegacyChildren(path: string, fallback: string | null): InspectedRecord<ChildRecord[]> {
+  const file = inspectRegularRecord(path)
+  if (!file.exists || file.error) return { exists: file.exists, value: null, error: file.error }
+  try {
+    const raw: unknown = JSON.parse(file.value!)
+    if (!Array.isArray(raw)) throw new Error('top level is not an array')
+    const rows = raw.map((value, index) => {
+      const row = value as Partial<ChildRecord>
+      const repo = canonicalRepository(typeof row.repo === 'string' ? row.repo : fallback ?? '')
+      if (!row || typeof row !== 'object' || !Number.isSafeInteger(row.pid) || Number(row.pid) <= 1
+        || typeof row.startedAt !== 'string' || !row.startedAt || typeof row.command !== 'string' || !row.command
+        || !Number.isSafeInteger(row.issue) || Number(row.issue) < 1 || !RECORD_ACTIONS.has(row.action as Action)
+        || !(row.owner === null || typeof row.owner === 'string') || !RECORD_STATES.has(row.from as State)) {
+        throw new Error(`invalid child row ${index + 1}`)
+      }
+      return { ...row, repo } as ChildRecord
+    })
+    return { exists: true, value: rows, error: null }
+  } catch (error) { return { exists: true, value: null, error: `${path} is malformed: ${(error as Error).message}` } }
+}
+
+function inspectLegacyLock(path: string): InspectedRecord<RunLock> {
+  const file = inspectRegularRecord(path)
+  if (!file.exists || file.error) return { exists: file.exists, value: null, error: file.error }
+  try {
+    const row = JSON.parse(file.value!) as Partial<RunLock>
+    if (!row || typeof row !== 'object' || !Number.isSafeInteger(row.pid) || Number(row.pid) <= 1
+      || typeof row.startedAt !== 'string' || typeof row.runId !== 'string' || typeof row.at !== 'string') throw new Error('invalid lock row')
+    return { exists: true, value: row as RunLock, error: null }
+  } catch (error) { return { exists: true, value: null, error: `${path} is malformed: ${(error as Error).message}` } }
+}
+
+function inspectLegacyFiles(root: string, fallback: string | null) {
+  return {
+    acted: inspectLegacyActed(actedPath(root)),
+    runs: inspectLegacyRuns(runsPath(root), fallback),
+    children: inspectLegacyChildren(childrenPath(root), fallback),
+    lock: inspectLegacyLock(runLockPath(root)),
+  }
+}
+
+export interface WorkerStateInspection { ok: boolean; reason: string; children: ChildRecord[] }
+
+// Read-only by design: disable uses this while the service is still loaded, so corrupt authority
+// cannot be converted into permission to unload, rewrite, signal, or delete anything.
+export function inspectLegacyWorkerState(input: { root: string; stateRoot: string; factoryRoot?: string; repo: string }): WorkerStateInspection {
+  const factoryRoot = input.factoryRoot ?? dirname(input.stateRoot)
+  const globalPath = safeGlobalStateRoot(factoryRoot, input.stateRoot, false)
+  if (!globalPath.ok && existsSync(input.stateRoot)) return { ok: false, reason: globalPath.reason, children: [] }
+  let globalChildren: ChildRecord[] = []
+  try {
+    readActed(input.stateRoot)
+    readRuns(input.stateRoot, Number.MAX_SAFE_INTEGER)
+    globalChildren = readChildren(input.stateRoot)
+    readRunLock(input.stateRoot)
+  } catch (error) {
+    return { ok: false, reason: (error as Error).message, children: [] }
+  }
+
+  const legacyRoot = workerDir(input.root)
+  const legacyPath = safeLegacyStateRoot(input.root, legacyRoot)
+  if (!legacyPath.ok) return { ok: false, reason: legacyPath.reason, children: [] }
+  if (!legacyPath.exists || legacyRoot === input.stateRoot) return { ok: true, reason: 'worker records are valid', children: globalChildren }
+  const legacy = inspectLegacyFiles(legacyRoot, canonicalRepository(input.repo))
+  const failed = Object.values(legacy).find((record) => record.error)
+  if (failed) return { ok: false, reason: failed.error!, children: [] }
+  const children = [...globalChildren, ...(legacy.children.value ?? [])]
+  return { ok: true, reason: 'worker records are valid', children: [...new Map(children.map((row) => [`${row.repo}#${row.issue}:${row.pid}:${row.startedAt}`, row])).values()] }
 }
 
 // Task 3 moved worker state from each checkout to one machine directory. Move only the four old
@@ -3045,14 +3180,26 @@ export async function runWorker(argv: string[], deps: CliDeps = {}): Promise<num
         print({ dryRun: true, unit: path }, `dry run: would ${commands.map((command) => command.join(' ')).join(' && ')}, then delete ${path}`)
         return 0
       }
+      const inspection = inspectLegacyWorkerState({ root, stateRoot, factoryRoot, repo })
+      if (!inspection.ok) {
+        print({ ok: false, unit: path, reason: inspection.reason }, `refused: worker records could not be validated before disable: ${inspection.reason}`)
+        return 2
+      }
       const run = deps.run ?? probe
       const problems: string[] = []
       for (const command of commands) {
         const result = run(command[0]!, command.slice(1))
-        if (result.code !== 0 && !/no such|not (?:find|loaded|exist)/i.test(result.stderr)) problems.push(`${command.join(' ')}: ${result.stderr.split('\n')[0] || `exit ${result.code}`}`)
+        if (result.code !== 0 && !/no such|not (?:find|loaded|exist)/i.test(result.stderr)) {
+          const reason = `${command.join(' ')}: ${result.stderr.split('\n')[0] || `exit ${result.code}`}`
+          print({ ok: false, unit: path, failed: command.join(' '), reason }, `refused: the worker service could not be unloaded; ${path} and every worker record were left in place: ${reason}`)
+          return 1
+        }
       }
       const migration = migrateLegacyWorkerState({ root, stateRoot, factoryRoot, repo, start: deps.start, alive: deps.alive })
-      if (!migration.ok) problems.push(migration.reason)
+      if (!migration.ok) {
+        print({ ok: false, unit: path, reason: migration.reason }, `the service is unloaded, but worker records could not be migrated; ${path} and every worker record were left in place: ${migration.reason}`)
+        return 1
+      }
       // Taking the unit away does not reach the agents it started: they were detached on purpose,
       // so the service could be restarted without killing a build. Disabling is not a restart.
       // Each record is proved to still be its own process before anything is signalled.

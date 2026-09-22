@@ -610,6 +610,7 @@ describe('persisted worker board state', () => {
     const base = realpathSync(mkdtempSync(join(tmpdir(), 'worker-state-')))
     const path = pathAt(base)
     mkdirSync(join(base, '.vegafactory', 'worker'), { recursive: true })
+    chmodSync(join(base, '.vegafactory', 'worker'), 0o700)
     writeFileSync(path, bytes)
     expect(() => readWorkerState({ home: base, env: {} })).toThrow('is malformed')
     expect(readFileSync(path, 'utf8')).toBe(bytes)
@@ -650,6 +651,7 @@ describe('persisted worker board state', () => {
     const base = realpathSync(mkdtempSync(join(tmpdir(), 'worker-state-')))
     const path = pathAt(base)
     mkdirSync(join(base, '.vegafactory', 'worker'), { recursive: true })
+    chmodSync(join(base, '.vegafactory', 'worker'), 0o700)
     writeFileSync(path, '{broken')
     const reconcile = () => reconcileBoards({
       home: base, env: {}, listed: [], previous: readWorkerState({ home: base, env: {} }), contexts: new Map(), inflight: new Map(),
@@ -1408,7 +1410,8 @@ describe('one poll over the board', () => {
     // A second process on this host, while the first is alive: refused.
     const other = takeRunLock(root, 'bbbb2222', (pid) => (pid === process.pid ? 'Fri Sep 18 09:00:00 2026' : 'Fri Sep 18 09:00:00 2026'))
     expect(other.ok).toBe(true) // the same pid is this process re-taking its own lock
-    writeFileSync(runLockPath(root), JSON.stringify({ pid: 999_999, startedAt: 'Fri Sep 18 08:00:00 2026', runId: 'cccc3333', at: 'x' }))
+    writeFileSync(runLockPath(root), JSON.stringify({ pid: 999_999, startedAt: 'Fri Sep 18 08:00:00 2026', runId: 'cccc3333', at: 'x' }), { mode: 0o600 })
+    chmodSync(runLockPath(root), 0o600)
     const blocked = takeRunLock(root, 'dddd4444', () => 'Fri Sep 18 08:00:00 2026')
     expect(blocked.ok).toBe(false)
     expect(blocked.reason).toContain('another worker is already running on this machine')
@@ -1418,7 +1421,8 @@ describe('one poll over the board', () => {
     releaseRunLock(root, 'eeee5555')
     expect(existsSync(runLockPath(root))).toBe(false)
 
-    writeFileSync(runLockPath(root), JSON.stringify({ pid: 999_998, startedAt: 'unknown', runId: 'ffff6666', at: 'x' }))
+    writeFileSync(runLockPath(root), JSON.stringify({ pid: 999_998, startedAt: 'unknown', runId: 'ffff6666', at: 'x' }), { mode: 0o600 })
+    chmodSync(runLockPath(root), 0o600)
     const unknown = takeRunLock(root, 'gggg7777', () => null, () => null)
     expect(unknown.ok).toBe(false)
     expect(unknown.reason).toContain('identity cannot be proved')
@@ -2183,6 +2187,7 @@ describe('legacy worker state migration', () => {
   }
   const seedGlobal = (stateRoot: string) => {
     mkdirSync(stateRoot, { recursive: true })
+    chmodSync(stateRoot, 0o700)
     writeFileSync(join(stateRoot, 'acted.json'), JSON.stringify({ 'o/r#9': { at: 1, action: 'plan', outcome: 'done', trigger: null, failures: 0, retryAt: null } }))
     writeFileSync(join(stateRoot, 'runs.jsonl'), `${JSON.stringify({ at: '2026-09-19T00:00:00Z', repo: 'o/r', issue: 9, action: 'plan', outcome: 'done', ms: 1, machine: HOST, note: 'global' })}\n`)
     writeFileSync(join(stateRoot, 'children.json'), JSON.stringify([{ repo: 'o/r', pid: 5159, startedAt: 'old', command: 'claude', issue: 9, action: 'plan', owner: null, from: 'planning' }]))
@@ -2444,7 +2449,8 @@ describe('the command', () => {
     expect(await runWorker(['status'], { cwd: otherRoot, home, host: HOST, env, out: (line) => statusLines.push(line), runner: gh.runner, git: anyGit })).toBe(0)
     expect(statusLines.join('\n')).toContain('no worker runs on this machine yet')
 
-    writeFileSync(runLockPath(stateRoot), JSON.stringify({ pid: 4242, startedAt: 'live', runId: 'first-cwd', at: 'then' }))
+    writeFileSync(runLockPath(stateRoot), JSON.stringify({ pid: 4242, startedAt: 'live', runId: 'first-cwd', at: 'then' }), { mode: 0o600 })
+    chmodSync(runLockPath(stateRoot), 0o600)
     const blocked: string[] = []
     expect(await runWorker(['run', '--once'], {
       cwd: otherRoot, home, host: HOST, env, out: (line) => blocked.push(line), runner: gh.runner, git: anyGit,
@@ -2624,6 +2630,7 @@ describe('the command', () => {
     expect(existsSync(stateRoot)).toBe(false)
 
     mkdirSync(stateRoot, { recursive: true })
+    chmodSync(stateRoot, 0o700)
     const path = join(stateRoot, 'boards.json')
     writeFileSync(path, '{broken')
     const before = readFileSync(path, 'utf8')
@@ -3554,7 +3561,9 @@ describe('the command', () => {
 
     const stateRoot = join(home, '.vegafactory', 'worker')
     mkdirSync(stateRoot, { recursive: true })
-    writeFileSync(runLockPath(stateRoot), JSON.stringify({ pid: 4242, startedAt: 'live', runId: 'other', at: 'then' }))
+    chmodSync(stateRoot, 0o700)
+    writeFileSync(runLockPath(stateRoot), JSON.stringify({ pid: 4242, startedAt: 'live', runId: 'other', at: 'then' }), { mode: 0o600 })
+    chmodSync(runLockPath(stateRoot), 0o600)
     const lines: string[] = []
     expect(await runWorker(['run', '--once', '--json'], {
       cwd: root, home, host: HOST, env: {}, out: (line) => lines.push(line), runner: gh.runner, git: anyGit,
@@ -3635,10 +3644,14 @@ describe('the command', () => {
     const live = { repo: 'o/r', pid: 5150, startedAt: 'Fri Sep 18 09:00:00 2026', command: 'claude', issue: 7, action: 'implement' as const, owner: `${HOST}:worker-ab12-7`, from: 'queued' as const }
     noteChild(stateRoot, live)
     const stopped: number[] = []
+    const events: string[] = []
+    const unit = unitPath('darwin', home)
+    mkdirSync(join(home, 'Library', 'LaunchAgents'), { recursive: true })
+    writeFileSync(unit, 'loaded unit')
     const code = await runWorker(['disable'], {
-      cwd: root, home, host: HOST, env: {}, out: (text) => lines.push(text), runner: gh.runner,
-      run: (() => ({ code: 0, stdout: '', stderr: '' })) as Probe,
-      stop: (pid: number) => { stopped.push(pid); return true },
+      cwd: root, home, host: HOST, env: {}, platform: 'darwin', out: (text) => lines.push(text), runner: gh.runner,
+      run: (() => { events.push('unload'); return { code: 0, stdout: '', stderr: '' } }) as Probe,
+      stop: (pid: number) => { events.push('signal'); stopped.push(pid); return true },
       start: () => live.startedAt,
     })
     expect(code).toBe(1)
@@ -3647,6 +3660,57 @@ describe('the command', () => {
     expect(lines.join('\n')).toContain(`o/r#7 (implement, claimed by ${HOST}:worker-ab12-7`)
     expect(readChildren(stateRoot)).toEqual([live])
     expect(lines.join('\n')).toContain('process could not be stopped safely')
+    expect(events).toEqual(['unload', 'signal'])
+    expect(existsSync(unit)).toBe(false)
+  })
+
+  test('disable refuses malformed global or legacy records before unloading or deleting its unit', async () => {
+    for (const source of ['global', 'legacy'] as const) {
+      const stateRoot = join(home, '.vegafactory', 'worker')
+      const recordRoot = source === 'global' ? stateRoot : workerDir(root)
+      mkdirSync(recordRoot, { recursive: true, mode: 0o700 })
+      if (source === 'global') chmodSync(recordRoot, 0o700)
+      const record = join(recordRoot, 'children.json')
+      writeFileSync(record, '{bad json', { mode: 0o600 })
+      chmodSync(record, 0o600)
+      const unit = unitPath('darwin', home)
+      mkdirSync(join(home, 'Library', 'LaunchAgents'), { recursive: true })
+      writeFileSync(unit, `unit-${source}`)
+      const calls: string[] = []
+      const lines: string[] = []
+      const code = await runWorker(['disable'], {
+        cwd: root, home, host: HOST, env: {}, platform: 'darwin', out: line => lines.push(line), runner: gh.runner,
+        run: ((command) => { calls.push(command); return { code: 0, stdout: '', stderr: '' } }) as Probe,
+        stop: () => { calls.push('signal'); return true },
+      })
+      expect(code, source).toBe(2)
+      expect(calls, source).toEqual([])
+      expect(readFileSync(unit, 'utf8'), source).toBe(`unit-${source}`)
+      expect(readFileSync(record, 'utf8'), source).toBe('{bad json')
+      expect(lines.join('\n'), source).toContain('could not be validated before disable')
+      rmSync(record)
+    }
+  })
+
+  test('an unload failure leaves the unit, records, and processes untouched', async () => {
+    const stateRoot = join(home, '.vegafactory', 'worker')
+    const live = { repo: 'o/r', pid: 5250, startedAt: 'Fri Sep 18 09:00:00 2026', command: 'claude', issue: 7, action: 'implement' as const, owner: null, from: 'queued' as const }
+    noteChild(stateRoot, live)
+    const unit = unitPath('darwin', home)
+    mkdirSync(join(home, 'Library', 'LaunchAgents'), { recursive: true })
+    writeFileSync(unit, 'keep this unit')
+    const stopped: number[] = []
+    const lines: string[] = []
+    const code = await runWorker(['disable'], {
+      cwd: root, home, host: HOST, env: {}, platform: 'darwin', out: line => lines.push(line), runner: gh.runner,
+      run: (() => ({ code: 1, stdout: '', stderr: 'Operation not permitted' })) as Probe,
+      stop: pid => { stopped.push(pid); return true }, start: () => live.startedAt,
+    })
+    expect(code).toBe(1)
+    expect(stopped).toEqual([])
+    expect(readFileSync(unit, 'utf8')).toBe('keep this unit')
+    expect(readChildren(stateRoot)).toEqual([live])
+    expect(lines.join('\n')).toContain('could not be unloaded')
   })
 
   test('a record whose process is gone is dropped, never signalled', async () => {
