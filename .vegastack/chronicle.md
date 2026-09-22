@@ -12,6 +12,16 @@ The project's story, newest first: what got built, why, and how it went — for 
 
 — approved by (kmanojkumar) · built by codex · branch fix/283-a-new-review-cycle-can-choose-a-new-base
 
+## 22-09-2026 — The stats page answers narrower questions without rebuilding ([#257](https://github.com/vegastack/vegafactory/issues/257))
+
+- **What:** The one-file offline dashboard now filters the events it already loaded by repository, owner, node, and inclusive date range. Every table and headline updates in place without a server, network request, or external asset.
+- **Why:** The dashboard could summarize the whole history but could not answer ordinary questions about one project, person, machine, or period without generating another file.
+- **How it went:** The old plan left browser behavior to a visual check. The implementation kept the page dependency-free but added a deterministic pure filter seam, syntax/data-safety tests, and one small DOM runtime that rebuilds cells with `textContent` rather than markup.
+- **Changed:** five in-page filters · live aggregate/table rebuilding · script-safe embedded events · preserved offline/XSS guarantees.
+- **Decisions:** none.
+
+— approved by (kmanojkumar) · built by codex · branch feat/257-a-stats-page-you-can-filter
+
 ## 21-09-2026 — One worker serves every board without mixing them ([#259](https://github.com/vegastack/vegafactory/issues/259))
 
 - **What:** One machine service now provisions and serves every explicit repository in its roster. Each board keeps its own checkout, App token, policy, issue cache, readiness and push path, while machine state and capacity stay genuinely global.
