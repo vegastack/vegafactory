@@ -2,6 +2,16 @@
 
 The project's story, newest first: what got built, why, and how it went — for the operator's future recall. Format home: the dev-chronicle skill.
 
+## 22-09-2026 — Worker records fail closed before anything is torn down ([#277](https://github.com/vegastack/vegafactory/issues/277))
+
+- **What:** Machine-global worker records now distinguish absence from corruption and remain private through runtime updates. Disable validates its authority before unloading, while attended enablement stops first and moves valid history and logs onto fresh private inodes.
+- **Why:** Silent reader fallbacks turned malformed child and acted records into empty state, so a later mutation could overwrite evidence and disable could discover unsafe child authority only after taking the service away.
+- **How it went:** The strict schemas already existed inside the legacy migration, but making them the runtime authority exposed an over-broad directory-mode check and several fixtures that had been creating valid records with public defaults. The append path then needed a small private journal so a crash after publication could retry without copying log bytes twice.
+- **Changed:** strict acted, child, run and lock reads · validation before unload · stop-first enable · fresh `0600` run/stdout/stderr inodes · owner-only legacy quarantine · retry-safe append migration · recovery guidance.
+- **Decisions:** none.
+
+— approved by (kmanojkumar) · built by codex · branch fix/277-the-worker-reads-its-own-records-before
+
 ## 22-09-2026 — Reclamation became explicit and issue paths became stable ([#260](https://github.com/vegastack/vegafactory/issues/260))
 
 - **What:** Issue checkout directories now use only the issue number, and `vegafactory worktree prune` previews merged, closed, or retained-idle candidates until a person passes `--write`. Clean pushed checkouts may shed untracked `node_modules` on a shorter window with an owner-only marker for restoration.
