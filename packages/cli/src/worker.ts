@@ -1191,15 +1191,24 @@ function safeLegacyStateRoot(root: string, stateRoot: string): { ok: boolean; ex
   const expected = join(root, '.vegastack', '.tmp', 'worker')
   if (resolve(root) !== root || stateRoot !== expected) return { ok: false, exists: false, reason: `the legacy worker path is not canonical: ${stateRoot}` }
   const uid = process.getuid?.()
-  for (const path of [root, join(root, '.vegastack'), join(root, '.vegastack', '.tmp'), expected]) {
+  const filesystemRoot = parse(expected).root
+  let cursor = filesystemRoot
+  let productOwned = false
+  for (const part of expected.slice(filesystemRoot.length).split(sep).filter(Boolean)) {
+    cursor = join(cursor, part)
+    productOwned ||= cursor === root
     try {
-      const info = lstatSync(path)
-      if (!info.isDirectory() || info.isSymbolicLink()) return { ok: false, exists: true, reason: `refusing an unsafe legacy worker directory at ${path}` }
-      if (uid !== undefined && info.uid !== uid) return { ok: false, exists: true, reason: `refusing a legacy worker directory owned by uid ${info.uid}: ${path}` }
-      if ((info.mode & 0o022) !== 0) return { ok: false, exists: true, reason: `refusing a legacy worker directory writable by another user: ${path}` }
+      const info = lstatSync(cursor)
+      if (!info.isDirectory() || info.isSymbolicLink()) return { ok: false, exists: true, reason: `refusing an unsafe legacy worker directory at ${cursor}` }
+      if (uid !== undefined && (productOwned ? info.uid !== uid : info.uid !== 0 && info.uid !== uid)) {
+        return { ok: false, exists: true, reason: `refusing a legacy worker ancestor owned by uid ${info.uid}: ${cursor}` }
+      }
+      if ((info.mode & 0o022) !== 0 && (productOwned || (info.mode & 0o1000) === 0)) {
+        return { ok: false, exists: true, reason: `refusing a legacy worker ancestor another user can replace: ${cursor}` }
+      }
     } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return { ok: true, exists: false, reason: 'no legacy worker state' }
-      return { ok: false, exists: true, reason: `the legacy worker directory cannot be inspected at ${path}: ${(error as Error).message}` }
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT' && productOwned) return { ok: true, exists: false, reason: 'no legacy worker state' }
+      return { ok: false, exists: true, reason: `the legacy worker directory cannot be inspected at ${cursor}: ${(error as Error).message}` }
     }
   }
   return { ok: true, exists: true, reason: 'safe legacy worker directory' }
@@ -1238,11 +1247,11 @@ export function trustedRecordOwner(owner: number, uid: number | undefined = proc
   return uid === undefined || owner === uid
 }
 
-function inspectRegularRecord(path: string): InspectedRecord<string> {
+export function inspectWorkerRecord(path: string, uid: number | undefined = process.getuid?.()): InspectedRecord<string> {
   try {
     const info = lstatSync(path)
     if (!info.isFile() || info.isSymbolicLink()) return { exists: true, value: null, error: `${path} is not a regular file` }
-    if (!trustedRecordOwner(info.uid)) return { exists: true, value: null, error: `${path} is owned by untrusted uid ${info.uid}` }
+    if (!trustedRecordOwner(info.uid, uid)) return { exists: true, value: null, error: `${path} is owned by untrusted uid ${info.uid}` }
     if ((info.mode & 0o022) !== 0) return { exists: true, value: null, error: `${path} is writable by another user` }
     return { exists: true, value: readFileSync(path, 'utf8'), error: null }
   } catch (error) {
@@ -1253,7 +1262,7 @@ function inspectRegularRecord(path: string): InspectedRecord<string> {
 }
 
 function inspectLegacyActed(path: string, fallback: string | null): InspectedRecord<Record<string, Acted>> {
-  const file = inspectRegularRecord(path)
+  const file = inspectWorkerRecord(path)
   if (!file.exists || file.error) return { exists: file.exists, value: null, error: file.error }
   try {
     const raw: unknown = JSON.parse(file.value!)
@@ -1273,7 +1282,7 @@ function inspectLegacyActed(path: string, fallback: string | null): InspectedRec
 }
 
 function inspectLegacyRuns(path: string, fallback: string | null): InspectedRecord<RunRecord[]> {
-  const file = inspectRegularRecord(path)
+  const file = inspectWorkerRecord(path)
   if (!file.exists || file.error) return { exists: file.exists, value: null, error: file.error }
   const rows: RunRecord[] = []
   try {
@@ -1292,7 +1301,7 @@ function inspectLegacyRuns(path: string, fallback: string | null): InspectedReco
 }
 
 function inspectLegacyChildren(path: string, fallback: string | null): InspectedRecord<ChildRecord[]> {
-  const file = inspectRegularRecord(path)
+  const file = inspectWorkerRecord(path)
   if (!file.exists || file.error) return { exists: file.exists, value: null, error: file.error }
   try {
     const raw: unknown = JSON.parse(file.value!)
@@ -1314,7 +1323,7 @@ function inspectLegacyChildren(path: string, fallback: string | null): Inspected
 }
 
 function inspectLegacyLock(path: string): InspectedRecord<RunLock> {
-  const file = inspectRegularRecord(path)
+  const file = inspectWorkerRecord(path)
   if (!file.exists || file.error) return { exists: file.exists, value: null, error: file.error }
   try {
     const row = JSON.parse(file.value!) as Partial<RunLock>
@@ -1567,41 +1576,79 @@ function migrateAppendTarget(input: {
   input.afterBoundary?.(`clear-journal:${input.name}`)
 }
 
-function quarantineMalformedLegacy(input: { root: string; stateRoot: string; repo: string }): string | null {
+interface QuarantineJournal { schema: 1; name: string; source: string; target: string; reason: string }
+
+function quarantineJournalPath(stateRoot: string): string { return join(stateRoot, '.quarantine.json') }
+
+function readQuarantineJournal(stateRoot: string): QuarantineJournal | null {
+  const path = quarantineJournalPath(stateRoot)
+  const text = readPrivateRecord(stateRoot, path)
+  if (text === null) return null
+  try {
+    const row = JSON.parse(text) as Partial<QuarantineJournal>
+    if (row.schema !== 1 || typeof row.name !== 'string' || typeof row.source !== 'string'
+      || typeof row.target !== 'string' || typeof row.reason !== 'string' || !row.reason) throw new Error('invalid journal schema')
+    return row as QuarantineJournal
+  } catch (error) { throw new WorkerRecordError('malformed', `${path} is malformed: ${(error as Error).message}`) }
+}
+
+function quarantineMalformedLegacy(input: { root: string; stateRoot: string; repo: string; afterBoundary?: (boundary: string) => void }): string | null {
   const legacyRoot = workerDir(input.root)
   const safe = safeLegacyStateRoot(input.root, legacyRoot)
-  if (!safe.ok || !safe.exists || legacyRoot === input.stateRoot) return null
-  const inspected = inspectLegacyFiles(legacyRoot, canonicalRepository(input.repo))
-  const entries = [
-    ['acted.json', inspected.acted], ['runs.jsonl', inspected.runs],
-    ['children.json', inspected.children], ['run.lock', inspected.lock],
-    ['worker.log', readAppendArtifact(join(legacyRoot, 'worker.log'))],
-    ['worker.err.log', readAppendArtifact(join(legacyRoot, 'worker.err.log'))],
-  ] as const
-  const failed = entries.find(([, result]) => result.error)
-  if (!failed) return null
-  const [name, result] = failed
-  const source = join(legacyRoot, name)
+  if (!safe.ok || legacyRoot === input.stateRoot) return null
   const quarantine = join(input.stateRoot, 'quarantine')
   ensurePrivateRecordRoot(input.stateRoot, true)
   ensurePrivateRecordRoot(quarantine, true)
-  const target = join(quarantine, `${name}.${randomUUID()}.preserved`)
-  try { renameSync(source, target) }
-  catch (error) { throw new WorkerRecordError('unreadable', `${result.error}; it could not be quarantined: ${(error as Error).message}`) }
-  const quarantined = lstatSync(target)
+  const journalPath = quarantineJournalPath(input.stateRoot)
+  let journal = readQuarantineJournal(input.stateRoot)
+  if (!journal) {
+    if (!safe.exists) return null
+    const inspected = inspectLegacyFiles(legacyRoot, canonicalRepository(input.repo))
+    const entries = [
+      ['acted.json', inspected.acted], ['runs.jsonl', inspected.runs],
+      ['children.json', inspected.children], ['run.lock', inspected.lock],
+      ['worker.log', readAppendArtifact(join(legacyRoot, 'worker.log'))],
+      ['worker.err.log', readAppendArtifact(join(legacyRoot, 'worker.err.log'))],
+    ] as const
+    const failed = entries.find(([, result]) => result.error)
+    if (!failed) return null
+    const [name, result] = failed
+    journal = { schema: 1, name, source: join(legacyRoot, name), target: join(quarantine, `${name}.${randomUUID()}.preserved`), reason: result.error! }
+    replacePrivateRecord(input.stateRoot, journalPath, JSON.stringify(journal, null, 2) + '\n')
+    input.afterBoundary?.(`quarantine-journal:${name}`)
+  }
+  const names = new Set(['acted.json', 'runs.jsonl', 'children.json', 'run.lock', 'worker.log', 'worker.err.log'])
+  if (!names.has(journal.name) || journal.source !== join(legacyRoot, journal.name) || dirname(journal.target) !== quarantine) {
+    throw new WorkerRecordError('malformed', `${journalPath} names a path outside the legacy quarantine transaction`)
+  }
+  const sourceExists = existsSync(journal.source)
+  const targetExists = existsSync(journal.target)
+  if (sourceExists && targetExists) throw new WorkerRecordError('unsafe', `${journalPath} found both source and quarantine target`)
+  if (sourceExists) {
+    const locked = safeLegacyStateRoot(input.root, legacyRoot)
+    if (!locked.ok || !locked.exists) throw new WorkerRecordError('unsafe', locked.reason)
+    try { renameSync(journal.source, journal.target) }
+    catch (error) { throw new WorkerRecordError('unreadable', `${journal.reason}; it could not be quarantined: ${(error as Error).message}`) }
+    input.afterBoundary?.(`quarantine-rename:${journal.name}`)
+  }
+  if (!existsSync(journal.target)) throw new WorkerRecordError('unreadable', `${journal.reason}; neither source nor quarantine target exists`)
+  const quarantined = lstatSync(journal.target)
   if (quarantined.isFile() && !quarantined.isSymbolicLink()) {
-    const bytes = readFileSync(target)
-    const privateCopy = join(quarantine, `.${name}.${randomUUID()}.private`)
+    const bytes = readFileSync(journal.target)
+    const privateCopy = join(quarantine, `.${journal.name}.${randomUUID()}.private`)
     try {
       writeFileSync(privateCopy, bytes, { flag: 'wx', mode: 0o600 })
       chmodSync(privateCopy, 0o600)
-      renameSync(privateCopy, target)
+      renameSync(privateCopy, journal.target)
+      input.afterBoundary?.(`quarantine-private:${journal.name}`)
     } catch (error) {
       rmSync(privateCopy, { force: true })
-      throw new WorkerRecordError('unreadable', `${result.error}; evidence moved to ${target}, but its private snapshot failed: ${(error as Error).message}`)
+      throw new WorkerRecordError('unreadable', `${journal.reason}; evidence moved to ${journal.target}, but its private snapshot failed: ${(error as Error).message}`)
     }
   }
-  return `${result.error}; preserved at ${target}`
+  rmSync(journalPath, { force: true })
+  input.afterBoundary?.(`quarantine-clear:${journal.name}`)
+  return `${journal.reason}; preserved at ${journal.target}`
 }
 
 function privatizeGlobalRecords(input: { stateRoot: string; start?: ProcessStart; alive?: ProcessAlive; afterBoundary?: (boundary: string) => void }): void {
@@ -1640,10 +1687,16 @@ export function prepareWorkerStorage(input: {
 }): LegacyMigrationResult {
   if (!input.serviceStopped) return { ok: false, migrated: false, reason: 'worker storage cannot rotate until the service is confirmed stopped' }
   const factoryRoot = input.factoryRoot ?? dirname(input.stateRoot)
+  const legacyPreflight = safeLegacyStateRoot(input.root, workerDir(input.root))
+  if (!legacyPreflight.ok) return { ok: false, migrated: false, reason: legacyPreflight.reason }
   try { ensurePrivateRecordRoot(input.stateRoot, true) }
   catch (error) { return { ok: false, migrated: false, reason: (error as Error).message } }
   try {
     return withLock(join(input.stateRoot, '.storage-preparation'), () => {
+      try {
+        const quarantined = quarantineMalformedLegacy(input)
+        if (quarantined) return { ok: false, migrated: false, reason: `${quarantined}; retry enable after inspecting the preserved evidence` }
+      } catch (error) { return { ok: false, migrated: false, reason: (error as Error).message } }
       const migration = migrateLegacyWorkerState({ ...input, factoryRoot, afterBoundary: input.afterBoundary })
       if (!migration.ok) {
         try {
@@ -1656,7 +1709,7 @@ export function prepareWorkerStorage(input: {
         privatizeGlobalRecords(input)
         const runs = inspectLegacyRuns(runsPath(input.stateRoot), null)
         if (runs.error) throw new WorkerRecordError('malformed', runs.error)
-        const runBytes = inspectRegularRecord(runsPath(input.stateRoot))
+        const runBytes = inspectWorkerRecord(runsPath(input.stateRoot))
         if (runBytes.error) throw new WorkerRecordError('unsafe', runBytes.error)
         rotatePrivateAppend(runsPath(input.stateRoot), runBytes.value ?? '')
         input.afterBoundary?.('privatize:runs.jsonl')

@@ -17,7 +17,7 @@ import {
   forgetChild, gitIn, migrateLegacyWorkerState, noteChild, prepareWorkerStorage, readChildren, refreshRoster, releaseRunLock, reserve, runLockPath, stopChild, takeRunLock, updateActed, verifiedListing,
   recordRoomSha, updateModeFor,
   normalizeWorkerRepos, readWorkerState, reconcileBoards, workerProblemReporter,
-  trustedRecordOwner, WorkerRecordError,
+  inspectWorkerRecord, trustedRecordOwner, WorkerRecordError,
   type Candidate, type Fetch, type GitRun, type Inflight, type PollDeps, type Probe, type RunStep, type StepResult,
 } from '../src/worker.ts'
 import type { GhRunner } from '../src/gh.ts'
@@ -2216,6 +2216,10 @@ describe('machine-global runtime records fail closed', () => {
     }
     expect(trustedRecordOwner(501, 501)).toBe(true)
     expect(trustedRecordOwner(502, 501)).toBe(false)
+    const { stateRoot } = privateRoot()
+    const path = join(stateRoot, 'foreign.json')
+    privateFile(path, '{}')
+    expect(inspectWorkerRecord(path, (process.getuid?.() ?? 501) + 1).error).toContain('owned by untrusted uid')
   })
 
   test('competing processes serialize run trimming and acted/child mutations', async () => {
@@ -2575,7 +2579,7 @@ describe('stopped-service worker storage preparation', () => {
     const boundaries = [
       'publish:acted.json', 'publish:runs.jsonl', 'publish:children.json',
       'remove:acted.json', 'remove:runs.jsonl', 'remove:children.json', 'remove:run.lock',
-      'privatize:acted.json', 'privatize:children.json', 'privatize:runs.jsonl',
+      'privatize:acted.json', 'privatize:children.json', 'privatize:run.lock', 'privatize:runs.jsonl',
       'journal:worker.log', 'publish:worker.log', 'remove:worker.log', 'clear-journal:worker.log',
       'journal:worker.err.log', 'publish:worker.err.log', 'remove:worker.err.log', 'clear-journal:worker.err.log',
     ]
@@ -2585,6 +2589,10 @@ describe('stopped-service worker storage preparation', () => {
       const legacy = workerDir(caseRoot)
       const stateRoot = join(caseHome, '.vegafactory', 'worker')
       mkdirSync(legacy, { recursive: true })
+      mkdirSync(stateRoot, { recursive: true, mode: 0o700 })
+      chmodSync(stateRoot, 0o700)
+      writeFileSync(join(stateRoot, 'run.lock'), JSON.stringify({ pid: 999998, startedAt: 'global-old', runId: 'global', at: 'old' }), { mode: 0o600 })
+      chmodSync(join(stateRoot, 'run.lock'), 0o600)
       writeFileSync(join(legacy, 'acted.json'), JSON.stringify({ 'o/r#1': { at: 1, action: 'plan', outcome: 'done', trigger: null, failures: 0, retryAt: null } }))
       writeFileSync(join(legacy, 'runs.jsonl'), run(1, 'once'))
       writeFileSync(join(legacy, 'children.json'), JSON.stringify([{ pid: 5150, startedAt: 'old', command: 'codex', issue: 1, action: 'plan', owner: null, from: 'planning' }]))
@@ -2609,6 +2617,7 @@ describe('stopped-service worker storage preparation', () => {
       for (const name of ['acted.json', 'runs.jsonl', 'children.json', 'worker.log', 'worker.err.log']) {
         expect(lstatSync(join(stateRoot, name)).mode & 0o777, `${boundary}:${name}`).toBe(0o600)
       }
+      expect(lstatSync(join(stateRoot, 'run.lock')).mode & 0o777, boundary).toBe(0o600)
       for (const name of ['acted.json', 'runs.jsonl', 'children.json', 'run.lock', 'worker.log', 'worker.err.log']) {
         expect(existsSync(join(legacy, name)), `${boundary}:${name}`).toBe(false)
       }
@@ -2629,6 +2638,42 @@ describe('stopped-service worker storage preparation', () => {
     expect(preserved).toHaveLength(1)
     expect(readFileSync(join(quarantine, preserved[0]!), 'utf8')).toBe('{bad json\n')
     expect(prepareWorkerStorage({ root, stateRoot, repo: 'o/r', serviceStopped: true })).toMatchObject({ ok: true })
+  })
+
+  test('every quarantine publication boundary resumes to one private evidence file', () => {
+    for (const boundary of [
+      'quarantine-journal:runs.jsonl', 'quarantine-rename:runs.jsonl',
+      'quarantine-private:runs.jsonl', 'quarantine-clear:runs.jsonl',
+    ]) {
+      const caseRoot = realpathSync(mkdtempSync(join(tmpdir(), 'worker-quarantine-root-')))
+      const caseHome = realpathSync(mkdtempSync(join(tmpdir(), 'worker-quarantine-home-')))
+      const legacy = workerDir(caseRoot)
+      const stateRoot = join(caseHome, '.vegafactory', 'worker')
+      const bytes = '{bad json\n'
+      mkdirSync(legacy, { recursive: true })
+      writeFileSync(join(legacy, 'runs.jsonl'), bytes)
+      let reached = false
+      const interrupted = prepareWorkerStorage({
+        root: caseRoot, stateRoot, repo: 'o/r', serviceStopped: true,
+        afterBoundary: current => {
+          if (!reached && current === boundary) { reached = true; throw new Error(`crash at ${boundary}`) }
+        },
+      })
+      expect(reached, boundary).toBe(true)
+      expect(interrupted.ok, boundary).toBe(false)
+      let recovered: ReturnType<typeof prepareWorkerStorage> = interrupted
+      for (let attempt = 0; attempt < 3 && !recovered.ok; attempt++) {
+        recovered = prepareWorkerStorage({ root: caseRoot, stateRoot, repo: 'o/r', serviceStopped: true })
+      }
+      expect(recovered, boundary).toMatchObject({ ok: true })
+      expect(existsSync(join(legacy, 'runs.jsonl')), boundary).toBe(false)
+      expect(existsSync(join(stateRoot, '.quarantine.json')), boundary).toBe(false)
+      const quarantine = join(stateRoot, 'quarantine')
+      const evidence = readdirSync(quarantine)
+      expect(evidence, boundary).toHaveLength(1)
+      expect(readFileSync(join(quarantine, evidence[0]!), 'utf8'), boundary).toBe(bytes)
+      expect(lstatSync(join(quarantine, evidence[0]!)).mode & 0o777, boundary).toBe(0o600)
+    }
   })
 
   test('runtime-invalid legacy rows are quarantined before any source deletion and then retry cleanly', () => {
@@ -2679,6 +2724,24 @@ describe('stopped-service worker storage preparation', () => {
     const quarantined = join(stateRoot, 'quarantine', readdirSync(join(stateRoot, 'quarantine'))[0]!)
     expect(lstatSync(quarantined).mode & 0o777).toBe(0o600)
     expect(readFileSync(quarantined, 'utf8')).toBe(JSON.stringify([child]))
+  })
+
+  test('a replaceable ancestor above the repository root blocks legacy authority unchanged', () => {
+    const outer = realpathSync(mkdtempSync(join(tmpdir(), 'worker-legacy-ancestor-')))
+    const shared = join(outer, 'shared')
+    const caseRoot = join(shared, 'repo')
+    const caseHome = realpathSync(mkdtempSync(join(tmpdir(), 'worker-legacy-home-')))
+    const legacy = workerDir(caseRoot)
+    const stateRoot = join(caseHome, '.vegafactory', 'worker')
+    mkdirSync(legacy, { recursive: true })
+    chmodSync(shared, 0o777)
+    const path = join(legacy, 'children.json')
+    const bytes = JSON.stringify([{ pid: 5150, startedAt: 'start', command: 'codex', issue: 1, action: 'plan', owner: null, from: 'planning' }])
+    writeFileSync(path, bytes)
+    const result = prepareWorkerStorage({ root: caseRoot, stateRoot, repo: 'o/r', serviceStopped: true })
+    expect(result).toMatchObject({ ok: false, migrated: false, reason: expect.stringContaining('another user can replace') })
+    expect(readFileSync(path, 'utf8')).toBe(bytes)
+    expect(existsSync(stateRoot)).toBe(false)
   })
 
   test('an unsafe legacy log link is quarantined without touching its target', () => {
