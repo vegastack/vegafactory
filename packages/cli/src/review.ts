@@ -719,11 +719,11 @@ export async function runReview(argv: string[], deps: ReviewDeps = {}): Promise<
   // state file remembers.
   const priorRound = prior?.round ?? 0
 
-  // The cap is one cycle's, over one set of inputs. Changed inputs after the cap — a commit that
-  // fixes something, an edited brief or plan — open the next cycle at round 1; unchanged inputs
-  // still hand back, because reviewing the same thing a fourth time is what the cap is for.
+  // A clean verdict finishes its cycle: a later head or edited artifact is a new review, not a
+  // fix round against a range that already passed. A needs-fixes cycle stays on its original base
+  // through the cap; changed inputs after round three then open the next cycle.
   const movedOn = Boolean(prior && (prior.head !== head || !sameArtifacts))
-  const newCycle = priorRound >= MAX_ROUNDS && movedOn
+  const newCycle = Boolean(prior && movedOn && (prior.verdict === 'clean' || priorRound >= MAX_ROUNDS))
   const unchanged = Boolean(prior && prior.head === head && sameArtifacts && !args.dryRun)
   // A clean review of exactly this head and these artifacts is the answer, at any round: the cap
   // exists to stop a fourth look at findings that are still open, not to void a finished review.
