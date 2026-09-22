@@ -29,13 +29,15 @@
     {
       "id": 3,
       "prompt": "Onboard priya into the org — she's joining the dev group and will own issues there.",
-      "expected_output": "The new-teammate checklist is walked as the person's own actions, and her login is added to the dev group's `operators:` line only on the operator's word.",
+      "expected_output": "The new-teammate checklist is walked as the person's own actions, including `vegafactory init` handing one canonical `worker: no` row to an operator-owned control-room PR, and her login is added to the dev group's `operators:` line only on the operator's word.",
       "files": [],
       "assertions": [
         "Her login is added to `groups/dev/group.md`'s `operators:` line, and that line is named as the one place a person is recorded",
         "The addition waits on the operator's word and is never inferred from org membership",
         "No `people.csv` is created or asked for — the lean room has no people file",
-        "The checklist steps (gh auth, harness install, `vegafactory skills add --group dev --global`, control-room access, Slack) are the person's own actions, and no credential is requested or read"
+        "The checklist steps (gh auth, harness install, `vegafactory skills add --group dev --global`, control-room access, Slack) are the person's own actions, and no credential is requested or read",
+        "She runs `vegafactory init` on her machine and sends its canonical `worker: no` row to an operator for a normal control-room PR",
+        "The skill never edits, commits, pushes, or opens the control-room PR for the node"
       ]
     },
     {

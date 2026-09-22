@@ -6,7 +6,8 @@ Run by `vegafactory-setup onboard <login>`. Every step below is the person's own
 2. Install the harnesses the group's `harness-policy:` line names, and sign each one in.
 3. Install the skills: `vegafactory skills add --group dev --global`.
 4. Control-room read access — the operator grants it; confirm with `gh repo view {{org}}/vegafactory-control-room`.
-5. Subscribe to the org's Slack channel through the official GitHub Slack app; notifications are GitHub assignment plus Slack, nothing else.
-6. Add the login to the group's `operators:` line if they will own issues in that group.
+5. Run `vegafactory init`, then follow `onboarding/new-node.md`: send its proposed `worker: no` row to an operator for a control-room PR. Init never writes or pushes the room.
+6. Subscribe to the org's Slack channel through the official GitHub Slack app; notifications are GitHub assignment plus Slack, nothing else.
+7. Add the login to the group's `operators:` line if they will own issues in that group.
 
 `operators:` is the one place a person is recorded, and only on the operator's word — never inferred from org membership.

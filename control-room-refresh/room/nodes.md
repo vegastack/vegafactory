@@ -5,4 +5,4 @@ Every machine that runs vegafactory, one row each. A node is `<os-user>@<hostnam
 | node | owner | worker | repos | caps | notes |
 |---|---|---|---|---|---|
 
-No worker is registered yet. No node is registered yet. A row here records a machine; only `worker: yes` on that row lets it work a board with nobody watching, and an empty `repos` cell grants nothing.
+No worker is registered yet. No node is registered yet. A row here records a machine; only `worker: yes` on that row lets it work a board with nobody watching, and an empty `repos` cell grants nothing. Use `onboarding/new-node.md` for an ordinary attended machine and `onboarding/worker-box.md` for unattended board work.
