@@ -77,8 +77,9 @@ Runs the other tool read-only in this worktree on issue n's diff and posts one r
   --dry-run            print the packet and the exact command without running anything
   --json               machine-readable result
 
-A fix round sends only the fix diff and the open finding ids. At most ${MAX_ROUNDS} rounds per cycle;
-after that, committed fixes or an edited brief or plan open the next cycle at round 1.
+A clean verdict finishes its cycle; a later head or edited brief/plan opens a new cycle at round 1.
+A needs-fixes cycle keeps its first base for at most ${MAX_ROUNDS} rounds; changed inputs after the cap
+open its next cycle. Fix rounds send only the fix diff and open finding ids.
 Exit 0 clean · 2 needs fixes or hand-back · 1 error.`
 }
 
@@ -719,11 +720,11 @@ export async function runReview(argv: string[], deps: ReviewDeps = {}): Promise<
   // state file remembers.
   const priorRound = prior?.round ?? 0
 
-  // The cap is one cycle's, over one set of inputs. Changed inputs after the cap — a commit that
-  // fixes something, an edited brief or plan — open the next cycle at round 1; unchanged inputs
-  // still hand back, because reviewing the same thing a fourth time is what the cap is for.
+  // A clean verdict finishes its cycle: a later head or edited artifact is a new review, not a
+  // fix round against a range that already passed. A needs-fixes cycle stays on its original base
+  // through the cap; changed inputs after round three then open the next cycle.
   const movedOn = Boolean(prior && (prior.head !== head || !sameArtifacts))
-  const newCycle = priorRound >= MAX_ROUNDS && movedOn
+  const newCycle = Boolean(prior && movedOn && (prior.verdict === 'clean' || priorRound >= MAX_ROUNDS))
   const unchanged = Boolean(prior && prior.head === head && sameArtifacts && !args.dryRun)
   // A clean review of exactly this head and these artifacts is the answer, at any round: the cap
   // exists to stop a fourth look at findings that are still open, not to void a finished review.
@@ -758,9 +759,9 @@ export async function runReview(argv: string[], deps: ReviewDeps = {}): Promise<
   const outPath = (group: Group) => join(dir, `${number}-${group.key}.out.json`)
   const nonce = reviewNonce()
 
-  // The base is chosen once, in round 1, and every later round reads the commit that round fixed —
-  // a moving base would silently change what "reviewed" means between rounds.
-  const fixed = prior?.base && isCommit(prior.base) ? prior.base : null
+  // The base is chosen once in round 1 of each cycle. Later rounds read that commit; a genuinely
+  // new cycle chooses again because its changed head/brief/plan is a new review range.
+  const fixed = !newCycle && prior?.base && isCommit(prior.base) ? prior.base : null
   if (args.base && fixed && resolveCommit(top, args.base) !== fixed) {
     throw new Error(`the base is fixed at ${fixed.slice(0, 7)} for this review — drop --base, or start a fresh cycle to change it`)
   }

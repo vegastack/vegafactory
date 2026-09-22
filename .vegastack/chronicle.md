@@ -2,6 +2,16 @@
 
 The project's story, newest first: what got built, why, and how it went — for the operator's future recall. Format home: the dev-chronicle skill.
 
+## 22-09-2026 — A new review cycle really starts a new range ([#283](https://github.com/vegastack/vegafactory/issues/283))
+
+- **What:** Round one of a new review cycle can choose the current diff base; every later round remains pinned to that choice.
+- **Why:** The CLI opened a new cycle after changed work but still inherited the spent cycle's base, contradicting its own recovery message and blocking #260's clean replacement review.
+- **How it went:** One public-command regression reproduced three spent rounds, changed the head, selected a new base, then proved the next round could not move it again.
+- **Changed:** new-cycle base selection and its regression matrix.
+- **Decisions:** none.
+
+— approved by (kmanojkumar) · built by codex · branch fix/283-a-new-review-cycle-can-choose-a-new-base
+
 ## 22-09-2026 — Every machine has a cheap node-enrolment path ([#261](https://github.com/vegastack/vegafactory/issues/261))
 
 - **What:** `vegafactory init` now prints the ordinary machine's canonical `worker: no` row, and a short checklist carries that row through an operator-owned control-room PR. Teammate onboarding links the same path, while unattended machines keep their separate worker-box procedure.

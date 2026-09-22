@@ -4,7 +4,7 @@ import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSy
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { artifactHash } from '../src/issue-cache.ts'
-import { credentialFailure, detectReviewer, payload, sessionId, readReviewComment, renderComment, resolveCommit, reviewNonce, reviewPolicy, runReview, validateReview, type CommentData, type ReviewState } from '../src/review.ts'
+import { credentialFailure, detectReviewer, payload, sessionId, readReviewComment, renderComment, resolveCommit, reviewNonce, reviewPolicy, reviewUsage, runReview, validateReview, type CommentData, type ReviewState } from '../src/review.ts'
 import { FakeGitHub } from './fake-github.ts'
 
 const git = (cwd: string, ...args: string[]) => spawnSync('git', ['-c', 'user.name=t', '-c', 'user.email=t@t', ...args], { cwd, encoding: 'utf8' }).stdout.trim()
@@ -632,6 +632,75 @@ describe('the base is fixed and always a commit', () => {
     expect(resolveCommit(root, 'origin/main')).toBe(git(root, 'rev-parse', 'origin/main'))
     expect(calls()).toEqual([])
   })
+
+  test('round one of a new cycle chooses a fresh base, then pins it', async () => {
+    queue('codex', [
+      codexReply(verdict([finding('F1')])),
+      codexReply(verdict([finding('F1')])),
+      codexReply(verdict([finding('F1')])),
+      codexReply(verdict([finding('F1')])),
+      codexReply(verdict([])),
+    ])
+    const first = git(root, 'rev-parse', 'origin/main')
+    expect((await review(['--reviewer', 'codex', '--base', first])).code).toBe(2)
+    commit('fix-1.ts', 'one\n')
+    expect((await review(['--reviewer', 'codex'])).code).toBe(2)
+    commit('fix-2.ts', 'two\n')
+    expect((await review(['--reviewer', 'codex'])).code).toBe(2)
+
+    commit('fix-3.ts', 'three\n')
+    const second = git(root, 'rev-parse', 'HEAD~1')
+    expect(second).not.toBe(first)
+    expect((await review(['--reviewer', 'codex', '--base', second])).code).toBe(2)
+    expect(readState()).toMatchObject({ cycle: 2, round: 1, base: second })
+
+    commit('fix-4.ts', 'four\n')
+    await expect(review(['--reviewer', 'codex', '--base', first])).rejects.toThrow('base is fixed')
+    expect((await review(['--reviewer', 'codex'])).code).toBe(0)
+    expect(readState()).toMatchObject({ cycle: 2, round: 2, base: second })
+  })
+
+  test('a new cycle without --base resolves the current default base', async () => {
+    queue('codex', [
+      codexReply(verdict([finding('F1')])),
+      codexReply(verdict([finding('F1')])),
+      codexReply(verdict([finding('F1')])),
+      codexReply(verdict([])),
+    ])
+    const first = git(root, 'rev-parse', 'origin/main')
+    expect((await review(['--reviewer', 'codex'])).code).toBe(2)
+    commit('fix-1.ts', 'one\n')
+    expect((await review(['--reviewer', 'codex'])).code).toBe(2)
+    commit('fix-2.ts', 'two\n')
+    expect((await review(['--reviewer', 'codex'])).code).toBe(2)
+
+    git(root, 'push', '-q', 'origin', 'HEAD:main')
+    const second = git(root, 'rev-parse', 'origin/main')
+    expect(second).not.toBe(first)
+    commit('fix-3.ts', 'three\n')
+    expect((await review(['--reviewer', 'codex'])).code).toBe(0)
+    expect(readState()).toMatchObject({ cycle: 2, round: 1, base: second, verdict: 'clean' })
+  })
+
+  test('a changed head after a clean verdict starts a new cycle with a new base', async () => {
+    queue('codex', [codexReply(verdict([])), codexReply(verdict([]))])
+    const first = git(root, 'rev-parse', 'origin/main')
+    expect((await review(['--reviewer', 'codex', '--base', first])).code).toBe(0)
+    expect(readState()).toMatchObject({ cycle: 1, round: 1, base: first, verdict: 'clean' })
+
+    commit('rebased.ts', 'new range\n')
+    const second = git(root, 'rev-parse', 'HEAD~1')
+    expect(second).not.toBe(first)
+    expect((await review(['--reviewer', 'codex', '--base', second])).code).toBe(0)
+    expect(readState()).toMatchObject({ cycle: 2, round: 1, base: second, verdict: 'clean' })
+  })
+
+  test('help explains clean-cycle rollover and needs-fixes base pinning', () => {
+    const text = reviewUsage()
+    expect(text).toContain('A clean verdict finishes its cycle')
+    expect(text).toContain('A needs-fixes cycle keeps its first base')
+    expect(text).toContain('changed inputs after the cap')
+  })
 })
 
 describe('untrusted payloads cannot speak to the reviewer', () => {
@@ -946,7 +1015,7 @@ describe('a review is about the brief and plan it read', () => {
     expect(again.code).toBe(0)
     expect(again.text).not.toContain('already reviewed')
     expect(calls()).toHaveLength(2)
-    expect(reviewComments()[0]!.body).toContain('type=review cycle=1 round=2')
+    expect(reviewComments()[0]!.body).toContain('type=review cycle=2 round=1')
   })
 
   test('an edited plan re-runs it as well, with a fresh reviewer rather than a resume', async () => {
@@ -957,7 +1026,8 @@ describe('a review is about the brief and plan it read', () => {
     const { text } = await review(['--reviewer', 'codex', '--dry-run', '--json'])
     const dry = JSON.parse(text)
     expect(dry.resume).toBe(false)
-    expect(dry.round).toBe(2)
+    expect(dry.cycle).toBe(2)
+    expect(dry.round).toBe(1)
   })
 })
 
@@ -1079,7 +1149,7 @@ describe('the same-tool fallback records its own review', () => {
     commit('fix.ts', 'x\n')
     writeFileSync(result, JSON.stringify(verdict([finding('F1', 'should-fix')])))
     expect((await review(['--reviewer', 'claude', '--record', '.vegastack/.tmp/review.json'], { env: onlyFake })).code).toBe(0)
-    expect(reviewComments()[0]!.body).toContain('cycle=1 round=2')
+    expect(reviewComments()[0]!.body).toContain('cycle=2 round=1')
     expect(readState().findings.map((f) => f.id)).toEqual(['F1'])
   })
 
