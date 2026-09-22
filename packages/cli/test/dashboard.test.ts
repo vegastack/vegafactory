@@ -2,7 +2,8 @@ import { beforeEach, expect, test } from 'bun:test'
 import { mkdirSync, mkdtempSync, readFileSync, realpathSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { expandHome, renderDashboard, runDashboard } from '../src/dashboard.ts'
+import { runInNewContext } from 'node:vm'
+import { expandHome, filterDashboardEvents, renderDashboard, runDashboard } from '../src/dashboard.ts'
 import { statsDir, type StatsEvent } from '../src/stats.ts'
 import { refuseAmbientHome } from './no-ambient-home.ts'
 
@@ -21,6 +22,43 @@ const DATA: StatsEvent[] = [
   event({ id: '2', at: '2026-09-18T09:00:00.000Z', owner: 'sam', node: 'sam@box', harness: 'codex', model: 'gpt-5.6-sol', issue: 43, state: 'ready-to-ship' }),
   event({ id: '3', at: '2026-09-18T10:00:00.000Z', repo: 'acme/other', issue: 7, state: 'planning' }),
 ]
+
+class FakeNode {
+  children: FakeNode[] = []
+  className = ''
+  dataset: Record<string, string> = {}
+  href = ''
+  listeners: Record<string, Array<() => void>> = {}
+  scope = ''
+  style: Record<string, string> = {}
+  textContent = ''
+  value = ''
+
+  constructor(readonly tagName: string) {}
+  append(...children: FakeNode[]) { this.children.push(...children) }
+  replaceChildren(...children: FakeNode[]) { this.children = children }
+  addEventListener(type: string, listener: () => void) { (this.listeners[type] ??= []).push(listener) }
+  dispatch(type: string) { for (const listener of this.listeners[type] ?? []) listener() }
+}
+
+function runDashboardScript(html: string) {
+  const ids = ['filter-repo', 'filter-owner', 'filter-node', 'filter-from', 'filter-to', 'dashboard-summary', 'dashboard-sections']
+  const nodes = new Map(ids.map((id) => [id, new FakeNode(id.includes('filter-') ? 'input' : 'div')]))
+  const document = {
+    createElement: (tag: string) => new FakeNode(tag),
+    getElementById: (id: string) => nodes.get(id) ?? null,
+  }
+  const script = html.match(/<script>([\s\S]*?)<\/script>/)?.[1]
+  if (!script) throw new Error('dashboard script not found')
+  runInNewContext(script, { document, Node: FakeNode })
+  return { nodes, change: (id: string, value: string) => { const node = nodes.get(id)!; node.value = value; node.dispatch('change') } }
+}
+
+const nodeText = (node: FakeNode): string => [node.textContent, ...node.children.map(nodeText)].join(' ')
+const plainText = (text: string): string => text
+  .replace(/<[^>]+>/g, ' ')
+  .replaceAll('&amp;', '&').replaceAll('&lt;', '<').replaceAll('&gt;', '>').replaceAll('&quot;', '"').replaceAll('&#39;', "'")
+  .replace(/\s+/g, ' ').trim()
 
 beforeEach(() => {
   home = realpathSync(mkdtempSync(join(tmpdir(), 'dash-')))
@@ -43,11 +81,19 @@ test('the page carries every section, links its issues and works offline', () =>
   expect(html).toContain('2026-09-17')
   expect(html).toContain('class="bar"')
   expect(html).toContain('planning')
-  // Nothing is fetched: no script, no stylesheet, no remote asset.
-  expect(html).not.toContain('<script')
+  // One inline script powers local filtering; nothing is fetched and no external asset exists.
+  expect((html.match(/<script\b/g) ?? [])).toHaveLength(1)
   expect(html).not.toContain('src="http')
   expect(html).not.toContain('cdn')
+  expect(html).not.toContain('fetch(')
+  expect(html).not.toContain('XMLHttpRequest')
+  expect(html).not.toContain('import(')
+  expect(html).not.toContain('innerHTML')
+  expect(html).toContain('createElement')
+  expect(html).toContain('textContent')
+  expect(html).toContain('addEventListener')
   expect(html.match(/https?:\/\/(?!github\.com\/)/g)).toBeNull()
+  for (const id of ['filter-repo', 'filter-owner', 'filter-node', 'filter-from', 'filter-to']) expect(html).toContain(`id="${id}"`)
 })
 
 test('an empty dataset still renders', () => {
@@ -60,6 +106,67 @@ test('a repository name can never inject markup', () => {
   const html = renderDashboard([event({ id: '1', repo: '<img src=x onerror=alert(1)>' })])
   expect(html).not.toContain('<img')
   expect(html).toContain('&lt;img')
+})
+
+test('embedded dashboard data cannot close its one script tag', () => {
+  const html = renderDashboard([event({ id: 'x', owner: '</script><script>alert(1)</script>', repo: 'x/y' })])
+  expect((html.match(/<script\b/g) ?? [])).toHaveLength(1)
+  expect(html).not.toContain('</script><script>alert(1)</script>')
+  expect(html).toContain('\\u003c/script\\u003e')
+})
+
+test('dashboard filters match repo, owner, node and inclusive days', () => {
+  expect(filterDashboardEvents(DATA, { repo: 'acme/app', owner: 'sam', node: '', from: '2026-09-18', to: '2026-09-18' }).map((row) => row.id)).toEqual(['2'])
+  expect(filterDashboardEvents(DATA, { repo: '', owner: '', node: '', from: '2026-09-18', to: '' })).toHaveLength(2)
+  expect(filterDashboardEvents([], { repo: '', owner: '', node: '', from: '', to: '' })).toEqual([])
+})
+
+test('the actual inline runtime rebuilds every section as filters change', () => {
+  const html = renderDashboard(DATA)
+  const { nodes, change } = runDashboardScript(html)
+  const headings = ['Owners', 'Nodes', 'Projects', 'Issues', 'Models', 'Model use per owner', 'Model use per project', 'By day', 'Time per stage', 'Skills']
+  const initialSummary = plainText(html.match(/id="dashboard-summary">([\s\S]*?)<\/p>/)![1]!)
+  const initialSections = plainText(html.match(/id="dashboard-sections">([\s\S]*?)<\/div>\n<script>/)![1]!)
+
+  // Render once with no filters, then use this complete DOM state as the reset oracle.
+  change('filter-repo', '')
+  const baselineSections = plainText(nodeText(nodes.get('dashboard-sections')!))
+  expect(nodes.get('dashboard-summary')!.textContent).toBe(initialSummary)
+  expect(baselineSections).toBe(initialSections)
+
+  const verify = (id: string, value: string, turns: number, visible: string) => {
+    change(id, value)
+    expect(nodes.get('dashboard-summary')!.textContent).toContain(`${turns} turns`)
+    const sections = nodes.get('dashboard-sections')!.children
+    expect(sections.map((section) => section.children[0]?.textContent)).toEqual(headings)
+    expect(sections).toHaveLength(10)
+    expect(plainText(nodeText(nodes.get('dashboard-sections')!))).toContain(visible)
+    change(id, '')
+    expect(nodes.get('dashboard-summary')!.textContent).toBe(initialSummary)
+    expect(plainText(nodeText(nodes.get('dashboard-sections')!))).toBe(initialSections)
+  }
+
+  verify('filter-repo', 'acme/other', 1, 'acme/other')
+  verify('filter-owner', 'sam', 1, 'sam')
+  verify('filter-node', 'sam@box', 1, 'sam@box')
+  verify('filter-from', '2026-09-18', 2, '2026-09-18') // inclusive lower boundary
+  verify('filter-to', '2026-09-17', 1, '2026-09-17') // inclusive upper boundary
+
+  expect(nodes.get('dashboard-sections')!.children.map((section) => section.children[0]?.textContent)).toEqual([
+    'Owners', 'Nodes', 'Projects', 'Issues', 'Models', 'Model use per owner', 'Model use per project', 'By day', 'Time per stage', 'Skills',
+  ])
+
+  // A valid combination with no rows keeps all ten sections and their empty state.
+  change('filter-repo', 'acme/other')
+  change('filter-owner', 'sam')
+  expect(nodes.get('dashboard-summary')!.textContent).toBe('no turns collected yet')
+  expect(nodes.get('dashboard-sections')!.children).toHaveLength(10)
+  for (const section of nodes.get('dashboard-sections')!.children) expect(section.children[1]?.textContent).toBe('nothing collected yet')
+
+  // Clearing every control restores full parity with the initial server-rendered state.
+  for (const id of ['filter-repo', 'filter-owner', 'filter-node', 'filter-from', 'filter-to']) change(id, '')
+  expect(nodes.get('dashboard-summary')!.textContent).toBe(initialSummary)
+  expect(plainText(nodeText(nodes.get('dashboard-sections')!))).toBe(initialSections)
 })
 
 test('dashboard writes one file, expands ~ and reports the turns', () => {
