@@ -4,7 +4,7 @@ import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSy
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { artifactHash } from '../src/issue-cache.ts'
-import { credentialFailure, detectReviewer, payload, sessionId, readReviewComment, renderComment, resolveCommit, reviewNonce, reviewPolicy, runReview, validateReview, type CommentData, type ReviewState } from '../src/review.ts'
+import { credentialFailure, detectReviewer, payload, sessionId, readReviewComment, renderComment, resolveCommit, reviewNonce, reviewPolicy, reviewUsage, runReview, validateReview, type CommentData, type ReviewState } from '../src/review.ts'
 import { FakeGitHub } from './fake-github.ts'
 
 const git = (cwd: string, ...args: string[]) => spawnSync('git', ['-c', 'user.name=t', '-c', 'user.email=t@t', ...args], { cwd, encoding: 'utf8' }).stdout.trim()
@@ -638,7 +638,7 @@ describe('the base is fixed and always a commit', () => {
       codexReply(verdict([finding('F1')])),
       codexReply(verdict([finding('F1')])),
       codexReply(verdict([finding('F1')])),
-      codexReply(verdict([])),
+      codexReply(verdict([finding('F1')])),
       codexReply(verdict([])),
     ])
     const first = git(root, 'rev-parse', 'origin/main')
@@ -651,12 +651,13 @@ describe('the base is fixed and always a commit', () => {
     commit('fix-3.ts', 'three\n')
     const second = git(root, 'rev-parse', 'HEAD~1')
     expect(second).not.toBe(first)
-    expect((await review(['--reviewer', 'codex', '--base', second])).code).toBe(0)
+    expect((await review(['--reviewer', 'codex', '--base', second])).code).toBe(2)
     expect(readState()).toMatchObject({ cycle: 2, round: 1, base: second })
 
     commit('fix-4.ts', 'four\n')
-    expect((await review(['--reviewer', 'codex', '--base', first])).code).toBe(0)
-    expect(readState()).toMatchObject({ cycle: 3, round: 1, base: first })
+    await expect(review(['--reviewer', 'codex', '--base', first])).rejects.toThrow('base is fixed')
+    expect((await review(['--reviewer', 'codex'])).code).toBe(0)
+    expect(readState()).toMatchObject({ cycle: 2, round: 2, base: second })
   })
 
   test('a changed head after a clean verdict starts a new cycle with a new base', async () => {
@@ -670,6 +671,13 @@ describe('the base is fixed and always a commit', () => {
     expect(second).not.toBe(first)
     expect((await review(['--reviewer', 'codex', '--base', second])).code).toBe(0)
     expect(readState()).toMatchObject({ cycle: 2, round: 1, base: second, verdict: 'clean' })
+  })
+
+  test('help explains clean-cycle rollover and needs-fixes base pinning', () => {
+    const text = reviewUsage()
+    expect(text).toContain('A clean verdict finishes its cycle')
+    expect(text).toContain('A needs-fixes cycle keeps its first base')
+    expect(text).toContain('changed inputs after the cap')
   })
 })
 

@@ -77,8 +77,9 @@ Runs the other tool read-only in this worktree on issue n's diff and posts one r
   --dry-run            print the packet and the exact command without running anything
   --json               machine-readable result
 
-A fix round sends only the fix diff and the open finding ids. At most ${MAX_ROUNDS} rounds per cycle;
-after that, committed fixes or an edited brief or plan open the next cycle at round 1.
+A clean verdict finishes its cycle; a later head or edited brief/plan opens a new cycle at round 1.
+A needs-fixes cycle keeps its first base for at most ${MAX_ROUNDS} rounds; changed inputs after the cap
+open its next cycle. Fix rounds send only the fix diff and open finding ids.
 Exit 0 clean · 2 needs fixes or hand-back · 1 error.`
 }
 
