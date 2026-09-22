@@ -17,7 +17,7 @@
 import { execFileSync } from 'node:child_process';
 import { copyFileSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, realpathSync, statSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { basename, delimiter, dirname, join, resolve, sep } from 'node:path';
+import { basename, delimiter, dirname, isAbsolute, join, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { findMarkerComment, ghJson, parseFlags, renderResult } from './lib/gh.mjs';
 
@@ -199,11 +199,12 @@ const DEFAULT_RETENTION_MS = 14 * DAY_MS;
 // kept. `force` is the operator's word and lifts ONE thing — the not-merged
 // block. Uncommitted, unpushed and locked are never lifted: those are the
 // three ways real work disappears.
-export function evaluateRemoval({ state, dirty, unpushed, remoteMissing, mergedIntoDefault, locked, force = false }) {
+export function evaluateRemoval({ state, dirty, unpushed, remoteMissing, mergedIntoDefault, locked, headReachable = true, force = false }) {
   const blocks = [];
   const warns = [];
   const branchGone = state === 'orphan-dir';
   if (dirty) blocks.push('uncommitted changes in the worktree — commit or discard them first');
+  if (branchGone && !headReachable) blocks.push('the detached HEAD contains a unique commit — attach it to a branch before removing this worktree');
   if (!branchGone && (unpushed || (remoteMissing && !mergedIntoDefault))) {
     blocks.push('commits not on the remote — push the branch first, then re-check');
   }
@@ -508,18 +509,26 @@ export function restoreWorktree({ repoRoot, issue, slug, type, devMd, home, writ
 // Read the git facts the safe-to-remove test needs. Every unverifiable fact
 // fails closed: a status call that errors reports dirty, a merge check that
 // errors reports not-merged.
-function gatherRemovalFacts({ repoRoot, path, branch, base, remote, locked }) {
-  const dirty = branch === null
-    ? false
-    : (() => {
-      const status = git(path, ['status', '--porcelain']);
-      return !status.ok || status.out !== '';
-    })();
-  if (branch === null) return { dirty, unpushed: false, remoteMissing: false, mergedIntoDefault: false };
+export function gatherRemovalFacts({ repoRoot, path, branch, base, remote, locked }) {
+  const status = git(path, ['status', '--porcelain']);
+  const dirty = !status.ok || status.out !== '';
+  const headResult = git(path, ['rev-parse', '--verify', 'HEAD']);
+  const head = headResult.ok && /^[0-9a-f]{40}$/i.test(headResult.out) ? headResult.out : null;
+  if (branch === null) {
+    const containing = head === null ? { ok: false, out: '' } : git(repoRoot, [
+      'for-each-ref', '--contains', head, '--format=%(refname)', 'refs/heads', 'refs/remotes',
+    ]);
+    const headReachable = containing.ok && containing.out.split('\n').some(Boolean);
+    return {
+      dirty, head, headReachable, everPushed: false, unpushed: false,
+      remoteMissing: false, deletedAfterPush: false, mergedIntoDefault: false, locked,
+    };
+  }
   const remoteRef = remote + '/' + branch;
   const remoteMissing = !git(repoRoot, ['rev-parse', '--verify', '--quiet', 'refs/remotes/' + remoteRef]).ok;
   const ahead = remoteMissing ? null : git(repoRoot, ['rev-list', remoteRef + '..' + branch]);
-  const unpushed = remoteMissing ? false : !ahead.ok || ahead.out !== '';
+  const everPushed = git(repoRoot, ['config', '--get', 'branch.' + branch + '.merge']).out.trim() === 'refs/heads/' + branch;
+  const unpushed = remoteMissing ? !everPushed : !ahead.ok || ahead.out !== '';
   const baseRef = git(repoRoot, ['rev-parse', '--verify', '--quiet', 'refs/remotes/' + remote + '/' + base]).ok
     ? remote + '/' + base
     : base;
@@ -528,8 +537,9 @@ function gatherRemovalFacts({ repoRoot, path, branch, base, remote, locked }) {
   // brand-new branch cut from origin/main 'merged' and prune it on day one.
   const isAncestor = git(repoRoot, ['merge-base', '--is-ancestor', branch, baseRef]).ok;
   // A squash merge deletes the remote branch (delete-on-merge), so content decides then.
-  const mergedIntoDefault = (!remoteMissing && isAncestor) || mergedByContent(repoRoot, branch, baseRef);
-  return { dirty, unpushed, remoteMissing, mergedIntoDefault, locked };
+  const mergedIntoDefault = ((!remoteMissing || everPushed) && isAncestor) || mergedByContent(repoRoot, branch, baseRef);
+  const deletedAfterPush = remoteMissing && everPushed;
+  return { dirty, head, headReachable: true, everPushed, unpushed, remoteMissing, deletedAfterPush, mergedIntoDefault, locked };
 }
 
 // Squash and rebase merges rewrite the commits, so by ancestry a merged branch
@@ -592,7 +602,7 @@ export function removeWorktree({ repoRoot, name, base, force = false, push = fal
   const branch = entry.branch;
   refreshBase({ repoRoot, base, remote, actions, warns });
   let facts = gatherRemovalFacts({ repoRoot, path, branch, base, remote, locked: entry.locked });
-  if (push && branch && (facts.remoteMissing || facts.unpushed)) {
+  if (push && branch && (facts.unpushed || (facts.remoteMissing && !facts.deletedAfterPush))) {
     actions.push(at(branch, 'git push -u ' + remote + ' ' + branch + ' before removing'));
     if (write) {
       const pushed = git(path, ['push', '-u', remote, branch]);
@@ -669,15 +679,28 @@ export function stagedSecrets(path) {
 // worktree's own branch, pushed normally. A rejected push (the remote moved)
 // keeps the commit local; staged secrets keep the work uncommitted.
 export function rescueWork({ path, branch, name, remote = 'origin' }) {
+  const staged = git(path, ['diff', '--cached', '--name-only', '--diff-filter=ACMR']);
+  if (!staged.ok) return { ok: false, committed: false, reason: 'the staged selection could not be read: ' + staged.out };
+  if (staged.out) return { ok: false, committed: false, reason: 'the staged selection is not empty — preserving it unchanged' };
+  const index = git(path, ['rev-parse', '--git-path', 'index']);
+  if (!index.ok || !index.out) return { ok: false, committed: false, reason: 'the git index path could not be read' };
+  const indexPath = isAbsolute(index.out) ? index.out : resolve(path, index.out);
+  let indexBytes;
+  try { indexBytes = readFileSync(indexPath); }
+  catch (error) { return { ok: false, committed: false, reason: 'the git index could not be snapshotted: ' + error.message }; }
+  const restoreIndex = () => {
+    try { writeFileSync(indexPath, indexBytes); return null; }
+    catch (error) { return ' and the original index could not be restored: ' + error.message; }
+  };
   const added = git(path, ['add', '--all']);
-  if (!added.ok) return { ok: false, committed: false, reason: 'git add failed: ' + added.out };
+  if (!added.ok) return { ok: false, committed: false, reason: 'git add failed: ' + added.out + (restoreIndex() ?? '') };
   const secrets = stagedSecrets(path);
   if (secrets.length > 0) {
-    git(path, ['reset', '--quiet']);
-    return { ok: false, committed: false, reason: 'possible secrets, so nothing was committed: ' + secrets.join(', ') };
+    const restore = restoreIndex();
+    return { ok: false, committed: false, reason: 'possible secrets, so nothing was committed: ' + secrets.join(', ') + (restore ?? '') };
   }
   const commit = git(path, ['commit', '--quiet', '-m', 'wip: rescued uncommitted work from ' + name]);
-  if (!commit.ok) return { ok: false, committed: false, reason: 'git commit failed: ' + commit.out };
+  if (!commit.ok) return { ok: false, committed: false, reason: 'git commit failed: ' + commit.out + (restoreIndex() ?? '') };
   const push = git(path, ['push', '--quiet', '-u', remote, 'HEAD:refs/heads/' + branch]);
   if (!push.ok) return { ok: false, committed: true, reason: 'the commit stays local because the push was rejected: ' + push.out.split('\n')[0] };
   return { ok: true, committed: true, reason: null };
@@ -691,7 +714,7 @@ export function rescueWork({ path, branch, name, remote = 'origin' }) {
 // here the retention window is what lifts the not-merged rule: the pushed
 // branch keeps the work and `restore` brings the directory back. Uncommitted,
 // unpushed and locked still keep it.
-export function pruneWorktrees({ repoRoot, base, olderThan, devMd, ledgerTimes = {}, now = Date.now(), write = false, remote = 'origin', workerLayout = false }) {
+export function pruneWorktrees({ repoRoot, base, olderThan, devMd, ledgerTimes = {}, issueStates = {}, now = Date.now(), write = false, remote = 'origin', workerLayout = false }) {
   const blocks = [];
   const warns = [];
   const actions = [];
@@ -700,42 +723,41 @@ export function pruneWorktrees({ repoRoot, base, olderThan, devMd, ledgerTimes =
   refreshBase({ repoRoot, base, remote, actions, warns });
   for (const entry of inventory(repoRoot, workerLayout)) {
     const branch = entry.branch;
-    const lastCommitAt = branch ? (git(repoRoot, ['log', '-1', '--format=%cI', branch]).out || null) : null;
+    const lastCommitAt = git(entry.path, ['log', '-1', '--format=%cI', 'HEAD']).out || null;
     const ledgerUpdatedAt = ledgerTimes[entry.name] ?? null;
     const facts = gatherRemovalFacts({ repoRoot, path: entry.path, branch, base, remote, locked: entry.locked });
     const state = classifyWorktree({
       dirExists: true,
       branchExists: branch !== null,
       locked: entry.locked,
-      issueState: null,
+      issueState: issueStates[entry.name] ?? null,
       mergedIntoDefault: facts.mergedIntoDefault,
     });
     const stamps = [lastCommitAt, ledgerUpdatedAt].map((v) => (v ? Date.parse(v) : Number.NaN)).filter(Number.isFinite);
     const ageDays = stamps.length === 0 ? 0 : Math.floor((now - Math.max(...stamps)) / DAY_MS);
-    if (state !== 'parked') continue;
-    if (!isPastRetention({ lastCommitAt, ledgerUpdatedAt, now, retentionMs })) continue;
-    const verdict = evaluateRemoval({ state, ...facts, locked: entry.locked, force: true });
-    // "Prune pushes then removes, and never automatically for anything with
-    // unpushed work": the push half protects the work and happens on --write
-    // whatever else is wrong; the remove half then re-runs the same safe test
-    // and may still keep the worktree (unmerged, dirty, locked). A dry run
-    // pushes nothing, so such a candidate is correctly not-yet-removable.
-    const remoteOnly = verdict.blocks.some((block) => block.includes('commits not on the remote'));
-    const rescuable = facts.dirty && branch !== null && !entry.locked;
+    const idle = isPastRetention({ lastCommitAt, ledgerUpdatedAt, now, retentionMs });
+    const reasonCode = facts.mergedIntoDefault ? 'merged' : issueStates[entry.name] === 'closed' ? 'closed' : idle ? 'idle' : null;
+    if (reasonCode === null) continue;
+    const verdict = evaluateRemoval({ state, ...facts, locked: entry.locked, force: reasonCode !== 'merged' });
+    // Reclamation never creates a remote branch. Dirty work can be rescued only when its named
+    // remote branch still exists; never-pushed and delete-on-merge branches stay put.
+    const rescuable = facts.dirty && branch !== null && !entry.locked && !facts.remoteMissing;
     candidates.push({
       name: entry.name,
       path: entry.path,
       branch,
       state,
+      reasonCode,
       ageDays,
       removable: verdict.blocks.length === 0,
-      pushable: remoteOnly,
+      pushable: false,
       rescuable,
       reason: verdict.blocks[0] ?? null,
+      reasons: verdict.blocks,
     });
   }
   for (const candidate of candidates) {
-    if (!candidate.removable && !candidate.pushable && !candidate.rescuable) continue;
+    if (!candidate.removable && !candidate.rescuable) continue;
     if (candidate.rescuable) {
       actions.push(at(candidate.name, 'commit uncommitted work as wip on ' + candidate.branch + ' and push it'));
       if (write) {
@@ -749,9 +771,9 @@ export function pruneWorktrees({ repoRoot, base, olderThan, devMd, ledgerTimes =
         candidate.rescuedTo = candidate.branch;
       }
     }
-    actions.push(at(candidate.name, (candidate.pushable ? 'push the branch, then re-check for removal after ' : 'remove after ') + candidate.ageDays + ' quiet days'));
+    actions.push(at(candidate.name, 'remove because it is ' + candidate.reasonCode));
     if (!write) continue;
-    const removed = removeWorktree({ repoRoot, name: candidate.name, base, force: true, push: true, write: true, remote, workerLayout });
+    const removed = removeWorktree({ repoRoot, name: candidate.name, base, force: true, push: false, write: true, remote, workerLayout });
     if (removed.blocks.length > 0) {
       warns.push(at(candidate.name, 'kept after all: ' + removed.blocks[0]));
       candidate.removable = false;
@@ -982,8 +1004,9 @@ function runVerb(verb, flags) {
     const warns = [];
     const repo = flags.repo || knobLine(devMd, 'repo')?.split('·')[0].trim() || null;
     const names = inventory(repoRoot, workerLayout).map((entry) => entry.name);
+    const github = repo ? gatherGithubFacts({ repo, names, warns }) : { openIssues: [], issueStates: {} };
     const ledgerTimes = repo ? gatherLedgerTimes({ repo, names, warns }) : {};
-    const pruned = pruneWorktrees({ repoRoot, base, olderThan: flags['older-than'], devMd, ledgerTimes, now: Date.now(), write: shared.write, workerLayout });
+    const pruned = pruneWorktrees({ repoRoot, base, olderThan: flags['older-than'], devMd, ledgerTimes, issueStates: github.issueStates, now: Date.now(), write: shared.write, workerLayout });
     return { ...pruned, warns: [...warns, ...pruned.warns] };
   }
   if (verb === 'create' || verb === 'restore') {
