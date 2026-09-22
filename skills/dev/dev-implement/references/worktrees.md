@@ -1,6 +1,6 @@
 # One feature, one worktree
 
-The main checkout never leaves the default branch and never carries uncommitted work. An issue branch stays descriptive as `<type>/<n>-<slug>`, but its directory is keyed only by the stable issue number: `.vegastack/.worktrees/<n>/` in an attended repository and `~/.vegafactory/worker/repos/<owner>__<repo>/issues/<n>/` in a worker repository holder. A renamed title therefore changes neither checkout identity nor resume path. Direct-chat and release branches with no issue use their slug as the directory leaf. `scripts/worktree.mjs` owns this contract, with `vegafactory worktree …` wrapping create, restore, remove, list, prune, and `status --json`; each exits `0` pass · `1` warn · `2` blocked.
+The main checkout never leaves the default branch and never carries uncommitted work. An issue branch stays descriptive as `<type>/<n>-<slug>`, but its directory is keyed only by the stable issue number: `.vegastack/.worktrees/<n>/` in an attended repository and `~/.vegafactory/worker/repos/<owner>__<repo>/issues/<n>/` in a worker repository holder. A renamed title therefore changes neither checkout identity nor resume path. Direct-chat and release branches with no issue use their slug as the directory leaf; an issue-shaped digit-led slug is refused. `scripts/worktree.mjs` owns this contract, with `vegafactory worktree …` wrapping create, restore, remove, list, prune, and `status --json`; each exits `0` pass · `1` warn · `2` blocked.
 
 ## Scenario matrix
 
@@ -10,13 +10,14 @@ The main checkout never leaves the default branch and never carries uncommitted 
 | Epic parent | A map only — no branch or worktree of its own. |
 | Sub-issue of an epic | Its own branch and worktree cut from the default branch, like any issue, and its own PR. The plan records which siblings' file sets do not overlap and so *may* run at the same time; the worker (#218) is what will run them, and until then they are worked one at a time. |
 | Resume | Same branch, same worktree, reused. The resume read-order — brief → plan → ledger → `git log` — runs *there*, and the ledger names which "there" that is. |
-| Corrections / take-back | Reuse the worktree. Directory gone but branch alive → `vegafactory worktree restore <n>`, which finds the branch carrying the number (`--slug` picks one when several do), re-adds the checkout and re-runs include-copy, setup and trust. `restore` never creates a branch: a missing branch means the work is elsewhere. |
+| Corrections / take-back | Reuse the numeric worktree. Directory gone but branch alive → `vegafactory worktree restore <n>`, which accepts only the branch whose config records that issue identity, re-adds the checkout and re-runs include-copy, setup and trust. `restore` never guesses from a digit-led branch name or creates a branch: a missing identity record leaves the work untouched. |
 | Ship, PR | `vegafactory ship check <n>` runs in the issue's worktree: it reads the branch there and refuses uncommitted changes. |
 | Ship, merge | After the merge: `vegafactory worktree remove <n>`. That removes the **directory only** — deleting the local branch and the remote branch are separate operator words. A parent's worktree goes only when the parent PR merges. |
 | Rebase onto the default branch | Done inside the worktree; re-verify whatever the rebase touched. |
 | Direct chat trivial fix | `<type>/<slug>` in its own worktree too — the main checkout stays clean even for a one-liner. |
 | Research | A worktree only when code is actually written, on a type dev.md's `branch:` knob lists — `chore/<n>-<slug>` unless the project adds `research` to that knob; removed at hand-back, never merged. |
 | Release | `chore/release-<version>` in its own worktree. |
+| Legacy `<n>-<slug>` checkout | Listed and removable only by exact `--name`; quarantined from issue hooks, GitHub/ledger reads, `--issue` removal, restore, and status reconciliation because its leaf is indistinguishable from an old digit-led direct-chat slug. Inspect and preserve it, then explicitly remove or migrate it before creating the numeric issue checkout. |
 | Cross-tool review | Read-only, in the same worktree; a reviewer never switches the branch under it. |
 | Abandoned issue | A closed issue becomes a prune candidate immediately, but every dirty/unpushed/locked/detached safety rule still applies. |
 

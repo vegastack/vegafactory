@@ -17,6 +17,7 @@ export type WorktreeVerb = (typeof verbs)[number]
 export interface WorktreeArgs {
   verb: WorktreeVerb
   issue?: number
+  name?: string
   slug?: string
   type?: string
   force: boolean
@@ -41,7 +42,8 @@ export function worktreeUsage(): string {
   create <issue> [--slug S] [--type T]  cut the branch and its worktree (no dependency install);
                                         slug and type come off the issue title unless given
   restore <issue> [--slug S]            re-add the checkout of the branch that carries the issue number
-  remove <issue> [--force]              remove the directory once it is clean, pushed and merged
+  remove <issue>|--name <leaf> [--force] remove the exact directory once it is clean, pushed and merged;
+                                         ambiguous legacy leaves require --name
   prune [--older-than 14d] [--write]    preview reclaimable worktrees and dependencies; --write
                                         performs the reported removals after every safety check
 
@@ -79,14 +81,20 @@ export function parseWorktreeArgs(argv: string[], env: NodeJS.ProcessEnv = proce
     else if (token === '--all-repos') args.allRepos = true
     else if (token === '--json') args.json = true
     else if (token === '--older-than') args.olderThan = requireValue(token, rest.shift())
+    else if (token === '--name') {
+      if (verb !== 'remove') throw new Error('--name only applies to worktree remove')
+      args.name = requireValue(token, rest.shift())
+    }
     else if (token === '--slug') args.slug = requireValue(token, rest.shift())
     else if (token === '--type') args.type = requireValue(token, rest.shift())
     else throw new Error(`Unknown option: ${token}`)
   }
   if (dryRun) args.write = false
-  if ((verb === 'create' || verb === 'restore' || verb === 'remove') && args.issue === undefined) {
+  if (verb === 'remove' && args.issue !== undefined && args.name !== undefined) throw new Error('worktree remove accepts either an issue number or --name, not both')
+  if ((verb === 'create' || verb === 'restore') && args.issue === undefined) {
     throw new Error(`worktree ${verb} needs an issue number`)
   }
+  if (verb === 'remove' && args.issue === undefined && args.name === undefined) throw new Error('worktree remove needs an issue number or --name <leaf>')
   return args
 }
 
@@ -98,6 +106,7 @@ function requireValue(flag: string, value: string | undefined): string {
 export function scriptArgs(args: WorktreeArgs): string[] {
   const out: string[] = [args.verb, '--json']
   if (args.issue !== undefined) out.push('--issue', String(args.issue))
+  if (args.name) out.push('--name', args.name)
   if (args.slug) out.push('--slug', args.slug)
   if (args.type) out.push('--type', args.type)
   if (args.olderThan) out.push('--older-than', args.olderThan)

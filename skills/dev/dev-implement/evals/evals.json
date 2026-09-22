@@ -53,12 +53,12 @@
     {
       "id": 5,
       "prompt": "Start approved issue 42 in vegastack/docs-tools. The old title was `fix: stale links`; its current title is `fix: links after redirects`. A legacy checkout already exists at `.vegastack/.worktrees/42-stale-links`, and a direct-chat branch named `fix/42-emergency` also exists but has no checkout. Explain exactly which checkout path you use and what you do before editing.",
-      "expected_output": "The issue keeps one stable numeric checkout identity. The legacy issue checkout is detected and reused or deliberately restored/removed before a numeric checkout can be created; the digit-led no-issue branch is never treated as issue 42 and cannot be created as a no-issue worktree under an issue-shaped leaf. No second checkout is created and no destructive prune is run implicitly.",
+      "expected_output": "The issue keeps one stable numeric checkout identity. The ambiguous legacy checkout is quarantined from issue-bound hooks, claims, ledgers, restore, status, and `--issue` removal; it must be inspected and explicitly migrated or removed by exact name before the numeric checkout is created. The digit-led no-issue branch is never treated as issue 42. No second checkout or destructive action is performed implicitly.",
       "files": [],
       "assertions": [
         "The stable target for issue 42 is `.vegastack/.worktrees/42`, independent of either title",
-        "The existing legacy `42-stale-links` checkout blocks creation of a second checkout until it is explicitly reused, restored, or removed",
-        "The direct-chat branch `fix/42-emergency` is not treated as issue 42 and a digit-led no-issue worktree slug is refused",
+        "The existing legacy `42-stale-links` checkout is quarantined from issue-bound hooks, claims, ledgers, restore, status reconciliation, and `--issue` removal",
+        "The direct-chat branch `fix/42-emergency` is not treated as issue 42; both ambiguous objects require explicit by-name inspection or cleanup",
         "No `prune --write`, deletion, or second checkout is performed implicitly"
       ]
     }

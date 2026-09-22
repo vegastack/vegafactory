@@ -12,7 +12,7 @@ import { defaultRunner, type GhRunner } from './gh.ts'
 import { canCommit, classifyCommand, extractCommand, isShellTool, loadPolicy, mergeTarget, type Decision, type MergeCheck } from './guard-rules.ts'
 import { cacheDir, readBody, readState, replaceFile, syncIssue, withLock } from './issue-cache.ts'
 import { askText, learningsPath, pendingNote } from './learning.ts'
-import { detectRepo, evidenceChangedAt, findValidAck, latestOfType, permissionLookup, repoRoot, snapshot } from './issue.ts'
+import { detectRepo, evidenceChangedAt, findValidAck, latestOfType, markerKeys, permissionLookup, repoRoot, snapshot } from './issue.ts'
 import { stateOf } from './labels.ts'
 import { effectiveUpdateMode, installArgs, latestPublishedVersion, maintainSelfUpdate, packageVersion, readUpdateNote, SELF_UPDATE_LIMIT_S, writeUpdateNote, type LatestVersion } from './self-update.ts'
 
@@ -472,16 +472,21 @@ function mergeCheck(cwd: string, root: string, repo: string, deps: HookDeps): Me
     // With no argument gh merges the current branch's PR.
     const target = mergeTarget(words) ?? git(cwd, ['branch', '--show-current']).out
     if (!target) return false
-    const view = deps.runner(['pr', 'view', target, '--repo', repo, '--json', 'closingIssuesReferences'])
+    const view = deps.runner(['pr', 'view', target, '--repo', repo, '--json', 'headRefName,headRefOid,closingIssuesReferences'])
     if (view.code !== 0) return false
-    const closing = (JSON.parse(view.stdout) as { closingIssuesReferences?: Array<{ number?: number }> }).closingIssuesReferences ?? []
+    const pr = JSON.parse(view.stdout) as { headRefName?: string; headRefOid?: string; closingIssuesReferences?: Array<{ number?: number }> }
+    const closing = pr.closingIssuesReferences ?? []
     const numbers = [...new Set(closing.map((issue) => issue.number).filter((number): number is number => Number.isInteger(number) && number! > 0))]
     const number = numbers.length === 1 ? numbers[0] : null
     if (!number) return false
+    if (!pr.headRefName || !/^[0-9a-f]{40}$/i.test(pr.headRefOid ?? '') || issueFromBranch(pr.headRefName, number) !== number) return false
     syncIssue({ root, repo, number, runner: deps.runner })
     const snap = snapshot(cacheDir(root, repo, number))
     const evidence = latestOfType(snap, 'evidence')
-    return !!evidence && findValidAck(snap, 'ship', permissionLookup(repo, deps.runner), evidenceChangedAt(evidence)).ok
+    if (!evidence) return false
+    const keys = markerKeys(snap.body(evidence))
+    if (keys.branch !== pr.headRefName || !/^[0-9a-f]{7,40}$/i.test(keys.sha ?? '') || !pr.headRefOid!.startsWith(keys.sha!)) return false
+    return findValidAck(snap, 'ship', permissionLookup(repo, deps.runner), evidenceChangedAt(evidence)).ok
   }
 }
 

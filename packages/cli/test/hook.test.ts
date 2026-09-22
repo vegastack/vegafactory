@@ -30,6 +30,7 @@ let out: string[]
 let detached: string[][]
 let stats: string[][]
 let prHead: string
+let prHeadOid: string
 let detachPid: number | undefined
 const OWNER = 'box:7'
 const ctx = () => ({ root, repo: 'o/r', number: 7, runner: gh.runner })
@@ -38,7 +39,7 @@ const ctx = () => ({ root, repo: 'o/r', number: 7, runner: gh.runner })
 const runner: GhRunner = (args, input) => {
   if (args[0] === 'pr' && args[1] === 'view') {
     const number = /^[\w.-]+\/(\d+)-/.exec(prHead)?.[1]
-    return { code: 0, stdout: JSON.stringify({ closingIssuesReferences: number ? [{ number: Number(number) }] : [] }), stderr: '' }
+    return { code: 0, stdout: JSON.stringify({ headRefName: prHead, headRefOid: prHeadOid, closingIssuesReferences: number ? [{ number: Number(number) }] : [] }), stderr: '' }
   }
   return gh.runner(args, input)
 }
@@ -88,6 +89,7 @@ beforeEach(() => {
   stats = []
   detachPid = undefined
   prHead = 'feat/7-export'
+  prHeadOid = git(root, 'rev-parse', 'HEAD')
   const base = realpathSync(mkdtempSync(join(tmpdir(), 'hook-')))
   fakeHome = join(base, 'home')
   mkdirSync(fakeHome, { recursive: true })
@@ -195,7 +197,8 @@ describe('guard', () => {
 
   test('gh pr merge passes only with a ship it after the latest evidence on the issue its branch names', async () => {
     expect((await hook('pre-tool', bash('gh pr merge 12 --squash'))).json().hookSpecificOutput.permissionDecision).toBe('ask')
-    gh.addComment(7, '<!-- vsk:v1 type=evidence -->\nit works\n- [ ] done')
+    const head = git(root, 'rev-parse', 'HEAD')
+    gh.addComment(7, `<!-- vsk:v1 type=evidence branch=feat/7-export sha=${head.slice(0, 7)} -->\nit works\n- [ ] done`)
     gh.addComment(7, ackBody({ stage: 'ship', by: 'mk', brief: artifactHash('Export CSV'), plan: null, source: 'session', quote: 'ship it' }))
     expect((await hook('pre-tool', bash('gh pr merge 12 --squash'))).text).toBe('')
     expect((await hook('pre-tool', bash('gh pr merge --squash'))).text).toBe('')
@@ -204,13 +207,16 @@ describe('guard', () => {
     prHead = 'feat/8-other'
     expect((await hook('pre-tool', bash('gh pr merge 12'))).text).toContain('"ask"')
     prHead = 'feat/7-export'
+    prHeadOid = 'f'.repeat(40)
+    expect((await hook('pre-tool', bash('gh pr merge 12'))).text).toContain('"ask"')
+    prHeadOid = head
     // Editing the evidence after "ship it" voids it, as issue check says; ticking a box does not.
     const evidence = gh.issues.get(7)!.comments.find((c) => c.body.includes('type=evidence'))!
-    gh.editComment(evidence.id, '<!-- vsk:v1 type=evidence -->\nit works\n- [x] done')
+    gh.editComment(evidence.id, `<!-- vsk:v1 type=evidence branch=feat/7-export sha=${head.slice(0, 7)} -->\nit works\n- [x] done`)
     expect((await hook('pre-tool', bash('gh pr merge 12'))).text).toBe('')
-    gh.editComment(evidence.id, '<!-- vsk:v1 type=evidence -->\nit works, edited')
+    gh.editComment(evidence.id, `<!-- vsk:v1 type=evidence branch=feat/7-export sha=${head.slice(0, 7)} -->\nit works, edited`)
     expect((await hook('pre-tool', bash('gh pr merge 12'))).text).toContain('"ask"')
-    gh.editComment(evidence.id, '<!-- vsk:v1 type=evidence -->\nit works')
+    gh.editComment(evidence.id, `<!-- vsk:v1 type=evidence branch=feat/7-export sha=${head.slice(0, 7)} -->\nit works`)
     gh.addComment(7, ackBody({ stage: 'ship', by: 'mk', brief: artifactHash('Export CSV'), plan: null, source: 'session', quote: 'ship it' }))
     expect((await hook('pre-tool', bash('gh pr merge 12'))).text).toBe('')
     gh.addComment(7, '<!-- vsk:v1 type=evidence -->\nnew evidence')

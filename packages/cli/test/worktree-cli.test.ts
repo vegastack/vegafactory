@@ -8,6 +8,10 @@ describe('parseWorktreeArgs', () => {
   test('prune previews until --write, and --dry-run always wins', () => {
     expect(parseWorktreeArgs(['create', '106'])).toMatchObject({ verb: 'create', issue: 106, write: true })
     expect(parseWorktreeArgs(['remove', '106'])).toMatchObject({ verb: 'remove', issue: 106, write: true, force: false })
+    expect(parseWorktreeArgs(['remove', '--name', '106-old-title'])).toMatchObject({ verb: 'remove', name: '106-old-title', write: true })
+    expect(scriptArgs(parseWorktreeArgs(['remove', '--name', '106-old-title']))).toEqual(['remove', '--json', '--name', '106-old-title', '--write'])
+    expect(() => parseWorktreeArgs(['remove', '106', '--name', '106-old-title'])).toThrow('either an issue number or --name')
+    expect(() => parseWorktreeArgs(['create', '106', '--name', 'x'])).toThrow('--name only applies')
     expect(parseWorktreeArgs(['remove', '106', '--force', '--dry-run'])).toMatchObject({ force: true, write: false })
     expect(parseWorktreeArgs(['prune', '--older-than', '7d'])).toMatchObject({ verb: 'prune', olderThan: '7d', write: false })
     expect(parseWorktreeArgs(['prune', '--write'])).toMatchObject({ verb: 'prune', write: true })
@@ -47,6 +51,16 @@ describe('runWorktree', () => {
     expect(calls[0]).toEqual(['create', '--json', '--issue', '106', '--write'])
     expect(await runWorktree(['restore', '106'], { spawn, registryPath })).toBe(0)
     expect(calls[1]).toEqual(['restore', '--json', '--issue', '106', '--write'])
+  })
+  test('exact-name legacy removal reaches the script without becoming an issue lookup', async () => {
+    const calls: string[][] = []
+    const spawn = (args: string[]) => {
+      calls.push(args)
+      return { status: 0, stdout: JSON.stringify({ guard: 'worktree', ok: true, blocks: [], warns: [] }) }
+    }
+    const registryPath = join(mkdtempSync(join(tmpdir(), 'vf-reg-')), 'worktree-roots.json')
+    expect(await runWorktree(['remove', '--name', '106-old-title'], { spawn, registryPath })).toBe(0)
+    expect(calls[0]).toEqual(['remove', '--json', '--name', '106-old-title', '--write'])
   })
   test('bare prune reaches the script as a preview and explicit write reaches it as a mutation', async () => {
     const calls: string[][] = []
