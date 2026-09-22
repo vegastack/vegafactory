@@ -41,7 +41,6 @@ const NEVER_PARALLEL = [
   'packages/cli/packaging.json',
   '.vegastack/dev.md',
   '.vegastack/chronicle.md',
-  '.vegastack/skillspector-baseline.json',
 ];
 
 export function sharedByEveryChild(path) {

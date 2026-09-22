@@ -1,6 +1,6 @@
 ---
 name: skill-maintainer
-description: Standards and release operations for the vegafactory repository itself. Use when working on this repository - editing an existing skill (SKILL.md, references, scripts, tests), renaming, deprecating, or removing a skill, creating or checking a skill group, cutting a release or rolling one back, adjudicating a skill-scan finding, or checking cross-harness portability across Claude Code, Codex and the agentskills.io standard. Not for scaffolding a new skill or scoring one against the contract (skillify), and not for skills that live in other projects.
+description: Standards and release operations for the vegafactory repository itself. Use when working on this repository - editing an existing skill (SKILL.md, references, scripts, tests), renaming, deprecating, or removing a skill, creating or checking a skill group, cutting a release or rolling one back, or checking cross-harness portability across Claude Code, Codex and the agentskills.io standard. Not for scaffolding a new skill or scoring one against the contract (skillify), and not for skills that live in other projects.
 ---
 
 # VegaStack Skill Maintainer
@@ -23,7 +23,6 @@ This skill states what must be true; skillify states how to get there. When a ru
 | Need | Read |
 |---|---|
 | Claude Code and Codex standards: discovery paths, frontmatter, budgets, install surfaces, portability | [standards](references/standards.md) |
-| skill-scan triage and the suppression baseline | [standards](references/standards.md) |
 | a new skill: the should-it-exist gate, scaffolding, audit, evals | the `skillify` skill |
 | repo shape, groups, the structure check | the group workflow below |
 | release, rename, deprecate, rollback | [release ops](references/release-ops.md) |

@@ -6,11 +6,6 @@
   { "query": "check whether the Claude Code hook facts are stale", "should_trigger": true },
   { "query": "the harness facts are older than 60 days - go look", "should_trigger": true },
   {
-    "query": "scan these skills for prompt injection",
-    "should_trigger": false,
-    "ambiguous_with": ["skill-scan"]
-  },
-  {
     "query": "audit this skill for completeness",
     "should_trigger": false,
     "ambiguous_with": ["skillify"]
