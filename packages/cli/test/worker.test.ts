@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, test } from 'bun:test'
 import { spawnSync } from 'node:child_process'
 import { generateKeyPairSync } from 'node:crypto'
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { claimBody, claimLine, holderOf, nodeId, trustedFactory } from '../src/claim.ts'
@@ -14,9 +14,10 @@ import {
   parseNodes, poll, readActed, readRuns, readiness, recordRun, resetAt, runKey, RUNS_KEPT, runWorker, schedule, serviceCommands, stagePolicy,
   standDown, standDownStrict, stepPrompt, tail, unitPath, unitText, unsafeForParallel, workingDir,
   workerUsage,
-  gitIn, migrateLegacyWorkerState, noteChild, readChildren, refreshRoster, releaseRunLock, reserve, runLockPath, stopChild, takeRunLock, verifiedListing,
+  forgetChild, gitIn, migrateLegacyWorkerState, noteChild, readChildren, refreshRoster, releaseRunLock, reserve, runLockPath, stopChild, takeRunLock, updateActed, verifiedListing,
   recordRoomSha, updateModeFor,
   normalizeWorkerRepos, readWorkerState, reconcileBoards, workerProblemReporter,
+  WorkerRecordError,
   type Candidate, type Fetch, type GitRun, type Inflight, type PollDeps, type Probe, type RunStep, type StepResult,
 } from '../src/worker.ts'
 import type { GhRunner } from '../src/gh.ts'
@@ -1992,14 +1993,14 @@ describe('the step a run makes', () => {
 
   test('a run\'s output is bounded, and so is the record of runs', () => {
     expect(tail('a\n'.repeat(1000) + 'last').length).toBeLessThanOrEqual(400)
-    for (let i = 0; i < RUNS_KEPT * 2 + 5; i++) {
+    for (let i = 1; i <= RUNS_KEPT * 2 + 5; i++) {
       recordRun(root, { at: new Date(i).toISOString(), repo: 'o/r', issue: i, action: 'plan', outcome: 'done', ms: 1, machine: HOST, note: '' })
     }
     // Trimmed back to the last RUNS_KEPT each time it doubles, so the file never grows unbounded
     // and the newest run is always there.
     const kept = readRuns(root, RUNS_KEPT * 4)
     expect(kept.length).toBeLessThanOrEqual(RUNS_KEPT * 2)
-    expect(kept.at(-1)!.issue).toBe(RUNS_KEPT * 2 + 4)
+    expect(kept.at(-1)!.issue).toBe(RUNS_KEPT * 2 + 5)
   })
 
   test('global run and child records preserve repository identity across a read', () => {
@@ -2092,6 +2093,78 @@ describe('the step a run makes', () => {
     const exec = async () => ({ code: 0, stdout: 'done', stderr: '', timedOut: false })
     const step = defaultRunStep({ ANTHROPIC_API_KEY: 'sk-ant-x' }, { exec })
     await expect(step({ action: 'implement', number: 7, repo: 'o/r', split: false, by: null }, { root, devMd: '', token: null })).rejects.toThrow(/ANTHROPIC_API_KEY.*subscriptions only/s)
+  })
+})
+
+describe('machine-global runtime records fail closed', () => {
+  const privateRoot = () => {
+    const home = realpathSync(mkdtempSync(join(tmpdir(), 'worker-records-')))
+    const stateRoot = join(home, '.vegafactory', 'worker')
+    mkdirSync(stateRoot, { recursive: true, mode: 0o700 })
+    chmodSync(stateRoot, 0o700)
+    return { home, stateRoot }
+  }
+  const privateFile = (path: string, text: string) => {
+    writeFileSync(path, text, { mode: 0o600 })
+    chmodSync(path, 0o600)
+  }
+
+  test('only ENOENT is absence; malformed records never become empty state', () => {
+    for (const [name, bad, read] of [
+      ['acted.json', '[]', (root: string) => readActed(root)],
+      ['children.json', JSON.stringify([{ repo: 'o/r', pid: 1 }]), (root: string) => readChildren(root)],
+      ['runs.jsonl', '{not-json}\n', (root: string) => readRuns(root)],
+    ] as const) {
+      const { stateRoot } = privateRoot()
+      expect(read(stateRoot)).toEqual(name === 'acted.json' ? {} : [])
+      const path = join(stateRoot, name)
+      privateFile(path, bad)
+      expect(() => read(stateRoot), name).toThrow(WorkerRecordError)
+      expect(readFileSync(path, 'utf8')).toBe(bad)
+    }
+    const { stateRoot } = privateRoot()
+    privateFile(join(stateRoot, 'acted.json'), JSON.stringify({ '../bad#1': { at: 1, action: 'plan', outcome: 'done', trigger: null, failures: 0, retryAt: null } }))
+    expect(() => readActed(stateRoot)).toThrow(WorkerRecordError)
+  })
+
+  test('invalid acted and child bytes survive every attempted mutation', () => {
+    const { stateRoot } = privateRoot()
+    const acted = join(stateRoot, 'acted.json')
+    privateFile(acted, '[]')
+    expect(() => updateActed(stateRoot, (rows) => { rows['o/r#1'] = { at: 1, action: 'plan', outcome: 'done', trigger: null, failures: 0, retryAt: null } })).toThrow(WorkerRecordError)
+    expect(readFileSync(acted, 'utf8')).toBe('[]')
+
+    const children = join(stateRoot, 'children.json')
+    privateFile(children, '{}')
+    const child = { repo: 'o/r', pid: 9191, startedAt: 'now', command: 'codex', issue: 1, action: 'plan' as const, owner: null, from: 'planning' as const }
+    expect(() => noteChild(stateRoot, child)).toThrow(WorkerRecordError)
+    expect(() => forgetChild(stateRoot, 9191)).toThrow(WorkerRecordError)
+    expect(readFileSync(children, 'utf8')).toBe('{}')
+  })
+
+  test('unsafe leaves and non-private permissions are distinct read errors', () => {
+    const { home, stateRoot } = privateRoot()
+    const target = join(home, 'outside.json')
+    privateFile(target, '{}')
+    symlinkSync(target, join(stateRoot, 'acted.json'))
+    expect(() => readActed(stateRoot)).toThrow(/unsafe|symbolic|regular|ordinary/i)
+    rmSync(join(stateRoot, 'acted.json'))
+    privateFile(join(stateRoot, 'acted.json'), '{}')
+    chmodSync(join(stateRoot, 'acted.json'), 0o644)
+    expect(() => readActed(stateRoot)).toThrow(/0600|private|permission/i)
+    expect(readFileSync(target, 'utf8')).toBe('{}')
+  })
+
+  test('valid runtime files are owner-only and concurrent child changes remain complete', () => {
+    const { stateRoot } = privateRoot()
+    const child = (pid: number) => ({ repo: 'o/r', pid, startedAt: String(pid), command: 'codex', issue: pid, action: 'plan' as const, owner: null, from: 'planning' as const })
+    noteChild(stateRoot, child(71))
+    noteChild(stateRoot, child(72))
+    recordRun(stateRoot, { at: new Date().toISOString(), repo: 'o/r', issue: 1, action: 'plan', outcome: 'done', ms: 1, machine: HOST, note: '' })
+    updateActed(stateRoot, (rows) => { rows['o/r#1'] = { at: 1, action: 'plan', outcome: 'done', trigger: null, failures: 0, retryAt: null } })
+    expect(readChildren(stateRoot).map((row) => row.pid)).toEqual([71, 72])
+    for (const name of ['children.json', 'runs.jsonl', 'acted.json']) expect(lstatSync(join(stateRoot, name)).mode & 0o777).toBe(0o600)
+    expect(lstatSync(stateRoot).mode & 0o777).toBe(0o700)
   })
 })
 
