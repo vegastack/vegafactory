@@ -1243,6 +1243,14 @@ function safeGlobalStateRoot(factoryRoot: string, stateRoot: string, create: boo
 
 type InspectedRecord<T> = { exists: boolean; value: T | null; error: string | null }
 
+function pathEntryExists(path: string): boolean {
+  try { lstatSync(path); return true }
+  catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return false
+    throw error
+  }
+}
+
 export function trustedRecordOwner(owner: number, uid: number | undefined = process.getuid?.()): boolean {
   return uid === undefined || owner === uid
 }
@@ -1621,8 +1629,8 @@ function quarantineMalformedLegacy(input: { root: string; stateRoot: string; rep
   if (!names.has(journal.name) || journal.source !== join(legacyRoot, journal.name) || dirname(journal.target) !== quarantine) {
     throw new WorkerRecordError('malformed', `${journalPath} names a path outside the legacy quarantine transaction`)
   }
-  const sourceExists = existsSync(journal.source)
-  const targetExists = existsSync(journal.target)
+  const sourceExists = pathEntryExists(journal.source)
+  const targetExists = pathEntryExists(journal.target)
   if (sourceExists && targetExists) throw new WorkerRecordError('unsafe', `${journalPath} found both source and quarantine target`)
   if (sourceExists) {
     const locked = safeLegacyStateRoot(input.root, legacyRoot)
@@ -1631,7 +1639,7 @@ function quarantineMalformedLegacy(input: { root: string; stateRoot: string; rep
     catch (error) { throw new WorkerRecordError('unreadable', `${journal.reason}; it could not be quarantined: ${(error as Error).message}`) }
     input.afterBoundary?.(`quarantine-rename:${journal.name}`)
   }
-  if (!existsSync(journal.target)) throw new WorkerRecordError('unreadable', `${journal.reason}; neither source nor quarantine target exists`)
+  if (!pathEntryExists(journal.target)) throw new WorkerRecordError('unreadable', `${journal.reason}; neither source nor quarantine target exists`)
   const quarantined = lstatSync(journal.target)
   if (quarantined.isFile() && !quarantined.isSymbolicLink()) {
     const bytes = readFileSync(journal.target)

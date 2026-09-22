@@ -2759,6 +2759,21 @@ describe('stopped-service worker storage preparation', () => {
     expect(preserved).toHaveLength(1)
     expect(lstatSync(join(stateRoot, 'quarantine', preserved[0]!)).isSymbolicLink()).toBe(true)
   })
+
+  test('a dangling legacy record link is evidence, not absence, and quarantines cleanly', () => {
+    const legacy = workerDir(root)
+    const stateRoot = join(home, '.vegafactory', 'worker')
+    mkdirSync(legacy, { recursive: true })
+    symlinkSync(join(home, 'missing-target'), join(legacy, 'children.json'))
+    const first = prepareWorkerStorage({ root, stateRoot, repo: 'o/r', serviceStopped: true })
+    expect(first).toMatchObject({ ok: false, reason: expect.stringContaining('preserved at') })
+    expect(() => lstatSync(join(legacy, 'children.json'))).toThrow()
+    const quarantine = join(stateRoot, 'quarantine')
+    const evidence = readdirSync(quarantine)
+    expect(evidence).toHaveLength(1)
+    expect(lstatSync(join(quarantine, evidence[0]!)).isSymbolicLink()).toBe(true)
+    expect(prepareWorkerStorage({ root, stateRoot, repo: 'o/r', serviceStopped: true })).toMatchObject({ ok: true })
+  })
 })
 
 describe('the command', () => {
