@@ -660,6 +660,28 @@ describe('the base is fixed and always a commit', () => {
     expect(readState()).toMatchObject({ cycle: 2, round: 2, base: second })
   })
 
+  test('a new cycle without --base resolves the current default base', async () => {
+    queue('codex', [
+      codexReply(verdict([finding('F1')])),
+      codexReply(verdict([finding('F1')])),
+      codexReply(verdict([finding('F1')])),
+      codexReply(verdict([])),
+    ])
+    const first = git(root, 'rev-parse', 'origin/main')
+    expect((await review(['--reviewer', 'codex'])).code).toBe(2)
+    commit('fix-1.ts', 'one\n')
+    expect((await review(['--reviewer', 'codex'])).code).toBe(2)
+    commit('fix-2.ts', 'two\n')
+    expect((await review(['--reviewer', 'codex'])).code).toBe(2)
+
+    git(root, 'push', '-q', 'origin', 'HEAD:main')
+    const second = git(root, 'rev-parse', 'origin/main')
+    expect(second).not.toBe(first)
+    commit('fix-3.ts', 'three\n')
+    expect((await review(['--reviewer', 'codex'])).code).toBe(0)
+    expect(readState()).toMatchObject({ cycle: 2, round: 1, base: second, verdict: 'clean' })
+  })
+
   test('a changed head after a clean verdict starts a new cycle with a new base', async () => {
     queue('codex', [codexReply(verdict([])), codexReply(verdict([]))])
     const first = git(root, 'rev-parse', 'origin/main')
