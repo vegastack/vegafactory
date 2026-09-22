@@ -631,7 +631,8 @@ async function update(options: Options, quietWhenCurrent = false, includeMissing
 async function sweepRetired(options: Options, agents: Agent[], base: string): Promise<{ removed: number; kept: string[] }> {
   const { retiredIn } = await import('./selection.ts')
   const catalog = await skillCatalog()
-  const names = new Set(retiredIn({ skill: options.skill, group: options.group, all: options.all }, catalog))
+  const namedRetired = new Set(retiredIn({ skill: options.skill, group: options.group, all: options.all }, catalog))
+  const names = new Set(namedRetired)
   const live = new Set(catalog.filter(entry => !entry.retired).map(entry => entry.name))
   const kept: string[] = []
   const doomed: { name: string; agent: Agent; destination: string; replacedBy?: string }[] = []
@@ -656,7 +657,10 @@ async function sweepRetired(options: Options, agents: Agent[], base: string): Pr
       if (!await exists(destination)) continue
       await assertNoSymlink(destination, false)
       const receipt = await readReceipt(destination)
-      if (!receipt?.files) continue
+      if (!receipt?.files) {
+        if (namedRetired.has(name)) kept.push(destination)
+        continue
+      }
       const untouched = receipt?.files ? (await compare(destination, receipt.files)).status === 'verified' : false
       if (untouched || options.force) doomed.push({ name, agent, destination, replacedBy: catalog.find(entry => entry.name === name)?.replacedBy })
       else kept.push(destination)
