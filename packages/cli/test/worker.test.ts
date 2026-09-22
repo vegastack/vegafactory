@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, test } from 'bun:test'
 import { spawnSync } from 'node:child_process'
 import { generateKeyPairSync } from 'node:crypto'
-import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import { appendFileSync, chmodSync, closeSync, existsSync, lstatSync, mkdirSync, mkdtempSync, openSync, readFileSync, readdirSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { claimBody, claimLine, holderOf, nodeId, trustedFactory } from '../src/claim.ts'
@@ -14,7 +14,7 @@ import {
   parseNodes, poll, readActed, readRuns, readiness, recordRun, resetAt, runKey, RUNS_KEPT, runWorker, schedule, serviceCommands, stagePolicy,
   standDown, standDownStrict, stepPrompt, tail, unitPath, unitText, unsafeForParallel, workingDir,
   workerUsage,
-  forgetChild, gitIn, migrateLegacyWorkerState, noteChild, readChildren, refreshRoster, releaseRunLock, reserve, runLockPath, stopChild, takeRunLock, updateActed, verifiedListing,
+  forgetChild, gitIn, migrateLegacyWorkerState, noteChild, prepareWorkerStorage, readChildren, refreshRoster, releaseRunLock, reserve, runLockPath, stopChild, takeRunLock, updateActed, verifiedListing,
   recordRoomSha, updateModeFor,
   normalizeWorkerRepos, readWorkerState, reconcileBoards, workerProblemReporter,
   WorkerRecordError,
@@ -1949,7 +1949,8 @@ describe('readiness and the service', () => {
     // Already lingering: setting it is gated by polkit, and asking again would fail on exactly the
     // box where an administrator had just done it — making the documented recovery no recovery.
     expect(serviceCommands('linux', '/u', 'enable', 501, true).flat()).not.toContain('enable-linger')
-    expect(serviceCommands('linux', '/u', 'enable', 501, true)[0]).toEqual(['systemctl', '--user', 'daemon-reload'])
+    expect(serviceCommands('linux', '/u', 'enable', 501, true)[0]).toEqual(['systemctl', '--user', 'stop', 'vegafactory-worker.service'])
+    expect(serviceCommands('linux', '/u', 'enable', 501, true)[1]).toEqual(['systemctl', '--user', 'daemon-reload'])
     // Reading the property needs no privilege, so it is safe to ask before trying to set it.
     expect(alreadyLingering((() => ({ code: 0, stdout: 'Linger=yes\n', stderr: '' })) as Probe, 501)).toBe(true)
     expect(alreadyLingering((() => ({ code: 0, stdout: 'Linger=no\n', stderr: '' })) as Probe, 501)).toBe(false)
@@ -2404,6 +2405,115 @@ describe('legacy worker state migration', () => {
     expect(result).toMatchObject({ ok: false, migrated: false })
     expect(readFileSync(path, 'utf8')).toBe(before)
     expect(existsSync(join(stateRoot, 'acted.json'))).toBe(false)
+  })
+})
+
+describe('stopped-service worker storage preparation', () => {
+  const run = (issue: number, note: string) => JSON.stringify({
+    at: `2026-09-${String(issue).padStart(2, '0')}T00:00:00Z`, repo: 'o/r', issue,
+    action: 'plan', outcome: 'done', ms: 1, machine: HOST, note,
+  }) + '\n'
+
+  test('refuses rotation without proof that the service is stopped', () => {
+    const stateRoot = join(home, '.vegafactory', 'worker')
+    expect(prepareWorkerStorage({ root, stateRoot, repo: 'o/r', serviceStopped: false })).toMatchObject({
+      ok: false, migrated: false, reason: expect.stringContaining('confirmed stopped'),
+    })
+    expect(existsSync(stateRoot)).toBe(false)
+  })
+
+  test('migrates once and replaces runs, stdout, and stderr with private fresh inodes', () => {
+    const legacy = workerDir(root)
+    const stateRoot = join(home, '.vegafactory', 'worker')
+    mkdirSync(legacy, { recursive: true })
+    mkdirSync(stateRoot, { recursive: true })
+    writeFileSync(join(legacy, 'runs.jsonl'), run(1, 'legacy'))
+    writeFileSync(join(stateRoot, 'runs.jsonl'), run(2, 'global'))
+    writeFileSync(join(stateRoot, 'acted.json'), JSON.stringify({ 'o/r#2': { at: 2, action: 'plan', outcome: 'done', trigger: null, failures: 0, retryAt: null } }))
+    writeFileSync(join(stateRoot, 'children.json'), '[]\n')
+    writeFileSync(join(legacy, 'worker.log'), 'legacy-out\n')
+    writeFileSync(join(stateRoot, 'worker.log'), 'global-out\n')
+    writeFileSync(join(legacy, 'worker.err.log'), 'legacy-err\n')
+    writeFileSync(join(stateRoot, 'worker.err.log'), 'global-err\n')
+
+    const oldRuns = openSync(join(legacy, 'runs.jsonl'), 'r')
+    const oldOut = openSync(join(legacy, 'worker.log'), 'r')
+    const oldErr = openSync(join(stateRoot, 'worker.err.log'), 'r')
+    for (const fd of [oldRuns, oldOut, oldErr]) readFileSync(fd, 'utf8')
+    try {
+      expect(prepareWorkerStorage({ root, stateRoot, repo: 'o/r', serviceStopped: true, start: () => null, alive: () => false })).toMatchObject({ ok: true })
+      recordRun(stateRoot, { at: '2026-09-03T00:00:00Z', repo: 'o/r', issue: 3, action: 'plan', outcome: 'done', ms: 1, machine: HOST, note: 'fresh' })
+      appendFileSync(join(stateRoot, 'worker.log'), 'fresh-out\n')
+      appendFileSync(join(stateRoot, 'worker.err.log'), 'fresh-err\n')
+      expect(readFileSync(oldRuns, 'utf8')).toBe('')
+      expect(readFileSync(oldOut, 'utf8')).toBe('')
+      expect(readFileSync(oldErr, 'utf8')).toBe('')
+    } finally { for (const fd of [oldRuns, oldOut, oldErr]) closeSync(fd) }
+
+    expect(readRuns(stateRoot, 10).map((row) => row.issue)).toEqual([2, 1, 3])
+    expect(readFileSync(join(stateRoot, 'worker.log'), 'utf8')).toBe('global-out\nlegacy-out\nfresh-out\n')
+    expect(readFileSync(join(stateRoot, 'worker.err.log'), 'utf8')).toBe('global-err\nlegacy-err\nfresh-err\n')
+    for (const name of ['acted.json', 'children.json', 'runs.jsonl', 'worker.log', 'worker.err.log']) expect(lstatSync(join(stateRoot, name)).mode & 0o777).toBe(0o600)
+    expect(lstatSync(stateRoot).mode & 0o777).toBe(0o700)
+    expect(existsSync(join(legacy, 'runs.jsonl'))).toBe(false)
+    expect(existsSync(join(legacy, 'worker.log'))).toBe(false)
+    expect(existsSync(join(legacy, 'worker.err.log'))).toBe(false)
+
+    expect(prepareWorkerStorage({ root, stateRoot, repo: 'o/r', serviceStopped: true, start: () => null, alive: () => false })).toMatchObject({ ok: true })
+    expect(readFileSync(join(stateRoot, 'worker.log'), 'utf8')).toBe('global-out\nlegacy-out\nfresh-out\n')
+    expect(readFileSync(join(stateRoot, 'worker.err.log'), 'utf8')).toBe('global-err\nlegacy-err\nfresh-err\n')
+  })
+
+  test('a crash after publishing an append target resumes without duplicate bytes', () => {
+    const legacy = workerDir(root)
+    const stateRoot = join(home, '.vegafactory', 'worker')
+    mkdirSync(legacy, { recursive: true })
+    writeFileSync(join(legacy, 'worker.log'), 'one copy\n')
+    const interrupted = prepareWorkerStorage({
+      root, stateRoot, repo: 'o/r', serviceStopped: true,
+      afterPublish: name => { if (name === 'worker.log') throw new Error('crash after publish') },
+    })
+    expect(interrupted).toMatchObject({ ok: false, reason: 'crash after publish' })
+    expect(readFileSync(join(stateRoot, 'worker.log'), 'utf8')).toBe('one copy\n')
+    expect(existsSync(join(legacy, 'worker.log'))).toBe(true)
+    expect(readdirSync(stateRoot)).toContain('.migrate-worker.log.json')
+
+    expect(prepareWorkerStorage({ root, stateRoot, repo: 'o/r', serviceStopped: true })).toMatchObject({ ok: true })
+    expect(readFileSync(join(stateRoot, 'worker.log'), 'utf8')).toBe('one copy\n')
+    expect(existsSync(join(legacy, 'worker.log'))).toBe(false)
+    expect(readdirSync(stateRoot)).not.toContain('.migrate-worker.log.json')
+  })
+
+  test('malformed legacy evidence is quarantined privately and requires an explicit retry', () => {
+    const legacy = workerDir(root)
+    const stateRoot = join(home, '.vegafactory', 'worker')
+    mkdirSync(legacy, { recursive: true })
+    writeFileSync(join(legacy, 'runs.jsonl'), '{bad json\n')
+    const first = prepareWorkerStorage({ root, stateRoot, repo: 'o/r', serviceStopped: true })
+    expect(first).toMatchObject({ ok: false, migrated: false, reason: expect.stringContaining('preserved at') })
+    expect(existsSync(join(legacy, 'runs.jsonl'))).toBe(false)
+    const quarantine = join(stateRoot, 'quarantine')
+    expect(lstatSync(quarantine).mode & 0o777).toBe(0o700)
+    const preserved = readdirSync(quarantine)
+    expect(preserved).toHaveLength(1)
+    expect(readFileSync(join(quarantine, preserved[0]!), 'utf8')).toBe('{bad json\n')
+    expect(prepareWorkerStorage({ root, stateRoot, repo: 'o/r', serviceStopped: true })).toMatchObject({ ok: true })
+  })
+
+  test('an unsafe legacy log link is quarantined without touching its target', () => {
+    const legacy = workerDir(root)
+    const stateRoot = join(home, '.vegafactory', 'worker')
+    const outside = join(home, 'outside-worker.log')
+    mkdirSync(legacy, { recursive: true })
+    writeFileSync(outside, 'external evidence\n')
+    symlinkSync(outside, join(legacy, 'worker.log'))
+    const result = prepareWorkerStorage({ root, stateRoot, repo: 'o/r', serviceStopped: true })
+    expect(result).toMatchObject({ ok: false, reason: expect.stringContaining('preserved at') })
+    expect(readFileSync(outside, 'utf8')).toBe('external evidence\n')
+    expect(existsSync(join(legacy, 'worker.log'))).toBe(false)
+    const preserved = readdirSync(join(stateRoot, 'quarantine'))
+    expect(preserved).toHaveLength(1)
+    expect(lstatSync(join(stateRoot, 'quarantine', preserved[0]!)).isSymbolicLink()).toBe(true)
   })
 })
 
@@ -2918,10 +3028,12 @@ describe('the command', () => {
       if (command === 'launchctl' && cmdArgs[0] === 'bootout') return { code: 1, stdout: '', stderr: 'Boot-out failed: 1: Operation not permitted' }
       return answers(0)(command, cmdArgs)
     }
+    const installedBeforeDenied = readFileSync(unitPath('darwin', home), 'utf8')
     const refused = await run(['enable'], { platform: 'darwin', run: denied, fetch, env: { VEGAFACTORY_APP_PRIVATE_KEY_FILE: key } })
     expect(refused.code).toBe(1)
     expect(refused.text).toContain('bootout')
     expect(refused.text).toContain('Operation not permitted')
+    expect(readFileSync(unitPath('darwin', home), 'utf8')).toBe(installedBeforeDenied)
 
     // "Already loaded" after a successful unload means the unload did not take. It used to be
     // waved through as harmless, which reported the old job as the newly enabled one.

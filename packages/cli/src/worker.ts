@@ -21,8 +21,8 @@
 //   or a subscription-reset wait binds this machine only: another machine can start that work
 //   before the deadline this one is keeping.
 import { spawn, spawnSync } from 'node:child_process'
-import { createSign, randomUUID } from 'node:crypto'
-import { appendFileSync, chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync } from 'node:fs'
+import { createHash, createSign, randomUUID } from 'node:crypto'
+import { appendFileSync, chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { homedir, hostname, userInfo } from 'node:os'
 import { dirname, join, parse, posix, resolve, sep } from 'node:path'
 import { APP_ACTOR, APP_ID, HEARTBEAT_EVERY_MS, appIdentityConfig, claim, heartbeat, holderOf, machineName, nodeId, release, trustedFactory } from './claim.ts'
@@ -858,6 +858,7 @@ export function serviceCommands(platform: NodeJS.Platform, path: string, verb: '
       // again would fail on exactly the box where that recovery was required — which would make
       // the documented way out of the refusal no way out at all.
       ...(lingering ? [] : [['loginctl', 'enable-linger', String(uid)]]),
+      ['systemctl', '--user', 'stop', 'vegafactory-worker.service'],
       ['systemctl', '--user', 'daemon-reload'],
       ['systemctl', '--user', 'enable', '--now', 'vegafactory-worker.service'],
       ['systemctl', '--user', 'restart', 'vegafactory-worker.service'],
@@ -1319,14 +1320,14 @@ function inspectLegacyFiles(root: string, fallback: string | null) {
   }
 }
 
-export interface WorkerStateInspection { ok: boolean; reason: string; children: ChildRecord[] }
+export interface WorkerStateInspection { ok: boolean; reason: string; children: ChildRecord[]; migrationNeeded: boolean }
 
 // Read-only by design: disable uses this while the service is still loaded, so corrupt authority
 // cannot be converted into permission to unload, rewrite, signal, or delete anything.
 export function inspectLegacyWorkerState(input: { root: string; stateRoot: string; factoryRoot?: string; repo: string }): WorkerStateInspection {
   const factoryRoot = input.factoryRoot ?? dirname(input.stateRoot)
   const globalPath = safeGlobalStateRoot(factoryRoot, input.stateRoot, false)
-  if (!globalPath.ok && existsSync(input.stateRoot)) return { ok: false, reason: globalPath.reason, children: [] }
+  if (!globalPath.ok && existsSync(input.stateRoot)) return { ok: false, reason: globalPath.reason, children: [], migrationNeeded: false }
   let globalChildren: ChildRecord[] = []
   try {
     readActed(input.stateRoot)
@@ -1334,18 +1335,25 @@ export function inspectLegacyWorkerState(input: { root: string; stateRoot: strin
     globalChildren = readChildren(input.stateRoot)
     readRunLock(input.stateRoot)
   } catch (error) {
-    return { ok: false, reason: (error as Error).message, children: [] }
+    const reason = error instanceof WorkerRecordError && error.kind === 'unsafe'
+      ? `refusing an unsafe global worker directory: ${error.message}`
+      : (error as Error).message
+    return { ok: false, reason, children: [], migrationNeeded: false }
   }
 
   const legacyRoot = workerDir(input.root)
   const legacyPath = safeLegacyStateRoot(input.root, legacyRoot)
-  if (!legacyPath.ok) return { ok: false, reason: legacyPath.reason, children: [] }
-  if (!legacyPath.exists || legacyRoot === input.stateRoot) return { ok: true, reason: 'worker records are valid', children: globalChildren }
+  if (!legacyPath.ok) return { ok: false, reason: legacyPath.reason, children: [], migrationNeeded: false }
+  if (!legacyPath.exists || legacyRoot === input.stateRoot) return { ok: true, reason: 'worker records are valid', children: globalChildren, migrationNeeded: false }
   const legacy = inspectLegacyFiles(legacyRoot, canonicalRepository(input.repo))
   const failed = Object.values(legacy).find((record) => record.error)
-  if (failed) return { ok: false, reason: failed.error!, children: [] }
+  if (failed) return { ok: false, reason: failed.error!, children: [], migrationNeeded: false }
+  const legacyLogs = ['worker.log', 'worker.err.log'].map((name) => readAppendArtifact(join(legacyRoot, name)))
+  const failedLog = legacyLogs.find((record) => record.error)
+  if (failedLog) return { ok: false, reason: failedLog.error!, children: [], migrationNeeded: false }
   const children = [...globalChildren, ...(legacy.children.value ?? [])]
-  return { ok: true, reason: 'worker records are valid', children: [...new Map(children.map((row) => [`${row.repo}#${row.issue}:${row.pid}:${row.startedAt}`, row])).values()] }
+  const migrationNeeded = Object.values(legacy).some((record) => record.exists) || legacyLogs.some((record) => record.exists)
+  return { ok: true, reason: 'worker records are valid', children: [...new Map(children.map((row) => [`${row.repo}#${row.issue}:${row.pid}:${row.startedAt}`, row])).values()], migrationNeeded }
 }
 
 // Task 3 moved worker state from each checkout to one machine directory. Move only the four old
@@ -1514,6 +1522,210 @@ export function migrateLegacyWorkerState(input: {
     for (const name of names) if (existsSync(join(legacyRoot, name))) rmSync(join(legacyRoot, name), { force: true })
     return { ok: true, migrated: true, reason: `migrated legacy worker state for ${repo}` }
   }, { what: 'the global worker state migration' }), { what: 'the legacy worker state migration' })
+}
+
+function digest(text: string): string {
+  return createHash('sha256').update(text).digest('hex')
+}
+
+function readAppendArtifact(path: string): { exists: boolean; text: string; error: string | null } {
+  try {
+    const info = lstatSync(path)
+    const uid = process.getuid?.()
+    if (!info.isFile() || info.isSymbolicLink()) return { exists: true, text: '', error: `${path} is not a regular append file` }
+    if (uid !== undefined && info.uid !== uid) return { exists: true, text: '', error: `${path} is owned by uid ${info.uid}` }
+    return { exists: true, text: readFileSync(path, 'utf8'), error: null }
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === 'ENOENT'
+      ? { exists: false, text: '', error: null }
+      : { exists: true, text: '', error: `${path} cannot be read: ${(error as Error).message}` }
+  }
+}
+
+// Replacing the name, rather than chmodding the old file, is the descriptor boundary: a process
+// that still holds the old inode can consume its remaining bytes but can never observe a later
+// append made through this path.
+export function rotatePrivateAppend(path: string, preserved: string): void {
+  const root = dirname(path)
+  ensurePrivateRecordRoot(root, true)
+  const current = readAppendArtifact(path)
+  if (current.error) throw new WorkerRecordError('unsafe', current.error)
+  const temporary = join(root, `.${parse(path).base}.${randomUUID()}.rotate`)
+  try {
+    writeFileSync(temporary, preserved, { flag: 'wx', mode: 0o600 })
+    chmodSync(temporary, 0o600)
+    renameSync(temporary, path)
+  } catch (error) {
+    rmSync(temporary, { force: true })
+    throw error
+  }
+}
+
+interface AppendMigrationJournal {
+  schema: 1
+  name: string
+  source: string
+  sourceDigest: string
+  beforeDigest: string
+  mergedDigest: string
+}
+
+function appendJournalPath(stateRoot: string, name: string): string {
+  return join(stateRoot, `.migrate-${name}.json`)
+}
+
+function readAppendJournal(stateRoot: string, name: string): AppendMigrationJournal | null {
+  const path = appendJournalPath(stateRoot, name)
+  const text = readPrivateRecord(stateRoot, path)
+  if (text === null) return null
+  try {
+    const row = JSON.parse(text) as Partial<AppendMigrationJournal>
+    if (row.schema !== 1 || row.name !== name || typeof row.source !== 'string'
+      || !/^[0-9a-f]{64}$/.test(row.sourceDigest ?? '') || !/^[0-9a-f]{64}$/.test(row.beforeDigest ?? '')
+      || !/^[0-9a-f]{64}$/.test(row.mergedDigest ?? '')) throw new Error('invalid journal schema')
+    return row as AppendMigrationJournal
+  } catch (error) { throw new WorkerRecordError('malformed', `${path} is malformed: ${(error as Error).message}`) }
+}
+
+function migrateAppendTarget(input: {
+  stateRoot: string
+  legacyRoot: string
+  name: string
+  afterPublish?: (name: string) => void
+}): void {
+  const target = join(input.stateRoot, input.name)
+  const source = join(input.legacyRoot, input.name)
+  const current = readAppendArtifact(target)
+  if (current.error) throw new WorkerRecordError('unsafe', current.error)
+  if (source === target) { rotatePrivateAppend(target, current.text); return }
+  const legacy = readAppendArtifact(source)
+  if (legacy.error) throw new WorkerRecordError('unsafe', legacy.error)
+  const journalPath = appendJournalPath(input.stateRoot, input.name)
+  let journal = readAppendJournal(input.stateRoot, input.name)
+  if (!journal && !legacy.exists) { rotatePrivateAppend(target, current.text); return }
+  if (!journal) {
+    const merged = current.text + legacy.text
+    journal = {
+      schema: 1, name: input.name, source,
+      sourceDigest: digest(legacy.text), beforeDigest: digest(current.text), mergedDigest: digest(merged),
+    }
+    replacePrivateRecord(input.stateRoot, journalPath, JSON.stringify(journal, null, 2) + '\n')
+  }
+  if (journal.source !== source) throw new WorkerRecordError('malformed', `${journalPath} names an unexpected source`)
+  const latestTarget = readAppendArtifact(target)
+  const latestSource = readAppendArtifact(source)
+  if (latestTarget.error || latestSource.error) throw new WorkerRecordError('unsafe', latestTarget.error ?? latestSource.error!)
+  const targetDigest = digest(latestTarget.text)
+  if (targetDigest === journal.beforeDigest) {
+    if (!latestSource.exists || digest(latestSource.text) !== journal.sourceDigest) throw new WorkerRecordError('malformed', `${source} changed during append migration`)
+    const merged = latestTarget.text + latestSource.text
+    if (digest(merged) !== journal.mergedDigest) throw new WorkerRecordError('malformed', `${journalPath} does not describe the append migration`)
+    rotatePrivateAppend(target, merged)
+    input.afterPublish?.(input.name)
+  } else if (targetDigest !== journal.mergedDigest) {
+    throw new WorkerRecordError('malformed', `${target} changed during append migration`)
+  }
+  const sourceAfter = readAppendArtifact(source)
+  if (sourceAfter.error) throw new WorkerRecordError('unsafe', sourceAfter.error)
+  if (sourceAfter.exists) {
+    if (digest(sourceAfter.text) !== journal.sourceDigest) throw new WorkerRecordError('malformed', `${source} changed before removal`)
+    rmSync(source)
+  }
+  rmSync(journalPath, { force: true })
+}
+
+function quarantineMalformedLegacy(input: { root: string; stateRoot: string; repo: string }): string | null {
+  const legacyRoot = workerDir(input.root)
+  const safe = safeLegacyStateRoot(input.root, legacyRoot)
+  if (!safe.ok || !safe.exists || legacyRoot === input.stateRoot) return null
+  const inspected = inspectLegacyFiles(legacyRoot, canonicalRepository(input.repo))
+  const entries = [
+    ['acted.json', inspected.acted], ['runs.jsonl', inspected.runs],
+    ['children.json', inspected.children], ['run.lock', inspected.lock],
+    ['worker.log', readAppendArtifact(join(legacyRoot, 'worker.log'))],
+    ['worker.err.log', readAppendArtifact(join(legacyRoot, 'worker.err.log'))],
+  ] as const
+  const failed = entries.find(([, result]) => result.error)
+  if (!failed) return null
+  const [name, result] = failed
+  const source = join(legacyRoot, name)
+  const quarantine = join(input.stateRoot, 'quarantine')
+  ensurePrivateRecordRoot(input.stateRoot, true)
+  ensurePrivateRecordRoot(quarantine, true)
+  const target = join(quarantine, `${name}.${randomUUID()}.preserved`)
+  try { renameSync(source, target) }
+  catch (error) { throw new WorkerRecordError('unreadable', `${result.error}; it could not be quarantined: ${(error as Error).message}`) }
+  const quarantined = lstatSync(target)
+  if (quarantined.isFile() && !quarantined.isSymbolicLink()) chmodSync(target, 0o600)
+  return `${result.error}; preserved at ${target}`
+}
+
+function privatizeGlobalRecords(input: { stateRoot: string; start?: ProcessStart; alive?: ProcessAlive }): void {
+  const records = inspectLegacyFiles(input.stateRoot, null)
+  const failed = Object.values(records).find((record) => record.error)
+  if (failed) throw new WorkerRecordError('malformed', failed.error!)
+  if (records.lock.value && records.lock.value.pid !== process.pid) {
+    const identity = processIdentity(records.lock.value, input.start ?? processStart, input.alive ?? processAlive)
+    if (identity !== 'gone') throw new WorkerRecordError('unsafe', identity === 'matching'
+      ? `the worker service still owns pid ${records.lock.value.pid}; storage rotation requires it to be stopped`
+      : `the worker lock belongs to pid ${records.lock.value.pid}, whose identity cannot be proved after service stop`)
+  }
+  if (records.acted.exists) {
+    const normalized: Record<string, Acted> = {}
+    for (const [key, value] of Object.entries(records.acted.value ?? {})) {
+      const match = /^(.*)#([1-9]\d*)$/.exec(key)!
+      const canonical = runKey({ repo: match[1]!, number: Number(match[2]) })
+      if (!normalized[canonical] || value.at > normalized[canonical]!.at) normalized[canonical] = value
+    }
+    rotatePrivateAppend(actedPath(input.stateRoot), JSON.stringify(normalized, null, 2) + '\n')
+  }
+  if (records.children.exists) rotatePrivateAppend(childrenPath(input.stateRoot), JSON.stringify(records.children.value ?? [], null, 2) + '\n')
+  if (records.lock.exists) rotatePrivateAppend(runLockPath(input.stateRoot), JSON.stringify(records.lock.value, null, 2) + '\n')
+}
+
+export function prepareWorkerStorage(input: {
+  root: string
+  stateRoot: string
+  factoryRoot?: string
+  repo: string
+  serviceStopped: boolean
+  start?: ProcessStart
+  alive?: ProcessAlive
+  afterPublish?: (name: string) => void
+}): LegacyMigrationResult {
+  if (!input.serviceStopped) return { ok: false, migrated: false, reason: 'worker storage cannot rotate until the service is confirmed stopped' }
+  const factoryRoot = input.factoryRoot ?? dirname(input.stateRoot)
+  try { ensurePrivateRecordRoot(input.stateRoot, true) }
+  catch (error) { return { ok: false, migrated: false, reason: (error as Error).message } }
+  try {
+    return withLock(join(input.stateRoot, '.storage-preparation'), () => {
+      const migration = migrateLegacyWorkerState({ ...input, factoryRoot })
+      if (!migration.ok) {
+        try {
+          const quarantined = quarantineMalformedLegacy(input)
+          if (quarantined) return { ok: false, migrated: false, reason: `${quarantined}; retry enable after inspecting the preserved evidence` }
+        } catch (error) { return { ok: false, migrated: false, reason: (error as Error).message } }
+        return migration
+      }
+      try {
+        privatizeGlobalRecords(input)
+        const runs = inspectLegacyRuns(runsPath(input.stateRoot), null)
+        if (runs.error) throw new WorkerRecordError('malformed', runs.error)
+        const runBytes = inspectRegularRecord(runsPath(input.stateRoot))
+        if (runBytes.error) throw new WorkerRecordError('unsafe', runBytes.error)
+        rotatePrivateAppend(runsPath(input.stateRoot), runBytes.value ?? '')
+        const legacyRoot = workerDir(input.root)
+        for (const name of ['worker.log', 'worker.err.log']) migrateAppendTarget({ stateRoot: input.stateRoot, legacyRoot, name, afterPublish: input.afterPublish })
+        return { ok: true, migrated: migration.migrated, reason: migration.migrated ? migration.reason : 'worker storage is private and append targets use fresh inodes' }
+      } catch (error) {
+        try {
+          const quarantined = quarantineMalformedLegacy(input)
+          if (quarantined) return { ok: false, migrated: migration.migrated, reason: `${quarantined}; retry enable after inspecting the preserved evidence` }
+        } catch (quarantineError) { return { ok: false, migrated: migration.migrated, reason: (quarantineError as Error).message } }
+        return { ok: false, migrated: migration.migrated, reason: (error as Error).message }
+      }
+    }, { what: 'worker storage preparation' })
+  } catch (error) { return { ok: false, migrated: false, reason: (error as Error).message } }
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -3088,9 +3300,12 @@ export async function runWorker(argv: string[], deps: CliDeps = {}): Promise<num
   }
 
   if (args.verb === 'run') {
-    const migration = migrateLegacyWorkerState({ root, stateRoot, factoryRoot, repo, start: deps.start, alive: deps.alive })
-    if (!migration.ok) {
-      print({ ok: false, reason: migration.reason }, `refused: ${migration.reason}`)
+    const inspection = inspectLegacyWorkerState({ root, stateRoot, factoryRoot, repo })
+    if (!inspection.ok || inspection.migrationNeeded) {
+      const reason = inspection.ok
+        ? 'legacy worker state needs a stopped-service migration — run `vegafactory worker enable` from an attended shell'
+        : inspection.reason
+      print({ ok: false, reason }, `refused: ${reason}`)
       return 2
     }
   }
@@ -3148,21 +3363,32 @@ export async function runWorker(argv: string[], deps: CliDeps = {}): Promise<num
       }
       const commands = serviceCommands(platform, path, 'enable', userInfo().uid, platform !== 'darwin' && alreadyLingering(deps.run ?? probe, userInfo().uid))
       if (args.dryRun) {
-        print({ ok: true, checks: allChecks, boards: boardChecks, unit: path, dryRun: true }, `${renderChecks(allChecks)}\n\ndry run: would write ${path}, then ${commands.map((command) => command.join(' ')).join(' && ')}`)
+        print({ ok: true, checks: allChecks, boards: boardChecks, unit: path, dryRun: true }, `${renderChecks(allChecks)}\n\ndry run: would ${commands.map((command) => command.join(' ')).join(' && ')}, rotate private worker storage while stopped, then write ${path} before loading it`)
         return 0
       }
-      mkdirSync(stateRoot, { recursive: true })
-      replaceFile(path, unitText(platform, { cli: deps.cli ?? cliPath(), root, repo, logDir: stateRoot, factoryHome: factoryRoot, env }))
       const run = deps.run ?? probe
-      for (const command of commands) {
+      const stopIndex = commands.findIndex((command) => (command[0] === 'launchctl' && command[1] === 'bootout')
+        || (command[0] === 'systemctl' && command.includes('stop')))
+      if (stopIndex < 0) throw new Error('worker enable has no service-stop boundary')
+      for (const command of commands.slice(0, stopIndex + 1)) {
         const result = run(command[0]!, command.slice(1))
-        // The leading `bootout` unloads whatever was there so the new plist is read. A machine
-        // enabling for the first time has nothing to unload, and that is the only failure this
-        // step may have: a permission error or a busy job leaves the old definition loaded, and
-        // reporting "enabled" then would be reporting the old identity as the new one.
-        const unloading = command[1] === 'bootout' && commands.length > 1 && command !== commands.at(-1)
-        const nothingToUnload = /no such process|not (?:loaded|find|exist)/i.test(result.stderr)
+        const unloading = command[1] === 'bootout' || command.includes('stop')
+        const nothingToUnload = /no such process|not (?:loaded|find|exist)|not loaded/i.test(result.stderr)
         if (result.code !== 0 && !(unloading && nothingToUnload)) {
+          print({ ok: false, unit: path, failed: command.join(' '), detail: result.stderr },
+            `refused before worker storage or ${path} changed: \`${command.join(' ')}\` failed: ${result.stderr.split('\n')[0] || `exit ${result.code}`}`)
+          return 1
+        }
+      }
+      const storage = prepareWorkerStorage({ root, stateRoot, factoryRoot, repo, serviceStopped: true, start: deps.start, alive: deps.alive })
+      if (!storage.ok) {
+        print({ ok: false, unit: path, reason: storage.reason }, `the worker service is stopped, but its storage was not changed safely: ${storage.reason}`)
+        return 1
+      }
+      replaceFile(path, unitText(platform, { cli: deps.cli ?? cliPath(), root, repo, logDir: stateRoot, factoryHome: factoryRoot, env }))
+      for (const command of commands.slice(stopIndex + 1)) {
+        const result = run(command[0]!, command.slice(1))
+        if (result.code !== 0) {
           print({ ok: false, unit: path, failed: command.join(' '), detail: result.stderr },
             `wrote ${path}, but \`${command.join(' ')}\` failed: ${result.stderr.split('\n')[0] || `exit ${result.code}`}`)
           return 1
@@ -3195,7 +3421,7 @@ export async function runWorker(argv: string[], deps: CliDeps = {}): Promise<num
           return 1
         }
       }
-      const migration = migrateLegacyWorkerState({ root, stateRoot, factoryRoot, repo, start: deps.start, alive: deps.alive })
+      const migration = prepareWorkerStorage({ root, stateRoot, factoryRoot, repo, serviceStopped: true, start: deps.start, alive: deps.alive })
       if (!migration.ok) {
         print({ ok: false, unit: path, reason: migration.reason }, `the service is unloaded, but worker records could not be migrated; ${path} and every worker record were left in place: ${migration.reason}`)
         return 1
