@@ -50,9 +50,9 @@ function git(cwd: string, args: string[]): string | null {
 // The issue's branch: the current one when it names the issue, else the one origin has.
 function findBranch(cwd: string, number: number): string | null {
   const current = git(cwd, ['branch', '--show-current'])
-  if (current && issueFromBranch(current) === number) return current
+  if (current && issueFromBranch(current, number) === number) return current
   const remote = (git(cwd, ['for-each-ref', '--format=%(refname:short)', 'refs/remotes/origin']) ?? '').split('\n')
-    .map((ref) => ref.replace(/^origin\//, '')).filter((ref) => issueFromBranch(ref) === number)
+    .map((ref) => ref.replace(/^origin\//, '')).filter((ref) => issueFromBranch(ref, number) === number)
   return remote.length === 1 ? remote[0]! : null
 }
 
@@ -73,7 +73,7 @@ export function shipCheck(input: { cwd: string; root: string; repo: string; numb
 
   const branch = input.branch ?? findBranch(cwd, number)
   if (!branch) return { ok: false, blocks: [...blocks, `no single branch names #${number} — pass --branch`], warns, branch: null, pr: null }
-  if (issueFromBranch(branch) !== number) return { ok: false, blocks: [...blocks, `${branch} does not name #${number} (<type>/${number}-…)`], warns, branch, pr: null }
+  if (issueFromBranch(branch, number) !== number) return { ok: false, blocks: [...blocks, `${branch} does not name #${number} (<type>/${number}-…)`], warns, branch, pr: null }
   if (git(cwd, ['branch', '--show-current']) === branch && git(cwd, ['status', '--porcelain'])) blocks.push(`${branch} has uncommitted changes`)
   git(cwd, ['fetch', '--quiet', 'origin', branch])
   const local = git(cwd, ['rev-parse', '--verify', '--quiet', `refs/heads/${branch}`])

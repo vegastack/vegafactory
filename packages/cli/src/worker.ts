@@ -2486,7 +2486,7 @@ export function pushableBranch(dir: string, number: number, git: Git): { branch:
   // the issue-name check too, so checking it second would hide it behind a vaguer message.
   const fallback = defaultBranch(dir)
   if (fallback && branch === fallback) return { branch: null, refusal: `the worktree is on the default branch ${branch}, so nothing was committed or pushed` }
-  if (issueFromBranch(branch) !== number) return { branch: null, refusal: `the worktree is on ${branch}, which does not name #${number}, so nothing was committed or pushed` }
+  if (issueFromBranch(branch, number) !== number) return { branch: null, refusal: `the worktree is on ${branch}, which does not name #${number}, so nothing was committed or pushed` }
   return { branch, refusal: null }
 }
 

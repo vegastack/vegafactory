@@ -65,9 +65,9 @@ function checkout() {
   mkdirSync(root, { recursive: true })
   git(root, 'init', '-q', '-b', 'main', root)
   git(root, 'remote', 'add', 'origin', 'https://github.com/acme/demo.git')
-  const tree = join(root, '.vegastack', '.worktrees', '42-demo')
+  const tree = join(root, '.vegastack', '.worktrees', '42')
   mkdirSync(tree, { recursive: true })
-  writeFileSync(join(tree, '.git'), `gitdir: ${join(root, '.git', 'worktrees', '42-demo')}\n`)
+  writeFileSync(join(tree, '.git'), `gitdir: ${join(root, '.git', 'worktrees', '42')}\n`)
   return { root, tree }
 }
 
