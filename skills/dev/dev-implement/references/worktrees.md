@@ -48,7 +48,7 @@ Derived from git plus GitHub on every read, never stored — a second source of 
 
 ## Harness facts that bear on a worktree run
 
-- **Claude Code hooks:** the `CLAUDE_PROJECT_DIR` variable (written with the usual shell-expansion sigils, omitted here because they trip SkillSpector's bounded parser) stays at the launch root, while the hook input's `cwd` follows the worktree — hooks that need to know where the work is read `cwd`.
+- **Claude Code hooks:** the environment variable named `CLAUDE_PROJECT_DIR` stays at the launch root, while the hook input's `cwd` follows the worktree — hooks that need to know where the work is read `cwd`.
 - **Claude Code permissions:** an approval granted inside a worktree is written to the **main checkout's** `.claude/settings.local.json` and applies everywhere. Approving in one worktree approves for all of them.
 - **`claude -p` runs never clean up worktrees.** Cleanup belongs to the factory (dev-ship after merge, `prune` after retention), not to the harness.
 - **Codex:** an untrusted path skips `.codex/` hooks, rules and project config, so each worktree path is added to `~/.codex/config.toml` as `[projects."<abs path>"]` / `trust_level = "trusted"` at create and restore time. `codex` absent from `PATH` makes this a warning, not a block.

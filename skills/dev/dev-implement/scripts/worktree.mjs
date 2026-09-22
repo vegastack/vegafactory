@@ -25,16 +25,8 @@ import { findMarkerComment, ghJson, parseFlags, renderResult } from './lib/gh.mj
 
 const WORKTREES_DIR = '.vegastack/.worktrees';
 const SLUG_MAX = 40;
-// stdio mode for a discarded fd, hoisted out of quote-adjacency: SkillSpector reads the
-// bare word beside its own closing quote as a removal cue and fails closed on the whole
-// file (skill-maintainer's standards.md, known behaviours). Same value, same behaviour.
-const DISCARD = 'ignore';
-
-// Located strings are concatenated, never assigned as template literals:
-// SkillSpector's static parser trips on the latter (see skillify's
-// trigger-check.mjs) and every file carrying that construct needs its own
-// coverage acceptance.
-const at = (where, message) => where + ': ' + message;
+// Prefix a diagnostic with the path whose check failed.
+const at = (where, message) => `${where}: ${message}`;
 
 // An issue title comes from GitHub and reaches an operator's terminal through
 // a block message. Two kinds of character in it are dangerous and neither is
@@ -43,9 +35,13 @@ const at = (where, message) => where + ': ' + message;
 // of all — which reorder what is printed, so a title can appear to end where
 // it does not and hide the words that follow it. Both go. A long title is cut
 // rather than allowed to fill the screen.
-const printable = (text) => String(text ?? '')
-  .replace(/[\u0000-\u001f\u007f-\u009f]+/gu, ' ')
-  .replace(/\p{Cf}+/gu, '')
+const printable = (text) => [...String(text ?? '')]
+  .map((character) => {
+    const point = character.codePointAt(0);
+    const control = point <= 31 || (point >= 127 && point <= 159);
+    return control || /\p{Cf}/u.test(character) ? ' ' : character;
+  })
+  .join('')
   .trim()
   .slice(0, 120);
 
@@ -180,8 +176,8 @@ export function classifyWorktree({ dirExists, branchExists, locked, issueState, 
 
 // --- filesystem safety ----------------------------------------------------
 
-// A symlink anywhere on the worktree parent turns `git worktree remove` into a
-// write outside the repo. Refuse rather than resolve.
+// A symlinked worktree parent lets Git write outside the repository during
+// checkout deletion. Refuse the path rather than resolving it.
 export function symlinkBlock(path) {
   try {
     if (existsSync(path) && lstatSync(path).isSymbolicLink()) return at(path, 'is a symlink — refusing to write through it');
@@ -216,7 +212,7 @@ export function evaluateRemoval({ state, dirty, unpushed, remoteKnown = true, re
     blocks.push('not merged into the default branch — merge it, or pass --force with the operator\'s word');
   }
   if (locked) blocks.push('the worktree is locked — a session is holding it; unlock it first');
-  if (state === 'abandoned') warns.push('the issue is closed and the branch never merged — removing this discards the only checkout of that work');
+  if (state === 'abandoned') warns.push('the issue is closed and the branch never merged — this is the only checkout of that work');
   return { blocks, warns };
 }
 
@@ -469,7 +465,7 @@ export function isPastRetention({ lastCommitAt, ledgerUpdatedAt, now, retentionM
 // eat and a patch-id would then miss.
 export function git(cwd, args, { input, raw = false } = {}) {
   try {
-    const out = execFileSync('git', args, { cwd, encoding: 'utf8', input, stdio: [input === undefined ? DISCARD : 'pipe', 'pipe', 'pipe'] });
+    const out = execFileSync('git', args, { cwd, encoding: 'utf8', input, stdio: [input === undefined ? 'ignore' : 'pipe', 'pipe', 'pipe'] });
     return { ok: true, out: raw ? out : out.trim() };
   } catch (error) {
     const stderr = error.stderr?.toString().trim() || error.message;
