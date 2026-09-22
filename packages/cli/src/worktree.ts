@@ -24,6 +24,7 @@ export interface WorktreeArgs {
   olderThan?: string
   allRepos: boolean
   json: boolean
+  workerLayout: boolean
 }
 
 export interface SpawnResult { status: number; stdout: string }
@@ -50,14 +51,14 @@ Every verb acts; --dry-run shows what it would do. Branches are never deleted, a
 }
 
 // Every verb acts by default; --dry-run previews. The safety rules live in the script.
-export function parseWorktreeArgs(argv: string[]): WorktreeArgs {
+export function parseWorktreeArgs(argv: string[], env: NodeJS.ProcessEnv = process.env): WorktreeArgs {
   const head = argv[0]
   if (!head || !verbs.includes(head as WorktreeVerb)) {
     throw new Error(`Unknown worktree verb: ${head ?? '(none)'} — expected list|create|restore|remove|prune|status`)
   }
   const verb = head as WorktreeVerb
   const rest = argv.slice(1)
-  const args: WorktreeArgs = { verb, force: false, write: true, allRepos: false, json: false }
+  const args: WorktreeArgs = { verb, force: false, write: true, allRepos: false, json: false, workerLayout: env.VSK_WORKTREE_LAYOUT === 'worker' }
   while (rest.length) {
     const token = rest.shift()!
     if (!token.startsWith('-')) {
@@ -94,6 +95,7 @@ export function scriptArgs(args: WorktreeArgs): string[] {
   if (args.olderThan) out.push('--older-than', args.olderThan)
   if (args.force) out.push('--force')
   if (args.write) out.push('--write')
+  if (args.workerLayout) out.push('--worker-layout')
   return out
 }
 

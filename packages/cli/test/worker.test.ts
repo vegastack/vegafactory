@@ -12,7 +12,7 @@ import {
   acknowledgedPlan, canonicalPath, childRunEnvironment, confirmShip, disjointSiblings, pushableBranch, pushPath, shipWord,
   drain, filesFromParent, harnessAnswers, hitLimit, hooksWired, listedHere, mintToken, overlaps, parseWorkerArgs,
   parseNodes, poll, readActed, readRuns, readiness, recordRun, resetAt, runKey, RUNS_KEPT, runWorker, schedule, serviceCommands, stagePolicy,
-  standDown, standDownStrict, stepPrompt, tail, unitPath, unitText, unsafeForParallel,
+  standDown, standDownStrict, stepPrompt, tail, unitPath, unitText, unsafeForParallel, workingDir,
   workerUsage,
   gitIn, migrateLegacyWorkerState, noteChild, readChildren, refreshRoster, releaseRunLock, reserve, runLockPath, stopChild, takeRunLock, verifiedListing,
   recordRoomSha, updateModeFor,
@@ -2022,9 +2022,19 @@ describe('the step a run makes', () => {
     expect(seen[0]!.timeoutMs).toBe(STEP_TIMEOUT_MS)
     // Nobody is watching, so a round of questions goes to the issue rather than a question tool.
     expect(seen[0]!.env.VSK_ASK_ROUTE).toBe('issue')
+    expect(seen[0]!.env.VSK_WORKTREE_LAYOUT).toBe('worker')
     expect(STEP_TIMEOUT_MS).toBe(20 * 60_000)
     expect(result.outcome).toBe('killed')
     expect(result.note).toContain('past the 20-minute step limit')
+  })
+
+  test('a worker finds the number-only issue directory beside its repository checkout', () => {
+    const holder = join(root, 'worker', 'repos', 'o__r')
+    const checkout = join(holder, 'repo')
+    const issue = join(holder, 'issues', '7')
+    mkdirSync(checkout, { recursive: true })
+    mkdirSync(issue, { recursive: true })
+    expect(workingDir(checkout, 7)).toBe(issue)
   })
 
   test('a worker run writes as the App and is never told where the key is', async () => {

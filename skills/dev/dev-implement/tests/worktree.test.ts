@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test'
-import { branchName, classifyWorktree, parseWorktreeList, slugify, titleParts, worktreeName, worktreePath } from '../scripts/worktree.mjs'
+import { branchName, classifyWorktree, issueOfWorktree, parseWorktreeList, slugify, titleParts, worktreeName, worktreePath } from '../scripts/worktree.mjs'
 
 const base = { dirExists: true, branchExists: true, locked: false, issueState: 'open' as const, mergedIntoDefault: false }
 
@@ -8,12 +8,15 @@ describe('naming', () => {
     expect(slugify('One feature, ONE worktree!')).toBe('one-feature-one-worktree')
     expect(slugify('x'.repeat(80)).length).toBe(40)
   })
-  test('an issue number leads the directory and the branch', () => {
-    expect(worktreeName(106, 'one-worktree')).toBe('106-one-worktree')
-    expect(worktreePath('/r', worktreeName(106, 'one-worktree'))).toBe('/r/.vegastack/.worktrees/106-one-worktree')
+  test('an issue number is the stable directory while the branch keeps its slug', () => {
+    expect(worktreeName(106, 'one-worktree')).toBe('106')
+    expect(worktreePath('/r', worktreeName(106, 'one-worktree'))).toBe('/r/.vegastack/.worktrees/106')
+    expect(worktreePath('/vf/worker/repos/o__r/repo', '106', true)).toBe('/vf/worker/repos/o__r/issues/106')
     expect(branchName('feat', 106, 'one-worktree')).toBe('feat/106-one-worktree')
     expect(branchName('chore', null, 'release-0-19-0')).toBe('chore/release-0-19-0')
     expect(worktreeName(null, 'release-0-19-0')).toBe('release-0-19-0')
+    expect(issueOfWorktree('106')).toBe(106)
+    expect(issueOfWorktree('106-legacy-title')).toBe(106)
   })
 })
 
@@ -134,4 +137,3 @@ describe('knobs and retention', () => {
     expect(isPastRetention({ lastCommitAt: null, ledgerUpdatedAt: null, now, retentionMs })).toBe(false)
   })
 })
-

@@ -12,6 +12,7 @@ describe('parseWorktreeArgs', () => {
     expect(parseWorktreeArgs(['prune', '--older-than', '7d'])).toMatchObject({ verb: 'prune', olderThan: '7d', write: true })
     expect(() => parseWorktreeArgs(['remove', '106', '--write'])).toThrow('Unknown option: --write')
     expect(parseWorktreeArgs(['list', '--all-repos'])).toMatchObject({ verb: 'list', allRepos: true })
+    expect(parseWorktreeArgs(['create', '106'], { VSK_WORKTREE_LAYOUT: 'worker' })).toMatchObject({ workerLayout: true })
   })
   test('an unknown verb is a usage error naming the real ones', () => {
     expect(() => parseWorktreeArgs(['nuke'])).toThrow(/list\|create\|restore\|remove\|prune\|status/)

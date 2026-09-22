@@ -17,7 +17,7 @@
 import { execFileSync } from 'node:child_process';
 import { copyFileSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, realpathSync, statSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { delimiter, dirname, join, resolve, sep } from 'node:path';
+import { basename, delimiter, dirname, join, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { findMarkerComment, ghJson, parseFlags, renderResult } from './lib/gh.mjs';
 
@@ -62,19 +62,27 @@ export function slugify(title) {
 // The worktree directory name. An issue number leads it so `ls` sorts by issue
 // and reconciliation against open issues is a parse, not a lookup table.
 export function worktreeName(issue, slug) {
-  return issue === null || issue === undefined ? String(slug) : String(issue) + '-' + slug;
+  return issue === null || issue === undefined ? String(slug) : String(issue);
 }
 
-// Always under the repo root, never elsewhere: a worktree outside the tree is
-// invisible to `git status`, to the ignore line, and to prune.
-export function worktreePath(repoRoot, name) {
-  return join(repoRoot, WORKTREES_DIR, name);
+// Attended checkouts stay project-local. A worker's repository checkout is one
+// child of its repository holder; issue checkouts are its other child, so one
+// repository never shares issue numbers or filesystem state with another.
+export function worktreeRoot(repoRoot, workerLayout = false) {
+  if (!workerLayout) return join(repoRoot, WORKTREES_DIR);
+  if (basename(repoRoot) !== 'repo') throw new Error('worker worktree layout requires a repository checkout ending in /repo');
+  return join(dirname(repoRoot), 'issues');
+}
+
+export function worktreePath(repoRoot, name, workerLayout = false) {
+  return join(worktreeRoot(repoRoot, workerLayout), name);
 }
 
 // <type>/<n>-<slug>, or <type>/<slug> for the branches that have no issue
 // (a direct chat fix, a release branch).
 export function branchName(type, issue, slug) {
-  return type + '/' + worktreeName(issue, slug);
+  const tail = issue === null || issue === undefined ? String(slug) : String(issue) + '-' + slug;
+  return type + '/' + tail;
 }
 
 // The branch type and slug an issue title carries: a `<type>:` prefix from the
@@ -291,12 +299,13 @@ export function git(cwd, args, { input, raw = false } = {}) {
 // /private/var), so a path off porcelain and a path composed from repoRoot do
 // not compare equal. Re-express a porcelain path under the caller's own root
 // whenever it names one of our worktrees; otherwise hand it back untouched.
-export function rebaseUnderRoot(repoRoot, absPath) {
+export function rebaseUnderRoot(repoRoot, absPath, workerLayout = false) {
   if (!absPath) return absPath;
-  const marker = sep + WORKTREES_DIR.split('/').join(sep) + sep;
-  const index = absPath.indexOf(marker);
-  if (index === -1) return absPath;
-  const composed = worktreePath(repoRoot, absPath.slice(index + marker.length));
+  const root = worktreeRoot(repoRoot, workerLayout);
+  const prefix = root + sep;
+  const named = absPath.startsWith(prefix) ? absPath.slice(prefix.length) : basename(absPath);
+  if (!named || named.includes(sep)) return absPath;
+  const composed = worktreePath(repoRoot, named, workerLayout);
   try {
     // Only claim the path as ours when it really is the same directory —
     // otherwise a worktree belonging to a different checkout (or the caller
@@ -321,11 +330,11 @@ const hasRemote = (repoRoot, remote) => git(repoRoot, ['remote', 'get-url', remo
 const branchExistsIn = (repoRoot, branch, gitRunner = git) => gitRunner(repoRoot, ['rev-parse', '--verify', '--quiet', 'refs/heads/' + branch]).ok;
 
 // The path of the worktree currently holding a branch, straight off porcelain.
-export function worktreeHoldingBranch(repoRoot, branch, gitRunner = git) {
+export function worktreeHoldingBranch(repoRoot, branch, gitRunner = git, workerLayout = false) {
   const listed = gitRunner(repoRoot, ['worktree', 'list', '--porcelain']);
   if (!listed.ok) return null;
   const found = parseWorktreeList(listed.out).find((entry) => entry.branch === branch)?.path ?? null;
-  return rebaseUnderRoot(repoRoot, found);
+  return rebaseUnderRoot(repoRoot, found, workerLayout);
 }
 
 // --- Codex trust ----------------------------------------------------------
@@ -391,7 +400,7 @@ function prepareCheckout({ repoRoot, path, devMd, home, write, actions, warns, b
 
 // Create the checkout for a branch: a fresh worktree cut from origin/<base>. Every issue —
 // sub-issues of an epic included — gets its own branch, worktree and PR.
-export function createWorktree({ repoRoot, issue, slug, type, title, base, devMd, home, write = false }) {
+export function createWorktree({ repoRoot, issue, slug, type, title, base, devMd, home, write = false, workerLayout = false }) {
   const blocks = [];
   const warns = [];
   const actions = [];
@@ -408,8 +417,9 @@ export function createWorktree({ repoRoot, issue, slug, type, title, base, devMd
   const branch = branchName(type, issue, slug);
   const name = worktreeName(issue, slug);
 
-  const path = worktreePath(repoRoot, name);
-  for (const candidate of [join(repoRoot, '.vegastack'), join(repoRoot, WORKTREES_DIR), path]) {
+  const root = worktreeRoot(repoRoot, workerLayout);
+  const path = worktreePath(repoRoot, name, workerLayout);
+  for (const candidate of [workerLayout ? dirname(root) : join(repoRoot, '.vegastack'), root, path]) {
     const symlink = symlinkBlock(candidate);
     if (symlink) blocks.push(symlink);
   }
@@ -417,6 +427,10 @@ export function createWorktree({ repoRoot, issue, slug, type, title, base, devMd
 
   if (branchExistsIn(repoRoot, branch)) {
     blocks.push(at(branch, 'the branch already exists — use restore to re-add its worktree'));
+    return { blocks, warns, actions, path, branch };
+  }
+  if (existsSync(path)) {
+    blocks.push(at(path, 'a worktree directory already exists for #' + issue + ' — inspect or remove it before creating another'));
     return { blocks, warns, actions, path, branch };
   }
 
@@ -452,15 +466,16 @@ export function createWorktree({ repoRoot, issue, slug, type, title, base, devMd
 // gone — the corrections and reclaim path. It never creates a branch: a
 // missing branch means the work is somewhere else, and guessing would be worse
 // than stopping.
-export function restoreWorktree({ repoRoot, issue, slug, type, devMd, home, write = false, gitRunner = git }) {
+export function restoreWorktree({ repoRoot, issue, slug, type, devMd, home, write = false, gitRunner = git, workerLayout = false }) {
   const blocks = [];
   const warns = [];
   const actions = [];
   const branch = branchName(type, issue, slug);
   const name = worktreeName(issue, slug);
-  const path = worktreePath(repoRoot, name);
+  const root = worktreeRoot(repoRoot, workerLayout);
+  const path = worktreePath(repoRoot, name, workerLayout);
 
-  for (const candidate of [join(repoRoot, '.vegastack'), join(repoRoot, WORKTREES_DIR), path]) {
+  for (const candidate of [workerLayout ? dirname(root) : join(repoRoot, '.vegastack'), root, path]) {
     const symlink = symlinkBlock(candidate);
     if (symlink) blocks.push(symlink);
   }
@@ -470,7 +485,7 @@ export function restoreWorktree({ repoRoot, issue, slug, type, devMd, home, writ
     blocks.push(at(branch, 'no branch of that name — nothing to restore; create it instead'));
     return { blocks, warns, actions, path, branch };
   }
-  const held = worktreeHoldingBranch(repoRoot, branch, gitRunner);
+  const held = worktreeHoldingBranch(repoRoot, branch, gitRunner, workerLayout);
   if (held) {
     warns.push(at(held, 'already holds ' + branch + ' — nothing to restore'));
     return { blocks, warns, actions, path: held, branch };
@@ -561,17 +576,17 @@ function refreshBase({ repoRoot, base, remote, actions, warns }) {
 // Remove one worktree directory — and only the directory. The local branch and
 // the remote branch are never touched here: deleting either is on the ship
 // guard's always-ask list and takes the operator's own word.
-export function removeWorktree({ repoRoot, name, base, force = false, push = false, write = false, remote = 'origin' }) {
+export function removeWorktree({ repoRoot, name, base, force = false, push = false, write = false, remote = 'origin', workerLayout = false }) {
   const blocks = [];
   const warns = [];
   const actions = [];
-  const path = worktreePath(repoRoot, name);
+  const path = worktreePath(repoRoot, name, workerLayout);
   const symlink = symlinkBlock(path);
   if (symlink) return { blocks: [symlink], warns, actions };
 
   const listed = git(repoRoot, ['worktree', 'list', '--porcelain']);
   if (!listed.ok) return { blocks: [at(repoRoot, 'cannot read the worktree list: ' + listed.out)], warns, actions };
-  const entry = parseWorktreeList(listed.out).find((item) => rebaseUnderRoot(repoRoot, item.path) === path);
+  const entry = parseWorktreeList(listed.out).find((item) => rebaseUnderRoot(repoRoot, item.path, workerLayout) === path);
   if (!entry) return { blocks: [at(name, 'no worktree at ' + path + ' — nothing to remove')], warns, actions };
 
   const branch = entry.branch;
@@ -610,12 +625,12 @@ export function removeWorktree({ repoRoot, name, base, force = false, push = fal
 
 // Every worktree directory under .vegastack/.worktrees, with its branch and
 // lock flag straight off porcelain. The main checkout is never one of them.
-export function inventory(repoRoot) {
+export function inventory(repoRoot, workerLayout = false) {
   const listed = git(repoRoot, ['worktree', 'list', '--porcelain']);
   if (!listed.ok) return [];
-  const prefix = worktreePath(repoRoot, '') + sep;
+  const prefix = worktreeRoot(repoRoot, workerLayout) + sep;
   return parseWorktreeList(listed.out)
-    .map((entry) => ({ ...entry, path: rebaseUnderRoot(repoRoot, entry.path) }))
+    .map((entry) => ({ ...entry, path: rebaseUnderRoot(repoRoot, entry.path, workerLayout) }))
     .filter((entry) => entry.path.startsWith(prefix))
     .map((entry) => ({ ...entry, name: entry.path.slice(prefix.length) }));
 }
@@ -676,14 +691,14 @@ export function rescueWork({ path, branch, name, remote = 'origin' }) {
 // here the retention window is what lifts the not-merged rule: the pushed
 // branch keeps the work and `restore` brings the directory back. Uncommitted,
 // unpushed and locked still keep it.
-export function pruneWorktrees({ repoRoot, base, olderThan, devMd, ledgerTimes = {}, now = Date.now(), write = false, remote = 'origin' }) {
+export function pruneWorktrees({ repoRoot, base, olderThan, devMd, ledgerTimes = {}, now = Date.now(), write = false, remote = 'origin', workerLayout = false }) {
   const blocks = [];
   const warns = [];
   const actions = [];
   const retentionMs = parseDuration(olderThan) ?? parseRetentionKnob(devMd);
   const candidates = [];
   refreshBase({ repoRoot, base, remote, actions, warns });
-  for (const entry of inventory(repoRoot)) {
+  for (const entry of inventory(repoRoot, workerLayout)) {
     const branch = entry.branch;
     const lastCommitAt = branch ? (git(repoRoot, ['log', '-1', '--format=%cI', branch]).out || null) : null;
     const ledgerUpdatedAt = ledgerTimes[entry.name] ?? null;
@@ -736,7 +751,7 @@ export function pruneWorktrees({ repoRoot, base, olderThan, devMd, ledgerTimes =
     }
     actions.push(at(candidate.name, (candidate.pushable ? 'push the branch, then re-check for removal after ' : 'remove after ') + candidate.ageDays + ' quiet days'));
     if (!write) continue;
-    const removed = removeWorktree({ repoRoot, name: candidate.name, base, force: true, push: true, write: true, remote });
+    const removed = removeWorktree({ repoRoot, name: candidate.name, base, force: true, push: true, write: true, remote, workerLayout });
     if (removed.blocks.length > 0) {
       warns.push(at(candidate.name, 'kept after all: ' + removed.blocks[0]));
       candidate.removable = false;
@@ -795,8 +810,8 @@ export function directorySize(path, { maxEntries = SIZE_BUDGET } = {}) {
 // The inventory with each entry's lifecycle state and disk footprint attached.
 // issueStates maps a worktree name to the GitHub state of its issue; without it
 // (offline, or no gh) nothing is ever classified 'abandoned'.
-export function listWorktrees({ repoRoot, base, issueStates = {}, remote = 'origin', withSize = true }) {
-  return inventory(repoRoot).map((entry) => {
+export function listWorktrees({ repoRoot, base, issueStates = {}, remote = 'origin', withSize = true, workerLayout = false }) {
+  return inventory(repoRoot, workerLayout).map((entry) => {
     const facts = gatherRemovalFacts({ repoRoot, path: entry.path, branch: entry.branch, base, remote, locked: entry.locked });
     const state = classifyWorktree({
       dirExists: true,
@@ -813,7 +828,7 @@ export function listWorktrees({ repoRoot, base, issueStates = {}, remote = 'orig
 // The issue number a worktree name carries, or null for the ones that have none
 // (a release branch, a direct chat fix).
 export function issueOfWorktree(name) {
-  const match = /^(\d+)-/.exec(String(name ?? ''));
+  const match = /^(\d+)(?:-|$)/.exec(String(name ?? ''));
   return match ? Number(match[1]) : null;
 }
 
@@ -934,16 +949,17 @@ function runVerb(verb, flags) {
     if (!Number.isInteger(issue) || issue <= 0) return { blocks: [at('--issue', 'expected a positive issue number, got ' + flags.issue)], warns: [] };
   }
   const slug = flags.slug ? slugify(flags.slug) : null;
-  const shared = { repoRoot, devMd, home, base, write: Boolean(flags.write) };
+  const workerLayout = Boolean(flags['worker-layout']);
+  const shared = { repoRoot, devMd, home, base, write: Boolean(flags.write), workerLayout };
 
   const repoOf = () => flags.repo || knobLine(devMd, 'repo')?.split('·')[0].trim() || null;
 
   if (verb === 'list' || verb === 'status') {
     const warns = [];
     const repo = repoOf();
-    const names = inventory(repoRoot).map((entry) => entry.name);
+    const names = inventory(repoRoot, workerLayout).map((entry) => entry.name);
     const github = repo ? gatherGithubFacts({ repo, names, warns }) : { openIssues: [], issueStates: {} };
-    const entries = listWorktrees({ repoRoot, base, issueStates: github.issueStates });
+    const entries = listWorktrees({ repoRoot, base, issueStates: github.issueStates, workerLayout });
     if (verb === 'list') return { blocks: [], warns, entries };
     return { blocks: [], warns, entries, reconciled: reconcileWorktrees({ entries, openIssues: github.openIssues }) };
   }
@@ -952,7 +968,7 @@ function runVerb(verb, flags) {
     // caller that only knows the issue number (the CLI, dev-ship) has.
     let name = flags.name;
     if (!name && issue !== null) {
-      const matches = inventory(repoRoot).filter((entry) => issueOfWorktree(entry.name) === issue);
+      const matches = inventory(repoRoot, workerLayout).filter((entry) => issueOfWorktree(entry.name) === issue);
       if (matches.length === 0) return { blocks: [at('#' + issue, 'no worktree for that issue')], warns: [] };
       if (matches.length > 1) {
         return { blocks: [at('#' + issue, 'several worktrees match (' + matches.map((m) => m.name).join(', ') + ') — pass --name')], warns: [] };
@@ -960,14 +976,14 @@ function runVerb(verb, flags) {
       name = matches[0].name;
     }
     if (!name) return { blocks: ['--name <n>-<slug> or --issue <n> is required for remove'], warns: [] };
-    return removeWorktree({ repoRoot, name, base, force: Boolean(flags.force), push: Boolean(flags.push), write: shared.write });
+    return removeWorktree({ repoRoot, name, base, force: Boolean(flags.force), push: Boolean(flags.push), write: shared.write, workerLayout });
   }
   if (verb === 'prune') {
     const warns = [];
     const repo = flags.repo || knobLine(devMd, 'repo')?.split('·')[0].trim() || null;
-    const names = inventory(repoRoot).map((entry) => entry.name);
+    const names = inventory(repoRoot, workerLayout).map((entry) => entry.name);
     const ledgerTimes = repo ? gatherLedgerTimes({ repo, names, warns }) : {};
-    const pruned = pruneWorktrees({ repoRoot, base, olderThan: flags['older-than'], devMd, ledgerTimes, now: Date.now(), write: shared.write });
+    const pruned = pruneWorktrees({ repoRoot, base, olderThan: flags['older-than'], devMd, ledgerTimes, now: Date.now(), write: shared.write, workerLayout });
     return { ...pruned, warns: [...warns, ...pruned.warns] };
   }
   if (verb === 'create' || verb === 'restore') {
@@ -1009,7 +1025,7 @@ const invokedDirectly = process.argv[1] && resolve(process.argv[1]) === fileURLT
 if (invokedDirectly) {
   const argv = process.argv.slice(2);
   const verb = argv.find((arg) => !arg.startsWith('--')) ?? '';
-  const flags = parseFlags(argv, ['json', 'write', 'force', 'push', 'all']);
+  const flags = parseFlags(argv, ['json', 'write', 'force', 'push', 'all', 'worker-layout']);
   let outcome;
   try {
     outcome = runVerb(verb, flags);
