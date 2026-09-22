@@ -60,6 +60,9 @@ export function slugify(title) {
 // The worktree directory name. An issue number is its stable identity; title
 // slugs remain branch presentation and cannot move the checkout after rename.
 export function worktreeName(issue, slug) {
+  if ((issue === null || issue === undefined) && issueOfWorktree(slug) !== null) {
+    throw new Error('a no-issue worktree slug cannot start with an issue number — choose a slug beginning with a letter');
+  }
   return issue === null || issue === undefined ? String(slug) : String(issue);
 }
 
@@ -592,6 +595,9 @@ export function createWorktree({ repoRoot, issue, slug, type, title, base, devMd
     return { blocks: [at('branch type', named + ' names no type — pass --type <one of: ' + types.join(', ') + '>')], warns, actions };
   }
   if (!types.includes(type)) return { blocks: [at('branch type', type + ' is not one this project has — dev.md lists ' + types.join(', '))], warns, actions };
+  if ((issue === null || issue === undefined) && issueOfWorktree(slug) !== null) {
+    return { blocks: [at('worktree slug', 'a no-issue worktree cannot start with an issue number — choose a slug beginning with a letter')], warns, actions };
+  }
   const branch = branchName(type, issue, slug);
   const name = worktreeName(issue, slug);
 
@@ -657,6 +663,9 @@ export function restoreWorktree({ repoRoot, issue, slug, type, devMd, home, writ
   const blocks = [];
   const warns = [];
   const actions = [];
+  if ((issue === null || issue === undefined) && issueOfWorktree(slug) !== null) {
+    return { blocks: [at('worktree slug', 'a no-issue worktree cannot start with an issue number — choose a slug beginning with a letter')], warns, actions };
+  }
   const branch = branchName(type, issue, slug);
   const name = worktreeName(issue, slug);
   const root = worktreeRoot(repoRoot, workerLayout);
@@ -947,7 +956,7 @@ export function rescueWork({ path, branch, name, remote = 'origin' }) {
 // kept; prune never creates a remote branch. Dirty work is rescued only when
 // the remote branch already exists and the user's staged selection is empty.
 // Every candidate then re-runs the same safe-to-remove test as explicit remove.
-export function pruneWorktrees({ repoRoot, base, olderThan, devMd, ledgerTimes = {}, ledgerUnknown = new Set(), issueStates = {}, issueUnknown = new Set(), now = Date.now(), write = false, remote = 'origin', workerLayout = false }) {
+export function pruneWorktrees({ repoRoot, base, olderThan, devMd, ledgerTimes = {}, ledgerUnknown = new Set(), issueStates = {}, issueUnknown = new Set(), now = Date.now(), write = false, remote = 'origin', workerLayout = false, recordDroppedDeps = noteDroppedDeps }) {
   const blocks = [];
   const warns = [];
   const actions = [];
@@ -996,7 +1005,7 @@ export function pruneWorktrees({ repoRoot, base, olderThan, devMd, ledgerTimes =
         actions.push(at(entry.name, 'drop untracked node_modules and keep the checkout'));
         if (write) {
           try {
-            noteDroppedDeps({ repoRoot, workerLayout, name: entry.name, path: entry.path, deps: ['node_modules'], droppedAt: new Date(now).toISOString() });
+            recordDroppedDeps({ repoRoot, workerLayout, name: entry.name, path: entry.path, deps: ['node_modules'], droppedAt: new Date(now).toISOString() });
             rmSync(deps, { recursive: true });
             freed.push(entry.name);
           } catch (error) {

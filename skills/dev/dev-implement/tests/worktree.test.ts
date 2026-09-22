@@ -18,6 +18,8 @@ describe('naming', () => {
     expect(branchName('feat', 106, 'one-worktree')).toBe('feat/106-one-worktree')
     expect(branchName('chore', null, 'release-0-19-0')).toBe('chore/release-0-19-0')
     expect(worktreeName(null, 'release-0-19-0')).toBe('release-0-19-0')
+    expect(() => worktreeName(null, '106-direct-fix')).toThrow('cannot start with an issue number')
+    expect(() => worktreeName(null, '106')).toThrow('cannot start with an issue number')
     expect(issueOfWorktree('106')).toBe(106)
     expect(issueOfWorktree('106-legacy-title')).toBe(106)
   })

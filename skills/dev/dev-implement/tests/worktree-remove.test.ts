@@ -1,9 +1,9 @@
 import { describe, expect, test } from 'bun:test'
 import { execFileSync, spawnSync } from 'node:child_process'
-import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, renameSync, symlinkSync, writeFileSync } from 'node:fs'
+import { chmodSync, chownSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, renameSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { createWorktree, pruneWorktrees, readDroppedDeps, removeWorktree } from '../scripts/worktree.mjs'
+import { createWorktree, pruneWorktrees, readDroppedDeps, removeWorktree, trustedAncestorOwner, verifyOwnedPath } from '../scripts/worktree.mjs'
 
 // Relative to the real clock: the fixture commits carry today's date, so a fixed
 // 'now' turns these into time bombs once the calendar catches up.
@@ -153,6 +153,18 @@ describe('removeWorktree', () => {
     expect(r.state).toBe('merged')
     expect(existsSync(wt.path)).toBe(false)
   })
+  test('a fast-forward merge counts as merged through ordinary ancestry', () => {
+    const remote = bareRemote()
+    const root = repoWithRemote(remote)
+    const wt = pushedFeature(root)
+    const other = cloneOf(remote)
+    git(other, 'merge', '-q', '--ff-only', 'origin/feat/106-x')
+    git(other, 'push', '-q', 'origin', 'main')
+    const r = removeWorktree({ repoRoot: root, name: '106', base: 'main', force: false, push: false, write: true })
+    expect(r.blocks).toEqual([])
+    expect(r.state).toBe('merged')
+    expect(existsSync(wt.path)).toBe(false)
+  })
   test('a branch that only shares some commits with the default branch stays unmerged', () => {
     const remote = bareRemote()
     const root = repoWithRemote(remote)
@@ -221,6 +233,17 @@ describe('dependency reclamation', () => {
     expect(lstatSync(marker).mode & 0o777).toBe(0o600)
   })
 
+  test('a marker publication failure leaves dependency bytes untouched', () => {
+    const { root, wt } = pushedWithDeps(133)
+    const result = pruneWorktrees({
+      repoRoot: root, base: 'main', devMd: depsDevMd, ledgerTimes: { '133': DEPS_LEDGER }, now: DEPS_NOW, write: true,
+      recordDroppedDeps: () => { throw new Error('simulated marker publication failure') },
+    })
+    expect(result.warns.join(' ')).toContain('simulated marker publication failure')
+    expect(result.freed).toEqual([])
+    expect(readFileSync(join(wt.path, 'node_modules', 'pkg', 'index.js'), 'utf8')).toBe('module.exports = 1\n')
+  })
+
   test('tracked, dirty, unpushed, and locked checkouts keep dependencies', () => {
     const tracked = pushedWithDeps(121)
     writeFileSync(join(tracked.wt.path, 'node_modules', 'tracked.js'), 'tracked\n')
@@ -279,6 +302,47 @@ describe('dependency reclamation', () => {
     const writableResult = pruneWorktrees({ repoRoot: writable.root, base: 'main', devMd: depsDevMd, ledgerTimes: { '127': DEPS_LEDGER }, now: DEPS_NOW, write: true })
     expect(writableResult.warns.join(' ')).toContain('other users can write')
     expect(existsSync(join(writable.wt.path, 'node_modules'))).toBe(true)
+  })
+
+  test('every managed ancestor rejects symlink substitution before deletion', () => {
+    const relatives = [
+      '.vegastack',
+      '.vegastack/.tmp',
+      '.vegastack/.tmp/deps-dropped',
+      '.vegastack/.worktrees',
+      '.vegastack/.worktrees/134',
+      '.vegastack/.worktrees/134/node_modules',
+    ]
+    for (const relativePath of relatives) {
+      const { root, wt } = pushedWithDeps(134)
+      const target = join(root, relativePath)
+      mkdirSync(target, { recursive: true })
+      const external = mkdtempSync(join(tmpdir(), 'vf-ancestor-substitution-'))
+      const moved = join(external, 'moved')
+      renameSync(target, moved)
+      symlinkSync(moved, target)
+
+      const dependencySafety = verifyOwnedPath(root, join(wt.path, 'node_modules'), { allowMissingLeaf: true })
+      const markerSafety = verifyOwnedPath(root, join(root, '.vegastack', '.tmp', 'deps-dropped'), { allowMissingLeaf: true })
+      expect(dependencySafety.ok && markerSafety.ok).toBe(false)
+      expect(existsSync(join(wt.path, 'node_modules', 'pkg', 'index.js'))).toBe(true)
+    }
+  })
+
+  test('a foreign-owned managed ancestor is refused where the platform can create one', () => {
+    const currentUid = process.getuid?.()
+    expect(trustedAncestorOwner((currentUid ?? 0) + 1, currentUid)).toBe(false)
+    if (currentUid !== 0) return
+
+    const { root, wt } = pushedWithDeps(140)
+    const ancestor = join(root, '.vegastack', '.worktrees')
+    chownSync(ancestor, 1, 1)
+    try {
+      expect(verifyOwnedPath(root, join(wt.path, 'node_modules')).reason).toContain('owned by uid 1')
+      expect(existsSync(join(wt.path, 'node_modules', 'pkg', 'index.js'))).toBe(true)
+    } finally {
+      chownSync(ancestor, 0, 0)
+    }
   })
 
   test('traversal-shaped names and non-ISO timestamps make the marker set unreadable', () => {
@@ -625,21 +689,24 @@ describe('pruneWorktrees', () => {
     git(addWt.path, 'push', '-q', '-u', 'origin', 'feat/115-add-fails')
     writeFileSync(join(addWt.path, 'dirty.txt'), 'dirty\n')
     const indexPath = git(addWt.path, 'rev-parse', '--path-format=absolute', '--git-path', 'index').trim()
+    const addIndexBefore = readFileSync(indexPath)
     writeFileSync(`${indexPath}.lock`, 'held\n')
     const addResult = pruneWorktrees({ repoRoot: addRoot, base: 'main', olderThan: '14d', devMd, ledgerTimes: { '115': OLD_LEDGER }, now: FUTURE_NOW, write: true })
     expect(addResult.candidates.find((c: { name: string }) => c.name === '115')?.reason).toContain('git add failed')
-    expect(git(addWt.path, 'diff', '--cached', '--name-only').trim()).toBe('')
+    expect(readFileSync(indexPath)).toEqual(addIndexBefore)
 
     const commitRoot = repoWithRemote()
     const commitWt = createWorktree({ repoRoot: commitRoot, issue: 116, slug: 'commit-fails', type: 'feat', base: 'main', devMd, home: commitRoot, write: true })
     git(commitWt.path, 'push', '-q', '-u', 'origin', 'feat/116-commit-fails')
     writeFileSync(join(commitWt.path, 'dirty.txt'), 'dirty\n')
+    const commitIndex = git(commitWt.path, 'rev-parse', '--path-format=absolute', '--git-path', 'index').trim()
+    const commitIndexBefore = readFileSync(commitIndex)
     const hook = join(commitRoot, '.git', 'hooks', 'pre-commit')
     writeFileSync(hook, '#!/bin/sh\nexit 1\n')
     chmodSync(hook, 0o755)
     const commitResult = pruneWorktrees({ repoRoot: commitRoot, base: 'main', olderThan: '14d', devMd, ledgerTimes: { '116': OLD_LEDGER }, now: FUTURE_NOW, write: true })
     expect(commitResult.candidates.find((c: { name: string }) => c.name === '116')?.reason).toContain('git commit failed')
-    expect(git(commitWt.path, 'diff', '--cached', '--name-only').trim()).toBe('')
+    expect(readFileSync(commitIndex)).toEqual(commitIndexBefore)
   })
 
   test('detached worktrees require a clean HEAD reachable from another ref', () => {

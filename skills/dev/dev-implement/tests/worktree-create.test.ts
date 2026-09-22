@@ -80,6 +80,16 @@ describe('createWorktree', () => {
     expect(renamed.path).toBe(first.path)
     expect(renamed.blocks.join(' ')).toContain('worktree')
   })
+  test('a no-issue checkout cannot impersonate or block an issue checkout', () => {
+    const root = repo()
+    const direct = createWorktree({ repoRoot: root, issue: null, slug: '106-direct-fix', type: 'fix', base: 'main', devMd, home: root, write: true })
+    expect(direct.blocks.join(' ')).toContain('cannot start with an issue number')
+    expect(existsSync(join(root, '.vegastack', '.worktrees', '106-direct-fix'))).toBe(false)
+
+    const issue = createWorktree({ repoRoot: root, issue: 106, slug: 'real-issue', type: 'fix', base: 'main', devMd, home: root, write: true })
+    expect(issue.blocks).toEqual([])
+    expect(issue.path).toBe(join(root, '.vegastack', '.worktrees', '106'))
+  })
   test('a legacy slugged checkout blocks a second numeric checkout for the issue', () => {
     const root = repo()
     const legacy = join(root, '.vegastack', '.worktrees', '106-old-title')
