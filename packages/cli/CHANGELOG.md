@@ -147,7 +147,6 @@
 
   Two operator words per issue, an ack and "ship it", and dev-ship runs that one word through the issue's whole landing: PR, merge queue, merge and the worktree cleanup. The release steps are the stated exception — a generated release PR belongs to no issue, so the guard has no recorded word to match and the tag push still asks; dev-ship says so rather than promising a hands-off release. Its runbook drops the child-into-parent merge machinery that the removed dispatcher needed.
 
-  `dev-chronicle` is now dev-status's chronicle mode — one skill, one description, one trigger fixture, the entry format and the "catch me up" digest kept as they were. dev-implement's resume leads with the status comment and the branch. dev-plan's plan format drops the fleet-parallel declaration. skill-scan keeps only the deterministic gate CI runs; its semantic pass is gone.
 
   New skill `skills-refresh`: it re-verifies the dated platform and harness facts the dev skills pin. A watchlist names each topic, the facts-file section that holds it and the vendor pages to read; `facts-scan.mjs` reports which lines are past the 60-day window; one subagent reads each tool's pages and reports what moved; every change becomes its own issue, the confirmed lines become one date bump, and a digest lands on a pinned log issue. It never edits a skill itself. dev-architect's platform facts and dev-setup's harness facts are converted to that one-line format — capability, how, since, checked, official link — so every claim carries its own date and source.
 
@@ -159,9 +158,6 @@
 
 ### Patch Changes
 
-- 1650752: The ship guard lets routine GitHub writes run without asking: `gh issue edit`, `gh pr edit`, `gh label create` and `gh label edit`. Closing, deleting, commenting, merging and releasing still ask.
-- d078ad0: Checks now run once each before merge: a pre-commit hook runs the fast checks, `bun run test:affected` runs only the tests a change can reach, and the merge queue runs the full suite, pack smoke and skill scan. The plan format and skill-authoring guidance name these commands.
-- ba5a8a4: `vegafactory worktree create` now reads its branch types from dev.md's `branch:` knob, which that line already called the only place the list lives — a copy was frozen in the worktree script, so editing the knob changed nothing. A title prefix outside the list is no longer a type, and it no longer leaks into the slug either: `research: P12 — prove the lean factory works` gave the slug `research-p12-…`, which reads like a type that lost its slash. `create` refuses a title that names no listed type, and a `--type` outside the list, naming the types this project has instead of silently choosing `feat`.
 
 ## 0.19.9
 
@@ -276,13 +272,7 @@
   - The dispatcher refuses a repo whose compiled policy is missing, and the headless prompt fences the issue's title and outcome as data.
   - Contract change: the hook's `--check` mode takes `--policy PATH` and `--repo owner/repo` instead of `--dev-md`.
 
-- ccb3228: The skill scanner is now its own installable skill, `skill-scan`, in a new `skills-tooling` group.
 
-  - New group `skills-tooling` — tools that work on agent skills themselves. It is installable everywhere, so `skills add --all` brings `skill-scan` along; `skills add --group skills-tooling` installs the group on its own.
-  - `skill-scan` owns the guard (`scripts/skill-scan.mjs`), its SkillSpector library (`scripts/lib/skillspector.mjs`), the baseline discipline, the `skill-scan:` and `skillspector-update:` knobs, and the six SkillSpector refresh sources — all moved from `dev-review` with their tests.
-  - `dev-review` narrows to code review. It keeps its Security axis, which now consumes the scan's report as an input rather than running the scan; its refresh contract returns to an evergreen waiver.
-  - dev-implement's Verify gate now runs `node <path-to-skill-scan>/scripts/skill-scan.mjs --json`, and dev-setup says that a project setting a `skill-scan:` root installs the `skill-scan` skill.
-  - Migration: a project already setting `skill-scan:` should install `skill-scan` alongside `dev-review` — `vegafactory skills add skill-scan`. Nothing the scanner checks, and none of the knob defaults, changed.
 
 - ca77712: A parent issue can now run its independent children at the same time, each in its own worktree, and join them back in plan order.
 
@@ -341,10 +331,6 @@
 
 - 05c00aa: dev-implement uploads UI evidence through a dry-run-by-default script and keeps its changelog mechanics and dev-review's scanner-provisioning detail out of the skill bodies.
 
-  - New `scripts/evidence-upload.mjs`: `--repo <o/r> --issue <n> --file <png> [--evidence-repo <o/r>] [--dev-md <path>] [--write] [--json]` — plans the PUT (path `<repo-name>/<issue>/<timestamp>-<name>`, size) and sends only under `--write`; the `{message, content}` body rides gh's stdin so the base64 payload never touches argv or any output line; one retry under a `-r2` name on HTTP 409; symlinks, non-image extensions, empty files, and a missing `evidence-repo:` knob are refused with exit 2.
-  - New `references/changelog-and-chronicle.md` carries the per-knob changelog mechanics, the entry's first-line rule, and the chronicle hand-off; dev-implement's body keeps a one-paragraph pointer and its Verify bullet names the script instead of a shell one-liner.
-  - dev-review's body keeps one sentence on scanner provisioning; the uv/brew/pipx lookup, the `skillspector-update:` knob, `--no-provision`, and the upgrade-reporting rule live in its README.
-  - `ghJson` in `scripts/lib/gh.mjs` accepts an `input` option that feeds the child's stdin, so one gh runner serves reads and stdin-fed writes.
 
 - 86158a3: Require exact reviewed commit, base and scope bindings before shipping.
 
@@ -392,10 +378,6 @@
 
 - dfb99c8: vegafactory-setup ships a dispatcher-box provisioning checklist, and both workflows record the always-on runner group they will move to.
 
-  - `onboarding/dispatcher-box.md` is the control room's third onboarding path: two macOS accounts on the box, so a CI job cannot read the dispatcher's tokens; the pinned toolchain (bun 1.3.14, Node 24, gh 2.97+, uv + SkillSpector); the sleep and auto-login rules; the runner registration block; the org-admin group grant; and a reboot drill that proves "always-on".
-  - `ci.yml` and `release.yml` name the org runner group `vsk-runners-mac-mini` and the exact switch to it, but keep targeting the registered laptop runners: an ungranted or empty group queues a required check forever with `runner: null`, so the switch waits for the operator's org-admin grant.
-  - Provenance stays off — moving to the mini does not restore it, because npm accepts a provenance bundle only from a GitHub-hosted runner (#57).
-  - `onboarding/dispatcher-box.md` creates and grants the runner group before the runner registers into it, and the registration block runs without `gh`: the release is looked up over the public API and the registration token is minted by an org admin and pasted in, so the runner account never holds a credential.
 
 - Require an exact operator approval record before crossing a stable major-version boundary, and recognize a generated package changelog version after a release branch consumes its pending Changesets entries.
 - 0fb6466: dev-intake stamps the org's native issue type and its Priority and Effort issue fields on every issue it creates, and dev-setup detects both and records them as the issue-types: and issue-fields: knobs. A repo with no org types degrades to labels.
@@ -584,15 +566,9 @@
 
 - 3668ca0: A new `factory` group ships `vegafactory-setup`, the skill that bootstraps and maintains the org control room every repo's profile layers on.
 
-  - The control room's files — `org.md`, `people.csv`, `decisions.md`, `groups/<g>/{group.md,people.csv,decisions.md}`, `repos.md`, `boards.md`, `rules/`, `onboarding/`, `templates/` — ship as seed templates with one reference documenting the layout, the precedence, and the read path.
-  - dev-setup now detects org defaults first and states an inherited knob instead of asking for it; `.vegastack/dev.md` gains a `control-room:` knob.
-  - `references/conventions.md` states the precedence in one line; the checkpoint-retention rule moved to dev-implement's `references/ledger-and-resume.md`, the skill that applies it.
-  - `groups/<g>/group.md` carries its harness policy as the one `harness-policy:` line dev.md uses, so the dispatcher's parser layers the two files key by key (the six `harness:` lines it wrote before parsed as nothing), and it gains defaults for `ui-evidence:`, `worktree-retention:`, `skillspector-update:` and `sync-max-age:`; its promise is stated as every knob a group can decide, not every knob a dev.md can hold.
 
 ### Patch Changes
 
-- 7b4a48b: `validate:skill` now rejects a description carrying `: ` (colon-space), the YAML mapping indicator that made skill-maintainer's frontmatter unparseable and its description invisible to every harness; the description itself is fixed. The shipped scripts, hooks and references no longer carry the two constructs that blinded SkillSpector's static analyzers — the `stdio` mode word beside its own quote, and template literals opening on their interpolation — so every skill but two now scans at full coverage, with the same bytes reaching every child process.
-- 9cfa60a: The parallel-children scripts fail closed where they guessed, and the join acts on what the children reported.
 
   - `children.mjs join --results` now diffs and merges the `branch` each child reports, so a branch the harness named is found rather than re-derived from the issue title; a reported value that is not a branch name is refused before any git call. A `done` child whose diff cannot be read is not merged, is written up in the ledger as not merged, and holds every merge. `wrote` reports whether the parent branch moved, so a join that landed one child and then blocked on another no longer reports a write it made as no write.
   - `launch`, `join` and `remove` block when the issue lookup behind `--repo` fails, instead of creating or looking for branches named from the issue number alone; `plan` still previews with a warning.
@@ -601,9 +577,6 @@
 
 - c52f65c: The parallel-children join now lands every child, not just the first, and the plan linter refuses a group it could never run.
 
-  - `mergeArgs(child, index)` fast-forwards only the first child — whose base _is_ the parent HEAD, so a refusal there proves the parent moved — and merges every child behind it with `--no-ff --no-edit`. All children branch from the same commit, so the first merge advances the parent and every later child stops being a descendant; `--ff-only` for all of them landed one child and refused the rest. A merge that fails is aborted and the join stops rather than guessing past a conflict.
-  - `plan-lint` blocks an independent group that declares a file nearly every change edits — `bun.lock`, `package.json`, `packages/cli/packaging.json`, `.vegastack/dev.md`, `.vegastack/chronicle.md`, `.vegastack/skillspector-baseline.json`, or any README — so a plan that cannot run in parallel says so while it is being written instead of at the join.
-  - `references/parallel-children.md` documents how a half-done join resumes: the unmerged child keeps its branch and worktree, nothing merged is rebased, and the next session runs that child alone against the advanced tip.
 
 - 3276063: dev-setup's `factory-board.yml.template` checks the profile out into its own `path: profile` instead of the runner's shared work directory: the sparse checkout of one file left git in sparse mode, and on a self-hosted runner the next job at that path started from an almost-empty tree. Re-run `dev-setup` to refresh a rendered board workflow.
 - 3c0d2e8: A feature request typed in chat now routes to dev-intake, and a trivial fix stays on dev-implement's direct path, on Claude Code and Codex alike.
@@ -612,7 +585,6 @@
   - dev-implement, dev-intake, and dev-architect descriptions read as calm conditionals: intake claims "add support for X" phrasings, implement's chat clause is limited to a trivial one-or-two-file fix, and architect's "Consult it BEFORE" becomes "Use when proposing".
   - README quick start says how to load a skill by name (`/dev-intake` in Claude Code and Hermes, `$dev-intake` in Codex) when routing needs bypassing.
 
-- a6a537c: Machine-readable skill scans now flush their complete JSON evidence before exiting.
 
   - Preserve full findings and suppression evidence when stdout is a pipe, including warning and blocking exits.
   - Keep the JSON schema, newline termination, human output and verdict semantics unchanged.
@@ -642,8 +614,6 @@
 
 - 020fd9b: Release preparation now validates warning-only scanner output instead of rejecting it before inspection.
 
-  - Accept exit `1` only for the exact skill-scan call, then require the existing zero-block complete-coverage JSON contract.
-  - Keep every other command zero-only and preserve scanner exit `2`, malformed, blocked, or incomplete evidence as hard failures.
 
 - 86158a3: Correct scanner test fixtures to remove absent environment overrides while preserving explicit values and restoring the original environment.
 
@@ -663,14 +633,7 @@
 
 ### Minor Changes
 
-- 4fd0c34: The skill-scan guard now finds the SkillSpector CLI through the channel that installed it, and keeps it up to date on its own.
 
-  - A scanner installed via uv, brew, or pipx is located and run by absolute path, so it is no longer reported as missing when the agent's shell has a different `PATH` than the operator's.
-  - New `skillspector-update:` knob in `.vegastack/dev.md` — `off | notify | auto`, defaulting to `auto`, which installs SkillSpector when absent and upgrades it before each scan.
-  - Any install or upgrade failure falls back to the copy already installed and the scan continues; only a scanner that cannot be found at all still blocks.
-  - An upgrade that changes the version or its dependencies is reported before the findings, so new findings read as the scanner having learned something rather than the change having broken something.
-  - A baseline that pins `scanner_version` for fingerprint suppressions warns when a different version ran; the pin is never moved automatically.
-  - `--no-provision` forces a single run to leave the machine untouched.
 
 ## 0.16.2
 
@@ -678,13 +641,6 @@
 
 - 4dca22f: Documentation now recommends the global install: `add --group dev-skills --global` is the headline command in the root README, the installer README, and every dev-skill walkthrough.
 
-  - Global installs once per machine and covers every project; it is also the only mode that can target all three runtimes, since Hermes has no project-level discovery. Project-local stays documented for repositories that should carry their own copy.
-  - Both READMEs now state that a project-local copy does **not** override a global one in Claude Code — personal skills take precedence over project skills — so the two should not be installed together for the same skill.
-  - `skill-maintainer` and `skillify` are named as the deliberate exception: they are repo-only, so a global copy would trigger everywhere.
-  - The upgrade path is documented for the first time (`add … --global --force`, with why `--force` is needed), alongside `verify`, `remove`, and `doctor --global` — which skips the per-project `.vegastack/dev.md` check.
-  - Every fenced command block is independently pasteable: alternatives no longer share a fence with the command you actually want, and the skill-scan invocation no longer hardcodes a project-local Claude Code path.
-  - `skillify`'s scaffolded-README template follows: a new skill's install block is generated with `--global`, and the family-install alternative gets its own fence instead of sharing one with the single-skill command.
-  - Root README gains npm/CI/Node/license badges, a table of contents, a scannable requirements table, a numbered quick start, and a contributing-and-support section; `CODE_OF_CONDUCT.md` (Contributor Covenant 2.1) is added and linked from `CONTRIBUTING.md`.
 
 ## 0.16.1
 
@@ -713,13 +669,7 @@
 
 ### Minor Changes
 
-- 322ae75: The skill-scan baseline gains a `coverage` section, for files a scanner could not finish reading.
 
-  - SkillSpector's own baseline suppresses findings only. It has no way to express "the scan of this file is incomplete", so a skill whose script the scanner cannot fully parse would block forever with no recourse. `coverage` entries accept that, named by `skill` and `file`, under the same discipline as a rule: a written reason carrying a "Still flag if:" clause, enforced by the guard.
-  - An acceptance covers exactly the file it names. If a skill has a second unread file that is not accounted for, it still blocks — accepting a known cause must not silently cover an unknown one.
-  - `AE1` findings are accepted through `coverage` too. Despite arriving as HIGH findings, they are completeness signals: the scanner's own text is "Referenced artifact was not completely inspected."
-  - A degraded or partly-read scan no longer hides the findings it did produce. Only a failed execution short-circuits, where no field of the report can be trusted.
-  - `skill-maintainer` documents the triage decision order — fix, rule, fingerprint, coverage, park — and the SkillSpector behaviours already traced on this repo, so future findings are adjudicated the same way rather than re-derived.
 
 ## 0.15.0
 
@@ -727,15 +677,6 @@
 
 - 1407b93: Projects that author agent skills can now have them scanned for vulnerabilities as part of the workflow, before anything is pushed.
 
-  - A new `skill-scan:` knob in `.vegastack/dev.md` names the directory holding the skills to scan; `none`, or no line at all, turns it off and the guard says it skipped rather than erroring.
-  - `dev-review` ships `scripts/skill-scan.mjs`, which runs [NVIDIA SkillSpector](https://github.com/NVIDIA/skillspector) over each skill and blocks on any unsuppressed HIGH or CRITICAL finding — never on the aggregate risk score, which a skills repo distorts by documenting the very mechanics being scanned.
-  - `dev-implement` runs the guard at its Verify gate; `dev-review`'s Security axis triages what it surfaces into the normal review comment and fix loop, and treats every scanner hit as a candidate finding to trace, never a verdict.
-  - Suppressions live in a JSON SkillSpector baseline whose every rule needs a reason carrying a "Still flag if:" clause — enforced by the guard, not trusted, and applied to fingerprint entries too so an auto-generated baseline cannot silence everything at once.
-  - Baseline matchers must be **literal**: `*`, `?`, `[` and `]` are rejected. A single wildcard rule can silence every finding while the run still reports success, and rejecting wildcard spellings one at a time proved to be an arms race — naming the file is the only checkable form of "as narrow as its cause".
-  - The guard refuses anything it cannot verify, not just findings: an unreadable profile or report, a report shape it does not recognise, an unrecognised severity, a scan that inspected zero files or left files partly read, an analyzer that did not finish, a crash, a profile giving `skill-scan` conflicting values, and any directory holding a `SKILL.md` that discovery did not reach — nested too deep, dot-prefixed, or behind a symlink. An unscanned skill nobody mentions looks exactly like a clean one.
-  - Discovery reads two levels, so a grouped authored layout (`<root>/<group>/<skill>/`) scans instead of silently finding nothing.
-  - `dev-setup` detects skills in a repo and drafts the knob, the Verify bullet, and a blocking pre-publish guard.
-  - The scanner is contributor-installed; the guard refuses with the install command when it is missing rather than passing quietly, and it is deliberately not part of `bun run check`.
 
 ## 0.14.0
 

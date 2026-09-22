@@ -24,10 +24,7 @@ const REPO = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/;
 const ISSUE = /^\d+$/;
 
 // The contents-API path for one file in the evidence repo — the one place it is built.
-// Interpolated paths and messages are concatenated, not template literals: a backtick at a
-// shell-word start whose first inner token carries the interpolation trips SkillSpector's
-// bounded parser for the whole skill (skill-maintainer's standards.md, known behaviours).
-const apiPathFor = (evidenceRepo, path) => 'repos/' + evidenceRepo + '/contents/' + path;
+const apiPathFor = (evidenceRepo, path) => `repos/${evidenceRepo}/contents/${path}`;
 
 // First `evidence-repo:` knob line in dev.md; a trailing `# comment` is ignored
 // because the value stops at whitespace.
