@@ -1363,7 +1363,8 @@ const invokedDirectly = process.argv[1] && resolve(process.argv[1]) === fileURLT
 if (invokedDirectly) {
   const argv = process.argv.slice(2);
   const verb = argv.find((arg) => !arg.startsWith('--')) ?? '';
-  const flags = parseFlags(argv, ['json', 'write', 'force', 'push', 'all', 'worker-layout']);
+  const flags = parseFlags(argv, ['json', 'write', 'dry-run', 'force', 'push', 'all', 'worker-layout']);
+  if (flags['dry-run']) flags.write = false;
   let outcome;
   try {
     outcome = runVerb(verb, flags);

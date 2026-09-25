@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test'
-import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { parseWorktreeArgs, recordRepoRoot, runWorktree, scriptArgs } from '../src/worktree.ts'
@@ -71,8 +71,14 @@ describe('runWorktree', () => {
     const registryPath = join(mkdtempSync(join(tmpdir(), 'vf-reg-')), 'worktree-roots.json')
     expect(await runWorktree(['prune'], { spawn, registryPath })).toBe(0)
     expect(calls[0]).not.toContain('--write')
+    expect(existsSync(registryPath)).toBe(false)
+    writeFileSync(registryPath, 'existing registry bytes\n')
+    expect(await runWorktree(['prune', '--write', '--dry-run'], { spawn, registryPath })).toBe(0)
+    expect(await runWorktree(['prune', '--dry-run', '--write'], { spawn, registryPath })).toBe(0)
+    expect(readFileSync(registryPath, 'utf8')).toBe('existing registry bytes\n')
     expect(await runWorktree(['prune', '--write'], { spawn, registryPath })).toBe(0)
-    expect(calls[1]).toContain('--write')
+    expect(calls[3]).toContain('--write')
+    expect(existsSync(registryPath)).toBe(true)
   })
 })
 

@@ -56,6 +56,21 @@ function pushedFeature(root: string) {
   return wt
 }
 
+test('the packaged prune script keeps a merged checkout with --dry-run in either flag order', () => {
+  const root = repoWithRemote()
+  const wt = pushedFeature(root)
+  git(root, 'merge', '-q', '--no-ff', '-m', 'merge feature', 'feat/106-x')
+  git(root, 'push', '-q', 'origin', 'main')
+  git(root, 'fetch', '-q', 'origin', 'main')
+  const script = join(import.meta.dir, '../scripts/worktree.mjs')
+  for (const flags of [['--write', '--dry-run'], ['--dry-run', '--write']]) {
+    const run = spawnSync(process.execPath, [script, 'prune', ...flags, '--repo-root', root, '--json'], { cwd: root, encoding: 'utf8' })
+    expect(run.status).toBe(0)
+    expect(existsSync(wt.path)).toBe(true)
+  }
+  expect(git(root, 'branch', '--list', 'feat/106-x').trim()).toContain('feat/106-x')
+})
+
 describe('removeWorktree', () => {
   test('dry run is the default and removes nothing', () => {
     const root = repoWithRemote()
