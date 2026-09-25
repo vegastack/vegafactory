@@ -472,7 +472,12 @@ export function isPastRetention({ lastCommitAt, ledgerUpdatedAt, now, retentionM
 // eat and a patch-id would then miss.
 export function git(cwd, args, { input, raw = false } = {}) {
   try {
-    const out = execFileSync('git', args, { cwd, encoding: 'utf8', input, stdio: [input === undefined ? 'ignore' : 'pipe', 'pipe', 'pipe'] });
+    const out = execFileSync('git', args, {
+      cwd, encoding: 'utf8', input, stdio: [input === undefined ? 'ignore' : 'pipe', 'pipe', 'pipe'],
+      ...(Number(process.env.VSK_WORKTREE_GIT_TIMEOUT_MS) > 0
+        ? { timeout: Number(process.env.VSK_WORKTREE_GIT_TIMEOUT_MS), killSignal: 'SIGKILL' }
+        : {}),
+    });
     return { ok: true, out: raw ? out : out.trim() };
   } catch (error) {
     const stderr = error.stderr?.toString().trim() || error.message;
@@ -967,7 +972,7 @@ export function rescueWork({ path, branch, name, remote = 'origin' }) {
 // kept; prune never creates a remote branch. Dirty work is rescued only when
 // the remote branch already exists and the user's staged selection is empty.
 // Every candidate then re-runs the same safe-to-remove test as explicit remove.
-export function pruneWorktrees({ repoRoot, base, olderThan, devMd, ledgerTimes = {}, ledgerUnknown = new Set(), issueStates = {}, issueUnknown = new Set(), now = Date.now(), write = false, remote = 'origin', workerLayout = false, recordDroppedDeps = noteDroppedDeps }) {
+export function pruneWorktrees({ repoRoot, base, olderThan, devMd, ledgerTimes = {}, ledgerUnknown = new Set(), issueStates = {}, issueUnknown = new Set(), now = Date.now(), write = false, remote = 'origin', workerLayout = false, excludeIssues = new Set(), recordDroppedDeps = noteDroppedDeps }) {
   const blocks = [];
   const warns = [];
   const actions = [];
@@ -979,6 +984,9 @@ export function pruneWorktrees({ repoRoot, base, olderThan, devMd, ledgerTimes =
   const dropped = readDroppedDeps({ repoRoot, workerLayout });
   const baseReady = refreshBase({ repoRoot, base, remote, actions, warns, write });
   for (const entry of inventory(repoRoot, workerLayout)) {
+    // The worker snapshots running and same-pass selected issues before asking for advice.
+    // This check precedes dependency and checkout candidate publication alike.
+    if (excludeIssues.has(issueOfWorktree(entry.name))) continue;
     const branch = entry.branch;
     const lastCommitAt = git(entry.path, ['log', '-1', '--format=%cI', 'HEAD']).out || null;
     const ledgerUpdatedAt = ledgerTimes[entry.name] ?? null;
@@ -1311,6 +1319,13 @@ function runVerb(verb, flags) {
   }
   if (verb === 'prune') {
     const warns = [];
+    const excludedText = flags['exclude-issues'];
+    const excluded = excludedText === undefined ? [] : String(excludedText).split(',').map(Number);
+    if (excluded.some((number) => !Number.isSafeInteger(number) || number <= 0)) {
+      return { blocks: ['--exclude-issues requires a comma-separated list of positive issue numbers'], warns };
+    }
+    // This is an internal preview selector, never a way to authorize deletion.
+    if (excludedText !== undefined && shared.write) return { blocks: ['--exclude-issues is preview-only'], warns };
     const repo = flags.repo || knobLine(devMd, 'repo')?.split('·')[0].trim() || null;
     const names = inventory(repoRoot, workerLayout).map((entry) => entry.name);
     const github = repo ? gatherGithubFacts({ repo, names, warns }) : { openIssues: [], issueStates: {}, unknown: new Set(names) };
@@ -1319,7 +1334,7 @@ function runVerb(verb, flags) {
       repoRoot, base, olderThan: flags['older-than'], devMd,
       ledgerTimes: ledger.times, ledgerUnknown: ledger.unknown,
       issueStates: github.issueStates, issueUnknown: github.unknown,
-      now: Date.now(), write: shared.write, workerLayout,
+      now: Date.now(), write: shared.write, workerLayout, excludeIssues: new Set(excluded),
     });
     return { ...pruned, warns: [...warns, ...pruned.warns] };
   }

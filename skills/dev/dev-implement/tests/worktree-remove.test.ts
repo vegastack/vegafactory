@@ -71,6 +71,28 @@ test('the packaged prune script keeps a merged checkout with --dry-run in either
   expect(git(root, 'branch', '--list', 'feat/106-x').trim()).toContain('feat/106-x')
 })
 
+test('preview exclusions suppress numeric and legacy issue leaves before any advice', () => {
+  const root = repoWithRemote()
+  const numeric = pushedFeature(root)
+  const legacy = join(root, '.vegastack', '.worktrees', '107-old-title')
+  git(root, 'worktree', 'add', '-q', '-b', 'feat/107-old-title', legacy, 'main')
+  git(legacy, 'push', '-q', '-u', 'origin', 'feat/107-old-title')
+  mkdirSync(join(numeric.path, 'node_modules'))
+  mkdirSync(join(legacy, 'node_modules'))
+  git(root, 'merge', '-q', '--no-ff', '-m', 'merge numeric', 'feat/106-x')
+  git(root, 'push', '-q', 'origin', 'main')
+  git(root, 'fetch', '-q', 'origin', 'main')
+  const input = { repoRoot: root, base: 'main', devMd, now: FUTURE_NOW, ledgerTimes: { '106': OLD_LEDGER, '107-old-title': OLD_LEDGER }, write: false }
+  const ordinary = pruneWorktrees(input)
+  expect(ordinary.candidates.some((row: { name: string }) => row.name === '106')).toBe(true)
+  expect(ordinary.candidates.some((row: { name: string }) => row.name === '107-old-title')).toBe(true)
+  const excluded = pruneWorktrees({ ...input, excludeIssues: new Set([106, 107]) })
+  expect(excluded.candidates).toEqual([])
+  expect(excluded.droppable).toEqual([])
+  expect(existsSync(numeric.path)).toBe(true)
+  expect(existsSync(legacy)).toBe(true)
+})
+
 describe('removeWorktree', () => {
   test('dry run is the default and removes nothing', () => {
     const root = repoWithRemote()
