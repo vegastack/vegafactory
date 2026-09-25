@@ -110,6 +110,8 @@ The rest of the worker's machine record is private too. `~/.vegafactory/worker/`
 
 After a board pass, `vegafactory worker status` may list issue worktrees worth inspecting with bare `vegafactory worktree prune`. This is advice only: the worker runs a bounded preview and never passes `--write`, removes a checkout or dependency, or pushes a branch. An unavailable housekeeping row means remote facts were incomplete or timed out; retry the bare preview yourself before deciding whether to run `prune --write`.
 
+If attended pruning reclaimed a checkout's `node_modules`, the next worker step reads its private marker and runs only that repository's declared `commands: setup` before launching the agent. Setup and agent share one step deadline; stop, disable, shutdown, or timeout stops the setup process group. A missing setup command or failed setup keeps the marker and starts no agent. An attended session uses `vegafactory worktree prepare <issue>` for the same restoration gate.
+
 `threads.json` in that same private worker directory remembers only a session UUID, canonical repository, issue, harness, node and last-seen branch head. It stores no transcript or prompt. A later run resumes when the node and branch head still match; a moved branch or machine starts a new conversation. A missing local session gets one fresh retry within the same step limit. Thread continuity grants no claim, approval or merge authority, and an invalid record refuses mutation until inspected.
 
 Control-room files record these **names**. The values live in GitHub organization settings and nowhere a repository can read them.

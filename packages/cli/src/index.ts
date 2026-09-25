@@ -60,7 +60,7 @@ Issues (agents read .vegastack/.tmp/issues/, then write back through these):
   issue sync|check|comment|edit-comment|body|label|ack|drop <n> ...   run "vegafactory issue --help"
 
 Worktrees (one issue, one worktree; the main checkout stays on the default branch):
-  worktree list|status|create|restore|remove|prune ...                run "vegafactory worktree --help"
+  worktree list|status|create|restore|remove|prune|prepare ...        run "vegafactory worktree --help"
 
 Review (the other tool reviews read-only; this command posts the comment):
   review <n> [--base REF] [--reviewer claude|codex] [--resume] [--dry-run]   run "vegafactory review --help"
