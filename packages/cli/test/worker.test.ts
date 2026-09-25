@@ -2296,7 +2296,7 @@ describe('machine-global runtime records fail closed', () => {
     const { home, stateRoot } = privateRoot()
     const fixture = join(home, 'housekeeping-fixture.mjs')
     const captured = join(home, 'captured-request.json')
-    writeFileSync(fixture, `import { writeFileSync } from 'node:fs'; let raw = ''; for await (const chunk of process.stdin) raw += chunk; writeFileSync(${JSON.stringify(captured)}, raw); process.stdout.write(JSON.stringify({schema:1,complete:true,advisories:[{repo:'o/r',issue:9,worktree:'9',reason:'merged',ageDays:1}],unavailable:[]}));`)
+    writeFileSync(fixture, `import { writeFileSync } from 'node:fs'; let raw = ''; for await (const chunk of process.stdin) raw += chunk; const request = JSON.parse(raw); writeFileSync(${JSON.stringify(captured)}, JSON.stringify(request)); process.stdout.write(JSON.stringify({schema:1,complete:true,advisories:[{repo:'o/r',issue:9,worktree:'9',reason:'merged',ageDays:1}],unavailable:[]}));`)
     const board = { key: 'o/r', repo: 'o/r', root: join(home, 'repos', 'o__r', 'repo'), devMd: '', runner: gh.runner, identity: { runner: gh.runner, freshen: async () => {}, token: () => null } }
     const lines: string[] = []
     const run = startHousekeeping({ stateRoot, boards: [board], excluded: new Set(['o/r#7']), deadlineMs: 2000,

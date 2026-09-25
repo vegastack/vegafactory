@@ -2326,7 +2326,7 @@ export interface HousekeepingRun { settled: boolean; stop(): void; done: Promise
 
 // The guard survives a worker crash and kills the whole group at the deadline. On a normal exit,
 // signal the guard first; its trap reaps its timer before the shell exits, leaving no sleeper.
-const HOUSEKEEPING_WATCHDOG = `"$@" <&0 & job=$!; { trap 'kill "$dog" 2>/dev/null; exit 0' TERM INT; sleep "$VF_LIMIT" & dog=$!; wait "$dog"; kill -KILL 0; } </dev/null >/dev/null 2>&1 & guard=$!; wait "$job"; code=$?; kill "$guard" 2>/dev/null; wait "$guard" 2>/dev/null; exit "$code"`
+const HOUSEKEEPING_WATCHDOG = `IFS= read -r request || [ -n "$request" ] || exit 2; printf '%s' "$request" | "$@" & job=$!; { trap 'kill "$dog" 2>/dev/null; exit 0' TERM INT; sleep "$VF_LIMIT" & dog=$!; wait "$dog"; kill -KILL 0; } </dev/null >/dev/null 2>&1 & guard=$!; wait "$job"; code=$?; kill "$guard" 2>/dev/null; wait "$guard" 2>/dev/null; exit "$code"`
 
 export function startHousekeeping(input: {
   stateRoot: string
