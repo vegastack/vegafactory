@@ -2131,7 +2131,7 @@ describe('the step a run makes', () => {
       seen.push({ timeoutMs: options.timeoutMs, cwd: options.cwd, env: options.env })
       return { code: null, stdout: 'x'.repeat(9000), stderr: '', timedOut: true }
     }
-    const result = await defaultRunStep({}, { exec })({ action: 'implement', number: 7, repo: 'o/r', split: false, by: null }, { root, devMd: '', token: null })
+    const result = await defaultRunStep({}, { exec, now: () => 1_000_000 })({ action: 'implement', number: 7, repo: 'o/r', split: false, by: null }, { root, devMd: '', token: null })
     expect(seen[0]!.timeoutMs).toBe(STEP_TIMEOUT_MS)
     // Nobody is watching, so a round of questions goes to the issue rather than a question tool.
     expect(seen[0]!.env.VSK_ASK_ROUTE).toBe('issue')
