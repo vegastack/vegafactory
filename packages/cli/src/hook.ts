@@ -15,6 +15,7 @@ import { askText, learningsPath, pendingNote } from './learning.ts'
 import { detectRepo, evidenceChangedAt, findValidAck, latestOfType, markerKeys, permissionLookup, repoRoot, snapshot } from './issue.ts'
 import { stateOf } from './labels.ts'
 import { effectiveUpdateMode, installArgs, latestPublishedVersion, maintainSelfUpdate, packageVersion, readUpdateNote, SELF_UPDATE_LIMIT_S, writeUpdateNote, type LatestVersion } from './self-update.ts'
+import { droppedDependencyStatus, parseSetupCommand } from '../../../skills/dev/dev-implement/scripts/worktree.mjs'
 
 export const HOOK_EVENTS = ['session-start', 'prompt', 'pre-tool', 'post-tool', 'stop', 'session-end'] as const
 export type HookEvent = typeof HOOK_EVENTS[number]
@@ -538,6 +539,24 @@ const whereAt = (cwd: string, deps: HookDeps): Where | null => {
 // Tools that only read; they pass even when the payload cannot be read.
 const READ_ONLY_TOOLS = new Set(['Read', 'Glob', 'Grep', 'LS', 'WebFetch', 'WebSearch', 'TodoWrite', 'view_image'])
 
+export function isDependencyPrepareCommand(command: string | null, issue: number): boolean {
+  return command !== null && command.trim() === `vegafactory worktree prepare ${issue}`
+}
+
+export function dependencyPreparation(where: Where): { needed: false } | { needed: true; command: string | null; reason: string } {
+  const name = String(where.number)
+  const workerLayout = basename(where.root) === 'repo' && where.top === join(dirname(where.root), 'issues', name)
+  let status: ReturnType<typeof droppedDependencyStatus>
+  try { status = droppedDependencyStatus({ repoRoot: where.root, workerLayout, name, path: where.top }) }
+  catch (error) { status = { needed: true, reason: 'dependency marker state could not be read: ' + (error as Error).message } }
+  if (!status.needed) return { needed: false }
+  let setup: { ok: true; command: string } | { ok: false; reason: string }
+  try { setup = parseSetupCommand(readFileSync(join(where.root, '.vegastack', 'dev.md'), 'utf8')) }
+  catch (error) { setup = { ok: false, reason: 'commands: setup cannot be read: ' + (error as Error).message } }
+  const command = setup.ok ? setup.command : null
+  return { needed: true, command, reason: `${status.reason}. Run \`vegafactory worktree prepare ${where.number}\` before working${command ? ` (declared setup: \`${command}\`)` : `; ${setup.ok ? '' : setup.reason}`}.` }
+}
+
 function preTool(harness: Harness, input: HookInput, deps: HookDeps): void {
   const payload = input.payload
   if (!payload) {
@@ -547,6 +566,10 @@ function preTool(harness: Harness, input: HookInput, deps: HookDeps): void {
     if (READ_ONLY_TOOLS.has(tool)) return
     if (FILE_TOOLS.has(tool)) {
       const here = whereAt(process.cwd(), deps)
+      if (here) {
+        const preparation = dependencyPreparation(here)
+        if (preparation.needed) return deps.out(renderDecision(harness, 'deny', preparation.reason))
+      }
       const denied = here ? ownership(harness, here, deps) : null
       if (denied) deps.out(denied)
       return
@@ -557,6 +580,10 @@ function preTool(harness: Harness, input: HookInput, deps: HookDeps): void {
   const here = whereAt(cwd, deps)
   const tool = String(payload.tool_name ?? '')
   if (here && (FILE_TOOLS.has(tool) || isShellTool(tool))) {
+    const preparation = dependencyPreparation(here)
+    if (preparation.needed && !(isShellTool(tool) && isDependencyPrepareCommand(extractCommand(payload), here.number))) {
+      return deps.out(renderDecision(harness, 'deny', preparation.reason))
+    }
     // Only a shell tool can produce a commit, so only a shell tool opens a window this session may
     // later be credited for. A file tool writes files; the Stop checkpoint is what commits them.
     const session = typeof payload.session_id === 'string' && payload.session_id ? payload.session_id : null
@@ -669,6 +696,8 @@ async function advisory(event: HookEvent, harness: Harness, payload: Record<stri
       `This worktree works issue #${where.number} (${where.repo}), state ${state ?? 'unknown'}, held by ${holder ? `${label(holder)}${local.held ? ' — this worktree' : ''}` : 'nobody'}.`,
       `Its local copy is ${cacheDir(where.root, where.repo, where.number)}; read it with \`vegafactory issue sync ${where.number}\` first.`,
     ]
+    const preparation = dependencyPreparation(where)
+    if (preparation.needed) lines.push(preparation.reason)
     if (holder && !local.held) lines.push(`Someone else holds it. Do not change files; to take it back: \`${takeBack(where, harness, model)}\`.`)
     else if (!holder) lines.push(`Nobody holds it; claim it before working: \`vegafactory issue claim ${where.number} --harness ${harness} --model ${model}\`.`)
     const pending = pendingNote(where.root)

@@ -14,10 +14,10 @@
 // Anything destructive is dry-run until --write, and a symlinked worktree
 // parent or ~/.codex/config.toml is refused outright.
 //
-// Usage: node worktree.mjs create|restore|remove|list|prune|status [flags] [--json]
-import { execFileSync } from 'node:child_process';
+// Usage: node worktree.mjs create|restore|remove|list|prune|status|prepare [flags] [--json]
+import { execFileSync, spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { chmodSync, copyFileSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { chmodSync, copyFileSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, realpathSync, renameSync, rmdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { basename, delimiter, dirname, isAbsolute, join, parse, relative, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -299,13 +299,12 @@ export function verifyOwnedPath(root, target, { allowMissingLeaf = false } = {})
   const parts = rel ? rel.split(sep).filter(Boolean) : [];
   for (let index = -1; index < parts.length; index += 1) {
     if (index >= 0) cursor = join(cursor, parts[index]);
-    if (!existsSync(cursor)) {
-      if (allowMissingLeaf) return { ok: true, reason: null };
-      return { ok: false, reason: cursor + ' does not exist' };
-    }
     let info;
     try { info = lstatSync(cursor); }
-    catch (error) { return { ok: false, reason: cursor + ' could not be inspected: ' + error.message }; }
+    catch (error) {
+      if (error.code === 'ENOENT' && allowMissingLeaf) return { ok: true, reason: null };
+      return { ok: false, reason: cursor + ' could not be inspected: ' + error.message };
+    }
     if (info.isSymbolicLink() || !info.isDirectory()) return { ok: false, reason: cursor + ' is not an ordinary directory (symlinks are refused)' };
     if (uid !== undefined && info.uid !== uid) return { ok: false, reason: cursor + ' is owned by uid ' + info.uid + ', not the current user' };
     if ((info.mode & 0o022) !== 0) return { ok: false, reason: cursor + ' is unsafe because other users can write it' };
@@ -313,9 +312,8 @@ export function verifyOwnedPath(root, target, { allowMissingLeaf = false } = {})
   return { ok: true, reason: null };
 }
 
-function ensureMarkerRoot(repoRoot, workerLayout) {
+function ensureOwnedDirectory(repoRoot, workerLayout, root) {
   const owner = managedRoot(repoRoot, workerLayout);
-  const root = markerRoot(repoRoot, workerLayout);
   const ownerSafety = verifyOwnedPath(owner, owner);
   if (!ownerSafety.ok) throw new Error(ownerSafety.reason);
   let cursor = owner;
@@ -327,6 +325,10 @@ function ensureMarkerRoot(repoRoot, workerLayout) {
   }
   chmodSync(root, 0o700);
   return root;
+}
+
+function ensureMarkerRoot(repoRoot, workerLayout) {
+  return ensureOwnedDirectory(repoRoot, workerLayout, markerRoot(repoRoot, workerLayout));
 }
 
 const markerFile = (repoRoot, workerLayout, name) => join(markerRoot(repoRoot, workerLayout), encodeURIComponent(name) + '.json');
@@ -353,8 +355,14 @@ export function readDroppedDeps({ repoRoot, workerLayout = false }) {
   const root = markerRoot(repoRoot, workerLayout);
   const safety = verifyOwnedPath(owner, root, { allowMissingLeaf: true });
   if (!safety.ok) return { records, unreadable: safety.reason };
-  if (!existsSync(root)) return { records, unreadable: null };
-  const rootInfo = lstatSync(root);
+  let rootInfo;
+  try { rootInfo = lstatSync(root); }
+  catch (error) {
+    return error.code === 'ENOENT'
+      ? { records, unreadable: null }
+      : { records, unreadable: root + ' could not be inspected: ' + error.message };
+  }
+  if (rootInfo.isSymbolicLink() || !rootInfo.isDirectory()) return { records, unreadable: root + ' is not an ordinary marker root' };
   if ((rootInfo.mode & 0o777) !== 0o700) return { records, unreadable: root + ' is not owner-only 0700' };
   let entries;
   try { entries = readdirSync(root); }
@@ -422,6 +430,245 @@ export function clearDroppedDeps({ repoRoot, workerLayout = false, name, path })
     rmSync(target);
     return true;
   } catch (error) { return error.code === 'ENOENT'; }
+}
+
+// A reclaimed checkout has exactly one authoritative setup command. The middle dot separates
+// profile fields only outside backticks, so a shell command may contain one without being split.
+export function parseSetupCommand(devMd) {
+  const lines = String(devMd ?? '').split('\n').filter((line) => /^commands:/.test(line));
+  if (lines.length !== 1) return { ok: false, reason: 'dev.md needs one readable commands: line with setup `...`' };
+  const fields = [];
+  let field = '';
+  let quoted = false;
+  for (const character of lines[0].slice('commands:'.length)) {
+    if (character === '`') quoted = !quoted;
+    if (character === '·' && !quoted) { fields.push(field.trim()); field = ''; }
+    else field += character;
+  }
+  fields.push(field.trim());
+  const setup = fields.filter((part) => /^setup(?:\s|$)/.test(part));
+  if (setup.length !== 1 || !/^setup\s+`[^`]+`$/.test(setup[0])) {
+    return { ok: false, reason: 'dev.md needs exactly one non-empty backticked commands: setup value' };
+  }
+  const command = setup[0].slice(setup[0].indexOf('`') + 1, -1).trim();
+  return command ? { ok: true, command } : { ok: false, reason: 'commands: setup must not be empty' };
+}
+
+const restorationRoot = (repoRoot, workerLayout) => workerLayout
+  ? join(dirname(repoRoot), 'deps-prepare')
+  : join(repoRoot, '.vegastack', '.tmp', 'deps-prepare');
+
+function privateJson(path) {
+  let info;
+  try { info = lstatSync(path); }
+  catch (error) {
+    if (error.code === 'ENOENT') return null;
+    throw new Error(path + ' could not be inspected: ' + error.message);
+  }
+  if (!info.isFile() || info.isSymbolicLink() || (process.getuid && info.uid !== process.getuid()) || (info.mode & 0o777) !== 0o600 || info.size > 16_384) {
+    throw new Error(path + ' is not an owner-only ordinary result file');
+  }
+  try { return JSON.parse(readFileSync(path, 'utf8')); }
+  catch (error) { throw new Error(path + ' is not valid JSON: ' + error.message); }
+}
+
+function processStart(pid) {
+  try { return execFileSync('ps', ['-p', String(pid), '-o', 'lstart='], { encoding: 'utf8', timeout: 10_000 }).trim() || null; }
+  catch { return null; }
+}
+
+function processIdentity(owner) {
+  const started = processStart(owner.pid);
+  if (started !== null) return started === owner.startedAt ? 'matching' : 'gone';
+  try { process.kill(owner.pid, 0); return 'unknown'; }
+  catch (error) { return error.code === 'ESRCH' ? 'gone' : 'unknown'; }
+}
+
+function ownerOf(lock, name) {
+  const info = lstatSync(lock);
+  if (!info.isDirectory() || info.isSymbolicLink() || (process.getuid && info.uid !== process.getuid()) || (info.mode & 0o777) !== 0o700) {
+    throw new Error(lock + ' is not an owner-only setup lock');
+  }
+  const owner = privateJson(join(lock, 'owner.json'));
+  if (!owner || owner.schema !== 1 || owner.name !== name || !Number.isSafeInteger(owner.pid) || owner.pid <= 1
+    || typeof owner.startedAt !== 'string' || !owner.startedAt || typeof owner.nonce !== 'string'
+    || !/^[0-9a-f-]{36}$/.test(owner.nonce)) throw new Error(lock + ' has an unknown setup owner');
+  return owner;
+}
+
+function resultOf(root, name, nonce) {
+  const path = join(root, name + '.' + nonce + '.result.json');
+  const value = privateJson(path);
+  if (value === null) return null;
+  if (value.schema !== 1 || value.name !== name || value.nonce !== nonce || typeof value.ok !== 'boolean'
+    || typeof value.command !== 'string' || typeof value.reason !== 'string' || !Number.isFinite(value.ms)) {
+    throw new Error(path + ' has an invalid setup result');
+  }
+  return value;
+}
+
+function publishResult(root, name, nonce, result) {
+  const path = join(root, name + '.' + nonce + '.result.json');
+  const temporary = join(root, '.' + name + '.' + nonce + '.' + randomUUID() + '.tmp');
+  if (privateJson(path) !== null) throw new Error(path + ' already exists');
+  try {
+    writeFileSync(temporary, JSON.stringify({ schema: 1, name, nonce, ...result }) + '\n', { flag: 'wx', mode: 0o600 });
+    renameSync(temporary, path);
+  } catch (error) {
+    try { rmSync(temporary, { force: true }); } catch { /* retain the original failure */ }
+    throw error;
+  }
+}
+
+function releaseSetupLock(lock, nonce) {
+  const owner = ownerOf(lock, basename(lock).slice(0, -'.lock'.length));
+  if (owner.nonce !== nonce) throw new Error(lock + ' changed owner before release');
+  rmSync(join(lock, 'owner.json'));
+  rmdirSync(lock);
+}
+
+const pause = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+// One executor contract serves the attended CLI and the worker. The caller owns how the process
+// group is registered; this default only runs the repository-declared shell command for a person.
+export function executeSetupCommand(command, { cwd, timeoutMs, signal, onStart } = {}) {
+  return new Promise((resolve) => {
+    const child = spawn('sh', ['-c', command], { cwd, detached: true, stdio: ['ignore', 'pipe', 'pipe'] });
+    let output = '';
+    let timedOut = false;
+    let done = false;
+    const keep = (chunk) => { output = (output + String(chunk)).slice(-512); };
+    const stop = () => {
+      if (!child.pid) return child.kill('SIGKILL');
+      try { process.kill(-child.pid, 'SIGKILL'); } catch { child.kill('SIGKILL'); }
+    };
+    const finish = (code, stoppedSignal) => {
+      if (done) return;
+      done = true;
+      clearTimeout(timer);
+      signal?.removeEventListener('abort', aborted);
+      resolve({ code, signal: stoppedSignal, timedOut, output });
+    };
+    const aborted = () => stop();
+    const timer = setTimeout(() => { timedOut = true; stop(); }, timeoutMs);
+    signal?.addEventListener('abort', aborted, { once: true });
+    if (signal?.aborted) stop();
+    if (child.pid) onStart?.(child.pid, command);
+    child.stdout.on('data', keep);
+    child.stderr.on('data', keep);
+    child.on('error', (error) => { keep(error.message); finish(null, null); });
+    child.on('close', finish);
+  });
+}
+
+export function droppedDependencyStatus({ repoRoot, workerLayout = false, name, path }) {
+  const expected = worktreePath(repoRoot, name, workerLayout);
+  if (!/^[1-9]\d*$/.test(String(name)) || path !== expected) {
+    return { needed: true, reason: 'the issue checkout does not match its numeric managed path' };
+  }
+  const state = readDroppedDeps({ repoRoot, workerLayout });
+  if (state.unreadable) return { needed: true, reason: 'dependency marker state is unreadable: ' + state.unreadable };
+  const marker = state.records.get(name);
+  if (!marker) return { needed: false, reason: 'no reclaimed dependencies' };
+  const safe = verifyOwnedPath(managedRoot(repoRoot, workerLayout), path);
+  if (!safe.ok) return { needed: true, reason: safe.reason };
+  return { needed: true, reason: 'node_modules was reclaimed', marker };
+}
+
+export async function restoreDroppedDependencies({ repoRoot, workerLayout = false, name, path, devMd, timeoutMs, signal,
+  execute = executeSetupCommand, onStart, now = Date.now }) {
+  const started = now();
+  const result = (ok, restored, command, reason) => ({ ok, restored, command, reason, ms: Math.max(0, now() - started) });
+  if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) return result(false, false, null, 'dependency setup has no remaining time');
+  const initial = droppedDependencyStatus({ repoRoot, workerLayout, name, path });
+  if (!initial.needed) return result(true, false, null, initial.reason);
+  if (!initial.marker) return result(false, false, null, initial.reason + ' — inspect the marker and checkout before retrying');
+  const parsed = parseSetupCommand(devMd);
+  if (!parsed.ok) return result(false, false, null, parsed.reason + ' — set commands: setup in .vegastack/dev.md');
+  if (signal?.aborted) return result(false, false, parsed.command, 'dependency setup was stopped before it began');
+  const root = restorationRoot(repoRoot, workerLayout);
+  try { ensureOwnedDirectory(repoRoot, workerLayout, root); }
+  catch (error) { return result(false, false, parsed.command, 'dependency setup lock is unsafe: ' + error.message); }
+  const lock = join(root, name + '.lock');
+  const deadline = started + timeoutMs;
+  let nonce = null;
+  while (nonce === null) {
+    if (signal?.aborted) return result(false, false, parsed.command, 'dependency setup was stopped');
+    if (now() >= deadline) return result(false, false, parsed.command, 'dependency setup timed out while waiting for its lock');
+    const mine = { schema: 1, name, nonce: randomUUID(), pid: process.pid, startedAt: processStart(process.pid) };
+    if (!mine.startedAt) return result(false, false, parsed.command, 'the setup process identity could not be proved');
+    try {
+      mkdirSync(lock, { mode: 0o700 });
+      writeFileSync(join(lock, 'owner.json'), JSON.stringify(mine) + '\n', { flag: 'wx', mode: 0o600 });
+      nonce = mine.nonce;
+      break;
+    } catch (error) {
+      if (error.code !== 'EEXIST') return result(false, false, parsed.command, 'dependency setup lock could not be created: ' + error.message);
+    }
+    let owner;
+    try { owner = ownerOf(lock, name); }
+    catch (error) {
+      if (error.code === 'ENOENT') {
+        const settled = droppedDependencyStatus({ repoRoot, workerLayout, name, path });
+        if (!settled.needed) return result(true, true, parsed.command, 'dependency setup completed by a concurrent run');
+        continue;
+      }
+      return result(false, false, parsed.command, error.message + ' — inspect the lock before retrying');
+    }
+    const identity = processIdentity(owner);
+    if (identity === 'unknown') return result(false, false, parsed.command, 'the setup lock owner cannot be identified safely');
+    if (identity === 'gone') {
+      try { renameSync(lock, join(root, '.' + name + '.' + owner.nonce + '.stale')); }
+      catch (error) { return result(false, false, parsed.command, 'a crashed setup lock could not be preserved: ' + error.message); }
+      continue;
+    }
+    for (;;) {
+      if (signal?.aborted) return result(false, false, parsed.command, 'dependency setup was stopped while waiting');
+      if (now() >= deadline) return result(false, false, parsed.command, 'dependency setup timed out while waiting');
+      let prior;
+      try { prior = resultOf(root, name, owner.nonce); }
+      catch (error) { return result(false, false, parsed.command, error.message); }
+      if (prior) {
+        const status = droppedDependencyStatus({ repoRoot, workerLayout, name, path });
+        if (prior.ok && !status.needed) return result(true, true, prior.command, 'dependency setup completed by the existing run');
+        if (prior.ok && processIdentity(owner) === 'matching') { await pause(25); continue; }
+        return result(false, false, prior.command, prior.ok ? 'dependency marker remained after setup — inspect it before retrying' : prior.reason);
+      }
+      if (processIdentity(owner) !== 'matching') return result(false, false, parsed.command, 'the setup owner stopped without publishing a result; retry from a new run');
+      await pause(25);
+    }
+  }
+  try {
+    const current = droppedDependencyStatus({ repoRoot, workerLayout, name, path });
+    if (!current.marker || JSON.stringify(current.marker) !== JSON.stringify(initial.marker)) {
+      return result(false, false, parsed.command, 'the dependency marker changed while acquiring the setup lock');
+    }
+    const remaining = deadline - now();
+    if (remaining <= 0) return result(false, false, parsed.command, 'dependency setup timed out before it began');
+    let execution;
+    try { execution = await execute(parsed.command, { cwd: path, timeoutMs: remaining, signal, onStart }); }
+    catch (error) { execution = { code: null, signal: null, timedOut: false, output: error.message }; }
+    const stopped = signal?.aborted || execution.timedOut || now() >= deadline || execution.signal || execution.code !== 0;
+    const reason = signal?.aborted ? 'dependency setup was stopped' : execution.timedOut || now() >= deadline ? 'dependency setup timed out'
+      : execution.signal ? 'dependency setup ended on ' + execution.signal
+      : execution.code !== 0 ? 'dependency setup exited ' + execution.code + ': ' + String(execution.output ?? '').slice(-400)
+      : 'dependency setup exited 0';
+    try { publishResult(root, name, nonce, { ok: !stopped, command: parsed.command, reason, ms: Math.max(0, now() - started) }); }
+    catch (error) { return result(false, false, parsed.command, 'dependency setup result could not be saved; marker preserved: ' + error.message); }
+    if (stopped) return result(false, false, parsed.command, reason);
+    if (signal?.aborted || now() >= deadline) return result(false, false, parsed.command, signal?.aborted ? 'dependency setup was stopped before marker clear' : 'dependency setup timed out before marker clear');
+    const beforeClear = droppedDependencyStatus({ repoRoot, workerLayout, name, path });
+    if (!beforeClear.marker || JSON.stringify(beforeClear.marker) !== JSON.stringify(initial.marker)) {
+      return result(false, false, parsed.command, 'the dependency marker changed before it could be cleared');
+    }
+    if (!clearDroppedDeps({ repoRoot, workerLayout, name, path })) return result(false, false, parsed.command, 'setup exited 0 but the dependency marker could not be cleared');
+    const afterClear = droppedDependencyStatus({ repoRoot, workerLayout, name, path });
+    if (afterClear.needed) return result(false, false, parsed.command, 'setup exited 0 but the dependency marker remains: ' + afterClear.reason);
+    return result(true, true, parsed.command, 'reclaimed node_modules restored with ' + parsed.command);
+  } finally {
+    try { releaseSetupLock(lock, nonce); }
+    catch { /* an uncertain lock remains evidence and blocks a later attempt */ }
+  }
 }
 
 // branch: the type list, which lives in the comment on that knob's own line —
@@ -1262,7 +1509,7 @@ function renderWorktree(result, { json }) {
     return { exitCode, text: lines.join('\n') };
   }
   const payload = JSON.parse(text);
-  for (const key of ['actions', 'path', 'branch', 'entries', 'candidates', 'reconciled']) {
+  for (const key of ['actions', 'path', 'branch', 'entries', 'candidates', 'reconciled', 'preparation']) {
     if (result[key] !== undefined) payload[key] = result[key];
   }
   return { exitCode, text: JSON.stringify(payload, null, 2) };
@@ -1284,6 +1531,26 @@ function runVerb(verb, flags) {
   const shared = { repoRoot, devMd, home, base, write: Boolean(flags.write), workerLayout };
 
   const repoOf = () => flags.repo || knobLine(devMd, 'repo')?.split('·')[0].trim() || null;
+
+  if (verb === 'prepare') {
+    if (issue === null) return { blocks: ['prepare needs --issue <n>'], warns: [] };
+    const name = String(issue);
+    const path = worktreePath(repoRoot, name, workerLayout);
+    const status = droppedDependencyStatus({ repoRoot, workerLayout, name, path });
+    if (!shared.write) {
+      if (!status.needed) return { blocks: [], warns: [], actions: [status.reason] };
+      if (!status.marker) return { blocks: [status.reason], warns: [] };
+      const setup = parseSetupCommand(devMd);
+      return setup.ok
+        ? { blocks: [], warns: [], actions: ['would run commands: setup `' + setup.command + '` for reclaimed node_modules'] }
+        : { blocks: [setup.reason], warns: [] };
+    }
+    return restoreDroppedDependencies({ repoRoot, workerLayout, name, path, devMd, timeoutMs: 10 * 60_000 })
+      .then((prepared) => ({
+        blocks: prepared.ok ? [] : [prepared.reason], warns: [], preparation: prepared,
+        actions: [prepared.command ? 'commands: setup `' + prepared.command + '` → ' + prepared.reason : prepared.reason],
+      }));
+  }
 
   if (verb === 'list' || verb === 'status') {
     const warns = [];
@@ -1355,7 +1622,7 @@ function runVerb(verb, flags) {
     const options = { ...shared, issue, slug: named.slug, type: named.type, title: named.title };
     return verb === 'create' ? createWorktree(options) : restoreWorktree(options);
   }
-  return { blocks: [at(verb, 'unknown verb — expected create|restore|remove|list|prune|status')], warns: [] };
+  return { blocks: [at(verb, 'unknown verb — expected create|restore|remove|list|prune|status|prepare')], warns: [] };
 }
 
 const invokedDirectly = process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url);
@@ -1366,7 +1633,7 @@ if (invokedDirectly) {
   if (flags['dry-run']) flags.write = false;
   let outcome;
   try {
-    outcome = runVerb(verb, flags);
+    outcome = await runVerb(verb, flags);
   } catch (error) {
     outcome = { blocks: [at('worktree', error.message)], warns: [] };
   }

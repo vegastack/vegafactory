@@ -12,6 +12,7 @@ import { addLesson, readLessons } from '../src/learning.ts'
 import { installArgs, packageVersion, readUpdateNote, SELF_UPDATE_LIMIT_S, writeUpdateNote } from '../src/self-update.ts'
 import { FakeGitHub } from './fake-github.ts'
 import { refuseAmbientHome } from './no-ambient-home.ts'
+import { clearDroppedDeps, noteDroppedDeps } from '../../../skills/dev/dev-implement/scripts/worktree.mjs'
 
 const git = (cwd: string, ...args: string[]) => {
   const result = spawnSync('git', ['-c', 'user.name=t', '-c', 'user.email=t@t', ...args], { cwd, encoding: 'utf8' })
@@ -227,6 +228,21 @@ describe('guard', () => {
 })
 
 describe('session context', () => {
+  test('a reclaimed checkout names setup and blocks implementation tools until its marker clears', async () => {
+    writeFileSync(join(root, '.vegastack/dev.md'), 'repo: o/r · default branch main\ncommands: setup `bun install --frozen-lockfile`\nvegafactory-update: off\n')
+    noteDroppedDeps({ repoRoot: root, name: '7', path: tree, droppedAt: new Date().toISOString() })
+    const started = await hook('session-start', { cwd: tree, model: 'opus' })
+    expect(started.json().hookSpecificOutput.additionalContext).toContain('node_modules was reclaimed')
+    expect(started.json().hookSpecificOutput.additionalContext).toContain('vegafactory worktree prepare 7')
+    expect(started.json().hookSpecificOutput.additionalContext).toContain('bun install --frozen-lockfile')
+    expect((await hook('pre-tool', bash('bun test'))).text).toContain('worktree prepare 7')
+    expect((await hook('pre-tool', bash('sh -c "vegafactory worktree prepare 7"'))).text).toContain('worktree prepare 7')
+    expect((await hook('pre-tool', { cwd: tree, tool_name: 'Write', tool_input: { file_path: join(tree, 'x') } })).text).toContain('worktree prepare 7')
+    expect((await hook('pre-tool', bash('vegafactory worktree prepare 7'))).text).toBe('')
+    expect(clearDroppedDeps({ repoRoot: root, name: '7', path: tree })).toBe(true)
+    expect((await hook('pre-tool', bash('bun test'))).text).toBe('')
+  })
+
   test('session-start names the issue, its holder and its local copy', async () => {
     const result = await hook('session-start', { cwd: tree, model: 'opus' })
     const context = result.json().hookSpecificOutput
