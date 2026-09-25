@@ -11,7 +11,7 @@ import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { worktreesPath, type HomeOptions } from './home.ts'
 
-const verbs = ['list', 'create', 'restore', 'remove', 'prune', 'status'] as const
+const verbs = ['list', 'create', 'restore', 'remove', 'prune', 'status', 'prepare'] as const
 export type WorktreeVerb = (typeof verbs)[number]
 
 export interface WorktreeArgs {
@@ -35,7 +35,7 @@ export interface WorktreeDeps {
 }
 
 export function worktreeUsage(): string {
-  return `Usage: vegafactory worktree <list|create|restore|remove|prune|status> [options]
+  return `Usage: vegafactory worktree <list|create|restore|remove|prune|status|prepare> [options]
 
   list [--all-repos]                    every worktree with its state and disk use
   status                                worktrees reconciled against open issues; orphans named
@@ -46,6 +46,8 @@ export function worktreeUsage(): string {
                                          ambiguous legacy leaves require --name
   prune [--older-than 14d] [--write]    preview reclaimable worktrees and dependencies; --write
                                         performs the reported removals after every safety check
+  prepare <issue>                       run the declared commands: setup when node_modules was reclaimed;
+                                        failure keeps the marker and blocks work
 
 Create, restore and remove act; bare prune previews and only prune --write acts.
 --dry-run always previews. Branches are never deleted, and
@@ -58,7 +60,7 @@ Create, restore and remove act; bare prune previews and only prune --write acts.
 export function parseWorktreeArgs(argv: string[], env: NodeJS.ProcessEnv = process.env): WorktreeArgs {
   const head = argv[0]
   if (!head || !verbs.includes(head as WorktreeVerb)) {
-    throw new Error(`Unknown worktree verb: ${head ?? '(none)'} — expected list|create|restore|remove|prune|status`)
+    throw new Error(`Unknown worktree verb: ${head ?? '(none)'} — expected list|create|restore|remove|prune|status|prepare`)
   }
   const verb = head as WorktreeVerb
   const rest = argv.slice(1)
@@ -91,7 +93,7 @@ export function parseWorktreeArgs(argv: string[], env: NodeJS.ProcessEnv = proce
   }
   if (dryRun) args.write = false
   if (verb === 'remove' && args.issue !== undefined && args.name !== undefined) throw new Error('worktree remove accepts either an issue number or --name, not both')
-  if ((verb === 'create' || verb === 'restore') && args.issue === undefined) {
+  if ((verb === 'create' || verb === 'restore' || verb === 'prepare') && args.issue === undefined) {
     throw new Error(`worktree ${verb} needs an issue number`)
   }
   if (verb === 'remove' && args.issue === undefined && args.name === undefined) throw new Error('worktree remove needs an issue number or --name <leaf>')
@@ -208,6 +210,6 @@ export async function runWorktree(argv: string[], deps?: Partial<WorktreeDeps>):
 
   const run = spawn(scriptArgs(args))
   render('', parseScriptOutput(run.stdout), args.json)
-  if (args.verb !== 'prune' || args.write) await recordRepoRoot(registryPath, process.cwd()).catch(() => [])
+  if (!['prune', 'prepare'].includes(args.verb) || args.write) await recordRepoRoot(registryPath, process.cwd()).catch(() => [])
   return run.status
 }

@@ -13,7 +13,7 @@ import {
   drain, filesFromParent, harnessAnswers, hitLimit, hooksWired, listedHere, mintToken, overlaps, parseWorkerArgs,
   parseNodes, poll, readActed, readRuns, readiness, recordRun, resetAt, runKey, RUNS_KEPT, runWorker, schedule, serviceCommands, stagePolicy,
   standDown, standDownStrict, stepPrompt, tail, unitPath, unitText, unsafeForParallel, workingDir,
-  workerUsage,
+  workerUsage, workerDependencyPreparation,
   forgetChild, gitIn, migrateLegacyWorkerState, noteChild, prepareWorkerStorage, readChildren, refreshRoster, releaseRunLock, reserve, runLockPath, stopChild, takeRunLock, updateActed, verifiedListing,
   recordRoomSha, updateModeFor,
   normalizeWorkerRepos, readWorkerState, reconcileBoards, workerProblemReporter,
@@ -25,6 +25,7 @@ import { ackBody, artifactHash, permissionLookup, snapshot } from '../src/issue.
 import { cacheDir, syncIssue, withLock } from '../src/issue-cache.ts'
 import { FakeGitHub } from './fake-github.ts'
 import { refuseAmbientHome } from './no-ambient-home.ts'
+import { noteDroppedDeps, readDroppedDeps, worktreePath } from '../../../skills/dev/dev-implement/scripts/worktree.mjs'
 
 refuseAmbientHome()
 
@@ -542,6 +543,7 @@ describe('multi-repository board reconciliation', () => {
     const inflight = new Map<string, Inflight>()
     const pollDeps: PollDeps = {
       stateRoot, boards: [selected], runId: 'f18', now: () => gh.clock, machine: HOST, out: () => {},
+      prepareDependencies: async () => ({ ok: true, restored: false, command: null, reason: 'no reclaimed dependencies', ms: 0 }),
       start: () => 'matching', stop: () => { releaseStep(); return true },
       standDown: (_repo, _number, reason) => reason,
       runStep: async (_step, runContext) => {
@@ -1141,7 +1143,8 @@ describe('one poll over the board', () => {
   const deps = (over: Partial<PollDeps> = {}): PollDeps => ({
     stateRoot: root,
     boards: [{ key: 'o/r', repo: 'o/r', root, runner: gh.runner, devMd: '', identity: { runner: gh.runner, freshen: async () => {}, token: () => 'token-r' } }],
-    now: () => gh.clock, machine: HOST, runId: 'test', out: () => {}, runStep: runStep(), standDown: () => 'stood down', ...over,
+    now: () => gh.clock, machine: HOST, runId: 'test', out: () => {}, runStep: runStep(), standDown: () => 'stood down',
+    prepareDependencies: async () => ({ ok: true, restored: false, command: null, reason: 'no reclaimed dependencies', ms: 0 }), ...over,
   })
   // One pass, then everything it started.
   const pass = async (over: Partial<PollDeps> = {}, inflight = new Map<string, Inflight>()) => {
@@ -1150,6 +1153,105 @@ describe('one poll over the board', () => {
   }
 
   beforeEach(() => { steps.length = 0 })
+
+  test('restoration uses the shared marker gate in a worker checkout', async () => {
+    const holder = realpathSync(mkdtempSync(join(tmpdir(), 'worker-deps-')))
+    const repoRoot = join(holder, 'repo')
+    const path = worktreePath(repoRoot, '275', true)
+    mkdirSync(repoRoot, { recursive: true, mode: 0o700 })
+    mkdirSync(path, { recursive: true, mode: 0o700 })
+    noteDroppedDeps({ repoRoot, workerLayout: true, name: '275', path, droppedAt: new Date().toISOString() })
+    let calls = 0
+    const prepare = workerDependencyPreparation({}, async (command, context) => {
+      calls += 1
+      expect(command).toBe('bun install --frozen-lockfile')
+      expect(context.cwd).toBe(path)
+      expect(context.env.VSK_WORKTREE_LAYOUT).toBe('worker')
+      context.onStart(7521, 'commands: setup')
+      return { code: 0, signal: null, timedOut: false, output: '' }
+    })
+    const input = { root: repoRoot, issue: 275, devMd: 'commands: setup `bun install --frozen-lockfile`\n', token: 'token',
+      timeoutMs: 1_000, signal: new AbortController().signal, onStart: () => {} }
+    expect(await prepare(input)).toMatchObject({ ok: true, restored: true })
+    expect(readDroppedDeps({ repoRoot, workerLayout: true }).records.has('275')).toBe(false)
+    expect(await prepare(input)).toMatchObject({ ok: true, restored: false })
+    expect(calls).toBe(1)
+  })
+
+  test('setup child is recorded and consumes the agent step budget', async () => {
+    gh.addIssue({ number: 1, labels: ['planning', 'medium'] })
+    const events: string[] = []
+    const inflight = new Map<string, Inflight>()
+    let tick = gh.clock
+    const started = await poll(deps({
+      caps: { ...DEFAULT_CAPS, stepMs: 1_000 }, start: () => 'same-start', now: () => tick,
+      prepareDependencies: async (input) => {
+        expect(input.timeoutMs).toBe(1_000)
+        input.onStart(7522, 'commands: setup')
+        expect(readChildren(root)).toContainEqual(expect.objectContaining({ pid: 7522, command: 'commands: setup' }))
+        events.push('setup-child-recorded')
+        tick += 400
+        events.push('marker-cleared')
+        return { ok: true, restored: true, command: 'bun install', reason: 'restored', ms: 400 }
+      },
+      runStep: async (_step, context) => {
+        expect(context.timeoutMs).toBe(600)
+        expect(readChildren(root)).toEqual([])
+        events.push('agent-started')
+        return { outcome: 'done', note: 'worked', ms: 100 }
+      },
+    }), inflight)
+    expect(started).toHaveLength(1)
+    expect((await drain(inflight))[0]).toMatchObject({ outcome: 'done', ms: 500 })
+    expect(events).toEqual(['setup-child-recorded', 'marker-cleared', 'agent-started'])
+  })
+
+  test('setup failure keeps the claim until failure and starts no agent', async () => {
+    gh.addIssue({ number: 1, labels: ['planning', 'medium'] })
+    const inflight = new Map<string, Inflight>()
+    let agents = 0
+    await poll(deps({
+      prepareDependencies: async () => ({ ok: false, restored: false, command: 'bun install', reason: 'dependency setup exited 1', ms: 42 }),
+      runStep: async () => { agents += 1; return { outcome: 'done', note: '', ms: 1 } },
+    }), inflight)
+    expect((await drain(inflight))[0]).toMatchObject({ outcome: 'failed', ms: 42 })
+    expect(agents).toBe(0)
+  })
+
+  test('stopping a setup signals its registered process group and never starts the agent', async () => {
+    gh.addIssue({ number: 1, labels: ['planning', 'medium'] })
+    const stopped: number[] = []
+    const inflight = new Map<string, Inflight>()
+    let agents = 0
+    await poll(deps({
+      start: () => 'same-start', alive: () => true, stop: (pid) => { stopped.push(pid); return true },
+      prepareDependencies: (input) => new Promise((resolve) => {
+        input.onStart(7523, 'commands: setup')
+        input.signal.addEventListener('abort', () => resolve({ ok: false, restored: false, command: 'bun install', reason: 'dependency setup was stopped', ms: 10 }), { once: true })
+      }),
+      runStep: async () => { agents += 1; return { outcome: 'done', note: '', ms: 1 } },
+    }), inflight)
+    expect(readChildren(root)).toContainEqual(expect.objectContaining({ pid: 7523, command: 'commands: setup' }))
+    inflight.get('o/r#1')!.stop()
+    await drain(inflight)
+    expect(stopped).toEqual([7523])
+    expect(readChildren(root)).toEqual([])
+    expect(agents).toBe(0)
+  })
+
+  test('a completed setup that spent the deadline cannot start an agent', async () => {
+    gh.addIssue({ number: 1, labels: ['planning', 'medium'] })
+    let tick = gh.clock
+    const inflight = new Map<string, Inflight>()
+    let agents = 0
+    await poll(deps({
+      now: () => tick, caps: { ...DEFAULT_CAPS, stepMs: 1_000 },
+      prepareDependencies: async () => { tick += 1_000; return { ok: true, restored: true, command: 'bun install', reason: 'restored', ms: 1_000 } },
+      runStep: async () => { agents += 1; return { outcome: 'done', note: '', ms: 1 } },
+    }), inflight)
+    expect((await drain(inflight))[0]).toMatchObject({ outcome: 'killed' })
+    expect(agents).toBe(0)
+  })
 
   const context = (repo: string, boardRoot: string, fake: FakeGitHub, token: string, devMd: string) => {
     // FakeGitHub deliberately models one fixed repository; adapt only its test transport while
@@ -4383,7 +4485,7 @@ describe('the caps reach what they limit', () => {
     for (const number of [1, 2, 3, 4]) gh.addIssue({ number, labels: ['planning', 'medium'] })
 
     const startsPerPass: number[] = []
-    const timeouts: (number | undefined)[] = []
+    const budgets: Array<{ timeout: number; deadline: number; observedAt: number }> = []
     const sleeps: number[] = []
     let pass = 0
     let started = 0
@@ -4392,7 +4494,7 @@ describe('the caps reach what they limit', () => {
       cwd: root, home, host: HOST, env: {}, out: () => {}, runner: gh.runner, now: () => gh.clock, git: clone => gitIn(clone),
       runStep: (async (_step, context) => {
         started++
-        timeouts.push(context.timeoutMs)
+        budgets.push({ timeout: context.timeoutMs!, deadline: context.deadlineAt!, observedAt: gh.clock })
         return { outcome: 'done' as const, note: '', ms: 1 }
       }) as RunStep,
       sleep: async (ms: number) => {
@@ -4408,8 +4510,15 @@ describe('the caps reach what they limit', () => {
     expect(code).toBe(0)
     // One run in the first pass because the row said one, three in the second because it said three.
     expect(startsPerPass.slice(0, 2)).toEqual([1, 3])
-    // Every run in a pass carries that pass's step limit, not the one the process started with.
-    expect(timeouts).toEqual([72 * 3_600_000, 4 * 3_600_000, 4 * 3_600_000, 4 * 3_600_000])
+    // The roster sets each run's cap; time spent reserving it is already spent when the agent
+    // starts, so it receives the exact remainder of that one absolute deadline.
+    const caps = [72 * 3_600_000, 4 * 3_600_000, 4 * 3_600_000, 4 * 3_600_000]
+    expect(budgets).toHaveLength(caps.length)
+    for (const [index, budget] of budgets.entries()) {
+      expect(budget.timeout).toBe(budget.deadline - budget.observedAt)
+      expect(budget.timeout).toBeGreaterThan(caps[index]! - 60_000)
+      expect(budget.timeout).toBeLessThanOrEqual(caps[index]!)
+    }
     // And the wait between passes is the poll the roster asked for, each time.
     expect(sleeps.slice(0, 2)).toEqual([60_000, 5 * 60_000])
   })
