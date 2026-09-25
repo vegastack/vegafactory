@@ -97,6 +97,10 @@ It must print `Linger=yes`. A `--user` service lives inside a login session and 
 
 **Where state and logs are.** The one machine service keeps `boards.json`, `run.lock`, run/child/acted records, `worker.log` and `worker.err.log` under `~/.vegafactory/worker/`; repositories never get separate worker state or log roots. On Linux the two log files are the whole of the worker's output: the unit redirects its streams, so `journalctl --user -u vegafactory-worker.service` shows systemd's own messages about the service starting and stopping, and nothing the worker itself printed.
 
+That directory is owner-only and its runtime records and logs are `0600`. A missing record is empty state; a malformed, partial, linked, non-regular, foreign, or non-private record is a refusal. In particular, `worker disable` validates current and legacy child records before unloading, so a refused disable leaves the service, unit file, records, and processes untouched.
+
+Re-run `vegafactory worker enable` to perform storage recovery. It stops the old service before changing storage or the unit, replaces the run history and both logs with fresh private inodes, then loads the new unit. Old descriptors reach EOF and cannot see later output. Malformed or unsafe legacy evidence is preserved under `~/.vegafactory/worker/quarantine/`; enable prints the exact path and stops, so inspect that file and run enable again. A failed service stop changes nothing, and an interrupted append migration resumes without duplicating bytes.
+
 Then the reboot drill: `sudo reboot`, wait for the box, and run every check above again **without logging anything in by hand**. A box that needs a human at the keyboard after a power cut is not always-on.
 
 On Linux, the logout drill is separate and the order matters. Log out every session for vf-worker and check from **another** account — logging back in first would start the service again and hide exactly the failure this is looking for:

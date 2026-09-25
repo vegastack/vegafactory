@@ -2,6 +2,16 @@
 
 The project's story, newest first: what got built, why, and how it went — for the operator's future recall. Format home: the dev-chronicle skill.
 
+## 22-09-2026 — Worker records fail closed before anything is torn down ([#277](https://github.com/vegastack/vegafactory/issues/277))
+
+- **What:** Machine-global worker records now distinguish absence from corruption and remain private through runtime updates. Disable validates its authority before unloading, while attended enablement stops first and moves valid history and logs onto fresh private inodes.
+- **Why:** Silent reader fallbacks turned malformed child and acted records into empty state, so a later mutation could overwrite evidence and disable could discover unsafe child authority only after taking the service away.
+- **How it went:** The strict schemas already existed inside the legacy migration, but making them the runtime authority exposed an over-broad directory-mode check and several fixtures that had been creating valid records with public defaults. The append path then needed a small private journal so a crash after publication could retry without copying log bytes twice.
+- **Changed:** strict acted, child, run and lock reads · validation before unload · stop-first enable · fresh `0600` run/stdout/stderr inodes · owner-only legacy quarantine · retry-safe append migration · recovery guidance.
+- **Decisions:** none.
+
+— approved by (kmanojkumar) · built by codex · branch fix/277-worker-records-integration
+
 ## 22-09-2026 — External skill inspection left no residue ([#286](https://github.com/vegastack/vegafactory/issues/286))
 
 - **What:** The bundled external inspection capability and every configuration, CI, provisioning, suppression, documentation, and workflow surface behind it were removed atomically.
