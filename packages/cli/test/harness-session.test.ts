@@ -53,6 +53,7 @@ describe('harness conversation identity', () => {
 
   test('only a harness-owned missing-session error qualifies for a fresh retry', () => {
     expect(parseHarnessResult('codex', '', `No saved session found with id ${CODEX_ID}`).resumeMissing).toBe(true)
+    expect(parseHarnessResult('codex', '', `Error: thread/resume: thread/resume failed: no rollout found for thread id ${CODEX_ID} (code -32600)`).resumeMissing).toBe(true)
     expect(parseHarnessResult('codex', '', 'model request failed').resumeMissing).toBe(false)
     expect(parseHarnessResult('claude', JSON.stringify({ type: 'result', is_error: true, result: `No conversation found with session ID ${CLAUDE_ID}` }), '').resumeMissing).toBe(true)
     expect(parseHarnessResult('claude', JSON.stringify({ type: 'result', is_error: false, result: 'No conversation found with session ID x' }), '').resumeMissing).toBe(false)

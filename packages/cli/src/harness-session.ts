@@ -46,7 +46,7 @@ export function sessionIdFromCodexEvent(line: string): string | null {
   } catch { return null }
 }
 
-const CODEX_MISSING = /(?:no saved session found with id|session (?:id )?[^\n]{0,80}(?:not found|does not exist)|rollout (?:file )?[^\n]{0,80}not found)/i
+const CODEX_MISSING = /(?:no saved session found with id|no rollout found for thread id|session (?:id )?[^\n]{0,80}(?:not found|does not exist)|rollout (?:file )?[^\n]{0,80}not found)/i
 const CLAUDE_MISSING = /(?:no conversation found with session id|session (?:id )?[^\n]{0,80}(?:not found|does not exist))/i
 
 export function parseHarnessResult(harness: HarnessName, stdout: string, stderr: string): { sessionId: string | null; text: string; resumeMissing: boolean } {

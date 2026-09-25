@@ -27,7 +27,7 @@ import { homedir, hostname, userInfo } from 'node:os'
 import { dirname, join, parse, posix, resolve, sep } from 'node:path'
 import { APP_ACTOR, APP_ID, HEARTBEAT_EVERY_MS, appIdentityConfig, claim, heartbeat, holderOf, machineName, nodeId, release, trustedFactory } from './claim.ts'
 import { defaultClonePath, factoryConfigPath, parseControlRoomKnob, readFactoryConfig, updateSettingsAtPath } from './control-room.ts'
-import { harnessInvocation, validSessionId, type HarnessName } from './harness-session.ts'
+import { harnessInvocation, parseHarnessResult, sessionIdFromCodexEvent, validSessionId, type HarnessName } from './harness-session.ts'
 import { billingVariables, childEnvironment } from './env.ts'
 import { GhError, ghList, type GhResult, type GhRunner } from './gh.ts'
 import { assertRepo, cacheDir, readState, replaceFile, syncIssue, withLock, type CommentEntry, type GhIssue, type IssueEntry } from './issue-cache.ts'
@@ -2052,7 +2052,13 @@ export function filesFromParent(parentPlan: string | null, number: number): stri
 
 export interface Step { action: Action; number: number; repo: string; split: boolean; by: string | null }
 export interface StepResult { outcome: Outcome; note: string; ms: number }
-export type RunStep = (step: Step, context: { root: string; devMd: string; token: string | null; timeoutMs?: number; onStart?: (pid: number, command: string) => void }) => Promise<StepResult>
+export type RunStep = (step: Step, context: {
+  root: string; devMd: string; token: string | null; timeoutMs?: number
+  stateRoot?: string; node?: string; deadlineAt?: number
+  onStart?: (pid: number, command: string) => void
+  onAttemptEnd?: (pid: number) => void
+  shouldStop?: () => boolean
+}) => Promise<StepResult>
 
 // A run that stopped because the subscription said "enough for now". Each tool words it its own
 // way, and each of these is a limit, not a failure of the work.
@@ -2120,7 +2126,7 @@ export function agentArgs(policy: { harness: string; model: string | null; effor
   })
 }
 
-interface Exec { code: number | null; stdout: string; stderr: string; timedOut: boolean; error?: string }
+interface Exec { code: number | null; stdout: string; stderr: string; timedOut: boolean; error?: string; started?: boolean; sessionId?: string | null; sessionOutput?: string }
 
 // The limit is enforced inside the child's own process group, so it holds even if the worker
 // dies: an agent orphaned by a crash or a `launchctl bootout` still stops on its own rather than
@@ -2147,17 +2153,41 @@ function execTool(tool: string, args: string[], options: { cwd: string; env: Nod
     let stdout = ''
     let stderr = ''
     let timedOut = false
+    let sessionId: string | null = null
+    let eventLine = ''
+    let sessionOutput = ''
+    let sessionOutputTooLarge = false
+    const result = (code: number | null, error?: string): Exec => ({
+      code, stdout, stderr, timedOut, error, started: !!child.pid, sessionId,
+      sessionOutput: sessionOutputTooLarge ? '' : sessionOutput,
+    })
     const timer = setTimeout(() => {
       timedOut = true
       try { process.kill(-child.pid!, 'SIGKILL') } catch { child.kill('SIGKILL') }
     }, options.timeoutMs)
     const keep = (text: string, chunk: unknown) => (text + String(chunk)).slice(-8192)
-    child.stdout.on('data', (chunk) => { stdout = keep(stdout, chunk) })
+    child.stdout.on('data', (chunk) => {
+      const part = String(chunk)
+      stdout = keep(stdout, part)
+      if (tool === 'codex') {
+        eventLine += part
+        let newline = eventLine.indexOf('\n')
+        while (newline !== -1) {
+          if (!sessionId) sessionId = sessionIdFromCodexEvent(eventLine.slice(0, newline))
+          eventLine = eventLine.slice(newline + 1)
+          newline = eventLine.indexOf('\n')
+        }
+        if (eventLine.length > 16_384) eventLine = eventLine.slice(-16_384)
+      } else if (!sessionOutputTooLarge) {
+        sessionOutput += part
+        if (sessionOutput.length > 1_048_576) { sessionOutput = ''; sessionOutputTooLarge = true }
+      }
+    })
     child.stderr.on('data', (chunk) => { stderr = keep(stderr, chunk) })
     child.stdin.on('error', () => {})
     child.stdin.end(options.input ?? '')
-    child.on('error', (error) => { clearTimeout(timer); resolve({ code: null, stdout, stderr, timedOut, error: error.message }) })
-    child.on('close', (code) => { clearTimeout(timer); resolve({ code, stdout, stderr, timedOut }) })
+    child.on('error', (error) => { clearTimeout(timer); resolve(result(null, error.message)) })
+    child.on('close', (code) => { clearTimeout(timer); resolve(result(code)) })
   })
 }
 
@@ -2171,6 +2201,17 @@ export function workingDir(root: string, number: number): string | null {
     if (statSync(issue).isDirectory()) return issue
   } catch { /* a step that needs a branch creates it */ }
   return null
+}
+
+export function branchHead(cwd: string, run?: GitRun): string | null {
+  const result = run
+    ? run(['rev-parse', '--verify', 'HEAD^{commit}'])
+    : (() => {
+      const read = spawnSync('git', ['rev-parse', '--verify', 'HEAD^{commit}'], { cwd, encoding: 'utf8', timeout: 10_000, stdio: ['ignore', 'pipe', 'pipe'] })
+      return { status: read.status, out: read.stdout ?? '' }
+    })()
+  const head = result.out.trim()
+  return result.status === 0 && GIT_HEAD.test(head) ? head : null
 }
 
 // The real step: a headless agent run on the operator's subscription, in the issue's worktree,
@@ -2199,27 +2240,65 @@ export function childRunEnvironment(env: NodeJS.ProcessEnv, token: string | null
   return child
 }
 
-export function defaultRunStep(env: NodeJS.ProcessEnv, { exec = execTool, timeoutMs = STEP_TIMEOUT_MS } = {}): RunStep {
+export function defaultRunStep(env: NodeJS.ProcessEnv, { exec = execTool, timeoutMs = STEP_TIMEOUT_MS, now = Date.now } = {}): RunStep {
   return async (step, context) => {
-    const started = Date.now()
+    const started = now()
     const policy = stagePolicy(context.devMd, STAGE_OF[step.action] ?? 'implement')
-    const { tool, args, stdin } = agentArgs(policy, stepPrompt(step))
+    const harness: HarnessName = policy?.harness === 'codex' ? 'codex' : 'claude'
     const cwd = workingDir(context.root, step.number) ?? context.root
     // Nobody is at the keyboard, so a round of questions goes to the issue and waits there for the
     // operator — dev-setup's references/ask-route.md, where VSK_ASK_ROUTE is the first step.
     // The limit arrives with the run rather than with the step function, so a roster change lands
     // on the next run instead of the next restart.
     const limit = context.timeoutMs ?? timeoutMs
-    const child = await exec(tool, args, { cwd, env: childRunEnvironment(env, context.token, true), timeoutMs: limit, input: stdin, onStart: context.onStart })
-    const ms = Date.now() - started
-    const text = `${child.stderr}\n${child.stdout}`
-    if (child.timedOut) return { outcome: 'killed', note: `${tool} ran past the ${limit / 60_000}-minute step limit and was stopped`, ms }
-    if (child.error) return { outcome: 'failed', note: `could not start ${tool}: ${child.error}`, ms }
-    // A limit is why a run stopped early, never a phrase in the work of a run that finished: the
-    // diff of a retry helper says "rate limit" all day.
-    if (child.code !== 0 && hitLimit(text)) return { outcome: 'limit', note: tail(text), ms }
-    if (child.code !== 0) return { outcome: 'failed', note: `${tool} exited ${child.code}: ${tail(text)}`, ms }
-    return { outcome: 'done', note: tail(child.stdout), ms }
+    const deadlineAt = context.deadlineAt ?? started + limit
+    const elapsed = () => Math.max(0, now() - started)
+    const stateRoot = context.stateRoot
+    const preHead = stateRoot ? branchHead(cwd) : null
+    if (stateRoot && !preHead) return { outcome: 'failed', note: 'the issue branch head could not be verified before launch', ms: elapsed() }
+    const node = context.node ?? nodeId()
+    const key = threadKey({ repo: step.repo, issue: step.number, harness })
+    const saved = stateRoot ? readThreads(stateRoot)[key] ?? null : null
+    const decision = stateRoot && preHead
+      ? threadDecision({ saved, repo: step.repo, issue: step.number, harness, node, head: preHead })
+      : { mode: 'fresh' as const, sessionId: null, reason: 'no worker thread store' }
+    let mode: 'fresh' | 'resume' = decision.mode
+    let retried = false
+    for (;;) {
+      if (context.shouldStop?.()) return { outcome: 'stopped', note: 'the run was stopped before another attempt', ms: elapsed() }
+      const remaining = Math.max(0, deadlineAt - now())
+      if (remaining <= 0) return { outcome: 'killed', note: `${harness} used the step time budget before another attempt`, ms: elapsed() }
+      const { tool, args, stdin } = agentArgs(policy, stepPrompt(step), mode === 'resume' ? decision.sessionId : null)
+      let startedPid: number | null = null
+      const child = await exec(tool, args, {
+        cwd, env: childRunEnvironment(env, context.token, true), timeoutMs: remaining, input: stdin,
+        onStart: (pid, command) => { startedPid = pid; context.onStart?.(pid, command) },
+      })
+      if (startedPid !== null) context.onAttemptEnd?.(startedPid)
+      const ms = elapsed()
+      const parsed = parseHarnessResult(harness, child.sessionOutput || child.stdout, child.stderr)
+      const text = `${child.stderr}\n${child.stdout}`
+      if (child.timedOut) return { outcome: 'killed', note: `${tool} ran past the ${limit / 60_000}-minute step limit and was stopped`, ms }
+      if (child.error) return { outcome: 'failed', note: `could not start ${tool}: ${child.error}`, ms }
+      if (child.code !== 0 && hitLimit(text)) return { outcome: 'limit', note: tail(text), ms }
+      if (child.code !== 0 && mode === 'resume' && !retried && parsed.resumeMissing) {
+        retried = true
+        mode = 'fresh'
+        continue
+      }
+      if (child.code !== 0) return { outcome: 'failed', note: `${tool} exited ${child.code}: ${tail(text)}`, ms }
+      if (stateRoot && preHead) {
+        const sessionId = child.sessionId ?? parsed.sessionId ?? (mode === 'resume' ? saved?.sessionId : null)
+        const postHead = branchHead(cwd)
+        if (!postHead) return { outcome: 'failed', note: 'the issue branch head could not be verified after the run', ms }
+        if (!sessionId || !(child.started || startedPid !== null)) return { outcome: 'failed', note: `${tool} completed without a verified session start and identifier`, ms }
+        updateThread(stateRoot, saved, {
+          repo: canonicalRepository(step.repo), issue: step.number, harness, sessionId, node,
+          lastSeenHead: postHead, updatedAt: new Date(now()).toISOString(),
+        })
+      }
+      return { outcome: 'done', note: tail(parsed.text || child.stdout), ms }
+    }
   }
 }
 
@@ -2837,6 +2916,10 @@ async function runOne(deps: PollDeps, selected: BoardContext, candidate: Candida
         devMd: selected.devMd,
         token: selected.identity.token(),
         timeoutMs: deps.caps?.stepMs ?? STEP_TIMEOUT_MS,
+        deadlineAt: deps.now() + (deps.caps?.stepMs ?? STEP_TIMEOUT_MS),
+        stateRoot: deps.stateRoot,
+        node: nodeId(undefined, deps.machine),
+        shouldStop: () => run.interrupt !== null,
         onStart: (pid, command) => {
           const record: ChildRecord = {
             repo: candidate.repo, pid, command, startedAt: (deps.start ?? processStart)(pid) ?? '', issue: candidate.number,
@@ -2845,6 +2928,13 @@ async function runOne(deps: PollDeps, selected: BoardContext, candidate: Candida
           started.push(record)
           run.stop = () => { stopChild(deps.stateRoot, record, { stop: deps.stop, start: deps.start, alive: deps.alive }) }
           try { noteChild(deps.stateRoot, record) } catch { /* the run still stops from here */ }
+        },
+        onAttemptEnd: (pid) => {
+          const index = started.findIndex((record) => record.pid === pid)
+          if (index === -1) return
+          started.splice(index, 1)
+          run.stop = () => {}
+          try { forgetChild(deps.stateRoot, pid) } catch { /* the next sweep drops it */ }
         },
       })
     }
