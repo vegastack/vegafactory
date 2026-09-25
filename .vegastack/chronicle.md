@@ -12,6 +12,16 @@ The project's story, newest first: what got built, why, and how it went — for 
 
 — approved by (kmanojkumar) · built by codex · branch feat/276-worker-idle-worktree-advice
 
+## 25-09-2026 — Worker issues remember a conversation without trusting it ([#274](https://github.com/vegastack/vegafactory/issues/274))
+
+- **What:** An unattended worker now resumes the same Claude or Codex issue conversation when its node and last-seen branch head still match, and starts fresh when they do not.
+- **Why:** Every pass previously started a blank chat, losing useful issue context even when the same worker and checkout continued the work.
+- **How it went:** A shared harness adapter captured supported session identifiers, while a private record kept only identity and branch metadata. A missing local session gets one bounded fresh retry, and the worker saves the head after the run so its own commit does not trigger a fork.
+- **Changed:** strict private thread records · verified fresh/resume commands · branch-moved fork · one-budget missing-session fallback · operator guidance.
+- **Decisions:** none.
+
+— approved by (kmanojkumar) · built by codex · branch feat/274-one-agent-thread-per-issue-resumed-and-f
+
 ## 22-09-2026 — Worker records fail closed before anything is torn down ([#277](https://github.com/vegastack/vegafactory/issues/277))
 
 - **What:** Machine-global worker records now distinguish absence from corruption and remain private through runtime updates. Disable validates its authority before unloading, while attended enablement stops first and moves valid history and logs onto fresh private inodes.

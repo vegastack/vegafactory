@@ -103,6 +103,8 @@ Re-run `vegafactory worker enable` to perform storage recovery. It stops the old
 
 After a pass, `vegafactory worker status` may list issue worktrees worth inspecting with bare `vegafactory worktree prune`. This is bounded, preview-only advice; the worker never passes `--write` or reclaims a checkout or dependency. An unavailable housekeeping row means repository facts were incomplete or timed out. A person checks the bare preview and decides whether to run `prune --write`.
 
+`threads.json` in the same owner-only directory holds only issue conversation identifiers and the last-seen branch head, never prompts or transcripts. The worker resumes on the same node and head; a moved branch or machine starts a fresh conversation, and a missing local session gets one fresh retry inside the original step limit. This cache grants no claim or shipping permission. If it is malformed or unsafe, the worker refuses to overwrite it and names the file for inspection.
+
 Then the reboot drill: `sudo reboot`, wait for the box, and run every check above again **without logging anything in by hand**. A box that needs a human at the keyboard after a power cut is not always-on.
 
 On Linux, the logout drill is separate and the order matters. Log out every session for vf-worker and check from **another** account — logging back in first would start the service again and hide exactly the failure this is looking for:

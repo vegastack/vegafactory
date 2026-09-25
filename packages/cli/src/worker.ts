@@ -27,6 +27,7 @@ import { homedir, hostname, userInfo } from 'node:os'
 import { dirname, join, parse, posix, resolve, sep } from 'node:path'
 import { APP_ACTOR, APP_ID, HEARTBEAT_EVERY_MS, appIdentityConfig, claim, heartbeat, holderOf, machineName, nodeId, release, trustedFactory } from './claim.ts'
 import { defaultClonePath, factoryConfigPath, parseControlRoomKnob, readFactoryConfig, updateSettingsAtPath } from './control-room.ts'
+import { harnessInvocation, parseHarnessResult, sessionIdFromCodexEvent, validSessionId, type HarnessName } from './harness-session.ts'
 import { billingVariables, childEnvironment } from './env.ts'
 import { GhError, ghList, type GhResult, type GhRunner } from './gh.ts'
 import { assertRepo, cacheDir, readState, replaceFile, syncIssue, withLock, type CommentEntry, type GhIssue, type IssueEntry } from './issue-cache.ts'
@@ -1069,6 +1070,81 @@ export function writeActed(stateRoot: string, acted: Record<string, Acted>) {
   replacePrivateRecord(stateRoot, actedPath(stateRoot), JSON.stringify(acted, null, 2) + '\n')
 }
 
+// Conversation continuity is private machine state, not an authorization record. It contains no
+// transcript, prompt, tool argument, or output, and a corrupt row never becomes a missing row.
+export interface ThreadRecord {
+  repo: string
+  issue: number
+  harness: HarnessName
+  sessionId: string
+  node: string
+  lastSeenHead: string
+  updatedAt: string
+}
+
+const threadsPath = (stateRoot: string) => join(stateRoot, 'threads.json')
+const GIT_HEAD = /^[0-9a-f]{40}$/
+const NODE_ID = /^[a-z0-9._-]+@[a-z0-9._-]+$/
+const THREAD_FIELDS = ['repo', 'issue', 'harness', 'sessionId', 'node', 'lastSeenHead', 'updatedAt']
+
+export function threadKey(input: { repo: string; issue: number; harness: HarnessName }): string {
+  if (!Number.isSafeInteger(input.issue) || input.issue < 1 || !['claude', 'codex'].includes(input.harness)) {
+    throw new WorkerRecordError('malformed', 'the worker thread identity is invalid')
+  }
+  return `${canonicalRepository(input.repo)}#${input.issue}#${input.harness}`
+}
+
+function validThread(value: unknown): value is ThreadRecord {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false
+  const row = value as Partial<ThreadRecord>
+  if (Object.keys(row).sort().join(',') !== [...THREAD_FIELDS].sort().join(',')) return false
+  if (typeof row.repo !== 'string' || typeof row.harness !== 'string' || typeof row.node !== 'string'
+    || typeof row.lastSeenHead !== 'string' || typeof row.updatedAt !== 'string') return false
+  try { if (canonicalRepository(row.repo) !== row.repo || threadKey(row as ThreadRecord) !== `${row.repo}#${row.issue}#${row.harness}`) return false }
+  catch { return false }
+  if (!validSessionId(row.sessionId) || !NODE_ID.test(row.node) || !GIT_HEAD.test(row.lastSeenHead)) return false
+  try { return new Date(row.updatedAt).toISOString() === row.updatedAt } catch { return false }
+}
+
+export function readThreads(stateRoot: string): Record<string, ThreadRecord> {
+  const text = readPrivateRecord(stateRoot, threadsPath(stateRoot))
+  if (text === null) return {}
+  let parsed: unknown
+  try { parsed = JSON.parse(text) } catch { throw new WorkerRecordError('malformed', `${threadsPath(stateRoot)} is not valid JSON`) }
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) throw new WorkerRecordError('malformed', `${threadsPath(stateRoot)} must be a thread map`)
+  for (const [key, value] of Object.entries(parsed)) {
+    if (!validThread(value) || key !== threadKey(value)) throw new WorkerRecordError('malformed', `${threadsPath(stateRoot)} has an invalid thread row at ${JSON.stringify(key)}`)
+  }
+  return parsed as Record<string, ThreadRecord>
+}
+
+export function updateThread(stateRoot: string, expected: ThreadRecord | null, next: ThreadRecord): void {
+  if (!validThread(next) || (expected !== null && (!validThread(expected) || threadKey(expected) !== threadKey(next)))) {
+    throw new WorkerRecordError('malformed', 'refusing to write an invalid worker thread')
+  }
+  ensurePrivateRecordRoot(stateRoot, true)
+  withLock(stateRoot, () => {
+    const saved = readThreads(stateRoot)
+    const key = threadKey(next)
+    if (JSON.stringify(saved[key] ?? null) !== JSON.stringify(expected)) {
+      throw new WorkerRecordError('unsafe', `the worker thread for ${key} changed concurrently`)
+    }
+    saved[key] = next
+    replacePrivateRecord(stateRoot, threadsPath(stateRoot), JSON.stringify(saved, null, 2) + '\n')
+  }, { what: 'the worker issue threads' })
+}
+
+export function threadDecision(input: { saved: ThreadRecord | null; repo: string; issue: number; harness: HarnessName; node: string; head: string }): { mode: 'fresh' | 'resume'; sessionId: string | null; reason: string } {
+  const key = threadKey(input)
+  if (!NODE_ID.test(input.node) || !GIT_HEAD.test(input.head)) throw new WorkerRecordError('unsafe', 'worker thread decision needs a valid node and Git head')
+  const saved = input.saved
+  if (!saved) return { mode: 'fresh', sessionId: null, reason: 'no recorded conversation' }
+  if (!validThread(saved) || threadKey(saved) !== key) throw new WorkerRecordError('malformed', `the worker thread for ${key} is invalid`)
+  if (saved.node !== input.node) return { mode: 'fresh', sessionId: null, reason: 'conversation belongs to another node' }
+  if (saved.lastSeenHead !== input.head) return { mode: 'fresh', sessionId: null, reason: 'branch head moved since the conversation' }
+  return { mode: 'resume', sessionId: saved.sessionId, reason: 'same node and branch head' }
+}
+
 // A pid on its own is not an identity: pids are reused, and a record left behind by a crash would
 // have a later, unrelated process signalled in its place. The pair (pid, start time) is an
 // identity, and the start time is what the operating system says, not what we remember.
@@ -2052,7 +2128,13 @@ export function filesFromParent(parentPlan: string | null, number: number): stri
 
 export interface Step { action: Action; number: number; repo: string; split: boolean; by: string | null }
 export interface StepResult { outcome: Outcome; note: string; ms: number }
-export type RunStep = (step: Step, context: { root: string; devMd: string; token: string | null; timeoutMs?: number; onStart?: (pid: number, command: string) => void }) => Promise<StepResult>
+export type RunStep = (step: Step, context: {
+  root: string; devMd: string; token: string | null; timeoutMs?: number
+  stateRoot?: string; node?: string; deadlineAt?: number
+  onStart?: (pid: number, command: string) => void
+  onAttemptEnd?: (pid: number) => void
+  shouldStop?: () => boolean
+}) => Promise<StepResult>
 
 // A run that stopped because the subscription said "enough for now". Each tool words it its own
 // way, and each of these is a limit, not a failure of the work.
@@ -2113,14 +2195,14 @@ const STAGE_OF: Record<string, string> = { plan: 'plan', implement: 'implement',
 // harness prompt — it is the worktree it is confined to, the branch it pushes, the step limit its
 // own process group enforces, and the ship guard in the hook, which asks through the issue rather
 // than a terminal (VSK_ASK_ROUTE). A run that cannot write is not unattended, it is stuck.
-export function agentArgs(policy: { harness: string; model: string | null; effort: string } | null, prompt: string): { tool: string; args: string[] } {
-  if (policy?.harness === 'codex') {
-    return { tool: 'codex', args: ['exec', '--dangerously-bypass-approvals-and-sandbox', ...(policy.model ? ['-c', `model=${policy.model}`] : []), '-c', `model_reasoning_effort=${policy.effort}`, prompt] }
-  }
-  return { tool: 'claude', args: ['-p', '--dangerously-skip-permissions', ...(policy?.model ? ['--model', policy.model] : []), ...(policy ? ['--effort', policy.effort] : []), prompt] }
+export function agentArgs(policy: { harness: string; model: string | null; effort: string } | null, prompt: string, sessionId: string | null = null) {
+  return harnessInvocation({
+    harness: policy?.harness === 'codex' ? 'codex' : 'claude', prompt, sessionId,
+    model: policy?.model ?? null, effort: policy?.effort ?? 'high', worker: true,
+  })
 }
 
-interface Exec { code: number | null; stdout: string; stderr: string; timedOut: boolean; error?: string }
+interface Exec { code: number | null; stdout: string; stderr: string; timedOut: boolean; error?: string; started?: boolean; sessionId?: string | null; sessionOutput?: string }
 
 // The limit is enforced inside the child's own process group, so it holds even if the worker
 // dies: an agent orphaned by a crash or a `launchctl bootout` still stops on its own rather than
@@ -2135,27 +2217,53 @@ const WATCHDOG = '"$@" & job=$!; { sleep "$VF_LIMIT" & dog=$!; wait "$dog"; kill
 
 // One child, in its own process group so a stuck step is killed with everything it started. Only
 // the tail of its output is kept: the record is bounded and the output never reaches the issue.
-function execTool(tool: string, args: string[], options: { cwd: string; env: NodeJS.ProcessEnv; timeoutMs: number; onStart?: (pid: number, command: string) => void }): Promise<Exec> {
+function execTool(tool: string, args: string[], options: { cwd: string; env: NodeJS.ProcessEnv; timeoutMs: number; input?: string; onStart?: (pid: number, command: string) => void }): Promise<Exec> {
   return new Promise((resolve) => {
     const child = spawn('sh', ['-c', WATCHDOG, 'vegafactory-worker', tool, ...args], {
       // Half a minute behind this process's own timer, so the backstop only ever fires for an
       // orphan and a killed step is reported as killed rather than as an exit code.
       cwd: options.cwd, env: { ...options.env, VF_LIMIT: String(Math.ceil(options.timeoutMs / 1000) + 30) },
-      stdio: ['ignore', 'pipe', 'pipe'], detached: true,
+      stdio: ['pipe', 'pipe', 'pipe'], detached: true,
     })
     if (child.pid) options.onStart?.(child.pid, tool)
     let stdout = ''
     let stderr = ''
     let timedOut = false
+    let sessionId: string | null = null
+    let eventLine = ''
+    let sessionOutput = ''
+    let sessionOutputTooLarge = false
+    const result = (code: number | null, error?: string): Exec => ({
+      code, stdout, stderr, timedOut, error, started: !!child.pid, sessionId,
+      sessionOutput: sessionOutputTooLarge ? '' : sessionOutput,
+    })
     const timer = setTimeout(() => {
       timedOut = true
       try { process.kill(-child.pid!, 'SIGKILL') } catch { child.kill('SIGKILL') }
     }, options.timeoutMs)
     const keep = (text: string, chunk: unknown) => (text + String(chunk)).slice(-8192)
-    child.stdout.on('data', (chunk) => { stdout = keep(stdout, chunk) })
+    child.stdout.on('data', (chunk) => {
+      const part = String(chunk)
+      stdout = keep(stdout, part)
+      if (tool === 'codex') {
+        eventLine += part
+        let newline = eventLine.indexOf('\n')
+        while (newline !== -1) {
+          if (!sessionId) sessionId = sessionIdFromCodexEvent(eventLine.slice(0, newline))
+          eventLine = eventLine.slice(newline + 1)
+          newline = eventLine.indexOf('\n')
+        }
+        if (eventLine.length > 16_384) eventLine = eventLine.slice(-16_384)
+      } else if (!sessionOutputTooLarge) {
+        sessionOutput += part
+        if (sessionOutput.length > 1_048_576) { sessionOutput = ''; sessionOutputTooLarge = true }
+      }
+    })
     child.stderr.on('data', (chunk) => { stderr = keep(stderr, chunk) })
-    child.on('error', (error) => { clearTimeout(timer); resolve({ code: null, stdout, stderr, timedOut, error: error.message }) })
-    child.on('close', (code) => { clearTimeout(timer); resolve({ code, stdout, stderr, timedOut }) })
+    child.stdin.on('error', () => {})
+    child.stdin.end(options.input ?? '')
+    child.on('error', (error) => { clearTimeout(timer); resolve(result(null, error.message)) })
+    child.on('close', (code) => { clearTimeout(timer); resolve(result(code)) })
   })
 }
 
@@ -2264,6 +2372,17 @@ export function workingDir(root: string, number: number): string | null {
   return null
 }
 
+export function branchHead(cwd: string, run?: GitRun): string | null {
+  const result = run
+    ? run(['rev-parse', '--verify', 'HEAD^{commit}'])
+    : (() => {
+      const read = spawnSync('git', ['rev-parse', '--verify', 'HEAD^{commit}'], { cwd, encoding: 'utf8', timeout: 10_000, stdio: ['ignore', 'pipe', 'pipe'] })
+      return { status: read.status, out: read.stdout ?? '' }
+    })()
+  const head = result.out.trim()
+  return result.status === 0 && GIT_HEAD.test(head) ? head : null
+}
+
 // The real step: a headless agent run on the operator's subscription, in the issue's worktree,
 // killed after the step limit. `childEnvironment` is what refuses an API key in the environment.
 // The environment a worker run gets. Three things are true of it and each one matters:
@@ -2290,27 +2409,66 @@ export function childRunEnvironment(env: NodeJS.ProcessEnv, token: string | null
   return child
 }
 
-export function defaultRunStep(env: NodeJS.ProcessEnv, { exec = execTool, timeoutMs = STEP_TIMEOUT_MS } = {}): RunStep {
+export function defaultRunStep(env: NodeJS.ProcessEnv, { exec = execTool, timeoutMs = STEP_TIMEOUT_MS, now = Date.now } = {}): RunStep {
   return async (step, context) => {
-    const started = Date.now()
+    const started = now()
     const policy = stagePolicy(context.devMd, STAGE_OF[step.action] ?? 'implement')
-    const { tool, args } = agentArgs(policy, stepPrompt(step))
+    const harness: HarnessName = policy?.harness === 'codex' ? 'codex' : 'claude'
     const cwd = workingDir(context.root, step.number) ?? context.root
     // Nobody is at the keyboard, so a round of questions goes to the issue and waits there for the
     // operator — dev-setup's references/ask-route.md, where VSK_ASK_ROUTE is the first step.
     // The limit arrives with the run rather than with the step function, so a roster change lands
     // on the next run instead of the next restart.
     const limit = context.timeoutMs ?? timeoutMs
-    const child = await exec(tool, args, { cwd, env: childRunEnvironment(env, context.token, true), timeoutMs: limit, onStart: context.onStart })
-    const ms = Date.now() - started
-    const text = `${child.stderr}\n${child.stdout}`
-    if (child.timedOut) return { outcome: 'killed', note: `${tool} ran past the ${limit / 60_000}-minute step limit and was stopped`, ms }
-    if (child.error) return { outcome: 'failed', note: `could not start ${tool}: ${child.error}`, ms }
-    // A limit is why a run stopped early, never a phrase in the work of a run that finished: the
-    // diff of a retry helper says "rate limit" all day.
-    if (child.code !== 0 && hitLimit(text)) return { outcome: 'limit', note: tail(text), ms }
-    if (child.code !== 0) return { outcome: 'failed', note: `${tool} exited ${child.code}: ${tail(text)}`, ms }
-    return { outcome: 'done', note: tail(child.stdout), ms }
+    const deadlineAt = context.deadlineAt ?? started + limit
+    const elapsed = () => Math.max(0, now() - started)
+    const stateRoot = context.stateRoot
+    const preHead = stateRoot ? branchHead(cwd) : null
+    if (stateRoot && !preHead) return { outcome: 'failed', note: 'the issue branch head could not be verified before launch', ms: elapsed() }
+    const node = context.node ?? nodeId()
+    const key = threadKey({ repo: step.repo, issue: step.number, harness })
+    const saved = stateRoot ? readThreads(stateRoot)[key] ?? null : null
+    const decision = stateRoot && preHead
+      ? threadDecision({ saved, repo: step.repo, issue: step.number, harness, node, head: preHead })
+      : { mode: 'fresh' as const, sessionId: null, reason: 'no worker thread store' }
+    let mode: 'fresh' | 'resume' = decision.mode
+    let retried = false
+    for (;;) {
+      if (context.shouldStop?.()) return { outcome: 'stopped', note: 'the run was stopped before another attempt', ms: elapsed() }
+      const remaining = Math.max(0, deadlineAt - now())
+      if (remaining <= 0) return { outcome: 'killed', note: `${harness} used the step time budget before another attempt`, ms: elapsed() }
+      const { tool, args, stdin } = agentArgs(policy, stepPrompt(step), mode === 'resume' ? decision.sessionId : null)
+      let startedPid: number | null = null
+      const child = await exec(tool, args, {
+        cwd, env: childRunEnvironment(env, context.token, true), timeoutMs: remaining, input: stdin,
+        onStart: (pid, command) => { startedPid = pid; context.onStart?.(pid, command) },
+      })
+      if (startedPid !== null) context.onAttemptEnd?.(startedPid)
+      const ms = elapsed()
+      const parsed = parseHarnessResult(harness, child.sessionOutput || child.stdout, child.stderr)
+      const text = `${child.stderr}\n${child.stdout}`
+      if (child.timedOut) return { outcome: 'killed', note: `${tool} ran past the ${limit / 60_000}-minute step limit and was stopped`, ms }
+      if (child.error) return { outcome: 'failed', note: `could not start ${tool}: ${child.error}`, ms }
+      if (child.code !== 0 && hitLimit(text)) return { outcome: 'limit', note: tail(text), ms }
+      if (child.code !== 0 && mode === 'resume' && !retried && parsed.resumeMissing) {
+        retried = true
+        mode = 'fresh'
+        continue
+      }
+      if (child.code !== 0) return { outcome: 'failed', note: `${tool} exited ${child.code}: ${tail(text)}`, ms }
+      if (stateRoot && preHead) {
+        const sessionId = child.sessionId ?? parsed.sessionId
+        const postHead = branchHead(cwd)
+        if (!postHead) return { outcome: 'failed', note: 'the issue branch head could not be verified after the run', ms }
+        if (!sessionId || !(child.started || startedPid !== null)) return { outcome: 'failed', note: `${tool} completed without a verified session start and identifier`, ms }
+        if (mode === 'resume' && sessionId !== saved?.sessionId) return { outcome: 'failed', note: `${tool} resumed a different conversation than the recorded one`, ms }
+        updateThread(stateRoot, saved, {
+          repo: canonicalRepository(step.repo), issue: step.number, harness, sessionId, node,
+          lastSeenHead: postHead, updatedAt: new Date(now()).toISOString(),
+        })
+      }
+      return { outcome: 'done', note: tail(parsed.text || child.stdout), ms }
+    }
   }
 }
 
@@ -2928,6 +3086,10 @@ async function runOne(deps: PollDeps, selected: BoardContext, candidate: Candida
         devMd: selected.devMd,
         token: selected.identity.token(),
         timeoutMs: deps.caps?.stepMs ?? STEP_TIMEOUT_MS,
+        deadlineAt: deps.now() + (deps.caps?.stepMs ?? STEP_TIMEOUT_MS),
+        stateRoot: deps.stateRoot,
+        node: nodeId(undefined, deps.machine),
+        shouldStop: () => run.interrupt !== null,
         onStart: (pid, command) => {
           const record: ChildRecord = {
             repo: candidate.repo, pid, command, startedAt: (deps.start ?? processStart)(pid) ?? '', issue: candidate.number,
@@ -2936,6 +3098,13 @@ async function runOne(deps: PollDeps, selected: BoardContext, candidate: Candida
           started.push(record)
           run.stop = () => { stopChild(deps.stateRoot, record, { stop: deps.stop, start: deps.start, alive: deps.alive }) }
           try { noteChild(deps.stateRoot, record) } catch { /* the run still stops from here */ }
+        },
+        onAttemptEnd: (pid) => {
+          const index = started.findIndex((record) => record.pid === pid)
+          if (index === -1) return
+          started.splice(index, 1)
+          run.stop = () => {}
+          try { forgetChild(deps.stateRoot, pid) } catch { /* the next sweep drops it */ }
         },
       })
     }
