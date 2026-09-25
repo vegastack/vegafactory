@@ -108,6 +108,8 @@ The rest of the worker's machine record is private too. `~/.vegafactory/worker/`
 
 `worker enable` is the recovery boundary. After readiness passes, it stops the old service before changing storage or the unit, migrates valid legacy records, and atomically publishes fresh private inodes for `runs.jsonl`, `worker.log`, and `worker.err.log`. A descriptor still holding an old inode reaches EOF and receives no later output. Malformed or unsafe legacy evidence moves into the owner-only `~/.vegafactory/worker/quarantine/` directory and enable stops with its exact path; inspect that preserved file, then run enable again. A failed stop changes neither the installed unit nor storage, and an interrupted append migration resumes from its private journal without duplicating bytes.
 
+`threads.json` in that same private worker directory remembers only a session UUID, canonical repository, issue, harness, node and last-seen branch head. It stores no transcript or prompt. A later run resumes when the node and branch head still match; a moved branch or machine starts a new conversation. A missing local session gets one fresh retry within the same step limit. Thread continuity grants no claim, approval or merge authority, and an invalid record refuses mutation until inspected.
+
 Control-room files record these **names**. The values live in GitHub organization settings and nowhere a repository can read them.
 
 Setting an organization secret needs `admin:org`. A `gh` token without it can write a repository secret but not an organization one, so this step reaches the operator even when everything around it is automated.

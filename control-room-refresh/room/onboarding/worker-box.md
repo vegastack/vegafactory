@@ -101,6 +101,8 @@ That directory is owner-only and its runtime records and logs are `0600`. A miss
 
 Re-run `vegafactory worker enable` to perform storage recovery. It stops the old service before changing storage or the unit, replaces the run history and both logs with fresh private inodes, then loads the new unit. Old descriptors reach EOF and cannot see later output. Malformed or unsafe legacy evidence is preserved under `~/.vegafactory/worker/quarantine/`; enable prints the exact path and stops, so inspect that file and run enable again. A failed service stop changes nothing, and an interrupted append migration resumes without duplicating bytes.
 
+`threads.json` in the same owner-only directory holds only issue conversation identifiers and the last-seen branch head, never prompts or transcripts. The worker resumes on the same node and head; a moved branch or machine starts a fresh conversation, and a missing local session gets one fresh retry inside the original step limit. This cache grants no claim or shipping permission. If it is malformed or unsafe, the worker refuses to overwrite it and names the file for inspection.
+
 Then the reboot drill: `sudo reboot`, wait for the box, and run every check above again **without logging anything in by hand**. A box that needs a human at the keyboard after a power cut is not always-on.
 
 On Linux, the logout drill is separate and the order matters. Log out every session for vf-worker and check from **another** account — logging back in first would start the service again and hide exactly the failure this is looking for:
