@@ -578,7 +578,7 @@ export function droppedDependencyStatus({ repoRoot, workerLayout = false, name, 
 }
 
 export async function restoreDroppedDependencies({ repoRoot, workerLayout = false, name, path, devMd, timeoutMs, signal,
-  execute = executeSetupCommand, onStart, now = Date.now }) {
+  execute = executeSetupCommand, onStart, now = Date.now, afterObservedResult = null }) {
   const started = now();
   const result = (ok, restored, command, reason) => ({ ok, restored, command, reason, ms: Math.max(0, now() - started) });
   if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) return result(false, false, null, 'dependency setup has no remaining time');
@@ -633,9 +633,18 @@ export async function restoreDroppedDependencies({ repoRoot, workerLayout = fals
       if (prior) {
         const status = droppedDependencyStatus({ repoRoot, workerLayout, name, path });
         if (prior.ok && !status.needed) return result(true, true, prior.command, 'dependency setup completed by the existing run');
+        afterObservedResult?.();
         let stillOwns = false;
+        let ownerError = null;
         try { stillOwns = ownerOf(lock, name).nonce === owner.nonce; }
-        catch (error) { if (error.code !== 'ENOENT') return result(false, false, prior.command, error.message); }
+        catch (error) { ownerError = error; }
+        // The owner can clear the marker and release the lock between the two reads above. A
+        // validated result for this exact nonce plus a now-absent marker proves completion;
+        // malformed or still-present marker state never does.
+        if (prior.ok && !droppedDependencyStatus({ repoRoot, workerLayout, name, path }).needed) {
+          return result(true, true, prior.command, 'dependency setup completed by the existing run');
+        }
+        if (ownerError && ownerError.code !== 'ENOENT') return result(false, false, prior.command, ownerError.message);
         if (prior.ok && stillOwns && processIdentity(owner) === 'matching') { await pause(25); continue; }
         return result(false, false, prior.command, prior.ok ? 'dependency marker remained after setup — inspect it before retrying' : prior.reason);
       }
