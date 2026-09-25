@@ -2221,6 +2221,17 @@ describe('machine-global runtime records fail closed', () => {
     expect(readHousekeeping(stateRoot).advisories).toEqual([])
   })
 
+  test('a failed housekeeping wrapper records unavailable advice without holding the next pass', async () => {
+    const { home, stateRoot } = privateRoot()
+    const board = { key: 'o/r', repo: 'o/r', root: join(home, 'repos', 'o__r', 'repo'), devMd: '', runner: gh.runner, identity: { runner: gh.runner, freshen: async () => {}, token: () => null } }
+    const run = startHousekeeping({ stateRoot, boards: [board], excluded: new Set(), deadlineMs: 1000,
+      env: process.env, cli: ['/definitely/missing-vegafactory'], start: () => 'the group start', onLine: () => {} })
+    const state = await run.done
+    expect(run.settled).toBe(true)
+    expect(state).toMatchObject({ running: null, complete: false, advisories: [], unavailable: [{ repo: 'o/r' }] })
+    expect(readHousekeeping(stateRoot).running).toBeNull()
+  })
+
   test('only ENOENT is absence; malformed records never become empty state', () => {
     for (const [name, bad, read] of [
       ['acted.json', '[]', (root: string) => readActed(root)],

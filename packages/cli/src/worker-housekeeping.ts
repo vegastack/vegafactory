@@ -24,7 +24,7 @@ interface PreviewResult { candidates?: Array<Record<string, unknown>>; blocks?: 
 
 const exactKeys = (value: Record<string, unknown>, names: string[]) =>
   Object.keys(value).sort().join(',') === [...names].sort().join(',')
-const boundedReason = (value: unknown) => String(value ?? 'unavailable').replace(/[\x00-\x1f\x7f]/g, ' ').slice(0, 400)
+const boundedReason = (value: unknown) => String(value ?? 'unavailable').replace(/[\x00-\x1f\x7f]/g, ' ').slice(0, 400) || 'unavailable'
 
 export function parseHousekeepingRequest(raw: string, now = Date.now()): HousekeepingRequest {
   if (Buffer.byteLength(raw) > INPUT_LIMIT) throw new Error('housekeeping request is too large')

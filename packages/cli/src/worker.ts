@@ -2303,6 +2303,8 @@ export function startHousekeeping(input: {
     env: { ...input.env, VF_LIMIT: String(Math.ceil(deadlineMs / 1000) + 1) },
     stdio: ['pipe', 'pipe', 'pipe'], detached: true,
   })
+  // A failed spawn reports asynchronously. Attach before inspecting pid or writing the record.
+  child.on('error', () => {})
   if (!child.pid) throw new Error('housekeeping process did not start')
   const pid = child.pid
   const startedAt = (input.start ?? processStart)(pid)
