@@ -175,4 +175,16 @@ describe('worker conversation continuation', () => {
     expect((await failedStart(step, { root, devMd, token: null, stateRoot, node: 'vf@mini' })).outcome).toBe('failed')
     expect(readThreads(stateRoot)[threadKey({ repo: 'o/a', issue: 7, harness: 'codex' })]).toEqual(saved)
   })
+
+  test('a resumed command must report the same supported session ID before its head advances', async () => {
+    const { root, issue, stateRoot } = checkout()
+    const saved = { ...row('o/a', 7, 'codex'), lastSeenHead: git(issue, 'rev-parse', 'HEAD') }
+    updateThread(stateRoot, null, saved)
+    const run = defaultRunStep({}, { exec: async (_tool, _args, options) => {
+      options.onStart?.(8001, 'codex')
+      return { code: 0, stdout: codexEvents(ID_B), stderr: '', timedOut: false }
+    } })
+    expect((await run(step, { root, devMd, token: null, stateRoot, node: 'vf@mini', onStart: () => {} })).outcome).toBe('failed')
+    expect(readThreads(stateRoot)[threadKey({ repo: 'o/a', issue: 7, harness: 'codex' })]).toEqual(saved)
+  })
 })

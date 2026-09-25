@@ -2288,10 +2288,11 @@ export function defaultRunStep(env: NodeJS.ProcessEnv, { exec = execTool, timeou
       }
       if (child.code !== 0) return { outcome: 'failed', note: `${tool} exited ${child.code}: ${tail(text)}`, ms }
       if (stateRoot && preHead) {
-        const sessionId = child.sessionId ?? parsed.sessionId ?? (mode === 'resume' ? saved?.sessionId : null)
+        const sessionId = child.sessionId ?? parsed.sessionId
         const postHead = branchHead(cwd)
         if (!postHead) return { outcome: 'failed', note: 'the issue branch head could not be verified after the run', ms }
         if (!sessionId || !(child.started || startedPid !== null)) return { outcome: 'failed', note: `${tool} completed without a verified session start and identifier`, ms }
+        if (mode === 'resume' && sessionId !== saved?.sessionId) return { outcome: 'failed', note: `${tool} resumed a different conversation than the recorded one`, ms }
         updateThread(stateRoot, saved, {
           repo: canonicalRepository(step.repo), issue: step.number, harness, sessionId, node,
           lastSeenHead: postHead, updatedAt: new Date(now()).toISOString(),
