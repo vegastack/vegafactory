@@ -1,5 +1,8 @@
 import { describe, expect, test } from 'bun:test'
-import { branchName, classifyWorktree, parseWorktreeList, slugify, titleParts, worktreeName, worktreePath } from '../scripts/worktree.mjs'
+import { chmodSync, existsSync, mkdirSync, mkdtempSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { branchName, canonicalIssueOfWorktree, classifyWorktree, issueOfWorktree, parseWorktreeList, slugify, titleParts, worktreeName, worktreePath } from '../scripts/worktree.mjs'
 
 const base = { dirExists: true, branchExists: true, locked: false, issueState: 'open' as const, mergedIntoDefault: false }
 
@@ -8,12 +11,19 @@ describe('naming', () => {
     expect(slugify('One feature, ONE worktree!')).toBe('one-feature-one-worktree')
     expect(slugify('x'.repeat(80)).length).toBe(40)
   })
-  test('an issue number leads the directory and the branch', () => {
-    expect(worktreeName(106, 'one-worktree')).toBe('106-one-worktree')
-    expect(worktreePath('/r', worktreeName(106, 'one-worktree'))).toBe('/r/.vegastack/.worktrees/106-one-worktree')
+  test('an issue number is the stable directory while the branch keeps its slug', () => {
+    expect(worktreeName(106, 'one-worktree')).toBe('106')
+    expect(worktreePath('/r', worktreeName(106, 'one-worktree'))).toBe('/r/.vegastack/.worktrees/106')
+    expect(worktreePath('/vf/worker/repos/o__r/repo', '106', true)).toBe('/vf/worker/repos/o__r/issues/106')
     expect(branchName('feat', 106, 'one-worktree')).toBe('feat/106-one-worktree')
     expect(branchName('chore', null, 'release-0-19-0')).toBe('chore/release-0-19-0')
     expect(worktreeName(null, 'release-0-19-0')).toBe('release-0-19-0')
+    expect(() => worktreeName(null, '106-direct-fix')).toThrow('cannot start with an issue number')
+    expect(() => worktreeName(null, '106')).toThrow('cannot start with an issue number')
+    expect(issueOfWorktree('106')).toBe(106)
+    expect(issueOfWorktree('106-legacy-title')).toBe(106)
+    expect(canonicalIssueOfWorktree('106')).toBe(106)
+    expect(canonicalIssueOfWorktree('106-legacy-title')).toBe(null)
   })
 })
 
@@ -67,7 +77,7 @@ describe('classifyWorktree', () => {
   })
 })
 
-import { evaluateRemoval, isPastRetention, parseBranchTypes, parseDuration, parseIncludeKnob, parseRetentionKnob } from '../scripts/worktree.mjs'
+import { clearDroppedDeps, evaluateRemoval, isPastRetention, noteDroppedDeps, parseBranchTypes, parseDepsRetentionKnob, parseDuration, parseIncludeKnob, parseRetentionKnob, readDroppedDeps, trustedAncestorOwner } from '../scripts/worktree.mjs'
 
 const devMd = [
   'commands: test `bun test` · check `bun run check` · build `bun run build` · setup `bun install --frozen-lockfile`',
@@ -104,6 +114,9 @@ describe('knobs and retention', () => {
     expect(parseDuration('soon')).toBeNull()
     expect(parseRetentionKnob(devMd)).toBe(7 * 86_400_000)
     expect(parseRetentionKnob('repo: o/r')).toBe(14 * 86_400_000)
+    expect(parseDepsRetentionKnob('worktree-retention: 14d')).toBe(3 * 86_400_000)
+    expect(parseDepsRetentionKnob('worktree-retention: 2d\nworktree-deps-retention: 9d')).toBe(2 * 86_400_000)
+    expect(parseDepsRetentionKnob('worktree-retention: 14d\nworktree-deps-retention: nope')).toBe(3 * 86_400_000)
   })
   test('the branch: knob is the one home for the type list', () => {
     expect(parseBranchTypes('branch: <type>/<slug>   # type: feat | fix | spike — the only place this list lives'))
@@ -135,3 +148,36 @@ describe('knobs and retention', () => {
   })
 })
 
+describe('worker dependency marker root', () => {
+  test('only root or the current uid can own an ancestor anchor', () => {
+    expect(trustedAncestorOwner(0, 501)).toBe(true)
+    expect(trustedAncestorOwner(501, 501)).toBe(true)
+    expect(trustedAncestorOwner(502, 501)).toBe(false)
+  })
+  test('the marker is owner-only beside repo and issues, never inside the checkout', () => {
+    const holder = mkdtempSync(join(tmpdir(), 'vf-worker-holder-'))
+    const repoRoot = join(holder, 'repo')
+    const path = join(holder, 'issues', '260')
+    mkdirSync(repoRoot, { mode: 0o700 })
+    mkdirSync(path, { recursive: true, mode: 0o700 })
+    noteDroppedDeps({ repoRoot, workerLayout: true, name: '260', path, droppedAt: '2026-09-22T00:00:00.000Z' })
+    expect(readDroppedDeps({ repoRoot, workerLayout: true }).records.get('260')).toMatchObject({ path, deps: ['node_modules'] })
+    expect(existsSync(join(holder, 'deps-dropped', '260.json'))).toBe(true)
+    expect(clearDroppedDeps({ repoRoot, workerLayout: true, name: '260', path })).toBe(true)
+    expect(existsSync(join(holder, 'deps-dropped', '260.json'))).toBe(false)
+  })
+  test('a non-sticky other-UID-writable parent cannot anchor marker operations', () => {
+    const outer = mkdtempSync(join(tmpdir(), 'vf-unsafe-parent-'))
+    const unsafe = join(outer, 'shared')
+    const holder = join(unsafe, 'holder')
+    const repoRoot = join(holder, 'repo')
+    const path = join(holder, 'issues', '260')
+    mkdirSync(unsafe, { mode: 0o777 })
+    chmodSync(unsafe, 0o777)
+    mkdirSync(repoRoot, { recursive: true, mode: 0o700 })
+    mkdirSync(path, { recursive: true, mode: 0o700 })
+    expect(() => noteDroppedDeps({ repoRoot, workerLayout: true, name: '260', path, droppedAt: '2026-09-22T00:00:00.000Z' }))
+      .toThrow('other users can rename entries')
+    expect(existsSync(join(holder, 'deps-dropped'))).toBe(false)
+  })
+})

@@ -1,24 +1,25 @@
 # One feature, one worktree
 
-The main checkout never leaves the default branch and never carries uncommitted work. Every branch — feature, epic parent, trivial chat fix, research spike, release — is checked out at `.vegastack/.worktrees/<n>-<slug>/` on `<type>/<n>-<slug>`, per `references/conventions.md`. All of it is decided by `scripts/worktree.mjs`, with `vegafactory worktree …` wrapping its create, restore, remove, list, prune, and `status --json` commands; anything destructive remains a dry run until `--write`, and every verb exits `0` pass · `1` warn · `2` blocked.
+The main checkout never leaves the default branch and never carries uncommitted work. An issue branch stays descriptive as `<type>/<n>-<slug>`, but its directory is keyed only by the stable issue number: `.vegastack/.worktrees/<n>/` in an attended repository and `~/.vegafactory/worker/repos/<owner>__<repo>/issues/<n>/` in a worker repository holder. A renamed title therefore changes neither checkout identity nor resume path. Direct-chat and release branches with no issue use their slug as the directory leaf; an issue-shaped digit-led slug is refused. `scripts/worktree.mjs` owns this contract, with `vegafactory worktree …` wrapping create, restore, remove, list, prune, and `status --json`; each exits `0` pass · `1` warn · `2` blocked.
 
 ## Scenario matrix
 
 | Scenario | What happens |
 |---|---|
-| New issue | `vegafactory worktree create <n>` — the slug and type come off the issue title (`<type>:` prefix, the rest slugified; `--slug`/`--type` override, and GitHub being unreachable blocks rather than guesses). The types are dev.md's `branch:` knob and nowhere else; a prefix outside that list is not a type, leaves the slug, and makes `create` refuse and name the ones this project has, rather than quietly becoming `feat`. Then it fetches `origin/<default>`, `git worktree add` on a new branch, copies dev.md's `worktree-include:` files, runs `commands: setup`, adds the Codex trust entry. The ledger's first line records the path. |
+| New issue | `vegafactory worktree create <n>` — the branch slug and type come off the issue title (`<type>:` prefix, the rest slugified; `--slug`/`--type` override, and GitHub being unreachable blocks rather than guesses), while the directory leaf is `<n>`. The types are dev.md's `branch:` knob and nowhere else; an unknown prefix is refused rather than quietly becoming `feat`. It fetches `origin/<default>`, adds the worktree, copies `worktree-include:` files and adds Codex trust. It does not install dependencies for a fresh checkout. |
 | Epic parent | A map only — no branch or worktree of its own. |
 | Sub-issue of an epic | Its own branch and worktree cut from the default branch, like any issue, and its own PR. The plan records which siblings' file sets do not overlap and so *may* run at the same time; the worker (#218) is what will run them, and until then they are worked one at a time. |
 | Resume | Same branch, same worktree, reused. The resume read-order — brief → plan → ledger → `git log` — runs *there*, and the ledger names which "there" that is. |
-| Corrections / take-back | Reuse the worktree. Directory gone but branch alive → `vegafactory worktree restore <n>`, which finds the branch carrying the number (`--slug` picks one when several do), re-adds the checkout and re-runs include-copy, setup and trust. `restore` never creates a branch: a missing branch means the work is elsewhere. |
+| Corrections / take-back | Reuse the numeric worktree. Directory gone but branch alive → `vegafactory worktree restore <n>`, which accepts only the branch whose config records that issue identity, re-adds the checkout and re-runs include-copy, setup and trust. `restore` never guesses from a digit-led branch name or creates a branch: a missing identity record leaves the work untouched. |
 | Ship, PR | `vegafactory ship check <n>` runs in the issue's worktree: it reads the branch there and refuses uncommitted changes. |
 | Ship, merge | After the merge: `vegafactory worktree remove <n>`. That removes the **directory only** — deleting the local branch and the remote branch are separate operator words. A parent's worktree goes only when the parent PR merges. |
 | Rebase onto the default branch | Done inside the worktree; re-verify whatever the rebase touched. |
 | Direct chat trivial fix | `<type>/<slug>` in its own worktree too — the main checkout stays clean even for a one-liner. |
 | Research | A worktree only when code is actually written, on a type dev.md's `branch:` knob lists — `chore/<n>-<slug>` unless the project adds `research` to that knob; removed at hand-back, never merged. |
 | Release | `chore/release-<version>` in its own worktree. |
+| Legacy `<n>-<slug>` checkout | Listed and removable only by exact `--name`; quarantined from issue hooks, GitHub/ledger reads, `--issue` removal, restore, and status reconciliation because its leaf is indistinguishable from an old digit-led direct-chat slug. Inspect and preserve it, then explicitly remove or migrate it before creating the numeric issue checkout. |
 | Cross-tool review | Read-only, in the same worktree; a reviewer never switches the branch under it. |
-| Abandoned issue | Branch and worktree are removed only on the operator's word. |
+| Abandoned issue | A closed issue becomes a prune candidate immediately, but every dirty/unpushed/locked/detached safety rule still applies. |
 
 ## Lifecycle states
 
@@ -26,7 +27,7 @@ Derived from git plus GitHub on every read, never stored — a second source of 
 
 | State | Derivation |
 |---|---|
-| `orphan-dir` | The directory exists, its branch does not. |
+| `orphan-dir` | The directory exists without a branch. It is removable only when clean and its detached HEAD is reachable from another local or remote ref; a unique commit is kept by name. |
 | `branch-only` | The branch exists, its directory does not — what `restore` fixes. |
 | `active` | A session holds it: `git worktree lock`, or the worker's lock. |
 | `merged` | The branch is on the remote **and** on `origin/<default>` — by ancestry, or by content when a squash or rebase merge rewrote the commits: its whole diff against the merge base, or every one of its commits, has a patch-id already there. A never-pushed branch cannot have merged: the default branch is reached through a PR. |
@@ -36,13 +37,15 @@ Derived from git plus GitHub on every read, never stored — a second source of 
 ## Safe to remove — all must hold
 
 1. `git status --porcelain` is empty.
-2. `git rev-list <remote>/<branch>..<branch>` is empty, and the remote branch exists. Missing or behind → push first, then re-check (`--push` does exactly that).
+2. `git rev-list <remote>/<branch>..<branch>` is empty. A never-pushed or locally-ahead branch is kept. A remote branch deleted after merge is not recreated.
 3. Merged into `origin/<default>` — `remove` and `prune` fetch it first, because the merge lands on the server — **or** `--force` with the operator's word.
 4. Not locked.
 
 `--force` lifts only rule 3. Uncommitted, unpushed and locked are never lifted — those are the three ways real work disappears. Failing any rule keeps the worktree and reports which rule failed.
 
-**Retention.** `worktree-retention:` (default `14d`) measured from the **later** of the last commit and the last ledger edit. `prune` proposes only `parked` worktrees past the window and is dry-run until `--write`. On `--write` it pushes an unpushed candidate's branch first — that half protects the work and happens whatever else is wrong — then re-runs the safe-to-remove test with the window standing in for rule 3 (parked means unmerged, and the pushed branch plus `restore` bring the checkout back), so a candidate that is still dirty, unpushed or locked keeps its worktree and says why. The branch always survives; branch deletion and `--force` on `remove` take the operator's word.
+**Reclamation.** Bare `vegafactory worktree prune` always previews; only `prune --write` mutates, and `--dry-run` wins in either flag order. Candidates are a merged branch, a closed issue, or a checkout past `worktree-retention:` (default `14d`), measured from the later of its last commit and ledger edit. Dirty work may be rescued only when its remote branch already exists, no staged selection would be disturbed, and the secret scan passes; every failed add/commit path restores the original index. Never-pushed, locally-ahead, locked, unsafe, or uniquely detached work stays put with every refusal named.
+
+**Dependencies.** `worktree-deps-retention:` defaults to `3d` and is clamped to the worktree window. Between those windows, `prune --write` may remove only an untracked `node_modules` directory from a clean, pushed, unlocked checkout. It publishes a schema-checked `0600` marker first under an owner-controlled `0700` store; invalid or unreadable marker state blocks another dependency deletion. Every path component from the owned root through the checkout and dependency must be a current-UID ordinary directory that another UID cannot replace. #275 consumes the marker and runs the declared setup command; this issue never restores dependencies itself.
 
 ## Harness facts that bear on a worktree run
 

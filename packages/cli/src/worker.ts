@@ -1632,6 +1632,10 @@ export const tail = (text: string, max = MAX_NOTE) => text.trim().split('\n').sl
 
 // The issue's worktree when one exists; a step that needs a branch makes its own.
 export function workingDir(root: string, number: number): string | null {
+  const issue = join(dirname(root), 'issues', String(number))
+  try {
+    if (statSync(issue).isDirectory()) return issue
+  } catch { /* a step that needs a branch creates it */ }
   const base = join(root, '.vegastack', '.worktrees')
   try {
     const match = readdirSync(base).find((name) => name.startsWith(`${number}-`))
@@ -1649,7 +1653,7 @@ export function workingDir(root: string, number: number): string | null {
 // - it is never told where the App's private key is. The token expires in an hour; the key does
 //   not. A child under this dedicated App-only account can still read the key through the
 //   filesystem; that is an accepted deployment property, not a claimed same-user boundary.
-export function childRunEnvironment(env: NodeJS.ProcessEnv, token: string | null): NodeJS.ProcessEnv {
+export function childRunEnvironment(env: NodeJS.ProcessEnv, token: string | null, workerLayout = false): NodeJS.ProcessEnv {
   let child: NodeJS.ProcessEnv = { ...childEnvironment(env), VSK_ASK_ROUTE: 'issue' }
   for (const name of Object.keys(child)) if (name.startsWith('VEGAFACTORY_')) delete child[name]
   if (env.VEGAFACTORY_APP_ID?.trim() || env.VEGAFACTORY_APP_ACTOR?.trim()) {
@@ -1661,6 +1665,7 @@ export function childRunEnvironment(env: NodeJS.ProcessEnv, token: string | null
   // Git/SSH credential path, then install exactly the selected repository's App token. The same
   // token backs API calls and HTTPS Git through gh's credential helper; there is no fallback.
   child = appGitEnvironment(child, token)
+  if (workerLayout) child.VSK_WORKTREE_LAYOUT = 'worker'
   return child
 }
 
@@ -1675,7 +1680,7 @@ export function defaultRunStep(env: NodeJS.ProcessEnv, { exec = execTool, timeou
     // The limit arrives with the run rather than with the step function, so a roster change lands
     // on the next run instead of the next restart.
     const limit = context.timeoutMs ?? timeoutMs
-    const child = await exec(tool, args, { cwd, env: childRunEnvironment(env, context.token), timeoutMs: limit, onStart: context.onStart })
+    const child = await exec(tool, args, { cwd, env: childRunEnvironment(env, context.token, true), timeoutMs: limit, onStart: context.onStart })
     const ms = Date.now() - started
     const text = `${child.stderr}\n${child.stdout}`
     if (child.timedOut) return { outcome: 'killed', note: `${tool} ran past the ${limit / 60_000}-minute step limit and was stopped`, ms }
@@ -2481,7 +2486,7 @@ export function pushableBranch(dir: string, number: number, git: Git): { branch:
   // the issue-name check too, so checking it second would hide it behind a vaguer message.
   const fallback = defaultBranch(dir)
   if (fallback && branch === fallback) return { branch: null, refusal: `the worktree is on the default branch ${branch}, so nothing was committed or pushed` }
-  if (issueFromBranch(branch) !== number) return { branch: null, refusal: `the worktree is on ${branch}, which does not name #${number}, so nothing was committed or pushed` }
+  if (issueFromBranch(branch, number) !== number) return { branch: null, refusal: `the worktree is on ${branch}, which does not name #${number}, so nothing was committed or pushed` }
   return { branch, refusal: null }
 }
 

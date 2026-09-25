@@ -17,6 +17,7 @@ export type WorktreeVerb = (typeof verbs)[number]
 export interface WorktreeArgs {
   verb: WorktreeVerb
   issue?: number
+  name?: string
   slug?: string
   type?: string
   force: boolean
@@ -24,6 +25,7 @@ export interface WorktreeArgs {
   olderThan?: string
   allRepos: boolean
   json: boolean
+  workerLayout: boolean
 }
 
 export interface SpawnResult { status: number; stdout: string }
@@ -40,24 +42,28 @@ export function worktreeUsage(): string {
   create <issue> [--slug S] [--type T]  cut the branch and its worktree (no dependency install);
                                         slug and type come off the issue title unless given
   restore <issue> [--slug S]            re-add the checkout of the branch that carries the issue number
-  remove <issue> [--force]              remove the directory once it is clean, pushed and merged
-  prune [--older-than 14d]              remove worktrees idle past retention; uncommitted work is
-                                        first committed as wip on the worktree's branch and pushed
+  remove <issue>|--name <leaf> [--force] remove the exact directory once it is clean, pushed and merged;
+                                         ambiguous legacy leaves require --name
+  prune [--older-than 14d] [--write]    preview reclaimable worktrees and dependencies; --write
+                                        performs the reported removals after every safety check
 
-Every verb acts; --dry-run shows what it would do. Branches are never deleted, and
+Create, restore and remove act; bare prune previews and only prune --write acts.
+--dry-run always previews. Branches are never deleted, and
 --force lifts only the "not merged" block — use it only on the operator's word.
 `
 }
 
-// Every verb acts by default; --dry-run previews. The safety rules live in the script.
-export function parseWorktreeArgs(argv: string[]): WorktreeArgs {
+// Lifecycle verbs act by default. Prune is the exception: it previews until --write, and
+// --dry-run wins in either flag order. The safety rules live in the script.
+export function parseWorktreeArgs(argv: string[], env: NodeJS.ProcessEnv = process.env): WorktreeArgs {
   const head = argv[0]
   if (!head || !verbs.includes(head as WorktreeVerb)) {
     throw new Error(`Unknown worktree verb: ${head ?? '(none)'} — expected list|create|restore|remove|prune|status`)
   }
   const verb = head as WorktreeVerb
   const rest = argv.slice(1)
-  const args: WorktreeArgs = { verb, force: false, write: true, allRepos: false, json: false }
+  const args: WorktreeArgs = { verb, force: false, write: verb !== 'prune', allRepos: false, json: false, workerLayout: env.VSK_WORKTREE_LAYOUT === 'worker' }
+  let dryRun = false
   while (rest.length) {
     const token = rest.shift()!
     if (!token.startsWith('-')) {
@@ -67,17 +73,28 @@ export function parseWorktreeArgs(argv: string[]): WorktreeArgs {
       continue
     }
     if (token === '--force') args.force = true
-    else if (token === '--dry-run') args.write = false
+    else if (token === '--dry-run') { dryRun = true; args.write = false }
+    else if (token === '--write') {
+      if (verb !== 'prune') throw new Error('--write only applies to worktree prune')
+      args.write = true
+    }
     else if (token === '--all-repos') args.allRepos = true
     else if (token === '--json') args.json = true
     else if (token === '--older-than') args.olderThan = requireValue(token, rest.shift())
+    else if (token === '--name') {
+      if (verb !== 'remove') throw new Error('--name only applies to worktree remove')
+      args.name = requireValue(token, rest.shift())
+    }
     else if (token === '--slug') args.slug = requireValue(token, rest.shift())
     else if (token === '--type') args.type = requireValue(token, rest.shift())
     else throw new Error(`Unknown option: ${token}`)
   }
-  if ((verb === 'create' || verb === 'restore' || verb === 'remove') && args.issue === undefined) {
+  if (dryRun) args.write = false
+  if (verb === 'remove' && args.issue !== undefined && args.name !== undefined) throw new Error('worktree remove accepts either an issue number or --name, not both')
+  if ((verb === 'create' || verb === 'restore') && args.issue === undefined) {
     throw new Error(`worktree ${verb} needs an issue number`)
   }
+  if (verb === 'remove' && args.issue === undefined && args.name === undefined) throw new Error('worktree remove needs an issue number or --name <leaf>')
   return args
 }
 
@@ -89,11 +106,13 @@ function requireValue(flag: string, value: string | undefined): string {
 export function scriptArgs(args: WorktreeArgs): string[] {
   const out: string[] = [args.verb, '--json']
   if (args.issue !== undefined) out.push('--issue', String(args.issue))
+  if (args.name) out.push('--name', args.name)
   if (args.slug) out.push('--slug', args.slug)
   if (args.type) out.push('--type', args.type)
   if (args.olderThan) out.push('--older-than', args.olderThan)
   if (args.force) out.push('--force')
   if (args.write) out.push('--write')
+  if (args.workerLayout) out.push('--worker-layout')
   return out
 }
 
@@ -189,6 +208,6 @@ export async function runWorktree(argv: string[], deps?: Partial<WorktreeDeps>):
 
   const run = spawn(scriptArgs(args))
   render('', parseScriptOutput(run.stdout), args.json)
-  await recordRepoRoot(registryPath, process.cwd()).catch(() => [])
+  if (args.verb !== 'prune' || args.write) await recordRepoRoot(registryPath, process.cwd()).catch(() => [])
   return run.status
 }

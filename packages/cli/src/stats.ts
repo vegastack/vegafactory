@@ -21,7 +21,7 @@ import { fileURLToPath } from 'node:url'
 import { nodeId } from './claim.ts'
 import { factoryConfigPath, lockOrgSync, parseControlRoomKnob, readFactoryConfig, recordOrgSha, repositoryReason, safeClonePath, type ControlRoomEntry } from './control-room.ts'
 import { defaultRunner, ghRequest, type GhRunner } from './gh.ts'
-import { issueFromBranch, issueFromWorktree } from './hook.ts'
+import { issueFromWorktree } from './hook.ts'
 import { cacheDir, withLock } from './issue-cache.ts'
 import { stageHistory, stageOn, type StageChange } from './stages.ts'
 import { GIT_CREDENTIAL_ARGS } from './sync.ts'
@@ -177,7 +177,7 @@ export function defaultSite(): SiteLookup {
   const repos = new Map<string, { repo: string | null; root: string | null }>()
   const histories = new Map<string, StageChange[]>()
   return (cwd, branch, at, known) => {
-    const issue = (cwd ? issueFromWorktree(cwd) : null) ?? (branch ? issueFromBranch(branch) : null)
+    const issue = cwd ? issueFromWorktree(cwd) : null
     if (!cwd) return { repo: known ?? null, issue, state: null }
     let place = repos.get(cwd)
     if (!place) {

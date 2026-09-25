@@ -787,7 +787,8 @@ function issueVerb(words: string[]): Decision | null {
   return null
 }
 
-// `vegafactory worktree`: remove refuses unmerged work itself; --force and prune need the word.
+// `vegafactory worktree`: remove refuses unmerged work itself; only an effective prune --write
+// mutates. Bare prune is the attended preview, and --dry-run wins in either flag order.
 function worktreeVerb(words: string[]): Decision | null {
   const at = words.findIndex((word, index) => index > 0 && word === 'worktree')
   if (words[0] === 'git' || at === -1) return null
@@ -795,7 +796,9 @@ function worktreeVerb(words: string[]): Decision | null {
   const args = words.slice(at + 2)
   if (expanded(verb) || ((verb === 'remove' || verb === 'prune') && args.some(expanded))) return ask(`a worktree command built by shell expansion ${WORD}`, 'unclassified')
   if (verb === 'remove' && args.some((arg) => arg.startsWith('--force') || arg === '-f')) return ask(`removing an unmerged worktree ${WORD}`, 'always-ask')
-  if (verb === 'prune' && !args.includes('--dry-run')) return ask(`pruning worktrees ${WORD} — preview with --dry-run`, 'always-ask')
+  const dryRun = args.includes('--dry-run')
+  const pruneWrite = args.some((arg) => arg === '--write' || arg.startsWith('--write='))
+  if (verb === 'prune' && pruneWrite && !dryRun) return ask(`pruning worktrees ${WORD} — preview with bare prune`, 'always-ask')
   return null
 }
 

@@ -17,6 +17,44 @@ export class GhUnavailable extends Error {
 // is a string (a request body that must stay off argv); otherwise it is
 // closed. VSK_GH is a TEST SEAM only (points unit tests at a stub binary);
 // guards are enforcement infrastructure, so never set it in real runs.
+// `gh api --paginate` prints one complete JSON document per page. Split the
+// stream once and consume all of it: reparsing every prefix is quadratic in
+// attacker-controlled issue/comment text, while accepting a good prefix would
+// turn a truncated response into an apparently complete answer.
+export function splitJsonDocuments(text) {
+  const source = String(text ?? '');
+  const documents = [];
+  let depth = 0;
+  let inString = false;
+  let escaped = false;
+  let start = -1;
+  for (let index = 0; index < source.length; index += 1) {
+    const character = source[index];
+    if (inString) {
+      if (escaped) escaped = false;
+      else if (character === '\\') escaped = true;
+      else if (character === '"') inString = false;
+      continue;
+    }
+    if (depth === 0 && start === -1 && character.trim() && character !== '[' && character !== '{') return null;
+    if (character === '"') { inString = true; continue; }
+    if (character === '[' || character === '{') {
+      if (depth === 0) start = index;
+      depth += 1;
+      continue;
+    }
+    if (character !== ']' && character !== '}') continue;
+    depth -= 1;
+    if (depth < 0) return null;
+    if (depth > 0) continue;
+    try { documents.push(JSON.parse(source.slice(start, index + 1))); }
+    catch { return null; }
+    start = -1;
+  }
+  if (depth !== 0 || inString || start !== -1) return null;
+  return documents.length ? documents : null;
+}
+
 export function ghJson(args, { gh = process.env.VSK_GH || 'gh', input } = {}) {
   let out;
   try {
@@ -36,6 +74,8 @@ export function ghJson(args, { gh = process.env.VSK_GH || 'gh', input } = {}) {
   try {
     return JSON.parse(out);
   } catch {
+    const pages = splitJsonDocuments(out);
+    if (pages && pages.every(Array.isArray)) return pages.flat();
     throw new GhUnavailable(`gh ${args.join(' ')} returned unparseable JSON`);
   }
 }

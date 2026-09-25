@@ -7,7 +7,7 @@
       "expected_output": "A detection summary confirmed in one round, then `.vegastack/dev.md` rendered with the knob lines and the Ship/Verify sections drafted from the Bun playbook, the workflow labels created, and the AGENTS.md block inserted between the `vsk-dev` markers with the team's own section untouched.",
       "files": [],
       "assertions": [
-        "`.vegastack/dev.md` carries the knob lines `review`, `tests`, `branch`, `labels`, `changelog` with values",
+        "`.vegastack/dev.md` carries the knob lines `harness-policy`, `tests`, `branch`, `worktree-retention`, `worktree-deps-retention`, `labels`, and `changelog` with values",
         "The AGENTS.md insertion is delimited by `<!-- vsk-dev:start -->` and `<!-- vsk-dev:end -->`",
         "The text outside the markers (the team's `## Conventions` section) is unchanged",
         "The `architect:` knob is set to `kmanojkumar`"

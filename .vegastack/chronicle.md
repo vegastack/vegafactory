@@ -12,6 +12,16 @@ The project's story, newest first: what got built, why, and how it went — for 
 
 — approved by (kmanojkumar) · built by codex · branch chore/286-remove-external-skill-inspection
 
+## 22-09-2026 — Reclamation became explicit and issue paths became stable ([#260](https://github.com/vegastack/vegafactory/issues/260))
+
+- **What:** Issue checkout directories now use only the issue number, and `vegafactory worktree prune` previews merged, closed, or retained-idle candidates until a person passes `--write`. Clean pushed checkouts may shed untracked `node_modules` on a shorter window with an owner-only marker for restoration.
+- **Why:** Title-derived directories drifted, unattended cleanup could not know whether a person was using a checkout, and the first cleanup branch mixed unrelated worker state with unsafe detached, index, and path handling.
+- **How it went:** The legacy worktree stayed untouched as evidence while a clean post-#259 branch rebuilt six narrow slices. Real repositories proved merge variants, deleted and never-pushed remotes, detached reachability, rescue failures, marker permissions, symlink redirection, and complete GitHub pagination.
+- **Changed:** number-only attended and worker issue paths · preview-only bare prune · explicit write · merged/closed/idle reasons · index-safe rescue · untracked dependency retention · atomic markers · strict paginated facts.
+- **Decisions:** reclamation is attended; the worker may advise but never removes; issue directory identity is the number, while branch names keep their descriptive slug.
+
+— approved by (kmanojkumar) · built by codex · branch feat/260-attended-worktree-reclamation
+
 ## 22-09-2026 — A new review cycle really starts a new range ([#283](https://github.com/vegastack/vegafactory/issues/283))
 
 - **What:** Round one of a new review cycle can choose the current diff base; every later round remains pinned to that choice.

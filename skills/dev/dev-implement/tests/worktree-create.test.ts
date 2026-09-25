@@ -3,7 +3,7 @@ import { execFileSync } from 'node:child_process'
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { codexTrustToml, createWorktree, restoreWorktree } from '../scripts/worktree.mjs'
+import { branchPartsForIssue, codexTrustToml, createWorktree, restoreWorktree } from '../scripts/worktree.mjs'
 
 const git = (cwd: string, ...args: string[]) => execFileSync('git', args, { cwd, encoding: 'utf8' })
 
@@ -25,14 +25,14 @@ describe('createWorktree', () => {
     const root = repo()
     const r = createWorktree({ repoRoot: root, issue: 224, slug: 'x', type: 'research', base: 'main', devMd, home: root, write: false })
     expect(r.blocks.join(' ')).toContain('feat, fix, docs, chore, refactor')
-    expect(existsSync(join(root, '.vegastack/.worktrees/224-x'))).toBe(false)
+    expect(existsSync(join(root, '.vegastack/.worktrees/224'))).toBe(false)
   })
   test('no type at all is refused rather than silently becoming feat, and the refusal quotes the title', () => {
     const root = repo()
     const r = createWorktree({ repoRoot: root, issue: 224, slug: 'x', type: null, title: 'research: P12 — prove the lean factory works', base: 'main', devMd, home: root, write: false })
     expect(r.blocks).toEqual(['branch type: "research: P12 — prove the lean factory works" names no type — pass --type <one of: feat, fix, docs, chore, refactor>'])
     expect(r.branch).toBeUndefined()
-    expect(existsSync(join(root, '.vegastack/.worktrees/224-x'))).toBe(false)
+    expect(existsSync(join(root, '.vegastack/.worktrees/224'))).toBe(false)
   })
   test('with no title to quote, the refusal names the issue', () => {
     const root = repo()
@@ -50,7 +50,7 @@ describe('createWorktree', () => {
     const root = repo()
     const r = createWorktree({ repoRoot: root, issue: 106, slug: 'x', type: 'feat', base: 'main', devMd, home: root, write: false })
     expect(r.blocks).toEqual([])
-    expect(r.path).toBe(join(root, '.vegastack/.worktrees/106-x'))
+    expect(r.path).toBe(join(root, '.vegastack/.worktrees/106'))
     expect(r.branch).toBe('feat/106-x')
     expect(existsSync(r.path)).toBe(false)
   })
@@ -59,6 +59,7 @@ describe('createWorktree', () => {
     const r = createWorktree({ repoRoot: root, issue: 106, slug: 'x', type: 'feat', base: 'main', devMd, home: root, write: true })
     expect(r.blocks).toEqual([])
     expect(git(r.path, 'rev-parse', '--abbrev-ref', 'HEAD').trim()).toBe('feat/106-x')
+    expect(git(root, 'config', '--get', 'branch.feat/106-x.vegafactoryIssue').trim()).toBe('106')
     expect(readFileSync(join(r.path, '.env'), 'utf8')).toBe('SECRET=1\n')
     expect(existsSync(join(r.path, 'setup.log'))).toBe(false)
     expect(git(root, 'rev-parse', '--abbrev-ref', 'HEAD').trim()).toBe('main')
@@ -71,6 +72,47 @@ describe('createWorktree', () => {
     expect(git(a.path, 'rev-parse', '--abbrev-ref', 'HEAD').trim()).toBe('feat/106-a')
     expect(git(b.path, 'rev-parse', '--abbrev-ref', 'HEAD').trim()).toBe('feat/107-b')
     expect(git(root, 'rev-parse', '--abbrev-ref', 'HEAD').trim()).toBe('main')
+  })
+  test('one issue cannot acquire a second title-derived directory', () => {
+    const root = repo()
+    const first = createWorktree({ repoRoot: root, issue: 106, slug: 'old-title', type: 'feat', base: 'main', devMd, home: root, write: true })
+    const renamed = createWorktree({ repoRoot: root, issue: 106, slug: 'new-title', type: 'feat', base: 'main', devMd, home: root, write: false })
+    expect(first.path).toBe(join(root, '.vegastack/.worktrees/106'))
+    expect(renamed.path).toBe(first.path)
+    expect(renamed.blocks.join(' ')).toContain('worktree')
+  })
+  test('a no-issue checkout cannot impersonate or block an issue checkout', () => {
+    const root = repo()
+    const direct = createWorktree({ repoRoot: root, issue: null, slug: '106-direct-fix', type: 'fix', base: 'main', devMd, home: root, write: true })
+    expect(direct.blocks.join(' ')).toContain('cannot start with an issue number')
+    expect(existsSync(join(root, '.vegastack', '.worktrees', '106-direct-fix'))).toBe(false)
+
+    const issue = createWorktree({ repoRoot: root, issue: 106, slug: 'real-issue', type: 'fix', base: 'main', devMd, home: root, write: true })
+    expect(issue.blocks).toEqual([])
+    expect(issue.path).toBe(join(root, '.vegastack', '.worktrees', '106'))
+  })
+  test('a pre-existing digit-led direct branch is never discovered as an issue branch', () => {
+    const root = repo()
+    git(root, 'branch', 'fix/106-emergency')
+    expect(branchPartsForIssue(root, 106)).toEqual({ error: 'no branch for #106 — nothing to restore; create it instead' })
+
+    const directPath = join(root, '.vegastack', '.worktrees', '106-emergency')
+    mkdirSync(join(root, '.vegastack', '.worktrees'), { recursive: true })
+    git(root, 'worktree', 'add', '-q', directPath, 'fix/106-emergency')
+    const removeByIssue = runScript(root, 'remove', '--issue', '106', '--write')
+    expect(removeByIssue.code).toBe(2)
+    expect(JSON.parse(removeByIssue.out).blocks.join(' ')).toContain('no worktree for that issue')
+    expect(existsSync(directPath)).toBe(true)
+  })
+  test('a legacy slugged checkout blocks a second numeric checkout for the issue', () => {
+    const root = repo()
+    const legacy = join(root, '.vegastack', '.worktrees', '106-old-title')
+    mkdirSync(join(root, '.vegastack', '.worktrees'), { recursive: true })
+    git(root, 'worktree', 'add', '-q', '-b', 'feat/106-old-title', legacy)
+    const next = createWorktree({ repoRoot: root, issue: 106, slug: 'new-title', type: 'feat', base: 'main', devMd, home: root, write: true })
+    expect(next.blocks.join(' ')).toContain('already has a worktree')
+    expect(existsSync(join(root, '.vegastack', '.worktrees', '106'))).toBe(false)
+    expect(existsSync(legacy)).toBe(true)
   })
   test('a symlinked .worktrees parent is refused', () => {
     const root = repo()
@@ -130,8 +172,8 @@ describe('the create and restore verbs resolve type and slug independently', () 
   test('--slug picks among several branches for one issue instead of being ambiguous', () => {
     const root = repo()
     const first = createWorktree({ repoRoot: root, issue: 106, slug: 'x', type: 'fix', base: 'main', devMd, home: root, write: true })
-    const second = createWorktree({ repoRoot: root, issue: 106, slug: 'y', type: 'docs', base: 'main', devMd, home: root, write: true })
     git(root, 'worktree', 'remove', '--force', first.path)
+    const second = createWorktree({ repoRoot: root, issue: 106, slug: 'y', type: 'docs', base: 'main', devMd, home: root, write: true })
     git(root, 'worktree', 'remove', '--force', second.path)
     // Without --slug the two are genuinely ambiguous and it says so.
     expect(JSON.parse(runScript(root, 'restore', '--issue', '106').out).blocks.join(' ')).toContain('several branches match')
@@ -218,13 +260,13 @@ describe('worktree.mjs create and restore by issue number', () => {
     return bin
   }
 
-  test('create names the branch and directory from the issue title, prefix as the type', () => {
+  test('create names the branch from the title and the directory from the issue number', () => {
     const root = repo()
     const created = run(root, ghStub('fix: One feature, ONE worktree!'), 'create', '--issue', '106', '--write')
     expect(created.out.blocks).toEqual([])
     expect(created.status).toBeLessThan(2)
     expect(created.out.branch).toBe('fix/106-one-feature-one-worktree')
-    expect(created.out.path).toBe(join(root, '.vegastack/.worktrees/106-one-feature-one-worktree'))
+    expect(created.out.path).toBe(join(root, '.vegastack/.worktrees/106'))
     expect(git(created.out.path, 'rev-parse', '--abbrev-ref', 'HEAD').trim()).toBe('fix/106-one-feature-one-worktree')
   })
   test('restore finds the branch by issue number and needs neither a slug nor GitHub', () => {

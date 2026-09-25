@@ -6,7 +6,7 @@ import { dirname, join } from 'node:path'
 import { Readable } from 'node:stream'
 import { claim } from '../src/claim.ts'
 import type { GhRunner } from '../src/gh.ts'
-import { detachBounded, issueFromBranch, issueFromWorktree, readHookInput, runHook, type HookDeps } from '../src/hook.ts'
+import { detachBounded, issueFromBranch, issueFromWorktree, locate, readHookInput, runHook, type HookDeps } from '../src/hook.ts'
 import { ackBody, artifactHash } from '../src/issue.ts'
 import { addLesson, readLessons } from '../src/learning.ts'
 import { installArgs, packageVersion, readUpdateNote, SELF_UPDATE_LIMIT_S, writeUpdateNote } from '../src/self-update.ts'
@@ -30,13 +30,17 @@ let out: string[]
 let detached: string[][]
 let stats: string[][]
 let prHead: string
+let prHeadOid: string
 let detachPid: number | undefined
-const OWNER = 'box:7-export'
+const OWNER = 'box:7'
 const ctx = () => ({ root, repo: 'o/r', number: 7, runner: gh.runner })
 
 // The fake answers `gh api`; the hook also asks `gh pr view` for a merge's head branch.
 const runner: GhRunner = (args, input) => {
-  if (args[0] === 'pr' && args[1] === 'view') return { code: 0, stdout: JSON.stringify({ headRefName: prHead }), stderr: '' }
+  if (args[0] === 'pr' && args[1] === 'view') {
+    const number = /^[\w.-]+\/(\d+)-/.exec(prHead)?.[1]
+    return { code: 0, stdout: JSON.stringify({ headRefName: prHead, headRefOid: prHeadOid, closingIssuesReferences: number ? [{ number: Number(number) }] : [] }), stderr: '' }
+  }
   return gh.runner(args, input)
 }
 
@@ -97,9 +101,10 @@ beforeEach(() => {
   writeFileSync(join(root, '.gitignore'), '.vegastack/.tmp/\n.vegastack/.worktrees/\n')
   git(root, 'add', '-A')
   git(root, 'commit', '-q', '-m', 'init')
+  prHeadOid = git(root, 'rev-parse', 'HEAD')
   git(root, 'push', '-q', 'origin', 'main')
   git(root, 'remote', 'set-head', 'origin', '--auto')
-  tree = join(root, '.vegastack/.worktrees/7-export')
+  tree = join(root, '.vegastack/.worktrees/7')
   git(root, 'worktree', 'add', '-q', '-b', 'feat/7-export', tree)
   plain = join(base, 'plain')
   git(base, 'clone', '-q', origin, plain)
@@ -107,10 +112,36 @@ beforeEach(() => {
 
 describe('finding the issue', () => {
   test('from the worktree folder or the branch name', () => {
-    expect(issueFromWorktree('/r/.vegastack/.worktrees/216-coordination')).toBe(216)
+    expect(issueFromWorktree('/r/.vegastack/.worktrees/216-coordination')).toBe(null)
+    expect(issueFromWorktree('/r/.vegastack/.worktrees/216')).toBe(216)
+    expect(issueFromWorktree('/home/x/.vegafactory/worker/repos/o__r/issues/216')).toBe(216)
     expect(issueFromWorktree('/r/.vegastack/.worktrees/x')).toBe(null)
-    expect(issueFromBranch('feat/216-coordination')).toBe(216)
+    expect(issueFromWorktree('/r/issues/216')).toBe(null)
+    expect(issueFromBranch('feat/216-coordination')).toBe(null)
+    expect(issueFromBranch('feat/216-coordination', 216)).toBe(216)
     expect(issueFromBranch('main')).toBe(null)
+  })
+
+  test('an existing digit-led direct checkout is not issue-bound', () => {
+    const direct = join(root, '.vegastack', '.worktrees', '42-emergency')
+    git(root, 'worktree', 'add', '-q', '-b', 'fix/42-emergency', direct)
+    expect(issueFromWorktree(direct)).toBe(null)
+    expect(issueFromBranch('fix/42-emergency')).toBe(null)
+    expect(locate(direct)).toBe(null)
+  })
+
+  test('detached attended and worker number-only checkouts retain issue identity', () => {
+    const attended = join(root, '.vegastack', '.worktrees', '8')
+    git(root, 'worktree', 'add', '-q', '-b', 'feat/8-attended', attended)
+    git(attended, 'switch', '-q', '--detach')
+    expect(locate(attended)?.number).toBe(8)
+
+    const holder = join(dirname(root), '.vegafactory', 'worker', 'repos', 'o__r')
+    const worker = join(holder, 'issues', '9')
+    mkdirSync(join(holder, 'issues'), { recursive: true })
+    git(root, 'worktree', 'add', '-q', '-b', 'feat/9-worker', worker)
+    git(worker, 'switch', '-q', '--detach')
+    expect(locate(worker)?.number).toBe(9)
   })
 
   test('input is bounded: an oversized payload is null but keeps its head', async () => {
@@ -166,7 +197,8 @@ describe('guard', () => {
 
   test('gh pr merge passes only with a ship it after the latest evidence on the issue its branch names', async () => {
     expect((await hook('pre-tool', bash('gh pr merge 12 --squash'))).json().hookSpecificOutput.permissionDecision).toBe('ask')
-    gh.addComment(7, '<!-- vsk:v1 type=evidence -->\nit works\n- [ ] done')
+    const head = git(root, 'rev-parse', 'HEAD')
+    gh.addComment(7, `<!-- vsk:v1 type=evidence branch=feat/7-export sha=${head.slice(0, 7)} -->\nit works\n- [ ] done`)
     gh.addComment(7, ackBody({ stage: 'ship', by: 'mk', brief: artifactHash('Export CSV'), plan: null, source: 'session', quote: 'ship it' }))
     expect((await hook('pre-tool', bash('gh pr merge 12 --squash'))).text).toBe('')
     expect((await hook('pre-tool', bash('gh pr merge --squash'))).text).toBe('')
@@ -175,13 +207,18 @@ describe('guard', () => {
     prHead = 'feat/8-other'
     expect((await hook('pre-tool', bash('gh pr merge 12'))).text).toContain('"ask"')
     prHead = 'feat/7-export'
+    prHeadOid = 'f'.repeat(40)
+    expect((await hook('pre-tool', bash('gh pr merge 12'))).text).toContain('"ask"')
+    prHeadOid = head.slice(0, 7) + (head[7] === 'a' ? 'b' : 'a') + head.slice(8)
+    expect((await hook('pre-tool', bash('gh pr merge 12'))).text).toContain('"ask"')
+    prHeadOid = head
     // Editing the evidence after "ship it" voids it, as issue check says; ticking a box does not.
     const evidence = gh.issues.get(7)!.comments.find((c) => c.body.includes('type=evidence'))!
-    gh.editComment(evidence.id, '<!-- vsk:v1 type=evidence -->\nit works\n- [x] done')
+    gh.editComment(evidence.id, `<!-- vsk:v1 type=evidence branch=feat/7-export sha=${head.slice(0, 7)} -->\nit works\n- [x] done`)
     expect((await hook('pre-tool', bash('gh pr merge 12'))).text).toBe('')
-    gh.editComment(evidence.id, '<!-- vsk:v1 type=evidence -->\nit works, edited')
+    gh.editComment(evidence.id, `<!-- vsk:v1 type=evidence branch=feat/7-export sha=${head.slice(0, 7)} -->\nit works, edited`)
     expect((await hook('pre-tool', bash('gh pr merge 12'))).text).toContain('"ask"')
-    gh.editComment(evidence.id, '<!-- vsk:v1 type=evidence -->\nit works')
+    gh.editComment(evidence.id, `<!-- vsk:v1 type=evidence branch=feat/7-export sha=${head.slice(0, 7)} -->\nit works`)
     gh.addComment(7, ackBody({ stage: 'ship', by: 'mk', brief: artifactHash('Export CSV'), plan: null, source: 'session', quote: 'ship it' }))
     expect((await hook('pre-tool', bash('gh pr merge 12'))).text).toBe('')
     gh.addComment(7, '<!-- vsk:v1 type=evidence -->\nnew evidence')
@@ -229,7 +266,7 @@ describe('ownership', () => {
     expect(denied.permissionDecisionReason).toContain('committed and pushed to feat/7-export')
     // The work stays on the issue branch; no other branch is made.
     expect(git(tree, 'branch', '--show-current')).toBe('feat/7-export')
-    expect(git(tree, 'log', '-1', '--format=%s')).toBe('wip: #7 rescued uncommitted work from 7-export')
+    expect(git(tree, 'log', '-1', '--format=%s')).toBe('wip: #7 rescued uncommitted work from 7')
     expect(git(tree, 'ls-remote', 'origin', 'feat/7-export')).toContain(git(tree, 'rev-parse', 'HEAD'))
     expect(git(tree, 'ls-remote', '--heads', 'origin')).not.toContain('rescue/')
     expect(git(tree, 'status', '--porcelain')).toBe('')

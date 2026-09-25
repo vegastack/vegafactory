@@ -18,6 +18,7 @@ merge: squash               # one commit per issue on main, matching the branch 
 branch: <type>/<slug>       # type: feat | fix | docs | chore | refactor — the only place this list lives
 worktree-include: .claude/settings.json      # the Claude hook wiring is gitignored, so each worktree needs its own copy; .codex/hooks.json is tracked and needs none
 worktree-retention: 14d     # a parked worktree survives this long with no session, measured from the later of its last commit and its last ledger edit
+worktree-deps-retention: 3d # untracked node_modules may be reclaimed after this quiet window, never later than the whole-worktree window
 labels: waiting-on-operator planning queued in-progress ready-to-ship small medium large research risky epic   # the fixed set, nothing renameable: one state label at a time, one size (or research); risky and epic are marks, and epic marks a map parent
 board: none                 # no project board yet; the operator's project commands are in vegafactory-setup's references/control-room.md
 issue-types: Feature=feat · Bug=fix · Task=docs,chore,refactor,research   # no Epic type in this org — the epic label marks map parents
