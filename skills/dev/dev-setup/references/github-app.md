@@ -108,6 +108,8 @@ The rest of the worker's machine record is private too. `~/.vegafactory/worker/`
 
 `worker enable` is the recovery boundary. After readiness passes, it stops the old service before changing storage or the unit, migrates valid legacy records, and atomically publishes fresh private inodes for `runs.jsonl`, `worker.log`, and `worker.err.log`. A descriptor still holding an old inode reaches EOF and receives no later output. Malformed or unsafe legacy evidence moves into the owner-only `~/.vegafactory/worker/quarantine/` directory and enable stops with its exact path; inspect that preserved file, then run enable again. A failed stop changes neither the installed unit nor storage, and an interrupted append migration resumes from its private journal without duplicating bytes.
 
+After a board pass, `vegafactory worker status` may list issue worktrees worth inspecting with bare `vegafactory worktree prune`. This is advice only: the worker runs a bounded preview and never passes `--write`, removes a checkout or dependency, or pushes a branch. An unavailable housekeeping row means remote facts were incomplete or timed out; retry the bare preview yourself before deciding whether to run `prune --write`.
+
 Control-room files record these **names**. The values live in GitHub organization settings and nowhere a repository can read them.
 
 Setting an organization secret needs `admin:org`. A `gh` token without it can write a repository secret but not an organization one, so this step reaches the operator even when everything around it is automated.

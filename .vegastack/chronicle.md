@@ -2,6 +2,16 @@
 
 The project's story, newest first: what got built, why, and how it went — for the operator's future recall. Format home: the dev-chronicle skill.
 
+## 25-09-2026 — Idle worker checkouts become visible before anyone cleans them up ([#276](https://github.com/vegastack/vegafactory/issues/276))
+
+- **What:** The worker now gives the operator a short list of issue checkouts worth inspecting with bare `vegafactory worktree prune`. Its status and service log also say when a repository's facts were unavailable, and the worker never removes a checkout or dependency itself.
+- **Why:** A machine with many boards could accumulate idle checkouts quietly, while cleanup still needed an attended decision.
+- **How it went:** Reusing the existing preview meant the candidate rules stayed in one place, but remote reads could hold the poll loop. A bounded child now carries those reads, and the worker records its process identity so stop, disable, and restart can end it safely.
+- **Changed:** preview-only advice after each pass · in-use issue exclusions · bounded private advisory record · incomplete-fact labels · operator guidance.
+- **Decisions:** none.
+
+— approved by (kmanojkumar) · built by codex · branch feat/276-worker-idle-worktree-advice
+
 ## 22-09-2026 — Worker records fail closed before anything is torn down ([#277](https://github.com/vegastack/vegafactory/issues/277))
 
 - **What:** Machine-global worker records now distinguish absence from corruption and remain private through runtime updates. Disable validates its authority before unloading, while attended enablement stops first and moves valid history and logs onto fresh private inodes.

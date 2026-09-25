@@ -101,6 +101,8 @@ That directory is owner-only and its runtime records and logs are `0600`. A miss
 
 Re-run `vegafactory worker enable` to perform storage recovery. It stops the old service before changing storage or the unit, replaces the run history and both logs with fresh private inodes, then loads the new unit. Old descriptors reach EOF and cannot see later output. Malformed or unsafe legacy evidence is preserved under `~/.vegafactory/worker/quarantine/`; enable prints the exact path and stops, so inspect that file and run enable again. A failed service stop changes nothing, and an interrupted append migration resumes without duplicating bytes.
 
+After a pass, `vegafactory worker status` may list issue worktrees worth inspecting with bare `vegafactory worktree prune`. This is bounded, preview-only advice; the worker never passes `--write` or reclaims a checkout or dependency. An unavailable housekeeping row means repository facts were incomplete or timed out. A person checks the bare preview and decides whether to run `prune --write`.
+
 Then the reboot drill: `sudo reboot`, wait for the box, and run every check above again **without logging anything in by hand**. A box that needs a human at the keyboard after a power cut is not always-on.
 
 On Linux, the logout drill is separate and the order matters. Log out every session for vf-worker and check from **another** account — logging back in first would start the service again and hide exactly the failure this is looking for:
