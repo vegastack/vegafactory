@@ -1191,9 +1191,12 @@ export function gatherGithubFacts({ repo, names = [], warns, read = ghJson }) {
   const unknown = new Set();
   let openIssues = [];
   try {
-    openIssues = read(['api', 'repos/' + repo + '/issues', '--paginate', '-X', 'GET', '-f', 'state=open'])
-      .filter((issue) => !issue.pull_request)
-      .map((issue) => ({ number: issue.number, state: issue.state }));
+    const listed = read(['api', 'repos/' + repo + '/issues', '--paginate', '-X', 'GET', '-f', 'state=open']);
+    if (!Array.isArray(listed) || listed.some((issue) => !issue || typeof issue !== 'object'
+      || !Number.isSafeInteger(issue.number) || issue.number <= 0 || issue.state !== 'open')) {
+      throw new Error('open issue facts have an invalid shape');
+    }
+    openIssues = listed.filter((issue) => !issue.pull_request).map((issue) => ({ number: issue.number, state: issue.state }));
   } catch (error) {
     warns.push(at('github', 'could not read open issues, reporting from git alone: ' + error.message));
     for (const name of names) unknown.add(name);
@@ -1211,7 +1214,11 @@ export function gatherGithubFacts({ repo, names = [], warns, read = ghJson }) {
       continue;
     }
     try {
-      issueStates[name] = read(['api', 'repos/' + repo + '/issues/' + issue]).state;
+      const detail = read(['api', 'repos/' + repo + '/issues/' + issue]);
+      if (!detail || typeof detail !== 'object' || detail.number !== issue || !['open', 'closed'].includes(detail.state)) {
+        throw new Error('issue state has an invalid shape');
+      }
+      issueStates[name] = detail.state;
     } catch (error) {
       warns.push(at('github', 'could not read the state of #' + issue + ': ' + error.message));
       unknown.add(name);
@@ -1232,6 +1239,9 @@ export function gatherLedgerTimes({ repo, names, warns, read = ghJson }) {
     }
     try {
       const comments = read(['api', 'repos/' + repo + '/issues/' + issue + '/comments', '--paginate']);
+      if (!Array.isArray(comments) || comments.some((comment) => !comment || typeof comment !== 'object'
+        || typeof comment.body !== 'string' || typeof comment.updated_at !== 'string'
+        || !Number.isFinite(Date.parse(comment.updated_at)))) throw new Error('ledger comments have an invalid shape');
       const ledger = findMarkerComment(comments, 'ledger');
       if (ledger) times[name] = ledger.comment.updated_at;
     } catch (error) {
