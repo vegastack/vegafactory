@@ -1,10 +1,10 @@
 import { describe, expect, test } from 'bun:test'
-import { spawn } from 'node:child_process'
-import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, renameSync, symlinkSync, writeFileSync } from 'node:fs'
+import { execFileSync, spawn } from 'node:child_process'
+import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmdirSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { randomUUID } from 'node:crypto'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { noteDroppedDeps, readDroppedDeps, restoreDroppedDependencies, parseSetupCommand, worktreePath } from '../scripts/worktree.mjs'
+import { clearDroppedDeps, noteDroppedDeps, readDroppedDeps, restoreDroppedDependencies, parseSetupCommand, worktreePath } from '../scripts/worktree.mjs'
 
 const devMd = 'commands: test `bun test` · setup `bun install --frozen-lockfile`\n'
 
@@ -136,6 +136,30 @@ describe('dependency restoration', () => {
     expect(calls).toBe(1)
   })
 
+  test('a waiter accepts a valid owner result when the marker clears during lock release', async () => {
+    const input = markedCheckout()
+    const root = join(input.repoRoot, '.vegastack', '.tmp', 'deps-prepare')
+    const lock = join(root, '275.lock')
+    mkdirSync(lock, { recursive: true, mode: 0o700 })
+    const nonce = randomUUID()
+    const startedAt = execFileSync('ps', ['-p', String(process.pid), '-o', 'lstart='], { encoding: 'utf8' }).trim()
+    writeFileSync(join(lock, 'owner.json'), JSON.stringify({ schema: 1, name: '275', nonce, pid: process.pid, startedAt }), { mode: 0o600 })
+    writeFileSync(join(root, `275.${nonce}.result.json`), JSON.stringify({ schema: 1, name: '275', nonce, ok: true,
+      command: 'bun install --frozen-lockfile', reason: 'setup exited 0', ms: 1 }), { mode: 0o600 })
+    let setupCalls = 0
+    const result = await restoreDroppedDependencies({ ...input, devMd, timeoutMs: 2_000,
+      execute: async () => { setupCalls++; return { code: 0, signal: null, timedOut: false, output: '' } },
+      afterObservedResult: () => {
+        expect(clearDroppedDeps(input)).toBe(true)
+        rmSync(join(lock, 'owner.json'))
+        rmdirSync(lock)
+      },
+    })
+    expect(result).toMatchObject({ ok: true, restored: true, reason: 'dependency setup completed by the existing run' })
+    expect(setupCalls).toBe(0)
+    expect(readDroppedDeps({ repoRoot: input.repoRoot }).records.has(input.name)).toBe(false)
+  })
+
   test('two separate prepare processes consume one owner result and run setup once', async () => {
     const input = markedCheckout()
     const counter = join(input.repoRoot, 'setup-count.txt')
@@ -157,7 +181,7 @@ describe('dependency restoration', () => {
       let stderr = ''
       child.stdout.on('data', (chunk) => { stdout += String(chunk) })
       child.stderr.on('data', (chunk) => { stderr += String(chunk) })
-      return new Promise<{ code: number | null; document: { ok: boolean; preparation: { restored: boolean } }; stderr: string }>((resolve) => {
+      return new Promise<{ code: number | null; document: { ok: boolean; preparation: { restored: boolean; reason: string } }; stderr: string }>((resolve) => {
         child.on('close', (code) => resolve({ code, document: JSON.parse(stdout), stderr }))
       })
     }
@@ -169,8 +193,11 @@ describe('dependency restoration', () => {
       await new Promise((resolve) => setTimeout(resolve, 100))
       writeFileSync(release, 'go')
       const completed = await Promise.all([first, second])
-      expect(completed.map((one) => one.code)).toEqual([0, 0])
-      expect(completed.map((one) => one.document.preparation.restored)).toEqual([true, true])
+      expect(completed.map((one) => one.code), JSON.stringify(completed)).toEqual([0, 0])
+      expect(completed[0]!.document.preparation.restored).toBe(true)
+      // A late second entrant may observe the cleared marker before it ever waits: it also
+      // succeeds, correctly reporting that no restoration was needed from its own invocation.
+      expect(completed[1]!.document.ok, JSON.stringify(completed)).toBe(true)
       expect(readFileSync(counter, 'utf8')).toBe('1')
     } finally {
       writeFileSync(release, 'go')

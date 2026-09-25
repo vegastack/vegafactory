@@ -578,7 +578,7 @@ export function droppedDependencyStatus({ repoRoot, workerLayout = false, name, 
 }
 
 export async function restoreDroppedDependencies({ repoRoot, workerLayout = false, name, path, devMd, timeoutMs, signal,
-  execute = executeSetupCommand, onStart, now = Date.now }) {
+  execute = executeSetupCommand, onStart, now = Date.now, afterObservedResult = null }) {
   const started = now();
   const result = (ok, restored, command, reason) => ({ ok, restored, command, reason, ms: Math.max(0, now() - started) });
   if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) return result(false, false, null, 'dependency setup has no remaining time');
@@ -633,9 +633,18 @@ export async function restoreDroppedDependencies({ repoRoot, workerLayout = fals
       if (prior) {
         const status = droppedDependencyStatus({ repoRoot, workerLayout, name, path });
         if (prior.ok && !status.needed) return result(true, true, prior.command, 'dependency setup completed by the existing run');
+        afterObservedResult?.();
         let stillOwns = false;
+        let ownerError = null;
         try { stillOwns = ownerOf(lock, name).nonce === owner.nonce; }
-        catch (error) { if (error.code !== 'ENOENT') return result(false, false, prior.command, error.message); }
+        catch (error) { ownerError = error; }
+        // The owner can clear the marker and release the lock between the two reads above. A
+        // validated result for this exact nonce plus a now-absent marker proves completion;
+        // malformed or still-present marker state never does.
+        if (prior.ok && !droppedDependencyStatus({ repoRoot, workerLayout, name, path }).needed) {
+          return result(true, true, prior.command, 'dependency setup completed by the existing run');
+        }
+        if (ownerError && ownerError.code !== 'ENOENT') return result(false, false, prior.command, ownerError.message);
         if (prior.ok && stillOwns && processIdentity(owner) === 'matching') { await pause(25); continue; }
         return result(false, false, prior.command, prior.ok ? 'dependency marker remained after setup — inspect it before retrying' : prior.reason);
       }
@@ -728,7 +737,12 @@ export function isPastRetention({ lastCommitAt, ledgerUpdatedAt, now, retentionM
 // eat and a patch-id would then miss.
 export function git(cwd, args, { input, raw = false } = {}) {
   try {
-    const out = execFileSync('git', args, { cwd, encoding: 'utf8', input, stdio: [input === undefined ? 'ignore' : 'pipe', 'pipe', 'pipe'] });
+    const out = execFileSync('git', args, {
+      cwd, encoding: 'utf8', input, stdio: [input === undefined ? 'ignore' : 'pipe', 'pipe', 'pipe'],
+      ...(Number(process.env.VSK_WORKTREE_GIT_TIMEOUT_MS) > 0
+        ? { timeout: Number(process.env.VSK_WORKTREE_GIT_TIMEOUT_MS), killSignal: 'SIGKILL' }
+        : {}),
+    });
     return { ok: true, out: raw ? out : out.trim() };
   } catch (error) {
     const stderr = error.stderr?.toString().trim() || error.message;
@@ -1223,7 +1237,7 @@ export function rescueWork({ path, branch, name, remote = 'origin' }) {
 // kept; prune never creates a remote branch. Dirty work is rescued only when
 // the remote branch already exists and the user's staged selection is empty.
 // Every candidate then re-runs the same safe-to-remove test as explicit remove.
-export function pruneWorktrees({ repoRoot, base, olderThan, devMd, ledgerTimes = {}, ledgerUnknown = new Set(), issueStates = {}, issueUnknown = new Set(), now = Date.now(), write = false, remote = 'origin', workerLayout = false, recordDroppedDeps = noteDroppedDeps }) {
+export function pruneWorktrees({ repoRoot, base, olderThan, devMd, ledgerTimes = {}, ledgerUnknown = new Set(), issueStates = {}, issueUnknown = new Set(), now = Date.now(), write = false, remote = 'origin', workerLayout = false, excludeIssues = new Set(), recordDroppedDeps = noteDroppedDeps }) {
   const blocks = [];
   const warns = [];
   const actions = [];
@@ -1235,6 +1249,9 @@ export function pruneWorktrees({ repoRoot, base, olderThan, devMd, ledgerTimes =
   const dropped = readDroppedDeps({ repoRoot, workerLayout });
   const baseReady = refreshBase({ repoRoot, base, remote, actions, warns, write });
   for (const entry of inventory(repoRoot, workerLayout)) {
+    // The worker snapshots running and same-pass selected issues before asking for advice.
+    // This check precedes dependency and checkout candidate publication alike.
+    if (excludeIssues.has(issueOfWorktree(entry.name))) continue;
     const branch = entry.branch;
     const lastCommitAt = git(entry.path, ['log', '-1', '--format=%cI', 'HEAD']).out || null;
     const ledgerUpdatedAt = ledgerTimes[entry.name] ?? null;
@@ -1439,9 +1456,12 @@ export function gatherGithubFacts({ repo, names = [], warns, read = ghJson }) {
   const unknown = new Set();
   let openIssues = [];
   try {
-    openIssues = read(['api', 'repos/' + repo + '/issues', '--paginate', '-X', 'GET', '-f', 'state=open'])
-      .filter((issue) => !issue.pull_request)
-      .map((issue) => ({ number: issue.number, state: issue.state }));
+    const listed = read(['api', 'repos/' + repo + '/issues', '--paginate', '-X', 'GET', '-f', 'state=open']);
+    if (!Array.isArray(listed) || listed.some((issue) => !issue || typeof issue !== 'object'
+      || !Number.isSafeInteger(issue.number) || issue.number <= 0 || issue.state !== 'open')) {
+      throw new Error('open issue facts have an invalid shape');
+    }
+    openIssues = listed.filter((issue) => !issue.pull_request).map((issue) => ({ number: issue.number, state: issue.state }));
   } catch (error) {
     warns.push(at('github', 'could not read open issues, reporting from git alone: ' + error.message));
     for (const name of names) unknown.add(name);
@@ -1459,7 +1479,11 @@ export function gatherGithubFacts({ repo, names = [], warns, read = ghJson }) {
       continue;
     }
     try {
-      issueStates[name] = read(['api', 'repos/' + repo + '/issues/' + issue]).state;
+      const detail = read(['api', 'repos/' + repo + '/issues/' + issue]);
+      if (!detail || typeof detail !== 'object' || detail.number !== issue || !['open', 'closed'].includes(detail.state)) {
+        throw new Error('issue state has an invalid shape');
+      }
+      issueStates[name] = detail.state;
     } catch (error) {
       warns.push(at('github', 'could not read the state of #' + issue + ': ' + error.message));
       unknown.add(name);
@@ -1480,6 +1504,9 @@ export function gatherLedgerTimes({ repo, names, warns, read = ghJson }) {
     }
     try {
       const comments = read(['api', 'repos/' + repo + '/issues/' + issue + '/comments', '--paginate']);
+      if (!Array.isArray(comments) || comments.some((comment) => !comment || typeof comment !== 'object'
+        || typeof comment.body !== 'string' || typeof comment.updated_at !== 'string'
+        || !Number.isFinite(Date.parse(comment.updated_at)))) throw new Error('ledger comments have an invalid shape');
       const ledger = findMarkerComment(comments, 'ledger');
       if (ledger) times[name] = ledger.comment.updated_at;
     } catch (error) {
@@ -1587,6 +1614,13 @@ function runVerb(verb, flags) {
   }
   if (verb === 'prune') {
     const warns = [];
+    const excludedText = flags['exclude-issues'];
+    const excluded = excludedText === undefined ? [] : String(excludedText).split(',').map(Number);
+    if (excluded.some((number) => !Number.isSafeInteger(number) || number <= 0)) {
+      return { blocks: ['--exclude-issues requires a comma-separated list of positive issue numbers'], warns };
+    }
+    // This is an internal preview selector, never a way to authorize deletion.
+    if (excludedText !== undefined && shared.write) return { blocks: ['--exclude-issues is preview-only'], warns };
     const repo = flags.repo || knobLine(devMd, 'repo')?.split('·')[0].trim() || null;
     const names = inventory(repoRoot, workerLayout).map((entry) => entry.name);
     const github = repo ? gatherGithubFacts({ repo, names, warns }) : { openIssues: [], issueStates: {}, unknown: new Set(names) };
@@ -1595,7 +1629,7 @@ function runVerb(verb, flags) {
       repoRoot, base, olderThan: flags['older-than'], devMd,
       ledgerTimes: ledger.times, ledgerUnknown: ledger.unknown,
       issueStates: github.issueStates, issueUnknown: github.unknown,
-      now: Date.now(), write: shared.write, workerLayout,
+      now: Date.now(), write: shared.write, workerLayout, excludeIssues: new Set(excluded),
     });
     return { ...pruned, warns: [...warns, ...pruned.warns] };
   }

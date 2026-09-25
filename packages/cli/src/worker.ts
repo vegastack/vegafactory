@@ -42,6 +42,8 @@ import { effectiveUpdateMode, maintainSelfUpdate, type UpdateMode, type UpdateRe
 import { lintPlan, normalizeGroupPath, parseIndependentGroups, sharedByEveryChild } from '../../../skills/dev/dev-plan/scripts/plan-lint.mjs'
 import { appKeyPath as workerAppKey, factoryHome, workerBoardsPath, workerDirectory, type HomeOptions } from './home.ts'
 import { canonicalRepository, ensureWorkerCheckout } from './worker-repo.ts'
+import { HOUSEKEEPING_DEADLINE_MS, parseHousekeepingDocument, parseHousekeepingRequest,
+  type HousekeepingAdvisory, type HousekeepingBoard, type HousekeepingDocument, type HousekeepingRequest } from './worker-housekeeping.ts'
 import { restoreDroppedDependencies, worktreePath } from '../../../skills/dev/dev-implement/scripts/worktree.mjs'
 
 // How often the board is read, how many steps run at once, and how long one step may take.
@@ -1002,6 +1004,67 @@ export function readRuns(stateRoot: string, limit = 20): RunRecord[] {
   return rows.slice(-limit)
 }
 
+export interface HousekeepingState extends HousekeepingDocument {
+  running: { pid: number; startedAt: string; command: 'worker-housekeeping'; startedAtMs: number;
+    board: { pid: number; startedAt: string; deadlineAt: number } | null } | null
+  at: string | null
+}
+
+const housekeepingPath = (stateRoot: string) => join(stateRoot, 'housekeeping.json')
+const emptyHousekeeping = (): HousekeepingState => ({ schema: 1, running: null, at: null, complete: true, advisories: [], unavailable: [] })
+
+function checkedHousekeeping(value: unknown, path: string): HousekeepingState {
+  const row = value as Partial<HousekeepingState> | null
+  try {
+    if (!row || typeof row !== 'object' || Array.isArray(row)
+      || Object.keys(row).sort().join(',') !== ['schema', 'running', 'at', 'complete', 'advisories', 'unavailable'].sort().join(',')) throw new Error('invalid record shape')
+    parseHousekeepingDocument(JSON.stringify({ schema: row.schema, complete: row.complete, advisories: row.advisories, unavailable: row.unavailable }))
+    if (!(row.at === null || typeof row.at === 'string' && new Date(row.at).toISOString() === row.at)) throw new Error('invalid advisory time')
+    if (row.running !== null) {
+      const running = row.running
+      if (!running || typeof running !== 'object' || Object.keys(running).sort().join(',') !== ['pid', 'startedAt', 'command', 'startedAtMs', 'board'].sort().join(',')
+        || !Number.isSafeInteger(running.pid) || Number(running.pid) <= 1 || typeof running.startedAt !== 'string' || !running.startedAt
+        || running.command !== 'worker-housekeeping' || !Number.isSafeInteger(running.startedAtMs) || Number(running.startedAtMs) <= 0) throw new Error('invalid process identity')
+      if (running.board !== null) {
+        const board = running.board
+        if (!board || typeof board !== 'object' || Object.keys(board).sort().join(',') !== ['pid', 'startedAt', 'deadlineAt'].sort().join(',')
+          || !Number.isSafeInteger(board.pid) || Number(board.pid) <= 1 || board.pid === running.pid
+          || typeof board.startedAt !== 'string' || !board.startedAt || !Number.isSafeInteger(board.deadlineAt)
+          || Number(board.deadlineAt) < Number(running.startedAtMs)) throw new Error('invalid board process identity')
+      }
+    }
+  } catch (error) { throw new WorkerRecordError('malformed', `${path} is malformed: ${(error as Error).message}`) }
+  return row as HousekeepingState
+}
+
+export function readHousekeeping(stateRoot: string): HousekeepingState {
+  const path = housekeepingPath(stateRoot)
+  const text = readPrivateRecord(stateRoot, path)
+  if (text === null) return emptyHousekeeping()
+  let value: unknown
+  try { value = JSON.parse(text) } catch { throw new WorkerRecordError('malformed', `${path} is not valid JSON`) }
+  return checkedHousekeeping(value, path)
+}
+
+export function writeHousekeeping(stateRoot: string, expected: HousekeepingState, next: HousekeepingState): void {
+  ensurePrivateRecordRoot(stateRoot, true)
+  withLock(stateRoot, () => {
+    const current = readHousekeeping(stateRoot)
+    if (JSON.stringify(current) !== JSON.stringify(expected)) throw new WorkerRecordError('unsafe', 'the housekeeping record changed concurrently')
+    // Validate the exact bytes before publishing them atomically under the private worker root.
+    const validated = JSON.stringify(next)
+    checkedHousekeeping(JSON.parse(validated), housekeepingPath(stateRoot))
+    replacePrivateRecord(stateRoot, housekeepingPath(stateRoot), validated + '\n')
+  }, { what: 'the worker\'s housekeeping record' })
+}
+
+export function omitInUseHousekeepingAdvice(stateRoot: string, excluded: Set<string>): void {
+  if (!excluded.size) return
+  const current = readHousekeeping(stateRoot)
+  const advisories = current.advisories.filter(row => !excluded.has(`${row.repo}#${row.issue}`))
+  if (advisories.length !== current.advisories.length) writeHousekeeping(stateRoot, current, { ...current, advisories })
+}
+
 export function readActed(stateRoot: string): Record<string, Acted> {
   const text = readPrivateRecord(stateRoot, actedPath(stateRoot))
   if (text === null) return {}
@@ -1186,6 +1249,58 @@ export function stopGroup(pid: number, signal: NodeJS.Signals = 'SIGTERM'): bool
   } catch {
     try { process.kill(pid, signal); return true } catch { return false }
   }
+}
+
+async function stopPreviewGroup(board: NonNullable<NonNullable<HousekeepingState['running']>['board']>, deps: {
+  stop?: (pid: number, signal: NodeJS.Signals) => boolean; start?: ProcessStart; alive?: ProcessAlive; wait?: (ms: number) => Promise<void>
+} = {}): Promise<string | null> {
+  const start = deps.start ?? processStart
+  const alive = deps.alive ?? processAlive
+  const wait = deps.wait ?? (ms => new Promise<void>(resolvePromise => setTimeout(resolvePromise, ms)))
+  let identity = processIdentity(board, start, alive)
+  if (identity === 'unknown') return 'the board preview process identity cannot be proved'
+  if (identity === 'matching') {
+    if (!(deps.stop ?? stopGroup)(board.pid, 'SIGKILL')) return 'the board preview process group could not be stopped'
+    for (let attempt = 0; attempt < 20; attempt++) {
+      await wait(50)
+      identity = processIdentity(board, start, alive)
+      if (identity === 'gone') break
+    }
+    if (identity !== 'gone') return 'the board preview process group did not stop within one second'
+    return null
+  }
+  // A vanished leader may have left its watchdog or a git/gh descendant in the group. Wait for
+  // the recorded self-kill deadline; never signal a group whose leader identity can no longer be
+  // proved, because its group id may have been reused by another process.
+  const remaining = Math.min(8_000, Math.max(0, board.deadlineAt + 500 - Date.now()))
+  if (remaining) await wait(remaining)
+  try { process.kill(-board.pid, 0); return 'the board preview group may still be active after its deadline' }
+  catch (error) { return (error as NodeJS.ErrnoException).code === 'ESRCH' ? null : 'the board preview group could not be inspected' }
+}
+
+export async function stopRecordedHousekeeping(stateRoot: string, deps: {
+  stop?: (pid: number, signal: NodeJS.Signals) => boolean; start?: ProcessStart; alive?: ProcessAlive; wait?: (ms: number) => Promise<void>
+} = {}): Promise<{ ok: boolean; reason: string | null }> {
+  const state = readHousekeeping(stateRoot)
+  const running = state.running
+  if (!running) return { ok: true, reason: null }
+  if (running.board) {
+    const boardProblem = await stopPreviewGroup(running.board, deps)
+    if (boardProblem) return { ok: false, reason: boardProblem }
+  }
+  let identity = processIdentity(running, deps.start ?? processStart, deps.alive ?? processAlive)
+  if (identity === 'unknown') return { ok: false, reason: 'the prior housekeeping process identity cannot be proved' }
+  if (identity === 'matching') {
+    if (!(deps.stop ?? stopGroup)(running.pid, 'SIGKILL')) return { ok: false, reason: 'the prior housekeeping process group could not be stopped' }
+    for (let attempt = 0; attempt < 20; attempt++) {
+      await (deps.wait ?? (ms => new Promise(resolvePromise => setTimeout(resolvePromise, ms))))(50)
+      identity = processIdentity(running, deps.start ?? processStart, deps.alive ?? processAlive)
+      if (identity === 'gone') break
+    }
+    if (identity !== 'gone') return { ok: false, reason: 'the prior housekeeping process group did not stop within one second' }
+  }
+  writeHousekeeping(stateRoot, state, { ...state, running: null, complete: false })
+  return { ok: true, reason: null }
 }
 
 // Signals a recorded run only while it is provably still that run. A stale record is dropped, not
@@ -2205,6 +2320,124 @@ function execTool(tool: string, args: string[], options: { cwd: string; env: Nod
     child.on('error', (error) => { clearTimeout(timer); options.signal?.removeEventListener('abort', aborted); resolve(result(null, null, error.message)) })
     child.on('close', (code, signal) => { clearTimeout(timer); options.signal?.removeEventListener('abort', aborted); resolve(result(code, signal)) })
   })
+}
+
+export interface HousekeepingRun { settled: boolean; stop(): void; done: Promise<HousekeepingState> }
+
+// The guard survives a worker crash and kills the whole group at the deadline. On a normal exit,
+// signal the guard first; its trap reaps its timer before the shell exits, leaving no sleeper.
+const HOUSEKEEPING_WATCHDOG = `IFS= read -r request || [ -n "$request" ] || exit 2; printf '%s' "$request" | "$@" & job=$!; { trap 'kill "$dog" 2>/dev/null; exit 0' TERM INT; sleep "$VF_LIMIT" & dog=$!; wait "$dog"; kill -KILL 0; } </dev/null >/dev/null 2>&1 & guard=$!; wait "$job"; code=$?; kill "$guard" 2>/dev/null; wait "$guard" 2>/dev/null; exit "$code"`
+
+export function startHousekeeping(input: {
+  stateRoot: string
+  boards: BoardContext[]
+  excluded: Set<string>
+  deadlineMs: number
+  env: NodeJS.ProcessEnv
+  onLine: (text: string) => void
+  cli?: string[]
+  start?: ProcessStart
+  stop?: (pid: number, signal: NodeJS.Signals) => boolean
+  now?: () => number
+}): HousekeepingRun {
+  const now = input.now ?? Date.now
+  const before = readHousekeeping(input.stateRoot)
+  if (before.running) throw new WorkerRecordError('unsafe', 'a prior housekeeping process is still recorded')
+  const deadlineMs = Math.min(HOUSEKEEPING_DEADLINE_MS, Math.max(1, input.deadlineMs))
+  const boards: HousekeepingBoard[] = input.boards.map(board => ({
+    repo: canonicalRepository(board.repo), root: board.root,
+    excludeIssues: [...input.excluded]
+      .filter(key => key.startsWith(`${canonicalRepository(board.repo)}#`))
+      .map(key => Number(key.slice(key.lastIndexOf('#') + 1)))
+      .filter(number => Number.isSafeInteger(number) && number > 0)
+      .sort((a, b) => a - b),
+  }))
+  const request: HousekeepingRequest = parseHousekeepingRequest(JSON.stringify({ schema: 1, deadlineAt: now() + deadlineMs, boards }), now())
+  const command = [...(input.cli ?? cliPath()), 'worker-housekeeping']
+  const child = spawn('sh', ['-c', HOUSEKEEPING_WATCHDOG, 'vegafactory-housekeeping', ...command], {
+    env: { ...input.env, VF_LIMIT: String(Math.ceil(deadlineMs / 1000) + 1) },
+    stdio: ['pipe', 'pipe', 'pipe'], detached: true,
+  })
+  // A failed spawn reports asynchronously. Attach before inspecting pid or writing the record.
+  child.on('error', () => {})
+  if (!child.pid) throw new Error('housekeeping process did not start')
+  const pid = child.pid
+  const startedAt = (input.start ?? processStart)(pid)
+  if (!startedAt) { (input.stop ?? stopGroup)(pid, 'SIGKILL'); throw new Error('housekeeping process identity could not be proved') }
+  const running = { pid, startedAt, command: 'worker-housekeeping' as const, startedAtMs: now(), board: null }
+  try { writeHousekeeping(input.stateRoot, before, { ...before, running }) }
+  catch (error) { (input.stop ?? stopGroup)(pid, 'SIGKILL'); throw error }
+  let stdout = ''
+  let stderr = ''
+  let stopped = false
+  let timedOut = false
+  let oversized = false
+  const run: HousekeepingRun = { settled: false, stop: () => {}, done: Promise.resolve(before) }
+  const signal = (reason: 'stopped' | 'timed out' | 'oversized') => {
+    stopped ||= reason === 'stopped'
+    timedOut ||= reason === 'timed out'
+    oversized ||= reason === 'oversized'
+    ;(input.stop ?? stopGroup)(pid, 'SIGKILL')
+  }
+  run.stop = () => {
+    if (run.settled) return
+    try {
+      const board = readHousekeeping(input.stateRoot).running?.board
+      if (board && processIdentity(board, input.start ?? processStart, processAlive) === 'matching') {
+        ;(input.stop ?? stopGroup)(board.pid, 'SIGKILL')
+      }
+    } catch { /* the private record remains for a fail-closed restart */ }
+    signal('stopped')
+  }
+  const timer = setTimeout(() => signal('timed out'), deadlineMs)
+  child.stdout.on('data', chunk => { stdout += String(chunk); if (Buffer.byteLength(stdout) > 128 * 1024) signal('oversized') })
+  child.stderr.on('data', chunk => { stderr = (stderr + String(chunk)).slice(-400) })
+  run.done = new Promise(resolvePromise => {
+    let finishing = false
+    const finish = async (code: number | null, error?: string) => {
+      if (finishing) return
+      finishing = true
+      clearTimeout(timer)
+      let document: HousekeepingDocument
+      try {
+        if (stopped || timedOut || oversized || error) throw new Error(error ?? (stopped ? 'housekeeping stopped' : timedOut ? 'housekeeping timed out' : 'housekeeping output exceeded its bound'))
+        document = parseHousekeepingDocument(stdout)
+        // A later poll may have selected more work while this preview was still running.
+        document.advisories = document.advisories.filter(row => !input.excluded.has(`${row.repo}#${row.issue}`))
+        if (code !== 0 && document.complete) throw new Error(`housekeeping exited ${code}${stderr ? `: ${stderr}` : ''}`)
+      } catch (failure) {
+        document = { schema: 1, complete: false, advisories: [], unavailable: boards.map(board => ({
+          repo: board.repo, reason: String((failure as Error).message || stderr || 'housekeeping failed').slice(0, 400),
+        })) }
+      }
+      let state: HousekeepingState = { ...document, running: null, at: new Date(now()).toISOString() }
+      try {
+        let latest = readHousekeeping(input.stateRoot)
+        if (latest.running?.pid === pid && latest.running.startedAt === startedAt) {
+          if (latest.running.board) {
+            const problem = await stopPreviewGroup(latest.running.board, { stop: input.stop, start: input.start })
+            if (problem) {
+              input.onLine(`housekeeping record unavailable: ${problem}`)
+              resolvePromise({ ...latest, complete: false })
+              return
+            }
+            const cleared = { ...latest, running: { ...latest.running, board: null } }
+            writeHousekeeping(input.stateRoot, latest, cleared)
+            latest = cleared
+          }
+          writeHousekeeping(input.stateRoot, latest, state)
+        } else state = latest
+      } catch (failure) { input.onLine(`housekeeping record unavailable: ${(failure as Error).message}`) }
+      run.settled = true
+      for (const advisory of state.advisories) input.onLine(`${advisory.repo}#${advisory.issue}: inspect worktree ${advisory.worktree} (${advisory.reason}) with bare vegafactory worktree prune`)
+      for (const missing of state.unavailable) input.onLine(`${missing.repo}: housekeeping unavailable (${missing.reason})`)
+      resolvePromise(state)
+    }
+    child.once('error', error => { void finish(null, error.message) })
+    child.once('close', code => { void finish(code) })
+  })
+  child.stdin.end(JSON.stringify(request))
+  return run
 }
 
 export async function runDependencySetup(command: string, context: { cwd: string; env: NodeJS.ProcessEnv; timeoutMs: number; signal: AbortSignal; onStart: (pid: number, command: string) => void }, exec = execTool): Promise<DependencySetupExecution> {
@@ -3297,6 +3530,10 @@ export function workerUsage(): string {
                          a pass ends. Reclaimed node_modules is restored with the repository's
                          commands: setup before an agent starts, within the same step deadline
 
+Each pass may report worktrees worth inspecting with bare \`vegafactory worktree prune\`.
+Housekeeping only previews; a person decides whether to run \`prune --write\`.
+An unavailable row means some remote facts could not be verified within the bound.
+
 One ship at a time per repository (different repositories may ship together), and as many runs
 across the whole machine as its roster row allows. The row's
 caps cell sets them — \`runs 10 · step 72h · poll 1m · retry 15m · park 3\`, in any order, every
@@ -3380,6 +3617,8 @@ export interface CliDeps {
   sleep?: (ms: number) => Promise<void>
   cli?: string[]
   update?: () => Promise<UpdateResult>
+  // Test seam; production launches the bounded internal housekeeping process.
+  housekeeping?: typeof startHousekeeping | false
   // Test seam for the repository boundary. Production always provisions a repository-scoped
   // App identity and worker-owned checkout through `ensureWorkerCheckout`.
   provisionBoard?: (repo: string) => Promise<BoardContext>
@@ -3401,7 +3640,7 @@ export async function runWorker(argv: string[], deps: CliDeps = {}): Promise<num
   const rawJson = argv.includes('--json')
   const runJson = rawJson && !['enable', 'disable', 'status'].includes(argv[0]!)
   const emitRunJson = (notes: string[], boards: Array<{ repo: string; ok: boolean; reason?: string }> = [], runs: RunRecord[] = []) => {
-    out(JSON.stringify({ machine, runs, boards, notes }, null, 2))
+    out(JSON.stringify({ machine, runs, boards, notes, housekeeping: emptyHousekeeping() }, null, 2))
   }
   const emitBootstrapRefusal = (reason: string) => {
     if (runJson) emitRunJson([`refused: ${reason}`])
@@ -3432,7 +3671,11 @@ export async function runWorker(argv: string[], deps: CliDeps = {}): Promise<num
     throw error
   }
   const keyPath = appKeyPath(env, home)
-  const runDocument = (notes: string[], boards: Array<{ repo: string; ok: boolean; reason?: string }> = [], runs: RunRecord[] = []) => ({ machine, runs, boards, notes })
+  const housekeepingSnapshot = (): HousekeepingState => {
+    try { return readHousekeeping(stateRoot) }
+    catch (error) { return { ...emptyHousekeeping(), complete: false, unavailable: [{ repo, reason: (error as Error).message.slice(0, 400) }] } }
+  }
+  const runDocument = (notes: string[], boards: Array<{ repo: string; ok: boolean; reason?: string }> = [], runs: RunRecord[] = []) => ({ machine, runs, boards, notes, housekeeping: housekeepingSnapshot() })
   const print = (value: unknown, text: string) => {
     if (runJson) out(JSON.stringify(runDocument([text]), null, 2))
     else out(args.json ? JSON.stringify(value, null, 2) : text)
@@ -3659,6 +3902,20 @@ export async function runWorker(argv: string[], deps: CliDeps = {}): Promise<num
         print({ ok: false, unit: path, reason: inspection.reason }, `refused: worker records could not be validated before disable: ${inspection.reason}`)
         return 2
       }
+      let recordedHousekeeping: HousekeepingState
+      try { recordedHousekeeping = readHousekeeping(stateRoot) }
+      catch (error) {
+        print({ ok: false, unit: path, reason: (error as Error).message }, `refused: housekeeping record could not be validated before disable: ${(error as Error).message}`)
+        return 2
+      }
+      if (recordedHousekeeping.running && processIdentity(recordedHousekeeping.running, deps.start ?? processStart, deps.alive ?? processAlive) === 'unknown') {
+        print({ ok: false, unit: path, reason: 'housekeeping process identity is unknown' }, 'refused: housekeeping process identity is unknown; the service was left loaded')
+        return 2
+      }
+      if (recordedHousekeeping.running?.board && processIdentity(recordedHousekeeping.running.board, deps.start ?? processStart, deps.alive ?? processAlive) === 'unknown') {
+        print({ ok: false, unit: path, reason: 'board preview process identity is unknown' }, 'refused: board preview process identity is unknown; the service was left loaded')
+        return 2
+      }
       const run = deps.run ?? probe
       const problems: string[] = []
       for (const command of commands) {
@@ -3668,6 +3925,11 @@ export async function runWorker(argv: string[], deps: CliDeps = {}): Promise<num
           print({ ok: false, unit: path, failed: command.join(' '), reason }, `refused: the worker service could not be unloaded; ${path} and every worker record were left in place: ${reason}`)
           return 1
         }
+      }
+      const stoppedHousekeeping = await stopRecordedHousekeeping(stateRoot, { stop: deps.stop, start: deps.start, alive: deps.alive })
+      if (!stoppedHousekeeping.ok) {
+        print({ ok: false, unit: path, reason: stoppedHousekeeping.reason }, `the service is unloaded, but housekeeping could not be stopped safely; ${path} was left in place: ${stoppedHousekeeping.reason}`)
+        return 1
       }
       const migration = prepareWorkerStorage({ root, stateRoot, factoryRoot, repo, serviceStopped: true, start: deps.start, alive: deps.alive })
       if (!migration.ok) {
@@ -3696,6 +3958,13 @@ export async function runWorker(argv: string[], deps: CliDeps = {}): Promise<num
     }
     case 'status': {
       const runs = readRuns(stateRoot)
+      let housekeeping: HousekeepingState
+      try { housekeeping = readHousekeeping(stateRoot) }
+      catch (error) {
+        const reason = (error as Error).message
+        print({ ok: false, machine, reason }, `refused: ${reason}`)
+        return 2
+      }
       let persisted: WorkerState
       try { persisted = readWorkerState(homeOptions) }
       catch (error) {
@@ -3737,12 +4006,16 @@ export async function runWorker(argv: string[], deps: CliDeps = {}): Promise<num
         for (const issue of one.issues) byState.set(issue.state, [...(byState.get(issue.state) ?? []), issue.number])
         return [`${one.repo} · ${one.state}`, ...[...byState].map(([state, issues]) => `  ${state.padEnd(18)} ${issues.map((issue) => `${one.repo}#${issue}`).join(' ')}`)]
       })
-      print({ machine, caps: statusCaps, boards, runs, parked, unavailable }, [
+      print({ machine, caps: statusCaps, boards, runs, parked, unavailable, housekeeping }, [
         `${machine} · ${workerListing.ok ? 'listed as a worker' : workerListing.reason}`,
         ...(workerListing.ok ? [capsLine] : []),
         ...boardLines,
         ...unavailable.filter((one) => !boards.some((board) => board.repo === one.repo)).map((one) => `${one.repo} · refused: ${one.reason}`),
         ...(parked.length ? ['', `parked for a person: ${parked.map((row) => `${row.repo}#${row.issue} (${row.action} failed ${row.failures}×)`).join(', ')}`] : []),
+        ...(housekeeping.running ? [`housekeeping preview running (pid ${housekeeping.running.pid})`] : []),
+        ...housekeeping.advisories.map((row) => `${row.repo}#${row.issue}: inspect worktree ${row.worktree} (${row.reason}) with bare vegafactory worktree prune`),
+        ...housekeeping.unavailable.map((row) => `${row.repo}: housekeeping unavailable (${row.reason})`),
+        ...(!housekeeping.complete && !housekeeping.unavailable.length ? ['housekeeping advice is incomplete'] : []),
         '',
         runs.length ? 'recent runs on this machine:' : 'no worker runs on this machine yet',
         ...runs.map((run) => `${run.at}  ${run.repo}#${run.issue} ${run.action.padEnd(12)} ${run.outcome.padEnd(8)} ${Math.round(run.ms / 1000)}s  ${run.note}`),
@@ -3814,10 +4087,24 @@ export async function runWorker(argv: string[], deps: CliDeps = {}): Promise<num
       // Started steps outlive the pass that began them, so the next pass keeps their slots and
       // still acts on the rest of the board — a twenty-minute build does not stop the poll.
       const inflight = new Map<string, Inflight>()
+      let housekeeping: HousekeepingRun | null = null
+      let housekeepingExclusions = new Set<string>()
+      const launchHousekeeping = deps.housekeeping === false ? null
+        : deps.housekeeping ?? (!deps.runner && !deps.provisionBoard ? startHousekeeping : null)
+      let housekeepingBlocked: string | null = null
+      try {
+        const recovered = await stopRecordedHousekeeping(stateRoot, { stop: deps.stop, start: deps.start, alive: deps.alive })
+        if (!recovered.ok) housekeepingBlocked = recovered.reason
+      } catch (error) { housekeepingBlocked = (error as Error).message }
+      if (housekeepingBlocked) note(`housekeeping unavailable: ${housekeepingBlocked}`)
       // Stopping means stopping: the agents this machine started are ended, their work saved and
       // their claims released. A worker that walked away leaving three agents writing to
       // GitHub would be worse than one that never started.
       const shutDown = async (why: string) => {
+        if (housekeeping && !housekeeping.settled) {
+          housekeeping.stop()
+          await housekeeping.done
+        }
         for (const [key, run] of inflight) {
           if (run.settled) continue
           note(`${key} ${run.candidate.action} stopped: ${why}`)
@@ -3919,6 +4206,13 @@ export async function runWorker(argv: string[], deps: CliDeps = {}): Promise<num
           waiting = 0
           unreadableFailures.clear()
           const picked = await poll(pollDeps, inflight)
+          const inUse = new Set<string>([
+            ...[...inflight].filter(([, run]) => !run.settled).map(([key]) => key),
+            ...picked.map(candidate => runKey(candidate)),
+          ])
+          for (const key of inUse) housekeepingExclusions.add(key)
+          try { omitInUseHousekeepingAdvice(stateRoot, inUse) }
+          catch (error) { note(`housekeeping advice unavailable: ${(error as Error).message}`) }
           for (const boardRepo of recoveryContexts.keys()) {
             if (![...inflight.values()].some(run => !run.settled && canonicalRepository(run.candidate.repo) === boardRepo)) recoveryContexts.delete(boardRepo)
           }
@@ -3927,6 +4221,16 @@ export async function runWorker(argv: string[], deps: CliDeps = {}): Promise<num
             return reason ? { repo: board.repo, ok: false, reason } : board
           })
           for (const candidate of picked) note(`${canonicalRepository(candidate.repo)}#${candidate.number} ${candidate.action} started`)
+          if (!signalled && launchHousekeeping && !housekeepingBlocked && (!housekeeping || housekeeping.settled)) {
+            housekeepingExclusions = new Set(inUse)
+            try {
+              housekeeping = launchHousekeeping({
+                stateRoot, boards: ready, excluded: housekeepingExclusions, deadlineMs: HOUSEKEEPING_DEADLINE_MS,
+                env, onLine: note, cli: deps.cli, start: deps.start, stop: deps.stop, now: deps.now,
+              })
+              void housekeeping.done
+            } catch (error) { note(`housekeeping unavailable: ${(error as Error).message}`) }
+          }
           // Idle is a high bar on purpose, because the thing it permits takes five minutes: the
           // whole board was read, nothing was picked up, and nothing is still running. An issue
           // that could not be read might have been the one with work on it, and an issue that was
@@ -3936,7 +4240,11 @@ export async function runWorker(argv: string[], deps: CliDeps = {}): Promise<num
           passFailed = true
           note(`poll failed: ${(error as Error).message}`)
         }
-        if (args.once) return finish(passFailed ? 2 : 0, await drain(inflight))
+        if (args.once) {
+          const runs = await drain(inflight)
+          if (housekeeping && !housekeeping.settled) await housekeeping.done
+          return finish(passFailed ? 2 : 0, runs)
+        }
         // A global install can replace this process's entry file, so it runs only with no agent
         // alive. A successful update ends the old process; the service starts the new copy.
         // A run is unsettled from the moment it is started until its own completion handler

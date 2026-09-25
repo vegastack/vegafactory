@@ -3,7 +3,7 @@ import { execFileSync, spawnSync } from 'node:child_process'
 import { chmodSync, chownSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, renameSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { createWorktree, pruneWorktrees, readDroppedDeps, removeWorktree, trustedAncestorOwner, verifyOwnedPath } from '../scripts/worktree.mjs'
+import { createWorktree, gatherGithubFacts, gatherLedgerTimes, pruneWorktrees, readDroppedDeps, removeWorktree, trustedAncestorOwner, verifyOwnedPath } from '../scripts/worktree.mjs'
 
 // Relative to the real clock: the fixture commits carry today's date, so a fixed
 // 'now' turns these into time bombs once the calendar catches up.
@@ -69,6 +69,48 @@ test('the packaged prune script keeps a merged checkout with --dry-run in either
     expect(existsSync(wt.path)).toBe(true)
   }
   expect(git(root, 'branch', '--list', 'feat/106-x').trim()).toContain('feat/106-x')
+})
+
+test('preview exclusions suppress numeric and legacy issue leaves before any advice', () => {
+  const root = repoWithRemote()
+  const numeric = pushedFeature(root)
+  const legacy = join(root, '.vegastack', '.worktrees', '107-old-title')
+  git(root, 'worktree', 'add', '-q', '-b', 'feat/107-old-title', legacy, 'main')
+  git(legacy, 'push', '-q', '-u', 'origin', 'feat/107-old-title')
+  mkdirSync(join(numeric.path, 'node_modules'))
+  mkdirSync(join(legacy, 'node_modules'))
+  git(root, 'merge', '-q', '--no-ff', '-m', 'merge numeric', 'feat/106-x')
+  git(root, 'push', '-q', 'origin', 'main')
+  git(root, 'fetch', '-q', 'origin', 'main')
+  const input = { repoRoot: root, base: 'main', devMd, now: FUTURE_NOW, ledgerTimes: { '106': OLD_LEDGER, '107-old-title': OLD_LEDGER }, write: false }
+  const ordinary = pruneWorktrees(input)
+  expect(ordinary.candidates.some((row: { name: string }) => row.name === '106')).toBe(true)
+  expect(ordinary.candidates.some((row: { name: string }) => row.name === '107-old-title')).toBe(true)
+  const excluded = pruneWorktrees({ ...input, excludeIssues: new Set([106, 107]) })
+  expect(excluded.candidates).toEqual([])
+  expect(excluded.droppable).toEqual([])
+  expect(existsSync(numeric.path)).toBe(true)
+  expect(existsSync(legacy)).toBe(true)
+})
+
+test('malformed GitHub issue and ledger facts are unavailable rather than silently absent', () => {
+  const issueWarns: string[] = []
+  const issues = gatherGithubFacts({ repo: 'o/r', names: ['7'], warns: issueWarns,
+    read: (args: string[]) => args.includes('--paginate') ? [] : { number: 7 } })
+  expect(issues.unknown.has('7')).toBe(true)
+  expect(issueWarns.join(' ')).toContain('invalid shape')
+
+  const pageWarns: string[] = []
+  const page = gatherGithubFacts({ repo: 'o/r', names: ['7'], warns: pageWarns,
+    read: () => [{ number: 7, state: 'broken' }] })
+  expect(page.unknown.has('7')).toBe(true)
+  expect(pageWarns.join(' ')).toContain('invalid shape')
+
+  const ledgerWarns: string[] = []
+  const ledger = gatherLedgerTimes({ repo: 'o/r', names: ['7'], warns: ledgerWarns,
+    read: () => [{ body: '<!-- vsk:v1 type=ledger -->' }] })
+  expect(ledger.unknown.has('7')).toBe(true)
+  expect(ledgerWarns.join(' ')).toContain('invalid shape')
 })
 
 describe('removeWorktree', () => {

@@ -65,6 +65,8 @@ export function ghJson(args, { gh = process.env.VSK_GH || 'gh', input } = {}) {
       env: process.env,
       input,
       stdio: [input === undefined ? 'ignore' : 'pipe', 'pipe', 'pipe'],
+      timeout: Number(process.env.VSK_WORKTREE_GH_TIMEOUT_MS) || 30_000,
+      killSignal: 'SIGKILL',
     });
   } catch (error) {
     const stderr = error.stderr?.toString().trim() || '';

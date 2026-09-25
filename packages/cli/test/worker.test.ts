@@ -18,6 +18,7 @@ import {
   recordRoomSha, updateModeFor,
   normalizeWorkerRepos, readWorkerState, reconcileBoards, workerProblemReporter,
   inspectWorkerRecord, trustedRecordOwner, WorkerRecordError,
+  readHousekeeping, writeHousekeeping, startHousekeeping, stopRecordedHousekeeping, omitInUseHousekeepingAdvice,
   type Candidate, type Fetch, type GitRun, type Inflight, type PollDeps, type Probe, type RunStep, type StepResult,
 } from '../src/worker.ts'
 import type { GhRunner } from '../src/gh.ts'
@@ -2130,7 +2131,7 @@ describe('the step a run makes', () => {
       seen.push({ timeoutMs: options.timeoutMs, cwd: options.cwd, env: options.env })
       return { code: null, stdout: 'x'.repeat(9000), stderr: '', timedOut: true }
     }
-    const result = await defaultRunStep({}, { exec })({ action: 'implement', number: 7, repo: 'o/r', split: false, by: null }, { root, devMd: '', token: null })
+    const result = await defaultRunStep({}, { exec, now: () => 1_000_000 })({ action: 'implement', number: 7, repo: 'o/r', split: false, by: null }, { root, devMd: '', token: null })
     expect(seen[0]!.timeoutMs).toBe(STEP_TIMEOUT_MS)
     // Nobody is watching, so a round of questions goes to the issue rather than a question tool.
     expect(seen[0]!.env.VSK_ASK_ROUTE).toBe('issue')
@@ -2227,6 +2228,137 @@ describe('machine-global runtime records fail closed', () => {
     writeFileSync(path, text, { mode: 0o600 })
     chmodSync(path, 0o600)
   }
+
+  test('housekeeping state is private, strict, atomic, and compare-and-set', () => {
+    const { stateRoot } = privateRoot()
+    const absent = readHousekeeping(stateRoot)
+    expect(absent).toMatchObject({ schema: 1, running: null, advisories: [] })
+    const next = { ...absent, at: '2026-09-25T00:00:00.000Z', advisories: [{ repo: 'o/r', issue: 7, worktree: '7', reason: 'merged' as const, ageDays: 1 }] }
+    writeHousekeeping(stateRoot, absent, next)
+    const path = join(stateRoot, 'housekeeping.json')
+    expect(readHousekeeping(stateRoot)).toEqual(next)
+    expect(lstatSync(path).mode & 0o777).toBe(0o600)
+    const bytes = readFileSync(path, 'utf8')
+    expect(() => writeHousekeeping(stateRoot, absent, next)).toThrow('concurrently')
+    expect(() => writeHousekeeping(stateRoot, next, { ...next, at: 'not-a-date' })).toThrow(WorkerRecordError)
+    expect(readFileSync(path, 'utf8')).toBe(bytes)
+    omitInUseHousekeepingAdvice(stateRoot, new Set(['o/r#7']))
+    expect(readHousekeeping(stateRoot).advisories).toEqual([])
+    privateFile(path, '[]')
+    expect(() => readHousekeeping(stateRoot)).toThrow(WorkerRecordError)
+    expect(readFileSync(path, 'utf8')).toBe('[]')
+  })
+
+  test('a recorded housekeeping process is stopped by proved identity, while unknown identity stays untouched', async () => {
+    const { stateRoot } = privateRoot()
+    const absent = readHousekeeping(stateRoot)
+    const running = { pid: 12345, startedAt: 'the original process', command: 'worker-housekeeping' as const, startedAtMs: Date.now(), board: null }
+    writeHousekeeping(stateRoot, absent, { ...absent, running })
+    const stopped: number[] = []
+    expect(await stopRecordedHousekeeping(stateRoot, { start: () => null, alive: () => null, stop: pid => { stopped.push(pid); return true } })).toMatchObject({ ok: false })
+    expect(stopped).toEqual([])
+    let calls = 0
+    expect(await stopRecordedHousekeeping(stateRoot, {
+      start: () => ++calls === 1 ? running.startedAt : 'a different process',
+      alive: () => true, stop: pid => { stopped.push(pid); return true }, wait: async () => {},
+    })).toEqual({ ok: true, reason: null })
+    expect(stopped).toEqual([12345])
+    expect(readHousekeeping(stateRoot).running).toBeNull()
+  })
+
+  test('restart stops a proved board group before its outer housekeeping group', async () => {
+    const { stateRoot } = privateRoot()
+    const absent = readHousekeeping(stateRoot)
+    const outer = { pid: 12345, startedAt: 'outer start', command: 'worker-housekeeping' as const,
+      startedAtMs: Date.now(), board: { pid: 23456, startedAt: 'board start', deadlineAt: Date.now() + 1000 } }
+    writeHousekeeping(stateRoot, absent, { ...absent, running: outer })
+    const stopped: number[] = []
+    const seen = new Map<number, number>()
+    const start = (pid: number) => {
+      const turn = (seen.get(pid) ?? 0) + 1
+      seen.set(pid, turn)
+      return turn === 1 ? pid === outer.pid ? outer.startedAt : outer.board.startedAt : 'a different process'
+    }
+    expect(await stopRecordedHousekeeping(stateRoot, { start, alive: () => true,
+      stop: pid => { stopped.push(pid); return true }, wait: async () => {} })).toEqual({ ok: true, reason: null })
+    expect(stopped).toEqual([outer.board.pid, outer.pid])
+    expect(readHousekeeping(stateRoot).running).toBeNull()
+
+    writeHousekeeping(stateRoot, readHousekeeping(stateRoot), { ...absent, running: outer })
+    const refused = await stopRecordedHousekeeping(stateRoot, { start: pid => pid === outer.board.pid ? null : outer.startedAt,
+      alive: () => null, stop: pid => { stopped.push(pid); return true } })
+    expect(refused.ok).toBe(false)
+    expect(stopped).toEqual([outer.board.pid, outer.pid])
+    expect(readHousekeeping(stateRoot).running?.board).toEqual(outer.board)
+  })
+
+  test('one bounded housekeeping group records its identity and the exact exclusion snapshot', async () => {
+    const { home, stateRoot } = privateRoot()
+    const fixture = join(home, 'housekeeping-fixture.mjs')
+    const captured = join(home, 'captured-request.json')
+    writeFileSync(fixture, `import { writeFileSync } from 'node:fs'; let raw = ''; for await (const chunk of process.stdin) raw += chunk; const request = JSON.parse(raw); writeFileSync(${JSON.stringify(captured)}, JSON.stringify(request)); process.stdout.write(JSON.stringify({schema:1,complete:true,advisories:[{repo:'o/r',issue:9,worktree:'9',reason:'merged',ageDays:1}],unavailable:[]}));`)
+    const board = { key: 'o/r', repo: 'o/r', root: join(home, 'repos', 'o__r', 'repo'), devMd: '', runner: gh.runner, identity: { runner: gh.runner, freshen: async () => {}, token: () => null } }
+    const lines: string[] = []
+    const run = startHousekeeping({ stateRoot, boards: [board], excluded: new Set(['o/r#7']), deadlineMs: 2000,
+      env: process.env, cli: [process.execPath, fixture], start: () => 'the group start', onLine: line => lines.push(line) })
+    expect(readHousekeeping(stateRoot).running?.pid).toBeGreaterThan(1)
+    const result = await run.done
+    expect(result).toMatchObject({ complete: true, running: null, advisories: [{ repo: 'o/r', issue: 9 }] })
+    expect(JSON.parse(readFileSync(captured, 'utf8')).boards[0].excludeIssues).toEqual([7])
+    expect(lines.join(' ')).toContain('bare vegafactory worktree prune')
+    expect(lstatSync(join(stateRoot, 'housekeeping.json')).mode & 0o777).toBe(0o600)
+  })
+
+  test('stopping housekeeping kills its process group and a second preview cannot overlap', async () => {
+    const { home, stateRoot } = privateRoot()
+    const fixture = join(home, 'hanging-housekeeping.mjs')
+    const grandchild = join(home, 'grandchild.pid')
+    writeFileSync(fixture, `import { spawn } from 'node:child_process'; import { writeFileSync } from 'node:fs'; const child = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' }); writeFileSync(${JSON.stringify(grandchild)}, String(child.pid)); process.stdin.resume(); setInterval(() => {}, 1000);`)
+    const board = { key: 'o/r', repo: 'o/r', root: join(home, 'repos', 'o__r', 'repo'), devMd: '', runner: gh.runner, identity: { runner: gh.runner, freshen: async () => {}, token: () => null } }
+    const input = { stateRoot, boards: [board], excluded: new Set<string>(), deadlineMs: 2000,
+      env: process.env, cli: [process.execPath, fixture], start: () => 'the first group', onLine: () => {} }
+    const run = startHousekeeping(input)
+    expect(() => startHousekeeping(input)).toThrow('prior housekeeping process')
+    for (let attempt = 0; !existsSync(grandchild) && attempt < 30; attempt++) await new Promise(resolvePromise => setTimeout(resolvePromise, 10))
+    expect(existsSync(grandchild)).toBe(true)
+    const pid = Number(readFileSync(grandchild, 'utf8'))
+    run.stop()
+    const result = await run.done
+    expect(result).toMatchObject({ complete: false, running: null })
+    for (let attempt = 0; attempt < 30; attempt++) {
+      const state = spawnSync('ps', ['-p', String(pid), '-o', 'state='], { encoding: 'utf8' }).stdout.trim()
+      if (!state || state.startsWith('Z')) break
+      await new Promise(resolvePromise => setTimeout(resolvePromise, 10))
+    }
+    const state = spawnSync('ps', ['-p', String(pid), '-o', 'state='], { encoding: 'utf8' }).stdout.trim()
+    expect(state === '' || state.startsWith('Z')).toBe(true)
+  })
+
+  test('a later selection removes advice before the pending preview is committed', async () => {
+    const { home, stateRoot } = privateRoot()
+    const fixture = join(home, 'delayed-housekeeping.mjs')
+    writeFileSync(fixture, `for await (const _chunk of process.stdin) {} setTimeout(() => process.stdout.write(JSON.stringify({schema:1,complete:true,advisories:[{repo:'o/r',issue:9,worktree:'9',reason:'idle',ageDays:15}],unavailable:[]})), 50);`)
+    const board = { key: 'o/r', repo: 'o/r', root: join(home, 'repos', 'o__r', 'repo'), devMd: '', runner: gh.runner, identity: { runner: gh.runner, freshen: async () => {}, token: () => null } }
+    const excluded = new Set<string>()
+    const run = startHousekeeping({ stateRoot, boards: [board], excluded, deadlineMs: 2000,
+      env: process.env, cli: [process.execPath, fixture], start: () => 'the group start', onLine: () => {} })
+    excluded.add('o/r#9')
+    const state = await run.done
+    expect(state.complete).toBe(true)
+    expect(state.advisories).toEqual([])
+    expect(readHousekeeping(stateRoot).advisories).toEqual([])
+  })
+
+  test('a failed housekeeping wrapper records unavailable advice without holding the next pass', async () => {
+    const { home, stateRoot } = privateRoot()
+    const board = { key: 'o/r', repo: 'o/r', root: join(home, 'repos', 'o__r', 'repo'), devMd: '', runner: gh.runner, identity: { runner: gh.runner, freshen: async () => {}, token: () => null } }
+    const run = startHousekeeping({ stateRoot, boards: [board], excluded: new Set(), deadlineMs: 1000,
+      env: process.env, cli: ['/definitely/missing-vegafactory'], start: () => 'the group start', onLine: () => {} })
+    const state = await run.done
+    expect(run.settled).toBe(true)
+    expect(state).toMatchObject({ running: null, complete: false, advisories: [], unavailable: [{ repo: 'o/r' }] })
+    expect(readHousekeeping(stateRoot).running).toBeNull()
+  })
 
   test('only ENOENT is absence; malformed records never become empty state', () => {
     for (const [name, bad, read] of [
@@ -3083,7 +3215,7 @@ describe('the command', () => {
     expect(await runWorker(['status', '--json'], { cwd: root, home, host: HOST, env: {}, out: (line) => lines.push(line), runner, git: anyGit })).toBe(0)
     expect(lines).toHaveLength(1)
     const document = JSON.parse(lines[0]!) as { machine: string; boards: Array<{ repo: string; ok: boolean }>; runs: Array<{ repo: string; issue: number }>; parked: unknown[]; unavailable: Array<{ repo: string }> }
-    expect(Object.keys(document).sort()).toEqual(['boards', 'caps', 'machine', 'parked', 'runs', 'unavailable'])
+    expect(Object.keys(document).sort()).toEqual(['boards', 'caps', 'housekeeping', 'machine', 'parked', 'runs', 'unavailable'])
     expect(document.boards.map((board) => [board.repo, board.ok])).toEqual([['o/r', true], ['o/old', false]])
     expect(document.runs).toContainEqual(expect.objectContaining({ repo: 'o/old', issue: 7 }))
     expect(document.unavailable).toContainEqual(expect.objectContaining({ repo: 'o/old' }))
@@ -3480,6 +3612,69 @@ describe('the command', () => {
     expect(result.text).toContain('#1 implement → done')
   })
 
+  test('same-pass selected work is excluded from one bounded advisory and JSON remains one document', async () => {
+    gh.addIssue({ number: 1, labels: ['queued', 'small'] })
+    const snapshots: Array<{ excluded: Set<string>; boards: string[] }> = []
+    const result = await run(['run', '--once', '--json'], {
+      runStep: (async () => ({ outcome: 'done', note: '', ms: 1 })) as RunStep,
+      housekeeping: ((input: { excluded: Set<string>; boards: Array<{ repo: string }> }) => {
+        snapshots.push({ excluded: new Set(input.excluded), boards: input.boards.map(board => board.repo) })
+        return { settled: true, stop: () => {}, done: Promise.resolve(readHousekeeping(join(home, '.vegafactory', 'worker'))) }
+      }) as typeof startHousekeeping,
+    })
+    expect(result.code).toBe(0)
+    expect(snapshots).toHaveLength(1)
+    expect(snapshots[0]!.excluded.has('o/r#1')).toBe(true)
+    expect(snapshots[0]!.boards).toEqual(['o/r'])
+    const document = JSON.parse(result.text)
+    expect(document.housekeeping.schema).toBe(1)
+    expect(document.runs).toHaveLength(1)
+  })
+
+  test('worker status renders bounded persisted advice in human and JSON modes', async () => {
+    const stateRoot = join(home, '.vegafactory', 'worker')
+    const before = readHousekeeping(stateRoot)
+    writeHousekeeping(stateRoot, before, { ...before, at: '2026-09-25T00:00:00.000Z', complete: false,
+      advisories: [{ repo: 'o/r', issue: 7, worktree: '7', reason: 'idle', ageDays: 15 }],
+      unavailable: [{ repo: 'o/b', reason: 'remote facts timed out' }] })
+    const human = await run(['status'])
+    expect(human.text).toContain('inspect worktree 7 (idle) with bare vegafactory worktree prune')
+    expect(human.text).toContain('o/b: housekeeping unavailable (remote facts timed out)')
+    const json = await run(['status', '--json'])
+    expect(JSON.parse(json.text).housekeeping.advisories).toEqual([{ repo: 'o/r', issue: 7, worktree: '7', reason: 'idle', ageDays: 15 }])
+  })
+
+  test('disable refuses an unprovable housekeeping process before unloading the unit', async () => {
+    const stateRoot = join(home, '.vegafactory', 'worker')
+    const before = readHousekeeping(stateRoot)
+    writeHousekeeping(stateRoot, before, { ...before, running: { pid: 91234, startedAt: 'unknown', command: 'worker-housekeeping', startedAtMs: Date.now(), board: null } })
+    const commands: string[] = []
+    const result = await run(['disable'], {
+      start: () => null, alive: () => null,
+      run: (command: string) => { commands.push(command); return { code: 0, stdout: '', stderr: '' } },
+    })
+    expect(result.code).toBe(2)
+    expect(result.text).toContain('housekeeping process identity is unknown')
+    expect(commands).toEqual([])
+  })
+
+  test('normal passes never await or overlap an unsettled advisory', async () => {
+    let launches = 0
+    let sleeps = 0
+    let finish!: (state: ReturnType<typeof readHousekeeping>) => void
+    const pending = new Promise<ReturnType<typeof readHousekeeping>>(resolvePromise => { finish = resolvePromise })
+    const handle = { settled: false, stop: () => { handle.settled = true; finish(readHousekeeping(join(home, '.vegafactory', 'worker'))) }, done: pending }
+    const result = await run(['run'], {
+      housekeeping: (() => { launches++; return handle }) as typeof startHousekeeping,
+      update: async () => ({ action: 'current' as const, before: '', after: '', latest: null, message: '' }),
+      sleep: async () => { if (++sleeps === 2) process.emit('SIGTERM' as NodeJS.Signals) },
+    })
+    expect(result.code).toBe(0)
+    expect(sleeps).toBe(2)
+    expect(launches).toBe(1)
+    expect(handle.settled).toBe(true)
+  })
+
   // A profile that exists and cannot be read may be the one saying `off`. Reading it as the
   // shipped `auto` would have this machine fetch and install executable code the operator refused,
   // on the strength of a permission error.
@@ -3832,7 +4027,7 @@ describe('the command', () => {
     expect(lines).toHaveLength(1)
     const document = JSON.parse(lines[0]!) as { machine: string; runs: { repo: string; issue: number }[]; boards: { repo: string; ok: boolean }[]; notes: string[] }
     expect(document.machine).toBe(HOST)
-    expect(Object.keys(document).sort()).toEqual(['boards', 'machine', 'notes', 'runs'])
+    expect(Object.keys(document).sort()).toEqual(['boards', 'housekeeping', 'machine', 'notes', 'runs'])
     expect(document.boards).toEqual([{ repo: 'o/r', ok: true }])
     expect(document.runs.map((run) => [run.repo, run.issue])).toEqual([['o/r', 1]])
     // The lines a human would have read are inside the document, not printed beside it.
@@ -3875,7 +4070,7 @@ describe('the command', () => {
     expect(code).toBe(0)
     expect(lines).toHaveLength(1)
     const document = JSON.parse(lines[0]!) as { machine: string; runs: { repo: string; issue: number }[]; boards: { repo: string; ok: boolean; reason?: string }[]; notes: string[] }
-    expect(Object.keys(document).sort()).toEqual(['boards', 'machine', 'notes', 'runs'])
+    expect(Object.keys(document).sort()).toEqual(['boards', 'housekeeping', 'machine', 'notes', 'runs'])
     expect(document.boards).toEqual([
       { repo: 'o/r', ok: true },
       { repo: 'o/bad', ok: false, reason: 'App installation missing' },
@@ -4034,7 +4229,7 @@ describe('the command', () => {
     expect(code).toBe(2)
     expect(lines).toHaveLength(1)
     const document = JSON.parse(lines[0]!) as Record<string, unknown>
-    expect(Object.keys(document).sort()).toEqual(['boards', 'machine', 'notes', 'runs'])
+    expect(Object.keys(document).sort()).toEqual(['boards', 'housekeeping', 'machine', 'notes', 'runs'])
     expect(document).toMatchObject({ machine: 'unlisted', runs: [], boards: [] })
     expect(document.notes).toEqual([expect.stringContaining('is not listed')])
   })
@@ -4052,7 +4247,7 @@ describe('the command', () => {
       const lines: string[] = []
       expect(await runWorker(item.argv, { cwd: root, home, host: HOST, env: {}, out: (line) => lines.push(line), runner: gh.runner, git: anyGit, ...item.over })).toBe(2)
       expect(lines).toHaveLength(1)
-      expect(Object.keys(JSON.parse(lines[0]!)).sort()).toEqual(['boards', 'machine', 'notes', 'runs'])
+      expect(Object.keys(JSON.parse(lines[0]!)).sort()).toEqual(['boards', 'housekeeping', 'machine', 'notes', 'runs'])
     }
 
     const stateRoot = join(home, '.vegafactory', 'worker')
@@ -4065,7 +4260,7 @@ describe('the command', () => {
       cwd: root, home, host: HOST, env: {}, out: (line) => lines.push(line), runner: gh.runner, git: anyGit,
       start: (pid) => pid === 4242 ? 'live' : 'self',
     })).toBe(2)
-    expect(Object.keys(JSON.parse(lines[0]!)).sort()).toEqual(['boards', 'machine', 'notes', 'runs'])
+    expect(Object.keys(JSON.parse(lines[0]!)).sort()).toEqual(['boards', 'housekeeping', 'machine', 'notes', 'runs'])
   })
 
   test('every JSON verb returns one document for bad flags and bootstrap outside a repository', async () => {
@@ -4077,14 +4272,14 @@ describe('the command', () => {
         expect(lines).toHaveLength(1)
         const document = JSON.parse(lines[0]!) as Record<string, unknown>
         expect(Object.keys(document).sort()).toEqual(verb === 'run'
-          ? ['boards', 'machine', 'notes', 'runs']
+          ? ['boards', 'housekeeping', 'machine', 'notes', 'runs']
           : ['machine', 'ok', 'reason'])
       }
     }
     const unknown: string[] = []
     expect(await runWorker(['frobnicate', '--json'], { cwd: outside, home, host: HOST, env: {}, out: (line) => unknown.push(line) })).toBe(2)
     expect(unknown).toHaveLength(1)
-    expect(Object.keys(JSON.parse(unknown[0]!)).sort()).toEqual(['boards', 'machine', 'notes', 'runs'])
+    expect(Object.keys(JSON.parse(unknown[0]!)).sort()).toEqual(['boards', 'housekeeping', 'machine', 'notes', 'runs'])
   })
 
   // The document answers when a pass ends. An always-on loop has no such moment, so collecting
@@ -4096,7 +4291,7 @@ describe('the command', () => {
     })
     expect(code).toBe(2)
     expect(JSON.parse(lines[0]!)).toEqual({
-      machine: HOST, runs: [], boards: [],
+      machine: HOST, runs: [], boards: [], housekeeping: readHousekeeping(join(home, '.vegafactory', 'worker')),
       notes: ['refused: --json reports one pass and answers when that pass ends — add --once, or drop --json and read the lines the loop prints'],
     })
   })
