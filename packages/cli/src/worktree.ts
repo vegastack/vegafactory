@@ -210,6 +210,6 @@ export async function runWorktree(argv: string[], deps?: Partial<WorktreeDeps>):
 
   const run = spawn(scriptArgs(args))
   render('', parseScriptOutput(run.stdout), args.json)
-  if (args.verb !== 'prune' || args.write) await recordRepoRoot(registryPath, process.cwd()).catch(() => [])
+  if (!['prune', 'prepare'].includes(args.verb) || args.write) await recordRepoRoot(registryPath, process.cwd()).catch(() => [])
   return run.status
 }

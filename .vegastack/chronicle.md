@@ -2,6 +2,16 @@
 
 The project's story, newest first: what got built, why, and how it went — for the operator's future recall. Format home: the dev-chronicle skill.
 
+## 25-09-2026 — Reclaimed dependencies return before work resumes ([#275](https://github.com/vegastack/vegafactory/issues/275))
+
+- **What:** An attended checkout with a reclaimed `node_modules` marker now requires `vegafactory worktree prepare <issue>`, while a worker runs the same declared setup before its agent. Success clears the marker; failure leaves it and stops the run.
+- **Why:** Reclamation made room on disk but a later agent could start in a checkout that no longer had the dependencies needed to build or test.
+- **How it went:** One owner-only, process-identity transaction serves both entry paths. The attended hook gives the exact command and blocks other tools; the worker records setup as a child and charges it against the agent's existing deadline.
+- **Changed:** shared marker and setup gate · explicit prepare verb · attended tool denial · worker child and deadline integration · recovery guidance.
+- **Decisions:** none new.
+
+— approved by (kmanojkumar) · built by codex · branch feat/275-dependency-restoration
+
 ## 22-09-2026 — Worker records fail closed before anything is torn down ([#277](https://github.com/vegastack/vegafactory/issues/277))
 
 - **What:** Machine-global worker records now distinguish absence from corruption and remain private through runtime updates. Disable validates its authority before unloading, while attended enablement stops first and moves valid history and logs onto fresh private inodes.

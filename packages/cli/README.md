@@ -28,7 +28,7 @@ npx @vegastack/vegafactory skills list
 | `skills verify [selection]` | Check installed copies against the bundled checksum manifest |
 | `skills remove <selection>` | Uninstall skills; refuses a locally edited copy unless `--force`; asks first, or needs `--yes` |
 | `skills doctor` | Check the install, the project's `.vegastack/dev.md` and the latest version |
-| `worktree <list\|status\|create\|restore\|remove\|prune>` | One git worktree per issue under `.vegastack/.worktrees/` |
+| `worktree <list\|status\|create\|restore\|remove\|prune\|prepare>` | One git worktree per issue; `prepare <issue>` restores reclaimed dependencies with the repository's declared setup command |
 | `issue <verb> <n>` | Read and write an issue through the local cache — `sync`, `check`, `comment`, `edit-comment`, `body`, `label`, `ack`, `drop` (`vegafactory issue --help`) |
 | `review <n>` | Cross-tool review: the other tool reads the issue's diff read-only and this command posts the one review comment (`vegafactory review --help`) |
 | `agent claude\|codex <args…>` | Start a headless run on the subscription; parent-app variables are dropped and API-key billing is refused |

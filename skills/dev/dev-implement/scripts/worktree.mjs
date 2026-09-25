@@ -451,7 +451,9 @@ export function parseSetupCommand(devMd) {
     return { ok: false, reason: 'dev.md needs exactly one non-empty backticked commands: setup value' };
   }
   const command = setup[0].slice(setup[0].indexOf('`') + 1, -1).trim();
-  return command ? { ok: true, command } : { ok: false, reason: 'commands: setup must not be empty' };
+  if (!command) return { ok: false, reason: 'commands: setup must not be empty' };
+  if (command.length > 4096) return { ok: false, reason: 'commands: setup is too long to record safely' };
+  return { ok: true, command };
 }
 
 const restorationRoot = (repoRoot, workerLayout) => workerLayout
@@ -473,7 +475,7 @@ function privateJson(path) {
 }
 
 function processStart(pid) {
-  try { return execFileSync('ps', ['-p', String(pid), '-o', 'lstart='], { encoding: 'utf8', timeout: 10_000 }).trim() || null; }
+  try { return execFileSync('ps', ['-p', String(pid), '-o', 'lstart='], { encoding: 'utf8', timeout: 10_000, stdio: ['ignore', 'pipe', 'ignore'] }).trim() || null; }
   catch { return null; }
 }
 
@@ -531,7 +533,7 @@ const pause = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 // One executor contract serves the attended CLI and the worker. The caller owns how the process
 // group is registered; this default only runs the repository-declared shell command for a person.
-export function executeSetupCommand(command, { cwd, timeoutMs, signal, onStart } = {}) {
+export function executeSetupCommand(command, { cwd, timeoutMs, signal, onStart }) {
   return new Promise((resolve) => {
     const child = spawn('sh', ['-c', command], { cwd, detached: true, stdio: ['ignore', 'pipe', 'pipe'] });
     let output = '';
@@ -631,10 +633,16 @@ export async function restoreDroppedDependencies({ repoRoot, workerLayout = fals
       if (prior) {
         const status = droppedDependencyStatus({ repoRoot, workerLayout, name, path });
         if (prior.ok && !status.needed) return result(true, true, prior.command, 'dependency setup completed by the existing run');
-        if (prior.ok && processIdentity(owner) === 'matching') { await pause(25); continue; }
+        let stillOwns = false;
+        try { stillOwns = ownerOf(lock, name).nonce === owner.nonce; }
+        catch (error) { if (error.code !== 'ENOENT') return result(false, false, prior.command, error.message); }
+        if (prior.ok && stillOwns && processIdentity(owner) === 'matching') { await pause(25); continue; }
         return result(false, false, prior.command, prior.ok ? 'dependency marker remained after setup — inspect it before retrying' : prior.reason);
       }
-      if (processIdentity(owner) !== 'matching') return result(false, false, parsed.command, 'the setup owner stopped without publishing a result; retry from a new run');
+      let stillOwns = false;
+      try { stillOwns = ownerOf(lock, name).nonce === owner.nonce; }
+      catch (error) { if (error.code !== 'ENOENT') return result(false, false, parsed.command, error.message); }
+      if (!stillOwns || processIdentity(owner) !== 'matching') return result(false, false, parsed.command, 'the setup owner stopped without publishing a result; retry from a new run');
       await pause(25);
     }
   }
@@ -651,6 +659,7 @@ export async function restoreDroppedDependencies({ repoRoot, workerLayout = fals
     const stopped = signal?.aborted || execution.timedOut || now() >= deadline || execution.signal || execution.code !== 0;
     const reason = signal?.aborted ? 'dependency setup was stopped' : execution.timedOut || now() >= deadline ? 'dependency setup timed out'
       : execution.signal ? 'dependency setup ended on ' + execution.signal
+      : execution.code === null ? 'dependency setup could not complete: ' + String(execution.output ?? '').slice(-400)
       : execution.code !== 0 ? 'dependency setup exited ' + execution.code + ': ' + String(execution.output ?? '').slice(-400)
       : 'dependency setup exited 0';
     try { publishResult(root, name, nonce, { ok: !stopped, command: parsed.command, reason, ms: Math.max(0, now() - started) }); }

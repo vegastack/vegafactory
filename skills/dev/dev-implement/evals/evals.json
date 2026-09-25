@@ -61,6 +61,17 @@
         "The direct-chat branch `fix/42-emergency` is not treated as issue 42; both ambiguous objects require explicit by-name inspection or cleanup",
         "No `prune --write`, deletion, or second checkout is performed implicitly"
       ]
+    },
+    {
+      "id": 6,
+      "prompt": "Resume approved issue 42 in its existing numeric checkout `.vegastack/.worktrees/42`. Attended prune already removed untracked node_modules and left a valid dropped-dependencies marker. The repository profile declares bun install --frozen-lockfile as its commands: setup value. The next task is a code edit. Describe the first implementation action and what happens if setup fails.",
+      "expected_output": "The agent runs `vegafactory worktree prepare 42` before editing. It names the declared setup command, treats a non-zero exit or unreadable marker as a stop, and preserves the marker so the checkout is not called ready.",
+      "files": [],
+      "assertions": [
+        "Runs `vegafactory worktree prepare 42` before any implementation tool",
+        "Names only the repository-declared `bun install --frozen-lockfile` command; no package-manager guess",
+        "A failed setup or unsafe marker leaves the marker and prevents implementation"
+      ]
     }
   ]
 }

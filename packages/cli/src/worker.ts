@@ -1977,7 +1977,7 @@ export function filesFromParent(parentPlan: string | null, number: number): stri
 
 export interface Step { action: Action; number: number; repo: string; split: boolean; by: string | null }
 export interface StepResult { outcome: Outcome; note: string; ms: number }
-export type RunStep = (step: Step, context: { root: string; devMd: string; token: string | null; timeoutMs?: number; onStart?: (pid: number, command: string) => void }) => Promise<StepResult>
+export type RunStep = (step: Step, context: { root: string; devMd: string; token: string | null; timeoutMs?: number; signal?: AbortSignal; onStart?: (pid: number, command: string) => void }) => Promise<StepResult>
 export interface DependencySetupExecution { code: number | null; signal: string | null; timedOut: boolean; output: string }
 export interface DependencyRestoreResult { ok: boolean; restored: boolean; command: string | null; reason: string; ms: number }
 export type PrepareDependencies = (input: { root: string; issue: number; devMd: string; token: string | null; timeoutMs: number; signal: AbortSignal; onStart: (pid: number, command: string) => void }) => Promise<DependencyRestoreResult>
@@ -2072,7 +2072,12 @@ function execTool(tool: string, args: string[], options: { cwd: string; env: Nod
       cwd: options.cwd, env: { ...options.env, VF_LIMIT: String(Math.ceil(options.timeoutMs / 1000) + 30) },
       stdio: ['ignore', 'pipe', 'pipe'], detached: true,
     })
-    if (child.pid) options.onStart?.(child.pid, tool)
+    let registrationError: string | null = null
+    if (child.pid) try { options.onStart?.(child.pid, tool) }
+    catch (error) {
+      registrationError = 'the child could not be recorded safely: ' + (error as Error).message
+      try { process.kill(-child.pid, 'SIGKILL') } catch { child.kill('SIGKILL') }
+    }
     let stdout = ''
     let stderr = ''
     let timedOut = false
@@ -2090,14 +2095,14 @@ function execTool(tool: string, args: string[], options: { cwd: string; env: Nod
     child.stdout.on('data', (chunk) => { stdout = keep(stdout, chunk) })
     child.stderr.on('data', (chunk) => { stderr = keep(stderr, chunk) })
     child.on('error', (error) => { clearTimeout(timer); options.signal?.removeEventListener('abort', aborted); resolve({ code: null, stdout, stderr, timedOut, error: error.message }) })
-    child.on('close', (code, signal) => { clearTimeout(timer); options.signal?.removeEventListener('abort', aborted); resolve({ code, stdout, stderr, timedOut, signal }) })
+    child.on('close', (code, signal) => { clearTimeout(timer); options.signal?.removeEventListener('abort', aborted); resolve({ code, stdout, stderr, timedOut, signal, ...(registrationError ? { error: registrationError } : {}) }) })
   })
 }
 
 export async function runDependencySetup(command: string, context: { cwd: string; env: NodeJS.ProcessEnv; timeoutMs: number; signal: AbortSignal; onStart: (pid: number, command: string) => void }, exec = execTool): Promise<DependencySetupExecution> {
   const child = await exec('sh', ['-c', command], { ...context, onStart: (pid) => context.onStart(pid, 'commands: setup') })
-  return { code: child.code, signal: child.signal ?? (context.signal.aborted ? 'SIGTERM' : null), timedOut: child.timedOut,
-    output: `${child.stderr}\n${child.stdout}`.slice(-8192) }
+  return { code: child.code, signal: child.error ? null : child.signal ?? (context.signal.aborted ? 'SIGTERM' : null), timedOut: child.timedOut,
+    output: `${child.error ?? ''}\n${child.stderr}\n${child.stdout}`.slice(-8192) }
 }
 
 export function workerDependencyPreparation(env: NodeJS.ProcessEnv, execute = runDependencySetup): PrepareDependencies {
@@ -2162,7 +2167,7 @@ export function defaultRunStep(env: NodeJS.ProcessEnv, { exec = execTool, timeou
     // The limit arrives with the run rather than with the step function, so a roster change lands
     // on the next run instead of the next restart.
     const limit = context.timeoutMs ?? timeoutMs
-    const child = await exec(tool, args, { cwd, env: childRunEnvironment(env, context.token, true), timeoutMs: limit, onStart: context.onStart })
+    const child = await exec(tool, args, { cwd, env: childRunEnvironment(env, context.token, true), timeoutMs: limit, signal: context.signal, onStart: context.onStart })
     const ms = Date.now() - started
     const text = `${child.stderr}\n${child.stdout}`
     if (child.timedOut) return { outcome: 'killed', note: `${tool} ran past the ${limit / 60_000}-minute step limit and was stopped`, ms }
@@ -2774,6 +2779,7 @@ async function runOne(deps: PollDeps, selected: BoardContext, candidate: Candida
   const controller = new AbortController()
   let active: ChildRecord | null = null
   let handedOver = false
+  let phase: 'setup' | 'agent' = 'setup'
   const stopRun = () => {
     controller.abort()
     if (active) try { stopChild(deps.stateRoot, active, { stop: deps.stop, start: deps.start, alive: deps.alive }) }
@@ -2781,13 +2787,16 @@ async function runOne(deps: PollDeps, selected: BoardContext, candidate: Candida
   }
   run.stop = stopRun
   const onStart = (pid: number, command: string) => {
+    const startedAt = (deps.start ?? processStart)(pid) ?? ''
+    if (!startedAt && phase === 'setup') throw new Error(`the setup process identity of pid ${pid} could not be proved`)
     const record: ChildRecord = {
-      repo: candidate.repo, pid, command, startedAt: (deps.start ?? processStart)(pid) ?? '', issue: candidate.number,
+      repo: candidate.repo, pid, command, startedAt, issue: candidate.number,
       action: candidate.action, owner: held, from: candidate.from,
     }
+    if (phase === 'setup') noteChild(deps.stateRoot, record)
+    else try { noteChild(deps.stateRoot, record) } catch { /* keep the prior agent fallback */ }
     started.push(record)
     active = record
-    try { noteChild(deps.stateRoot, record) } catch { /* the process-group abort still stops this child */ }
   }
   // While this machine holds the claim it says so, on the same schedule a session's hooks use.
   const beat = held ? setInterval(() => { try { heartbeat(claimCtx, held) } catch { /* a missed beat is not a failure */ } }, HEARTBEAT_EVERY_MS) : null
@@ -2802,7 +2811,8 @@ async function runOne(deps: PollDeps, selected: BoardContext, candidate: Candida
         root: selected.root, issue: candidate.number, devMd: selected.devMd, token: selected.identity.token(),
         timeoutMs: Math.max(0, deadline - deps.now()), signal: controller.signal, onStart,
       })
-      if (active) { try { forgetChild(deps.stateRoot, active.pid) } catch { /* the next sweep drops it */ }; active = null }
+      const finishedSetup = active as ChildRecord | null
+      if (finishedSetup) { try { forgetChild(deps.stateRoot, finishedSetup.pid) } catch { /* the next sweep drops it */ }; active = null }
       if (!preparation.ok) {
         result = { outcome: /timed out/.test(preparation.reason) ? 'killed' : 'failed', note: preparation.reason, ms: preparation.ms }
       } else if (controller.signal.aborted || run.interrupt) {
@@ -2821,9 +2831,10 @@ async function runOne(deps: PollDeps, selected: BoardContext, candidate: Candida
         if (remaining <= 0 || controller.signal.aborted) {
           result = { outcome: controller.signal.aborted ? 'stopped' : 'killed', note: 'no step time remained after dependency setup', ms: preparation.ms }
         } else {
+          phase = 'agent'
           result = await deps.runStep({ action: candidate.action, number: candidate.number, repo: candidate.repo, split: item.decision.split, by: item.decision.by }, {
             root: selected.root, devMd: selected.devMd, token: selected.identity.token(),
-            timeoutMs: remaining, onStart,
+            timeoutMs: remaining, signal: controller.signal, onStart,
           })
           result.ms += preparation.ms
         }
@@ -3113,7 +3124,8 @@ export function workerUsage(): string {
   status                 every configured or persisted board, plus this machine's recent runs
   run [--once]           the poll loop itself (the unit runs this); --once makes a single pass
                          and is the only form --json reports, because the document answers when
-                         a pass ends
+                         a pass ends. Reclaimed node_modules is restored with the repository's
+                         commands: setup before an agent starts, within the same step deadline
 
 One ship at a time per repository (different repositories may ship together), and as many runs
 across the whole machine as its roster row allows. The row's
@@ -3188,6 +3200,7 @@ export interface CliDeps {
   platform?: NodeJS.Platform
   fetch?: Fetch
   runStep?: RunStep
+  prepareDependencies?: PrepareDependencies
   git?: (clone: string) => GitRun
   rosterGit?: (clone: string, env: NodeJS.ProcessEnv) => GitRun
   stop?: (pid: number, signal: NodeJS.Signals) => boolean
@@ -3612,7 +3625,11 @@ export async function runWorker(argv: string[], deps: CliDeps = {}): Promise<num
         stateRoot, boards: [],
         machine, runId, caps, appActor: app.appActor, out: note, now: deps.now ?? Date.now,
         runStep: deps.runStep ?? defaultRunStep(env), stop: deps.stop, start: deps.start, alive: deps.alive,
-        prepareDependencies: workerDependencyPreparation(env),
+        // An injected step is a complete test step; tests that exercise restoration inject its
+        // preparation explicitly. The CLI path has neither injection and always uses the gate.
+        prepareDependencies: deps.prepareDependencies ?? (deps.runStep
+          ? async () => ({ ok: true, restored: false, command: null, reason: 'injected step', ms: 0 })
+          : workerDependencyPreparation(env)),
         standDown: (boardRepo, number, reason, restoreTo) => {
           const key = canonicalRepository(boardRepo)
           const context = contexts.get(key) ?? recoveryContexts.get(key)

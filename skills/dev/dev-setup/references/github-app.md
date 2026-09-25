@@ -108,6 +108,8 @@ The rest of the worker's machine record is private too. `~/.vegafactory/worker/`
 
 `worker enable` is the recovery boundary. After readiness passes, it stops the old service before changing storage or the unit, migrates valid legacy records, and atomically publishes fresh private inodes for `runs.jsonl`, `worker.log`, and `worker.err.log`. A descriptor still holding an old inode reaches EOF and receives no later output. Malformed or unsafe legacy evidence moves into the owner-only `~/.vegafactory/worker/quarantine/` directory and enable stops with its exact path; inspect that preserved file, then run enable again. A failed stop changes neither the installed unit nor storage, and an interrupted append migration resumes from its private journal without duplicating bytes.
 
+If attended pruning reclaimed a checkout's `node_modules`, the next worker step reads its private marker and runs only that repository's declared `commands: setup` before launching the agent. Setup and agent share one step deadline; stop, disable, shutdown, or timeout stops the setup process group. A missing setup command or failed setup keeps the marker and starts no agent. An attended session uses `vegafactory worktree prepare <issue>` for the same restoration gate.
+
 Control-room files record these **names**. The values live in GitHub organization settings and nowhere a repository can read them.
 
 Setting an organization secret needs `admin:org`. A `gh` token without it can write a repository secret but not an organization one, so this step reaches the operator even when everything around it is automated.

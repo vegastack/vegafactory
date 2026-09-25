@@ -243,6 +243,15 @@ describe('session context', () => {
     expect((await hook('pre-tool', bash('bun test'))).text).toBe('')
   })
 
+  test('an unreadable marker stays a tool gate and the setup command is still the recovery path', async () => {
+    noteDroppedDeps({ repoRoot: root, name: '7', path: tree, droppedAt: new Date().toISOString() })
+    const marker = join(root, '.vegastack', '.tmp', 'deps-dropped', '7.json')
+    writeFileSync(marker, '{bad json\n')
+    expect((await hook('pre-tool', bash('bun test'))).text).toContain('dependency marker state is unreadable')
+    expect((await hook('pre-tool', bash('vegafactory worktree prepare 7'))).text).toBe('')
+    expect(readFileSync(marker, 'utf8')).toBe('{bad json\n')
+  })
+
   test('session-start names the issue, its holder and its local copy', async () => {
     const result = await hook('session-start', { cwd: tree, model: 'opus' })
     const context = result.json().hookSpecificOutput

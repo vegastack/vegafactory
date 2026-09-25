@@ -550,11 +550,11 @@ export function dependencyPreparation(where: Where): { needed: false } | { neede
   try { status = droppedDependencyStatus({ repoRoot: where.root, workerLayout, name, path: where.top }) }
   catch (error) { status = { needed: true, reason: 'dependency marker state could not be read: ' + (error as Error).message } }
   if (!status.needed) return { needed: false }
-  let setup: { ok: true; command: string } | { ok: false; reason: string }
+  let setup: { ok: boolean; command?: string; reason?: string }
   try { setup = parseSetupCommand(readFileSync(join(where.root, '.vegastack', 'dev.md'), 'utf8')) }
   catch (error) { setup = { ok: false, reason: 'commands: setup cannot be read: ' + (error as Error).message } }
-  const command = setup.ok ? setup.command : null
-  return { needed: true, command, reason: `${status.reason}. Run \`vegafactory worktree prepare ${where.number}\` before working${command ? ` (declared setup: \`${command}\`)` : `; ${setup.ok ? '' : setup.reason}`}.` }
+  const command = setup.ok ? setup.command ?? null : null
+  return { needed: true, command, reason: `${status.reason}. Run \`vegafactory worktree prepare ${where.number}\` before working${command ? ` (declared setup: \`${command}\`)` : `; ${setup.reason ?? 'the setup command is unavailable'}`}.` }
 }
 
 function preTool(harness: Harness, input: HookInput, deps: HookDeps): void {
@@ -689,16 +689,21 @@ async function advisory(event: HookEvent, harness: Harness, payload: Record<stri
   if (event === 'session-start') {
     // Before the refresh, which talks to GitHub and can throw.
     observe(where, session, deps.now())
-    const { holder, state } = refresh(where, local, deps, true)
-    writeLocal(where, local)
+    let refreshed: ReturnType<typeof refresh> | null = null
+    let claimProblem: string | null = null
+    try { refreshed = refresh(where, local, deps, true); writeLocal(where, local) }
+    catch (error) { claimProblem = (error as Error).message }
+    const holder = refreshed?.holder ?? null
+    const state = refreshed?.state ?? null
     const lines = [
       ...(update ? [update] : []),
-      `This worktree works issue #${where.number} (${where.repo}), state ${state ?? 'unknown'}, held by ${holder ? `${label(holder)}${local.held ? ' — this worktree' : ''}` : 'nobody'}.`,
+      `This worktree works issue #${where.number} (${where.repo}), state ${state ?? 'unknown'}, held by ${holder ? `${label(holder)}${local.held ? ' — this worktree' : ''}` : claimProblem ? 'unverified' : 'nobody'}.`,
       `Its local copy is ${cacheDir(where.root, where.repo, where.number)}; read it with \`vegafactory issue sync ${where.number}\` first.`,
     ]
     const preparation = dependencyPreparation(where)
     if (preparation.needed) lines.push(preparation.reason)
-    if (holder && !local.held) lines.push(`Someone else holds it. Do not change files; to take it back: \`${takeBack(where, harness, model)}\`.`)
+    if (claimProblem) lines.push(`Claim state could not be verified (${claimProblem}); do not change files until issue sync succeeds.`)
+    else if (holder && !local.held) lines.push(`Someone else holds it. Do not change files; to take it back: \`${takeBack(where, harness, model)}\`.`)
     else if (!holder) lines.push(`Nobody holds it; claim it before working: \`vegafactory issue claim ${where.number} --harness ${harness} --model ${model}\`.`)
     const pending = pendingNote(where.root)
     if (pending) lines.push(pending)

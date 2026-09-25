@@ -76,6 +76,10 @@ describe('runWorktree', () => {
     const registryPath = join(mkdtempSync(join(tmpdir(), 'vf-reg-')), 'worktree-roots.json')
     expect(await runWorktree(['prepare', '106'], { spawn, registryPath })).toBe(0)
     expect(calls).toEqual([['prepare', '--json', '--issue', '106', '--write']])
+    const previewRegistry = join(mkdtempSync(join(tmpdir(), 'vf-reg-')), 'worktree-roots.json')
+    expect(await runWorktree(['prepare', '106', '--dry-run'], { spawn, registryPath: previewRegistry })).toBe(0)
+    expect(calls[1]).not.toContain('--write')
+    expect(existsSync(previewRegistry)).toBe(false)
   })
   test('bare prune reaches the script as a preview and explicit write reaches it as a mutation', async () => {
     const calls: string[][] = []
