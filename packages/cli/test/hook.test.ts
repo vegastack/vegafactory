@@ -209,6 +209,8 @@ describe('guard', () => {
     prHead = 'feat/7-export'
     prHeadOid = 'f'.repeat(40)
     expect((await hook('pre-tool', bash('gh pr merge 12'))).text).toContain('"ask"')
+    prHeadOid = head.slice(0, 7) + (head[7] === 'a' ? 'b' : 'a') + head.slice(8)
+    expect((await hook('pre-tool', bash('gh pr merge 12'))).text).toContain('"ask"')
     prHeadOid = head
     // Editing the evidence after "ship it" voids it, as issue check says; ticking a box does not.
     const evidence = gh.issues.get(7)!.comments.find((c) => c.body.includes('type=evidence'))!

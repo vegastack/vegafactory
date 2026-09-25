@@ -485,7 +485,9 @@ function mergeCheck(cwd: string, root: string, repo: string, deps: HookDeps): Me
     const evidence = latestOfType(snap, 'evidence')
     if (!evidence) return false
     const keys = markerKeys(snap.body(evidence))
-    if (keys.branch !== pr.headRefName || !/^[0-9a-f]{7,40}$/i.test(keys.sha ?? '') || !pr.headRefOid!.startsWith(keys.sha!)) return false
+    if (keys.branch !== pr.headRefName || !/^[0-9a-f]{7,40}$/i.test(keys.sha ?? '')) return false
+    const evidenceHead = git(cwd, ['rev-parse', '--verify', '--quiet', `${keys.sha}^{commit}`])
+    if (!evidenceHead.ok || evidenceHead.out !== pr.headRefOid) return false
     return findValidAck(snap, 'ship', permissionLookup(repo, deps.runner), evidenceChangedAt(evidence)).ok
   }
 }
