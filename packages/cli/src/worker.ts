@@ -27,7 +27,7 @@ import { homedir, hostname, userInfo } from 'node:os'
 import { dirname, join, parse, posix, resolve, sep } from 'node:path'
 import { APP_ACTOR, APP_ID, HEARTBEAT_EVERY_MS, appIdentityConfig, claim, heartbeat, holderOf, machineName, nodeId, release, trustedFactory } from './claim.ts'
 import { defaultClonePath, factoryConfigPath, parseControlRoomKnob, readFactoryConfig, updateSettingsAtPath } from './control-room.ts'
-import { harnessInvocation } from './harness-session.ts'
+import { harnessInvocation, validSessionId, type HarnessName } from './harness-session.ts'
 import { billingVariables, childEnvironment } from './env.ts'
 import { GhError, ghList, type GhResult, type GhRunner } from './gh.ts'
 import { assertRepo, cacheDir, readState, replaceFile, syncIssue, withLock, type CommentEntry, type GhIssue, type IssueEntry } from './issue-cache.ts'
@@ -1013,6 +1013,81 @@ export function readActed(stateRoot: string): Record<string, Acted> {
 export function writeActed(stateRoot: string, acted: Record<string, Acted>) {
   if (!validActed(acted)) throw new WorkerRecordError('malformed', 'refusing to write an invalid acted record')
   replacePrivateRecord(stateRoot, actedPath(stateRoot), JSON.stringify(acted, null, 2) + '\n')
+}
+
+// Conversation continuity is private machine state, not an authorization record. It contains no
+// transcript, prompt, tool argument, or output, and a corrupt row never becomes a missing row.
+export interface ThreadRecord {
+  repo: string
+  issue: number
+  harness: HarnessName
+  sessionId: string
+  node: string
+  lastSeenHead: string
+  updatedAt: string
+}
+
+const threadsPath = (stateRoot: string) => join(stateRoot, 'threads.json')
+const GIT_HEAD = /^[0-9a-f]{40}$/
+const NODE_ID = /^[a-z0-9._-]+@[a-z0-9._-]+$/
+const THREAD_FIELDS = ['repo', 'issue', 'harness', 'sessionId', 'node', 'lastSeenHead', 'updatedAt']
+
+export function threadKey(input: { repo: string; issue: number; harness: HarnessName }): string {
+  if (!Number.isSafeInteger(input.issue) || input.issue < 1 || !['claude', 'codex'].includes(input.harness)) {
+    throw new WorkerRecordError('malformed', 'the worker thread identity is invalid')
+  }
+  return `${canonicalRepository(input.repo)}#${input.issue}#${input.harness}`
+}
+
+function validThread(value: unknown): value is ThreadRecord {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false
+  const row = value as Partial<ThreadRecord>
+  if (Object.keys(row).sort().join(',') !== [...THREAD_FIELDS].sort().join(',')) return false
+  if (typeof row.repo !== 'string' || typeof row.harness !== 'string' || typeof row.node !== 'string'
+    || typeof row.lastSeenHead !== 'string' || typeof row.updatedAt !== 'string') return false
+  try { if (canonicalRepository(row.repo) !== row.repo || threadKey(row as ThreadRecord) !== `${row.repo}#${row.issue}#${row.harness}`) return false }
+  catch { return false }
+  if (!validSessionId(row.sessionId) || !NODE_ID.test(row.node) || !GIT_HEAD.test(row.lastSeenHead)) return false
+  try { return new Date(row.updatedAt).toISOString() === row.updatedAt } catch { return false }
+}
+
+export function readThreads(stateRoot: string): Record<string, ThreadRecord> {
+  const text = readPrivateRecord(stateRoot, threadsPath(stateRoot))
+  if (text === null) return {}
+  let parsed: unknown
+  try { parsed = JSON.parse(text) } catch { throw new WorkerRecordError('malformed', `${threadsPath(stateRoot)} is not valid JSON`) }
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) throw new WorkerRecordError('malformed', `${threadsPath(stateRoot)} must be a thread map`)
+  for (const [key, value] of Object.entries(parsed)) {
+    if (!validThread(value) || key !== threadKey(value)) throw new WorkerRecordError('malformed', `${threadsPath(stateRoot)} has an invalid thread row at ${JSON.stringify(key)}`)
+  }
+  return parsed as Record<string, ThreadRecord>
+}
+
+export function updateThread(stateRoot: string, expected: ThreadRecord | null, next: ThreadRecord): void {
+  if (!validThread(next) || (expected !== null && (!validThread(expected) || threadKey(expected) !== threadKey(next)))) {
+    throw new WorkerRecordError('malformed', 'refusing to write an invalid worker thread')
+  }
+  ensurePrivateRecordRoot(stateRoot, true)
+  withLock(stateRoot, () => {
+    const saved = readThreads(stateRoot)
+    const key = threadKey(next)
+    if (JSON.stringify(saved[key] ?? null) !== JSON.stringify(expected)) {
+      throw new WorkerRecordError('unsafe', `the worker thread for ${key} changed concurrently`)
+    }
+    saved[key] = next
+    replacePrivateRecord(stateRoot, threadsPath(stateRoot), JSON.stringify(saved, null, 2) + '\n')
+  }, { what: 'the worker issue threads' })
+}
+
+export function threadDecision(input: { saved: ThreadRecord | null; repo: string; issue: number; harness: HarnessName; node: string; head: string }): { mode: 'fresh' | 'resume'; sessionId: string | null; reason: string } {
+  const key = threadKey(input)
+  if (!NODE_ID.test(input.node) || !GIT_HEAD.test(input.head)) throw new WorkerRecordError('unsafe', 'worker thread decision needs a valid node and Git head')
+  const saved = input.saved
+  if (!saved) return { mode: 'fresh', sessionId: null, reason: 'no recorded conversation' }
+  if (!validThread(saved) || threadKey(saved) !== key) throw new WorkerRecordError('malformed', `the worker thread for ${key} is invalid`)
+  if (saved.node !== input.node) return { mode: 'fresh', sessionId: null, reason: 'conversation belongs to another node' }
+  if (saved.lastSeenHead !== input.head) return { mode: 'fresh', sessionId: null, reason: 'branch head moved since the conversation' }
+  return { mode: 'resume', sessionId: saved.sessionId, reason: 'same node and branch head' }
 }
 
 // A pid on its own is not an identity: pids are reused, and a record left behind by a crash would
