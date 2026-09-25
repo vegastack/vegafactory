@@ -1,6 +1,10 @@
 import { describe, expect, test } from 'bun:test'
+import { spawnSync } from 'node:child_process'
+import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import {
-  housekeepingPreviewArgs, parseHousekeepingDocument, parseHousekeepingRequest, runWorkerHousekeeping,
+  housekeepingPreviewArgs, parseHousekeepingDocument, parseHousekeepingRequest, previewHousekeepingBoard, runWorkerHousekeeping,
   type HousekeepingBoard, type HousekeepingRequest,
 } from '../src/worker-housekeeping.ts'
 
@@ -74,9 +78,29 @@ describe('worker housekeeping request and preview boundary', () => {
     const result = await runWorkerHousekeeping(request(), deps(async () => ({ blocks: [], warns: ['github facts unavailable'], candidates: many })))
     expect(result.advisories).toHaveLength(50)
     expect(result.complete).toBe(false)
-    expect(result.unavailable).toEqual([
-      { repo: 'o/r', reason: 'github facts unavailable' },
-      { repo: 'o/r', reason: 'advisory limit reached' },
-    ])
+    expect(result.unavailable).toEqual([{ repo: 'o/r', reason: 'github facts unavailable; advisory limit reached' }])
+  })
+
+  test('each board preview subprocess is bounded and returns one parsed document', async () => {
+    const home = mkdtempSync(join(tmpdir(), 'vf-housekeeping-preview-'))
+    const root = join(home, 'repo')
+    mkdirSync(root)
+    const script = join(home, 'preview.mjs')
+    writeFileSync(script, `process.stdout.write(JSON.stringify({blocks:[],warns:[],candidates:[{name:'7',removable:true,reasonCode:'merged',ageDays:1}]}));`)
+    expect(await previewHousekeepingBoard(board('o/r', root), {}, 1000, script)).toMatchObject({ candidates: [{ name: '7' }] })
+    writeFileSync(script, 'setInterval(() => {}, 1000)')
+    await expect(previewHousekeepingBoard(board('o/r', root), {}, 50, script)).rejects.toThrow('timed out')
+  })
+
+  test('the internal command rejects malformed stdin as one JSON refusal', () => {
+    const home = mkdtempSync(join(tmpdir(), 'vf-housekeeping-cli-'))
+    const result = spawnSync(process.execPath, [join(import.meta.dir, '../src/index.ts'), 'worker-housekeeping'], {
+      input: JSON.stringify({ schema: 1, write: true, boards: [] }), encoding: 'utf8', timeout: 2000,
+      env: { ...process.env, VEGAFACTORY_HOME: home },
+    })
+    expect(result.status).toBe(2)
+    const reply = JSON.parse(result.stdout)
+    expect(reply).toMatchObject({ schema: 1, complete: false, advisories: [], unavailable: [{ repo: 'unknown/unknown' }] })
+    expect(result.stdout.trim().split('\n')).toHaveLength(1)
   })
 })

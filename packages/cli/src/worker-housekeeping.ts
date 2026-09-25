@@ -85,6 +85,9 @@ export function parseHousekeepingDocument(raw: string): HousekeepingDocument {
     const row = rawRow as Record<string, unknown>
     if (!exactKeys(row, ['repo', 'reason']) || typeof row.repo !== 'string' || canonicalRepository(row.repo) !== row.repo
       || typeof row.reason !== 'string' || !row.reason || row.reason.length > 400) throw new Error('invalid housekeeping unavailable row')
+    const key = `unavailable:${row.repo}`
+    if (seen.has(key)) throw new Error('duplicate housekeeping unavailable row')
+    seen.add(key)
   }
   if (doc.complete && doc.unavailable.length) throw new Error('complete housekeeping reply contains unavailable boards')
   return doc as unknown as HousekeepingDocument
@@ -104,8 +107,8 @@ export function housekeepingPreviewArgs(board: HousekeepingBoard, script = workt
     ...(board.excludeIssues.length ? ['--exclude-issues', board.excludeIssues.join(',')] : []), '--json']
 }
 
-export async function previewHousekeepingBoard(board: HousekeepingBoard, env: NodeJS.ProcessEnv, budgetMs: number): Promise<PreviewResult> {
-  const args = housekeepingPreviewArgs(board)
+export async function previewHousekeepingBoard(board: HousekeepingBoard, env: NodeJS.ProcessEnv, budgetMs: number, script = worktreeScript()): Promise<PreviewResult> {
+  const args = housekeepingPreviewArgs(board, script)
   return new Promise((resolvePromise, reject) => {
     const child = spawn(process.execPath, args, {
       cwd: board.root,
@@ -138,29 +141,35 @@ export async function previewHousekeepingBoard(board: HousekeepingBoard, env: No
 export async function runWorkerHousekeeping(request: HousekeepingRequest, deps: {
   now?: () => number
   reposRoot?: string
-  tokenFor: (repo: string) => Promise<string>
+  tokenFor: (repo: string, budgetMs: number) => Promise<string>
   envForToken: (token: string) => NodeJS.ProcessEnv
   preview?: (board: HousekeepingBoard, env: NodeJS.ProcessEnv, budgetMs: number) => Promise<PreviewResult>
 }): Promise<HousekeepingDocument> {
   const now = deps.now ?? Date.now
   const advisories: HousekeepingAdvisory[] = []
   const unavailable: HousekeepingDocument['unavailable'] = []
+  const markUnavailable = (repo: string, reason: unknown) => {
+    const text = boundedReason(reason)
+    const prior = unavailable.find(row => row.repo === repo)
+    if (prior) prior.reason = boundedReason(`${prior.reason}; ${text}`)
+    else unavailable.push({ repo, reason: text })
+  }
   const seen = new Set<string>()
   const preview = deps.preview ?? previewHousekeepingBoard
   for (const board of request.boards) {
-    if (now() >= request.deadlineAt) { unavailable.push({ repo: board.repo, reason: 'deadline expired before preview' }); continue }
+    if (now() >= request.deadlineAt) { markUnavailable(board.repo, 'deadline expired before preview'); continue }
     if (deps.reposRoot && board.root !== join(deps.reposRoot, board.repo.replace('/', '__'), 'repo')) {
-      unavailable.push({ repo: board.repo, reason: 'board root does not match the managed repository' }); continue
+      markUnavailable(board.repo, 'board root does not match the managed repository'); continue
     }
     try {
-      const token = await deps.tokenFor(board.repo)
+      const boardDeadline = Math.min(request.deadlineAt, now() + BOARD_DEADLINE_MS)
+      const token = await deps.tokenFor(board.repo, Math.max(1, boardDeadline - now()))
       if (!token) throw new Error('repository App token is unavailable')
-      const remaining = request.deadlineAt - now()
+      const remaining = boardDeadline - now()
       if (remaining <= 0) throw new Error('deadline expired before preview')
       const result = await preview(board, deps.envForToken(token), Math.min(BOARD_DEADLINE_MS, remaining))
-      if (result.blocks?.length || result.warns?.length) {
-        unavailable.push({ repo: board.repo, reason: boundedReason(result.blocks?.[0] ?? result.warns?.[0]) })
-      }
+      if (result.blocks?.length) { markUnavailable(board.repo, result.blocks[0]); continue }
+      if (result.warns?.length) markUnavailable(board.repo, result.warns[0])
       for (const candidate of result.candidates ?? []) {
         const issue = Number(candidate.name)
         if (!candidate.removable || !Number.isSafeInteger(issue) || issue <= 0
@@ -170,14 +179,14 @@ export async function runWorkerHousekeeping(request: HousekeepingRequest, deps: 
         if (seen.has(key)) continue
         seen.add(key)
         if (advisories.length === MAX_ADVISORIES) {
-          unavailable.push({ repo: board.repo, reason: 'advisory limit reached' })
+          markUnavailable(board.repo, 'advisory limit reached')
           break
         }
         advisories.push({ repo: board.repo, issue, worktree: candidate.name as string,
           reason: candidate.reasonCode as HousekeepingAdvisory['reason'],
           ageDays: Number.isSafeInteger(candidate.ageDays) && Number(candidate.ageDays) >= 0 ? Number(candidate.ageDays) : null })
       }
-    } catch (error) { unavailable.push({ repo: board.repo, reason: boundedReason((error as Error).message) }) }
+    } catch (error) { markUnavailable(board.repo, (error as Error).message) }
   }
   return { schema: 1, complete: unavailable.length === 0, advisories, unavailable }
 }
@@ -192,23 +201,32 @@ async function readBoundedStdin(): Promise<string> {
 }
 
 export async function runHousekeepingCli(): Promise<number> {
-  let request: HousekeepingRequest
-  try { request = parseHousekeepingRequest(await readBoundedStdin()) }
-  catch (error) { process.stdout.write(JSON.stringify({ schema: 1, complete: false, advisories: [], unavailable: [{ repo: 'unknown/unknown', reason: boundedReason((error as Error).message) }] }) + '\n'); return 2 }
-  const env = process.env
-  const app = appIdentityConfig(env)
-  const { appIdentity, childRunEnvironment } = await import('./worker.ts')
-  const identities = new Map<string, ReturnType<typeof appIdentity>>()
-  const result = await runWorkerHousekeeping(request, {
-    reposRoot: workerRepositoriesDirectory({ env }),
-    tokenFor: async repo => {
-      let identity = identities.get(repo)
-      if (!identity) { identity = appIdentity({ repo, keyPath: appKeyPath({ env }), appId: app.appId }); identities.set(repo, identity) }
-      await identity.freshen()
-      return identity.token() ?? ''
-    },
-    envForToken: token => childRunEnvironment(env, token, true),
-  })
-  process.stdout.write(JSON.stringify(result) + '\n')
-  return result.complete ? 0 : 1
+  let request: HousekeepingRequest | null = null
+  try {
+    request = parseHousekeepingRequest(await readBoundedStdin())
+    const env = process.env
+    const app = appIdentityConfig(env)
+    const { appIdentity, childRunEnvironment } = await import('./worker.ts')
+    const result = await runWorkerHousekeeping(request, {
+      reposRoot: workerRepositoriesDirectory({ env }),
+      tokenFor: async (repo, budgetMs) => {
+        const controller = new AbortController()
+        const timer = setTimeout(() => controller.abort(), budgetMs)
+        try {
+          const identity = appIdentity({ repo, keyPath: appKeyPath({ env }), appId: app.appId,
+            fetch: (url, init) => fetch(url, { ...init, signal: controller.signal }) })
+          await identity.freshen()
+          return identity.token() ?? ''
+        } finally { clearTimeout(timer) }
+      },
+      envForToken: token => childRunEnvironment(env, token, true),
+    })
+    process.stdout.write(JSON.stringify(result) + '\n')
+    return result.complete ? 0 : 1
+  } catch (error) {
+    const repos = request?.boards.map(board => board.repo) ?? ['unknown/unknown']
+    process.stdout.write(JSON.stringify({ schema: 1, complete: false, advisories: [],
+      unavailable: repos.map(repo => ({ repo, reason: boundedReason((error as Error).message) })) }) + '\n')
+    return 2
+  }
 }
