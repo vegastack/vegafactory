@@ -1634,7 +1634,10 @@ function runVerb(verb, flags) {
   return { blocks: [at(verb, 'unknown verb — expected create|restore|remove|list|prune|status|prepare')], warns: [] };
 }
 
-const invokedDirectly = process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url);
+// The CLI bundles this module into dist/index.js; equality with import.meta.url alone would
+// mistake that bundle's entry for this script and run a worktree verb on every CLI command.
+const invokedDirectly = process.argv[1] && basename(fileURLToPath(import.meta.url)) === 'worktree.mjs'
+  && resolve(process.argv[1]) === fileURLToPath(import.meta.url);
 if (invokedDirectly) {
   const argv = process.argv.slice(2);
   const verb = argv.find((arg) => !arg.startsWith('--')) ?? '';

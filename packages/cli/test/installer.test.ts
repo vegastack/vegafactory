@@ -751,10 +751,10 @@ describe('selecting a family', () => {
   test('worktree has landed: it is no longer reserved and prints its own verbs', () => {
     const bare = run(temporary, ['worktree'])
     expect(bare.exitCode).toBe(0)
-    expect(bare.stdout.toString()).toContain('vegafactory worktree <list|create|restore|remove|prune|status>')
+    expect(bare.stdout.toString()).toContain('vegafactory worktree <list|create|restore|remove|prune|status|prepare>')
     const unknown = run(temporary, ['worktree', 'nuke'])
     expect(unknown.exitCode).not.toBe(0)
-    expect(unknown.stderr.toString()).toContain('list|create|restore|remove|prune|status')
+    expect(unknown.stderr.toString()).toContain('list|create|restore|remove|prune|status|prepare')
     expect(run(temporary, ['--help']).stdout.toString()).toContain('vegafactory worktree')
   })
 
