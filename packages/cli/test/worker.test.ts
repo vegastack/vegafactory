@@ -2172,6 +2172,17 @@ describe('machine-global runtime records fail closed', () => {
     expect(readFileSync(target, 'utf8')).toBe('{}')
   })
 
+  test('a dangling run-history link is refused before append and its target stays absent', () => {
+    const { home, stateRoot } = privateRoot()
+    const target = join(home, 'outside-missing.jsonl')
+    const path = join(stateRoot, 'runs.jsonl')
+    symlinkSync(target, path)
+    const record = { at: '2026-09-21T00:00:00Z', repo: 'o/r', issue: 1, action: 'plan' as const, outcome: 'done' as const, ms: 1, machine: HOST, note: '' }
+    expect(() => recordRun(stateRoot, record)).toThrow(WorkerRecordError)
+    expect(lstatSync(path).isSymbolicLink()).toBe(true)
+    expect(existsSync(target)).toBe(false)
+  })
+
   test('valid runtime files are owner-only and concurrent child changes remain complete', () => {
     const { stateRoot } = privateRoot()
     const child = (pid: number) => ({ repo: 'o/r', pid, startedAt: String(pid), command: 'codex', issue: pid, action: 'plan' as const, owner: null, from: 'planning' as const })

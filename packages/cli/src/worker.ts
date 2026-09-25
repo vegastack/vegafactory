@@ -940,7 +940,8 @@ function readPrivateRecord(stateRoot: string, path: string): string | null {
 
 function replacePrivateRecord(stateRoot: string, path: string, text: string): void {
   ensurePrivateRecordRoot(stateRoot, true)
-  if (existsSync(path)) readPrivateRecord(stateRoot, path)
+  // lstat inside readPrivateRecord distinguishes a dangling symlink from absence.
+  readPrivateRecord(stateRoot, path)
   replaceFile(path, text)
   chmodSync(path, 0o600)
 }
@@ -976,7 +977,8 @@ export function recordRun(stateRoot: string, record: RunRecord) {
   ensurePrivateRecordRoot(stateRoot, true)
   withLock(stateRoot, () => {
     const path = runsPath(stateRoot)
-    if (existsSync(path)) readRuns(stateRoot, Number.MAX_SAFE_INTEGER)
+    // Always validate the leaf before append; existsSync reports a dangling link as missing.
+    readRuns(stateRoot, Number.MAX_SAFE_INTEGER)
     appendFileSync(path, JSON.stringify(record) + '\n', { mode: 0o600 })
     chmodSync(path, 0o600)
     const lines = readFileSync(path, 'utf8').split('\n').filter(Boolean)
