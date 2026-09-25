@@ -27,6 +27,7 @@ import { homedir, hostname, userInfo } from 'node:os'
 import { dirname, join, parse, posix, resolve, sep } from 'node:path'
 import { APP_ACTOR, APP_ID, HEARTBEAT_EVERY_MS, appIdentityConfig, claim, heartbeat, holderOf, machineName, nodeId, release, trustedFactory } from './claim.ts'
 import { defaultClonePath, factoryConfigPath, parseControlRoomKnob, readFactoryConfig, updateSettingsAtPath } from './control-room.ts'
+import { harnessInvocation } from './harness-session.ts'
 import { billingVariables, childEnvironment } from './env.ts'
 import { GhError, ghList, type GhResult, type GhRunner } from './gh.ts'
 import { assertRepo, cacheDir, readState, replaceFile, syncIssue, withLock, type CommentEntry, type GhIssue, type IssueEntry } from './issue-cache.ts'
@@ -2037,11 +2038,11 @@ const STAGE_OF: Record<string, string> = { plan: 'plan', implement: 'implement',
 // harness prompt — it is the worktree it is confined to, the branch it pushes, the step limit its
 // own process group enforces, and the ship guard in the hook, which asks through the issue rather
 // than a terminal (VSK_ASK_ROUTE). A run that cannot write is not unattended, it is stuck.
-export function agentArgs(policy: { harness: string; model: string | null; effort: string } | null, prompt: string): { tool: string; args: string[] } {
-  if (policy?.harness === 'codex') {
-    return { tool: 'codex', args: ['exec', '--dangerously-bypass-approvals-and-sandbox', ...(policy.model ? ['-c', `model=${policy.model}`] : []), '-c', `model_reasoning_effort=${policy.effort}`, prompt] }
-  }
-  return { tool: 'claude', args: ['-p', '--dangerously-skip-permissions', ...(policy?.model ? ['--model', policy.model] : []), ...(policy ? ['--effort', policy.effort] : []), prompt] }
+export function agentArgs(policy: { harness: string; model: string | null; effort: string } | null, prompt: string, sessionId: string | null = null) {
+  return harnessInvocation({
+    harness: policy?.harness === 'codex' ? 'codex' : 'claude', prompt, sessionId,
+    model: policy?.model ?? null, effort: policy?.effort ?? 'high', worker: true,
+  })
 }
 
 interface Exec { code: number | null; stdout: string; stderr: string; timedOut: boolean; error?: string }
@@ -2059,13 +2060,13 @@ const WATCHDOG = '"$@" & job=$!; { sleep "$VF_LIMIT" & dog=$!; wait "$dog"; kill
 
 // One child, in its own process group so a stuck step is killed with everything it started. Only
 // the tail of its output is kept: the record is bounded and the output never reaches the issue.
-function execTool(tool: string, args: string[], options: { cwd: string; env: NodeJS.ProcessEnv; timeoutMs: number; onStart?: (pid: number, command: string) => void }): Promise<Exec> {
+function execTool(tool: string, args: string[], options: { cwd: string; env: NodeJS.ProcessEnv; timeoutMs: number; input?: string; onStart?: (pid: number, command: string) => void }): Promise<Exec> {
   return new Promise((resolve) => {
     const child = spawn('sh', ['-c', WATCHDOG, 'vegafactory-worker', tool, ...args], {
       // Half a minute behind this process's own timer, so the backstop only ever fires for an
       // orphan and a killed step is reported as killed rather than as an exit code.
       cwd: options.cwd, env: { ...options.env, VF_LIMIT: String(Math.ceil(options.timeoutMs / 1000) + 30) },
-      stdio: ['ignore', 'pipe', 'pipe'], detached: true,
+      stdio: ['pipe', 'pipe', 'pipe'], detached: true,
     })
     if (child.pid) options.onStart?.(child.pid, tool)
     let stdout = ''
@@ -2078,6 +2079,8 @@ function execTool(tool: string, args: string[], options: { cwd: string; env: Nod
     const keep = (text: string, chunk: unknown) => (text + String(chunk)).slice(-8192)
     child.stdout.on('data', (chunk) => { stdout = keep(stdout, chunk) })
     child.stderr.on('data', (chunk) => { stderr = keep(stderr, chunk) })
+    child.stdin.on('error', () => {})
+    child.stdin.end(options.input ?? '')
     child.on('error', (error) => { clearTimeout(timer); resolve({ code: null, stdout, stderr, timedOut, error: error.message }) })
     child.on('close', (code) => { clearTimeout(timer); resolve({ code, stdout, stderr, timedOut }) })
   })
@@ -2125,14 +2128,14 @@ export function defaultRunStep(env: NodeJS.ProcessEnv, { exec = execTool, timeou
   return async (step, context) => {
     const started = Date.now()
     const policy = stagePolicy(context.devMd, STAGE_OF[step.action] ?? 'implement')
-    const { tool, args } = agentArgs(policy, stepPrompt(step))
+    const { tool, args, stdin } = agentArgs(policy, stepPrompt(step))
     const cwd = workingDir(context.root, step.number) ?? context.root
     // Nobody is at the keyboard, so a round of questions goes to the issue and waits there for the
     // operator — dev-setup's references/ask-route.md, where VSK_ASK_ROUTE is the first step.
     // The limit arrives with the run rather than with the step function, so a roster change lands
     // on the next run instead of the next restart.
     const limit = context.timeoutMs ?? timeoutMs
-    const child = await exec(tool, args, { cwd, env: childRunEnvironment(env, context.token, true), timeoutMs: limit, onStart: context.onStart })
+    const child = await exec(tool, args, { cwd, env: childRunEnvironment(env, context.token, true), timeoutMs: limit, input: stdin, onStart: context.onStart })
     const ms = Date.now() - started
     const text = `${child.stderr}\n${child.stdout}`
     if (child.timedOut) return { outcome: 'killed', note: `${tool} ran past the ${limit / 60_000}-minute step limit and was stopped`, ms }

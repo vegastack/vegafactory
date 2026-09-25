@@ -71,7 +71,7 @@ const finding = (id: string, severity = 'must-fix', extra: Record<string, unknow
   ({ id, axis: 'bugs', severity, file: 'src/app.ts', line: 3, issue: `problem ${id}`, fix: `fix ${id}`, ...extra })
 const verdict = (findings: unknown[]) => ({ verdict: findings.some((f) => (f as { severity: string }).severity === 'must-fix') ? 'needs-fixes' : 'clean', findings })
 const codexReply = (result: unknown, session = '019a0000-0000-7000-8000-000000000001'): Reply =>
-  ({ output: JSON.stringify(result), stderr: `OpenAI Codex\n--------\nsession id: ${session}\n--------\n` })
+  ({ output: JSON.stringify(result), stdout: JSON.stringify({ type: 'thread.started', thread_id: session }) + '\n' })
 const claudeReply = (result: unknown, session = 'c1a0de00-0000-4000-8000-000000000001'): Reply =>
   ({ stdout: JSON.stringify({ type: 'result', is_error: false, session_id: session, result: '', structured_output: result }) })
 
@@ -144,7 +144,7 @@ describe('packet and command line', () => {
     const dry = JSON.parse(text)
     expect(dry.commands).toHaveLength(1)
     const argv = dry.commands[0].command as string[]
-    expect(argv.slice(0, 4)).toEqual(['codex', 'exec', '-s', 'read-only'])
+    expect(argv.slice(0, 5)).toEqual(['codex', 'exec', '--json', '-s', 'read-only'])
     expect(argv).toContain('--output-schema')
     expect(argv.join(' ')).toContain('-c model=gpt-5.6 -c model_reasoning_effort=xhigh')
     expect(argv.at(-1)).toBe('-')
@@ -291,7 +291,7 @@ describe('fix rounds', () => {
     expect(code).toBe(0)
     expect(text).toContain('resumed')
     const second = calls()[1]!
-    expect(second.args.slice(0, 5)).toEqual(['exec', 'resume', '-c', 'sandbox_mode=read-only', '-c'])
+    expect(second.args.slice(0, 6)).toEqual(['exec', 'resume', '--json', '-c', 'sandbox_mode=read-only', '-c'])
     expect(second.args).toContain('019a0000-0000-7000-8000-000000000001')
     expect(second.args).not.toContain('-s')
     expect(second.stdin).toContain('Open findings from your last round: F1.')
@@ -330,7 +330,7 @@ describe('fix rounds', () => {
     const { code } = await review(['--reviewer', 'codex'], { machine: 'laptop' })
     expect(code).toBe(0)
     const second = calls()[1]!
-    expect(second.args.slice(0, 4)).toEqual(['exec', '-s', 'read-only', '-c'])
+    expect(second.args.slice(0, 5)).toEqual(['exec', '--json', '-s', 'read-only', '-c'])
     expect(second.stdin).toContain('## Findings from the previous round')
     expect(second.stdin).toContain('"id": "F1"')
     expect(second.stdin).toContain('## Acceptance criteria')
@@ -539,7 +539,7 @@ describe('rounds across machines', () => {
     commit('fix2.ts', 'b\n')
     const { code } = await review(['--reviewer', 'codex'], { machine: 'mini' })
     expect(code).toBe(0)
-    expect(calls()[2]!.args.slice(0, 3)).toEqual(['exec', '-s', 'read-only'])
+    expect(calls()[2]!.args.slice(0, 4)).toEqual(['exec', '--json', '-s', 'read-only'])
     expect(reviewComments()).toHaveLength(1)
     expect(reviewComments()[0]!.body).toContain('type=review cycle=1 round=3')
     expect(readState().round).toBe(3)
