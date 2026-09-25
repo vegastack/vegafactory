@@ -7,14 +7,10 @@
   { "query": "the reviewer found 3 must-fixes, run the fix loop and re-review", "should_trigger": true },
   { "query": "the review handed back after round 3 — what now?", "should_trigger": true },
   { "query": "does this implementation actually match the brief?", "should_trigger": true },
-  { "query": "scan our skills for vulnerabilities before I push", "should_trigger": false, "ambiguous_with": ["skill-scan"] },
-  { "query": "skillspector says skill-maintainer is HIGH - is that real?", "should_trigger": false, "ambiguous_with": ["skill-scan"] },
-  { "query": "triage these security scanner findings on the branch", "should_trigger": true, "ambiguous_with": ["skill-scan"] },
   { "query": "review my plan before I approve it", "should_trigger": false, "ambiguous_with": ["dev-plan"] },
   { "query": "should we add Redis here - review the architecture", "should_trigger": false, "ambiguous_with": ["dev-architect"] },
   { "query": "merge it and ship", "should_trigger": false, "ambiguous_with": ["dev-ship"] },
   { "query": "implement issue 12 end to end", "should_trigger": false, "ambiguous_with": ["dev-implement"] },
   { "query": "review this PR in the kubernetes repo", "should_trigger": false },
-  { "query": "is this third-party skill I downloaded safe to install", "should_trigger": false, "ambiguous_with": ["skill-scan"] },
   { "query": "audit this app for design-system drift", "should_trigger": false }
 ]

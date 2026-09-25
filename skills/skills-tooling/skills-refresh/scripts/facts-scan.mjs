@@ -27,13 +27,7 @@ export function parseDate(text) {
   return back.getUTCDate() === day && back.getUTCMonth() === month - 1 && back.getUTCFullYear() === year ? at : null
 }
 
-/**
- * Reads the watchlist's one table: tool, facts file section, official pages.
- * Every message below is concatenated rather than templated: a template literal that opens on
- * its interpolation degrades SkillSpector's tool-misuse analyzer for the whole skill, and a
- * degraded scan scores higher than a clean one while proving nothing (skill-maintainer's
- * standards.md, known behaviours). Same strings, same behaviour, a scan that finishes.
- */
+/** Reads the watchlist's one table: tool, facts file section, official pages. */
 export function readWatchlist(text) {
   const rows = []
   const problems = []

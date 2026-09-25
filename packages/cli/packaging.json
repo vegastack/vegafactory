@@ -96,12 +96,6 @@
     "references/standards.md",
     "references/release-ops.md"
   ],
-  "skill-scan": [
-    "SKILL.md",
-    "agents/openai.yaml",
-    "scripts/lib/skillspector.mjs",
-    "scripts/skill-scan.mjs"
-  ],
   "skillify": [
     "SKILL.md",
     "agents/openai.yaml",

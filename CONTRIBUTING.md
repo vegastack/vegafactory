@@ -14,26 +14,9 @@ bun run check          # everything; the merge queue runs this
 bun run build      # builds the CLI and syncs the skill copy into packages/cli
 ```
 
-`bun install` enables the commit-msg hook, which runs `check:fast` on every commit and skips `wip:` checkpoints. Pull requests run the fast checks and affected tests; the merge queue runs the full suite, a packed-tarball smoke test and the skill scan once, on main plus your PR. Nothing reaches main except through the queue.
+`bun install` enables the commit-msg hook, which runs `check:fast` on every commit and skips `wip:` checkpoints. Pull requests run the fast checks and affected tests; the merge queue runs the full suite and a packed-tarball smoke test once, on main plus your PR. Nothing reaches main except through the queue.
 
 `npx @vegastack/vegafactory@latest init` sets up the rest of the machine — the CLI and skills for Claude Code and Codex, and this repository's hooks — if you have not run it already.
-
-### Scanning the skills
-
-Every skill this repo ships is scanned by [NVIDIA SkillSpector](https://github.com/NVIDIA/skillspector) in the merge queue, from one hash-locked commit run with `--no-provision`. A local run is the opposite by design: under dev.md's `skillspector-update: auto` the guard installs and upgrades the scanner through whatever channel holds it. You don't need it locally; to investigate a finding (Python 3.12):
-
-```sh
-uv tool install git+https://github.com/NVIDIA/skillspector.git
-bun run build && node skills/skills-tooling/skill-scan/scripts/skill-scan.mjs --json
-```
-
-Run it from the repo root: with no `--root` it reads the `skill-scan:` knob from `.vegastack/dev.md` and applies `.vegastack/skillspector-baseline.json` by convention. A profile it cannot read is an error, not a skip — the guard refuses rather than quietly passing from the wrong directory.
-
-The guard locates SkillSpector through whatever channel installed it (uv, brew, pipx) and runs it by absolute path, so it is found even when your shell's `PATH` does not have it. Under `.vegastack/dev.md`'s `skillspector-update: auto` it also installs it when absent and upgrades it before each scan, falling back to the installed copy on any failure — so the command above is a one-time convenience rather than a prerequisite. Set `skillspector-update: notify` to only be told what upstream published, or `off` to never touch the network; `--no-provision` leaves the machine alone for one run.
-
-The guard still refuses (exit 2) when the binary cannot be found at all, rather than passing quietly. It blocks on any unsuppressed **HIGH or CRITICAL** finding, never on the aggregate risk score — a skills repo documents the mechanics the scanner matches on, so the score says more about our subject matter than our risk. Build first: the knob names `packages/cli/skill/`, because the authored tree's unpackaged `tests/` fixtures are deliberately adversarial.
-
-Suppressions live in `.vegastack/skillspector-baseline.json`. Adding one is a security decision needing the maintainer's word, scoped as narrowly as its cause, with a `reason` carrying a **"Still flag if:"** clause the guard enforces. Widening a rule to make the guard green is the failure mode, not the fix.
 
 ## How work moves here
 
@@ -54,11 +37,11 @@ Everything above is described for users in the [README](README.md), command by c
 | `skills/` | Authored skill content — the single source of truth. Edit here. A skill sits at `skills/<name>/` or, inside a group, at `skills/<group>/<name>/` — one level, never deeper. |
 | `skills/dev/` | The dev-workflow group (setup, intake, plan, architect, implement, debug, review, ship, status — which also holds the chronicle): a `GROUP.md` plus nine skills, each with `SKILL.md`, references, deterministic scripts where they earn them, tests. |
 | `skills/factory/` | The org group: `vegafactory-setup`, which bootstraps and maintains the control room whose defaults every repo's dev profile layers on. |
-| `skills/skills-tooling/` | The skills-about-skills group — tools that operate on agent skills themselves: `skill-scan`, the SkillSpector guard and its suppression baseline, and `skills-refresh`, the sweep that re-verifies the dated facts the dev skills pin. |
+| `skills/skills-tooling/` | The skills-about-skills group — currently `skills-refresh`, which re-verifies the dated facts the dev skills pin. |
 | `skills/repo-tooling/` | The skills that only make sense inside this repository: `skillify`, the skill factory and auditor, and `skill-maintainer`, the standards and release operations. Both are repo-only, so `add --all` skips them. |
 | `packages/cli/` | The `@vegastack/vegafactory` installer. `packages/cli/skill/` and `skill-integrity.json` are **generated at build** from `skills/` — never edit or commit them. |
 | `packages/cli/repo-only.json` | The skills `add --all` skips because they only make sense inside this repository. Hand-maintained; validated by the build. |
-| `.vegastack/` | The project's own instance of the workflow: `dev.md` (the canonical process doc — release runbook, versioning, rollback), `decisions.md` (the decision register), `chronicle.md` (the append-only story) and `skillspector-baseline.json` (audited skill-scan suppressions). `.vegastack/.tmp/` and `.vegastack/.worktrees/` are working state and are gitignored. |
+| `.vegastack/` | The project's own instance of the workflow: `dev.md` (the canonical process doc — release runbook, versioning, rollback), `decisions.md` (the decision register), and `chronicle.md` (the append-only story). `.vegastack/.tmp/` and `.vegastack/.worktrees/` are working state and are gitignored. |
 
 ## Never commit generated files
 

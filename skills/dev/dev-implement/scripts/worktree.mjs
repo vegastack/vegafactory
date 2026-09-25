@@ -23,16 +23,7 @@ import { findMarkerComment, ghJson, parseFlags, renderResult } from './lib/gh.mj
 
 const WORKTREES_DIR = '.vegastack/.worktrees';
 const SLUG_MAX = 40;
-// stdio mode for a discarded fd, hoisted out of quote-adjacency: SkillSpector reads the
-// bare word beside its own closing quote as a removal cue and fails closed on the whole
-// file (skill-maintainer's standards.md, known behaviours). Same value, same behaviour.
-const DISCARD = 'ignore';
-
-// Located strings are concatenated, never assigned as template literals:
-// SkillSpector's static parser trips on the latter (see skillify's
-// trigger-check.mjs) and every file carrying that construct needs its own
-// coverage acceptance.
-const at = (where, message) => where + ': ' + message;
+const at = (where, message) => `${where}: ${message}`;
 
 // An issue title comes from GitHub and reaches an operator's terminal through
 // a block message. Two kinds of character in it are dangerous and neither is
@@ -279,7 +270,7 @@ export function isPastRetention({ lastCommitAt, ledgerUpdatedAt, now, retentionM
 // eat and a patch-id would then miss.
 export function git(cwd, args, { input, raw = false } = {}) {
   try {
-    const out = execFileSync('git', args, { cwd, encoding: 'utf8', input, stdio: [input === undefined ? DISCARD : 'pipe', 'pipe', 'pipe'] });
+    const out = execFileSync('git', args, { cwd, encoding: 'utf8', input, stdio: [input === undefined ? 'ignore' : 'pipe', 'pipe', 'pipe'] });
     return { ok: true, out: raw ? out : out.trim() };
   } catch (error) {
     const stderr = error.stderr?.toString().trim() || error.message;

@@ -62,8 +62,9 @@ test('every documented group count and inventory matches the bundle', async () =
   expect(readme).toContain(`The issue-driven development workflow: ${NUMBER_WORDS[members('dev')]} stages`)
 })
 
-// A retirement that drops the skill but not its tombstone leaves an installed copy behind.
-test('a name that left the bundle has a tombstone, and a tombstone names no live skill', async () => {
+// Named tombstones carry replacement guidance; generic receipt-owned orphans are swept by the
+// installer without leaving a permanent catalog entry.
+test('a tombstone names no live skill and its replacement exists', async () => {
   const retired = JSON.parse(read('packages/cli/retired.json')) as Record<string, { group: string; replacedBy: string }>
   const { discoverSkills } = await import('../scripts/lib/skills.mjs')
   const skills = discoverSkills(join(root, 'skills')) as Map<string, unknown>
