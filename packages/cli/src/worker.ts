@@ -1005,7 +1005,8 @@ export function readRuns(stateRoot: string, limit = 20): RunRecord[] {
 }
 
 export interface HousekeepingState extends HousekeepingDocument {
-  running: { pid: number; startedAt: string; command: 'worker-housekeeping'; startedAtMs: number } | null
+  running: { pid: number; startedAt: string; command: 'worker-housekeeping'; startedAtMs: number;
+    board: { pid: number; startedAt: string; deadlineAt: number } | null } | null
   at: string | null
 }
 
@@ -1021,9 +1022,16 @@ function checkedHousekeeping(value: unknown, path: string): HousekeepingState {
     if (!(row.at === null || typeof row.at === 'string' && new Date(row.at).toISOString() === row.at)) throw new Error('invalid advisory time')
     if (row.running !== null) {
       const running = row.running
-      if (!running || typeof running !== 'object' || Object.keys(running).sort().join(',') !== ['pid', 'startedAt', 'command', 'startedAtMs'].sort().join(',')
+      if (!running || typeof running !== 'object' || Object.keys(running).sort().join(',') !== ['pid', 'startedAt', 'command', 'startedAtMs', 'board'].sort().join(',')
         || !Number.isSafeInteger(running.pid) || Number(running.pid) <= 1 || typeof running.startedAt !== 'string' || !running.startedAt
         || running.command !== 'worker-housekeeping' || !Number.isSafeInteger(running.startedAtMs) || Number(running.startedAtMs) <= 0) throw new Error('invalid process identity')
+      if (running.board !== null) {
+        const board = running.board
+        if (!board || typeof board !== 'object' || Object.keys(board).sort().join(',') !== ['pid', 'startedAt', 'deadlineAt'].sort().join(',')
+          || !Number.isSafeInteger(board.pid) || Number(board.pid) <= 1 || board.pid === running.pid
+          || typeof board.startedAt !== 'string' || !board.startedAt || !Number.isSafeInteger(board.deadlineAt)
+          || Number(board.deadlineAt) < Number(running.startedAtMs)) throw new Error('invalid board process identity')
+      }
     }
   } catch (error) { throw new WorkerRecordError('malformed', `${path} is malformed: ${(error as Error).message}`) }
   return row as HousekeepingState
@@ -1243,12 +1251,43 @@ export function stopGroup(pid: number, signal: NodeJS.Signals = 'SIGTERM'): bool
   }
 }
 
+async function stopPreviewGroup(board: NonNullable<NonNullable<HousekeepingState['running']>['board']>, deps: {
+  stop?: (pid: number, signal: NodeJS.Signals) => boolean; start?: ProcessStart; alive?: ProcessAlive; wait?: (ms: number) => Promise<void>
+} = {}): Promise<string | null> {
+  const start = deps.start ?? processStart
+  const alive = deps.alive ?? processAlive
+  const wait = deps.wait ?? (ms => new Promise<void>(resolvePromise => setTimeout(resolvePromise, ms)))
+  let identity = processIdentity(board, start, alive)
+  if (identity === 'unknown') return 'the board preview process identity cannot be proved'
+  if (identity === 'matching') {
+    if (!(deps.stop ?? stopGroup)(board.pid, 'SIGKILL')) return 'the board preview process group could not be stopped'
+    for (let attempt = 0; attempt < 20; attempt++) {
+      await wait(50)
+      identity = processIdentity(board, start, alive)
+      if (identity === 'gone') break
+    }
+    if (identity !== 'gone') return 'the board preview process group did not stop within one second'
+    return null
+  }
+  // A vanished leader may have left its watchdog or a git/gh descendant in the group. Wait for
+  // the recorded self-kill deadline; never signal a group whose leader identity can no longer be
+  // proved, because its group id may have been reused by another process.
+  const remaining = Math.min(8_000, Math.max(0, board.deadlineAt + 500 - Date.now()))
+  if (remaining) await wait(remaining)
+  try { process.kill(-board.pid, 0); return 'the board preview group may still be active after its deadline' }
+  catch (error) { return (error as NodeJS.ErrnoException).code === 'ESRCH' ? null : 'the board preview group could not be inspected' }
+}
+
 export async function stopRecordedHousekeeping(stateRoot: string, deps: {
   stop?: (pid: number, signal: NodeJS.Signals) => boolean; start?: ProcessStart; alive?: ProcessAlive; wait?: (ms: number) => Promise<void>
 } = {}): Promise<{ ok: boolean; reason: string | null }> {
   const state = readHousekeeping(stateRoot)
   const running = state.running
   if (!running) return { ok: true, reason: null }
+  if (running.board) {
+    const boardProblem = await stopPreviewGroup(running.board, deps)
+    if (boardProblem) return { ok: false, reason: boardProblem }
+  }
   let identity = processIdentity(running, deps.start ?? processStart, deps.alive ?? processAlive)
   if (identity === 'unknown') return { ok: false, reason: 'the prior housekeeping process identity cannot be proved' }
   if (identity === 'matching') {
@@ -2325,7 +2364,7 @@ export function startHousekeeping(input: {
   const pid = child.pid
   const startedAt = (input.start ?? processStart)(pid)
   if (!startedAt) { (input.stop ?? stopGroup)(pid, 'SIGKILL'); throw new Error('housekeeping process identity could not be proved') }
-  const running = { pid, startedAt, command: 'worker-housekeeping' as const, startedAtMs: now() }
+  const running = { pid, startedAt, command: 'worker-housekeeping' as const, startedAtMs: now(), board: null }
   try { writeHousekeeping(input.stateRoot, before, { ...before, running }) }
   catch (error) { (input.stop ?? stopGroup)(pid, 'SIGKILL'); throw error }
   let stdout = ''
@@ -2340,15 +2379,25 @@ export function startHousekeeping(input: {
     oversized ||= reason === 'oversized'
     ;(input.stop ?? stopGroup)(pid, 'SIGKILL')
   }
-  run.stop = () => { if (!run.settled) signal('stopped') }
+  run.stop = () => {
+    if (run.settled) return
+    try {
+      const board = readHousekeeping(input.stateRoot).running?.board
+      if (board && processIdentity(board, input.start ?? processStart, processAlive) === 'matching') {
+        ;(input.stop ?? stopGroup)(board.pid, 'SIGKILL')
+      }
+    } catch { /* the private record remains for a fail-closed restart */ }
+    signal('stopped')
+  }
   const timer = setTimeout(() => signal('timed out'), deadlineMs)
   child.stdout.on('data', chunk => { stdout += String(chunk); if (Buffer.byteLength(stdout) > 128 * 1024) signal('oversized') })
   child.stderr.on('data', chunk => { stderr = (stderr + String(chunk)).slice(-400) })
   run.done = new Promise(resolvePromise => {
-    const finish = (code: number | null, error?: string) => {
-      if (run.settled) return
+    let finishing = false
+    const finish = async (code: number | null, error?: string) => {
+      if (finishing) return
+      finishing = true
       clearTimeout(timer)
-      run.settled = true
       let document: HousekeepingDocument
       try {
         if (stopped || timedOut || oversized || error) throw new Error(error ?? (stopped ? 'housekeeping stopped' : timedOut ? 'housekeeping timed out' : 'housekeeping output exceeded its bound'))
@@ -2363,16 +2412,29 @@ export function startHousekeeping(input: {
       }
       let state: HousekeepingState = { ...document, running: null, at: new Date(now()).toISOString() }
       try {
-        const latest = readHousekeeping(input.stateRoot)
-        if (latest.running?.pid === pid && latest.running.startedAt === startedAt) writeHousekeeping(input.stateRoot, latest, state)
-        else state = latest
+        let latest = readHousekeeping(input.stateRoot)
+        if (latest.running?.pid === pid && latest.running.startedAt === startedAt) {
+          if (latest.running.board) {
+            const problem = await stopPreviewGroup(latest.running.board, { stop: input.stop, start: input.start })
+            if (problem) {
+              input.onLine(`housekeeping record unavailable: ${problem}`)
+              resolvePromise({ ...latest, complete: false })
+              return
+            }
+            const cleared = { ...latest, running: { ...latest.running, board: null } }
+            writeHousekeeping(input.stateRoot, latest, cleared)
+            latest = cleared
+          }
+          writeHousekeeping(input.stateRoot, latest, state)
+        } else state = latest
       } catch (failure) { input.onLine(`housekeeping record unavailable: ${(failure as Error).message}`) }
+      run.settled = true
       for (const advisory of state.advisories) input.onLine(`${advisory.repo}#${advisory.issue}: inspect worktree ${advisory.worktree} (${advisory.reason}) with bare vegafactory worktree prune`)
       for (const missing of state.unavailable) input.onLine(`${missing.repo}: housekeeping unavailable (${missing.reason})`)
       resolvePromise(state)
     }
-    child.once('error', error => finish(null, error.message))
-    child.once('close', code => finish(code))
+    child.once('error', error => { void finish(null, error.message) })
+    child.once('close', code => { void finish(code) })
   })
   child.stdin.end(JSON.stringify(request))
   return run
@@ -3848,6 +3910,10 @@ export async function runWorker(argv: string[], deps: CliDeps = {}): Promise<num
       }
       if (recordedHousekeeping.running && processIdentity(recordedHousekeeping.running, deps.start ?? processStart, deps.alive ?? processAlive) === 'unknown') {
         print({ ok: false, unit: path, reason: 'housekeeping process identity is unknown' }, 'refused: housekeeping process identity is unknown; the service was left loaded')
+        return 2
+      }
+      if (recordedHousekeeping.running?.board && processIdentity(recordedHousekeeping.running.board, deps.start ?? processStart, deps.alive ?? processAlive) === 'unknown') {
+        print({ ok: false, unit: path, reason: 'board preview process identity is unknown' }, 'refused: board preview process identity is unknown; the service was left loaded')
         return 2
       }
       const run = deps.run ?? probe

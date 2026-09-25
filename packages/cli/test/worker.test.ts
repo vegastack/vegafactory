@@ -2252,7 +2252,7 @@ describe('machine-global runtime records fail closed', () => {
   test('a recorded housekeeping process is stopped by proved identity, while unknown identity stays untouched', async () => {
     const { stateRoot } = privateRoot()
     const absent = readHousekeeping(stateRoot)
-    const running = { pid: 12345, startedAt: 'the original process', command: 'worker-housekeeping' as const, startedAtMs: Date.now() }
+    const running = { pid: 12345, startedAt: 'the original process', command: 'worker-housekeeping' as const, startedAtMs: Date.now(), board: null }
     writeHousekeeping(stateRoot, absent, { ...absent, running })
     const stopped: number[] = []
     expect(await stopRecordedHousekeeping(stateRoot, { start: () => null, alive: () => null, stop: pid => { stopped.push(pid); return true } })).toMatchObject({ ok: false })
@@ -2264,6 +2264,32 @@ describe('machine-global runtime records fail closed', () => {
     })).toEqual({ ok: true, reason: null })
     expect(stopped).toEqual([12345])
     expect(readHousekeeping(stateRoot).running).toBeNull()
+  })
+
+  test('restart stops a proved board group before its outer housekeeping group', async () => {
+    const { stateRoot } = privateRoot()
+    const absent = readHousekeeping(stateRoot)
+    const outer = { pid: 12345, startedAt: 'outer start', command: 'worker-housekeeping' as const,
+      startedAtMs: Date.now(), board: { pid: 23456, startedAt: 'board start', deadlineAt: Date.now() + 1000 } }
+    writeHousekeeping(stateRoot, absent, { ...absent, running: outer })
+    const stopped: number[] = []
+    const seen = new Map<number, number>()
+    const start = (pid: number) => {
+      const turn = (seen.get(pid) ?? 0) + 1
+      seen.set(pid, turn)
+      return turn === 1 ? pid === outer.pid ? outer.startedAt : outer.board.startedAt : 'a different process'
+    }
+    expect(await stopRecordedHousekeeping(stateRoot, { start, alive: () => true,
+      stop: pid => { stopped.push(pid); return true }, wait: async () => {} })).toEqual({ ok: true, reason: null })
+    expect(stopped).toEqual([outer.board.pid, outer.pid])
+    expect(readHousekeeping(stateRoot).running).toBeNull()
+
+    writeHousekeeping(stateRoot, readHousekeeping(stateRoot), { ...absent, running: outer })
+    const refused = await stopRecordedHousekeeping(stateRoot, { start: pid => pid === outer.board.pid ? null : outer.startedAt,
+      alive: () => null, stop: pid => { stopped.push(pid); return true } })
+    expect(refused.ok).toBe(false)
+    expect(stopped).toEqual([outer.board.pid, outer.pid])
+    expect(readHousekeeping(stateRoot).running?.board).toEqual(outer.board)
   })
 
   test('one bounded housekeeping group records its identity and the exact exclusion snapshot', async () => {
@@ -3621,7 +3647,7 @@ describe('the command', () => {
   test('disable refuses an unprovable housekeeping process before unloading the unit', async () => {
     const stateRoot = join(home, '.vegafactory', 'worker')
     const before = readHousekeeping(stateRoot)
-    writeHousekeeping(stateRoot, before, { ...before, running: { pid: 91234, startedAt: 'unknown', command: 'worker-housekeeping', startedAtMs: Date.now() } })
+    writeHousekeeping(stateRoot, before, { ...before, running: { pid: 91234, startedAt: 'unknown', command: 'worker-housekeeping', startedAtMs: Date.now(), board: null } })
     const commands: string[] = []
     const result = await run(['disable'], {
       start: () => null, alive: () => null,

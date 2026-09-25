@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test'
 import { spawnSync } from 'node:child_process'
-import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
@@ -86,10 +86,45 @@ describe('worker housekeeping request and preview boundary', () => {
     const root = join(home, 'repo')
     mkdirSync(root)
     const script = join(home, 'preview.mjs')
-    writeFileSync(script, `process.stdout.write(JSON.stringify({blocks:[],warns:[],candidates:[{name:'7',removable:true,reasonCode:'merged',ageDays:1}]}));`)
-    expect(await previewHousekeepingBoard(board('o/r', root), {}, 1000, script)).toMatchObject({ candidates: [{ name: '7' }] })
+    const sideEffect = join(home, 'started')
+    writeFileSync(script, `import { writeFileSync } from 'node:fs'; writeFileSync(${JSON.stringify(sideEffect)}, 'ran'); process.stdout.write(JSON.stringify({blocks:[],warns:[],candidates:[{name:'7',removable:true,reasonCode:'merged',ageDays:1}]}));`)
+    let ranBeforeRecord = false
+    const group: number[] = []
+    expect(await previewHousekeepingBoard(board('o/r', root), {}, 1000, script, {
+      started: pid => { ranBeforeRecord = existsSync(sideEffect); group.push(pid) },
+      finished: pid => group.push(-pid),
+    })).toMatchObject({ candidates: [{ name: '7' }] })
+    expect(ranBeforeRecord).toBe(false)
+    expect(existsSync(sideEffect)).toBe(true)
+    expect(group[1]).toBe(-group[0]!)
     writeFileSync(script, 'setInterval(() => {}, 1000)')
     await expect(previewHousekeepingBoard(board('o/r', root), {}, 50, script)).rejects.toThrow('timed out')
+  })
+
+  test('timeout and oversized output stop the board group with its grandchild', async () => {
+    for (const mode of ['timeout', 'oversized'] as const) {
+      const home = mkdtempSync(join(tmpdir(), 'vf-housekeeping-descendant-'))
+      const root = join(home, 'repo')
+      mkdirSync(root)
+      const script = join(home, 'preview.mjs')
+      const pidFile = join(home, 'grandchild.pid')
+      writeFileSync(script, `import { spawn } from 'node:child_process'; import { writeFileSync } from 'node:fs'; const child = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' }); writeFileSync(${JSON.stringify(pidFile)}, String(child.pid)); ${mode === 'timeout' ? 'setInterval(() => {}, 1000)' : "process.stdout.write('x'.repeat(150000)); setInterval(() => {}, 1000)"};`)
+      const groups: number[] = []
+      await expect(previewHousekeepingBoard(board('o/r', root), {}, 250, script, {
+        started: pid => { groups.push(pid) }, finished: pid => { groups.push(-pid) },
+      })).rejects.toThrow(mode === 'timeout' ? 'timed out' : 'exceeded its bound')
+      expect(groups[0]).toBeGreaterThan(1)
+      expect(groups[1]).toBe(-groups[0]!)
+      expect(existsSync(pidFile)).toBe(true)
+      const pid = Number(readFileSync(pidFile, 'utf8'))
+      for (let attempt = 0; attempt < 40; attempt++) {
+        const state = spawnSync('ps', ['-p', String(pid), '-o', 'state='], { encoding: 'utf8' }).stdout.trim()
+        if (!state || state.startsWith('Z')) break
+        await new Promise(resolvePromise => setTimeout(resolvePromise, 10))
+      }
+      const state = spawnSync('ps', ['-p', String(pid), '-o', 'state='], { encoding: 'utf8' }).stdout.trim()
+      expect(state === '' || state.startsWith('Z')).toBe(true)
+    }
   })
 
   test('the internal command rejects malformed stdin as one JSON refusal', () => {

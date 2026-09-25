@@ -5,7 +5,7 @@ import { existsSync } from 'node:fs'
 import { basename, dirname, isAbsolute, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { appIdentityConfig } from './claim.ts'
-import { appKeyPath, workerRepositoriesDirectory } from './home.ts'
+import { appKeyPath, workerDirectory, workerRepositoriesDirectory } from './home.ts'
 import { canonicalRepository } from './worker-repo.ts'
 
 export const HOUSEKEEPING_DEADLINE_MS = 20_000
@@ -15,6 +15,8 @@ const OUTPUT_LIMIT = 128 * 1024
 export const MAX_ADVISORIES = 50
 const MAX_BOARDS = 20
 const MAX_EXCLUSIONS = 500
+
+export interface PreviewGroupHooks { started: (pid: number, deadlineAt: number) => void; finished: (pid: number) => void }
 
 export interface HousekeepingBoard { repo: string; root: string; excludeIssues: number[] }
 export interface HousekeepingRequest { schema: 1; deadlineAt: number; boards: HousekeepingBoard[] }
@@ -107,24 +109,37 @@ export function housekeepingPreviewArgs(board: HousekeepingBoard, script = workt
     ...(board.excludeIssues.length ? ['--exclude-issues', board.excludeIssues.join(',')] : []), '--json']
 }
 
-export async function previewHousekeepingBoard(board: HousekeepingBoard, env: NodeJS.ProcessEnv, budgetMs: number, script = worktreeScript()): Promise<PreviewResult> {
+// A repository preview is its own bounded process group. The parent records its identity before
+// sending the one-byte go signal; the group guard still kills git/gh if the parent disappears.
+const BOARD_WATCHDOG = `read ready || exit 2; "$@" </dev/null & job=$!; { trap 'kill "$dog" 2>/dev/null; exit 0' TERM INT; sleep "$VF_LIMIT" & dog=$!; wait "$dog"; kill -KILL 0; } </dev/null >/dev/null 2>&1 & guard=$!; wait "$job"; code=$?; kill "$guard" 2>/dev/null; wait "$guard" 2>/dev/null; exit "$code"`
+
+export async function previewHousekeepingBoard(board: HousekeepingBoard, env: NodeJS.ProcessEnv, budgetMs: number, script = worktreeScript(), hooks?: PreviewGroupHooks): Promise<PreviewResult> {
   const args = housekeepingPreviewArgs(board, script)
   return new Promise((resolvePromise, reject) => {
-    const child = spawn(process.execPath, args, {
+    const child = spawn('sh', ['-c', BOARD_WATCHDOG, 'vegafactory-board-preview', process.execPath, ...args], {
       cwd: board.root,
-      env: { ...env, VSK_WORKTREE_GH_TIMEOUT_MS: String(Math.max(1, budgetMs - 100)), VSK_WORKTREE_GIT_TIMEOUT_MS: String(Math.max(1, budgetMs - 100)) },
-      stdio: ['ignore', 'pipe', 'pipe'],
+      env: { ...env, VF_LIMIT: String(Math.ceil(budgetMs / 1000) + 1),
+        VSK_WORKTREE_GH_TIMEOUT_MS: String(Math.max(1, budgetMs - 100)), VSK_WORKTREE_GIT_TIMEOUT_MS: String(Math.max(1, budgetMs - 100)) },
+      stdio: ['pipe', 'pipe', 'pipe'], detached: true,
     })
+    child.on('error', () => {})
+    if (!child.pid) return reject(new Error('preview process did not start'))
+    const pid = child.pid
+    const killGroup = () => { try { process.kill(-pid, 'SIGKILL') } catch { child.kill('SIGKILL') } }
+    try { hooks?.started(pid, Date.now() + budgetMs + 1500) }
+    catch (error) { killGroup(); return reject(error) }
     let stdout = ''
     let stderr = ''
     let oversized = false
     let timedOut = false
-    const timer = setTimeout(() => { timedOut = true; child.kill('SIGKILL') }, budgetMs)
-    child.stdout.on('data', chunk => { stdout += String(chunk); if (Buffer.byteLength(stdout) > OUTPUT_LIMIT) { oversized = true; child.kill('SIGKILL') } })
+    const timer = setTimeout(() => { timedOut = true; killGroup() }, budgetMs)
+    child.stdout.on('data', chunk => { stdout += String(chunk); if (Buffer.byteLength(stdout) > OUTPUT_LIMIT) { oversized = true; killGroup() } })
     child.stderr.on('data', chunk => { stderr = (stderr + String(chunk)).slice(-400) })
+    child.stdin.on('error', () => {})
     child.on('error', error => { clearTimeout(timer); reject(error) })
     child.on('close', code => {
       clearTimeout(timer)
+      try { hooks?.finished(pid) } catch (error) { return reject(error) }
       if (timedOut) return reject(new Error('preview timed out'))
       if (oversized) return reject(new Error('preview output exceeded its bound'))
       let result: PreviewResult
@@ -135,6 +150,7 @@ export async function previewHousekeepingBoard(board: HousekeepingBoard, env: No
       if (code !== 0 && !result.blocks.length && !result.warns.length) return reject(new Error(`preview exited ${code}`))
       resolvePromise(result)
     })
+    child.stdin.end('go\n')
   })
 }
 
@@ -144,6 +160,7 @@ export async function runWorkerHousekeeping(request: HousekeepingRequest, deps: 
   tokenFor: (repo: string, budgetMs: number) => Promise<string>
   envForToken: (token: string) => NodeJS.ProcessEnv
   preview?: (board: HousekeepingBoard, env: NodeJS.ProcessEnv, budgetMs: number) => Promise<PreviewResult>
+  previewGroups?: PreviewGroupHooks
 }): Promise<HousekeepingDocument> {
   const now = deps.now ?? Date.now
   const advisories: HousekeepingAdvisory[] = []
@@ -155,7 +172,8 @@ export async function runWorkerHousekeeping(request: HousekeepingRequest, deps: 
     else unavailable.push({ repo, reason: text })
   }
   const seen = new Set<string>()
-  const preview = deps.preview ?? previewHousekeepingBoard
+  const preview = deps.preview ?? ((board: HousekeepingBoard, env: NodeJS.ProcessEnv, budgetMs: number) =>
+    previewHousekeepingBoard(board, env, budgetMs, worktreeScript(), deps.previewGroups))
   for (const board of request.boards) {
     if (now() >= request.deadlineAt) { markUnavailable(board.repo, 'deadline expired before preview'); continue }
     if (deps.reposRoot && board.root !== join(deps.reposRoot, board.repo.replace('/', '__'), 'repo')) {
@@ -206,9 +224,23 @@ export async function runHousekeepingCli(): Promise<number> {
     request = parseHousekeepingRequest(await readBoundedStdin())
     const env = process.env
     const app = appIdentityConfig(env)
-    const { appIdentity, childRunEnvironment } = await import('./worker.ts')
+    const { appIdentity, childRunEnvironment, processStart, readHousekeeping, writeHousekeeping } = await import('./worker.ts')
+    const stateRoot = workerDirectory({ env })
     const result = await runWorkerHousekeeping(request, {
       reposRoot: workerRepositoriesDirectory({ env }),
+      previewGroups: {
+        started: (pid, deadlineAt) => {
+          const startedAt = processStart(pid)
+          if (!startedAt) throw new Error('board preview process identity could not be proved')
+          const state = readHousekeeping(stateRoot)
+          if (!state.running || state.running.board) throw new Error('another board preview is still recorded')
+          writeHousekeeping(stateRoot, state, { ...state, running: { ...state.running, board: { pid, startedAt, deadlineAt } } })
+        },
+        finished: pid => {
+          const state = readHousekeeping(stateRoot)
+          if (state.running?.board?.pid === pid) writeHousekeeping(stateRoot, state, { ...state, running: { ...state.running, board: null } })
+        },
+      },
       tokenFor: async (repo, budgetMs) => {
         const controller = new AbortController()
         const timer = setTimeout(() => controller.abort(), budgetMs)
