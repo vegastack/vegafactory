@@ -4485,7 +4485,7 @@ describe('the caps reach what they limit', () => {
     for (const number of [1, 2, 3, 4]) gh.addIssue({ number, labels: ['planning', 'medium'] })
 
     const startsPerPass: number[] = []
-    const timeouts: (number | undefined)[] = []
+    const budgets: Array<{ timeout: number; deadline: number; observedAt: number }> = []
     const sleeps: number[] = []
     let pass = 0
     let started = 0
@@ -4494,7 +4494,7 @@ describe('the caps reach what they limit', () => {
       cwd: root, home, host: HOST, env: {}, out: () => {}, runner: gh.runner, now: () => gh.clock, git: clone => gitIn(clone),
       runStep: (async (_step, context) => {
         started++
-        timeouts.push(context.timeoutMs)
+        budgets.push({ timeout: context.timeoutMs!, deadline: context.deadlineAt!, observedAt: gh.clock })
         return { outcome: 'done' as const, note: '', ms: 1 }
       }) as RunStep,
       sleep: async (ms: number) => {
@@ -4510,8 +4510,15 @@ describe('the caps reach what they limit', () => {
     expect(code).toBe(0)
     // One run in the first pass because the row said one, three in the second because it said three.
     expect(startsPerPass.slice(0, 2)).toEqual([1, 3])
-    // Every run in a pass carries that pass's step limit, not the one the process started with.
-    expect(timeouts).toEqual([72 * 3_600_000, 4 * 3_600_000, 4 * 3_600_000, 4 * 3_600_000])
+    // The roster sets each run's cap; time spent reserving it is already spent when the agent
+    // starts, so it receives the exact remainder of that one absolute deadline.
+    const caps = [72 * 3_600_000, 4 * 3_600_000, 4 * 3_600_000, 4 * 3_600_000]
+    expect(budgets).toHaveLength(caps.length)
+    for (const [index, budget] of budgets.entries()) {
+      expect(budget.timeout).toBe(budget.deadline - budget.observedAt)
+      expect(budget.timeout).toBeGreaterThan(caps[index]! - 60_000)
+      expect(budget.timeout).toBeLessThanOrEqual(caps[index]!)
+    }
     // And the wait between passes is the poll the roster asked for, each time.
     expect(sleeps.slice(0, 2)).toEqual([60_000, 5 * 60_000])
   })
