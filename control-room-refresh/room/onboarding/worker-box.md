@@ -103,6 +103,8 @@ Re-run `vegafactory worker enable` to perform storage recovery. It stops the old
 
 When attended `worktree prune --write` reclaimed an issue checkout's `node_modules`, the worker runs that repository's declared `commands: setup` before its agent, within the same step deadline. Stop, disable, shutdown, and timeout stop the setup process group; any failure leaves the marker and starts no agent. A person returning to that checkout runs `vegafactory worktree prepare <issue>` and sees the exact setup command and outcome.
 
+`threads.json` in the same owner-only directory holds only issue conversation identifiers and the last-seen branch head, never prompts or transcripts. The worker resumes on the same node and head; a moved branch or machine starts a fresh conversation, and a missing local session gets one fresh retry inside the original step limit. This cache grants no claim or shipping permission. If it is malformed or unsafe, the worker refuses to overwrite it and names the file for inspection.
+
 Then the reboot drill: `sudo reboot`, wait for the box, and run every check above again **without logging anything in by hand**. A box that needs a human at the keyboard after a power cut is not always-on.
 
 On Linux, the logout drill is separate and the order matters. Log out every session for vf-worker and check from **another** account — logging back in first would start the service again and hide exactly the failure this is looking for:

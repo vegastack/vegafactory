@@ -9,6 +9,7 @@ import { machineName, trustedAuthors, trustedFactory, type Trusted } from './cla
 import { childEnvironment } from './env.ts'
 import { defaultRunner, ghRequest, type GhRunner } from './gh.ts'
 import { defaultBranch } from './guard-rules.ts'
+import { parseHarnessResult, sessionCommand, validSessionId } from './harness-session.ts'
 import { assertRepo, cacheDir, readBody, syncIssue, type CommentEntry } from './issue-cache.ts'
 import { parseStage } from '../../../skills/dev/dev-setup/scripts/effective-policy.mjs'
 import { currentHashes, detectRepo, latestOfType, locked, markerKeys, repoRoot, runIssue, snapshot, type Snapshot, type WriteContext } from './issue.ts'
@@ -302,7 +303,7 @@ export function reviewerArgs(reviewer: Reviewer, options: { schemaPath: string; 
     // A pinned model the account cannot use fails the run, so the policy's `default` pins nothing.
     const model = policy ? [...(policy.model ? ['-c', `model=${policy.model}`] : []), '-c', `model_reasoning_effort=${policy.effort}`] : []
     // `exec resume` has no --sandbox flag; the config key keeps the resumed run read-only.
-    const head = session ? ['exec', 'resume', '-c', 'sandbox_mode=read-only'] : ['exec', '-s', 'read-only']
+    const head = [...sessionCommand(reviewer, session), '--json', ...(session ? ['-c', 'sandbox_mode=read-only'] : ['-s', 'read-only'])]
     // The branch under review must not be able to run anything: `hooks={}` drops any inline hook
     // table, and marking this path untrusted skips the repo's whole `.codex/` layer (its config,
     // hooks and rules). `--dangerously-bypass-hook-trust` is exactly what is never passed.
@@ -312,7 +313,7 @@ export function reviewerArgs(reviewer: Reviewer, options: { schemaPath: string; 
   // --tools takes a list, so the next flag must follow it; the prompt goes on stdin. `--restricted`
   // ignores the user, project and local settings files — the project's hooks with them — and takes
   // away the tools that run code; the inline settings then supply an empty hook table of our own.
-  return ['-p', ...(session ? ['--resume', session] : []), '--restricted', '--strict-mcp-config', '--settings', '{"hooks":{}}',
+  return [...sessionCommand(reviewer, session), '--restricted', '--strict-mcp-config', '--settings', '{"hooks":{}}',
     '--tools', 'Read,Grep,Glob', '--output-format', 'json',
     '--json-schema', JSON.stringify(REVIEW_SCHEMA),
     ...(policy?.model ? ['--model', policy.model] : []), ...(policy ? ['--effort', policy.effort] : [])]
@@ -349,8 +350,7 @@ function parseJson(text: string): unknown {
 
 // Both tools name a session with a UUID. Anything else — an option, a stray word, a truncated
 // line — is not an id to hand back to `resume`, so the next round starts fresh instead.
-const SESSION_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
-export const sessionId = (value: string | null | undefined): string | null => (value && SESSION_ID.test(value) ? value : null)
+export const sessionId = validSessionId
 
 interface RunOutcome { ok: true; result: ReviewResult; session: string | null }
 interface RunFailure { ok: false; reason: string; auth?: boolean }
@@ -360,13 +360,13 @@ export function readRun(reviewer: Reviewer, stdout: string, stderr: string, outP
   let reply: unknown
   let session: string | null
   if (reviewer === 'codex') {
-    session = sessionId(/session id:\s*(\S+)/i.exec(stderr + '\n' + stdout)?.[1])
+    session = parseHarnessResult('codex', stdout, stderr).sessionId
     reply = parseJson(existsSync(outPath) ? readFileSync(outPath, 'utf8') : stdout)
   } else {
     const result = parseJson(stdout) as { session_id?: string; is_error?: boolean; structured_output?: unknown; result?: string } | undefined
     if (!result) return { ok: false, reason: 'claude printed no JSON result' }
     if (result.is_error) return { ok: false, reason: `claude reported an error: ${String(result.result ?? '').slice(0, 200)}` }
-    session = sessionId(result.session_id)
+    session = parseHarnessResult('claude', stdout, stderr).sessionId
     reply = result.structured_output ?? (typeof result.result === 'string' ? parseJson(result.result) : undefined)
   }
   const checked = validateReview(reply)
