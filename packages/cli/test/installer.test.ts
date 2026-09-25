@@ -456,6 +456,30 @@ describe('selecting a family', () => {
       expect(existsSync(join(project, '.claude/skills/dev-status'))).toBe(true)
     })
 
+    test('a group update sweeps an installer-owned orphan without a tombstone', async () => {
+      const project = join(temporary, 'orphan-sweep')
+      await mkdir(project, { recursive: true })
+      expect(run(temporary, ['skills', 'add', '--group', 'skills-tooling', '--agent', 'claude', '--dir', project, '--non-interactive']).exitCode).toBe(0)
+      const old = await installRetired(project, '.claude/skills', 'obsolete-example')
+
+      const result = run(temporary, ['skills', 'update', '--group', 'skills-tooling', '--agent', 'claude', '--dir', project, '--non-interactive'])
+      expect(result.exitCode).toBe(0)
+      expect(result.stdout.toString()).toContain('removed retired claude:')
+      expect(existsSync(old)).toBe(false)
+    })
+
+    test('a locally edited orphan without a tombstone is preserved', async () => {
+      const project = join(temporary, 'orphan-edited')
+      await mkdir(project, { recursive: true })
+      expect(run(temporary, ['skills', 'add', '--group', 'skills-tooling', '--agent', 'claude', '--dir', project, '--non-interactive']).exitCode).toBe(0)
+      const old = await installRetired(project, '.claude/skills', 'obsolete-example', true)
+
+      const result = run(temporary, ['skills', 'update', '--group', 'skills-tooling', '--agent', 'claude', '--dir', project, '--non-interactive'])
+      expect(result.exitCode).toBe(1)
+      expect(result.stdout.toString()).toContain('kept locally edited copy')
+      expect(existsSync(old)).toBe(true)
+    })
+
     test('a locally modified copy is kept and reported, like any edited copy', async () => {
       const project = join(temporary, 'retired-edited')
       await mkdir(project, { recursive: true })

@@ -1,6 +1,6 @@
 ---
 name: skills-refresh
-description: Re-verify the dated platform and harness facts the dev skills pin, and file what changed as issues. Use when asked to "refresh the skills", "check the pinned facts", "are our platform facts still true", "run the facts sweep", "what changed in Cloudflare/Next.js/Claude Code since we last checked", when a fact is older than the 60-day window, or when a scheduled refresh run starts. Not for editing skill prose (dev-implement builds the issues this files), scanning skills for vulnerabilities (skill-scan), authoring or auditing a skill (skillify), or architecture advice from those facts (dev-architect).
+description: Re-verify the dated platform and harness facts the dev skills pin, and file what changed as issues. Use when asked to "refresh the skills", "check the pinned facts", "are our platform facts still true", "run the facts sweep", "what changed in Cloudflare/Next.js/Claude Code since we last checked", when a fact is older than the 60-day window, or when a scheduled refresh run starts. Not for editing skill prose (dev-implement builds the issues this files), authoring or auditing a skill (skillify), or architecture advice from those facts (dev-architect).
 ---
 
 # skills-refresh
@@ -9,7 +9,7 @@ Act: read the sources, report what moved, and file it. This skill never edits a 
 
 Facts about other people's products go stale on their schedule, not ours. This skill re-reads the pinned ones against the vendor's own pages, writes one issue per real change, and posts a digest. The edits themselves are ordinary work: an issue, an ack, dev-implement. **Nothing here writes to `skills/`** — a sweep that edits what it also verifies is a sweep nobody can check.
 
-Nearest neighbors: `dev-architect` and `dev-setup` own the facts files this reads; `skillify` judges whether a skill is complete; `skill-scan` judges whether one is safe.
+Nearest neighbors: `dev-architect` and `dev-setup` own the facts files this reads; `skillify` judges whether a skill is complete.
 
 ## Routing
 

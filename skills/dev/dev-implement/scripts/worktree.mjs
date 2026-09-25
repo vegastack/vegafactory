@@ -25,7 +25,6 @@ import { findMarkerComment, ghJson, parseFlags, renderResult } from './lib/gh.mj
 
 const WORKTREES_DIR = '.vegastack/.worktrees';
 const SLUG_MAX = 40;
-// Prefix a diagnostic with the path whose check failed.
 const at = (where, message) => `${where}: ${message}`;
 
 // An issue title comes from GitHub and reaches an operator's terminal through

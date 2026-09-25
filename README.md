@@ -55,7 +55,7 @@ An always-on machine can work that loop for you. `vegafactory worker enable` tur
 
 **The factory keeps its own numbers and its own lessons.** `vegafactory stats` reads the harnesses' session logs for counts — turns, tokens, time, model, stage; never prompts or code — and `vegafactory dashboard` renders them as one offline page. `vegafactory learning` holds what sessions learned until you turn each into a dev.md line. `skills-refresh` re-checks the dated platform facts the skills pin and files what changed as issues.
 
-**Verification is three layers behind a merge queue.** The commit hook runs the fast checks, the build runs the tests a change can reach, and the merge queue runs everything once — full suite, packed-tarball smoke test and the skill scan — on main plus your PR.
+**Verification is three layers behind a merge queue.** The commit hook runs the fast checks, the build runs the tests a change can reach, and the merge queue runs everything once — full suite and packed-tarball smoke test — on main plus your PR.
 
 ## Glossary
 
@@ -121,11 +121,10 @@ Skills that work on this repository itself: they are not installed by --all, and
 
 ### Skills tooling
 
-Tools that work on agent skills themselves: scanning them for vulnerabilities, vetting the ones you did not write, and the suppression discipline behind both.
+Tools that maintain the dated facts agent skills rely on.
 
 | Skill | What it does | Docs |
 |---|---|---|
-| [skill-scan](skills/skills-tooling/skill-scan/) | Scans agent skills with NVIDIA SkillSpector and holds the suppression baseline: the Verify-gate guard, and the answer to "is this downloaded skill safe to install" | [SKILL.md](skills/skills-tooling/skill-scan/SKILL.md) |
 | [skills-refresh](skills/skills-tooling/skills-refresh/) | Re-verifies the dated platform and harness facts the dev skills pin: a watchlist, a 60-day sweep, one subagent per tool, and one issue per change — it never edits a skill itself | [SKILL.md](skills/skills-tooling/skills-refresh/SKILL.md) |
 
 ## Installing a few, or upgrading
@@ -157,22 +156,6 @@ npx @vegastack/vegafactory@latest skills add --group dev --global --force
 
 Volatile facts in skill references — versions, limits, vendor mechanisms — carry the date they were checked and an official source, and are re-checked when they pass 60 days.
 
-## Security
-
-**These skills are scanned before they ship.** Every skill in the bundle is checked by [NVIDIA SkillSpector](https://github.com/NVIDIA/skillspector) — 71 vulnerability patterns across prompt injection, data exfiltration, excessive agency, supply chain, and MCP-specific risks — in the merge queue, before any change reaches main, on the built bundle npm actually serves. The gate blocks on any unsuppressed HIGH or CRITICAL finding, never on the aggregate score. Suppressions are not a switch: each is a reviewed entry in [`.vegastack/skillspector-baseline.json`](.vegastack/skillspector-baseline.json) whose reason must say what would make the pattern a real finding again.
-
-**You can scan any skill the same way — including one you are about to install from someone else.** Agent skills execute with your agent's authority, so "who wrote this and what does it actually do" is a fair question to ask of any of them, ours included.
-
-```sh
-uv tool install git+https://github.com/NVIDIA/skillspector.git
-npx @vegastack/vegafactory skills add skill-scan --global
-node ~/.claude/skills/skill-scan/scripts/skill-scan.mjs --root path/to/some-skill
-```
-
-That path is the guard's location for a global Claude Code install; substitute your own surface (`~/.agents/skills/…` for Codex, `.claude/skills/…` or `.agents/skills/…` for a project-local copy). Point `--root` at one skill directory or at a directory of them, flat or one group deep. Exit `0` is clean, `1` clean with warnings, `2` blocked — either by a finding, reported with its rule, severity and `file:line`, or because the scan could not be trusted at all: the scanner missing, an unreadable report, a baseline that fails its own discipline, or **a `SKILL.md` discovery never reached** — buried too deep, dot-prefixed, or behind a symlink. That last one matters: an unscanned skill nobody mentions is indistinguishable from a clean one, so the guard names it and refuses. Without `--root` it reads the `skill-scan:` knob from your project's dev.md.
-
-A scanner hit is evidence, not a verdict — `dev-review`'s [security axis](skills/dev/dev-review/references/security-axis.md) sets out how to trace one before acting on it. Report vulnerabilities in these skills through [GitHub Security Advisories](SECURITY.md), not public issues.
-
 ## Develop
 
 ```sh
@@ -183,7 +166,7 @@ bun run check          # everything (the merge queue runs this)
 bun run build
 ```
 
-[CONTRIBUTING.md](CONTRIBUTING.md) has the repo layout, how to add a skill, the content-versioning rules, the no-generated-files policy and the scan's suppression discipline.
+[CONTRIBUTING.md](CONTRIBUTING.md) has the repo layout, how to add a skill, the content-versioning rules, and the no-generated-files policy.
 
 ## Contributing and support
 

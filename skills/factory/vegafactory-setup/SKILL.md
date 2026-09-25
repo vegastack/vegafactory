@@ -41,7 +41,7 @@ A board mirrors the state labels; it never drives them. This round records the b
 
 ## Seeding `groups/<g>/group.md`
 
-A group file carries one default for every knob a group can decide for a repo's `.vegastack/dev.md` — per-repo facts such as `repo:`, `skill-scan:`, `board:` and `control-room:` stay in the repo — so a repo that answers nothing else still gets a complete profile. Seed it from an existing repo's dev.md: confirmed knob lines transfer verbatim, including `harness-policy:`, because a group file uses the same parser. When no confirmed policy exists, use dev-setup's refresh-tracked harness selection and flag mapping in `references/harness-facts.md`; this skill does not freeze vendor model/version defaults. <!-- mirrored -->
+A group file carries one default for every knob a group can decide for a repo's `.vegastack/dev.md` — per-repo facts such as `repo:`, `board:` and `control-room:` stay in the repo — so a repo that answers nothing else still gets a complete profile. Seed it from an existing repo's dev.md: confirmed knob lines transfer verbatim, including `harness-policy:`, because a group file uses the same parser. When no confirmed policy exists, use dev-setup's refresh-tracked harness selection and flag mapping in `references/harness-facts.md`; this skill does not freeze vendor model/version defaults. <!-- mirrored -->
 
 A knob whose value differs between two repos in the group is a question, not an average: ask which one is the group's default, and let the other repo keep its hand edit — the precedence rule already protects it.
 

@@ -28,12 +28,12 @@ describe('the pending queue', () => {
     expect(pendingNote(root)).toBe(null)
     expect(existsSync(learningsPath(root))).toBe(false)
 
-    expect(run('add', '  the skill scan reads the   built bundle  ')).toBe(0)
+    expect(run('add', '  the package smoke test reads the   built bundle  ')).toBe(0)
     expect(out.join('\n')).toContain('recorded')
     expect(run('add', 'unset ANTHROPIC_BASE_URL before the tests')).toBe(0)
     // One line in, one lesson out, with the spacing tidied.
-    expect(queue()).toBe('- the skill scan reads the built bundle\n- unset ANTHROPIC_BASE_URL before the tests\n')
-    expect(readLessons(root).map((lesson) => lesson.text)).toEqual(['the skill scan reads the built bundle', 'unset ANTHROPIC_BASE_URL before the tests'])
+    expect(queue()).toBe('- the package smoke test reads the built bundle\n- unset ANTHROPIC_BASE_URL before the tests\n')
+    expect(readLessons(root).map((lesson) => lesson.text)).toEqual(['the package smoke test reads the built bundle', 'unset ANTHROPIC_BASE_URL before the tests'])
 
     // The same lesson twice is one lesson, and empty text is refused.
     addLesson(root, 'unset ANTHROPIC_BASE_URL before the tests')
@@ -44,7 +44,7 @@ describe('the pending queue', () => {
   })
 
   test('a lesson only reaches dev.md through the model: accept drops it and writes nothing', () => {
-    addLesson(root, 'the skill scan reads the built bundle')
+    addLesson(root, 'the package smoke test reads the built bundle')
     addLesson(root, 'unset ANTHROPIC_BASE_URL before the tests')
     const [first, second] = readLessons(root)
     expect(run('accept', first!.id)).toBe(0)
@@ -71,10 +71,10 @@ describe('the pending queue', () => {
   })
 
   test('the session-start note names the file, the one-line rule and the yes', () => {
-    addLesson(root, 'the skill scan reads the built bundle')
+    addLesson(root, 'the package smoke test reads the built bundle')
     const note = pendingNote(root)!
     expect(note).toContain(learningsPath(root))
-    expect(note).toContain('the skill scan reads the built bundle')
+    expect(note).toContain('the package smoke test reads the built bundle')
     expect(note).toContain('ONE .vegastack/dev.md line')
     expect(note).toContain("only on the user's explicit yes")
     expect(note).toContain('control-room lines stay manual')

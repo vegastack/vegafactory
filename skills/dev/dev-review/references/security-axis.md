@@ -2,18 +2,6 @@
 
 The security axis runs on every review; on a big or `risky` diff it runs as its own reviewer. This file is its method — how a suspicion becomes a finding, and how severity is earned. `vegafactory review` puts the short form in the packet; a same-tool fallback subagent gets this file's steps in full.
 
-## Scanner evidence — a finding's start, never its end
-
-A scanner report (skill-scan in the merge queue, or whatever the project runs) is an **input to this axis**, on the same footing as the diff. It is evidence, not a verdict:
-
-- **A scanner hit is a candidate finding.** It arrives with a rule ID and a `file:line` and nothing else — no data flow, no attacker, no exploitability. Promote it to a finding only after the Method below fills those in; a hit you cannot trace is a nit like any other untraced hunch.
-- **Read the source at the location before judging it.** The scanner matched text; whether that text is a vulnerability is your call, made against the file, not the summary.
-- **Severity is yours, not the scanner's.** Map its finding onto the ladder below by exploitability. A scanner HIGH that cannot be exploited is not must-fix; a scanner MEDIUM with a traced path to a real sink is.
-- **Never downgrade an unexplained HIGH or CRITICAL** on reputation, score, or "it's our own code". Either the trace shows why it does not hold, or it stands.
-- **The aggregate risk score is not a finding.** It is distorted upward by documentation of the very mechanics being scanned and downward by unrelated suppressions. Quote it for context; never rank on it.
-- **Suppressions are in scope for this axis.** A finding silenced by a baseline rule rather than fixed is reviewable: check the rule is scoped as narrowly as its cause and that its stated re-trigger condition is one that would actually fire.
-- **A degraded or partial scan is not a clean scan.** If the report says the run did not complete, say so in the verdict line rather than reporting its numbers.
-
 ## Method — evidence before severity
 
 1. **Trace the data flow** for every candidate finding: origin → transformations → sink. Is the value attacker-controlled at the point of use? A finding without a traced flow is a hunch, not a finding.

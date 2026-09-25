@@ -9,6 +9,5 @@
   { "query": "write a SKILL.md for my blog repo at ~/code/blog so codex picks it up there", "should_trigger": false },
   { "query": "use dev-architect to review the tenancy design in this service", "should_trigger": false },
   { "query": "bump the changeset and cut a release of @vegastack/vegafactory", "should_trigger": false, "ambiguous_with": ["skill-maintainer"] },
-  { "query": "rename skillify to skill-factory across the repo - directory, packaging entry, README row, changeset", "should_trigger": false, "ambiguous_with": ["skill-maintainer"] },
-  { "query": "the skill-scan blocked on an AE1 in dev-ship after my edit - how do I re-adjudicate it in the baseline?", "should_trigger": false, "ambiguous_with": ["skill-maintainer"] }
+  { "query": "rename skillify to skill-factory across the repo - directory, packaging entry, README row, changeset", "should_trigger": false, "ambiguous_with": ["skill-maintainer"] }
 ]

@@ -19,16 +19,8 @@ import { discoverSkills } from '../../../../packages/cli/scripts/lib/skills.mjs'
 const MIN_ENTRIES = 8;
 const FIXTURE = join('tests', 'fixtures', 'trigger-queries.json');
 
-// Located messages are built by concatenation, not template literals. The skill
-// scanner's bounded shell parser reads a backtick preceded by whitespace or one
-// of ;|&()<>/ as a command substitution and reports static_parse_limit when the
-// first whitespace-delimited token inside it carries a $ expansion — wherever
-// the literal sits (an argument or an assignment; bisected in issue 104, which
-// retired the earlier "assignment position" reading from issue 95). It degrades
-// an analyzer for the whole skill. Concatenation, or a literal that opens with a
-// plain word, scans complete.
-const at = (where, message) => where + ': ' + message;
-const quoted = (text) => '"' + text + '"';
+const at = (where, message) => `${where}: ${message}`;
+const quoted = (text) => `"${text}"`;
 
 // lowercase → collapse whitespace → trim → strip trailing sentence punctuation.
 export function normalizeQuery(query) {

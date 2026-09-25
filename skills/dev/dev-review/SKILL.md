@@ -1,6 +1,6 @@
 ---
 name: dev-review
-description: Independent cross-tool review of finished implementation work — a diff against its brief and plan, reviewed by the other tool. Use when dev-implement's review step runs, when asked to "review this branch/diff/issue", "give this a second pair of eyes", "check the finished work on issue N", or when review findings need a fix loop, re-review, or a hand-back. Not for reviewing an unbuilt plan (dev-plan's approval gate), architecture review (dev-architect), shipping gates (dev-ship), scanning skills for vulnerabilities (skill-scan), or generic PR review in repos outside this workflow.
+description: Independent cross-tool review of finished implementation work — a diff against its brief and plan, reviewed by the other tool. Use when dev-implement's review step runs, when asked to "review this branch/diff/issue", "give this a second pair of eyes", "check the finished work on issue N", or when review findings need a fix loop, re-review, or a hand-back. Not for reviewing an unbuilt plan (dev-plan's approval gate), architecture review (dev-architect), shipping gates (dev-ship), or generic PR review in repos outside this workflow.
 ---
 
 # dev-review
@@ -53,7 +53,6 @@ Each finding renders as a bold **Finding [F1]** line carrying its severity, its 
 
 - Quiet by default: spec, bugs and security always; style only where a documented rule exists.
 - `.vegastack/review-known-patterns.md` goes into every packet as project policy, read from the base commit — an edit on the branch under review is part of the diff, not a suppression. Each entry needs a **"Still flag if:"** clause; a suppression without one is a blind spot, not a calibration.
-- A CI scanner finding (skill-scan in the merge queue) comes back as a correction on the issue, judged like any other finding: suppressed rather than fixed is itself a finding.
 
 ## When the other tool is missing — the fallback
 

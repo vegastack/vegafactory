@@ -48,7 +48,7 @@ Every behavior-changing branch carries its changelog entry per dev.md's `changel
 Before claiming any status, run the proving command fresh and read its exit code (conventions' verification gate); a subagent's diff or report file is evidence, its say-so is not.
 
 - Run what dev.md's `tests:` knob requires; a `risky` issue gets focused security, failure, and recovery checks on top; a `## Verify` runbook means run the app and smoke-check the flows it names. Post-release checks live in `## Ship` and belong to dev-ship.
-- Run dev.md's `check` command (fast checks plus the tests your change reaches). The full suite and the skill scan run once, in the merge queue; a scan finding there comes back as a correction, and a new suppression needs the operator's word.
+- Run dev.md's `check` command (fast checks plus the tests your change reaches). The full suite runs once in the merge queue.
 - UI changed and `ui-evidence: playwright` → capture screenshots of the key states and upload each with `node <path-to-this-skill>/scripts/evidence-upload.mjs --repo <o/r> --issue <n> --file <png> --write --json` — it reads dev.md's `evidence-repo:` knob and names the file `<this-repo-name>/<issue-number>/<timestamp>-<name>.png` (dry-run without `--write`; exit 2 says what it refused). Link them in the evidence comment as links, because private-repo images don't render inline. Evidence repo unreachable → name local paths and say so, and the hand-back proceeds, because evidence is a link, not a gate.
 - dev.md's Ship or Verify section is an empty TODO next to visible machinery → finish normally, then suggest re-running dev-setup.
 

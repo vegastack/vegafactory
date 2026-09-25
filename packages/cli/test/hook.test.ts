@@ -612,9 +612,9 @@ describe('heartbeat and checkpoints', () => {
   })
 
   test('session-start shows the lessons waiting for a dev.md line, and a silent session keeps them', async () => {
-    addLesson(root, 'the skill scan reads the built bundle')
+    addLesson(root, 'the package smoke test reads the built bundle')
     const context = (await hook('session-start', { cwd: tree, session_id: 's4' })).json().hookSpecificOutput.additionalContext
-    expect(context).toContain('the skill scan reads the built bundle')
+    expect(context).toContain('the package smoke test reads the built bundle')
     expect(context).toContain('ONE .vegastack/dev.md line')
     expect(context).toContain('vegafactory learning accept')
     expect(context).toContain('control-room lines stay manual')
@@ -622,8 +622,8 @@ describe('heartbeat and checkpoints', () => {
     // The session works, is asked, and records nothing. The older lesson is still waiting.
     writeFileSync(join(tree, 'work.txt'), 'work')
     expect((await hook('stop', { cwd: tree, session_id: 's4' })).json().hookSpecificOutput.additionalContext).toContain('which general lessons')
-    expect(readLessons(root).map((lesson) => lesson.text)).toEqual(['the skill scan reads the built bundle'])
-    expect((await hook('session-start', { cwd: tree, session_id: 's5' })).json().hookSpecificOutput.additionalContext).toContain('the skill scan reads the built bundle')
+    expect(readLessons(root).map((lesson) => lesson.text)).toEqual(['the package smoke test reads the built bundle'])
+    expect((await hook('session-start', { cwd: tree, session_id: 's5' })).json().hookSpecificOutput.additionalContext).toContain('the package smoke test reads the built bundle')
   })
 
   test('a link planted at the old predictable temp name is not written through', async () => {
