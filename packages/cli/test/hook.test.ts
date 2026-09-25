@@ -89,7 +89,6 @@ beforeEach(() => {
   stats = []
   detachPid = undefined
   prHead = 'feat/7-export'
-  prHeadOid = git(root, 'rev-parse', 'HEAD')
   const base = realpathSync(mkdtempSync(join(tmpdir(), 'hook-')))
   fakeHome = join(base, 'home')
   mkdirSync(fakeHome, { recursive: true })
@@ -102,6 +101,7 @@ beforeEach(() => {
   writeFileSync(join(root, '.gitignore'), '.vegastack/.tmp/\n.vegastack/.worktrees/\n')
   git(root, 'add', '-A')
   git(root, 'commit', '-q', '-m', 'init')
+  prHeadOid = git(root, 'rev-parse', 'HEAD')
   git(root, 'push', '-q', 'origin', 'main')
   git(root, 'remote', 'set-head', 'origin', '--auto')
   tree = join(root, '.vegastack/.worktrees/7')
