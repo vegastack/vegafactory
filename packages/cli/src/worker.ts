@@ -2083,17 +2083,14 @@ function execTool(tool: string, args: string[], options: { cwd: string; env: Nod
 
 export const tail = (text: string, max = MAX_NOTE) => text.trim().split('\n').slice(-3).join(' ').slice(-max)
 
-// The issue's worktree when one exists; a step that needs a branch makes its own.
+// The canonical issue checkout when one exists. Legacy title-derived leaves are
+// ambiguous and cannot establish issue identity for an unattended run or stand-down.
 export function workingDir(root: string, number: number): string | null {
   const issue = join(dirname(root), 'issues', String(number))
   try {
     if (statSync(issue).isDirectory()) return issue
   } catch { /* a step that needs a branch creates it */ }
-  const base = join(root, '.vegastack', '.worktrees')
-  try {
-    const match = readdirSync(base).find((name) => name.startsWith(`${number}-`))
-    return match && statSync(join(base, match)).isDirectory() ? join(base, match) : null
-  } catch { return null }
+  return null
 }
 
 // The real step: a headless agent run on the operator's subscription, in the issue's worktree,

@@ -1668,7 +1668,9 @@ describe('standing an issue down', () => {
 
   test('a failing git add is a strict failure and reconciliation keeps the hand-back pending', async () => {
     gh.addIssue({ number: 91, labels: ['queued', 'small'] })
-    const worktree = join(root, '.vegastack', '.worktrees', '91-save')
+    const boardRoot = join(root, 'worker', 'repos', 'o__r', 'repo')
+    const worktree = join(root, 'worker', 'repos', 'o__r', 'issues', '91')
+    mkdirSync(boardRoot, { recursive: true })
     mkdirSync(worktree, { recursive: true })
     spawnSync('git', ['init', '-q', '-b', 'feat/91-save'], { cwd: worktree })
     spawnSync('git', ['config', 'user.email', 't@example.com'], { cwd: worktree })
@@ -1677,7 +1679,7 @@ describe('standing an issue down', () => {
     writeFileSync(join(worktree, 'open.txt'), 'unsaved')
     writeFileSync(join(worktree, '.git', 'index.lock'), 'locked')
     const stateHome = realpathSync(mkdtempSync(join(tmpdir(), 'worker-reconcile-')))
-    const ctx = { root, repo: 'o/r', number: 91, runner: gh.runner, machine: HOST, now: gh.clock, restoreTo: 'queued' as const }
+    const ctx = { root: boardRoot, repo: 'o/r', number: 91, runner: gh.runner, machine: HOST, now: gh.clock, restoreTo: 'queued' as const }
     const previous = {
       schema: 1 as const,
       revision: 0,
@@ -1686,7 +1688,7 @@ describe('standing an issue down', () => {
     let strict: ReturnType<typeof standDownStrict> | null = null
     await reconcileBoards({
       home: stateHome, env: {}, listed: [], previous,
-      contexts: new Map([['o/r', { key: 'o/r', repo: 'o/r', root, runner: gh.runner, devMd: 'repo: o/r\n', identity: { runner: gh.runner, freshen: async () => {}, token: () => null } }]]),
+      contexts: new Map([['o/r', { key: 'o/r', repo: 'o/r', root: boardRoot, runner: gh.runner, devMd: 'repo: o/r\n', identity: { runner: gh.runner, freshen: async () => {}, token: () => null } }]]),
       inflight: new Map(), provision: async () => { throw new Error('unused') },
       handBack: async (_repo, _issue, reason) => { strict = standDownStrict(ctx, reason); return strict }, out: () => {},
     })
@@ -1721,7 +1723,9 @@ describe('standing an issue down', () => {
 
   test('a recovery push uses only the selected board App token', () => {
     gh.addIssue({ number: 1, labels: ['queued', 'small'] })
-    const worktree = join(root, '.vegastack', '.worktrees', '1-work')
+    const boardRoot = join(root, 'worker', 'repos', 'o__r', 'repo')
+    const worktree = join(root, 'worker', 'repos', 'o__r', 'issues', '1')
+    mkdirSync(boardRoot, { recursive: true })
     mkdirSync(worktree, { recursive: true })
     spawnSync('git', ['init', '-q', '-b', 'feat/1-work'], { cwd: worktree })
     spawnSync('git', ['commit', '-q', '--allow-empty', '-m', 'first'], { cwd: worktree })
@@ -1735,7 +1739,7 @@ describe('standing an issue down', () => {
       if (args[0] === 'push') return { status: 0, out: '' }
       return { status: 1, out: 'unexpected git call' }
     }
-    expect(standDownStrict({ root, repo: 'o/r', number: 1, runner: gh.runner, machine: HOST, now: gh.clock, token: 'token-r', git }, 'removed').ok).toBe(true)
+    expect(standDownStrict({ root: boardRoot, repo: 'o/r', number: 1, runner: gh.runner, machine: HOST, now: gh.clock, token: 'token-r', git }, 'removed').ok).toBe(true)
     const push = calls.find(call => call.args[0] === 'push')!
     expect(push.env?.GH_TOKEN).toBe('token-r')
     expect(push.env?.GITHUB_TOKEN).toBe('token-r')
@@ -2041,6 +2045,14 @@ describe('the step a run makes', () => {
     mkdirSync(checkout, { recursive: true })
     mkdirSync(issue, { recursive: true })
     expect(workingDir(checkout, 7)).toBe(issue)
+  })
+
+  test('a worker does not select a legacy title-derived leaf as an issue checkout', () => {
+    const holder = join(root, 'worker', 'repos', 'o__r')
+    const checkout = join(holder, 'repo')
+    const legacy = join(checkout, '.vegastack', '.worktrees', '7-old-title')
+    mkdirSync(legacy, { recursive: true })
+    expect(workingDir(checkout, 7)).toBeNull()
   })
 
   test('a worker run writes as the App and is never told where the key is', async () => {
